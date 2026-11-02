@@ -397,7 +397,7 @@ impl<D: BlockDev> Mount<D> {
             if let Some(slot) = self.st.borrow_mut().alloc.next_slot(bucket, node) {
                 return Ok(slot);
             }
-            self.take_bucket().await?;
+            self.take_bucket(false).await?;
         }
     }
 
@@ -405,7 +405,7 @@ impl<D: BlockDev> Mount<D> {
     /// and that no traversal may lead into (A6.14, A6.19), else the lowest
     /// free one. Its alloc key must agree it is empty, and no backpointer
     /// lead into it; the nodes cached there are unreachable, and go.
-    async fn take_bucket(&self) -> Result<()> {
+    pub(super) async fn take_bucket(&self, data: bool) -> Result<()> {
         let durable = self.st.borrow().journal.durable;
         let mut emptied = None;
         Source::walk(self, Btree::NeedDiscard, Bpos::MIN, |k, _| {
@@ -469,7 +469,11 @@ impl<D: BlockDev> Mount<D> {
         if !st.cache.drop_unreachable(b * sectors, (b + 1) * sectors) {
             return Err(Error::Corrupt("a bucket an index lists as empty holding a changed btree node"));
         }
-        st.alloc.take(b, bucket.reused_gen());
+        if data {
+            st.alloc.take_data(b, bucket.reused_gen());
+        } else {
+            st.alloc.take(b, bucket.reused_gen());
+        }
         #[cfg(test)]
         {
             st.alloc.reused += usize::from(emptied.is_some());
@@ -478,7 +482,7 @@ impl<D: BlockDev> Mount<D> {
     }
 
     /// Low bits of a backpointer's offset below its sector (A6.25).
-    fn bp_shift(&self) -> u32 {
+    pub(super) fn bp_shift(&self) -> u32 {
         match self.sb.flag(6, 40, 8) {
             0 => 10,
             s => s as u32,
@@ -599,7 +603,7 @@ impl<D: BlockDev> Mount<D> {
     }
 
     /// Bucket `b` as `txn` would leave it: its alloc key, or a hole.
-    async fn bucket(&self, txn: &Txn, b: u64) -> Result<Bucket> {
+    pub(super) async fn bucket(&self, txn: &Txn, b: u64) -> Result<Bucket> {
         match self.get_in(txn, Btree::Alloc, Bpos::new(0, b, 0)).await? {
             Some((k, v)) if k.kind == kind::ALLOC_V4 => {
                 let a = AllocV4::decode(&v)?;
@@ -614,7 +618,7 @@ impl<D: BlockDev> Mount<D> {
     /// key, its freespace, LRU and bucket_gens entries, and its state's
     /// accounting (A6.12–A6.24, A7.12). An emptied bucket's alloc key and
     /// need_discard entry wait for the transaction's sequence.
-    async fn bucket_changed(&self, txn: &mut Txn, b: u64, before: Bucket, after: Bucket) -> Result<()> {
+    pub(super) async fn bucket_changed(&self, txn: &mut Txn, b: u64, before: Bucket, after: Bucket) -> Result<()> {
         let bucket_sectors = self.sb.member.bucket_sectors as u32;
         let alloc_pos = Bpos::new(0, b, 0);
         if after.data_type == data_type::NEED_DISCARD && before.data_type != data_type::NEED_DISCARD {

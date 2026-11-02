@@ -34,7 +34,7 @@ const RENAME: usize = 4 + 2 + 1 + 3;
 const RELEASE: usize = 1 + 1 + 2;
 /// The whiteouts and one accounting key.
 const DROP_WHITEOUTS: usize = WHITEOUTS + 1;
-const _: () = assert!(RENAME == FOOTPRINT && CREATE <= FOOTPRINT && LINK <= FOOTPRINT && UNLINK <= FOOTPRINT && DROP_WHITEOUTS <= FOOTPRINT);
+const _: () = assert!(RENAME <= FOOTPRINT && CREATE <= FOOTPRINT && LINK <= FOOTPRINT && UNLINK <= FOOTPRINT && DROP_WHITEOUTS <= FOOTPRINT);
 
 /// What a new name links.
 pub enum Link {
@@ -107,7 +107,7 @@ fn one_link_less(dir: &mut InodeValue) -> Result<()> {
     Ok(())
 }
 
-fn inode_pos(ino: u64) -> Bpos {
+pub(super) fn inode_pos(ino: u64) -> Bpos {
     Bpos::new(0, ino, ROOT_SNAPSHOT)
 }
 
@@ -140,13 +140,13 @@ impl<D: BlockDev> Mount<D> {
     /// A new file or directory `name` in directory `dir`, owned by `owner`,
     /// its times `now`, in nanoseconds since the Unix epoch. Its number is
     /// the inode cursor's next free one (A8.7), its name in the first free
-    /// slot from its hash (A5.25). A symlink waits for the data path.
+    /// slot from its hash (A5.25).
     pub async fn create(&self, dir: u64, name: &[u8], new: New, owner: Owner, now: i64) -> Result<Inode> {
         valid_name(name)?;
         let (type_bits, dirent_type) = match new {
             New::File => (mode::S_IFREG, DirentType::Regular),
             New::Dir => (mode::S_IFDIR, DirentType::Directory),
-            New::Symlink(_) => return Err(Error::Unsupported("a symlink, whose target is file data")),
+            New::Symlink(target) => return self.create_symlink(dir, name, &target, owner, now).await,
         };
         let seed = self.nonzero()?;
         self.observe(now);
@@ -352,6 +352,9 @@ impl<D: BlockDev> Mount<D> {
     /// `deleted_inodes` key go (A8.13). A node with a name is left as it is;
     /// a key that names no orphan goes alone.
     pub async fn release(&self, node: u64) -> Result<()> {
+        let _data = self.data_slot().await;
+        let orphan = self.inode_opt(&Txn::default(), node).await?.is_some_and(|v| v.flags & inode_flag::UNLINKED != 0 && !is_dir(&v));
+        if orphan { self.trim_extents(node, 0).await?; }
         self.transact(K_TX / 2, RELEASE, Draw::Freeing, async |txn: &mut Txn| {
             let orphan = self.inode_opt(txn, node).await?.filter(|v| v.flags & inode_flag::UNLINKED != 0 && !is_dir(v));
             if orphan.is_some() {
@@ -393,11 +396,11 @@ impl<D: BlockDev> Mount<D> {
         Ok(v)
     }
 
-    async fn inode_in(&self, txn: &Txn, ino: u64) -> Result<InodeValue> {
+    pub(super) async fn inode_in(&self, txn: &Txn, ino: u64) -> Result<InodeValue> {
         self.inode_opt(txn, ino).await?.ok_or(Error::NotFound)
     }
 
-    async fn inode_opt(&self, txn: &Txn, ino: u64) -> Result<Option<InodeValue>> {
+    pub(super) async fn inode_opt(&self, txn: &Txn, ino: u64) -> Result<Option<InodeValue>> {
         match self.get_in(txn, Btree::Inodes, inode_pos(ino)).await? {
             Some((k, v)) if k.kind == kind::INODE_V3 => Ok(Some(InodeValue::decode(&v)?)),
             Some((k, _)) if matches!(k.kind, kind::INODE | kind::INODE_V2) => Err(Error::Unsupported("inode in a format before inode_v3")),
@@ -421,7 +424,7 @@ impl<D: BlockDev> Mount<D> {
     }
 
     /// A directory's change and modification times set to `now`.
-    fn touch(&self, dir: &mut InodeValue, now: i64) {
+    pub(super) fn touch(&self, dir: &mut InodeValue, now: i64) {
         let time = self.stored_time(now);
         dir.set(inode_field::MTIME, time);
         dir.set(inode_field::CTIME, time);
@@ -616,7 +619,7 @@ impl<D: BlockDev> Mount<D> {
 
     /// Sets inode `ino` to `v`, its journal-sequence field the
     /// transaction's (A5.14).
-    async fn set_inode(&self, txn: &mut Txn, ino: u64, v: &InodeValue) -> Result<()> {
+    pub(super) async fn set_inode(&self, txn: &mut Txn, ino: u64, v: &InodeValue) -> Result<()> {
         let pos = inode_pos(ino);
         self.set(txn, Btree::Inodes, pos, Some((Key::new(kind::INODE_V3, pos), v.encode()))).await?;
         if !txn.stamped.contains(&pos) {
@@ -635,7 +638,7 @@ impl<D: BlockDev> Mount<D> {
     /// accounting the change makes: a key of a snapshot btree counts, and
     /// its bytes, in its snapshot's class (A7.14); an inode counts once
     /// more (A7.10).
-    async fn set(&self, txn: &mut Txn, btree: Btree, pos: Bpos, kv: Option<(Key, Vec<u8>)>) -> Result<()> {
+    pub(super) async fn set(&self, txn: &mut Txn, btree: Btree, pos: Bpos, kv: Option<(Key, Vec<u8>)>) -> Result<()> {
         let old = self.get_in(txn, btree, pos).await?;
         let counted = |kv: &Option<(Key, Vec<u8>)>| match kv {
             Some((k, v)) if matches!(btree, Btree::Extents | Btree::Inodes | Btree::Dirents | Btree::Xattrs | Btree::Damage) && !matches!(k.kind, kind::DELETED | kind::WHITEOUT | kind::EXTENT_WHITEOUT) => {
@@ -644,13 +647,18 @@ impl<D: BlockDev> Mount<D> {
             _ => None,
         };
         let (before, after) = (counted(&old), counted(&kv));
-        if before != after {
+        let external = |kv: &Option<(Key, Vec<u8>)>| match kv {
+            Some((k, _)) if btree == Btree::Extents && k.kind == kind::EXTENT => u64::from(k.size),
+            _ => 0,
+        };
+        let sectors = external(&kv).wrapping_sub(external(&old));
+        if before != after || sectors != 0 {
             let mut record = alloc::vec![class::SNAPSHOT];
             record.extend_from_slice(&ROOT_SNAPSHOT.to_le_bytes());
             record.extend_from_slice(&(btree as u32).to_le_bytes());
             let keys = u64::from(after.is_some()).wrapping_sub(u64::from(before.is_some()));
             let bytes = after.unwrap_or(0).wrapping_sub(before.unwrap_or(0));
-            self.account(txn, &record, &[keys, bytes, 0]).await?;
+            self.account(txn, &record, &[keys, bytes, sectors]).await?;
             if btree == Btree::Inodes && before.is_some() != after.is_some() {
                 self.account(txn, &[class::NR_INODES], &[keys]).await?;
             }
@@ -675,14 +683,14 @@ impl<D: BlockDev> Mount<D> {
     }
 
     /// `now` in the volume's units since its time base (A5.11).
-    fn stored_time(&self, now: i64) -> u64 {
+    pub(super) fn stored_time(&self, now: i64) -> u64 {
         let precision = i128::from(self.sb.header.time_precision);
         (i128::from(now) / precision - i128::from(self.sb.header.time_base) / precision) as i64 as u64
     }
 
     /// Notes an operation at `now`, nanoseconds since the epoch: entries
     /// carry the newest as their datetime.
-    fn observe(&self, now: i64) {
+    pub(super) fn observe(&self, now: i64) {
         let mut st = self.st.borrow_mut();
         st.now = st.now.max((now / 1_000_000_000).max(0) as u64);
     }

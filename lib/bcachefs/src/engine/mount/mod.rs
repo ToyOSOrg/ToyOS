@@ -38,10 +38,12 @@ use super::value::{self, accounting_pos, class, data_type, inode_field, inode_fl
 use super::{kind, Btree, Error, Result, SECTOR};
 
 mod allocator;
+mod data;
 mod ops;
 mod reclaim;
 
 use allocator::{Allocator, Draw, Readers};
+pub use data::Reservation;
 pub use ops::{Link, Removed, Rename};
 pub(crate) use reclaim::Order;
 #[cfg(test)]
@@ -56,12 +58,10 @@ pub struct MountOptions {
     pub cache_nodes: usize,
 }
 
-/// u64s one ordinary transaction journals at most: a namespace operation's
-/// inode, dirent and accounting keys, names of 512 bytes included.
+/// u64s one ordinary transaction journals at most.
 pub(crate) const K_TX: u64 = 512;
-/// Nodes any ordinary transaction dirties at most: the largest grant of
-/// the operations' (`mount/ops.rs`).
-pub(crate) const FOOTPRINT: usize = 10;
+/// Nodes any ordinary transaction dirties at most.
+pub(crate) const FOOTPRINT: usize = 28;
 /// Nodes one reclaim batch writes.
 const BATCH: usize = 2;
 /// u64s a reclaim share holds for each node that can pin the journal:
@@ -87,7 +87,7 @@ const BLACKLIST_FEATURE: u64 = 1 << 5;
 pub enum New {
     File,
     Dir,
-    /// Its target is file data, which B7's data path writes.
+    /// The target, without its on-disk NUL terminator.
     Symlink(Vec<u8>),
 }
 
@@ -112,6 +112,7 @@ struct State {
     new_roots: BTreeMap<Btree, NodeId>,
     journal: Writer,
     key_version: u64,
+    next_version: u64,
     clocks: [u64; 2],
     /// Seconds since the epoch of the newest operation: each entry's
     /// datetime.
@@ -164,6 +165,9 @@ pub struct Mount<D> {
     /// waiting on a node and by reclaim waiting on a bucket.
     written: Broadcast,
     readers: RefCell<Readers>,
+    data_held: Cell<bool>,
+    data_queue: Queue,
+    reservations: Rc<RefCell<data::Reservations>>,
     root: u64,
 }
 
@@ -201,6 +205,7 @@ struct Txn {
     emptied: Vec<(u64, Bucket)>,
     /// Buckets taken that it fills.
     filled: Vec<u64>,
+    allocated_data: Vec<u64>,
     /// New roots.
     roots: Vec<Root>,
     /// Written nodes made reachable, installed in the cache at apply.
@@ -321,6 +326,7 @@ impl<D: BlockDev> Mount<D> {
     /// `empty` is the volume's count of empty buckets.
     async fn from(parts: Parts<D>, empty: u64, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
         let Parts { dev, mut sb, key, roots, key_version, replay, root } = parts;
+        let key_version = key_version.checked_add(if replay.is_some() && key.is_some() { 65_536 } else { 0 }).ok_or(Error::NoSpace("encrypted extent versions"))?;
         let ring: Vec<u64> = sb.journal.iter().flat_map(|&(first, count)| first..first + count).collect();
         let bucket_sectors = u64::from(sb.member.bucket_sectors);
         let mut journal = Writer::new(ring, bucket_sectors, sb.block_bytes(), K_TX);
@@ -405,6 +411,7 @@ impl<D: BlockDev> Mount<D> {
             new_roots: BTreeMap::new(),
             journal,
             key_version,
+            next_version: key_version,
             clocks,
             now: sb.header.write_time,
             granted: 0,
@@ -435,12 +442,16 @@ impl<D: BlockDev> Mount<D> {
             journal_queue: Queue::default(),
             written: Broadcast::default(),
             readers: RefCell::default(),
+            data_held: Cell::new(false),
+            data_queue: Queue::default(),
+            reservations: Rc::default(),
             root,
         };
         mount.go_read_write(restate).await?;
         if let Some((_, replayed)) = replay {
             mount.install_replay(replayed).await?;
         }
+        mount.resume_truncates().await?;
         Ok(mount)
     }
 
@@ -547,18 +558,14 @@ impl<D: BlockDev> Mount<D> {
     }
 }
 
-/// Refuses a volume holding a logged operation, which a mount must resume
-/// before writing (A8.17, A8.18) and this one cannot yet.
+/// Refuses logged operations this writer cannot resume.
 async fn no_logged_ops<D: BlockDev>(volume: &Volume<D>) -> Result<()> {
-    let mut found = false;
-    Source::walk(volume, Btree::LoggedOps, Bpos::MIN, |k, _| {
-        found = k.pos.inode == 0;
-        Ok(false)
+    Source::walk(volume, Btree::LoggedOps, Bpos::MIN, |k, v| {
+        if k.pos.inode != 0 { return Ok(false); }
+        data::truncate_value(k, v)?;
+        Ok(true)
     })
     .await?;
-    if found {
-        return Err(Error::Unsupported("writing a volume with a logged operation to resume"));
-    }
     Ok(())
 }
 
@@ -941,6 +948,8 @@ impl<D: BlockDev> Mount<D> {
     /// room left could not hold even with nothing else dirty is refused
     /// `NoSpace`, once nothing written or emptied can change that.
     fn grant(&self, class: Class, draw: Draw, journal: u64, nodes: usize) -> Result<bool> {
+        self.cancel_dropped();
+        let pending = self.reservations.borrow().pending(draw);
         let mut st = self.st.borrow_mut();
         if let Some(why) = st.read_only {
             return Err(Error::ReadOnly(why));
@@ -948,14 +957,14 @@ impl<D: BlockDev> Mount<D> {
         let room = match class {
             Class::Ordinary => {
                 let held = st.cache.dirty + st.cache.unpointed + st.granted;
-                if !st.alloc.fits(nodes, st.reclaim_room, draw) && held == 0 && st.reclaim_granted == 0 && !st.alloc.returning() {
+                if !st.alloc.fits(nodes + pending, st.reclaim_room, draw) && held == 0 && st.reclaim_granted == 0 && !st.alloc.returning() {
                     return Err(Error::NoSpace(match draw {
-                        Draw::Ordinary => "no room left for the btree nodes a change may write",
+                        Draw::Ordinary | Draw::Reserved(_) => "no room left for the btree nodes a change may write",
                         Draw::Freeing => "no room left for the btree nodes a removal may write",
                     }));
                 }
                 // Nothing more lands in a node reclaim has yet to split.
-                held + nodes <= st.limit && st.cache.oversized == 0 && st.alloc.fits(held + nodes, st.reclaim_room, draw)
+                held + nodes <= st.limit && st.cache.oversized == 0 && st.alloc.fits(held + nodes + pending, st.reclaim_room, draw)
             }
             Class::Reclaim => st.reclaim_granted + nodes <= st.reclaim_room,
         };
@@ -1045,6 +1054,7 @@ impl<D: BlockDev> Mount<D> {
             }
             self.ungrant(&mut st, Class::Ordinary, bound, nodes);
         };
+        if let Draw::Reserved(id) = draw { self.reservations.borrow_mut().active.remove(&id).expect("admission consumes a reservation"); }
         let mut txn = Txn::default();
         let out = prepare(&mut txn).await;
         self.finish(txn, out.is_ok(), Class::Ordinary, bound, nodes)?;
@@ -1054,7 +1064,7 @@ impl<D: BlockDev> Mount<D> {
     /// Applies `txn` when `apply`, else drops it; either way releases its
     /// holds and its grant. `ReadOnly` when the mount stopped writing while
     /// it was prepared.
-    fn finish(&self, txn: Txn, apply: bool, class: Class, bound: u64, nodes: usize) -> Result<()> {
+    fn finish(&self, mut txn: Txn, apply: bool, class: Class, bound: u64, nodes: usize) -> Result<()> {
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
         // An ordinary grant is each operation's bound; reclaim's is capped
@@ -1065,10 +1075,13 @@ impl<D: BlockDev> Mount<D> {
             st.read_only.get_or_insert("reclaim dirtying more nodes than its cache room");
         }
         let stopped = st.read_only;
+        let allocated = core::mem::take(&mut txn.allocated_data);
         if apply && stopped.is_none() {
             self.apply(st, txn, bound);
+            for sector in allocated { st.alloc.unpin(sector / u64::from(self.sb.member.bucket_sectors)); }
         } else {
             release(st, &txn.held);
+            for sector in allocated { st.alloc.cancel_data(sector, u64::from(self.sb.member.bucket_sectors)); }
         }
         #[cfg(test)]
         {

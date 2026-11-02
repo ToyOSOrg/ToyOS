@@ -477,6 +477,7 @@ pub(crate) trait Source {
     /// Bytes of file `ino` from `offset` into `out`, as many as the file
     /// holds there. Holes read as zeros.
     async fn read(&self, ino: u64, offset: u64, out: &mut [u8]) -> Result<usize> {
+        let _reading = Reading(self, self.begin_read());
         let inode = self.inode(ino).await?;
         let len = inode.size.saturating_sub(offset).min(out.len() as u64) as usize;
         let out = &mut out[..len];
@@ -533,6 +534,7 @@ pub(crate) trait Source {
     /// in one run of whole blocks from the file's first byte to its last:
     /// inline, sparse, encrypted, unchecksummed or split apart.
     async fn in_place(&self, ino: u64) -> Result<Option<(u64, u64)>> {
+        let _reading = Reading(self, self.begin_read());
         let inode = self.inode(ino).await?;
         if self.superblock().encrypted() || inode.kind() != Some(DirentType::Regular) || inode.size == 0 {
             return Ok(None);
@@ -596,7 +598,12 @@ pub(crate) trait Source {
         if self.superblock().encrypted() && !matches!(crc.csum_type, csum::CHACHA_POLY_80 | csum::CHACHA_POLY_128) {
             return Err(Error::Corrupt("unauthenticated extent on an encrypted volume"));
         }
-        let mut data = read_bytes(self.dev(), extent.ptr.sector * SECTOR as u64, crc.compressed as usize * SECTOR).await?;
+        let at = extent.ptr.sector * SECTOR as u64;
+        let len = crc.compressed as usize * SECTOR;
+        let skip_block = (at % BLOCK as u64) as usize;
+        let mut blocks = alloc::vec![[0u8; BLOCK]; (skip_block + len).div_ceil(BLOCK)];
+        self.dev().read_data(at / BLOCK as u64, &mut blocks).await?;
+        let mut data = blocks.as_flattened()[skip_block..skip_block + len].to_vec();
         match crc.csum_type {
             csum::NONE => {}
             // Over the whole encoded extent, the value zero-extended to the

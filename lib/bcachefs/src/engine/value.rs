@@ -308,6 +308,28 @@ const CRC32_SECTORS: u32 = 128;
 const CRC64_SECTORS: u32 = 512;
 
 impl Extent {
+    pub(crate) fn with_crc(crc: &Crc, ptr: Ptr) -> Vec<u8> {
+        let (compressed, uncompressed) = (u64::from(crc.compressed - 1), u64::from(crc.uncompressed - 1));
+        let (offset, nonce, ty, compression) = (u64::from(crc.offset), u64::from(crc.nonce), u64::from(crc.csum_type), u64::from(crc.compression));
+        let words = match Self::smallest_entry(crc) {
+            4 => alloc::vec![2 | compressed << 2 | uncompressed << 9 | offset << 16 | ty << 24 | compression << 28 | u64::from(u32::from_le_bytes(crc.csum[..4].try_into().unwrap())) << 32, ptr.encode()],
+            10 => alloc::vec![4 | compressed << 3 | uncompressed << 12 | offset << 21 | nonce << 30 | ty << 40 | compression << 44 | u64::from(u16::from_le_bytes(crc.csum[8..10].try_into().unwrap())) << 48, u64::from_le_bytes(crc.csum[..8].try_into().unwrap()), ptr.encode()],
+            _ => alloc::vec![8 | compressed << 4 | uncompressed << 17 | offset << 30 | nonce << 43 | ty << 56 | compression << 60, u64::from_le_bytes(crc.csum[..8].try_into().unwrap()), u64::from_le_bytes(crc.csum[8..].try_into().unwrap()), ptr.encode()],
+        };
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    pub(crate) fn authenticated(sectors: u32, tag: [u8; 16], wide: bool, ptr: Ptr) -> Vec<u8> {
+        let n = u64::from(sectors - 1);
+        let low = u64::from_le_bytes(tag[..8].try_into().unwrap());
+        let words = if wide || sectors > CRC64_SECTORS {
+            alloc::vec![8 | n << 4 | n << 17 | u64::from(csum_type::CHACHA_POLY_128) << 56, low, u64::from_le_bytes(tag[8..].try_into().unwrap()), ptr.encode()]
+        } else {
+            alloc::vec![4 | n << 3 | n << 12 | u64::from(csum_type::CHACHA_POLY_80) << 40 | u64::from(u16::from_le_bytes(tag[8..10].try_into().unwrap())) << 48, low, ptr.encode()]
+        };
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
     /// An unencrypted, uncompressed extent of `sectors` at `ptr`, its
     /// checksum `csum` of `csum_type` in the smallest entry that holds it:
     /// a crc32 entry up to 128 sectors, else a crc64 one.

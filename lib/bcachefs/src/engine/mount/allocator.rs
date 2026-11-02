@@ -28,6 +28,7 @@ pub(crate) enum Draw {
     /// Removes names or nodes: unlink, rmdir, an orphan's release. It takes
     /// the freeing reserve too, so a full volume can still be emptied (§2.3).
     Freeing,
+    Reserved(u64),
 }
 
 /// Node slots one freeing transaction can need: each node it dirties
@@ -47,6 +48,10 @@ pub(super) struct Allocator {
     per_bucket: u64,
     /// The bucket being filled, its next slot and its generation.
     open: Option<(u64, u64, u8)>,
+    data: Option<(u64, u64, u8)>,
+    pins: BTreeMap<u64, (usize, Option<u64>)>,
+    holes: BTreeSet<(u64, u64)>,
+    durable: u64,
     /// Buckets taken whose filling is not yet applied, which the indexes
     /// still list as empty.
     taken: BTreeSet<u64>,
@@ -65,6 +70,10 @@ impl Allocator {
         Allocator {
             per_bucket,
             open: None,
+            data: None,
+            pins: BTreeMap::new(),
+            holes: BTreeSet::new(),
+            durable: 0,
             taken: BTreeSet::new(),
             free,
             returning: BTreeMap::new(),
@@ -79,13 +88,14 @@ impl Allocator {
 
     /// Node slots there are or will be once every emptying is durable.
     fn slots(&self) -> u64 {
-        self.open_slots() + self.per_bucket * (self.free + self.returning.values().sum::<u64>())
+        self.open_slots() + self.per_bucket * (self.free + self.returning.values().sum::<u64>() - self.pins.values().filter(|(_, empty)| empty.is_some()).count() as u64)
     }
 
     /// Node slots to be had now, past `blocked` buckets that a traversal
     /// may still lead into.
     pub(super) fn ready(&self, blocked: usize) -> u64 {
-        self.open_slots() + self.per_bucket * self.free.saturating_sub(blocked as u64)
+        let pinned = self.pins.values().filter(|(_, empty)| empty.is_some_and(|seq| seq <= self.durable)).count() as u64;
+        self.open_slots() + self.per_bucket * self.free.saturating_sub(blocked as u64 + pinned)
     }
 
     /// Whether an emptying waits to be durable.
@@ -101,7 +111,7 @@ impl Allocator {
     /// nothing here counts on it.
     pub(super) fn fits(&self, nodes: usize, reclaim_room: usize, draw: Draw) -> bool {
         let reserve = match draw {
-            Draw::Ordinary => FREEING_RESERVE,
+            Draw::Ordinary | Draw::Reserved(_) => FREEING_RESERVE,
             Draw::Freeing => 0,
         };
         (COMMON_REWRITE * (nodes + reclaim_room)) as u64 + OVERSIZED + reserve <= self.slots()
@@ -115,7 +125,7 @@ impl Allocator {
     }
 
     pub(super) fn is_taken(&self, b: u64) -> bool {
-        self.taken.contains(&b)
+        self.taken.contains(&b) || self.pins.contains_key(&b)
     }
 
     /// `b`, empty at generation `gen`, opened for nodes.
@@ -125,9 +135,74 @@ impl Allocator {
         self.open = Some((b, 0, gen));
     }
 
+    pub(super) fn take_data(&mut self, b: u64, gen: u8) {
+        self.taken.insert(b);
+        self.free = self.free.saturating_sub(1);
+        self.data = Some((b, 0, gen));
+    }
+
+    pub(super) fn next_data(&mut self, bucket_sectors: u64, sectors: u64) -> Option<(u64, u8)> {
+        if let Some((_, sector)) = self.holes.pop_first() {
+            return Some((sector, 0));
+        }
+        let (b, next, gen) = self.data?;
+        if sectors > bucket_sectors - next {
+            self.data = None;
+            return None;
+        }
+        self.data = (next + sectors < bucket_sectors).then_some((b, next + sectors, gen));
+        Some((b * bucket_sectors + next, gen))
+    }
+
+    pub(super) fn data_fits(&self, nodes: usize, reclaim_room: usize) -> bool {
+        let need = (COMMON_REWRITE * (nodes + reclaim_room)) as u64 + OVERSIZED + FREEING_RESERVE;
+        need + self.per_bucket <= self.slots()
+    }
+
+    pub(super) fn free_bytes(&self, bucket_bytes: u64) -> u64 {
+        let pinned = self.pins.values().filter(|(_, empty)| empty.is_some_and(|seq| seq <= self.durable)).count() as u64;
+        self.free.saturating_sub(pinned) * bucket_bytes
+    }
+
+    pub(super) fn pin(&mut self, b: u64) {
+        self.pins.entry(b).or_insert((0, None)).0 += 1;
+    }
+
+    pub(super) fn unpin(&mut self, b: u64) {
+        let entry = self.pins.get_mut(&b).expect("a reserved bucket is pinned");
+        entry.0 -= 1;
+        if entry.0 == 0 { self.pins.remove(&b); }
+    }
+
+    pub(super) fn cancel_data(&mut self, sector: u64, bucket: u64) {
+        let b = sector / bucket;
+        let empty = self.pins[&b].1.is_some();
+        self.unpin(b);
+        if empty { return; }
+        if self.taken.contains(&b) && !self.pins.contains_key(&b) {
+            self.taken.remove(&b);
+            self.free += 1;
+            if self.data.is_some_and(|(open, _, _)| open == b) { self.data = None; }
+            self.holes.retain(|(bucket, _)| *bucket != b);
+        } else {
+            self.holes.insert((b, sector));
+        }
+    }
+
     /// `b`'s filling applied: the indexes no longer list it.
     pub(super) fn filled(&mut self, b: u64) {
         self.taken.remove(&b);
+        if let Some((_, empty)) = self.pins.get_mut(&b) {
+            if let Some(seq) = empty.take() {
+                if seq <= self.durable {
+                    self.free -= 1;
+                } else {
+                    let count = self.returning.get_mut(&seq).expect("a pinned emptying is returning");
+                    *count -= 1;
+                    if *count == 0 { self.returning.remove(&seq); }
+                }
+            }
+        }
     }
 
     /// `b` emptied by sequence `seq`.
@@ -135,11 +210,17 @@ impl Allocator {
         // A round's own nodes go in the open bucket first, so the round
         // that releases its last node fills it again.
         assert!(self.open.is_none_or(|(open, _, _)| open != b), "the open bucket {b} emptied");
+        if self.data.is_some_and(|(open, _, _)| open == b) {
+            self.data = None;
+        }
+        if let Some((_, empty)) = self.pins.get_mut(&b) { *empty = Some(seq); }
+        self.holes.retain(|(bucket, _)| *bucket != b);
         *self.returning.entry(seq).or_default() += 1;
     }
 
     /// The journal written through `seq`: what it emptied is free.
     pub(super) fn durable_through(&mut self, seq: u64) {
+        self.durable = seq;
         let later = self.returning.split_off(&(seq + 1));
         self.free += self.returning.values().sum::<u64>();
         self.returning = later;

@@ -1,9 +1,7 @@
 //! A bucket's state as a transaction changes it, and the keys each change
 //! writes: its alloc key, its freespace, need_discard and fragmentation-LRU
 //! entries, its generation and the device's per-state accounting (A6,
-//! A7.12). v1 changes buckets only by btree nodes: an empty bucket takes
-//! nodes, and a btree bucket that loses its last node waits in need_discard
-//! until its emptying is durable, when it takes nodes again (A6.19).
+//! A7.12). Empty buckets wait until their emptying is durable before reuse.
 
 use super::bkey::Bpos;
 use super::value::{class, data_type, AllocV4};
@@ -118,19 +116,23 @@ impl Bucket {
     /// leave it (A6.19). `Corrupt` when the alloc key holds the bucket for
     /// anything else.
     pub(crate) fn fill(&mut self, node: u32, io_time: u64, bucket_sectors: u32) -> Result<()> {
+        self.fill_as(data_type::BTREE, node, io_time, bucket_sectors)
+    }
+
+    pub(crate) fn fill_as(&mut self, kind: u8, sectors: u32, io_time: u64, bucket_sectors: u32) -> Result<()> {
         if matches!(self.data_type, data_type::FREE | data_type::NEED_DISCARD) {
             self.owed_raise();
-            self.data_type = data_type::BTREE;
+            self.data_type = kind;
             self.needs_gen_increment = true;
             self.need_discard = true;
             self.io_time = io_time.max(1);
             self.journal_seq_nonempty = 0;
             self.journal_seq_empty = 0;
         }
-        if self.data_type != data_type::BTREE || self.dirty + node > bucket_sectors {
-            return Err(Error::Corrupt("a btree node placed in a bucket its alloc key holds otherwise"));
+        if self.data_type != kind || sectors > bucket_sectors.saturating_sub(self.dirty) {
+            return Err(Error::Corrupt("data placed in a bucket its alloc key holds otherwise"));
         }
-        self.dirty += node;
+        self.dirty += sectors;
         Ok(())
     }
 
@@ -139,10 +141,14 @@ impl Bucket {
     /// empty sequence. Whether it was emptied; `Corrupt` when the alloc key
     /// does not hold the node.
     pub(crate) fn drain(&mut self, node: u32) -> Result<bool> {
-        if self.data_type != data_type::BTREE || self.dirty < node {
-            return Err(Error::Corrupt("a btree node released from a bucket its alloc key does not hold it in"));
+        self.drain_as(data_type::BTREE, node)
+    }
+
+    pub(crate) fn drain_as(&mut self, kind: u8, sectors: u32) -> Result<bool> {
+        if self.data_type != kind || self.dirty < sectors {
+            return Err(Error::Corrupt("data released from a bucket its alloc key does not hold it in"));
         }
-        self.dirty -= node;
+        self.dirty -= sectors;
         if self.dirty > 0 {
             return Ok(false);
         }
