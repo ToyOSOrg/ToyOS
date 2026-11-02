@@ -155,6 +155,13 @@ pub enum NetError {
     Io,
 }
 
+/// Whether `addr` can be a host's own: neither unspecified, multicast nor broadcast, the
+/// check an answer naming this machine's end of a stream or a connected socket passes.
+fn unicast(addr: [u8; 4]) -> bool {
+    let addr = core::net::Ipv4Addr::from(addr);
+    !addr.is_unspecified() && !addr.is_multicast() && !addr.is_broadcast()
+}
+
 impl NetError {
     pub fn from_error_code(code: u32) -> Self {
         match code {
@@ -185,8 +192,9 @@ ipc_payload! {
     }
 
     /// The answer to [`MsgType::TcpConnect`], with the stream's bells
-    /// (`net::stream::BELLS`).
+    /// (`net::stream::BELLS`): the address and port the stream left from.
     pub struct TcpConnectResponse {
+        pub local_addr: [u8; 4],
         pub local_port: u16,
         pub _pad: u16,
     }
@@ -221,6 +229,7 @@ ipc_payload! {
         pub remote_addr: [u8; 4],
         pub remote_port: u16,
         pub local_port: u16,
+        pub local_addr: [u8; 4],
         pub nodelay: u32,
     }
 
@@ -539,19 +548,23 @@ mod tests {
         ));
     }
 
-    /// The accept's answer as a client decodes it: the peer, the port, and
-    /// `nodelay` last, any non-zero word on, and an answer without it refused.
+    /// The accept's answer as a client decodes it: the peer, the local port
+    /// and address, and `nodelay` last, any non-zero word on, and an answer
+    /// without it refused.
     #[test]
     fn an_accepts_answer_ends_in_its_streams_nodelay() {
-        let mut wire = [192, 0, 2, 7, 0x39, 0x30, 0x16, 0, 0, 0, 0, 0];
+        let mut wire = [192, 0, 2, 7, 0x39, 0x30, 0x16, 0, 198, 51, 100, 9, 0, 0, 0, 0];
         let answer: TcpAcceptResponse = crate::ipc::decode_payload(&wire).unwrap();
-        assert_eq!((answer.remote_addr, answer.remote_port, answer.local_port), ([192, 0, 2, 7], 12345, 22));
+        assert_eq!(
+            (answer.remote_addr, answer.remote_port, answer.local_port, answer.local_addr),
+            ([192, 0, 2, 7], 12345, 22, [198, 51, 100, 9])
+        );
         assert_eq!(answer.nodelay, 0);
-        wire[8..].copy_from_slice(&[0, 0, 0, 0x80]);
+        wire[12..].copy_from_slice(&[0, 0, 0, 0x80]);
         let answer: TcpAcceptResponse = crate::ipc::decode_payload(&wire).unwrap();
         assert_ne!(answer.nodelay, 0);
         assert!(matches!(
-            crate::ipc::decode_payload::<TcpAcceptResponse>(&wire[..8]),
+            crate::ipc::decode_payload::<TcpAcceptResponse>(&wire[..12]),
             Err(IpcError::Malformed)
         ));
     }
