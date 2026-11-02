@@ -486,20 +486,20 @@ fn authenticated_live_sectors_survive_torn_reordered_evacuation() {
 fn evacuation_keeps_small_reads_within_one_physical_block() {
     use core::cell::Cell;
     use toyos_blockdev::Block;
-    struct Reads<'a> { dev: &'a Image, largest: Cell<usize> }
+    struct Reads<'a> { dev: &'a Image, blocks: Cell<usize> }
     impl BlockDev for Reads<'_> {
         fn blocks(&self) -> u64 { self.dev.blocks() }
         async fn read(&self, lba: u64, out: &mut [Block]) -> core::result::Result<(), toyos_blockdev::Error> { self.dev.read(lba, out).await }
         async fn write(&self, lba: u64, bytes: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> { self.dev.write(lba, bytes).await }
         async fn flush(&self) -> core::result::Result<(), toyos_blockdev::Error> { self.dev.flush().await }
         async fn read_data(&self, lba: u64, out: &mut [Block]) -> core::result::Result<(), toyos_blockdev::Error> {
-            self.largest.set(self.largest.get().max(out.len()));
+            self.blocks.set(self.blocks.get() + out.len());
             self.dev.read_data(lba, out).await
         }
     }
     for encrypted in [false, true] {
         let dev = formatted(64 << 20, encrypted.then_some(Encryption { passphrase: b"test", kdf: MIN_KDF }));
-        let counted = Reads { dev: &dev, largest: Cell::new(0) };
+        let counted = Reads { dev: &dev, blocks: Cell::new(0) };
         let m = if encrypted { block_on_ready(Mount::unlock(&counted, b"test", LIMITS, MEMORY, random())).unwrap() } else { block_on_ready(Mount::open(&counted, MEMORY, random())).unwrap() };
         let mut inodes = Vec::new();
         for i in 0..8 {
@@ -511,10 +511,10 @@ fn evacuation_keeps_small_reads_within_one_physical_block() {
         assert!(block_on_ready(m.test_compact_user()).unwrap());
         for (i, &ino) in inodes.iter().enumerate() {
             let mut got = vec![0; if i == 0 { BLOCK } else { 512 }];
-            counted.largest.set(0);
+            counted.blocks.set(0);
             assert_eq!(block_on_ready(m.read(ino, 0, &mut got)).unwrap(), got.len());
             assert!(got.iter().all(|&byte| byte == i as u8));
-            assert_eq!(counted.largest.get(), 1);
+            assert_eq!(counted.blocks.get(), 1);
         }
         block_on_ready(m.unmount()).unwrap();
     }
