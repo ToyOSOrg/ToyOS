@@ -49,7 +49,7 @@ mod streams;
 
 pub use holders::{Bell, HolderId};
 pub use listeners::{AcceptRefused, Accepted, ListenRefused, ListenerId};
-pub use streams::{ConnectRefused, ExportRefused, Session, StreamEvent, StreamId};
+pub use streams::{ConnectRefused, ExportRefused, Memory, Session, StreamEvent, StreamId};
 
 use alloc::vec;
 use alloc::vec::Vec;

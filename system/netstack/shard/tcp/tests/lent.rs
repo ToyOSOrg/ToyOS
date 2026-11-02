@@ -42,12 +42,26 @@ impl Lent for Shared {
         self.0.borrow().len()
     }
 
+    fn most(&self) -> usize {
+        self.0.borrow().len()
+    }
+
+    fn want(&mut self, _: usize) {}
+
+    /// A fixed ring: a position is its offset below the length.
     fn put(&mut self, at: usize, data: &[u8]) {
-        self.0.borrow_mut()[at..at + data.len()].copy_from_slice(data);
+        let mut bytes = self.0.borrow_mut();
+        let len = bytes.len();
+        for (i, b) in data.iter().enumerate() {
+            bytes[(at + i) % len] = *b;
+        }
     }
 
     fn take(&self, at: usize, out: &mut [u8]) {
-        out.copy_from_slice(&self.0.borrow()[at..at + out.len()]);
+        let bytes = self.0.borrow();
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = bytes[(at + i) % bytes.len()];
+        }
     }
 }
 

@@ -49,7 +49,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::Ordering;
 
 use toyos::ipc::{FrameRx, IpcError, RxStep};
-use toyos::net::stream::{Adopt, Server, Words, ADOPT, EXPORT, EXPORTED, LAYOUT, RECEIVE_RING, REGION_BYTES, SEND_RING};
+use toyos::net::stream::{Adopt, Server, Words, ADOPT, EXPORT, EXPORTED, LAYOUT, RECEIVE_INITIAL, RECEIVE_RING, REGION_BYTES, SEND_RING};
 use toyos::net::{MsgType, RespType, TcpConnectRequest, TcpConnectResponse};
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
@@ -510,7 +510,7 @@ fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
     let _: TcpConnectRequest = toyos::ipc::decode_payload(rx.payload(frame.payload_len)).expect("the connect's request");
     let [region] = rx.take_handles::<1>().expect("the stream's region");
     let region = SharedMemory::lent(region, REGION_BYTES).expect("a region netstack takes");
-    let mut server = Server::new(words_of(&region), LAYOUT);
+    let mut server = Server::new(words_of(&region), LAYOUT, RECEIVE_INITIAL);
     region.bytes().write(RECEIVE_RING, peer);
     let _ = server.publish(words_of(&region), peer.len() as u32).expect("the client keeps the protocol");
     let (handed, (receive, send, rung)) = bells();

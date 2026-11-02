@@ -183,6 +183,10 @@ pub const SHM_DEVICE: u64 = 1;
 /// authority to place a child in a job is the authority to make memory for it.
 pub const SHM_FOR_JOB: u64 = 1 << 1;
 
+/// [`shm_reserve`]: only the region's first bytes, the call's fourth
+/// argument, are committed; [`shm_commit`] commits more.
+pub const SHM_PART: u64 = 1 << 2;
+
 /// What a [`SHM_DEVICE`] region is a whole number of.
 pub const SHM_DEVICE_PAGE: u64 = 2 * 1024 * 1024;
 
@@ -370,6 +374,8 @@ pub const SYS_THREAD_SET_AFFINITY: u64 = 161;
 pub const SYS_THREAD_GET_AFFINITY: u64 = 162;
 /// The CPU the caller is running on. See [`current_cpu`].
 pub const SYS_CURRENT_CPU: u64 = 163;
+/// Commit pages of a region made with fewer. See [`shm_commit`].
+pub const SYS_SHM_COMMIT: u64 = 164;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -377,13 +383,13 @@ pub const SYS_CURRENT_CPU: u64 = 163;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 165;
+pub const SYSCALL_PROFILE_BINS: usize = 166;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_CURRENT_CPU < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_SHM_COMMIT < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -2300,6 +2306,28 @@ pub fn shm_create(size: usize) -> Result<RawHandle, SyscallError> {
 /// [`shm_create`], with [`SHM_DEVICE`] for memory a device is lent.
 pub fn shm_create_flags(size: usize, flags: u64) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_SHM_CREATE, size as u64, flags, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// [`shm_create`] of `size` bytes with only the pages of the first
+/// `committed` committed: a page past them is no memory yet, and touching
+/// one through a mapping faults, until [`shm_commit`] commits it.
+/// `InvalidArgument` for `committed` past `size`.
+pub fn shm_reserve(size: usize, committed: usize) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_SHM_CREATE, size as u64, SHM_PART, 0, committed as u64)).map(|v| RawHandle(v as u32))
+}
+
+/// Commit every page `[offset, offset + len)` of the region `shm` names
+/// touches that is not yet: zeroed, counted to the job the region is
+/// counted to, and refused whole, `ResourceExhausted`, where they cannot all
+/// be. A page committed already is left as it is, so any holder may commit
+/// what it is about to touch. Needs [`Rights::MAP`] alone: a holder that may
+/// only map a region read-only may still spend its owner's memory on it, up
+/// to the size the owner made it. `InvalidArgument` for no bytes, a range
+/// past the region, or a device's window.
+///
+/// [`Rights::MAP`]: crate::handle::Rights::MAP
+pub fn shm_commit(shm: RawHandle, offset: usize, len: usize) -> Result<(), SyscallError> {
+    check(syscall(SYS_SHM_COMMIT, shm.0 as u64, offset as u64, len as u64, 0)).map(|_| ())
 }
 
 /// [`shm_create`], counted to the job `job` names (carrying `WRITE`) rather

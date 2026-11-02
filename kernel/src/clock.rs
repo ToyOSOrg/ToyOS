@@ -64,7 +64,7 @@ pub fn set_counter(boot: u64, mult: u64) {
     let stated = STATED_MULT.load(Relaxed);
     let at_boot = Line { counter: 0, stamp: 0, mult: if stated != 0 { stated } else { mult } }.nanos(boot);
     let page = SharedMemObject::create(crate::mm::charge::boot(), crate::mm::PAGE_SIZE).expect("clock: no frame for the clock page");
-    let lines = crate::DirectMap::from_phys(page.page(0)).as_mut_ptr::<ClockPage>();
+    let lines = crate::DirectMap::from_phys(page.page(0).expect("clock: its page is committed whole")).as_mut_ptr::<ClockPage>();
     // SAFETY: the page is this object's own, which no address space maps yet
     // and none unmaps after: held below for the machine's life. Every field of
     // `ClockPage` is an atomic, so a shared reference reads and writes it as

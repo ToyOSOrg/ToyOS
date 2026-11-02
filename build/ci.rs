@@ -832,6 +832,8 @@ pub(crate) const CONTROLS: &[Control] = &[
     )]),
     red(SDK, "transport-no-resume", Some("transport_loom"), &[Fails("two_holders_read_each_byte_once")]),
     red(SDK, "transport-ungated-violation", Some("transport_loom"), &[Fails("looks_without_the_gate_lose_no_wake")]),
+    red(SDK, "transport-grow-room-now", Some("transport_loom"), &[Fails("a_ring_grown_while_it_holds_bytes_reads_each_as_written")]),
+    red(SDK, "transport-size-before-tail", Some("transport_loom"), &[Fails("a_ring_grown_while_it_holds_bytes_reads_each_as_written")]),
     red(SDK, "transport-end-keeps-inflight", None, &[Fails(
         "transport::inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
     )]),

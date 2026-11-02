@@ -65,17 +65,26 @@ pub use crate::transport::session::Way;
 
 // ---- the region ----
 
-/// The region a stream is: four 2 MiB pages.
-pub const REGION_BYTES: usize = 8 << 20;
+/// The region a stream is at most: its header and its two rings each grown
+/// whole. A connect makes only the header and each ring's first
+/// [`RECEIVE_INITIAL`] and [`SEND_INITIAL`] bytes memory; each ring's producer
+/// makes more as it grows it (`crate::transport::stream`).
+pub const REGION_BYTES: usize = SEND_RING + SEND_BYTES as usize;
 /// The header's words: its first 4 KiB.
 pub const WORDS: usize = 1024;
 const HEADER_BYTES: usize = WORDS * 4;
-/// The receive ring, after the header.
+/// The receive ring, after the header, at most.
 pub const RECEIVE_BYTES: u32 = 4 << 20;
 pub const RECEIVE_RING: usize = HEADER_BYTES;
-/// The send ring, the rest.
-pub const SEND_BYTES: u32 = (4 << 20) - HEADER_BYTES as u32;
+/// The send ring, after it, at most.
+pub const SEND_BYTES: u32 = 4 << 20;
 pub const SEND_RING: usize = RECEIVE_RING + RECEIVE_BYTES as usize;
+/// The receive ring as a connect makes it: [tcp]'s first receive buffer
+/// (`toyos_net_tcp::limits::RECEIVE_BUFFER_INITIAL`), rounded up to the power
+/// of two a ring is.
+pub const RECEIVE_INITIAL: u32 = 64 << 10;
+/// The send ring as a connect makes it.
+pub const SEND_INITIAL: u32 = 64 << 10;
 
 /// Word `n` of the protocol's, on a 64-byte line of its own.
 const fn line(n: usize) -> usize {
@@ -93,11 +102,11 @@ pub const LAYOUT: Layout<RECEIVE_BYTES, SEND_BYTES, WORDS> = Layout::new::<
     { line(13) },
     { line(14) },
 >(
-    Place::new::<{ line(0) }, { line(1) }, { line(2) }, { line(3) }, RECEIVE_RING>(),
-    Place::new::<{ line(4) }, { line(5) }, { line(6) }, { line(7) }, SEND_RING>(),
+    Place::new::<{ line(0) }, { line(1) }, { line(2) }, { line(3) }, { line(15) }, RECEIVE_RING>(),
+    Place::new::<{ line(4) }, { line(5) }, { line(6) }, { line(7) }, { line(16) }, SEND_RING>(),
 );
 
-const _: () = assert!(SEND_RING + SEND_BYTES as usize == REGION_BYTES && NODELAY < WORDS);
+const _: () = assert!(line(16) < WORDS && NODELAY < WORDS);
 
 /// The header, as the one type that may alias words a peer writes.
 pub type Words = [AtomicU32; WORDS];
@@ -343,6 +352,11 @@ struct Call {
 }
 
 impl Call {
+    /// Make a ring's first `cap` bytes, at `ring`, memory.
+    fn commit(&self, ring: usize, cap: u32) -> bool {
+        self.end.region.is_some_and(|mapped| syscall::shm_commit(mapped.handle, ring, cap as usize).is_ok())
+    }
+
     fn words(&self) -> &Words {
         // SAFETY: the region is mapped at `base`, 2 MiB aligned, for as long as
         // a call is counted, and its header is `WORDS` words reached only as
@@ -517,7 +531,8 @@ pub fn read(handle: BorrowedHandle<'_>, buf: &mut [u8], wait: Wait) -> Result<us
             ring.read(0, &mut buf[at..at + span.len]);
         };
         let rx = Half(&call.halves().rx);
-        let read = session::read(call.words(), &rx, &call.bells(), wait.mode(), max, copy);
+        let reach = |cap: u32| call.commit(RECEIVE_RING, cap);
+        let read = session::read(call.words(), &rx, &call.bells(), wait.mode(), max, reach, copy);
         read.map(|n| n as usize).map_err(Refused::from)
     })?
 }
@@ -534,7 +549,8 @@ pub fn write(handle: BorrowedHandle<'_>, buf: &[u8], wait: Wait) -> Result<usize
             ring.write(0, &buf[at..at + span.len]);
         };
         let tx = Half(&call.halves().tx);
-        let wrote = session::write(call.words(), &tx, &call.bells(), wait.mode(), len, copy);
+        let reach = |cap: u32| call.commit(SEND_RING, cap);
+        let wrote = session::write(call.words(), &tx, &call.bells(), wait.mode(), len, reach, copy);
         wrote.map(|n| n as usize).map_err(Refused::from)
     })?
 }
@@ -814,15 +830,17 @@ fn open<A: Answered>(
 ) -> Result<Opened<A>, NetError> {
     let slot = TABLE.lock().reserve().ok_or(NetError::ResourceExhausted)?;
     let made = (|| {
-        let region = SharedMemory::create(REGION_BYTES).map_err(|e| match e {
+        let exhausted = |e| match e {
             SyscallError::ResourceExhausted => NetError::ResourceExhausted,
             _ => NetError::Io,
-        })?;
+        };
+        let region = SharedMemory::reserve(REGION_BYTES, RECEIVE_RING + RECEIVE_INITIAL as usize).map_err(exhausted)?;
+        region.commit(SEND_RING, SEND_INITIAL as usize).map_err(exhausted)?;
         // SAFETY: a fresh region of `REGION_BYTES`, 2 MiB aligned, whose header
         // is reached only as atomics.
         let words = unsafe { &*(region.as_ptr() as *const Words) };
         words[NODELAY].store(u32::from(nodelay), Ordering::Relaxed);
-        let (rx, tx) = session::client(words, LAYOUT);
+        let (rx, tx) = session::client(words, LAYOUT, SEND_INITIAL);
         let lent = region.share().map_err(|_| NetError::Io)?;
         let (answer, bells, connection) = ask(lent)?;
         let (region, base) = region.into_raw();

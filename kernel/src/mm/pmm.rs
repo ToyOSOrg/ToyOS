@@ -136,21 +136,9 @@ pub fn release_floor(job: &Job) {
 /// # Safety
 /// Each is a frame [`Frame::into_raw`] gave up, that no leaf on any CPU maps
 /// any more and nothing else frees.
-pub unsafe fn free_drawn(job: &Job, frames: &[u64]) {
+pub unsafe fn free_drawn(job: &Job, frames: impl IntoIterator<Item = u64>) {
     let pins = pins();
-    with(|f| f.free_drawn(job.memory(), frames.iter().copied(), &pins));
-}
-
-/// Give back every frame of `frames`, drawn for pages `job` committed, under
-/// one hold of the allocator's lock.
-pub fn free_all(job: &Job, frames: alloc::boxed::Box<[Frame]>) {
-    let pins = pins();
-    with(|f| f.free_drawn(job.memory(), frames.iter().map(|frame| frame.phys), &pins));
-    // Given up only once the allocator's lock is let go: the list goes back
-    // to the heap, which may give a page back through it.
-    for frame in frames.into_vec() {
-        let _ = frame.into_raw();
-    }
+    with(|f| f.free_drawn(job.memory(), frames, &pins));
 }
 
 /// The pin counters, published once by [`init`]: where they are, how many,

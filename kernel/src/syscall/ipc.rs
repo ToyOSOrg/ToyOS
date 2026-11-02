@@ -325,10 +325,10 @@ pub(super) fn sys_port_badge(
 }
 
 /// Make a shared region and hand back the one handle to it, carrying MAP, WRITE, DUP and TRANSFER — naming it is what authorizes mapping it.
-/// `SHM_DEVICE` asks for memory a device can be lent, and `SHM_FOR_JOB`
-/// counts it to the job `job` names rather than the caller's; any other
-/// bit is refused.
-pub(super) fn sys_shm_create(size: u64, flags: u64, job: RawHandle) -> u64 {
+/// `SHM_DEVICE` asks for memory a device can be lent, `SHM_PART` commits
+/// only its first `committed` bytes, and `SHM_FOR_JOB` counts it to the job
+/// `job` names rather than the caller's; any other bit is refused.
+pub(super) fn sys_shm_create(size: u64, flags: u64, job: RawHandle, committed: u64) -> u64 {
     let charged = match flags & SHM_FOR_JOB {
         0 => crate::mm::charge::current(),
         _ => match process::with_process_data(|data| data.handles.get::<crate::object::job::JobObject>(job, Rights::WRITE)) {
@@ -338,6 +338,7 @@ pub(super) fn sys_shm_create(size: u64, flags: u64, job: RawHandle) -> u64 {
     };
     let created = match flags & !SHM_FOR_JOB {
         0 => crate::object::shm::SharedMemObject::create(&charged, size),
+        SHM_PART => crate::object::shm::SharedMemObject::reserve(&charged, size, committed),
         SHM_DEVICE => crate::object::shm::SharedMemObject::create_run(&charged, size),
         _ => return SyscallError::InvalidArgument.to_u64(),
     };
@@ -346,6 +347,19 @@ pub(super) fn sys_shm_create(size: u64, flags: u64, job: RawHandle) -> u64 {
         Err(e) => return e.to_u64(),
     };
     process::with_process_data(|data| handle_result(ops::install(&mut data.handles, object)))
+}
+
+/// `toyos_abi::syscall::shm_commit`, charged to the region's own job.
+pub(super) fn sys_shm_commit(h: RawHandle, offset: u64, len: u64) -> u64 {
+    // A refusal is made with nothing held: a bad handle's ends the process.
+    let object = match process::with_process_data(|data| data.handles.get::<crate::object::shm::SharedMemObject>(h, Rights::MAP)) {
+        Ok(object) => object,
+        Err(e) => return e.refuse(),
+    };
+    match object.commit(offset, len) {
+        Ok(()) => 0,
+        Err(e) => e.to_u64(),
+    }
 }
 
 /// `toyos_abi::syscall::shm_sub`: the new object's handle carries `h`'s rights.

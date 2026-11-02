@@ -95,6 +95,12 @@ transport-no-resume = []
 # A look without the gate is believed when it names a violation, so a cursor
 # another holder moved under it ends the call.
 transport-ungated-violation = []
+# A stream's consumer loads the ring's size before its tail, so it can read a
+# byte written after a growth by the size before it.
+transport-size-before-tail = []
+# A producer that grew its ring counts its room in the new capacity at once,
+# so it writes over bytes before the switch the consumer has not read.
+transport-grow-room-now = []
 
 [lints.rust]
 # The guest's target: its stream sinks are compiled only for it.

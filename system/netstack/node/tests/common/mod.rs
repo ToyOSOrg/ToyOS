@@ -360,7 +360,8 @@ impl Wire {
             tcp: toyos_net_tcp::Secrets { isn: [3; 16], timestamp: [4; 16], port_offset: [5; 16], port_index: [6; 16], port_table: [0; 16] },
         };
         let now = Instant::from_millis(3_600_000);
-        let config = Config { receive_buffer: 65_535, send_buffer: 65_535, secrets };
+        // netstack's own buffers: each a stream's ring at its most.
+        let config = Config { receive_buffer: toyos::net::stream::RECEIVE_BYTES, send_buffer: toyos::net::stream::SEND_BYTES, secrets };
         let mut draws = 0x5a00_0000;
         let mut node = Node::new(now, config, HostName::new("toyos")).unwrap();
         let link = node.add_link(now, IndividualMac::new(MacAddr(mac)).unwrap(), Rank(0), draw(&mut draws));

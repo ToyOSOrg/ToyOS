@@ -10,12 +10,19 @@
 //! closing its last handle is how a device's window is taken back from every
 //! process that mapped it.
 //!
-//! Frames are the object's from its creation to its end, so a fault on a
-//! mapping of one never allocates.
+//! **A fault never allocates.** A region's pages are committed, each a
+//! frame of its own, zeroed, counted to the object's job, at the call that
+//! commits them: `SYS_SHM_CREATE`, all or a first part of them, then
+//! `SYS_SHM_COMMIT`, which any holder that may map it calls. A committed
+//! page is the object's to its end. A fault on a page not committed is
+//! refused as an access outside every range is, a syscall's window over one
+//! is `BadAddress`, and the kernel's own read of one ([`SharedMemObject::read`],
+//! a program image's loader among its callers) answers zeros.
 
 use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use kernel::sched::job::Job;
 
@@ -23,7 +30,7 @@ use toyos_abi::syscall::SyscallError;
 
 use crate::mm::charge::{self, Charge, Exhausted};
 use crate::mm::policy::CachePolicy;
-use crate::mm::pmm::{self, Frame, Run};
+use crate::mm::pmm::{self, Run};
 use crate::mm::space::Space;
 use crate::mm::{PAGE_2M, PAGE_SIZE};
 use crate::{DirectMap, UserAddr};
@@ -40,8 +47,9 @@ const CHUNK: usize = 1 << 16;
 /// What an object's bytes are.
 enum Backing {
     /// Frames of its own, one per page, in no order, [`CHUNK`] to a piece so
-    /// that no piece is past one heap allocation.
-    Frames(Vec<Box<[Frame]>>),
+    /// that no piece is past one heap allocation: each word its page's
+    /// frame, or 0 while the page is not committed, since no frame is at 0.
+    Frames(Vec<Box<[AtomicU64]>>),
     /// 2 MiB pages of its own in one physical run: what a device may be lent
     /// or granted, and what a kernel-built image addresses as one slice.
     Run(Run),
@@ -77,27 +85,71 @@ impl SharedMemObject {
     /// to `job`; `InvalidArgument` for no bytes or a size no page count
     /// holds, `ResourceExhausted` where frames run out.
     pub fn create(job: &Arc<Job>, size: u64) -> Result<Arc<Self>, SyscallError> {
+        Self::reserve(job, size, size)
+    }
+
+    /// [`Self::create`], with only its first `committed` bytes' pages
+    /// committed; [`Self::commit`] commits the rest.
+    pub fn reserve(job: &Arc<Job>, size: u64, committed: u64) -> Result<Arc<Self>, SyscallError> {
         let pages = pages(size)?;
-        let (count, full, rest) = (pages.div_ceil(CHUNK as u64), pages / CHUNK as u64, (pages % CHUNK as u64) as usize);
-        let lists = charge::array::<Frame>(CHUNK).saturating_mul(full as usize).saturating_add(charge::array::<Frame>(rest));
-        let core = Self::new_core_for(job, charge::array::<Box<[Frame]>>(count as usize).saturating_add(lists))?;
-        // Promised whole before any is taken: frames one at a time until none
-        // is left would starve every other allocation meanwhile.
-        if !pmm::promise(job, pages) {
-            return Err(SyscallError::ResourceExhausted);
+        if committed > size {
+            return Err(SyscallError::InvalidArgument);
         }
+        let (count, full, rest) = (pages.div_ceil(CHUNK as u64), pages / CHUNK as u64, (pages % CHUNK as u64) as usize);
+        let lists = charge::array::<AtomicU64>(CHUNK).saturating_mul(full as usize).saturating_add(charge::array::<AtomicU64>(rest));
+        let core = Self::new_core_for(job, charge::array::<Box<[AtomicU64]>>(count as usize).saturating_add(lists))?;
         let mut pieces = Vec::with_capacity(count as usize);
         let mut left = pages as usize;
         while left > 0 {
             let n = left.min(CHUNK);
-            let mut piece = Vec::with_capacity(n);
-            for _ in 0..n {
-                piece.push(pmm::alloc_promised());
-            }
-            pieces.push(piece.into_boxed_slice());
+            pieces.push((0..n).map(|_| AtomicU64::new(0)).collect());
             left -= n;
         }
-        Ok(Self::new(core, Backing::Frames(pieces), pages * PAGE_SIZE, CachePolicy::Normal))
+        let object = Self::new(core, Backing::Frames(pieces), pages * PAGE_SIZE, CachePolicy::Normal);
+        if committed > 0 {
+            object.commit(0, committed)?;
+        }
+        Ok(object)
+    }
+
+    /// Commit every page `[offset, offset + len)` touches that is not yet,
+    /// each a zeroed frame counted to the object's job: refused whole,
+    /// `ResourceExhausted`, where its frames cannot all be promised.
+    /// `InvalidArgument` for no bytes, a range past the object, or an
+    /// aperture; memory with no page to commit answers at once.
+    pub fn commit(&self, offset: u64, len: u64) -> Result<(), SyscallError> {
+        if len == 0 || offset.checked_add(len).is_none_or(|end| end > self.size) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let pieces = match &self.backing {
+            Backing::Frames(pieces) => pieces,
+            Backing::Sub { whole, offset: base, .. } => return whole.commit(base + offset, len),
+            Backing::Run(_) | Backing::Boot { .. } => return Ok(()),
+            Backing::Aperture { .. } => return Err(SyscallError::InvalidArgument),
+        };
+        let words = || {
+            let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
+            (first..end).map(|page| &pieces[page as usize / CHUNK][page as usize % CHUNK])
+        };
+        let wanted = words().filter(|word| word.load(Ordering::Acquire) == 0).count() as u64;
+        // Promised whole before any is taken, as a creation's are.
+        if !pmm::promise(self.core.job(), wanted) {
+            return Err(SyscallError::ResourceExhausted);
+        }
+        let mut drawn = 0;
+        // A page another commit filled meanwhile was counted here and is
+        // left; one it fills between the look and the store keeps its frame.
+        for word in words().filter(|word| word.load(Ordering::Acquire) == 0) {
+            let frame = pmm::alloc_promised().into_raw();
+            drawn += 1;
+            // Release: a fault that reads the frame finds it zeroed.
+            if word.compare_exchange(0, frame, Ordering::Release, Ordering::Acquire).is_err() {
+                // SAFETY: drawn just now and named by nothing.
+                unsafe { pmm::free_drawn(self.core.job(), [frame]) };
+            }
+        }
+        pmm::unpromise(self.core.job(), wanted - drawn);
+        Ok(())
     }
 
     /// `size` bytes of zeroed memory in whole pages, over one run of whole
@@ -199,27 +251,30 @@ impl SharedMemObject {
         }
     }
 
-    /// The physical address of the page `offset` bytes in, which lies inside it.
-    pub fn page(&self, offset: u64) -> u64 {
+    /// The physical address of the page `offset` bytes in, which lies inside
+    /// it; `None` while that page is not committed.
+    pub fn page(&self, offset: u64) -> Option<u64> {
         assert!(offset < self.size, "shm koid {}: page {offset:#x} of {:#x} bytes", self.core.koid().raw(), self.size);
         let page = offset & !(PAGE_SIZE - 1);
         match &self.backing {
             Backing::Frames(pieces) => {
                 let frame = (page / PAGE_SIZE) as usize;
-                pieces[frame / CHUNK][frame % CHUNK].direct_map().phys()
+                // Acquire: the commit's zeroing is seen before the frame is.
+                Some(pieces[frame / CHUNK][frame % CHUNK].load(Ordering::Acquire)).filter(|&phys| phys != 0)
             }
-            Backing::Run(run) => run.direct_map().phys() + page,
-            Backing::Boot { phys, .. } | Backing::Aperture { phys, .. } => phys + page,
+            Backing::Run(run) => Some(run.direct_map().phys() + page),
+            Backing::Boot { phys, .. } | Backing::Aperture { phys, .. } => Some(phys + page),
             Backing::Sub { whole, offset, .. } => whole.page(offset + page),
         }
     }
 
     /// Copy `bytes` in at `offset`, through the direct map. For memory the
     /// kernel lays out before a process can see it, and the words it alone
-    /// writes after; never an aperture.
+    /// writes after; never an aperture, and only over committed pages.
     pub fn write(&self, offset: u64, bytes: &[u8]) {
         assert!(self.is_ram(), "shm koid {}: the kernel writes no aperture", self.core.koid().raw());
         self.each_piece(offset, bytes.len(), |phys, at, n| {
+            let phys = phys.unwrap_or_else(|| panic!("shm koid {}: the kernel wrote {:#x}, not committed", self.core.koid().raw(), offset + at as u64));
             // SAFETY: `each_piece` bounds `[at, at + n)` inside `bytes` and
             // `phys..+n` inside one of this object's own pages, which the
             // direct map covers; no reference forms over a page a process may
@@ -228,19 +283,23 @@ impl SharedMemObject {
         });
     }
 
-    /// Copy out `out.len()` bytes at `offset`, each read once.
+    /// Copy out `out.len()` bytes at `offset`, each read once: a page not
+    /// committed reads as zeros.
     pub fn read(&self, offset: u64, out: &mut [u8]) {
         assert!(self.is_ordinary(), "shm koid {}: the kernel reads no aperture", self.core.koid().raw());
         let into = out.as_mut_ptr();
-        self.each_piece(offset, out.len(), |phys, at, n| {
+        self.each_piece(offset, out.len(), |phys, at, n| match phys {
             // SAFETY: as `write`, mirrored; `out` is the caller's own.
-            unsafe { core::ptr::copy_nonoverlapping(DirectMap::from_phys(phys).as_ptr(), into.add(at), n) }
+            Some(phys) => unsafe { core::ptr::copy_nonoverlapping(DirectMap::from_phys(phys).as_ptr(), into.add(at), n) },
+            // SAFETY: `each_piece` bounds `[at, at + n)` inside `out`.
+            None => unsafe { core::ptr::write_bytes(into.add(at), 0, n) },
         });
     }
 
     /// `f(phys, at, n)` for each piece of `[offset, offset + len)` inside one
-    /// page, `at` its offset from `offset`.
-    fn each_piece(&self, offset: u64, len: usize, mut f: impl FnMut(u64, usize, usize)) {
+    /// page, `at` its offset from `offset`; `phys` is `None` for a page not
+    /// committed.
+    fn each_piece(&self, offset: u64, len: usize, mut f: impl FnMut(Option<u64>, usize, usize)) {
         assert!(
             offset.checked_add(len as u64).is_some_and(|end| end <= self.size),
             "shm koid {}: {len} bytes at {offset:#x} of {:#x}",
@@ -251,7 +310,7 @@ impl SharedMemObject {
         while done < len {
             let at = offset + done as u64;
             let n = ((PAGE_SIZE - at % PAGE_SIZE) as usize).min(len - done);
-            f(self.page(at) + at % PAGE_SIZE, done, n);
+            f(self.page(at).map(|page| page + at % PAGE_SIZE), done, n);
             done += n;
         }
     }
@@ -288,15 +347,19 @@ fn pages(size: u64) -> Result<u64, SyscallError> {
 /// first every futex wait on a word in them ends, so none is left keyed on a
 /// frame the allocator hands out again. Nothing is allocated: each piece is
 /// sorted in place, its waits ended by one walk of the 64 buckets, and its
-/// frames freed under one hold of the allocator's lock.
+/// committed frames freed under one hold of the allocator's lock.
 impl Drop for SharedMemObject {
     fn drop(&mut self) {
         match &mut self.backing {
             Backing::Frames(pieces) => {
                 for mut piece in pieces.drain(..) {
-                    piece.sort_unstable_by_key(|frame| frame.direct_map().phys());
-                    crate::sched::futex::revoke_sorted(&piece, |frame| frame.direct_map().phys());
-                    pmm::free_all(self.core.job(), piece);
+                    piece.sort_unstable_by_key(|word| word.load(Ordering::Relaxed));
+                    let committed = piece.partition_point(|word| word.load(Ordering::Relaxed) == 0);
+                    let frames = &piece[committed..];
+                    crate::sched::futex::revoke_sorted(frames, |word| word.load(Ordering::Relaxed));
+                    // SAFETY: the last mapping and handle are gone, so no leaf
+                    // maps a frame of it, and nothing else frees one.
+                    unsafe { pmm::free_drawn(self.core.job(), frames.iter().map(|word| word.load(Ordering::Relaxed))) };
                 }
             }
             Backing::Run(run) => {

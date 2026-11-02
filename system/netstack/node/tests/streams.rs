@@ -90,15 +90,31 @@ struct Far {
     snd_nxt: u32,
     /// The node's next sequence number the peer has everything before.
     rcv_nxt: u32,
-    /// The node's last acknowledgment, and the window it came with.
+    /// The node's last acknowledgment, and the window it came with, scaled.
     acked: u32,
-    window: u16,
+    window: u32,
+    /// The peer offers window scaling in its SYN-ACK (RFC 7323 §2.2).
+    scales: bool,
+    /// The shift the node's SYN asked for, where both scale.
+    shift: u8,
     received: Vec<u8>,
     /// The node's FIN arrived, after everything before it.
     fin: bool,
     resets: Vec<Segment>,
     /// Every segment the node emitted, in order.
     segments: Vec<Segment>,
+}
+
+/// The window scale a SYN the node emitted asks for, or 0 where it asks none.
+fn window_shift(frame: &[u8]) -> u8 {
+    let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
+    let Some(TransportSlice::Tcp(tcp)) = &packet.transport else { panic!("a TCP segment") };
+    tcp.options_iterator()
+        .find_map(|option| match option {
+            Ok(TcpOptionElement::WindowScale(shift)) => Some(shift),
+            _ => None,
+        })
+        .unwrap_or(0)
 }
 
 fn v4(bytes: &[u8]) -> Ipv4Addr {
@@ -123,6 +139,8 @@ impl Far {
             rcv_nxt: 0,
             acked: 0,
             window: 0,
+            scales: false,
+            shift: 0,
             received: Vec::new(),
             fin: false,
             resets: Vec::new(),
@@ -133,7 +151,9 @@ impl Far {
     /// A segment from the peer in its frame, built by `etherparse`: PSH with text.
     fn frame(&self, seq: u32, ack: Option<u32>, syn: bool, fin: bool, rst: bool, text: &[u8]) -> Vec<u8> {
         let mut step = PacketBuilder::ethernet2(self.mac, MAC).ipv4(self.addr.octets(), A.octets(), 64).tcp(PORT, self.port, seq, 65_535);
-        if syn {
+        if syn && self.scales {
+            step = step.syn().options(&[TcpOptionElement::MaximumSegmentSize(1460), TcpOptionElement::WindowScale(7)]).unwrap();
+        } else if syn {
             step = step.syn().options(&[TcpOptionElement::MaximumSegmentSize(1460)]).unwrap();
         }
         if let Some(ack) = ack {
@@ -174,7 +194,7 @@ impl Far {
 
     /// How many bytes the node's window still lets the peer send.
     fn open(&self) -> usize {
-        self.acked.wrapping_add(u32::from(self.window)).wrapping_sub(self.snd_nxt) as usize
+        self.acked.wrapping_add(self.window).wrapping_sub(self.snd_nxt) as usize
     }
 
     /// The outside reading of a frame the node emitted, and the frames it is answered with.
@@ -193,6 +213,7 @@ impl Far {
                 self.port = segment.from_port;
                 self.received.clear();
                 self.fin = false;
+                self.shift = if self.scales { window_shift(frame) } else { 0 };
             } else if segment.from_port != self.port {
                 return Vec::new();
             }
@@ -221,7 +242,9 @@ impl Far {
             return Vec::new();
         }
         if let Some(ack) = segment.ack {
-            (self.acked, self.window) = (ack, segment.window);
+            // A SYN's window is never scaled (RFC 7323 §2.2).
+            let shift = if segment.syn { 0 } else { self.shift };
+            (self.acked, self.window) = (ack, u32::from(segment.window) << shift);
         }
         match self.manner {
             Manner::Deaf => return Vec::new(),
@@ -596,7 +619,7 @@ fn a_deadline_moves_an_established_stream_with_no_opportunity_after_it() {
 #[test]
 fn a_write_larger_than_the_window_is_queued_whole_and_arrives_whole() {
     let (mut net, id, client) = established();
-    let sent = text(100_000);
+    let sent = text(toyos::net::stream::SEND_INITIAL as usize);
     assert_eq!(client.write(&sent), Ok(sent.len()), "the send ring holds all of it");
     net.node.bridge(net.now, [id]);
     net.pump();
@@ -729,7 +752,8 @@ fn room_released_rings_a_writer_over_a_full_send_ring_on_its_bell() {
         }
         net.bridge();
     }
-    assert_eq!(written, toyos::net::stream::SEND_BYTES as usize, "the ring is full");
+    // A deaf peer acknowledges nothing, so no byte is released and the ring stays as made.
+    assert_eq!(written, toyos::net::stream::SEND_INITIAL as usize, "the ring is full");
     let bell = client.bell();
     // The peer acknowledges every byte it heard of the node's.
     let heard = u32::try_from(net.far.segments.iter().map(|segment| segment.text.len()).sum::<usize>()).unwrap();
@@ -978,6 +1002,68 @@ fn a_tail_past_the_send_rings_room_resets_that_stream() {
     assert_eq!((client.dropped(), net.node.streams(), net.far.resets.len()), (true, 0, 1));
 }
 
+/// The send ring's size word, which only the client writes.
+const TX_SIZE: usize = 16 * 16;
+
+/// A client that claims its send ring grown to its place without committing a page of it, and
+/// publishes `len` bytes, past the ring's first size.
+fn grown_without_a_commit(client: &Client, len: usize) {
+    client.region.client_commits_nothing();
+    client.word(TX_SIZE).store(toyos::net::stream::SEND_BYTES.trailing_zeros(), Ordering::Release);
+    client.word(TX_TAIL).store(u32::try_from(len).unwrap(), Ordering::Release);
+    client.region_ring();
+}
+
+// netstack commits what a client's size claims before [tcp] reads by it: every read stays inside
+// netstack's own commits, and the peer hears the bytes, a fresh commit's zeros, past the first
+// size.
+#[test]
+fn a_send_ring_a_client_grew_without_committing_is_read_through_netstacks_own_commit() {
+    let (mut net, id, client) = established();
+    const LEN: usize = 100_000;
+    grown_without_a_commit(&client, LEN);
+    for _ in 0..1_000 {
+        if net.far.received.len() == LEN {
+            break;
+        }
+        let before = net.far.received.len();
+        net.bridge();
+        if net.far.received.len() == before {
+            let at = net.node.next_deadline().expect("a timer, if nothing else");
+            net.fire(at);
+        }
+    }
+    assert!(net.far.received == vec![0; LEN], "the peer heard {} bytes", net.far.received.len());
+    assert!(net.events().iter().all(|event| !matches!(event, StreamEvent::Violated { id: v, .. } if *v == id)));
+}
+
+// A size netstack cannot make memory, the kernel refusing the commit, is a violation of that
+// stream alone, before [tcp] reads a byte by it.
+#[test]
+fn a_send_ring_size_netstack_cannot_commit_resets_that_stream() {
+    let (mut net, id, client) = established();
+    client.region.refuse_netstacks_commits();
+    grown_without_a_commit(&client, 100_000);
+    net.bridge();
+    assert_eq!(net.events(), [StreamEvent::Violated { id, violation: Violation::Size }]);
+    assert_eq!((client.dropped(), net.node.streams(), net.far.received.len()), (true, 0, 0));
+}
+
+// The client, as the receive ring's consumer, commits what a size claims before it reads by it:
+// a size netstack stored without committing, here written in its place, is read only through
+// the client's own commit.
+#[test]
+fn a_receive_ring_grown_without_netstacks_commit_is_read_through_the_clients_own() {
+    const RX_TAIL: usize = 16;
+    const RX_SIZE: usize = 15 * 16;
+    const LEN: usize = 100_000;
+    let (_net, _, client) = established();
+    client.region.netstack_commits_nothing();
+    client.word(RX_SIZE).store(toyos::net::stream::RECEIVE_BYTES.trailing_zeros(), Ordering::Release);
+    client.word(RX_TAIL).store(u32::try_from(LEN).unwrap(), Ordering::Release);
+    assert!(inbox(&client) == vec![0; LEN]);
+}
+
 // Text published after the client's own shutdown is past the FIN [tcp] queued: a violation.
 #[test]
 fn text_published_after_the_shutdown_resets_that_stream() {
@@ -1129,4 +1215,74 @@ fn the_last_holder_leaving_is_the_streams_close() {
     net.pump();
     assert!(net.far.fin, "the last holder left");
     assert_eq!((first.dropped(), net.node.streams()), (true, 0));
+}
+
+// ---- the rings grow under load ----
+
+// A client that writes more than its send ring holds doubles the ring at each write the room
+// cannot take whole, to its place, and netstack reads the grown ring by the size the client
+// stored: the peer's stream is the client's, byte for byte. Netstack's commits make no memory
+// here, so every page either end touches is one the client committed.
+#[test]
+fn an_upload_larger_than_its_send_ring_grows_it_to_its_place() {
+    use toyos::net::stream::{SEND_BYTES, SEND_RING};
+    const PERIOD: usize = 251;
+    let byte = |i: usize| (i % PERIOD) as u8;
+    const WRITE: usize = 2 * SEND_BYTES as usize;
+    let pattern: Vec<u8> = (0..WRITE + PERIOD).map(byte).collect();
+    let (mut net, _, client) = established();
+    client.region.netstack_commits_nothing();
+    let mut offset = 0;
+    for _ in 0..1_000 {
+        if client.region.committed(SEND_RING) == SEND_BYTES as usize {
+            break;
+        }
+        match client.write(&pattern[offset % PERIOD..][..WRITE]) {
+            Ok(n) => offset += n,
+            Err(Refused::WouldBlock) => {}
+            Err(other) => panic!("{other:?}"),
+        }
+        net.bridge();
+    }
+    assert_eq!(client.region.committed(SEND_RING), SEND_BYTES as usize, "the send ring after {offset} bytes");
+    let heard = &net.far.received;
+    assert!(!heard.is_empty() && heard.iter().enumerate().all(|(i, &b)| b == byte(i)), "the peer's stream is the client's");
+}
+
+// RFC 7323 §2: a peer that scales windows lets [tcp] want a receive buffer past the receive
+// ring's first size as the client keeps reading a round trip's worth; the node commits the
+// region below twice the ring and doubles it, and the client reads every byte in place across
+// each switch. Each round trip the peer fills the window it was offered over a millisecond, the
+// round trip [tcp] measures, and the client reads all of it. The client commits nothing itself,
+// so every page either end touches is one the node committed.
+#[test]
+fn a_download_a_reader_keeps_up_with_grows_the_receive_ring_and_keeps_every_byte() {
+    use toyos::net::stream::{RECEIVE_INITIAL, RECEIVE_RING};
+    const GROWN: usize = 4 * RECEIVE_INITIAL as usize;
+    let mut net = Net::new();
+    net.far.scales = true;
+    let (id, client) = net.connect(None);
+    client.region.client_commits_nothing();
+    let local = Port::new(net.far.port).expect("the SYN's source port");
+    assert_eq!(net.events(), [StreamEvent::Connected { id, local }]);
+    assert!(net.far.shift > 0, "the node's SYN asked to scale its window");
+    let sent = text(16 << 20);
+    let (mut offset, mut got) = (0, Vec::new());
+    for _ in 0..1_000 {
+        if client.region.committed(RECEIVE_RING) >= GROWN {
+            break;
+        }
+        while let len @ 1.. = net.far.open().min(1_460).min(sent.len() - offset) {
+            net.now = net.now.after(Duration::from_micros(20));
+            let frame = net.far.text(&sent[offset..offset + len]);
+            offset += len;
+            net.deliver(&frame);
+        }
+        net.now = net.now.after(Duration::from_millis(1));
+        got.extend(inbox(&client));
+        net.bridge();
+    }
+    assert!(client.region.committed(RECEIVE_RING) >= GROWN, "the receive ring after {offset} bytes: {}", client.region.committed(RECEIVE_RING));
+    got.extend(inbox(&client));
+    assert!(got.len() > GROWN && got[..] == sent[..got.len()], "the client's stream is the peer's: {} bytes", got.len());
 }

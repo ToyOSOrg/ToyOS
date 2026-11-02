@@ -1,5 +1,5 @@
-//! A region a client lent, as the node's [`Session`]: its header as words, its two rings as
-//! [tcp]'s buffers, and the stream's [`Holders`], every one of whose two bells a ring reaches.
+//! A region a client lent, as the node's [`Session`]: its header as words, its bytes as the
+//! node's [`Memory`], and the stream's [`Holders`], every one of whose two bells a ring reaches.
 //!
 //! **A region is judged before it is mapped** ([`SharedMemory::lent`]): a handle that is no
 //! region, one that is not memory the kernel allocated, and one that is not exactly
@@ -19,47 +19,35 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use toyos::ipc::FrameRx;
-use toyos::net::stream::{Words, RECEIVE_BYTES, RECEIVE_RING, REGION_BYTES, SEND_BYTES, SEND_RING};
+use toyos::net::stream::{Words, RECEIVE_INITIAL, RECEIVE_RING, REGION_BYTES, SEND_INITIAL, SEND_RING};
 use toyos::shm::{self, SharedMemory};
 use toyos::transport::session::{Holder, Rings};
 use toyos::wake::{Bell, Waker};
 use toyos::{Connection, OwnedHandle};
 use toyos_abi::syscall::SyscallError;
-use toyos_net_node::Session;
-use toyos_net_tcp::Lent;
+use toyos_net_node::{Memory, Session};
 
-/// The region's mapping.
+/// The region's mapping, as the node lays its rings out in it: a page is touched only once
+/// [`Memory::commit`] made it memory, since a region is made with only its first rings'.
 struct Mapping(SharedMemory);
 
-/// One of the region's rings, as [tcp]'s storage.
-struct Ring {
-    mapping: Rc<Mapping>,
-    base: usize,
-    len: usize,
-}
-
-impl std::fmt::Debug for Ring {
+impl std::fmt::Debug for Mapping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Ring({:#x}, {})", self.base, self.len)
+        f.write_str("Mapping")
     }
 }
 
-impl Ring {
-    /// The address of `len` bytes at `at`, which [`Lent`]'s contract keeps inside the ring.
+impl Mapping {
+    /// The address of `len` bytes at `at`, inside the region.
     fn at(&self, at: usize, len: usize) -> *mut u8 {
-        assert!(at.checked_add(len).is_some_and(|end| end <= self.len), "{len} bytes at {at} run past a ring of {}", self.len);
-        // SAFETY: the ring lies inside the mapping, which `mapping` keeps alive, and the
-        // assertion keeps the bytes inside the ring.
-        unsafe { self.mapping.0.as_ptr().add(self.base + at) }
+        assert!(at.checked_add(len).is_some_and(|end| end <= REGION_BYTES), "{len} bytes at {at} run past the region");
+        // SAFETY: the assertion keeps the bytes inside the mapping, which `self` keeps alive.
+        unsafe { self.0.as_ptr().add(at) }
     }
 }
 
-impl Lent for Ring {
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn put(&mut self, at: usize, data: &[u8]) {
+impl Memory for Mapping {
+    fn put(&self, at: usize, data: &[u8]) {
         let to = self.at(at, data.len());
         // SAFETY: `at` bounded the bytes inside the mapping; `data` is netstack's own memory
         // and never the region.
@@ -70,6 +58,10 @@ impl Lent for Ring {
         let from = self.at(at, out.len());
         // SAFETY: as in `put`, with the two sides swapped.
         unsafe { core::ptr::copy_nonoverlapping(from, out.as_mut_ptr(), out.len()) }
+    }
+
+    fn commit(&self, at: usize, len: usize) -> bool {
+        self.0.commit(at, len).is_ok()
     }
 }
 
@@ -106,10 +98,14 @@ pub struct Region {
 }
 
 impl Region {
-    /// The region `handle` names, judged and mapped. Refused, nothing is mapped and the handle
-    /// is closed.
+    /// The region `handle` names, judged and mapped, and its header and both rings' first
+    /// sizes made memory, charged to the client as each commit is. Refused, nothing is mapped
+    /// and the handle is closed.
     pub fn judged(handle: toyos::OwnedHandle) -> Result<SharedMemory, shm::Lent> {
-        SharedMemory::lent(handle, REGION_BYTES)
+        let mapping = SharedMemory::lent(handle, REGION_BYTES)?;
+        mapping.commit(0, RECEIVE_RING + RECEIVE_INITIAL as usize).map_err(shm::Lent::Kernel)?;
+        mapping.commit(SEND_RING, SEND_INITIAL as usize).map_err(shm::Lent::Kernel)?;
+        Ok(mapping)
     }
 
     /// The session over `mapping`, `first` its first holder, and its holders, which `serve`
@@ -128,12 +124,8 @@ impl Session for Region {
         unsafe { &*(self.mapping.0.as_ptr() as *const Words) }
     }
 
-    fn receive(&self) -> Box<dyn Lent> {
-        Box::new(Ring { mapping: self.mapping.clone(), base: RECEIVE_RING, len: RECEIVE_BYTES as usize })
-    }
-
-    fn send(&self) -> Box<dyn Lent> {
-        Box::new(Ring { mapping: self.mapping.clone(), base: SEND_RING, len: SEND_BYTES as usize })
+    fn memory(&self) -> Rc<dyn Memory> {
+        self.mapping.clone()
     }
 
     /// A ring into a bell its holder no longer holds is dropped: that

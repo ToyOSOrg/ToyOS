@@ -8,15 +8,21 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use toyos::net::stream::{Words, LAYOUT, NODELAY, RECEIVE_BYTES, RECEIVE_RING, REGION_BYTES, SEND_BYTES, SEND_RING};
-use toyos_net_node::Session;
-use toyos_net_tcp::Lent;
+use toyos::net::stream::{Words, LAYOUT, NODELAY, RECEIVE_BYTES, RECEIVE_INITIAL, RECEIVE_RING, REGION_BYTES, SEND_BYTES, SEND_INITIAL, SEND_RING};
+use toyos_net_node::{Memory, Session};
 use toyos::transport::session::{self, Bells, Doorbell, Holder, HungUp, Lock, Mode, Receiving, Refused, Rings, Sending, Took, Waited};
 
 /// The region and its holders' doorbells, which the holders and the node share.
 pub struct Region {
     words: Box<Words>,
     bytes: RefCell<Vec<u8>>,
+    /// Each commit's range, the client's and the node's.
+    committed: RefCell<Vec<(usize, usize)>>,
+    /// Whether the client's and the node's commits make memory: one that makes none leaves
+    /// every page the other's to commit, so a test shows the other's commits alone suffice.
+    commits: Cell<(bool, bool)>,
+    /// The node's commits are refused, as the kernel refuses one past the job's memory.
+    refused: Cell<bool>,
     holders: RefCell<Vec<Rc<Doorbells>>>,
     /// A holder rang netstack since the test last asked.
     rang: Cell<bool>,
@@ -78,33 +84,66 @@ pub struct Client {
     tx: Held<Sending<SEND_BYTES, { toyos::net::stream::WORDS }>>,
 }
 
-/// One ring of the region, as [tcp]'s storage.
-#[derive(Debug)]
-struct Ring {
-    region: Rc<Region>,
-    base: usize,
-    len: usize,
-}
-
 impl std::fmt::Debug for Region {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Region")
     }
 }
 
-impl Lent for Ring {
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn put(&mut self, at: usize, data: &[u8]) {
-        assert!(at + data.len() <= self.len, "a put past the ring");
-        self.region.bytes.borrow_mut()[self.base + at..][..data.len()].copy_from_slice(data);
+impl Memory for Region {
+    fn put(&self, at: usize, data: &[u8]) {
+        assert!(self.reaches(at, data.len()), "a put of {} bytes at {at} past what was committed", data.len());
+        self.bytes.borrow_mut()[at..][..data.len()].copy_from_slice(data);
     }
 
     fn take(&self, at: usize, out: &mut [u8]) {
-        assert!(at + out.len() <= self.len, "a take past the ring");
-        out.copy_from_slice(&self.region.bytes.borrow()[self.base + at..][..out.len()]);
+        assert!(self.reaches(at, out.len()), "a take of {} bytes at {at} past what was committed", out.len());
+        out.copy_from_slice(&self.bytes.borrow()[at..][..out.len()]);
+    }
+
+    fn commit(&self, at: usize, len: usize) -> bool {
+        if self.refused.get() {
+            return false;
+        }
+        if self.commits.get().1 {
+            self.committed.borrow_mut().push((at, at + len));
+        }
+        true
+    }
+}
+
+impl Region {
+    /// The client's commit of `[at, at + len)`.
+    fn client_commit(&self, at: usize, len: usize) -> bool {
+        if self.commits.get().0 {
+            self.committed.borrow_mut().push((at, at + len));
+        }
+        true
+    }
+
+    /// From here on the client's commits make no memory.
+    pub fn client_commits_nothing(&self) {
+        self.commits.set((false, self.commits.get().1));
+    }
+
+    /// From here on the node's commits make no memory.
+    pub fn netstack_commits_nothing(&self) {
+        self.commits.set((self.commits.get().0, false));
+    }
+
+    /// From here on the node's commits are refused.
+    pub fn refuse_netstacks_commits(&self) {
+        self.refused.set(true);
+    }
+
+    /// Whether `[at, at + len)` lies in what a commit made memory, as a fault would ask.
+    fn reaches(&self, at: usize, len: usize) -> bool {
+        self.committed.borrow().iter().any(|&(start, end)| start <= at && at + len <= end)
+    }
+
+    /// The most of the ring at `ring` committed from its start.
+    pub fn committed(&self, ring: usize) -> usize {
+        self.committed.borrow().iter().filter(|&&(start, _)| start == ring).map(|&(_, end)| end - ring).max().unwrap_or(0)
     }
 }
 
@@ -116,12 +155,8 @@ impl Session for Lend {
         &self.0.words
     }
 
-    fn receive(&self) -> Box<dyn Lent> {
-        Box::new(Ring { region: self.0.clone(), base: RECEIVE_RING, len: RECEIVE_BYTES as usize })
-    }
-
-    fn send(&self) -> Box<dyn Lent> {
-        Box::new(Ring { region: self.0.clone(), base: SEND_RING, len: SEND_BYTES as usize })
+    fn memory(&self) -> Rc<dyn Memory> {
+        self.0.clone()
     }
 
     fn ring(&self, rings: Rings) {
@@ -155,11 +190,14 @@ impl Client {
         let region = Rc::new(Region {
             words: Box::new(std::array::from_fn(|_| AtomicU32::new(0))),
             bytes: RefCell::new(vec![0; REGION_BYTES]),
+            committed: RefCell::new(vec![(0, RECEIVE_RING + RECEIVE_INITIAL as usize), (SEND_RING, SEND_RING + SEND_INITIAL as usize)]),
+            commits: Cell::new((true, true)),
+            refused: Cell::new(false),
             holders: RefCell::new(Vec::new()),
             rang: Cell::new(false),
             dropped: Cell::new(false),
         });
-        let halves = session::client(&region.words, LAYOUT);
+        let halves = session::client(&region.words, LAYOUT, SEND_INITIAL);
         (Self::holding(&region, halves), Box::new(Lend(region)))
     }
 
@@ -190,7 +228,9 @@ impl Client {
     pub fn read(&self, max: usize) -> Result<Vec<u8>, Refused> {
         let mut out = vec![0; max];
         let region = &self.region;
-        let n = session::read(&region.words, &self.rx, &self.ringing, Mode::Nonblocking, u32::try_from(max).unwrap(), |span, at| {
+        let reach = |cap: u32| region.client_commit(RECEIVE_RING, cap as usize);
+        let n = session::read(&region.words, &self.rx, &self.ringing, Mode::Nonblocking, u32::try_from(max).unwrap(), reach, |span, at| {
+            assert!(region.reaches(span.offset, span.len), "a read of {span:?} past what was committed");
             out[at..at + span.len].copy_from_slice(&region.bytes.borrow()[span.offset..][..span.len]);
         })?;
         out.truncate(n as usize);
@@ -212,7 +252,9 @@ impl Client {
     /// A write that does not wait: how much of `data` the send ring took.
     pub fn write(&self, data: &[u8]) -> Result<usize, Refused> {
         let region = &self.region;
-        let n = session::write(&region.words, &self.tx, &self.ringing, Mode::Nonblocking, u32::try_from(data.len()).unwrap(), |span, at| {
+        let reach = |cap: u32| region.client_commit(SEND_RING, cap as usize);
+        let n = session::write(&region.words, &self.tx, &self.ringing, Mode::Nonblocking, u32::try_from(data.len()).unwrap(), reach, |span, at| {
+            assert!(region.reaches(span.offset, span.len), "a write of {span:?} past what was committed");
             region.bytes.borrow_mut()[span.offset..][..span.len].copy_from_slice(&data[at..at + span.len]);
         })?;
         Ok(n as usize)
