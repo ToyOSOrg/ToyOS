@@ -217,6 +217,15 @@ started. Nothing reaches userland when a device arrives or leaves.
    - On AArch64's SMMUv3 a function that arrived after the unit was
      programmed is listed and refused a claim by name: its routes are read
      for the functions enumerated at boot.
+   - **Next, by the owner's ruling of 1–2 Nov 2026: claims are the
+     supervisor's to time.** The kernel's wait at claim time for the root
+     bridges' declaration goes; the supervisor starts `drives` processes off
+     the device set once the declaration is in it. That restores
+     `acpi_server_death` (`issues/the-acpi-servers-death-has-no-readback-on-the-t14.md`)
+     and the guest arm on a held function's configuration
+     (`issues/no-guest-reads-a-held-functions-configuration-refused-to-the-acpi-holder.md`),
+     both lost because a boot whose first `acpi` holder is a job can hold no
+     claim. Its own PR, after #934.
 3. **Drivers leave the shared services.** netstack, soundserver and diskserver
    each become a driver per function plus the service its clients use. The
    client port carries a per-device source and `gone`.
