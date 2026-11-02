@@ -104,7 +104,7 @@ pub struct Stat {
 }
 
 impl Stat {
-    /// What the kernel answers about a file or a handle of its own: one name,
+    /// What the kernel answers about an object of its own: one name,
     /// and of the times only when it was last written.
     pub fn of_kernel(stat: toyos_abi::syscall::Stat) -> Self {
         Self {
@@ -469,6 +469,9 @@ pub fn dl_open(path: &[u8]) -> Result<u64, DlOpenRefused> {
 /// from one) says so before it asks for a path.
 #[cfg_attr(not(all(feature = "fd-table", not(test))), allow(dead_code))]
 fn named(path: &[u8]) -> Result<&str, Error> {
+    if path.len() > fs::MAX_PATH {
+        return Err(Error::Served(fs::Error::NameTooLong));
+    }
     match core::str::from_utf8(path) {
         Ok("") => Err(Error::Served(fs::Error::NotFound)),
         Ok(path) => Ok(path),
@@ -519,14 +522,15 @@ mod tests {
         assert_eq!(absolute("/", "../../.."), "/");
     }
 
-    /// The empty path names nothing, whoever would resolve it; any other
-    /// UTF-8 path is itself.
+    /// The path boundary refuses empty, non-UTF-8 and oversized names.
     #[test]
     fn the_empty_path_names_nothing() {
         assert_eq!(named(b""), Err(Error::Served(fs::Error::NotFound)));
         assert_eq!(named(b"."), Ok("."));
         assert_eq!(named(b"/"), Ok("/"));
         assert_eq!(named(b"\xff"), Err(Error::NotUtf8));
+        assert!(named(&alloc::vec![b'a'; fs::MAX_PATH]).is_ok());
+        assert_eq!(named(&alloc::vec![b'a'; fs::MAX_PATH + 1]), Err(Error::Served(fs::Error::NameTooLong)));
     }
 
     #[test]

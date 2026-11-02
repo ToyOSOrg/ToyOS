@@ -1,9 +1,5 @@
-//! A spawn and the end of its child leave every kind of kernel object as it
-//! was, for a program from each of three places: a file its server holds in
-//! memory, which it answers as a region over those pages; a file a server
-//! does not, which the spawn reads whole into a region of the spawner's own;
-//! and a file of the kernel's `/tmp`, which the kernel opens itself. Whatever
-//! the child is paged from, the spawner and the child must both let it go.
+//! Spawns from served system, persistent and memory volumes release their
+//! kernel objects when the child and its process handle are gone.
 //!
 //! Roles: no argument is the test; `held` writes a line and waits for its
 //! stdin to end.
@@ -34,7 +30,9 @@ fn main() {
             let copy = in_state(SELF_PATH);
             spawns_return_the_census("a copy in /state", &copy);
             std::fs::remove_file(&copy).unwrap_or_else(|e| panic!("remove {copy}: {e}"));
-            spawns_return_the_census("a copy in /tmp", &image::in_tmp(SELF_PATH));
+            let copy = image::in_tmp(SELF_PATH);
+            spawns_return_the_census("a copy in /tmp", &copy);
+            std::fs::remove_file(&copy).expect("remove /tmp executable");
         }
     }
 }

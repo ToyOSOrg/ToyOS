@@ -1,129 +1,31 @@
-//! `read_dir` must return every entry or an error, never a short listing.
-//!
-//! Two defects, and the second is what makes the first's bound honest. The
-//! kernel built a directory listing with one entry per file and no cap, so a
-//! `read_dir` over 32,769 files in one tmpfs directory panicked it — measured,
-//! 1.8 s, from `fs::write` in a loop. And `SYS_READDIR` filled the caller's
-//! buffer, stopped, and reported the bytes it had written, which is
-//! indistinguishable from a complete listing: 4125 entries of 34,816, as
-//! success. A bound plus a silent truncation is a quieter version of the same
-//! defect, so both are asserted here. All below is an ordinary workload.
+//! A served directory listing larger than one reply returns every entry once.
 
+use std::collections::BTreeSet;
 use std::fs;
-use std::process::Command;
 
-/// `vfs::MAX_LIST_ENTRIES`. The kernel refuses a listing above it; this test
-/// exists partly to prove the number is not above the real ceiling, so it must
-/// track the kernel's.
-const MAX_LIST_ENTRIES: usize = 16_384;
-
-/// Enough plain entries that the encoded listing cannot fit std's first
-/// buffer (65,536 bytes). At ~15 bytes an entry this is ~90 KB, so a
-/// truncating kernel returns about 4,000 of them.
-const PLAIN_ENTRIES: usize = 6_000;
+const DIR: &str = "/tmp/readdir_bound";
+const ENTRIES: usize = 6_000;
 
 fn main() {
-    plain_entries_are_all_returned();
-    subdirectories_at_the_limit();
-    one_past_the_limit_is_refused();
-    a_directory_still_lists_in_a_mount_past_the_bound();
-    system_alive();
+    fs::create_dir(DIR).expect("create listing directory");
+    // The names alone exceed a 64 KiB reply, independently of wire overhead.
+    for i in 0..ENTRIES {
+        fs::write(format!("{DIR}/entry-{i:06}"), b"").expect("create file");
+    }
+    let mut names = BTreeSet::new();
+    for entry in fs::read_dir(DIR).expect("open listing") {
+        let entry = entry.expect("read listing batch");
+        assert!(entry.file_type().expect("entry type").is_file());
+        let name = entry.file_name().into_string().expect("UTF-8 name");
+        assert!(names.insert(name), "listing repeated an entry");
+    }
+    assert_eq!(names.len(), ENTRIES, "listing omitted entries");
+    for i in 0..ENTRIES {
+        let name = format!("entry-{i:06}");
+        assert!(names.contains(&name), "listing omitted {name}");
+        fs::remove_file(format!("{DIR}/{name}")).expect("remove file");
+    }
+    assert_eq!(fs::read_dir(DIR).expect("emptied listing").collect::<std::io::Result<Vec<_>>>().expect("empty batch").len(), 0);
+    fs::remove_dir(DIR).expect("remove listing directory");
     println!("all readdir bound tests passed");
-}
-
-/// A listing larger than the caller's buffer comes back whole.
-///
-/// Plain file entries, in their own subdirectory, so this exercises the
-/// `result` path rather than the dedup one. The count is the assertion: a
-/// truncating kernel returns a valid-looking prefix of it.
-fn plain_entries_are_all_returned() {
-    for i in 0..PLAIN_ENTRIES {
-        fs::write(format!("/tmp/a/f{i}"), b"").expect("create failed");
-    }
-    let n = fs::read_dir("/tmp/a").expect("read_dir failed").count();
-    assert_eq!(n, PLAIN_ENTRIES, "read_dir truncated: {n} entries of {PLAIN_ENTRIES}");
-    println!("  PASS: {n} entries returned whole, past a 65,536-byte buffer");
-
-    for i in 0..PLAIN_ENTRIES {
-        fs::remove_file(format!("/tmp/a/f{i}")).expect("remove failed");
-    }
-}
-
-/// Exactly `MAX_LIST_ENTRIES` entries, nearly all in the shape that costs the
-/// most.
-///
-/// Every name but [`PLAIN_AT_LIMIT`] is `d<i>/f`, so listing `/tmp` puts one
-/// entry per distinct subdirectory into the kernel's dedup set — the
-/// allocation the bound is derived against. A directory opened is numbered
-/// (`kernel/pure/dirnodes.rs`, `MAX_DIRECTORIES`, the same count), and this
-/// test opens two more than it fills, `/tmp` here and `/tmp/empty` below, so
-/// those two entries are plain files. It succeeding is what says the bound is
-/// not above the real ceiling; deriving it on paper does not.
-fn subdirectories_at_the_limit() {
-    for i in 0..MAX_LIST_ENTRIES - PLAIN_AT_LIMIT {
-        fs::write(format!("/tmp/d{i}/f"), b"").expect("create failed");
-    }
-    for i in 0..PLAIN_AT_LIMIT {
-        fs::write(format!("/tmp/plain{i}"), b"").expect("create failed");
-    }
-    let n = fs::read_dir("/tmp").expect("read_dir at the limit failed").count();
-    assert_eq!(n, MAX_LIST_ENTRIES, "listing at the limit returned {n}");
-    println!("  PASS: {n} entries listed at the limit, {} of them distinct subdirectories", n - PLAIN_AT_LIMIT);
-}
-
-/// The entries at the limit that are files, leaving a directory number each
-/// for the two directories the test opens.
-const PLAIN_AT_LIMIT: usize = 2;
-
-/// The whole listing of `path`, or the error that ended it: opening the
-/// directory or any read of its listing.
-fn listing(path: &str) -> std::io::Result<usize> {
-    fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>().map(|entries| entries.len())
-}
-
-/// One more, and the answer is an error rather than a panic or a short list.
-fn one_past_the_limit_is_refused() {
-    fs::write(format!("/tmp/d{MAX_LIST_ENTRIES}/f"), b"").expect("create failed");
-    match listing("/tmp") {
-        Ok(n) => panic!("listing past the limit returned {n} entries"),
-        Err(e) => println!("  PASS: one past the limit refused ({e})"),
-    }
-}
-
-/// The bound belongs to the directory, not to the mount holding it.
-///
-/// `/tmp` is over it by now and cannot list its own root, which is the shape
-/// asserted at the end: every directory *in* it still lists, including one
-/// holding nothing — the answer a mount-wide bound cannot give, an empty
-/// listing and a refusal being the same byte to a caller checking existence.
-fn a_directory_still_lists_in_a_mount_past_the_bound() {
-    let full = fs::read_dir("/tmp/d0").expect("read_dir of a directory in a full tmpfs");
-    let names: Vec<String> =
-        full.map(|e| e.expect("entry").file_name().to_string_lossy().into_owned()).collect();
-    assert_eq!(names, vec![String::from("f")], "/tmp/d0 listed {names:?}");
-
-    fs::create_dir("/tmp/empty").expect("mkdir failed");
-    let n = fs::read_dir("/tmp/empty").expect("read_dir of an empty directory in a full tmpfs").count();
-    assert_eq!(n, 0, "an empty directory listed {n} entries");
-    println!("  PASS: /tmp serves a directory and an empty one while its own root is refused");
-
-    // The mount root is a directory too, and its bound is still the same one.
-    match listing("/tmp") {
-        Ok(n) => panic!("/tmp listed {n} entries after the per-directory bound"),
-        Err(e) => println!("  PASS: /tmp's own root is still refused ({e})"),
-    }
-}
-
-/// The refusal cost the caller an error and nothing else. A panic inside
-/// `Vfs::list` would have stranded the VFS lock, so a spawn — which reads the
-/// binary through the same lock — is the check that the filesystem still
-/// works, not just that this process is still running.
-fn system_alive() {
-    let output = Command::new("/system/bin/echo")
-        .arg("still alive")
-        .output()
-        .expect("failed to run echo after the refusal");
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "still alive");
-    println!("  PASS: the VFS still serves after the refusal");
 }

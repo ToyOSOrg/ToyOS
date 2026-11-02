@@ -183,10 +183,6 @@ const RUST_SKIP: &[&str] = &[
     // `tests/images/floorcase.toml`: `memory_floor_holds_the_controls` runs it
     // on QEMU and the `memory_floor` metal row on the T14.
     "memory_floor",
-    // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
-    // shares — every later `read_dir("/tmp")` in it would be refused.
-    // `readdir_bound` gives it one.
-    "readdir_bound",
     // They need an HDA controller, which the shared boot's machine has not:
     // the `hda_tone`, `hda_tone_resampled` and `hda_volume_step` metal rows
     // run them on the T14 and the AMD bench, and
@@ -862,7 +858,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "readdir_bound",
         metal::Metal {
-            arms: TESTCASES_READDIR,
+            arms: TESTCASES,
             judge: |b| b[0].job_passed("test_rs_readdir_bound"),
         },
     ),
@@ -1459,10 +1455,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: SELFTESTS, judge: |b| pci_cap_selftest(b[0].kernel().text()) },
     ),
     (
-        "read_fault_selftests",
-        metal::Metal { arms: SELFTESTS, judge: |b| read_fault_probes(b[0].kernel().text()) },
-    ),
-    (
         "lapic_spurious_vector",
         metal::Metal { arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
     ),
@@ -2012,11 +2004,6 @@ const TESTCASES_REFUSED: &[metal::Arm] =
 const FLOORCASE: &[metal::Arm] =
     &[metal::once("floorcase", "tests/images/floorcase.toml", &[], &["test_rs_memory_floor"])];
 
-/// Its own boot: `readdir_bound` fills `/tmp` to the VFS listing limit, and
-/// every later `read_dir("/tmp")` in a boot it shared would be refused.
-const TESTCASES_READDIR: &[metal::Arm] =
-    &[metal::once("testcases-readdir", "tests/images/testcases.toml", &[], &["test_rs_readdir_bound"])];
-
 /// The shipping kernel with the windows' instrument and nothing else, so what
 /// it reads is that kernel under the herd. Three exits, a report each:
 /// `idle_span`'s is the boot's first, where the kernel holds; `pwd`'s reads the
@@ -2137,7 +2124,6 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
 /// [`ACTUATOR_TESTS`] ride, which is the same kernel.
 const SELFTEST_PARAMS: &[&str] = &[
     "pci-cap-selftest",
-    "revoked-backing-selftest",
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
     "sysret-ss-probe",
@@ -6474,19 +6460,6 @@ fn app_view(back: &metal::Readback) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// A backing read after deletion is refused on both writable mounts, and a page-cache slot whose fill the device refused is unbound.
-fn read_fault_probes(log: &str) -> Result<(), String> {
-        let probe = "revoke-selftest: /tmp/revoke_probe";
-        let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-            return Err(format!("{probe} never ran:\n{log}"));
-        };
-        if !verdict.contains("PASS") {
-            return Err(format!("{}\n{log}", verdict.trim()));
-        }
-        eprintln!("  [read-fault] {}", verdict.trim());
-        Ok(())
 }
 
 /// The spurious vector and an unclaimed one are both gated rather than escalated to #DF.

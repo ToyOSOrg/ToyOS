@@ -641,6 +641,9 @@ unsafe extern "C" fn toyos_fs_chdir(path: *const u8, len: usize) -> i64 {
     let path = unsafe { bytes(path, len) };
     let changed = super::named(path).and_then(|path| {
         let abs = super::absolute(&cwd(), path);
+        if abs.len() > fs::MAX_PATH {
+            return Err(Error::Served(fs::Error::NameTooLong));
+        }
         let stat = on_path(At::Cwd, abs.as_bytes(), directory_stat, |_, dir, base, rel| dir.stat(base, rel, true).map(stat_of))?;
         if stat.file_type != FileType::Directory {
             return Err(Error::NotADirectory);

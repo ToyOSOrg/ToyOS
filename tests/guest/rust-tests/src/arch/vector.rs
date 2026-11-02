@@ -8,7 +8,8 @@ mod x86_64 {
     use core::arch::asm;
     use core::arch::x86_64::__cpuid_count;
 
-    use toyos_abi::syscall::{Stat, SYS_STAT};
+    use toyos_abi::syscall::{Stat, SYS_FSTAT};
+    use toyos::AsHandle;
 
     /// Which vector registers this machine gives a thread. Only [`width`]
     /// makes one, so holding one is having checked what std reports.
@@ -109,12 +110,12 @@ mod x86_64 {
         );
     }
 
-    /// Turns of the hold loop between two of its `stat`s.
+    /// Turns of the hold loop between two of its `fstat`s.
     const BURST: u64 = 100_000;
 
-    /// The hold loop: `r12` runs of [`BURST`] turns, each ending in a `stat`
+    /// The hold loop: `r12` runs of [`BURST`] turns, each ending in a `fstat`
     /// whose arguments `rdi`, `rsi`, `rdx`, `r8` and `r9` keep across every
-    /// `syscall`, and the `stat`s' results ORed into `r13`.
+    /// `syscall`, and the `fstat`s' results ORed into `r13`.
     macro_rules! bursts {
         () => {
             concat!(
@@ -132,7 +133,7 @@ mod x86_64 {
     }
 
     #[target_feature(enable = "avx")]
-    unsafe fn hold_avx(p: *mut u8, bursts: u64, path: &[u8], stat: *mut Stat) -> u64 {
+    unsafe fn hold_avx(p: *mut u8, bursts: u64, handle: u32, stat: *mut Stat) -> u64 {
         let refused;
         asm!(
             ymm!(load 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15),
@@ -142,11 +143,11 @@ mod x86_64 {
             inout("r12") bursts => _,
             inout("r13") 0u64 => refused,
             burst = const BURST,
-            in("rdi") SYS_STAT,
-            in("rsi") path.as_ptr(),
-            in("rdx") path.len(),
-            in("r8") stat,
-            in("r9") 1u64,
+            in("rdi") SYS_FSTAT,
+            in("rsi") u64::from(handle),
+            in("rdx") stat,
+            in("r8") 0u64,
+            in("r9") 0u64,
             out("rax") _,
             out("rcx") _,
             out("r11") _,
@@ -157,7 +158,7 @@ mod x86_64 {
     }
 
     #[target_feature(enable = "avx512f")]
-    unsafe fn hold_avx512(p: *mut u8, bursts: u64, path: &[u8], stat: *mut Stat) -> u64 {
+    unsafe fn hold_avx512(p: *mut u8, bursts: u64, handle: u32, stat: *mut Stat) -> u64 {
         let refused;
         asm!(
             zmm!(load 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31),
@@ -169,11 +170,11 @@ mod x86_64 {
             inout("r12") bursts => _,
             inout("r13") 0u64 => refused,
             burst = const BURST,
-            in("rdi") SYS_STAT,
-            in("rsi") path.as_ptr(),
-            in("rdx") path.len(),
-            in("r8") stat,
-            in("r9") 1u64,
+            in("rdi") SYS_FSTAT,
+            in("rsi") u64::from(handle),
+            in("rdx") stat,
+            in("r8") 0u64,
+            in("r9") 0u64,
             out("rax") _,
             out("rcx") _,
             out("r11") _,
@@ -199,23 +200,25 @@ mod x86_64 {
 
     /// `file` loaded into every vector register, held there through `bursts`
     /// runs of [`BURST`] turns of a loop that touches no vector register, each
-    /// ending in a `stat` of `path` that the kernel runs on this thread's own
+    /// ending in an object `fstat` that the kernel runs on this thread's own
     /// kernel stack, and read back.
-    pub fn hold(width: Width, file: &[u8], bursts: u64, path: &[u8]) -> Vec<u8> {
+    pub fn hold(width: Width, file: &[u8], bursts: u64) -> Vec<u8> {
         assert_eq!(file.len(), width.bytes());
         assert!(bursts > 0, "`dec` from zero would loop 2^64 times");
         let mut held = file.to_vec();
+        let object = toyos::null(toyos_abi::Rights::READ).expect("an object for fstat");
+        let handle = object.as_handle().raw().0;
         let mut stat = Stat::default();
         // SAFETY: as `read`'s; the loads and stores are `width.bytes()` long,
         // every vector register the block writes is declared clobbered, and
-        // `stat` reads `path` and writes `stat`, both live across the block.
+        // `fstat` uses the held object and writes `stat`, both live across the block.
         let refused = unsafe {
             match width.0 {
-                Kind::Avx => hold_avx(held.as_mut_ptr(), bursts, path, &mut stat),
-                Kind::Avx512 => hold_avx512(held.as_mut_ptr(), bursts, path, &mut stat),
+                Kind::Avx => hold_avx(held.as_mut_ptr(), bursts, handle, &mut stat),
+                Kind::Avx512 => hold_avx512(held.as_mut_ptr(), bursts, handle, &mut stat),
             }
         };
-        assert_eq!(refused, 0, "a `stat` of {} was refused", String::from_utf8_lossy(path));
+        assert_eq!(refused, 0, "fstat of a held object was refused");
         held
     }
 }

@@ -54,7 +54,7 @@ fn main() {
     for i in 0..ATTEMPTS {
         // A name of its own for one file: the ledger is keyed by name.
         let name = format!("{DIR}/{i}.so");
-        syscall::symlink(lib.as_bytes(), name.as_bytes()).unwrap_or_else(|e| panic!("link {name}: {e:?}"));
+        files::symlink(lib.as_bytes(), (files::At::Cwd, name.as_bytes())).unwrap_or_else(|e| panic!("link {name}: {e:?}"));
         match files::dl_open(name.as_bytes()) {
             Ok(handle) => {
                 first.get_or_insert((name, handle));
