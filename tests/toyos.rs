@@ -493,7 +493,8 @@ const MACHINE_TESTS: &[&str] = &[
     "a_function_arrives_and_leaves",
     // A PCI claim on a boot whose `acpi` claim holder never declares the root
     // bridges' memory: the kernel's wait for it and its deadline, on QEMU
-    // x86-64's q35 with two `edu` (`Profile::HeadlessTwoEdu`). The state
+    // x86-64's q35 with two `edu` and no console port, since no claim can
+    // carry it (`Profile::HeadlessTwoEduNoConsolePort`). The state
     // machine is `toyos-pci`'s, host-tested; the wait on its watch and the
     // refusal at its end are a claimant's thread in a booted kernel. No bench
     // boots without its ACPI server.
@@ -2819,7 +2820,7 @@ const ACPI_MEDIATED_SAID: [&str; 10] = [
     "acpi: the FACS read through as type 10, its write was refused FacsWrite, and the memory after it was written and put back",
     "acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; the i8042's row ClaimedPort; PM1a_CNT read and refused its write ReadOnlyPort; the POST port was written",
     "acpi: ACPI_ENABLE and ACPI_DISABLE were refused SMI_CMD as KernelCommand and SCI_EN stayed set, a write wider than a byte was refused CommandSpan, every firmware call made was read back from the port and counted on the boot processor, and a storm of them was refused CommandRate",
-    "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the console function this kernel drives HeldFunction, and the host bridge's 0x44 was written",
+    "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, and the host bridge's 0x44 was written",
     "acpi: the lock a dead holder left taken read free; it was taken and given back, given back with GBL_RLS where the firmware had asked, and found pending while the firmware owned it",
     "acpi: a sleep type wider than three bits was refused InvalidArgument, the next holder's replaced a dead one's, and a second under one claim was refused AlreadyExists",
 ];
@@ -2857,6 +2858,8 @@ fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
             // The test kernel, for the Global Lock's actuator.
             kernel_features: ACTUATOR_KERNEL,
             ready_marker: "acpi: the ACPI row: ",
+            // Every claim of this boot is refused: its `acpi` holders declare nothing.
+            profile: qemu::Profile::HeadlessNoConsolePort,
             smp: cpus,
             extra_root_files: vec![suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated")],
             qmp: true,
@@ -2947,6 +2950,8 @@ fn acpi_supply_outlives_holder() -> Result<(), String> {
         &[],
         BootOptions {
             ready_marker: "acpi: the ACPI row: ",
+            // Every claim of this boot is refused: its `acpi` holders declare nothing.
+            profile: qemu::Profile::HeadlessNoConsolePort,
             extra_root_files: vec![
                 suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated"),
                 // The arm's name is the file's: `acpi_mediated` asks whether it is there.
@@ -3001,6 +3006,8 @@ fn acpi_press_is_one_sci() -> Result<(), String> {
         &[],
         BootOptions {
             ready_marker: "acpi: the ACPI row: ",
+            // Every claim of this boot is refused: its `acpi` holders declare nothing.
+            profile: qemu::Profile::HeadlessNoConsolePort,
             extra_root_files: vec![
                 suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated"),
                 // The arm's name is the file's: `acpi_mediated` asks whether it is there.
@@ -5272,7 +5279,7 @@ fn a_claim_waits_out_an_undeclared_machine() -> Result<(), String> {
     const WAITED: &str = "pcidev: a claim waited ";
     const REFUSED: &str = "NOT HANDED OVER — no declaration of the memory the root bridges decode is held (nothing was declared before a claim's deadline)";
     const DEADLINE: Duration = Duration::from_secs(30);
-    let options = BootOptions { profile: qemu::Profile::HeadlessTwoEdu, ..Default::default() };
+    let options = BootOptions { profile: qemu::Profile::HeadlessTwoEduNoConsolePort, ..Default::default() };
     let config = compile::repo_root().join("tests/images/undeclaredcase.toml");
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     // The guest is quiet for the whole of the wait, which the deadline bounds:

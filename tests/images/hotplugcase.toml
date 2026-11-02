@@ -10,6 +10,7 @@ start = ["logkeeper", "acpiserver", "test-runner"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 # QEMU's `pcie-root-port` is no port a device outside the machine plugs
 # into, and no firmware property can say so: this image declares it, and no
@@ -24,3 +25,8 @@ args = ["--hot-plug-ports-internal"]
 drives = ["pci:00:ff:00/1234:11e8"]
 
 [programs.test-runner]
+
+# The virtio-serial driver, for the VM's console alone: this image runs no agent.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

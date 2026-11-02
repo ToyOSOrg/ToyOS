@@ -678,6 +678,11 @@ pub enum Profile {
     /// `iommu_platform=on`, and the harness sets that only where a unit exists,
     /// so the guest's own negotiation comes out the other way here.
     HeadlessNoIommu,
+    /// [`Profile::Headless`] without the console's port, for a boot nothing
+    /// declares the root bridges' memory on, where every claim is refused and
+    /// the UART is the console: `tests/images/acpicase.toml`'s, whose `acpi`
+    /// holders are jobs that declare nothing.
+    HeadlessNoConsolePort,
     /// [`Profile::Headless`] with no USB controller: the machine whose NVMe
     /// disk is the only storage it has, and the only device its firmware can
     /// boot.
@@ -709,6 +714,9 @@ pub enum Profile {
     /// neither of: two identical functions, each a `drives` row's to start a
     /// process on.
     HeadlessTwoEdu,
+    /// [`Profile::HeadlessTwoEdu`] without the console's port, as
+    /// [`Profile::HeadlessNoConsolePort`]: `tests/images/undeclaredcase.toml`'s.
+    HeadlessTwoEduNoConsolePort,
     /// [`Profile::Headless`] with a `pcie-root-port` whose slot the
     /// firmware's `_OSC` grants native hot-plug of, an `edu` behind it from
     /// boot: the machine a test pulls it out of and plugs one into over QMP.
@@ -807,6 +815,7 @@ impl Profile {
             }
             Self::Headless
             | Self::HeadlessNoIommu
+            | Self::HeadlessNoConsolePort
             | Self::HeadlessNoUsb
             | Self::HeadlessVirtioGpu
             | Self::HeadlessUsbSpare
@@ -815,6 +824,7 @@ impl Profile {
             | Self::HeadlessE1000e
             | Self::HeadlessTwoNics
             | Self::HeadlessTwoEdu
+            | Self::HeadlessTwoEduNoConsolePort
             | Self::HeadlessHotplugPort
             | Self::Metal
             | Self::MetalTwoHda
@@ -1164,6 +1174,7 @@ impl Profile {
             }
             Self::MetalAmdViTestdev => Shape { probes: Probes::Testdevs, ..Self::MetalAmdVi.shape() },
             Self::HeadlessNoIommu => Shape { iommu: None, console_port: false, ..Self::Headless.shape() },
+            Self::HeadlessNoConsolePort => Shape { console_port: false, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessNicBehindPort => Shape { nic: Nic::BehindPort, ..Self::Headless.shape() },
@@ -1171,6 +1182,7 @@ impl Profile {
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::HeadlessTwoNics => Shape { nic: Nic::VirtioPair, ..Self::Headless.shape() },
             Self::HeadlessTwoEdu => Shape { probes: Probes::Edus, ..Self::Headless.shape() },
+            Self::HeadlessTwoEduNoConsolePort => Shape { console_port: false, ..Self::HeadlessTwoEdu.shape() },
             Self::HeadlessHotplugPort => Shape { probes: Probes::HotplugPort, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
                 xhci: &[XHCI_DEFAULT, XHCI_SPARE],

@@ -5,7 +5,7 @@
 //! Run on a boot that starts no ACPI server (`tests/images/acpicase.toml`),
 //! where the i8042's row is another claim's; on a guest: every write here that must be refused is one
 //! a kernel that made it would make for real — to RAM, to the tables, to
-//! COM1, to `PM1a_CNT`, to a function's header or a held function — and the
+//! COM1, to `PM1a_CNT`, to a function's header — and the
 //! firmware's side of the lock is staged on the FACS itself, which only a
 //! machine whose firmware is not using it can take. Each address is found as
 //! a holder finds it, from the RSDP the claim's description names.
@@ -518,19 +518,6 @@ fn configuration(holder: &Holder, info: &AcpiInfo) {
     assert_eq!(holder.write(Space::PciConfig, host_bridge(0x44), Width::Byte, held), Ok(()), "acpi: 0x44 by address");
     assert_eq!(holder.write(Space::SystemMemory, ecam + 0x44, Width::Byte, held), Ok(()), "acpi: 0x44 through ECAM");
     assert_eq!(holder.read(Space::PciConfig, host_bridge(0x44), Width::Byte), Ok(held));
-    // The console function this kernel drives is its driver's whole: the last
-    // virtio-serial function on bus 0, since the harness puts the clipboard's
-    // channel before it. Each write below is of the value the register holds,
-    // so one a broken fence let through would be red here and nowhere else.
-    const VIRTIO_SERIAL: u64 = 0x1043_1af4;
-    let console = (0..32).rev().find(|&device| holder.read(Space::PciConfig, pci_address(0, 0, device, 0, 0), Width::DWord) == Ok(VIRTIO_SERIAL)).expect("acpi: no virtio-serial function on this guest's bus 0");
-    for offset in [0x44u16, 0x100] {
-        let at = pci_address(0, 0, console, 0, offset);
-        let value = holder.read(Space::PciConfig, at, Width::DWord).expect("acpi: a held function reads");
-        assert_eq!(holder.write(Space::PciConfig, at, Width::DWord, value), Err(Refused::HeldFunction), "acpi: the console function's {offset:#x}");
-        let through = ecam + (u64::from(console) << 15 | u64::from(offset));
-        assert_eq!(holder.write(Space::SystemMemory, through, Width::DWord, value), Err(Refused::HeldFunction), "acpi: the console function's {offset:#x} through ECAM");
-    }
     // ICH9's LPC bridge places the ACPI and TCO blocks the kernel declared at 40h.
     let pmbase = pci_address(0, 0, 0x1F, 0, 0x40);
     let value = holder.read(Space::PciConfig, pmbase, Width::DWord).expect("acpi: the LPC bridge's PMBASE reads");
@@ -540,7 +527,7 @@ fn configuration(holder: &Holder, info: &AcpiInfo) {
 }
 
 /// What [`configuration`] says after the host bridge's identity.
-const CONFIGURATION_SAID: &str = "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the console function this kernel drives HeldFunction, and the host bridge's 0x44 was written";
+const CONFIGURATION_SAID: &str = "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, and the host bridge's 0x44 was written";
 
 fn lock(holder: &Holder, info: &AcpiInfo) {
     let fadt = holder.table(info.rsdp, b"FACP");
