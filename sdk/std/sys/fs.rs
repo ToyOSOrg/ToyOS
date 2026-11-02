@@ -327,10 +327,10 @@ impl File {
         crate::sys::on_fd(self.0, |h| Ok(f(h.raw())))
     }
 
-    /// A child's output handle: a copied generic object or a pipe the server
-    /// writes at this open description's offset.
-    pub fn as_child_stdio(&self) -> io::Result<toyos::OwnedHandle> {
-        files::stream(self.0).map_err(files_error)
+    /// A child gets a shared file description, or a copied generic object.
+    pub fn as_child_stdio(&self) -> io::Result<(toyos::OwnedHandle, toyos::fd::Kind)> {
+        toyos::fd::copy(self.0).map_err(crate::sys::refused)?
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))
     }
 
     pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {

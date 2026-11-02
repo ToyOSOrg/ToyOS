@@ -29,6 +29,13 @@ pub trait CommandExt {
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn inherit_exported(&mut self, child_fd: u32, end: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
 
+    /// Give the child a connection from `toyos::files::export`, naming the
+    /// same filesystem description and offset. The command duplicates it for
+    /// its next spawn only; a second spawn refuses this consumed export.
+    /// Ordinary `Stdio::from(File)` exports afresh on every spawn.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn inherit_file(&mut self, child_fd: u32, end: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
+
     /// Give the child a handle under a name it can look itself up by.
     ///
     /// The handle is **moved**: into the command, then by its next spawn into
@@ -65,13 +72,13 @@ pub trait CommandExt {
     /// The bytes a prepared spawn starts, as [`prepare`](CommandExt::prepare)
     /// read them off a file server: what a caller holds a program to before it
     /// runs, with no second read between the two. `None` before a prepare and
-    /// for a program the kernel opens itself.
+    /// for a boot image or an independent launch.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn prepared_image(&self) -> Option<&[u8]>;
 
     /// Run the program at `path` rather than the one the command names, which
-    /// stays the child's `argv[0]`: the kernel opens `path`, or the spawn reads
-    /// it when a file server serves it, and nothing opens `argv[0]`.
+    /// stays the child's `argv[0]`: the spawn reads `path` through its
+    /// filesystem capability, and nothing opens `argv[0]`.
     ///
     /// **A helper's alone.** The launcher runs the program its manifest row
     /// names, so an [`independent`](CommandExt::independent) command that
@@ -144,6 +151,11 @@ impl CommandExt for crate::process::Command {
 
     fn inherit_exported(&mut self, child_fd: u32, end: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
         self.as_inner_mut().inherit_exported(child_fd, end);
+        self
+    }
+
+    fn inherit_file(&mut self, child_fd: u32, end: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
+        self.as_inner_mut().inherit_file(child_fd, end);
         self
     }
 

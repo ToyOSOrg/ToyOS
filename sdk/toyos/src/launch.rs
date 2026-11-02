@@ -83,6 +83,7 @@ const fn kind_word(kind: Kind) -> u32 {
     match kind {
         Kind::Handle => 0,
         Kind::Exported => 1,
+        Kind::File => 2,
     }
 }
 
@@ -91,6 +92,7 @@ const fn kind_of(word: u32) -> Option<Kind> {
     match word {
         0 => Some(Kind::Handle),
         1 => Some(Kind::Exported),
+        2 => Some(Kind::File),
         _ => None,
     }
 }
@@ -467,14 +469,14 @@ mod tests {
             env: b"",
             cwd: "/",
             extras: Vec::new(),
-            fds: vec![(0, (), Kind::Handle), (1, (), Kind::Exported)],
+            fds: vec![(0, (), Kind::Handle), (1, (), Kind::Exported), (2, (), Kind::File)],
             parent: Parent::Detached,
             job: (),
         };
         let len = request.encode(&mut buf).expect("encode a launch");
         let decoded = Request::decode(&buf[..len]).expect("decode it");
-        assert_eq!(decoded.fds().collect::<Vec<_>>(), [(0, Some(Kind::Handle)), (1, Some(Kind::Exported))]);
-        assert_eq!(decoded.handle_count(), 3, "two descriptors and the job");
+        assert_eq!(decoded.fds().collect::<Vec<_>>(), [(0, Some(Kind::Handle)), (1, Some(Kind::Exported)), (2, Some(Kind::File))]);
+        assert_eq!(decoded.handle_count(), 4, "three descriptors and the job");
         let second_kind = HEADER + FD_BYTES + 4;
         buf[second_kind..second_kind + 4].copy_from_slice(&7u32.to_le_bytes());
         let decoded = Request::decode(&buf[..len]).expect("decode it");

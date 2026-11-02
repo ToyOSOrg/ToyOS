@@ -298,7 +298,7 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
             Ok(Some(((handle, kind), !inheritable)))
         },
         actions,
-        |path, oflag, mode| crate::posix_io::open_handle(path, oflag, mode).map(|h| (h, Kind::Handle)),
+        |path, oflag, mode| crate::posix_io::open_handle(path, oflag, mode),
         // SAFETY: a file the plan opened and names nowhere else.
         |(handle, _)| unsafe { syscall::close(handle) },
     )?;
@@ -361,6 +361,7 @@ fn errno_of(refused: Refused) -> i32 {
         // A holder past what netstack has places for is a descriptor too many.
         Refused::Export(toyos::net::NetError::ResourceExhausted) => crate::errcode::EMFILE,
         Refused::Export(_) => crate::errcode::EIO,
+        Refused::File(e) => crate::errcode::of_files(e),
         Refused::Syscall(e) => crate::errcode::of(e),
     }
 }

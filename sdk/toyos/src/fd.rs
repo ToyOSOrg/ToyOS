@@ -303,13 +303,16 @@ pub unsafe fn replace(fd: Fd, object: Object) -> Result<(), Error> {
 
 /// What a child is given for `fd`, and its kind: a copy of the kernel handle
 /// it names, or for a stream, a listener or a datagram socket an end of a new
-/// holder of it (`net::stream::export`, `net::socket::export`). `None` for a
+/// holder of it (`net::stream::export`, `net::socket::export`), or a fresh
+/// filesystem connection sharing its open description. `None` for a
 /// descriptor that is not open, as a child of POSIX's holds no closed one.
-/// Refused for an object that is no kernel handle, for one the kernel will
-/// not duplicate, and for a socket netstack makes no holder of.
+/// Refused when the object cannot be exported or duplicated.
 pub fn copy(fd: Fd) -> Result<Option<(crate::OwnedHandle, Kind)>, crate::spawn::Refused> {
     use crate::spawn::Refused;
     let copied = with(fd, |o| match (o.handle(), o.kernel_handle()) {
+        (None, _) if o.tag() == SERVED_FILE => {
+            crate::files::export_held(o).map(|end| (end, Kind::File)).map_err(Refused::File)
+        }
         (Some(bell), _) if o.tag() == SOCKET && crate::net::socket::is_socket(bell) => {
             crate::net::socket::export(bell).map(|end| (end, Kind::Exported)).map_err(Refused::Export)
         }
@@ -331,6 +334,8 @@ pub enum Kind {
     /// A stream's, a listener's or a datagram socket's exported end, which
     /// the child takes up as its holder: `fd:<n>:exported`.
     Exported,
+    /// An exported filesystem connection holding description 1: `fd:<n>:file`.
+    File,
 }
 
 impl Kind {
@@ -339,6 +344,7 @@ impl Kind {
         match self {
             Self::Handle => "",
             Self::Exported => ":exported",
+            Self::File => ":file",
         }
     }
 }
@@ -361,11 +367,23 @@ pub fn endowed_fd(label: &str) -> Option<(Fd, Kind)> {
     let (digits, kind) = match rest.split_once(':') {
         None => (rest, Kind::Handle),
         Some((digits, "exported")) => (digits, Kind::Exported),
+        Some((digits, "file")) => (digits, Kind::File),
+        Some((digits, suffix)) if suffix.strip_prefix("file:").and_then(number).is_some() => (digits, Kind::File),
         Some(_) => return None,
     };
+    Some((number(digits)?, kind))
+}
+
+fn number(digits: &str) -> Option<Fd> {
     let canonical = digits.bytes().all(|b| b.is_ascii_digit()) && (digits == "0" || !digits.starts_with('0'));
     let n: Fd = digits.parse().ok().filter(|_| canonical)?;
-    (0..MAX_FDS as Fd).contains(&n).then_some((n, kind))
+    (0..MAX_FDS as Fd).contains(&n).then_some(n)
+}
+
+/// File aliases carry a process-local group selected by the spawning SDK.
+#[cfg_attr(not(all(feature = "fd-table", not(test))), allow(dead_code))]
+fn file_group(label: &str) -> Option<Fd> {
+    label.split_once(":file:").and_then(|(_, group)| number(group))
 }
 
 /// The table itself, in the copy that owns it.
@@ -414,11 +432,26 @@ mod owner {
     /// closed: how many were.
     fn endow(table: &mut Table<MAX_FDS>, endowed: &Endowments) -> Result<usize, Fault> {
         let mut refused = 0;
+        let mut files = alloc::collections::BTreeMap::new();
         for label in endowed.labels() {
             let Some((fd, kind)) = endowed_fd(label) else { continue };
             let Some(handle) = endowed.take::<OwnedHandle>(label) else { continue };
+            let group = (kind == Kind::File).then(|| file_group(label)).flatten();
+            if let Some(source) = group.and_then(|group| files.get(&group)).copied() {
+                drop(handle);
+                match table.alias_at(source, fd) {
+                    Ok(()) => {},
+                    Err(Fault::Refused(_)) => refused += 1,
+                    Err(Fault::Broken) => return Err(Fault::Broken),
+                }
+                continue;
+            }
             let object = match kind {
                 Kind::Handle => Object::handle(handle),
+                Kind::File => match crate::files::adopt_exported(handle) {
+                    Ok(object) => object,
+                    Err(_) => { refused += 1; continue; }
+                },
                 Kind::Exported => match crate::net::adopt_exported(handle) {
                     Some(object) => object,
                     None => {
@@ -430,7 +463,7 @@ mod owner {
             let record = object.into_record();
             match table.install_at(fd, record, true) {
                 // The table owns the object from here on.
-                Ok(()) => {}
+                Ok(()) => { if let Some(group) = group { files.insert(group, fd); } }
                 Err(Fault::Refused(_)) => {
                     // SAFETY: refused, so still this function's alone.
                     unsafe { record.release() };
@@ -539,12 +572,14 @@ mod tests {
         assert_eq!(endowed_fd("fd:0"), Some((0, Kind::Handle)));
         assert_eq!(endowed_fd("fd:4095"), Some((4095, Kind::Handle)));
         assert_eq!(endowed_fd("fd:3:exported"), Some((3, Kind::Exported)));
-        for kind in [Kind::Handle, Kind::Exported] {
+        assert_eq!(endowed_fd("fd:4:file:1"), Some((4, Kind::File)));
+        assert_eq!(file_group("fd:4:file:1"), Some(1));
+        for kind in [Kind::Handle, Kind::Exported, Kind::File] {
             assert_eq!(endowed_fd(&format!("fd:7{}", kind.suffix())), Some((7, kind)), "a label of its own");
         }
         for other in [
             "fd:4096", "fd:-1", "fd:", "fd:1x", "svc", "fd1", "dev:fd:1", "fd:+3", "fd:03", "fd:00", "fd: 3",
-            "fd:3:", "fd:3:file", "fd:3:stream", "fd:3:exported:", "fd::exported", "fd:4096:exported",
+            "fd:3:", "fd:3:file:", "fd:3:file:01", "fd:3:file:4096", "fd:3:stream", "fd:3:exported:", "fd::exported", "fd:4096:exported",
         ] {
             assert_eq!(endowed_fd(other), None, "{other}");
         }

@@ -227,6 +227,7 @@ extern "C" {
     fn toyos_fs_truncate(fd: Fd, size: u64) -> i64;
     fn toyos_fs_fsync(fd: Fd) -> i64;
     fn toyos_fs_stream(fd: Fd) -> i64;
+    fn toyos_fs_export(word: u64) -> i64;
     fn toyos_fs_image(fd: Fd) -> i64;
     fn toyos_fs_mkdir(at: Fd, path: *const u8, len: usize) -> i64;
     fn toyos_fs_unlink(at: Fd, path: *const u8, len: usize, dir: bool) -> i64;
@@ -309,6 +310,25 @@ pub fn fsync(fd: Fd) -> Result<(), Error> {
 pub fn stream(fd: Fd) -> Result<OwnedHandle, Error> {
     // SAFETY: plain values; a handle answered is this process's alone.
     decode(unsafe { toyos_fs_stream(fd) }).map(|h| OwnedHandle(toyos_abi::RawHandle(h as u32)))
+}
+
+/// Export a served description for another process, sharing its access mode
+/// and offset. The returned connection becomes an `fd:<n>:file` endowment.
+pub fn export(fd: Fd) -> Result<OwnedHandle, Error> {
+    fd::with(fd, export_held).map_err(Error::Fd)?
+}
+
+/// The object remains held across the owner ABI call, including if its
+/// descriptor is concurrently closed and its number reused.
+pub(crate) fn export_held(object: fd::Lent<'_>) -> Result<OwnedHandle, Error> {
+    if object.tag() != fd::SERVED_FILE { return Err(Error::NotAFile); }
+    // SAFETY: the caller's Lent keeps this object alive for the call.
+    decode(unsafe { toyos_fs_export(object.word()) }).map(|h| OwnedHandle(toyos_abi::RawHandle(h as u32)))
+}
+
+#[cfg(all(feature = "fd-table", not(test)))]
+pub(crate) fn adopt_exported(handle: OwnedHandle) -> Result<fd::Object, Error> {
+    owner::adopt_exported(handle)
 }
 
 pub fn mkdir(at: At, path: &[u8]) -> Result<(), Error> {

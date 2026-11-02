@@ -75,8 +75,8 @@ fn is_directory<T>(_: &str) -> Result<T, Error> { Err(Error::Served(fs::Error::I
 /// description is shared with another process, which is for good, and a
 /// directory's from the start, as the server refuses to move one.
 ///
-/// [`Position::stream`] is the one request that shares a description, so it
-/// hands the offset over itself; another that ever does belongs beside it.
+/// [`Position::export`] and [`Position::stream`] share descriptions, so each
+/// hands the offset over before another process can use it.
 ///
 /// Reached only under the capability's turn, so a read or write and the
 /// offset's move are one step against every other thread's.
@@ -151,6 +151,17 @@ impl Position {
         let landed = landed.filter(|&l| l <= fs::MAX_FILE_BYTES).ok_or(fs::Error::InvalidRequest)?;
         *at = Offset::Here(landed);
         Ok(landed)
+    }
+
+    /// Share this description with another process. Once handed over, every
+    /// read, write and seek uses the server's one offset.
+    fn export(&self, dir: &mut Dir, fid: Fid) -> Result<crate::ipc::Connection, fs::Error> {
+        let mut at = self.at.lock();
+        if let Offset::Here(offset) = *at {
+            dir.seek(fid, fs::SEEK_START, offset as i64)?;
+            *at = Offset::Server;
+        }
+        dir.export(&[fid])
     }
 
     /// A stream the server writes at the description's offset for another
@@ -350,6 +361,10 @@ fn on_fd_held<T>(
 /// A descriptor for `held`; on a full table it is let go again, which takes
 /// its capability's turn, so no turn may be held here.
 fn install(held: Held, cloexec: bool) -> Result<Fd, fd::Error> {
+    fd::install(object(held), !cloexec, 0)
+}
+
+fn object(held: Held) -> Object {
     let held = Arc::new(held);
     let word = {
         let mut open = OPEN.lock();
@@ -364,7 +379,31 @@ fn install(held: Held, cloexec: bool) -> Result<Fd, fd::Error> {
             }
         }
     };
-    fd::install(Object::tagged(SERVED_FILE, word as u64, release_held), !cloexec, 0)
+    Object::tagged(SERVED_FILE, word as u64, release_held)
+}
+
+/// Take up the one description exported for an endowed file descriptor.
+/// This constructs an object without entering the descriptor table again.
+pub(super) fn adopt_exported(handle: crate::OwnedHandle) -> Result<Object, Error> {
+    let mut dir = Dir::adopt(crate::ipc::Connection::received(handle)).map_err(Error::Served)?;
+    let fid = Fid { id: 1, generation: dir.generation() };
+    dir.fstat(fid).map_err(Error::Served)?;
+    Ok(object(Held::Served(Served {
+        cap: Arc::new(Capability { dir: Turnstile::new(dir) }),
+        fid,
+        position: Position { append: false, at: Lock::new(Offset::Server) },
+        holder: None,
+    })))
+}
+
+#[no_mangle]
+extern "C" fn toyos_fs_export(word: u64) -> i64 {
+    let held = held(word).expect("a held descriptor names this file object");
+    let exported = match &*held {
+        Held::Served(file) => file.position.export(&mut file.cap.dir.lock(), file.fid).map_err(Error::Served),
+        Held::Directory(_) => Err(Error::Served(fs::Error::Unsupported)),
+    };
+    answer(exported.map(|conn| u64::from(conn.into_raw().0)))
 }
 
 /// What a server answered, as this module says it.

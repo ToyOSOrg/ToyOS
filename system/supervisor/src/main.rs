@@ -3178,6 +3178,9 @@ fn start<'a>(
                     LaunchFd::Caller(handle, toyos::fd::Kind::Handle) => {
                         command.inherit_handle(*fd, handle.as_handle().into());
                     }
+                    LaunchFd::Caller(handle, toyos::fd::Kind::File) => {
+                        command.inherit_file(*fd, handle.as_handle().into());
+                    }
                     LaunchFd::Caller(handle, toyos::fd::Kind::Exported) => {
                         command.inherit_exported(*fd, handle.as_handle().into());
                     }

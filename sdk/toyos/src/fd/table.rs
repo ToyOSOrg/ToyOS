@@ -113,6 +113,16 @@ impl<const N: usize> Table<N> {
         self.set(i, slot, inheritable)
     }
 
+    /// An endowed alias at its exact number, without displacing an earlier
+    /// endowment. Both descriptors share one object and one final release.
+    pub(super) fn alias_at(&mut self, source: Fd, fd: Fd) -> Result<(), Fault> {
+        let i = usize::try_from(fd).map_err(|_| Error::BadFd)?;
+        if self.fds.get(i) != Some(&0) { return Err(Error::BadFd.into()); }
+        let (_, object, _) = self.entry(source)?;
+        self.reference(object)?;
+        self.set(i, object, true)
+    }
+
     /// A second descriptor on `fd`'s object, the lowest free at or above
     /// `floor`.
     pub(super) fn dup(&mut self, fd: Fd, floor: Fd, inheritable: bool) -> Result<Fd, Fault> {
@@ -285,6 +295,17 @@ mod tests {
         assert_eq!(t.install_at(-1, o(2), true), Err(Error::BadFd.into()));
         assert_eq!(w(t.close(3)), Ok(Some(1)));
         assert_eq!(t.install(o(3), false, 0), Ok(0), "a refusal took a number or an object");
+    }
+
+    #[test]
+    fn endowed_aliases_share_one_object_and_cannot_displace_an_endowment() {
+        let mut t = T::new();
+        t.install_at(3, o(1), true).unwrap();
+        t.alias_at(3, 0).unwrap();
+        assert_eq!(held(&t), 1);
+        assert_eq!(t.alias_at(3, 0), Err(Error::BadFd.into()));
+        assert_eq!(w(t.close(3)), Ok(None));
+        assert_eq!(w(t.close(0)), Ok(Some(1)));
     }
 
     /// A descriptor naming no object is a broken table, which the table

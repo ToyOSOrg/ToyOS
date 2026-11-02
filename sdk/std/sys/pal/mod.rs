@@ -141,6 +141,7 @@ pub fn refused(refused: toyos::spawn::Refused) -> crate::io::Error {
             toyos::net::NetError::ResourceExhausted => Error::from(ErrorKind::QuotaExceeded),
             _ => Error::from(ErrorKind::Other),
         },
+        Refused::File(e) => files_error(e),
         Refused::NotStarted => Error::from(ErrorKind::Other),
         Refused::Syscall(e) => to_io_error(e),
     }

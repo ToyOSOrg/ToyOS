@@ -57,6 +57,8 @@ enum Given {
     /// The caller's stream or socket, kept, of which each spawn exports a
     /// holder for its child alone.
     Holder(toyos::net::Exporter),
+    /// An already-exported file connection is forwarded at most once.
+    File(Option<io::Result<toyos::OwnedHandle>>),
 }
 
 /// Whom a child is placed under: [`toyos::spawn::Parent`], with a place the
@@ -246,6 +248,11 @@ impl Command {
         self.inherit(child_fd, Given::Copy(copy(end).map(|h| (h, toyos::fd::Kind::Exported))));
     }
 
+    /// Forward an exported filesystem description to this command's child.
+    pub fn inherit_file(&mut self, child_fd: u32, end: crate::os::toyos::io::BorrowedHandle<'_>) {
+        self.inherit(child_fd, Given::File(Some(copy(end))));
+    }
+
     fn inherit(&mut self, child_fd: u32, given: Given) {
         self.extra_fds.retain(|(fd, _)| *fd != child_fd);
         self.extra_fds.push((child_fd, given));
@@ -381,11 +388,15 @@ impl Command {
         }
         // A stream's or a socket's holder is this spawn's alone: exported
         // now, and gone with the spawn.
-        for (fd, given) in &self.extra_fds {
+        for (fd, given) in &mut self.extra_fds {
             match given {
                 Given::Holder(kept) => {
                     let end = kept.export().map_err(|e| refused(toyos::spawn::Refused::Export(e)))?;
                     held.push((*fd, end, toyos::fd::Kind::Exported));
+                }
+                Given::File(file) => {
+                    let handle = file.take().ok_or_else(|| io::const_error!(io::ErrorKind::InvalidInput, "an exported file connection was already forwarded"))??;
+                    held.push((*fd, handle, toyos::fd::Kind::File));
                 }
                 Given::Copy(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
                 Given::Copy(Ok(_)) => {}
@@ -501,7 +512,7 @@ impl Command {
                 *parent_pipe = Some(ours);
                 handle(copy(&theirs)?)
             }
-            Stdio::InheritFile(file) => handle(file.as_child_stdio()?),
+            Stdio::InheritFile(file) => Some(file.as_child_stdio()?),
             Stdio::InheritPipe(pipe) => handle(copy(pipe)?),
             Stdio::ParentStdout => inherit(1)?,
             Stdio::ParentStderr => inherit(2)?,
