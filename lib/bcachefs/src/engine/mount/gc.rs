@@ -26,11 +26,17 @@ impl<D: BlockDev> Mount<D> {
     /// Called with the file-data slot held, before an ordinary allocation
     /// is accepted. Live bytes are packed; key ranges and counts stay fixed.
     pub(super) async fn compact_user(&self) -> Result<bool> {
-        let candidate = {
+        let candidates: Vec<_> = {
             let st = self.st.borrow();
-            st.sparse_data.iter().copied().find(|&b| st.alloc.movable_data(b))
+            st.sparse_data.iter().copied().filter(|&b| st.alloc.movable_data(b)).collect()
         };
-        let Some(victim) = candidate else { return Ok(false); };
+        for victim in candidates {
+            if self.compact_user_bucket(victim).await? { return Ok(true); }
+        }
+        Ok(false)
+    }
+
+    async fn compact_user_bucket(&self, victim: u64) -> Result<bool> {
         let bucket = u64::from(self.sb.member.bucket_sectors);
         let first = (victim * bucket) << self.bp_shift();
         let end = ((victim + 1) * bucket) << self.bp_shift();
@@ -60,7 +66,12 @@ impl<D: BlockDev> Mount<D> {
             entries.push((key, value, live));
         }
         if entries.is_empty() { return Err(Error::Corrupt("nonempty data bucket has no backpointers")); }
-        let chunk = (64 << 10).max(self.sb.block_bytes());
+        // A small read verifies no more than one filesystem block. An
+        // existing larger extent keeps its own checksum range.
+        let chunk = self.sb.block_bytes();
+        entries.sort_unstable_by_key(|(_, _, live)| core::cmp::Reverse(live.len()));
+        let mut groups = Vec::new();
+        let mut packed = 0;
         let mut begin = 0;
         while begin < entries.len() {
             let mut end = begin + 1;
@@ -69,8 +80,15 @@ impl<D: BlockDev> Mount<D> {
                 bytes += entries[end].2.len();
                 end += 1;
             }
-            let version = self.data_version().await?;
             let physical = bytes.div_ceil(self.sb.block_bytes()) * self.sb.block_bytes();
+            groups.push((begin, end, physical));
+            packed += physical;
+            begin = end;
+        }
+        // Do not cycle an unhelpful packing through successive buckets.
+        if packed >= bucket as usize * SECTOR { return Ok(false); }
+        for (begin, end, physical) in groups {
+            let version = self.data_version().await?;
             let mut blocks = alloc::vec![[0u8; BLOCK]; physical / BLOCK];
             let mut at = 0;
             for (_, _, live) in &entries[begin..end] {
@@ -113,7 +131,6 @@ impl<D: BlockDev> Mount<D> {
                 }).await?;
                 range.published = true;
             }
-            begin = end;
         }
         self.commit().await?;
         Ok(true)

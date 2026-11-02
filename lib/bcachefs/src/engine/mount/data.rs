@@ -115,8 +115,8 @@ impl<D: BlockDev> Mount<D> {
         Ok(Reservation { owner: Rc::clone(&self.reservations), id, first, bytes })
     }
 
-    /// Consumes a reservation with one write inside its block. Capacity
-    /// cannot fail after acceptance; device failures remain errors.
+    /// Uses the reserved data block. Successful application consumes the
+    /// token; failed preparation leaves it available for retry.
     pub async fn write_reserved(&self, reservation: &mut Reservation, offset: u64, data: &[u8], now: i64) -> Result<usize> {
         if !Rc::ptr_eq(&reservation.owner, &self.reservations) {
             return Err(Error::Invalid("reservation belongs to another mount"));
