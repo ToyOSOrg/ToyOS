@@ -577,7 +577,7 @@ fn cancelling_an_overwrite_before_copy_keeps_the_older_dirty_reservation() {
 #[test]
 fn a_supply_stops_before_a_present_page_and_resumes_after_the_write_copies_it() {
     let mut v = volume();
-    let fake = Fake::new(4, 2);
+    let fake = Fake::new(4, 4);
     let mut files = Files::new(Some(fake));
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.write(&mut v, id, node, PAGE, &pattern(PAGE as usize, 6)).unwrap();
