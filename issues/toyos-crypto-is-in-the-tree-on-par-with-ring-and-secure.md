@@ -507,6 +507,16 @@ Not consumers:
          2.65; null 1.82 and 1.04, leaky 210.6 and 194.7. Its Ed25519 run is
          pending. Evidence:
          https://github.com/ToyOSOrg/evidence/tree/6488b4fbb6785e65332d03fb504fe3849d89810a/pr-1046/r4
+       - **#1063's P-256 register kernels at 9a5d4fad5** (with the AVX2
+         table read), 1,000,000 measurements a routine, no CPU timing mode:
+         - The T14 (0x806c1, microcode 0xbe): P-256 public key max |t|
+           3.20 and agreement 1.51; P-384 public key 1.19 and agreement
+           1.42; Ed25519 2.73. Null 1.22 and 1.70, leaky 855.8 and 890.6.
+         - The AMD bench (0x860f01, 0x860010d): P-256 2.99 and 1.49; P-384
+           2.47 and 2.43; Ed25519 1.66. Null 1.14 and 2.12, leaky 140.1
+           and 169.3.
+         - Evidence:
+           https://github.com/ToyOSOrg/evidence/tree/aa3369406af00b46a4b76476ef4cea7df040e30f/combined/r3
        - Their judge asks only that each job ran and its controls held; the
          verdicts are this record's. The first boots, of the fast program at
          ec5a0cd18, read LEAKS everywhere: that harness made each random
