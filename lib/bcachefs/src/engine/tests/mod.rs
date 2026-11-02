@@ -870,10 +870,9 @@ fn an_encrypted_volume_takes_directories_but_no_data() {
 }
 
 /// The superblock rules ToyOS writes by and upstream's volumes do not:
-/// upstream sets inline data, discard and rotational, names the device
+/// upstream sets discard and rotational, names the device
 /// and keeps its counters, errors and recovery-pass fields.
-const UPSTREAM_ONLY: [Finding; 7] = [
-    Finding::Superblock("format's feature set"),
+const UPSTREAM_ONLY: [Finding; 6] = [
     Finding::Superblock("member discard off"),
     Finding::Superblock("member not rotational, and known"),
     Finding::Superblock("member device name, model and serial zero"),
