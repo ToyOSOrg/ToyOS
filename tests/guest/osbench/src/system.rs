@@ -47,6 +47,7 @@ pub fn null_syscall() {
 
 /// `thread::spawn` of an empty closure and its `join`: 1,000 after 50.
 pub fn thread_spawn() {
+    let span = crate::ran::start();
     let once = || {
         let t = Instant::now();
         thread::spawn(|| {}).join().expect("an empty thread");
@@ -57,7 +58,7 @@ pub fn thread_spawn() {
     }
     crate::clock::settle();
     let mut ns: Vec<u64> = (0..1000).map(|_| once()).collect();
-    result("thread.spawn_join", "ns", &mut ns, &[]);
+    result("thread.spawn_join", "ns", &mut ns, &[("parent", crate::ran::thread_over(span, sys::tid()))]);
 }
 
 /// This program spawned with null stdio as `osbench nop`, which exits at
@@ -100,9 +101,11 @@ pub fn process_spawn() {
 /// to end-of-file. One unread round, then seven.
 pub fn pipe_throughput(size: usize) {
     let bench = format!("pipe.throughput.{size}");
+    let rounds = std::cell::RefCell::new(Vec::new());
     let round = || -> std::io::Result<u64> {
+        let span = crate::ran::start();
         let (mut reader, mut writer) = std::io::pipe()?;
-        let writing = thread::spawn(move || -> std::io::Result<()> {
+        let writing = thread::spawn(move || -> std::io::Result<sys::Tid> {
             let chunk = vec![0x5au8; size];
             let start = Instant::now();
             while start.elapsed() < Duration::from_millis(100) {
@@ -110,7 +113,7 @@ pub fn pipe_throughput(size: usize) {
                     writer.write_all(&chunk)?;
                 }
             }
-            Ok(())
+            Ok(sys::tid())
         });
         let mut buf = vec![0u8; 64 * 1024];
         // The clock starts at the first byte; what it carried is not counted.
@@ -125,8 +128,10 @@ pub fn pipe_throughput(size: usize) {
             }
         }
         let ns = ns_since(start).max(1);
-        writing.join().expect("the writer panicked")?;
-        Ok(bytes * 1000 / ns)
+        let writer_tid = writing.join().expect("the writer panicked")?;
+        let mbps = bytes * 1000 / ns;
+        rounds.borrow_mut().push(crate::ran::pipe_round(span, mbps, sys::tid(), writer_tid));
+        Ok(mbps)
     };
     let run = || -> std::io::Result<Vec<u64>> {
         round()?;
@@ -134,7 +139,7 @@ pub fn pipe_throughput(size: usize) {
         (0..7).map(|_| round()).collect()
     };
     match run() {
-        Ok(mut mbps) => result(&bench, "MB/s", &mut mbps, &[("write_bytes", size.to_string())]),
+        Ok(mut mbps) => result(&bench, "MB/s", &mut mbps, &[("write_bytes", size.to_string()), ("rounds", rounds.borrow().join(","))]),
         Err(e) => refuse(&bench, e),
     }
 }
