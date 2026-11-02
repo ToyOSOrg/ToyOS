@@ -368,7 +368,10 @@ impl<D: BlockDev> Mount<D> {
         for (k, v) in &old {
             match k.kind {
                 kind::EXTENT => {
-                    checked_extent(v)?;
+                    let extent = checked_extent(v)?;
+                    let authenticated = matches!(extent.crc.unwrap().csum_type, csum_type::CHACHA_POLY_80 | csum_type::CHACHA_POLY_128);
+                    if self.key.is_some() && !authenticated { return Err(Error::Corrupt("unauthenticated extent on an encrypted volume")); }
+                    if self.key.is_none() && authenticated { return Err(Error::Locked); }
                 }
                 kind::INLINE_DATA | kind::WHITEOUT | kind::EXTENT_WHITEOUT => {}
                 _ => return Err(Error::Unsupported("modifying an extent type this writer cannot account")),
@@ -616,6 +619,11 @@ pub(super) fn checked_extent(v: &[u8]) -> Result<Extent> {
     let crc = extent.crc.ok_or(Error::Unsupported("modifying data without a checksum entry"))?;
     if extent.ptr.dev != 0 || extent.ptr.cached || extent.ptr.unwritten || crc.compression != 0 || crc.compressed != crc.uncompressed {
         return Err(Error::Unsupported("modifying cached, unwritten, compressed or other-device data"));
+    }
+    match crc.csum_type {
+        csum_type::NONE | csum_type::CRC32C_NONZERO | csum_type::CRC32C => {}
+        csum_type::CHACHA_POLY_80 | csum_type::CHACHA_POLY_128 if crc.csum_len == csum_type::bytes(crc.csum_type) => {}
+        _ => return Err(Error::Unsupported("modifying data with a checksum this reader cannot verify")),
     }
     Ok(extent)
 }
