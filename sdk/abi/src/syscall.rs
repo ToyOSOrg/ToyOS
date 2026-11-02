@@ -3387,6 +3387,9 @@ pub enum PagedOp {
     /// Set the mtime to `time`, as a file's `utimens` does; the bytes and
     /// the version stay.
     Stamp = 10,
+    /// Unused slots in the pager's resident-page quota. This advisory
+    /// snapshot reserves nothing and promises no physical memory.
+    Room = 11,
 }
 
 /// [`PagedOp::Supply`]'s pages are dirty.

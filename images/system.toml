@@ -369,7 +369,7 @@ receives = ["disk"]
 drives = ["pci:0c:03:30"]
 receives = ["disk", "input"]
 
-# The file servers: DATA, the log and the boot volume, one process
+# The file servers: DATA, temporary files, the log and boot volumes, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports. A pager: its readers wait on the pages it
 # supplies, which only a row of this file may make a program do.

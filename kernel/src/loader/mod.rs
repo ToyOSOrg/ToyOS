@@ -56,7 +56,7 @@ const STACK_GUARD: u64 = 1024 * 1024;
 /// comes from untrusted ELF fields, so the read is clamped rather than sized
 /// by it.
 pub(crate) fn read_file_range(
-    backing: &dyn crate::file_backing::FileBacking,
+    backing: &crate::file_backing::SharedImage,
     offset: u64,
     len: usize,
 ) -> Vec<u8> {
@@ -71,10 +71,7 @@ pub(crate) fn read_file_range(
         let off_in_block = (file_off % 4096) as usize;
         let chunk = (4096 - off_in_block).min(remaining);
 
-        // A page the store refuses ends the read here rather than filling zeros.
-        if backing.read_page(file_off - off_in_block as u64, &mut page_buf).is_err() {
-            break;
-        }
+        backing.read_page(file_off - off_in_block as u64, &mut page_buf);
         result.extend_from_slice(&page_buf[off_in_block..off_in_block + chunk]);
 
         file_off += chunk as u64;
@@ -171,8 +168,8 @@ fn segment_prot(seg: &toyos_elf::Segment) -> kernel::vm::Prot {
 /// the child's handle table around its handle to itself once nothing is left
 /// to refuse.
 ///
-/// `path` is the program, opened here — or, with `image`, the bytes the caller
-/// read from it itself, and then nothing opens it. `argv[0]` is only the name the child goes by.
+/// `path` labels the supplied executable image; the kernel resolves no path.
+/// `argv[0]` is the name the child goes by.
 ///
 /// `Refusal`, not `-> !`, is the error type: every failure below owns a
 /// partly built process (address space, stack, kernel stack), and nothing
@@ -183,7 +180,7 @@ pub fn spawn<C: Commit>(
     commit: C,
     cwd: String,
     env: Vec<u8>,
-    backing: Arc<dyn crate::file_backing::FileBacking>,
+    backing: Arc<crate::file_backing::SharedImage>,
     parent: Parent,
 ) -> Result<(Pid, C::Held), crate::object::Refusal> {
     let job = Arc::clone(commit.job());
@@ -214,15 +211,7 @@ pub fn spawn<C: Commit>(
         return Err(SyscallError::InvalidArgument.into());
     };
 
-    // Taken before the child's space is locked: a file's snapshot takes the
-    // file cache's lock, which a user copy may hold while it takes a space's.
-    let source = match backing.source() {
-        Ok(source) => source,
-        Err(e) => {
-            log!("spawn: {}: {e}", path);
-            return Err(e.into());
-        }
-    };
+    let source = backing.source();
 
     let t1 = crate::clock::nanos_since_boot();
 
@@ -281,16 +270,11 @@ pub fn spawn<C: Commit>(
                 return Err(SyscallError::ResourceExhausted.into());
             };
             // `slice` bounds `filesz` against the `memsz` allocation, re-checking what `Layout::parse` already refused.
-            if elf::read_backing_into(
+            elf::read_backing_into(
                 backing.as_ref(),
                 tls_file_off,
                 tls_buf.slice(tls.template().len() as usize),
-            )
-            .is_err()
-            {
-                log!("spawn: {}: the TLS template could not be read off the device", path);
-                return Err(SyscallError::NotFound.into());
-            }
+            );
             Some(tls_buf)
         }
         None => None,
@@ -501,7 +485,7 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
         labels.extend_from_slice(label.as_bytes());
     }
     let len = images.supervisor.immutable().expect("a boot image is immutable");
-    let image: Arc<dyn crate::file_backing::FileBacking> = Arc::new(
+    let image: Arc<crate::file_backing::SharedImage> = Arc::new(
         crate::file_backing::SharedImage::over(images.supervisor, len)
             .expect("spawn_supervisor: a boot image is ordinary memory, its length inside it"),
     );

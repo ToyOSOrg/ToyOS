@@ -19,7 +19,7 @@ use crate::device as device_registry;
 
 use super::device::DeviceClaim;
 use super::handle::{HandleEntry, HandleTable};
-use super::{KObjectRef, KObjectVariant};
+use super::KObjectRef;
 
 /// What a freshly created object's one handle carries.
 pub fn initial_rights(object: &KObjectRef) -> Rights {

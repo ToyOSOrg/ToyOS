@@ -3,20 +3,20 @@
 //! which is the only copy of the file's data the server keeps. This moves
 //! pages between the object and the volume: a page a reader asks for is read
 //! off the volume and supplied, a write lands dirty in the object, and a sync
-//! writes the dirty pages back before the volume's own sync.
+//! writes the dirty pages back before the volume's own sync. Memory volumes
+//! use anonymous objects instead: no writeback or eviction can discard them.
 //!
 //! **An object per file, by its volume identity**, which the notices name it
 //! by. It holds the volume's node for its life, so a dirty file stays open
 //! on the volume whoever closed it, and outlives its last close for its pages'
 //! sake until room is wanted: then a file nobody holds and nothing dirties
-//! goes first, oldest first.
+//! goes first, oldest first. Anonymous objects stay while named or held.
 //!
 //! **A write is one write of the object's**, however many calls it takes:
 //! a call that stops short leaves it under way until its end, so no holder
 //! reads the file half written (`toyos::paged::Pager::end_write`).
 //!
-//! **The volume's size and mtime are the object's**, which its holders
-//! `fstat` without a request: each call that moves the volume's mtime hands
+//! **The volume's size and mtime are the object's**: each call that moves the volume's mtime hands
 //! the object the volume's own value, at its resolution. A write reserves on the volume
 //! first, so the volume's size runs past the object's only for the bytes the
 //! write then puts in before it returns; nothing reads the volume for them
@@ -40,6 +40,7 @@ const RANGE: u64 = PAGED_RANGE_PAGES;
 pub trait Pager {
     fn object(&self, size: u64, mtime: u64) -> Result<u64, Refused>;
     fn anonymous(&self, size: u64, mtime: u64) -> Result<u64, Refused>;
+    fn room(&self) -> Result<u64, Refused>;
     fn read(&self, id: u64, out: Bytes<'_>, offset: u64) -> Result<usize, Refused>;
     fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused>;
     fn write(&self, id: u64, offset: u64, bytes: &[u8], mtime: u64) -> Result<usize, Refused>;
@@ -59,6 +60,9 @@ impl Pager for toyos::paged::Pager {
     }
     fn anonymous(&self, size: u64, mtime: u64) -> Result<u64, Refused> {
         toyos::paged::Pager::anonymous(self, size, mtime)
+    }
+    fn room(&self) -> Result<u64, Refused> {
+        toyos::paged::Pager::room(self)
     }
     fn read(&self, id: u64, out: Bytes<'_>, offset: u64) -> Result<usize, Refused> {
         toyos::paged::Pager::read(self, id, out, offset)
@@ -149,6 +153,14 @@ impl<P: Pager> Files<P> {
     /// The pager, which reads ready while a notice is owed.
     pub fn pager(&self) -> Option<&P> {
         self.pager.as_ref()
+    }
+
+    pub fn room(&self, volume: &mut dyn Volume) -> Result<toyos::fs::Room, Error> {
+        if volume.memory() {
+            Ok(toyos::fs::Room { free: self.pg().room().map_err(word)?.saturating_mul(PAGE), unit: PAGE })
+        } else {
+            volume.room()
+        }
     }
 
     fn pg(&self) -> &P {
@@ -408,6 +420,7 @@ impl<P: Pager> Files<P> {
 
     /// `data` written to `node`'s file at `offset`.
     pub fn write(&mut self, volume: &mut dyn Volume, identity: u64, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
+        if data.is_empty() { return Ok(()); }
         if self.pager.is_none() || !self.files.contains_key(&identity) {
             return volume.write(node, offset, data);
         }

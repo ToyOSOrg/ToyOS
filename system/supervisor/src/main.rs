@@ -3581,8 +3581,8 @@ fn guid_text(guid: [u8; 16]) -> String {
 
 /// A file server's arguments and the volume it is endowed for one start.
 ///
-/// A file server is told its role. SYSTEM is handed ROOT's image; every other
-/// role `block` minted with its grant (`toyos_supervisor::storage`), and LOG
+/// A file server is told its role. SYSTEM is handed ROOT's image; MEMORY
+/// needs no block grant, and disk roles receive `block` minted with their grant (`toyos_supervisor::storage`), and LOG
 /// and BOOT the GUID of the partition the loader named. A log or boot role the
 /// loader named no partition for, and a block port closed for good, each
 /// refuse the start: the role is then absent, never served from memory.

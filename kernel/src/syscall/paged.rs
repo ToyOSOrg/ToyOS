@@ -128,6 +128,7 @@ pub(super) fn sys_paged_op(ctx: &SyscallContext<'_>, h: RawHandle, op: u64, args
     let range_ok = |count: u64| (1..=PAGED_RANGE_PAGES).contains(&count) && args.offset.checked_add(count).is_some();
     let id = args.object;
     match op {
+        x if x == PagedOp::Room as u64 => pager.room(),
         x if x == PagedOp::Read as u64 => {
             if args.flags != 0 || !within_reach(args.offset, args.len) {
                 return SyscallError::InvalidArgument.to_u64();

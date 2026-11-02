@@ -181,11 +181,6 @@ impl View {
         }
     }
 
-    fn sub(&self, what: &str, off: usize, len: usize) -> View {
-        assert!(off.checked_add(len).is_some_and(|end| end <= self.len), "{what} {off}+{len} past a {}-byte window", self.len);
-        View { start: self.start + off as u64, len, access: self.access }
-    }
-
     fn read_into(&self, off: usize, dst: &mut [u8]) {
         let into = dst.as_mut_ptr();
         self.pieces("UserBytes::read_at", off, dst.len(), |run, at, n| {
@@ -242,11 +237,6 @@ impl UserBytes<'_> {
             unsafe { core::ptr::copy_nonoverlapping(run, dst.add(at), n) }
         });
     }
-
-    /// The `len`-byte window at `off` inside this one.
-    pub fn sub(&self, off: usize, len: usize) -> UserBytes<'_> {
-        UserBytes(self.0.sub("UserBytes::sub", off, len), PhantomData)
-    }
 }
 
 /// A bulk buffer the kernel copies into and never reads back, so it cannot act on a value another thread substituted.
@@ -293,10 +283,4 @@ impl UserBytesMut<'_> {
             unsafe { core::ptr::write_bytes(run, 0, n) }
         });
     }
-
-    /// The `len`-byte window at `off` inside this one.
-    pub fn sub(&mut self, off: usize, len: usize) -> UserBytesMut<'_> {
-        UserBytesMut(self.0.sub("UserBytesMut::sub", off, len), PhantomData)
-    }
 }
-

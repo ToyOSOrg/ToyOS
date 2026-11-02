@@ -93,6 +93,12 @@ impl Pager {
         syscall::paged_anonymous(self.0.raw(), size, mtime).map_err(|e| Refused::of(e, None))
     }
 
+    /// Unused slots in this pager's page quota, without reserving them or
+    /// promising that physical memory will be available for them.
+    pub fn room(&self) -> Result<u64, Refused> {
+        self.op(PagedOp::Room, PagedArgs::default(), None)
+    }
+
     /// A holder handle on object `id`, to send.
     pub fn holder(&self, id: u64) -> Result<OwnedHandle, SyscallError> {
         let raw = syscall::paged_holder(self.0.raw(), id)?;

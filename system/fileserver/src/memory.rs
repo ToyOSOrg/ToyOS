@@ -10,12 +10,12 @@ use crate::volume::{parent, Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Vo
 struct Inode {
     meta: Meta,
     target: Option<String>,
+    children: BTreeMap<String, Node>,
     opens: usize,
     linked: bool,
 }
 
 pub struct MemoryVolume {
-    names: BTreeMap<String, Node>,
     nodes: BTreeMap<Node, Inode>,
     next: Node,
     clock: fn() -> u64,
@@ -23,25 +23,38 @@ pub struct MemoryVolume {
 
 impl MemoryVolume {
     pub fn new(roots: &[&str], clock: fn() -> u64) -> Self {
-        let mut volume = Self { names: BTreeMap::new(), nodes: BTreeMap::new(), next: 1, clock };
-        volume.insert("", Kind::Dir, None);
+        let mut volume = Self { nodes: BTreeMap::new(), next: 1, clock };
+        volume.allocate(Kind::Dir, None);
         for root in roots.iter().filter(|r| !r.is_empty()) {
             volume.mkdir(root).expect("memory volume roots are distinct direct children");
         }
         volume
     }
 
-    fn insert(&mut self, path: &str, kind: Kind, target: Option<String>) -> Node {
+    fn allocate(&mut self, kind: Kind, target: Option<String>) -> Node {
         let node = self.next;
         self.next = self.next.checked_add(1).expect("memory inode numbers exhausted");
         let size = target.as_ref().map_or(0, |t| t.len() as u64);
-        self.nodes.insert(node, Inode { meta: Meta { kind, size, mtime: (self.clock)() }, target, opens: 0, linked: true });
-        assert!(self.names.insert(path.into(), node).is_none(), "a new memory inode has a vacant name");
+        self.nodes.insert(node, Inode { meta: Meta { kind, size, mtime: (self.clock)() }, target, children: BTreeMap::new(), opens: 0, linked: true });
         node
     }
 
+    fn insert(&mut self, path: &str, kind: Kind, target: Option<String>) -> Result<Node, Error> {
+        self.vacant(path)?;
+        let parent = self.node(parent(path))?;
+        let node = self.allocate(kind, target);
+        self.nodes.get_mut(&parent).expect("the parent exists").children.insert(name(path).into(), node);
+        Ok(node)
+    }
+
     fn node(&self, path: &str) -> Result<Node, Error> {
-        self.names.get(path).copied().ok_or(Error::NotFound)
+        let mut node = 1;
+        for name in path.split('/').filter(|part| !part.is_empty()) {
+            let inode = &self.nodes[&node];
+            if inode.meta.kind != Kind::Dir { return Err(Error::NotADirectory); }
+            node = *inode.children.get(name).ok_or(Error::NotFound)?;
+        }
+        Ok(node)
     }
 
     fn inode(&mut self, node: Node) -> Result<&mut Inode, Error> {
@@ -56,14 +69,17 @@ impl MemoryVolume {
     }
 
     fn vacant(&self, path: &str) -> Result<(), Error> {
-        if self.names.contains_key(path) {
-            return Err(Error::AlreadyExists);
+        match self.node(path) {
+            Ok(_) => return Err(Error::AlreadyExists),
+            Err(Error::NotFound) => {}
+            Err(e) => return Err(e),
         }
         self.directory(parent(path))
     }
 
     fn detach(&mut self, path: &str) {
-        let node = self.names.remove(path).expect("detaching an existing name");
+        let parent = self.node(parent(path)).expect("an existing name has a parent");
+        let node = self.nodes.get_mut(&parent).expect("the parent exists").children.remove(name(path)).expect("detaching an existing name");
         let inode = self.nodes.get_mut(&node).expect("a name has an inode");
         inode.linked = false;
         if inode.opens == 0 {
@@ -85,13 +101,13 @@ impl Volume for MemoryVolume {
     }
 
     fn read_link(&mut self, path: &str) -> Result<String, Error> {
-        self.inode(self.node(path)?)?.target.clone().ok_or(Error::InvalidRequest)
+        self.inode(self.node(path)?)?.target.clone().ok_or(Error::NotALink)
     }
 
     fn list(&mut self, dir: &str) -> Result<Vec<Listed>, Error> {
         self.directory(dir)?;
-        Ok(self.names.iter().filter(|(path, _)| !path.is_empty() && parent(path) == dir).map(|(path, node)| Listed {
-            name: path.rsplit('/').next().expect("a path has a name").into(),
+        Ok(self.nodes[&self.node(dir)?].children.iter().map(|(name, node)| Listed {
+            name: name.clone(),
             meta: self.nodes[node].meta,
             identity: *node,
         }).collect())
@@ -102,8 +118,7 @@ impl Volume for MemoryVolume {
             Ok(_) if how.create_new => return Err(Error::AlreadyExists),
             Ok(node) => node,
             Err(Error::NotFound) if how.create || how.create_new => {
-                self.vacant(path)?;
-                self.insert(path, Kind::File, None)
+                self.insert(path, Kind::File, None)?
             }
             Err(e) => return Err(e),
         };
@@ -160,15 +175,14 @@ impl Volume for MemoryVolume {
     }
 
     fn mkdir(&mut self, path: &str) -> Result<(), Error> {
-        self.vacant(path)?;
-        self.insert(path, Kind::Dir, None);
+        self.insert(path, Kind::Dir, None)?;
         Ok(())
     }
 
     fn rmdir(&mut self, path: &str) -> Result<(), Error> {
         if path.is_empty() { return Err(Error::Root); }
         self.directory(path)?;
-        if self.names.keys().any(|name| parent(name) == path) { return Err(Error::NotEmpty); }
+        if !self.nodes[&self.node(path)?].children.is_empty() { return Err(Error::NotEmpty); }
         self.detach(path);
         Ok(())
     }
@@ -191,23 +205,26 @@ impl Volume for MemoryVolume {
             if kind == Kind::Dir { return Err(Error::NotADirectory); }
             self.detach(to);
         }
-        let moved: Vec<_> = self.names.keys().filter(|path| path.as_str() == from || path.strip_prefix(from).is_some_and(|s| s.starts_with('/'))).cloned().collect();
-        for path in moved {
-            let node = self.names.remove(&path).expect("a moved name exists");
-            self.names.insert(format!("{to}{}", &path[from.len()..]), node);
-        }
+        let old_parent = self.node(parent(from))?;
+        let new_parent = self.node(parent(to))?;
+        self.nodes.get_mut(&old_parent).expect("the old parent exists").children.remove(name(from));
+        self.nodes.get_mut(&new_parent).expect("the new parent exists").children.insert(name(to).into(), node);
         Ok(())
     }
 
     fn symlink(&mut self, path: &str, target: &str) -> Result<(), Error> {
-        self.vacant(path)?;
-        self.insert(path, Kind::Symlink, Some(target.into()));
+        self.insert(path, Kind::Symlink, Some(target.into()))?;
         Ok(())
     }
 
     fn sync(&mut self) -> Result<Vec<(Node, Error)>, Error> { Ok(Vec::new()) }
+    fn commit(&mut self, _: Option<Node>) -> Result<(), Error> { Ok(()) }
     fn room(&mut self) -> Result<Room, Error> { Err(Error::Unsupported) }
-    fn describe(&self) -> String { format!("memory: {} named inodes, {} retained", self.names.len(), self.nodes.len()) }
+    fn describe(&self) -> String { format!("memory: {} inodes", self.nodes.len()) }
+}
+
+fn name(path: &str) -> &str {
+    path.rsplit('/').next().expect("a path has a name")
 }
 
 #[cfg(test)]
@@ -248,5 +265,19 @@ mod tests {
         assert_eq!(volume.identity("home/a-file"), Ok(sibling));
         assert_eq!(volume.rmdir("home/b"), Err(Error::NotEmpty));
         assert_eq!(volume.rename("home/b", "home/b/inner"), Err(Error::IntoItself));
+    }
+
+    #[test]
+    fn symlinks_keep_their_names_and_never_replace_existing_entries() {
+        let mut volume = MemoryVolume::new(&[], clock);
+        let node = volume.open("file", CREATE).unwrap();
+        assert_eq!(volume.symlink("file", "target"), Err(Error::AlreadyExists));
+        assert_eq!(volume.identity("file"), Ok(node));
+        assert_eq!(volume.read_link("file"), Err(Error::NotALink));
+        volume.symlink("link", "/home/toy/target").unwrap();
+        let listed = volume.list("").unwrap();
+        assert_eq!(listed[1].name, "link");
+        assert_eq!(listed[1].meta.kind, Kind::Symlink);
+        assert_eq!(volume.read_link("link"), Ok("/home/toy/target".into()));
     }
 }

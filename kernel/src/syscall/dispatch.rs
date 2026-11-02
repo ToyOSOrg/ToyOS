@@ -8,7 +8,7 @@
 //! runs for a decode refusal exactly as for a handler. `syscall_total` and
 //! `syscall_total_ns` then count and time the same set of calls.
 
-use crate::object::{ops, KObjectRef};
+use crate::object::ops;
 use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
 use crate::process;
@@ -118,7 +118,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let image = match args.image_len {
                 0 => return SyscallError::InvalidArgument.to_u64(),
                 len => match shared_image(args.image, len) {
-                    Ok(image) => alloc::sync::Arc::new(image) as alloc::sync::Arc<dyn crate::file_backing::FileBacking>,
+                    Ok(image) => alloc::sync::Arc::new(image) as alloc::sync::Arc<crate::file_backing::SharedImage>,
                     Err(refused) => return refused,
                 },
             };

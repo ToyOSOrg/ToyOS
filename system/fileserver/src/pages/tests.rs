@@ -21,6 +21,7 @@ struct Model {
     pages: BTreeMap<(u64, u64), Page>,
     sizes: BTreeMap<u64, u64>,
     mtimes: BTreeMap<u64, u64>,
+    anonymous: BTreeSet<u64>,
     supplies: u32,
     /// Every supply from here is refused.
     refusing: bool,
@@ -71,6 +72,7 @@ impl Fake {
 
     fn supply_pages(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused> {
         let mut m = self.0.borrow_mut();
+        let anonymous = m.anonymous.contains(&id);
         m.supplies += 1;
         if m.refusing {
             return Err(Refused::Kernel(SyscallError::Io));
@@ -85,7 +87,7 @@ impl Fake {
                 continue;
             } else if m.pages.len() >= m.capacity {
                 Some(Refused::NoRoom)
-            } else if dirty && m.held() >= m.ceiling {
+            } else if dirty && !anonymous && m.held() >= m.ceiling {
                 Some(Refused::DirtyFull)
             } else {
                 None
@@ -96,7 +98,7 @@ impl Fake {
             let mut held = vec![0u8; PAGE as usize];
             let n = if dirty { chunk.len() } else { chunk.len().min((size - page * PAGE) as usize) };
             held[..n].copy_from_slice(&chunk[..n]);
-            m.pages.insert((id, page), Page { bytes: held, dirty, writeback: false });
+            m.pages.insert((id, page), Page { bytes: held, dirty: dirty && !anonymous, writeback: false });
             if dirty {
                 let s = m.sizes.get_mut(&id).unwrap();
                 *s = (*s).max(page * PAGE + chunk.len() as u64);
@@ -108,19 +110,20 @@ impl Fake {
 
     fn write_pages(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
         let mut m = self.0.borrow_mut();
+        let anonymous = m.anonymous.contains(&id);
         let mut done = 0;
         while done < bytes.len() {
             let at = offset + done as u64;
             let key = (id, at / PAGE);
             let Some(page) = m.pages.get(&key) else { break };
-            if !page.dirty && !page.writeback && m.held() >= m.ceiling {
+            if !anonymous && !page.dirty && !page.writeback && m.held() >= m.ceiling {
                 return if done > 0 { Ok(done) } else { Err(Refused::DirtyFull) };
             }
             let within = (at % PAGE) as usize;
             let n = (PAGE as usize - within).min(bytes.len() - done);
             let page = m.pages.get_mut(&key).unwrap();
             page.bytes[within..within + n].copy_from_slice(&bytes[done..done + n]);
-            page.dirty = true;
+            page.dirty = !anonymous;
             let s = m.sizes.get_mut(&id).unwrap();
             *s = (*s).max(at + n as u64);
             done += n;
@@ -130,6 +133,11 @@ impl Fake {
 }
 
 impl Pager for Fake {
+    fn room(&self) -> Result<u64, Refused> {
+        let model = self.0.borrow();
+        Ok((model.capacity - model.pages.len()) as u64)
+    }
+
     fn object(&self, size: u64, mtime: u64) -> Result<u64, Refused> {
         let mut m = self.0.borrow_mut();
         if m.sizes.len() >= m.objects {
@@ -139,6 +147,12 @@ impl Pager for Fake {
         let id = m.next;
         m.sizes.insert(id, size);
         m.mtimes.insert(id, mtime);
+        Ok(id)
+    }
+
+    fn anonymous(&self, size: u64, mtime: u64) -> Result<u64, Refused> {
+        let id = self.object(size, mtime)?;
+        self.0.borrow_mut().anonymous.insert(id);
         Ok(id)
     }
 
@@ -154,10 +168,13 @@ impl Pager for Fake {
         let end = size.min(offset + out.len() as u64);
         let mut at = offset;
         while at < end {
-            let Some(page) = m.pages.get(&(id, at / PAGE)) else { break };
             let within = (at % PAGE) as usize;
             let n = ((PAGE as usize - within) as u64).min(end - at) as usize;
-            out.write((at - offset) as usize, &page.bytes[within..within + n]);
+            match m.pages.get(&(id, at / PAGE)) {
+                Some(page) => out.write((at - offset) as usize, &page.bytes[within..within + n]),
+                None if m.anonymous.contains(&id) => out.sub((at - offset) as usize, n).zero(),
+                None => break,
+            }
             at += n as u64;
         }
         match at - offset {
@@ -190,6 +207,7 @@ impl Pager for Fake {
 
     fn withdraw(&self, id: u64, first: u64, count: u64) -> Result<u64, Refused> {
         let mut m = self.0.borrow_mut();
+        if m.anonymous.contains(&id) { return Ok(0); }
         let before = m.pages.len();
         let end = first.saturating_add(count);
         m.pages.retain(|(c, p), page| *c != id || !(first..end).contains(p) || page.dirty || page.writeback);
@@ -259,14 +277,14 @@ fn volume() -> DataVolume<Ram> {
 const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
 
 /// `path` opened through `files`: its node and identity.
-fn open(files: &mut Files<Fake>, v: &mut DataVolume<Ram>, path: &str) -> (Node, u64) {
+fn open(files: &mut Files<Fake>, v: &mut dyn Volume, path: &str) -> (Node, u64) {
     let node = v.open(path, CREATE).unwrap();
     let identity = v.identity(path).unwrap();
     files.opened(v, identity, node).unwrap();
     (node, identity)
 }
 
-fn read(files: &mut Files<Fake>, v: &mut DataVolume<Ram>, (node, id): (Node, u64), offset: u64, len: usize) -> Vec<u8> {
+fn read(files: &mut Files<Fake>, v: &mut dyn Volume, (node, id): (Node, u64), offset: u64, len: usize) -> Vec<u8> {
     let mut out = vec![0xEEu8; len];
     // SAFETY: `out` is the test's, reached only through these bytes meanwhile.
     let bytes = unsafe { Bytes::from_raw(out.as_mut_ptr(), len) };
@@ -287,6 +305,61 @@ fn on_volume(v: &mut DataVolume<Ram>, path: &str) -> Vec<u8> {
 
 fn pattern(len: usize, seed: u8) -> Vec<u8> {
     (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+}
+
+#[test]
+fn memory_bytes_survive_close_sync_and_namespace_replacement_until_the_last_holder() {
+    let mut volume = crate::memory::MemoryVolume::new(&[], clock);
+    let fake = Fake::new(4, 0);
+    let mut files = Files::new(Some(fake.clone()));
+    let (node, id) = open(&mut files, &mut volume, "file");
+    files.write(&mut volume, id, node, 0, b"old contents").unwrap();
+    files.closed(&mut volume, id, node).unwrap();
+    files.sync(&mut volume).unwrap();
+    let again = open(&mut files, &mut volume, "file");
+    assert_eq!(again, (node, id));
+    assert_eq!(read(&mut files, &mut volume, again, 0, 20), b"old contents");
+    let replacement = open(&mut files, &mut volume, "replacement");
+    files.write(&mut volume, replacement.1, replacement.0, 0, b"new contents").unwrap();
+    volume.rename("replacement", "file").unwrap();
+    files.unlinked(&mut volume, id).unwrap();
+    assert_eq!(read(&mut files, &mut volume, again, 0, 20), b"old contents");
+    assert_eq!(volume.identity("file"), Ok(replacement.1));
+    let object = files.object(id).unwrap();
+    files.held(id);
+    files.closed(&mut volume, id, node).unwrap();
+    assert!(files.object(id).is_some(), "the paged holder outlives the description");
+    files.notice(&mut volume, Notice::NoHolders { object });
+    assert!(files.object(id).is_none());
+    assert_eq!(volume.node_meta(node), Err(Error::Stale));
+    assert_eq!(read(&mut files, &mut volume, replacement, 0, 20), b"new contents");
+    assert_eq!(fake.0.borrow().held(), 0, "anonymous bytes need no writeback slots");
+}
+
+#[test]
+fn memory_sparse_files_do_not_resurrect_truncated_bytes_or_evict_existing_data() {
+    let mut volume = crate::memory::MemoryVolume::new(&[], clock);
+    let fake = Fake::new(2, 0);
+    let mut files = Files::new(Some(fake.clone()));
+    let (node, id) = open(&mut files, &mut volume, "file");
+    files.write(&mut volume, id, node, PAGE + 5, b"tail").unwrap();
+    assert_eq!(fake.pages_of(files.object(id).unwrap()), 1, "the hole holds no pages");
+    assert_eq!(files.room(&mut volume).unwrap().free, PAGE);
+    let bytes = read(&mut files, &mut volume, (node, id), 0, 2 * PAGE as usize);
+    assert_eq!(files.room(&mut volume).unwrap().free, PAGE, "reading a hole retains no zero page");
+    assert!(bytes[..PAGE as usize + 5].iter().all(|&b| b == 0));
+    assert_eq!(&bytes[PAGE as usize + 5..], b"tail");
+    files.truncate(&mut volume, id, node, PAGE + 6).unwrap();
+    files.truncate(&mut volume, id, node, PAGE + 9).unwrap();
+    assert_eq!(read(&mut files, &mut volume, (node, id), PAGE + 5, 4), b"t\0\0\0");
+    files.write(&mut volume, id, node, 0, b"head").unwrap();
+    let (other, other_id) = open(&mut files, &mut volume, "other");
+    assert_eq!(files.write(&mut volume, other_id, other, 0, b"full"), Err(Error::NoSpace));
+    assert_eq!(volume.node_meta(other).unwrap().size, 0);
+    assert_eq!(read(&mut files, &mut volume, (node, id), PAGE + 5, 4), b"t\0\0\0");
+    files.truncate(&mut volume, id, node, PAGE).unwrap();
+    files.write(&mut volume, other_id, other, 0, b"room").unwrap();
+    assert_eq!(read(&mut files, &mut volume, (other, other_id), 0, 4), b"room");
 }
 
 #[test]

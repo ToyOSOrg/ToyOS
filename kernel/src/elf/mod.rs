@@ -310,13 +310,12 @@ impl ModuleImage {
 
 /// Read `dst.size()` bytes from a file backing straight into `dst`.
 ///
-/// `dst` is a `KernelSlice`, so the read is bounded by its own allocation; `Err` leaves it partially zeroed, and callers must refuse rather than continue.
-#[must_use = "an image assembled from a failed read is zeros, not the program"]
+/// `dst` is a `KernelSlice`, so the read is bounded by its own allocation.
 pub(crate) fn read_backing_into(
-    backing: &dyn crate::file_backing::FileBacking,
+    backing: &crate::file_backing::SharedImage,
     offset: u64,
     dst: KernelSlice,
-) -> crate::file_backing::BlockResult {
+) {
     let mut remaining = dst.size();
     let mut file_off = offset;
     let mut buf_off = 0usize;
@@ -324,7 +323,7 @@ pub(crate) fn read_backing_into(
     while remaining > 0 {
         let off_in_block = (file_off % 4096) as usize;
         let chunk = (4096 - off_in_block).min(remaining);
-        backing.read_page(file_off - off_in_block as u64, &mut page_buf)?;
+        backing.read_page(file_off - off_in_block as u64, &mut page_buf);
         // SAFETY: `copy_from` asserts `buf_off + chunk <= dst.size()`; `page_buf`
         // and `dst` cannot overlap, and nothing else can see `dst` yet.
         unsafe { dst.copy_from(buf_off, &page_buf[off_in_block..off_in_block + chunk]) };
@@ -332,12 +331,11 @@ pub(crate) fn read_backing_into(
         buf_off += chunk;
         remaining -= chunk;
     }
-    Ok(())
 }
 
 /// Load a shared object into one contiguous allocation and apply its
 /// `R_X86_64_RELATIVE` relocations.
-pub fn load_shared_lib(backing: &dyn crate::file_backing::FileBacking) -> Result<LoadedLib, &'static str> {
+pub fn load_shared_lib(backing: &crate::file_backing::SharedImage) -> Result<LoadedLib, &'static str> {
     let header_size = 4096.min(backing.file_size() as usize);
     let header_data = crate::loader::read_file_range(backing, 0, header_size);
     let layout = parse_layout(&header_data)?;
@@ -375,8 +373,7 @@ pub fn load_shared_lib(backing: &dyn crate::file_backing::FileBacking) -> Result
     // subslice turns a weakening of that into an assert, not an overwrite.
     for seg in layout.segments() {
         let dst = module.at(seg.image()).subslice(0, seg.filesz() as usize);
-        read_backing_into(backing, seg.file_offset(), dst)
-            .map_err(|_| "a segment could not be read off the device")?;
+        read_backing_into(backing, seg.file_offset(), dst);
     }
 
     let dyn_info = match layout.dynamic() {
@@ -492,7 +489,7 @@ pub fn load_shared_lib(backing: &dyn crate::file_backing::FileBacking) -> Result
 /// `.dynsym`'s entry count as the section header table declares it, or `None`
 /// when the file does not say.
 fn dynsym_count_from_sections(
-    backing: &dyn crate::file_backing::FileBacking,
+    backing: &crate::file_backing::SharedImage,
     layout: &Layout,
 ) -> Option<usize> {
     let table = layout.section_headers()?;
