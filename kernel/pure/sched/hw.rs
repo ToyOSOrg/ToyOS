@@ -60,7 +60,7 @@ pub enum TraceKind {
     /// `task` was picked and dispatched; every `name` is its payload's
     /// [`crate::sched::task::SchedPayload::name`].
     Schedule { task: TaskKey, name: u64 },
-    Wake { task: TaskKey, name: u64 },
+    Wake { task: TaskKey, name: u64, waker: u32 },
     /// Two-phase wait commit parked the task.
     ParkCommit { task: TaskKey, name: u64 },
     Migrate { task: TaskKey, name: u64, to: CpuId },

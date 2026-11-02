@@ -111,7 +111,7 @@ impl Stream for TraceRing {
 pub fn record(ev: TraceEvent) {
     let (kind, task, data) = match ev.kind {
         TraceKind::Schedule { name, .. } => (Kind::Pick, Some(name), 0),
-        TraceKind::Wake { name, .. } => (Kind::Wake, Some(name), 0),
+        TraceKind::Wake { name, waker, .. } => (Kind::Wake, Some(name), waker),
         TraceKind::ParkCommit { name, .. } => (Kind::ParkCommit, Some(name), 0),
         TraceKind::Migrate { name, to, .. } => (Kind::Migrate, Some(name), to.0),
         TraceKind::Adopt { name, .. } => (Kind::Adopt, Some(name), 0),
