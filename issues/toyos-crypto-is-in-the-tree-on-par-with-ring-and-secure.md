@@ -517,6 +517,18 @@ Not consumers:
            and 169.3.
          - Evidence:
            https://github.com/ToyOSOrg/evidence/tree/aa3369406af00b46a4b76476ef4cea7df040e30f/combined/r3
+         - Its speed A/B against main, three base/head pairs a bench: P-256
+           ECDH 0.75–0.82 of main and verify 0.76–0.85, but for one T14
+           boot in which ring ran 1.10x slower too.
+         - **A measured layout effect:** AMD asserted `chacha20-poly1305/key`
+           rose from 5.3 ns to 6.0, 6.9 and 6.0 ns in the three pairs, with ring
+           unchanged. Its instructions are the same in both builds; only
+           `SealingKey::chacha20_poly1305` moved, from a 64-byte boundary to
+           32 bytes past one. The T14 and the unasserted build show
+           1.00–1.04. Evidence:
+           https://github.com/ToyOSOrg/evidence/tree/58dcc2314053075b410ed6ccdd48f0e2b68c9c1f/combined/r4
+           and
+           https://github.com/ToyOSOrg/evidence/tree/d6e8e35334d4f83b5140e7dedd8b4d9f1f49b338/combined/r5
        - Their judge asks only that each job ran and its controls held; the
          verdicts are this record's. The first boots, of the fast program at
          ec5a0cd18, read LEAKS everywhere: that harness made each random
