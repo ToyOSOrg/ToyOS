@@ -310,7 +310,7 @@ fn renames_reusing_buckets_on_a_nearly_full_volume_survive_a_crash_at_every_requ
 fn encrypted_renames_reusing_buckets_survive_a_crash_at_every_request() {
     let secret = hex_secret();
     let image = formatted(64 << 20, Some(Encryption { passphrase: &secret, kdf: MIN_KDF })).into_inner();
-    let reused = ops_survive_a_crash_on(image, Some(&secret), PRESSED, &renames(8, 6), 4, 6);
+    let reused = ops_survive_a_crash_on(image, Some(&secret), PRESSED, &renames(8, 32), 4, 6);
     assert!(reused > 4, "{reused} buckets taken again");
 }
 

@@ -437,42 +437,12 @@ impl Replay {
     /// and an accounting key adds every delta newer than its own version
     /// (A7.8), dropped when its counters come to zero.
     pub(crate) fn over(&self, btree: Btree, level: u8, min: Bpos, max: Bpos, keys: Vec<(Key, Vec<u8>)>) -> Result<Vec<(Key, Vec<u8>)>> {
-        let mut merged: BTreeMap<Bpos, (Key, Vec<u8>)> = keys.into_iter().map(|(k, v)| (k.pos, (k, v))).collect();
-        let mut pending = self.pending.range(btree, level, min, max).peekable();
+        let mut keys = self.pending.over(btree, level, min, max, keys)?;
         if btree == Btree::Accounting && level == 0 {
-            while let Some(first) = pending.peek() {
-                let pos = first.key().pos;
-                let stored = merged.remove(&pos);
-                let (mut key, mut sums) = match stored {
-                    Some((key, value)) => (key, counters(&value)?),
-                    None => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
-                };
-                let since = key.version;
-                while pending.peek().is_some_and(|entry| entry.key().pos == pos) {
-                    let entry = pending.next().unwrap();
-                    let version = entry.key().version;
-                    if version <= since { continue; }
-                    let delta = counters(entry.value())?;
-                    if sums.len() < delta.len() {
-                        sums.resize(delta.len(), 0);
-                    }
-                    for (sum, d) in sums.iter_mut().zip(delta) {
-                        *sum = sum.wrapping_add(d);
-                    }
-                    key.version = key.version.max(version);
-                }
-                if sums.iter().any(|&c| c != 0) {
-                    merged.insert(pos, (key, sums.iter().flat_map(|c| c.to_le_bytes()).collect()));
-                }
-            }
-        } else {
-            for logged in pending {
-                let key = *logged.key();
-                if key.kind == kind::DELETED { merged.remove(&key.pos); }
-                else { merged.insert(key.pos, (key, logged.value().to_vec())); }
-            }
+            for (_, value) in &keys { counters(value)?; }
+            keys.retain(|(_, value)| value.iter().any(|&b| b != 0));
         }
-        Ok(merged.into_values().collect())
+        Ok(keys)
     }
 }
 
@@ -542,13 +512,9 @@ pub(crate) struct Writer {
     pub closing: bool,
     /// The largest reservation any transaction makes, in u64s.
     pub max_tx: u64,
-    /// Entries of the ring reclaim needs to journal the pointer update of
-    /// every node that can pin it. Ordinary reservations leave twice this:
-    /// one share for reclaim as it runs, and one for the reclaim that writes
-    /// out a replayed window after a crash, when the first may be spent.
+    /// Entries left for a reclaim share. Ordinary admission leaves two;
+    /// live reclaim leaves the second for recovery after a crash.
     pub reclaim_entries: u64,
-    /// The mount is writing out a replayed window, and reclaim may take
-    /// both shares.
     pub replaying: bool,
 }
 

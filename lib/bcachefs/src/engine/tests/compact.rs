@@ -28,14 +28,28 @@ fn deleting_all_files_leaves_only_the_inode_spine_and_reuses_its_room() {
 #[test]
 fn a_clean_node_relocation_keeps_its_keys_and_updates_its_pointer() {
     let dev = formatted(64 << 20, None);
+    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+    let ino = block_on_ready(m.create(m.root(), b"dependency", New::File, OWNER, NOW)).unwrap().ino;
+    block_on_ready(m.commit()).unwrap();
+    let first = block_on_ready(m.inode(ino)).unwrap().journal_seq;
+    block_on_ready(m.set_mtime(ino, NOW + 17)).unwrap();
+    let latest = block_on_ready(m.inode(ino)).unwrap().journal_seq;
+    assert!(latest > first);
+    block_on_ready(m.unmount()).unwrap();
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     let root = *v.roots().iter().find(|r| r.btree == Btree::Inodes).unwrap();
+    let stored = block_on_ready(super::super::read::read_node(&dev, v.superblock(), None, Btree::Inodes, root.level, &root.ptr, Bpos::MAX)).unwrap();
+    assert!(stored.bset_seqs.iter().copied().max().unwrap() >= latest, "a replacement represents its latest journal record, not its first pin");
     drop(v);
     let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
     assert!(block_on_ready(m.relocate_node(Btree::Inodes, root.level, Bpos::MAX, root.ptr.ptr.sector)).unwrap());
     block_on_ready(m.unmount()).unwrap();
     let v = block_on_ready(Volume::open(&dev)).unwrap();
-    assert_ne!(v.roots().iter().find(|r| r.btree == Btree::Inodes).unwrap().ptr.ptr.sector, root.ptr.ptr.sector);
+    let moved = v.roots().iter().find(|r| r.btree == Btree::Inodes).unwrap();
+    assert_ne!(moved.ptr.ptr.sector, root.ptr.ptr.sector);
+    let stored = block_on_ready(super::super::read::read_node(&dev, v.superblock(), None, Btree::Inodes, moved.level, &moved.ptr, Bpos::MAX)).unwrap();
+    assert!(stored.bset_seqs.iter().copied().max().unwrap() >= latest, "a clean relocation preserves the existing dependency");
+    assert_eq!(block_on_ready(v.inode(ino)).unwrap().mtime, NOW + 17);
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }
 

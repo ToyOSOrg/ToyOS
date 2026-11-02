@@ -33,7 +33,7 @@ pub(crate) struct Plan {
 
 enum Write {
     /// A bset appended at sector `at` of the node.
-    Append { at: u64, bytes: Vec<u8> },
+    Append { at: u64, bytes: Vec<u8>, journal_seq: u64 },
     /// New nodes, each with its bytes, and a new root above them when a
     /// root split.
     Fresh { nodes: Vec<(Planned, Vec<u8>)>, root: Option<(Planned, Vec<u8>)> },
@@ -125,9 +125,9 @@ pub(super) const fn fresh_nodes(nodes: usize) -> usize {
 /// the slot, as no transaction enters it while a changed node is oversized
 /// ([`Mount::transact`]), and the pointer update of the one reclaim round in
 /// flight, each at most `K_TX` u64s of keys. Spread evenly, all that fills
-/// this many nodes of at least [`MIN_NODE`], each a key short of full. A
-/// replay installs its window's keys with no such bound
-/// (`issues/a-replayed-bcachefs-node-past-seven-nodes-is-refused.md`).
+/// this many nodes of at least [`MIN_NODE`], each a key short of full.
+/// Materialization takes at most one transaction of distinct key positions,
+/// including during replay.
 pub(super) const MAX_GROUPS: usize = 7;
 
 /// New nodes one rewrite writes at most: a split's, and a root above them.
@@ -257,6 +257,7 @@ impl<D: BlockDev> Mount<D> {
         // Reclaim's room for nodes is its own share; no draw limits it.
         self.admit(Class::Reclaim, Draw::Freeing, bound, nodes).await?;
         let _slot = self.slot(Class::Reclaim).await;
+        self.prepare_pending(Class::Reclaim, bound, nodes)?;
         let mut txn = Txn::default();
         let out = self.point(&mut txn, plans).await;
         self.finish(txn, out.is_ok(), Class::Reclaim, bound, nodes)?;
@@ -268,6 +269,9 @@ impl<D: BlockDev> Mount<D> {
     /// A node is appended to when it may be and has room; otherwise it is
     /// rewritten to fresh nodes, split past two thirds full.
     async fn plan(&self, order: Order, only: Option<NodeId>) -> Result<Vec<Plan>> {
+        if only.is_none() {
+            self.materialize(order).await?;
+        }
         let chosen: Vec<NodeId> = if let Some(id) = only { alloc::vec![id] } else {
             let st = self.st.borrow();
             // An oversized node first; then by `order`.
@@ -298,7 +302,7 @@ impl<D: BlockDev> Mount<D> {
             if self.st.borrow().cache.node(id).captured.is_some() { continue; }
             let ids = self.rebalance_pair(id).await?;
             if ids.is_empty() { continue; }
-            let (btree, level, root, min, max, keys, changes, append, groups) = {
+            let (btree, level, root, min, max, keys, changes, dependency, append, groups) = {
                 let st = self.st.borrow();
                 let n = st.cache.node(id);
                 let root = st.new_roots.get(&n.btree) == Some(&id) || st.roots.get(&n.btree).is_some_and(|r| r.ptr.ptr.sector == n.sector);
@@ -307,6 +311,7 @@ impl<D: BlockDev> Mount<D> {
                 let append = ids.len() == 1 && n.compact.is_none() && !n.fresh && n.written > 0 && !st.cache.oversized(n) && usize::from(n.on_disk) * SECTOR + later <= node_bytes;
                 let keys: Vec<_> = ids.iter().flat_map(|&id| st.cache.node(id).keys.iter().cloned()).collect();
                 let changes: BTreeMap<_, _> = ids.iter().flat_map(|&id| st.cache.node(id).unwritten.iter().map(|(&p, &s)| (p, s))).collect();
+                let dependency = ids.iter().map(|&id| st.cache.node(id).journal_seq).max().unwrap();
                 let sizes: Vec<usize> = keys.iter().map(|(_, v)| key_bytes(v)).collect();
                 // At two thirds, as upstream splits; an oversized node, too
                 // full for two at that, in as few as each a node holds.
@@ -314,11 +319,9 @@ impl<D: BlockDev> Mount<D> {
                 if groups.len() > 2 {
                     groups = mkfs::spread(&sizes, node_bytes - FIRST_KEYS);
                 }
-                (n.btree, n.level, root, st.cache.node(ids[0]).min, st.cache.node(*ids.last().unwrap()).max, keys, changes, append, groups)
+                (n.btree, n.level, root, st.cache.node(ids[0]).min, st.cache.node(*ids.last().unwrap()).max, keys, changes, dependency, append, groups)
             };
             if groups.len() > MAX_GROUPS {
-                // More than a node read holds once unpacked, and two
-                // transactions ([`MAX_GROUPS`]): a replay's leaf.
                 return Err(Error::Unsupported("a btree node whose keys fill more than seven nodes"));
             }
             let written = groups.len() + usize::from(groups.len() > 1 && root);
@@ -335,11 +338,11 @@ impl<D: BlockDev> Mount<D> {
                 let st = self.st.borrow();
                 let n = st.cache.node(id);
                 let keys: Vec<Vec<u8>> = n.unwritten.keys().map(|pos| changed(n, *pos)).collect();
-                let journal_seq = n.unwritten.values().copied().max().expect("a dirty node has changes");
+                let journal_seq = n.unwritten.values().map(|c| c.last).max().expect("a dirty node has changes").max(n.journal_seq);
                 let at = u64::from(n.on_disk);
                 let later = node::Later { btree, level, seq: n.seq, offset: at as usize * SECTOR, journal_seq, keys: &keys };
                 let bytes = node::encode_later(block, self.key.as_ref(), &later)?;
-                Write::Append { at, bytes }
+                Write::Append { at, bytes, journal_seq }
             } else {
                 let splits = groups.len() > 1;
                 if splits && root && level == 3 {
@@ -354,12 +357,13 @@ impl<D: BlockDev> Mount<D> {
                     let low = if j == 0 { min } else { keys[range.start - 1].0.pos.successor().expect("a key below the last position") };
                     let high = if j + 1 == groups.len() { max } else { keys[range.end - 1].0.pos };
                     let mine = keys[range.clone()].to_vec();
-                    let journal_seq = changes.range(low..=high).map(|(_, s)| *s).max().unwrap_or(0);
+                    let journal_seq = changes.range(low..=high).map(|(_, c)| c.last).max().unwrap_or(0).max(dependency);
                     nodes.push(self.fresh_node(btree, level, low, high, journal_seq, mine, sectors[j], magic)?);
                 }
                 let above = (splits && root).then(|| {
                     let keys = nodes.iter().map(|(p, _): &(Planned, Vec<u8>)| pointer(p.max, &p.ptr())).collect();
-                    self.fresh_node(btree, level + 1, Bpos::MIN, Bpos::MAX, 0, keys, sectors[groups.len()], magic)
+                    let dependency = nodes.iter().map(|(p, _)| p.journal_seq).max().unwrap();
+                    self.fresh_node(btree, level + 1, Bpos::MIN, Bpos::MAX, dependency, keys, sectors[groups.len()], magic)
                 });
                 Write::Fresh { nodes, root: above.transpose()? }
             };
@@ -384,6 +388,70 @@ impl<D: BlockDev> Mount<D> {
         Ok(plans)
     }
 
+    /// Transfers one bounded range from journal ownership to a cached
+    /// node. No transaction is replayed and no allocation triggers repeat.
+    async fn materialize(&self, order: Order) -> Result<()> {
+        let next = {
+            let st = self.st.borrow();
+            match order {
+                Order::OldestPin => st.pending.oldest().filter(|c| st.cache.oldest_pin().is_none_or(|p| c.first < p)),
+                Order::LeavesFirst => (0..4).find_map(|level| Btree::ALL.iter().find_map(|&btree| {
+                    st.pending.range(btree, level, Bpos::MIN, Bpos::MAX).next().map(|e| e.capture())
+                })),
+            }
+        };
+        let Some(next) = next else { return Ok(()) };
+        let (btree, level, pos) = next.position;
+        let id = self.find(btree, level, pos).await?;
+        let mut st = self.st.borrow_mut();
+        let n = st.cache.node(id);
+        if n.writing || n.captured.is_some() || n.held != 0 { return Ok(()); }
+        let mut captures = Vec::new();
+        let mut bytes = 0;
+        let mut pending = st.pending.range(btree, level, pos, n.max).peekable();
+        while let Some(first) = pending.peek() {
+            let at = first.key().pos;
+            let start = captures.len();
+            let mut size = if btree == Btree::Accounting && level == 0 {
+                n.keys.get(n.at(at)).filter(|(k, _)| k.pos == at).map_or(0, |(_, v)| key_bytes(v))
+            } else { 0 };
+            while pending.peek().is_some_and(|e| e.key().pos == at) {
+                let entry = pending.next().unwrap();
+                size = size.max(key_bytes(entry.value()));
+                captures.try_reserve(1).map_err(|_| Error::NoMemory)?;
+                captures.push(entry.capture());
+            }
+            if bytes + size > K_TX as usize * 8 && start != 0 { captures.truncate(start); break; }
+            bytes += size;
+        }
+        let st = &mut *st;
+        let mut accounting = None;
+        for capture in captures {
+            let pos = capture.position.2;
+            assert!(st.pending.transfer(capture, |entry| {
+                st.cache.change(id, |n| {
+                    if btree != Btree::Accounting || level != 0 {
+                        let kv = (entry.key.kind != kind::DELETED).then_some((entry.key, entry.value));
+                        n.put(pos, kv, entry.first, entry.last);
+                        return;
+                    }
+                    let (mut key, mut sums) = match n.keys.get(n.at(pos)) {
+                        Some((key, value)) if key.pos == pos => (*key, journal::counters(value).expect("cached accounting decodes")),
+                        _ => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
+                    };
+                    if accounting.is_none_or(|(previous, _)| previous != pos) { accounting = Some((pos, key.version)); }
+                    if entry.key.version <= accounting.unwrap().1 { return; }
+                    let delta = journal::counters(&entry.value).expect("pending accounting decodes");
+                    sums.resize(sums.len().max(delta.len()), 0);
+                    for (sum, d) in sums.iter_mut().zip(delta) { *sum = sum.wrapping_add(d); }
+                    key.version = key.version.max(entry.key.version);
+                    n.put(pos, Some((key, value::counters(&sums))), entry.first, entry.last);
+                });
+            }), "materialization cannot race a pending replacement under the slot");
+        }
+        Ok(())
+    }
+
     pub(super) fn minimum_fill(&self) -> usize {
         (mkfs::capacity(self.sb.node_sectors() as usize * SECTOR) - FIRST_KEYS) / 2 - 255 * 8
     }
@@ -403,15 +471,15 @@ impl<D: BlockDev> Mount<D> {
         let parent = self.find(btree, level + 1, max).await?;
         let adjacent = {
             let mut st = self.st.borrow_mut();
-            let p = st.cache.node(parent);
-            let at = p.at(max);
-            if p.keys.len() == 1 {
+            let keys = st.keys(parent)?;
+            let at = keys.partition_point(|(k, _)| k.pos < max);
+            if keys.len() == 1 {
                 let seq = st.journal.open.as_ref().map_or(st.journal.next_seq, |o| o.seq);
                 st.cache.change(parent, |n| { n.compact.get_or_insert(seq); });
                 return Ok(Vec::new());
             }
             let index = if at > 0 { at - 1 } else { at + 1 };
-            let (k, v) = p.keys.get(index).ok_or(Error::Corrupt("underfull node absent from its parent"))?;
+            let (k, v) = keys.get(index).ok_or(Error::Corrupt("underfull node absent from its parent"))?;
             (k.pos, NodePtr::decode(v)?)
         };
         let other = self.load(btree, level, &adjacent.1, adjacent.0).await?;
@@ -430,7 +498,7 @@ impl<D: BlockDev> Mount<D> {
         let build = Build { btree, level, seq, min, max, journal_seq, keys: &encoded };
         let bytes = node::encode(magic, self.sb.block_bytes(), self.key.as_ref(), &build)?;
         let sectors = (bytes.len() / SECTOR) as u16;
-        Ok((Planned { btree, level, min, max, seq, sector: at.0, gen: at.1, sectors, keys }, bytes))
+        Ok((Planned { btree, level, min, max, seq, sector: at.0, gen: at.1, sectors, journal_seq, keys }, bytes))
     }
 
     /// Room for a batch's new nodes now, outside the slot: buckets emptied
@@ -585,7 +653,7 @@ impl<D: BlockDev> Mount<D> {
         }
         for p in plans {
             let writes: Vec<(u64, &[u8])> = match &p.write {
-                Write::Append { at, bytes } => alloc::vec![(self.st.borrow().cache.node(p.ids[0]).sector + at, &bytes[..])],
+                Write::Append { at, bytes, .. } => alloc::vec![(self.st.borrow().cache.node(p.ids[0]).sector + at, &bytes[..])],
                 Write::Fresh { nodes, root } => nodes.iter().chain(root).map(|(planned, bytes)| (planned.sector, &bytes[..])).collect(),
             };
             for (sector, bytes) in writes {
@@ -615,7 +683,7 @@ impl<D: BlockDev> Mount<D> {
             };
             let (btree, level) = (plan.btree, plan.level);
             match plan.write {
-                Write::Append { at, bytes } => {
+                Write::Append { at, bytes, journal_seq } => {
                     let sectors = (at + (bytes.len() / SECTOR) as u64) as u16;
                     let ptr = NodePtr { seq, written: sectors, min, ptr: node_ptr(sector, gen) };
                     if plan.root {
@@ -624,7 +692,7 @@ impl<D: BlockDev> Mount<D> {
                         let (k, v) = pointer(max, &ptr);
                         self.put(txn, btree, level + 1, max, Some((k, v))).await?;
                     }
-                    txn.installs.push(Install::Append { id: plan.ids[0], sectors });
+                    txn.installs.push(Install::Append { id: plan.ids[0], sectors, journal_seq });
                 }
                 Write::Fresh { nodes, root } => {
                     let by: Vec<Planned> = nodes.into_iter().map(|(p, _)| p).collect();
@@ -784,7 +852,8 @@ impl<D: BlockDev> Mount<D> {
     /// every change since capture, partitioned by their new ranges.
     pub(super) fn install(&self, st: &mut State, install: Install) {
         match install {
-            Install::Append { id, sectors } => st.cache.change(id, |n| {
+            Install::Append { id, sectors, journal_seq } => st.cache.change(id, |n| {
+                n.journal_seq = n.journal_seq.max(journal_seq);
                 n.written = sectors;
                 n.on_disk = sectors;
                 n.bsets += 1;
@@ -805,7 +874,7 @@ impl<D: BlockDev> Mount<D> {
                 }
                 for p in by {
                     let mine: Vec<(Key, Vec<u8>)> = keys.iter().filter(|(k, _)| (p.min..=p.max).contains(&k.pos)).cloned().collect();
-                    let changes: BTreeMap<Bpos, u64> = unwritten.range(p.min..=p.max).map(|(k, v)| (*k, *v)).collect();
+                    let changes: BTreeMap<Bpos, Change> = unwritten.range(p.min..=p.max).map(|(k, v)| (*k, *v)).collect();
                     let id = st.cache.insert(fresh_cached(&p, mine));
                     let seq = st.journal.open.as_ref().map_or(st.journal.next_seq, |o| o.seq);
                     st.cache.change(id, |n| {
@@ -821,56 +890,26 @@ impl<D: BlockDev> Mount<D> {
         }
     }
 
-    /// Lays the replayed window over the nodes: each key installed in its
-    /// node as a change of the entry it came from, from the top level down so
-    /// each level's pointers lead to the next; each accounting delta newer
-    /// than its stored key added (A7.8). Then reclaim writes until the dirty
-    /// nodes are within the limit again.
+    /// Replay has the same pending owner as runtime changes. Recover enough
+    /// journal headroom for ordinary admission without loading every leaf.
     pub(super) async fn install_replay(&self, replayed: journal::Replay) -> Result<()> {
-        self.st.borrow_mut().journal.replaying = true;
-        let mut pending = replayed.pending;
-        let mut captured = Vec::new();
-        captured.try_reserve(pending.iter().count()).map_err(|_| Error::NoMemory)?;
-        captured.extend(pending.iter().map(|entry| entry.capture()));
-        captured.sort_unstable_by_key(|c| (core::cmp::Reverse(c.position.1), c.position.0, c.position.2, c.order));
-        let mut accounting = None;
-        for capture in captured {
-            let (btree, level, pos) = capture.position;
-            let id = self.find(btree, level, pos).await?;
-            assert!(pending.transfer(capture, |entry| {
-                self.st.borrow_mut().cache.change(id, |n| {
-                    if btree != Btree::Accounting || level != 0 {
-                        let key = (entry.key.kind != kind::DELETED).then_some((entry.key, entry.value));
-                        n.put(pos, key, entry.first);
-                        return;
-                    }
-                    let (mut key, mut sums) = match n.keys.get(n.at(pos)) {
-                        Some((k, v)) if k.pos == pos => (*k, journal::counters(v).expect("a cached accounting key decodes")),
-                        _ => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
-                    };
-                    if accounting.is_none_or(|(previous, _)| previous != pos) { accounting = Some((pos, key.version)); }
-                    if entry.key.version <= accounting.unwrap().1 { return; }
-                    let delta = journal::counters(&entry.value).expect("a replayed accounting delta decodes");
-                    sums.resize(sums.len().max(delta.len()), 0);
-                    for (sum, d) in sums.iter_mut().zip(delta) { *sum = sum.wrapping_add(d); }
-                    key.version = key.version.max(entry.key.version);
-                    n.put(pos, Some((key, value::counters(&sums))), entry.first);
-                });
-            }), "a replay capture has no concurrent replacement");
-        }
-        assert!(pending.oldest_pin().is_none(), "all replay pins transferred");
         {
-            let st = self.st.borrow();
-            let need = ((st.cache.dirty + st.cache.unpointed) as u64 * PER_NODE).div_ceil(st.journal.body() - st.journal.max_tx) + 1;
-            if need > st.journal.ring_free() {
-                return Err(Error::NoSpace("a journal too full to write out its replay"));
-            }
+            let mut st = self.st.borrow_mut();
+            st.pending = replayed.pending;
+            st.journal.replaying = true;
         }
-        while {
-            let st = self.st.borrow();
-            st.cache.dirty + st.cache.unpointed > st.limit
-        } {
-            self.reclaim_round(Order::OldestPin).await?;
+        loop {
+            let room = {
+                let mut st = self.st.borrow_mut();
+                if st.journal.reserve(K_TX, Class::Ordinary) {
+                    st.journal.unreserve(K_TX);
+                    true
+                } else { false }
+            };
+            if room { break; }
+            if !self.reclaim_round(Order::OldestPin).await? {
+                return Err(Error::NoSpace("a journal too full to materialize its replay"));
+            }
         }
         self.flush_open().await?;
         self.st.borrow_mut().journal.replaying = false;
@@ -900,6 +939,7 @@ fn fresh_cached(p: &Planned, keys: Vec<(Key, Vec<u8>)>) -> Cached {
         written: p.sectors,
         on_disk: p.sectors,
         bsets: 1,
+        journal_seq: p.journal_seq,
         bytes: keys.iter().map(|(_, v)| key_bytes(v)).sum(),
         keys: Rc::new(keys),
         unwritten: BTreeMap::new(),
@@ -950,7 +990,7 @@ impl Plan {
     /// offset in it and its length.
     pub(crate) fn appended<D>(&self, m: &Mount<D>) -> Option<(u64, usize, usize)> {
         match &self.write {
-            Write::Append { at, bytes } => Some((m.st.borrow().cache.node(self.ids[0]).sector, *at as usize * SECTOR, bytes.len())),
+            Write::Append { at, bytes, .. } => Some((m.st.borrow().cache.node(self.ids[0]).sector, *at as usize * SECTOR, bytes.len())),
             Write::Fresh { .. } => None,
         }
     }
