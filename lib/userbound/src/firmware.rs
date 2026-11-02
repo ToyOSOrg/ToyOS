@@ -78,10 +78,10 @@ use crate::span::PAGE_4K;
 
 /// `EfiReservedMemoryType`, `EfiRuntimeServicesData`, `EfiACPIReclaimMemory`
 /// and `EfiACPIMemoryNVS`.
-const EFI_RESERVED: u32 = 0;
+pub(crate) const EFI_RESERVED: u32 = 0;
 const EFI_RUNTIME_DATA: u32 = 6;
 const EFI_ACPI_RECLAIM: u32 = 9;
-const EFI_ACPI_NVS: u32 = 10;
+pub(crate) const EFI_ACPI_NVS: u32 = 10;
 /// `EfiMemoryMappedIO`.
 const EFI_MMIO: u32 = 11;
 

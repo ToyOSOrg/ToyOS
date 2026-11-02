@@ -1207,7 +1207,18 @@ impl<'a> Supervisor<'a> {
             return Err(format!("the supervisor watches {MAX_CHILDREN} processes already"));
         }
         let name = entry.to_string();
-        let claim = self.syscap.claim_function::<toyos::Device>(function.arrival).map_err(|e| refused(&name, e))?;
+        // The privileges beyond the claim this signed image's row names,
+        // granted at the mint.
+        let windows: Vec<_> = row
+            .firmware
+            .iter()
+            .map(|word| {
+                toyos_manifest::firmware_window(word)
+                    .unwrap_or_else(|| panic!("supervisor: {} names firmware window `{word}`, which the build refuses", row.name))
+            })
+            .collect();
+        let windows = toyos_abi::pci::FirmwareWindows::of(&windows);
+        let claim = self.syscap.claim_function_granted::<toyos::Device>(function.arrival, windows).map_err(|e| refused(&name, e))?;
         let claim = translated(claim, &function).map_err(|why| missing(&name, &why))?;
         self.make_state_dir(row);
         let mut extra = Extra { claims: vec![(format!("{DEV_PREFIX}{name}"), claim)], ..Extra::default() };
@@ -3069,7 +3080,7 @@ fn start<'a>(
                 };
                 let found = claims::function(&matcher, records, boot_controller());
                 let function = found.as_ref().ok().and_then(|at| records.iter().find(|pci| pci.arrival == *at)).copied();
-                (found.map(DeviceRequest::Function).map_err(Missing::Unresolved), function)
+                (found.map(|at| DeviceRequest::Function(at, toyos_abi::pci::FirmwareWindows::NONE)).map_err(Missing::Unresolved), function)
             }
         };
         let minted = request.and_then(|request| claim(syscap, request).map_err(Missing::Refused)).and_then(|minted| {
@@ -3551,7 +3562,7 @@ fn pci_records(syscap: &SysCap) -> Result<Vec<Pci>, String> {
 fn claim(syscap: &SysCap, request: DeviceRequest) -> Result<toyos::Device, SyscallError> {
     match request {
         DeviceRequest::Class(class) => syscap.claim(class),
-        DeviceRequest::Function(arrival) => syscap.claim_function(arrival),
+        DeviceRequest::Function(arrival, windows) => syscap.claim_function_granted(arrival, windows),
         DeviceRequest::Isa(set) => syscap.claim_isa(set),
     }
 }
