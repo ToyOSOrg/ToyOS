@@ -104,6 +104,13 @@ impl Out for Window<'_> {
 }
 
 pub trait Volume {
+    /// Its paged objects are the only backing for file contents. Their pages
+    /// cannot be evicted while the inode remains linked or held open.
+    fn memory(&self) -> bool { false }
+
+    /// Whether an open inode still has a name.
+    fn linked(&mut self, _node: Node) -> Result<bool, Error> { Ok(true) }
+
     /// Whether anything here may be changed.
     fn writable(&self) -> bool;
 
@@ -363,8 +370,8 @@ pub fn take_anchor() {
 }
 
 /// What a file written now is stamped with (`toyos_abi::syscall::Stat::mtime`):
-/// nanoseconds since the Unix epoch, UTC, as the kernel's `clock::mtime_now`
-/// reckons them, and 0 — undated — on a machine whose RTC never answered.
+/// nanoseconds since the Unix epoch, UTC, and 0 — undated — on a machine whose
+/// RTC never answered.
 pub fn now_nanos() -> u64 {
     let anchor = ANCHOR.get().expect("fileserver takes the anchor at its start");
     anchor.map_or(0, |secs| secs.saturating_mul(NANOS_PER_SEC).saturating_add(nanos_since_boot()))

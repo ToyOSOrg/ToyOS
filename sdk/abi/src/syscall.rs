@@ -3387,6 +3387,9 @@ pub enum PagedOp {
     /// Set the mtime to `time`, as a file's `utimens` does; the bytes and
     /// the version stay.
     Stamp = 10,
+    /// Unused slots in the pager's resident-page quota. This advisory
+    /// snapshot reserves nothing and promises no physical memory.
+    Room = 11,
 }
 
 /// [`PagedOp::Supply`]'s pages are dirty.
@@ -3462,6 +3465,12 @@ pub fn pager_create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> 
 /// for.
 pub fn paged_create(pager: RawHandle, size: u64, mtime: u64) -> Result<u64, SyscallError> {
     check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, mtime, 0))
+}
+
+/// A resizable anonymous object: its present pages are authoritative, never
+/// withdrawn or discarded by a failure, and writes need no writeback slot.
+pub fn paged_anonymous(pager: RawHandle, size: u64, mtime: u64) -> Result<u64, SyscallError> {
+    check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, mtime, 1))
 }
 
 /// A holder handle on `pager`'s object `object`, carrying `READ`, which may

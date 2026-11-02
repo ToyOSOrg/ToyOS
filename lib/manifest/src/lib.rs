@@ -108,7 +108,7 @@ pub struct RoleDir {
     pub dir: &'static str,
     /// Where it is on the role's volume, which a grant on it names
     /// (`toyos::fs::Grant`): DATA keeps its directories side by side, and
-    /// SYSTEM, LOG and BOOT are each served whole.
+    /// SYSTEM, LOG, BOOT and MEMORY are each served whole.
     pub root: &'static str,
     /// Whether a grant on it may change it: SYSTEM's ROOT is the signed
     /// image, which nothing does.
@@ -124,11 +124,12 @@ pub const SYSTEM: &str = "system";
 
 /// The file-server roles, and the directories each serves: one port per role,
 /// and one grant on it per directory.
-pub const ROLES: [(&str, &[RoleDir]); 4] = [
+pub const ROLES: [(&str, &[RoleDir]); 5] = [
     (SYSTEM, &[RoleDir { dir: "/system", root: "", write: false }]),
     ("data", &[dir("/apps", "apps"), dir("/config", "config"), dir("/home", "home"), dir("/state", "state")]),
     ("log", &[dir("/log", "")]),
     ("boot", &[dir("/boot", "")]),
+    ("memory", &[dir("/tmp", "")]),
 ];
 
 /// The directories `role` serves, or `None` for a name that is no role.
@@ -158,6 +159,11 @@ pub fn whole_tree() -> Vec<View> {
             dirs.iter().map(|d| View { role, dir: d.dir.to_string(), root: d.root.to_string(), write: d.write })
         })
         .collect()
+}
+
+/// `/tmp`, read-write: an explicit capability in every view.
+fn temporary() -> View {
+    View { role: "memory", dir: "/tmp".into(), root: String::new(), write: true }
 }
 
 /// `/system`, read-only: in every view.
@@ -396,7 +402,7 @@ impl Program {
 
     /// The directories this row's program is endowed. **An installed package
     /// sees `/system` and its own directory read-only, its own folder of the
-    /// home read-write and the folder its launch was granted, and nothing else
+    /// home read-write, `/tmp`, and the folder its launch was granted, and nothing else
     /// any role serves**: no other package, no other part of the home, no
     /// `/config`, `/state`, `/log` or `/boot`.
     /// **Every other row sees the whole tree but [`STATE`], and of that only its
@@ -407,7 +413,7 @@ impl Program {
         match self.package() {
             Some(name) => {
                 let granted = self.folder.iter().map(|f| data_dir(f.path.clone(), f.access == grants::Access::ReadWrite));
-                [system(), data_dir(package::Package::dir(name), false), data_dir(app_home(name), true)]
+                [system(), temporary(), data_dir(package::Package::dir(name), false), data_dir(app_home(name), true)]
                     .into_iter()
                     .chain(granted)
                     .collect()
@@ -945,8 +951,8 @@ mod tests {
     }
 
     /// **An installed package sees `/system` and its own directory read-only
-    /// and its own folder read-write, and nothing else any role serves.**
-    /// Spelled out whole, so a fourth directory, a wider root or a writable
+    /// and its own folder and `/tmp` read-write, and nothing else any role serves.**
+    /// Spelled out whole, so an extra directory, a wider root or a writable
     /// package is red.
     #[test]
     fn a_package_s_view_is_its_own_directory_read_only_and_its_own_folder() {
@@ -955,6 +961,7 @@ mod tests {
             views(&row),
             [
                 system(),
+                ("memory", "/tmp".into(), String::new(), true),
                 ("data", "/apps/gbae".into(), "apps/gbae".into(), false),
                 ("data", "/home/toy/Apps/gbae".into(), "home/toy/Apps/gbae".into(), true),
             ]
@@ -963,7 +970,7 @@ mod tests {
         let longest = "n".repeat(MAX_PROGRAM_NAME);
         let row = sample().app_row(&longest, &format!("/apps/{longest}/{longest}")).unwrap();
         assert_eq!(
-            views(&row).into_iter().skip(1).map(|(_, _, root, write)| (root, write)).collect::<Vec<_>>(),
+            views(&row).into_iter().skip(2).map(|(_, _, root, write)| (root, write)).collect::<Vec<_>>(),
             [(format!("apps/{longest}"), false), (format!("home/toy/Apps/{longest}"), true)]
         );
     }
@@ -979,6 +986,7 @@ mod tests {
                 views(&row),
                 [
                     system(),
+                    ("memory", "/tmp".into(), String::new(), true),
                     ("data", "/apps/gbae".into(), "apps/gbae".into(), false),
                     ("data", "/home/toy/Apps/gbae".into(), "home/toy/Apps/gbae".into(), true),
                     ("data", "/home/toy/Games".into(), "home/toy/Games".into(), write),
@@ -999,10 +1007,10 @@ mod tests {
         let whole_but_state = |own: Option<&str>| -> Vec<_> {
             std::iter::once(system())
                 .chain(
-                    ["/apps", "/config", "/home", "/log", "/boot"]
+                    ["/apps", "/config", "/home", "/log", "/boot", "/tmp"]
                         .iter()
-                        .zip(["apps", "config", "home", "", ""])
-                        .zip(["data", "data", "data", "log", "boot"])
+                        .zip(["apps", "config", "home", "", "", ""])
+                        .zip(["data", "data", "data", "log", "boot", "memory"])
                         .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), true)),
                 )
                 .chain(own.map(|name| ("data", format!("/state/{name}"), format!("state/{name}"), true)))
@@ -1124,7 +1132,7 @@ mod tests {
     /// role is refused where it is written: the supervisor would start a server for
     /// directories nobody named.
     #[test]
-    fn a_role_is_one_of_the_three_and_its_directories_are_fixed() {
+    fn a_role_has_fixed_directories() {
         let m = sample();
         let fileserver = m.program("fileserver").unwrap();
         assert_eq!(fileserver.roles, ["data", "log"]);

@@ -48,9 +48,9 @@ fn pager(h: RawHandle, rights: Rights) -> Result<Arc<PagerObject>, u64> {
     process::with_process_data(|data| data.handles.get::<PagerObject>(h, rights)).map_err(|e| e.refuse())
 }
 
-pub(super) fn sys_paged_create(h: RawHandle, size: u64, mtime: u64) -> u64 {
+pub(super) fn sys_paged_create(h: RawHandle, size: u64, mtime: u64, anonymous: bool) -> u64 {
     match pager(h, Rights::WRITE) {
-        Ok(pager) => pager.add(size, mtime),
+        Ok(pager) => pager.add(size, mtime, anonymous),
         Err(refused) => refused,
     }
 }
@@ -128,6 +128,7 @@ pub(super) fn sys_paged_op(ctx: &SyscallContext<'_>, h: RawHandle, op: u64, args
     let range_ok = |count: u64| (1..=PAGED_RANGE_PAGES).contains(&count) && args.offset.checked_add(count).is_some();
     let id = args.object;
     match op {
+        x if x == PagedOp::Room as u64 => pager.room(),
         x if x == PagedOp::Read as u64 => {
             if args.flags != 0 || !within_reach(args.offset, args.len) {
                 return SyscallError::InvalidArgument.to_u64();

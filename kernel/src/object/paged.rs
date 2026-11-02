@@ -262,6 +262,11 @@ impl PagerObject {
         &self.watch
     }
 
+    pub fn room(&self) -> u64 {
+        let state = self.state.lock();
+        (state.pages.capacity() - state.pages.used()) as u64
+    }
+
     /// Whether a notice is owed: a request no notice has named, or a last
     /// holder gone.
     pub fn has_notices(&self) -> bool {
@@ -273,7 +278,7 @@ impl PagerObject {
 
     /// A new object of `size` bytes last written at `mtime`: its id.
     /// `ResourceExhausted` where every slot holds one.
-    pub fn add(&self, size: u64, mtime: u64) -> u64 {
+    pub fn add(&self, size: u64, mtime: u64, anonymous: bool) -> u64 {
         if size > kernel::paged::LAST_END {
             return SyscallError::InvalidArgument.to_u64();
         }
@@ -282,7 +287,7 @@ impl PagerObject {
             return SyscallError::Gone.to_u64();
         }
         let Some(slot) = state.free.pop() else { return SyscallError::ResourceExhausted.to_u64() };
-        let object = state.pages.object(slot, size, mtime);
+        let object = if anonymous { state.pages.anonymous(slot, size, mtime) } else { state.pages.object(slot, size, mtime) };
         state.entries[slot as usize] = Some(Entry { object, refs: 1, holders: 0, owned: true, no_holders: false });
         u64::from(slot)
     }
@@ -480,13 +485,18 @@ impl PagerObject {
             match step {
                 Step::Copy(count) => {
                     for piece in &pieces[..count] {
-                        // SAFETY: `phys` is a frame of the object, pinned by
-                        // `pin_chunk`, and `within + len` lies inside it.
-                        unsafe { out.write_raw(done, DirectMap::from_phys(piece.phys).as_ptr::<u8>().add(piece.within), piece.len) };
+                        match piece.phys {
+                            Some(phys) => {
+                                // SAFETY: `phys` is pinned by `pin_chunk`,
+                                // and `within + len` lies inside its frame.
+                                unsafe { out.write_raw(done, DirectMap::from_phys(phys).as_ptr::<u8>().add(piece.within), piece.len) };
+                            }
+                            None => out.fill_zero(done, piece.len),
+                        }
                         done += piece.len;
                     }
                     for piece in &pieces[..count] {
-                        pmm::unpin_range(piece.phys, PAGE as usize);
+                        if let Some(phys) = piece.phys { pmm::unpin_range(phys, PAGE as usize); }
                     }
                     let (gone, written) = {
                         let state = self.state.lock();
@@ -565,13 +575,19 @@ impl PagerObject {
                 Lookup::Present(phys) if pmm::pin_range(phys, PAGE as usize) => {
                     let within = (pos % PAGE) as usize;
                     let len = ((PAGE - pos % PAGE).min(range.end - pos)) as usize;
-                    pieces[count] = Piece { phys, within, len };
+                    pieces[count] = Piece { phys: Some(phys), within, len };
                     count += 1;
                     pos += len as u64;
                 }
                 // A pin count at its limit: copy what is pinned, and pin again.
                 Lookup::Present(_) if count > 0 => break,
                 Lookup::Present(_) => panic!("paged: a frame's pins overflowed"),
+                Lookup::Zero => {
+                    let len = ((PAGE - pos % PAGE).min(range.end - pos)) as usize;
+                    pieces[count] = Piece { phys: None, within: 0, len };
+                    count += 1;
+                    pos += len as u64;
+                }
                 _ if count > 0 => break,
                 Lookup::Absent => {
                     if let Some(waiting) = waiting {
@@ -894,10 +910,10 @@ impl PagerObject {
     }
 }
 
-/// Part of one pinned frame a read copies.
+/// Part of one pinned frame or unwritten anonymous page a read copies.
 #[derive(Clone, Copy, Default)]
 struct Piece {
-    phys: u64,
+    phys: Option<u64>,
     within: usize,
     len: usize,
 }

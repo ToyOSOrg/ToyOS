@@ -181,11 +181,6 @@ impl View {
         }
     }
 
-    fn sub(&self, what: &str, off: usize, len: usize) -> View {
-        assert!(off.checked_add(len).is_some_and(|end| end <= self.len), "{what} {off}+{len} past a {}-byte window", self.len);
-        View { start: self.start + off as u64, len, access: self.access }
-    }
-
     fn read_into(&self, off: usize, dst: &mut [u8]) {
         let into = dst.as_mut_ptr();
         self.pieces("UserBytes::read_at", off, dst.len(), |run, at, n| {
@@ -242,11 +237,6 @@ impl UserBytes<'_> {
             unsafe { core::ptr::copy_nonoverlapping(run, dst.add(at), n) }
         });
     }
-
-    /// The `len`-byte window at `off` inside this one.
-    pub fn sub(&self, off: usize, len: usize) -> UserBytes<'_> {
-        UserBytes(self.0.sub("UserBytes::sub", off, len), PhantomData)
-    }
 }
 
 /// A bulk buffer the kernel copies into and never reads back, so it cannot act on a value another thread substituted.
@@ -292,36 +282,5 @@ impl UserBytesMut<'_> {
             // SAFETY: as `write_at`, with a constant zero byte instead of a slice.
             unsafe { core::ptr::write_bytes(run, 0, n) }
         });
-    }
-
-    /// The `len`-byte window at `off` inside this one.
-    pub fn sub(&mut self, off: usize, len: usize) -> UserBytesMut<'_> {
-        UserBytesMut(self.0.sub("UserBytesMut::sub", off, len), PhantomData)
-    }
-}
-
-/// Bytes the kernel copies *from*, wherever they live — lets `file_cache::write_page` name the capability it needs instead of a concrete window type.
-pub trait ByteSource {
-    fn len(&self) -> usize;
-    fn read_at(&self, off: usize, dst: &mut [u8]);
-}
-
-impl ByteSource for [u8] {
-    fn len(&self) -> usize {
-        <[u8]>::len(self)
-    }
-
-    fn read_at(&self, off: usize, dst: &mut [u8]) {
-        dst.copy_from_slice(&self[off..off + dst.len()]);
-    }
-}
-
-impl ByteSource for UserBytes<'_> {
-    fn len(&self) -> usize {
-        UserBytes::len(self)
-    }
-
-    fn read_at(&self, off: usize, dst: &mut [u8]) {
-        UserBytes::read_at(self, off, dst);
     }
 }

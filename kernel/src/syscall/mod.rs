@@ -7,7 +7,6 @@ mod debug;
 mod device;
 pub(crate) mod dispatch;
 mod event;
-mod fs;
 mod handles;
 mod io;
 mod ipc;
