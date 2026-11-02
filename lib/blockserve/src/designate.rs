@@ -259,13 +259,19 @@ mod tests {
     #[test]
     fn a_recognised_or_judged_partition_is_never_written() {
         let mut ours = Disk::new(300, |_| 0);
-        ours.blocks[0][..4].copy_from_slice(b"BCFS");
+        ours.blocks[1][24..40].copy_from_slice(&[
+            0xc6, 0x85, 0x73, 0xf6, 0x66, 0xce, 0x90, 0xa9,
+            0xd9, 0x6a, 0x60, 0xcf, 0x80, 0x3d, 0xf7, 0xef,
+        ]);
+        let mut retired = Disk::new(300, |_| 0);
+        retired.blocks[0][..4].copy_from_slice(b"BCFS");
         let mut stamped = Disk::new(300, |_| 0);
         stamped.blocks[0] = bcachefs::designation(300);
         let mut ext4 = Disk::new(300, |_| 0);
         ext4.blocks[0][1080..1082].copy_from_slice(&[0x53, 0xEF]);
         let cases = [
             (ours, true, Designated::Volume),
+            (retired, true, Designated::Foreign("the retired ToyOS provisional file system".into())),
             (stamped, true, Designated::Already),
             (ext4, true, Designated::Foreign("an ext2/3/4 file system".into())),
             (Disk::new(300, |_| 7), false, Designated::WouldWrite),
