@@ -687,7 +687,7 @@ impl<'q> Vm<'q> {
         };
         for (index, spec) in vm.scenario.procs.clone().iter().enumerate() {
             for &template in &spec.initial {
-                vm.spawn(index, template, CpuMask::ANY);
+                vm.spawn(index, template, CpuMask::ANY, None);
             }
         }
         // Spawned before any CPU took a step, so sent by none of them.
@@ -711,7 +711,9 @@ impl<'q> Vm<'q> {
         all
     }
 
-    fn spawn(&mut self, process: usize, template: usize, mask: CpuMask) {
+    /// `near` is the CPU of the thread spawning this one, as
+    /// `CpuHandles::place` takes it.
+    fn spawn(&mut self, process: usize, template: usize, mask: CpuMask, near: Option<CpuId>) {
         if self.live.len() >= self.scenario.max_tasks {
             return;
         }
@@ -747,7 +749,7 @@ impl<'q> Vm<'q> {
         // differ in where a task lands and in nothing else.
         let least_loaded = self
             .handles
-            .place(CpuId(self.next_spawn_cpu as u32), self.clock, mask)
+            .place(CpuId(self.next_spawn_cpu as u32), self.clock, mask, near)
             .0 as usize;
         self.next_spawn_cpu = (least_loaded + 1) % self.scenario.cpus();
         let dst = match self.scenario.placement {
@@ -1530,7 +1532,7 @@ impl<'q> Vm<'q> {
                 let process = self.programs[&key].process;
                 // A new thread starts with its spawner's mask.
                 let mask = self.shared[&key].mask().load().0;
-                self.spawn(process, template, mask);
+                self.spawn(process, template, mask, Some(CpuId(cpu as u32)));
                 self.programs.get_mut(&key).expect("live").pc += 1;
             }
             Op::Wake { queue, all, boost } => {

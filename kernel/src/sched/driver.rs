@@ -401,11 +401,11 @@ fn idle_ctx() -> KernelCtx {
 
 /// Where a spawn goes: the rule is [`CpuHandles::place`]'s; this supplies the rotating start, load-bearing at
 /// boot since every program the supervisor starts is spawned before any CPU has published a load.
-fn placement(now: Nanos, mask: CpuMask) -> CpuId {
+fn placement(now: Nanos, mask: CpuMask, near: Option<CpuId>) -> CpuId {
     static ROTATE: AtomicU64 = AtomicU64::new(0);
     let count = crate::smp::cpu_count() as u64;
     let start = CpuId((ROTATE.fetch_add(1, Ordering::Relaxed) % count) as u32);
-    cpus().place(start, now, mask)
+    cpus().place(start, now, mask, near)
 }
 
 /// Everything a new thread needs. `entry_sp` points at the trampoline frame `alloc_kernel_stack` built;
@@ -423,6 +423,10 @@ pub struct NewTask {
     pub image: Option<Arc<crate::process::UserImage>>,
     /// The CPUs it may run on.
     pub mask: CpuMask,
+    /// The CPU of the thread spawning it into its own process, which it is
+    /// placed near (`CpuHandles::place`); `None` for a new process's first
+    /// thread and a kernel thread.
+    pub near: Option<CpuId>,
 }
 
 /// Place a new task by message — never by reaching into the destination's queue.
@@ -457,7 +461,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
         rt: RtState::default(),
         mask: new.mask,
     }
-    .build(placement(now, new.mask), now);
+    .build(placement(now, new.mask, new.near), now);
     let sched = ThreadSched {
         handle,
         shared: task.shared().clone(),
