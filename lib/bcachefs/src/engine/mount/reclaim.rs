@@ -748,6 +748,7 @@ impl<D: BlockDev> Mount<D> {
     /// accounting (A6.12–A6.24, A7.12). An emptied bucket's alloc key and
     /// need_discard entry wait for the transaction's sequence.
     pub(super) async fn bucket_changed(&self, txn: &mut Txn, b: u64, before: Bucket, after: Bucket) -> Result<()> {
+        txn.bucket_states.push((before.data_type, after.data_type));
         let bucket_sectors = self.sb.member.bucket_sectors as u32;
         let alloc_pos = Bpos::new(0, b, 0);
         if after.data_type == data_type::NEED_DISCARD && before.data_type != data_type::NEED_DISCARD {

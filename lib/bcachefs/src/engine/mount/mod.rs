@@ -113,6 +113,10 @@ struct State {
     journal: Writer,
     key_version: u64,
     next_version: u64,
+    metadata_bytes: u64,
+    metadata_buckets: u64,
+    baseline_nodes: BTreeSet<u64>,
+    granted_bytes: u64,
     clocks: [u64; 2],
     /// Seconds since the epoch of the newest operation: each entry's
     /// datetime.
@@ -206,6 +210,7 @@ struct Txn {
     /// Buckets taken that it fills.
     filled: Vec<u64>,
     allocated_data: Vec<u64>,
+    bucket_states: Vec<(u8, u8)>,
     /// New roots.
     roots: Vec<Root>,
     /// Written nodes made reachable, installed in the cache at apply.
@@ -311,7 +316,8 @@ impl<D: BlockDev> Mount<D> {
         let volume = Volume::open(dev).await?;
         no_logged_ops(&volume).await?;
         let empty = allocator::empty_buckets(&volume).await?;
-        Self::from(volume.into_parts(), empty, options, random).await
+        let metadata = allocator::metadata_budget(&volume).await?;
+        Self::from(volume.into_parts(), empty, metadata, options, random).await
     }
 
     /// An encrypted volume, unlocked as [`Volume::unlock`] does, mounted
@@ -321,11 +327,12 @@ impl<D: BlockDev> Mount<D> {
         let volume = Volume::unlock(dev, passphrase, limits).await?;
         no_logged_ops(&volume).await?;
         let empty = allocator::empty_buckets(&volume).await?;
-        Self::from(volume.into_parts(), empty, options, random).await
+        let metadata = allocator::metadata_budget(&volume).await?;
+        Self::from(volume.into_parts(), empty, metadata, options, random).await
     }
 
     /// `empty` is the volume's count of empty buckets.
-    async fn from(parts: Parts<D>, empty: u64, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
+    async fn from(parts: Parts<D>, empty: u64, metadata: (u64, u64, BTreeSet<u64>), options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
         let Parts { dev, mut sb, key, roots, key_version, replay, root } = parts;
         let key_version = key_version.checked_add(if replay.is_some() && key.is_some() { 65_536 } else { 0 }).ok_or(Error::NoSpace("encrypted extent versions"))?;
         let ring: Vec<u64> = sb.journal.iter().flat_map(|&(first, count)| first..first + count).collect();
@@ -413,6 +420,10 @@ impl<D: BlockDev> Mount<D> {
             journal,
             key_version,
             next_version: key_version,
+            metadata_bytes: metadata.0,
+            metadata_buckets: metadata.1,
+            baseline_nodes: metadata.2,
+            granted_bytes: 0,
             clocks,
             now: sb.header.write_time,
             granted: 0,
@@ -973,7 +984,7 @@ impl<D: BlockDev> Mount<D> {
         };
         if room && st.journal.reserve(journal, class) {
             match class {
-                Class::Ordinary => st.granted += nodes,
+                Class::Ordinary => { st.granted += nodes; st.granted_bytes += journal * 8; }
                 Class::Reclaim => st.reclaim_granted += nodes,
             }
             return Ok(true);
@@ -1014,7 +1025,7 @@ impl<D: BlockDev> Mount<D> {
     fn ungrant(&self, st: &mut State, class: Class, journal: u64, nodes: usize) {
         st.journal.unreserve(journal);
         match class {
-            Class::Ordinary => st.granted -= nodes,
+            Class::Ordinary => { st.granted -= nodes; st.granted_bytes -= journal * 8; }
             Class::Reclaim => st.reclaim_granted -= nodes,
         }
         self.admit_reclaim.wake();
@@ -1080,6 +1091,26 @@ impl<D: BlockDev> Mount<D> {
         let stopped = st.read_only;
         let allocated = core::mem::take(&mut txn.allocated_data);
         if apply && stopped.is_none() {
+            for &(before, after) in &txn.bucket_states {
+                st.metadata_buckets = st.metadata_buckets + u64::from(after == data_type::BTREE) - u64::from(before == data_type::BTREE);
+            }
+            for (&(btree, level, pos), update) in &txn.updates {
+                if level != 0 { continue; }
+                let node = st.cache.node(held(st, btree, level, pos));
+                let prior = node.keys.get(node.at(pos)).filter(|(k, _)| k.pos == pos);
+                let charge = |entry: Option<&(Key, Vec<u8>)>| entry.filter(|(_, v)| !allocator::structural(btree, v)).map_or(0, |(_, v)| key_bytes(v) as u64);
+                st.metadata_bytes = st.metadata_bytes + charge(update.as_ref()) - charge(prior);
+                if btree == Btree::Backpointers && update.is_none() && prior.is_some_and(|(_, value)| value.get(2) == Some(&data_type::BTREE)) {
+                    st.baseline_nodes.remove(&(pos.offset >> self.bp_shift()));
+                }
+            }
+            for (&pos, delta) in &txn.accounting {
+                let node = st.cache.node(held(st, Btree::Accounting, 0, pos));
+                let prior = node.keys.get(node.at(pos)).filter(|(k, _)| k.pos == pos);
+                let before = prior.map_or(0, |(_, v)| key_bytes(v) as u64);
+                let counters = prior.map_or(0, |(_, v)| v.len() / 8).max(delta.len());
+                st.metadata_bytes = st.metadata_bytes + (KEY_U64S * 8 + counters * 8) as u64 - before;
+            }
             self.apply(st, txn, bound);
             for sector in allocated { st.alloc.unpin(sector / u64::from(self.sb.member.bucket_sectors)); }
         } else {

@@ -208,8 +208,36 @@ impl<D: BlockDev> Mount<D> {
 
     /// Total volume bytes and bytes in currently free, reusable buckets.
     pub fn space(&self) -> (u64, u64) {
+        self.cancel_dropped();
         let bucket = u64::from(self.sb.member.bucket_sectors) * SECTOR as u64;
-        (self.sb.member.nbuckets * bucket, self.st.borrow().alloc.free_bytes(bucket))
+        let node = u64::from(self.sb.node_sectors()) * SECTOR as u64;
+        let st = self.st.borrow();
+        let pending = self.reservations.borrow().active.len() as u64;
+        let logical = st.alloc.capacity(st.metadata_buckets).saturating_sub(self.metadata_nodes(&st, st.granted_bytes + pending * K_TX * 8)) * node;
+        let promised = pending * FOOTPRINT as u64 * reclaim::COMMON_REWRITE as u64 * node;
+        (self.sb.member.nbuckets * bucket, st.alloc.free_bytes(bucket).saturating_sub(promised).min(logical))
+    }
+
+    pub(super) fn metadata_nodes(&self, st: &State, pending_bytes: u64) -> u64 {
+        let buckets = u128::from(self.sb.member.nbuckets);
+        let slots = buckets * u128::from(self.sb.member.bucket_sectors) / u128::from(self.sb.node_sectors());
+        // Each bucket has at most one alloc, freespace, discard and LRU
+        // record; each node slot one metadata backpointer. Generation
+        // records cover 256 buckets. Remaining fixed accounting records
+        // are bounded by the format's classes and btrees.
+        let structural = buckets * (104 + 3 * 40) + buckets.div_ceil(256) * 296 + slots * 72 + (Btree::ALL.len() * 9 * 64) as u128;
+        let bytes = u128::from(st.metadata_bytes) + structural + u128::from(pending_bytes);
+        let node_bytes = self.sb.node_sectors() as usize * SECTOR;
+        let minimum = (mkfs::capacity(node_bytes) - FIRST_KEYS) / 2 - MAX_KEY;
+        let stable = st.baseline_nodes.len() as u128 + 2 * (Btree::ALL.len() as u128 + bytes.div_ceil(minimum as u128));
+        stable.min(u128::from(u64::MAX)) as u64
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn check_metadata_budget(&self) {
+        let (bytes, buckets, _) = allocator::metadata_budget(self).await.unwrap();
+        let st = self.st.borrow();
+        assert_eq!((st.metadata_bytes, st.metadata_buckets), (bytes, buckets));
     }
 
     /// The high-water mark is durable before any version beneath it is
