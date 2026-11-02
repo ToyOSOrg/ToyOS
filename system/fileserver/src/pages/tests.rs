@@ -253,7 +253,7 @@ fn clock() -> u64 {
 }
 
 fn volume() -> DataVolume<Ram> {
-    DataVolume::format(Ram::new(4096), 256, &["home"], clock).unwrap()
+    DataVolume::format(Ram::new(16384), 256, &["home"], clock).unwrap()
 }
 
 const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
@@ -398,8 +398,8 @@ fn a_write_refused_part_way_is_cut_back_to_what_it_put() {
 #[test]
 fn a_write_refused_in_a_hole_gives_back_the_block_it_took() {
     // Every block the volume does not write holds what an earlier tenant left.
-    let disk = Ram::new(4096);
-    let stale = vec![[0xAB; toyos_blockdev::BLOCK]; 4096];
+    let disk = Ram::new(16384);
+    let stale = vec![[0xAB; toyos_blockdev::BLOCK]; 16384];
     toyos_blockdev::block_on(toyos_blockdev::BlockDev::write(&disk, 0, &stale), || ()).unwrap();
     let mut v = DataVolume::format(disk, 256, &["home"], clock).unwrap();
     let fake = Fake::new(64, 16);
@@ -424,8 +424,8 @@ fn a_write_refused_in_a_hole_gives_back_the_block_it_took() {
 /// the block its reserve took last held.
 #[test]
 fn a_write_in_part_into_a_hole_supplies_zeros_around_it() {
-    let disk = Ram::new(4096);
-    let stale = vec![[0xAB; toyos_blockdev::BLOCK]; 4096];
+    let disk = Ram::new(16384);
+    let stale = vec![[0xAB; toyos_blockdev::BLOCK]; 16384];
     toyos_blockdev::block_on(toyos_blockdev::BlockDev::write(&disk, 0, &stale), || ()).unwrap();
     let mut v = DataVolume::format(disk, 256, &["home"], clock).unwrap();
     let fake = Fake::new(64, 16);
@@ -572,8 +572,8 @@ fn a_write_of_many_calls_is_read_whole_or_not_at_all() {
 
 /// A volume whose every block holds what an earlier tenant left, 0xAB.
 fn stale_volume() -> DataVolume<Ram> {
-    let disk = Ram::new(4096);
-    let stale = vec![[0xAB; toyos_blockdev::BLOCK]; 4096];
+    let disk = Ram::new(16384);
+    let stale = vec![[0xAB; toyos_blockdev::BLOCK]; 16384];
     toyos_blockdev::block_on(toyos_blockdev::BlockDev::write(&disk, 0, &stale), || ()).unwrap();
     DataVolume::format(disk, 256, &["home"], clock).unwrap()
 }
@@ -673,7 +673,7 @@ fn ticking() -> u64 {
 /// open, a write, one refused, a truncate and a stamp, each is the volume's.
 #[test]
 fn an_objects_size_and_mtime_are_the_volumes_after_every_change() {
-    let mut v = DataVolume::format(Ram::new(4096), 256, &["home"], ticking).unwrap();
+    let mut v = DataVolume::format(Ram::new(16384), 256, &["home"], ticking).unwrap();
     let fake = Fake::new(64, 16);
     let mut files = Files::new(Some(fake.clone()));
     let n = v.open("home/f", CREATE).unwrap();

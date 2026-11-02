@@ -481,47 +481,6 @@ impl Inner {
     }
 }
 
-/// The cache as the bcachefs crate reads it: shared, since the volume reads
-/// and writes files' data past the same cache its btree lives in. The crate
-/// is synchronous, so each request is driven to its end here.
-pub struct Shared<D>(pub std::rc::Rc<Cache<D>>);
-
-impl<D> Clone for Shared<D> {
-    fn clone(&self) -> Self {
-        Self(std::rc::Rc::clone(&self.0))
-    }
-}
-
-impl<D: Disk> bcachefs::BlockIO for Shared<D> {
-    fn read_block(&self, block: bcachefs::BlockNum, buf: &mut bcachefs::BlockBuf) -> Result<(), bcachefs::DeviceError> {
-        let out = std::slice::from_mut(buf.as_bytes_mut());
-        self.0.block_on(self.0.read(block.raw(), out)).map_err(|_| bcachefs::DeviceError::classify(&Attempted))
-    }
-
-    fn write_block(&self, block: bcachefs::BlockNum, buf: &bcachefs::BlockBuf) -> Result<(), bcachefs::DeviceError> {
-        let data = std::slice::from_ref(buf.as_bytes());
-        self.0.block_on(self.0.write(block.raw(), data)).map_err(|_| bcachefs::DeviceError::classify(&Attempted))
-    }
-
-    fn block_count(&self) -> u64 {
-        self.0.blocks()
-    }
-
-    fn sync(&self) -> Result<(), bcachefs::DeviceError> {
-        self.0.block_on(self.0.flush()).map_err(|_| bcachefs::DeviceError::classify(&Attempted))
-    }
-}
-
-/// What every device [`Error`] is to bcachefs: attempted, since nothing in
-/// this server refuses on a clock.
-struct Attempted;
-
-impl bcachefs::TransferError for Attempted {
-    fn refused_before_attempt(&self) -> bool {
-        false
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;

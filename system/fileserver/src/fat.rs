@@ -332,7 +332,7 @@ impl<D: Disk> Volume for FatVolume<D> {
         open.dirty = true;
         open.written = Some(now);
         // A chain has no holes: it holds a block for every page of its size.
-        let reserved = Reserved { size: open.file.len(), held: open.file.len().div_ceil(toyos_blockdev::BLOCK as u64) };
+        let reserved = Reserved { size: open.file.len(), contents: open.file.len(), ticket: 0 };
         self.cache.block_on(self.fs.reserve(&mut open.file, offset, len)).map_err(|e| logged("reserve", &open.path, e))?;
         Ok(reserved)
     }

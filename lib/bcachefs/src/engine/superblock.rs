@@ -13,6 +13,14 @@ pub(crate) const MAGIC: [u8; 16] = [0xc6, 0x85, 0x73, 0xf6, 0x66, 0xce, 0x90, 0x
 /// Where the primary copy and the layout copy start, in sectors.
 pub(crate) const PRIMARY: u64 = 8;
 pub(crate) const LAYOUT: u64 = 7;
+
+/// A format signature, not validation: used to avoid overwriting a volume
+/// even when its primary superblock is damaged.
+pub fn carries_volume(front: &[u8]) -> bool {
+    [LAYOUT as usize * super::SECTOR, PRIMARY as usize * super::SECTOR + 24]
+        .into_iter()
+        .any(|at| front.get(at..at + MAGIC.len()) == Some(&MAGIC))
+}
 /// The fixed header's bytes.
 pub(crate) const HEADER: usize = 752;
 /// The most a copy this reader reads may hold. Upstream's default reserve is

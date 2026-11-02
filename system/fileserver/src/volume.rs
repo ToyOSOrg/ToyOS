@@ -4,8 +4,7 @@
 //!
 //! **An open file is a [`Node`]**, one per path while any client holds it
 //! open, so two opens of one file write one set of pages and see one length. A
-//! node whose file was unlinked or renamed over answers `Stale` from then on:
-//! its blocks may be another file's.
+//! node is distinct from the path that was used to open it.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -223,16 +222,17 @@ pub trait Volume {
 #[derive(Clone, Copy, Debug)]
 pub struct Reserved {
     pub size: u64,
-    /// The pages it held blocks for. Past them a page below `size` is a hole,
-    /// whose block, if the reserve took one, holds what another file left.
-    pub held: u64,
+    /// Old bytes that can be read safely, including holes that read as zero.
+    pub contents: u64,
+    /// Volume-owned identifier for cancelling capacity taken by this write.
+    pub ticket: u64,
 }
 
 impl Reserved {
     /// Where the file's old bytes on the volume end: a page in part reads
     /// what it held below this, and zeros from here.
     pub fn contents(&self) -> u64 {
-        self.size.min(self.held.saturating_mul(toyos_blockdev::BLOCK as u64))
+        self.contents
     }
 }
 

@@ -31,7 +31,7 @@ pub use fsck::{fsck, Finding};
 pub use mkfs::{fit, mkfs, Encryption, Options};
 pub use mount::{Link, Mount, MountOptions, New, Owner, Removed, Rename};
 pub use read::{read_file, DirEntry, Inode, Volume};
-pub use superblock::{Kdf, Superblock};
+pub use superblock::{carries_volume, Kdf, Superblock};
 pub use tree::{Meta, NodeRef, Tree};
 pub use value::DirentType;
 
