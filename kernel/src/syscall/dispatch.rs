@@ -35,7 +35,7 @@ use super::io::{
 use super::ipc::{
     Incoming, Outgoing,
     sys_accept, sys_inbox_setup, sys_message_recv, sys_message_send,
-    sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe,
+    sys_inbox_submit, sys_namespace_build, sys_namespace_names, sys_namespace_open, sys_pipe,
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map, sys_shm_sub,
 };
 use super::machine::{
@@ -410,6 +410,11 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             };
             // ctx lets sys_namespace_build bound both counts before it reads either vector.
             sys_namespace_build(&ctx, &args)
+        }
+        SYS_NAMESPACE_NAMES => {
+            let len = a3.min((MAX_NAMESPACE_ENTRIES * (2 + MAX_SERVICE_NAME)) as u64);
+            let Some(mut out) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
+            sys_namespace_names(RawHandle(a1 as u32), &mut out)
         }
         SYS_NAMESPACE_OPEN => {
             let name = match ctx.user_str(UserAddr::new(a2), a3) { Ok(s) => s, Err(e) => return e.to_u64() };

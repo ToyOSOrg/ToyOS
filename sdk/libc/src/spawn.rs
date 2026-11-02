@@ -329,7 +329,7 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
 /// never launches.
 fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, toyos::BorrowedHandle<'_>, Kind)]) -> Result<Process, i32> {
     let mut cwd = alloc::vec![0u8; syscall::MAX_PATH];
-    let n = syscall::getcwd(&mut cwd);
+    let n = toyos::files::getcwd(&mut cwd);
     let cwd = core::str::from_utf8(&cwd[..n]).map_err(|_| EINVAL)?;
     let request = Spawn {
         program: path,
@@ -349,13 +349,8 @@ fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, toyos::BorrowedHandle
     let Start::Helper(helper) = request.start().map_err(errno_of)? else {
         unreachable!("a spawn that is not independent is a helper or refused")
     };
-    // A program on a file server is read here into an image the kernel pages
-    // the child from: the kernel opens only what it serves itself.
-    let image = match toyos::files::is_served(path.as_bytes()) {
-        true => Some(toyos::files::read_image(path.as_bytes()).map_err(crate::errcode::of_image)?),
-        false => None,
-    };
-    helper.spawn(image.as_ref()).map_err(errno_of)
+    let image = toyos::files::read_image(path.as_bytes()).map_err(crate::errcode::of_image)?;
+    helper.spawn(Some(&image)).map_err(errno_of)
 }
 
 fn errno_of(refused: Refused) -> i32 {

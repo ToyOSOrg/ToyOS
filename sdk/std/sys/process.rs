@@ -174,7 +174,7 @@ impl Command {
         let kept = self.image.as_ref().is_some_and(|(read, _)| *read == source);
         if !kept {
             self.image = None;
-            if self.boot_image.is_none() && crate::sys::fs::is_served(Path::new(&source)) {
+            if self.boot_image.is_none() && !self.independent {
                 let image = crate::sys::fs::read_image(Path::new(&source), self.endowed_job())?;
                 self.image = Some((source, image));
             }
@@ -184,8 +184,7 @@ impl Command {
     }
 
     /// The program a prepared spawn starts, as [`Self::prepare`] read it off a
-    /// file server: `None` before a prepare, and for a program the kernel
-    /// opens itself.
+    /// file server: `None` before a prepare and for a boot image or launch.
     pub fn prepared_image(&self) -> Option<&[u8]> {
         self.prepared.as_ref()?;
         self.image.as_ref().map(|(_, image)| image.bytes())
@@ -321,9 +320,9 @@ impl Command {
             Some(dir) => crate::env::current_dir()?.join(dir),
             None => crate::env::current_dir()?,
         };
-        // The kernel judges a directory it serves itself; one on a file server
-        // is judged here, by that server, since the kernel cannot.
-        if crate::sys::fs::is_served(&dir) && !crate::fs::metadata(&dir)?.is_dir() {
+        // An explicitly requested directory is validated by its server. An
+        // inherited cwd may be bootstrap metadata without root authority.
+        if self.cwd.is_some() && !crate::fs::metadata(&dir)?.is_dir() {
             return Err(io::const_error!(
                 io::ErrorKind::NotFound,
                 "working directory is not a directory",
@@ -429,7 +428,7 @@ impl Command {
         // A helper's program on a file server is taken here as the memory
         // object its server holds it in, or read into one counted to the job
         // the child is endowed to run in or else to this process's, which the
-        // kernel pages the child from: it opens only what it serves itself. A
+        // kernel pages the child from. A
         // launch runs its row's own program.
         let source = Path::new(image_path.unwrap_or(program));
         let image = match (prepared_image, boot_image) {
@@ -444,8 +443,7 @@ impl Command {
                 })?;
                 Some(toyos::process::Image::immutable(region))
             }
-            (None, None) if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source, job_of(&endowments))?),
-            (None, None) => None,
+            (None, None) => Some(crate::sys::fs::read_image(source, job_of(&endowments))?),
         };
         let (labels, endowed): (Vec<String>, Vec<toyos::OwnedHandle>) = endowments.into_iter().unzip();
         let (names, provided): (Vec<String>, Vec<toyos::OwnedHandle>) = provided.into_iter().unzip();

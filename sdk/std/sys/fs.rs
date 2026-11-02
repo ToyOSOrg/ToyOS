@@ -1,10 +1,9 @@
-//! Files on ToyOS: a path is served by the kernel (`/tmp`) or by a file
-//! server behind one of the process's directory capabilities, and
-//! `toyos::files` routes it, follows its links and keeps what it opened. A
-//! `File` is one descriptor of the process's table either way.
+//! Files through the process's directory capabilities and namespace ancestors.
+//! `toyos::files` owns routing, connections and descriptors shared with libc.
 
 use toyos::files::{self, At, Open};
-use toyos_abi::syscall::{self, SeekFrom as AbiSeek};
+use toyos_abi::syscall;
+use toyos::files::SeekFrom as AbiSeek;
 
 use crate::ffi::OsString;
 use crate::fmt;
@@ -239,7 +238,7 @@ impl DirEntry {
     }
 
     /// What the listing said, or where it said only that the entry is no
-    /// directory, as the kernel's does, what the entry is asked.
+    /// directory, what the entry is asked.
     pub fn file_type(&self) -> io::Result<FileType> {
         match self.file_type {
             FileType { is_file: false, is_dir: false, is_symlink: false } => lstat(&self.path()).map(|a| a.file_type),
@@ -301,11 +300,6 @@ fn bytes(path: &Path) -> &[u8] {
     path.as_os_str().as_encoded_bytes()
 }
 
-/// Whether `path` is on a file server rather than the kernel.
-pub fn is_served(path: &Path) -> bool {
-    files::is_served(bytes(path))
-}
-
 impl File {
     /// The file descriptor `fd` names, owned from here on.
     pub fn from_fd(fd: i32) -> Self {
@@ -333,9 +327,8 @@ impl File {
         crate::sys::on_fd(self.0, |h| Ok(f(h.raw())))
     }
 
-    /// A kernel handle a child may use this file through: a copy of a kernel
-    /// file's own, or a pipe its server writes to the file at this file's
-    /// offset. The caller holds it until the child has its own.
+    /// A child's output handle: a copied generic object or a pipe the server
+    /// writes at this open description's offset.
     pub fn as_child_stdio(&self) -> io::Result<toyos::OwnedHandle> {
         files::stream(self.0).map_err(files_error)
     }
@@ -592,8 +585,7 @@ pub fn set_times_nofollow(p: &Path, times: FileTimes) -> io::Result<()> {
     files::set_times(At::Cwd, bytes(p), false, &times.change()?).map_err(files_error)
 }
 
-/// The whole of the file at `path` as a program image: what a spawn of a
-/// program the kernel cannot open itself hands the kernel.
+/// Read a program image for the kernel to map into a child.
 pub fn read_image(path: &Path, job: Option<toyos::BorrowedHandle<'_>>) -> io::Result<toyos::process::Image> {
     files::read_image_for(bytes(path), job).map_err(|refused| match refused {
         toyos::process::ImageRefused::Empty => {
@@ -607,8 +599,7 @@ pub fn read_image(path: &Path, job: Option<toyos::BorrowedHandle<'_>>) -> io::Re
     })
 }
 
-/// Make the working directory `p`, which a file server judges when it serves
-/// it and the kernel judges when it does.
+/// Validate `p` and store it in the shared SDK working-directory state.
 pub fn chdir(p: &Path) -> io::Result<()> {
     files::chdir(bytes(p)).map_err(files_error)
 }
