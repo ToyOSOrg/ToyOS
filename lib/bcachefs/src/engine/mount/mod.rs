@@ -222,7 +222,8 @@ enum Install {
     Append { id: NodeId, sectors: u16 },
     /// `id` replaced by the nodes written for it, and a root above them when
     /// a root split.
-    Replace { id: NodeId, by: Vec<Planned>, root: Option<Planned> },
+    Replace { ids: Vec<NodeId>, by: Vec<Planned>, root: Option<Planned> },
+    Collapse { id: NodeId },
 }
 
 /// A new node as planned and written.
@@ -648,6 +649,7 @@ impl<D: BlockDev> Mount<D> {
             keys: Rc::new(node.keys),
             unwritten: BTreeMap::new(),
             captured: None,
+            compact: None,
             writing: false,
             fresh,
             held: 0,
@@ -716,6 +718,7 @@ impl<D: BlockDev> Mount<D> {
             keys: Rc::new(Vec::new()),
             unwritten: BTreeMap::new(),
             captured: None,
+            compact: None,
             writing: false,
             fresh: true,
             held: 0,
