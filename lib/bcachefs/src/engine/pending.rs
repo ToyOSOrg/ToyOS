@@ -173,6 +173,57 @@ impl Pending {
             .map(|e| Capture { position: e.position(), order: e.order, first: e.first })
     }
 
+    /// A durable ordinary replacement no longer needs the replaced record.
+    /// Captures retain their original dependency; accounting remains additive.
+    pub fn durable(&mut self, seq: u64) {
+        let mut at = [0; LEVELS];
+        let mut changed = [false; LEVELS];
+        loop {
+            let mut position = None;
+            for (i, run) in self.runs.iter().enumerate() {
+                let Some(run) = run else { continue };
+                while run.entries.get(at[i]).is_some_and(|e| !e.live) { at[i] += 1; }
+                if let Some(entry) = run.entries.get(at[i]) {
+                    position = Some(position.map_or(entry.position(), |p: Position| p.min(entry.position())));
+                }
+            }
+            let Some(position) = position else { break };
+            let mut end = at;
+            let mut replacement = None;
+            for (i, run) in self.runs.iter().enumerate() {
+                let Some(run) = run else { continue };
+                while let Some(entry) = run.entries.get(end[i]).filter(|e| e.position() == position) {
+                    if entry.live && !entry.accounting() && entry.last <= seq {
+                        replacement = Some(replacement.map_or(entry.order, |old: u64| old.max(entry.order)));
+                    }
+                    end[i] += 1;
+                }
+            }
+            for (i, run) in self.runs.iter_mut().enumerate() {
+                let Some(run) = run else { continue };
+                for entry in &mut run.entries[at[i]..end[i]] {
+                    if !entry.live || entry.accounting() { continue; }
+                    if replacement.is_some_and(|newer| newer > entry.order) {
+                        entry.live = false;
+                        entry.value = Vec::new();
+                        changed[i] = true;
+                    } else if entry.last <= seq && entry.first != entry.last {
+                        entry.first = entry.last;
+                        changed[i] = true;
+                    }
+                }
+            }
+            at = end;
+        }
+        for (i, run) in self.runs.iter_mut().enumerate() {
+            if !changed[i] { continue; }
+            let run = run.as_mut().unwrap();
+            run.pins.sort_unstable_by_key(|&at| (run.entries[at].first, run.entries[at].order));
+            run.oldest = 0;
+            run.retire();
+        }
+    }
+
     #[cfg(test)]
     pub fn allocated_bytes(&self) -> usize {
         let entries = |entries: &Vec<Entry>| entries.capacity() * core::mem::size_of::<Entry>() + entries.iter().map(|e| e.value.capacity()).sum::<usize>();
@@ -424,6 +475,42 @@ mod tests {
     }
 
     #[test]
+    fn durable_replacements_release_old_pins_across_runs_and_keep_captures() {
+        let mut pending = Pending::default();
+        add(&mut pending, 3, vec![update(1, 11)]);
+        add(&mut pending, 4, vec![update(2, 22)]);
+        add(&mut pending, 7, vec![update(1, 33)]);
+        pending.durable(6);
+        assert_eq!(pending.oldest_pin(), Some(3));
+        pending.durable(7);
+        assert_eq!(pending.oldest_pin(), Some(4));
+        assert_eq!(pending.iter().count(), 2);
+
+        add(&mut pending, 8, vec![update(2, 44)]);
+        let capture = pending.range(Btree::Inodes, 0, Bpos::new(0, 2, 0), Bpos::new(0, 2, 0)).next().unwrap().capture();
+        assert_eq!(capture.first, 4);
+        pending.durable(8);
+        assert_eq!(pending.oldest_pin(), Some(7), "promoted indices must be re-sorted");
+        assert!(pending.transfer(capture, |entry| {
+            assert_eq!((entry.first, entry.last, entry.value), (4, 8, 44u64.to_le_bytes().to_vec()));
+        }));
+        assert_eq!(pending.oldest_pin(), Some(7));
+    }
+
+    #[test]
+    fn a_forgotten_intermediate_replacement_does_not_release_a_pin() {
+        let mut pending = Pending::default();
+        add(&mut pending, 3, vec![update(1, 11)]);
+        add(&mut pending, 4, vec![update(2, 22)]);
+        add(&mut pending, 5, vec![update(1, 33)]);
+        add(&mut pending, 6, vec![update(1, 44)]);
+        pending.durable(5);
+        assert_eq!(pending.oldest_pin(), Some(3));
+        pending.durable(6);
+        assert_eq!(pending.oldest_pin(), Some(4));
+    }
+
+    #[test]
     fn failed_capacity_preflight_preserves_the_visible_batch_and_pin() {
         let mut pending = Pending::default();
         add(&mut pending, 3, vec![update(1, 11)]);
@@ -459,6 +546,9 @@ mod tests {
             add(&mut replay.pending, version, vec![(Btree::Accounting, 0, key, value::counters(&[delta]))]);
         }
         assert_eq!(replay.pending.iter().count(), 4);
+        replay.pending.durable(99);
+        assert_eq!(replay.pending.iter().count(), 4);
+        assert_eq!(replay.pending.oldest_pin(), Some(2));
         let stored = Key { version: Version { hi: 0, lo: 2 }, ..Key::new(super::super::kind::ACCOUNTING, pos) };
         let once = replay.over(Btree::Accounting, 0, Bpos::MIN, Bpos::MAX, vec![(stored, value::counters(&[10]))]).unwrap();
         assert_eq!(journal::counters(&once[0].1).unwrap(), [7]);

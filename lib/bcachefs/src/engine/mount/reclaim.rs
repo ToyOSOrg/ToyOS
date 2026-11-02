@@ -167,11 +167,14 @@ impl<D: BlockDev> Mount<D> {
     /// One batch of dirty nodes chosen by `order`, planned under the slot
     /// and written outside it; then their pointer updates journaled. The
     /// journal is written once that frees a bucket of its ring, so a sweep's
-    /// updates share entries. Whether there was any node to write.
+    /// updates share entries. Whether any work was retired or written.
     pub(super) async fn reclaim_round(&self, order: Order) -> Result<bool> {
+        let had_work = self.busy();
         let plans = self.write_batch(order).await?;
         if plans.is_empty() {
-            return Ok(false);
+            let retired = had_work && !self.busy();
+            let published = if self.st.borrow().journal_frees() { self.flush_open().await? } else { false };
+            return Ok(retired || published);
         }
         self.point_batch(plans).await?;
         if self.st.borrow().journal_frees() {
@@ -270,7 +273,7 @@ impl<D: BlockDev> Mount<D> {
     /// rewritten to fresh nodes, split past two thirds full.
     async fn plan(&self, order: Order, only: Option<NodeId>) -> Result<Vec<Plan>> {
         if only.is_none() {
-            self.materialize(order).await?;
+            while self.materialize(order).await? && self.st.borrow().cache.dirty == 0 {}
         }
         let chosen: Vec<NodeId> = if let Some(id) = only { alloc::vec![id] } else {
             let st = self.st.borrow();
@@ -388,9 +391,9 @@ impl<D: BlockDev> Mount<D> {
         Ok(plans)
     }
 
-    /// Transfers one bounded range from journal ownership to a cached
-    /// node. No transaction is replayed and no allocation triggers repeat.
-    async fn materialize(&self, order: Order) -> Result<()> {
+    /// Transfers a node's range with bounded positive growth. Deletions do
+    /// not consume growth room; no allocation triggers repeat.
+    async fn materialize(&self, order: Order) -> Result<bool> {
         let next = {
             let st = self.st.borrow();
             match order {
@@ -400,38 +403,43 @@ impl<D: BlockDev> Mount<D> {
                 })),
             }
         };
-        let Some(next) = next else { return Ok(()) };
+        let Some(next) = next else { return Ok(false) };
         let (btree, level, pos) = next.position;
         let id = self.find(btree, level, pos).await?;
         let mut st = self.st.borrow_mut();
         let n = st.cache.node(id);
-        if n.writing || n.captured.is_some() || n.held != 0 { return Ok(()); }
+        if n.writing || n.captured.is_some() || n.held != 0 { return Ok(false); }
         let mut captures = Vec::new();
-        let mut bytes = 0;
-        let mut pending = st.pending.range(btree, level, pos, n.max).peekable();
+        let mut growth = 0;
+        let mut pending = st.pending.range(btree, level, pos, n.max)
+            .chain(st.pending.range(btree, level, n.min, pos).take_while(|e| e.key().pos < pos)).peekable();
         while let Some(first) = pending.peek() {
             let at = first.key().pos;
             let start = captures.len();
-            let mut size = if btree == Btree::Accounting && level == 0 {
-                n.keys.get(n.at(at)).filter(|(k, _)| k.pos == at).map_or(0, |(_, v)| key_bytes(v))
-            } else { 0 };
+            let before = n.keys.get(n.at(at)).filter(|(k, _)| k.pos == at).map_or(0, |(_, v)| key_bytes(v));
+            let mut size = if btree == Btree::Accounting && level == 0 { before } else { 0 };
             while pending.peek().is_some_and(|e| e.key().pos == at) {
                 let entry = pending.next().unwrap();
-                size = size.max(key_bytes(entry.value()));
+                if entry.key().kind != kind::DELETED { size = size.max(key_bytes(entry.value())); }
                 captures.try_reserve(1).map_err(|_| Error::NoMemory)?;
                 captures.push(entry.capture());
             }
-            if bytes + size > K_TX as usize * 8 && start != 0 { captures.truncate(start); break; }
-            bytes += size;
+            let added = size.saturating_sub(before);
+            if growth + added > K_TX as usize * 8 && start != 0 { captures.truncate(start); continue; }
+            growth += added;
         }
         let st = &mut *st;
+        let durable = st.journal.durable;
         let mut accounting = None;
+        let transferred = !captures.is_empty();
         for capture in captures {
             let pos = capture.position.2;
             assert!(st.pending.transfer(capture, |entry| {
                 st.cache.change(id, |n| {
                     if btree != Btree::Accounting || level != 0 {
                         let kv = (entry.key.kind != kind::DELETED).then_some((entry.key, entry.value));
+                        let current = n.keys.get(n.at(pos)).filter(|(k, _)| k.pos == pos);
+                        if entry.last <= durable && current == kv.as_ref() { return; }
                         n.put(pos, kv, entry.first, entry.last);
                         return;
                     }
@@ -449,7 +457,7 @@ impl<D: BlockDev> Mount<D> {
                 });
             }), "materialization cannot race a pending replacement under the slot");
         }
-        Ok(())
+        Ok(transferred)
     }
 
     pub(super) fn minimum_fill(&self) -> usize {
