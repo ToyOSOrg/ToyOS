@@ -828,36 +828,37 @@ impl<D: BlockDev> Mount<D> {
     /// nodes are within the limit again.
     pub(super) async fn install_replay(&self, replayed: journal::Replay) -> Result<()> {
         self.st.borrow_mut().journal.replaying = true;
-        let mut keys: Vec<_> = replayed.keys.into_iter().collect();
-        keys.sort_by_key(|((btree, level, pos), _)| (core::cmp::Reverse(*level), *btree, *pos));
-        for ((btree, level, pos), logged) in keys {
+        let mut pending = replayed.pending;
+        let mut captured = Vec::new();
+        captured.try_reserve(pending.iter().count()).map_err(|_| Error::NoMemory)?;
+        captured.extend(pending.iter().map(|entry| entry.capture()));
+        captured.sort_unstable_by_key(|c| (core::cmp::Reverse(c.position.1), c.position.0, c.position.2, c.order));
+        let mut accounting = None;
+        for capture in captured {
+            let (btree, level, pos) = capture.position;
             let id = self.find(btree, level, pos).await?;
-            self.st.borrow_mut().cache.change(id, |n| n.put(pos, logged.key, logged.seq));
-        }
-        for (pos, deltas) in replayed.accounting {
-            let id = self.find(Btree::Accounting, 0, pos).await?;
-            self.st.borrow_mut().cache.change(id, |n| {
-                let i = n.at(pos);
-                let (mut key, mut sums) = match n.keys.get(i) {
-                    Some((k, v)) if k.pos == pos => (*k, journal::counters(v).expect("a cached accounting key decodes")),
-                    _ => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
-                };
-                let since = key.version;
-                let mut first = None;
-                for (version, delta) in deltas.iter().filter(|(v, _)| *v > since) {
-                    sums.resize(sums.len().max(delta.len()), 0);
-                    for (sum, d) in sums.iter_mut().zip(delta) {
-                        *sum = sum.wrapping_add(*d);
+            assert!(pending.transfer(capture, |entry| {
+                self.st.borrow_mut().cache.change(id, |n| {
+                    if btree != Btree::Accounting || level != 0 {
+                        let key = (entry.key.kind != kind::DELETED).then_some((entry.key, entry.value));
+                        n.put(pos, key, entry.first);
+                        return;
                     }
-                    key.version = *version;
-                    let seq = u64::from(version.hi) << 32 | version.lo >> 32;
-                    first = Some(first.map_or(seq, |f: u64| f.min(seq)));
-                }
-                if let Some(seq) = first {
-                    n.put(pos, Some((key, value::counters(&sums))), seq);
-                }
-            });
+                    let (mut key, mut sums) = match n.keys.get(n.at(pos)) {
+                        Some((k, v)) if k.pos == pos => (*k, journal::counters(v).expect("a cached accounting key decodes")),
+                        _ => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
+                    };
+                    if accounting.is_none_or(|(previous, _)| previous != pos) { accounting = Some((pos, key.version)); }
+                    if entry.key.version <= accounting.unwrap().1 { return; }
+                    let delta = journal::counters(&entry.value).expect("a replayed accounting delta decodes");
+                    sums.resize(sums.len().max(delta.len()), 0);
+                    for (sum, d) in sums.iter_mut().zip(delta) { *sum = sum.wrapping_add(d); }
+                    key.version = key.version.max(entry.key.version);
+                    n.put(pos, Some((key, value::counters(&sums))), entry.first);
+                });
+            }), "a replay capture has no concurrent replacement");
         }
+        assert!(pending.oldest_pin().is_none(), "all replay pins transferred");
         {
             let st = self.st.borrow();
             let need = ((st.cache.dirty + st.cache.unpointed) as u64 * PER_NODE).div_ceil(st.journal.body() - st.journal.max_tx) + 1;

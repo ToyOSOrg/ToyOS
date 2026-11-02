@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use toyos_blockdev::BlockDev;
 
-use super::bkey::{Bpos, Format, Key, Version, KEY_U64S};
+use super::bkey::{Bpos, Format, Key, KEY_U64S};
 use super::crypt::{MasterKey, Nonce};
 use super::node::check_key;
 use super::read::read_bytes;
@@ -374,21 +374,11 @@ fn keys(btree: Btree, level: u8, mut b: &[u8]) -> Result<Vec<(Key, Vec<u8>)>> {
 /// A key replay lays over a node's, or its deletion.
 pub(crate) type Replayed = Option<(Key, Vec<u8>)>;
 
-/// A replayed key and the sequence of the entry it came from.
-pub(crate) struct Logged {
-    pub seq: u64,
-    pub key: Replayed,
-}
-
 /// The window's records laid over the btrees: what a reader of an unclean
 /// volume sees in place of the nodes' keys.
 #[derive(Default)]
 pub(crate) struct Replay {
-    /// Every replayed key but accounting's, by btree, level and position, the
-    /// latest winning; a deletion as `None`.
-    pub keys: BTreeMap<(Btree, u8, Bpos), Logged>,
-    /// Accounting deltas by position, in journal order.
-    pub accounting: BTreeMap<Bpos, Vec<(Version, Vec<u64>)>>,
+    pub pending: super::pending::Pending,
     /// The latest root record of each btree.
     pub roots: Vec<Root>,
     pub key_version: Option<u64>,
@@ -409,17 +399,14 @@ pub(crate) fn replay(scan: &Scan, sb: &Superblock, w: &Window) -> Result<Replay>
             match record {
                 Record::Keys { btree, level, keys } => {
                     r.read += keys.len();
-                    for (key, value) in keys {
-                        if btree == Btree::Accounting {
-                            if key.kind != kind::ACCOUNTING {
-                                return Err(Error::Corrupt("accounting record of another type"));
-                            }
-                            r.accounting.entry(key.pos).or_default().push((key.version, counters(&value)?));
-                            continue;
+                    if btree == Btree::Accounting && level == 0 {
+                        for (key, value) in &keys {
+                            if key.kind != kind::ACCOUNTING { return Err(Error::Corrupt("accounting record of another type")); }
+                            counters(value)?;
                         }
-                        let replayed = (key.kind != kind::DELETED).then_some((key, value));
-                        r.keys.insert((btree, level, key.pos), Logged { seq: found.seq, key: replayed });
                     }
+                    r.pending.reserve(keys.len())?;
+                    r.pending.apply(found.seq, keys.into_iter().map(|(key, value)| (btree, level, key, value)));
                 }
                 Record::Root(root) => {
                     r.roots.retain(|old| old.btree != root.btree);
@@ -451,33 +438,38 @@ impl Replay {
     /// (A7.8), dropped when its counters come to zero.
     pub(crate) fn over(&self, btree: Btree, level: u8, min: Bpos, max: Bpos, keys: Vec<(Key, Vec<u8>)>) -> Result<Vec<(Key, Vec<u8>)>> {
         let mut merged: BTreeMap<Bpos, (Key, Vec<u8>)> = keys.into_iter().map(|(k, v)| (k.pos, (k, v))).collect();
+        let mut pending = self.pending.range(btree, level, min, max).peekable();
         if btree == Btree::Accounting && level == 0 {
-            for (&pos, deltas) in self.accounting.range(min..=max) {
+            while let Some(first) = pending.peek() {
+                let pos = first.key().pos;
                 let stored = merged.remove(&pos);
                 let (mut key, mut sums) = match stored {
                     Some((key, value)) => (key, counters(&value)?),
                     None => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
                 };
                 let since = key.version;
-                for (version, delta) in deltas.iter().filter(|(v, _)| *v > since) {
+                while pending.peek().is_some_and(|entry| entry.key().pos == pos) {
+                    let entry = pending.next().unwrap();
+                    let version = entry.key().version;
+                    if version <= since { continue; }
+                    let delta = counters(entry.value())?;
                     if sums.len() < delta.len() {
                         sums.resize(delta.len(), 0);
                     }
                     for (sum, d) in sums.iter_mut().zip(delta) {
-                        *sum = sum.wrapping_add(*d);
+                        *sum = sum.wrapping_add(d);
                     }
-                    key.version = key.version.max(*version);
+                    key.version = key.version.max(version);
                 }
                 if sums.iter().any(|&c| c != 0) {
                     merged.insert(pos, (key, sums.iter().flat_map(|c| c.to_le_bytes()).collect()));
                 }
             }
         } else {
-            for ((_, _, pos), logged) in self.keys.range((btree, level, min)..=(btree, level, max)) {
-                match &logged.key {
-                    Some(kv) => merged.insert(*pos, kv.clone()),
-                    None => merged.remove(pos),
-                };
+            for logged in pending {
+                let key = *logged.key();
+                if key.kind == kind::DELETED { merged.remove(&key.pos); }
+                else { merged.insert(key.pos, (key, logged.value().to_vec())); }
             }
         }
         Ok(merged.into_values().collect())

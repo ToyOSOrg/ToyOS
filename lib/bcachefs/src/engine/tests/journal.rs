@@ -20,8 +20,7 @@ fn the_unclean_fixture_is_read_through_its_journal() {
     let (window, replay) = v.replayed().expect("an unclean volume replays");
     assert_eq!((window.first, window.last, window.next), (61, 62, 63));
     // Accounting deltas add rather than replace, so each is kept.
-    let deltas: usize = replay.accounting.values().map(Vec::len).sum();
-    assert_eq!((replay.read, replay.keys.len() + deltas), (115, 90));
+    assert_eq!((replay.read, replay.pending.iter().count()), (115, 90));
     let mut want: Vec<String> = (1..=200).map(|i| format!("f{i}")).collect();
     want.push("lost+found".into());
     want.sort();
@@ -133,7 +132,7 @@ fn a_torn_entry_is_refused(encryption: Option<Encryption>) {
             if window.last != last {
                 return Err(format!("replay ended at {} with the fourth entry {}", window.last, if whole { "whole" } else { "torn or lost" }));
             }
-            let inodes = replay.keys.keys().filter(|(b, _, _)| *b == Btree::Inodes).count() as u64;
+            let inodes = replay.pending.iter().filter(|entry| entry.position().0 == Btree::Inodes).count() as u64;
             if inodes != last {
                 return Err(format!("{inodes} inodes replayed through entry {last}"));
             }

@@ -19,6 +19,7 @@ mod journal;
 mod mkfs;
 mod node;
 mod mount;
+mod pending;
 mod read;
 mod superblock;
 mod sync;
@@ -39,6 +40,8 @@ pub use value::DirentType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Device(toyos_blockdev::Error),
+    /// Memory for an operation could not be obtained before it applied.
+    NoMemory,
     /// A checksum or MAC disagreed with the bytes it covers.
     Checksum(&'static str),
     /// Bytes that are not the format, and what was wrong with them.
