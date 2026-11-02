@@ -839,10 +839,9 @@ fn a_populated_volume_is_a_function_of_its_tree_random_source_and_time() {
 
 #[test]
 fn a_tree_past_the_device_is_refused() {
-    // 8 MiB: data from bucket 137, the end copy from bucket 448, one node
-    // per bucket. 512 buckets of data put the first node at 649; 310 put
-    // the 15 roots at 447–461. Each needs those and the end copy's 64.
-    for (bytes, blocks) in [(8 << 20, (649 + 1 + 64) * 4), (310 << 14, (461 + 1 + 64) * 4)] {
+    // The enlarged journal puts data at bucket 239. A rejected layout
+    // still reports room for its nodes and the end superblock's 64 buckets.
+    for (bytes, blocks) in [(8 << 20, (751 + 1 + 64) * 4), (310 << 14, (549 + 1 + 64) * 4)] {
         let data = vec![1u8; bytes];
         let mut tree = Tree::new();
         tree.file(Tree::ROOT, b"big", &data, Meta { perm: 0o644, uid: 0, gid: 0 }).unwrap();

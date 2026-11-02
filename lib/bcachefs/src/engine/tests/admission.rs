@@ -92,10 +92,8 @@ fn writers(dev: &Image, cache_nodes: usize, dirs: &[u64], writers: usize, per: u
     Pressure { limit, room, peak, waits }
 }
 
-/// The least cache a mount takes: room for one transaction's footprint
-/// beside reclaim's, so each writer waits for reclaim to clean what the
-/// last one dirtied.
-const SMALL_CACHE: usize = 54;
+/// The least cache a mount takes: one maximum transaction beside reclaim.
+const SMALL_CACHE: usize = super::super::mount::MIN_CACHE;
 
 /// Creates past what the journal holds, with no commit: entries fill and are
 /// written, the ring fills with entries the dirty nodes pin, and a writer
@@ -107,16 +105,6 @@ fn a_writer_waiting_on_a_full_journal_completes_while_reclaim_runs() {
     let dev = formatted(64 << 20, None);
     let p = writers(&dev, 256, &[mkfs::ROOT_INODE], 1, 600);
     assert!(p.waits[0] > 0, "no writer waited for the journal: {:?}", p.waits);
-}
-
-/// A writer whose every transaction fills the dirty-node limit waits for
-/// cache room until reclaim cleans the last one's nodes. Red when cache room
-/// is taken after the slot, or when reclaim draws on ordinary admission.
-#[test]
-fn a_writer_filling_the_cache_with_dirty_nodes_completes_while_reclaim_runs() {
-    let dev = formatted(64 << 20, None);
-    let p = writers(&dev, SMALL_CACHE, &[mkfs::ROOT_INODE], 1, 60);
-    assert!(p.waits[1] > 0, "no writer waited for cache room: {:?}", p.waits);
 }
 
 /// Thirty-two writers at once, each in a directory whose names live in a

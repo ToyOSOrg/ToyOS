@@ -49,7 +49,7 @@ pub use ops::{Link, Removed, Rename};
 pub(crate) use reclaim::Order;
 #[cfg(test)]
 pub(crate) use reclaim::Plan;
-use reclaim::{fresh_cost, node_ptr, MAX_GROUPS, RECLAIM_ROOM, REWRITTEN};
+use reclaim::{fresh_cost, node_ptr, MAX_GROUPS, MAX_REWRITE, RECLAIM_ROOM, REWRITTEN};
 
 /// How much a mount may hold in memory.
 #[derive(Clone, Copy, Debug)]
@@ -65,13 +65,13 @@ pub(crate) const K_TX: u64 = 512;
 pub(crate) const FOOTPRINT: usize = 28;
 /// Nodes one reclaim batch writes.
 const BATCH: usize = 2;
-/// u64s a reclaim share holds for each node that can pin the journal:
-/// sized for a rewrite to one node, the common case. A share too short for
-/// the splits a batch needs stops the mount by name ([`Mount::admit`]).
-const PER_NODE: u64 = fresh_cost(1);
+/// A pinning node may require the largest supported split. This also
+/// exceeds a two-source sibling rewrite's cost, even with one clean source.
+const PER_NODE: u64 = fresh_cost(MAX_REWRITE);
 /// Cache room past the limit that only reclaim takes: what its transaction
 /// dirties, and the nodes a batch's rewrites replace its nodes with.
 const RECLAIM: usize = RECLAIM_ROOM + REWRITTEN;
+pub(crate) const MIN_CACHE: usize = RECLAIM + 3 * FOOTPRINT;
 /// The smallest btree node this writer writes. Past its first bset a
 /// smaller one has room for about two whole-block appends, and reclaim's own
 /// changes to the allocator's leaves then rewrite more nodes than they
@@ -83,6 +83,15 @@ const RETRIES: usize = 2;
 const RW_FEATURES: u64 = 1 << 8 | 1 << 9 | 1 << 12 | 1 << 13 | 1 << 17 | 1 << 18;
 /// Feature bit 5: the superblock holds a blacklist.
 const BLACKLIST_FEATURE: u64 = 1 << 5;
+
+/// Ring geometry that leaves two worst-case reclaim shares and an ordinary
+/// quarter, with room for at least one maximum-size ordinary transaction.
+pub(crate) fn journal_buckets(bucket_sectors: u64, block: usize) -> u64 {
+    let journal = Writer::new(alloc::vec![0], bucket_sectors, block, K_TX);
+    let per_entry = journal.body() - K_TX;
+    let share = ((RECLAIM + FOOTPRINT) as u64 * PER_NODE).div_ceil(per_entry) + 1;
+    (share * 8).div_ceil(3).div_ceil(journal.slots())
+}
 
 /// What a new node is.
 pub enum New {
@@ -227,10 +236,9 @@ struct Txn {
 enum Install {
     /// `id`'s appended bset, now `sectors` long in all.
     Append { id: NodeId, sectors: u16 },
-    /// `id` replaced by the nodes written for it, and a root above them when
-    /// a root split.
+    /// Sources replaced by nodes covering their combined range, with a new
+    /// root when the old root split.
     Replace { ids: Vec<NodeId>, by: Vec<Planned>, root: Option<Planned> },
-    Collapse { id: NodeId },
 }
 
 /// A new node as planned and written.
@@ -397,11 +405,15 @@ impl<D: BlockDev> Mount<D> {
         // every node that can pin it, and leave transactions a quarter.
         let per_entry = journal.body() - journal.max_tx;
         let share = journal.slots() * 3 / 8;
-        let by_journal = ((share - 1) * per_entry / PER_NODE) as usize;
-        let limit = options.cache_nodes.saturating_sub(reclaim_room + 2 * FOOTPRINT).min(by_journal.saturating_sub(reclaim_room));
-        if limit < FOOTPRINT {
-            return Err(Error::Invalid("a cache or journal too small for a transaction and its reclaim"));
+        let by_journal = (share.saturating_sub(1) * per_entry / PER_NODE) as usize;
+        if options.cache_nodes < MIN_CACHE {
+            return Err(Error::Invalid("cache too small for a transaction and worst-case reclaim"));
         }
+        if by_journal < reclaim_room + FOOTPRINT {
+            return Err(Error::Unsupported("journal too small for a transaction and worst-case reclaim"));
+        }
+        let limit = options.cache_nodes.saturating_sub(reclaim_room + 2 * FOOTPRINT).min(by_journal.saturating_sub(reclaim_room));
+        assert!(limit >= FOOTPRINT, "validated cache and journal admit one transaction");
         journal.reclaim_entries = ((limit + reclaim_room) as u64 * PER_NODE).div_ceil(per_entry) + 1;
 
         let journal_next = journal.next_seq;
@@ -1010,7 +1022,10 @@ impl<D: BlockDev> Mount<D> {
     fn can_free(&self) -> bool {
         let st = self.st.borrow();
         let flush = st.journal_frees() || st.alloc.returning();
-        !st.journal.closed.is_empty() || (flush && st.journal.may_close()) || st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b)) || st.cache.ids().into_iter().any(|id| {
+        !st.journal.closed.is_empty()
+            || (flush && st.journal.open.is_some() && st.journal.may_close())
+            || st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b))
+            || st.cache.ids().into_iter().any(|id| {
             let n = st.cache.node(id);
             n.dirty() && !n.writing && n.captured.is_none() && n.held == 0
         })

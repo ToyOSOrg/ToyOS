@@ -222,6 +222,10 @@ fn ops_survive_a_crash_on(image: Vec<u8>, passphrase: Option<&[u8]>, options: Mo
             for (i, op) in ops.iter().enumerate() {
                 applied.set(i + 1);
                 apply(&mount, op).await;
+                if matches!(op, Op::Rename(..)) {
+                    let plans = mount.write_batch(super::super::mount::Order::OldestPin).await.unwrap();
+                    mount.point_batch(plans).await.unwrap();
+                }
                 if (i + 1) % every == 0 {
                     mount.commit().await.unwrap();
                     committed.set(i + 1);
@@ -274,7 +278,7 @@ fn encrypted_namespace_operations_survive_a_crash_at_every_request() {
 
 /// A cache whose dirty-node limit is one transaction's footprint: reclaim
 /// writes before every operation, so leaves fill and rewrite.
-pub(super) const PRESSED: MountOptions = MountOptions { cache_nodes: 54 };
+pub(super) const PRESSED: MountOptions = MountOptions { cache_nodes: super::super::mount::MIN_CACHE };
 
 /// `files` files made, then each renamed back and forth `rounds` times:
 /// the same leaves rewritten again and again, each rewrite emptying the

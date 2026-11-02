@@ -375,7 +375,7 @@ impl Geometry {
         }
         let layout = Layout { max_bits: SB_MAX_BITS, offsets: alloc::vec![PRIMARY, second, end] };
         let front = (second + SB_SECTORS).div_ceil(bucket);
-        let journal = (front, (nbuckets / 128).max(8));
+        let journal = (front, (nbuckets / 128).max(8).max(super::mount::journal_buckets(bucket, BLOCK)));
         Ok(Geometry { bucket, nbuckets, node: bucket.min(MAX_NODE_SECTORS), layout, journal, data_buckets: 0 })
     }
 
@@ -707,10 +707,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_small_device_lays_out_as_format_does() {
-        // Upstream's own 32 MiB layout: 65 536 sectors in 32-sector buckets, copies at 8,
-        // 2 056 and 63 488; buckets 0–127 hold 32 superblock sectors, 128
-        // holds 8, 1 984–2 047 hold 32.
+    fn a_small_device_keeps_superblock_regions_and_sizes_the_reclaim_journal() {
         let g = Geometry::new(65536).unwrap();
         assert_eq!((g.bucket, g.nbuckets, g.node), (32, 2048, 32));
         assert_eq!(g.layout.offsets, [8, 2056, 63488]);
@@ -720,7 +717,8 @@ mod tests {
         assert_eq!(sb.len(), 129 + 64);
         assert_eq!(sb[128], (128, 8));
         assert!(sb.iter().filter(|&&(b, _)| b != 128).all(|&(_, s)| s == 32));
-        assert_eq!(g.journal, (129, 16));
+        assert_eq!(g.journal, (129, super::super::mount::journal_buckets(g.bucket, BLOCK)));
+        assert!(g.journal.1 > g.nbuckets / 128);
     }
 
     #[test]
