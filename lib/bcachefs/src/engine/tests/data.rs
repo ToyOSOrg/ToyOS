@@ -185,7 +185,7 @@ fn reserved_blocks_write_after_capacity_refusal_and_dropped_tokens_return_capaci
     });
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     let bytes = read_all(&v, ino).unwrap();
-    for (i, block) in bytes.chunks_exact(BLOCK).enumerate() {
+    for (i, block) in bytes.as_chunks::<BLOCK>().0.iter().enumerate() {
         assert_eq!(block, &[i as u8; BLOCK]);
     }
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
@@ -342,7 +342,7 @@ fn small_and_large_geometries_reserve_an_ordinary_dirty_window() {
         let v = block_on_ready(Volume::open(&dev)).unwrap();
         let got = read_all(&v, ino).unwrap();
         assert_eq!(got.len(), 64 * BLOCK);
-        for (i, block) in got.chunks_exact(BLOCK).enumerate() { assert_eq!(block, &[i as u8; BLOCK]); }
+        for (i, block) in got.as_chunks::<BLOCK>().0.iter().enumerate() { assert_eq!(block, &[i as u8; BLOCK]); }
         assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
     }
 }

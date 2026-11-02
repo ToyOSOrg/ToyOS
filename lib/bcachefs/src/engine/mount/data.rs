@@ -177,7 +177,7 @@ impl<D: BlockDev> Mount<D> {
     /// Writes as many bytes as fit. A later chunk's failure returns the
     /// completed byte count; `commit` is the durability barrier.
     pub async fn write(&self, ino: u64, offset: u64, data: &[u8], now: i64) -> Result<usize> {
-        offset.checked_add(data.len() as u64).filter(|n| *n <= i64::MAX as u64).ok_or(Error::Invalid("file size past 2^63-1"))?;
+        offset.checked_add(data.len() as u64).filter(|n| i64::try_from(*n).is_ok()).ok_or(Error::Invalid("file size past 2^63-1"))?;
         let _slot = self.data_slot().await;
         self.observe(now);
         let mut done = 0;

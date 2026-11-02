@@ -2052,7 +2052,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Us
 /// a real one.
 ///
 /// Designates the result, because every caller here is making a scratch disk
-/// for a guest that expects a working `/apps` and `/home`, and the kernel will
+/// for a guest that expects a working `/apps` and `/home`, and the file server will
 /// not format an undesignated one. Leaving it to the call sites would mean two
 /// places to forget; forgetting is not silent (the boot says so and both paths
 /// are volatile) but it is not worth the chance.
@@ -2065,12 +2065,12 @@ pub fn create_sparse(path: &Path, len: u64) {
 }
 
 /// Partition this image as a DATA disk and stamp the designation on that
-/// partition, so the kernel is allowed to format it.
+/// partition, so the file server is allowed to format it.
 ///
-/// The kernel never formats a volume that does not carry the stamp, which is
+/// The file server never formats a volume that does not carry the stamp, which is
 /// what stops it taking the disk of any machine it is booted on. So a throwaway
 /// image has to say so, and this is the whole of the test harness's opt-in:
-/// **data on a scratch file, not a build flag.** The kernel binary and the
+/// **data on a scratch file, not a build flag.** The file-server binary and the
 /// code path are identical either way — `probe` runs the same match
 /// on metal as it does here — so the configuration under test is the
 /// configuration that ships, which a `#[cfg]` could not have given us.
