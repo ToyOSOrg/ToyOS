@@ -1038,7 +1038,7 @@ impl<X: SchedPayload> CpuSched<X> {
     /// [`CpuHandles::place`] would spawn it.
     fn relocate<H: Hw<Payload = X>, P: PreemptGuard>(&mut self, task: ReadyTask<X>, env: Env<'_, H, P>, now: Nanos) {
         let mask = task.affinity();
-        let dst = self.forward_target(mask, env).unwrap_or_else(|| env.cpus.place(self.id, now, mask));
+        let dst = self.forward_target(mask, env).unwrap_or_else(|| env.cpus.place(self.id, now, mask, None));
         self.hand_off(task, dst, env, now);
     }
 
@@ -2783,9 +2783,16 @@ impl<M: SchedMsg> CpuHandles<M> {
     /// least behind, and among those one that sleeps with no kick on its way
     /// ([`Doorbell::sleeping_unrung`]: a spawn raises no published load, so a
     /// burst would otherwise pile on the first sleeper while it wakes), then
-    /// one whose SMT siblings run least, then the one quickest to wake
-    /// ([`CpuHandle::idle_exit`]), as [`Self::idle_near`] weighs its sleepers.
-    /// Scanned from `start` so that ties spread instead of piling on one CPU.
+    /// one whose SMT siblings run least, then one in `near`'s LLC, then the
+    /// one quickest to wake ([`CpuHandle::idle_exit`]), as [`Self::idle_near`]
+    /// weighs its sleepers. Scanned from `start` so that ties spread instead of
+    /// piling on one CPU.
+    ///
+    /// `near` is the CPU of the thread spawning a thread into its own process:
+    /// the two share an address space and usually work together, and a pair
+    /// split across LLCs moves every line it shares between L3s. A free core
+    /// elsewhere still beats a shared one in that LLC, so a burst of threads
+    /// spreads over the machine's free cores before it doubles up on any.
     ///
     /// **It lives here rather than in the driver because the simulator places
     /// tasks too**, and a placement rule written twice is one the sim is not
@@ -2795,15 +2802,16 @@ impl<M: SchedMsg> CpuHandles<M> {
     /// A machine where no CPU is answering falls back to the plain minimum: the
     /// test breaks a tie against a CPU that will never answer, and a machine
     /// with none has no such tie to break.
-    pub fn place(&self, start: CpuId, now: Nanos, mask: CpuMask) -> CpuId {
+    pub fn place(&self, start: CpuId, now: Nanos, mask: CpuMask, near: Option<CpuId>) -> CpuId {
         let n = self.handles.len();
+        let away = |cpu| near.is_some_and(|near| self.topology.level(cpu, near) > Some(Level::Llc));
         let scan = |answering_only: bool| {
             (0..n)
                 .map(|offset| CpuId(((start.0 as usize + offset) % n) as u32))
                 .filter(|&cpu| mask.contains(cpu) && (!answering_only || self.get(cpu).answering(now)))
                 .min_by_key(|&cpu| {
                     let handle = self.get(cpu);
-                    (handle.load(), !handle.doorbell().sleeping_unrung(), self.busy_siblings(cpu), handle.idle_exit())
+                    (handle.load(), !handle.doorbell().sleeping_unrung(), self.busy_siblings(cpu), away(cpu), handle.idle_exit())
                 })
         };
         scan(true)
@@ -4589,10 +4597,10 @@ mod tests {
         }
         let mask = CpuMask::from_words(&[0b1010], 4).unwrap();
         for start in 0..4 {
-            let at = w.handles.place(CpuId(start), NOW, mask);
+            let at = w.handles.place(CpuId(start), NOW, mask, None);
             assert!(mask.contains(at), "start {start} chose {at:?}");
         }
-        assert_eq!(w.handles.place(C0, NOW, CpuMask::one(CpuId(2))), CpuId(2));
+        assert_eq!(w.handles.place(C0, NOW, CpuMask::one(CpuId(2)), None), CpuId(2));
         w.abandon();
     }
 
@@ -4729,14 +4737,14 @@ mod tests {
         handles.get(idle).publish_load(0);
         handles.get(busy).publish_load(4);
         handles.get(stopped).publish_load(0);
-        assert_eq!(handles.place(idle, Nanos(2), CpuMask::ANY), idle);
-        assert_eq!(handles.place(busy, Nanos(2), CpuMask::ANY), stopped, "ties go to the scan order");
+        assert_eq!(handles.place(idle, Nanos(2), CpuMask::ANY, None), idle);
+        assert_eq!(handles.place(busy, Nanos(2), CpuMask::ANY, None), stopped, "ties go to the scan order");
 
         // Handed a message and never taking the pass that clears the edge: its
         // zero is believed inside the window and refused outside it.
         owe_a_pass(stopped);
-        assert_eq!(handles.place(busy, Nanos(2), CpuMask::ANY), stopped);
-        assert_eq!(handles.place(busy, late, CpuMask::ANY), idle);
+        assert_eq!(handles.place(busy, Nanos(2), CpuMask::ANY, None), stopped);
+        assert_eq!(handles.place(busy, late, CpuMask::ANY, None), idle);
 
         // A CPU that is merely *busy* is not stale: it owes a pass and its last
         // one is recent, which is every wake on a working machine.
@@ -4744,7 +4752,7 @@ mod tests {
         handles.get(busy).publish_pass(late);
         handles.get(busy).publish_load(0);
         handles.get(idle).publish_load(1);
-        assert_eq!(handles.place(busy, late, CpuMask::ANY), busy);
+        assert_eq!(handles.place(busy, late, CpuMask::ANY, None), busy);
 
         // And a machine where nothing answers still places somebody.
         owe_a_pass(idle);
@@ -4753,7 +4761,7 @@ mod tests {
         handles.get(idle).publish_load(3);
         handles.get(busy).publish_load(2);
         handles.get(stopped).publish_load(9);
-        assert_eq!(handles.place(idle, late, CpuMask::ANY), busy);
+        assert_eq!(handles.place(idle, late, CpuMask::ANY, None), busy);
     }
 
     /// One package of two LLCs, each two cores of two threads, listed against
@@ -4883,12 +4891,12 @@ mod tests {
             handles.get(CpuId(cpu)).publish_pass(NOW);
         }
         sleep(&handles, &[1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(handles.place(CpuId(4), NOW, CpuMask::ANY), CpuId(5), "4's sibling runs; 5's core is free");
-        assert_eq!(handles.place(CpuId(0), NOW, CpuMask::ANY), CpuId(1), "0 itself runs");
+        assert_eq!(handles.place(CpuId(4), NOW, CpuMask::ANY, None), CpuId(5), "4's sibling runs; 5's core is free");
+        assert_eq!(handles.place(CpuId(0), NOW, CpuMask::ANY, None), CpuId(1), "0 itself runs");
         wake_up(&handles, &[1, 2, 3, 5, 6, 7]);
-        assert_eq!(handles.place(CpuId(0), NOW, CpuMask::ANY), CpuId(4), "the one sleeper is placed on, sibling or not");
+        assert_eq!(handles.place(CpuId(0), NOW, CpuMask::ANY, None), CpuId(4), "the one sleeper is placed on, sibling or not");
         handles.get(CpuId(4)).publish_load(1);
-        assert_eq!(handles.place(CpuId(0), NOW, CpuMask::ANY), CpuId(0), "a queue outweighs who runs");
+        assert_eq!(handles.place(CpuId(0), NOW, CpuMask::ANY, None), CpuId(0), "a queue outweighs who runs");
     }
 
     /// **Among free cores' sleepers a spawn wakes the shallowest**: the wake
@@ -4904,12 +4912,32 @@ mod tests {
             handles.get(CpuId(cpu)).publish_idle_exit(1_048_000);
         }
         handles.get(CpuId(7)).publish_idle_exit(253_000);
-        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY), CpuId(7), "cpu7 wakes in 253 µs, every other sleeper in 1048");
+        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY, None), CpuId(7), "cpu7 wakes in 253 µs, every other sleeper in 1048");
         handles.get(CpuId(7)).publish_idle_exit(1_048_000);
-        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY), CpuId(1), "equals go to the rotation's first");
-        assert_eq!(handles.place(CpuId(2), NOW, CpuMask::ANY), CpuId(2), "and rotate");
+        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY, None), CpuId(1), "equals go to the rotation's first");
+        assert_eq!(handles.place(CpuId(2), NOW, CpuMask::ANY, None), CpuId(2), "and rotate");
         handles.get(CpuId(4)).publish_idle_exit(0);
-        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY), CpuId(1), "cpu4 waits shallowest, but its sibling runs: a free core first");
+        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY, None), CpuId(1), "cpu4 waits shallowest, but its sibling runs: a free core first");
+    }
+
+    /// **A spawned thread starts on a free core in its spawner's LLC**, and
+    /// only then on a free core elsewhere, before a shared core near: the
+    /// spawner runs on cpu1, whose LLC is {1, 5, 3, 7} and whose sibling is
+    /// cpu5.
+    #[test]
+    fn a_spawned_thread_starts_on_a_free_core_in_its_spawners_llc() {
+        let (handles, _consumers) = bare_handles(two_llcs());
+        for cpu in 0..8 {
+            handles.get(CpuId(cpu)).publish_pass(NOW);
+        }
+        sleep(&handles, &[0, 2, 3, 4, 5, 6, 7]);
+        let near = Some(C1);
+        assert_eq!(handles.place(C0, NOW, CpuMask::ANY, None), C0, "a new process's thread takes the rotation's first");
+        assert_eq!(handles.place(C0, NOW, CpuMask::ANY, near), CpuId(3), "cpu3, a free core of cpu1's LLC");
+        wake_up(&handles, &[3, 7]);
+        assert_eq!(handles.place(C0, NOW, CpuMask::ANY, near), C0, "cpu5 shares cpu1's core: a free core elsewhere first");
+        wake_up(&handles, &[0, 2, 4, 6]);
+        assert_eq!(handles.place(C0, NOW, CpuMask::ANY, near), CpuId(5), "the one sleeper left");
     }
 
     /// **A spawn passes over a sleeper already being woken**: it keeps its
@@ -4926,9 +4954,9 @@ mod tests {
             handles.get(CpuId(cpu)).publish_idle_exit(1_048_000);
         }
         handles.get(CpuId(7)).publish_idle_exit(253_000);
-        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY), CpuId(7), "cpu7 is the shallowest sleeper");
+        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY, None), CpuId(7), "cpu7 is the shallowest sleeper");
         let _ = handles.get(CpuId(7)).doorbell().ring(Urgency::Normal);
-        let next = handles.place(CpuId(1), NOW, CpuMask::ANY);
+        let next = handles.place(CpuId(1), NOW, CpuMask::ANY, None);
         assert!(next != CpuId(7) && handles.get(next).doorbell().sleeping(), "the next spawn goes to another sleeper, not {next:?}");
     }
 

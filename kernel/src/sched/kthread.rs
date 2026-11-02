@@ -112,6 +112,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
         job,
         image: None,
         mask: kernel::sched::affinity::CpuMask::ANY,
+        near: None,
     });
     table
         .get_mut(pid)

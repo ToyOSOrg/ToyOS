@@ -729,6 +729,7 @@ pub fn spawn_thread(
         job,
         image,
         mask: crate::sched::driver::current_mask(),
+        near: Some(kernel::sched::hw::CpuId(percpu::cpu_id())),
     });
     proc.threads.get_mut(tid).unwrap().set_sched(sched);
     drop(guard);

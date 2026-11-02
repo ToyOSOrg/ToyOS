@@ -485,6 +485,17 @@ fn a_turn_taking_pair_is_never_forwarded_off_its_cpu() {
     });
 }
 
+/// **A spawned partner starts in its spawner's LLC**: on
+/// `scenarios::spawned_partner` no kick crosses between the AMD shape's two
+/// LLCs but the one that hands the spawner to cpu8.
+#[test]
+fn a_spawned_partner_starts_in_its_spawners_llc() {
+    sweep(&scenarios::spawned_partner(), 40, |outcome| {
+        let crossing = outcome.levels.ipis[kernel_sim::topology::slot(Some(kernel::sched::topology::Level::Package))];
+        assert!(crossing <= 1, "{crossing} kicks crossed the LLCs: {:?} {}", outcome.levels, outcome.report());
+    });
+}
+
 /// **A wake due ahead of the running task waits out [`MIN_SLICE_NS`] and a
 /// hop, not a request** — on one CPU, against one rival process, every wake
 /// but one per run.
