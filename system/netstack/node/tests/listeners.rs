@@ -354,7 +354,7 @@ impl Net {
     /// `holder`'s accept that takes `peer`'s connection.
     fn accepts_as(&mut self, id: ListenerId, holder: HolderId, peer: Peer) -> (StreamId, Rc<Client>) {
         let (accepted, client) = self.accept_as(id, holder).expect("a connection and a place");
-        assert_eq!((accepted.remote, accepted.local), (peer.endpoint(), Port::new(SSH).unwrap()));
+        assert_eq!((accepted.remote, accepted.local), (peer.endpoint(), Endpoint { addr: A, port: Port::new(SSH).unwrap() }));
         (accepted.id, client)
     }
 
@@ -418,7 +418,7 @@ fn a_listener_answers_a_syn_and_wakes_its_owner_when_the_handshake_ends() {
 
     let (client, session) = Client::new();
     let accepted = net.node.accept(net.now, id, HolderId::FIRST, || Some(session)).unwrap();
-    assert_eq!((accepted.remote, accepted.local), (P1.endpoint(), Port::new(SSH).unwrap()));
+    assert_eq!((accepted.remote, accepted.local), (P1.endpoint(), Endpoint { addr: A, port: Port::new(SSH).unwrap() }));
     assert_eq!(inbox(&client), b"hello", "what arrived before the accept moves in it");
     assert_eq!((net.node.streams(), net.node.listeners(), net.node.held()), (1, 1, 2));
     assert_eq!(client.write(b"welcome"), Ok(7));

@@ -55,7 +55,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use toyos_dhcp::{AddressRequest, Client, HostName, Lease, Output};
-pub use toyos_net_shard::{Credit, IfIndex, Rank};
+pub use toyos_net_shard::{Credit, IfIndex, Rank, UdpPeer};
 use toyos_net_shard::{Config, Shard};
 use toyos_net_wire::ethernet::IndividualMac;
 use toyos_net_wire::Instant;

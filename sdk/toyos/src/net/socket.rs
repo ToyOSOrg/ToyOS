@@ -92,6 +92,16 @@ crate::ipc_payload! {
         pub value: u32,
     }
 
+    /// [`PEER`]'s answer: the peer a connect named, and the address the socket sends there from,
+    /// which the connect fixed.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct Peer {
+        pub addr: [u8; 4],
+        pub port: u16,
+        pub _pad: u16,
+        pub local_addr: [u8; 4],
+    }
+
     /// An exported end's [`ADOPT`]: what kind of socket it holds, and the
     /// address and port it is at.
     pub struct Adopt {
@@ -371,10 +381,16 @@ pub fn is_socket(handle: BorrowedHandle<'_>) -> bool {
     kind(handle).is_some()
 }
 
-/// The address the socket `handle` reaches is at, as its listen or bind named
-/// it, and the port it holds.
+/// The address the socket `handle` reaches is at and the port it holds: a
+/// connected datagram socket's is the one its connect fixed, as netstack answers
+/// it, and any other's is the one its listen or bind named.
 pub fn local(handle: BorrowedHandle<'_>) -> Result<([u8; 4], u16), NetError> {
-    TABLE.lock().get(handle.raw()).map(|end| (end.addr, end.port)).ok_or(NetError::NotASocket)
+    let end = TABLE.lock().get(handle.raw()).ok_or(NetError::NotASocket)?;
+    let connected = match end.kind {
+        Kind::Datagram => connected(handle)?.map(|peer| peer.local_addr),
+        Kind::Listener => None,
+    };
+    Ok((connected.unwrap_or(end.addr), end.port))
 }
 
 /// `handle`, which reaches one of this process's sockets, as a descriptor's object: let go by
@@ -459,15 +475,21 @@ pub fn connect(handle: BorrowedHandle<'_>, addr: [u8; 4], port: u16) -> Result<(
 
 /// The peer the socket `handle` reaches is connected to, by any of its holders.
 pub fn peer(handle: BorrowedHandle<'_>) -> Result<Option<([u8; 4], u16)>, NetError> {
+    Ok(connected(handle)?.map(|peer| (peer.addr, peer.port)))
+}
+
+/// netstack's [`PEER`] answer for the datagram socket `handle` reaches, `None` while no
+/// holder connected it. One naming a local address no socket sends from is refused.
+fn connected(handle: BorrowedHandle<'_>) -> Result<Option<Peer>, NetError> {
     call_on(handle, Kind::Datagram, |slot, end| {
         let _turn = TURNS[slot].lock();
         ipc::signal(end.connection, PEER).map_err(hangup)?;
         let mut rx = FrameRx::<MAX_ANSWER>::new();
         match answer(&end.connection, &mut rx) {
-            Ok(frame) => {
-                let peer: Datagram = ipc::decode_payload(rx.payload(frame.payload_len)).map_err(|_| NetError::Protocol(PEER))?;
-                Ok(Some((peer.addr, peer.port)))
-            }
+            Ok(frame) => match ipc::decode_payload::<Peer>(rx.payload(frame.payload_len)) {
+                Ok(peer) if super::unicast(peer.local_addr) => Ok(Some(peer)),
+                _ => Err(NetError::Protocol(PEER)),
+            },
             Err(NetError::NotConnected) => Ok(None),
             Err(e) => Err(e),
         }
@@ -578,6 +600,16 @@ pub(super) fn adopted(connection: Connection, payload: &[u8], handles: ipc::Batc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`PEER`]'s answer as a holder decodes it: the peer, its port, then the address the
+    /// socket sends from; an answer without that address is refused.
+    #[test]
+    fn a_peers_answer_ends_in_the_address_it_is_sent_from() {
+        let wire = [192, 0, 2, 7, 53, 0, 0, 0, 198, 51, 100, 9];
+        let peer: Peer = ipc::decode_payload(&wire).unwrap();
+        assert_eq!(peer, Peer { addr: [192, 0, 2, 7], port: 53, _pad: 0, local_addr: [198, 51, 100, 9] });
+        assert!(ipc::decode_payload::<Peer>(&wire[..8]).is_err());
+    }
 
     /// A datagram is one frame's payload: its far end, then exactly its bytes, read back as it
     /// was written, whatever bytes it carries, an empty one too.

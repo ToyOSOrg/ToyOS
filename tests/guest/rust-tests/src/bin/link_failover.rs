@@ -8,6 +8,10 @@
 //! names. It asks the harness, on a stream over the other link, to set the
 //! first link's NIC down; the next datagrams leave by the other link and none
 //! by the first. Asked to set it up again, the datagrams return to it.
+//!
+//! A stream and a connected datagram socket to each network's host first
+//! report that link's lease as their local address: netstack's, since the two
+//! leases differ.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -85,22 +89,43 @@ fn main() {
     let snap = until("both links' leases", |snap| {
         snap.get("net.links") == Some(&Value::U64(2)) && (0..2).all(|n| snap.get(&format!("net.link.{n}.lease.held")) == Some(&Value::Bool(true)))
     });
-    // Each link's network, by its lease's address: QEMU's host is `.2` of it.
-    let network = |n: usize| {
+    // Each link's lease, and its network: QEMU's host is `.2` of it.
+    let lease = |n: usize| -> Ipv4Addr {
         let address = text(&snap, &format!("net.link.{n}.lease.address")).unwrap_or_else(|| panic!("link_failover: link {n} holds no lease"));
-        let address: Ipv4Addr = address.split('/').next().and_then(|a| a.parse().ok()).expect("link_failover: an address");
-        let [a, b, c, _] = address.octets();
+        address.split('/').next().and_then(|a| a.parse().ok()).expect("link_failover: an address")
+    };
+    let leases = [lease(0), lease(1)];
+    let network = |n: usize| {
+        let [a, b, c, _] = leases[n].octets();
         Ipv4Addr::new(a, b, c, 0)
     };
     let networks = [network(0), network(1)];
+    assert_ne!(networks[0], networks[1], "link_failover: both links lease on one network");
 
     let socket = UdpSocket::bind("0.0.0.0:0").expect("link_failover: a datagram socket");
     let (first, second) = carried(round(&socket));
     println!("  PASS: a round left by link {first}, on {}", networks[first]);
 
-    // The harness, on a stream over the second link: its network's own host.
-    let [a, b, c, _] = networks[second].octets();
-    let mut control = TcpStream::connect(SocketAddr::from((Ipv4Addr::new(a, b, c, 2), port))).expect("link_failover: a stream to the harness over the second link");
+    // The harness on each network's own host: a stream over each link, the
+    // first's let go and the second's the control.
+    let harness = |n: usize| {
+        let [a, b, c, _] = networks[n].octets();
+        let stream = TcpStream::connect(SocketAddr::from((Ipv4Addr::new(a, b, c, 2), port))).expect("link_failover: a stream to the harness");
+        let local = stream.local_addr().expect("link_failover: the stream's local address");
+        assert_eq!(local.ip(), leases[n], "link_failover: the stream over link {n} says it left from {local}");
+        println!("  PASS: the stream over link {n} left from its lease, {local}");
+        stream
+    };
+    for (n, network) in networks.iter().enumerate() {
+        let [a, b, c, _] = network.octets();
+        let connected = UdpSocket::bind("0.0.0.0:0").expect("link_failover: a datagram socket to connect");
+        connected.connect(SocketAddr::from((Ipv4Addr::new(a, b, c, 2), port))).expect("link_failover: a datagram socket's connect");
+        let local = connected.local_addr().expect("link_failover: the datagram socket's local address");
+        assert_eq!(local.ip(), leases[n], "link_failover: the datagram socket connected over link {n} says it sends from {local}");
+        println!("  PASS: the datagram socket connected over link {n} sends from its lease, {local}");
+    }
+    drop(harness(first));
+    let mut control = harness(second);
     control.set_read_timeout(Some(BOUND)).expect("link_failover: a read timeout");
     let mut answers = BufReader::new(control.try_clone().expect("link_failover: the stream's reader"));
     let mut ask = |word: &str| {

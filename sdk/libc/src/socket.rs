@@ -825,23 +825,23 @@ pub unsafe extern "C" fn getsockname(
     addr: *mut Sockaddr,
     addrlen: *mut SocklenT,
 ) -> i32 {
-    let local_port = match sock_from_fd(fd) {
+    let (ip, port) = match sock_from_fd(fd) {
         Some(Sock::Stream(held)) => match stream::endpoints(held.handle()) {
-            Ok((_, local_port)) => local_port,
+            Ok((_, local)) => local,
             Err(refused) => { set_errno(crate::errcode::of_stream(refused)); return -1; }
         },
         Some(Sock::Listener(held) | Sock::Datagram(held)) => match socket::local(held.handle()) {
-            Ok((_, port)) => port,
+            Ok(local) => local,
             Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
         },
+        // Neither bound nor connected: the unspecified address, and no port.
         Some(Sock::Entry(mut socket)) => match *socket.slot() {
-            Some(_) => 0,
+            Some(_) => ([0; 4], 0),
             None => { set_errno(EBADF); return -1; }
         },
         None => { set_errno(EBADF); return -1; }
     };
-    // Local address: 10.0.2.15 (QEMU default)
-    fill_sockaddr(addr, addrlen, [10, 0, 2, 15], local_port);
+    fill_sockaddr(addr, addrlen, ip, port);
     0
 }
 
