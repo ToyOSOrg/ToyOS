@@ -52,7 +52,7 @@ impl Plan {
     fn cost(&self) -> u64 {
         match self.written() {
             0 => APPEND_COST,
-            k => fresh_cost(k) + (self.ids.len() - 1) as u64 * (ALLOC + 4 * SET + BUCKET_GENS),
+            k => fresh_cost(k) + (self.ids.len() - 1) as u64 * MERGE_EXTRA,
         }
     }
 
@@ -89,6 +89,7 @@ const HEADERS: u64 = 8;
 
 /// An append's update: the pointer's written sectors, in its record.
 const APPEND_COST: u64 = 1 + POINTER;
+const MERGE_EXTRA: u64 = ALLOC + 4 * SET + BUCKET_GENS;
 
 /// u64s the pointer update of a node rewritten to `nodes` new ones
 /// journals at most. Each new node: its pointer, its bucket's change and its
@@ -141,12 +142,15 @@ pub(super) const COMMON_REWRITE: usize = 3;
 /// Node slots one batch can take: its common rewrites, or one alone.
 const BATCH_SLOTS: u64 = (if BATCH * COMMON_REWRITE > MAX_REWRITE { BATCH * COMMON_REWRITE } else { MAX_REWRITE }) as u64;
 
-/// Cache room reclaim's transaction takes past the limit, for the leaves
-/// it dirties: every position of a rewrite to one node in a leaf of its
-/// own. A batch whose positions could need more is granted this, as they
-/// share leaves; one that dirties more is refused and stops the mount, never
-/// overfilling the cache.
-pub(super) const RECLAIM_ROOM: usize = fresh_nodes(1);
+/// Every changed position may occupy a separate leaf. A common batch may
+/// include two sibling rewrites; an oversized rewrite runs alone.
+pub(super) const RECLAIM_ROOM: usize = {
+    let pairs = BATCH * (fresh_nodes(2) + 7);
+    let common = BATCH * fresh_nodes(COMMON_REWRITE);
+    let oversized = fresh_nodes(MAX_REWRITE);
+    let batch = if pairs > common { pairs } else { common };
+    if batch > oversized { batch } else { oversized }
+};
 
 /// Nodes past the limit a batch's rewrites can leave dirty: their new
 /// nodes, each taking the changes since its node was captured, beside the
@@ -157,6 +161,7 @@ pub(super) const REWRITTEN: usize = {
 };
 
 const _: () = assert!(fresh_cost(MAX_REWRITE) <= K_TX, "the largest rewrite fits one reclaim transaction");
+const _: () = assert!(fresh_cost(2) + MERGE_EXTRA <= fresh_cost(MAX_REWRITE), "a sibling rewrite fits a pin's journal debt");
 
 impl<D: BlockDev> Mount<D> {
     /// One batch of dirty nodes chosen by `order`, planned under the slot
@@ -184,7 +189,6 @@ impl<D: BlockDev> Mount<D> {
     }
 
     async fn write_batch_once(&self, order: Order) -> Result<Vec<Plan>> {
-        while self.collapse_root().await? {}
         self.make_room().await?;
         let plans = {
             let _slot = self.slot(Class::Reclaim).await;
@@ -201,7 +205,6 @@ impl<D: BlockDev> Mount<D> {
     /// evacuation uses the same publication and reader barriers as reclaim.
     pub(crate) async fn relocate_node(&self, btree: Btree, level: u8, pos: Bpos, expected_sector: u64) -> Result<bool> {
         let out = async {
-            while self.collapse_root().await? {}
             self.make_room().await?;
             let plans = {
                 let _slot = self.slot(Class::Reclaim).await;
@@ -222,54 +225,6 @@ impl<D: BlockDev> Mount<D> {
             Ok(true)
         }.await;
         self.stopped_by(out)
-    }
-
-    async fn collapse_root(&self) -> Result<bool> {
-        let candidate = {
-            let st = self.st.borrow();
-            st.roots.values().find_map(|r| {
-                let id = st.cache.id_at(r.ptr.ptr.sector)?;
-                let n = st.cache.node(id);
-                (n.level > 0 && n.keys.len() == 1 && n.dirty() && !n.writing && n.captured.is_none() && n.held == 0).then_some((r.btree, n.sector))
-            })
-        };
-        let Some((btree, expected)) = candidate else { return Ok(false) };
-        let bound = fresh_cost(1);
-        let room = RECLAIM_ROOM;
-        self.flush_closed().await?;
-        self.admit(Class::Reclaim, Draw::Freeing, bound, room).await?;
-        let _slot = self.slot(Class::Reclaim).await;
-        let mut txn = Txn::default();
-        let out = async {
-            let id = {
-                let st = self.st.borrow();
-                if st.roots.get(&btree).is_none_or(|r| r.ptr.ptr.sector != expected) { return Ok(false); }
-                let Some(id) = st.cache.id_at(expected) else { return Ok(false) };
-                id
-            };
-            let (level, sector, gen, key, ptr) = {
-                let st = self.st.borrow();
-                let n = st.cache.node(id);
-                if n.keys.len() != 1 || n.writing || n.captured.is_some() || n.held != 0 { return Ok(false); }
-                let (key, value) = &n.keys[0];
-                (n.level, n.sector, n.gen, *key, NodePtr::decode(value)?)
-            };
-            let child = self.load(btree, level - 1, &ptr, key.pos).await?;
-            {
-                let st = self.st.borrow();
-                let n = st.cache.node(child);
-                if n.writing || n.captured.is_some() { return Ok(false); }
-            }
-            if ptr.min != Bpos::MIN || key.pos != Bpos::MAX { return Err(Error::Corrupt("only root child does not span the btree")); }
-            txn.roots.push(Root { btree, level: level - 1, key, ptr });
-            let mut buckets = BTreeMap::new();
-            self.node_counted(&mut txn, &mut buckets, btree, level, sector, gen, Bpos::MAX, false).await?;
-            for (b, (before, after)) in buckets { self.bucket_changed(&mut txn, b, before, after).await?; }
-            txn.installs.push(Install::Collapse { id });
-            Ok(true)
-        }.await;
-        self.finish(txn, out.is_ok(), Class::Reclaim, bound, room)?;
-        out
     }
 
     /// Reclaim's second half: the written batch's pointer updates
@@ -294,7 +249,8 @@ impl<D: BlockDev> Mount<D> {
 
     async fn point_batch_once(&self, plans: Vec<Plan>) -> Result<()> {
         let bound = plans.iter().map(Plan::cost).sum();
-        let nodes = plans.iter().map(Plan::nodes).sum::<usize>().min(RECLAIM_ROOM);
+        let nodes = plans.iter().map(Plan::nodes).sum::<usize>();
+        assert!(nodes <= RECLAIM_ROOM, "a reclaim batch exceeds its derived node bound");
         // Closed entries hold pipeline depth that only writing them returns:
         // reclaim never waits on what it would itself have to do.
         self.flush_closed().await?;
@@ -366,7 +322,7 @@ impl<D: BlockDev> Mount<D> {
                 return Err(Error::Unsupported("a btree node whose keys fill more than seven nodes"));
             }
             let written = groups.len() + usize::from(groups.len() > 1 && root);
-            let cost = if append { APPEND_COST } else { fresh_cost(written) + (ids.len() - 1) as u64 * (ALLOC + 4 * SET + BUCKET_GENS) };
+            let cost = if append { APPEND_COST } else { fresh_cost(written) + (ids.len() - 1) as u64 * MERGE_EXTRA };
             // A rewrite past the common one is a batch of its own, so the
             // nodes a batch's rewrites leave stay within reclaim's room.
             let alone = !append && written > COMMON_REWRITE;
@@ -438,10 +394,9 @@ impl<D: BlockDev> Mount<D> {
         let (btree, level, max) = {
             let st = self.st.borrow();
             let n = st.cache.node(id);
-            let root = st.new_roots.get(&n.btree) == Some(&id) || st.roots.get(&n.btree).is_some_and(|r| r.ptr.ptr.sector == n.sector);
-            if root {
-                return Ok(if n.level > 0 && n.keys.len() == 1 { Vec::new() } else { alloc::vec![id] });
-            }
+            // Root depth stays: older journal entries can still hold keys
+            // at every former level. The sole-child spine is bounded by it.
+            if n.min == Bpos::MIN && n.max == Bpos::MAX { return Ok(alloc::vec![id]); }
             if n.bytes >= self.minimum_fill() { return Ok(alloc::vec![id]); }
             (n.btree, n.level, n.max)
         };
@@ -816,9 +771,8 @@ impl<D: BlockDev> Mount<D> {
         Ok(())
     }
 
-    /// A reclaimed node made reachable: an appended bset now counted in its
-    /// node, or the node replaced by those written for it, each holding its
-    /// share of the node's keys and of the changes since it was captured.
+    /// Published replacements take the sources' current keys, including
+    /// every change since capture, partitioned by their new ranges.
     pub(super) fn install(&self, st: &mut State, install: Install) {
         match install {
             Install::Append { id, sectors } => st.cache.change(id, |n| {
@@ -844,21 +798,16 @@ impl<D: BlockDev> Mount<D> {
                     let mine: Vec<(Key, Vec<u8>)> = keys.iter().filter(|(k, _)| (p.min..=p.max).contains(&k.pos)).cloned().collect();
                     let changes: BTreeMap<Bpos, u64> = unwritten.range(p.min..=p.max).map(|(k, v)| (*k, *v)).collect();
                     let id = st.cache.insert(fresh_cached(&p, mine));
-                    let is_root = st.roots.get(&p.btree).is_some_and(|r| r.ptr.ptr.sector == p.sector);
                     let seq = st.journal.open.as_ref().map_or(st.journal.next_seq, |o| o.seq);
                     st.cache.change(id, |n| {
                         n.unwritten = changes;
-                        if !is_root && n.bytes < self.minimum_fill() { n.compact = Some(seq); }
+                        if (n.min != Bpos::MIN || n.max != Bpos::MAX) && n.bytes < self.minimum_fill() { n.compact = Some(seq); }
                     });
                 }
                 if let Some(p) = root {
                     let keys = p.keys.clone();
                     st.cache.insert(fresh_cached(&p, keys));
                 }
-            }
-            Install::Collapse { id } => {
-                st.cache.change(id, |n| { n.unwritten.clear(); n.compact = None; n.captured = None; });
-                st.cache.remove(id);
             }
         }
     }
@@ -873,7 +822,6 @@ impl<D: BlockDev> Mount<D> {
         let mut keys: Vec<_> = replayed.keys.into_iter().collect();
         keys.sort_by_key(|((btree, level, pos), _)| (core::cmp::Reverse(*level), *btree, *pos));
         for ((btree, level, pos), logged) in keys {
-            if self.st.borrow().roots.get(&btree).is_some_and(|root| level > root.level) { continue; }
             let id = self.find(btree, level, pos).await?;
             self.st.borrow_mut().cache.change(id, |n| n.put(pos, logged.key, logged.seq));
         }

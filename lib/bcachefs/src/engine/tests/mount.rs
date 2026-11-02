@@ -85,35 +85,21 @@ fn leaves_and_roots_split_and_their_buckets_and_accounting_derive() {
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }
 
-/// The upstream volume left mid-write (BB-A2-1) on 64 MiB, of 32 KiB nodes,
-/// mounted read-write: its window replayed past the unflushed entries after
-/// it, the journal moved on by the post-crash skip with the skipped
-/// sequences blacklisted, every node it writes a fresh one, then unmounted
-/// clean.
+/// The imported ring cannot hold the writer's worst-case reclaim shares;
+/// its committed contents remain available through read-only replay.
 #[test]
-fn the_unclean_fixture_mounts_read_write_past_the_skip_and_unmounts_clean() {
+fn an_imported_journal_too_small_for_reclaim_is_read_and_refused_read_write() {
     let dev = fixture("unclean-32k-nodes.img.gz");
-    mounted(&dev, async |m: &Mount<&Image>| {
-        for i in 0..20 {
-            m.create(m.root(), format!("toyos{i}").as_bytes(), New::File, OWNER, NOW).await.unwrap();
-        }
-        m.commit().await.unwrap();
-    });
+    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Unsupported("journal too small for a transaction and worst-case reclaim")));
     let v = block_on_ready(Volume::open(&dev)).unwrap();
-    let sb = v.superblock();
-    assert!(sb.clean_flag());
-    assert_eq!(sb.blacklist, [(19, 23 + 4096)], "F was 18, the newest entry found 22");
-    assert!(sb.clean.as_ref().unwrap().journal_seq > 23 + 4096);
     // As upstream's own FUSE mount of the fixture reads it: f1 to f139
     // whole, f140 made but empty; the rest were in the unflushed entries.
     let (entries, _) = block_on_ready(v.readdir(v.root(), 0, 1000)).unwrap();
-    assert_eq!(entries.len(), 140 + 20 + 1, "the fixture's 140, these 20 and lost+found");
+    assert_eq!(entries.len(), 140 + 1, "the fixture's 140 and lost+found");
     for i in 1..=139 {
         assert_eq!(read_all(&v, path(&v, &format!("f{i}"))).unwrap(), format!("{i}\n").into_bytes(), "f{i}");
     }
     assert_eq!(read_all(&v, path(&v, "f140")).unwrap(), b"");
-    let found = block_on_ready(fsck(&v)).unwrap();
-    assert_eq!(found, UPSTREAM_ONLY, "only what upstream itself writes otherwise");
 }
 
 /// The same on 32 MiB, of 16 KiB nodes, is read, its window replayed, and

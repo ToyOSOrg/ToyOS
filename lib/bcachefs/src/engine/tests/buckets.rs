@@ -80,6 +80,8 @@ fn churn<D: BlockDev>(dev: &D, options: MountOptions, files: usize, reuses: usiz
                 let (i, round) = (n % files, n / files);
                 let (from, to) = if round % 2 == 0 { ("a", "b") } else { ("b", "a") };
                 m.rename((r, format!("{from}{i}").as_bytes()), (r, format!("{to}{i}").as_bytes()), Rename::NoReplace, NOW).await.unwrap();
+                let plans = m.write_batch(super::super::mount::Order::OldestPin).await.unwrap();
+                m.point_batch(plans).await.unwrap();
                 n += 1;
                 if n % every == 0 {
                     m.commit().await.unwrap();

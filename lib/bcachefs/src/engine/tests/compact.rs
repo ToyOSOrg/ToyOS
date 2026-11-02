@@ -2,7 +2,7 @@ use super::mount::{mounted, random, MEMORY, NOW, OWNER};
 use super::*;
 
 #[test]
-fn deleting_all_files_collapses_the_inode_tree_and_reuses_its_room() {
+fn deleting_all_files_leaves_only_the_inode_spine_and_reuses_its_room() {
     let dev = formatted(64 << 20, None);
     for round in 0..3 {
         mounted(&dev, async |m: &Mount<&Image>| {
@@ -17,7 +17,10 @@ fn deleting_all_files_collapses_the_inode_tree_and_reuses_its_room() {
             }
         });
         let v = block_on_ready(Volume::open(&dev)).unwrap();
-        assert_eq!(v.roots().iter().find(|r| r.btree == Btree::Inodes).unwrap().level, 0, "round {round}");
+        let root = v.roots().iter().find(|r| r.btree == Btree::Inodes).unwrap();
+        assert_eq!(root.level, 1, "round {round}");
+        let node = block_on_ready(super::super::read::read_node(&dev, v.superblock(), None, Btree::Inodes, root.level, &root.ptr, Bpos::MAX)).unwrap();
+        assert_eq!(node.keys.len(), 1, "all inode siblings merged in round {round}");
         assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
     }
 }
@@ -67,7 +70,7 @@ fn a_change_after_sibling_bytes_are_written_survives_their_pointer_update() {
 }
 
 #[test]
-fn sibling_merges_and_root_collapse_recover_after_torn_reordered_writes() {
+fn sibling_merges_recover_after_torn_reordered_writes() {
     use core::cell::Cell;
     use toyos_blockdev::model::{Model, Overlay};
     use super::crash::Watched;
