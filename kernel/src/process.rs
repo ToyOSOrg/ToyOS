@@ -902,6 +902,7 @@ fn teardown(pid: Pid, tid: Tid, end: End, mark: i32, process_data: &Arc<Lock<Pro
 /// Take the running thread out of its process: out of its address space, its accounting into the process's, and its own mark in the table. The last thread out of a claimed process tears the process down here.
 /// Returns rather than diverging: the exit pass never comes back, and the live `Arc`s here would leak with no scope left to drop them.
 pub fn leave(chosen: Option<i32>) {
+    crate::sched::driver::current_leaves();
     let (pid, tid) = (current_process(), current_tid());
     crate::mm::paging::activate_kernel();
     let process_data = process_data();
@@ -965,6 +966,7 @@ pub fn exit(end: End) -> ! {
 
 /// Exit the current thread. If this is the main thread, it is the process's exit. For a child thread, frees its own mappings and leaves.
 pub fn thread_exit(code: i32) -> ! {
+    crate::sched::driver::current_leaves();
     let process_pid = current_process();
     let tid = current_tid();
     let route = {

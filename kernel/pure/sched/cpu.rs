@@ -533,6 +533,21 @@ impl<X: SchedPayload> CpuSched<X> {
         self.leave_fair_for_rt(now);
     }
 
+    /// The CPU a wake the running task posts names as its waker
+    /// ([`WakeCause::waker`]): this one, unless nothing runs here or the
+    /// running thread is leaving its process. A dying waker is no partner
+    /// for [`Self::toward_its_waker`] to follow: a parent woken by each
+    /// child's exit would chase children it never talks to again.
+    pub fn waker(&self) -> Option<CpuId> {
+        self.running.as_ref().filter(|task| !task.is_leaving()).map(|_| self.id)
+    }
+
+    /// The running thread has begun leaving its process: no wake it posts
+    /// from now on names a waker.
+    pub fn current_leaves(&mut self) {
+        self.running.as_mut().expect("a thread leaving its process is running").begin_leaving();
+    }
+
     /// `SYS_RT_ENTER` on the running task — permanent RT, as opposed to the
     /// bounded window a waker lends. The privilege gate lives at the syscall
     /// layer.
@@ -1178,7 +1193,49 @@ impl<X: SchedPayload> CpuSched<X> {
         let mut task = entry.task.wake(self.id, cause, entry.class, now);
         self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
         task.refresh_affinity();
-        self.place(task, env, now);
+        match self.toward_its_waker(&mut task, cause, env) {
+            Some(dst) => self.hand_off(task, dst, env, now),
+            None => self.place(task, env, now),
+        }
+    }
+
+    /// **A woken partner follows its waker's LLC.** A wake from another LLC
+    /// whose run from it is at or past [`WAKER_RUN`] goes to a CPU of that
+    /// LLC the task's mask names, [`Doorbell::sleeping_unrung`] and off the
+    /// waker's own core, nearest the waker and quickest to wake. A waker that
+    /// has parked leaves its SMT sibling looking like a free core, and a pair
+    /// on one core contends for it: on the AMD bench a request/reply pair
+    /// there reads about as slow as one split across LLCs. Only a wake that finds the task parked
+    /// reaches here, so only those are counted: one that finds it running or
+    /// about to park is a flag the task consumes unseen. A request/reply pair
+    /// split across LLCs shares one after [`WAKER_RUN`] round trips. A server
+    /// with a client in each LLC follows the far one when the near one's
+    /// requests keep finding it running; once moved, both are counted. The
+    /// run is not reset by a move, so a task stolen out of the LLC it was
+    /// woken from goes back on that LLC's next wake. A real-time task keeps
+    /// the RT band's placement, and a stopped or killed one [`Self::place`]'s.
+    fn toward_its_waker<H: Hw<Payload = X>, P: PreemptGuard>(
+        &self,
+        task: &mut ReadyTask<X>,
+        cause: WakeCause,
+        env: Env<'_, H, P>,
+    ) -> Option<CpuId> {
+        let waker = cause.waker?;
+        let topology = env.cpus.topology();
+        let llc = topology.llc_index(waker);
+        let run = task.count_waker_llc(llc);
+        if run < WAKER_RUN
+            || llc == topology.llc_index(self.id)
+            || task.is_rt()
+            || task.shared().stop_pending()
+            || task.shared().kill_pending()
+        {
+            return None;
+        }
+        let mask = task.affinity();
+        env.cpus.idle_in_llc(waker, topology.position(waker), |cpu| {
+            mask.contains(cpu.id()) && cpu.doorbell().sleeping_unrung() && topology.level(cpu.id(), waker) != Some(Level::Core)
+        })
     }
 
     fn handle_adopt<H: Hw<Payload = X>, P: PreemptGuard>(
@@ -2634,6 +2691,12 @@ pub struct CpuHandles<M> {
     offering: Box<[AtomicU64]>,
 }
 
+/// How many parked wakes in a row from one other LLC move a task into it
+/// ([`CpuSched::toward_its_waker`]). A split pair pays this many split round
+/// trips once; a task whose parked wakes come from two LLCs independently
+/// and evenly moves on about one in 2^(n+1) - 2, 1 in 510 at 8.
+pub const WAKER_RUN: u16 = 8;
+
 /// The CPUs an idle CPU is chosen among, nearest first: `me`'s LLC, then the
 /// rest of its package, then the machine. A choice stays in the first group
 /// with a candidate, so locality decides before core idleness does.
@@ -2754,29 +2817,42 @@ impl<M: SchedMsg> CpuHandles<M> {
     /// go to the first at or after topology position `from`, which is how
     /// consecutive choices rotate.
     pub fn idle_near(&self, me: CpuId, from: usize, usable: impl Fn(&CpuHandle<M>) -> bool) -> Option<CpuId> {
-        for (inner, outer) in IDLE_GROUPS {
-            // The best of each tier, as (exit, cpu): strictly less replaces, so the first of equals stays.
-            let mut free_core: Option<(u64, CpuId)> = None;
-            let mut shared_core: Option<(u64, CpuId)> = None;
-            for cpu in self.topology.ring(me, inner, outer, from) {
-                let handle = self.get(cpu);
-                if !usable(handle) {
-                    continue;
-                }
-                let exit = handle.idle_exit();
-                let tier = if self.busy_siblings(cpu) == 0 { &mut free_core } else { &mut shared_core };
-                if tier.is_none_or(|(best, _)| exit < best) {
-                    *tier = Some((exit, cpu));
-                }
-                if free_core.is_some_and(|(best, _)| best == 0) {
-                    break;
-                }
+        IDLE_GROUPS.into_iter().find_map(|(inner, outer)| self.idle_among(me, inner, outer, from, &usable))
+    }
+
+    /// [`Self::idle_near`] inside `me`'s LLC alone.
+    pub fn idle_in_llc(&self, me: CpuId, from: usize, usable: impl Fn(&CpuHandle<M>) -> bool) -> Option<CpuId> {
+        self.idle_among(me, None, Level::Llc, from, &usable)
+    }
+
+    /// The best CPU `usable` accepts in one of [`IDLE_GROUPS`]' rings: a free
+    /// core before a shared one, then the quickest to wake.
+    fn idle_among(
+        &self,
+        me: CpuId,
+        inner: Option<Level>,
+        outer: Level,
+        from: usize,
+        usable: &impl Fn(&CpuHandle<M>) -> bool,
+    ) -> Option<CpuId> {
+        // The best of each tier, as (exit, cpu): strictly less replaces, so the first of equals stays.
+        let mut free_core: Option<(u64, CpuId)> = None;
+        let mut shared_core: Option<(u64, CpuId)> = None;
+        for cpu in self.topology.ring(me, inner, outer, from) {
+            let handle = self.get(cpu);
+            if !usable(handle) {
+                continue;
             }
-            if let Some((_, cpu)) = free_core.or(shared_core) {
-                return Some(cpu);
+            let exit = handle.idle_exit();
+            let tier = if self.busy_siblings(cpu) == 0 { &mut free_core } else { &mut shared_core };
+            if tier.is_none_or(|(best, _)| exit < best) {
+                *tier = Some((exit, cpu));
+            }
+            if free_core.is_some_and(|(best, _)| best == 0) {
+                break;
             }
         }
-        None
+        free_core.or(shared_core).map(|(_, cpu)| cpu)
     }
 
     /// Where a new task goes: the CPU in `mask` still answering whose queue it would wait
@@ -3124,7 +3200,10 @@ mod tests {
             shared: &Arc<TaskShared<Msg<TestPayload>>>,
             reason: WakeReason,
         ) {
-            let cause = WakeCause::new(reason);
+            self.post_claimed_cause(cpu, shared, WakeCause::new(reason));
+        }
+
+        fn post_claimed_cause(&self, cpu: CpuId, shared: &Arc<TaskShared<Msg<TestPayload>>>, cause: WakeCause) {
             let slot = shared
                 .wake_node()
                 .claim()
@@ -4594,6 +4673,144 @@ mod tests {
         }
         assert_eq!(w.handles.place(C0, NOW, CpuMask::one(CpuId(2))), CpuId(2));
         w.abandon();
+    }
+
+    /// A task parked on cpu0, in [`two_llcs`]' LLC 0, every other CPU
+    /// asleep. LLC 1 is cpu1, cpu3, cpu5 and cpu7.
+    fn parked_in_llc_0(w: &mut World, mask: CpuMask) -> Arc<TaskShared<Msg<TestPayload>>> {
+        let job = Arc::new(Job::new(JobKey(1000 + w.next_key)));
+        let (_, task) = w.spawn_masked(C0, RtState::default(), job, mask);
+        w.run_a_pass(C0);
+        w.park_running(C0);
+        for cpu in 1..8 {
+            w.run_a_pass(CpuId(cpu));
+        }
+        task
+    }
+
+    /// Wake the task parked on cpu0 as the thread running on `waker` would,
+    /// and let cpu0 take the wake.
+    fn woken_from(w: &mut World, task: &Arc<TaskShared<Msg<TestPayload>>>, waker: u32) {
+        assert_eq!(task.claim_wake(), Claim::Parked(C0), "the task is parked on cpu0");
+        w.post_claimed_cause(C0, task, WakeCause::new(WakeReason::Woken).from(Some(CpuId(waker))));
+        w.run_a_pass(C0);
+    }
+
+    /// Wake `task` `times` from `waker`, each time letting it run at home on
+    /// cpu0 and park again.
+    fn woken_at_home(w: &mut World, task: &Arc<TaskShared<Msg<TestPayload>>>, waker: u32, times: u16) {
+        for _ in 0..times {
+            woken_from(w, task, waker);
+            assert_eq!(task.state(), TaskState::Running(C0), "a wake from cpu{waker} short of the run left it home");
+            w.park_running(C0);
+        }
+    }
+
+    /// **The wake that makes [`WAKER_RUN`] in a row from another LLC moves
+    /// the task into it**, onto a sleeping CPU there.
+    #[test]
+    fn a_run_of_wakes_from_another_llc_moves_the_task_into_it() {
+        let mut w = World::on(two_llcs());
+        let task = parked_in_llc_0(&mut w, CpuMask::ANY);
+        woken_at_home(&mut w, &task, 1, WAKER_RUN - 1);
+        woken_from(&mut w, &task, 1);
+        let state = task.state();
+        w.abandon();
+        assert!(
+            matches!(state, TaskState::InTransit(cpu) if cpu.0 % 2 == 1),
+            "the run's last wake handed it to a CPU of LLC 1, and it is {state:?}",
+        );
+    }
+
+    /// **A wake from home starts the run again**: a task woken from both
+    /// LLCs never makes [`WAKER_RUN`] in a row from the other one.
+    #[test]
+    fn a_wake_from_home_breaks_the_run() {
+        let mut w = World::on(two_llcs());
+        let task = parked_in_llc_0(&mut w, CpuMask::ANY);
+        for _ in 0..3 {
+            woken_at_home(&mut w, &task, 1, WAKER_RUN - 1);
+            woken_at_home(&mut w, &task, 2, 1);
+        }
+        w.abandon();
+    }
+
+    /// **The move stays inside the mask**: a task whose mask names only LLC
+    /// 0 stays home however often LLC 1 wakes it.
+    #[test]
+    fn a_task_masked_out_of_its_wakers_llc_stays_home() {
+        let mut w = World::on(two_llcs());
+        let llc_0 = CpuMask::from_words(&[0b0101_0101], 8).unwrap();
+        let task = parked_in_llc_0(&mut w, llc_0);
+        woken_at_home(&mut w, &task, 1, 2 * WAKER_RUN);
+        w.abandon();
+    }
+
+    /// **The move stays off the waker's core**: a waker that has parked
+    /// leaves its SMT sibling asleep and first in the scan, and the task goes
+    /// to the other core of the waker's LLC instead.
+    #[test]
+    fn a_move_stays_off_the_wakers_core() {
+        let mut w = World::on(two_llcs());
+        let task = parked_in_llc_0(&mut w, CpuMask::ANY);
+        woken_at_home(&mut w, &task, 1, WAKER_RUN - 1);
+        woken_from(&mut w, &task, 1);
+        let state = task.state();
+        w.abandon();
+        assert!(
+            matches!(state, TaskState::InTransit(cpu) if cpu.0 == 3 || cpu.0 == 7),
+            "the task went to cpu3 or cpu7, off cpu1's core with cpu5, and it is {state:?}",
+        );
+    }
+
+    /// **A thread leaving its process names no waker**: the thread running
+    /// on cpu1 wakes the task one short of [`WAKER_RUN`], then begins
+    /// leaving, and a full run of wakes it posts on its way out leaves the
+    /// task home.
+    #[test]
+    fn a_leaving_threads_wakes_leave_the_task_home() {
+        let mut w = World::on(two_llcs());
+        let task = parked_in_llc_0(&mut w, CpuMask::ANY);
+        w.spawn(C1);
+        w.run_a_pass(C1);
+        let woken_by_cpu1 = |w: &mut World, times| {
+            for _ in 0..times {
+                assert_eq!(task.claim_wake(), Claim::Parked(C0), "the task is parked on cpu0");
+                let cause = WakeCause::new(WakeReason::Woken).from(w.cpus[1].waker());
+                w.post_claimed_cause(C0, &task, cause);
+                w.run_a_pass(C0);
+                assert_eq!(task.state(), TaskState::Running(C0), "a wake from cpu1 moved the task");
+                w.park_running(C0);
+            }
+        };
+        assert_eq!(w.cpus[1].waker(), Some(C1), "cpu1's running thread names itself");
+        woken_by_cpu1(&mut w, WAKER_RUN - 1);
+        w.cpus[1].current_leaves();
+        woken_by_cpu1(&mut w, WAKER_RUN);
+        w.abandon();
+    }
+
+    /// **Two runs ending in one drain go to two CPUs**: the first move rings
+    /// its CPU, and a rung sleeper is passed over, as a wake forward passes
+    /// it.
+    #[test]
+    fn two_runs_ending_in_one_drain_go_to_two_cpus() {
+        let mut w = World::on(two_llcs());
+        let first = parked_in_llc_0(&mut w, CpuMask::ANY);
+        woken_at_home(&mut w, &first, 1, WAKER_RUN - 1);
+        let second = parked_in_llc_0(&mut w, CpuMask::ANY);
+        woken_at_home(&mut w, &second, 1, WAKER_RUN - 1);
+        for task in [&first, &second] {
+            assert_eq!(task.claim_wake(), Claim::Parked(C0), "the task is parked on cpu0");
+            w.post_claimed_cause(C0, task, WakeCause::new(WakeReason::Woken).from(Some(CpuId(1))));
+        }
+        w.run_a_pass(C0);
+        let states = [first.state(), second.state()];
+        w.abandon();
+        match states {
+            [TaskState::InTransit(a), TaskState::InTransit(b)] if a != b && a.0 % 2 == 1 && b.0 % 2 == 1 => {}
+            _ => panic!("the two moves did not go to two CPUs of LLC 1: {states:?}"),
+        }
     }
 
     /// **One forward per idle sibling**: wakes drained in one pass are handed

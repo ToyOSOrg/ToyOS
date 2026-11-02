@@ -102,7 +102,7 @@ pub fn post_wake() {
     // One read-modify-write of `klogd`'s own word and no lock: it claims a parked or committing `klogd`
     // and flags a running one, whose next commit refuses — the post a producer holding any lock may make.
     irq_off(|guard| {
-        notify(shared, WakeCause::new(WakeReason::Woken), cpus(), &HW, guard);
+        notify(shared, WakeCause::new(WakeReason::Woken).from(crate::sched::driver::waker()), cpus(), &HW, guard);
     });
 }
 

@@ -485,6 +485,38 @@ fn a_turn_taking_pair_is_never_forwarded_off_its_cpu() {
     });
 }
 
+/// **A pair split across LLCs is brought into one**: on
+/// `scenarios::split_pair`, with balancing off, the one move is a wake
+/// following its waker's LLC, and after it every wake stays inside that LLC.
+#[test]
+fn a_split_pair_moves_once_into_one_llc() {
+    sweep(&scenarios::split_pair(), 40, |outcome| {
+        assert_eq!(outcome.migrations, 1, "the pair did not settle into one LLC with one move: {}", outcome.report());
+    });
+}
+
+/// **A server with a client in each LLC seldom follows them, and never
+/// back**: on `scenarios::server_of_two_llcs` at most a quarter of the runs
+/// move the server, and no run moves it twice, even at ten times the rounds.
+/// A server moves when one client's requests keep finding it running, so
+/// that only the other's are counted; after the move both are, and nothing
+/// moves it back. A run half as long as `WAKER_RUN` already moves it more
+/// often than the bound, and following every wake moves it hundreds of times
+/// over these seeds.
+#[test]
+fn a_server_with_a_client_in_each_llc_seldom_follows_them() {
+    const SEEDS: u64 = 40;
+    sweep(&scenarios::server_of_two_llcs(10 * scenarios::WAKE_LLC_ROUNDS), SEEDS, |outcome| {
+        assert!(outcome.migrations <= 1, "the server moved {} times in one run: {}", outcome.migrations, outcome.report());
+    });
+    let mut moves = 0;
+    sweep(&scenarios::server_of_two_llcs(scenarios::WAKE_LLC_ROUNDS), SEEDS, |outcome| {
+        assert!(outcome.migrations <= 1, "the server moved {} times in one run: {}", outcome.migrations, outcome.report());
+        moves += outcome.migrations;
+    });
+    assert!(moves <= SEEDS / 4, "the server followed its clients' LLCs: {moves} moves over {SEEDS} runs");
+}
+
 /// **A wake due ahead of the running task waits out [`MIN_SLICE_NS`] and a
 /// hop, not a request** — on one CPU, against one rival process, every wake
 /// but one per run.

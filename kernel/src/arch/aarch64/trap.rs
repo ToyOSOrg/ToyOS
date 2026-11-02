@@ -212,6 +212,7 @@ fn irq(frame: &Frame, from_el0: bool) -> bool {
         _ => {}
     }
     percpu::preempt_count_up();
+    percpu::irq_depth_up();
     let resched = match intid {
         irqchip::SGI_KICK => {
             percpu::irq_took(Source::Kick);
@@ -243,6 +244,7 @@ fn irq(frame: &Frame, from_el0: bool) -> bool {
             }
         },
     };
+    percpu::irq_depth_down();
     percpu::preempt_count_down();
     irqchip::end(intid);
     if resched {
