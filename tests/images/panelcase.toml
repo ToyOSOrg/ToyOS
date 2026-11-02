@@ -7,7 +7,7 @@
 assets = ["assets"]
 
 [boot]
-start = ["logkeeper", "compositor"]
+start = ["acpiserver", "logkeeper", "compositor"]
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
 [programs.logkeeper]
@@ -19,6 +19,13 @@ serves = ["log-carrier"]
 service = true
 serves = ["compositor", "prompt", "clipboard", "input", "display", "display-output"]
 devices = ["framebuffer"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
 
 # The virtio-serial driver, for the VM's console alone: this image runs no agent.
 [programs.virtio-console]

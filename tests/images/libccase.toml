@@ -2,7 +2,7 @@
 # its own, `echo` among them, and `system` and `popen` run their commands by
 # `/system/bin/shell -c`.
 [boot]
-start = ["logkeeper", "test-runner"]
+start = ["acpiserver", "logkeeper", "test-runner"]
 
 [programs.logkeeper]
 service = true
@@ -21,6 +21,13 @@ syscap = ["dup", "roster"]
 [symlinks]
 "bin/echo" = "/system/bin/toybox"
 "bin/cat" = "/system/bin/toybox"
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
 
 # The virtio-serial driver, for the VM's console alone: this image runs no agent.
 [programs.virtio-console]
