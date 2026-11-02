@@ -21,12 +21,12 @@ pub(super) struct Reservations {
 }
 
 impl Reservations {
-    pub(super) fn pending(&self, draw: Draw) -> usize {
+    pub(super) fn pending(&self, draw: Draw) -> u64 {
         let own = match draw {
             Draw::Reserved(id) => usize::from(self.active.contains_key(&id)),
             _ => 0,
         };
-        (self.active.len() - own) * FOOTPRINT
+        (self.active.len() - own) as u64 * K_TX * 8
     }
 }
 
@@ -94,7 +94,7 @@ impl<D: BlockDev> Mount<D> {
         }
         let _data = self.data_slot().await;
         let id = self
-            .transact(1, FOOTPRINT, Draw::Ordinary, async |txn: &mut Txn| {
+            .transact(K_TX, FOOTPRINT, Draw::Ordinary, async |txn: &mut Txn| {
                 regular(&self.inode_in(txn, ino).await?)?;
                 self.block_extents(ino, first, first + bytes as u64).await?;
                 let (sector, _) = self.data_sector(self.sb.block_bytes() as u64 / SECTOR as u64).await?;
@@ -206,16 +206,17 @@ impl<D: BlockDev> Mount<D> {
         .await
     }
 
-    /// Total volume bytes and bytes in currently free, reusable buckets.
+    /// Total bytes and capacity left after pending data and metadata claims.
     pub fn space(&self) -> (u64, u64) {
         self.cancel_dropped();
         let bucket = u64::from(self.sb.member.bucket_sectors) * SECTOR as u64;
         let node = u64::from(self.sb.node_sectors()) * SECTOR as u64;
         let st = self.st.borrow();
-        let pending = self.reservations.borrow().active.len() as u64;
-        let logical = st.alloc.capacity(st.metadata_buckets).saturating_sub(self.metadata_nodes(&st, st.granted_bytes + pending * K_TX * 8)) * node;
-        let promised = pending * FOOTPRINT as u64 * reclaim::COMMON_REWRITE as u64 * node;
-        (self.sb.member.nbuckets * bucket, st.alloc.free_bytes(bucket).saturating_sub(promised).min(logical))
+        let pending = self.reservations.borrow().pending(Draw::Ordinary);
+        let stable = st.alloc.stable_slots(self.metadata_nodes(&st, st.granted_bytes + pending));
+        let transient = Allocator::transient(st.cache.dirty + st.cache.unpointed + st.granted + FOOTPRINT, st.reclaim_room, Draw::Ordinary);
+        let logical = st.alloc.capacity(st.metadata_buckets).saturating_sub(stable + transient) * node;
+        (self.sb.member.nbuckets * bucket, st.alloc.free_bytes(bucket).min(logical))
     }
 
     pub(super) fn metadata_nodes(&self, st: &State, pending_bytes: u64) -> u64 {
@@ -227,17 +228,17 @@ impl<D: BlockDev> Mount<D> {
         // are bounded by the format's classes and btrees.
         let structural = buckets * (104 + 3 * 40) + buckets.div_ceil(256) * 296 + slots * 72 + (Btree::ALL.len() * 9 * 64) as u128;
         let bytes = u128::from(st.metadata_bytes) + structural + u128::from(pending_bytes);
-        let node_bytes = self.sb.node_sectors() as usize * SECTOR;
-        let minimum = (mkfs::capacity(node_bytes) - FIRST_KEYS) / 2 - MAX_KEY;
+        let minimum = self.minimum_fill();
         let stable = st.baseline_nodes.len() as u128 + 2 * (Btree::ALL.len() as u128 + bytes.div_ceil(minimum as u128));
         stable.min(u128::from(u64::MAX)) as u64
     }
 
     #[cfg(test)]
     pub(crate) async fn check_metadata_budget(&self) {
-        let (bytes, buckets, _) = allocator::metadata_budget(self).await.unwrap();
+        let metadata = allocator::metadata_budget(self).await.unwrap();
         let st = self.st.borrow();
-        assert_eq!((st.metadata_bytes, st.metadata_buckets), (bytes, buckets));
+        assert_eq!((st.metadata_bytes, st.metadata_buckets), (metadata.bytes, metadata.buckets));
+        assert_eq!(st.sparse_metadata, metadata.sparse);
     }
 
     /// The high-water mark is durable before any version beneath it is
@@ -247,7 +248,7 @@ impl<D: BlockDev> Mount<D> {
             return Ok(Version::default());
         }
         if self.st.borrow().next_version == self.st.borrow().key_version {
-            self.transact(1, 0, Draw::Ordinary, async |_txn: &mut Txn| {
+            self.transact(0, 0, Draw::Freeing, async |_txn: &mut Txn| {
                 let mut st = self.st.borrow_mut();
                 st.key_version = st.key_version.checked_add(VERSIONS).ok_or(Error::NoSpace("encrypted extent versions"))?;
                 Ok(())
@@ -306,8 +307,9 @@ impl<D: BlockDev> Mount<D> {
         }
         {
             let st = self.st.borrow();
-            let held = st.cache.dirty + st.cache.unpointed + st.granted + self.reservations.borrow().pending(Draw::Ordinary);
-            if !st.alloc.data_fits(held, st.reclaim_room) {
+            let held = st.cache.dirty + st.cache.unpointed + st.granted;
+            let stable = self.metadata_nodes(&st, st.granted_bytes + self.reservations.borrow().pending(Draw::Ordinary));
+            if !st.alloc.data_fits(held, st.reclaim_room) || !st.alloc.keeps(st.metadata_buckets, stable, held, st.reclaim_room, Draw::Ordinary, true) {
                 return Err(Error::NoSpace("no data bucket beyond metadata and freeing reserves"));
             }
         }

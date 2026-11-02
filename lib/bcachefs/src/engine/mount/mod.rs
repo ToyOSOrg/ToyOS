@@ -39,6 +39,7 @@ use super::{kind, Btree, Error, Result, SECTOR};
 
 mod allocator;
 mod data;
+mod gc;
 mod ops;
 mod reclaim;
 
@@ -115,6 +116,7 @@ struct State {
     next_version: u64,
     metadata_bytes: u64,
     metadata_buckets: u64,
+    sparse_metadata: BTreeSet<u64>,
     baseline_nodes: BTreeSet<u64>,
     granted_bytes: u64,
     clocks: [u64; 2],
@@ -210,7 +212,7 @@ struct Txn {
     /// Buckets taken that it fills.
     filled: Vec<u64>,
     allocated_data: Vec<u64>,
-    bucket_states: Vec<(u8, u8)>,
+    bucket_states: Vec<(u64, Bucket, Bucket)>,
     /// New roots.
     roots: Vec<Root>,
     /// Written nodes made reachable, installed in the cache at apply.
@@ -332,7 +334,7 @@ impl<D: BlockDev> Mount<D> {
     }
 
     /// `empty` is the volume's count of empty buckets.
-    async fn from(parts: Parts<D>, empty: u64, metadata: (u64, u64, BTreeSet<u64>), options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
+    async fn from(parts: Parts<D>, empty: u64, metadata: allocator::Metadata, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
         let Parts { dev, mut sb, key, roots, key_version, replay, root } = parts;
         let key_version = key_version.checked_add(if replay.is_some() && key.is_some() { 65_536 } else { 0 }).ok_or(Error::NoSpace("encrypted extent versions"))?;
         let ring: Vec<u64> = sb.journal.iter().flat_map(|&(first, count)| first..first + count).collect();
@@ -420,9 +422,10 @@ impl<D: BlockDev> Mount<D> {
             journal,
             key_version,
             next_version: key_version,
-            metadata_bytes: metadata.0,
-            metadata_buckets: metadata.1,
-            baseline_nodes: metadata.2,
+            metadata_bytes: metadata.bytes,
+            metadata_buckets: metadata.buckets,
+            sparse_metadata: metadata.sparse,
+            baseline_nodes: metadata.baseline,
             granted_bytes: 0,
             clocks,
             now: sb.header.write_time,
@@ -971,14 +974,19 @@ impl<D: BlockDev> Mount<D> {
         let room = match class {
             Class::Ordinary => {
                 let held = st.cache.dirty + st.cache.unpointed + st.granted;
-                if !st.alloc.fits(nodes + pending, st.reclaim_room, draw) && held == 0 && st.reclaim_granted == 0 && !st.alloc.returning() {
+                let stable = self.metadata_nodes(&st, pending + st.granted_bytes + journal * 8);
+                let keeps = st.alloc.keeps(st.metadata_buckets, stable, nodes, st.reclaim_room, draw, false);
+                let physical = st.alloc.fits(nodes, st.reclaim_room, draw);
+                let can_compact = st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b));
+                if (!keeps || (!physical && !can_compact)) && held == 0 && st.reclaim_granted == 0 && !st.alloc.returning() {
                     return Err(Error::NoSpace(match draw {
                         Draw::Ordinary | Draw::Reserved(_) => "no room left for the btree nodes a change may write",
                         Draw::Freeing => "no room left for the btree nodes a removal may write",
                     }));
                 }
                 // Nothing more lands in a node reclaim has yet to split.
-                held + nodes <= st.limit && st.cache.oversized == 0 && st.alloc.fits(held + nodes + pending, st.reclaim_room, draw)
+                held + nodes <= st.limit && st.cache.oversized == 0 && st.alloc.fits(held + nodes, st.reclaim_room, draw)
+                    && st.alloc.keeps(st.metadata_buckets, stable, held + nodes, st.reclaim_room, draw, false)
             }
             Class::Reclaim => st.reclaim_granted + nodes <= st.reclaim_room,
         };
@@ -1002,7 +1010,7 @@ impl<D: BlockDev> Mount<D> {
     fn can_free(&self) -> bool {
         let st = self.st.borrow();
         let flush = st.journal_frees() || st.alloc.returning();
-        !st.journal.closed.is_empty() || (flush && st.journal.may_close()) || st.cache.ids().into_iter().any(|id| {
+        !st.journal.closed.is_empty() || (flush && st.journal.may_close()) || st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b)) || st.cache.ids().into_iter().any(|id| {
             let n = st.cache.node(id);
             n.dirty() && !n.writing && n.captured.is_none() && n.held == 0
         })
@@ -1018,6 +1026,7 @@ impl<D: BlockDev> Mount<D> {
         if self.reclaim_round(Order::OldestPin).await? {
             return Ok(());
         }
+        if self.compact_metadata().await? { return Ok(()); }
         self.flush_open().await.map(|_| ())
     }
 
@@ -1068,10 +1077,12 @@ impl<D: BlockDev> Mount<D> {
             }
             self.ungrant(&mut st, Class::Ordinary, bound, nodes);
         };
-        if let Draw::Reserved(id) = draw { self.reservations.borrow_mut().active.remove(&id).expect("admission consumes a reservation"); }
         let mut txn = Txn::default();
         let out = prepare(&mut txn).await;
         self.finish(txn, out.is_ok(), Class::Ordinary, bound, nodes)?;
+        if out.is_ok() {
+            if let Draw::Reserved(id) = draw { self.reservations.borrow_mut().active.remove(&id).expect("a completed reserved write consumes its reservation"); }
+        }
         out
     }
 
@@ -1091,14 +1102,19 @@ impl<D: BlockDev> Mount<D> {
         let stopped = st.read_only;
         let allocated = core::mem::take(&mut txn.allocated_data);
         if apply && stopped.is_none() {
-            for &(before, after) in &txn.bucket_states {
-                st.metadata_buckets = st.metadata_buckets + u64::from(after == data_type::BTREE) - u64::from(before == data_type::BTREE);
+            for &(b, before, after) in &txn.bucket_states {
+                st.metadata_buckets = st.metadata_buckets + u64::from(after.data_type == data_type::BTREE) - u64::from(before.data_type == data_type::BTREE);
+                if after.data_type == data_type::BTREE && u64::from(after.dirty) <= u64::from(self.sb.member.bucket_sectors) / 2 {
+                    st.sparse_metadata.insert(b);
+                } else {
+                    st.sparse_metadata.remove(&b);
+                }
             }
             for (&(btree, level, pos), update) in &txn.updates {
                 if level != 0 { continue; }
                 let node = st.cache.node(held(st, btree, level, pos));
                 let prior = node.keys.get(node.at(pos)).filter(|(k, _)| k.pos == pos);
-                let charge = |entry: Option<&(Key, Vec<u8>)>| entry.filter(|(_, v)| !allocator::structural(btree, v)).map_or(0, |(_, v)| key_bytes(v) as u64);
+                let charge = |entry: Option<&(Key, Vec<u8>)>| entry.map_or(0, |(_, v)| allocator::charge(btree, v));
                 st.metadata_bytes = st.metadata_bytes + charge(update.as_ref()) - charge(prior);
                 if btree == Btree::Backpointers && update.is_none() && prior.is_some_and(|(_, value)| value.get(2) == Some(&data_type::BTREE)) {
                     st.baseline_nodes.remove(&(pos.offset >> self.bp_shift()));

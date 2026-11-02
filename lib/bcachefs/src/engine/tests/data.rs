@@ -166,10 +166,11 @@ fn reserved_blocks_write_after_capacity_refusal_and_dropped_tokens_return_capaci
                 Err(Error::NoSpace(_)) => break,
                 Err(e) => panic!("reserve: {e:?}"),
             }
-            assert!(tokens.len() < 1000);
+            assert!(tokens.len() < dev.blocks() as usize);
         }
-        assert!(tokens.len() > 1);
+        assert!(tokens.len() >= 64, "an ordinary 256 KiB buffered write fits a 64 MiB volume");
         let count = tokens.len();
+        std::println!("64 MiB volume accepts {count} pending 4 KiB blocks before refusal");
         drop(tokens);
         let mut tokens = Vec::new();
         for i in 0..count {
@@ -292,6 +293,7 @@ fn a_failed_reserved_data_write_keeps_the_old_contents_and_reports_failure() {
     let mut token = block_on_ready(m.reserve(ino, 0, BLOCK)).unwrap();
     assert_eq!(block_on_ready(m.write_reserved(&mut token, 0, &[0x44; BLOCK], NOW)), Err(Error::Device(toyos_blockdev::Error::Device)));
     assert_eq!(failing.attempts.get(), 3);
+    assert!(matches!(block_on_ready(m.write_reserved(&mut token, 0, &[0x44; BLOCK], NOW)), Err(Error::ReadOnly(_))));
     assert!(matches!(block_on_ready(m.commit()), Err(Error::ReadOnly(_))));
     let mut got = [0; BLOCK];
     block_on_ready(m.read(ino, 0, &mut got)).unwrap();

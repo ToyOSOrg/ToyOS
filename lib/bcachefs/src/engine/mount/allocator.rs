@@ -20,23 +20,43 @@ use crate::engine::read::Source;
 use crate::engine::value::{accounting_pos, class, data_type};
 use crate::engine::{journal, Btree, Error, Result};
 
-/// Records whose distinct positions are bounded by the device geometry.
-pub(super) fn structural(btree: Btree, value: &[u8]) -> bool {
-    matches!(btree, Btree::Alloc | Btree::Freespace | Btree::Lru | Btree::NeedDiscard | Btree::BucketGens)
-        || (btree == Btree::Backpointers && value.get(2) == Some(&data_type::BTREE))
+/// Bytes beyond the records prepaid from the device geometry.
+pub(super) fn charge(btree: Btree, value: &[u8]) -> u64 {
+    let prepaid = match btree {
+        Btree::Alloc => 104,
+        Btree::Freespace | Btree::Lru | Btree::NeedDiscard => 40,
+        Btree::BucketGens => 296,
+        Btree::Backpointers if value.get(2) == Some(&data_type::BTREE) => 72,
+        _ => 0,
+    };
+    super::key_bytes(value).saturating_sub(prepaid) as u64
 }
 
-pub(super) async fn metadata_budget<S: Source>(source: &S) -> Result<(u64, u64, BTreeSet<u64>)> {
+pub(super) struct Metadata {
+    pub bytes: u64,
+    pub buckets: u64,
+    pub baseline: BTreeSet<u64>,
+    pub sparse: BTreeSet<u64>,
+}
+
+pub(super) async fn metadata_budget<S: Source>(source: &S) -> Result<Metadata> {
     let mut bytes = 0u64;
     let roots: BTreeSet<u64> = Btree::ALL.iter().filter_map(|&b| source.root_of(b).map(|r| r.ptr.ptr.sector)).collect();
     let mut baseline = BTreeSet::new();
+    let mut sparse = BTreeSet::new();
     let shift = match source.superblock().flag(6, 40, 8) { 0 => 10, value => value as u32 };
     for btree in Btree::ALL {
         source.walk(btree, Bpos::MIN, |key, value| {
-            if !structural(btree, value) { bytes += super::key_bytes(value) as u64; }
+            bytes += charge(btree, value);
             if btree == Btree::Backpointers && value.get(2) == Some(&data_type::BTREE) {
                 let sector = key.pos.offset >> shift;
                 if !roots.contains(&sector) { baseline.insert(sector); }
+            }
+            if btree == Btree::Alloc {
+                let bucket = super::AllocV4::decode(value)?;
+                if bucket.data_type == data_type::BTREE && u64::from(bucket.dirty) <= u64::from(source.superblock().member.bucket_sectors) / 2 {
+                    sparse.insert(key.pos.offset);
+                }
             }
             Ok(true)
         }).await?;
@@ -46,7 +66,7 @@ pub(super) async fn metadata_budget<S: Source>(source: &S) -> Result<(u64, u64, 
         Some((_, value)) => journal::counters(&value)?.first().copied().unwrap_or(0),
         None => 0,
     };
-    Ok((bytes, buckets, baseline))
+    Ok(Metadata { bytes, buckets, baseline, sparse })
 }
 
 /// What a transaction's nodes may take of the room left.
@@ -127,6 +147,16 @@ impl Allocator {
         (self.free + self.returning.values().sum::<u64>() - pinned + metadata_buckets + self.metadata_taken.len() as u64) * self.per_bucket
     }
 
+    pub(super) fn metadata_open(&self, bucket: u64) -> bool {
+        self.open.is_some_and(|(b, _, _)| b == bucket)
+    }
+
+    pub(super) fn stable_slots(&self, nodes: u64) -> u64 {
+        // A closed bucket that cannot be evacuated is more than half
+        // full. One open bucket may be arbitrarily empty.
+        nodes * if self.per_bucket == 1 { 1 } else { 2 } + self.per_bucket
+    }
+
     /// Node slots to be had now, past `blocked` buckets that a traversal
     /// may still lead into.
     pub(super) fn ready(&self, blocked: usize) -> u64 {
@@ -145,12 +175,20 @@ impl Allocator {
     /// them, and [`OVERSIZED`] covers nodes read packed. A write that
     /// replaces a node gives its bucket back only once that is durable, so
     /// nothing here counts on it.
-    pub(super) fn fits(&self, nodes: usize, reclaim_room: usize, draw: Draw) -> bool {
+    pub(super) fn transient(nodes: usize, reclaim_room: usize, draw: Draw) -> u64 {
         let reserve = match draw {
             Draw::Ordinary | Draw::Reserved(_) => FREEING_RESERVE,
             Draw::Freeing => 0,
         };
-        (COMMON_REWRITE * (nodes + reclaim_room)) as u64 + OVERSIZED + reserve <= self.slots()
+        (COMMON_REWRITE * (nodes + reclaim_room)) as u64 + OVERSIZED + reserve
+    }
+
+    pub(super) fn fits(&self, nodes: usize, reclaim_room: usize, draw: Draw) -> bool {
+        Self::transient(nodes, reclaim_room, draw) <= self.slots()
+    }
+
+    pub(super) fn keeps(&self, metadata_buckets: u64, stable: u64, nodes: usize, reclaim_room: usize, draw: Draw, data: bool) -> bool {
+        self.stable_slots(stable) + Self::transient(nodes, reclaim_room, draw) + if data { self.per_bucket } else { 0 } <= self.capacity(metadata_buckets)
     }
 
     /// The open bucket's next slot: its sector and generation.
@@ -192,7 +230,7 @@ impl Allocator {
     }
 
     pub(super) fn data_fits(&self, nodes: usize, reclaim_room: usize) -> bool {
-        let need = (COMMON_REWRITE * (nodes + reclaim_room)) as u64 + OVERSIZED + FREEING_RESERVE;
+        let need = Self::transient(nodes, reclaim_room, Draw::Ordinary);
         need + self.per_bucket <= self.slots()
     }
 
