@@ -1,12 +1,14 @@
 //! A `drives` row's process for a test boot: it says which function the claim
 //! it was started holding drives, by the address the kernel hands over, and
-//! holds it until the function leaves. Then it says what each call on the
-//! claim answered and ends with 0, which is owed no restart.
+//! holds it until the function leaves, with its BAR 0 mapped and the BAR's
+//! handle kept. Then it says what each call on the claim answered, and what
+//! mapping that kept handle again answers, and ends with 0, which is owed no
+//! restart.
 
 use toyos::endow::{Endowments, DEV_PREFIX};
 use toyos::poller::{Poller, READABLE};
-use toyos_abi::syscall::{RegWidth, SyscallError};
-use toyos::PciDev;
+use toyos_abi::syscall::{self, RegWidth, SyscallError, VmProt};
+use toyos::{AsHandle, PciDev};
 
 /// What it says once it holds its function, followed by the function's
 /// `bus:dev.func`.
@@ -24,6 +26,11 @@ fn main() {
     let claim: PciDev = endowed.take(&label).expect("pciholder: the claim its label names");
     let info = claim.describe().expect("pciholder: its claim's description");
     let at = format!("{:02x}:{:02x}.{}", info.bus, info.dev, info.func);
+    // Made before the function leaves, and kept past it: its departure is
+    // what revokes them.
+    let kept = syscall::device_bar_map(claim.as_handle().raw(), 0).expect("pciholder: its function's BAR 0");
+    // SAFETY: a mapping made only to be held, never read or written.
+    unsafe { syscall::shm_map(kept, VmProt::ReadWrite) }.expect("pciholder: its BAR 0 mapped");
     println!("{HOLDING}{at}");
     let poller = Poller::new(1);
     let read = loop {
@@ -37,5 +44,7 @@ fn main() {
     let config = claim.config_read(0, RegWidth::U32).err();
     let bar = claim.map_bar(0, 1).err();
     let grant = claim.dma_alloc(4096).err();
-    println!("{GONE}{at}: irq={read:?} config={config:?} bar={bar:?} dma={grant:?}");
+    // SAFETY: a refused map makes no mapping, and one made is never touched.
+    let remapped = unsafe { syscall::shm_map(kept, VmProt::ReadWrite) }.err();
+    println!("{GONE}{at}: irq={read:?} config={config:?} bar={bar:?} dma={grant:?} kept={remapped:?}");
 }

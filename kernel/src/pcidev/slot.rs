@@ -246,11 +246,21 @@ pub(super) fn above(function: &Function) -> Option<&'static HotPlug> {
 }
 
 /// Act on what every armed slot is owed, and answer how long until one may
-/// change with no interrupt to say so.
+/// change with no interrupt to say so. What a departed function's claim
+/// handed out is taken under [`REFRESHING`], before an arrival on its record
+/// can be claimed, and revoked once it is let go: the revoke's shootdown
+/// waits on other CPUs (`super::Handed::revoke`).
 pub(super) fn refresh() -> Option<u64> {
     let slots: Vec<&'static HotPlug> = SLOTS.lock().clone();
-    let _refreshing = REFRESHING.lock();
-    slots.iter().filter_map(|slot| slot.refresh()).min()
+    let mut departed = Vec::new();
+    let settle = {
+        let _refreshing = REFRESHING.lock();
+        slots.iter().filter_map(|slot| slot.refresh(&mut departed)).min()
+    };
+    for handed in departed {
+        handed.revoke();
+    }
+    settle
 }
 
 impl HotPlug {
@@ -365,7 +375,9 @@ impl HotPlug {
 
     /// Act on what this slot is owed; answers how long until it may change
     /// with no interrupt to say so.
-    fn refresh(&self) -> Option<u64> {
+    /// What the slot is owed, acted on; what each function behind it that
+    /// departed since the last reading had handed out goes into `departed`.
+    fn refresh(&self, departed: &mut Vec<super::Handed>) -> Option<u64> {
         let seen = self.seen();
         if !seen.occupied {
             self.removing.store(false, Ordering::Release);
@@ -404,6 +416,7 @@ impl HotPlug {
             let left = function.left.swap(0, Ordering::AcqRel);
             if left != 0 {
                 log!("pcidev: {function} left the device set; arrival {left} is retired");
+                departed.push(super::take(function));
             }
             super::retire(number);
         }

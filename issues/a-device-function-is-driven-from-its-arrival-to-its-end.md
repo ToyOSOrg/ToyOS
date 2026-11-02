@@ -204,16 +204,11 @@ started. Nothing reaches userland when a device arrives or leaves.
    - §6.6.1's 100 ms after the link comes up is waited out on every port;
      Readiness Notifications (§6.23), which end it early where a port and
      device support them, are not read.
-   - **A departed function's BAR mapping outlives it**: a departure drops
-     its BARs from `Machine::decoded`, so the next arrival behind the port
-     can be assigned the same addresses while a process still holds a
-     mapping made through the departed claim
-     (`issues/a-bars-mapping-outlives-the-claim-it-was-asked-on.md`). Its
-     addresses are not reassigned while the claim is held, since `retire`
-     waits for the release. Exit: that issue's revocation at a claim's
-     release, and at departure from the set's reader (`slot::refresh`'s
-     per-record loop, never the slot's interrupt), wired by whichever of the
-     two lands second.
+   - **A departed function's BAR mapping goes with it**: the set's reader
+     revokes what the departed arrival's claim handed out (#1137's
+     `Handed`), taken under `REFRESHING` and revoked once it is let go, so
+     the next arrival behind the port may be given the same addresses
+     (`issues/a-bars-mapping-outlives-the-claim-it-was-asked-on.md`).
    - On AArch64's SMMUv3 a function that arrived after the unit was
      programmed is listed and refused a claim by name: its routes are read
      for the functions enumerated at boot.

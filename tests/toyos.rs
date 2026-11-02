@@ -5395,7 +5395,9 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
 /// plugged in again: the boot one is on a domain of its own before the slot
 /// is armed and held by a `pciholder`; the pull — the slot's attention
 /// button, which is what `device_del` presses — answers `Gone` to every call
-/// the holder's claim makes, the holder ends, the supervisor's set no longer
+/// the holder's claim makes, and to a map of the BAR handle it kept from
+/// before, which the departure revoked while the claim was still held; the
+/// holder ends, the supervisor's set no longer
 /// lists the function, and the slot is powered off, which is what QEMU waits
 /// for to say the device is deleted; the plug is a later arrival, its
 /// unassigned BAR given an address inside the port's window, with a
@@ -5417,7 +5419,7 @@ fn a_function_arrives_and_leaves() -> Result<(), String> {
     }
 
     qemu.device_del(qemu::HOTPLUG_PRESENT, Duration::from_secs(30)).map_err(|e| format!("{e}\n{console}"))?;
-    let gone = format!("pciholder: gone PCI {at}: irq=Gone config=Some(Gone) bar=Some(Gone) dma=Some(Gone)");
+    let gone = format!("pciholder: gone PCI {at}: irq=Gone config=Some(Gone) bar=Some(Gone) dma=Some(Gone) kept=Some(Gone)");
     let left = format!("supervisor: PCI {at} (arrival ");
     let ended = format!("pciholder on PCI {at} ended, code=0");
     await_guest(&mut qemu, &mut console, "the holder's end", |t| t.contains(&gone) && t.contains(&left) && t.contains(&ended))

@@ -15,17 +15,18 @@ already does, so the old process's next access faults:
 - when the claim moves, by IPC or a spawn's endowment. The move takes what
   the claim handed out under the lock that moves it, so the new holder's
   fresh mappings are not taken, and revokes it once that lock is let go.
+- when its function departs from behind a hot-plug slot (#934): the device
+  set's reader revokes what the departed arrival's claim handed out
+  (`slot::refresh`), on its thread and with no `MACHINE` or slot lock held,
+  so a mapping the departed claim made reaches nothing the next device
+  behind the port is assigned. `a_function_arrives_and_leaves` reads a BAR
+  handle the holder kept from before the pull mapping `Gone` after it.
 
 An aperture's handle is installed only while the caller's table still holds
 the claim, under that same lock, so one a sibling thread asks for across a
 release or a move is refused `Gone`.
 
 **What is left:**
-- **A function's departure.** #934 adds a function leaving (Gone). It calls
-  `pcidev::revoke_handed(number)` from its refresh loop, never from the
-  hot-plug interrupt and never with `MACHINE` held. Until then, a mapping of
-  a function that departs while its claim is held outlives the departure.
-  The next device behind that port may then be given the same BAR addresses.
 - **What no guest test reads.** `bar_map_again` (`tests/toyos.rs`) reads a
   BAR handle kept past an IPC move and past the claim's end mapping `Gone`,
   and the new holder's fresh mapping reading the device. Still unread: a
