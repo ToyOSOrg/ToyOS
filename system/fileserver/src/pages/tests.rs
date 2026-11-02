@@ -337,6 +337,26 @@ fn memory_bytes_survive_close_sync_and_namespace_replacement_until_the_last_hold
 }
 
 #[test]
+fn persistent_unlink_preserves_dirty_bytes_until_the_last_holder() {
+    let mut v = volume();
+    let fake = Fake::new(64, 16);
+    let mut files = Files::new(Some(fake));
+    let (node, id) = open(&mut files, &mut v, "home/held");
+    files.write(&mut v, id, node, 0, b"still held").unwrap();
+    files.held(id);
+    let object = files.object(id).unwrap();
+    v.unlink("home/held").unwrap();
+    files.unlinked(&mut v, id).unwrap();
+    assert_eq!(read(&mut files, &mut v, (node, id), 0, 10), b"still held");
+    files.closed(&mut v, id, node).unwrap();
+    assert_eq!(files.object(id), Some(object));
+    files.notice(&mut v, Notice::NoHolders { object });
+    assert_eq!(files.object(id), None);
+    assert_eq!(v.node_meta(node), Err(Error::Stale));
+    assert!(v.sync().unwrap().is_empty());
+}
+
+#[test]
 fn memory_sparse_files_do_not_resurrect_truncated_bytes_or_evict_existing_data() {
     let mut volume = crate::memory::MemoryVolume::new(&[], clock);
     let fake = Fake::new(2, 0);
