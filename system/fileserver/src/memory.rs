@@ -201,8 +201,12 @@ impl Volume for MemoryVolume {
         let kind = self.nodes[&node].meta.kind;
         if to.strip_prefix(from).is_some_and(|rest| rest.starts_with('/')) { return Err(Error::IntoItself); }
         if let Ok(over) = self.node(to) {
-            if self.nodes[&over].meta.kind == Kind::Dir { return Err(Error::IsADirectory); }
-            if kind == Kind::Dir { return Err(Error::NotADirectory); }
+            match (kind == Kind::Dir, self.nodes[&over].meta.kind == Kind::Dir) {
+                (false, true) => return Err(Error::IsADirectory),
+                (true, false) => return Err(Error::NotADirectory),
+                (true, true) if !self.nodes[&over].children.is_empty() => return Err(Error::NotEmpty),
+                _ => {}
+            }
             self.detach(to);
         }
         let old_parent = self.node(parent(from))?;
@@ -279,5 +283,23 @@ mod tests {
         assert_eq!(listed[1].name, "link");
         assert_eq!(listed[1].meta.kind, Kind::Symlink);
         assert_eq!(volume.read_link("link"), Ok("/home/toy/target".into()));
+    }
+
+    #[test]
+    fn a_directory_can_replace_only_an_empty_directory() {
+        let mut volume = MemoryVolume::new(&[], clock);
+        volume.mkdir("source").unwrap();
+        volume.mkdir("target").unwrap();
+        let file = volume.open("source/file", CREATE).unwrap();
+        let directory = volume.identity("source").unwrap();
+        volume.rename("source", "target").unwrap();
+        assert_eq!(volume.identity("target"), Ok(directory));
+        assert_eq!(volume.identity("target/file"), Ok(file));
+        assert_eq!(volume.lstat("source"), Err(Error::NotFound));
+        volume.mkdir("empty").unwrap();
+        assert_eq!(volume.rename("empty", "target"), Err(Error::NotEmpty));
+        assert_eq!(volume.rename("target/file", "empty"), Err(Error::IsADirectory));
+        assert_eq!(volume.rename("empty", "target/file"), Err(Error::NotADirectory));
+        assert_eq!(volume.identity("target/file"), Ok(file));
     }
 }

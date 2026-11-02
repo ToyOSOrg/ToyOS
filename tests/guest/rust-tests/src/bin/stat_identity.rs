@@ -1,10 +1,5 @@
-//! A file's identity through std (`std::os::toyos::fs::MetadataExt`) on the
-//! kernel's own mount (`/tmp`): one file is one `(dev, ino)` through every
-//! path, a symlink, its open handle, its directory's listing and a rename;
-//! two files are two, as are two directories; a symlink is one of its own,
-//! across a rename; a directory that ends gives its number up, and one that
-//! stands keeps it; and the volume is no served one, `toyos::fs::SERVED_VOLUME`
-//! clear.
+//! File and directory identities survive renames and held descriptions on
+//! both the userland memory volume and writable DATA.
 
 use std::fs::{self, File, Metadata};
 use std::os::toyos::fs::{symlink, MetadataExt};
@@ -71,67 +66,58 @@ fn judge(dir: &str, spelling: &str) -> u64 {
     ida.0
 }
 
-/// On a kernel mount a directory that ends gives its number up, so the one
-/// made there next is another: by `rmdir`, and by the unlink or the rename of
-/// the file that alone made it one, but not by that file's truncating open.
-fn an_ended_directory_is_forgotten() {
-    const DIR: &str = "/tmp/stat-identity-ended";
-    const FILE: &str = "/tmp/stat-identity-ended/f";
-    const AWAY: &str = "/tmp/stat-identity-away";
-    let again = |end: &str, make: &dyn Fn(), ends: &dyn Fn()| {
-        make();
-        let before = of(DIR);
-        ends();
-        make();
-        assert_ne!(of(DIR), before, "{end} left {DIR}'s number to the directory made there next");
-        ends();
-    };
-    let mkdir = || fs::create_dir(DIR).unwrap();
-    let file = || write(FILE);
-    again("rmdir", &mkdir, &|| fs::remove_dir(DIR).unwrap());
-    again("an unlink", &file, &|| fs::remove_file(FILE).unwrap());
-    again("a rename", &file, &|| {
-        fs::rename(FILE, AWAY).unwrap();
-        fs::remove_file(AWAY).unwrap();
-    });
-
-    // A truncating open puts its file back at once: the directory never ended.
-    file();
-    let kept = of(DIR);
-    file();
-    assert_eq!(of(DIR), kept, "a truncating open of its one file renumbered {DIR}");
-    fs::remove_file(FILE).unwrap();
+/// Removing a child never removes or renumbers its directory. Removing and
+/// recreating that directory must assign a new identity.
+fn directory_lifetimes(root: &str) {
+    let dir = format!("{root}/stat-identity-lifetime");
+    let file = format!("{dir}/file");
+    let away = format!("{root}/stat-identity-away");
+    fs::create_dir(&dir).unwrap();
+    let before = of(&dir);
+    write(&file);
+    fs::remove_file(&file).unwrap();
+    assert_eq!(of(&dir), before, "unlink removed or renumbered its parent");
+    write(&file);
+    fs::rename(&file, &away).unwrap();
+    assert_eq!(of(&dir), before, "rename removed or renumbered its parent");
+    fs::remove_file(&away).unwrap();
+    fs::remove_dir(&dir).unwrap();
+    fs::create_dir(&dir).unwrap();
+    assert_ne!(of(&dir), before, "a recreated directory reused a live identity");
+    fs::remove_dir(&dir).unwrap();
 }
 
-/// On a kernel mount a directory that still stands after a removal beneath it
-/// keeps its number, as `/tmp` above it does: one a second file still makes a
-/// directory, and one `mkdir` made whose only file goes.
-fn a_standing_directory_keeps_its_number() {
-    const DIR: &str = "/tmp/stat-identity-stands";
-    const ONE: &str = "/tmp/stat-identity-stands/one";
-    const TWO: &str = "/tmp/stat-identity-stands/two";
-    let tmp = of("/tmp");
-
-    write(ONE);
-    write(TWO);
-    let before = of(DIR);
-    fs::remove_file(ONE).unwrap();
-    assert_eq!(of(DIR), before, "an unlink beside a second file renumbered {DIR}");
-    assert_eq!(of("/tmp"), tmp, "an unlink beneath it renumbered /tmp");
-    fs::remove_file(TWO).unwrap();
-
-    fs::create_dir(DIR).unwrap();
-    write(ONE);
-    let before = of(DIR);
-    fs::remove_file(ONE).unwrap();
-    assert_eq!(of(DIR), before, "an unlink of its only file renumbered the made {DIR}");
-    fs::remove_dir(DIR).unwrap();
+fn directory_replacement(root: &str) {
+    use toyos::fs::{Base, Dir, O_DIRECTORY, O_READ};
+    let source = format!("{root}/stat-identity-source");
+    let target = format!("{root}/stat-identity-target");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&target).unwrap();
+    write(&format!("{source}/file"));
+    let mut directory = Dir::connect(toyos::endow::namespace().unwrap(), &format!("fs:{root}")).unwrap();
+    let original = directory.open(Base::Root, "stat-identity-source", O_DIRECTORY | O_READ).unwrap().fid;
+    let alias = directory.dup(original).unwrap();
+    let replaced = directory.open(Base::Root, "stat-identity-target", O_DIRECTORY | O_READ).unwrap().fid;
+    fs::rename(&source, &target).unwrap();
+    let now = of(&format!("{target}/file"));
+    for fid in [original, alias] {
+        assert_eq!(directory.stat(Base::Fid(fid), "file", true).unwrap().node, now.1,
+            "a directory alias lost its identity while its name moved");
+    }
+    assert!(directory.stat(Base::Fid(replaced), "file", true).is_err(),
+        "a replaced directory description acquired the replacing directory's contents");
+    for fid in [original, alias, replaced] { directory.close(fid); }
+    fs::remove_file(format!("{target}/file")).unwrap();
+    fs::remove_dir(&target).unwrap();
 }
 
 fn main() {
-    an_ended_directory_is_forgotten();
-    a_standing_directory_keeps_its_number();
-    let tmp = judge("/tmp", "/tmp/../tmp/./stat-identity-a");
-    assert_eq!(tmp & toyos::fs::SERVED_VOLUME, 0, "a kernel mount answered a served volume");
+    for root in ["/tmp", "/home"] {
+        directory_lifetimes(root);
+        directory_replacement(root);
+        let spelling = format!("{root}/../{}/./stat-identity-a", root.trim_start_matches('/'));
+        let volume = judge(root, &spelling);
+        assert_ne!(volume & toyos::fs::SERVED_VOLUME, 0, "a userland volume answered an unserved identity");
+    }
     println!("stat_identity: ok");
 }

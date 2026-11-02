@@ -1055,7 +1055,7 @@ impl Server {
                 if let Some(identity) = over {
                     self.files.unlinked(&mut *self.volume, identity)?;
                 }
-                self.each_dir(|held, _| descriptions::moved(held, &from, &to));
+                self.each_dir(|held, removed| descriptions::renamed(held, removed, &from, &to));
                 self.dirtied();
                 Ok(Answer::Reply(Reply::ok()))
             }
@@ -1085,10 +1085,14 @@ impl Server {
         }
     }
 
-    /// `f` on every held directory's path and removal, on every connection.
+    /// `f` once per held directory description, including exported aliases.
     fn each_dir(&mut self, mut f: impl FnMut(&mut String, &mut bool)) {
+        let mut seen = std::collections::BTreeSet::new();
         for client in self.clients.values() {
             for shared in client.fids.dirs() {
+                if !seen.insert(Rc::as_ptr(shared)) {
+                    continue;
+                }
                 if let Held::Dir { path, removed } = &mut shared.borrow_mut().held {
                     f(path, removed);
                 }
