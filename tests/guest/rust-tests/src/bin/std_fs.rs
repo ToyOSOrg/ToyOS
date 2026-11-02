@@ -48,7 +48,7 @@ fn the_empty_path_names_nothing() {
     }
 }
 
-/// `create_new` on the kernel's `/tmp` makes a file once and refuses the name
+/// `create_new` on `/tmp` makes a file once and refuses the name
 /// after, as a lock file needs.
 fn create_new_is_exclusive_on_tmp() {
     let path = "/tmp/std_fs_create_new";

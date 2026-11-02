@@ -69,6 +69,7 @@ fn main() {
     assert_eq!(appender.stream_position().unwrap(), 12, "an append leaves the offset at the end");
     drop(appender);
     assert_eq!(fs::read(FILE).unwrap(), b"01ab456789xy");
+    refused_spawn_keeps_export(f.as_raw_fd());
 
     // The child writes `CHILD\n` at the parent's offset, 4, and the parent
     // its `!` after it, over the `x`.
@@ -106,6 +107,25 @@ fn main() {
     assert_eq!(&buf, b"abZ", "open description survives unlink");
     drop(f);
     println!("served_file_offset: passed");
+}
+
+fn refused_spawn_keeps_export(fd: i32) {
+    use toyos::AsHandle;
+    let exported = toyos::files::export(fd).expect("export the shared description");
+    let fds = [(1, exported.as_handle(), toyos::fd::Kind::File)];
+    let request = toyos::spawn::Spawn {
+        program: "/system/bin/toybox", image: None, image_held: false,
+        argv: b"toybox\0", env: &[], cwd: "/", fds: &fds,
+        endow: Vec::new(), provided: Vec::new(), parent: toyos::spawn::Parent::Caller,
+        independent: false, launcher: None, pager: None,
+    };
+    let toyos::spawn::Start::Helper(helper) = request.start().expect("a helper") else { panic!("a helper became a launch") };
+    // No image: the kernel refuses after the SDK duplicated the endowments.
+    assert!(matches!(helper.spawn(None), Err(toyos::spawn::Refused::Syscall(toyos_abi::syscall::SyscallError::InvalidArgument))));
+    let mut dir = toyos::fs::Dir::adopt(toyos::ipc::Connection::received(exported)).expect("refusal kept the original export");
+    let fid = toyos::fs::Fid { id: 1, generation: dir.generation() };
+    assert_eq!(dir.seek(fid, toyos::fs::SEEK_CURRENT, 0).unwrap(), 4, "refusal kept the shared offset");
+    dir.close(fid);
 }
 
 #[repr(C)]

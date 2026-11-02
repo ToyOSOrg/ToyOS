@@ -30,9 +30,9 @@
 //!
 //! **An export is a connection this server makes to itself** through a private
 //! port only it holds a connector to, for its life: connect, then accept, which
-//! answers exactly that connection since this loop is single-threaded. The end
-//! handed out cannot be duplicated, so it has one holder. A restart takes the
-//! port with it, so nothing pending reaches a new instance.
+//! answers exactly that connection since this loop is single-threaded. Each
+//! child gets a fresh exported connection and adopts its aliases together. A
+//! restart takes the port with it, so nothing pending reaches a new instance.
 //!
 //! **A server never blocks on a client.** Accept and the first frame are two
 //! events; a request is buffered until whole; every reply is one `try_send`,
@@ -74,7 +74,6 @@ use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor};
 use toyos::shm::{Bytes, SharedMemory};
 use toyos::Pipe;
-use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{SyscallError, MAX_BADGE, PIPE_CAPACITY, SERVE_PREFIX};
 
 /// What one turn of a stream appends at most.
@@ -87,11 +86,6 @@ const STREAM_PRESENT: usize = PIPE_CAPACITY / STREAM_READ;
 
 /// The name the private export port has in this server's own namespace.
 const EXPORT_PORT: &str = "export";
-
-/// What the end an export hands out carries: a connection's rights without
-/// `DUP`, so whoever holds it is its one holder, and may pass it on.
-const EXPORTED: Rights =
-    Rights::TRANSFER.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE).union(Rights::MAP);
 
 // One wait watches the acceptor, every connection and every stream at once.
 const _: () = assert!(1 + MAX_SERVED + MAX_HANDSHAKES + MAX_STREAMS <= Poller::MAX_HANDLES as usize);
@@ -216,15 +210,12 @@ impl Exports {
         Self { acceptor, names }
     }
 
-    /// A connection to this server: the end to hand away, narrowed to
-    /// [`EXPORTED`], and this server's.
+    /// A connection to this server: the end to hand away and this server's.
+    /// The exported end keeps `DUP` for spawning from a borrowed handle.
     fn connect(&self) -> Result<(Connection, Connection), Error> {
         let theirs = self.names.open(EXPORT_PORT).map_err(|e| Error::kernel("an export's connection", e))?;
         let ours = self.acceptor.accept().unwrap_or_else(|e| panic!("fileserver: the export port refused an accept ({e:?})"));
-        let narrowed = toyos::AsHandle::as_handle(&theirs)
-            .try_clone_narrowed(EXPORTED)
-            .map_err(|e| Error::kernel("an export's narrowed end", e))?;
-        Ok((Connection::received(narrowed), ours))
+        Ok((theirs, ours))
     }
 }
 
@@ -1105,7 +1096,7 @@ impl Server {
             return Err(Error::InvalidRequest);
         }
         let rel = self.path(id, r)?;
-        let path = match self.resolve(id, r.fid, &rel, true)? {
+        let path = match self.resolve(id, r.fid, &rel, r.flags & O_CREATE_NEW == 0)? {
             Resolved::Absolute(p) => return self.follow(id, r, &p),
             Resolved::Path(p) => p,
         };
@@ -1119,7 +1110,7 @@ impl Server {
             Err(e) => return Err(e),
         };
         let (held, meta) = match found {
-            Some(Kind::Dir) if r.flags & O_CREATE_NEW != 0 => return Err(Error::AlreadyExists),
+            Some(_) if r.flags & O_CREATE_NEW != 0 => return Err(Error::AlreadyExists),
             Some(Kind::Dir) if writes => return Err(Error::IsADirectory),
             Some(Kind::Dir) => (Held::Dir { path: path.clone(), removed: false }, self.volume.lstat(&path)?),
             _ if r.flags & O_DIRECTORY != 0 => return Err(if found.is_some() { Error::NotADirectory } else { Error::NotFound }),
