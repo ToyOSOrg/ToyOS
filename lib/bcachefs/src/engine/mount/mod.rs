@@ -79,7 +79,7 @@ const MIN_NODE: usize = 32 << 10;
 /// Retries of a failed node or journal write, each of the same bytes.
 const RETRIES: usize = 2;
 /// Feature bits a volume carries once written read-write (A1.41).
-const RW_FEATURES: u64 = 1 << 9 | 1 << 12 | 1 << 13 | 1 << 17 | 1 << 18;
+const RW_FEATURES: u64 = 1 << 8 | 1 << 9 | 1 << 12 | 1 << 13 | 1 << 17 | 1 << 18;
 /// Feature bit 5: the superblock holds a blacklist.
 const BLACKLIST_FEATURE: u64 = 1 << 5;
 

@@ -19,6 +19,8 @@ fn file_data_overwrites_sparse_ranges_and_truncation_survive_remount() {
         m.truncate(ino, 41_003, NOW).await.unwrap();
         m.truncate(ino, want.len() as u64, NOW).await.unwrap();
         want[41_003..].fill(0);
+        m.write(ino, 41_000, b"new tail", NOW).await.unwrap();
+        want[41_000..41_008].copy_from_slice(b"new tail");
         m.commit().await.unwrap();
         ino
     });
@@ -51,12 +53,13 @@ fn orphan_release_reclaims_file_data_and_keeps_other_files() {
 fn encrypted_data_uses_authenticated_extents_and_durable_version_ranges() {
     let dev = formatted(64 << 20, Some(Encryption { passphrase: b"test", kdf: MIN_KDF }));
     let m = block_on_ready(Mount::unlock(&dev, b"test", LIMITS, MEMORY, random())).unwrap();
-    let ino = block_on_ready(async {
+    let (ino, old_version) = block_on_ready(async {
         let ino = m.create(m.root(), b"secret", New::File, OWNER, NOW).await.unwrap().ino;
         m.write(ino, 0, &[0x45; 8192], NOW).await.unwrap();
         m.write(ino, 100, b"changed", NOW).await.unwrap();
+        let old_version = super::super::read::Source::get(&m, Btree::Extents, Bpos::new(ino, 8, u32::MAX)).await.unwrap().unwrap().0.version.lo;
         m.truncate(ino, 200, NOW).await.unwrap();
-        ino
+        (ino, old_version)
     });
     block_on_ready(m.unmount()).unwrap();
     let v = block_on_ready(Volume::unlock(&dev, b"test", LIMITS)).unwrap();
@@ -64,8 +67,6 @@ fn encrypted_data_uses_authenticated_extents_and_durable_version_ranges() {
     want[100..107].copy_from_slice(b"changed");
     assert_eq!(read_all(&v, ino).unwrap(), want);
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
-    let first = block_on_ready(v.get(Btree::Extents, Bpos::new(ino, 8, u32::MAX))).unwrap().unwrap();
-    let old_version = first.0.version.lo;
     assert!(old_version > 0 && old_version <= v.key_version());
     drop(v);
     let m = block_on_ready(Mount::unlock(&dev, b"test", LIMITS, MEMORY, random())).unwrap();
@@ -214,5 +215,101 @@ fn symlink_targets_are_file_data_and_read_after_remount() {
     });
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     assert_eq!(block_on_ready(v.readlink(path(&v, "link"))).unwrap(), b"../target");
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+#[test]
+fn partial_truncate_needs_no_new_data_block_at_capacity() {
+    let dev = formatted(64 << 20, None);
+    let ino = mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap().ino;
+        m.write(ino, 0, &[0x77; 8192], NOW).await.unwrap();
+        let mut tokens = Vec::new();
+        loop {
+            match m.reserve(ino, 0, BLOCK).await {
+                Ok(token) => tokens.push(token),
+                Err(Error::NoSpace(_)) => break,
+                Err(e) => panic!("reserve: {e:?}"),
+            }
+        }
+        m.truncate(ino, 700, NOW).await.unwrap();
+        drop(tokens);
+        m.truncate(ino, 8192, NOW).await.unwrap();
+        ino
+    });
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    let mut want = vec![0; 8192];
+    want[..700].fill(0x77);
+    assert_eq!(read_all(&v, ino).unwrap(), want);
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+#[test]
+fn a_reservation_past_the_maximum_file_size_is_refused_without_overflow() {
+    let dev = formatted(64 << 20, None);
+    mounted(&dev, async |m: &Mount<&Image>| {
+        assert!(matches!(m.reserve(m.root(), u64::MAX - 1, 1).await, Err(Error::Invalid(_))));
+    });
+}
+
+#[test]
+fn a_failed_reserved_data_write_keeps_the_old_contents_and_reports_failure() {
+    use core::cell::Cell;
+    use toyos_blockdev::Block;
+    struct Failing<'a> {
+        dev: &'a Image,
+        attempts: Cell<usize>,
+    }
+    impl BlockDev for Failing<'_> {
+        fn blocks(&self) -> u64 {
+            self.dev.blocks()
+        }
+        async fn read(&self, lba: u64, out: &mut [Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+            self.dev.read(lba, out).await
+        }
+        async fn write(&self, lba: u64, data: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+            self.dev.write(lba, data).await
+        }
+        async fn flush(&self) -> core::result::Result<(), toyos_blockdev::Error> {
+            self.dev.flush().await
+        }
+        async fn write_data(&self, _: u64, _: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+            self.attempts.set(self.attempts.get() + 1);
+            Err(toyos_blockdev::Error::Device)
+        }
+    }
+    let dev = formatted(64 << 20, None);
+    let ino = mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap().ino;
+        m.write(ino, 0, &[0x22; BLOCK], NOW).await.unwrap();
+        ino
+    });
+    let failing = Failing { dev: &dev, attempts: Cell::new(0) };
+    let m = block_on_ready(Mount::open(&failing, MEMORY, random())).unwrap();
+    let mut token = block_on_ready(m.reserve(ino, 0, BLOCK)).unwrap();
+    assert_eq!(block_on_ready(m.write_reserved(&mut token, 0, &[0x44; BLOCK], NOW)), Err(Error::Device(toyos_blockdev::Error::Device)));
+    assert_eq!(failing.attempts.get(), 3);
+    assert!(matches!(block_on_ready(m.commit()), Err(Error::ReadOnly(_))));
+    let mut got = [0; BLOCK];
+    block_on_ready(m.read(ino, 0, &mut got)).unwrap();
+    assert_eq!(got, [0x22; BLOCK]);
+}
+
+#[test]
+fn a_large_imported_extent_is_sliced_without_rewriting_its_neighbors() {
+    let original: Vec<u8> = (0..50_000).map(|i| (i * 11) as u8).collect();
+    let mut tree = Tree::new();
+    tree.file(Tree::ROOT, b"f", &original, Meta { perm: 0o644, uid: 0, gid: 0 }).unwrap();
+    let dev = populated(64 << 20, &tree, 13);
+    let ino = mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.lookup(m.root(), b"f").await.unwrap().unwrap().ino;
+        let mut token = m.reserve(ino, 4500, 100).await.unwrap();
+        m.write_reserved(&mut token, 4500, &[0x66; 100], NOW).await.unwrap();
+        ino
+    });
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    let mut want = original;
+    want[4500..4600].fill(0x66);
+    assert_eq!(read_all(&v, ino).unwrap(), want);
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }

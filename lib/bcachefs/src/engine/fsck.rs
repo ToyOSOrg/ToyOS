@@ -86,7 +86,7 @@ fn superblock(sb: &Superblock) -> Vec<Finding> {
     let clean = sb.clean_flag();
     let ext = sb.field(field_type::EXT).unwrap_or(&[]);
     let flags = sb.member.flags;
-    let expected_features = FEATURES | if sb.blacklist.is_empty() { 0 } else { 1 << 5 };
+    let expected_features = FEATURES | h.features[0] & (1 << 8) | if sb.blacklist.is_empty() { 0 } else { 1 << 5 };
     // Going read-write leaves the compat bits as they are (A1.41).
     let expected_compat = COMPAT_INITIALIZED | COMPAT_CLEAN;
     let has_replicas = |t: u8| sb.replicas.iter().any(|r| r.data_type == t && r.devs == [0] && r.required == 1);
@@ -570,8 +570,11 @@ impl<'a> Walk<'a> {
         // Each inode's extents: their sectors, the furthest end, overlaps.
         let mut data: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
         let mut before: Option<(u64, u64)> = None;
-        for (&(ino, end), &(_, size)) in &self.extents {
+        for (&(ino, end), &(kind_, size)) in &self.extents {
             let pos = Bpos::new(ino, end, mkfs::ROOT_SNAPSHOT);
+            if kind_ == kind::INLINE_DATA && sb.header.features[0] & (1 << 8) == 0 {
+                found.push(Finding::Key { btree: Btree::Extents, pos, rule: "inline data without its feature bit" });
+            }
             let start = end.saturating_sub(u64::from(size));
             if before.is_some_and(|(i, e)| i == ino && start < e) {
                 found.push(Finding::Key { btree: Btree::Extents, pos, rule: "overlapping the extent before it" });
