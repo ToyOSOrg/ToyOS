@@ -47,7 +47,7 @@ pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
 unsafe fn copy_short_alias(dest: *mut u8, src: *const u8, n: usize) {
     // SAFETY: `n` is at least 64; down only between disjoint ranges.
     unsafe {
-        if (n > ROUTED_MOST && has_erms()) || (dest as usize).abs_diff(src as usize) < n {
+        if n > ROUTED_MOST || (dest as usize).abs_diff(src as usize) < n {
             movsb(dest, src, n);
         } else if has_avx() {
             copy_down_avx(dest, src, n);
@@ -73,49 +73,33 @@ unsafe fn movsb(dest: *mut u8, src: *const u8, n: usize) {
 /// The distance under which [`copy_forward`] copies highest first.
 const SHORT_ALIAS: usize = 512;
 
-/// The longest copy [`copy_forward`] copies highest first where `rep movsb`
-/// is a fast string at every length (ERMS): a longer one is bound by memory
-/// bandwidth, where its stores, which need not read a line before writing it
-/// whole (Intel 64 and IA-32 Architectures Optimization Reference Manual,
-/// "Enhanced REP MOVSB and STOSB"), outrun the loop's.
+/// The longest copy [`copy_forward`] copies highest first. A longer one runs
+/// from beyond the caches, where the loop's stores read each line before
+/// writing it and measured slower than `rep movsb` at distances that do not
+/// stall.
 const ROUTED_MOST: usize = 1 << 20;
 
 /// Whether this CPU runs AVX and its system saves the YMM state: CPUID.1:ECX
 /// AVX (bit 28) and OSXSAVE (bit 27), and XCR0's SSE and AVX bits (1 and 2).
+/// Asked once; a racing first call asks twice and stores the same answer.
 pub(crate) fn has_avx() -> bool {
-    features() & AVX != 0
-}
-
-/// Whether `rep movsb` is a fast string at any length: ERMS, CPUID.(7,0):EBX
-/// bit 9.
-fn has_erms() -> bool {
-    features() & ERMS != 0
-}
-
-const AVX: u8 = 1 << 0;
-const ERMS: u8 = 1 << 1;
-const ASKED: u8 = 1 << 7;
-
-/// The CPU's answers [`has_avx`] and [`has_erms`] read, asked once; a racing
-/// first call asks twice and stores the same answer.
-fn features() -> u8 {
     use core::sync::atomic::{AtomicU8, Ordering};
-    static FEATURES: AtomicU8 = AtomicU8::new(0);
-    let known = FEATURES.load(Ordering::Relaxed);
-    if known & ASKED != 0 {
-        return known;
+    static AVX: AtomicU8 = AtomicU8::new(0);
+    match AVX.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let ecx = core::arch::x86_64::__cpuid(1).ecx;
+            let avx = ecx & (1 << 28) != 0 && ecx & (1 << 27) != 0 && {
+                let (lo, _hi): (u32, u32);
+                // SAFETY: OSXSAVE says XGETBV exists; XCR0 is readable at every privilege level.
+                unsafe { core::arch::asm!("xgetbv", in("ecx") 0, out("eax") lo, out("edx") _hi, options(nomem, nostack, preserves_flags)) };
+                lo & 0b110 == 0b110
+            };
+            AVX.store(if avx { 2 } else { 1 }, Ordering::Relaxed);
+            avx
+        }
     }
-    let ecx = core::arch::x86_64::__cpuid(1).ecx;
-    let avx = ecx & (1 << 28) != 0 && ecx & (1 << 27) != 0 && {
-        let (lo, _hi): (u32, u32);
-        // SAFETY: OSXSAVE says XGETBV exists; XCR0 is readable at every privilege level.
-        unsafe { core::arch::asm!("xgetbv", in("ecx") 0, out("eax") lo, out("edx") _hi, options(nomem, nostack, preserves_flags)) };
-        lo & 0b110 == 0b110
-    };
-    let erms = core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 9) != 0;
-    let answer = ASKED | if avx { AVX } else { 0 } | if erms { ERMS } else { 0 };
-    FEATURES.store(answer, Ordering::Relaxed);
-    answer
 }
 
 /// Where a descending loop of `width`-byte stores starts: the offset of the
