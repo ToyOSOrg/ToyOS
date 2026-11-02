@@ -3,10 +3,11 @@
 #
 # Only what a job list needs to run and to reach the log, the ACPI server, and
 # netstack for `osbench lan` and `osbench internet`, each its own metal row
-# (`tests/toyos.rs`): no compositor or sound, so little but the measurement
-# asks for a CPU. The image has no DATA partition, so DATA is the bench's: the
-# TOYOS-DATA partition on its NVMe, which `osbench persist` writes, and which
-# the `osbench` row refuses a boot to be without.
+# (`tests/toyos.rs`), and the shipped image's display driver: no compositor
+# or sound, so little but the measurement asks for a CPU. The image has no
+# DATA partition, so DATA is the bench's: the TOYOS-DATA partition on its
+# NVMe, which `osbench persist` writes, and which the `osbench` row refuses a
+# boot to be without.
 #
 # The runner's capability carries `jobs`, for the fairness run that starts each
 # workload as a job of its own; `counters`, `trace` and `roster`, so `osbench
@@ -44,6 +45,14 @@ serves = ["netstack", "link"]
 [programs.i219]
 drives = ["pci:02:00:00/8086:15fc"]
 receives = ["link"]
+
+# The T14's display driver, as `images/system.toml` runs it, so the power a
+# row reads is the display engine the shipped system leaves. With no
+# compositor, its presents on `display-output` have no consumer, so the row
+# receives no port; the driver says so and keeps the scan-out. No other bench
+# has the T14's iGPU, so none starts it.
+[programs.tgl-display]
+drives = ["pci:03:00:00/8086:9a49"]
 
 # The order `osbench all` runs the groups in. The bound is the metal row's, its
 # 465 s on the 60 s every list has (`tests/toyos.rs`), restated for a boot of
