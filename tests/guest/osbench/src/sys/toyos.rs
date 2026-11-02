@@ -417,7 +417,7 @@ pub mod diag {
     pub fn describe(entry: &Entry) -> String {
         let what = match entry.event {
             Event::Pick => "pick",
-            Event::Wake => "wake",
+            Event::Wake { .. } => "wake",
             Event::Park => "park",
             Event::Preempt => "preempt",
             Event::Migrate { .. } => "migrate",

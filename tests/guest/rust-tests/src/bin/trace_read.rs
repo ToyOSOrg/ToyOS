@@ -151,7 +151,7 @@ fn woken_before_picked(entries: &[Entry], task: Thread) {
     for e in entries.iter().filter(|e| e.event.names_its_task() && e.thread == Some(task)) {
         match e.event {
             Event::Park => parked = true,
-            Event::Wake => {
+            Event::Wake { .. } => {
                 parked = false;
                 woken = Some(e);
             }

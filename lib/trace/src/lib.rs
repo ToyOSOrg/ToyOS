@@ -30,7 +30,7 @@ pub struct Thread {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Pick,
-    Wake,
+    Wake { waker: u32 },
     Park,
     Preempt,
     Migrate { to: u32 },
@@ -48,13 +48,13 @@ impl Event {
     /// Whether the record's thread is the task the event happened to, rather
     /// than whichever thread the CPU was running.
     pub const fn names_its_task(&self) -> bool {
-        matches!(self, Self::Pick | Self::Wake | Self::Park | Self::Migrate { .. } | Self::Adopt | Self::Retire)
+        matches!(self, Self::Pick | Self::Wake { .. } | Self::Park | Self::Migrate { .. } | Self::Adopt | Self::Retire)
     }
 
     const fn name(&self) -> &'static str {
         match self {
             Self::Pick => "pick",
-            Self::Wake => "wake",
+            Self::Wake { .. } => "wake",
             Self::Park => "park",
             Self::Preempt => "preempt",
             Self::Migrate { .. } => "migrate",
@@ -107,7 +107,7 @@ impl Entry {
         let kind = Kind::from_u16(raw.kind).ok_or(Undecodable::Kind(raw.kind))?;
         let event = match kind {
             Kind::Pick => Event::Pick,
-            Kind::Wake => Event::Wake,
+            Kind::Wake => Event::Wake { waker: raw.data },
             Kind::ParkCommit => Event::Park,
             Kind::Preempt => Event::Preempt,
             Kind::Migrate => Event::Migrate { to: raw.data },
@@ -155,7 +155,7 @@ impl fmt::Display for Line<'_> {
             Event::TimerFireBurst { fires } => write!(f, " fires={fires}"),
             Event::Mark { index } => write!(f, " index={index}"),
             Event::Pick
-            | Event::Wake
+            | Event::Wake { .. }
             | Event::Park
             | Event::Preempt
             | Event::Adopt
@@ -201,7 +201,7 @@ mod tests {
     fn a_wake_names_its_task_and_prints_when_on_which_cpu() {
         let entry = Entry::decode(&raw(Kind::Wake, 0, 7, 0)).unwrap();
         assert_eq!(entry.thread, Some(Thread { pid: 7, tid: 0 }));
-        assert_eq!(entry.event, Event::Wake);
+        assert_eq!(entry.event, Event::Wake { waker: 0 });
         assert_eq!(entry.line(CLOCK).to_string(), "[12.000345678 cpu3] wake 7/0");
     }
 
