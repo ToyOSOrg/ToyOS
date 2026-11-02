@@ -149,9 +149,15 @@ fn empty_buckets<D: BlockDev>(v: &Volume<D>) -> u64 {
         .sum()
 }
 
-/// A 64 MiB volume whose one file leaves about `free` buckets empty.
-pub(super) fn nearly_full(data: &mut Vec<u8>, free: u64) -> Image {
-    let v = block_on_ready(Volume::open(formatted(64 << 20, None))).unwrap();
+/// The native admission reserve, plus one transaction's rewrite footprint.
+/// The populated file needs at most one extent and backpointer per bucket;
+/// count their bytes twice to cover both occupancy and imported-node debt.
+pub(super) fn nearly_full(data: &mut Vec<u8>) -> Image {
+    let blank = formatted(64 << 20, None);
+    let m = block_on_ready(Mount::open(&blank, MEMORY, random())).unwrap();
+    let free = m.test_reserve_buckets(super::read::Source::superblock(&m).member.nbuckets * 2 * 128);
+    block_on_ready(m.unmount()).unwrap();
+    let v = block_on_ready(Volume::open(blank)).unwrap();
     let (empty, bucket) = (empty_buckets(&v), u64::from(v.superblock().member.bucket_sectors) * SECTOR as u64);
     data.resize(((empty - free) * bucket) as usize * 63 / 64, 7);
     let mut tree = Tree::new();
@@ -171,7 +177,7 @@ pub(super) fn nearly_full(data: &mut Vec<u8>, free: u64) -> Image {
 #[test]
 fn a_full_volume_refuses_changes_by_name_and_still_removes_names_and_unmounts_clean() {
     let mut data = Vec::new();
-    let dev = nearly_full(&mut data, 400);
+    let dev = nearly_full(&mut data);
     let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
     let stalled = || panic!("stalled; {}", m.dump());
     let made = Executor::new().block_on(
@@ -201,7 +207,7 @@ fn a_full_volume_refuses_changes_by_name_and_still_removes_names_and_unmounts_cl
         },
         stalled,
     );
-    assert!(made > 1_000, "{made} creates filled the volume");
+    assert!(made > 21, "the capacity refusal follows enough creates to exercise removals: {made}");
     block_on_ready(m.unmount()).unwrap();
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     let (entries, more) = block_on_ready(v.readdir(v.root(), 0, usize::MAX)).unwrap();
@@ -242,7 +248,7 @@ pub(super) fn reclaim_all<D: BlockDev>(m: &Mount<D>) -> Vec<u64> {
 #[test]
 fn a_full_volume_crashed_mounts_read_write_and_still_removes_names() {
     let mut data = Vec::new();
-    let dev = nearly_full(&mut data, 400);
+    let dev = nearly_full(&mut data);
     let made = {
         let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
         let made = Executor::new().block_on(

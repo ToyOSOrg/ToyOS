@@ -292,15 +292,15 @@ fn renames(files: usize, rounds: usize) -> Vec<Op> {
     ops
 }
 
-/// Allocation pressure: a volume a file has filled to a few hundred empty
-/// buckets, its leaves rewritten until emptied buckets are taken again, a
+/// Allocation pressure: a file leaves the native rewrite reserve and one
+/// transaction's headroom, then leaves rewrite until emptied buckets are taken again, a
 /// crash at every request. Every crash state replays to a prefix holding
 /// every commit and checks clean: a bucket is written again only once its
 /// emptying is durable. Red when one is reused before.
 #[test]
 fn renames_reusing_buckets_on_a_nearly_full_volume_survive_a_crash_at_every_request() {
     let mut data = Vec::new();
-    let image = super::buckets::nearly_full(&mut data, 400).into_inner();
+    let image = super::buckets::nearly_full(&mut data).into_inner();
     let reused = ops_survive_a_crash_on(image, None, PRESSED, &renames(8, 8), 4, 8);
     assert!(reused > 4, "{reused} buckets taken again");
 }
