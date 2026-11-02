@@ -89,7 +89,7 @@ impl<D: BlockDev> Mount<D> {
     pub async fn reserve(&self, ino: u64, offset: u64, len: usize) -> Result<Reservation> {
         let bytes = self.sb.block_bytes();
         let first = offset / bytes as u64 * bytes as u64;
-        if len == 0 || offset.checked_add(len as u64).is_none_or(|end| end > first + bytes as u64 || end > i64::MAX as u64) {
+        if len == 0 || offset.checked_add(len as u64).is_none_or(|end| end > i64::MAX as u64 || end > first.saturating_add(bytes as u64)) {
             return Err(Error::Invalid("reservation outside one filesystem block"));
         }
         let _data = self.data_slot().await;
@@ -299,7 +299,7 @@ impl<D: BlockDev> Mount<D> {
             Ok(true)
         })
         .await?;
-        if old.len() > 1 {
+        if old.len() > 2 || (old.len() == 2 && !old.iter().any(|(k, _)| k.kind == kind::INLINE_DATA)) {
             return Err(Error::Unsupported("multiple data extents in one filesystem block"));
         }
         for (k, v) in &old {
@@ -362,22 +362,22 @@ impl<D: BlockDev> Mount<D> {
         })
         .await?;
         self.st.borrow_mut().clocks[1] += u64::from(physical);
+        retained.push((key, value));
+        self.replace_data_keys(txn, inode, old, retained).await
+    }
+
+    async fn replace_data_keys(&self, txn: &mut Txn, inode: &mut InodeValue, old: Vec<(Key, Vec<u8>)>, new: Vec<(Key, Vec<u8>)>) -> Result<()> {
         let mut buckets = BTreeMap::new();
-        self.data_counted(txn, &mut buckets, &key, &value, true).await?;
         for (k, v) in old {
             self.data_counted(txn, &mut buckets, &k, &v, false).await?;
             self.set(txn, Btree::Extents, k.pos, None).await?;
-            inode.sectors = inode.sectors.checked_sub(if k.kind == kind::EXTENT { u64::from(k.size) } else { 0 }).ok_or(Error::Corrupt("inode sectors below its extents"))?;
+            inode.sectors = inode.sectors.checked_sub(allocated_sectors(&k)).ok_or(Error::Corrupt("inode sectors below its extents"))?;
         }
-        for (k, v) in retained {
+        for (k, v) in new {
             self.data_counted(txn, &mut buckets, &k, &v, true).await?;
-            if k.kind == kind::EXTENT {
-                inode.sectors += u64::from(k.size);
-            }
+            inode.sectors += allocated_sectors(&k);
             self.set(txn, Btree::Extents, k.pos, Some((k, v))).await?;
         }
-        self.set(txn, Btree::Extents, pos, Some((key, value))).await?;
-        inode.sectors += u64::from(key.size);
         self.data_buckets(txn, buckets).await?;
         Ok(())
     }
@@ -479,17 +479,23 @@ impl<D: BlockDev> Mount<D> {
     }
 
     pub(super) async fn trim_extents(&self, ino: u64, size: u64) -> Result<()> {
-        let block = self.sb.block_bytes() as u64;
-        let end = size.div_ceil(block) * block;
-        if !size.is_multiple_of(block) && self.extent_after(ino, size).await?.is_some_and(|(k, _)| start(&k).is_ok_and(|first| first < end)) {
-            let version = self.data_version().await?;
+        let end = size.div_ceil(SECTOR as u64) * SECTOR as u64;
+        if !size.is_multiple_of(SECTOR as u64) && self.extent_after(ino, size).await?.is_some_and(|(k, _)| start(&k).is_ok_and(|first| first < end)) {
             self.transact(K_TX, FOOTPRINT, Draw::Freeing, async |txn: &mut Txn| {
                 let mut inode = self.inode_in(txn, ino).await?;
-                let first = size / block * block;
-                let mut bytes = alloc::vec![0u8; block as usize];
+                let first = size / SECTOR as u64 * SECTOR as u64;
+                let (key, value) = self.extent_after(ino, first).await?.ok_or(Error::Corrupt("truncate tail extent disappeared"))?;
+                let mut bytes = alloc::vec![0u8; SECTOR];
                 Source::read(self, ino, first, &mut bytes).await?;
                 bytes[(size - first) as usize..].fill(0);
-                self.replace_block(txn, ino, &mut inode, first, &bytes, version, None).await?;
+                let mut retained = Vec::new();
+                let from = start(&key)?;
+                if from < first {
+                    retained.push(slice(&key, &value, from, first)?);
+                }
+                let pos = Bpos::new(ino, end / SECTOR as u64, ROOT_SNAPSHOT);
+                retained.push((Key { size: 1, ..Key::new(kind::INLINE_DATA, pos) }, bytes));
+                self.replace_data_keys(txn, &mut inode, alloc::vec![(key, value)], retained).await?;
                 self.set_inode(txn, ino, &inode).await
             })
             .await?;
@@ -504,13 +510,11 @@ impl<D: BlockDev> Mount<D> {
                 let mut buckets = BTreeMap::new();
                 self.data_counted(txn, &mut buckets, &key, &value, false).await?;
                 self.set(txn, Btree::Extents, key.pos, None).await?;
-                inode.sectors = inode.sectors.checked_sub(if key.kind == kind::EXTENT { u64::from(key.size) } else { 0 }).ok_or(Error::Corrupt("inode sectors below its extents"))?;
+                inode.sectors = inode.sectors.checked_sub(allocated_sectors(&key)).ok_or(Error::Corrupt("inode sectors below its extents"))?;
                 if first < end {
                     let (k, v) = slice(&key, &value, first, end)?;
                     self.data_counted(txn, &mut buckets, &k, &v, true).await?;
-                    if k.kind == kind::EXTENT {
-                        inode.sectors += u64::from(k.size);
-                    }
+                    inode.sectors += allocated_sectors(&k);
                     self.set(txn, Btree::Extents, k.pos, Some((k, v))).await?;
                 }
                 self.data_buckets(txn, buckets).await?;
@@ -546,6 +550,14 @@ fn checked_extent(v: &[u8]) -> Result<Extent> {
         return Err(Error::Unsupported("modifying cached, unwritten, compressed or other-device data"));
     }
     Ok(extent)
+}
+
+fn allocated_sectors(k: &Key) -> u64 {
+    if matches!(k.kind, kind::EXTENT | kind::INLINE_DATA) {
+        u64::from(k.size)
+    } else {
+        0
+    }
 }
 
 fn slice(k: &Key, v: &[u8], first: u64, end: u64) -> Result<(Key, Vec<u8>)> {
