@@ -191,14 +191,14 @@ impl<D: Disk> Volume for DataVolume<D> {
         let mut cursor = 0;
         let mut listed = Vec::new();
         loop {
-            let (entries, end) = mapped("readdir", self.cache.block_on(self.fs.readdir(inode.ino, cursor, 256)))?;
-            if entries.is_empty() && !end { return Err(Error::Io); }
+            let (entries, more) = mapped("readdir", self.cache.block_on(self.fs.readdir(inode.ino, cursor, 256)))?;
+            if entries.is_empty() && more { return Err(Error::Io); }
             for entry in entries {
                 cursor = entry.next;
                 let inode = mapped("directory entry", self.cache.block_on(self.fs.inode(entry.ino)))?;
                 listed.push(Listed { name: String::from_utf8(entry.name).map_err(|_| Error::Io)?, meta: self.meta(&inode)?, identity: entry.ino });
             }
-            if end { break; }
+            if !more { break; }
         }
         listed.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         Ok(listed)
@@ -225,9 +225,11 @@ impl<D: Disk> Volume for DataVolume<D> {
         let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
         open.holders = open.holders.checked_sub(1).expect("one close per open");
         if open.holders != 0 { return Ok(()); }
-        self.persist(node)?;
         let inode = mapped("close", self.cache.block_on(self.fs.inode(node)))?;
-        if inode.nlink == 0 { mapped("orphan close", self.cache.block_on(self.fs.release(node)))?; }
+        if inode.nlink == 0 {
+            self.open.get_mut(&node).unwrap().pages.clear();
+            mapped("orphan close", self.cache.block_on(self.fs.release(node)))?;
+        } else { self.persist(node)?; }
         self.open.remove(&node);
         Ok(())
     }
@@ -338,7 +340,17 @@ impl<D: Disk> Volume for DataVolume<D> {
     fn sync(&mut self) -> Result<Vec<(Node, Error)>, Error> {
         let nodes: Vec<_> = self.open.keys().copied().collect();
         let mut refused = Vec::new();
-        for node in nodes { if let Err(error) = self.persist(node) { refused.push((node, error)); } }
+        for node in nodes {
+            match self.persist(node) {
+                Err(error) => refused.push((node, error)),
+                Ok(()) if self.open[&node].holders == 0 => {
+                    let inode = mapped("unheld inode", self.cache.block_on(self.fs.inode(node)))?;
+                    if inode.nlink == 0 { mapped("orphan release", self.cache.block_on(self.fs.release(node)))?; }
+                    self.open.remove(&node);
+                }
+                Ok(()) => {}
+            }
+        }
         mapped("sync", self.cache.block_on(self.fs.commit()))?;
         Ok(refused)
     }

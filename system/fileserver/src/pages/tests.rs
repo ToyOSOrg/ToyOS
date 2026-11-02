@@ -686,7 +686,7 @@ fn an_fsync_makes_its_file_durable_and_no_other_files_overwrite() {
 /// another: its pages reach the volume first and its entry goes with them,
 /// so after a stop it reads its own bytes, never an earlier tenant's.
 #[test]
-fn an_fsync_writes_first_the_pages_of_every_file_its_commit_carries() {
+fn an_fsync_commits_its_file_without_publishing_another_files_dirty_size() {
     let page = PAGE as usize;
     let mut v = stale_volume();
     let mut files = Files::new(Some(Fake::new(64, 16)));
@@ -696,11 +696,11 @@ fn an_fsync_writes_first_the_pages_of_every_file_its_commit_carries() {
     files.write(&mut v, c.1, c.0, 0, &pattern(3 * page, 5)).unwrap();
 
     files.fsync(&mut v, Some((a.1, a.0))).unwrap();
-    assert!(!files.owes(&v), "the fsync left a change owed");
+    assert!(files.owes(&v), "the other file still has buffered data");
     let mut v = after_a_stop(v);
     assert!(on_volume(&mut v, "home/a") == pattern(page, 4), "the fsynced file is not as written");
     let carried = on_volume(&mut v, "home/c");
-    assert!(carried == pattern(3 * page, 5), "the carried file reads {} bytes, not its own", carried.len());
+    assert!(carried.is_empty(), "unwritten data must not become a durable file length");
 }
 
 /// A file whose pages a sync could not write is owed after an fsync of
@@ -717,7 +717,7 @@ fn a_file_a_sync_could_not_write_back_stays_owed_past_another_s_fsync() {
     files.write(&mut v, f.1, f.0, 0, &pattern(page, 6)).unwrap();
     fake.0.borrow_mut().unwritable = Some(files.files[&f.1].object);
     assert_eq!(files.sync(&mut v).map(|u| u.len()), Ok(1), "the sync wrote the refused file's pages");
-    assert!(!v.owes(), "the sync left f's entry owed");
+    assert!(v.owes(), "the failed file's buffered metadata must stay pending");
     files.write(&mut v, a.1, a.0, 0, &pattern(page, 7)).unwrap();
 
     files.fsync(&mut v, Some((a.1, a.0))).unwrap();

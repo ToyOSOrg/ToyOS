@@ -252,20 +252,19 @@ impl<P: Pager> Files<P> {
         }
     }
 
-    /// A name was removed or replaced. Memory inodes remain usable through
-    /// every open description and paged holder until the last one ends.
+    /// A removed name does not invalidate an inode the volume still holds.
     pub fn unlinked(&mut self, volume: &mut dyn Volume, identity: u64) -> Result<(), Error> {
-        if volume.memory() {
-            self.collect_unlinked(volume, identity)
-        } else {
-            self.forget(volume, identity);
-            Ok(())
+        let Some(f) = self.files.get(&identity) else { return Ok(()) };
+        match volume.node_meta(f.node) {
+            Ok(_) => self.collect_unlinked(volume, identity),
+            Err(Error::Stale) => { self.forget(volume, identity); Ok(()) }
+            Err(error) => Err(error),
         }
     }
 
     fn collect_unlinked(&mut self, volume: &mut dyn Volume, identity: u64) -> Result<(), Error> {
         let Some(f) = self.files.get(&identity) else { return Ok(()) };
-        if volume.memory() && f.opens == 0 && !f.held && !volume.linked(f.node)? {
+        if f.opens == 0 && !f.held && !volume.linked(f.node)? {
             self.forget(volume, identity);
         }
         Ok(())
@@ -623,7 +622,12 @@ impl<P: Pager> Files<P> {
             }
         }
         let mut unwritten = volume.sync()?;
-        unwritten.extend(refused);
+        for (node, error) in refused {
+            match unwritten.iter_mut().find(|(held, _)| *held == node) {
+                Some((_, why)) => *why = error,
+                None => unwritten.push((node, error)),
+            }
+        }
         Ok(unwritten)
     }
 
