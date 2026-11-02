@@ -35,20 +35,25 @@ pub(super) fn charge(btree: Btree, value: &[u8]) -> u64 {
 pub(super) struct Metadata {
     pub bytes: u64,
     pub buckets: u64,
+    pub nodes: u64,
     pub baseline: BTreeSet<u64>,
     pub sparse: BTreeSet<u64>,
+    pub sparse_data: BTreeSet<u64>,
 }
 
 pub(super) async fn metadata_budget<S: Source>(source: &S) -> Result<Metadata> {
     let mut bytes = 0u64;
     let roots: BTreeSet<u64> = Btree::ALL.iter().filter_map(|&b| source.root_of(b).map(|r| r.ptr.ptr.sector)).collect();
     let mut baseline = BTreeSet::new();
+    let mut nodes = 0;
     let mut sparse = BTreeSet::new();
+    let mut sparse_data = BTreeSet::new();
     let shift = match source.superblock().flag(6, 40, 8) { 0 => 10, value => value as u32 };
     for btree in Btree::ALL {
         source.walk(btree, Bpos::MIN, |key, value| {
             bytes += charge(btree, value);
             if btree == Btree::Backpointers && value.get(2) == Some(&data_type::BTREE) {
+                nodes += 1;
                 let sector = key.pos.offset >> shift;
                 if !roots.contains(&sector) { baseline.insert(sector); }
             }
@@ -56,6 +61,9 @@ pub(super) async fn metadata_budget<S: Source>(source: &S) -> Result<Metadata> {
                 let bucket = super::AllocV4::decode(value)?;
                 if bucket.data_type == data_type::BTREE && u64::from(bucket.dirty) <= u64::from(source.superblock().member.bucket_sectors) / 2 {
                     sparse.insert(key.pos.offset);
+                }
+                if bucket.data_type == data_type::USER && u64::from(bucket.dirty) <= u64::from(source.superblock().member.bucket_sectors) / 2 {
+                    sparse_data.insert(key.pos.offset);
                 }
             }
             Ok(true)
@@ -66,7 +74,7 @@ pub(super) async fn metadata_budget<S: Source>(source: &S) -> Result<Metadata> {
         Some((_, value)) => journal::counters(&value)?.first().copied().unwrap_or(0),
         None => 0,
     };
-    Ok(Metadata { bytes, buckets, baseline, sparse })
+    Ok(Metadata { bytes, buckets, nodes, baseline, sparse, sparse_data })
 }
 
 /// What a transaction's nodes may take of the room left.
@@ -144,11 +152,19 @@ impl Allocator {
 
     pub(super) fn capacity(&self, metadata_buckets: u64) -> u64 {
         let pinned = self.pins.values().filter(|(_, empty)| empty.is_some()).count() as u64;
-        (self.free + self.returning.values().sum::<u64>() - pinned + metadata_buckets + self.metadata_taken.len() as u64) * self.per_bucket
+        (self.free + self.returning.values().sum::<u64>() - pinned) * self.per_bucket + self.occupied_metadata(metadata_buckets)
+    }
+
+    pub(super) fn occupied_metadata(&self, metadata_buckets: u64) -> u64 {
+        (metadata_buckets + self.metadata_taken.len() as u64) * self.per_bucket
     }
 
     pub(super) fn metadata_open(&self, bucket: u64) -> bool {
         self.open.is_some_and(|(b, _, _)| b == bucket)
+    }
+
+    pub(super) fn movable_data(&self, bucket: u64) -> bool {
+        !self.pins.contains_key(&bucket) && self.data.is_none_or(|(b, _, _)| b != bucket)
     }
 
     pub(super) fn stable_slots(&self, nodes: u64) -> u64 {
@@ -216,9 +232,9 @@ impl Allocator {
         self.data = Some((b, 0, gen));
     }
 
-    pub(super) fn next_data(&mut self, bucket_sectors: u64, sectors: u64) -> Option<(u64, u8)> {
-        if let Some((_, sector)) = self.holes.pop_first() {
-            return Some((sector, 0));
+    pub(super) fn next_data(&mut self, bucket_sectors: u64, sectors: u64, fixed: bool) -> Option<(u64, u8)> {
+        if fixed {
+            if let Some((_, sector)) = self.holes.pop_first() { return Some((sector, 0)); }
         }
         let (b, next, gen) = self.data?;
         if sectors > bucket_sectors - next {
@@ -229,8 +245,8 @@ impl Allocator {
         Some((b * bucket_sectors + next, gen))
     }
 
-    pub(super) fn data_fits(&self, nodes: usize, reclaim_room: usize) -> bool {
-        let need = Self::transient(nodes, reclaim_room, Draw::Ordinary);
+    pub(super) fn data_fits(&self, nodes: usize, reclaim_room: usize, draw: Draw) -> bool {
+        let need = Self::transient(nodes, reclaim_room, draw);
         need + self.per_bucket <= self.slots()
     }
 

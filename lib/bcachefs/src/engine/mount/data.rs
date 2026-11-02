@@ -93,11 +93,12 @@ impl<D: BlockDev> Mount<D> {
             return Err(Error::Invalid("reservation outside one filesystem block"));
         }
         let _data = self.data_slot().await;
-        let id = self
+        let id = loop {
+            let out = self
             .transact(K_TX, FOOTPRINT, Draw::Ordinary, async |txn: &mut Txn| {
                 regular(&self.inode_in(txn, ino).await?)?;
                 self.block_extents(ino, first, first + bytes as u64).await?;
-                let (sector, _) = self.data_sector(self.sb.block_bytes() as u64 / SECTOR as u64).await?;
+                let (sector, _) = self.data_sector(self.sb.block_bytes() as u64 / SECTOR as u64, Draw::Ordinary, true).await?;
                 self.st.borrow_mut().alloc.pin(sector / u64::from(self.sb.member.bucket_sectors));
                 let mut pool = self.reservations.borrow_mut();
                 let id = pool.next;
@@ -105,7 +106,12 @@ impl<D: BlockDev> Mount<D> {
                 pool.active.insert(id, ReservedBlock { ino, sector });
                 Ok(id)
             })
-            .await?;
+            .await;
+            match out {
+                Err(Error::NoSpace(_)) if self.compact_user().await? => continue,
+                other => break other?,
+            }
+        };
         Ok(Reservation { owner: Rc::clone(&self.reservations), id, first, bytes })
     }
 
@@ -177,7 +183,7 @@ impl<D: BlockDev> Mount<D> {
     /// Writes as many bytes as fit. A later chunk's failure returns the
     /// completed byte count; `commit` is the durability barrier.
     pub async fn write(&self, ino: u64, offset: u64, data: &[u8], now: i64) -> Result<usize> {
-        offset.checked_add(data.len() as u64).filter(|n| *n <= i64::MAX as u64).ok_or(Error::Invalid("file size past 2^63-1"))?;
+        offset.checked_add(data.len() as u64).filter(|n| i64::try_from(*n).is_ok()).ok_or(Error::Invalid("file size past 2^63-1"))?;
         let _slot = self.data_slot().await;
         self.observe(now);
         let mut done = 0;
@@ -186,6 +192,14 @@ impl<D: BlockDev> Mount<D> {
             let out = match version {
                 Ok(version) => self.write_chunk(ino, offset + done as u64, &data[done..], now, version, None).await,
                 Err(e) => Err(e),
+            };
+            let out = match out {
+                Err(error @ Error::NoSpace(_)) => match self.compact_user().await {
+                    Ok(true) => continue,
+                    Ok(false) => Err(error),
+                    Err(error) => Err(error),
+                },
+                other => other,
             };
             match out {
                 Ok(n) => done += n,
@@ -239,13 +253,30 @@ impl<D: BlockDev> Mount<D> {
     pub(crate) async fn check_metadata_budget(&self) {
         let metadata = allocator::metadata_budget(self).await.unwrap();
         let st = self.st.borrow();
-        assert_eq!((st.metadata_bytes, st.metadata_buckets), (metadata.bytes, metadata.buckets));
+        assert_eq!((st.metadata_bytes, st.metadata_buckets, st.btree_nodes), (metadata.bytes, metadata.buckets, metadata.nodes));
+        assert!(st.btree_nodes <= st.alloc.occupied_metadata(st.metadata_buckets));
         assert_eq!(st.sparse_metadata, metadata.sparse);
+        assert_eq!(st.sparse_data, metadata.sparse_data);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reserve_buckets(&self, extra_metadata: u64) -> u64 {
+        let st = self.st.borrow();
+        let stable = st.alloc.stable_slots(self.metadata_nodes(&st, extra_metadata + K_TX * 8));
+        let transient = Allocator::transient(FOOTPRINT, st.reclaim_room, Draw::Ordinary);
+        let per_bucket = u64::from(self.sb.member.bucket_sectors) / u64::from(self.sb.node_sectors());
+        (stable + transient + (reclaim::COMMON_REWRITE * FOOTPRINT) as u64).div_ceil(per_bucket)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_compact_user(&self) -> Result<bool> {
+        let _data = self.data_slot().await;
+        self.compact_user().await
     }
 
     /// The high-water mark is durable before any version beneath it is
     /// used, including a ciphertext write whose metadata never commits.
-    async fn data_version(&self) -> Result<Version> {
+    pub(super) async fn data_version(&self) -> Result<Version> {
         if self.key.is_none() {
             return Ok(Version::default());
         }
@@ -299,24 +330,24 @@ impl<D: BlockDev> Mount<D> {
         .await
     }
 
-    async fn data_sector(&self, sectors: u64) -> Result<(u64, u8)> {
+    pub(super) async fn data_sector(&self, sectors: u64, draw: Draw, fixed: bool) -> Result<(u64, u8)> {
         let bucket = u64::from(self.sb.member.bucket_sectors);
         if sectors > bucket {
             return Err(Error::Unsupported("data extent larger than a bucket"));
         }
-        if let Some(at) = self.st.borrow_mut().alloc.next_data(bucket, sectors) {
+        if let Some(at) = self.st.borrow_mut().alloc.next_data(bucket, sectors, fixed) {
             return Ok(at);
         }
         {
             let st = self.st.borrow();
             let held = st.cache.dirty + st.cache.unpointed + st.granted;
             let stable = self.metadata_nodes(&st, st.granted_bytes + self.reservations.borrow().pending(Draw::Ordinary));
-            if !st.alloc.data_fits(held, st.reclaim_room) || !st.alloc.keeps(st.metadata_buckets, stable, held, st.reclaim_room, Draw::Ordinary, true) {
+            if !st.alloc.data_fits(held, st.reclaim_room, draw) || !st.alloc.keeps(st.metadata_buckets, stable, held, st.reclaim_room, draw, true) {
                 return Err(Error::NoSpace("no data bucket beyond metadata and freeing reserves"));
             }
         }
         self.take_bucket(true).await?;
-        Ok(self.st.borrow_mut().alloc.next_data(bucket, sectors).expect("a fresh bucket holds the extent"))
+        Ok(self.st.borrow_mut().alloc.next_data(bucket, sectors, fixed).expect("a fresh bucket holds the extent"))
     }
 
     async fn block_extents(&self, ino: u64, first: u64, end: u64) -> Result<Vec<(Key, Vec<u8>)>> {
@@ -367,7 +398,7 @@ impl<D: BlockDev> Mount<D> {
         let physical = (blocks * BLOCK / SECTOR) as u32;
         let sector = match reserved {
             Some(sector) => sector,
-            None => self.data_sector(u64::from(physical)).await?.0,
+            None => self.data_sector(u64::from(physical), Draw::Ordinary, true).await?.0,
         };
         if reserved.is_none() {
             self.st.borrow_mut().alloc.pin(sector / u64::from(self.sb.member.bucket_sectors));
@@ -375,17 +406,7 @@ impl<D: BlockDev> Mount<D> {
         }
         let gen = self.bucket(txn, sector / u64::from(self.sb.member.bucket_sectors)).await?.reused_gen();
         let ptr = Ptr { sector, dev: 0, gen, cached: false, unwritten: false };
-        let value = if let Some(master) = &self.key {
-            let nonce = Nonce::extent(version.hi, version.lo, 0);
-            master.xor(nonce, data.as_flattened_mut())?;
-            let tag = master.mac(nonce, data.as_flattened())?;
-            Extent::authenticated(physical, tag, self.sb.flag(1, 9, 1) != 0, ptr)
-        } else {
-            if physical > 512 {
-                return Err(Error::Unsupported("unencrypted extent past crc64 maximum"));
-            }
-            Extent::encode(physical, csum_type::CRC32C, crate::crc32c::crc32c_zero(data.as_flattened()), ptr)
-        };
+        let value = self.encode_data(&mut data, version, ptr, self.sb.flag(1, 9, 1) != 0)?;
         let pos = Bpos::new(ino, (first + bytes.len() as u64) / SECTOR as u64, ROOT_SNAPSHOT);
         let key = Key { size: (bytes.len() / SECTOR) as u32, version, ..Key::new(kind::EXTENT, pos) };
         self.reissue("file data write failed", async || {
@@ -398,7 +419,22 @@ impl<D: BlockDev> Mount<D> {
         self.replace_data_keys(txn, inode, old, retained).await
     }
 
-    async fn replace_data_keys(&self, txn: &mut Txn, inode: &mut InodeValue, old: Vec<(Key, Vec<u8>)>, new: Vec<(Key, Vec<u8>)>) -> Result<()> {
+    pub(super) fn encode_data(&self, data: &mut [[u8; BLOCK]], version: Version, ptr: Ptr, wide: bool) -> Result<Vec<u8>> {
+        let physical = (data.len() * BLOCK / SECTOR) as u32;
+        Ok(if let Some(master) = &self.key {
+            let nonce = Nonce::extent(version.hi, version.lo, 0);
+            master.xor(nonce, data.as_flattened_mut())?;
+            let tag = master.mac(nonce, data.as_flattened())?;
+            Extent::authenticated(physical, tag, wide, ptr)
+        } else {
+            if physical > 512 {
+                return Err(Error::Unsupported("unencrypted extent past crc64 maximum"));
+            }
+            Extent::encode(physical, csum_type::CRC32C, crate::crc32c::crc32c_zero(data.as_flattened()), ptr)
+        })
+    }
+
+    pub(super) async fn replace_data_keys(&self, txn: &mut Txn, inode: &mut InodeValue, old: Vec<(Key, Vec<u8>)>, new: Vec<(Key, Vec<u8>)>) -> Result<()> {
         let mut buckets = BTreeMap::new();
         for (k, v) in old {
             self.data_counted(txn, &mut buckets, &k, &v, false).await?;
@@ -575,7 +611,7 @@ impl<D: BlockDev> Mount<D> {
     }
 }
 
-fn checked_extent(v: &[u8]) -> Result<Extent> {
+pub(super) fn checked_extent(v: &[u8]) -> Result<Extent> {
     let extent = Extent::decode(v)?;
     let crc = extent.crc.ok_or(Error::Unsupported("modifying data without a checksum entry"))?;
     if extent.ptr.dev != 0 || extent.ptr.cached || extent.ptr.unwritten || crc.compression != 0 || crc.compressed != crc.uncompressed {

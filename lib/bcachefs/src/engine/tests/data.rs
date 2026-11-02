@@ -185,7 +185,7 @@ fn reserved_blocks_write_after_capacity_refusal_and_dropped_tokens_return_capaci
     });
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     let bytes = read_all(&v, ino).unwrap();
-    for (i, block) in bytes.chunks_exact(BLOCK).enumerate() {
+    for (i, block) in bytes.as_chunks::<BLOCK>().0.iter().enumerate() {
         assert_eq!(block, &[i as u8; BLOCK]);
     }
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
@@ -342,7 +342,7 @@ fn small_and_large_geometries_reserve_an_ordinary_dirty_window() {
         let v = block_on_ready(Volume::open(&dev)).unwrap();
         let got = read_all(&v, ino).unwrap();
         assert_eq!(got.len(), 64 * BLOCK);
-        for (i, block) in got.chunks_exact(BLOCK).enumerate() { assert_eq!(block, &[i as u8; BLOCK]); }
+        for (i, block) in got.as_chunks::<BLOCK>().0.iter().enumerate() { assert_eq!(block, &[i as u8; BLOCK]); }
         assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
     }
 }
@@ -406,4 +406,78 @@ fn a_full_data_volume_can_release_a_large_orphan_and_use_its_capacity_again() {
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     assert_eq!(read_all(&v, ino).unwrap(), bytes);
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+#[test]
+fn retained_small_files_reclaim_their_truncated_data_buckets() {
+    let dev = formatted(64 << 20, None);
+    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+    let mut inodes = Vec::new();
+    for i in 0..1600 {
+        let ino = block_on_ready(m.create(m.root(), format!("f{i}").as_bytes(), New::File, OWNER, NOW)).unwrap().ino;
+        assert_eq!(block_on_ready(m.write(ino, 0, &[i as u8; 32_768], NOW)).unwrap(), 32_768);
+        block_on_ready(m.truncate(ino, 4096, NOW)).unwrap();
+        inodes.push(ino);
+        if i % 32 == 0 { block_on_ready(m.commit()).unwrap(); }
+    }
+    block_on_ready(m.check_metadata_budget());
+    block_on_ready(m.unmount()).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    for (i, ino) in inodes.into_iter().enumerate() { assert_eq!(read_all(&v, ino).unwrap(), [i as u8; 4096]); }
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+fn interrupted_user_evacuation(encrypted: bool) {
+    use core::cell::Cell;
+    use toyos_blockdev::model::{Model, Overlay};
+    use super::crash::Watched;
+    let dev = formatted(64 << 20, encrypted.then_some(Encryption { passphrase: b"test", kdf: MIN_KDF }));
+    let m = if encrypted { block_on_ready(Mount::unlock(&dev, b"test", LIMITS, MEMORY, random())).unwrap() } else { block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap() };
+    let mut inodes = Vec::new();
+    for i in 0..16 {
+        let ino = block_on_ready(m.create(m.root(), format!("f{i}").as_bytes(), New::File, OWNER, NOW)).unwrap().ino;
+        block_on_ready(m.write(ino, 0, &[i as u8; BLOCK], NOW)).unwrap();
+        inodes.push(ino);
+    }
+    for &ino in &inodes { block_on_ready(m.truncate(ino, 512, NOW)).unwrap(); }
+    block_on_ready(m.unmount()).unwrap();
+    let model = Model::new(dev.into_inner(), 512);
+    let requests = Cell::new(0u64);
+    let watched = Watched { model: &model, after: Box::new(|model| {
+        requests.set(requests.get() + 1);
+        model.check(16, requests.get(), |bytes| {
+            let dev = Overlay::new(bytes);
+            let raw = if encrypted { block_on_ready(Volume::unlock(&dev, b"test", LIMITS)) } else { block_on_ready(Volume::open(&dev)) }.map_err(|e| format!("raw open: {e:?}"))?;
+            let findings = block_on_ready(fsck(&raw)).map_err(|e| format!("raw fsck: {e:?}"))?;
+            if findings.iter().any(|finding| !matches!(finding, Finding::Copy(_))) { return Err(format!("raw fsck: {findings:?}")); }
+            drop(raw);
+            let m = if encrypted { block_on_ready(Mount::unlock(&dev, b"test", LIMITS, MEMORY, random())) } else { block_on_ready(Mount::open(&dev, MEMORY, random())) }.map_err(|e| format!("open: {e:?}"))?;
+            for (i, &ino) in inodes.iter().enumerate() {
+                let mut got = [0; 512];
+                let n = block_on_ready(m.read(ino, 0, &mut got)).map_err(|e| format!("read: {e:?}"))?;
+                if n != got.len() || got != [i as u8; 512] { return Err(format!("changed file {i}")); }
+            }
+            block_on_ready(m.unmount()).map_err(|e| format!("recover: {e:?}"))?;
+            let v = if encrypted { block_on_ready(Volume::unlock(&dev, b"test", LIMITS)) } else { block_on_ready(Volume::open(&dev)) }.map_err(|e| format!("open: {e:?}"))?;
+            let findings = block_on_ready(fsck(&v)).map_err(|e| format!("fsck: {e:?}"))?;
+            if !findings.is_empty() { return Err(format!("fsck: {findings:?}")); }
+            Ok(())
+        }).unwrap_or_else(|e| panic!("{e}"));
+    }) };
+    let m = if encrypted { block_on_ready(Mount::unlock(&watched, b"test", LIMITS, MEMORY, random())).unwrap() } else { block_on_ready(Mount::open(&watched, MEMORY, random())).unwrap() };
+    assert!(block_on_ready(m.test_compact_user()).unwrap());
+    assert!(block_on_ready(m.test_compact_user()).unwrap());
+    block_on_ready(m.check_metadata_budget());
+    block_on_ready(m.unmount()).unwrap();
+    assert!(requests.get() > 10);
+}
+
+#[test]
+fn packed_live_sectors_survive_torn_reordered_evacuation() {
+    interrupted_user_evacuation(false);
+}
+
+#[test]
+fn authenticated_live_sectors_survive_torn_reordered_evacuation() {
+    interrupted_user_evacuation(true);
 }

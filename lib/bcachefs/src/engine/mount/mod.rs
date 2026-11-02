@@ -125,7 +125,9 @@ struct State {
     next_version: u64,
     metadata_bytes: u64,
     metadata_buckets: u64,
+    btree_nodes: u64,
     sparse_metadata: BTreeSet<u64>,
+    sparse_data: BTreeSet<u64>,
     baseline_nodes: BTreeSet<u64>,
     granted_bytes: u64,
     clocks: [u64; 2],
@@ -183,6 +185,7 @@ pub struct Mount<D> {
     data_held: Cell<bool>,
     data_queue: Queue,
     reservations: Rc<RefCell<data::Reservations>>,
+    metadata_gc: Cell<bool>,
     root: u64,
 }
 
@@ -436,7 +439,9 @@ impl<D: BlockDev> Mount<D> {
             next_version: key_version,
             metadata_bytes: metadata.bytes,
             metadata_buckets: metadata.buckets,
+            btree_nodes: metadata.nodes,
             sparse_metadata: metadata.sparse,
+            sparse_data: metadata.sparse_data,
             baseline_nodes: metadata.baseline,
             granted_bytes: 0,
             clocks,
@@ -472,6 +477,7 @@ impl<D: BlockDev> Mount<D> {
             data_held: Cell::new(false),
             data_queue: Queue::default(),
             reservations: Rc::default(),
+            metadata_gc: Cell::new(false),
             root,
         };
         mount.go_read_write(restate).await?;
@@ -1121,6 +1127,11 @@ impl<D: BlockDev> Mount<D> {
                 } else {
                     st.sparse_metadata.remove(&b);
                 }
+                if after.data_type == data_type::USER && u64::from(after.dirty) <= u64::from(self.sb.member.bucket_sectors) / 2 {
+                    st.sparse_data.insert(b);
+                } else {
+                    st.sparse_data.remove(&b);
+                }
             }
             for (&(btree, level, pos), update) in &txn.updates {
                 if level != 0 { continue; }
@@ -1128,8 +1139,11 @@ impl<D: BlockDev> Mount<D> {
                 let prior = node.keys.get(node.at(pos)).filter(|(k, _)| k.pos == pos);
                 let charge = |entry: Option<&(Key, Vec<u8>)>| entry.map_or(0, |(_, v)| allocator::charge(btree, v));
                 st.metadata_bytes = st.metadata_bytes + charge(update.as_ref()) - charge(prior);
-                if btree == Btree::Backpointers && update.is_none() && prior.is_some_and(|(_, value)| value.get(2) == Some(&data_type::BTREE)) {
-                    st.baseline_nodes.remove(&(pos.offset >> self.bp_shift()));
+                if btree == Btree::Backpointers {
+                    let before = prior.is_some_and(|(_, value)| value.get(2) == Some(&data_type::BTREE));
+                    let after = update.as_ref().is_some_and(|(_, value)| value.get(2) == Some(&data_type::BTREE));
+                    st.btree_nodes = st.btree_nodes + u64::from(after) - u64::from(before);
+                    if before && !after { st.baseline_nodes.remove(&(pos.offset >> self.bp_shift())); }
                 }
             }
             for (&pos, delta) in &txn.accounting {

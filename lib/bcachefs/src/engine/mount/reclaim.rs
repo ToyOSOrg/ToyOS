@@ -440,10 +440,14 @@ impl<D: BlockDev> Mount<D> {
     async fn make_room(&self) -> Result<()> {
         loop {
             let blocked = self.readers.borrow_mut().blocked();
-            let (ready, returning) = {
+            let (ready, returning, low) = {
                 let st = self.st.borrow();
-                (st.alloc.ready(blocked), st.alloc.returning())
+                (st.alloc.ready(blocked), st.alloc.returning(), Allocator::transient(st.cache.dirty + st.cache.unpointed + st.granted, st.reclaim_room, Draw::Freeing))
             };
+            if !self.metadata_gc.get() && ready < low && Box::pin(self.compact_metadata()).await? {
+                self.flush_open().await?;
+                continue;
+            }
             if ready >= BATCH_SLOTS {
                 return Ok(());
             }
