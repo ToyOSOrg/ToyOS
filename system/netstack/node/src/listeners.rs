@@ -62,7 +62,7 @@ pub enum ListenRefused {
 pub struct Accepted {
     pub id: StreamId,
     pub remote: Endpoint,
-    pub local: Port,
+    pub local: Endpoint,
     /// Whether Nagle's algorithm is off for the stream as it is handed over: what
     /// [`Node::nodelay`] answers for as long as the node holds the stream, which may be no
     /// longer than this accept's own pass.
@@ -202,7 +202,7 @@ impl Node {
         let session = session().ok_or(AcceptRefused::NoRegion)?;
         let Some((conn, tuple, options)) = self.stack.tcp_accept(bound) else { unreachable!("[tcp] counted a connection it would not hand over") };
         let id = self.streams.accepted(&mut self.stack, conn, options, session);
-        Ok(Accepted { id, remote: tuple.remote, local: tuple.local.port, nodelay: options.nodelay })
+        Ok(Accepted { id, remote: tuple.remote, local: tuple.local, nodelay: options.nodelay })
     }
 
     fn end_listener(&mut self, now: Instant, id: ListenerId) {

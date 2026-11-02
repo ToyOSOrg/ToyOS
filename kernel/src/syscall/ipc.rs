@@ -456,20 +456,41 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
                     return Err(SyscallError::PermissionDenied.into());
                 }
             }
+            // A device claim that moves takes back every mapping made through
+            // it: what it handed out is taken off it here, before the send
+            // shows it to a receiver that may hand out its own, and revoked
+            // once this lock is let go.
+            let claims: Vec<_> = wanted
+                .iter()
+                .filter_map(|h| data.handles.get::<crate::object::device::DeviceClaim>(*h, Rights::TRANSFER).ok())
+                .filter_map(|claim| claim.take_mappings().map(|handed| (claim, handed)))
+                .collect();
             // A refusal restores every handle at its own number, so it is invisible.
             let tx = conn.tx().clone();
             let moved = data.handles.transfer(wanted, |batch| tx.send(&out.bytes, batch));
-            Ok::<_, crate::object::Refusal>((tx, moved))
+            let handed: Vec<_> = match moved {
+                Ok(()) => claims.into_iter().map(|(_, handed)| handed).collect(),
+                Err(_) => {
+                    for (claim, handed) in claims {
+                        claim.restore_mappings(handed);
+                    }
+                    Vec::new()
+                }
+            };
+            Ok::<_, crate::object::Refusal>((tx, moved, handed))
         });
         let tx = match sent {
-            Ok((tx, Ok(()))) => {
+            Ok((tx, Ok(()), handed)) => {
+                for handed in handed {
+                    handed.revoke();
+                }
                 crate::scheduler::post_lending(tx.read_watch(), || tx.set_rt_boost_pending());
                 return Ok(());
             }
-            Ok((tx, Err(SendRefused::NoRoom))) if !nonblock => tx,
-            Ok((_, Err(SendRefused::NoRoom))) => return Err(SyscallError::WouldBlock.to_u64()),
-            Ok((_, Err(SendRefused::Gone))) => return Err(SyscallError::Gone.to_u64()),
-            Ok((_, Err(SendRefused::NoMemory))) => return Err(SyscallError::ResourceExhausted.to_u64()),
+            Ok((tx, Err(SendRefused::NoRoom), _)) if !nonblock => tx,
+            Ok((_, Err(SendRefused::NoRoom), _)) => return Err(SyscallError::WouldBlock.to_u64()),
+            Ok((_, Err(SendRefused::Gone), _)) => return Err(SyscallError::Gone.to_u64()),
+            Ok((_, Err(SendRefused::NoMemory), _)) => return Err(SyscallError::ResourceExhausted.to_u64()),
             Err(e) => return Err(e.refuse()),
         };
         // Outside every lock: room appears as the receiver takes messages, and each receive posts this watch.

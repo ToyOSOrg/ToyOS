@@ -15,12 +15,14 @@
 use toyos::ipc::{FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::{endow, say, Connection, PciDev};
+use toyos_abi::pci::FirmwareWindow;
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_display_output::{Hello, Present, Presented, Size, MAX_FRAME, MSG_HELLO, MSG_PRESENTED, PORT};
 use toyos_device_memory::Registers;
 use toyos_manifest::device::PciMatch;
 use toyos_pci_claim::Bar;
 use toyos_tgl_display::dmc::{Package, Stepping, TGL_PACKAGE};
+use toyos_tgl_display::opregion::OpRegion;
 use toyos_tgl_display::{interrupt, Programmed, Refusal, FRAME_CEILING_NANOS};
 
 /// The T14's iGPU, Tiger Lake GT2 (`8086:9a49`), a VGA-compatible display
@@ -56,6 +58,7 @@ fn main() {
     // once, since the claim's domain already maps what it reads.
     toyos_pci_claim::start(&dev).unwrap_or_else(|why| panic!("tgl-display: {why}"));
     say!("tgl-display: PCI {:02x}:{:02x}.{} registers in BAR {BAR}, {span:#x} of its {bytes:#x} bytes", info.bus, info.dev, info.func);
+    opregion(&dev);
 
     let package = Package::parse(TGL_PACKAGE).unwrap_or_else(|why| panic!("tgl-display: the DMC package is malformed: {why:?}"));
     let revision = dev.config_read(0x08, RegWidth::U32).unwrap_or_else(|why| panic!("tgl-display: config space: {why:?}")) as u8;
@@ -230,5 +233,25 @@ fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_inter
                 (None, _) => return Ended::Refused(format!("the compositor sent frame {msg_type}, which `{PORT}` has not")),
             }
         }
+    }
+}
+
+/// What a copy of the IGD OpRegion the signed image's row grants this claim
+/// says, or why there is none to read.
+fn opregion(dev: &PciDev) {
+    let (memory, offset, len) = match dev.firmware_window(FirmwareWindow::IgdOpRegion) {
+        Ok(Ok(window)) => window,
+        Ok(Err(refused)) => return say!("tgl-display: the kernel refused the IGD OpRegion firmware set up: {refused:?}"),
+        Err(why) => return say!("tgl-display: no IGD OpRegion ({why:?})"),
+    };
+    let copy = memory.bytes().sub(offset, len).to_vec();
+    match OpRegion::parse(&copy) {
+        Ok(region) => say!(
+            "tgl-display: IGD OpRegion, {len} bytes at offset {offset:#x} of its pages; OVER {:08x}, MBOX {:08x}, VBT mailbox {} bytes",
+            region.version,
+            region.mailboxes,
+            region.vbt().len(),
+        ),
+        Err(why) => say!("tgl-display: the IGD OpRegion is malformed: {why:?}"),
     }
 }

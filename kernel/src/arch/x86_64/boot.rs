@@ -4,7 +4,7 @@
 
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
-use super::{apic, control_regs, idt, ioapic, microcode, pat, percpu};
+use super::{apic, control_regs, copy, cpu, idt, ioapic, microcode, pat, percpu};
 use crate::drivers::acpi::{self, MadtInfo};
 use crate::log;
 use crate::mm::Region;
@@ -63,6 +63,13 @@ pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     // RDSEED, and `control_regs::init`'s CPUID.
     microcode::init(args);
     microcode::load(0);
+
+    let rule = match cpu::vendor() {
+        kernel::cpu::Vendor::Amd => copy::Rule::AMD,
+        kernel::cpu::Vendor::Intel | kernel::cpu::Vendor::Other(_) => copy::Rule::NEVER,
+    };
+    copy::set_rule(rule);
+    log!("memcpy: highest first {rule:?}");
 
     // The read-back `pat::init` owes, on a boot that now has three channels to
     // carry a refusal.

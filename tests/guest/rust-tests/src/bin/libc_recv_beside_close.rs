@@ -140,7 +140,7 @@ fn test(role: &str) {
     let (_send, send_bell) = wake::pair().expect("the send bell");
     let (rung_waker, rung) = wake::pair().expect("the rung bell");
     let bells = [OwnedHandle::from(receive_bell), send_bell.into(), rung_waker.into()];
-    conn.send_with(RespType::Result as u32, &TcpConnectResponse { local_port: 49_152, _pad: 0 }, bells)
+    conn.send_with(RespType::Result as u32, &TcpConnectResponse { local_addr: [192, 0, 2, 1], local_port: 49_152, _pad: 0 }, bells)
         .expect("answer the connect with the bells");
     assert_eq!(line(&mut out), "connected");
 

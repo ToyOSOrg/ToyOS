@@ -712,6 +712,10 @@ const MACHINE_TESTS: &[&str] = &[
     // when it is up. Two drivers' links, a NIC's carrier and netstack's
     // routes cross three processes and two devices, which the node's and the
     // shard's host tests of rank, failover and return hold below the drivers.
+    // std's `local_addr` of a stream and of a connected datagram socket over
+    // each link is that link's lease, and the two differ, so one is not QEMU's
+    // 10.0.2.15: what netstack answered through the SDK, which the node's host
+    // tests hold only as far as the node.
     // QEMU x86-64 (`qemu::SUITE_ARCH`), on two user networks; the datagrams go
     // to RFC 5737's TEST-NET-1, which answers nothing, and the harness is the
     // peer on the host's loopback, so it depends on no public network. The networks are not
@@ -1438,6 +1442,15 @@ const METAL: &[(&str, metal::Metal)] = &[
         "display_output_presents",
         metal::Metal { arms: METALCASE_TONE, judge: |b| display_output_presents(b[0]) },
     ),
+    (
+        // The IGD OpRegion the signed image grants tgl-display's claim: the
+        // kernel finds it at the iGPU's ASLS register, holds it to its
+        // signature, its 8 KB and firmware's own memory, and maps it; the
+        // driver's copy validates as the specification lays it out. Only the
+        // T14's firmware sets one up, and QEMU's has no IGD.
+        "igd_opregion_window",
+        metal::Metal { arms: METALCASE, judge: |b| igd_opregion_window(&b[0].log()) },
+    ),
     // ---- the `SYS_DEBUG` members' boot, armed ----
     // The cheapest cluster there is: every one of these arms a check that runs
     // at init, logs its verdict and does nothing else, so they cost no flash
@@ -2074,6 +2087,15 @@ fn display_output_presents(boot: &metal::Readback) -> Result<(), String> {
     println!(
         "display_output_presents: pipe A frames {allowed_at} -> {answered_at}; hda offered its output {order} PG3 went down, and the tone played after"
     );
+    Ok(())
+}
+
+/// What [`igd_opregion_window`] reads: the window granted at the mint,
+/// mapped, and the driver's copy valid. Any refusal on the way leaves this
+/// line unsaid, and `must_say` prints the log.
+fn igd_opregion_window(log: &serial::Serial) -> Result<(), String> {
+    let read = log.must_say("tgl-display: IGD OpRegion, 8192 bytes")?;
+    println!("igd_opregion_window: {read}");
     Ok(())
 }
 
@@ -6060,6 +6082,8 @@ fn traffic_leaves_by_the_second_link_while_the_first_is_down() -> Result<(), Str
     let port = peer.local_addr().map_err(|e| format!("the listener's port: {e}"))?.port();
     let socket = qemu.qmp_socket().to_path_buf();
     let heard = std::thread::spawn(move || -> Result<(), String> {
+        // The job's stream over its first link only reports its local address.
+        drop(peer.accept().map_err(|e| format!("the guest's first connect: {e}"))?);
         let (conn, _) = peer.accept().map_err(|e| format!("the guest's connect: {e}"))?;
         conn.set_read_timeout(Some(CEILING)).map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(conn.try_clone().map_err(|e| e.to_string())?);
@@ -6210,6 +6234,7 @@ fn stream_holders(test_config: &Path) -> Result<(), String> {
         "given out and taken back: one end; a duplicate of its handle endowed or sent: refused",
         "one end, two threads: the write completes beside an unanswered read, which then takes the peer's next bytes",
         "piped children across threads: fed, read and waited for apart, and one killed beside its reader",
+        "a stream's local address: the answer's, and none refused",
     ] {
         if !result.stdout.contains(claim) {
             return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
@@ -6246,6 +6271,8 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
         "bar_map_again: two answers held at once map apart, and the later outlives the earlier",
         "bar_map_again: answered with a handle that maps",
         "bar_map_again: answered after the refusal with a handle that maps",
+        "bar_map_again: a BAR's handle kept past its claim's move maps nothing, and the new holder's maps",
+        "bar_map_again: a BAR's handle kept past its claim's end maps nothing",
     ] {
         let Some(line) = result.stdout.lines().find(|l| l.contains(answered)) else {
             return Err(format!("the job never said `{answered}`:\n{}", result.stdout));

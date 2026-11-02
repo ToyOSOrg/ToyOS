@@ -63,6 +63,14 @@ use toyos_net_wire::{Instant, Port};
 pub use toyos_net_ip::{Credit, IfIndex, Rank};
 pub use toyos_net_udp::Origin;
 
+/// A connected datagram socket's peer, and the address it sends there from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UdpPeer {
+    pub addr: Ipv4Addr,
+    pub port: Port,
+    pub local: Ipv4Addr,
+}
+
 /// Independent 128-bit keys from the system's randomness: one leaked value predicts no other.
 #[derive(Clone, Debug)]
 pub struct Secrets {
@@ -674,10 +682,11 @@ impl Shard {
         self.udp.readable(id)
     }
 
-    /// The peer a connected socket's datagrams go to and come from.
-    pub fn udp_peer(&mut self, id: SocketId) -> Result<Option<(Ipv4Addr, Port)>, toyos_net_udp::Error> {
+    /// The peer a connected socket's datagrams go to and come from, and the address it sends
+    /// from, which its connect fixed.
+    pub fn udp_peer(&mut self, id: SocketId) -> Result<Option<UdpPeer>, toyos_net_udp::Error> {
         self.udp.binding(id).map(|(binding, _)| match binding {
-            toyos_net_udp::Binding::Connected { peer, peer_port, .. } => Some((peer, peer_port)),
+            toyos_net_udp::Binding::Connected { local, peer, peer_port } => Some(UdpPeer { addr: peer, port: peer_port, local }),
             toyos_net_udp::Binding::Any | toyos_net_udp::Binding::Specific(_) => None,
         })
     }

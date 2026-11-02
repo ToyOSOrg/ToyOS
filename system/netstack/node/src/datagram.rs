@@ -43,7 +43,7 @@ use toyos_net_wire::{Instant, Port};
 
 use crate::holders::{Bell, HolderId, Holders};
 use crate::streams::ExportRefused;
-use crate::Node;
+use crate::{Node, UdpPeer};
 
 /// One client socket. An id outlives its socket only as a refusal: [udp] never hands a closed
 /// socket's id to another.
@@ -179,8 +179,8 @@ impl Node {
         connected
     }
 
-    /// The peer [`Self::udp_connect`] named, if any.
-    pub fn udp_peer(&mut self, id: DatagramId) -> Result<Option<(Ipv4Addr, Port)>, Refused> {
+    /// The peer [`Self::udp_connect`] named, if any, and the address the socket sends there from.
+    pub fn udp_peer(&mut self, id: DatagramId) -> Result<Option<UdpPeer>, Refused> {
         self.stack.peer(id.0).map_err(refused)
     }
 

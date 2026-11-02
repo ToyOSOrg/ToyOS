@@ -39,8 +39,6 @@ and, filed before this track:
 - `issues/a-machine-without-an-iommu-refuses-every-claim.md` — bhyve; crosvm
   for every device it emulates; and VirtualBox, QEMU and Cloud Hypervisor by
   default (`issues/no-claim-gets-an-address-space-under-virtio-iommu.md`).
-- `issues/getsockname-answers-an-address-nobody-asked-netstack-for.md` —
-  QEMU's user-mode network address in `sdk/libc`.
 - `issues/pci-is-enumerated-on-segment-group-0-alone.md` — Cloud
   Hypervisor's `num_pci_segments`.
 

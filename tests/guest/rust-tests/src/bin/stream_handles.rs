@@ -25,6 +25,9 @@
 //!   two read its stdout and stderr, and another waits for its exit; a child
 //!   that holds its pipes open is killed from a thread other than the one
 //!   reading them, and that read ends. `sshserver` runs every program so.
+//! - **A stream's local address is netstack's answer**: std's `local_addr`
+//!   reads the address and port the connect's answer named, and a connect
+//!   whose answer names the unspecified address is refused.
 //!
 //! **This test is netstack for its children**: a port of its own served to
 //! each as `netstack`, which answers a connect with the region judged and its
@@ -93,6 +96,8 @@ fn main() {
         Some("two-threads") => two_threads(),
         Some("echo") => echo(),
         Some("hold") => hold(),
+        Some("local") => local(),
+        Some("unaddressed") => unaddressed(),
         Some("child") => std::process::exit(0),
         Some(other) => panic!("unknown role {other:?}"),
         None => test(),
@@ -108,6 +113,7 @@ fn test() {
     refuses_a_stream_as_a_file();
     reads_and_writes_on_two_threads();
     pipes_across_threads();
+    takes_its_local_address_from_the_answer();
     println!("a stream's holders: one dead inside the gate leaves the other working; netstack's exit ends both");
 }
 
@@ -241,6 +247,18 @@ fn refuses_a_stream_as_a_file() {
     assert!(!said.status.success(), "the stream was taken as a file: {}", String::from_utf8_lossy(&said.stdout));
     assert!(stderr.contains("is a stream's, which is read and written through its region, not as a file"), "refused, but not by name: {stderr}");
     println!("  a stream as a file: refused by name");
+}
+
+/// std's `local_addr` is what the connect's answer named, and an answer naming
+/// the unspecified address refuses the connect.
+fn takes_its_local_address_from_the_answer() {
+    let (child, _netstack) = run("local", &[]);
+    let said = child.wait_with_output().expect("wait the child");
+    assert_eq!(String::from_utf8_lossy(&said.stdout).trim(), "192.0.2.1:49152", "the stream's local address");
+    let (child, _netstack) = run_answering("unaddressed", &[], [0; 4]);
+    let said = child.wait_with_output().expect("wait the child");
+    assert_eq!(String::from_utf8_lossy(&said.stdout).trim(), "refused", "a connect answered with no local address");
+    println!("  a stream's local address: the answer's, and none refused");
 }
 
 // ---- this test as netstack ----
@@ -451,7 +469,7 @@ impl Netstack {
         let theirs = self.exports.1.open("export").expect("a connection of the private port");
         let ours = self.exports.0.accept().expect("the private port's connection");
         let ([receive_bell, send_bell, rung_waker], (receive, send, rung)) = bells();
-        let adopt = Adopt { holder: number.number(), peer_port: 80, peer_addr: [192, 0, 2, 2], local_port: 49_152, _pad: 0 };
+        let adopt = Adopt { holder: number.number(), peer_port: 80, peer_addr: [192, 0, 2, 2], local_addr: [192, 0, 2, 1], local_port: 49_152, _pad: 0 };
         let region = self.region.share().expect("a handle of the region");
         let handles = [region, receive_bell, send_bell, rung_waker];
         ours.send_with(ADOPT, &adopt, handles).expect("queue the holder's adoption");
@@ -490,6 +508,11 @@ impl Netstack {
 /// Spawns `role` with this test as its netstack, and serves its connect, the
 /// stream's receive ring holding `peer`.
 fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
+    run_answering(role, peer, [192, 0, 2, 1])
+}
+
+/// [`run`], the connect answered as left from `local`, port 49152.
+fn run_answering(role: &str, peer: &[u8], local: [u8; 4]) -> (Child, Netstack) {
     let (acceptor, connector) = port::create().expect("a port");
     // This test's own names, so a child reaches the file server its own
     // spawns read images through, and this test as its `netstack`.
@@ -514,7 +537,7 @@ fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
     region.bytes().write(RECEIVE_RING, peer);
     let _ = server.publish(words_of(&region), peer.len() as u32).expect("the client keeps the protocol");
     let (handed, (receive, send, rung)) = bells();
-    conn.send_with(RespType::Result as u32, &TcpConnectResponse { local_port: 49_152, _pad: 0 }, handed)
+    conn.send_with(RespType::Result as u32, &TcpConnectResponse { local_addr: local, local_port: 49_152, _pad: 0 }, handed)
         .expect("answer the connect with the bells");
     let (exports, export_connector) = port::create().expect("the private port");
     let names = namespace::build().add("export", &export_connector).finish().expect("the private port's namespace");
@@ -700,6 +723,22 @@ fn foreign() -> ! {
     // SAFETY: a descriptor this process holds and nothing else answers for.
     let _adopted = unsafe { TcpStream::from_raw_fd(fd) };
     say("adopted");
+    std::process::exit(0)
+}
+
+/// A client that says its stream's local address.
+fn local() -> ! {
+    let stream = connect();
+    say(&stream.local_addr().expect("the stream's local address").to_string());
+    std::process::exit(0)
+}
+
+/// A client whose connect's answer names no local address.
+fn unaddressed() -> ! {
+    match TcpStream::connect(ADDR.parse::<SocketAddr>().expect("an address")) {
+        Ok(stream) => say(&format!("connected from {:?}", stream.local_addr())),
+        Err(_) => say("refused"),
+    }
     std::process::exit(0)
 }
 

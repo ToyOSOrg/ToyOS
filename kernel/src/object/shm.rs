@@ -310,6 +310,15 @@ impl Drop for SharedMemObject {
 /// An aperture's last handle takes it out of every space that still maps it.
 impl ZeroHandles for SharedMemObject {
     fn on_zero_handles(&self) {
+        self.revoke();
+    }
+}
+
+impl SharedMemObject {
+    /// An aperture taken out of every space that maps it, and refused every
+    /// later mapping: what its last handle does, and what the end of the
+    /// authority it was asked on does. Nothing for any other object.
+    pub fn revoke(&self) {
         let Backing::Aperture { mapped, .. } = &self.backing else { return };
         let Some((mapped, _charge)) = mapped.take() else { return };
         for (space, at, len) in mapped {
