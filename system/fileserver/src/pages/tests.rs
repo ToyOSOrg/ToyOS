@@ -606,8 +606,13 @@ fn a_write_refused_in_a_hole_gives_back_the_block_it_took() {
     files.sync(&mut v).unwrap();
     let room = v.room().unwrap().free;
     fake.0.borrow_mut().refusing = true;
-    assert!(files.write(&mut v, id, node, PAGE, &pattern(PAGE as usize, 5)).is_err());
-    assert_eq!(v.room().unwrap().free, room, "the refused write kept the hole's block, or gave back more");
+    for _ in 0..2 {
+        assert_eq!(files.write(&mut v, id, node, PAGE, &pattern(PAGE as usize, 5)), Err(Error::Io));
+        assert_eq!(files.sync(&mut v).unwrap(), [], "a cancelled write left capacity awaiting bytes");
+    }
+    // Reservation admission may compact older metadata, increasing free
+    // space. It must not keep capacity for either refused write.
+    assert!(v.room().unwrap().free >= room, "the refused writes kept capacity");
     assert_eq!(v.node_meta(node).unwrap().size, 3 * PAGE);
     fake.0.borrow_mut().refusing = false;
     let mut out = vec![0xEEu8; PAGE as usize];
