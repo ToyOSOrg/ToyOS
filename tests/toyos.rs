@@ -6477,10 +6477,10 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_process_tree")?;
     let kernel = back.kernel();
     let log = kernel.text();
-    let unloaded = log.lines().filter(|l| l.contains("spawn: /tmp/no_such_program: ")).count();
+    let unloaded = log.lines().filter(|l| l.contains("spawn: /tmp/process_tree_invalid_elf: ")).count();
     if unloaded != 2 {
         return Err(format!(
-            "the loader refused /tmp/no_such_program {unloaded} times, not once per B"
+            "the loader refused the invalid executable {unloaded} times, not once per B"
         ));
     }
     let refused: Vec<&str> = log.lines().filter(|l| l.contains("spawn: refused under pid ")).collect();

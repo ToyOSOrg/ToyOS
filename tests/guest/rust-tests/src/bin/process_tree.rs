@@ -44,11 +44,9 @@ use std::os::toyos::process::ExitStatusExt;
 use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_process_tree";
-/// This program copied to `/tmp`, which the kernel opens itself, under the
-/// same name: a chain's links spawn it with no file server's connection
-/// each, so a file server's bound on one share's clients is not what stops
-/// the chain before its depth does.
+/// The chain loads its executable through the temporary file server.
 const LINK_PATH: &str = "/tmp/test_rs_process_tree";
+const INVALID_PATH: &str = "/tmp/process_tree_invalid_elf";
 /// `/system/bin/toybox` under the name of an applet that reads its input until
 /// it ends: a declared program, so a launch, and one that runs until killed
 /// while A holds its input open.
@@ -97,9 +95,11 @@ fn main() {
 }
 
 fn test() {
+    std::fs::write(INVALID_PATH, [0; 64]).expect("write an invalid executable");
     for end in [Ending::Killed, Ending::CpuFault] {
         an_end_takes_its_subtree(end);
     }
+    std::fs::remove_file(INVALID_PATH).expect("remove the invalid executable");
     a_manage_only_handle_is_no_place();
     a_pipe_is_no_place();
     a_chain_stops_at_max_depth_and_dies_whole();
@@ -394,9 +394,8 @@ fn park() -> ! {
 
 fn b() -> ! {
     let conn = endow::service(BACK).expect("A endowed a port back");
-    // Admitted under B, then refused by the loader: its hold on B goes. On
-    // `/tmp`, which the kernel opens itself, so its loader is what refuses it.
-    assert!(Command::new("/tmp/no_such_program").spawn().is_err(), "a program that is not there started");
+    // The supplied image reaches ELF validation after admission under B.
+    assert!(Command::new(INVALID_PATH).spawn().is_err(), "an invalid executable started");
     let c = Command::new(SELF_PATH).arg("c").stdin(Stdio::null()).spawn().expect("B spawns C");
     let d = Command::new(HELD).independent().spawn().expect("B launches D");
     let e = Command::new(HELD).independent().detached().spawn().expect("B launches E detached");
