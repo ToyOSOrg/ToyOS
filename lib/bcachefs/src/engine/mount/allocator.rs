@@ -20,6 +20,35 @@ use crate::engine::read::Source;
 use crate::engine::value::{accounting_pos, class, data_type};
 use crate::engine::{journal, Btree, Error, Result};
 
+/// Records whose distinct positions are bounded by the device geometry.
+pub(super) fn structural(btree: Btree, value: &[u8]) -> bool {
+    matches!(btree, Btree::Alloc | Btree::Freespace | Btree::Lru | Btree::NeedDiscard | Btree::BucketGens)
+        || (btree == Btree::Backpointers && value.get(2) == Some(&data_type::BTREE))
+}
+
+pub(super) async fn metadata_budget<S: Source>(source: &S) -> Result<(u64, u64, BTreeSet<u64>)> {
+    let mut bytes = 0u64;
+    let roots: BTreeSet<u64> = Btree::ALL.iter().filter_map(|&b| source.root_of(b).map(|r| r.ptr.ptr.sector)).collect();
+    let mut baseline = BTreeSet::new();
+    let shift = match source.superblock().flag(6, 40, 8) { 0 => 10, value => value as u32 };
+    for btree in Btree::ALL {
+        source.walk(btree, Bpos::MIN, |key, value| {
+            if !structural(btree, value) { bytes += super::key_bytes(value) as u64; }
+            if btree == Btree::Backpointers && value.get(2) == Some(&data_type::BTREE) {
+                let sector = key.pos.offset >> shift;
+                if !roots.contains(&sector) { baseline.insert(sector); }
+            }
+            Ok(true)
+        }).await?;
+    }
+    let pos = accounting_pos(&[class::DEV_DATA_TYPE, 0, data_type::BTREE]);
+    let buckets = match source.get(Btree::Accounting, pos).await? {
+        Some((_, value)) => journal::counters(&value)?.first().copied().unwrap_or(0),
+        None => 0,
+    };
+    Ok((bytes, buckets, baseline))
+}
+
 /// What a transaction's nodes may take of the room left.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Draw {
@@ -55,6 +84,7 @@ pub(super) struct Allocator {
     /// Buckets taken whose filling is not yet applied, which the indexes
     /// still list as empty.
     taken: BTreeSet<u64>,
+    metadata_taken: BTreeSet<u64>,
     /// Empty buckets on the medium, not taken.
     free: u64,
     /// Buckets each sequence emptied, until it is durable.
@@ -75,6 +105,7 @@ impl Allocator {
             holes: BTreeSet::new(),
             durable: 0,
             taken: BTreeSet::new(),
+            metadata_taken: BTreeSet::new(),
             free,
             returning: BTreeMap::new(),
             #[cfg(test)]
@@ -89,6 +120,11 @@ impl Allocator {
     /// Node slots there are or will be once every emptying is durable.
     fn slots(&self) -> u64 {
         self.open_slots() + self.per_bucket * (self.free + self.returning.values().sum::<u64>() - self.pins.values().filter(|(_, empty)| empty.is_some()).count() as u64)
+    }
+
+    pub(super) fn capacity(&self, metadata_buckets: u64) -> u64 {
+        let pinned = self.pins.values().filter(|(_, empty)| empty.is_some()).count() as u64;
+        (self.free + self.returning.values().sum::<u64>() - pinned + metadata_buckets + self.metadata_taken.len() as u64) * self.per_bucket
     }
 
     /// Node slots to be had now, past `blocked` buckets that a traversal
@@ -131,6 +167,7 @@ impl Allocator {
     /// `b`, empty at generation `gen`, opened for nodes.
     pub(super) fn take(&mut self, b: u64, gen: u8) {
         self.taken.insert(b);
+        self.metadata_taken.insert(b);
         self.free = self.free.saturating_sub(1);
         self.open = Some((b, 0, gen));
     }
@@ -192,6 +229,7 @@ impl Allocator {
     /// `b`'s filling applied: the indexes no longer list it.
     pub(super) fn filled(&mut self, b: u64) {
         self.taken.remove(&b);
+        self.metadata_taken.remove(&b);
         if let Some((_, empty)) = self.pins.get_mut(&b) {
             if let Some(seq) = empty.take() {
                 if seq <= self.durable {

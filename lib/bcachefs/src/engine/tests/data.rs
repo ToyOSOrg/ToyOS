@@ -21,6 +21,7 @@ fn file_data_overwrites_sparse_ranges_and_truncation_survive_remount() {
         want[41_003..].fill(0);
         m.write(ino, 41_000, b"new tail", NOW).await.unwrap();
         want[41_000..41_008].copy_from_slice(b"new tail");
+        m.check_metadata_budget().await;
         m.commit().await.unwrap();
         ino
     });
@@ -43,6 +44,7 @@ fn orphan_release_reclaims_file_data_and_keeps_other_files() {
         assert_eq!(bytes, [1; 4096]);
         m.release(a).await.unwrap();
         assert_eq!(m.inode(a).await, Err(Error::NotFound));
+        m.check_metadata_budget().await;
     });
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     assert_eq!(read_all(&v, path(&v, "b")).unwrap(), [2; 8192]);
@@ -200,6 +202,7 @@ fn a_reserved_slot_survives_its_bucket_emptying_and_generation_change() {
         m.release(a).await.unwrap();
         m.commit().await.unwrap();
         m.write_reserved(&mut tb, 0, &[2; BLOCK], NOW).await.unwrap();
+        m.check_metadata_budget().await;
     });
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     assert_eq!(read_all(&v, path(&v, "b")).unwrap(), [2; BLOCK]);
