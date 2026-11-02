@@ -72,10 +72,7 @@ const PER_NODE: u64 = fresh_cost(MAX_REWRITE);
 /// dirties, and the nodes a batch's rewrites replace its nodes with.
 const RECLAIM: usize = RECLAIM_ROOM + REWRITTEN;
 pub(crate) const MIN_CACHE: usize = RECLAIM + 3 * FOOTPRINT;
-/// The smallest btree node this writer writes. Past its first bset a
-/// smaller one has room for about two whole-block appends, and reclaim's own
-/// changes to the allocator's leaves then rewrite more nodes than they
-/// settle ([`MAX_GROUPS`] needs less).
+/// The smallest btree node this writer accepts.
 const MIN_NODE: usize = 32 << 10;
 /// Retries of a failed node or journal write, each of the same bytes.
 const RETRIES: usize = 2;
@@ -84,7 +81,7 @@ const RW_FEATURES: u64 = 1 << 8 | 1 << 9 | 1 << 12 | 1 << 13 | 1 << 17 | 1 << 18
 /// Feature bit 5: the superblock holds a blacklist.
 const BLACKLIST_FEATURE: u64 = 1 << 5;
 
-/// Ring geometry that leaves two worst-case reclaim shares and an ordinary
+/// Ring geometry that leaves two cache-sized reclaim shares and an ordinary
 /// quarter, with room for at least one maximum-size ordinary transaction.
 pub(crate) fn journal_buckets(bucket_sectors: u64, block: usize) -> u64 {
     let journal = Writer::new(alloc::vec![0], bucket_sectors, block, K_TX);
@@ -1050,7 +1047,9 @@ impl<D: BlockDev> Mount<D> {
     fn can_free(&self) -> bool {
         let st = self.st.borrow();
         let flush = st.journal_frees() || st.alloc.returning();
-        st.pending.oldest_pin().is_some() || !st.journal.closed.is_empty() || (flush && st.journal.open.is_some() && st.journal.may_close()) || st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b)) || st.cache.ids().into_iter().any(|id| {
+        st.pending.oldest_pin().is_some() || !st.journal.closed.is_empty() || (flush && st.journal.open.is_some() && st.journal.may_close())
+            || (st.journal_frees() && st.journal.open.is_none() && st.journal.openable() > 0)
+            || st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b)) || st.cache.ids().into_iter().any(|id| {
             let n = st.cache.node(id);
             n.dirty() && !n.writing && n.captured.is_none() && n.held == 0
         })
@@ -1325,6 +1324,7 @@ impl<D: BlockDev> Mount<D> {
                 let mut st = self.st.borrow_mut();
                 st.journal.closed.pop_front();
                 st.journal.written(seq, last_seq, (bytes.len() / SECTOR) as u64);
+                st.pending.durable(seq);
                 st.alloc.durable_through(seq);
                 drop(st);
                 self.admit_reclaim.wake();
@@ -1389,6 +1389,9 @@ impl<D: BlockDev> Mount<D> {
         let upto = {
             let mut st = self.st.borrow_mut();
             let st = &mut *st;
+            if st.journal.open.is_none() && st.journal_frees() && st.journal.openable() > 0 {
+                st.journal.open_new();
+            }
             if st.journal.open.is_some() && st.journal.may_close() {
                 self.close(st, false);
             }
@@ -1532,6 +1535,11 @@ impl<D: BlockDev> Mount<D> {
     pub(crate) fn pending_pressure(&self) -> (usize, usize, usize) {
         let st = self.st.borrow();
         (st.pending.iter().count(), st.pending.allocated_bytes(), st.cache.dirty + st.cache.unpointed)
+    }
+
+    pub(crate) fn journal_room(&self) -> (u64, u64) {
+        let st = self.st.borrow();
+        (st.journal.ring_free(), 2 * st.journal.reclaim_entries)
     }
 
     /// What a stalled test reports: the counts admission and reclaim look

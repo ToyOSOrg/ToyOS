@@ -594,6 +594,9 @@ impl Writer {
             Class::Reclaim if self.replaying => 0,
             Class::Reclaim => self.reclaim_entries,
         };
+        // An entry opened by reclaim must not restart ordinary admission
+        // while the ring is still below its ordinary reserve floor.
+        if class == Class::Ordinary && self.ring_free() < keep { return false; }
         let leaves = total <= self.room() + self.ring_free().saturating_sub(keep) * per_entry;
         let fits = now && leaves;
         if fits {

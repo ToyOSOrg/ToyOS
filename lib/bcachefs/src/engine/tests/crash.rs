@@ -301,7 +301,7 @@ fn renames(files: usize, rounds: usize) -> Vec<Op> {
 fn renames_reusing_buckets_on_a_nearly_full_volume_survive_a_crash_at_every_request() {
     let mut data = Vec::new();
     let image = super::buckets::nearly_full(&mut data).into_inner();
-    let reused = ops_survive_a_crash_on(image, None, PRESSED, &renames(8, 8), 4, 8);
+    let reused = ops_survive_a_crash_on(image, None, PRESSED, &renames(8, 32), 4, 8);
     assert!(reused > 4, "{reused} buckets taken again");
 }
 
@@ -312,6 +312,66 @@ fn encrypted_renames_reusing_buckets_survive_a_crash_at_every_request() {
     let image = formatted(64 << 20, Some(Encryption { passphrase: &secret, kdf: MIN_KDF })).into_inner();
     let reused = ops_survive_a_crash_on(image, Some(&secret), PRESSED, &renames(8, 32), 4, 6);
     assert!(reused > 4, "{reused} buckets taken again");
+}
+
+#[test]
+fn journal_pressure_recovers_after_torn_reordered_publication() {
+    let name = |i| format!("p{i:06}-{}", "x".repeat(240)).into_bytes();
+    for passphrase in [None, Some(hex_secret())] {
+        let encryption = passphrase.as_ref().map(|secret| Encryption { passphrase: secret, kdf: MIN_KDF });
+        let model = Model::new(formatted(64 << 20, encryption).into_inner(), 512);
+        let applied = Cell::new(0);
+        let committed = Cell::new(0);
+        let armed = Cell::new(false);
+        let checked = Cell::new(0u64);
+        let dev = Watched {
+            model: &model,
+            after: Box::new(|model| {
+                if !armed.get() || checked.get() == 8 { return; }
+                checked.set(checked.get() + 1);
+                model.check(4, 0xadd1_0000 + checked.get(), |bytes| {
+                    let disk = Overlay::new(bytes);
+                    let m = match &passphrase {
+                        Some(secret) => block_on_ready(Mount::unlock(&disk, secret, MIN_LIMITS, MEMORY, random())),
+                        None => block_on_ready(Mount::open(&disk, MEMORY, random())),
+                    }.map_err(|e| format!("pressure recovery: {e:?}"))?;
+                    let (entries, more) = block_on_ready(m.readdir(m.root(), 0, usize::MAX)).map_err(|e| format!("names: {e:?}"))?;
+                    if more || !(committed.get()..=applied.get()).contains(&entries.len()) {
+                        return Err(format!("{} names outside committed/applied bounds", entries.len()));
+                    }
+                    let seen: BTreeSet<_> = entries.into_iter().map(|e| e.name).collect();
+                    if seen != (0..seen.len()).map(&name).collect() { return Err("names are not a creation prefix".into()); }
+                    block_on_ready(m.unmount()).map_err(|e| format!("pressure drain: {e:?}"))?;
+                    let v = match &passphrase {
+                        Some(secret) => block_on_ready(Volume::unlock(&disk, secret, MIN_LIMITS)),
+                        None => block_on_ready(Volume::open(&disk)),
+                    }.map_err(|e| format!("reopen: {e:?}"))?;
+                    let problems = block_on_ready(fsck(&v)).map_err(|e| format!("fsck: {e:?}"))?;
+                    if !problems.is_empty() { return Err(format!("fsck: {problems:?}")); }
+                    Ok(())
+                }).unwrap_or_else(|e| panic!("{e}"));
+            }),
+        };
+        let m = match &passphrase {
+            Some(secret) => block_on_ready(Mount::unlock(&dev, secret, MIN_LIMITS, MEMORY, random())),
+            None => block_on_ready(Mount::open(&dev, MEMORY, random())),
+        }.unwrap();
+        Executor::new().block_on(async {
+            for i in 0..2000 {
+                let (free, floor) = m.journal_room();
+                armed.set(free <= floor);
+                applied.set(i + 1);
+                m.create(m.root(), &name(i), New::File, OWNER, NOW).await.unwrap();
+                if (i + 1) % 32 == 0 {
+                    m.commit().await.unwrap();
+                    committed.set(i + 1);
+                }
+            }
+        }, || panic!("pressure operation stalled; {}", m.dump()));
+        armed.set(false);
+        block_on_ready(m.unmount()).unwrap();
+        assert_eq!(checked.get(), 8, "cutpoints must reach the ordinary journal reserve floor");
+    }
 }
 
 /// The window upstream's reader takes (A2-torn-newest A2.T1, A2.13): every
