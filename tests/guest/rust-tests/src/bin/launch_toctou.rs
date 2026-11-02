@@ -67,11 +67,14 @@ fn attacker() {
     let flipper = std::thread::spawn({
         let stop = Arc::clone(&stop);
         move || {
-            // tmpfs displaces the existing entry, so each call is one swap of
-            // what the link names.
+            // Rename atomically replaces the link; symlink itself never
+            // overwrites an existing name.
+            const NEXT: &str = "/tmp/ps-next";
             while !stop.load(Ordering::Relaxed) {
-                symlink(SELF_PATH, LINK).expect("re-point the link at this binary");
-                symlink(DECLARED, LINK).expect("re-point the link at the declared row");
+                for target in [SELF_PATH, DECLARED] {
+                    symlink(target, NEXT).expect("prepare the next link");
+                    std::fs::rename(NEXT, LINK).expect("replace the link atomically");
+                }
             }
         }
     });
@@ -100,6 +103,7 @@ fn attacker() {
 
     stop.store(true, Ordering::Relaxed);
     flipper.join().expect("the re-point thread failed");
+    std::fs::remove_file(LINK).expect("remove the race link");
     assert!(under_row > 0, "none of {ATTEMPTS} launches ran the `toybox` row's program under its row");
     assert!(refused > 0, "the link never named this binary when the launcher asked in {ATTEMPTS} launches");
     println!("launch_toctou: PASS ({under_row} of {ATTEMPTS} launches ran the row's program under it, none the caller's)");

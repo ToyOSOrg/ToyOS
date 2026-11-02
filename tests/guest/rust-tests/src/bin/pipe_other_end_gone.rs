@@ -32,7 +32,7 @@ use toyos::ipc::Connection;
 use toyos::poller::{Poller, OTHER_END_GONE, READABLE};
 use toyos::syscap::SysCap;
 use toyos::{namespace, pipe_pair, port, AsHandle, BorrowedHandle, OwnedHandle, Pipe};
-use toyos_abi::syscall::{self, SyscallError};
+use toyos_abi::syscall::SyscallError;
 
 #[path = "../roster.rs"]
 mod roster;

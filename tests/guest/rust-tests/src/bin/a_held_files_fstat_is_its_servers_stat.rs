@@ -1,12 +1,6 @@
-//! A served file's `fstat` through a descriptor holding its paged object is
-//! answered by the kernel from what the object publishes, without a request.
-//! After a write, a truncate and a set time, it agrees with the server's
-//! `stat` of the file's path on size and mtime, and on every field the open
-//! answered.
-//!
-//! A guest test because the two answers come from two components, the
-//! kernel's object and the file server's volume, which only a guest runs
-//! together; each side's rule is host-tested (`fileserver` pages, `fat`).
+//! A served descriptor and its path agree on metadata after writes,
+//! truncation and explicit timestamps. An unlinked descriptor retains its
+//! identity while its link count changes.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -35,7 +29,9 @@ fn main() {
     f.set_modified(then).expect("set the mtime");
     agree(&f, "a set time");
     assert_eq!(f.metadata().unwrap().modified().unwrap(), then, "the time set");
-    drop(f);
     fs::remove_file(FILE).unwrap();
+    assert_eq!(f.metadata().unwrap().nlink(), 0, "unlink updates an already open descriptor");
+    assert_eq!(f.metadata().unwrap().len(), 100);
+    drop(f);
     println!("a_held_files_fstat_is_its_servers_stat: passed");
 }

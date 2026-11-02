@@ -35,8 +35,7 @@ fn main() {
     }
     let _ = fs::remove_file(&file);
 
-    // Another row's state and the supervisor's store, by name: no capability
-    // names either, so each reaches only the kernel's bare mount point.
+    // Another row's state and the supervisor's store have no capability.
     for path in [SERVICE, "/state/supervisor/grants"] {
         if let Ok(meta) = fs::metadata(path) {
             red.push(format!("{path} answered metadata ({} bytes)", meta.len()));
@@ -54,13 +53,10 @@ fn main() {
             red.push("a grant line was appended to /state/supervisor/grants".to_string());
         }
     }
-    // `/state` with no capability is a mount point of the kernel's, and lists
-    // nothing of what the file server holds under it.
-    if let Ok(listing) = fs::read_dir("/state") {
-        let found: Vec<_> = listing.filter_map(Result::ok).map(|e| e.file_name()).collect();
-        if !found.is_empty() {
-            red.push(format!("/state lists {found:?}"));
-        }
+    // The synthetic ancestor exposes the granted child's name only.
+    match fs::read_dir("/state").and_then(|entries| entries.map(|entry| entry.map(|e| e.file_name())).collect::<std::io::Result<Vec<_>>>()) {
+        Ok(found) if found == [std::ffi::OsString::from("test-runner")] => {}
+        other => red.push(format!("/state did not list exactly its granted child: {other:?}")),
     }
 
     if !red.is_empty() {

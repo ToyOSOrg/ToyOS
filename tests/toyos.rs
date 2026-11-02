@@ -68,6 +68,8 @@ const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
+    // Its explicit metal registration owns the directory listing workload.
+    "readdir_bound",
     // It writes the log disk for ever, so that its boot's deadline resets the
     // machine under it: `the_disk_survives_a_reset_under_load` runs it alone.
     "stick_load",
