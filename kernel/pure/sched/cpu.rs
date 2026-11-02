@@ -1191,7 +1191,7 @@ impl<X: SchedPayload> CpuSched<X> {
             return;
         };
         let mut task = entry.task.wake(self.id, cause, entry.class, now);
-        self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
+        self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name(), waker: cause.waker.map_or(0, |cpu| cpu.0 + 1) });
         task.refresh_affinity();
         match self.toward_its_waker(&mut task, cause, env) {
             Some(dst) => self.hand_off(task, dst, env, now),
@@ -1278,7 +1278,7 @@ impl<X: SchedPayload> CpuSched<X> {
                         entry.class,
                         now,
                     );
-                    self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
+                    self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name(), waker: 0 });
                     self.place(task, env, now);
                 }
                 Claim::PrePark => panic!("a parked task cannot be pre-park"),
@@ -1288,7 +1288,7 @@ impl<X: SchedPayload> CpuSched<X> {
         }
         if let Some(ready) = self.rq.remove(key) {
             // Out of its band and into the dying list.
-            self.trace(env, now, TraceKind::Wake { task: key, name: ready.ext().name() });
+            self.trace(env, now, TraceKind::Wake { task: key, name: ready.ext().name(), waker: 0 });
             self.keep_dying(ready, now);
             return;
         }
