@@ -402,10 +402,14 @@ impl<D: BlockDev> Mount<D> {
         };
         let parent = self.find(btree, level + 1, max).await?;
         let adjacent = {
-            let st = self.st.borrow();
+            let mut st = self.st.borrow_mut();
             let p = st.cache.node(parent);
             let at = p.at(max);
-            if p.keys.len() == 1 { return Ok(Vec::new()); }
+            if p.keys.len() == 1 {
+                let seq = st.journal.open.as_ref().map_or(st.journal.next_seq, |o| o.seq);
+                st.cache.change(parent, |n| { n.compact.get_or_insert(seq); });
+                return Ok(Vec::new());
+            }
             let index = if at > 0 { at - 1 } else { at + 1 };
             let (k, v) = p.keys.get(index).ok_or(Error::Corrupt("underfull node absent from its parent"))?;
             (k.pos, NodePtr::decode(v)?)
