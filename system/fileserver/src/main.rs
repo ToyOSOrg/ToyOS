@@ -542,10 +542,8 @@ impl Server {
             for id in late {
                 self.drop_client(id, "it never lent its window");
             }
-            if self.writeback.take_due(now) {
-                if let Err(e) = self.sync() {
-                    println!("fileserver: the write-back sync failed: {e:?}");
-                }
+            if self.writeback.take_due(now) && let Err(e) = self.sync() {
+                println!("fileserver: the write-back sync failed: {e:?}");
             }
         }
     }
@@ -1131,7 +1129,7 @@ impl Server {
                 // The volume truncated first, so a refused open changed
                 // nothing; the object follows before anything writes back.
                 if how.truncate && found.is_some() {
-                    let truncated = self.volume.identity(&path).and_then(|identity| self.files.truncated(&mut *self.volume, identity, node));
+                    let truncated = self.volume.identity(&path).and_then(|identity| self.files.truncated(identity));
                     if let Err(e) = truncated {
                         let _ = self.volume.close(node);
                         return Err(e);
@@ -1241,12 +1239,8 @@ impl Server {
         };
         if held {
             let file = self.fid(id, r.fid)?;
-            let (node, identity) = {
-                let f = file.borrow();
-                (f.node().map_err(|_| Error::Unsupported)?, f.identity)
-            };
+            let node = file.borrow().node().map_err(|_| Error::Unsupported)?;
             self.volume.set_mtime(node, mtime)?;
-            self.files.stamped(&mut *self.volume, identity, node)?;
         } else {
             let path = match self.resolve(id, r.fid, &rel, r.flags & FOLLOW_LAST != 0)? {
                 Resolved::Absolute(p) => return self.follow(id, r, &p),
@@ -1255,9 +1249,8 @@ impl Server {
             if self.volume.lstat(&path)?.kind != Kind::File {
                 return Err(Error::Unsupported);
             }
-            let identity = self.volume.identity(&path)?;
             let node = self.volume.open(&path, OpenHow { create: false, create_new: false, truncate: false })?;
-            let set = self.volume.set_mtime(node, mtime).and_then(|()| self.files.stamped(&mut *self.volume, identity, node));
+            let set = self.volume.set_mtime(node, mtime);
             let closed = self.volume.close(node);
             set.and(closed)?;
         }
@@ -1324,7 +1317,7 @@ impl Server {
         let mut words = vec![0u8; count * 8];
         self.window(id).read(at, &mut words);
         let fids: Vec<u64> =
-            words.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().expect("eight bytes"))).collect();
+            words.as_chunks::<8>().0.iter().map(|w| u64::from_le_bytes(*w)).collect();
         let parent = &self.clients[&id];
         let (share, writes) = (parent.share, parent.writes);
         let fids = parent.fids.export(&fids)?;
@@ -1373,12 +1366,12 @@ impl Server {
         if let Some(why) = ended {
             println!("fileserver: a stream is ended: {why}");
         }
-        if let Some(stream) = self.streams.remove(&sid) {
-            if let Some((node, identity)) = descriptions::release(stream.file) {
-                // Nobody is left to answer: a refused close is said, and its
-                // node kept for the next sync.
-                let _ = self.files.closed(&mut *self.volume, identity, node);
-            }
+        if let Some(stream) = self.streams.remove(&sid)
+            && let Some((node, identity)) = descriptions::release(stream.file)
+        {
+            // Nobody is left to answer: a refused close is said, and its
+            // node kept for the next sync.
+            let _ = self.files.closed(&mut *self.volume, identity, node);
         }
         false
     }

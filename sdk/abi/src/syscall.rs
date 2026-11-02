@@ -354,8 +354,6 @@ pub const SYS_CURRENT_CPU: u64 = 163;
 /// Map a firmware window a claim was granted at its mint. See
 /// [`device_firmware_window`].
 pub const SYS_DEVICE_FIRMWARE_WINDOW: u64 = 164;
-/// What a holder's paged object publishes. See [`paged_stat`].
-pub const SYS_PAGED_STAT: u64 = 165;
 /// List the names held by a namespace, without opening any connector.
 pub const SYS_NAMESPACE_NAMES: u64 = 166;
 
@@ -3111,8 +3109,7 @@ pub enum PagedOp {
     /// Copy `len` bytes from `buf` into the present pages at `offset`, dirty,
     /// growing the size to their end as each page's bytes land. Answers the
     /// bytes written, stopping at the first absent page; `NotFound` when the
-    /// first is absent, `WouldBlock` at the dirty ceiling. `time` is the
-    /// file's mtime from this write, as its volume keeps it. A write that
+    /// first is absent, `WouldBlock` at the dirty ceiling. A write that
     /// does not take all it was given stays under way until
     /// [`PagedOp::EndWrite`].
     Write = 1,
@@ -3122,7 +3119,7 @@ pub enum PagedOp {
     /// Mark `len` pages from page `offset` failed: each read of one answers
     /// `Io` until it is supplied again.
     Fail = 3,
-    /// Set the size to `offset`, and the mtime to `time`. A shrink drops
+    /// Set the size to `offset`. A shrink drops
     /// every page past it, dirty or not, and zeroes the last page's tail; the
     /// new range of a growth reads as the pager supplies it.
     Resize = 4,
@@ -3143,9 +3140,6 @@ pub enum PagedOp {
     /// End the write a short [`PagedOp::Write`] or dirty supply left under
     /// way; `InvalidArgument` where none is.
     EndWrite = 9,
-    /// Set the mtime to `time`, as a file's `utimens` does; the bytes and
-    /// the version stay.
-    Stamp = 10,
     /// Unused slots in the pager's resident-page quota. This advisory
     /// snapshot reserves nothing and promises no physical memory.
     Room = 11,
@@ -3169,21 +3163,6 @@ crate::user_safe! {
         pub len: u64,
         pub buf: u64,
         pub flags: u64,
-        /// [`PagedOp::Write`]'s, [`PagedOp::Resize`]'s and [`PagedOp::Stamp`]'s
-        /// mtime, nanoseconds since the Unix epoch.
-        pub time: u64,
-    }
-}
-
-crate::user_safe! {
-    /// What a paged object publishes to its holders ([`paged_stat`]): the
-    /// size and version the kernel keeps, and the mtime its pager last set.
-    #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-    pub struct PagedStat {
-        pub size: u64,
-        pub mtime: u64,
-        /// Moved by every write and resize: the object's data generation.
-        pub version: u64,
     }
 }
 
@@ -3218,18 +3197,18 @@ pub fn pager_create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> 
     check(syscall(SYS_PAGER_CREATE, capacity, dirty, objects, report_ns)).map(|raw| RawHandle(raw as u32))
 }
 
-/// A paged object of `size` bytes last written at `mtime`, its pages absent:
+/// A paged object of `size` bytes, its pages absent:
 /// its id, which `pager`'s calls and notices name it by.
 /// `ResourceExhausted` where the pager serves as many objects as it was made
 /// for.
-pub fn paged_create(pager: RawHandle, size: u64, mtime: u64) -> Result<u64, SyscallError> {
-    check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, mtime, 0))
+pub fn paged_create(pager: RawHandle, size: u64) -> Result<u64, SyscallError> {
+    check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, 0, 0))
 }
 
 /// A resizable anonymous object: its present pages are authoritative, never
 /// withdrawn or discarded by a failure, and writes need no writeback slot.
-pub fn paged_anonymous(pager: RawHandle, size: u64, mtime: u64) -> Result<u64, SyscallError> {
-    check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, mtime, 1))
+pub fn paged_anonymous(pager: RawHandle, size: u64) -> Result<u64, SyscallError> {
+    check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, 1, 0))
 }
 
 /// A holder handle on `pager`'s object `object`, carrying `READ`, which may
@@ -3250,14 +3229,6 @@ pub fn paged_holder(pager: RawHandle, object: u64) -> Result<RawHandle, SyscallE
 /// can be checked.
 pub fn paged_read(holder: RawHandle, out: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
     check(syscall(SYS_PAGED_READ, holder.0 as u64, out.as_mut_ptr() as u64, out.len() as u64, offset)).map(|n| n as usize)
-}
-
-/// What `holder`'s object publishes, read without a request: atomic against
-/// its pager's writes, so `WouldBlock` while one is under way, and the pager
-/// is asked. Refused as [`paged_read`] refuses.
-pub fn paged_stat(holder: RawHandle) -> Result<PagedStat, SyscallError> {
-    let mut out = PagedStat::default();
-    check(syscall(SYS_PAGED_STAT, holder.0 as u64, &mut out as *mut PagedStat as u64, 0, 0)).map(|_| out)
 }
 
 /// One [`PagedOp`] on one of `pager`'s objects.

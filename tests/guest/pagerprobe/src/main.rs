@@ -40,7 +40,7 @@ fn main() {
         return hold();
     }
     let pager = Pager::create(LARGE + 16, 0, 4, Duration::from_secs(1)).expect("pagerprobe: its row starts it as a pager");
-    let large = pager.object(LARGE * PAGE, 0).expect("pagerprobe: the large object");
+    let large = pager.object(LARGE * PAGE).expect("pagerprobe: the large object");
     fill(&pager, large);
     assert_eq!(pager.withdraw(large, 0, u64::MAX), Ok(LARGE), "pagerprobe: the whole object withdrawn at once");
     fill(&pager, large);
@@ -50,10 +50,10 @@ fn main() {
         Err(Refused::Kernel(SyscallError::InvalidArgument)),
         "pagerprobe: a second release of one object was taken"
     );
-    let left = pager.object(LARGE * PAGE, 0).expect("pagerprobe: the object the pager's end takes");
+    let left = pager.object(LARGE * PAGE).expect("pagerprobe: the object the pager's end takes");
     fill(&pager, left);
     println!("pagerprobe: more than 512 MiB in one object withdrawn, released and left for the end");
-    let anonymous = pager.anonymous(32 * PAGE, 0).expect("pagerprobe: anonymous memory");
+    let anonymous = pager.anonymous(32 * PAGE).expect("pagerprobe: anonymous memory");
     assert_eq!(pager.supply(anonymous, 0, &vec![0x37; 16 * PAGE as usize], true), Ok(16));
     assert_eq!(pager.room(), Ok(0), "the anonymous pages consumed the remaining quota");
     assert_eq!(pager.withdraw(anonymous, 0, 32), Ok(0), "anonymous bytes cannot be withdrawn");
@@ -64,7 +64,7 @@ fn main() {
     assert_eq!(pager.read(anonymous, out, 0), Ok(bytes.len()));
     anonymous_contents(&bytes);
     assert_eq!(pager.room(), Ok(0), "a zero-hole read needs no quota");
-    let object = pager.object(4096, 0).expect("pagerprobe: an object");
+    let object = pager.object(4096).expect("pagerprobe: an object");
     let own = pager.holder(object).expect("pagerprobe: a holder for itself");
     // The handle is a holder, and this process a pager: refused by the kernel.
     assert_eq!(

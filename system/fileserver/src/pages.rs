@@ -16,10 +16,9 @@
 //! a call that stops short leaves it under way until its end, so no holder
 //! reads the file half written (`toyos::paged::Pager::end_write`).
 //!
-//! **The volume's size and mtime are the object's**: each call that moves the volume's mtime hands
-//! the object the volume's own value, at its resolution. A write reserves on the volume
-//! first, so the volume's size runs past the object's only for the bytes the
-//! write then puts in before it returns; nothing reads the volume for them
+//! A write reserves on the volume first, so the volume's size runs past the
+//! object's only for the bytes the write then puts in before it returns;
+//! nothing reads the volume for them
 //! meanwhile, and a write refused part way is cut back to what it put.
 //!
 //! **A server with no pager** (ROOT's, whose files are immutable) reads and
@@ -38,28 +37,27 @@ const RANGE: u64 = PAGED_RANGE_PAGES;
 
 /// A pager's calls on its objects, by id, as `toyos::paged::Pager` makes them.
 pub trait Pager {
-    fn object(&self, size: u64, mtime: u64) -> Result<u64, Refused>;
-    fn anonymous(&self, size: u64, mtime: u64) -> Result<u64, Refused>;
+    fn object(&self, size: u64) -> Result<u64, Refused>;
+    fn anonymous(&self, size: u64) -> Result<u64, Refused>;
     fn room(&self) -> Result<u64, Refused>;
     fn read(&self, id: u64, out: Bytes<'_>, offset: u64) -> Result<usize, Refused>;
     fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused>;
-    fn write(&self, id: u64, offset: u64, bytes: &[u8], mtime: u64) -> Result<usize, Refused>;
+    fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused>;
     fn end_write(&self, id: u64) -> Result<(), Refused>;
     fn withdraw(&self, id: u64, first: u64, count: u64) -> Result<u64, Refused>;
     fn fail(&self, id: u64, first: u64, count: u64) -> Result<(), Refused>;
-    fn resize(&self, id: u64, size: u64, mtime: u64) -> Result<(), Refused>;
-    fn stamp(&self, id: u64, mtime: u64) -> Result<(), Refused>;
+    fn resize(&self, id: u64, size: u64) -> Result<(), Refused>;
     fn writeback_begin(&self, id: u64, first: u64, count: u64) -> Result<[u64; 8], Refused>;
     fn writeback_end(&self, id: u64, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused>;
     fn release(&self, id: u64) -> Result<(), Refused>;
 }
 
 impl Pager for toyos::paged::Pager {
-    fn object(&self, size: u64, mtime: u64) -> Result<u64, Refused> {
-        toyos::paged::Pager::object(self, size, mtime)
+    fn object(&self, size: u64) -> Result<u64, Refused> {
+        toyos::paged::Pager::object(self, size)
     }
-    fn anonymous(&self, size: u64, mtime: u64) -> Result<u64, Refused> {
-        toyos::paged::Pager::anonymous(self, size, mtime)
+    fn anonymous(&self, size: u64) -> Result<u64, Refused> {
+        toyos::paged::Pager::anonymous(self, size)
     }
     fn room(&self) -> Result<u64, Refused> {
         toyos::paged::Pager::room(self)
@@ -70,8 +68,8 @@ impl Pager for toyos::paged::Pager {
     fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused> {
         toyos::paged::Pager::supply(self, id, offset, bytes, dirty)
     }
-    fn write(&self, id: u64, offset: u64, bytes: &[u8], mtime: u64) -> Result<usize, Refused> {
-        toyos::paged::Pager::write(self, id, offset, bytes, mtime)
+    fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
+        toyos::paged::Pager::write(self, id, offset, bytes)
     }
     fn end_write(&self, id: u64) -> Result<(), Refused> {
         toyos::paged::Pager::end_write(self, id)
@@ -82,11 +80,8 @@ impl Pager for toyos::paged::Pager {
     fn fail(&self, id: u64, first: u64, count: u64) -> Result<(), Refused> {
         toyos::paged::Pager::fail(self, id, first, count)
     }
-    fn resize(&self, id: u64, size: u64, mtime: u64) -> Result<(), Refused> {
-        toyos::paged::Pager::resize(self, id, size, mtime)
-    }
-    fn stamp(&self, id: u64, mtime: u64) -> Result<(), Refused> {
-        toyos::paged::Pager::stamp(self, id, mtime)
+    fn resize(&self, id: u64, size: u64) -> Result<(), Refused> {
+        toyos::paged::Pager::resize(self, id, size)
     }
     fn writeback_begin(&self, id: u64, first: u64, count: u64) -> Result<[u64; 8], Refused> {
         toyos::paged::Pager::writeback_begin(self, id, first, count)
@@ -193,14 +188,13 @@ impl<P: Pager> Files<P> {
         Some(f)
     }
 
-    /// After an open of `identity` at `node` that truncated: its object holds
+    /// After an open of `identity` that truncated: its object holds
     /// no page of before. The volume went first, so a refused open changed
     /// nothing, and nothing writes back between the two.
-    pub fn truncated(&mut self, volume: &mut dyn Volume, identity: u64, node: Node) -> Result<(), Error> {
+    pub fn truncated(&mut self, identity: u64) -> Result<(), Error> {
         let Some(f) = self.files.get(&identity) else { return Ok(()) };
         let id = f.object;
-        let mtime = volume.node_meta(node)?.mtime;
-        self.pg().resize(id, 0, mtime).map_err(word)?;
+        self.pg().resize(id, 0).map_err(word)?;
         self.files.get_mut(&identity).expect("found").dirty = None;
         Ok(())
     }
@@ -226,7 +220,7 @@ impl<P: Pager> Files<P> {
         // Objects are bounded by count as pages are: a file nobody holds goes
         // to make room for another's.
         let object = loop {
-            let created = if volume.memory() { self.pg().anonymous(meta.size, meta.mtime) } else { self.pg().object(meta.size, meta.mtime) };
+            let created = if volume.memory() { self.pg().anonymous(meta.size) } else { self.pg().object(meta.size) };
             match created {
                 Ok(object) => break object,
                 Err(Refused::NoRoom) if self.drop_oldest(volume, identity) => {}
@@ -425,19 +419,10 @@ impl<P: Pager> Files<P> {
         }
         let reserved = volume.reserve(node, offset, data.len() as u64)?;
         let old = reserved.size;
-        let mtime = match volume.node_meta(node) {
-            Ok(meta) => meta.mtime,
-            Err(e) => {
-                if let Err(again) = volume.unreserve(node, reserved, 0) {
-                    println!("fileserver: a write of file {identity} was not cut back to {old} ({again:?}), after {e:?}");
-                }
-                return Err(e);
-            }
-        };
         self.touch(identity);
         let id = self.files[&identity].object;
         let mut put = Put { done: 0, held: false };
-        let writing = Writing { identity, node, old, contents: reserved.contents(), offset, data, mtime };
+        let writing = Writing { identity, node, old, contents: reserved.contents(), offset, data };
         let written = self.put(volume, &writing, &mut put);
         if let Err(e) = &written {
             // What was reserved and not put would read as the blocks' old bytes.
@@ -445,10 +430,9 @@ impl<P: Pager> Files<P> {
             let cut = old.max(landed);
             let resized = self
                 .pg()
-                .resize(id, cut, mtime)
+                .resize(id, cut)
                 .map_err(word)
-                .and(volume.unreserve(node, reserved, landed))
-                .and_then(|()| self.stamped(volume, identity, node));
+                .and(volume.unreserve(node, reserved, landed));
             if let Err(again) = resized {
                 println!("fileserver: a refused write of file {identity} was not cut back to {cut} ({again:?}), after {e:?}");
             }
@@ -466,13 +450,13 @@ impl<P: Pager> Files<P> {
     /// counting into `put` what landed and whether a call left the write
     /// under way.
     fn put(&mut self, volume: &mut dyn Volume, w: &Writing<'_>, put: &mut Put) -> Result<(), Error> {
-        let Writing { identity, node, old, contents, offset, data, mtime } = *w;
+        let Writing { identity, node, old, contents, offset, data } = *w;
         let end = offset + data.len() as u64;
         let done = &mut put.done;
         while *done < data.len() {
             let at = offset + *done as u64;
             let id = self.files.get(&identity).ok_or(Error::Stale)?.object;
-            let wrote = self.pg().write(id, at, &data[*done..], mtime);
+            let wrote = self.pg().write(id, at, &data[*done..]);
             // A first call that takes everything is the whole write; any later
             // call is under the write a short first one left under way.
             put.held |= wrote != Ok(data.len() - *done);
@@ -532,15 +516,6 @@ impl<P: Pager> Files<P> {
         }
     }
 
-    /// `identity`'s volume moved its mtime, which `node` reads: its object
-    /// follows.
-    pub fn stamped(&mut self, volume: &mut dyn Volume, identity: u64, node: Node) -> Result<(), Error> {
-        let Some(f) = self.files.get(&identity) else { return Ok(()) };
-        let id = f.object;
-        let mtime = volume.node_meta(node)?.mtime;
-        self.pg().stamp(id, mtime).map_err(word)
-    }
-
     /// `node`'s file cut or grown to `size`: the volume first, so a refusal
     /// changes nothing, then the object, before anything can write a page
     /// past the size back.
@@ -549,14 +524,13 @@ impl<P: Pager> Files<P> {
         if !self.files.contains_key(&identity) {
             return Ok(());
         }
-        let mtime = volume.node_meta(node)?.mtime;
         let f = self.files.get_mut(&identity).expect("found");
         if let Some((lo, hi)) = f.dirty {
             let hi = hi.min(size.div_ceil(PAGE));
             f.dirty = (lo < hi).then_some((lo, hi));
         }
         let id = f.object;
-        self.pg().resize(id, size, mtime).map_err(word)
+        self.pg().resize(id, size).map_err(word)
     }
 
     /// `identity`'s dirty pages written to the volume. A page dirtied again
@@ -707,8 +681,6 @@ struct Writing<'a> {
     contents: u64,
     offset: u64,
     data: &'a [u8],
-    /// The file's mtime from this write, as the volume keeps it.
-    mtime: u64,
 }
 
 /// The runs of set bits among the first `count` of `bits`: where each starts
