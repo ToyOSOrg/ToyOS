@@ -29,6 +29,7 @@ pub mod boot;
 pub mod cache;
 pub mod clocksource;
 pub mod control_regs;
+pub mod copy;
 pub mod counters;
 pub mod console_uart;
 pub mod cpu;
