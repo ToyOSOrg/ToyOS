@@ -1433,10 +1433,10 @@ pub fn restore_handed(binding: &Binding, handed: Handed) {
     }
 }
 
-/// Every aperture function `number`'s claim handed out, revoked: at the
-/// claim's last handle, and at its function's departure, which has no
-/// binding. Under [`Handed::revoke`]'s terms: never from the hot-plug
-/// interrupt, and never with `MACHINE` held.
+/// Every aperture function `number`'s claim handed out, revoked, for a
+/// caller that holds the function's number and no binding. Under
+/// [`Handed::revoke`]'s terms: thread context only, and never with `MACHINE`
+/// held.
 pub fn revoke_handed(number: usize) {
     take(function(number)).revoke();
 }

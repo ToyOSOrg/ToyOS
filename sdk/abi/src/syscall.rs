@@ -2782,6 +2782,11 @@ pub fn write_nonblock(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallErr
 /// Every call answers an object of its own over the same window, so a BAR
 /// whose handle was closed can be asked for again.
 ///
+/// **The object lives no longer than the claim's hold.** When the claim
+/// ends or moves to another holder, every mapping of it is taken back, so
+/// the old holder's next access faults, and a handle kept past that maps
+/// `Gone`.
+///
 /// A window alone drives nothing: the function masters the bus from
 /// [`device_dma_start`] and not before.
 pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallError> {

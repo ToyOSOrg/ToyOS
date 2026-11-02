@@ -115,9 +115,10 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
 /// Mints a device claim, gated on a `SysCap` carrying [`Rights::DEVICE`].
 ///
 /// `selector` says which device where the class alone does not — a PCI
-/// function's arrival, an ISA set — and a word the class
-/// does not read is refused, never dropped: whoever set it meant a device this
-/// claim would not name.
+/// function's arrival, with the firmware windows its claim is granted in the
+/// second word, or an ISA set. A word the class does not read, or a window
+/// bit there is none of, is refused, never dropped: whoever set it meant a
+/// device this claim would not name.
 pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]) -> u64 {
     let Some(class) = device::DeviceType::from_raw(class) else {
         return SyscallError::InvalidArgument.to_u64();
