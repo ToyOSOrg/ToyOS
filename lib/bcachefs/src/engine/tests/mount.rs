@@ -114,7 +114,7 @@ fn the_unclean_fixture_of_16_kib_nodes_is_read_and_refused_read_write() {
 
 /// What this writer does not handle in full is refused read-write by name
 /// (§3.1): a superblock field of a type v1.39.4 does not define, and a
-/// logged operation it cannot resume.
+/// malformed logged truncate it cannot safely resume.
 #[test]
 fn a_volume_this_writer_cannot_keep_is_refused_read_write() {
     let open = |dev: &Image| block_on_ready(Mount::open(dev, MEMORY, random())).err();
@@ -126,21 +126,19 @@ fn a_volume_this_writer_cannot_keep_is_refused_read_write() {
         let pos = Bpos::new(0, 0, 0);
         keys.push((Key::new(kind::LOGGED_OP_TRUNCATE, pos), vec![0; 24]));
     });
-    assert_eq!(open(&dev), Some(Error::Unsupported("writing a volume with a logged operation to resume")));
+    assert_eq!(open(&dev), Some(Error::Corrupt("logged truncate value")));
     assert!(block_on_ready(Volume::open(&dev)).is_ok(), "still read");
 }
 
-/// A key of a type v1.39.4 does not define, met by a read while mounted, is
-/// refused by name, and the mount stops writing (§3.1).
+/// The mount inventories keys for its capacity ledger before writing. An
+/// unknown type is refused during that walk, before the volume is writable.
 #[test]
-fn a_key_of_an_unknown_type_met_while_mounted_stops_writing() {
+fn a_key_of_an_unknown_type_is_refused_before_writing() {
     let dev = formatted(64 << 20, None);
     rewrite_leaf(&dev, Btree::Dirents, Bpos::MIN, 0, |keys| {
         keys.push((Key::new(kind::UNKNOWN, Bpos::new(mkfs::ROOT_INODE, 77, u32::MAX)), vec![0; 8]));
     });
-    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
-    assert_eq!(block_on_ready(m.readdir(m.root(), 0, 10)).err(), Some(Error::Unsupported("key type v1.39.4 does not define")));
-    assert_eq!(block_on_ready(m.create(m.root(), b"f", New::File, OWNER, NOW)).err(), Some(Error::ReadOnly("key type v1.39.4 does not define")));
+    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Unsupported("key type v1.39.4 does not define")));
 }
 
 /// One crash state of going read-write: it opens, never as a volume marked
@@ -270,9 +268,7 @@ fn a_pointer_to_a_cached_node_of_another_btree_is_refused() {
         let inodes = clean.body[from + 8..from + len].to_vec();
         clean.body[to + 8..to + len].copy_from_slice(&inodes);
     });
-    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
-    let made = Executor::new().block_on(async { m.create_unnamed(m.root(), OWNER, NOW).await.map(|i| i.ino) }, || panic!("stalled"));
-    assert_eq!(made, Err(Error::Corrupt("two btree pointers to one node")));
+    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Corrupt("btree node of another btree or level than its pointer's")));
 }
 
 /// Rewrites the accounting root leaf, on an unencrypted volume, as upstream
