@@ -49,6 +49,8 @@ pub(crate) struct Cached {
     /// The oldest sequence a written bset holds whose pointer update is not
     /// applied.
     pub captured: Option<u64>,
+    /// A published underfull node still needing a sibling rewrite.
+    pub compact: Option<u64>,
     /// A write of it is in flight: it takes no change until it completes.
     pub writing: bool,
     /// Its next write goes to a fresh node, never appended: it was read
@@ -62,7 +64,7 @@ pub(crate) struct Cached {
 
 impl Cached {
     pub(crate) fn pin(&self) -> Option<u64> {
-        let oldest = self.unwritten.values().min().copied();
+        let oldest = self.unwritten.values().copied().chain(self.compact).min();
         match (oldest, self.captured) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -70,7 +72,7 @@ impl Cached {
     }
 
     pub(crate) fn dirty(&self) -> bool {
-        !self.unwritten.is_empty()
+        !self.unwritten.is_empty() || self.compact.is_some()
     }
 
     /// Whether dropping it loses nothing: a reread from the medium gives
@@ -288,6 +290,7 @@ mod tests {
             bytes: 0,
             unwritten: BTreeMap::new(),
             captured: None,
+            compact: None,
             writing: false,
             fresh: false,
             held: 0,
