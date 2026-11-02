@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -8,6 +8,29 @@ use super::*;
 use crate::data::DataVolume;
 use crate::ram::Ram;
 use crate::volume::OpenHow;
+use toyos_blockdev::{Block, BlockDev};
+
+struct RefusingRead {
+    ram: Ram,
+    refusing: Rc<Cell<bool>>,
+}
+
+impl BlockDev for RefusingRead {
+    fn blocks(&self) -> u64 { self.ram.blocks() }
+    async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), toyos_blockdev::Error> {
+        self.ram.read(lba, out).await?;
+        if self.refusing.get() && out.contains(&[0xb2; toyos_blockdev::BLOCK]) {
+            return Err(toyos_blockdev::Error::Device);
+        }
+        Ok(())
+    }
+    async fn write(&self, lba: u64, data: &[Block]) -> Result<(), toyos_blockdev::Error> {
+        self.ram.write(lba, data).await
+    }
+    async fn flush(&self) -> Result<(), toyos_blockdev::Error> { self.ram.flush().await }
+}
+
+impl crate::cache::Disk for RefusingRead {}
 
 /// The kernel's paged objects as far as the server can tell them apart: a
 /// table of `capacity` pages, `ceiling` of them dirty or under write-back,
@@ -83,6 +106,7 @@ impl Fake {
             let why = if !dirty && page >= size.div_ceil(PAGE) {
                 Some(Refused::Kernel(SyscallError::InvalidArgument))
             } else if m.pages.contains_key(&(id, page)) {
+                if dirty { return Ok(installed); }
                 continue;
             } else if m.pages.len() >= m.capacity {
                 Some(Refused::NoRoom)
@@ -474,6 +498,94 @@ fn a_write_refused_part_way_is_cut_back_to_what_it_put() {
     fake.0.borrow_mut().refusing = false;
     files.sync(&mut v).unwrap();
     assert_eq!(on_volume(&mut v, "home/f"), b"kept");
+}
+
+#[test]
+fn an_overwrite_keeps_incoming_capacity_while_its_older_dirty_page_is_flushed() {
+    let mut v = volume();
+    let fake = Fake::new(4, 1);
+    let mut files = Files::new(Some(fake.clone()));
+    let (node, id) = open(&mut files, &mut v, "home/f");
+    files.write(&mut v, id, node, 0, &pattern(2 * PAGE as usize, 1)).unwrap();
+    files.fsync(&mut v, Some((id, node))).unwrap();
+    files.write(&mut v, id, node, PAGE, &pattern(PAGE as usize, 2)).unwrap();
+    let object = files.object(id).unwrap();
+    assert!(!fake.0.borrow().pages[&(object, 0)].dirty);
+    assert!(fake.0.borrow().pages[&(object, 1)].dirty);
+
+    let replacement = pattern(2 * PAGE as usize, 3);
+    files.write(&mut v, id, node, 0, &replacement).unwrap();
+    files.fsync(&mut v, Some((id, node))).unwrap();
+    let mut v = after_a_stop(v);
+    assert_eq!(on_volume(&mut v, "home/f"), replacement);
+}
+
+#[test]
+fn a_partial_writeback_cleans_only_its_prefix_and_retries_the_same_reserved_suffix() {
+    let refusing = Rc::new(Cell::new(false));
+    let disk = RefusingRead { ram: Ram::new(16384), refusing: Rc::clone(&refusing) };
+    let mut v = DataVolume::format(disk, 256, &["home"], clock).unwrap();
+    let node = v.open("home/f", CREATE).unwrap();
+    let mut old = vec![0xa1; PAGE as usize];
+    old.extend(vec![0xb2; PAGE as usize]);
+    v.write(node, 0, &old).unwrap();
+    v.close(node).unwrap();
+    v.sync().unwrap();
+
+    let fake = Fake::new(4, 4);
+    let mut files = Files::new(Some(fake.clone()));
+    let (node, id) = open(&mut files, &mut v, "home/f");
+    let new = pattern(2 * PAGE as usize, 8);
+    files.write(&mut v, id, node, 0, &new).unwrap();
+    refusing.set(true);
+    assert_eq!(files.fsync(&mut v, Some((id, node))), Err(Error::Io));
+    let object = files.object(id).unwrap();
+    let m = fake.0.borrow();
+    assert!(!m.pages[&(object, 0)].dirty, "the successful prefix must not consume its reservation twice");
+    assert!(m.pages[&(object, 1)].dirty, "the refused suffix still owes its bytes");
+    drop(m);
+    refusing.set(false);
+    files.fsync(&mut v, Some((id, node))).unwrap();
+    let mut v = match DataVolume::probe(v.stopped(), 256, &["home"], clock) {
+        crate::data::Probed::Mounted(v) => *v,
+        _ => panic!("the committed file must mount"),
+    };
+    let node = v.open("home/f", CREATE).unwrap();
+    let mut bytes = vec![0; new.len()];
+    assert_eq!(v.read(node, 0, &mut Buf(&mut bytes)), Ok(bytes.len()));
+    assert_eq!(bytes, new);
+}
+
+#[test]
+fn cancelling_an_overwrite_before_copy_keeps_the_older_dirty_reservation() {
+    let mut v = volume();
+    let fake = Fake::new(4, 4);
+    let mut files = Files::new(Some(fake.clone()));
+    let (node, id) = open(&mut files, &mut v, "home/f");
+    let old = pattern(PAGE as usize, 4);
+    files.write(&mut v, id, node, PAGE, &old).unwrap();
+    fake.0.borrow_mut().refusing = true;
+    assert_eq!(files.write(&mut v, id, node, 0, &pattern(2 * PAGE as usize, 5)), Err(Error::Io));
+    fake.0.borrow_mut().refusing = false;
+    files.fsync(&mut v, Some((id, node))).unwrap();
+    let mut v = after_a_stop(v);
+    let bytes = on_volume(&mut v, "home/f");
+    assert!(bytes[..PAGE as usize].iter().all(|&b| b == 0));
+    assert_eq!(bytes[PAGE as usize..], old);
+}
+
+#[test]
+fn a_supply_stops_before_a_present_page_and_resumes_after_the_write_copies_it() {
+    let mut v = volume();
+    let fake = Fake::new(4, 2);
+    let mut files = Files::new(Some(fake));
+    let (node, id) = open(&mut files, &mut v, "home/f");
+    files.write(&mut v, id, node, PAGE, &pattern(PAGE as usize, 6)).unwrap();
+    let replacement = pattern(3 * PAGE as usize, 7);
+    files.write(&mut v, id, node, 0, &replacement).unwrap();
+    files.fsync(&mut v, Some((id, node))).unwrap();
+    let mut v = after_a_stop(v);
+    assert_eq!(on_volume(&mut v, "home/f"), replacement);
 }
 
 /// A write into a hole the file was extended over, refused before any byte

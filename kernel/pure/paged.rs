@@ -602,11 +602,13 @@ impl<F: Copy> Pages<F> {
         Ok(begun)
     }
 
-    /// End the write-back of exactly a range begun: a bit per page still
-    /// dirty, holding its slot. A page removed meanwhile is clear.
+    /// End a range begun, or its leading part, retaining the unended suffix:
+    /// a bit per page still dirty. A page removed meanwhile is clear.
     pub fn writeback_end(&mut self, o: &mut Object, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused> {
-        let at = self.open.iter().position(|r| *r == Some((o.id, first, count))).ok_or(Refused::InvalidArgument)?;
-        self.open[at] = None;
+        let at = self.open.iter().position(|r| r.is_some_and(|(id, a, n)| id == o.id && a == first && count > 0 && count <= n))
+            .ok_or(Refused::InvalidArgument)?;
+        let (_, _, total) = self.open[at].expect("the range found");
+        self.open[at] = (count < total).then_some((o.id, first + count, total - count));
         let mut kept = [0u64; 8];
         for k in 0..count {
             let Some(i) = self.find(o.id, first + k) else { continue };
@@ -902,13 +904,25 @@ mod tests {
     }
 
     #[test]
-    fn a_range_must_be_ended_exactly_as_begun_and_once() {
+    fn a_range_ends_once_in_leading_parts_and_keeps_its_unwritten_suffix() {
         let mut p: Pages<u64> = Pages::new(8, 8).unwrap();
         let mut o = p.object(8, PAGE * 1024);
+        for page in 0..4 {
+            p.supply(&mut o, page, page, true, (page + 1) * PAGE).unwrap();
+        }
         p.writeback_begin(&mut o, 0, 4).unwrap();
         assert_eq!(p.writeback_begin(&mut o, 3, 2), Err(Refused::InvalidArgument), "overlapping");
-        assert_eq!(p.writeback_end(&mut o, 0, 3, true), Err(Refused::InvalidArgument), "not the range begun");
-        assert!(p.writeback_end(&mut o, 0, 4, true).is_ok());
+        assert_eq!(p.writeback_end(&mut o, 1, 3, true), Err(Refused::InvalidArgument), "not a leading part");
+        assert_eq!(p.writeback_end(&mut o, 0, 0, true), Err(Refused::InvalidArgument), "empty");
+        assert_eq!(p.writeback_end(&mut o, 0, 5, true), Err(Refused::InvalidArgument), "past the range");
+        assert_eq!(p.writeback_end(&mut o, 0, 2, true), Ok([0; 8]));
+        assert_eq!(p.dirty_held(), 2);
+        assert_eq!(p.writeback_begin(&mut o, 2, 2), Err(Refused::InvalidArgument), "the suffix remains held");
+        assert_eq!(p.writeback_end(&mut o, 0, 2, true), Err(Refused::InvalidArgument), "the prefix already ended");
+        assert_eq!(p.writeback_end(&mut o, 2, 2, false).unwrap()[0], 0b11);
+        assert_eq!(p.writeback_begin(&mut o, 0, 4).unwrap()[0], 0b1100, "only the unwritten suffix is retried");
+        assert_eq!(p.writeback_end(&mut o, 0, 4, true), Ok([0; 8]));
+        assert_eq!(p.dirty_held(), 0);
         assert_eq!(p.writeback_end(&mut o, 0, 4, true), Err(Refused::InvalidArgument), "twice");
         assert_eq!(p.writeback_begin(&mut o, 0, RANGE_PAGES + 1), Err(Refused::InvalidArgument));
         assert_eq!(p.writeback_begin(&mut o, 0, 0), Err(Refused::InvalidArgument));

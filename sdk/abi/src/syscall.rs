@@ -3101,7 +3101,9 @@ pub enum PagedOp {
     /// Copy `len` bytes from `buf` into fresh pages at `offset`, a whole page
     /// in: clean, or dirty with [`PAGED_DIRTY`], which also grows the size to
     /// the end of the bytes and is a write ([`PagedOp::Write`]). A page
-    /// already present is left as it is. Answers the pages installed;
+    /// already present is left as it is. Clean supply skips it; dirty supply
+    /// stops there, so its installed count describes a copied prefix.
+    /// Answers the pages installed;
     /// `ResourceExhausted` where no page could be had, `WouldBlock` at the
     /// dirty ceiling, `InvalidArgument` for a clean page past the size or a
     /// dirty one past its end.
@@ -3127,9 +3129,9 @@ pub enum PagedOp {
     /// [`PAGED_RANGE_PAGES`]: each dirty page is cleaned and held until the
     /// end. `buf` receives a 64-byte bitmap of the pages begun.
     WritebackBegin = 5,
-    /// End exactly a range begun, written to the device or not
+    /// End a range begun or its leading part, written to the device or not
     /// ([`PAGED_WRITTEN`]): `buf` receives a 64-byte bitmap of the pages
-    /// still dirty, dirtied again since the begin or not written.
+    /// still dirty. Any remaining suffix stays under write-back.
     WritebackEnd = 6,
     /// Read `len` bytes at `offset` into `buf`, never waiting: `WouldBlock`
     /// where the first page is absent, a short count where a later one is.

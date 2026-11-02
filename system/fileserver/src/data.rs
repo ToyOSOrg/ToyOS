@@ -2,7 +2,7 @@
 //! sizes and capacity reservations stay here until their pages are written.
 
 use crate::cache::{Cache, Disk};
-use crate::volume::{Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume, parent};
+use crate::volume::{Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume, WriteBack, parent};
 use bcachefs::engine::{self, DirentType, Mount, MountOptions, New, Owner, Reservation};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -28,6 +28,7 @@ struct Open {
     mtime: u64,
     changed: bool,
     pages: BTreeMap<u64, Pending>,
+    incoming: BTreeMap<u64, Pending>,
 }
 pub struct DataVolume<D: Disk> {
     fs: Mount<Rc<Cache<D>>>,
@@ -198,7 +199,7 @@ impl<D: Disk> DataVolume<D> {
     }
     fn persist(&mut self, node: Node) -> Result<(), Error> {
         let open = self.open.get(&node).ok_or(Error::Stale)?;
-        if !open.pages.is_empty() {
+        if !open.pages.is_empty() || !open.incoming.is_empty() {
             return Err(Error::Io);
         }
         if !open.changed {
@@ -299,6 +300,7 @@ impl<D: Disk> Volume for DataVolume<D> {
                 mtime: inode.mtime.max(0) as u64,
                 changed: false,
                 pages: BTreeMap::new(),
+                incoming: BTreeMap::new(),
             })
             .holders += 1;
         if how.truncate
@@ -317,7 +319,9 @@ impl<D: Disk> Volume for DataVolume<D> {
         }
         let inode = mapped("close", self.cache.block_on(self.fs.inode(node)))?;
         if inode.nlink == 0 {
-            self.open.get_mut(&node).unwrap().pages.clear();
+            let open = self.open.get_mut(&node).unwrap();
+            open.pages.clear();
+            open.incoming.clear();
             mapped("orphan close", self.cache.block_on(self.fs.release(node)))?;
         } else {
             self.persist(node)?;
@@ -352,6 +356,7 @@ impl<D: Disk> Volume for DataVolume<D> {
     fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<Reserved, Error> {
         let end = offset.checked_add(len).ok_or(Error::FileTooLarge)?;
         let open = self.open.get(&node).ok_or(Error::Stale)?;
+        assert!(open.incoming.is_empty(), "a write completes or cancels before the next reserve");
         let ticket = self.next_ticket;
         self.next_ticket = ticket.checked_add(1).expect("reservation generation exhausted");
         let reserved = Reserved { size: open.size, contents: open.size, ticket };
@@ -359,12 +364,9 @@ impl<D: Disk> Volume for DataVolume<D> {
             return Ok(reserved);
         }
         for page in offset / BLOCK as u64..end.div_ceil(BLOCK as u64) {
-            if self.open[&node].pages.contains_key(&page) {
-                continue;
-            }
             match self.cache.block_on(self.fs.reserve(node, page * BLOCK as u64, BLOCK)) {
                 Ok(reservation) => {
-                    self.open.get_mut(&node).unwrap().pages.insert(page, Pending { ticket, reservation });
+                    self.open.get_mut(&node).unwrap().incoming.insert(page, Pending { ticket, reservation });
                 }
                 Err(error) => {
                     self.unreserve(node, reserved, 0)?;
@@ -378,31 +380,33 @@ impl<D: Disk> Volume for DataVolume<D> {
         open.changed = true;
         Ok(reserved)
     }
+    fn landed(&mut self, node: Node, reserved: Reserved, offset: u64, len: usize) {
+        if len == 0 { return; }
+        let open = self.open.get_mut(&node).expect("a reserved inode");
+        for page in offset / BLOCK as u64..(offset + len as u64).div_ceil(BLOCK as u64) {
+            let pending = open.incoming.remove(&page).expect("each copied page has incoming capacity");
+            assert_eq!(pending.ticket, reserved.ticket, "the write's incoming capacity");
+            open.pages.insert(page, pending);
+        }
+    }
     fn unreserve(&mut self, node: Node, reserved: Reserved, landed: u64) -> Result<(), Error> {
         let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
-        let cancelled: Vec<_> = open
-            .pages
-            .iter()
-            .filter_map(|(&page, pending)| {
-                (pending.ticket == reserved.ticket && page * BLOCK as u64 >= landed).then_some(page)
-            })
-            .collect();
-        for page in cancelled {
-            open.pages.remove(&page);
-        }
+        open.incoming.retain(|_, pending| pending.ticket != reserved.ticket);
+        open.pages.retain(|&page, pending| pending.ticket != reserved.ticket || page * (BLOCK as u64) < landed);
         open.size = reserved.size.max(landed);
         Ok(())
     }
-    fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
-        let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
+    fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> WriteBack {
+        let open = self.open.get_mut(&node).ok_or((0, Error::Stale))?;
         if !offset.is_multiple_of(BLOCK as u64)
             || offset.checked_add(data.len() as u64).is_none_or(|end| end > open.size)
         {
-            return Err(Error::InvalidRequest);
+            return Err((0, Error::InvalidRequest));
         }
         for (i, bytes) in data.chunks(BLOCK).enumerate() {
             let page = offset / BLOCK as u64 + i as u64;
-            let pending = open.pages.get_mut(&page).ok_or(Error::Io)?;
+            let done = i * BLOCK;
+            let pending = open.pages.get_mut(&page).ok_or((done, Error::Io))?;
             let written = mapped(
                 "writeback",
                 self.cache.block_on(self.fs.write_reserved(
@@ -411,9 +415,9 @@ impl<D: Disk> Volume for DataVolume<D> {
                     bytes,
                     time(open.mtime),
                 )),
-            )?;
+            ).map_err(|error| (done, error))?;
             if written != bytes.len() {
-                return Err(Error::Io);
+                return Err((done, Error::Io));
             }
             open.pages.remove(&page);
         }
@@ -517,7 +521,7 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(refused)
     }
     fn owes(&self) -> bool {
-        self.open.values().any(|open| open.changed || !open.pages.is_empty())
+        self.open.values().any(|open| open.changed || !open.pages.is_empty() || !open.incoming.is_empty())
     }
     fn commit(&mut self, node: Option<Node>) -> Result<(), Error> {
         if let Some(node) = node {
@@ -618,7 +622,8 @@ mod tests {
     fn cancelling_one_reservation_keeps_an_earlier_dirty_page() {
         let mut v = volume();
         let f = v.open("home/f", CREATE).unwrap();
-        v.reserve(f, 0, 4).unwrap();
+        let first = v.reserve(f, 0, 4).unwrap();
+        v.landed(f, first, 0, 4);
         let before = v.room().unwrap().free;
         let later = v.reserve(f, BLOCK as u64, 4).unwrap();
         v.unreserve(f, later, 0).unwrap();

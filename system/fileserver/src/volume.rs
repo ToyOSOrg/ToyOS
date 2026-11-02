@@ -58,6 +58,10 @@ pub struct OpenHow {
 /// An open file, while any client holds it.
 pub type Node = u64;
 
+/// A write-back is whole, or reports the byte count of the complete-page
+/// prefix written before its refusal. The suffix keeps its capacity for retry.
+pub type WriteBack = Result<(), (usize, Error)>;
+
 /// Where a read's bytes go, `len()` of them at most: the client's window, which
 /// is shared with the client and so is written through a copy and never
 /// through a reference, or a buffer of this process's own.
@@ -159,19 +163,21 @@ pub trait Volume {
     /// its reserve gives back its room through [`Self::unreserve`].
     fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<Reserved, Error>;
 
-    /// A write refused after its reserve: the size back to the reserve's old
-    /// one, or to `landed` where the write's bytes reached past it, and every
-    /// block the reserve took past both given back, since it holds what the
-    /// file that last had it left there. `landed` is 0 where none landed.
-    /// Called before any other call on the file, so nothing has recorded the
-    /// reserve's blocks.
+    /// Bytes of this reservation copied into the file's buffer. Called once
+    /// for each touched page, before any write-back can take the new bytes.
+    /// An older dirty version may be written back before this call.
+    fn landed(&mut self, _node: Node, _reserved: Reserved, _offset: u64, _len: usize) {}
+
+    /// Cancel the capacity for bytes this write did not copy, restoring the
+    /// size to the old one or `landed`, whichever is larger. `landed` is 0
+    /// where none landed. Older dirty bytes retain their capacity.
     fn unreserve(&mut self, node: Node, reserved: Reserved, landed: u64) -> Result<(), Error> {
         self.truncate(node, reserved.size.max(landed))
     }
 
     /// `data` at the whole-page `offset`, inside the size, into the room
     /// [`Self::reserve`] made; a last page in part is zeros past the size.
-    fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error>;
+    fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> WriteBack;
 
     fn truncate(&mut self, node: Node, size: u64) -> Result<(), Error>;
 
@@ -269,7 +275,9 @@ pub trait Writes: Volume {
             let written = self.read(node, start, &mut Buf(&mut page[..below])).and_then(|_| {
                 page[(from - start) as usize..(to - start) as usize]
                     .copy_from_slice(&data[(from - offset) as usize..(to - offset) as usize]);
+                self.landed(node, reserved, from, (to - from) as usize);
                 self.write_back(node, start, &page[..(size - start).min(PAGE) as usize])
+                    .map_err(|(_, error)| error)
             });
             if let Err(e) = written {
                 if let Err(again) = self.unreserve(node, reserved, landed) {

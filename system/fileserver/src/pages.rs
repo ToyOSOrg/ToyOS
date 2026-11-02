@@ -30,7 +30,7 @@ use toyos::fs::Error;
 use toyos::paged::{Notice, Refused, PAGE, PAGED_RANGE_PAGES};
 use toyos::shm::Bytes;
 
-use crate::volume::{Buf, Node, Volume, Window, Writes};
+use crate::volume::{Buf, Node, Reserved, Volume, Window, Writes};
 
 /// The most pages one supply or write-back carries.
 const RANGE: u64 = PAGED_RANGE_PAGES;
@@ -422,7 +422,7 @@ impl<P: Pager> Files<P> {
         self.touch(identity);
         let id = self.files[&identity].object;
         let mut put = Put { done: 0, held: false };
-        let writing = Writing { identity, node, old, contents: reserved.contents(), offset, data };
+        let writing = Writing { identity, node, reserved, offset, data };
         let written = self.put(volume, &writing, &mut put);
         if let Err(e) = &written {
             // What was reserved and not put would read as the blocks' old bytes.
@@ -450,7 +450,7 @@ impl<P: Pager> Files<P> {
     /// counting into `put` what landed and whether a call left the write
     /// under way.
     fn put(&mut self, volume: &mut dyn Volume, w: &Writing<'_>, put: &mut Put) -> Result<(), Error> {
-        let Writing { identity, node, old, contents, offset, data } = *w;
+        let Writing { identity, node, reserved, offset, data } = *w;
         let end = offset + data.len() as u64;
         let done = &mut put.done;
         while *done < data.len() {
@@ -462,7 +462,7 @@ impl<P: Pager> Files<P> {
             put.held |= wrote != Ok(data.len() - *done);
             match wrote {
                 Ok(n) => {
-                    self.landed(identity, at, n);
+                    self.landed(volume, w, at, n);
                     *done += n;
                     continue;
                 }
@@ -474,20 +474,19 @@ impl<P: Pager> Files<P> {
             let whole = ((data.len() - *done) as u64 / PAGE).min(RANGE);
             if at.is_multiple_of(PAGE) && whole > 0 {
                 let bytes = &data[*done..*done + (whole * PAGE) as usize];
-                // Each page taken is written; one already present was not
-                // taken, and the write above puts it on the next turn.
+                // Dirty supply stops at the first present page. The next
+                // write handles it, so every reported byte is a prefix.
                 let taken = self.supplied(volume, identity, page, whole, bytes, true)?;
-                self.landed(identity, at, (taken * PAGE) as usize);
-                if taken == whole {
-                    *done += bytes.len();
-                }
+                let len = (taken * PAGE) as usize;
+                self.landed(volume, w, at, len);
+                *done += len;
                 continue;
             }
             // A page in part: what it held below the old end, zeros past the
             // old contents, then the write's.
             let start = page * PAGE;
-            let below = old.saturating_sub(start).min(PAGE) as usize;
-            let held = contents.saturating_sub(start).min(PAGE) as usize;
+            let below = reserved.size.saturating_sub(start).min(PAGE) as usize;
+            let held = reserved.contents().saturating_sub(start).min(PAGE) as usize;
             let upto = end.min(start + PAGE);
             let mut buf = std::mem::take(&mut self.buf);
             buf.clear();
@@ -500,8 +499,9 @@ impl<P: Pager> Files<P> {
             });
             self.buf = buf;
             if supplied? == 1 {
-                self.landed(identity, start, PAGE as usize);
-                *done += (upto - at) as usize;
+                let len = (upto - at) as usize;
+                self.landed(volume, w, at, len);
+                *done += len;
             }
         }
         Ok(())
@@ -509,9 +509,10 @@ impl<P: Pager> Files<P> {
 
     /// `len` bytes at `at` landed dirty: the next write-back takes them, a
     /// write-back the same write makes room with included.
-    fn landed(&mut self, identity: u64, at: u64, len: usize) {
+    fn landed(&mut self, volume: &mut dyn Volume, w: &Writing<'_>, at: u64, len: usize) {
         if len > 0 {
-            let f = self.files.get_mut(&identity).expect("a file being written");
+            volume.landed(w.node, w.reserved, at, len);
+            let f = self.files.get_mut(&w.identity).expect("a file being written");
             f.dirtied(at / PAGE, (at + len as u64).div_ceil(PAGE));
         }
     }
@@ -551,6 +552,7 @@ impl<P: Pager> Files<P> {
             let pager = self.pager.as_ref().expect("paged");
             let begun = pager.writeback_begin(object, first, count).map_err(word)?;
             let mut written = Ok(());
+            let mut complete = count;
             for (start, pages) in runs(&begun, count) {
                 let at = (first + start) * PAGE;
                 let len = (pages * PAGE).min(size - at) as usize;
@@ -559,23 +561,29 @@ impl<P: Pager> Files<P> {
                 // SAFETY: `buf` is this process's, reached only through these
                 // bytes while they live.
                 let out = unsafe { Bytes::from_raw(buf.as_mut_ptr(), len) };
-                written = match pager.read(object, out, at) {
+                let result = match pager.read(object, out, at) {
                     Ok(n) if n == len => volume.write_back(node, at, &buf),
                     Ok(n) => {
                         println!("fileserver: file {identity}'s pages under write-back at {at} read {n} of {len} bytes");
-                        Err(Error::Io)
+                        Err((0, Error::Io))
                     }
-                    Err(why) => Err(word(why)),
+                    Err(why) => Err((0, word(why))),
                 };
-                if written.is_err() {
+                if let Err((done, error)) = result {
+                    assert!(done < len && (done as u64).is_multiple_of(PAGE), "write-back refusal reports a whole-page prefix");
+                    complete = start + done as u64 / PAGE;
+                    written = Err(error);
                     break;
                 }
             }
-            let still = pager.writeback_end(object, first, count, written.is_ok()).map_err(word)?;
-            for (start, pages) in runs(&still, count) {
-                let (a, b) = (first + start, first + start + pages);
-                let (x, y) = kept.unwrap_or((a, b));
-                kept = Some((x.min(a), y.max(b)));
+            for (at, pages, accepted) in [(first, complete, true), (first + complete, count - complete, false)] {
+                if pages == 0 { continue; }
+                let still = pager.writeback_end(object, at, pages, accepted).map_err(word)?;
+                for (start, pages) in runs(&still, pages) {
+                    let (a, b) = (at + start, at + start + pages);
+                    let (x, y) = kept.unwrap_or((a, b));
+                    kept = Some((x.min(a), y.max(b)));
+                }
             }
             failed = failed.and(written);
             first += count;
@@ -671,14 +679,12 @@ struct Put {
     held: bool,
 }
 
-/// A write under way: its file, at `offset`, which was `old` bytes long.
+/// A write under way and the capacity held until its bytes land.
 #[derive(Clone, Copy)]
 struct Writing<'a> {
     identity: u64,
     node: Node,
-    old: u64,
-    /// The end of the old bytes the volume holds ([`crate::volume::Reserved::contents`]).
-    contents: u64,
+    reserved: Reserved,
     offset: u64,
     data: &'a [u8],
 }

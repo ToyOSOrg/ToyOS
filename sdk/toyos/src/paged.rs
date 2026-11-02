@@ -119,8 +119,9 @@ impl Pager {
 
     /// `bytes` into fresh pages of object `id` from page-aligned `offset`, at
     /// most [`PAGED_RANGE_PAGES`] of them: clean, as the file holds them, or
-    /// dirty, which grows the size to their end. A page already present is
-    /// kept. The pages installed.
+    /// dirty, which grows the size to their end. Returns the pages installed.
+    /// Clean supply skips present pages; dirty supply stops at the first
+    /// present or refused page, so its count is the copied prefix.
     pub fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused> {
         let flags = if dirty { PAGED_DIRTY } else { 0 };
         let args = PagedArgs { object: id, offset, len: bytes.len() as u64, buf: bytes.as_ptr() as u64, flags };
@@ -167,8 +168,8 @@ impl Pager {
         Ok(bits)
     }
 
-    /// End the write-back of exactly a range begun, `written` to the device
-    /// or not: a bit per page still dirty.
+    /// End a range begun or its leading part, `written` to the device or not:
+    /// a bit per page still dirty. Any remaining suffix stays under write-back.
     pub fn writeback_end(&self, id: u64, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused> {
         let mut bits = [0u64; 8];
         let flags = if written { PAGED_WRITTEN } else { 0 };

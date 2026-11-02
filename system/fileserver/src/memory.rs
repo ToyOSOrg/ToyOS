@@ -156,7 +156,7 @@ impl Volume for MemoryVolume {
         Ok(Reserved { size, contents: size, ticket: 0 })
     }
 
-    fn write_back(&mut self, _: Node, _: u64, _: &[u8]) -> Result<(), Error> {
+    fn write_back(&mut self, _: Node, _: u64, _: &[u8]) -> crate::volume::WriteBack {
         unreachable!("memory file bytes stay in their paged object")
     }
 

@@ -635,8 +635,8 @@ impl PagerObject {
     }
 
     /// Copy `src` into fresh pages of object `id` from page-aligned `offset`,
-    /// clean or dirty: the pages installed. A dirty supply is a write. The
-    /// caller checked the span is in reach.
+    /// clean or dirty: the pages installed. A dirty supply is a write and
+    /// stops at the first present or refused page. The span is checked.
     pub fn supply(&self, id: u64, offset: u64, src: &UserBytes, dirty: bool) -> u64 {
         if !offset.is_multiple_of(PAGE) || src.len() == 0 {
             return SyscallError::InvalidArgument.to_u64();
@@ -709,9 +709,15 @@ impl PagerObject {
                 ends[k] = page_at + (src.len() - from).min(PAGE as usize) as u64;
             }
             let mut refused = None;
+            let mut stopped = false;
             {
                 let mut state = self.state.lock();
                 for k in 0..reserved {
+                    if stopped {
+                        let gone = state.gone;
+                        state.held.give_back(self.core.job(), gone, frames[k], false);
+                        continue;
+                    }
                     let answer = match state.live(id) {
                         Ok(_) => {
                             let (pages, object) = state.split(slot);
@@ -727,11 +733,13 @@ impl PagerObject {
                         Ok(Supplied::Present) => {
                             let gone = state.gone;
                             state.held.give_back(self.core.job(), gone, frames[k], false);
+                            stopped = dirty;
                         }
                         Err(why) => {
                             let gone = state.gone;
                             state.held.give_back(self.core.job(), gone, frames[k], false);
                             refused.get_or_insert(why);
+                            stopped = true;
                         }
                     }
                 }
@@ -739,6 +747,9 @@ impl PagerObject {
             self.changed.post();
             if let Some(why) = refused {
                 return refusal(installed, word(why));
+            }
+            if stopped {
+                return installed;
             }
             done += reserved * PAGE as usize;
         }

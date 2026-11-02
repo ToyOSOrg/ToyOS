@@ -28,7 +28,7 @@ use toyos_blockdev::BlockDev;
 use toyos_fat32::{Error, Fat32, FatTime};
 
 use crate::cache::{Cache, Disk};
-use crate::volume::{parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume, NANOS_PER_SEC};
+use crate::volume::{parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume, WriteBack, NANOS_PER_SEC};
 
 /// The most entries one directory listing materialises.
 const MAX_LIST: usize = 16_384;
@@ -331,13 +331,13 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(reserved)
     }
 
-    fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), fs::Error> {
-        let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
+    fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> WriteBack {
+        let open = self.open.get_mut(&node).ok_or((0, fs::Error::Stale))?;
         if open.gone {
-            return Err(fs::Error::Stale);
+            return Err((0, fs::Error::Stale));
         }
         open.dirty = true;
-        self.cache.block_on(self.fs.write_back(&mut open.file, offset, data)).map_err(|e| logged("write-back", &open.path, e))
+        self.cache.block_on(self.fs.write_back(&mut open.file, offset, data)).map_err(|e| (0, logged("write-back", &open.path, e)))
     }
 
     fn truncate(&mut self, node: Node, size: u64) -> Result<(), fs::Error> {

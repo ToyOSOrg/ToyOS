@@ -214,8 +214,8 @@ impl Volume for RootVolume {
         Err(Error::ReadOnly)
     }
 
-    fn write_back(&mut self, _: Node, _: u64, _: &[u8]) -> Result<(), Error> {
-        Err(Error::ReadOnly)
+    fn write_back(&mut self, _: Node, _: u64, _: &[u8]) -> crate::volume::WriteBack {
+        Err((0, Error::ReadOnly))
     }
 
     fn truncate(&mut self, _: Node, _: u64) -> Result<(), Error> {
