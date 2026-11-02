@@ -16,13 +16,12 @@ fn partials(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Larger than the flush interval twice over and no page multiple, so the
-/// periodic flush and the partial tail both run; it lands whole under the
-/// destination's name, and no partial is left beside it.
+/// A copy spanning many buffers and a partial tail lands whole under the
+/// destination's name, with no partial left beside it.
 #[test]
-fn a_copy_past_the_flush_interval_lands_whole_and_leaves_no_partial() {
+fn a_copy_spanning_many_buffers_lands_whole_and_leaves_no_partial() {
     let dir = TempDir::new("cp-whole");
-    let data: Vec<u8> = (0..2 * FLUSH_BYTES as usize + 137).map(|i| (i.wrapping_mul(31) ^ (i >> 9)) as u8).collect();
+    let data: Vec<u8> = (0..(2 << 20) + 137usize).map(|i| (i.wrapping_mul(31) ^ (i >> 9)) as u8).collect();
     let (source, dest) = (dir.join("source"), dir.join("dest"));
     fs::write(&source, &data).unwrap();
     copy(&source, &dest).unwrap();

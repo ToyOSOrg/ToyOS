@@ -7,8 +7,7 @@ use toyos_blockdev::{within, Block, BlockDev, Error};
 
 use crate::cache::Disk;
 
-/// A volume in memory: the DATA role on a machine with no DATA partition, as
-/// the kernel's tmpfs was. Sparse, so what nothing wrote costs nothing.
+/// A sparse test block device. Unwritten blocks cost no storage.
 pub struct Ram {
     blocks: u64,
     written: RefCell<BTreeMap<u64, Box<Block>>>,

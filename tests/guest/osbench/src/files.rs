@@ -40,7 +40,7 @@ impl Target {
 
 pub fn memory() -> Target {
     let (dir, served_by) = if cfg!(target_os = "toyos") {
-        ("/tmp", "the kernel's tmpfs, through syscalls")
+        ("/tmp", "the userland memory filesystem")
     } else {
         ("/dev/shm", "tmpfs, through the VFS")
     };
