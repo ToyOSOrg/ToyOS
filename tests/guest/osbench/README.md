@@ -220,9 +220,11 @@ What makes the disk rows one comparison, and what stays each system's own:
   `nobarrier` would show in `fs.disk.mount`'s superblock options, and the
   device's write-cache mode is in `served_by` (`write cache write back`).
   On ToyOS, the NVMe driver issues Flush where the controller has a volatile
-  write cache, which its boot log says. ToyOS's fsync makes its whole volume
-  durable, not just the file
-  (`issues/an-fsync-of-a-served-file-syncs-its-whole-volume.md`).
+  write cache, which its boot log says. ToyOS's fsync makes its file
+  durable with every file the volume's commit carries beside it: one whose
+  entry was written or whose blocks were taken since the last commit
+  (`persist.write_4k_fsync_beside_1m` writes over another file's blocks,
+  which no commit carries).
 - **One procedure for the cache.** Every row reads only files it wrote in its
   own run, and neither system's cache is dropped before it. What then
   reaches the disk is each system's own write-back and cache policy, and

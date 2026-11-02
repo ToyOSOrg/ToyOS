@@ -40,10 +40,11 @@
 //! client lends is read once per request into this process's memory, and
 //! what is acted on is that copy.
 //!
-//! **What is written reaches the disk at a sync**: an fsync, a client's
-//! `SYNC`, or [`fileserver::writeback::WRITEBACK`] after the first unsynced write when nothing asked
-//! sooner. A kill loses what no sync covered, which is POSIX's promise and no
-//! more.
+//! **What is written reaches the disk at a sync**: a client's `SYNC`, or
+//! [`fileserver::writeback::WRITEBACK`] after the first unsynced write when
+//! nothing asked sooner; an fsync makes its own file durable, with what the
+//! volume's commit carries beside it ([`fileserver::pages::Files::fsync`]). A
+//! kill loses what neither covered, which is POSIX's promise and no more.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -544,7 +545,7 @@ impl Server {
                 self.drop_client(id, "it never lent its window");
             }
             if self.writeback.take_due(now) {
-                if let Err(e) = self.sync(None) {
+                if let Err(e) = self.sync() {
                     println!("fileserver: the write-back sync failed: {e:?}");
                 }
             }
@@ -928,14 +929,18 @@ impl Server {
             SETATTR => self.set_attr(id, &r),
             FSYNC => {
                 let file = self.settled(id, r.fid)?;
-                let node = match file.borrow().held {
-                    Held::File(node) => Some(node),
-                    // A directory's names are made durable with the volume.
+                let named = match file.borrow().held {
+                    Held::File(node) => Some((file.borrow().identity, node)),
                     Held::Dir { .. } => None,
                 };
-                self.sync(node)
+                self.files.fsync(&mut *self.volume, named)?;
+                // One that left nothing to make durable did the write-back's work.
+                if !self.files.owes(&*self.volume) {
+                    self.writeback.synced(false, Instant::now());
+                }
+                Ok(Answer::Reply(Reply::ok()))
             }
-            SYNC => self.sync(None),
+            SYNC => self.sync(),
             ROOM => {
                 let room = self.volume.room()?;
                 Ok(Answer::Reply(Reply { value: room.free, value2: room.unit, ..Reply::ok() }))
@@ -1129,7 +1134,7 @@ impl Server {
                 // The volume truncated first, so a refused open changed
                 // nothing; the object follows before anything writes back.
                 if how.truncate && found.is_some() {
-                    let truncated = self.volume.identity(&path).and_then(|identity| self.files.truncated(identity));
+                    let truncated = self.volume.identity(&path).and_then(|identity| self.files.truncated(&mut *self.volume, identity, node));
                     if let Err(e) = truncated {
                         let _ = self.volume.close(node);
                         return Err(e);
@@ -1238,8 +1243,13 @@ impl Server {
             Time::At(nanos) => nanos,
         };
         if held {
-            let node = self.fid(id, r.fid)?.borrow().node().map_err(|_| Error::Unsupported)?;
+            let file = self.fid(id, r.fid)?;
+            let (node, identity) = {
+                let f = file.borrow();
+                (f.node().map_err(|_| Error::Unsupported)?, f.identity)
+            };
             self.volume.set_mtime(node, mtime)?;
+            self.files.stamped(&mut *self.volume, identity, node)?;
         } else {
             let path = match self.resolve(id, r.fid, &rel, r.flags & FOLLOW_LAST != 0)? {
                 Resolved::Absolute(p) => return self.follow(id, r, &p),
@@ -1248,8 +1258,9 @@ impl Server {
             if self.volume.lstat(&path)?.kind != Kind::File {
                 return Err(Error::Unsupported);
             }
+            let identity = self.volume.identity(&path)?;
             let node = self.volume.open(&path, OpenHow { create: false, create_new: false, truncate: false })?;
-            let set = self.volume.set_mtime(node, mtime);
+            let set = self.volume.set_mtime(node, mtime).and_then(|()| self.files.stamped(&mut *self.volume, identity, node));
             let closed = self.volume.close(node);
             set.and(closed)?;
         }
@@ -1257,13 +1268,12 @@ impl Server {
         Ok(Answer::Reply(Reply::ok()))
     }
 
-    /// The volume synced, answered as `node`'s file fared, or with none as
-    /// every file did. A file whose entry was refused keeps the write-back
-    /// due, so the next one tries it again.
-    fn sync(&mut self, node: Option<Node>) -> Result<Answer, Error> {
+    /// The volume synced, answered as every file fared. A file whose entry
+    /// was refused keeps the write-back due, so the next one tries it again.
+    fn sync(&mut self) -> Result<Answer, Error> {
         let unwritten = self.files.sync(&mut *self.volume)?;
         self.writeback.synced(!unwritten.is_empty(), Instant::now());
-        match unwritten.into_iter().find(|&(n, _)| node.is_none_or(|node| n == node)) {
+        match unwritten.into_iter().next() {
             Some((_, e)) => Err(e),
             None => Ok(Answer::Reply(Reply::ok())),
         }
