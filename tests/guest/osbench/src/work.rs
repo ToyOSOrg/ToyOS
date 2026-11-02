@@ -86,6 +86,7 @@ pub fn suite() {
     // five rounds after one, at one job and at one per CPU.
     for jobs in [1, crate::cpus()] {
         let bench = format!("work.build_shaped.j{jobs}");
+        let span = crate::ran::start();
         let build = || -> Result<u64, String> {
             let t = Instant::now();
             let mut running: Vec<Child> = Vec::new();
@@ -116,7 +117,16 @@ pub fn suite() {
             (0..5).map(|_| build()).collect()
         };
         match rounds() {
-            Ok(mut ns) => result(&bench, "ns", &mut ns, &[("files", FILES.to_string()), ("jobs", jobs.to_string())]),
+            Ok(mut ns) => result(
+                &bench,
+                "ns",
+                &mut ns,
+                &[
+                    ("files", FILES.to_string()),
+                    ("jobs", jobs.to_string()),
+                    ("parent", crate::ran::thread_over(span, crate::sys::tid())),
+                ],
+            ),
             Err(why) => refuse(&bench, why),
         }
     }
