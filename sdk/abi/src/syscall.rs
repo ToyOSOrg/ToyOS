@@ -3,17 +3,10 @@ pub const SYS_WRITE: u64 = 0;
 pub const SYS_READ: u64 = 1;
 pub const SYS_THREAD_EXIT: u64 = 5;
 pub const SYS_RANDOM: u64 = 6;
-pub const SYS_OPEN: u64 = 9;
 pub const SYS_CLOSE: u64 = 10;
-pub const SYS_SEEK: u64 = 13;
 pub const SYS_FSTAT: u64 = 14;
-pub const SYS_FSYNC: u64 = 15;
 /// What a path names, as a [`Stat`]: [`stat`].
-pub const SYS_STAT: u64 = 16;
-pub const SYS_READDIR: u64 = 17;
-pub const SYS_DELETE: u64 = 18;
 pub const SYS_SHUTDOWN: u64 = 19;
-pub const SYS_CHDIR: u64 = 20;
 pub const SYS_GETCWD: u64 = 21;
 pub const SYS_PIPE: u64 = 24;
 /// Start a program, endowing it exactly what the caller names. Answers a
@@ -85,15 +78,11 @@ pub const SYS_NANOSLEEP: u64 = 49;
 /// [`dup`] and [`dup_narrowed`].
 pub const SYS_HANDLE_DUP: u64 = 50;
 pub const SYS_GETPID: u64 = 51;
-pub const SYS_RENAME: u64 = 52;
-pub const SYS_MKDIR: u64 = 53;
-pub const SYS_RMDIR: u64 = 54;
 pub const SYS_DLOPEN: u64 = 55;
 pub const SYS_DLSYM: u64 = 56;
 pub const SYS_DLCLOSE: u64 = 57;
 pub const SYS_FUTEX_WAIT: u64 = 58;
 pub const SYS_FUTEX_WAKE: u64 = 59;
-pub const SYS_FTRUNCATE: u64 = 60;
 pub const SYS_STACK_INFO: u64 = 61;
 pub const SYS_CPU_COUNT: u64 = 62;
 pub const SYS_VM_RESERVE: u64 = 63;
@@ -103,8 +92,6 @@ pub const SYS_WRITE_NONBLOCK: u64 = 67;
 pub const SYS_EXIT: u64 = 72;
 pub const SYS_GET_ENV: u64 = 73;
 pub const SYS_CLOCK_EPOCH: u64 = 75;
-pub const SYS_SYMLINK: u64 = 81;
-pub const SYS_READLINK: u64 = 82;
 /// Accept a queued connection from an [`Acceptor`] handle.
 ///
 /// [`Acceptor`]: crate::handle::RawHandle
@@ -312,12 +299,6 @@ pub const SYS_MACHINE_STOPS: u64 = 136;
 ///
 /// [`Rights::INVENTORY`]: crate::handle::Rights::INVENTORY
 pub const SYS_BOOT_SOURCES: u64 = 137;
-/// Read a kernel file at an offset, leaving its handle's offset where it is.
-/// See [`pread`].
-pub const SYS_PREAD: u64 = 138;
-/// Write a kernel file at an offset, whether or not its handle appends, and
-/// leaving the handle's offset where it is. See [`pwrite`].
-pub const SYS_PWRITE: u64 = 139;
 pub const SYS_VM_PROTECT: u64 = 140;
 pub const SYS_VM_DISCARD: u64 = 141;
 pub const SYS_VM_DECOMMIT: u64 = 142;
@@ -375,6 +356,8 @@ pub const SYS_CURRENT_CPU: u64 = 163;
 pub const SYS_DEVICE_FIRMWARE_WINDOW: u64 = 164;
 /// What a holder's paged object publishes. See [`paged_stat`].
 pub const SYS_PAGED_STAT: u64 = 165;
+/// List the names held by a namespace, without opening any connector.
+pub const SYS_NAMESPACE_NAMES: u64 = 166;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -382,14 +365,14 @@ pub const SYS_PAGED_STAT: u64 = 165;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 167;
+pub const SYSCALL_PROFILE_BINS: usize = 168;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
 const _: () = assert!(SYS_DEVICE_FIRMWARE_WINDOW < SYSCALL_PROFILE_OTHER as u64);
-const _: () = assert!(SYS_PAGED_STAT < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_NAMESPACE_NAMES < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -723,44 +706,6 @@ impl FileType {
     }
 }
 
-/// Seek position for [`seek`].
-pub enum SeekFrom {
-    Start(u64),
-    Current(i64),
-    End(i64),
-}
-
-/// Flags for [`open`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OpenFlags(pub u64);
-
-impl OpenFlags {
-    pub const READ: Self = Self(1);
-    pub const WRITE: Self = Self(2);
-    pub const CREATE: Self = Self(4);
-    pub const TRUNCATE: Self = Self(8);
-    pub const APPEND: Self = Self(16);
-    /// With [`Self::CREATE`] only: refused `AlreadyExists` when the name is
-    /// there, a link or a directory included, decided in the one call that
-    /// creates it.
-    pub const EXCLUSIVE: Self = Self(32);
-    /// Every bit defined above. An open carrying another is refused
-    /// `InvalidArgument` before its path is resolved.
-    pub const KNOWN: Self =
-        Self(Self::READ.0 | Self::WRITE.0 | Self::CREATE.0 | Self::TRUNCATE.0 | Self::APPEND.0 | Self::EXCLUSIVE.0);
-
-    pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
-}
-
-impl core::ops::BitOr for OpenFlags {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
-}
-
-impl core::ops::BitOrAssign for OpenFlags {
-    fn bitor_assign(&mut self, rhs: Self) { self.0 |= rhs.0; }
-}
-
 /// What pages of a process's own memory may be used for. No value is both
 /// writable and executable. `None` pages fault on any access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -894,18 +839,6 @@ pub fn write(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallError> {
 /// Read bytes from a handle. Returns number of bytes read.
 pub fn read(handle: RawHandle, buf: &mut [u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_READ, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
-}
-
-/// Read a file at `offset`: how many bytes, 0 at or past its end. Any handle
-/// but a file's is [`SyscallError::NotSupported`].
-pub fn pread(handle: RawHandle, buf: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
-    check(syscall(SYS_PREAD, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, offset)).map(|n| n as usize)
-}
-
-/// Write a file at `offset`: how many bytes. Any handle but a file's is
-/// [`SyscallError::NotSupported`].
-pub fn pwrite(handle: RawHandle, buf: &[u8], offset: u64) -> Result<usize, SyscallError> {
-    check(syscall(SYS_PWRITE, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, offset)).map(|n| n as usize)
 }
 
 /// Exit the current thread only. Does not return.
@@ -1293,10 +1226,6 @@ pub fn set_thread_name(name: &[u8]) {
     syscall(SYS_SET_THREAD_NAME, name.as_ptr() as u64, name.len() as u64, 0, 0);
 }
 
-/// The most links `SYS_OPEN` follows from the name it is given: the link a
-/// chain reaches past them is refused `InvalidArgument`.
-pub const MAX_LINKS: u32 = 10;
-
 /// The longest path a file server's wire carries (`sdk/toyos/src/fs.rs`), and
 /// libc's `PATH_MAX` (`sdk/libc/include/limits.h`).
 pub const MAX_PATH: usize = 4096;
@@ -1315,11 +1244,6 @@ pub const MAX_WHOLE_PIPE_WRITE: usize = 4096;
 /// for memory.
 pub const PIPE_CAPACITY: usize = 2 << 20;
 
-/// Open a file.
-pub fn open(path: &[u8], flags: OpenFlags) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_OPEN, path.as_ptr() as u64, path.len() as u64, flags.0, 0)).map(|v| RawHandle(v as u32))
-}
-
 /// Close a handle.
 ///
 /// # Safety
@@ -1329,16 +1253,6 @@ pub unsafe fn close(handle: RawHandle) {
     syscall(SYS_CLOSE, handle.0 as u64, 0, 0, 0);
 }
 
-/// Seek within a file handle. Returns new offset.
-pub fn seek(handle: RawHandle, pos: SeekFrom) -> Result<u64, SyscallError> {
-    let (offset, whence) = match pos {
-        SeekFrom::Start(n) => (n as i64, 0u64),
-        SeekFrom::Current(n) => (n, 1u64),
-        SeekFrom::End(n) => (n, 2u64),
-    };
-    check(syscall(SYS_SEEK, handle.0 as u64, offset as u64, whence, 0))
-}
-
 /// Get file metadata for a file handle.
 pub fn fstat(handle: RawHandle) -> Result<Stat, SyscallError> {
     let mut stat = Stat::default();
@@ -1346,81 +1260,8 @@ pub fn fstat(handle: RawHandle) -> Result<Stat, SyscallError> {
     Ok(stat)
 }
 
-/// What the kernel's `path` names: a file, a directory, or, unless `follow`
-/// follows it, a symlink, each with the identity [`fstat`] answers a file.
-pub fn stat(path: &[u8], follow: bool) -> Result<Stat, SyscallError> {
-    let mut stat = Stat::default();
-    let out = &mut stat as *mut Stat as u64;
-    check_unit(syscall(SYS_STAT, path.as_ptr() as u64, path.len() as u64, out, follow as u64))?;
-    Ok(stat)
-}
-
-/// Flush a file handle to disk, or a partition claim's writes out of its
-/// device's cache ([`crate::part`]): `Ok` is the device's own word that every
-/// write the claim returned from before this call is durable.
-pub fn fsync(handle: RawHandle) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_FSYNC, handle.0 as u64, 0, 0, 0))
-}
-
-/// Read directory entries. Returns the number of bytes the listing *needs*.
-///
-/// `Ok(n)` with `n <= buf.len()` means the entries are in `buf`; `n >
-/// buf.len()` means nothing was written and `n` is the size to retry with.
-/// The kernel never writes a partial listing — see `sys_readdir`.
-///
-/// The error is returned rather than folded into `0`: "the directory is too
-/// large to list" and "the directory is empty" are different answers and a
-/// caller has to be able to tell them apart.
-pub fn readdir(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
-    let n = syscall(SYS_READDIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
-    match SyscallError::from_u64(n) {
-        Some(e) => Err(e),
-        None => Ok(n as usize),
-    }
-}
-
-/// The kind byte a [`readdir`] entry opens with: a file.
-pub const DIRENT_FILE: u8 = 1;
-/// The kind byte a [`readdir`] entry opens with: a directory.
-pub const DIRENT_DIR: u8 = 2;
-
-/// One entry of a [`readdir`] listing: its kind byte, its name, a NUL, and its
-/// node as eight bytes, little-endian: the [`Stat::node`] [`stat`] answers it.
-pub struct Dirent<'a> {
-    pub is_dir: bool,
-    pub name: &'a [u8],
-    pub node: u64,
-}
-
-/// The entry at `*at` in a whole [`readdir`] listing, with `*at` moved past
-/// it; `None` once `*at` is at its end. A listing of any other shape is a
-/// kernel that broke this ABI, and panics.
-pub fn dirent<'a>(listing: &'a [u8], at: &mut usize) -> Option<Dirent<'a>> {
-    let rest = listing.get(*at..).filter(|r| !r.is_empty())?;
-    let is_dir = match rest[0] {
-        DIRENT_FILE => false,
-        DIRENT_DIR => true,
-        kind => panic!("SYS_READDIR answered an entry of kind {kind}"),
-    };
-    let len = rest[1..].iter().position(|&b| b == 0).expect("SYS_READDIR answered a name with no NUL");
-    let node = rest
-        .get(len + 2..len + 10)
-        .expect("SYS_READDIR answered an entry with no node");
-    *at += len + 10;
-    Some(Dirent { is_dir, name: &rest[1..1 + len], node: u64::from_le_bytes(node.try_into().unwrap()) })
-}
-
-/// Delete a file or directory.
-pub fn delete(path: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_DELETE, path.as_ptr() as u64, path.len() as u64, 0, 0))
-}
-
-/// Change current working directory.
-pub fn chdir(path: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_CHDIR, path.as_ptr() as u64, path.len() as u64, 0, 0))
-}
-
-/// Get the current working directory.
+/// Get the initial working directory supplied by spawn. Runtime changes
+/// belong to the SDK process state (`toyos::files::getcwd`).
 ///
 /// Returns the length the path *needs*, not the number of bytes written:
 /// `n <= buf.len()` means the path is in `buf[..n]`, and `n > buf.len()` means
@@ -2097,6 +1938,15 @@ pub fn namespace_open(ns: RawHandle, name: &str) -> Result<RawHandle, SyscallErr
     .map(|v| RawHandle(v as u32))
 }
 
+/// The namespace's names, sorted, encoded as a little-endian `u16` length
+/// followed by that many UTF-8 bytes for each name. Requires READ. Returns
+/// the complete required byte length; writes nothing when `out` is smaller.
+/// A namespace is immutable, so a size query and a later read agree.
+pub fn namespace_names(namespace: RawHandle, out: &mut [u8]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_NAMESPACE_NAMES, namespace.0 as u64, out.as_mut_ptr() as u64, out.len() as u64, 0)).map(|n| n as usize)
+}
+
+
 /// Bytes one badge may carry. Policy on the primitive: a badge is kernel
 /// memory no process is charged for, so the bound is what its one reader, the
 /// supervisor's launch authority, needs.
@@ -2562,31 +2412,6 @@ pub fn getpid() -> Pid {
     Pid(syscall(SYS_GETPID, 0, 0, 0, 0) as u32)
 }
 
-/// Rename a file.
-pub fn rename(old: &[u8], new: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_RENAME, old.as_ptr() as u64, old.len() as u64, new.as_ptr() as u64, new.len() as u64))
-}
-
-/// Create a directory.
-pub fn mkdir(path: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0, 0))
-}
-
-/// Remove a directory.
-pub fn rmdir(path: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0, 0))
-}
-
-/// Create a symbolic link at `link` pointing to `target`.
-pub fn symlink(target: &[u8], link: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_SYMLINK, target.as_ptr() as u64, target.len() as u64, link.as_ptr() as u64, link.len() as u64))
-}
-
-/// Read the target of a symbolic link. Returns the number of bytes written to `buf`.
-pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
-    check(syscall(SYS_READLINK, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)).map(|n| n as usize)
-}
-
 /// Libraries one process holds, `DT_NEEDED` and loaded alike; [`dl_open`] of a
 /// name it does not hold past it is `ResourceExhausted`.
 pub const MAX_LIBRARIES: usize = 1024;
@@ -2659,11 +2484,6 @@ pub unsafe fn futex_wait(addr: *const u32, expected: u32, timeout: Option<u64>) 
 /// `addr` must point to a valid, aligned `u32`.
 pub unsafe fn futex_wake(addr: *const u32, count: u32) -> u64 {
     syscall(SYS_FUTEX_WAKE, addr as u64, count as u64, 0, 0)
-}
-
-/// Truncate a file handle to `size` bytes.
-pub fn ftruncate(handle: RawHandle, size: u64) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_FTRUNCATE, handle.0 as u64, size, 0, 0))
 }
 
 /// Get the current thread's stack base address and size.
@@ -3276,56 +3096,7 @@ mod tests {
         assert_eq!(PciId::from_wire(1 << 32), None);
     }
 
-    /// A listing of `entries`, each a name, whether it is a directory and a
-    /// node, encoded as `sys_readdir` (`kernel/src/syscall/fs.rs`) encodes it.
-    fn listing(entries: &[(&str, bool, u64)]) -> std::vec::Vec<u8> {
-        let mut out = std::vec::Vec::new();
-        for (name, is_dir, node) in entries {
-            out.push(if *is_dir { 2 } else { 1 });
-            out.extend_from_slice(name.as_bytes());
-            out.push(0);
-            out.extend_from_slice(&node.to_le_bytes());
-        }
-        out
-    }
 
-    fn read_listing(bytes: &[u8]) -> std::vec::Vec<(std::string::String, bool, u64)> {
-        let mut at = 0;
-        let mut out = std::vec::Vec::new();
-        while let Some(entry) = dirent(bytes, &mut at) {
-            out.push((std::string::String::from_utf8(entry.name.to_vec()).unwrap(), entry.is_dir, entry.node));
-        }
-        assert_eq!(at, bytes.len(), "the reader stopped short of the listing's end");
-        out
-    }
-
-    #[test]
-    fn every_dirent_is_read_back_whatever_its_node_holds() {
-        // Nodes whose bytes are NULs, kind bytes and letters: a reader that
-        // does not step over all eight takes them for names.
-        let entries = [
-            ("a", false, 0),
-            ("dir", true, 0x0201_0000_0000_0000),
-            ("b.txt", false, 0x6162_6300_0102_0304),
-            ("", false, u64::MAX),
-            ("last", true, 17),
-        ];
-        let want: std::vec::Vec<_> = entries.iter().map(|(n, d, s)| ((*n).into(), *d, *s)).collect();
-        assert_eq!(read_listing(&listing(&entries)), want);
-        assert!(read_listing(&[]).is_empty());
-    }
-
-    #[test]
-    #[should_panic(expected = "of kind 3")]
-    fn a_dirent_of_another_kind_is_a_broken_kernel() {
-        read_listing(&[3, b'x', 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    #[should_panic(expected = "no node")]
-    fn a_short_dirent_is_a_broken_kernel() {
-        read_listing(&[1, b'x', 0, 0, 0]);
-    }
 }
 
 

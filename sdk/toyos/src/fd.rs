@@ -55,9 +55,6 @@ pub const SERVED_FILE: u32 = 1;
 /// let go by the copy of this crate that holds the stream's end, which only
 /// that copy knows.
 pub const STREAM: u32 = 2;
-/// The tag of a directory the kernel serves, which has no handle
-/// (`crate::files`).
-pub const KERNEL_DIR: u32 = 3;
 /// The tag of a listener's or a datagram socket's descriptor
 /// (`crate::net::socket`): a copy of its bell, which a poller watches and no
 /// file call reaches, let go by the copy of this crate that holds the

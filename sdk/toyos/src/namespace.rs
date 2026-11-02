@@ -26,6 +26,24 @@ impl Namespace {
         syscall::namespace_open(self.0.raw(), name).map(|h| Connection(OwnedHandle(h)))
     }
 
+    /// The names this namespace holds, sorted. Inspection opens no connector
+    /// and conveys no authority beyond the namespace itself.
+    pub fn names(&self) -> Result<alloc::vec::Vec<alloc::string::String>, SyscallError> {
+        let required = syscall::namespace_names(self.0.raw(), &mut [])?;
+        assert!(required <= MAX_NAMESPACE_ENTRIES * (2 + syscall::MAX_SERVICE_NAME), "namespace names exceed the ABI bound");
+        let mut bytes = alloc::vec![0; required];
+        let read = syscall::namespace_names(self.0.raw(), &mut bytes)?;
+        assert_eq!(required, read, "an immutable namespace changed names");
+        let mut names = alloc::vec::Vec::new();
+        let mut rest = &bytes[..];
+        while !rest.is_empty() {
+            let len = u16::from_le_bytes(rest[..2].try_into().expect("namespace name length")) as usize;
+            names.push(alloc::string::String::from_utf8(rest[2..2 + len].to_vec()).expect("namespace name is UTF-8"));
+            rest = &rest[2 + len..];
+        }
+        Ok(names)
+    }
+
     pub fn into_raw(self) -> RawHandle {
         self.0.into_raw()
     }

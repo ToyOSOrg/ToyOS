@@ -1,6 +1,5 @@
 // POSIX file I/O: a path or a descriptor is `toyos::files`', which routes it to
-// the kernel or to the file server behind one of the process's directory
-// capabilities.
+// the file server behind one of the process's directory capabilities.
 
 #![allow(non_camel_case_types)]
 
@@ -9,16 +8,16 @@ use alloc::vec::Vec;
 use core::ptr;
 
 use toyos_abi::{RawHandle, Rights};
-use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
+use toyos_abi::syscall;
 
-use toyos::files::{self, At};
+use toyos::files::{self, At, SeekFrom};
 
 use crate::errcode::{EBADF, EINTR, EINVAL};
 use crate::signal::Call;
 use crate::time::Timespec;
 
-pub(crate) use crate::atreq::{O_APPEND, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
-use crate::atreq::{read_write, AT_EMPTY_PATH, AT_FDCWD, AT_REMOVEDIR, AT_SYMLINK_FOLLOW, AT_SYMLINK_NOFOLLOW};
+pub(crate) use crate::atreq::{O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+use crate::atreq::{AT_EMPTY_PATH, AT_FDCWD, AT_REMOVEDIR, AT_SYMLINK_FOLLOW, AT_SYMLINK_NOFOLLOW};
 
 const SEEK_SET: i32 = 0;
 const SEEK_CUR: i32 = 1;
@@ -113,25 +112,17 @@ pub unsafe extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, _mode: 
     }
 }
 
-/// A spawn's `addopen` file, as a handle of this process's for the child.
-/// A file a file server holds is refused: no kernel handle reaches it.
+/// A spawn's `addopen` file exported as a server stream for the child.
 pub(crate) fn open_handle(path: &[u8], flags: i32, _mode: u32) -> Result<RawHandle, Errno> {
-    let (readable, writable) = read_write(flags);
+    let how = crate::atreq::how(flags)?;
     if path == DEV_NULL {
-        return syscall::null(null_rights(readable, writable)).map_err(crate::errcode::of);
+        return syscall::null(null_rights(how.read, how.write)).map_err(crate::errcode::of);
     }
-    if files::is_served(path) {
-        return Err(crate::errcode::EOPNOTSUPP);
-    }
-
-    let mut oflags = OpenFlags(0);
-    if readable { oflags |= OpenFlags::READ; }
-    if writable { oflags |= OpenFlags::WRITE; }
-    if flags & O_CREAT != 0 { oflags |= OpenFlags::CREATE; }
-    if flags & O_CREAT != 0 && flags & O_EXCL != 0 { oflags |= OpenFlags::EXCLUSIVE; }
-    if flags & O_TRUNC != 0 { oflags |= OpenFlags::TRUNCATE; }
-    if flags & O_APPEND != 0 { oflags |= OpenFlags::APPEND; }
-    syscall::open(path, oflags).map_err(crate::errcode::of)
+    let fd = files::open(At::Cwd, path, how).map_err(crate::errcode::of_files)?;
+    let stream = files::stream(fd).map(|h| h.into_raw()).map_err(crate::errcode::of_files);
+    // SAFETY: this function's descriptor, after the server exported the stream.
+    let _ = unsafe { toyos::fd::close(fd) };
+    stream
 }
 
 /// POSIX's null device, which libc answers with a kernel null handle: the
@@ -436,7 +427,7 @@ pub unsafe extern "C" fn linkat(from_dirfd: i32, from: *const u8, to_dirfd: i32,
 pub unsafe extern "C" fn getcwd(buf: *mut u8, size: usize) -> *mut u8 {
     if buf.is_null() || size == 0 { return ptr::null_mut(); }
     let slice = core::slice::from_raw_parts_mut(buf, size);
-    let n = syscall::getcwd(slice);
+    let n = files::getcwd(slice);
     if n == 0 || n >= size {
         return ptr::null_mut();
     }
@@ -478,9 +469,6 @@ pub unsafe extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, fl
     }
 }
 
-/// `SYS_READLINK` answers `NotFound` for a path that is no link as for one
-/// that names nothing, and POSIX tells them apart: `EINVAL` for the first. A
-/// file server tells them apart itself.
 #[no_mangle]
 pub unsafe extern "C" fn readlink(path: *const u8, buf: *mut u8, size: usize) -> isize {
     unsafe { readlinkat(AT_FDCWD, path, buf, size) }
@@ -503,20 +491,10 @@ pub unsafe extern "C" fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, s
             unsafe { ptr::copy_nonoverlapping(target.as_ptr(), buf, n) };
             n as isize
         }
-        Err(files::Error::Kernel(syscall::SyscallError::NotFound)) => {
-            // `stat` sets `errno` for a path that names nothing.
-            if unsafe { fstatat(dirfd, path, ptr::null_mut(), AT_SYMLINK_NOFOLLOW) } == 0 {
-                crate::errno::set(EINVAL);
-            }
-            -1
-        }
         Err(e) => refuse_files(e) as isize,
     }
 }
 
-/// A file server refuses a name that exists, as POSIX has it. The kernel's
-/// `SYS_SYMLINK` displaces whatever holds the name, and a question asked first
-/// races its answer, so a link the kernel would hold is refused `ENOSYS`.
 #[no_mangle]
 pub unsafe extern "C" fn symlink(target: *const u8, link: *const u8) -> i32 {
     unsafe { symlinkat(target, AT_FDCWD, link) }
@@ -529,52 +507,25 @@ pub unsafe extern "C" fn symlinkat(target: *const u8, dirfd: i32, link: *const u
         Ok(at) => at,
         Err(e) => return refuse(e),
     };
-    match files::is_served_at(at, link) {
-        Ok(true) => files::symlink(target, (at, link)).map_or_else(refuse_files, |()| 0),
-        Ok(false) => refuse(crate::errcode::ENOSYS),
-        Err(e) => refuse_files(e),
-    }
+    files::symlink(target, (at, link)).map_or_else(refuse_files, |()| 0)
 }
 
 struct TheServers;
 
 impl crate::resolve::Served for TheServers {
-    fn holds(&mut self, at: &[u8]) -> bool {
-        files::is_served(at)
-    }
-
     fn name(&mut self, at: &[u8]) -> Result<crate::resolve::Name, i32> {
         let st = files::stat(At::Cwd, at, false).map_err(crate::errcode::of_files)?;
         match st.file_type {
             syscall::FileType::Symlink => {
                 files::read_link(At::Cwd, at).map(crate::resolve::Name::Link).map_err(crate::errcode::of_files)
             }
+            syscall::FileType::Directory => Ok(crate::resolve::Name::Directory),
             _ => Ok(crate::resolve::Name::Other),
         }
     }
 }
 
-struct TheKernel;
-
-impl crate::resolve::Kernel for TheKernel {
-    fn read_link(&mut self, at: &[u8], target: &mut [u8]) -> Result<usize, syscall::SyscallError> {
-        syscall::readlink(at, target)
-    }
-
-    fn open(&mut self, at: &[u8]) -> Result<(), syscall::SyscallError> {
-        // SAFETY: a handle just opened, closed once.
-        syscall::open(at, OpenFlags::READ).map(|h| unsafe { syscall::close(h) })
-    }
-
-    fn is_dir(&mut self, at: &[u8]) -> bool {
-        syscall::stat(at, true).is_ok_and(|st| st.file_type == syscall::FileType::Directory)
-    }
-}
-
-/// POSIX's `realpath` (`resolve::resolve_path`): POSIX's resolution where a
-/// file server holds the names, the kernel's rules where it does, so the
-/// answer is the file `open` of `path` reaches, in a block of `malloc`'s when
-/// `resolved` is null.
+/// POSIX path resolution through this process's filesystem capabilities.
 #[no_mangle]
 pub unsafe extern "C" fn realpath(path: *const u8, resolved: *mut u8) -> *mut u8 {
     use syscall::MAX_PATH;
@@ -583,9 +534,9 @@ pub unsafe extern "C" fn realpath(path: *const u8, resolved: *mut u8) -> *mut u8
         return ptr::null_mut();
     }
     let mut cwd = [0u8; MAX_PATH];
-    let n = syscall::getcwd(&mut cwd);
-    assert!(n != 0 && n <= MAX_PATH, "SYS_GETCWD: a working directory past MAX_PATH");
-    let resolved_at = crate::resolve::resolve_path(&cwd[..n], c_str_to_bytes(path), &mut TheServers, &mut TheKernel);
+    let n = files::getcwd(&mut cwd);
+    assert!(n != 0 && n <= MAX_PATH, "SDK working directory past MAX_PATH");
+    let resolved_at = crate::resolve::resolve_path(&cwd[..n], c_str_to_bytes(path), &mut TheServers);
     let at = match resolved_at {
         Ok(at) => at,
         Err(code) => {

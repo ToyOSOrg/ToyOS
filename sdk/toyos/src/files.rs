@@ -1,36 +1,21 @@
-//! Files by path, and the descriptors that name open ones, wherever they are
-//! served: the kernel serves `/tmp`, and every other directory a
-//! process may reach is a capability in its namespace, `fs:<directory>`,
-//! served by a file server ([`crate::fs`]). A program or a library is read
-//! here into an image the kernel pages it from ([`read_image`]).
+//! Files and directories through the capabilities a process holds, named
+//! `fs:<directory>` in its namespace. Absolute paths and paths from the
+//! working directory use the longest matching prefix, at most
+//! [`MAX_CAPABILITY_DEPTH`] components deep. A relative path from a
+//! descriptor stays on that directory's server. Absolute symlinks return
+//! here for routing through the same capabilities.
 //!
-//! **An absolute path, or one from the working directory, goes to the
-//! capability with the longest matching prefix**, at most
-//! [`MAX_CAPABILITY_DEPTH`] components deep, relative to it, made absolute and
-//! its `.` and `..` taken lexically; a path under no capability the process
-//! holds is the kernel's. **A relative path from a descriptor ([`At::Fd`])
-//! goes to whoever serves that directory**: its server resolves the path,
-//! `..` by the directory itself. An absolute link a server meets is followed
-//! here, in this process's own table, at most [`MAX_LINKS`] times. A file
-//! server that restarts is survived: its capability is connected again
-//! ([`crate::fs::Dir`]), and what a descriptor held on it answers `Stale`.
-//!
-//! **A directory the kernel serves has no handle**: a descriptor of one names
-//! its absolute path, and a path from it is that path's lexically
-//! ([`crate::fd::KERNEL_DIR`]). The kernel keeps no hard link, unnamed file or
-//! times a caller sets, and refuses each `NotSupported`.
-//!
-//! **One copy of this crate keeps this state**, the copy that owns the
-//! descriptor table ([`crate::fd`]), and every copy reaches it through
-//! `toyos_fs_*`: std and libc see one set of connections and one table. A
-//! file or directory a server holds open is a descriptor naming an object of
-//! this module's ([`crate::fd::SERVED_FILE`]); a kernel file is one naming its
-//! handle.
+//! One SDK copy owns the descriptor table, connections and working directory;
+//! every copy, including std and libc, reaches it through `toyos_fs_*`.
+//! Kernel objects still support generic reads, writes and metadata queries.
+
+#[cfg(any(feature = "fd-table", test))]
+mod namespace;
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use toyos_abi::syscall::{FileType, SeekFrom, SyscallError};
+use toyos_abi::syscall::{FileType, SyscallError};
 
 use crate::fd::{self, Fd};
 use crate::fs;
@@ -43,6 +28,14 @@ pub const MAX_CAPABILITY_DEPTH: usize = 4;
 
 /// The most absolute links one path's resolution follows.
 pub const MAX_LINKS: usize = 40;
+
+/// Where a file seek starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeekFrom {
+    Start(u64),
+    Current(i64),
+    End(i64),
+}
 
 /// What an open asks for.
 #[repr(C)]
@@ -134,7 +127,7 @@ impl Stat {
 /// Why a call was not answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The kernel's refusal, of a path or a handle it serves.
+    /// A kernel object or transport refused the operation.
     Kernel(SyscallError),
     /// A file server's refusal, or its client end's ([`crate::fs::Error`]).
     Served(fs::Error),
@@ -144,8 +137,7 @@ pub enum Error {
     NotUtf8,
     /// More absolute links on the way than are followed.
     Loop,
-    /// A rename or a link between two servers, or between a server and the
-    /// kernel.
+    /// A rename or a link between different filesystem authorities.
     CrossesServers,
     /// A descriptor that names no file, but an object of a library's own.
     NotAFile,
@@ -244,7 +236,7 @@ extern "C" {
     fn toyos_fs_readlink(at: Fd, path: *const u8, len: usize, out: *mut u8, cap: usize) -> i64;
     fn toyos_fs_set_times(at: Fd, path: *const u8, len: usize, follow: bool, flags: u64, atime: u64, mtime: u64) -> i64;
     fn toyos_fs_readdir(fd: Fd, cursor: u64, out: *mut u8, cap: usize, next: *mut u64) -> i64;
-    fn toyos_fs_is_served(at: Fd, path: *const u8, len: usize) -> i64;
+    fn toyos_fs_getcwd(out: *mut u8, len: usize) -> usize;
     fn toyos_fs_chdir(path: *const u8, len: usize) -> i64;
 }
 
@@ -311,9 +303,9 @@ pub fn fsync(fd: Fd) -> Result<(), Error> {
     decode(unsafe { toyos_fs_fsync(fd) }).map(drop)
 }
 
-/// A kernel handle a child may write the file through as its stdout: a copy
-/// of a kernel file's own, or a pipe the file's server writes to it at its
-/// offset. The caller holds it until the child has its own.
+/// A child's output handle: a copy of a generic object handle, or a pipe
+/// the filesystem server writes at the open description's offset. The caller
+/// holds it until the child has its own.
 pub fn stream(fd: Fd) -> Result<OwnedHandle, Error> {
     // SAFETY: plain values; a handle answered is this process's alone.
     decode(unsafe { toyos_fs_stream(fd) }).map(|h| OwnedHandle(toyos_abi::RawHandle(h as u32)))
@@ -331,8 +323,7 @@ pub fn unlink(at: At, path: &[u8], dir: bool) -> Result<(), Error> {
     decode(unsafe { toyos_fs_unlink(at.word(), path.as_ptr(), path.len(), dir) }).map(drop)
 }
 
-/// Make `path` the working directory, which a file server judges when it
-/// serves it and the kernel when it does.
+/// Validate `path` as a directory and make it the process's working directory.
 pub fn chdir(path: &[u8]) -> Result<(), Error> {
     // SAFETY: `path` is live for the call.
     decode(unsafe { toyos_fs_chdir(path.as_ptr(), path.len()) }).map(drop)
@@ -418,7 +409,7 @@ pub fn read_image_for(path: &[u8], job: Option<crate::BorrowedHandle<'_>>) -> Re
             NotImmutable::Kernel(e) => ImageRefused::Memory(e),
             NotImmutable::Writable => ImageRefused::Read(Error::Served(fs::Error::Malformed)),
         }),
-        Err(Error::Served(fs::Error::Unsupported) | Error::Kernel(SyscallError::NotSupported)) => match fstat(fd) {
+        Err(Error::Served(fs::Error::Unsupported)) => match fstat(fd) {
             Ok(stat) => Image::read_for(job, stat.size, |buf| read(fd, buf)),
             Err(e) => Err(ImageRefused::Read(e)),
         },
@@ -445,7 +436,7 @@ pub enum DlOpenRefused {
 pub fn dl_open(path: &[u8]) -> Result<u64, DlOpenRefused> {
     let text = core::str::from_utf8(path).map_err(|_| DlOpenRefused::Image(ImageRefused::Read(Error::NotUtf8)))?;
     let mut cwd = alloc::vec![0u8; toyos_abi::syscall::MAX_PATH];
-    let n = toyos_abi::syscall::getcwd(&mut cwd);
+    let n = getcwd(&mut cwd);
     let name = absolute(&String::from_utf8_lossy(&cwd[..n.min(cwd.len())]), text);
     let image = read_image(name.as_bytes()).map_err(DlOpenRefused::Image)?;
     let (handle, len) = image.spawn_words();
@@ -465,15 +456,11 @@ fn named(path: &[u8]) -> Result<&str, Error> {
     }
 }
 
-/// Whether `path` is on a file server rather than the kernel.
-pub fn is_served(path: &[u8]) -> bool {
-    is_served_at(At::Cwd, path) == Ok(true)
-}
-
-/// Whether `path` from `at` is on a file server rather than the kernel.
-pub fn is_served_at(at: At, path: &[u8]) -> Result<bool, Error> {
-    // SAFETY: `path` is live for the call.
-    decode(unsafe { toyos_fs_is_served(at.word(), path.as_ptr(), path.len()) }).map(|n| n == 1)
+/// The process's working directory. Returns the required length, writing
+/// the complete path only when it fits in `out`.
+pub fn getcwd(out: &mut [u8]) -> usize {
+    // SAFETY: `out` lends its writable bytes for this call.
+    unsafe { toyos_fs_getcwd(out.as_mut_ptr(), out.len()) }
 }
 
 /// `path`, absolute against `cwd` and without `.` or `..`, which are read off
