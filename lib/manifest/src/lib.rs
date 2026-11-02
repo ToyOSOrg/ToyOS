@@ -829,7 +829,7 @@ mod tests {
                     source: Source::Path("/system/bin/update".into()),
                     slots: true,
                     state: true,
-                    authorize: vec!["tables".into(), "designate:data".into()],
+                    authorize: vec!["tables".into(), "designate:data".into(), "format:data".into()],
                     ..Program::default()
                 },
                 Program {

@@ -94,6 +94,7 @@ impl<D: Disk> DataVolume<D> {
         let cache = Rc::new(Cache::new(disk, clean_limit));
         let first =
             cache.block_on(Mount::open(Rc::clone(&cache), MountOptions { cache_nodes: NODES }, Box::new(OsRandom)));
+        let mut formatted = false;
         let fs = match first {
             Ok(fs) => fs,
             Err(error) => {
@@ -114,6 +115,7 @@ impl<D: Disk> DataVolume<D> {
                 {
                     return Probed::Unmountable(format!("format: {error:?}"));
                 }
+                formatted = true;
                 match cache.block_on(Mount::open(
                     Rc::clone(&cache),
                     MountOptions { cache_nodes: NODES },
@@ -124,7 +126,12 @@ impl<D: Disk> DataVolume<D> {
                 }
             }
         };
-        Self::over(fs, cache, roots, clock).map_or_else(Probed::Unmountable, |volume| Probed::Mounted(Box::new(volume)))
+        Self::over(fs, cache, roots, clock).map_or_else(Probed::Unmountable, |volume| {
+            if !formatted {
+                println!("fileserver: mounted the DATA volume");
+            }
+            Probed::Mounted(Box::new(volume))
+        })
     }
     fn over(fs: Mount<Rc<Cache<D>>>, cache: Rc<Cache<D>>, roots: &[&str], clock: fn() -> u64) -> Result<Self, String> {
         // Mount recovery precedes every live description.

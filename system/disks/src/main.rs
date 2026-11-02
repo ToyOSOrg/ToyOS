@@ -5,11 +5,13 @@
 //! - `disks designate data`: judge the machine's one DATA partition for
 //!   designation and write nothing; `--commit` writes the stamp, which the
 //!   DATA file server formats at its next start.
+//! - `disks format data`: describe the unique DATA partition without writing;
+//!   `--commit` destroys its contents and creates native, unencrypted bcachefs.
 //!
 //! **It holds no authority of its own.** Each command needs the
 //! authorization its row is minted under its name
 //! (`toyos_manifest::authorize`): `tables` to list, `designate:data` to
-//! designate. A run without one is refused, whoever runs it and from where;
+//! designate, `format:data` for raw DATA access. A run without one is refused;
 //! a login grants none. Exit status 0 where it was done, 1 where it was
 //! refused or failed, 2 for a command line it does not take.
 
@@ -17,16 +19,36 @@ use toyos_blockring::wire::{Designated, DiskHead, SlotLine};
 use toyos_gpt::Guid;
 use toyos_manifest::authorize::Authorization;
 
-const USAGE: &str = "usage: disks [list | designate data [--commit]]";
+mod format;
+
+const USAGE: &str = "usage: disks [list | designate data [--commit] | format data [--commit]]";
+
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    List,
+    Designate { commit: bool },
+    Format { commit: bool },
+}
+
+fn command(args: &[&str]) -> Option<Command> {
+    match args {
+        [] | ["list"] => Some(Command::List),
+        ["designate", "data"] => Some(Command::Designate { commit: false }),
+        ["designate", "data", "--commit"] => Some(Command::Designate { commit: true }),
+        ["format", "data"] => Some(Command::Format { commit: false }),
+        ["format", "data", "--commit"] => Some(Command::Format { commit: true }),
+        _ => None,
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let code = match args[..] {
-        [] | ["list"] => list(),
-        ["designate", "data"] => designate(false),
-        ["designate", "data", "--commit"] => designate(true),
-        _ => {
+    let code = match command(&args) {
+        Some(Command::List) => list(),
+        Some(Command::Designate { commit }) => designate(commit),
+        Some(Command::Format { commit }) => format(commit),
+        None => {
             eprintln!("{USAGE}");
             2
         }
@@ -43,12 +65,18 @@ fn unauthorized(authorization: Authorization) -> i32 {
 }
 
 fn list() -> i32 {
-    let Some(names) = toyos::endow::namespace() else { return unauthorized(Authorization::Tables) };
+    let Some(names) = toyos::endow::namespace() else {
+        return unauthorized(Authorization::Tables);
+    };
     let service = Authorization::Tables.name();
     let listed = match diskserver::list(names, service) {
         Ok(listed) => listed,
         Err(diskserver::Error::NotHeld) => return unauthorized(Authorization::Tables),
-        Err(why) => return refuse(&format!("disks: the block service would not list its partitions: {why:?}")),
+        Err(why) => {
+            return refuse(&format!(
+                "disks: the block service would not list its partitions: {why:?}"
+            ));
+        }
     };
     let mut disks: Vec<u32> = listed.iter().map(|l| l.disk).collect();
     disks.sort_unstable();
@@ -70,14 +98,106 @@ fn list() -> i32 {
 }
 
 fn designate(commit: bool) -> i32 {
-    let Some(names) = toyos::endow::namespace() else { return unauthorized(Authorization::DesignateData) };
+    let Some(names) = toyos::endow::namespace() else {
+        return unauthorized(Authorization::DesignateData);
+    };
     match diskserver::tables::designate(names, Authorization::DesignateData.name(), commit) {
         Err(diskserver::Error::NotHeld) => unauthorized(Authorization::DesignateData),
         Ok(done) => {
             println!("{}", designated(&done));
-            i32::from(!matches!(done, Designated::Written | Designated::WouldWrite | Designated::Already))
+            i32::from(!matches!(
+                done,
+                Designated::Written | Designated::WouldWrite | Designated::Already
+            ))
         }
-        Err(why) => refuse(&format!("disks: the DATA partition was not designated: {why:?}")),
+        Err(why) => refuse(&format!(
+            "disks: the DATA partition was not designated: {why:?}"
+        )),
+    }
+}
+
+struct OsRandom;
+impl toyos_crypto::Random for OsRandom {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), toyos_crypto::Error> {
+        getrandom::fill(out).map_err(|_| toyos_crypto::Error::Entropy)
+    }
+}
+
+fn format(commit: bool) -> i32 {
+    use toyos_blockdev::{BlockDev, block_on};
+    let authorization = Authorization::FormatData;
+    let Some(names) = toyos::endow::namespace() else {
+        return unauthorized(authorization);
+    };
+    let service = authorization.name();
+    let listed = match diskserver::list(names, service) {
+        Ok(listed) => listed,
+        Err(diskserver::Error::NotHeld) => return unauthorized(authorization),
+        Err(why) => return refuse(&format!("disks: DATA was not listed: {why:?}")),
+    };
+    let target = match format::select(&listed) {
+        Ok(target) => target,
+        Err(why) => return refuse(&format!("disks: {why}; nothing was written")),
+    };
+    let own = match toyos::namespace::build().keep(names, &[service]).finish() {
+        Ok(own) => own,
+        Err(why) => {
+            return refuse(&format!(
+                "disks: the formatting capability could not be kept: {why:?}"
+            ));
+        }
+    };
+    // The block service holds the partition exclusively for this session.
+    let session = match diskserver::Session::open(own, service, target.unique) {
+        Ok(session) => session,
+        Err(why) => {
+            return refuse(&format!(
+                "disks: DATA {} could not be opened exclusively: {why:?}; nothing was written",
+                Guid(target.unique)
+            ));
+        }
+    };
+    let disk = diskserver::disk::Served::new(session);
+    let contents = match block_on(format::contents(&disk), || disk.wait()) {
+        Ok(contents) => contents,
+        Err(why) => {
+            return refuse(&format!(
+                "disks: DATA could not be inspected: {why:?}; nothing was written"
+            ));
+        }
+    };
+    println!(
+        "disks: target disk {} DATA {}: {} bytes; contents: {contents}",
+        target.disk,
+        Guid(target.unique),
+        disk.blocks() * toyos_blockdev::BLOCK as u64
+    );
+    if !commit {
+        println!(
+            "disks: would destroy all contents and create unencrypted bcachefs; nothing was written (--commit writes)"
+        );
+        return 0;
+    }
+    println!("disks: destroying DATA contents and creating unencrypted bcachefs");
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(now) => now.as_nanos().min(u64::MAX as u128) as u64,
+        Err(why) => {
+            return refuse(&format!(
+                "disks: no filesystem timestamp: {why}; nothing was written"
+            ));
+        }
+    };
+    match block_on(format::create(&disk, now, OsRandom), || disk.wait()) {
+        Ok(()) => {
+            println!(
+                "disks: DATA {} formatted as bcachefs; flushed and mounted for verification",
+                Guid(target.unique)
+            );
+            0
+        }
+        Err(why) => refuse(&format!(
+            "disks: formatting failed: {why:?}; DATA may be incomplete"
+        )),
     }
 }
 
@@ -108,7 +228,10 @@ fn kind(guid: [u8; 16]) -> String {
         (Guid::TOYOS_SLOTS, "ToyOS slot table"),
         (Guid::TOYOS_SCRATCH, "ToyOS scratch"),
     ];
-    named.iter().find(|(g, _)| g.0 == guid).map_or_else(|| Guid(guid).to_string(), |(_, name)| (*name).to_string())
+    named
+        .iter()
+        .find(|(g, _)| g.0 == guid)
+        .map_or_else(|| Guid(guid).to_string(), |(_, name)| (*name).to_string())
 }
 
 /// `bytes` in the largest binary unit that leaves at least 10 of it.
@@ -161,6 +284,27 @@ fn describe(disk: u32, head: &DiskHead, slots: &[SlotLine]) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn formatting_requires_the_exact_explicit_commit_command() {
+        assert_eq!(
+            command(&["format", "data"]),
+            Some(Command::Format { commit: false })
+        );
+        assert_eq!(
+            command(&["format", "data", "--commit"]),
+            Some(Command::Format { commit: true })
+        );
+        for args in [
+            vec!["format"],
+            vec!["format", "root", "--commit"],
+            vec!["format", "data", "--force"],
+            vec!["format", "data", "--commit", "extra"],
+            vec!["--commit", "format", "data"],
+        ] {
+            assert_eq!(command(&args), None, "{args:?}");
+        }
+    }
+
     /// A disk prints its size, its table's state and each partition by its
     /// one-based number, type, size, unique GUID, name and use; copies that
     /// disagree say what each is.
@@ -190,14 +334,35 @@ mod tests {
         };
         let text = describe(1, &head, &[data]);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], "disk 1: 238 GiB (500118192 sectors of 512 bytes), a GPT, both copies agree");
+        assert_eq!(
+            lines[0],
+            "disk 1: 238 GiB (500118192 sectors of 512 bytes), a GPT, both copies agree"
+        );
         assert_eq!(
             lines[1].split_whitespace().collect::<Vec<_>>(),
-            ["4", "ToyOS", "DATA", "170", "GiB", "11111111-1111-1111-1111-111111111111", "\"ToyOS", "data\"", "free"]
+            [
+                "4",
+                "ToyOS",
+                "DATA",
+                "170",
+                "GiB",
+                "11111111-1111-1111-1111-111111111111",
+                "\"ToyOS",
+                "data\"",
+                "free"
+            ]
         );
         assert_eq!(lines.len(), 2);
-        let torn = DiskHead { agree: false, backup: "Gpt(HeaderCrc { stored: 1, computed: 2 })".into(), ..head };
-        assert!(describe(0, &torn, &[]).contains("primary valid, backup Gpt(HeaderCrc"), "{}", describe(0, &torn, &[]));
+        let torn = DiskHead {
+            agree: false,
+            backup: "Gpt(HeaderCrc { stored: 1, computed: 2 })".into(),
+            ..head
+        };
+        assert!(
+            describe(0, &torn, &[]).contains("primary valid, backup Gpt(HeaderCrc"),
+            "{}",
+            describe(0, &torn, &[])
+        );
         assert_eq!(size(4096), "4096 B");
         assert_eq!(size(10 << 30), "10 GiB");
     }
@@ -205,6 +370,9 @@ mod tests {
     #[test]
     fn a_designation_is_said_as_what_it_came_to() {
         assert!(designated(&Designated::Written).contains("read back"));
-        assert!(designated(&Designated::Foreign("an NTFS file system".into())).contains("carries an NTFS file system"));
+        assert!(
+            designated(&Designated::Foreign("an NTFS file system".into()))
+                .contains("carries an NTFS file system")
+        );
     }
 }

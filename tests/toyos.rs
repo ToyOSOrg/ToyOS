@@ -68,6 +68,8 @@ const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
+    // The DATA round trip has separate write and read boots, not a no-argument run.
+    "data_roundtrip",
     // Its explicit metal registration owns the directory listing workload.
     "readdir_bound",
     // It writes the log disk for ever, so that its boot's deadline resets the
@@ -1592,6 +1594,47 @@ const METAL: &[(&str, metal::Metal)] = &[
         // owner's empty ToyOS DATA.
         "bench_data_designated",
         metal::Metal { arms: DESIGNATE, judge: |b| bench_data_designated(&b[0].log(), &b[1].log()) },
+    ),
+    (
+        // Explicitly destroys the unique DATA partition on either bench.
+        // Never part of an unfiltered suite; no production image holds this grant.
+        "bench_data_formatted",
+        metal::Metal {
+            arms: &[metal::Arm {
+                named_only: true,
+                ..metal::once("data-format", "tests/images/formatcase.toml", &[], &["disks format data --commit"])
+            }],
+            judge: |b| {
+                b[0].job_passed("disks")?;
+                b[0].log().must_say("supervisor: test-runner is authorized for `format:data`")?;
+                b[0].log().must_say("formatted as bcachefs; flushed and mounted for verification")?;
+                Ok(())
+            },
+        },
+    ),
+    (
+        // Both benches: ordinary Rust writes, flushes and namespace changes
+        // survive a real reboot and a fresh native DATA mount.
+        "bench_data_survives_reboot",
+        metal::Metal {
+            arms: &[
+                metal::Arm { named_only: true, ..metal::once("data-roundtrip-1-write", "tests/images/datacase.toml", &[], &["test_rs_data_roundtrip write"]) },
+                metal::Arm { named_only: true, ..metal::once("data-roundtrip-2-read", "tests/images/datacase.toml", &[], &["test_rs_data_roundtrip read"]) },
+            ],
+            judge: |b| {
+                for boot in b {
+                    boot.job_passed("test_rs_data_roundtrip")?;
+                    let (_, fate) = common::hostdisk::left_alone(&boot.log(), &common::hostdisk::loader_named(&boot.loader())?)?;
+                    if fate != common::hostdisk::Data::Mounted {
+                        return Err("the round trip requires an already formatted native DATA volume".into());
+                    }
+                }
+                let written = data_roundtrip_token(b[0].log().text(), "written")?;
+                let read = data_roundtrip_token(b[1].log().text(), "verified")?;
+                if written != read { return Err("the second boot did not verify the first boot's DATA token".into()); }
+                Ok(())
+            },
+        },
     ),
     (
         // The log disk written while the boot deadline resets the machine: the
@@ -5053,7 +5096,7 @@ fn bench_data_designated(first: &serial::Serial, second: &serial::Serial) -> Res
     nvme_wrote_the_designation(first.text())?;
     first.must_say("the DATA partition is designated: the stamp is on the disk and read back")?;
     first.must_not_say("are in memory and will not survive a reboot")?;
-    second.must_say("fileserver: block 0 designates this partition for ToyOS; formatting it")?;
+    second.must_say("fileserver: formatting the explicitly designated DATA partition as bcachefs")?;
     let serving = second.must_say("fileserver: Data serving ")?;
     if !serving.contains(" — bcachefs") {
         return Err(format!("DATA is served by no bcachefs volume: {serving:?}"));
@@ -5061,6 +5104,15 @@ fn bench_data_designated(first: &serial::Serial, second: &serial::Serial) -> Res
     second.must_not_say("are in memory and will not survive a reboot")?;
     second.must_not_say("DATA is absent this boot")?;
     Ok(())
+}
+
+fn data_roundtrip_token(text: &str, phase: &str) -> Result<String, String> {
+    let marker = format!("DATA_ROUNDTRIP {phase} ");
+    let tokens: Vec<_> = text.lines().filter_map(|line| line.split_once(&marker).map(|(_, token)| token.trim())).collect();
+    match tokens[..] {
+        [token] if token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit()) => Ok(token.to_string()),
+        _ => Err(format!("the DATA round trip has no unique valid {phase} token: {tokens:?}")),
+    }
 }
 
 /// A boot of the designation image beside [`common::hostdisk`]'s disk: a

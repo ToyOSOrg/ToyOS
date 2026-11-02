@@ -10,6 +10,15 @@ mod checks {
     // outside that text, so each of those names the printer's `eprintln!`.
     use toyos_build::eprintln;
 
+    #[test]
+    fn a_data_round_trip_needs_one_complete_token_per_boot() {
+        let token = "0123456789abcdef0123456789abcdef";
+        assert_eq!(data_roundtrip_token(&format!("[job] DATA_ROUNDTRIP written {token}\n"), "written").unwrap(), token);
+        for text in [String::new(), format!("DATA_ROUNDTRIP verified {token}"), "DATA_ROUNDTRIP written 123".into(), format!("DATA_ROUNDTRIP written {token}junk"), format!("DATA_ROUNDTRIP written {token}\nDATA_ROUNDTRIP written {token}\n")] {
+            assert!(data_roundtrip_token(&text, "written").is_err(), "{text}");
+        }
+    }
+
     #[path = "audio.rs"]
     mod audio_checks;
     #[path = "claims.rs"]
@@ -1222,7 +1231,7 @@ mod checks {
             .iter()
             .map(|name| ((*name).to_string(), Vec::new()))
             .collect();
-        let jobs = vec!["test_rs_parent".to_string()];
+        let jobs = vec!["test_rs_parent --write".to_string()];
         let staged = |text: &str| -> Vec<String> {
             metal::reached(text, &jobs, &bins).into_iter().map(|(path, _)| path).collect()
         };

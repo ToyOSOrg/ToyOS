@@ -3047,12 +3047,14 @@ mod tests {
     #[test]
     fn a_disk_changing_authorization_goes_to_no_row_a_login_can_start() {
         let gate = |text: &str| held_by_their_holders_alone(&toml::from_str(text).unwrap());
-        assert!(gate("[programs.runner]\nauthorize = [\"designate:data\"]\n").is_ok());
+        for word in ["designate:data", "format:data"] {
+            assert!(gate(&format!("[programs.runner]\nauthorize = [\"{word}\"]\n")).is_ok());
+            let launched = gate(&format!("[programs.disks]\nauthorize = [\"{word}\"]\n[programs.shell]\nstarts = [\"disks\"]\n"));
+            assert!(launched.unwrap_err().contains("may start it"));
+            let login = gate(&format!("[boot]\nstart = [\"sshserver\"]\n[programs.sshserver]\nlogin = true\nauthorize = [\"{word}\"]\n"));
+            assert!(login.unwrap_err().contains("is a login authority"));
+        }
         assert!(gate("[programs.disks]\nauthorize = [\"tables\"]\n[programs.shell]\nstarts = [\"disks\"]\n").is_ok());
-        let launched = gate("[programs.disks]\nauthorize = [\"designate:data\"]\n[programs.shell]\nstarts = [\"disks\"]\n");
-        assert!(launched.unwrap_err().contains("may start it"));
-        let login = gate("[boot]\nstart = [\"sshserver\"]\n[programs.sshserver]\nlogin = true\nauthorize = [\"designate:data\"]\n");
-        assert!(login.unwrap_err().contains("is a login authority"));
         assert!(gate("[programs.sshserver]\nlogin = true\nauthorize = [\"tables\"]\n").is_ok(), "reading the tables is no change");
         assert!(gate("[programs.disks]\nauthorize = [\"format:everything\"]\n").unwrap_err().contains("no disk authorization"));
     }
@@ -3291,6 +3293,8 @@ mod tests {
         "tests/images/benchcase.toml",
         "tests/images/clipboardcase.toml",
         "tests/images/designatecase.toml",
+        "tests/images/formatcase.toml",
+        "tests/images/datacase.toml",
         "tests/images/drivescase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/jobcase.toml",

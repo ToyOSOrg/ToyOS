@@ -744,7 +744,7 @@ pub fn reached(
         // together are a fraction of one helper binary.
         if name.ends_with(".so") {
             out.push((format!("lib/{name}"), data.clone()));
-        } else if !jobs.contains(&staged) && names(&staged) {
+        } else if !jobs.iter().any(|job| binary(job) == staged) && names(&staged) {
             out.push((format!("bin/{staged}"), data.clone()));
         }
     }
@@ -780,12 +780,13 @@ fn build(
     // carrying two hundred binaries it never runs is a minute of flash.
     let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
     for job in &batch.jobs {
-        let Some(name) = job.strip_prefix("test_rs_") else { continue };
+        let bin = binary(job);
+        let Some(name) = bin.strip_prefix("test_rs_") else { continue };
         let (_, data) = rust_bins
             .iter()
             .find(|(n, _)| n == name)
             .ok_or_else(|| format!("the job {job:?} names no binary under tests/guest/rust-tests"))?;
-        extra.push((format!("bin/{job}"), data.clone()));
+        extra.push((format!("bin/{bin}"), data.clone()));
     }
     extra.extend(batch.files.iter().cloned());
     // **What a job spawns comes with it, and it is not optional.** A binary that
@@ -812,7 +813,7 @@ fn build(
             reachable.push_str(to);
         }
         for job in &batch.jobs {
-            let Some(name) = job.strip_prefix("test_rs_") else { continue };
+            let Some(name) = binary(job).strip_prefix("test_rs_") else { continue };
             if let Ok(source) = std::fs::read_to_string(bin.join(format!("{name}.rs"))) {
                 reachable.push('\n');
                 reachable.push_str(&source);

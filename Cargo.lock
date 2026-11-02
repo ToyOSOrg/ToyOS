@@ -767,9 +767,14 @@ dependencies = [
 name = "disks"
 version = "0.1.0"
 dependencies = [
+ "bcachefs",
  "diskserver",
+ "getrandom 0.3.4",
  "toyos",
+ "toyos-blockdev",
  "toyos-blockring",
+ "toyos-blockserve",
+ "toyos-crypto",
  "toyos-gpt",
  "toyos-manifest",
 ]
