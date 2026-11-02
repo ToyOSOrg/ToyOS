@@ -57,7 +57,7 @@ use fileserver::descriptions::{self, Description, Held, Ids, Shared};
 use fileserver::listing;
 use diskserver::disk::Served;
 use fileserver::cache::Disk;
-use fileserver::ram::Ram;
+use fileserver::memory::MemoryVolume;
 use fileserver::fat::FatVolume;
 use fileserver::resolve::{self, Found, Refusal as Escape, Resolved};
 use fileserver::rights;
@@ -103,10 +103,6 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// whatever its grant.
 const NO_SUCH_OPERATION: &str = "it asked for an operation this protocol does not have";
 
-/// The volume memory stands in for when DATA has no partition: 1 GiB of
-/// blocks, of which only what is written costs anything.
-const RAM_BLOCKS: u64 = 1 << 18;
-
 /// What a volume's cache keeps clean: its tree, or its FAT and directories.
 /// A file's pages are its paged object's ([`pager`]).
 const CLEAN_BLOCKS: usize = (16 << 20) / toyos_blockdev::BLOCK;
@@ -127,6 +123,7 @@ const REPORT: Duration = Duration::from_secs(5);
 enum Role {
     System,
     Data,
+    Memory,
     Log,
     Boot,
 }
@@ -136,6 +133,7 @@ impl Role {
         match text {
             "system" => Some(Self::System),
             "data" => Some(Self::Data),
+            "memory" => Some(Self::Memory),
             "log" => Some(Self::Log),
             "boot" => Some(Self::Boot),
             _ => None,
@@ -146,6 +144,7 @@ impl Role {
         match self {
             Self::System => "system",
             Self::Data => "data",
+            Self::Memory => "memory",
             Self::Log => "log",
             Self::Boot => "boot",
         }
@@ -291,7 +290,7 @@ const DATA_DIRTY: u64 = 8 * 1024;
 fn pager(role: Role) -> Option<toyos::paged::Pager> {
     let (capacity, dirty, objects) = match role {
         Role::System => return None,
-        Role::Data => {
+        Role::Data | Role::Memory => {
             let share = toyos::system::memory_total() / PAGES_SHARE / toyos::paged::PAGE;
             let capacity = share.saturating_sub(2 * SMALL_PAGES).max(SMALL_PAGES);
             // A file held for every 16 pages, the table's own cost a small
@@ -340,8 +339,9 @@ fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> (Box<dyn Volum
             let (volume, memory) = root();
             return (Box::new(volume), Some(memory));
         }
+        Role::Memory => Box::new(MemoryVolume::new(roots, fileserver::volume::now_nanos)) as Box<dyn Volume>,
         Role::Data => match fileserver::data::find(data_partitions().as_deref().map_err(String::clone)) {
-            Located::Nowhere => ram(roots, "this machine has no DATA partition"),
+            Located::Nowhere => memory(roots, "this machine has no DATA partition"),
             Located::Served(guid) => match served(guid) {
                 Some(disk) => data_on(disk, roots),
                 None => absent(roots, "the DATA partition would not open".into()),
@@ -401,12 +401,9 @@ fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
     }
 }
 
-fn ram(roots: &[&str], why: &str) -> Box<dyn Volume> {
+fn memory(roots: &[&str], why: &str) -> Box<dyn Volume> {
     println!("fileserver: {why}; /apps, /config, /home and /state are in memory and will not survive a reboot");
-    match DataVolume::format(Ram::new(RAM_BLOCKS), CLEAN_BLOCKS, roots, fileserver::volume::now_nanos) {
-        Ok(volume) => Box::new(volume),
-        Err(why) => panic!("fileserver: a volume in memory would not format: {why}"),
-    }
+    Box::new(MemoryVolume::new(roots, fileserver::volume::now_nanos))
 }
 
 fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>, String> {
@@ -1027,7 +1024,7 @@ impl Server {
                         let gone = self.volume.identity(&path).ok();
                         self.volume.unlink(&path)?;
                         if let Some(identity) = gone {
-                            self.files.forget(&mut *self.volume, identity);
+                            self.files.unlinked(&mut *self.volume, identity)?;
                         }
                     }
                 }
@@ -1053,7 +1050,7 @@ impl Server {
                 };
                 self.volume.rename(&from, &to)?;
                 if let Some(identity) = over {
-                    self.files.forget(&mut *self.volume, identity);
+                    self.files.unlinked(&mut *self.volume, identity)?;
                 }
                 self.each_dir(|held, _| descriptions::moved(held, &from, &to));
                 self.dirtied();

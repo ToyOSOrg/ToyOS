@@ -27,6 +27,7 @@ pub mod data;
 pub mod descriptions;
 pub mod fat;
 pub mod listing;
+pub mod memory;
 pub mod pages;
 pub mod ram;
 pub mod resolve;

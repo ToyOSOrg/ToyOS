@@ -105,6 +105,13 @@ impl Out for Window<'_> {
 }
 
 pub trait Volume {
+    /// Its paged objects are the only backing for file contents. Their pages
+    /// cannot be evicted while the inode remains linked or held open.
+    fn memory(&self) -> bool { false }
+
+    /// Whether an open inode still has a name.
+    fn linked(&mut self, _node: Node) -> Result<bool, Error> { Ok(true) }
+
     /// Whether anything here may be changed.
     fn writable(&self) -> bool;
 

@@ -7,10 +7,9 @@
 use alloc::sync::Arc;
 
 use toyos_abi::handle::{RawHandle, Rights};
-use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError, MAX_WHOLE_PIPE_WRITE};
+use toyos_abi::syscall::{FileType, SyscallError, MAX_WHOLE_PIPE_WRITE};
 
 use crate::drivers::serial;
-use crate::file_cache;
 use crate::pipe::{self, PipeRef};
 use kernel::pipe::End;
 use crate::user_ptr::{UserBytes, UserBytesMut};
@@ -19,7 +18,6 @@ use crate::watch::Watch;
 use crate::device as device_registry;
 
 use super::device::DeviceClaim;
-use super::file::{FileObject, OpenFileState};
 use super::handle::{HandleEntry, HandleTable};
 use super::{KObjectRef, KObjectVariant};
 
@@ -32,7 +30,6 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::Connection(_) => {
             BASE.union(Rights::READ).union(Rights::WRITE).union(Rights::MAP)
         }
-        KObjectRef::File(_) => BASE.union(Rights::READ).union(Rights::WRITE),
         // No `DUP`: a claim admits exactly one handle, exclusivity by type rather than a check in `dup`.
         KObjectRef::Device(_) => {
             Rights::TRANSFER.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE)
@@ -75,108 +72,6 @@ pub fn install(table: &mut HandleTable, object: KObjectRef) -> Result<RawHandle,
         .map_err(|_| SyscallError::ResourceExhausted)
 }
 
-/// A file opened at absolute `path`, installed in `table`.
-pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
-    // First, so the answer is the bit and not the path's own refusal.
-    if flags.0 & !OpenFlags::KNOWN.0 != 0 {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    let writable = flags.contains(OpenFlags::WRITE);
-    let create = flags.contains(OpenFlags::CREATE);
-    let truncate = flags.contains(OpenFlags::TRUNCATE);
-    let append = flags.contains(OpenFlags::APPEND);
-    let exclusive = flags.contains(OpenFlags::EXCLUSIVE);
-    if exclusive && !create {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    let modifies = writable || create || truncate || append;
-    // Charged before the file is opened or made, so a refusal makes nothing.
-    let core = match FileObject::new_core(0) {
-        Ok(core) => core,
-        Err(e) => return SyscallError::from(e).to_u64(),
-    };
-
-    let opened = {
-        let mut vfs = crate::vfs::lock();
-        // Scoped to this block: dropped before the object exists, since `OpenFileState::Drop` re-takes it.
-
-        let intent = if modifies {
-            crate::vfs::ResolveIntent::UserModify
-        } else {
-            crate::vfs::ResolveIntent::KernelOrRead
-        };
-        // An exclusive create decides on the name itself, its link not
-        // followed, so a link (dangling or not) or a directory there is
-        // `AlreadyExists`, as POSIX's `O_EXCL` has it.
-        if exclusive {
-            match vfs.stat(path, false) {
-                Ok(_) => return SyscallError::AlreadyExists.to_u64(),
-                Err(SyscallError::NotFound) => {}
-                Err(e) => return e.to_u64(),
-            }
-        }
-        let target = match vfs.resolve_for_open(path, intent) {
-            Ok(target) => target,
-            Err(e) => return e.to_u64(),
-        };
-
-        if create {
-            let (_, file) = vfs.resolve_path("/", target.as_str());
-            if file.is_empty() {
-                return SyscallError::InvalidArgument.to_u64();
-            }
-        }
-
-        // Under the same VFS lock as the check above, so two exclusive
-        // creates of one name cannot both find it missing; nothing is there,
-        // so the target is the name itself.
-        let built = if exclusive {
-            let mtime = crate::clock::mtime_now();
-            vfs.create_file(target.as_str(), mtime).map(|(file_id, volume)| (file_id, volume, mtime, 0))
-        } else if truncate && create {
-            let mtime = crate::clock::mtime_now();
-            // `NotFound` is not a failure: truncating past a name that was not there is fine.
-            // Any `vfs.delete_file` error other than `NotFound` is propagated, not swallowed: truncating past it could silently create a file over one the mount could not confirm was missing.
-            match vfs.delete_file(target.as_str()) {
-                Ok(()) | Err(SyscallError::NotFound) => {}
-                Err(e) => return e.to_u64(),
-            }
-            vfs.create_file(target.as_str(), mtime).map(|(file_id, volume)| (file_id, volume, mtime, 0))
-        } else {
-            // `mtime_target` takes no reference, so it runs first and the reference-taking
-            // `open_target` runs last — a refusal cannot strand a reference. `CREATE` acts on `NotFound` only.
-            match vfs.mtime_target(&target) {
-                Ok(mtime) => vfs.open_target(&target).map(|(file_id, volume)| {
-                    let position =
-                        if append { file_cache::size(file_id) as usize } else { 0 };
-                    (file_id, volume, mtime, position)
-                }),
-                Err(SyscallError::NotFound) if create => {
-                    let mtime = crate::clock::mtime_now();
-                    vfs.create_file(target.as_str(), mtime).map(|(file_id, volume)| (file_id, volume, mtime, 0))
-                }
-                Err(e) => Err(e),
-            }
-        };
-        built
-    };
-
-    let (file_id, volume, mtime, position) = match opened {
-        Ok(v) => v,
-        Err(e) => return e.to_u64(),
-    };
-    let object = KObjectRef::File(FileObject::new(core, OpenFileState { file_id, volume, position, mtime }));
-    // `writable` is a right, not a field: a read-only write fails for lacking `WRITE`.
-    let mut rights = initial_rights(&object);
-    if !writable {
-        rights = rights.without(Rights::WRITE);
-    }
-    match table.install(HandleEntry::new(object, rights)) {
-        Ok(h) => h.0 as u64,
-        Err(_) => SyscallError::ResourceExhausted.to_u64(),
-    }
-}
-
 /// Release one handle.
 ///
 /// What the object holds is released by its own zero-handle hook; `close` releases only what is the process's, not the object's: polls on a watch it ends.
@@ -217,7 +112,7 @@ pub fn written_pipe(object: &KObjectRef) -> Option<PipeRef> {
 pub fn pipe_read(object: &KObjectRef) -> Option<&PipeRef> {
     match object {
         KObjectRef::PipeRead(r) => Some(r.pipe()),
-        KObjectRef::Connection(_) | KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Device(_)
+        KObjectRef::Connection(_) | KObjectRef::PipeWrite(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
@@ -230,7 +125,7 @@ pub fn pipe_read(object: &KObjectRef) -> Option<&PipeRef> {
 pub fn pipe_write(object: &KObjectRef) -> Option<&PipeRef> {
     match object {
         KObjectRef::PipeWrite(w) => Some(w.pipe()),
-        KObjectRef::Connection(_) | KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
+        KObjectRef::Connection(_) | KObjectRef::PipeRead(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
@@ -295,7 +190,7 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         },
         // Named unconditionally: the watch alone cannot enforce rights.
         KObjectRef::SysCap(_) => Some(WatchRef::Static(&crate::log::user::WATCH)),
-        KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
+        KObjectRef::PipeWrite(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => None,
     }
@@ -308,7 +203,7 @@ pub fn watched_readable(object: &KObjectRef) {
         KObjectRef::Notice(n) => n.listen(),
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) | KObjectRef::Device(_)
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
-        | KObjectRef::Namespace(_) | KObjectRef::File(_) | KObjectRef::Console(_) | KObjectRef::SysCap(_)
+        | KObjectRef::Namespace(_) | KObjectRef::Console(_) | KObjectRef::SysCap(_)
         | KObjectRef::Process(_) | KObjectRef::Null(_) | KObjectRef::Job(_) => {}
     }
 }
@@ -319,7 +214,7 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::PipeWrite(w) => Some(WatchRef::Shared(w.pipe().write_watch().clone())),
         KObjectRef::Connection(c) => Some(WatchRef::Shared(c.tx().write_watch().clone())),
         KObjectRef::Console(_) => Some(WatchRef::Static(&crate::log::console::SPACE)),
-        KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
+        KObjectRef::PipeRead(_) | KObjectRef::Device(_)
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
@@ -337,7 +232,7 @@ pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
-        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
+        | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
         | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => None,
     }
 }
@@ -351,7 +246,7 @@ pub fn other_end_gone(object: &KObjectRef) -> bool {
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
-        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
+        | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
         | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => false,
     }
 }
@@ -375,96 +270,10 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
             device_registry::DeviceType::Framebuffer => true,
         },
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
-        | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::Notice(_) => true,
     }
-}
-
-/// What a file's page that could not be read or kept answers its call.
-fn block_refusal(e: crate::file_backing::BlockError) -> SyscallError {
-    match e {
-        crate::file_backing::BlockError::Device => SyscallError::Io,
-        crate::file_backing::BlockError::Exhausted => SyscallError::ResourceExhausted,
-    }
-}
-
-fn read_file(file: &FileObject, buf: &mut UserBytesMut) -> Option<u64> {
-    file.with(|state| {
-        let (answer, read) = read_file_at(state.file_id, state.position, buf);
-        state.position += read;
-        Some(answer)
-    })
-}
-
-/// Read file `file_id` at `position` into `buf`: the syscall's answer, and how
-/// many bytes it read.
-fn read_file_at(file_id: file_cache::FileId, position: usize, buf: &mut UserBytesMut) -> (u64, usize) {
-    let size = file_cache::size(file_id) as usize;
-    let count = buf.len().min(size.saturating_sub(position));
-    let mut read = 0;
-    let mut refused = None;
-    while read < count {
-        let abs_pos = position + read;
-        let page_idx = (abs_pos / 4096) as u32;
-        let offset_in_page = abs_pos % 4096;
-        let to_read = (4096 - offset_in_page).min(count - read);
-        // A refused page is not a page of zeros: stop short rather than fake a hole under a success.
-        if let Err(e) = file_cache::read_page(file_id, page_idx, offset_in_page, &mut buf.sub(read, to_read)) {
-            refused = Some(e);
-            break;
-        }
-        read += to_read;
-    }
-    if let (0, Some(e)) = (read, refused) {
-        return (block_refusal(e).to_u64(), 0);
-    }
-    (read as u64, read)
-}
-
-/// Write `buf` to file `file_id` at `position`, stamping it: the syscall's
-/// answer, and how many bytes it wrote.
-fn write_file_at(state: &mut OpenFileState, position: usize, buf: &UserBytes) -> (u64, usize) {
-    // Refused, never wrapped: past this the `u32` page index would alias a low page.
-    if (position as u64).saturating_add(buf.len() as u64) > file_cache::MAX_FILE_SIZE {
-        return (SyscallError::InvalidArgument.to_u64(), 0);
-    }
-    let mut written = 0;
-    let mut refused = None;
-    while written < buf.len() {
-        let abs_pos = position + written;
-        let page_idx = (abs_pos / 4096) as u32;
-        let offset_in_page = abs_pos % 4096;
-        let to_write = (4096 - offset_in_page).min(buf.len() - written);
-        // A page that cannot be re-read off the device is refused, not merged into zeros.
-        if let Err(e) = file_cache::write_page(state.file_id, page_idx, offset_in_page, &buf.sub(written, to_write)) {
-            refused = Some(e);
-            break;
-        }
-        written += to_write;
-    }
-    if let (0, Some(e)) = (written, refused) {
-        return (block_refusal(e).to_u64(), 0);
-    }
-    state.mtime = crate::clock::mtime_now();
-    file_cache::touch(state.file_id, state.mtime);
-    (written as u64, written)
-}
-
-/// Read a file at `offset`, leaving its position: any other object is
-/// refused `NotSupported`, as a pipe has no offset to read at.
-pub fn pread(object: &KObjectRef, offset: u64, buf: &mut UserBytesMut) -> u64 {
-    let KObjectRef::File(file) = object else { return SyscallError::NotSupported.to_u64() };
-    let Ok(position) = usize::try_from(offset) else { return 0 };
-    file.with(|state| read_file_at(state.file_id, position, buf).0)
-}
-
-/// Write a file at `offset`, leaving its position: any other object is
-/// refused `NotSupported`.
-pub fn pwrite(object: &KObjectRef, offset: u64, buf: &UserBytes) -> u64 {
-    let KObjectRef::File(file) = object else { return SyscallError::NotSupported.to_u64() };
-    let Ok(position) = usize::try_from(offset) else { return SyscallError::InvalidArgument.to_u64() };
-    file.with(|state| write_file_at(state, position, buf).0)
 }
 
 /// Read a device claim; takes `table` because describing a device installs handles into it.
@@ -545,7 +354,6 @@ fn record_bytes(record: &toyos_abi::pci::DeviceIrqRecord) -> &[u8] {
 /// Read whatever a handle names except a device claim; [`read_device`] needs the table mutably.
 pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
     match object {
-        KObjectRef::File(f) => read_file(f, buf),
         KObjectRef::PipeRead(r) => r.pipe().try_read(buf).map(|n| n as u64),
         KObjectRef::Device(_) => unreachable!("a device claim is read by `read_device`"),
         KObjectRef::Console(_) => {
@@ -596,11 +404,6 @@ fn write_pipe(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
 
 pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
     match object {
-        KObjectRef::File(f) => f.with(|state| {
-            let (answer, written) = write_file_at(state, state.position, buf);
-            state.position += written;
-            Some(answer)
-        }),
         KObjectRef::PipeWrite(_) => write_pipe(object, buf),
         // The whole lines `klogd`'s queue has room for, and a trailing partial one:
         // a short count is a writer ahead of the console, told so.
@@ -617,26 +420,6 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
     }
 }
 
-pub fn seek(object: &KObjectRef, pos: SeekFrom) -> u64 {
-    let KObjectRef::File(file) = object else {
-        return SyscallError::PermissionDenied.to_u64();
-    };
-    file.with(|state| {
-        let size = file_cache::size(state.file_id) as usize;
-        let new_pos = match pos {
-            SeekFrom::Start(n) => n as i64,
-            SeekFrom::Current(n) => (state.position as i64).checked_add(n).unwrap_or(-1),
-            SeekFrom::End(n) => (size as i64).checked_add(n).unwrap_or(-1),
-        };
-        if new_pos < 0 || new_pos as u64 > file_cache::MAX_FILE_SIZE {
-            return SyscallError::InvalidArgument.to_u64();
-        }
-        // Past EOF is a position, not an error (POSIX lseek): a later write extends the file.
-        state.position = new_pos as usize;
-        state.position as u64
-    })
-}
-
 toyos_abi::user_safe! {
     #[derive(Clone, Copy)]
     pub struct Stat {
@@ -648,18 +431,10 @@ toyos_abi::user_safe! {
     }
 }
 
-/// What kind of thing this is, how big, and which file: a file's node is its
-/// `FileId`, one per file for as long as it exists (`vfs::FileSystem::open_file`).
+/// The kind and size of a kernel object.
 pub fn fstat(object: &KObjectRef) -> Stat {
     let plain = |t: FileType| Stat { file_type: t as u64, size: 0, mtime: 0, volume: 0, node: 0 };
     match object {
-        KObjectRef::File(f) => f.with(|state| Stat {
-            file_type: FileType::File as u64,
-            size: file_cache::size(state.file_id),
-            mtime: state.mtime,
-            volume: state.volume,
-            node: state.file_id,
-        }),
         KObjectRef::PipeRead(r) => {
             plain(if r.is_tty() { FileType::Tty } else { FileType::Pipe })
         }
@@ -696,33 +471,6 @@ pub fn fstat(object: &KObjectRef) -> Stat {
     }
 }
 
-/// `SYS_FSYNC`: a kernel file's pages are the file (`/tmp`) or never written
-/// (ROOT), so it owes nothing; nothing else here holds writes.
-pub fn fsync(object: &KObjectRef) -> u64 {
-    match object {
-        KObjectRef::File(_) => 0,
-        _ => SyscallError::PermissionDenied.to_u64(),
-    }
-}
-
-pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
-    let KObjectRef::File(file) = object else {
-        return SyscallError::PermissionDenied.to_u64();
-    };
-    if size > file_cache::MAX_FILE_SIZE {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    // The seek pointer is not touched (POSIX ftruncate): a shrink leaves it past EOF.
-    file.with(|state| {
-        if let Err(e) = file_cache::set_size(state.file_id, size) {
-            return SyscallError::from(e).to_u64();
-        }
-        state.mtime = crate::clock::mtime_now();
-        file_cache::touch(state.file_id, state.mtime);
-        0
-    })
-}
-
 pub fn has_data(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::PipeRead(r) => r.pipe().has_data(),
@@ -734,7 +482,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
         KObjectRef::Notice(n) => n.readable(),
         KObjectRef::EventWait(e) => e.ready(),
         KObjectRef::Pager(p) => p.has_notices(),
-        KObjectRef::File(_) | KObjectRef::Null(_) => true,
+        KObjectRef::Null(_) => true,
         KObjectRef::Device(d) => match d.class() {
             // A claim its last handle has let go has nothing to read: a poll
             // on it is ended where it registers (`DeviceClaim::add_poll`).
@@ -759,7 +507,7 @@ pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::SysCap(_) => true,
         KObjectRef::Console(_) | KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
-        | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Device(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::Device(_)
         | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
         | KObjectRef::Notice(_) => false,
@@ -772,7 +520,7 @@ pub fn has_space(object: &KObjectRef) -> bool {
         // one refused, retried on readiness, lands.
         KObjectRef::PipeWrite(w) => w.pipe().has_space(MAX_WHOLE_PIPE_WRITE),
         KObjectRef::Connection(c) => c.tx().writable(),
-        KObjectRef::File(_) | KObjectRef::Null(_) => true,
+        KObjectRef::Null(_) => true,
         KObjectRef::Console(_) => crate::log::console::has_room(),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
@@ -792,7 +540,7 @@ pub fn mark_tty(object: &KObjectRef) -> u64 {
             w.mark_tty();
             0
         }
-        KObjectRef::Connection(_) | KObjectRef::File(_) | KObjectRef::Device(_)
+        KObjectRef::Connection(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_) | KObjectRef::SharedMem(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)

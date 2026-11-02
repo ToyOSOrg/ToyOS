@@ -207,6 +207,7 @@ struct Slot<F> {
 /// list of its slots.
 pub struct Object {
     id: u32,
+    anonymous: bool,
     size: u64,
     gone: bool,
     head: u32,
@@ -307,7 +308,13 @@ impl<F: Copy> Pages<F> {
     /// [`release`](Self::release) takes every page it held.
     pub fn object(&mut self, id: u32, size: u64) -> Object {
         assert!(size <= LAST_END, "an object of {size} bytes past the last page");
-        Object { id, size, gone: false, head: NONE, pages: 0 }
+        Object { id, anonymous: false, size, gone: false, head: NONE, pages: 0 }
+    }
+
+    /// An anonymous object owns its pages: no backing can supply them again,
+    /// so writeback, failure and withdrawal cannot discard present bytes.
+    pub fn anonymous(&mut self, id: u32, size: u64) -> Object {
+        Object { anonymous: true, ..self.object(id, size) }
     }
 
     fn hash(&self, object: u32, page: u64) -> usize {
@@ -447,10 +454,11 @@ impl<F: Copy> Pages<F> {
             }
             None => {}
         }
-        if dirty && self.dirty_held >= self.dirty_ceiling {
+        let tracked = dirty && !o.anonymous;
+        if tracked && self.dirty_held >= self.dirty_ceiling {
             return Err(Refused::DirtyFull);
         }
-        let state = State { dirty, ..State::CLEAN };
+        let state = State { dirty: tracked, ..State::CLEAN };
         self.insert(o, page, Some(frame), state)?;
         if dirty {
             o.size = o.size.max(end);
@@ -470,12 +478,12 @@ impl<F: Copy> Pages<F> {
         let i = self.find(o.id, page).ok_or(Refused::InvalidArgument)?;
         let s = self.slot(i);
         let frame = s.frame.ok_or(Refused::InvalidArgument)?;
-        let needs_slot = !s.state.counts_dirty();
+        let needs_slot = !o.anonymous && !s.state.counts_dirty();
         if needs_slot && self.dirty_held >= self.dirty_ceiling {
             return Err(Refused::DirtyFull);
         }
         let s = self.slot_mut(i);
-        s.state.dirty = true;
+        s.state.dirty = !o.anonymous;
         s.state.write_pins = s.state.write_pins.checked_add(1).expect("a page's write pins overflowed");
         if s.state.writeback {
             s.state.pinned_since_begin = true;
@@ -518,7 +526,7 @@ impl<F: Copy> Pages<F> {
     /// cleaned and keeps its slot until the end. The pages begun, as a bitmap.
     pub fn writeback_begin(&mut self, o: &mut Object, first: u64, count: u64) -> Result<[u64; 8], Refused> {
         let overlapping = self.open.iter().flatten().any(|&(id, a, n)| id == o.id && Self::overlaps((a, n), (first, count)));
-        if !Self::range_ok(o, first, count) || overlapping {
+        if o.anonymous || !Self::range_ok(o, first, count) || overlapping {
             return Err(Refused::InvalidArgument);
         }
         let at = self.open.iter().position(Option::is_none).ok_or(Refused::InvalidArgument)?;
@@ -566,6 +574,7 @@ impl<F: Copy> Pages<F> {
     /// holds: their frames, for the caller to free at their last pin.
     /// A range longer than the object holds pages walks its pages, not the range.
     pub fn withdraw(&mut self, o: &mut Object, first: u64, count: u64, out: &mut impl FnMut(F)) -> usize {
+        if o.anonymous { return 0; }
         let end = first.saturating_add(count);
         let mut removed = 0;
         let mut take = |pages: &mut Self, o: &mut Object, i: u32| {
@@ -604,6 +613,7 @@ impl<F: Copy> Pages<F> {
         let end = first.saturating_add(count).min(o.page_end());
         for page in first..end {
             if let Some(i) = self.find(o.id, page) {
+                if o.anonymous && self.slot(i).frame.is_some() { continue; }
                 if let Some(frame) = self.remove(o, i) {
                     out(frame);
                 }
@@ -675,6 +685,28 @@ mod tests {
 
     fn sink(freed: &mut Vec<u64>) -> impl FnMut(u64) + '_ {
         |f| freed.push(f)
+    }
+
+    #[test]
+    fn anonymous_bytes_survive_cache_operations_and_release_with_the_object() {
+        let mut pages = Pages::new(2, 0).unwrap();
+        let mut object = pages.anonymous(1, 0);
+        assert_eq!(pages.supply(&mut object, 0, 42, true, PAGE), Ok(Supplied::Installed));
+        assert_eq!(pages.dirty_held(), 0);
+        assert_eq!(pages.write_pin(&mut object, 0), Ok(42));
+        pages.write_unpin(&mut object, 0, 42, PAGE);
+        assert_eq!(pages.withdraw(&mut object, 0, 1, &mut none), 0);
+        assert_eq!(pages.writeback_begin(&mut object, 0, 1), Err(Refused::InvalidArgument));
+        assert_eq!(pages.fail(&mut object, 0, 1, &mut none), Ok(()));
+        assert_eq!(pages.lookup(&object, 0), Lookup::Present(42));
+        assert_eq!(pages.supply(&mut object, 1, 43, true, 2 * PAGE), Ok(Supplied::Installed));
+        assert_eq!(pages.supply(&mut object, 2, 44, true, 3 * PAGE), Err(Refused::NoRoom));
+        let mut freed = Vec::new();
+        pages.resize(&mut object, PAGE, &mut sink(&mut freed));
+        assert_eq!(freed, [43]);
+        pages.release(object, &mut sink(&mut freed));
+        assert_eq!(freed, [43, 42]);
+        assert_eq!(pages.used(), 0);
     }
 
     #[test]

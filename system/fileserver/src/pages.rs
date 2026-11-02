@@ -33,6 +33,7 @@ const RANGE: u64 = PAGED_RANGE_PAGES;
 /// A pager's calls on its objects, by id, as `toyos::paged::Pager` makes them.
 pub trait Pager {
     fn object(&self, size: u64) -> Result<u64, Refused>;
+    fn anonymous(&self, size: u64) -> Result<u64, Refused>;
     fn read(&self, id: u64, out: Bytes<'_>, offset: u64) -> Result<usize, Refused>;
     fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused>;
     fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused>;
@@ -47,6 +48,9 @@ pub trait Pager {
 impl Pager for toyos::paged::Pager {
     fn object(&self, size: u64) -> Result<u64, Refused> {
         toyos::paged::Pager::object(self, size)
+    }
+    fn anonymous(&self, size: u64) -> Result<u64, Refused> {
+        toyos::paged::Pager::anonymous(self, size)
     }
     fn read(&self, id: u64, out: Bytes<'_>, offset: u64) -> Result<usize, Refused> {
         toyos::paged::Pager::read(self, id, out, offset)
@@ -98,10 +102,12 @@ struct File {
     dirty: Option<(u64, u64)>,
     /// When it was last used, by [`Files::tick`].
     used: u64,
+    anonymous: bool,
 }
 
 impl File {
     fn dirtied(&mut self, first: u64, end: u64) {
+        if self.anonymous { return; }
         let (lo, hi) = self.dirty.unwrap_or((first, end));
         self.dirty = Some((lo.min(first), hi.max(end)));
     }
@@ -176,6 +182,7 @@ impl<P: Pager> Files<P> {
     /// more for it. The object's file holds it once for good, so a second
     /// hold goes back at once.
     pub fn opened(&mut self, volume: &mut dyn Volume, identity: u64, node: Node) -> Result<(), Error> {
+        assert!(!volume.memory() || self.pager.is_some(), "memory files require a pager");
         if self.pager.is_none() {
             return Ok(());
         }
@@ -192,13 +199,14 @@ impl<P: Pager> Files<P> {
         // Objects are bounded by count as pages are: a file nobody holds goes
         // to make room for another's.
         let object = loop {
-            match self.pg().object(size) {
+            let created = if volume.memory() { self.pg().anonymous(size) } else { self.pg().object(size) };
+            match created {
                 Ok(object) => break object,
                 Err(Refused::NoRoom) if self.drop_oldest(volume, identity) => {}
                 Err(why) => return Err(word(why)),
             }
         };
-        self.files.insert(identity, File { object, node, opens: 1, held: false, dirty: None, used: 0 });
+        self.files.insert(identity, File { object, node, opens: 1, held: false, dirty: None, used: 0, anonymous: volume.memory() });
         self.by_object.insert(object, identity);
         self.touch(identity);
         Ok(())
@@ -209,11 +217,31 @@ impl<P: Pager> Files<P> {
         match self.files.get_mut(&identity) {
             Some(f) => {
                 f.opens = f.opens.saturating_sub(1);
+                self.collect_unlinked(volume, identity)?;
                 Ok(())
             }
             None if self.pager.is_none() => volume.close(node),
             None => Ok(()),
         }
+    }
+
+    /// A name was removed or replaced. Memory inodes remain usable through
+    /// every open description and paged holder until the last one ends.
+    pub fn unlinked(&mut self, volume: &mut dyn Volume, identity: u64) -> Result<(), Error> {
+        if volume.memory() {
+            self.collect_unlinked(volume, identity)
+        } else {
+            self.forget(volume, identity);
+            Ok(())
+        }
+    }
+
+    fn collect_unlinked(&mut self, volume: &mut dyn Volume, identity: u64) -> Result<(), Error> {
+        let Some(f) = self.files.get(&identity) else { return Ok(()) };
+        if volume.memory() && f.opens == 0 && !f.held && !volume.linked(f.node)? {
+            self.forget(volume, identity);
+        }
+        Ok(())
     }
 
     /// `identity`'s file is gone from the volume: its object goes, its
@@ -312,6 +340,7 @@ impl<P: Pager> Files<P> {
     /// nobody holds dropped, else another's clean pages withdrawn, else this
     /// one's outside the range, else the dirty written back. Whether any went.
     fn make_room(&mut self, volume: &mut dyn Volume, identity: u64, first: u64, count: u64) -> Result<bool, Error> {
+        if volume.memory() { return Ok(false); }
         if self.drop_oldest(volume, identity) {
             return Ok(true);
         }
@@ -339,6 +368,7 @@ impl<P: Pager> Files<P> {
     /// The oldest file nobody holds, open or dirties, but `identity`,
     /// forgotten: whether there was one.
     fn drop_oldest(&mut self, volume: &mut dyn Volume, identity: u64) -> bool {
+        if volume.memory() { return false; }
         match self.oldest(identity, &File::droppable).first() {
             Some(&id) => {
                 self.forget(volume, id);
@@ -550,8 +580,11 @@ impl<P: Pager> Files<P> {
                 }
             }
             Notice::NoHolders { object } => {
-                if let Some(f) = self.by_object.get(&object).and_then(|identity| self.files.get_mut(identity)) {
-                    f.held = false;
+                if let Some(&identity) = self.by_object.get(&object) {
+                    self.files.get_mut(&identity).expect("an indexed object has a file").held = false;
+                    if let Err(e) = self.collect_unlinked(volume, identity) {
+                        println!("fileserver: unlinked file {identity} would not be collected ({e:?})");
+                    }
                 }
             }
         }

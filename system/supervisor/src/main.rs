@@ -3592,6 +3592,7 @@ fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>, b
         return Ok(storage);
     };
     storage.args.push(role.to_string());
+    if role == "memory" { return Ok(storage); }
     if role == toyos_manifest::SYSTEM {
         let root = boot.root.try_clone()
             .map_err(|e| std::io::Error::other(format!("ROOT's image did not duplicate: {e:?}")))?;

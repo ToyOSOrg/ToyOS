@@ -37,7 +37,7 @@ use crate::process::{
     ProcessEntry, ThreadData, ThreadEntry, UserImage, PROCESS_TABLE,
 };
 use crate::sync::Lock;
-use crate::{scheduler, vfs, UserAddr};
+use crate::{scheduler, UserAddr};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::SyscallError;
 use toyos_elf::{Layout, TlsSegment};
@@ -49,7 +49,7 @@ const USER_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// The reserved range below the main stack.
 const STACK_GUARD: u64 = 1024 * 1024;
 
-/// Read a byte range from a file through the page cache.
+/// Read a byte range from the supplied executable image.
 ///
 /// Returns only the part of the request the file actually holds — callers
 /// treat a short result as truncated and length-check before indexing; `len`
@@ -183,7 +183,7 @@ pub fn spawn<C: Commit>(
     commit: C,
     cwd: String,
     env: Vec<u8>,
-    image: Option<Arc<dyn crate::file_backing::FileBacking>>,
+    backing: Arc<dyn crate::file_backing::FileBacking>,
     parent: Parent,
 ) -> Result<(Pid, C::Held), crate::object::Refusal> {
     let job = Arc::clone(commit.job());
@@ -196,21 +196,6 @@ pub fn spawn<C: Commit>(
     let admission = Admission::ask(parent)?;
     let mut charge = ProcessData::charge(&job, path, &env).map_err(SyscallError::from)?;
     let t0 = crate::clock::nanos_since_boot();
-
-    let backing: Arc<dyn crate::file_backing::FileBacking> = match image {
-        Some(image) => image,
-        None => {
-            // Scoped, not held across the match: dropping `commit` on any `return` here takes the VFS lock.
-            let opened = vfs::lock().open_backing(path);
-            match opened {
-                Ok(b) => b,
-                Err(e) => {
-                    log!("spawn: {}: {e}", path);
-                    return Err(e.into());
-                }
-            }
-        }
-    };
 
     let header_size = 4096.min(backing.file_size() as usize);
     let header_data = read_file_range(backing.as_ref(), 0, header_size);
@@ -522,7 +507,7 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
     );
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
     let table = SupervisorTable { job, handles, entries, labels };
-    match spawn(SUPERVISOR, &[SUPERVISOR], table, String::from("/"), Vec::new(), Some(image), Parent::Root) {
+    match spawn(SUPERVISOR, &[SUPERVISOR], table, String::from("/"), Vec::new(), image, Parent::Root) {
         Ok((pid, ())) => pid,
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_supervisor: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_supervisor: {e}"),

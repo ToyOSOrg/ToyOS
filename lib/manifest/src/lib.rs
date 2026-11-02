@@ -124,11 +124,12 @@ pub const SYSTEM: &str = "system";
 
 /// The file-server roles, and the directories each serves: one port per role,
 /// and one grant on it per directory.
-pub const ROLES: [(&str, &[RoleDir]); 4] = [
+pub const ROLES: [(&str, &[RoleDir]); 5] = [
     (SYSTEM, &[RoleDir { dir: "/system", root: "", write: false }]),
     ("data", &[dir("/apps", "apps"), dir("/config", "config"), dir("/home", "home"), dir("/state", "state")]),
     ("log", &[dir("/log", "")]),
     ("boot", &[dir("/boot", "")]),
+    ("memory", &[dir("/tmp", "")]),
 ];
 
 /// The directories `role` serves, or `None` for a name that is no role.
@@ -999,10 +1000,10 @@ mod tests {
         let whole_but_state = |own: Option<&str>| -> Vec<_> {
             std::iter::once(system())
                 .chain(
-                    ["/apps", "/config", "/home", "/log", "/boot"]
+                    ["/apps", "/config", "/home", "/log", "/boot", "/tmp"]
                         .iter()
-                        .zip(["apps", "config", "home", "", ""])
-                        .zip(["data", "data", "data", "log", "boot"])
+                        .zip(["apps", "config", "home", "", "", ""])
+                        .zip(["data", "data", "data", "log", "boot", "memory"])
                         .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), true)),
                 )
                 .chain(own.map(|name| ("data", format!("/state/{name}"), format!("state/{name}"), true)))

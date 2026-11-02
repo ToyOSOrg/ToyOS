@@ -48,9 +48,9 @@ fn pager(h: RawHandle, rights: Rights) -> Result<Arc<PagerObject>, u64> {
     process::with_process_data(|data| data.handles.get::<PagerObject>(h, rights)).map_err(|e| e.refuse())
 }
 
-pub(super) fn sys_paged_create(h: RawHandle, size: u64) -> u64 {
+pub(super) fn sys_paged_create(h: RawHandle, size: u64, anonymous: bool) -> u64 {
     match pager(h, Rights::WRITE) {
-        Ok(pager) => pager.add(size),
+        Ok(pager) => pager.add(size, anonymous),
         Err(refused) => refused,
     }
 }

@@ -86,6 +86,12 @@ impl Pager {
         syscall::paged_create(self.0.raw(), size).map_err(|e| Refused::of(e, None))
     }
 
+    /// Anonymous bytes, retained until shrunk or released. No backing can
+    /// refill a present page, so withdrawal and writeback cannot discard it.
+    pub fn anonymous(&self, size: u64) -> Result<u64, Refused> {
+        syscall::paged_anonymous(self.0.raw(), size).map_err(|e| Refused::of(e, None))
+    }
+
     /// A holder handle on object `id`, to send.
     pub fn holder(&self, id: u64) -> Result<OwnedHandle, SyscallError> {
         let raw = syscall::paged_holder(self.0.raw(), id)?;

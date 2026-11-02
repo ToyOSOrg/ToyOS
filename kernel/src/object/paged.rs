@@ -268,7 +268,7 @@ impl PagerObject {
 
     /// A new object of `size` bytes: its id. `ResourceExhausted` where every
     /// slot holds one.
-    pub fn add(&self, size: u64) -> u64 {
+    pub fn add(&self, size: u64, anonymous: bool) -> u64 {
         if size > kernel::paged::LAST_END {
             return SyscallError::InvalidArgument.to_u64();
         }
@@ -277,7 +277,7 @@ impl PagerObject {
             return SyscallError::Gone.to_u64();
         }
         let Some(slot) = state.free.pop() else { return SyscallError::ResourceExhausted.to_u64() };
-        let object = state.pages.object(slot, size);
+        let object = if anonymous { state.pages.anonymous(slot, size) } else { state.pages.object(slot, size) };
         state.entries[slot as usize] = Some(Entry { object, refs: 1, holders: 0, owned: true, no_holders: false });
         u64::from(slot)
     }

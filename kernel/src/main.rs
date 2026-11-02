@@ -47,14 +47,7 @@ mod inventory;
 mod loaded;
 mod rollback;
 mod bootimage;
-mod file_cache;
-#[cfg(feature = "boot-actuators")]
-#[cfg(feature = "boot-actuators")]
-mod revoke_selftest;
-mod tmpfs;
 mod file_backing;
-mod fs_rename;
-mod vfs;
 mod elf;
 mod symbols;
 mod process;
@@ -100,7 +93,6 @@ mod late_panic {
     }
 }
 
-use alloc::boxed::Box;
 use arch::{cpu, percpu};
 use drivers::{acpi, gop, pci, serial};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
@@ -445,7 +437,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // Before storage and everything under it: what it covers is the rest of this
     // boot, and a wedge down there is the reason to have one.
     arch::watchdog::init(&pci_devices);
-    file_cache::init();
     loaded::init(kernel_args);
 
     boot_phase!("peripherals ready", t_periph);
@@ -453,11 +444,8 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     let t_subsys = clock::nanos_since_boot();
 
     arch::boot::start_other_cpus(&platform, kernel_args);
-    vfs::init();
     process::init();
     scheduler::init();
-
-    vfs::lock().mount(&["tmp"], Box::new(crate::tmpfs::TmpFs::new()));
 
     boot_phase!("subsystems ready", t_subsys);
 
@@ -466,11 +454,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // The supervisor reads /system/etc/system.manifest itself; the boot config never names the program it starts.
     let pid = process::spawn_supervisor(bootimage::objects(boot_images));
     log!("spawned the supervisor pid={pid}");
-
-    #[cfg(feature = "boot-actuators")]
-    if actuator::revoked_backing_selftest() {
-        revoke_selftest::run();
-    }
 
     let t_devices = clock::nanos_since_boot();
 

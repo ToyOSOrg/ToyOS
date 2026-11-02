@@ -13,7 +13,6 @@ pub mod bootwrite;
 pub mod carrier;
 pub mod clock;
 pub mod cpu;
-pub mod dirnodes;
 pub mod dmaguard;
 pub mod event;
 pub mod frames;

@@ -300,28 +300,3 @@ impl UserBytesMut<'_> {
     }
 }
 
-/// Bytes the kernel copies *from*, wherever they live — lets `file_cache::write_page` name the capability it needs instead of a concrete window type.
-pub trait ByteSource {
-    fn len(&self) -> usize;
-    fn read_at(&self, off: usize, dst: &mut [u8]);
-}
-
-impl ByteSource for [u8] {
-    fn len(&self) -> usize {
-        <[u8]>::len(self)
-    }
-
-    fn read_at(&self, off: usize, dst: &mut [u8]) {
-        dst.copy_from_slice(&self[off..off + dst.len()]);
-    }
-}
-
-impl ByteSource for UserBytes<'_> {
-    fn len(&self) -> usize {
-        UserBytes::len(self)
-    }
-
-    fn read_at(&self, off: usize, dst: &mut [u8]) {
-        UserBytes::read_at(self, off, dst);
-    }
-}

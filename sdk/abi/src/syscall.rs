@@ -3435,6 +3435,12 @@ pub fn paged_create(pager: RawHandle, size: u64) -> Result<u64, SyscallError> {
     check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, 0, 0))
 }
 
+/// A resizable anonymous object: its present pages are authoritative, never
+/// withdrawn or discarded by a failure, and writes need no writeback slot.
+pub fn paged_anonymous(pager: RawHandle, size: u64) -> Result<u64, SyscallError> {
+    check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, 1, 0))
+}
+
 /// A holder handle on `pager`'s object `object`, carrying `READ`, which may
 /// be narrowed, duplicated and sent.
 pub fn paged_holder(pager: RawHandle, object: u64) -> Result<RawHandle, SyscallError> {
