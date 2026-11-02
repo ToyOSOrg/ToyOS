@@ -35,7 +35,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::future::{poll_fn, Future};
-use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 
@@ -210,11 +209,9 @@ impl<D: Disk> Cache<D> {
                 match inner.slots.get(&at) {
                     Some(slot) => *data = **slot.data,
                     None => {
-                        if inner.order.try_reserve(1).is_ok() {
-                            if let Some(data) = boxed(data) {
-                                inner.slots.insert(at, Slot { data: Rc::new(data), dirty: false, version: 0 });
-                                inner.order.push_back(at);
-                            }
+                        if inner.order.try_reserve(1).is_ok() && let Some(data) = boxed(data) {
+                            inner.slots.insert(at, Slot { data: Rc::new(data), dirty: false, version: 0 });
+                            inner.order.push_back(at);
                         }
                     }
                 }
@@ -378,7 +375,7 @@ impl<D: Disk> BlockDev for Cache<D> {
         self.inner.borrow_mut().flushing = true;
         let _flushing = Flushing(self);
         let mut runs = self.dirty_runs().into_iter();
-        let mut flight: Vec<Pin<Box<dyn Future<Output = Result<(), Error>> + '_>>> = Vec::new();
+        let mut flight = Vec::new();
         let mut refused = Ok(());
         poll_fn(|cx| loop {
             while refused.is_ok() && flight.len() < self.disk.depth() {

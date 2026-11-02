@@ -173,10 +173,8 @@ impl<D: Disk> FatVolume<D> {
     }
 
     fn orphan(&mut self, path: &str) {
-        if let Some(node) = self.by_path.remove(path) {
-            if let Some(open) = self.open.get_mut(&node) {
-                open.gone = true;
-            }
+        if let Some(node) = self.by_path.remove(path) && let Some(open) = self.open.get_mut(&node) {
+            open.gone = true;
         }
     }
 
@@ -197,10 +195,8 @@ impl<D: Disk> Volume for FatVolume<D> {
         if path.is_empty() {
             return Ok(Meta { kind: Kind::Dir, size: 0, mtime: 0 });
         }
-        if let Some(&node) = self.by_path.get(path) {
-            if self.open.contains_key(&node) {
-                return self.node_meta(node);
-            }
+        if let Some(&node) = self.by_path.get(path) && self.open.contains_key(&node) {
+            return self.node_meta(node);
         }
         let meta = self.cache.block_on(self.fs.metadata(path)).map_err(|e| match e {
             Error::NotADirectory => fs::Error::NotFound,
@@ -284,11 +280,9 @@ impl<D: Disk> Volume for FatVolume<D> {
         if open.holders > 0 {
             return Ok(());
         }
-        if self.writable {
-            if let Err(e) = self.level(node) {
-                println!("fileserver: node {node} was not brought level at its last close ({e:?}); the next sync does it");
-                return Err(e);
-            }
+        if self.writable && let Err(e) = self.level(node) {
+            println!("fileserver: node {node} was not brought level at its last close ({e:?}); the next sync does it");
+            return Err(e);
         }
         self.release(node);
         Ok(())

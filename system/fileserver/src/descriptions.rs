@@ -143,7 +143,7 @@ impl Ids {
 pub fn moved(path: &mut String, from: &str, to: &str) {
     let beneath = path.len() > from.len() && path.starts_with(from) && path.as_bytes()[from.len()] == b'/';
     if path == from || beneath {
-        *path = crate::volume::join(to, &path[from.len()..].trim_start_matches('/').to_string());
+        *path = crate::volume::join(to, path[from.len()..].trim_start_matches('/'));
     }
 }
 

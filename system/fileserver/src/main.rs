@@ -391,7 +391,7 @@ fn absent(roots: &[&str], why: String) -> Box<dyn Volume> {
 
 fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
     match DataVolume::probe(disk, CLEAN_BLOCKS, roots, fileserver::volume::now_nanos) {
-        Probed::Mounted(volume) => Box::new(volume),
+        Probed::Mounted(volume) => volume,
         Probed::Unmountable(why) => {
             println!("fileserver: the DATA volume is ours and does not mount ({why}); it is absent this boot");
             Box::new(Absent::new(roots, why))

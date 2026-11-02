@@ -654,7 +654,7 @@ fn stale_volume() -> DataVolume<Ram> {
 /// `v` stopped now and mounted again: what its last commit left.
 fn after_a_stop(v: DataVolume<Ram>) -> DataVolume<Ram> {
     match DataVolume::probe(v.stopped(), 256, &["home"], clock) {
-        crate::data::Probed::Mounted(v) => v,
+        crate::data::Probed::Mounted(v) => *v,
         _ => panic!("the volume does not mount after a stop"),
     }
 }

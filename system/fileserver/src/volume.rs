@@ -63,6 +63,7 @@ pub type Node = u64;
 /// through a reference, or a buffer of this process's own.
 pub trait Out {
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool { self.len() == 0 }
     /// `bytes` at `at`, inside `len()`.
     fn put(&mut self, at: usize, bytes: &[u8]);
     /// `len` zeros at `at`, inside `len()`: a hole's bytes.
@@ -250,8 +251,15 @@ impl Reserved {
 pub trait Writes: Volume {
     fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
         const PAGE: u64 = toyos_blockdev::BLOCK as u64;
+        if data.is_empty() { return Ok(()); }
         let reserved = self.reserve(node, offset, data.len() as u64)?;
-        let size = self.node_meta(node)?.size;
+        let size = match self.node_meta(node) {
+            Ok(meta) => meta.size,
+            Err(error) => {
+                self.unreserve(node, reserved, 0)?;
+                return Err(error);
+            }
+        };
         let end = offset + data.len() as u64;
         let mut landed = 0;
         for start in (offset / PAGE * PAGE..end).step_by(PAGE as usize) {
