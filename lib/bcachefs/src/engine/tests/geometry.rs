@@ -216,6 +216,17 @@ fn a_publication_split_again_by_its_own_keys_settles_self_describing() {
     }
 }
 
+/// A node of one block filled with names to `NoSpace`, the mount dropped,
+/// remounted with every node it writes fresh (§3.5), every name removed,
+/// files and directories made and removed again, and 256 KiB written.
+/// Never finishes when admission withholds its refusal until reclaim has
+/// nothing left: on a node of one block reclaim never has, so the fill's
+/// last create spins in reclaim forever.
+#[test]
+fn a_full_volume_of_one_block_nodes_crashes_removes_everything_and_unmounts_clean() {
+    super::buckets::full_crash_removal_and_reuse(shaped(64 << 20, 64, 64, None), 0);
+}
+
 /// A crash at every request of a mixed workload on a node of one block,
 /// the unmount's publication and clean entry included: each state mounts,
 /// holds a prefix of the names no shorter than committed, unmounts clean
