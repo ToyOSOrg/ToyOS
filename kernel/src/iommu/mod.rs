@@ -118,9 +118,6 @@ pub enum IommuError {
     DomainsExhausted(u32),
     /// Every allowed address below this limit is handed out.
     AddressesExhausted(Limit),
-    /// No declaration of the root bridges' windows is held, so no address is
-    /// known to be clear of them.
-    Undeclared,
     /// Less than a new domain was asked to hand out is allowed below 4 GiB.
     NoRoom { room: u64 },
     /// Not a whole number of the 2 MiB leaves this kernel writes.
@@ -141,11 +138,6 @@ impl core::fmt::Display for IommuError {
             Self::AddressesExhausted(limit) => {
                 write!(f, "a domain's device addresses below {:#x} are all handed out", limit.end())
             }
-            Self::Undeclared => write!(
-                f,
-                "no declaration of the root bridges' windows is held, so no device address is known \
-                 to be clear of them"
-            ),
             Self::NoRoom { room } => {
                 write!(f, "less than the {room:#x} bytes a new domain hands out first is allowed below 4 GiB")
             }
@@ -163,13 +155,20 @@ pub struct OwnSpace(DomainId);
 
 impl OwnSpace {
     /// One with `room` bytes of it below 4 GiB handed out at the address
-    /// answered, or the reason there is none: a machine with no unit and a
-    /// machine out of domains are both refusals.
+    /// answered, clear of the root bridges' declared `windows`, or the reason
+    /// there is none: a machine with no unit and a machine out of domains are
+    /// both refusals.
     ///
     /// What firmware reserved for function `bus:device.function` is mapped in
     /// it at its own addresses, before the function can attach.
-    pub fn create(room: u64, bus: u8, device: u8, function: u8) -> Result<(Self, u64), IommuError> {
-        let (id, at) = unit::domain::create(room)?;
+    pub fn create(
+        room: u64,
+        windows: &[toyos_abi::acpi::RootBridgeWindow],
+        bus: u8,
+        device: u8,
+        function: u8,
+    ) -> Result<(Self, u64), IommuError> {
+        let (id, at) = unit::domain::create(room, windows)?;
         unit::domain::keep_reserved(id, StreamId::pci(bus, device, function));
         Ok((Self(id), at.raw()))
     }
@@ -223,17 +222,10 @@ impl core::fmt::Display for StreamId {
 ///
 /// The device list must be the complete enumeration: enabling translation with an unenumerated device left off it can brick the machine's own boot disk.
 ///
-/// No domain's addresses reach into one of `windows`, the root bridges'
-/// declared memory, or `None` where no declaration is held ([`window`]).
 /// `kernel` is this kernel's image, `[start, end)` physical: what a unit's
 /// hand-over keeps out of every device's reach where it can.
-pub fn init(
-    rsdp_addr: u64,
-    devices: &[crate::drivers::pci::PciDevice],
-    windows: Option<&toyos_pci::aperture::Declaration<alloc::vec::Vec<toyos_abi::boot::RootBridgeWindow>>>,
-    kernel: (u64, u64),
-) {
-    unit::init(rsdp_addr, devices, windows.map(|declared| declared.windows()), kernel);
+pub fn init(rsdp_addr: u64, devices: &[crate::drivers::pci::PciDevice], kernel: (u64, u64)) {
+    unit::init(rsdp_addr, devices, kernel);
 }
 
 /// Once, after every kernel driver has taken its functions from firmware and
@@ -277,6 +269,13 @@ pub fn isolates(function: &crate::drivers::pci::PciDevice) -> Result<(), &'stati
         None => Ok(()),
         Some(why) => Err(why),
     }
+}
+
+/// Whether the unit blocks every requester on `buses` it has not seen, so
+/// a function arriving there reaches nothing until a claim attaches it, or
+/// why not.
+pub fn governs(buses: (u8, u8)) -> Result<(), &'static str> {
+    unit::domain::governs(buses)
 }
 
 /// A claimed function's message, raising an interrupt of its own and

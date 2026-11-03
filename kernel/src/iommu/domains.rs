@@ -5,6 +5,8 @@
 
 use alloc::vec::Vec;
 
+use toyos_abi::acpi::RootBridgeWindow;
+
 use kernel::iova::{Limit, Window};
 
 use crate::iommu::{DomainId, IommuError, Iova};
@@ -17,11 +19,10 @@ pub struct Domains<S> {
     /// By id minus `first`; never shrinks, since a released id would name a
     /// domain some unit may still have cached.
     live: Vec<(S, Window)>,
-    /// What no domain's addresses may reach, as `(start, end)`: the root
-    /// bridges' declared windows, the regions firmware reserved, and the
-    /// backend's own special ranges; `None` where no declaration of the
-    /// windows is held, and then there is no domain.
-    reserved: Option<Vec<(u64, u64)>>,
+    /// The regions firmware reserved and the backend's own special ranges, as
+    /// `(start, end)`, which no domain's addresses reach beside the root
+    /// bridges' declared windows.
+    reserved: Vec<(u64, u64)>,
 }
 
 /// A domain [`Domains::prepare`] admitted, not yet made.
@@ -33,24 +34,25 @@ pub struct Next {
 
 impl<S: Copy> Domains<S> {
     pub const fn new(first: u16) -> Self {
-        Self { first, live: Vec::new(), reserved: None }
+        Self { first, live: Vec::new(), reserved: Vec::new() }
     }
 
     /// Before any domain is made: every one is built clear of these.
-    pub fn avoid(&mut self, reserved: Option<Vec<(u64, u64)>>) {
+    pub fn avoid(&mut self, reserved: Vec<(u64, u64)>) {
         self.reserved = reserved;
     }
 
-    /// The next domain's id and its addresses over `translatable` bits, with
-    /// `room` bytes below 4 GiB handed out first, which any holder can reach;
-    /// refused, with no id spent, where ids reach `ceiling` or the room is not
-    /// there.
-    pub fn prepare(&self, translatable: u8, ceiling: u32, room: u64) -> Result<Next, IommuError> {
+    /// The next domain's id and its addresses over `translatable` bits, clear
+    /// of the root bridges' declared `windows`, with `room` bytes below 4 GiB
+    /// handed out first, which any holder can reach; refused, with no id
+    /// spent, where ids reach `ceiling` or the room is not there.
+    pub fn prepare(&self, translatable: u8, ceiling: u32, room: u64, windows: &[RootBridgeWindow]) -> Result<Next, IommuError> {
         let id = u16::try_from(usize::from(self.first) + self.live.len())
             .ok()
             .filter(|id| u32::from(*id) < ceiling)
             .ok_or(IommuError::DomainsExhausted(ceiling))?;
-        let mut addresses = Window::new(translatable, self.reserved.as_deref().ok_or(IommuError::Undeclared)?);
+        let reserved: Vec<(u64, u64)> = windows.iter().map(|w| (w.base, w.end())).chain(self.reserved.iter().copied()).collect();
+        let mut addresses = Window::new(translatable, &reserved);
         let first = match room {
             0 => 0,
             room => addresses.reserve(room, Limit::NARROWEST).ok_or(IommuError::NoRoom { room })?,
@@ -102,9 +104,8 @@ impl<S: Copy> Domains<S> {
     /// window avoids (one range may join several reserved regions), which is
     /// what makes the placement collide with nothing.
     pub fn reserved_space(&self, id: DomainId, start: u64, end: u64) -> S {
-        let reserved = self.reserved.as_deref().expect("iommu: a domain exists only where a declaration is held");
         assert!(
-            kernel::rmrr::covered(reserved, start, end),
+            kernel::rmrr::covered(&self.reserved, start, end),
             "iommu: domain{} placing {start:#x}..{end:#x} at its own address, which no domain avoids",
             id.raw()
         );

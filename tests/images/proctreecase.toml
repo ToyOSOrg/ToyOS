@@ -16,7 +16,7 @@
 # hold its `login` connector.
 
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "test-runner"]
 
 [apps]
 folder = "read-write"
@@ -83,6 +83,13 @@ restart = true
 pager = true
 roles = ["data", "log", "boot", "memory"]
 receives = ["block"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
 
 # The virtio-serial driver, for the VM's console alone: this image runs no agent.
 [programs.virtio-console]

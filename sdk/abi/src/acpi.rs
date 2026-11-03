@@ -34,6 +34,18 @@
 //! what `_CST` names is in the AML too. The holder hands over only states the
 //! kernel may enter as they are ([`IdleDeclaration`]); until it has, every CPU
 //! waits in C1.
+//!
+//! **The PCI root bridges are the holder's to declare, once** ([`op::DECLARE`],
+//! [`Apertures`]): each root's memory windows from its `_CRS`, and what its
+//! `_OSC` granted, are AML. Until a declaration is held the kernel hands over
+//! no PCI function, and a claim made meanwhile waits for it; a declaration
+//! the kernel refuses, or a claim that ends without one, leaves every PCI
+//! claim refused for the boot.
+//!
+//! **A hardware-reduced machine** ([`HARDWARE_REDUCED`]; ACPI 6.5 §4.1) has
+//! no fixed hardware: its claim names no block and raises no SCI, and its
+//! holder reaches the tables, firmware's memory and configuration space
+//! through [`Access`] alone.
 
 crate::user_safe! {
     /// A run of ports a register block occupies; `len` 0 is no block.
@@ -57,6 +69,10 @@ impl Block {
 /// The FADT's power button is the fixed-hardware one, `PWRBTN_STS` and
 /// `PWRBTN_EN` in the PM1 event block.
 pub const FIXED_POWER_BUTTON: u16 = 1 << 0;
+
+/// The FADT's `HW_REDUCED_ACPI` (ACPI 6.5 Table 5.10): the claim's two
+/// blocks are [`Block::NONE`], and no SCI is raised on it.
+pub const HARDWARE_REDUCED: u16 = 1 << 1;
 
 crate::user_safe! {
     /// The claim's description.
@@ -98,6 +114,10 @@ pub mod op {
     /// Each replaces what was declared for that processor before, by this
     /// holder or an earlier one.
     pub const IDLE: u64 = 4;
+    /// Declare the PCI root bridges, their memory and their `_OSC`: an
+    /// [`Apertures`](super::Apertures), in through the caller's struct. Once
+    /// a boot, from the claim's holder.
+    pub const DECLARE: u64 = 5;
 
     pub const TAKEN: u64 = 0;
     pub const PENDING: u64 = 1;
@@ -234,6 +254,12 @@ pub enum Refused {
     /// package's power limit, or what places the IOMMU or redirects
     /// interrupts.
     KernelRegister = 23,
+    /// A register's access on a machine whose kernel maps no register for
+    /// AML: an AArch64 kernel's direct map holds memory alone, and no range
+    /// register types an address a register there.
+    NoRegisters = 24,
+    /// A port access on a machine with no port space.
+    NoPorts = 25,
 }
 
 impl Refused {
@@ -261,6 +287,8 @@ impl Refused {
             21 => Self::HeldFunction,
             22 => Self::AddressMap,
             23 => Self::KernelRegister,
+            24 => Self::NoRegisters,
+            25 => Self::NoPorts,
             _ => return None,
         })
     }
@@ -299,6 +327,192 @@ impl Access {
 
     pub const fn write(space: Space, address: u64, width: Width, value: u64) -> Self {
         Self { address, value, space: space as u8, width: width as u8, write: 1, refused: 0, memory_type: UNLISTED, reserved: [0; 3] }
+    }
+}
+
+crate::user_safe! {
+    /// One memory window a PCI root bridge decodes, in the addresses a CPU
+    /// issues.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct RootBridgeWindow {
+        pub base: u64,
+        pub length: u64,
+    }
+}
+
+impl RootBridgeWindow {
+    /// The first address past the window, saturating: a firmware-named length
+    /// is untrusted input and an extent that would wrap is one this cannot
+    /// contain anything past.
+    pub fn end(&self) -> u64 {
+        self.base.saturating_add(self.length)
+    }
+
+    /// Whether every address of the `length` bytes at `base` is one this window
+    /// decodes.
+    ///
+    /// The whole extent and not its first address: a BAR that starts inside a
+    /// window and runs past it decodes addresses the bridge does not. An extent
+    /// of no length carries no address for a window to decode and is inside
+    /// none of them.
+    pub fn holds(&self, base: u64, length: u64) -> bool {
+        length != 0
+            && base >= self.base
+            && base.checked_add(length).is_some_and(|end| end <= self.end())
+    }
+}
+
+/// The most root bridges one declaration carries.
+pub const MAX_BRIDGES: usize = 16;
+/// The most memory windows one declaration carries, every root's together.
+/// Measured: QEMU's `virt` declares 2, q35 4, the ThinkPad T14 3 and the AMD
+/// bench's one root 16. Four times what any machine in reach needs is a
+/// bound no firmware should meet.
+pub const MAX_WINDOWS: usize = 64;
+
+/// The PCI host bridge `_OSC` Control field's bits ToyOS asks for (PCI
+/// Firmware Specification 3.3, §4.5.1, Table 4-5): native PCI Express
+/// hot-plug, and the PCI Express capability structure.
+pub const NATIVE_HOT_PLUG: u32 = 1 << 0;
+pub const CAPABILITY_STRUCTURE: u32 = 1 << 4;
+
+/// What a root bridge's `_OSC` said.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Osc {
+    /// The root has no `_OSC`.
+    Absent,
+    /// Its evaluation, or its answer, was refused: nothing is granted.
+    Refused,
+    /// Its query offered these Control bits: what a commit would be
+    /// granted. A commit is made only where its control is acted on.
+    Offered(u32),
+}
+
+/// [`HostBridge::osc`]'s words.
+const OSC_ABSENT: u32 = 0;
+const OSC_REFUSED: u32 = 1;
+const OSC_ANSWERED: u32 = 2;
+
+/// [`HostBridge::commit`]'s words.
+const COMMIT_NONE: u32 = 0;
+const COMMIT_MADE: u32 = 1;
+
+crate::user_safe! {
+    /// One PCI root bridge: its segment, the buses below it, what its `_OSC`
+    /// query offered and what a commit was granted, and the run of
+    /// [`Apertures::windows`] its `_CRS` produces.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct HostBridge {
+        pub segment: u16,
+        pub first_bus: u8,
+        pub last_bus: u8,
+        pub osc: u32,
+        pub offered: u32,
+        pub commit: u32,
+        pub committed: u32,
+        pub first_window: u32,
+        pub window_count: u32,
+    }
+}
+
+impl HostBridge {
+    /// What its `_OSC` said, or `None` for a word no [`Osc`] is, or a grant
+    /// beside no answer.
+    pub fn osc(&self) -> Option<Osc> {
+        match (self.osc, self.offered) {
+            (OSC_ABSENT, 0) => Some(Osc::Absent),
+            (OSC_REFUSED, 0) => Some(Osc::Refused),
+            (OSC_ANSWERED, offered) => Some(Osc::Offered(offered)),
+            _ => None,
+        }
+    }
+
+    /// The Control bits a commit (Query clear) was granted, `Some(None)`
+    /// where none was made; `None` for a word the ABI does not name, a
+    /// commit beside no offer, or bits granted that were not offered.
+    pub fn commit(&self) -> Option<Option<u32>> {
+        match (self.commit, self.osc()?) {
+            (COMMIT_NONE, _) if self.committed == 0 => Some(None),
+            (COMMIT_MADE, Osc::Offered(offered)) if self.committed & !offered == 0 => Some(Some(self.committed)),
+            _ => None,
+        }
+    }
+}
+
+crate::user_safe! {
+    /// What [`op::DECLARE`] carries: the first `bridge_count` of `bridges`,
+    /// each naming its run of the first `window_count` of `windows`.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Apertures {
+        pub bridge_count: u32,
+        pub window_count: u32,
+        pub bridges: [HostBridge; MAX_BRIDGES],
+        pub windows: [RootBridgeWindow; MAX_WINDOWS],
+    }
+}
+
+impl Default for Apertures {
+    fn default() -> Self {
+        let none = HostBridge {
+            segment: 0,
+            first_bus: 0,
+            last_bus: 0,
+            osc: OSC_ABSENT,
+            offered: 0,
+            commit: COMMIT_NONE,
+            committed: 0,
+            first_window: 0,
+            window_count: 0,
+        };
+        Self { bridge_count: 0, window_count: 0, bridges: [none; MAX_BRIDGES], windows: [RootBridgeWindow::default(); MAX_WINDOWS] }
+    }
+}
+
+impl Apertures {
+    /// Add one root, `committed` what a commit was granted where one was
+    /// made, or `None` where it does not fit: past [`MAX_BRIDGES`] or
+    /// [`MAX_WINDOWS`], or over a bus range that ends before it starts.
+    pub fn push(&mut self, segment: u16, buses: (u8, u8), windows: &[RootBridgeWindow], osc: Osc, committed: Option<u32>) -> Option<()> {
+        let (osc, offered) = match osc {
+            Osc::Absent => (OSC_ABSENT, 0),
+            Osc::Refused => (OSC_REFUSED, 0),
+            Osc::Offered(offered) => (OSC_ANSWERED, offered),
+        };
+        let (commit, committed) = match committed {
+            None => (COMMIT_NONE, 0),
+            Some(committed) => (COMMIT_MADE, committed),
+        };
+        (buses.0 <= buses.1).then_some(())?;
+        let first = self.window_count as usize;
+        let end = first.checked_add(windows.len())?;
+        let slot = self.bridges.get_mut(self.bridge_count as usize)?;
+        self.windows.get_mut(first..end)?.copy_from_slice(windows);
+        *slot = HostBridge {
+            segment,
+            first_bus: buses.0,
+            last_bus: buses.1,
+            osc,
+            offered,
+            commit,
+            committed,
+            first_window: first as u32,
+            window_count: windows.len() as u32,
+        };
+        self.bridge_count += 1;
+        self.window_count = end as u32;
+        Some(())
+    }
+
+    /// The bridges declared, or `None` for a count past the array.
+    pub fn bridges(&self) -> Option<&[HostBridge]> {
+        self.bridges.get(..self.bridge_count as usize)
+    }
+
+    /// `bridge`'s windows, or `None` for a run past the windows declared.
+    pub fn windows_of(&self, bridge: &HostBridge) -> Option<&[RootBridgeWindow]> {
+        let first = bridge.first_window as usize;
+        let end = first.checked_add(bridge.window_count as usize)?;
+        self.windows.get(..self.window_count as usize)?.get(first..end)
     }
 }
 
@@ -352,5 +566,83 @@ crate::user_safe! {
         /// How many of [`Self::states`] are declared; 0 leaves the processor in C1.
         pub count: u32,
         pub states: [IdleState; IDLE_STATES],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_window_holds_an_extent_and_not_merely_its_first_address() {
+        let window = RootBridgeWindow { base: 0xa080_0000, length: 0x1f80_0000 };
+        assert_eq!(window.end(), 0xc000_0000);
+
+        assert!(window.holds(0xbcf0_0000, 0x2_0000));
+        assert!(window.holds(0xa080_0000, 0x2_0000));
+        assert!(window.holds(0xa080_0000, 0x1f80_0000));
+        assert!(window.holds(0xbfff_f000, 0x1000));
+        assert!(!window.holds(0xa07f_f000, 0x2_0000));
+        assert!(!window.holds(0x9920_0000, 0x1000));
+        assert!(!window.holds(0xbfff_f000, 0x1001));
+        assert!(!window.holds(0xbfff_0000, 0x1001_0000));
+        assert!(!window.holds(0xc000_0000, 0));
+        assert!(!window.holds(0xa080_0000, 0));
+
+        let whole = RootBridgeWindow { base: 1, length: u64::MAX };
+        assert_eq!(whole.end(), u64::MAX);
+        assert!(!whole.holds(2, u64::MAX));
+    }
+
+    /// Roots that fit are carried whole, each with its own run of the shared
+    /// windows; one past either array is none; a count, a run or an `_OSC`
+    /// word past what the ABI names reads back as none.
+    #[test]
+    fn a_declaration_carries_its_bridges_and_nothing_past_them() {
+        let w = |base| RootBridgeWindow { base, length: 0x1000 };
+        let mut declared = Apertures::default();
+        declared.push(0, (0, 0x7f), &[w(0x1000), w(0x3000)], Osc::Offered(NATIVE_HOT_PLUG), None).expect("fits");
+        declared.push(0, (0x80, 0xff), &[w(0x5000)], Osc::Absent, None).expect("fits");
+        let bridges = declared.bridges().expect("two bridges").to_vec();
+        assert_eq!(bridges.len(), 2);
+        assert_eq!(declared.windows_of(&bridges[0]), Some(&[w(0x1000), w(0x3000)][..]));
+        assert_eq!(declared.windows_of(&bridges[1]), Some(&[w(0x5000)][..]));
+        assert_eq!(bridges[0].osc(), Some(Osc::Offered(NATIVE_HOT_PLUG)));
+        assert_eq!(bridges[1].osc(), Some(Osc::Absent));
+        assert_eq!(declared.push(0, (2, 1), &[], Osc::Absent, None), None);
+
+        // One root may carry every window: the bound is the declaration's.
+        let mut wide = Apertures::default();
+        assert_eq!(wide.push(0, (0, 0xff), &[w(0); MAX_WINDOWS], Osc::Absent, None), Some(()));
+        assert_eq!(wide.push(0, (0, 0xff), &[w(0)], Osc::Absent, None), None);
+        let mut many = Apertures::default();
+        for _ in 0..MAX_BRIDGES {
+            many.push(0, (0, 0), &[], Osc::Absent, None).expect("fits");
+        }
+        assert_eq!(many.push(0, (0, 0), &[], Osc::Absent, None), None);
+
+        let first = bridges[0];
+        assert_eq!(declared.windows_of(&HostBridge { window_count: 3, ..first }), Some(&[w(0x1000), w(0x3000), w(0x5000)][..]));
+        assert_eq!(declared.windows_of(&HostBridge { window_count: 4, ..first }), None);
+        assert_eq!(HostBridge { osc: 3, ..first }.osc(), None);
+        assert_eq!(HostBridge { osc: OSC_ABSENT, offered: 1, ..first }.osc(), None);
+
+        // An offer with no commit, stage B's record, decodes; a commit decodes
+        // beside an offer of what it was granted; a commit beside no offer,
+        // granting what was not offered, or under a word the ABI does not
+        // name, is none.
+        assert_eq!(first.commit(), Some(None));
+        let mut committed = Apertures::default();
+        committed.push(0, (0, 0xff), &[], Osc::Offered(NATIVE_HOT_PLUG), Some(NATIVE_HOT_PLUG)).expect("fits");
+        assert_eq!(committed.bridges[0].commit(), Some(Some(NATIVE_HOT_PLUG)));
+        let mut unoffered = Apertures::default();
+        unoffered.push(0, (0, 0xff), &[], Osc::Absent, Some(NATIVE_HOT_PLUG)).expect("fits");
+        assert_eq!(unoffered.bridges[0].commit(), None);
+        let mut beyond = Apertures::default();
+        beyond.push(0, (0, 0xff), &[], Osc::Offered(CAPABILITY_STRUCTURE), Some(NATIVE_HOT_PLUG)).expect("fits");
+        assert_eq!(beyond.bridges[0].commit(), None);
+        assert_eq!(HostBridge { commit: 2, ..first }.commit(), None);
+        assert_eq!(HostBridge { committed: 1, ..first }.commit(), None);
+        assert_eq!(Apertures { bridge_count: MAX_BRIDGES as u32 + 1, ..declared }.bridges(), None);
     }
 }

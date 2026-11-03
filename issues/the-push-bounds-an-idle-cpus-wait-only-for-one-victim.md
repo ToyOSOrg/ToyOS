@@ -21,6 +21,8 @@ workloads at 8, 16 and 64 CPUs, the worst stretch measured is 17 rounds against
 a bound of 66. It is the derivation that is missing, not a schedule that
 crosses it.
 
-Exit: stage S2 of the scheduler design (#872) replaces the most-surplus victim
-with two random choices and the cursor push with a nearest-first one, and
-derives I15's bound for that protocol over any number of victims.
+Owned by the placement track (`issues/placement-has-no-migration-cost-or-wake-affinity.md`),
+which owns the push and the victim choice.
+
+Exit: I15's bound is derived for the shipped balance protocol over any number
+of victims.

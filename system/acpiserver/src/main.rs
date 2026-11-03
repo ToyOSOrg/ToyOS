@@ -10,7 +10,9 @@
 //! **At start** every fixed and general-purpose event is disabled and its
 //! status cleared, then the fixed power button is enabled where the FADT
 //! says the machine has one, and the SCI acknowledged: a press after the
-//! clear latches and is served, one before it is lost.
+//! clear latches and is served, one before it is lost. A hardware-reduced
+//! machine (`toyos_abi::acpi::HARDWARE_REDUCED`) has no blocks and no SCI:
+//! its tables are loaded and its namespace served, and no event.
 //!
 //! **Then the machine's tables are loaded** ([`aml::load`]), through the
 //! kernel's mediated access ([`Claim`]): after the arming, so a press during
@@ -29,6 +31,9 @@
 //! where §6.5.4 asks it be, `\_SB._INI`, and the `_STA` and `_INI` of each
 //! device at or above an `_INI` by Table 6.67, again over whatever a table
 //! loaded meanwhile added.
+//!
+//! **Then the root bridges' memory is declared to the kernel**
+//! ([`apertures`]), every PCI claim on the machine waiting for it.
 //!
 //! **Then the embedded controller is found in the namespace and armed**
 //! ([`devices::find`], [`devices::attach`]): attached to the AML host in the ECDT's place, so its
@@ -70,6 +75,7 @@
 //! of every one at [`COUNTS`] intervals, never a line per event.
 
 mod aml;
+mod apertures;
 mod battery;
 mod cpu;
 mod cst;
@@ -92,7 +98,7 @@ use toyos::ioport::{in16, in8, out16, out8};
 use toyos::poller::{Poller, READABLE};
 use toyos::power::{self, Mode, Refused, Stop};
 use toyos::AcpiDev;
-use toyos_abi::acpi::{Access, AcpiInfo, Block, IdleDeclaration, FIXED_POWER_BUTTON};
+use toyos_abi::acpi::{Access, AcpiInfo, Apertures, Block, IdleDeclaration, FIXED_POWER_BUTTON, HARDWARE_REDUCED};
 use toyos_abi::syscall::{DeviceType, SyscallError};
 
 use acpiserver_api::{CONTROLLER_NONE, CONTROLLER_SERVED};
@@ -100,7 +106,7 @@ use aml::Aml;
 use battery::Power;
 use devices::{Ec, Queried};
 use ec::Transaction;
-use host::{port_in, Answer, Declared, Kernel, Stopping, Take, Unmade, OWN};
+use host::{port_in, Answer, Declared, Handed, Kernel, RootsDeclared, Stopping, Take, Unmade, OWN};
 use init::{Census, Names};
 use sci::{Bits, Event, Fixed, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 
@@ -156,10 +162,18 @@ fn main() {
     };
     let info = dev.describe().expect("acpiserver: the claim's first read is its description");
     let claim = Claim { dev: &dev, info, poller: Poller::new(1), watching: Cell::new(false), stop: RefCell::new(None) };
+    let mut internal = false;
+    for arg in std::env::args().skip(1) {
+        assert!(arg == apertures::PORTS_INTERNAL, "acpiserver: {arg:?} is no argument this server takes");
+        internal = true;
+    }
     let mut server = Server::new(&claim, Machine, info);
-    server.arm(&dev);
+    if info.flags & HARDWARE_REDUCED == 0 {
+        server.arm(&dev);
+    }
     let (loaded, kept) = aml::load(&claim, server.info.rsdp);
     let names = server.loaded(loaded.handed, kept);
+    server.declare(names.as_ref(), internal);
     let (batteries, adapters) = server.arm_controller(names.as_ref());
     if let Some(names) = server.negotiate(names) {
         println!("{}", server.census.line());
@@ -264,10 +278,26 @@ impl Kernel for Claim<'_> {
         sci::await_sleep(&mut Waiting(self), until, &served)
     }
 
-    fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
+    fn s5(&self, slp_typ_a: u64) -> Result<Handed, Stopping> {
         match self.dev.s5(slp_typ_a) {
-            Err(SyscallError::InvalidArgument) => Ok(false),
-            answer => Self::answered("the power-off's sleep type", answer).map(|()| true),
+            Err(SyscallError::InvalidArgument) => Ok(Handed::TooWide),
+            answer => Self::answered("the power-off's sleep type", answer).map(|()| Handed::Kept),
+        }
+    }
+
+    fn hardware_reduced(&self) -> bool {
+        self.info.flags & HARDWARE_REDUCED != 0
+    }
+
+    fn declare(&self, roots: &[apertures::Root]) -> Result<RootsDeclared, Stopping> {
+        let mut declared = Apertures::default();
+        for root in roots {
+            declared.push(root.segment, root.buses, &root.windows, root.osc, root.committed).expect("acpiserver: the roots were read into a declaration's room");
+        }
+        match self.dev.declare(&declared) {
+            Err(SyscallError::InvalidArgument) => Ok(RootsDeclared::Refused),
+            Err(SyscallError::AlreadyExists) => Ok(RootsDeclared::Late),
+            answer => Self::answered("the root bridges' memory", answer).map(|()| RootsDeclared::Held),
         }
     }
 
@@ -415,6 +445,18 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
         self.scis += u64::from(count);
         self.take();
         self.kernel.ack();
+    }
+
+    /// Declare the root bridges' memory ([`apertures`]) out of the namespace
+    /// as initialised; with no namespace, no window.
+    fn declare(&mut self, names: Option<&Names>, internal: bool) {
+        let read = match (self.aml.as_mut(), names) {
+            (Some(aml), Some(names)) => apertures::read(aml, names, &mut self.census, internal),
+            _ => Err("no namespace was kept".into()),
+        };
+        if apertures::declare(self.kernel, read).is_err() {
+            println!("acpiserver: the machine is stopping, so the root bridges' memory is not declared");
+        }
     }
 
     /// Initialise the namespace the load kept ([`init`]), and again whatever

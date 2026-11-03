@@ -635,51 +635,6 @@ impl super::Scoped<'_, Rng> {
     }
 }
 
-/// `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL` (UEFI 2.10 §14.2.1).
-#[repr(C)]
-pub struct PciRootBridgeIo {
-    parent_handle: Unused,
-    poll_mem: Unused,
-    poll_io: Unused,
-    mem_read: Unused,
-    mem_write: Unused,
-    io_read: Unused,
-    io_write: Unused,
-    pci_read: Unused,
-    pci_write: Unused,
-    copy_mem: Unused,
-    map: Unused,
-    unmap: Unused,
-    allocate_buffer: Unused,
-    free_buffer: Unused,
-    flush: Unused,
-    get_attributes: Unused,
-    set_attributes: Unused,
-    configuration: unsafe extern "efiapi" fn(this: *mut PciRootBridgeIo, resources: *mut *const c_void) -> Status,
-    pub segment_number: u32,
-}
-
-const _: () = {
-    assert!(size_of::<PciRootBridgeIo>() == 18 * 8 + 8);
-    assert!(offset_of!(PciRootBridgeIo, configuration) == 17 * 8);
-    assert!(offset_of!(PciRootBridgeIo, segment_number) == 18 * 8);
-};
-
-// SAFETY: §14.2.1's layout, under its GUID.
-unsafe impl Protocol for PciRootBridgeIo {
-    const GUID: Guid = Guid::new(0x2f707ebb, 0x4a1a, 0x11d4, [0x9a, 0x38, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d]);
-}
-
-impl super::Scoped<'_, PciRootBridgeIo> {
-    /// `Configuration()` (§14.2.13): the bridge's ACPI resource descriptors,
-    /// in memory firmware owns.
-    pub fn configuration(&self) -> Result<*const c_void, Status> {
-        let mut resources = ptr::null();
-        // SAFETY: the open interface, and a live out parameter.
-        unsafe { (self.configuration)(self.this(), &mut resources) }.ok().map(|()| resources)
-    }
-}
-
 /// `EFI_PCI_IO_PROTOCOL` (UEFI 2.10 §14.4.1), on one handle per PCI function:
 /// only `GetLocation()` is called.
 #[repr(C)]

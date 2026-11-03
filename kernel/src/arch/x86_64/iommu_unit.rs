@@ -8,7 +8,6 @@ use crate::drivers::pci::PciDevice;
 use crate::log;
 use crate::mm::policy::MmioPolicy;
 use crate::mm::Mmio;
-use toyos_abi::boot::RootBridgeWindow;
 
 /// Which backend [`init`] found: none until it has, and then fixed.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,10 +34,10 @@ fn backend() -> Backend {
 const MAX_PHYS: u64 = 1 << 52;
 
 /// The units of whichever table firmware published.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeWindow]>, kernel: (u64, u64)) {
-    let found = if super::vtd::init(rsdp_addr, devices, windows, kernel) {
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], kernel: (u64, u64)) {
+    let found = if super::vtd::init(rsdp_addr, devices, kernel) {
         Backend::Vtd
-    } else if super::amdvi::init(rsdp_addr, devices, windows) {
+    } else if super::amdvi::init(rsdp_addr, devices) {
         Backend::AmdVi
     } else {
         Backend::None
@@ -139,10 +138,10 @@ pub mod domain {
     use crate::arch::x86_64::{amdvi, vtd};
     use crate::iommu::{DomainId, IommuError, Iova, Limit, StreamId};
 
-    pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
+    pub fn create(room: u64, windows: &[toyos_abi::acpi::RootBridgeWindow]) -> Result<(DomainId, Iova), IommuError> {
         match backend() {
-            Backend::Vtd => vtd::domain::create(room),
-            Backend::AmdVi => amdvi::domain::create(room),
+            Backend::Vtd => vtd::domain::create(room, windows),
+            Backend::AmdVi => amdvi::domain::create(room, windows),
             Backend::None => Err(IommuError::NoUnit),
         }
     }
@@ -153,6 +152,16 @@ pub mod domain {
     pub fn keep_reserved(id: DomainId, stream: StreamId) {
         if backend() == Backend::Vtd {
             vtd::domain::keep_reserved(id, stream);
+        }
+    }
+
+    /// Whether the unit blocks every requester on `buses` it has not seen,
+    /// or why not.
+    pub fn governs(buses: (u8, u8)) -> Result<(), &'static str> {
+        match backend() {
+            Backend::Vtd => vtd::domain::governs(buses),
+            Backend::AmdVi => amdvi::domain::governs(buses),
+            Backend::None => Err("no unit translates"),
         }
     }
 

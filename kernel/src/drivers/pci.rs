@@ -22,7 +22,7 @@ const HEADER_TYPE: u64 = 0x0E;
 pub(crate) const CAPABILITIES_PTR: u64 = 0x34;
 
 const MULTI_FUNCTION: u8 = 0x80;
-const INVALID_VENDOR: u16 = 0xFFFF;
+pub(crate) const INVALID_VENDOR: u16 = 0xFFFF;
 
 /// The one MSI-X table entry this kernel programs; a device's queues must point at it too.
 pub const MSIX_ENTRY: u16 = 0;
@@ -62,8 +62,7 @@ impl Capability<'_> {
         self.device.read_config_u8(self.offset)
     }
 
-    /// The config-space offset this capability sits at, for the cap self-test to name the link the walk yielded.
-    #[cfg(feature = "boot-actuators")]
+    /// The config-space offset this capability sits at.
     pub(crate) fn offset(&self) -> u64 {
         self.offset
     }
@@ -121,6 +120,23 @@ impl PciDevice {
         Self { mmio, bus: 0, dev: 0, func: 0 }
     }
 
+    /// The function at `bus:dev.func`, over the window [`function_window`]
+    /// answered for it.
+    pub(crate) fn at(mmio: Mmio, bus: u8, dev: u8, func: u8) -> Self {
+        Self { mmio, bus, dev, func }
+    }
+
+    /// Whether its header says functions other than 0 may answer beside it.
+    pub(crate) fn multi_function(&self) -> bool {
+        self.read_config_u8(HEADER_TYPE) & MULTI_FUNCTION != 0
+    }
+
+    /// Its header's layout (PCIe base spec 6.0 §7.5.1.1): 0 for an endpoint's,
+    /// 1 for a bridge's.
+    pub(crate) fn header_type(&self) -> u8 {
+        self.read_config_u8(HEADER_TYPE) & !MULTI_FUNCTION
+    }
+
     /// The whole window, for the DMA-fault handler: it publishes these at boot
     /// and clears Bus Master Enable through the one whose requester id matches.
     pub fn config_window(&self) -> Mmio {
@@ -173,7 +189,7 @@ impl PciDevice {
     /// bridge's secondary and subordinate bus to 0xFF for the length of it,
     /// cutting off every function behind the bridge.
     pub fn bar_slots(&self) -> u8 {
-        match self.read_config_u8(HEADER_TYPE) & !MULTI_FUNCTION {
+        match self.header_type() {
             0 => bar::MAX_INDEX + 1,
             1 => 2,
             _ => 0,

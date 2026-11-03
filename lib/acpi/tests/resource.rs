@@ -3,9 +3,9 @@
 
 mod common;
 
-use common::{qword_descriptor, resource_list as list, Machine, BUS, IO, MEMORY};
-use toyos_abi::boot::RootBridgeWindow;
-use toyos_acpi::{io_ports, memory_windows, ResourceError, MAX_LIST_BYTES};
+use common::{address_space, qword_descriptor, resource_list as list, Machine, BUS, IO, MEMORY};
+use toyos_abi::acpi::RootBridgeWindow;
+use toyos_acpi::{io_ports, root_bridge, ResourceError, RootResources, MAX_LIST_BYTES};
 
 /// Where a firmware pool allocation sits in the crafted machines below.
 const AT: u64 = 0x7f00_1234;
@@ -22,7 +22,7 @@ fn qword(kind: u8, min: u64, length: u64, translation: u64) -> Vec<u8> {
 fn windows(bytes: &[u8], room: usize) -> Result<Vec<RootBridgeWindow>, ResourceError> {
     let regions: &[(u64, &[u8])] = &[(AT, bytes)];
     let mut out = vec![RootBridgeWindow::default(); room];
-    let count = memory_windows(Machine { regions }, AT, &mut out)?;
+    let count = root_bridge(Machine { regions }, AT, &mut out)?.windows;
     out.truncate(count);
     Ok(out)
 }
@@ -90,9 +90,9 @@ fn a_maximum_that_is_not_the_minimum_plus_the_length_is_refused() {
     assert!(matches!(windows(&list(&[swapped]), 8), Err(ResourceError::Inconsistent { .. })));
 }
 
-/// A window whose addresses differ on the two sides of the bridge. What this
-/// answers is which addresses a CPU may issue, and no machine in reach
-/// translates one — so it is refused rather than carried untranslated.
+/// A window whose addresses differ on the two sides of the bridge: the
+/// declaration is in the addresses a CPU issues, so it is refused rather
+/// than carried untranslated.
 #[test]
 fn a_translated_window_is_refused_rather_than_taken_at_its_minimum() {
     let bytes = list(&[qword(MEMORY, 0x1000_0000, 0x1000, 0x4000_0000)]);
@@ -126,15 +126,86 @@ fn a_range_the_bridge_consumes_is_not_a_window_it_forwards() {
     }
 }
 
-/// The narrower address space descriptors, and anything else: refused by the
-/// tag rather than stepped over. A window silently dropped is an aperture the
-/// kernel would then place a BAR outside of.
+/// A root bridge's `_CRS` as QEMU's `virt` publishes it (measured: its DSDT
+/// evaluated, `lib/acpi/fixtures/qemu-11.1.1-virt/SOURCE`), descriptor for
+/// descriptor: a Word bus range, a DWord memory window, a DWord I/O range
+/// translated to its CPU address, and a QWord memory window. The two memory
+/// windows are the declaration; the I/O range's translation is no refusal,
+/// since it is no memory.
+#[test]
+fn every_width_of_address_space_descriptor_is_read() {
+    let crs = list(&[
+        address_space(0x88, 2, BUS, [0, 0, 0xff, 0, 0x100]),
+        address_space(0x87, 4, MEMORY, [0, 0x1000_0000, 0x3efe_ffff, 0, 0x2eff_0000]),
+        address_space(0x87, 4, IO, [0, 0, 0xffff, 0x3eff_0000, 0x1_0000]),
+        address_space(0x8A, 8, MEMORY, [0, 0x80_0000_0000, 0xff_ffff_ffff, 0, 0x80_0000_0000]),
+    ]);
+    assert_eq!(
+        windows(&crs, 8).expect("virt's _CRS"),
+        [
+            RootBridgeWindow { base: 0x1000_0000, length: 0x2eff_0000 },
+            RootBridgeWindow { base: 0x80_0000_0000, length: 0x80_0000_0000 },
+        ]
+    );
+    // The Extended descriptor (§6.4.3.5.4): its fields two bytes later.
+    let mut extended = vec![0x8B, 0x35, 0x00, MEMORY, 0x00, 0x00, 0x01, 0x00];
+    for field in [0u64, 0xc000_0000, 0xcfff_ffff, 0, 0x1000_0000, 0] {
+        extended.extend_from_slice(&field.to_le_bytes());
+    }
+    assert_eq!(windows(&list(&[extended]), 8), Ok(vec![RootBridgeWindow { base: 0xc000_0000, length: 0x1000_0000 }]));
+}
+
+/// The root's buses are its one bus number range, in a descriptor of any
+/// width; a second range, and one past bus 0xff, are refused by name, and a
+/// list with none names none.
+#[test]
+fn a_roots_buses_are_its_one_bus_range() {
+    let read = |bytes: &[u8]| {
+        let regions: &[(u64, &[u8])] = &[(AT, bytes)];
+        root_bridge(Machine { regions }, AT, &mut [RootBridgeWindow::default(); 8])
+    };
+    let bus = |min, length| address_space(0x88, 2, BUS, [0, min, min + length - 1, 0, length]);
+    let memory = qword(MEMORY, 0x8000_0000, 0x1000_0000, 0);
+    assert_eq!(read(&list(&[bus(0, 0x100), memory.clone()])), Ok(RootResources { buses: Some((0, 0xff)), windows: 1 }));
+    assert_eq!(read(&list(&[qword(BUS, 0x80, 0x40, 0)])), Ok(RootResources { buses: Some((0x80, 0xbf)), windows: 0 }));
+    assert_eq!(read(&list(&[memory])), Ok(RootResources { buses: None, windows: 1 }));
+    assert_eq!(read(&list(&[bus(0, 0x10), bus(0x20, 0x10)])), Err(ResourceError::Buses { min: 0x20, max: 0x2f }));
+    assert_eq!(read(&list(&[bus(0xf0, 0x20)])), Err(ResourceError::Buses { min: 0xf0, max: 0x10f }));
+}
+
+/// q35's `_CRS` carries the configuration ports beside its ranges as a small
+/// I/O Port Descriptor: stepped over with the I/O ranges, and what follows it
+/// still read.
+#[test]
+fn the_small_io_descriptors_are_stepped_over() {
+    let crs = list(&[
+        vec![0x47, 0x01, 0xf8, 0x0c, 0xf8, 0x0c, 0x01, 0x08],
+        vec![0x4B, 0x60, 0x00, 0x01],
+        address_space(0x87, 4, MEMORY, [0, 0x8000_0000, 0xafff_ffff, 0, 0x3000_0000]),
+    ]);
+    assert_eq!(windows(&crs, 8), Ok(vec![RootBridgeWindow { base: 0x8000_0000, length: 0x3000_0000 }]));
+}
+
+/// Every other descriptor is refused by its tag rather than stepped over: a
+/// memory descriptor this decoder does not read (Memory24, Memory32, Fixed
+/// Memory32, §6.4.3.1-3) may be a window, and an IRQ or DMA descriptor names
+/// something no root bridge's `_CRS` should.
 #[test]
 fn a_descriptor_this_decoder_does_not_read_is_refused_by_its_tag() {
-    for tag in [0x87u8, 0x88, 0x8B] {
-        let mut d = vec![tag, 0x17, 0x00];
-        d.resize(3 + 0x17, 0);
+    for tag in [0x81u8, 0x85, 0x86] {
+        let mut d = vec![tag, 0x09, 0x00];
+        d.resize(3 + 0x09, 0);
         assert_eq!(windows(&list(&[d]), 8), Err(ResourceError::UnknownTag { tag }));
+    }
+    assert_eq!(windows(&list(&[vec![0x22, 0x01, 0x00]]), 8), Err(ResourceError::UnknownTag { tag: 0x22 }));
+}
+
+/// A non-zero `_TRA` on a memory window is refused by name, in each width.
+#[test]
+fn a_translated_window_is_refused_in_every_width() {
+    for (tag, width) in [(0x88u8, 2usize), (0x87, 4), (0x8A, 8)] {
+        let d = address_space(tag, width, MEMORY, [0, 0x1000, 0x1fff, 0x100, 0x1000]);
+        assert_eq!(windows(&list(&[d]), 8), Err(ResourceError::Translated { min: 0x1000, offset: 0x100 }), "{tag:#x}");
     }
 }
 

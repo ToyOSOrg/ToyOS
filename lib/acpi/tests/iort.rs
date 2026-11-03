@@ -643,7 +643,8 @@ fn an_id_two_mappings_claim_is_refused_when_it_is_asked_for() {
 
 /// Firmware's bytes, any of them wrong: every single-byte change to either
 /// captured IORT, and every length it could declare, is decoded or refused and
-/// every requester of two buses asked for, without a panic and to an end.
+/// every requester of two buses asked for, one by one and as a range, without
+/// a panic and to an end.
 #[test]
 fn no_corruption_of_a_published_iort_panics_or_hangs_the_decoder() {
     for regions in [HWGIC, ITS] {
@@ -655,6 +656,7 @@ fn no_corruption_of_a_published_iort_panics_or_hangs_the_decoder() {
                 for rid in 0..0x200 {
                     let _ = table.route(0, rid);
                 }
+                let _ = table.translates(0, 0..=0x1ff, 0x0905_0000);
             }
         };
         for at in 36..original.len() {
@@ -746,4 +748,82 @@ fn opening_a_table_and_routing_a_requester_each_read_it_a_bounded_number_of_time
     );
     let routed = reads.get();
     assert!(routed <= 2 * bytes.len(), "routing through {} bytes read {routed}", bytes.len());
+}
+
+/// What [`toyos_acpi::Iort::translates`] answers for `rids`, beside what
+/// asking [`toyos_acpi::Iort::route`] of each one says: every one routed
+/// through the unit at `0x0905_0000`, or a refusal of one of them.
+fn by_range_and_by_requester(bytes: &[u8], segment: u32, rids: core::ops::RangeInclusive<u16>) -> (bool, bool) {
+    judged(bytes, |table| {
+        let ranged = table.translates(segment, rids.clone(), 0x0905_0000).unwrap_or(false);
+        let each = rids.clone().all(|rid| {
+            matches!(table.route(segment, rid), Ok(Route::Translated { smmu, .. }) if smmu.base == 0x0905_0000)
+        });
+        (ranged, each)
+    })
+    .expect("a table that opens")
+}
+
+/// The range is judged as its requesters are, one by one: across gaps, other
+/// units, an ITS, overlaps, shared streams and other segments, at every range
+/// over the IDs these tables name.
+#[test]
+fn a_range_is_translated_exactly_where_each_of_its_requesters_is() {
+    const OTHER_SMMU: u32 = ROOT_AT;
+    let other = |mappings: &[[u32; 5]]| {
+        let mut unit = smmu(&[]);
+        unit[16..24].copy_from_slice(&0x0a00_0000u64.to_le_bytes());
+        table(5, &[its(7), smmu(&[]), unit, root_complex(0, mappings)])
+    };
+    let tables = [
+        // One mapping, and two that abut.
+        three(&[[0x100, 0xff, 0x1000, SMMU_AT, 0]], &[]),
+        three(&[[0, 0x7f, 0, SMMU_AT, 0], [0x80, 0x7f, 0x80, SMMU_AT, 0]], &[]),
+        // A gap at 0x80..=0x8f, and the rest past an ITS.
+        three(&[[0, 0x7f, 0, SMMU_AT, 0], [0x90, 0x6f, 0x90, SMMU_AT, 0], [0x100, 0xff, 0, ITS_AT, 0]], &[]),
+        // An overlap at 0x80..=0xff, and a shared stream at 0x18..=0x1f.
+        three(&[[0, 0xff, 0, SMMU_AT, 0], [0x80, 0xff, 0x400, SMMU_AT, 0]], &[]),
+        three(&[FIRST, [0x100, 0xf, 0x18, SMMU_AT, 0]], &[]),
+        // Through another unit for 0x40..=0x7f.
+        other(&[[0, 0x3f, 0, SMMU_AT, 0], [0x40, 0x3f, 0x40, OTHER_SMMU, 0]]),
+    ];
+    let edges: [u16; 12] = [0, 0x7, 0x8, 0x3f, 0x40, 0x7f, 0x80, 0x8f, 0x90, 0xff, 0x100, 0x1ff];
+    for (i, t) in tables.iter().enumerate() {
+        for segment in [0, 1] {
+            for &first in &edges {
+                for &last in edges.iter().filter(|last| **last >= first) {
+                    let (ranged, each) = by_range_and_by_requester(t, segment, first..=last);
+                    assert_eq!(ranged, each, "table {i}, segment {segment}, {first:#x}..={last:#x}");
+                }
+            }
+        }
+    }
+    // And the tables QEMU published: bus 0 alone is behind the unit.
+    for regions in [HWGIC, ITS] {
+        let table = iort(Machine { regions }, RSDP).expect("the IORT QEMU published");
+        assert_eq!(table.translates(0, 0..=0xff, 0x0905_0000), Ok(true));
+        assert_eq!(table.translates(0, 0..=0x1ff, 0x0905_0000), Ok(false));
+        assert_eq!(table.translates(0, 0x100..=0xffff, 0x0905_0000), Ok(false));
+        assert_eq!(table.translates(0, 0..=0xff, 0x0a00_0000), Ok(false));
+    }
+}
+
+/// Every bus behind one unit, by one mapping: the range reads the table a
+/// few times over, where asking each of 65 536 requesters would read it as
+/// many times.
+#[test]
+fn a_range_of_every_bus_reads_the_table_a_bounded_number_of_times() {
+    let mut nodes: Vec<Vec<u8>> = vec![smmu(&[])];
+    nodes.extend((1..400).map(|segment| root_complex(segment, &[[0, 0xffff, 0x1_0000 * segment, 48, 0]])));
+    nodes.push(root_complex(0, &[[0, 0xffff, 0, 48, 0]]));
+    let bytes = table(5, &nodes);
+    let head = rsdp(0x1000, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(0x800, &head), (0x1000, &root), (TABLE_AT, &bytes)];
+    let reads = Cell::new(0);
+    let opened = iort(Counted { machine: Machine { regions }, reads: &reads }, 0x800).expect("a table of 400 nodes");
+    reads.set(0);
+    assert_eq!(opened.translates(0, 0x100..=0xffff, 0x0905_0000), Ok(true));
+    let ranged = reads.get();
+    assert!(ranged <= 4 * bytes.len(), "a range through {} bytes read {ranged}", bytes.len());
 }

@@ -85,8 +85,16 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
         },
         _ => None,
     };
+    let declared = match op {
+        ops::DECLARE => match ctx.copy_in::<toyos_abi::acpi::Apertures>(UserAddr::new(at)) {
+            Ok(declared) => Some(declared),
+            Err(e) => return e.to_u64(),
+        },
+        _ => None,
+    };
     let pid = process::current_process();
-    // The holder's check and the act are one borrow of the row, as a read's are.
+    // The holder's check and the act are one borrow of the row, as a read's
+    // are, but for `DECLARE`'s act, made below.
     let done = claim.isa(|row| {
         if !crate::isa::held_by(row, pid) {
             return Err(SyscallError::PermissionDenied);
@@ -102,9 +110,20 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
                 Some(declaration) => crate::arch::acpi_mode::idle(row, declaration).map(|()| 0),
                 None => unreachable!("the declaration is copied in for IDLE"),
             },
+            // Made below, once the borrow is given back: its slots' arming
+            // writes ports' configuration and waits on the units.
+            (ops::DECLARE, _) => Ok(0),
             _ => Err(SyscallError::InvalidArgument),
         }
     });
+    let done = match (done, &declared) {
+        (Some(Ok(_)), Some(declared)) => Some(match crate::pcidev::declare(declared) {
+            Ok(()) => Ok(0),
+            Err(toyos_pci::aperture::Declined::Refused(_)) => Err(SyscallError::InvalidArgument),
+            Err(toyos_pci::aperture::Declined::Late) => Err(SyscallError::AlreadyExists),
+        }),
+        (done, _) => done,
+    };
     let done = done.unwrap_or(Err(SyscallError::Gone)).and_then(|word| match &request {
         Some(request) => ctx.copy_out(UserAddr::new(at), request).map(|()| word),
         None => Ok(word),

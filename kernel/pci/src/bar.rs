@@ -89,6 +89,34 @@ impl fmt::Display for Unusable {
     }
 }
 
+/// The dwords that put a Memory Space BAR at `address`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    pub low: u32,
+    /// `None` where the BAR is 32 bits wide and has no second register.
+    pub high: Option<u32>,
+}
+
+/// The dwords that put BAR `index`, whose low dword reads `low`, at
+/// `address`: for a BAR its device left unassigned, whose address the caller
+/// chose aligned to its size and, for a 32-bit one, below 4 GiB.
+///
+/// **The low four bits are carried through rather than recomputed.** They say
+/// memory or I/O, 32-bit or 64-bit, and prefetchable, and they are the
+/// *device's* — hardwired, read-only, and not something a caller placing a
+/// window gets an opinion about.
+///
+/// # Panics
+/// Where `address` holds a flag bit, or is past 4 GiB for a 32-bit BAR: the
+/// caller's choice, not the device's.
+pub fn placement(index: u8, low: u32, address: u64) -> Result<Placement, Unusable> {
+    let wide = kind(index, low)?.wide;
+    assert!(address & !u64::from(MEMORY_ADDRESS) & 0xFFFF_FFFF == 0, "bar: {address:#x} holds a BAR's flag bits");
+    assert!(wide || u32::try_from(address).is_ok(), "bar: {address:#x} is past a 32-bit BAR's reach");
+    let low = (address as u32 & MEMORY_ADDRESS) | (low & !MEMORY_ADDRESS);
+    Ok(Placement { low, high: wide.then_some((address >> 32) as u32) })
+}
+
 /// A Memory Space BAR whose upper half is in the register after it.
 ///
 /// Separate from [`Memory`] so a caller reads that register only when the
@@ -149,14 +177,22 @@ pub enum Width {
     Wide(Wide),
 }
 
-/// Decode BAR `index`'s low dword.
+/// What kind of Memory Space BAR a low dword describes, whatever address it
+/// holds: an unassigned register is still one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Kind {
+    pub wide: bool,
+    pub prefetchable: bool,
+}
+
+/// BAR `index`'s kind, from its low dword.
 ///
 /// Bit 0 first, which is the whole point: a register that does not describe
 /// memory has no Type field to read, and the bits where one would be are part
 /// of a port number. The index is part of the decode because a 64-bit claim
 /// is a claim about the *next* register too, and slot [`MAX_INDEX`] has none
-/// — [`Width::Wide`] is unreachable there, so no caller can be led to 0x28.
-pub fn decode(index: u8, low: u32) -> Result<Width, Unusable> {
+/// — a wide kind is refused there, so no caller can be led to 0x28.
+pub fn kind(index: u8, low: u32) -> Result<Kind, Unusable> {
     // A bad index is a caller bug, not a device's claim, so this fails fast.
     assert!(index <= MAX_INDEX, "BAR {index} — a Type 0 header has six");
     if low & IO_SPACE != 0 {
@@ -164,10 +200,20 @@ pub fn decode(index: u8, low: u32) -> Result<Width, Unusable> {
     }
     let prefetchable = low & PREFETCHABLE != 0;
     match low & TYPE {
-        TYPE_32 => Memory::new((low & MEMORY_ADDRESS) as u64, prefetchable).map(Width::Narrow),
+        TYPE_32 => Ok(Kind { wide: false, prefetchable }),
         TYPE_64 if index == MAX_INDEX => Err(Unusable::WideAtLastIndex),
-        TYPE_64 => Ok(Width::Wide(Wide { low, prefetchable })),
+        TYPE_64 => Ok(Kind { wide: true, prefetchable }),
         _ => Err(Unusable::ReservedType(((low & TYPE) >> 1) as u8)),
+    }
+}
+
+/// Decode BAR `index`'s low dword: its [`kind`], and for a 32-bit one the
+/// address firmware assigned it.
+pub fn decode(index: u8, low: u32) -> Result<Width, Unusable> {
+    let Kind { wide, prefetchable } = kind(index, low)?;
+    match wide {
+        false => Memory::new((low & MEMORY_ADDRESS) as u64, prefetchable).map(Width::Narrow),
+        true => Ok(Width::Wide(Wide { low, prefetchable })),
     }
 }
 
@@ -365,5 +411,29 @@ mod tests {
             advertised_size(0xFFFF_C00C, Some(0)),
             Err(BadSize::NotPowerOfTwo(_)),
         ));
+    }
+
+    /// The four flag bits are the device's and survive a placement; the
+    /// address bits are the caller's. A placement that recomputed the flags
+    /// would tell a 64-bit prefetchable BAR it is a 32-bit non-prefetchable
+    /// one — and the register would take it, because software writes the
+    /// whole dword.
+    #[test]
+    fn a_placement_writes_the_address_and_keeps_the_devices_own_bits() {
+        let placed = placement(4, 0x0000_000C, 0x8_0020_0000).unwrap();
+        assert_eq!(placed.low, 0x0020_000C, "the low four bits are the device's");
+        assert_eq!(placed.high, Some(8));
+        // A 32-bit BAR keeps its own flags too, and has no second register.
+        assert_eq!(placement(0, 0x0000_0008, 0xC020_0000), Ok(Placement { low: 0xC020_0008, high: None }));
+        assert_eq!(kind(0, 0x0000_0008), Ok(Kind { wide: false, prefetchable: true }));
+        assert_eq!(kind(2, 0x0000_000C), Ok(Kind { wide: true, prefetchable: true }));
+        // An I/O BAR has no memory address to be given.
+        assert_eq!(placement(1, 0x0000_C001, 0xC020_0000), Err(Unusable::IoSpace { port: 0xC000 }));
+    }
+
+    #[test]
+    #[should_panic(expected = "past a 32-bit BAR's reach")]
+    fn a_32_bit_bar_is_never_placed_past_4_gib() {
+        let _ = placement(1, 0x0000_0000, 0x8_0020_0000);
     }
 }

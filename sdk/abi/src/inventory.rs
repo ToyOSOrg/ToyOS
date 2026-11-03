@@ -53,7 +53,7 @@ impl Holder {
 /// A PCI function's address: its segment group, as the MCFG entry its
 /// configuration space was found through names it, and its bus, device and
 /// function there.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct PciAddr {
     pub segment: u16,
     pub bus: u8,

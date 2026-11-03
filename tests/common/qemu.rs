@@ -678,6 +678,11 @@ pub enum Profile {
     /// `iommu_platform=on`, and the harness sets that only where a unit exists,
     /// so the guest's own negotiation comes out the other way here.
     HeadlessNoIommu,
+    /// [`Profile::Headless`] without the console's port, for a boot nothing
+    /// declares the root bridges' memory on, where every claim is refused and
+    /// the UART is the console: `tests/images/acpicase.toml`'s, whose `acpi`
+    /// holders are jobs that declare nothing.
+    HeadlessNoConsolePort,
     /// [`Profile::Headless`] with no USB controller: the machine whose NVMe
     /// disk is the only storage it has, and the only device its firmware can
     /// boot.
@@ -709,6 +714,13 @@ pub enum Profile {
     /// neither of: two identical functions, each a `drives` row's to start a
     /// process on.
     HeadlessTwoEdu,
+    /// [`Profile::HeadlessTwoEdu`] without the console's port, as
+    /// [`Profile::HeadlessNoConsolePort`]: `tests/images/undeclaredcase.toml`'s.
+    HeadlessTwoEduNoConsolePort,
+    /// [`Profile::Headless`] with a `pcie-root-port` whose slot the
+    /// firmware's `_OSC` grants native hot-plug of, an `edu` behind it from
+    /// boot: the machine a test pulls it out of and plugs one into over QMP.
+    HeadlessHotplugPort,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the
     /// machine shape that gets flashed, so it is the one the input tests run
@@ -803,6 +815,7 @@ impl Profile {
             }
             Self::Headless
             | Self::HeadlessNoIommu
+            | Self::HeadlessNoConsolePort
             | Self::HeadlessNoUsb
             | Self::HeadlessVirtioGpu
             | Self::HeadlessUsbSpare
@@ -811,6 +824,8 @@ impl Profile {
             | Self::HeadlessE1000e
             | Self::HeadlessTwoNics
             | Self::HeadlessTwoEdu
+            | Self::HeadlessTwoEduNoConsolePort
+            | Self::HeadlessHotplugPort
             | Self::Metal
             | Self::MetalTwoHda
             | Self::MetalUsbKeyboard
@@ -1005,6 +1020,12 @@ struct Shape {
     hda: bool,
 }
 
+/// The `id` of [`Probes::HotplugPort`]'s root port, which a hot-added
+/// device names as its bus.
+pub const HOTPLUG_PORT: &str = "hpslot";
+/// The `id` of the `edu` behind [`HOTPLUG_PORT`] from boot.
+pub const HOTPLUG_PRESENT: &str = "present";
+
 /// The devices a machine has for a test to aim a DMA or a message from, and
 /// on `virt` the SMMUv3 that comes with them: a unit no function writes
 /// through is a unit no test reads.
@@ -1017,6 +1038,12 @@ enum Probes {
     /// Two of QEMU's `edu`, behind the machine's unit: identical functions a
     /// claim tells apart only by their arrivals.
     Edus,
+    /// A `pcie-root-port`, [`HOTPLUG_PORT`], with an `edu` behind it from boot
+    /// ([`HOTPLUG_PRESENT`]), behind the machine's unit, on a q35 whose DSDT
+    /// leaves its slot to native hot-plug:
+    /// `acpi-pci-hotplug-with-bridge-support=off`, without which the `_OSC`
+    /// keeps hot-plug for ACPI and the kernel arms no slot.
+    HotplugPort,
     /// On `virt`, its SMMUv3 with the ITS behind it
     /// ([`Arch::irqchip`]), one `edu`, whose message is the only one a guest
     /// of this suite can raise on demand, and an `e1000e` behind a root port
@@ -1147,6 +1174,7 @@ impl Profile {
             }
             Self::MetalAmdViTestdev => Shape { probes: Probes::Testdevs, ..Self::MetalAmdVi.shape() },
             Self::HeadlessNoIommu => Shape { iommu: None, console_port: false, ..Self::Headless.shape() },
+            Self::HeadlessNoConsolePort => Shape { console_port: false, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessNicBehindPort => Shape { nic: Nic::BehindPort, ..Self::Headless.shape() },
@@ -1154,6 +1182,8 @@ impl Profile {
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::HeadlessTwoNics => Shape { nic: Nic::VirtioPair, ..Self::Headless.shape() },
             Self::HeadlessTwoEdu => Shape { probes: Probes::Edus, ..Self::Headless.shape() },
+            Self::HeadlessTwoEduNoConsolePort => Shape { console_port: false, ..Self::HeadlessTwoEdu.shape() },
+            Self::HeadlessHotplugPort => Shape { probes: Probes::HotplugPort, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
                 xhci: &[XHCI_DEFAULT, XHCI_SPARE],
                 usb: &[
@@ -1598,6 +1628,22 @@ impl QemuInstance {
                 carried,
             },
         )
+    }
+
+    /// Plug a `driver` device named `id` into [`HOTPLUG_PORT`].
+    pub fn device_add(&mut self, driver: &str, id: &str) {
+        let socket = self.sockets.qmp.clone().expect("device_add needs BootOptions { qmp: true }");
+        let command = format!("{{\"execute\":\"device_add\",\"arguments\":{{\"driver\":\"{driver}\",\"bus\":\"{HOTPLUG_PORT}\",\"id\":\"{id}\"}}}}");
+        Qmp::connect(&socket).execute(&command);
+    }
+
+    /// Ask for device `id`'s removal, as its slot's attention button does,
+    /// and wait up to `budget` for QEMU to say the guest let it go.
+    pub fn device_del(&mut self, id: &str, budget: Duration) -> Result<(), String> {
+        let socket = self.sockets.qmp.clone().expect("device_del needs BootOptions { qmp: true }");
+        let mut qmp = Qmp::connect(&socket);
+        qmp.execute(&format!("{{\"execute\":\"device_del\",\"arguments\":{{\"id\":\"{id}\"}}}}"));
+        qmp.await_event("DEVICE_DELETED", self.budget(budget))
     }
 
     /// A span of the guest's *physical* memory, as QEMU reads it.
@@ -2099,6 +2145,30 @@ impl Qmp {
         }
     }
 
+    /// Wait up to `budget` for an event named `name`.
+    fn await_event(&mut self, name: &str, budget: Duration) -> Result<(), String> {
+        use std::io::Read;
+        let want = format!("\"{name}\"");
+        let deadline = Instant::now() + budget;
+        loop {
+            if self.pending.windows(want.len()).any(|w| w == want.as_bytes()) {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(format!("no {name} within {budget:?}: {}", String::from_utf8_lossy(&self.pending)));
+            }
+            self.stream.set_read_timeout(Some(left)).expect("qmp: an event's budget");
+            let mut buf = [0u8; 4096];
+            match self.stream.read(&mut buf) {
+                Ok(0) => return Err(format!("qmp: socket closed waiting for {name}")),
+                Ok(n) => self.pending.extend_from_slice(&buf[..n]),
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Err(e) => return Err(format!("qmp: read failed waiting for {name}: {e}")),
+            }
+        }
+    }
+
     fn execute(&mut self, command: &str) {
         self.stream.write_all(command.as_bytes()).unwrap();
         self.stream.write_all(b"\n").unwrap();
@@ -2337,7 +2407,8 @@ fn qemu_command(
     machine.extend(arch.irqchip(accel, remapped));
     match arch {
         Arch::X86_64 => assert!(
-            shape.probes == Probes::Absent || (matches!(shape.probes, Probes::Testdevs | Probes::Edus) && shape.iommu.is_some()),
+            shape.probes == Probes::Absent
+                || (matches!(shape.probes, Probes::Testdevs | Probes::Edus | Probes::HotplugPort) && shape.iommu.is_some()),
             "a q35 has no SMMUv3, and an iommu-testdev or edu on one is behind no unit"
         ),
         Arch::Aarch64 => {
@@ -2514,6 +2585,11 @@ fn qemu_command(
     if shape.probes == Probes::Edus {
         qemu.arg("-device").arg("edu");
         qemu.arg("-device").arg("edu");
+    }
+    if shape.probes == Probes::HotplugPort {
+        qemu.arg("-global").arg("ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off");
+        qemu.arg("-device").arg(format!("pcie-root-port,id={HOTPLUG_PORT},chassis=3,slot=3"));
+        qemu.arg("-device").arg(format!("edu,bus={HOTPLUG_PORT},id={HOTPLUG_PRESENT}"));
     }
     if shape.probes == Probes::Its {
         qemu.arg("-device").arg("edu");

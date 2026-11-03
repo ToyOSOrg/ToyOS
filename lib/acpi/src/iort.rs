@@ -180,6 +180,13 @@ impl Mapping {
         // `output + span` was checked not to wrap when the table was opened.
         (id >= self.input && id - self.input <= self.span).then(|| self.output + (id - self.input))
     }
+
+    /// The input IDs of `first..=last` this mapping holds, as an inclusive range.
+    fn within(&self, first: u32, last: u32) -> Option<(u32, u32)> {
+        // `input + span` was checked not to wrap when the table was opened.
+        let (low, high) = (first.max(self.input), last.min(self.input + self.span));
+        (low <= high).then_some((low, high))
+    }
 }
 
 /// An IORT whose every node [`iort`] has walked.
@@ -251,11 +258,67 @@ impl<P: Phys> Iort<P> {
                         _ => return Err(IortRefused::Output { at: unit.at, reference: mapping.reference }),
                     },
                 };
-                self.alone(unit, (root.at, index), id)?;
+                self.alone(unit, (root.at, index), (id, id))?;
                 Ok(Route::Translated { smmu, stream: id, its })
             }
             _ => Err(IortRefused::Output { at: root.at, reference: mapping.reference }),
         }
+    }
+
+    /// Whether every requester in `rids` of `segment` is routed through the
+    /// SMMUv3 at `base` under a stream no other mapping puts out to that unit,
+    /// as [`Iort::route`] answers `Translated` for each; where the unit sends
+    /// a stream on is not read. Judged by range, not by requester: for each
+    /// root complex mapping that holds any of them, one walk of the nodes and
+    /// their mappings for an overlap and one for a shared stream.
+    pub fn translates(&self, segment: u32, rids: core::ops::RangeInclusive<u16>, base: u64) -> Result<bool, IortRefused> {
+        let (first, last) = (u32::from(*rids.start()), u32::from(*rids.end()));
+        if first > last {
+            return Ok(true);
+        }
+        let mut covered = 0;
+        for held in self.root_mappings(segment) {
+            let (root, index, mapping) = held?;
+            let Some((low, high)) = mapping.within(first, last) else { continue };
+            for other in self.root_mappings(segment) {
+                let (other_root, other_index, other) = other?;
+                if (other_root.at, other_index) != (root.at, index) {
+                    if let Some((id, _)) = other.within(low, high) {
+                        return Err(IortRefused::Overlap { id });
+                    }
+                }
+            }
+            covered += high - low + 1;
+            match self.output(root, mapping)? {
+                (unit, Node::Smmuv3(smmu)) if smmu.base == base => {
+                    // `output + span` was checked not to wrap when the table was opened.
+                    let streams = (mapping.output + (low - mapping.input), mapping.output + (high - mapping.input));
+                    self.alone(unit, (root.at, index), streams)?;
+                }
+                (_, Node::Smmuv3(_) | Node::Its { .. }) => return Ok(false),
+                _ => return Err(IortRefused::Output { at: root.at, reference: mapping.reference }),
+            }
+        }
+        // No two of the counted ranges overlap, so they cover the whole only by adding up to it.
+        Ok(covered == last - first + 1)
+    }
+
+    /// Every mapping of every root complex of `segment`, with its node and index.
+    fn root_mappings(&self, segment: u32) -> impl Iterator<Item = Result<(Raw, u32, Mapping), IortRefused>> + '_ {
+        self.raw_nodes().flat_map(move |raw| {
+            let root = raw.and_then(|raw| Ok((self.decode(raw)? == Node::RootComplex { segment }).then_some(raw)));
+            let (refused, root) = match root {
+                Ok(root) => (None, root),
+                Err(why) => (Some(Err(why)), None),
+            };
+            let mappings = root.into_iter().flat_map(move |raw| {
+                (0..raw.mappings).map(move |index| {
+                    let at = IortRefused::Mappings { at: raw.at, count: raw.mappings, offset: raw.array };
+                    Ok((raw, index, self.mapping(raw, index).ok_or(at)?))
+                })
+            });
+            refused.into_iter().chain(mappings)
+        })
     }
 
     /// The index of the mapping that is an SMMUv3's own DeviceID (Table 13,
@@ -289,10 +352,11 @@ impl<P: Phys> Iort<P> {
         })
     }
 
-    /// Refuses `stream` of the SMMUv3 `unit` where any mapping but `by` —
-    /// mapping `by.1` of the node at `by.0` — puts it out to that unit,
-    /// whatever its node's type: one walk of the nodes and their mappings.
-    fn alone(&self, unit: Raw, by: (usize, u32), stream: u32) -> Result<(), IortRefused> {
+    /// Refuses `streams`, an inclusive range, of the SMMUv3 `unit` where any
+    /// mapping but `by` — mapping `by.1` of the node at `by.0` — puts one of
+    /// them out to that unit, whatever its node's type: one walk of the nodes
+    /// and their mappings.
+    fn alone(&self, unit: Raw, by: (usize, u32), streams: (u32, u32)) -> Result<(), IortRefused> {
         for raw in self.raw_nodes() {
             let raw = raw?;
             let Raw { at, mappings: count, array: offset, .. } = raw;
@@ -305,9 +369,10 @@ impl<P: Phys> Iort<P> {
             for index in (0..count).filter(|index| (at, *index) != by) {
                 let mapping = self.mapping(raw, index).ok_or(IortRefused::Mappings { at, count, offset })?;
                 let last = if mapping.single { 0 } else { mapping.span };
-                let reaches = stream >= mapping.output && stream - mapping.output <= last;
-                if reaches && mapping.reference as usize == unit.at {
-                    return Err(IortRefused::SharedStream { stream, at });
+                // Not wrapping is checked only of a type `check` decodes.
+                let reached = (streams.0.max(mapping.output), streams.1.min(mapping.output.saturating_add(last)));
+                if reached.0 <= reached.1 && mapping.reference as usize == unit.at {
+                    return Err(IortRefused::SharedStream { stream: reached.0, at });
                 }
             }
         }

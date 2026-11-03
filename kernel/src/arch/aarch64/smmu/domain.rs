@@ -90,20 +90,45 @@ impl Live {
 /// firmware table this kernel reads on AArch64 reserves any.
 pub fn keep_reserved(_id: DomainId, _function: StreamId) {}
 
-/// Why no claim may have `function`: never, since nothing this kernel reads
-/// of the IORT says it keeps the machine's own addresses.
-pub fn unclaimable(_function: StreamId) -> Option<&'static str> {
-    None
+/// Whether the armed unit governs every requester on `buses`, so one seen
+/// first after boot is aborted: the IORT routes each of their RIDs through
+/// it, where an invalid STE or a StreamID past the table aborts what no
+/// claim attached (`super`'s module header). Read from the IORT again, on
+/// the arming's thread, since routes were read at boot for the functions
+/// enumerated then alone; judged over the RID range by its mappings, so the
+/// time it takes under the declaration's lock, preemption off, is the
+/// table's to bound and not the bus count's.
+pub fn governs(buses: (u8, u8)) -> Result<(), &'static str> {
+    let (base, rsdp) = match UNIT.lock().as_ref() {
+        Some(live) => (live.base, live.rsdp),
+        None => return Err("no SMMUv3 is armed"),
+    };
+    let iort = toyos_acpi::iort(crate::drivers::acpi::direct_phys(), rsdp).map_err(|_| "the IORT is not read again")?;
+    let rids = u16::from(buses.0) << 8..=u16::from(buses.1) << 8 | 0xff;
+    match iort.translates(u32::from(toyos_acpi::SEGMENT_GROUP), rids, base) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("the IORT routes a requester id behind it through no armed SMMUv3"),
+        Err(_) => Err("the IORT refuses a route behind it"),
+    }
 }
 
-/// A new domain, with `room` bytes of it handed out first: refused, with no id
-/// spent, where it would have less than that.
-pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
+/// Why no claim may have `function`: it arrived after the unit was
+/// programmed, and its IORT route was read only for the functions enumerated
+/// then.
+pub fn unclaimable(function: StreamId) -> Option<&'static str> {
+    let arrived = UNIT.lock().as_ref().is_some_and(|live| !live.enumerated.contains(&function));
+    arrived.then_some("it arrived after the SMMUv3 was programmed, and its IORT route is read for the functions enumerated then")
+}
+
+/// A new domain, with `room` bytes of it handed out first, clear of the root
+/// bridges' declared `windows`: refused, with no id spent, where it would
+/// have less than that.
+pub fn create(room: u64, windows: &[toyos_abi::acpi::RootBridgeWindow]) -> Result<(DomainId, Iova), IommuError> {
     let doorbell = super::super::irqchip::its::doorbell_page();
     let mut held = UNIT.lock();
     let live = held.as_mut().ok_or(IommuError::NoUnit)?;
     let ceiling = if live.unit.asid(0x100).is_some() { 1 << 16 } else { 1 << 8 };
-    let next = live.domains.prepare(INPUT_BITS as u8, ceiling, room)?;
+    let next = live.domains.prepare(INPUT_BITS as u8, ceiling, room, windows)?;
     let asid = live.unit.asid(next.id).expect("SMMU: an id below the unit's ASIDs");
     let root = Phys::new(live.memory.alloc(PAGE_SIZE)).expect("SMMU: a table below the unit's output size");
     let context = Phys::new(live.memory.alloc(64)).expect("SMMU: a descriptor below the unit's output size");

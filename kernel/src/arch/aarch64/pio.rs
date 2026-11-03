@@ -1,5 +1,5 @@
-//! The I/O port space: AArch64 has none, and so no row to fill and no port to
-//! declare.
+//! The I/O port space: AArch64 has none, so no port to declare or open, and
+//! no line a row raises; the `acpi` claim's row names neither.
 
 use core::convert::Infallible;
 
@@ -7,10 +7,10 @@ use toyos_userbound::Ports;
 
 use crate::process::Pid;
 
-/// No row is filled, so no wire is resolved.
+/// No row raises a line, so no wire is resolved.
 pub type Wire = Infallible;
 
-/// No line is routed where no row exists.
+/// No line is routed where no row raises one.
 pub type Line = Infallible;
 
 pub fn route(_row: usize, wire: Wire) -> Result<Line, alloc::string::String> {
@@ -38,7 +38,6 @@ pub fn holder(_ports: Ports) -> Option<&'static str> {
     None
 }
 
-/// Never called: nothing is bound where nothing can be claimed.
-pub fn switch_to(_pid: Option<Pid>) {
-    unreachable!("AArch64 has no I/O permission bitmap")
-}
+/// Nothing: there is no I/O permission bitmap, and a row's binding opens no
+/// port.
+pub fn switch_to(_pid: Option<Pid>) {}

@@ -4,7 +4,7 @@
 # IORT routes past the SMMUv3; `test_rs_claim_bar_fault` faults in edu's BAR
 # and names it as a syscall's buffer.
 [boot]
-start = ["logkeeper", "test-runner"]
+start = ["acpiserver", "logkeeper", "test-runner"]
 
 [programs.logkeeper]
 service = true
@@ -18,3 +18,10 @@ syscap = ["logread"]
 receives = ["power"]
 args = ["--bound-ms=240000", "test_rs_claim_lpi", "test_rs_claim_unrouted", "test_rs_claim_bar_fault"]
 syscap = ["device", "inventory", "dup"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]

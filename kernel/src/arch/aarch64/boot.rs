@@ -364,9 +364,11 @@ pub fn timer() {
     log!("timer: the EL1 virtual timer, PPI {}, stopped until the scheduler arms it", super::irqchip::timer_intid());
 }
 
-/// The platform's own devices that are not PCI functions: none this kernel
-/// drives on an ACPI Arm machine.
-pub fn platform_devices(_platform: &Platform, _rsdp_addr: u64) {}
+/// The platform's own devices that are not PCI functions: on an ACPI Arm
+/// machine, the `acpi` claim's row alone.
+pub fn platform_devices(_platform: &Platform, rsdp_addr: u64) {
+    super::acpi_mode::init(rsdp_addr);
+}
 
 /// Every other CPU, running.
 pub fn start_other_cpus(platform: &Platform, args: &KernelArgs) {

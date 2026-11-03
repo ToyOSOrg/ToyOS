@@ -155,9 +155,13 @@ pub trait Kernel {
     /// `false` is the deadline.
     fn released(&self, until: Instant) -> bool;
     /// Hand the kernel `\_S5`'s `SLP_TYPa` for its power-off, which it takes
-    /// once under a claim: `false` where it is wider than the register's
-    /// field, and the kernel kept nothing.
-    fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping>;
+    /// once under a claim.
+    fn s5(&self, slp_typ_a: u64) -> Result<Handed, Stopping>;
+    /// The machine is hardware-reduced (`toyos_abi::acpi::HARDWARE_REDUCED`):
+    /// no fixed hardware, and a power-off that writes no sleep type.
+    fn hardware_reduced(&self) -> bool;
+    /// Declare the PCI root bridges, once ([`crate::apertures`]).
+    fn declare(&self, roots: &[crate::apertures::Root]) -> Result<RootsDeclared, Stopping>;
     /// Hand the kernel one processor's idle states (`crate::cst`).
     fn idle(&self, declaration: &IdleDeclaration) -> Result<Declared, Stopping>;
     /// Waits until `until`, serving the SCI as `sci::await_sleep` does for
@@ -177,6 +181,24 @@ pub trait Kernel {
     /// (`toyos::power::Pending::terminate`): refused `NoStopPending` once it
     /// has ended, whatever stop is pending since.
     fn terminate(&self) -> Result<(), toyos::power::Refused>;
+}
+
+/// What the kernel did with `\_S5`'s `SLP_TYPa`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Handed {
+    Kept,
+    /// Wider than the register's field: the kernel kept nothing.
+    TooWide,
+}
+
+/// What the kernel did with a declaration of the root bridges' memory.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RootsDeclared {
+    Held,
+    /// Refused whole, said in the kernel's log by name.
+    Refused,
+    /// The kernel already holds an answer: a declaration, or its refusal.
+    Late,
 }
 
 /// Why an access to one of the controller's ports was not made.
@@ -775,6 +797,10 @@ pub mod tests {
         pub stops_after: Cell<Option<usize>>,
         /// The `SLP_TYPa` it was handed and kept.
         pub handed: Cell<Option<u64>>,
+        /// The machine is hardware-reduced.
+        pub reduced: bool,
+        /// The roots it was declared, once.
+        pub roots: RefCell<Option<Vec<crate::apertures::Root>>>,
         /// Each processor's idle states it was handed, all kept.
         pub declared: RefCell<Vec<IdleDeclaration>>,
         /// What each Sleep's wait takes, in turn; nothing once it runs out.
@@ -907,15 +933,29 @@ pub mod tests {
             self.sleeps.borrow_mut().pop_front().unwrap_or_default()
         }
 
-        fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
+        fn s5(&self, slp_typ_a: u64) -> Result<Handed, Stopping> {
             self.stopping()?;
             assert!(!self.held.get(), "the sleep type was handed over under the Global Lock");
             // ACPI 6.5 Table 4.16: `SLP_TYPx` is three bits.
             if slp_typ_a > 7 {
-                return Ok(false);
+                return Ok(Handed::TooWide);
             }
             assert_eq!(self.handed.replace(Some(slp_typ_a)), None, "a second sleep type under one claim, which the kernel refuses");
-            Ok(true)
+            Ok(Handed::Kept)
+        }
+
+        fn hardware_reduced(&self) -> bool {
+            self.reduced
+        }
+
+        fn declare(&self, roots: &[crate::apertures::Root]) -> Result<RootsDeclared, Stopping> {
+            self.stopping()?;
+            let mut declared = self.roots.borrow_mut();
+            if declared.is_some() {
+                return Ok(RootsDeclared::Late);
+            }
+            *declared = Some(roots.to_vec());
+            Ok(if roots.is_empty() { RootsDeclared::Refused } else { RootsDeclared::Held })
         }
 
         fn idle(&self, declaration: &IdleDeclaration) -> Result<Declared, Stopping> {
