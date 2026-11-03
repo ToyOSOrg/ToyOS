@@ -3,12 +3,11 @@
 
 mod common;
 
-use common::{t14_root_bridge, Machine, OVMF_ROOT_BRIDGE};
-use toyos_abi::boot::RootBridgeWindow;
+use common::Machine;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
     century_of, definition_blocks, dsdt_address, ecam_allocations, find_table, fixed_hardware, hpet_base,
-    isa_line, madt_entries, memory_windows, pm1a_control, pm_timer, psci, reset_register, rtc_century, sci_line, PmTimer,
+    isa_line, madt_entries, pm1a_control, pm_timer, psci, reset_register, rtc_century, sci_line, PmTimer,
     Century, FixedHardware, IoApicEntry, Line, MadtEntry, Polarity, PowerButton, Psci, Reset, SmiCmd,
     SourceOverride, TableError, Trigger, FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
     MADT_ENTRIES,
@@ -167,43 +166,6 @@ fn the_xsdt_walk_reaches_every_entry() {
         assert_eq!(table.base(), at);
     }
     assert_eq!(find_table(m, RSDP, b"SSDT", 36).err(), Some(TableError::Absent));
-}
-
-const ROOT_BRIDGE: u64 = 0x7f00_0000;
-
-fn bridge_windows(bytes: &[u8]) -> Vec<RootBridgeWindow> {
-    let regions: &[(u64, &[u8])] = &[(ROOT_BRIDGE, bytes)];
-    let mut out = [RootBridgeWindow::default(); 8];
-    let count = memory_windows(Machine { regions }, ROOT_BRIDGE, &mut out).expect("bytes a firmware answered with");
-    out[..count].to_vec()
-}
-
-/// The I/O and bus ranges in the same list are what make this more than a
-/// count: a decoder that took every descriptor would answer four windows here.
-#[test]
-fn the_windows_a_boot_printed_are_what_that_firmwares_own_bytes_say() {
-    assert_eq!(
-        bridge_windows(OVMF_ROOT_BRIDGE),
-        [
-            RootBridgeWindow { base: 0xc000_0000, length: 0x0010_0000 },
-            RootBridgeWindow { base: 0x8_0000_0000, length: 0x0010_0000 },
-        ]
-    );
-}
-
-/// The same decode against a second firmware, whose list is the same four
-/// descriptors carrying entirely different numbers. The two together are what
-/// say the decoder reads fields rather than offsets that happen to hold the
-/// right values on one machine.
-#[test]
-fn a_second_firmwares_bytes_decode_to_that_machines_own_windows() {
-    assert_eq!(
-        bridge_windows(&t14_root_bridge()),
-        [
-            RootBridgeWindow { base: 0xa200_0000, length: 0x1b00_0000 },
-            RootBridgeWindow { base: 0x40_0000_0000, length: 0x20_3dc0_0000 },
-        ]
-    );
 }
 
 /// q35's ICH9 power-management block at the base QEMU's firmware put it,

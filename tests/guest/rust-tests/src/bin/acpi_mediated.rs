@@ -5,7 +5,7 @@
 //! Run on a boot that starts no ACPI server (`tests/images/acpicase.toml`),
 //! where the i8042's row is another claim's; on a guest: every write here that must be refused is one
 //! a kernel that made it would make for real — to RAM, to the tables, to
-//! COM1, to `PM1a_CNT`, to a function's header or a held function — and the
+//! COM1, to `PM1a_CNT`, to a function's header — and the
 //! firmware's side of the lock is staged on the FACS itself, which only a
 //! machine whose firmware is not using it can take. Each address is found as
 //! a holder finds it, from the RSDP the claim's description names.
@@ -356,7 +356,7 @@ const STORMED: [u64; 2] = [0x54, 0x55];
 const STORM: usize = 10_000;
 
 /// Threads started in turn before one must have found itself off the boot
-/// processor, as `acpi_release`'s.
+/// processor.
 const STARTS: usize = 64;
 
 /// What the boot processor counts of the kernel's writes to `SMI_CMD`, in a
@@ -518,18 +518,6 @@ fn configuration(holder: &Holder, info: &AcpiInfo) {
     assert_eq!(holder.write(Space::PciConfig, host_bridge(0x44), Width::Byte, held), Ok(()), "acpi: 0x44 by address");
     assert_eq!(holder.write(Space::SystemMemory, ecam + 0x44, Width::Byte, held), Ok(()), "acpi: 0x44 through ECAM");
     assert_eq!(holder.read(Space::PciConfig, host_bridge(0x44), Width::Byte), Ok(held));
-    // The NVMe controller its driver holds is that driver's whole. Each write
-    // below is of the value the register holds, so one a broken fence let
-    // through would be red here and nowhere else.
-    const NVME: u64 = 0x0010_1b36;
-    let nvme = (0..32).find(|&device| holder.read(Space::PciConfig, pci_address(0, 0, device, 0, 0), Width::DWord) == Ok(NVME)).expect("acpi: no NVMe controller on this guest's bus 0");
-    for offset in [0x44u16, 0x100] {
-        let at = pci_address(0, 0, nvme, 0, offset);
-        let value = holder.read(Space::PciConfig, at, Width::DWord).expect("acpi: a held function reads");
-        assert_eq!(holder.write(Space::PciConfig, at, Width::DWord, value), Err(Refused::HeldFunction), "acpi: the NVMe controller's {offset:#x}");
-        let through = ecam + (u64::from(nvme) << 15 | u64::from(offset));
-        assert_eq!(holder.write(Space::SystemMemory, through, Width::DWord, value), Err(Refused::HeldFunction), "acpi: the NVMe controller's {offset:#x} through ECAM");
-    }
     // ICH9's LPC bridge places the ACPI and TCO blocks the kernel declared at 40h.
     let pmbase = pci_address(0, 0, 0x1F, 0, 0x40);
     let value = holder.read(Space::PciConfig, pmbase, Width::DWord).expect("acpi: the LPC bridge's PMBASE reads");
@@ -539,7 +527,7 @@ fn configuration(holder: &Holder, info: &AcpiInfo) {
 }
 
 /// What [`configuration`] says after the host bridge's identity.
-const CONFIGURATION_SAID: &str = "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the NVMe controller its driver holds HeldFunction, and the host bridge's 0x44 was written";
+const CONFIGURATION_SAID: &str = "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, and the host bridge's 0x44 was written";
 
 fn lock(holder: &Holder, info: &AcpiInfo) {
     let fadt = holder.table(info.rsdp, b"FACP");

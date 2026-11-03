@@ -48,7 +48,7 @@ static DOMAINS: Lock<Vtd> =
     Lock::new(Vtd { agreement: Agreement::None, domains: Domains::new(table::KERNEL_DOMAIN + 1) });
 
 /// Before any domain is made: every one is built clear of these.
-pub fn avoid(reserved: Option<Vec<(u64, u64)>>) {
+pub fn avoid(reserved: Vec<(u64, u64)>) {
     DOMAINS.lock().domains.avoid(reserved);
 }
 
@@ -63,16 +63,17 @@ pub fn unit_agrees(width: AddressWidth, ceiling: u32, mgaw: u8) {
     };
 }
 
-/// A new domain, with `room` bytes of it handed out first: refused, with no id
-/// spent, where the domain would have less than that.
-pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
+/// A new domain, with `room` bytes of it handed out first, clear of the root
+/// bridges' declared `windows`: refused, with no id spent, where it would
+/// have less than that.
+pub fn create(room: u64, windows: &[toyos_abi::acpi::RootBridgeWindow]) -> Result<(DomainId, Iova), IommuError> {
     let mut held = DOMAINS.lock();
     let (width, ceiling, mgaw) = match held.agreement {
         Agreement::None => return Err(IommuError::NoUnit),
         Agreement::Split => return Err(IommuError::WidthsDisagree),
         Agreement::One(width, ceiling, mgaw) => (width, ceiling, mgaw),
     };
-    let next = held.domains.prepare(table::translatable_bits(width, mgaw), ceiling, room)?;
+    let next = held.domains.prepare(table::translatable_bits(width, mgaw), ceiling, room, windows)?;
     let space = Space { root: TABLES.lock().alloc(), width };
     let what = alloc::format!("root={:#x} aw={} mgaw={mgaw}", space.root.phys(), width.bits());
     Ok(held.domains.add(next, space, what))
@@ -80,6 +81,26 @@ pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
 
 pub fn reserve(stream: StreamId, reserved: Reserved) {
     RESERVED.lock().push((stream, reserved));
+}
+
+/// Whether a programmed unit governs every requester on `buses`, so one
+/// seen first after boot is blocked: every unit's root and context tables
+/// carry an entry only for a requester enumerated at boot or attached since
+/// (`table::identity_domain`, [`attach`]), and a request through a
+/// not-present entry is blocked and faulted (VT-d Rev. 4.0 §3.4.3). Which
+/// unit serves a requester is its DRHD's (§8.3): one whose device scope
+/// names a bridge's sub-hierarchy over `buses`, or one that includes every
+/// PCI device no other names, on the segment functions are enumerated on.
+/// Every unit is programmed where the claim path remaps at all
+/// (`super::remappable`).
+pub fn governs(buses: (u8, u8)) -> Result<(), &'static str> {
+    let covers = |unit: &super::Live| {
+        unit.pci_all || unit.hierarchies.iter().any(|&(first, last)| first <= buses.0 && buses.1 <= last)
+    };
+    match super::UNITS.lock().iter().any(covers) {
+        true => Ok(()),
+        false => Err("no programmed VT-d unit's device scope covers them, and none includes every PCI device"),
+    }
 }
 
 /// Why no claim may have `stream`, if an RMRR refuses it.

@@ -3,7 +3,7 @@
 # holds a launcher, and `cat` and `echo` are links to it, so a spawn of
 # either is a launch.
 [boot]
-start = ["logkeeper", "test-runner"]
+start = ["acpiserver", "logkeeper", "test-runner"]
 
 [programs.logkeeper]
 service = true
@@ -18,6 +18,13 @@ starts = ["toybox"]
 [symlinks]
 "bin/cat" = "/system/bin/toybox"
 "bin/echo" = "/system/bin/toybox"
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
 
 # The virtio-serial driver, for the VM's console alone: this image runs no agent.
 [programs.virtio-console]

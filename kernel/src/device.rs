@@ -105,8 +105,13 @@ impl Drop for Claim {
             Claimed::PciFunction(_) => {}
             // The row's drop is its release.
             Claimed::Isa(_) => {}
-            // Back to the mode the firmware handed over, and then the row's drop.
-            Claimed::Acpi(_) => crate::arch::acpi_mode::release(),
+            // Back to the mode the firmware handed over, and then the row's
+            // drop; and no declaration of the root bridges' memory will
+            // come where its holder made none.
+            Claimed::Acpi(_) => {
+                crate::arch::acpi_mode::release();
+                crate::pcidev::declarer_gone();
+            }
         }
     }
 }

@@ -12,7 +12,7 @@
 # output-path choice are the only exercise of `toyos-hda` that hardware can
 # give.
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "soundserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "soundserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
@@ -91,3 +91,10 @@ restart = true
 pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]

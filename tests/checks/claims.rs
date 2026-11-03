@@ -6,10 +6,11 @@
 use super::*;
 
 /// The T14's records of one boot, verbatim but for the readback's `stream|`
-/// prefix: the I219 enumerated, firmware's root-bridge windows, a domain, and
-/// the I219 claimed, released and claimed again.
+/// prefix and the declaration's record, which names its declarer as the
+/// kernel now does: the I219 enumerated, the root-bridge windows, a domain,
+/// and the I219 claimed, released and claimed again.
 const RECORDED: &str = r"[2026-09-29 11:54:39  0.065 cpu0 kernel]   PCI 00:1f.6 [0200] vendor=8086 device=15fc prog_if=00 bars=[bar0=0xbcf00000]
-[2026-09-29 11:54:39  0.149 cpu0 kernel] pcidev: firmware declared root bridge memory: mem 0xa2000000..0xbd000000, mem 0x4000000000..0x603dc00000, mem 0xa0800000..0xa2000000, mem 0xbd000000..0xc0000000, mem 0xff000000..0xffb80000, mem 0xffd3a070..0x100000000, mem 0x603dc00000..0x8000000000
+[2026-09-29 11:54:39  0.149 cpu0 kernel] pcidev: the acpi claim declared root bridge memory: mem 0xa2000000..0xbd000000, mem 0x4000000000..0x603dc00000, mem 0xa0800000..0xa2000000, mem 0xbd000000..0xc0000000, mem 0xff000000..0xffb80000, mem 0xffd3a070..0x100000000, mem 0x603dc00000..0x8000000000
 [2026-09-29 11:54:39  0.250 cpu0 kernel] iommu: domain2 root=0xa31000 aw=48 mgaw=39 addresses from 0x2000000000 to 0x8000000000
 [2026-09-29 11:54:39  0.251 cpu0 kernel] iommu: domain2 maps 0x1c00000..0x1e00000 at 0x3fffe00000
 [2026-09-29 11:54:39  0.252 cpu0 kernel] iommu: domain2 maps 0x1e00000..0x2200000 at 0x4000000000

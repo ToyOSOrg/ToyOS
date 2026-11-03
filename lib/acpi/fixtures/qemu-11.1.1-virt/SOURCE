@@ -26,3 +26,9 @@ one file each:
 Those are `tests/iort.rs`'s regions, so the XSDT's own entries point at them
 and the walk under test is the real one. The XSDT's other six entries (FACP,
 PPTT, GTDT, MCFG, SPCR, DBG2) name tables that are not here.
+
+dsdt.bin is the DSDT of a boot of the same QEMU and firmware under `-M
+virt,gic-version=3,its=on,iommu=smmuv3,kernel-irqchip=off -m 256`, written out
+by `pmemsave` of 0x4c000000+64 MiB and found there by its signature and
+checksum: 5406 bytes at 0x4cb41018, summing to zero. Its PCI root's `_CRS` is
+what `acpiserver` declares on that machine.

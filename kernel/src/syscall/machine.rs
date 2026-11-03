@@ -369,6 +369,56 @@ pub(super) fn sys_boot_sources(syscap: RawHandle, out: &mut UserBytesMut) -> u64
 /// than answered in part.
 pub(super) const MAX_INVENTORY_RECORDS: u64 = 1024;
 
+/// A handle to the device set ([`toyos_abi::devset`]): requires a `SysCap`
+/// carrying `Rights::DEVICE`, the right that mints claims.
+pub(super) fn sys_device_set(syscap: RawHandle) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::DEVICE) {
+        return e.refuse();
+    }
+    let set = match crate::object::devset::DeviceSet::new() {
+        Ok(set) => set,
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
+    process::with_process_data(|data| {
+        super::handles::handle_result(crate::object::ops::install(&mut data.handles, crate::object::KObjectRef::DeviceSet(set)))
+    })
+}
+
+/// The device set's snapshot into `out`, header first, read whole: an empty
+/// `out` answers how many records there are, and one too short is refused
+/// whole with `ResourceExhausted`. A whole read marks the handle as having
+/// seen its generation.
+///
+/// **What a slot is owed is acted on here, on the reader's thread**
+/// (`pcidev::snapshot`), outside every process lock.
+pub(super) fn sys_device_set_read(set: RawHandle, out: &mut UserBytesMut) -> u64 {
+    use toyos_abi::devset::{self, Header};
+    use toyos_abi::inventory::RECORD_BYTES;
+    let set = match process::with_process_data(|data| data.handles.get::<crate::object::devset::DeviceSet>(set, Rights::READ)) {
+        Ok(set) => set,
+        Err(e) => return e.refuse(),
+    };
+    let (generation, settle_in, functions) = crate::pcidev::snapshot();
+    let count = functions.len() + 1;
+    if out.is_empty() {
+        return count as u64;
+    }
+    if out.len() < count * RECORD_BYTES {
+        return SyscallError::ResourceExhausted.to_u64();
+    }
+    let header = Header {
+        generation,
+        settle_in,
+        functions: u32::try_from(functions.len()).expect("pcidev: fewer functions than a u32 counts"),
+    };
+    out.write_at(0, &header.encode().0);
+    for (at, pci) in functions.into_iter().enumerate() {
+        out.write_at((at + 1) * RECORD_BYTES, &devset::function(pci).0);
+    }
+    set.saw(generation);
+    count as u64
+}
+
 /// Every inventory record, into `out`, or nothing: requires a `SysCap`
 /// carrying `Rights::INVENTORY`. An empty `out` answers the count; one too
 /// short for every record is refused whole with `ResourceExhausted`.

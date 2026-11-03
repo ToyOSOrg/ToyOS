@@ -64,6 +64,8 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::EventWait(_) => BASE.union(Rights::READ),
         KObjectRef::Pager(_) => super::paged::PagerObject::RIGHTS,
         KObjectRef::Paged(_) => super::paged::PagedHolderObject::RIGHTS,
+        // Neither `DUP` nor `TRANSFER`: the set is its minter's alone.
+        KObjectRef::DeviceSet(_) => Rights::READ.union(Rights::WAIT),
     }
 }
 
@@ -222,7 +224,7 @@ pub fn pipe_read(object: &KObjectRef) -> Option<&PipeRef> {
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
-        | KObjectRef::Notice(_) => None,
+        | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
@@ -235,7 +237,7 @@ pub fn pipe_write(object: &KObjectRef) -> Option<&PipeRef> {
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
-        | KObjectRef::Notice(_) => None,
+        | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
@@ -243,7 +245,8 @@ pub fn pipe_write(object: &KObjectRef) -> Option<&PipeRef> {
 /// share of one that goes with its object.
 pub enum WatchRef {
     Static(&'static Watch),
-    /// A static watch posted where nothing may be freed, as `pmm::returned` is.
+    /// A static watch posted where nothing may be freed, as `pmm::returned`
+    /// and the device set, which a hot-plug slot's handler posts, are.
     InPlace(&'static crate::watch::IrqWatch),
     Shared(Arc<Watch>),
     /// The watch of the function or row a claim holds: named by the claim,
@@ -280,6 +283,7 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::Connection(c) => Some(WatchRef::Shared(c.rx().read_watch().clone())),
         KObjectRef::Acceptor(a) => Some(WatchRef::Shared(a.watch().clone())),
         KObjectRef::Process(p) => Some(WatchRef::Shared(p.watch().clone())),
+        KObjectRef::DeviceSet(_) => Some(WatchRef::InPlace(&crate::pcidev::SET_WATCH)),
         KObjectRef::Notice(n) => Some(WatchRef::Shared(n.watch().clone())),
         KObjectRef::EventWait(e) => Some(WatchRef::Shared(e.watch().clone())),
         KObjectRef::Pager(p) => Some(WatchRef::Shared(p.watch().clone())),
@@ -309,7 +313,7 @@ pub fn watched_readable(object: &KObjectRef) {
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) | KObjectRef::Device(_)
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
         | KObjectRef::Namespace(_) | KObjectRef::File(_) | KObjectRef::Console(_) | KObjectRef::SysCap(_)
-        | KObjectRef::Process(_) | KObjectRef::Null(_) | KObjectRef::Job(_) => {}
+        | KObjectRef::Process(_) | KObjectRef::Null(_) | KObjectRef::Job(_) | KObjectRef::DeviceSet(_) => {}
     }
 }
 
@@ -324,7 +328,7 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
-        | KObjectRef::Notice(_) => None,
+        | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
@@ -338,7 +342,7 @@ pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
         | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
-        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => None,
+        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
@@ -352,7 +356,7 @@ pub fn other_end_gone(object: &KObjectRef) -> bool {
         | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
-        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => false,
+        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => false,
     }
 }
 
@@ -368,6 +372,8 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
         KObjectRef::SysCap(_) => false,
         KObjectRef::Console(_) => false,
         KObjectRef::Process(_) | KObjectRef::Job(_) => false,
+        // The set's watch is every handle's: one handle's close ends none.
+        KObjectRef::DeviceSet(_) => false,
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
@@ -579,7 +585,7 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
         KObjectRef::Connection(_) | KObjectRef::PipeWrite(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) => Some(SyscallError::PermissionDenied.to_u64()),
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::DeviceSet(_) => Some(SyscallError::PermissionDenied.to_u64()),
     }
 }
 
@@ -611,7 +617,7 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
         KObjectRef::Connection(_) | KObjectRef::PipeRead(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) => {
+        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => {
             Some(SyscallError::PermissionDenied.to_u64())
         }
     }
@@ -686,7 +692,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         },
         KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) => plain(FileType::Unknown),
+        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => plain(FileType::Unknown),
         KObjectRef::Device(d) => plain(match d.class() {
             device_registry::DeviceType::Framebuffer => FileType::Framebuffer,
             device_registry::DeviceType::PciFunction
@@ -730,6 +736,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
         KObjectRef::Console(_) => serial::has_data(),
         KObjectRef::Acceptor(a) => a.has_pending(),
         KObjectRef::Process(p) => p.finished(),
+        KObjectRef::DeviceSet(set) => set.changed(),
         KObjectRef::Job(j) => j.ready(),
         KObjectRef::Notice(n) => n.readable(),
         KObjectRef::EventWait(e) => e.ready(),
@@ -762,7 +769,7 @@ pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
-        | KObjectRef::Notice(_) => false,
+        | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => false,
     }
 }
 
@@ -777,7 +784,7 @@ pub fn has_space(object: &KObjectRef) -> bool {
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) => false,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => false,
     }
 }
 
@@ -796,7 +803,7 @@ pub fn mark_tty(object: &KObjectRef) -> u64 {
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_) | KObjectRef::SharedMem(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) | KObjectRef::Notice(_) => {
+        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => {
             SyscallError::InvalidArgument.to_u64()
         }
     }

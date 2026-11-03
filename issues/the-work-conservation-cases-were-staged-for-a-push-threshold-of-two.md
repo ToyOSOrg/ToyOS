@@ -25,9 +25,10 @@ kicking a busy target (PR #874), two of their claims stop being shown:
   CCX. A neighbour that looks loaded and has nothing stealable needs load the
   fair band does not express.
 
-Owned by stage S2 of the scheduler design (#872), which replaces the push and
-the victim choice and derives I15's bound for them.
+Owned by the placement track (`issues/placement-has-no-migration-cost-or-wake-affinity.md`),
+which owns the push and the victim choice and the derivation of I15's bound
+for them.
 
-**Exit**: S2's tests assert that a sampled schedule comes within half of I15's
+**Exit**: the simulator's tests assert that a sampled schedule comes within half of I15's
 bound at both benches' shapes, and `group_imbalance` stages CCX load no probe
 takes at the shipped threshold.
