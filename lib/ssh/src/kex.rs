@@ -133,6 +133,7 @@ pub(crate) struct Exchange<'a> {
 impl Exchange<'_> {
     /// `H`.
     pub(crate) fn hash(&self) -> [u8; 32] {
+        let _protection = toyos_crypto::timing::protect();
         let mut data = Vec::new();
         for field in [
             self.client_version,
@@ -154,6 +155,7 @@ impl Exchange<'_> {
 /// session_id)`, extended by `HASH(K || H || K1)`. `secret` is `K` encoded as
 /// in the exchange hash.
 pub(crate) fn derive(secret: &[u8], hash: &[u8; 32], letter: u8, session_id: &[u8; 32]) -> [u8; 64] {
+    let _protection = toyos_crypto::timing::protect();
     let first = sha256(&[secret, hash, &[letter], session_id]);
     let second = sha256(&[secret, hash, &first]);
     let mut key = [0; 64];
