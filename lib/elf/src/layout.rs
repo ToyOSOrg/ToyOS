@@ -504,9 +504,9 @@ impl Layout {
     /// The whole `page_size` pages [`Self::relro`] covers, `[start, end)` in
     /// image offsets, or `None` for none: its start rounded down and its end
     /// rounded down, as a loader that protects them must, so no byte past it
-    /// is taken with them. The bytes the first page holds before it belong to
-    /// no writable segment wherever no two segments share a page
-    /// ([`Self::overlapping_load_pages`]).
+    /// is taken with them. The first page's bytes before it are taken too: a
+    /// caller that protects these pages holds that they are no writable
+    /// byte's, as where RELRO opens its `PT_LOAD`.
     pub fn relro_pages(&self, page_size: u64) -> Option<(u64, u64)> {
         debug_assert!(page_size.is_power_of_two());
         let mask = page_size.wrapping_sub(1);
