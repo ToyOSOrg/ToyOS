@@ -6,55 +6,52 @@ opened: 2026-08-01
 
 # `probe()` mounts on a checksum, and a stamp over a used volume does not reformat
 
-Two things, from reading DATA's probe (`DataVolume::probe` in
-`system/fileserver/src/data.rs`, the kernel's `bcachefs_adapter::probe` before it)
-against the crate:
+Two things about DATA's probe (`DataVolume::probe` in
+`system/fileserver/src/data.rs`) and the bcachefs engine under it.
 
-**The threshold does not match the consequence.** `Probed::Mounted` is a
-read-write mount: `sync()` rewrites both superblocks, and any file operation
-writes the bitmap, btree nodes and data. So mounting a stranger's disk modifies
-it, which is a weaker form of the wrong the designation stamp exists to prevent.
-Accidental collision is not the risk: random bytes do not pass a superblock's
-magic and checksum. The risk is a volume this machine did not write on a
-partition typed as DATA — a **deliberately crafted** one on a disk somebody
-hands you, which is the metal track's situation exactly.
+**The threshold does not match the consequence.** A probe that mounts opens
+the volume read-write (`Mount::open`): replay, orphan release, the roots it
+makes and its first commit all write. So mounting a stranger's disk modifies
+it, which is a weaker form of the wrong the designation stamp exists to
+prevent. Accidental collision is not the risk: random bytes do not pass a
+superblock's magic and checksum. The risk is a volume this machine did not
+write on a partition typed as DATA — a **deliberately crafted** one on a disk
+somebody hands you, which is the metal track's situation exactly.
 
-Recommendation, for the owner to decide:
+What bounds it today:
 
-- **Done:** `Superblock::check` takes `block_count != device_blocks`, so a
-  volume image copied onto a different disk stops mounting — the same property
-  the designation stamp's block count gives a format. It is not authentication:
-  an attacker who knows the disk size writes the right number.
-  `a_volume_copied_onto_a_larger_device_does_not_mount` holds it.
-- **Done, 2026-08-23:** a file's extents are range-checked against the volume
-  in `decode_leaf_value`, so "mounting a hostile volume is merely rude" no
-  longer has an unchecked extent reaching a block read — or a bitmap write —
-  behind it. The residual bound this left — `read_link` sizing one kernel
-  allocation from the volume rather than the smaller heap ceiling — was closed
-  by giving `Mounted::read_link` a `max_len` its caller passes (the file
-  server's), refused as `FsError::TargetTooLong` before the allocation.
-- **The real fix, if the threat model wants one:** read-write requires
-  something the attacker cannot compute — a keyed MAC, or a designation-like
-  stamp — and everything else mounts read-only. ToyOS has no key store and no
-  TPM support, so this is a metal-track decision, not a patch.
+- **The exact check** (owner, 2026-09-01: "take the exact check now"): a
+  volume mounts only with exactly the buckets mkfs lays out on that partition
+  (`Mount::spans_its_device`), so a volume copied onto a partition of another
+  size is refused, not mounted
+  (`a_volume_copied_onto_a_larger_partition_does_not_mount`). It is not
+  authentication: whoever knows the partition's size writes a volume of it.
+- **Hostile contents are refusals, not reach.** The writer refuses features,
+  fields and geometries it does not keep (`writable`), every superblock copy,
+  member and btree pointer is bounded by the device it is read from
+  (`read_copy`, `read.rs`), a file extent's checksum is verified before its
+  bytes are used, a symlink target past 4 KiB is refused before it is
+  allocated (`readlink`), and every block request is bounded to the
+  partition by the block service.
 
-**The owner ruled on 2026-09-01: take the exact check now, authenticate on
-the metal track.** The exact check is taken and the first bullet above is
-closed. It is not authentication and the entry must keep saying so: an attacker
-who knows the disk's size writes the right number. What it removes is every case
-where the volume did not come from this disk.
+**Authentication is deferred to the metal track** by the same ruling:
+read-write only for something the attacker cannot compute — a keyed MAC or a
+designation-like stamp — and read-only for everything else. It needs a place
+to keep a secret, and ToyOS has neither a key store nor TPM support. The
+threat this leaves open is stated rather than reduced: a deliberately
+crafted volume of the partition's own size still earns a read-write mount,
+and read-write means written on sight.
 
-Authentication — read-write only for something the attacker cannot compute,
-read-only for everything else — is deferred to the metal track, because it needs
-a place to keep a secret and ToyOS has neither a key store nor TPM support. The
-threat this leaves open is stated rather than reduced: a deliberately crafted
-block 0 on a disk handed to the machine still earns a read-write mount, and
-read-write means written on sight.
+**Separately: a designation stamp over a used volume does not reformat.** The
+stamp is block 0 (`lib/bcachefs/src/designation.rs`), and it zeroes only the
+superblock's layout copy at sector 7; the primary copy at sector 8, block 1,
+still reads, so the probe mounts the old volume and never looks at the stamp.
+A volume whose superblocks all fail, stamped, is refused "an existing volume
+cannot be reformatted" while any copy's magic remains (`carries_volume`).
+Harmless for the harness, which stamps fresh images, but "re-stamp the disk to
+reformat `/home`" is not a workflow that works; `disks format data --commit`
+in the preparation image is the way to reformat.
 
-**Separately, and reproduced:** a designation stamp written over a disk that
-already held a ToyOS volume does **not** cause a reformat. `designate_for_format`
-writes block 0 only, `Superblock::read` falls back to the backup superblock at
-the last block when block 0 does not parse, and a stamp does not parse — so
-`mount()` succeeds from the backup and `probe()` answers `Mounted`, mounting the old
-volume. Harmless for the harness, which stamps freshly created sparse files, but
-it means "re-stamp the disk to reformat `/home`" is not a workflow that works.
+**Exit**: read-write mount only of a volume this machine can prove it wrote,
+by the metal track's secret, with everything else read-only; shown by a test
+in which a crafted volume of the partition's size mounts read-only.

@@ -125,6 +125,14 @@ impl<D: BlockDev> Mount<D> {
         self.root
     }
 
+    /// Whether the volume has exactly the buckets its device holds, as
+    /// [`mkfs`](crate::engine::mkfs) lays one out: a volume copied onto a
+    /// device of another size has not.
+    pub fn spans_its_device(&self) -> bool {
+        let sectors = self.dev.blocks() * (BLOCK / crate::engine::SECTOR) as u64;
+        sectors / u64::from(self.sb.member.bucket_sectors) == self.sb.member.nbuckets
+    }
+
     pub async fn inode(&self, ino: u64) -> Result<Inode> {
         Source::inode(self, ino).await
     }

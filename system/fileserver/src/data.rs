@@ -96,6 +96,11 @@ impl<D: Disk> DataVolume<D> {
             cache.block_on(Mount::open(Rc::clone(&cache), MountOptions { cache_nodes: NODES }, Box::new(OsRandom)));
         let mut formatted = false;
         let fs = match first {
+            // Not authentication: whoever knows the partition's size can
+            // write a volume of it (`issues/probe-mounts-on-a-checksum.md`).
+            Ok(fs) if !fs.spans_its_device() => {
+                return Probed::Unmountable("the volume's buckets are not this partition's: it was made on another".into());
+            }
             Ok(fs) => fs,
             Err(error) => {
                 let mut block = [[0; BLOCK]; 2];
@@ -657,6 +662,26 @@ mod tests {
         let mut v = reopen(v);
         let f = v.open("home/f", EXISTING).unwrap();
         assert_eq!(read(&mut v, f), b"kept");
+    }
+    /// A volume copied whole onto a larger partition is refused, not mounted
+    /// and written; the same bytes on their own partition mount.
+    #[test]
+    fn a_volume_copied_onto_a_larger_partition_does_not_mount() {
+        const BLOCKS: u64 = 16384;
+        let made = volume().stopped();
+        let larger = Ram::new(BLOCKS + 2048);
+        let mut block = [[0; BLOCK]];
+        for lba in 0..BLOCKS {
+            toyos_blockdev::block_on_ready(made.read(lba, &mut block)).unwrap();
+            if block[0].iter().any(|&b| b != 0) {
+                toyos_blockdev::block_on_ready(larger.write(lba, &block)).unwrap();
+            }
+        }
+        assert!(matches!(DataVolume::probe(made, 256, &["home"], clock), Probed::Mounted(_)));
+        assert!(matches!(
+            DataVolume::probe(larger, 256, &["home"], clock),
+            Probed::Unmountable(why) if why.contains("made on another")
+        ));
     }
     #[test]
     fn designation_is_required_before_any_format_write() {
