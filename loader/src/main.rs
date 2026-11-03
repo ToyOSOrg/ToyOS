@@ -603,6 +603,26 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             let (at, len) = plan.loader();
             println!("Loader image: {:#x}+{:#x}, mapped at identity as {at:#x}+{len:#x}", loader.0, loader.1);
             println!("Kernel text: {:#x}+{:#x}, mapped read-only", text.0, text.1);
+            #[cfg(target_arch = "x86_64")]
+            {
+                // PROBE (not for merge): what firmware's tables let CPL 0 do with
+                // the kernel's text where the loader put it (pool memory,
+                // EfiLoaderData), with a fresh page of each loader type, and with
+                // the loader's own code.
+                arch::firmware_maps("kernel text (EfiLoaderData pool)", text.0);
+                arch::firmware_maps("kernel text end", text.0 + text.1 - 1);
+                for (name, memory_type) in [("a fresh EfiLoaderCode page", 1u32), ("a fresh EfiLoaderData page", 2u32)] {
+                    match system_table.boot_services().allocate_page_of(memory_type) {
+                        Ok(at) => {
+                            arch::firmware_maps(name, at);
+                            // SAFETY: the page just allocated, which nothing reads.
+                            let _ = unsafe { system_table.boot_services().free_pages(at, 1) };
+                        }
+                        Err(e) => println!("FIRMWARE MAP PROBE: {name}: refused {e:?}"),
+                    }
+                }
+                arch::firmware_maps("the loader's own code", arch::firmware_maps as *const () as u64);
+            }
         }
         Err(why) => println!("Boot map: NO MAP HOLDS THIS MACHINE, {why}"),
     }

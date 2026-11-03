@@ -281,6 +281,13 @@ impl BootServices {
         unsafe { (self.allocate_pages)(kind, LOADER_DATA, pages, &mut at) }.ok().map(|()| at)
     }
 
+    /// `AllocatePages` (§7.2.1) of one page of `memory_type`, anywhere.
+    pub fn allocate_page_of(&self, memory_type: u32) -> Result<u64, Status> {
+        let mut at = 0;
+        // SAFETY: the out parameter is a live `u64`.
+        unsafe { (self.allocate_pages)(0, memory_type, 1, &mut at) }.ok().map(|()| at)
+    }
+
     /// `FreePages` (§7.2.2).
     ///
     /// # Safety

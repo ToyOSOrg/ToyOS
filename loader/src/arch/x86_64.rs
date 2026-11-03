@@ -119,6 +119,56 @@ pub mod pio {
     }
 }
 
+/// PROBE (not for merge): how firmware's own tables map `addr` for a CPL 0
+/// fetch, read before the exit: present, writable and executable as the walk
+/// from `CR3` finds them (SDM Vol. 3A §4.5, §4.6), any level's `XD` counting
+/// only under `EFER.NXE`.
+pub fn firmware_maps(what: &str, addr: u64) {
+    let (cr0, cr3, cr4): (u64, u64, u64);
+    let (lo, hi): (u32, u32);
+    // SAFETY: reads of three control registers and `IA32_EFER`, at CPL 0.
+    unsafe {
+        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+        core::arch::asm!("rdmsr", in("ecx") 0xC000_0080u32, out("eax") lo, out("edx") hi, options(nomem, nostack));
+    }
+    let efer = u64::from(hi) << 32 | u64::from(lo);
+    let nxe = efer & 1 << 11 != 0;
+    let levels = if cr4 & 1 << 12 != 0 { 5 } else { 4 };
+    let mut table = cr3 & 0x000F_FFFF_FFFF_F000;
+    let (mut writable, mut xd) = (true, false);
+    let mut said = alloc::string::String::new();
+    for level in (0..levels).rev() {
+        let index = (addr >> (12 + 9 * level)) & 0x1FF;
+        // SAFETY: firmware's tables, at their physical addresses, which its identity map reaches.
+        let entry = unsafe { core::ptr::read_volatile((table + index * 8) as *const u64) };
+        if entry & 1 == 0 {
+            said = alloc::format!("not present at level {level}");
+            break;
+        }
+        writable &= entry & 2 != 0;
+        xd |= entry & 1 << 63 != 0;
+        if level == 0 || (level < 3 && entry & 1 << 7 != 0) {
+            said = alloc::format!(
+                "{} {}, {} KiB leaf {entry:#018x}",
+                if writable { "writable" } else { "read-only" },
+                if xd && nxe { "NOT executable" } else { "executable" },
+                4u64 << (9 * level),
+            );
+            break;
+        }
+        table = entry & 0x000F_FFFF_FFFF_F000;
+    }
+    println!(
+        "FIRMWARE MAP PROBE: {what} {addr:#x}: {said} (CR0.WP={} EFER.NXE={} CR4.LA57={} CR4.SMEP={})",
+        cr0 >> 16 & 1,
+        u8::from(nxe),
+        cr4 >> 12 & 1,
+        cr4 >> 20 & 1,
+    );
+}
+
 /// Switch to the boot map at `args.boot_pml4_addr` and jump to the kernel
 /// image's entry through the high half, handing it `args`.
 ///
