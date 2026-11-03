@@ -1,0 +1,17 @@
+# One CPU and one job, `pan_read`, on the test kernel: its kernel reads the
+# job's page at EL1, which PAN makes a fault that ends the machine.
+[boot]
+start = ["logkeeper", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+[programs.test-runner]
+receives = ["power"]
+args = ["--bound-ms=60000", "pan_read"]
+
+[programs.kernelprobe]
+
+[symlinks]
+"bin/pan_read" = "/system/bin/kernelprobe"

@@ -1,5 +1,6 @@
 mod arch;
 mod debug_refused;
+mod pan_read;
 mod preempt;
 mod unmap_touch;
 
@@ -13,6 +14,7 @@ fn main() {
         Some("debug_refused") => debug_refused::main(args),
         Some("first_entry") => first_entry::main(args),
         Some("fp_isolation") => fp_isolation::main(args),
+        Some("pan_read") => pan_read::main(args),
         Some("preempt") => preempt::main(args),
         Some("unmap_touch") => unmap_touch::main(args),
         other => panic!("kernelprobe: no probe is called {other:?}"),

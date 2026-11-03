@@ -61,6 +61,10 @@ const ACTUATOR_TESTS: &[&str] = &[
     // Action 26: the timer's interrupt inside a syscall's body, which only a
     // running gate decides and nothing in a guest puts there on demand.
     "ring0_timer_in_syscall",
+    // Action 29, asked only to learn that this is the kernel whose entries
+    // check `RFLAGS.AC`: the shipping one does not, and the binary's verdict is
+    // that check not firing.
+    "ring0_clears_ac",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`.
@@ -403,6 +407,8 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_timer_floor", qemu::Profile::Virt),
     ("virt_fp_isolation", qemu::Profile::Virt),
     ("virt_first_entry", qemu::Profile::Virt),
+    // Under HVF, an Apple CPU's own PAN.
+    ("virt_pan_refuses_el1_a_user_page", qemu::Profile::Virt),
     ("virt_unmap_touch", qemu::Profile::Virt),
     ("virt_debug_refused", qemu::Profile::Virt),
     ("virt_readonly_copyout", qemu::Profile::Virt),
@@ -3446,6 +3452,51 @@ fn virt_no_seed_refused(profile: qemu::Profile, test_config: &Path) -> Result<()
     Ok(())
 }
 
+/// `PSTATE.PAN` at EL1: `tests/images/virtpancase.toml`'s one job has the test
+/// kernel read its page at the user address, and the kernel ends in a
+/// permission fault (Arm ARM `ESR_ELx.DFSC` 0b0011xx) on exactly that address.
+/// A kernel without PAN reads it, and the job ends instead, its read answered.
+fn virt_pan_refuses_el1_a_user_page(profile: qemu::Profile) -> Result<(), String> {
+    const READ: &str = "SYS_DEBUG: a Ring 0 read of 0x";
+    let config = compile::repo_root().join("tests/images/virtpancase.toml");
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        &[],
+        &[],
+        BootOptions {
+            profile,
+            smp: 1,
+            kernel_features: toyos_build::build::TEST_KERNEL,
+            ready_marker: "control registers: SCTLR_EL1=",
+            ..Default::default()
+        },
+    );
+    let mut serial = virt_console(&qemu);
+    await_guest(&mut qemu, &mut serial, "the read's fault or the job's end", |log| {
+        log.split_once(READ).is_some_and(|(_, after)| after.contains("  elr=")) || log.contains("===TEST_END pan_read ")
+    })
+    .map_err(|why| format!("{why}\nserial:\n{serial}"))?;
+    let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok();
+    let read = serial.lines().find_map(|l| l.split_once(READ)).and_then(|(_, a)| hex(a.trim()));
+    let esr = serial
+        .lines()
+        .find(|l| l.contains("KERNEL PANIC: ") && l.contains("(ESR="))
+        .and_then(|l| l.split_once("(ESR=")).and_then(|(_, e)| hex(e.trim_end_matches(')')));
+    let far = serial.lines().find_map(|l| l.split_once("far=")).and_then(|(_, f)| hex(f.split_whitespace().next()?));
+    let (Some(read), Some(esr), Some(far)) = (read, esr, far) else {
+        return Err(format!("no read, fault class and address to judge\nserial:\n{serial}"));
+    };
+    // EC 0x25, a data abort taken without a change of level; DFSC 0b0011xx, a
+    // permission fault at any level.
+    if esr >> 26 != 0x25 || esr & 0x3c != 0x0c || far != read {
+        return Err(format!(
+            "the kernel's read of {read:#x} ended in ESR={esr:#x} at far={far:#x}, not a permission fault there\nserial:\n{serial}"
+        ));
+    }
+    eprintln!("  [virt_pan] the EL1 read of {read:#x} was a permission fault (ESR={esr:#x})");
+    Ok(())
+}
+
 /// A machine whose MCFG decodes sixteen buses, with RAM past them: the kernel
 /// maps those sixteen buses' megabytes and no more, and enumerates the
 /// functions QEMU put there and nothing else, and the boot goes on.
@@ -4394,34 +4445,30 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             Ok(())
         }
         "virt_el2_drop" => {
-            // The entry's drop from EL2, which HVF never exercises: `virt` with
-            // EL2 under TCG, where firmware hands the loader the CPU at EL2. A
-            // loader that refuses the CPU says so and stops; a handover with
-            // EL2's MMU on halts in a named refusal, or faults first where
-            // firmware maps the image execute-never; a drop that leaves
-            // `HCR_EL2` other than declared halts in a named refusal and says
-            // nothing; one that lands anywhere but EL1 on `SP_EL1` panics in the
-            // declaration's read-back. Each way the line this waits for never
-            // comes.
+            // The entry's drop from EL2 on a CPU with neither FEAT_VHE nor
+            // FEAT_PAN, which HVF never exercises: `virt` with EL2 under TCG,
+            // where firmware hands the loader the CPU at EL2. A loader that
+            // refuses the CPU says so and stops; a handover with EL2's MMU on
+            // halts in a named refusal, or faults first where firmware maps the
+            // image execute-never; a drop that leaves `HCR_EL2` other than
+            // declared halts in a named refusal and says nothing; one that
+            // lands anywhere but EL1 on `SP_EL1` panics in the declaration's
+            // read-back before it reaches FEAT_PAN. Each way the refusal this
+            // waits for never comes.
+            const REFUSED: &str = "control registers: this CPU, entered at EL2, has no FEAT_PAN";
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 &[],
                 &[],
-                BootOptions {
-                    profile,
-                    kernel_params: &["test-early-panic"],
-                    ready_marker: "EARLY PANIC:",
-                    ..Default::default()
-                },
+                BootOptions { profile, ready_marker: "EARLY PANIC:", ..Default::default() },
             );
-            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
+            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(REFUSED));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
                 "CPU: entered at EL2, HCR_EL2.E2H 0,",
                 "ID_AA64MMFR4_EL1.E2H0 0x0: the kernel's entry writes E2H clear",
-                "as declared; entered at EL2, HCR_EL2 read back as declared",
                 "EARLY PANIC: panicked at",
-                EARLY_PANIC_MESSAGE,
+                REFUSED,
             ] {
                 if !serial.contains(want) {
                     return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
@@ -4513,6 +4560,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_random_differs" => virt_random_differs(profile),
         "virt_wall_clock_utc" => virt_wall_clock_utc(profile),
         "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
+        "virt_pan_refuses_el1_a_user_page" => virt_pan_refuses_el1_a_user_page(profile),
         "virt_smmu" => virt_smmu(profile, test_config),
         "virt_claim_lpi" => virt_claim_lpi(profile),
         "virt_low_ecam" => virt_low_ecam(profile, test_config),
@@ -7022,14 +7070,14 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         (16, "FSGSBASE", false),
         // Set: user programs use AVX, whose state only `XSAVE` moves.
         (18, "OSXSAVE", true),
-        // Not a bit the machine may withhold: `Arch::cpu`'s two x86-64 CPUs
-        // are the only x86-64 CPUs this repository launches and both name
-        // `+smep`, so a boot without supervisor-mode execution prevention is a
-        // kernel that stopped enabling it or a launcher that stopped asking.
+        // Required by the kernel's declaration, which refuses a CPU without
+        // them: a boot that holds either clear is a kernel that stopped
+        // enabling it.
         (20, "SMEP", true),
+        (21, "SMAP", true),
     ];
     /// The `CR4` bits the CPU may withhold, so neither answer is wrong.
-    const CR4_MAY: &[(u32, &str)] = &[(11, "UMIP"), (17, "PCIDE"), (21, "SMAP")];
+    const CR4_MAY: &[(u32, &str)] = &[(11, "UMIP"), (17, "PCIDE")];
     const XCR0_BITS: &[(u32, &str, bool)] = &[(0, "x87", true), (1, "SSE", true), (2, "AVX", true)];
     /// AVX-512's components, which a CPU without AVX-512 does not have.
     const XCR0_AVX512: &[(u32, &str)] = &[(5, "opmask"), (6, "ZMM_Hi256"), (7, "Hi16_ZMM")];

@@ -334,6 +334,8 @@ pub(crate) extern "sysv64" fn kernel_exit_to_user_check() {
 extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("trap_dispatch");
+    #[cfg(feature = "test-actuators")]
+    crate::arch::cpu::ac_witness("trap_dispatch");
     // SAFETY: `frame` is `rsp` from common_entry's pushes on this CPU's kernel stack, held nowhere else.
     let frame = unsafe { &mut *frame };
     // **First, and before every handler below it.** A handler that faults again

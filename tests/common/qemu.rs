@@ -766,7 +766,7 @@ pub enum Profile {
     /// emulated at EL1 elsewhere, and the only profile that is not a q35.
     Virt,
     /// [`Profile::Virt`] with no virtio-rng, on a CPU with no RNDR: the host's
-    /// under HVF, and `cortex-a72` where it is emulated. Firmware then has no
+    /// under HVF, and `cortex-a76` where it is emulated. Firmware then has no
     /// `EFI_RNG_PROTOCOL`, so the kernel's generator has nothing to be keyed
     /// from.
     VirtNoRng,
@@ -774,10 +774,11 @@ pub enum Profile {
     /// firmware then hands the loader the CPU at EL2, and the kernel's entry
     /// has to drop from it. HVF gives a guest EL1 only.
     VirtEl2,
-    /// [`Profile::VirtEl2`] on `-cpu cortex-a72`, which has no FEAT_VHE: any
-    /// firmware hands the loader EL2 with `HCR_EL2.E2H` clear, where an `_el1`
-    /// register name is EL1's own, so the loader's EL2 arm alone turns EL2's
-    /// MMU off.
+    /// [`Profile::VirtEl2`] on `-cpu cortex-a72`, an Armv8.0 CPU, so with no
+    /// FEAT_VHE and no FEAT_PAN: any firmware hands the loader EL2 with
+    /// `HCR_EL2.E2H` clear, where an `_el1` register name is EL1's own, so the
+    /// loader's EL2 arm alone turns EL2's MMU off; and the kernel, once
+    /// dropped to EL1, refuses the CPU by name.
     VirtEl2NoVhe,
     /// [`Profile::Virt`] emulated on `-cpu max` whatever the host: firmware
     /// hands the loader the CPU at EL1 and QEMU's FADT names PSCI's conduit
@@ -850,7 +851,7 @@ impl Profile {
     fn cpu(self) -> String {
         match self {
             Self::VirtEl2NoVhe => "cortex-a72".to_string(),
-            Self::VirtNoRng if !self.accel().is_hardware() => "cortex-a72".to_string(),
+            Self::VirtNoRng if !self.accel().is_hardware() => "cortex-a76".to_string(),
             // The one declaration's CPU with its x2APIC taken away, refused by
             // name the day that declaration stops offering one.
             Self::MetalNoX2apic => {

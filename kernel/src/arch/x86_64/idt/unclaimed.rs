@@ -22,8 +22,10 @@ static NO_ISR: AtomicU64 = AtomicU64::new(0);
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn unclaimed_entry() {
     naked_asm!(
-        // This vector can interrupt `memmove`'s `std` … `cld` window, so it owes its own `cld`.
+        // This vector can interrupt `memmove`'s `std` … `cld` window, so it
+        // owes its own `cld`, and Ring 3, so its own `clac`.
         "cld",
+        "clac",
         "push rax",
         "push rcx",
         "push rdx",

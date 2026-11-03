@@ -21,14 +21,16 @@ pub use toyos_bootmap::aarch64::MAIR;
 /// stack alignment checked at EL1 and EL0 (`SA`, `SA0`), AArch32 EL0's `IT`
 /// and `SETEND` disabled (`ITD`, `SED` — RES1 on a CPU with no AArch32 EL0,
 /// and nothing this kernel runs is AArch32), over the bits Armv8.0 makes
-/// RES1 (29, 28, 23, 22, 20, 11). `WXN` (bit 19, DDI 0601 2023-12): a page
+/// RES1 (29, 28, 22, 20, 11). `WXN` (bit 19, DDI 0601 2023-12): a page
 /// writable at EL1 is never executed there, nor one writable at EL0 at EL0,
 /// whatever its descriptor says (DDI 0487 M.d D8.4.1.2.4) — the loader's
-/// tables, which map the kernel's text read-only, included. Little-endian at
-/// both levels; EL0's cache maintenance and `WFI`/`WFE` trap.
+/// tables, which map the kernel's text read-only, included. `SPAN` (bit 23)
+/// clear: every exception taken to EL1 sets `PSTATE.PAN`, so EL1 faults on
+/// any access to a page EL0 can reach (FEAT_PAN, which [`check`] requires).
+/// Little-endian at both levels; EL0's cache maintenance and `WFI`/`WFE` trap.
 pub const SCTLR: u64 = SCTLR_RES1 | 1 << 0 | 1 << 2 | 1 << 3 | 1 << 4 | 1 << 7 | 1 << 8 | 1 << 12 | 1 << 19;
 
-const SCTLR_RES1: u64 = 1 << 29 | 1 << 28 | 1 << 23 | 1 << 22 | 1 << 20 | 1 << 11;
+const SCTLR_RES1: u64 = 1 << 29 | 1 << 28 | 1 << 22 | 1 << 20 | 1 << 11;
 
 /// `TCR_EL1` but for `IPS`: 48-bit regions from both tables (`T0SZ` = `T1SZ` =
 /// 16), 4 KiB granules (`TG0` = 0, `TG1` = 2), walks inner-shareable and
@@ -78,8 +80,16 @@ pub const CPTR_EL2: u64 = 0x33FF;
 /// `Enable`, without which EL1's own `ICC_SRE_EL1` traps to EL2.
 pub const ICC_SRE_EL2: u64 = 0b1111;
 
-/// `SPSR_EL2` for the drop: EL1 on `SP_EL1` (`M` = 0b0101), `D`, `A`, `I`, `F` masked.
-pub const SPSR_EL2_TO_EL1: u64 = 0x3C5;
+/// `SPSR` for the entry's `ERET` into the kernel, from EL2 or from EL1
+/// itself: EL1 on `SP_EL1` (`M` = 0b0101), `D`, `A`, `I`, `F` masked, and
+/// `PAN` (bit 22) set — the one way to set it with no FEAT_PAN instruction,
+/// which a CPU without it would take as undefined before [`check`] can name
+/// what it lacks. From then on every exception to EL1 sets it again
+/// ([`SCTLR`]'s `SPAN`) and every return to EL1 restores it.
+pub const SPSR_ENTRY: u64 = 0x3C5 | PSTATE_PAN;
+
+/// `PSTATE.PAN`, where `SPSR_ELx` and the `PAN` register hold it.
+const PSTATE_PAN: u64 = 1 << 22;
 
 /// The exception level the loader entered the kernel at, as the entry recorded it.
 pub static ENTRY_EL: AtomicU64 = AtomicU64::new(0);
@@ -129,10 +139,17 @@ pub fn tcr() -> u64 {
 /// Read every EL1 register the declaration names back, and refuse a CPU that
 /// holds anything else; then say what it holds, and that it was entered at `el`.
 pub fn check(el: u64) {
+    // What the drop from EL2 left, or the EL1 entry kept: EL1, on `SP_EL1`.
+    let (now, spsel) = (read!("CurrentEL") >> 2 & 3, read!("SPSel") & 1);
+    assert_eq!((now, spsel), (1, 1), "control registers: running at EL{now} on SP_EL{spsel}, not EL1 on SP_EL1");
     // `ID_AA64MMFR0_EL1.ASIDBits` = 0b0010: without 16-bit ASIDs `TCR_EL1.AS`
     // is RES0, and the read-back below would name the register, not the reason.
     let asid_bits = read!("id_aa64mmfr0_el1") >> 4 & 0xF;
     assert_eq!(asid_bits, 0b0010, "control registers: this CPU has 8-bit ASIDs, and the declaration's TCR_EL1.AS needs 16");
+    // `ID_AA64MMFR1_EL1.PAN` nonzero: without FEAT_PAN `SCTLR_EL1.SPAN` is
+    // RES1 and EL1 reaches every EL0 page, which this kernel does not run with.
+    let pan = read!("id_aa64mmfr1_el1") >> 20 & 0xF;
+    assert_ne!(pan, 0, "control registers: this CPU, entered at EL{el}, has no FEAT_PAN, so EL1 could not be kept off EL0's pages");
     let declared = [
         ("SCTLR_EL1", read!("sctlr_el1"), SCTLR),
         ("TCR_EL1", read!("tcr_el1"), tcr()),
@@ -143,13 +160,14 @@ pub fn check(el: u64) {
     for (name, live, value) in declared {
         assert_eq!(live, value, "control registers: {name} holds {live:#x}, and the declaration says {value:#x}");
     }
+    // The `PAN` register (`S3_0_C4_C2_3`), named by its encoding: the target
+    // is Armv8.0, whose assembler has no name for it.
+    let live_pan = read!("S3_0_C4_C2_3");
+    assert_eq!(live_pan, PSTATE_PAN, "control registers: PSTATE.PAN reads {live_pan:#x} at EL1, and the declaration sets it");
     hold_dit();
-    // What the drop from EL2 left, or the EL1 entry kept: EL1, on `SP_EL1`.
-    let (now, spsel) = (read!("CurrentEL") >> 2 & 3, read!("SPSel") & 1);
-    assert_eq!((now, spsel), (1, 1), "control registers: running at EL{now} on SP_EL{spsel}, not EL1 on SP_EL1");
     log!(
         "control registers: SCTLR_EL1={SCTLR:#x} TCR_EL1={:#x} MAIR_EL1={:#x} CPACR_EL1={CPACR:#x} \
-         CNTKCTL_EL1={CNTKCTL:#x}, as declared; entered at EL{el}{}",
+         CNTKCTL_EL1={CNTKCTL:#x} PSTATE.PAN=1, as declared; entered at EL{el}{}",
         tcr(),
         MAIR,
         if el == 2 {
