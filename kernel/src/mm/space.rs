@@ -857,9 +857,10 @@ impl AddressSpace {
         let start = start & !(PAGE_SIZE - 1);
         self.inventory.covered_where(start, end, |at, entry| {
             let committed = || match &entry.kind {
-                Kind::Object { object, offset, .. } => (start.max(at)..end.min(entry.end))
-                    .step_by(PAGE_SIZE as usize)
-                    .all(|page| object.page(offset + (page - at)).is_some()),
+                Kind::Object { object, offset, .. } => {
+                    let (lo, hi) = (start.max(at), end.min(entry.end));
+                    object.committed(offset + (lo - at), hi - lo)
+                }
                 Kind::Private { .. } | Kind::Copy { .. } => true,
             };
             entry.prot.allows(access) && entry.backed() && copyable(entry) && committed()

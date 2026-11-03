@@ -73,12 +73,20 @@ pub struct SharedMemObject {
     backing: Backing,
     size: u64,
     cache: CachePolicy,
+    /// [`Backing::Frames`]' pages not yet committed; 0 for every other
+    /// backing. A syscall's window over an object asks it, so one committed
+    /// whole answers without a look at each page.
+    missing: AtomicU64,
 }
 
 impl SharedMemObject {
     /// Over `core`, charged with what `backing` keeps on the heap.
     fn new(core: ObjectCore, backing: Backing, size: u64, cache: CachePolicy) -> Arc<Self> {
-        Arc::new(Self { core, backing, size, cache })
+        let missing = match &backing {
+            Backing::Frames(_) => AtomicU64::new(size / PAGE_SIZE),
+            _ => AtomicU64::new(0),
+        };
+        Arc::new(Self { core, backing, size, cache, missing })
     }
 
     /// `size` bytes of zeroed memory in whole pages, frame by frame, counted
@@ -143,9 +151,13 @@ impl SharedMemObject {
             let frame = pmm::alloc_promised().into_raw();
             drawn += 1;
             // Release: a fault that reads the frame finds it zeroed.
-            if word.compare_exchange(0, frame, Ordering::Release, Ordering::Acquire).is_err() {
+            match word.compare_exchange(0, frame, Ordering::Release, Ordering::Acquire) {
+                // Release: whoever reads none missing finds every frame stored.
+                Ok(_) => {
+                    self.missing.fetch_sub(1, Ordering::Release);
+                }
                 // SAFETY: drawn just now and named by nothing.
-                unsafe { pmm::free_drawn(self.core.job(), [frame]) };
+                Err(_) => unsafe { pmm::free_drawn(self.core.job(), [frame]) },
             }
         }
         pmm::unpromise(self.core.job(), wanted - drawn);
@@ -248,6 +260,15 @@ impl SharedMemObject {
         match &self.backing {
             Backing::Run(run) => Some((run.direct_map().phys(), run.count() as u64 * PAGE_2M)),
             Backing::Frames(_) | Backing::Boot { .. } | Backing::Aperture { .. } | Backing::Sub { .. } => None,
+        }
+    }
+
+    /// Whether every page `[offset, offset + len)` touches is committed.
+    pub fn committed(&self, offset: u64, len: u64) -> bool {
+        match &self.backing {
+            Backing::Sub { whole, offset: base, .. } => whole.committed(base + offset, len),
+            _ if self.missing.load(Ordering::Acquire) == 0 => true,
+            _ => (offset & !(PAGE_SIZE - 1)..offset + len).step_by(PAGE_SIZE as usize).all(|at| self.page(at).is_some()),
         }
     }
 
