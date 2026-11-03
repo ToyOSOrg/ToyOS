@@ -7142,6 +7142,30 @@ fn field_between<'a>(log: &'a str, head: &str, tail: &str) -> Result<&'a str, St
         .ok_or_else(|| format!("no record carrying {head:?} and then {tail:?}"))
 }
 
+/// The kernel's line for the ACPI fixed hardware's first interrupt
+/// (`kernel/src/isa.rs`, named by its claim's row).
+const ACPI_FIRST_INTERRUPT: &str = "isa: the ACPI fixed hardware took its first interrupt";
+
+/// The lines of `log` stamped in `from_ms..=to_ms`: `Ok` with the first-time
+/// ACPI events among them where they are all such events, `Err` with the rest
+/// where any is not. An event is what the machine raised at a time it chose
+/// and the boot names once: acpiserver's word on a query or GPE it took for
+/// the first time ([`acpiserver_api::FIRST_TAKEN`]) and the kernel's
+/// [`ACPI_FIRST_INTERRUPT`].
+fn idle_second_lines(log: &str, from_ms: u64, to_ms: u64) -> Result<Vec<&str>, Vec<&str>> {
+    let event = |line: &str| {
+        toyos_logstream::program_line(line)
+            .is_some_and(|said| said.tag == "acpiserver" && said.text.contains(acpiserver_api::FIRST_TAKEN))
+            || toyos_logstream::parse(line)
+                .is_some_and(|p| p.source == toyos_logstream::Source::Kernel && p.text == ACPI_FIRST_INTERRUPT)
+    };
+    let (events, rest): (Vec<&str>, Vec<&str>) = log
+        .lines()
+        .filter(|line| toyos_logstream::parse(line).and_then(|p| p.ms).is_some_and(|ms| (from_ms..=to_ms).contains(&ms)))
+        .partition(|line| event(line));
+    if rest.is_empty() { Ok(events) } else { Err(rest) }
+}
+
 /// The shortest span `counters_on_metal` reads the SMI count across: twice the
 /// longest period between the T14's firmware interrupts that has been read
 /// (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
@@ -7157,8 +7181,10 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// one its `control_regs:` line holds. No line, the kernel's or a
 /// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
 /// `counters_metal` reads on the log's clock, either
-/// edge's included because a line stamped in it may follow the read: the
-/// second is the idle machine's. The boot ran in ACPI mode, which
+/// edge's included because a line stamped in it may follow the read, but a
+/// first-time ACPI event's ([`idle_second_lines`]), which the machine raises
+/// when it chooses and the row reports: the second is the idle machine's,
+/// its own events aside. The boot ran in ACPI mode, which
 /// `/system/bin/acpiserver`'s claim put it in: `idle0` reads after the
 /// kernel's write of the enable to `SMI_CMD`, which the boot processor
 /// counted with the time it held it, and no other CPU counts one; and from
@@ -7213,16 +7239,10 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     let (idle0, at0) = phase("idle0")?;
     let (idle1, at1) = phase("idle1")?;
     let (spin, at2) = phase("spin")?;
-    let (from_ms, to_ms) = (at0 / 1_000_000, at1 / 1_000_000);
-    let inside: Vec<&str> = log
-        .text()
-        .lines()
-        .filter(|line| {
-            toyos_logstream::parse(line).and_then(|p| p.ms).is_some_and(|ms| (from_ms..=to_ms).contains(&ms))
-        })
-        .collect();
-    if !inside.is_empty() {
-        return Err(format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"));
+    let events = idle_second_lines(log.text(), at0 / 1_000_000, at1 / 1_000_000)
+        .map_err(|inside| format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"))?;
+    for event in &events {
+        eprintln!("  [counters] the machine's own event inside the idle second: {}", event.trim());
     }
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
     let mut roster = vec![bsp.rsplit("lapic_id=").next().unwrap_or_default().trim().to_string()];

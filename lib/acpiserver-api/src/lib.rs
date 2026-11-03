@@ -8,6 +8,11 @@
 /// each query number with how often it was taken.
 pub const QUERIES_COUNTED: &str = "embedded controller queries taken: ";
 
+/// What closes the server's word on an event the machine raised, an embedded
+/// controller query or a GPE, the first time this boot takes it: written once
+/// per event, at a time the machine chose.
+pub const FIRST_TAKEN: &str = " taken for the first time";
+
 /// The server's word on the embedded controller, once, after the tables'
 /// load: [`CONTROLLER_SERVED`] and its GPE and ports where it serves one,
 /// [`CONTROLLER_NONE`] and why where it serves none.

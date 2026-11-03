@@ -11,11 +11,12 @@
 //! three are taken**: a printed line reaches the stick within the second,
 //! through the `/log` fileserver on that fileserver's CPU.
 //!
-//! **`idle0` waits for the ACPI server's first lines** ([`acpi_said`]):
-//! `acpiserver` logs whether it serves an embedded controller, and a query number the first time the
-//! embedded controller raises it, and the kernel the claim's first interrupt,
-//! at times the machine chooses. A query number first raised later, on a quiet
-//! machine, is the `counters` row's to refuse.
+//! **`idle0` waits for the ACPI server's word on its controller**
+//! ([`acpi_said`]), the end of what its start writes before any event. What
+//! the machine raises afterwards, at times it chooses (a query or GPE the
+//! server names the first time it takes it, and the kernel's first fixed-
+//! hardware interrupt), may land anywhere, the idle second included: the
+//! `counters` row reports those lines there and refuses any other.
 //!
 //! **Then for the log to be quiet** ([`settle`]): a job starts while
 //! logkeeper is still writing the boot so far and the job's own launch lines
@@ -39,7 +40,7 @@ use toyos::syscap::SysCap;
 use toyos_abi::clock::stamp_ns;
 use toyos_abi::counters::{Counter, RawRecord, Record};
 use toyos_abi::syscall;
-use toyos_logstream::{parse, program_line, Source};
+use toyos_logstream::program_line;
 
 #[path = "../served_log.rs"]
 mod served_log;
@@ -71,8 +72,7 @@ const CHILDREN: u32 = 22_000;
 /// at its write budget (`system/logkeeper/src/policy.rs`, 5 s).
 const SETTLE_BOUND: Duration = Duration::from_secs(10);
 
-/// How long [`acpi_said`] waits for the server to say its controller and the
-/// controller's first query and SCI to come.
+/// How long [`acpi_said`] waits for the server to say its controller.
 const ACPI_BOUND: Duration = Duration::from_secs(10);
 
 /// What this binary's own children are asked to do: exit at once.
@@ -183,27 +183,14 @@ fn print(phase: &str, read: &Read) {
     }
 }
 
-/// Wait until `acpiserver` has said whether it serves an embedded controller
-/// and, where it does, the kernel has logged the claim's first interrupt and
-/// the server its first query.
+/// Wait until `acpiserver` has said whether it serves an embedded controller.
 fn acpi_said(log: &mut Log) {
-    let mut armed: Option<bool> = None;
-    let (mut interrupt, mut query) = (false, false);
-    log.until("the ACPI server's controller, and its first SCI and query", ACPI_BOUND, |line| {
-        if let Some(said) = program_line(line).filter(|said| said.tag == "acpiserver") {
-            if said.text.starts_with(acpiserver_api::CONTROLLER_SERVED) {
-                armed = Some(true);
-            }
-            if said.text.starts_with(acpiserver_api::CONTROLLER_NONE) {
-                armed = Some(false);
-            }
-            query |= said.text.starts_with("acpiserver: embedded controller query ")
-                && said.text.contains(" taken for the first time");
-        }
-        interrupt |= parse(line).is_some_and(|p| {
-            p.source == Source::Kernel && p.text == "isa: the ACPI fixed hardware took its first interrupt"
-        });
-        armed.is_some_and(|ec| !ec || interrupt && query)
+    log.until("the ACPI server's word on its controller", ACPI_BOUND, |line| {
+        program_line(line).is_some_and(|said| {
+            said.tag == "acpiserver"
+                && (said.text.starts_with(acpiserver_api::CONTROLLER_SERVED)
+                    || said.text.starts_with(acpiserver_api::CONTROLLER_NONE))
+        })
     });
 }
 
