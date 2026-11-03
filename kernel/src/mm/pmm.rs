@@ -397,9 +397,9 @@ impl Drop for Run {
     }
 }
 
-/// A 2 MiB superframe the kernel heap holds, holding what its last owner left
-/// in it: the heap answers uninitialized memory, and `alloc_zeroed` writes its
-/// own zeros. It goes back when it drops.
+/// A 2 MiB superframe the kernel heap holds, zeroed when it was taken, so no
+/// byte the heap hands out holds what a previous owner of the frame, another
+/// process among them, left there. It goes back when it drops.
 pub(super) struct HeapPage {
     phys: u64,
 }
@@ -407,9 +407,13 @@ pub(super) struct HeapPage {
 impl HeapPage {
     /// Grow the heap by one superframe: one its charges reserved, or one for
     /// the kernel's own use. Does not heap-allocate: the heap calls it when
-    /// it is full.
+    /// it is full, with its lock released, and the zeroing runs once the
+    /// PMM's is too, so no CPU waits on either through the 2 MiB write.
     pub(super) fn grow() -> Option<Self> {
         let phys = FRAMES.lock().as_mut()?.alloc_heap()?;
+        // SAFETY: just taken off the allocator, so unaliased, and the direct
+        // map covers every address it can name.
+        unsafe { core::ptr::write_bytes(DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE_2M as usize) };
         Some(Self { phys })
     }
 
