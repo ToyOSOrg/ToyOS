@@ -10,7 +10,7 @@
 //! address it placed the image at. A raw `p_vaddr` never leaves this module.
 
 use crate::header::{
-    FileHeader, Machine, ProgramHeader, PROGRAM_HEADER_SIZE, PT_DYNAMIC, PT_GNU_EH_FRAME, PT_LOAD,
+    FileHeader, Machine, ProgramHeader, PROGRAM_HEADER_SIZE, PT_DYNAMIC, PT_GNU_EH_FRAME, PT_GNU_RELRO, PT_LOAD,
     PT_TLS, SECTION_HEADER_SIZE,
 };
 use crate::{Error, MAX_LOAD_SEGMENTS, MAX_TLS_ALIGN};
@@ -313,6 +313,7 @@ pub struct Layout {
     dynamic: Option<DynamicSegment>,
     section_headers: Option<SectionTableRef>,
     eh_frame_hdr: Option<ImageRange>,
+    relro: Option<ImageRange>,
     program_headers: Option<ProgramHeaderTable>,
 }
 
@@ -335,6 +336,7 @@ impl Layout {
         let mut tls = None;
         let mut dynamic = None;
         let mut eh_frame_hdr = None;
+        let mut relro = None;
 
         // First pass: the extent, the singleton headers, and every `PT_LOAD`
         // field validated — so the second pass over the same headers only places
@@ -368,6 +370,7 @@ impl Layout {
                 PT_TLS => tls = Some(phdr),
                 PT_DYNAMIC => dynamic = Some(phdr),
                 PT_GNU_EH_FRAME => eh_frame_hdr = Some(phdr),
+                PT_GNU_RELRO => relro = Some(phdr),
                 _ => {}
             }
         }
@@ -435,6 +438,10 @@ impl Layout {
             None => None,
             Some(e) => Some(extent.range(e.vaddr, e.memsz).ok_or(Error::EhFrameOutsideImage)?),
         };
+        let relro = match relro {
+            None => None,
+            Some(r) => Some(extent.range(r.vaddr, r.memsz).ok_or(Error::RelroOutsideImage)?),
+        };
         let program_headers = program_header_table(&ehdr, segments.get(..placed).unwrap_or(&[]));
 
         Ok(Layout {
@@ -446,6 +453,7 @@ impl Layout {
             dynamic,
             section_headers: section_table(&ehdr),
             eh_frame_hdr,
+            relro,
             program_headers,
         })
     }
@@ -485,6 +493,26 @@ impl Layout {
     /// `PT_GNU_EH_FRAME`, for DWARF unwinding.
     pub const fn eh_frame_hdr(&self) -> Option<ImageRange> {
         self.eh_frame_hdr
+    }
+
+    /// `PT_GNU_RELRO`: what the image's relocations write and nothing writes
+    /// after them.
+    pub const fn relro(&self) -> Option<ImageRange> {
+        self.relro
+    }
+
+    /// The whole `page_size` pages [`Self::relro`] covers, `[start, end)` in
+    /// image offsets, or `None` for none: its start rounded down and its end
+    /// rounded down, as a loader that protects them must, so no byte past it
+    /// is taken with them. The bytes the first page holds before it belong to
+    /// no writable segment wherever no two segments share a page
+    /// ([`Self::overlapping_load_pages`]).
+    pub fn relro_pages(&self, page_size: u64) -> Option<(u64, u64)> {
+        debug_assert!(page_size.is_power_of_two());
+        let mask = page_size.wrapping_sub(1);
+        let relro = self.relro?;
+        let (start, end) = (relro.start & !mask, relro.end().get() & !mask);
+        (start < end).then_some((start, end))
     }
 
     /// Where the loaded image holds the program header table, or `None` when

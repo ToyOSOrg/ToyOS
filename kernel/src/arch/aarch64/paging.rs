@@ -1040,13 +1040,13 @@ pub(crate) fn seal_kernel_half() {}
 
 /// [`kernel::wx::audit`] of the kernel's tables, `TTBR1_EL1`'s on every CPU;
 /// the kernel space's `TTBR0_EL1` half maps nothing.
-pub fn audit_wx(text: core::ops::Range<u64>) -> kernel::wx::Verdict {
+pub fn audit_wx(bounds: kernel::wx::Bounds) -> kernel::wx::Verdict {
     let high = high();
     let tables = high.as_ref().expect("audit_wx: before the kernel's tables exist");
     // SAFETY: every table the kernel's root names is one this file linked, and
     // the lock held keeps them in place while they are read.
     let table = |phys: u64| unsafe { &Table::at(phys).0 };
-    kernel::wx::audit::<kernel::wx::Aarch64>(&tables.root().0, text, &table)
+    kernel::wx::audit::<kernel::wx::Aarch64>(&tables.root().0, bounds, &table)
 }
 
 /// `kernel-wx-leaf`: the direct map's leaf over `phys` made executable at

@@ -371,8 +371,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
 ];
 
 /// What the boot's audit of the kernel's tables says when every leaf passed
-/// (`kernel/src/mm/mod.rs`).
+/// (`kernel/src/mm/mod.rs`): its two halves, the text's bounds between them.
 const KERNEL_WX_HOLDS: &str = " kernel leaves, none writable and executable, none executable outside the text ";
+const KERNEL_RELRO_HOLDS: &str = ", none writable over the RELRO 0x";
 
 /// What `test-early-panic` panics with (`kernel/src/main.rs`): the last line its
 /// report puts on serial.
@@ -1173,7 +1174,11 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES,
             judge: |b| {
                 let kernel = b[0].kernel();
-                eprintln!("  [kernel_wx] {}", kernel.must_say(KERNEL_WX_HOLDS)?);
+                let line = kernel.must_say(KERNEL_WX_HOLDS)?;
+                if !line.contains(KERNEL_RELRO_HOLDS) {
+                    return Err(format!("the audit's line names no RELRO it held read-only: {line}"));
+                }
+                eprintln!("  [kernel_wx] {line}");
                 Ok(())
             },
         },

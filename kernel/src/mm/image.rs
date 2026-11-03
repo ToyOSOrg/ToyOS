@@ -1,5 +1,7 @@
 //! The kernel's own image where the loader placed it, and what each of its
-//! pages may be used for: its `PT_LOAD` segments' flags, page by page.
+//! pages may be used for: its `PT_LOAD` segments' flags, page by page, and
+//! its `PT_GNU_RELRO` pages read-only, since the loader applied every
+//! relocation before the kernel ran.
 
 use toyos_elf::{Layout, Segment};
 
@@ -15,6 +17,8 @@ pub struct Image<'a> {
     segments: &'a [Segment],
     /// The one executable segment's pages, physical.
     text: Region,
+    /// `PT_GNU_RELRO`'s whole pages, physical; empty where it has none.
+    relro: Region,
 }
 
 impl<'a> Image<'a> {
@@ -38,7 +42,10 @@ impl<'a> Image<'a> {
         let (start, end) = text.page_range(PAGE_SIZE);
         let text = Region { start: base + start, end: base + end };
         assert!(memory.start <= text.start && text.end <= memory.end, "kernel image: its text is outside its memory");
-        Self { memory, base, segments, text }
+        let relro = layout.relro_pages(PAGE_SIZE).map_or(Region { start: base, end: base }, |(start, end)| {
+            Region { start: base + start, end: base + end }
+        });
+        Self { memory, base, segments, text, relro }
     }
 
     /// Whether any byte of `[phys, phys + len)` is the image's.
@@ -62,6 +69,7 @@ impl<'a> Image<'a> {
         Some(match holder {
             Some(segment) if segment.flags().executable() => Prot::ReadExec,
             Some(segment) if !segment.writable() => Prot::Read,
+            Some(_) if (self.relro.start..self.relro.end).contains(&phys) => Prot::Read,
             _ => Prot::ReadWrite,
         })
     }
@@ -78,5 +86,10 @@ impl<'a> Image<'a> {
     /// The text's pages, as the direct map addresses them.
     pub fn text(&self) -> core::ops::Range<u64> {
         PHYS_OFFSET + self.text.start..PHYS_OFFSET + self.text.end
+    }
+
+    /// RELRO's whole pages, as the direct map addresses them.
+    pub fn relro(&self) -> core::ops::Range<u64> {
+        PHYS_OFFSET + self.relro.start..PHYS_OFFSET + self.relro.end
     }
 }

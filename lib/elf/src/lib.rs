@@ -133,6 +133,8 @@ pub enum Error {
     DynamicOutsideImage,
     /// `PT_GNU_EH_FRAME` is outside the loadable segments.
     EhFrameOutsideImage,
+    /// `PT_GNU_RELRO` is outside the loadable segments.
+    RelroOutsideImage,
     /// `PT_TLS` `p_align` is neither zero nor a power of two no larger than
     /// [`MAX_TLS_ALIGN`].
     BadTlsAlign,
@@ -171,6 +173,7 @@ impl Error {
             Error::TlsOutsideImage => "ELF: PT_TLS file image outside the loadable segments",
             Error::DynamicOutsideImage => "ELF: PT_DYNAMIC outside the loadable segments",
             Error::EhFrameOutsideImage => "ELF: PT_GNU_EH_FRAME outside the loadable segments",
+            Error::RelroOutsideImage => "ELF: PT_GNU_RELRO outside the loadable segments",
             Error::BadTlsAlign => "ELF: PT_TLS p_align is not a power of two within a page",
             Error::InitArrayOutsideImage => "ELF: DT_INIT_ARRAY outside the loadable segments",
             Error::InitArrayNotWholePointers => "ELF: DT_INIT_ARRAYSZ is not a whole number of pointers",

@@ -106,8 +106,8 @@ const AUDIT_REFUSED: &str = " kernel leaves, writable and executable: ";
 
 /// The boot's audit of the kernel's tables against one direct-map leaf
 /// `kernel-wx-leaf` made writable and executable: the refusal names that leaf
-/// under both rules and counts no other, so every leaf the boot made itself
-/// passed the same walk.
+/// under both rules and counts no other, nor any writable over the RELRO, so
+/// every leaf the boot made itself passed the same walk.
 pub fn kernel_wx_leaf_is_refused(test_config: &Path, profile: qemu::Profile) -> Result<(), String> {
     let qemu = QemuInstance::boot_with_options(
         test_config,
@@ -126,9 +126,12 @@ pub fn kernel_wx_leaf_is_refused(test_config: &Path, profile: qemu::Profile) -> 
         .map(str::trim_end)
         .ok_or_else(|| format!("no audit refusal\n{serial}"))?;
     let once = format!(": 1 (the first at {at})");
-    let (both, outside) = (format!("writable and executable{once}"), "; executable outside the text ");
-    match refusal.split_once(outside) {
-        Some((writable, executable)) if writable.ends_with(&both) && executable.ends_with(&once) => {
+    let (both, outside, relro) =
+        (format!("writable and executable{once}"), "; executable outside the text ", "; writable over the RELRO ");
+    match refusal.split_once(outside).and_then(|(writable, rest)| Some((writable, rest.split_once(relro)?))) {
+        Some((writable, (executable, read_only)))
+            if writable.ends_with(&both) && executable.ends_with(&once) && read_only.ends_with(": none") =>
+        {
             eprintln!("  [kernel_wx] {refusal}");
             Ok(())
         }
