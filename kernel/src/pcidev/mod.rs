@@ -1666,6 +1666,11 @@ fn with_bound<T>(
         return Err(SyscallError::Io);
     }
     let mut guard = function.bound.lock();
+    // Again under the lock a departure reads what the claim handed out under:
+    // whatever is handed out from here is in what it reads.
+    if !binding.here() {
+        return Err(SyscallError::Gone);
+    }
     // Bound before `claim` hands the binding out, and unbound only by its drop.
     f(guard.as_mut().expect("pcidev: a claim's binding has its function bound"))
 }
@@ -1726,6 +1731,12 @@ impl Handed {
 /// mappings go too.
 fn take(function: &Function) -> Handed {
     Handed(function.bound.lock().as_mut().map(|bound| core::mem::take(&mut bound.handed)).unwrap_or_default())
+}
+
+/// What `function`'s claim handed out so far, left on it: a departure's
+/// revoke, which the release's revokes again before it gives the function up.
+fn handed_now(function: &Function) -> Handed {
+    Handed(function.bound.lock().as_ref().map(|bound| bound.handed.clone()).unwrap_or_default())
 }
 
 /// What the claim handed out so far, taken off it. A move takes it under the

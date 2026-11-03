@@ -15,7 +15,9 @@
 //! ([`refresh`]), charged to it: powering a slot, §6.6.1's wait after its link
 //! comes up, which is a time in the snapshot the reader waits to and never a
 //! spin, and reading the functions below it. What a slot is owed is
-//! `toyos_pci::hotplug::next`'s.
+//! `toyos_pci::hotplug::next`'s. So is a departure's end: what the departed
+//! claim handed out is revoked there, and only then is its holder woken, so
+//! a holder that wakes on its departure finds its apertures gone.
 //!
 //! **An arrived function's BARs are assigned once, before it is listed**: each
 //! one the device leaves unassigned is given the lowest address inside its
@@ -247,9 +249,11 @@ pub(super) fn above(function: &Function) -> Option<&'static HotPlug> {
 
 /// Act on what every armed slot is owed, and answer how long until one may
 /// change with no interrupt to say so. What a departed function's claim
-/// handed out is taken under [`REFRESHING`], before an arrival on its record
-/// can be claimed, and revoked once it is let go: the revoke's shootdown
-/// waits on other CPUs (`super::Handed::revoke`).
+/// handed out is read under [`REFRESHING`], before an arrival on its record
+/// can be claimed, and revoked once it is let go, since the revoke's
+/// shootdown waits on other CPUs (`super::Handed::revoke`); then its holder
+/// is woken. The claim keeps the list, so its release revokes it too,
+/// before the function is given up, whichever comes first.
 pub(super) fn refresh() -> Option<u64> {
     let slots: Vec<&'static HotPlug> = SLOTS.lock().clone();
     let mut departed = Vec::new();
@@ -257,8 +261,9 @@ pub(super) fn refresh() -> Option<u64> {
         let _refreshing = REFRESHING.lock();
         slots.iter().filter_map(|slot| slot.refresh(&mut departed)).min()
     };
-    for handed in departed {
+    for (function, handed) in departed {
         handed.revoke();
+        function.watch.post_in_place();
     }
     settle
 }
@@ -294,15 +299,15 @@ impl HotPlug {
         }
     }
 
-    /// Take every function behind the slot out of the device set, and wake
-    /// whoever waits on one so it reads `Gone`.
+    /// Take every function behind the slot out of the device set: every call
+    /// its claim makes answers `Gone` from here. Its holder is woken by the
+    /// set's reader, once what the claim handed out is revoked ([`refresh`]).
     fn depart(&self) {
         self.link_since.store(0, Ordering::Release);
         for function in functions().filter(|function| self.behind(function)) {
             let arrival = function.arrival.swap(0, Ordering::AcqRel);
             if arrival != 0 {
                 function.left.store(arrival, Ordering::Release);
-                function.watch.post_in_place();
             }
         }
     }
@@ -373,11 +378,11 @@ impl HotPlug {
         }
     }
 
-    /// Act on what this slot is owed; answers how long until it may change
-    /// with no interrupt to say so.
-    /// What the slot is owed, acted on; what each function behind it that
-    /// departed since the last reading had handed out goes into `departed`.
-    fn refresh(&self, departed: &mut Vec<super::Handed>) -> Option<u64> {
+    /// Act on what this slot is owed, put each function behind it that
+    /// departed since the last reading into `departed` with what its claim
+    /// had handed out, and answer how long until the slot may change with no
+    /// interrupt to say so.
+    fn refresh(&self, departed: &mut Vec<(&'static Function, super::Handed)>) -> Option<u64> {
         let seen = self.seen();
         if !seen.occupied {
             self.removing.store(false, Ordering::Release);
@@ -416,7 +421,7 @@ impl HotPlug {
             let left = function.left.swap(0, Ordering::AcqRel);
             if left != 0 {
                 log!("pcidev: {function} left the device set; arrival {left} is retired");
-                departed.push(super::take(function));
+                departed.push((function, super::handed_now(function)));
             }
             super::retire(number);
         }
