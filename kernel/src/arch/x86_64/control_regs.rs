@@ -160,6 +160,42 @@ const CR4_REQUIRED: u64 = cr4::DE
     | cr4::SMEP
     | cr4::SMAP;
 
+/// [`CR4_REQUIRED`]'s bits by name, for a refusal to say which a CPU lacks.
+const CR4_REQUIRED_NAMES: [(u64, &str); 9] = [
+    (cr4::DE, "DE"),
+    (cr4::PAE, "PAE"),
+    (cr4::MCE, "MCE"),
+    (cr4::PGE, "PGE"),
+    (cr4::OSFXSR, "OSFXSR"),
+    (cr4::OSXMMEXCPT, "OSXMMEXCPT"),
+    (cr4::OSXSAVE, "OSXSAVE"),
+    (cr4::SMEP, "SMEP"),
+    (cr4::SMAP, "SMAP"),
+];
+
+const _: () = {
+    let mut named = 0;
+    let mut i = 0;
+    while i < CR4_REQUIRED_NAMES.len() {
+        named |= CR4_REQUIRED_NAMES[i].0;
+        i += 1;
+    }
+    assert!(named == CR4_REQUIRED, "every required CR4 bit has a name");
+};
+
+/// The names of `bits`' [`CR4_REQUIRED_NAMES`], space-separated.
+struct Cr4Names(u64);
+
+impl core::fmt::Display for Cr4Names {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut names = CR4_REQUIRED_NAMES.iter().filter(|(bit, _)| self.0 & bit != 0).map(|(_, name)| name);
+        if let Some(first) = names.next() {
+            f.write_str(first)?;
+        }
+        names.try_for_each(|name| write!(f, " {name}"))
+    }
+}
+
 /// `CR4` bits this kernel takes when the CPU offers them (checked against CPUID first: an undefined bit is `#GP`).
 const CR4_OPTIONAL: u64 = cr4::PCIDE | cr4::UMIP;
 
@@ -460,7 +496,8 @@ fn declaration(cpu_id: u32) -> u64 {
     let missing = CR4_REQUIRED & !have;
     assert!(
         missing == 0,
-        "control_regs: cpu{cpu_id} lacks CR4 bits {missing:#x} that this kernel requires",
+        "control_regs: cpu{cpu_id} lacks CR4 bits {missing:#x} ({}) that this kernel requires",
+        Cr4Names(missing),
     );
     let declared = CR4_REQUIRED | (have & CR4_OPTIONAL);
 

@@ -1743,7 +1743,7 @@ fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
 /// disambiguator that stands in front of it.
 const SYSCALL_ENTRY_SYMBOL: &str = "6kernel4arch6x86_647syscall13syscall_entry";
 
-/// `cld`, which `arch::entry::cld` puts first in every Ring 0 entry.
+/// `cld`, which `arch::entry::cld` puts first in `syscall_entry`.
 const CLD: u8 = 0xfc;
 /// `mov gs:[disp32], rsp` less its displacement: the `gs` override, `REX.W`,
 /// the opcode, and the ModRM/SIB pair that says `rsp` against an absolute
