@@ -714,6 +714,9 @@ pub fn spawn_thread(
         .expect("spawn_thread: the entry the insert admission just answered for");
     // Every thread carries the same image, so a crash report never asks this table.
     let image = proc.image.clone();
+    let homes = proc.threads.iter()
+        .filter_map(|(_, thread)| thread.sched().and_then(|sched| kernel::sched::cpu::home_of(sched.shared.state())))
+        .fold(kernel::sched::affinity::CpuMask::NONE, |homes, cpu| homes.union(kernel::sched::affinity::CpuMask::one(cpu)));
     let tid = proc.threads.insert(ThreadEntry::new(thread_data));
     // Before the thread's first instruction, which is the enqueue below: the
     // thread reads its own id here without a syscall (`toyos_abi::TCB_TID`).
@@ -729,7 +732,7 @@ pub fn spawn_thread(
         job,
         image,
         mask: crate::sched::driver::current_mask(),
-        near: Some(kernel::sched::hw::CpuId(percpu::cpu_id())),
+        near: Some(kernel::sched::cpu::Near { spawner: kernel::sched::hw::CpuId(percpu::cpu_id()), homes }),
     });
     proc.threads.get_mut(tid).unwrap().set_sched(sched);
     drop(guard);

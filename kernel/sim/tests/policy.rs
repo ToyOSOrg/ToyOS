@@ -496,6 +496,18 @@ fn a_spawned_partner_starts_in_its_spawners_llc() {
     });
 }
 
+/// **A burst of parked threads is spread before it is packed**: on
+/// `scenarios::spawned_burst` the spawner's threads go to as many CPUs as
+/// there are threads, though every one parks and raises no load.
+#[test]
+fn a_burst_of_parked_threads_is_spread_over_free_cores() {
+    sweep(&scenarios::spawned_burst(), 40, |outcome| {
+        let burst = &outcome.placed[1..];
+        let cpus: std::collections::BTreeSet<usize> = burst.iter().copied().collect();
+        assert_eq!(cpus.len(), burst.len(), "the burst shared CPUs: placed on {burst:?}");
+    });
+}
+
 /// **A wake due ahead of the running task waits out [`MIN_SLICE_NS`] and a
 /// hop, not a request** — on one CPU, against one rival process, every wake
 /// but one per run.

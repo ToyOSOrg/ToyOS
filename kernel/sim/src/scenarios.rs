@@ -1222,6 +1222,32 @@ pub fn spawned_partner() -> Scenario {
     .with_balance(Balance::None)
 }
 
+/// **A burst of threads that park**: on the AMD bench's shape, with
+/// balancing off, a thread on cpu7 spawns [`SPAWNED_BURST`] threads, more than
+/// the free cores of its LLC, each of which parks for a millisecond. A parked
+/// thread raises no published load, so only spawn placement keeps the burst
+/// from piling onto the spawner's LLC.
+pub fn spawned_burst() -> Scenario {
+    let mut spawner = vec![Op::SetAffinity(1 << 7), Op::Run(MS), Op::SetAffinity(0xffff)];
+    spawner.extend((0..SPAWNED_BURST).map(|_| Op::Spawn { template: 1 }));
+    scenario(
+        "spawned_burst",
+        16,
+        vec![queue(WaitClass::Io)],
+        vec![process(
+            "burst",
+            vec![0],
+            vec![Script::new(spawner), Script::new(vec![Op::Block { queue: 0, deadline: Some(MS) }])],
+        )],
+    )
+    .with_topology(Shape::amd_bench())
+    .with_balance(Balance::None)
+}
+
+/// How many threads [`spawned_burst`]'s spawner starts: more than its LLC's
+/// free cores and fewer than the machine's.
+pub const SPAWNED_BURST: usize = 10;
+
 /// **Masks under stealing**, every thread spawned on cpu0 of four with the
 /// shipped balance policy: two threads pinned to cpu0, two masked to cpu1 and
 /// cpu2, one that moves itself between halves of the machine as it runs, and
