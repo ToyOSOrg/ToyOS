@@ -356,7 +356,7 @@ df-witness = []
 # would be indistinguishable from a broken reader without this.
 df-witness-mutate = ["df-witness"]
 # **The kernel this tree had before the `cld`**, and the only way to have a
-# negative control for it: `arch::entry::ring3_naked_asm` drops the instruction
+# negative control for it: `arch::entry::cld` drops the instruction
 # and `arch::syscall::init` puts `DF` back out of the `SYSCALL` mask, so a build
 # carrying this inherits a set direction flag from whatever it interrupted
 # exactly as every kernel before 2026-08-21 did.

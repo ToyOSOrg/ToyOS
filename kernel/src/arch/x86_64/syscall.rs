@@ -3,7 +3,7 @@
 //! `STAR` names the selectors, `LSTAR` is the one address `syscall` can reach, and `FMASK` masks the `RFLAGS` bits a Ring 3 thread may not hand the kernel; [`crate::syscall::dispatch`] is the first code that interprets the syscall number.
 
 use crate::arch::cpu;
-use crate::arch::entry::ring3_naked_asm;
+use crate::arch::entry::syscall_naked_asm;
 use crate::arch::percpu;
 
 use crate::syscall::dispatch::syscall_dispatch;
@@ -30,7 +30,7 @@ pub fn init() {
         // TF must stay masked: an unmasked single-step trap taken between entry and the stack switch takes `#DB` on the user stack, which SMAP refuses and which escalates to a double fault.
         // `debug_trap`'s `tf-syscall` arm is the check that catches `TF` being left unmasked.
         // `IF` stays masked until `syscall_handler` opens it, past the stack switch; `RFLAGS.AC` clear is what makes SMAP bind at all.
-        // `DF` is cleared to match `arch::entry::ring3_naked_asm`'s `cld`.
+        // `DF` is cleared to match `arch::entry::cld`.
         // `entry-df-unclean` takes out only `DF`, never another bit — a control that removed two bits would be measuring two things.
         let df = if cfg!(feature = "entry-df-unclean") { 0 } else { DF };
         cpu::wrmsr(MSR_FMASK, TF | IF | AC | df);
@@ -42,7 +42,7 @@ pub fn init() {
 // `SYSCALL` switches no stack: before the `rsp` switch below runs, the CPU is at CPL 0 on the user's stack, so nothing that can fault may execute there.
 #[unsafe(naked)]
 extern "sysv64" fn syscall_entry() {
-    ring3_naked_asm!(
+    syscall_naked_asm!(
         "mov gs:[{user_rsp}], rsp",
         "mov rsp, gs:[{kernel_rsp}]",
         "mov gs:[{syscall_rip}], rcx",
@@ -104,6 +104,8 @@ extern "sysv64" fn syscall_handler(num: u64, a1: u64, a2: u64, _: u64, a3: u64, 
     }
     #[cfg(feature = "df-witness")]
     cpu::df_witness("syscall_handler");
+    #[cfg(feature = "test-actuators")]
+    cpu::ac_witness("syscall_handler");
     percpu::enter_syscall();
     cpu::enable_interrupts();
     let out = syscall_dispatch(num, a1, a2, a3, a4);

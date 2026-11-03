@@ -403,6 +403,7 @@ mod checks {
             "never named",
         )?;
         refused("every CPU without SMEP", &[(DECLARED.0, DECLARED.1 & !(1 << 20), DECLARED.2); 4], "SMEP")?;
+        refused("every CPU without SMAP", &[(DECLARED.0, DECLARED.1 & !(1 << 21), DECLARED.2); 4], "SMAP")?;
         refused("every CPU without PGE", &[(DECLARED.0, DECLARED.1 & !(1 << 7), DECLARED.2); 4], "PGE")?;
         // A CPU that agrees about every named bit and differs in one the CPU is
         // allowed to withhold, so nothing above it can object.
@@ -415,7 +416,7 @@ mod checks {
         // died before the check looks like.
         refused("three lines for four CPUs", &[DECLARED; 3], "{0, 1, 2, 3}")?;
 
-        eprintln!("  [control_regs] the verdict refuses 15 machines and accepts the two declared ones");
+        eprintln!("  [control_regs] the verdict refuses 16 machines and accepts the two declared ones");
         Ok(())
     }
 

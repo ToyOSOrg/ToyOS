@@ -144,12 +144,24 @@ pub const CR0: u64 = cr0::PE | cr0::MP | cr0::ET | cr0::NE | cr0::WP | cr0::PG;
 
 /// `CR4` bits every CPU must have. `DE` is zero legacy, not need — this kernel
 /// touches no debug register. `PGE` makes a kernel leaf global
-/// (`paging::kernel_leaf`). `FSGSBASE` is [`CR4_FORBIDDEN`], not here.
-const CR4_REQUIRED: u64 =
-    cr4::DE | cr4::PAE | cr4::MCE | cr4::PGE | cr4::OSFXSR | cr4::OSXMMEXCPT | cr4::OSXSAVE;
+/// (`paging::kernel_leaf`). `SMEP` and `SMAP` make Ring 0 fault on fetching
+/// from or touching a user page (SDM Vol. 3A §4.6), which every CPU of this
+/// kernel's range (2020 on) offers, so one without them is refused rather than
+/// run with the user half open to a kernel bug; and every Ring 0 entry's
+/// `clac` (`arch::entry`) is `#UD` without `SMAP`. `FSGSBASE` is
+/// [`CR4_FORBIDDEN`], not here.
+const CR4_REQUIRED: u64 = cr4::DE
+    | cr4::PAE
+    | cr4::MCE
+    | cr4::PGE
+    | cr4::OSFXSR
+    | cr4::OSXMMEXCPT
+    | cr4::OSXSAVE
+    | cr4::SMEP
+    | cr4::SMAP;
 
 /// `CR4` bits this kernel takes when the CPU offers them (checked against CPUID first: an undefined bit is `#GP`).
-const CR4_OPTIONAL: u64 = cr4::SMEP | cr4::SMAP | cr4::PCIDE | cr4::UMIP;
+const CR4_OPTIONAL: u64 = cr4::PCIDE | cr4::UMIP;
 
 /// The `CR4` bit no shipping CPU may hold: `FSGSBASE` gives Ring 3 `WRGSBASE`,
 /// and `GS.base` aims the first memory access of every kernel entry
@@ -285,11 +297,9 @@ pub fn init(cpu_id: u32) {
                 cpu::wrmsr(xss::MSR, XSS);
             }
         }
-        if declared & cr4::SMAP != 0 {
-            // Nothing in this kernel sets `RFLAGS.AC`, so this is the only
-            // `clac` the kernel needs.
-            cpu::clac();
-        }
+        // What firmware left in `RFLAGS.AC`; from here on every entry from
+        // Ring 3 clears it, and nothing in this kernel sets it.
+        cpu::clac();
     }
     self_check(cpu_id, declared, xcr0, form, has_xss);
     super::fpu::declare_area(cpu_id, xcr0, form);

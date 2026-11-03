@@ -148,6 +148,29 @@ pub fn direction_flag_set() -> bool {
     rflags & 0x400 != 0
 }
 
+/// The test kernel's check that Ring 0 runs with `RFLAGS.AC` clear, under
+/// which alone SMAP refuses it a user page: every entry clears it
+/// (`arch::entry`, `IA32_FMASK`), so a set flag at `site` is a gate that did not.
+#[cfg(feature = "test-actuators")]
+pub fn ac_witness(site: &str) {
+    let rflags: u64;
+    // SAFETY: balanced push/pop leaves rsp unchanged; the pair uses the stack, so no nomem.
+    unsafe {
+        asm!("pushfq", "pop {}", out(reg) rflags);
+    }
+    if rflags & 1 << 18 != 0 {
+        ac_witnessed(site);
+    }
+}
+
+#[cfg(feature = "test-actuators")]
+#[cold]
+#[inline(never)]
+fn ac_witnessed(site: &str) -> ! {
+    clac();
+    panic!("AC WITNESS: Ring 0 reached {site} with RFLAGS.AC set, so SMAP let it reach every user page");
+}
+
 /// Clears DF before reporting: `core::fmt`'s backward copy would corrupt the report it's printing.
 #[cfg(feature = "df-witness")]
 #[cold]
@@ -277,7 +300,7 @@ pub unsafe fn wbinvd() {
 /// Clears `RFLAGS.AC`, so a supervisor access to a user page faults under SMAP.
 #[inline]
 pub fn clac() {
-    // SAFETY: clears one RFLAGS bit and touches no memory; #UD without SMAP, which the one caller checks first.
+    // SAFETY: clears one RFLAGS bit and touches no memory; #UD without SMAP, which `control_regs` refuses a CPU for before it gets here.
     unsafe { asm!("clac", options(nomem, nostack)); }
 }
 
