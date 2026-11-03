@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc as StdArc;
 
 use kernel::sched::affinity::CpuMask;
-use kernel::sched::cpu::{Action, CpuHandle, CpuSched, Env, SchedPass};
+use kernel::sched::cpu::{home_of, Action, CpuHandle, CpuSched, Env, Near, SchedPass};
 use kernel::sched::job::{Job, JobKey};
 use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent, TraceKind};
 use kernel::sched::invariants::Container;
@@ -260,6 +260,8 @@ pub struct Vm<'q> {
     pub programs: BTreeMap<TaskKey, Program>,
     /// Every task ever created, so a finalize-twice is detectable.
     pub spawned: BTreeSet<TaskKey>,
+    /// The CPU each spawn was placed on, in spawn order.
+    pub placed: Vec<usize>,
     /// Every task that ever executed a single op. The difference against
     /// [`Self::spawned`] is what a stopped CPU costs the machine, and it is the
     /// only quantity that can be read off a run where some tasks never run at
@@ -616,6 +618,7 @@ impl<'q> Vm<'q> {
             procs,
             programs: BTreeMap::new(),
             spawned: BTreeSet::new(),
+            placed: Vec::new(),
             ran: BTreeSet::new(),
             live: BTreeSet::new(),
             shared: BTreeMap::new(),
@@ -711,9 +714,9 @@ impl<'q> Vm<'q> {
         all
     }
 
-    /// `near` is the CPU of the thread spawning this one, as
+    /// `near` names the thread spawning this one into its process, as
     /// `CpuHandles::place` takes it.
-    fn spawn(&mut self, process: usize, template: usize, mask: CpuMask, near: Option<CpuId>) {
+    fn spawn(&mut self, process: usize, template: usize, mask: CpuMask, near: Option<Near>) {
         if self.live.len() >= self.scenario.max_tasks {
             return;
         }
@@ -757,6 +760,7 @@ impl<'q> Vm<'q> {
             PlacementShape::AllOn(cpu) => cpu,
             PlacementShape::Listed(cpus) => cpus[self.spawned.len()],
         };
+        self.placed.push(dst);
         let builder = TaskBuilder {
             key,
             job,
@@ -1532,7 +1536,13 @@ impl<'q> Vm<'q> {
                 let process = self.programs[&key].process;
                 // A new thread starts with its spawner's mask.
                 let mask = self.shared[&key].mask().load().0;
-                self.spawn(process, template, mask, Some(CpuId(cpu as u32)));
+                let homes = self
+                    .programs
+                    .iter()
+                    .filter(|(_, program)| program.process == process)
+                    .filter_map(|(key, _)| self.shared.get(key).and_then(|shared| home_of(shared.state())))
+                    .fold(CpuMask::NONE, |homes, cpu| homes.union(CpuMask::one(cpu)));
+                self.spawn(process, template, mask, Some(Near { spawner: CpuId(cpu as u32), homes }));
                 self.programs.get_mut(&key).expect("live").pc += 1;
             }
             Op::Wake { queue, all, boost } => {

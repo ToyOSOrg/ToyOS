@@ -1348,7 +1348,8 @@ impl<X: SchedPayload> CpuSched<X> {
     }
 }
 
-fn home_of(state: TaskState) -> Option<CpuId> {
+/// The CPU a task in `state` calls home, if it is alive.
+pub fn home_of(state: TaskState) -> Option<CpuId> {
     match state {
         TaskState::Running(cpu)
         | TaskState::Ready(cpu)
@@ -2634,6 +2635,19 @@ pub struct CpuHandles<M> {
     offering: Box<[AtomicU64]>,
 }
 
+/// A thread spawned into its own process, as [`CpuHandles::place`] weighs it:
+/// its spawner's CPU, near which it starts, and the CPUs the process's threads
+/// call home. The thread usually works with its spawner, and a pair split
+/// across LLCs moves every line it shares between L3s. A parked thread raises
+/// no published load, so without `homes` a burst of threads that park would
+/// pile into the spawner's LLC while the rest of the machine sat idle, and be
+/// woken there together.
+#[derive(Clone, Copy, Debug)]
+pub struct Near {
+    pub spawner: CpuId,
+    pub homes: CpuMask,
+}
+
 /// The CPUs an idle CPU is chosen among, nearest first: `me`'s LLC, then the
 /// rest of its package, then the machine. A choice stays in the first group
 /// with a candidate, so locality decides before core idleness does.
@@ -2783,16 +2797,11 @@ impl<M: SchedMsg> CpuHandles<M> {
     /// least behind, and among those one that sleeps with no kick on its way
     /// ([`Doorbell::sleeping_unrung`]: a spawn raises no published load, so a
     /// burst would otherwise pile on the first sleeper while it wakes), then
-    /// one whose SMT siblings run least, then one in `near`'s LLC, then the
-    /// one quickest to wake ([`CpuHandle::idle_exit`]), as [`Self::idle_near`]
-    /// weighs its sleepers. Scanned from `start` so that ties spread instead of
-    /// piling on one CPU.
-    ///
-    /// `near` is the CPU of the thread spawning a thread into its own process:
-    /// the two share an address space and usually work together, and a pair
-    /// split across LLCs moves every line it shares between L3s. A free core
-    /// elsewhere still beats a shared one in that LLC, so a burst of threads
-    /// spreads over the machine's free cores before it doubles up on any.
+    /// one whose SMT siblings run least, then for a thread [`Near`] names one
+    /// no thread of its process calls home and then one in its spawner's LLC,
+    /// then the one quickest to wake ([`CpuHandle::idle_exit`]), as
+    /// [`Self::idle_near`] weighs its sleepers. Scanned from `start` so that
+    /// ties spread instead of piling on one CPU.
     ///
     /// **It lives here rather than in the driver because the simulator places
     /// tasks too**, and a placement rule written twice is one the sim is not
@@ -2802,16 +2811,17 @@ impl<M: SchedMsg> CpuHandles<M> {
     /// A machine where no CPU is answering falls back to the plain minimum: the
     /// test breaks a tie against a CPU that will never answer, and a machine
     /// with none has no such tie to break.
-    pub fn place(&self, start: CpuId, now: Nanos, mask: CpuMask, near: Option<CpuId>) -> CpuId {
+    pub fn place(&self, start: CpuId, now: Nanos, mask: CpuMask, near: Option<Near>) -> CpuId {
         let n = self.handles.len();
-        let away = |cpu| near.is_some_and(|near| self.topology.level(cpu, near) > Some(Level::Llc));
+        let homed = |cpu| near.is_some_and(|near| near.homes.contains(cpu));
+        let away = |cpu| near.is_some_and(|near| self.topology.level(cpu, near.spawner) > Some(Level::Llc));
         let scan = |answering_only: bool| {
             (0..n)
                 .map(|offset| CpuId(((start.0 as usize + offset) % n) as u32))
                 .filter(|&cpu| mask.contains(cpu) && (!answering_only || self.get(cpu).answering(now)))
                 .min_by_key(|&cpu| {
                     let handle = self.get(cpu);
-                    (handle.load(), !handle.doorbell().sleeping_unrung(), self.busy_siblings(cpu), away(cpu), handle.idle_exit())
+                    (handle.load(), !handle.doorbell().sleeping_unrung(), self.busy_siblings(cpu), homed(cpu), away(cpu), handle.idle_exit())
                 })
         };
         scan(true)
@@ -4931,13 +4941,34 @@ mod tests {
             handles.get(CpuId(cpu)).publish_pass(NOW);
         }
         sleep(&handles, &[0, 2, 3, 4, 5, 6, 7]);
-        let near = Some(C1);
+        let near = Some(Near { spawner: C1, homes: CpuMask::one(C1) });
         assert_eq!(handles.place(C0, NOW, CpuMask::ANY, None), C0, "a new process's thread takes the rotation's first");
         assert_eq!(handles.place(C0, NOW, CpuMask::ANY, near), CpuId(3), "cpu3, a free core of cpu1's LLC");
         wake_up(&handles, &[3, 7]);
         assert_eq!(handles.place(C0, NOW, CpuMask::ANY, near), C0, "cpu5 shares cpu1's core: a free core elsewhere first");
         wake_up(&handles, &[0, 2, 4, 6]);
         assert_eq!(handles.place(C0, NOW, CpuMask::ANY, near), CpuId(5), "the one sleeper left");
+    }
+
+    /// **A spawned thread passes over the CPUs its process's threads call
+    /// home**, near or not, while a free core no thread of it calls home is
+    /// left: the spawner runs on cpu1, and its threads are parked on cpu3 and
+    /// cpu7, the other free core of its LLC.
+    #[test]
+    fn a_spawned_thread_passes_over_cpus_its_siblings_call_home() {
+        let (handles, _consumers) = bare_handles(two_llcs());
+        for cpu in 0..8 {
+            handles.get(CpuId(cpu)).publish_pass(NOW);
+        }
+        sleep(&handles, &[0, 2, 3, 4, 5, 6, 7]);
+        let homes = |cpus: &[u32]| cpus.iter().fold(CpuMask::NONE, |mask, &cpu| mask.union(CpuMask::one(CpuId(cpu))));
+        let near = |cpus: &[u32]| Some(Near { spawner: C1, homes: homes(cpus) });
+        assert_eq!(handles.place(C0, NOW, CpuMask::ANY, near(&[1, 3, 7])), C0, "cpu0, a free core no thread of it calls home");
+        assert_eq!(
+            handles.place(C0, NOW, CpuMask::ANY, near(&[0, 1, 2, 3, 4, 6, 7])),
+            CpuId(3),
+            "every free core is someone's home: then the spawner's LLC, and a free core before cpu5's shared one",
+        );
     }
 
     /// **A spawn passes over a sleeper already being woken**: it keeps its
