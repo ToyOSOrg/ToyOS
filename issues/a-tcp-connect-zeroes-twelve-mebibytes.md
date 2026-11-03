@@ -49,7 +49,7 @@ Evidence: [r8](https://github.com/ToyOSOrg/evidence/tree/4d6de513cc641c73a3d65a4
 - **What was learned:**
   - Every syscall's user window passes `Space::allows`, and anything added there shows in osbench's `fs` and `pipe` rows on both benches. A second inventory walk read +4 to +15%. A per-page commit check cost every image read at spawn.
   - Folding the check into the one descent, and answering a whole-committed object from a count, removed most of it, not all.
-  - A retry should keep the uncommitted-page refusal off `allows`. For example, the user copy can answer `BadAddress` where its own page lookup finds nothing, instead of dropping the write.
+  - A retry waits for #1150 (S0-a user-copy paths) and for stage 7b, which reshape user copies. It should then keep the uncommitted-page refusal off `allows`. For example, the user copy can answer `BadAddress` where its own page lookup finds nothing, instead of dropping the write.
   - A/B rows that move in opposite directions between sessions with the same code on their path (the T14 `fs.mem` rows, the AMD `mem.anon.map`) are to be read against the instruction-level diff of both binaries before they are believed.
 
 **Direction, the owner's (2026-10-27)**: remove the waste, not shrink a
