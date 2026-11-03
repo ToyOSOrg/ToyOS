@@ -186,28 +186,35 @@ pub fn init(memory_map: &'static [MemoryMapEntry], reserved: &[Region], image: &
 }
 
 /// Walk the kernel's tables and stop the boot on a leaf that is writable and
-/// executable, or executable outside `image`'s text.
+/// executable, executable outside `image`'s text, or writable over its RELRO.
 pub fn audit_wx(image: &Image) {
-    let text = image.text();
-    let verdict = paging::audit_wx(text.clone());
+    let (text, relro) = (image.text(), image.relro());
+    let verdict = paging::audit_wx(kernel::wx::Bounds { text: text.clone(), read_only: relro.clone() });
     let said = |finding: Option<kernel::wx::Finding>| match finding {
         Some(found) => ::alloc::format!("{} (the first at {:#x})", found.leaves, found.first),
         None => ::alloc::string::String::from("none"),
     };
     assert!(
         verdict.holds(),
-        "paging: of {} kernel leaves, writable and executable: {}; executable outside the text {:#x}..{:#x}: {}",
+        "paging: of {} kernel leaves, writable and executable: {}; executable outside the text {:#x}..{:#x}: {}; \
+         writable over the RELRO {:#x}..{:#x}: {}",
         verdict.leaves,
         said(verdict.writable_executable),
         text.start,
         text.end,
         said(verdict.executable_outside_text),
+        relro.start,
+        relro.end,
+        said(verdict.writable_read_only),
     );
     crate::log!(
-        "paging: {} kernel leaves, none writable and executable, none executable outside the text {:#x}..{:#x}",
+        "paging: {} kernel leaves, none writable and executable, none executable outside the text {:#x}..{:#x}, \
+         none writable over the RELRO {:#x}..{:#x}",
         verdict.leaves,
         text.start,
-        text.end
+        text.end,
+        relro.start,
+        relro.end
     );
 }
 

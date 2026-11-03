@@ -1279,12 +1279,12 @@ pub(crate) fn seal_kernel_half() {
 
 /// [`kernel::wx::audit`] of the kernel's tables, whose kernel half every
 /// address space shares.
-pub fn audit_wx(text: core::ops::Range<u64>) -> kernel::wx::Verdict {
+pub fn audit_wx(bounds: kernel::wx::Bounds) -> kernel::wx::Verdict {
     let space = KERNEL.lock();
     // SAFETY: every table the kernel's root names is one this module linked,
     // and the lock held keeps them in place while they are read.
     let table = |phys: u64| unsafe { &PageTablePage::from_phys(phys).0 };
-    kernel::wx::audit::<kernel::wx::X86_64>(&space.root_table().0, text, &table)
+    kernel::wx::audit::<kernel::wx::X86_64>(&space.root_table().0, bounds, &table)
 }
 
 /// `kernel-wx-leaf`: the direct map's leaf over `phys` made executable, so

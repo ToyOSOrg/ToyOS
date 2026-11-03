@@ -222,6 +222,27 @@ fn a_header_naming_a_vaddr_outside_the_image_is_refused_by_name() {
         .ph(Phdr { kind: PT_GNU_EH_FRAME, flags: PF_R, offset: 0, vaddr: 0, filesz: 0, memsz: u64::MAX, align: 4 })
         .build();
     assert_eq!(refused(eh), Error::EhFrameOutsideImage);
+
+    let relro = Elf::honest(0x1000)
+        .ph(Phdr { kind: PT_GNU_RELRO, flags: PF_R, offset: 0, vaddr: 0x800, filesz: 0x1000, memsz: 0x1000, align: 1 })
+        .build();
+    assert_eq!(refused(relro), Error::RelroOutsideImage);
+}
+
+/// A loader protects RELRO's whole pages only: its start rounded down, its end
+/// rounded down, and none where that leaves no page.
+#[test]
+fn relro_pages_are_the_whole_pages_it_covers() {
+    let relro = |vaddr, memsz| {
+        let bytes = Elf::honest(0x4000)
+            .ph(Phdr { kind: PT_GNU_RELRO, flags: PF_R, offset: 0, vaddr, filesz: memsz, memsz, align: 1 })
+            .build();
+        accepted(bytes).relro_pages(0x1000)
+    };
+    assert_eq!(relro(0x1650, 0x19b0), Some((0x1000, 0x3000)));
+    assert_eq!(relro(0x1650, 0x1000), Some((0x1000, 0x2000)));
+    assert_eq!(relro(0x1650, 0x100), None);
+    assert_eq!(accepted(Elf::honest(0x4000).build()).relro_pages(0x1000), None);
 }
 
 /// `.tbss` is address space the containing `PT_LOAD` need not cover: only the

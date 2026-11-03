@@ -36,6 +36,8 @@ fn a_linked_binary_parses_to_what_readelf_says() {
     assert_eq!(dynamic, Some((0xbe620, 0xc0620, 0x100)));
     let eh = layout.eh_frame_hdr().map(|r| (r.start().get(), r.len()));
     assert_eq!(eh, Some((0x2538c, 0x251c)));
+    assert_eq!(layout.relro().map(|r| (r.start().get(), r.len())), Some((0xb9270, 0x7d90)));
+    assert_eq!(layout.relro_pages(4096), Some((0xb9000, 0xc1000)));
     assert_eq!(layout.tls().unwrap().memsz(), 0x68);
     assert_eq!(layout.tls().unwrap().align(), 0x8);
 
