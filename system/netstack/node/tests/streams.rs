@@ -1264,7 +1264,7 @@ fn a_download_a_reader_keeps_up_with_grows_the_receive_ring_and_keeps_every_byte
     net.far.scales = true;
     let (id, client) = net.connect(None);
     client.region.client_commits_nothing();
-    let local = Port::new(net.far.port).expect("the SYN's source port");
+    let local = Endpoint { addr: A, port: Port::new(net.far.port).expect("the SYN's source port") };
     assert_eq!(net.events(), [StreamEvent::Connected { id, local }]);
     assert!(net.far.shift > 0, "the node's SYN asked to scale its window");
     let sent = text(16 << 20);
