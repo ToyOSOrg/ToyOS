@@ -586,6 +586,22 @@ mod tests {
         assert_eq!(&bytes[2 * BLOCK + 17..2 * BLOCK + 19], b"va");
         assert!(bytes[2 * BLOCK + 19..].iter().all(|&b| b == 0));
     }
+    /// The volume is 64 MiB, so the write lands only as a hole: nothing
+    /// bridges the gibibyte before it.
+    #[test]
+    fn a_write_a_gibibyte_past_the_end_leaves_a_hole() {
+        let mut v = volume();
+        let f = v.open("home/far", CREATE).unwrap();
+        let far = 1 << 30;
+        v.write(f, far, b"x").unwrap();
+        v.sync().unwrap();
+        assert_eq!(v.node_meta(f).unwrap().size, far + 1);
+        let mut tail = vec![0xa5; 2 * BLOCK];
+        let from = far + 1 - tail.len() as u64;
+        assert_eq!(v.read(f, from, &mut Buf(&mut tail)).unwrap(), tail.len());
+        assert_eq!(tail.pop(), Some(b'x'));
+        assert!(tail.iter().all(|&b| b == 0));
+    }
     #[test]
     fn unlink_and_replacement_keep_live_inode_identity() {
         let mut v = volume();
