@@ -15,9 +15,11 @@
 //!
 //! **The other arms.** A `MANAGE`-only handle is no place, and the supervisor refuses a
 //! launch whose place is a pipe and answers the launches after it. A chain —
-//! each link spawns the next directly — stops where the kernel refuses a
-//! process more than `MAX_DEPTH` below the supervisor, and dies whole with its
-//! first link. And a `cat` a shell `detach`es outlives the shell.
+//! each link spawns the next directly, from this program's immutable image it
+//! is endowed, so no link asks a file server for anything — stops where the
+//! kernel refuses a process more than `MAX_DEPTH` below the supervisor, and
+//! dies whole with its first link. And a `cat` a shell `detach`es outlives the
+//! shell.
 //!
 //! This process holds the launcher test-runner endows every job, and hands a
 //! duplicate to each child that launches: a direct spawn inherits none.
@@ -44,8 +46,6 @@ use std::os::toyos::process::ExitStatusExt;
 use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_process_tree";
-/// The chain loads its executable through the temporary file server.
-const LINK_PATH: &str = "/tmp/test_rs_process_tree";
 const INVALID_PATH: &str = "/tmp/process_tree_invalid_elf";
 /// `/system/bin/toybox` under the name of an applet that reads its input until
 /// it ends: a declared program, so a launch, and one that runs until killed
@@ -55,6 +55,9 @@ const SHELL: &str = "/system/bin/shell";
 
 /// The name B's namespace carries the port back to A under.
 const BACK: &str = "back";
+
+/// The label a chain's link is endowed this program's image under.
+const LINK_IMAGE: &str = "link-image";
 
 /// B to A: the handles to C, D, B's own `self` and E, in that order.
 const MSG_GROWN: u32 = 1;
@@ -301,9 +304,9 @@ fn a_pipe_is_no_place() {
 /// the link says on the chain's one output. Killing the first link then ends
 /// every one.
 fn a_chain_stops_at_max_depth_and_dies_whole() {
-    std::fs::copy(SELF_PATH, LINK_PATH).expect("copy this program to /tmp for the chain");
-    let mut first = Command::new(LINK_PATH)
-        .args(["link", "1"])
+    let read = toyos::files::read_image(SELF_PATH.as_bytes()).expect("read this program's image");
+    let image = read.as_immutable().expect("the system share holds this program as an immutable region");
+    let mut first = link_command(1, image.as_handle())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the chain's first link");
@@ -339,11 +342,20 @@ fn link(k: u32) -> ! {
         println!("unbounded at link {k}");
         park();
     }
-    let next = Command::new(LINK_PATH).args(["link", &(k + 1).to_string()]).spawn();
+    let image: OwnedHandle = Endowments::get().take(LINK_IMAGE).expect("a link is endowed its image");
+    let next = link_command(k + 1, image.as_handle()).spawn();
     if let Err(e) = next {
         println!("link {k}: its next link was refused: {e}");
     }
     park();
+}
+
+/// Link `k`, run from `image` and endowed a copy of it for the next.
+fn link_command(k: u32, image: toyos::BorrowedHandle<'_>) -> Command {
+    let copy = image.try_clone_to_owned().expect("a copy of the image for the link");
+    let mut command = Command::new(SELF_PATH);
+    command.args(["link", &k.to_string()]).boot_image(image.into()).endow(LINK_IMAGE, copy.into());
+    command
 }
 
 /// A `cat` a shell `detach`es is its session owner's child, so it runs on once the shell's

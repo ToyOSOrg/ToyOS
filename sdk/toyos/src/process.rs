@@ -173,6 +173,15 @@ impl Image {
         Self { object: Object::Immutable(image), len }
     }
 
+    /// The region nobody writes this image is, when its server held the
+    /// program so: a copy starts another child with no file read.
+    pub fn as_immutable(&self) -> Option<&Immutable> {
+        match &self.object {
+            Object::Immutable(image) => Some(image),
+            Object::Read(_) => None,
+        }
+    }
+
     /// The program's bytes, as they were read.
     pub fn bytes(&self) -> &[u8] {
         let bytes = match &self.object {
