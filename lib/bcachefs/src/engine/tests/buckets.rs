@@ -258,7 +258,7 @@ fn metadata_only_capacity_returns_after_reopening_and_removing_all_names() {
     full_crash_removal_and_reuse(formatted(64 << 20, None), 0);
 }
 
-fn full_crash_removal_and_reuse(dev: Image, existing: usize) -> Image {
+pub(super) fn full_crash_removal_and_reuse(dev: Image, existing: usize) -> Image {
     let name = |i| format!("f{i:06}-{}", "x".repeat(240));
     let made = {
         let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
