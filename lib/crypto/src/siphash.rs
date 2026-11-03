@@ -24,6 +24,7 @@ fn compress(v: &mut [u64; 4], m: u64) {
 }
 
 pub fn siphash24(key: &Key, data: &[u8]) -> u64 {
+    let _protection = crate::timing::protect();
     let (k0, k1) = key.split_at(8);
     let k0 = k0.iter().rev().fold(0u64, |a, &b| a.rotate_left(8) | u64::from(b));
     let k1 = k1.iter().rev().fold(0u64, |a, &b| a.rotate_left(8) | u64::from(b));

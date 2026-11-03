@@ -56,9 +56,11 @@ impl SealingKey {
     }
     #[cfg(feature = "rustls-provider")]
     pub(crate) fn initialize(&mut self, key: &[u8]) {
+        let _protection = crate::timing::protect();
         self.key.initialize(key);
     }
     pub fn aes128_gcm(key: [u8; 16], iv: [u8; 12]) -> Self {
+        let _protection = crate::timing::protect();
         let key = Secret(key);
         Self {
             key: Key::Gcm(crate::gcm::Gcm::aes128(&key.0)),
@@ -68,6 +70,7 @@ impl SealingKey {
         }
     }
     pub fn aes256_gcm(key: [u8; 32], iv: [u8; 12]) -> Self {
+        let _protection = crate::timing::protect();
         let key = Secret(key);
         Self {
             key: Key::Gcm(crate::gcm::Gcm::aes256(&key.0)),
@@ -90,6 +93,7 @@ impl SealingKey {
         aad: &[u8],
         plaintext: &mut [u8],
     ) -> Result<([u8; 12], [u8; 16]), Error> {
+        let _protection = crate::timing::protect();
         if self.exhausted {
             return Err(Error::CounterExhausted);
         }
@@ -122,15 +126,18 @@ impl OpeningKey {
     }
     #[cfg(feature = "rustls-provider")]
     pub(crate) fn initialize(&mut self, key: &[u8]) {
+        let _protection = crate::timing::protect();
         self.key.initialize(key);
     }
     pub fn aes128_gcm(key: [u8; 16]) -> Self {
+        let _protection = crate::timing::protect();
         let key = Secret(key);
         Self {
             key: Key::Gcm(crate::gcm::Gcm::aes128(&key.0)),
         }
     }
     pub fn aes256_gcm(key: [u8; 32]) -> Self {
+        let _protection = crate::timing::protect();
         let key = Secret(key);
         Self {
             key: Key::Gcm(crate::gcm::Gcm::aes256(&key.0)),
@@ -148,6 +155,7 @@ impl OpeningKey {
         ciphertext: &mut [u8],
         tag: &[u8],
     ) -> Result<(), Error> {
+        let _protection = crate::timing::protect();
         if tag.len() != 16 {
             return Err(Error::Length);
         }

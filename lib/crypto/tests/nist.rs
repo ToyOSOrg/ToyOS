@@ -4,8 +4,8 @@
 //! offer is counted outside the interface by the reason it names, and each
 //! file's cases are held to a count taken from its text apart from the
 //! parse: its `Count = `, `Len = `, `Msg = ` or `Qx = ` lines, or its
-//! `"tcId"`s. ECDSA and ML-KEM, which have no instruction path, run in the
-//! `portable` form alone.
+//! `"tcId"`s. ML-KEM, which has no instruction path, runs in the `portable`
+//! form alone.
 
 mod support;
 
@@ -179,7 +179,6 @@ fn cavp_gcm() {
 /// FIPS 186-4's signature and public-key validation vectors, on P-256 and
 /// P-384 with SHA-256, SHA-384 and SHA-512, the digest as SEC 1's bits2int.
 #[test]
-#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn cavp_ecdsa() {
     let curve = |r: &Record| -> Option<usize> {
         match r.headers[0].split(',').next().unwrap() {

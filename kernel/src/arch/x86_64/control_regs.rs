@@ -399,6 +399,15 @@ pub fn pcid_active() -> bool {
     DECLARED_CR4.load(Ordering::Acquire) & cr4::PCIDE != 0
 }
 
+/// Whether a user thread can set data-independent timing for itself: never
+/// on x86-64. Intel's DOITM (`IA32_UARCH_MISC_CTL[0]`) is Ring 0's, and this
+/// kernel turns it on for no thread
+/// (`issues/intels-store-forwarding-predictor-times-constant-time-code-by-its-data.md`);
+/// AMD has no such mode.
+pub fn user_timing_control() -> bool {
+    false
+}
+
 /// Drops every translation this CPU holds, global ones included (SDM Vol. 3A
 /// §4.10.4.1, APM Vol. 2 §5.5): `PGE` cleared and put back where it is set;
 /// where it is not, nothing is global and a `CR3` reload drops the rest. For a
