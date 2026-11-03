@@ -54,6 +54,14 @@ review has been done, and passing vectors does not show it is safer than ring.
   2.6 GB/s against the portable rounds' 0.52, and SHA-512 at 1.36 against
   0.83. ToyOS's own AArch64 targets do not promise them and nothing detects
   them at run time, so they hash portably; see the weaknesses.
+- **On ToyOS every operation that takes a secret runs under the thread's
+  timing protection** (`src/timing.rs`, `toyos::timing`): `PSTATE.DIT` on
+  AArch64. That covers ciphers, MACs, KDFs, keyed SipHash, `ct::equal` and
+  the key operations. A plain hash takes none, so a caller hashing a secret
+  takes `toyos_crypto::timing::protect` itself, as `toyos-ssh`'s exchange
+  hash and key derivation do. x86-64 has no such mode a thread sets, and
+  ToyOS turns Intel's DOITM on for none, so constant time there rests on the
+  code, as on AMD.
 
 ## Consumers and what each needs
 
@@ -499,6 +507,28 @@ Not consumers:
          2.65; null 1.82 and 1.04, leaky 210.6 and 194.7. Its Ed25519 run is
          pending. Evidence:
          https://github.com/ToyOSOrg/evidence/tree/6488b4fbb6785e65332d03fb504fe3849d89810a/pr-1046/r4
+       - **#1063's P-256 register kernels at 9a5d4fad5** (with the AVX2
+         table read), 1,000,000 measurements a routine, no CPU timing mode:
+         - The T14 (0x806c1, microcode 0xbe): P-256 public key max |t|
+           3.20 and agreement 1.51; P-384 public key 1.19 and agreement
+           1.42; Ed25519 2.73. Null 1.22 and 1.70, leaky 855.8 and 890.6.
+         - The AMD bench (0x860f01, 0x860010d): P-256 2.99 and 1.49; P-384
+           2.47 and 2.43; Ed25519 1.66. Null 1.14 and 2.12, leaky 140.1
+           and 169.3.
+         - Evidence:
+           https://github.com/ToyOSOrg/evidence/tree/aa3369406af00b46a4b76476ef4cea7df040e30f/combined/r3
+         - Its speed A/B against main, three base/head pairs a bench: P-256
+           ECDH 0.75–0.82 of main and verify 0.76–0.85, but for one T14
+           boot in which ring ran 1.10x slower too.
+         - **A measured layout effect:** AMD asserted `chacha20-poly1305/key`
+           rose from 5.3 ns to 6.0, 6.9 and 6.0 ns in the three pairs, with ring
+           unchanged. Its instructions are the same in both builds; only
+           `SealingKey::chacha20_poly1305` moved, from a 64-byte boundary to
+           32 bytes past one. The T14 and the unasserted build show
+           1.00–1.04. Evidence:
+           https://github.com/ToyOSOrg/evidence/tree/58dcc2314053075b410ed6ccdd48f0e2b68c9c1f/combined/r4
+           and
+           https://github.com/ToyOSOrg/evidence/tree/d6e8e35334d4f83b5140e7dedd8b4d9f1f49b338/combined/r5
        - Their judge asks only that each job ran and its controls held; the
          verdicts are this record's. The first boots, of the fast program at
          ec5a0cd18, read LEAKS everywhere: that harness made each random
@@ -652,6 +682,14 @@ Not consumers:
 
 ## Weaknesses until the exits hold
 
+- On x86-64 nothing but the code keeps secret work's timing independent of
+  its data. The T14's store-forwarding predictor once timed P-256 by its
+  data, which DOITM, PSFD or SSBD removed
+  (`issues/intels-store-forwarding-predictor-times-constant-time-code-by-its-data.md`).
+  Intel's MXCSR-dependent timing can delay the AVX2 Poly1305's `VPMULUDQ`
+  on its data
+  (`issues/the-avx2-poly1305-runs-under-intels-mxcsr-dependent-timing.md`).
+  **Owner**: this track. **Exit**: both issues'.
 - Erasure is what `lib/crypto/src/secret.rs`'s contract states: secret
   owners, each key agreement's shared value and named workspaces are
   erased. Since the parity work's 5x51 field (#992), 2^255 - 19 field

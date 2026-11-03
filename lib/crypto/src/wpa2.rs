@@ -133,6 +133,7 @@ impl PairwiseMasterKey {
 }
 /// IEEE 802.11 passphrase form; a raw hexadecimal PSK belongs to the caller.
 pub fn derive_pmk(passphrase: &[u8], ssid: &[u8]) -> Result<PairwiseMasterKey, Error> {
+    let _protection = crate::timing::protect();
     if !(8..=63).contains(&passphrase.len()) || ssid.is_empty() || ssid.len() > 32 {
         return Err(Error::Length);
     }
@@ -152,10 +153,12 @@ pub fn derive_pmk(passphrase: &[u8], ssid: &[u8]) -> Result<PairwiseMasterKey, E
     Ok(PairwiseMasterKey(output))
 }
 pub fn hmac_sha1(key: &[u8], parts: &[&[u8]]) -> Result<[u8; 20], Error> {
+    let _protection = crate::timing::protect();
     Ok(mac(key, parts)?.0)
 }
 /// 802.11i PRF: HMAC-SHA1(key, label || 0 || data || counter), counter from 0.
 pub fn prf(key: &[u8], label: &[u8], data: &[u8], output: &mut [u8]) -> Result<(), Error> {
+    let _protection = crate::timing::protect();
     if output.len() > 256 * 20 {
         return Err(Error::Length);
     }
@@ -173,11 +176,13 @@ pub fn prf(key: &[u8], label: &[u8], data: &[u8], output: &mut [u8]) -> Result<(
 pub struct KeyEncryptionKey(Aes);
 impl KeyEncryptionKey {
     pub fn new(key: [u8; 16]) -> Self {
+        let _protection = crate::timing::protect();
         let key = Secret(key);
         Self(Aes::aes128(&key.0))
     }
     /// RFC 3394 default-IV unwrap. Output has exactly ciphertext.len()-8 bytes.
     pub fn unwrap(&self, ciphertext: &[u8], output: &mut [u8]) -> Result<(), Error> {
+        let _protection = crate::timing::protect();
         if ciphertext.len() < 24
             || !ciphertext.len().is_multiple_of(8)
             || output.len() != ciphertext.len() - 8
