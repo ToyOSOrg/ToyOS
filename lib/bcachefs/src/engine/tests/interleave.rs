@@ -142,10 +142,11 @@ fn bsets(image: &[u8], sector: u64, node_bytes: usize) -> Vec<u64> {
 
 /// A transaction applied but never committed; its nodes are written, each
 /// bset naming its entry, which never becomes durable; the crash; a mount
-/// and a clean unmount. Every bset on the medium naming a sequence past the
-/// newest durable flush entry is then blacklisted, so no reader takes it,
-/// and none is reached anyway. Red with a skip of 0: the sequences the
-/// crashed mount had open would be named again.
+/// and a clean unmount. Every sequence past the newest durable flush entry
+/// that those bsets name is then blacklisted, so no reader takes one that
+/// survives, and none is reached anyway. Red when the mount after the crash
+/// blacklists nothing: the sequences the crashed mount had open would be
+/// named again.
 #[test]
 fn a_bset_naming_an_unflushed_sequence_never_reappears_unblacklisted() {
     let dev = formatted(64 << 20, None);
@@ -157,14 +158,14 @@ fn a_bset_naming_an_unflushed_sequence_never_reappears_unblacklisted() {
     let sectors: Vec<u64> = plans.iter().flat_map(|p| p.sectors(&m)).collect();
     let crashed = Bytes::new(dev.get().clone());
     drop(m);
+    let node_bytes = super::super::read::Source::superblock(&open_ro(&crashed, None).unwrap()).node_sectors() as usize * SECTOR;
+    // Read before the next mount, which may write those slots again.
+    let named: Vec<u64> = sectors.iter().flat_map(|&s| bsets(&crashed.get(), s, node_bytes)).filter(|&s| s > durable).collect();
     let m = open_rw(&crashed, None);
     create(&m, b"after");
     block_on_ready(m.unmount()).unwrap();
     let v = open_ro(&crashed, None).unwrap();
     assert_eq!(names(&v), [b"after".to_vec()]);
-    let node_bytes = v.superblock().node_sectors() as usize * SECTOR;
-    let image = crashed.get();
-    let named: Vec<u64> = sectors.iter().flat_map(|&s| bsets(&image, s, node_bytes)).filter(|&s| s > durable).collect();
     assert!(!named.is_empty(), "the crashed mount's bsets name its open entry");
     for seq in named {
         assert!(v.superblock().blacklisted(seq), "a bset naming {seq}, past the durable {durable}, not blacklisted");

@@ -182,7 +182,7 @@ fn ops_survive_a_crash_anywhere(encryption: Option<Encryption>, ops: &[Op], ever
 
 /// [`ops_survive_a_crash_anywhere`] on `image`, mounted with `options`; how
 /// many buckets the mount took again after an emptying.
-fn ops_survive_a_crash_on(image: Vec<u8>, passphrase: Option<&[u8]>, options: MountOptions, ops: &[Op], every: usize, samples: u64) -> usize {
+pub(super) fn ops_survive_a_crash_on(image: Vec<u8>, passphrase: Option<&[u8]>, options: MountOptions, ops: &[Op], every: usize, samples: u64) -> usize {
     let passphrase = passphrase.map(<[u8]>::to_vec);
     // The names the volume holds already stay through every state.
     let initial: BTreeSet<Vec<u8>> = {
