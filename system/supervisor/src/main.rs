@@ -121,6 +121,8 @@ use toyos_manifest::package::{self, Package};
 use toyos_manifest::device::{Entry, PciMatch};
 use toyos_manifest::{Manifest, Program, Source, View};
 use toyos_supervisor::claims::{self, Missing, Unresolved};
+use toyos_supervisor::declaration;
+use toyos_abi::devset::Declaration;
 use toyos_supervisor::drives::{self, Act, Drives};
 use toyos_supervisor::restart::{self, AfterEnd, Budget};
 use toyos::endow::{Endowments, FromHandle};
@@ -647,6 +649,9 @@ fn main() {
         settle: None,
         instances: Vec::new(),
         undriven: Vec::new(),
+        storage: declaration::Storage::awaiting(Instant::now()),
+        storage_started: false,
+        unstarted: Vec::new(),
         log,
         worker: Worker::start(),
         restarting: false,
@@ -735,9 +740,10 @@ impl Worker {
     }
 }
 
-/// A row whose process the machine's files depend on: a block service, or a
-/// file server. Started before every other row, and never made a home, which
-/// would be a directory on the volume it serves.
+/// A row whose process the machine's files depend on: a disk driver, the
+/// block service, or a file server. Started once the root bridges' memory is
+/// declared, before every row whose home is on it, and never made a home,
+/// which would be a directory on the volume it serves.
 fn is_storage(program: &Program) -> bool {
     !program.roles.is_empty() || is_block(program) || is_disk_driver(program)
 }
@@ -747,8 +753,8 @@ fn is_disk_driver(program: &Program) -> bool {
     !program.drives.is_empty() && program.receives.iter().any(|r| r == toyos_blockring::disk::PORT)
 }
 
-/// A row holding the `acpi` claim, whose holder declares the memory every PCI
-/// claim waits for: started before every other row.
+/// A row holding the `acpi` claim, whose holder declares the memory no PCI
+/// claim is handed over without: started before every other row.
 fn declares(program: &Program) -> bool {
     program.devices.iter().any(|device| device == "acpi")
 }
@@ -798,6 +804,14 @@ struct Supervisor<'a> {
     /// Every disk driver's function on this machine the boot started no
     /// driver on, whose disks the block service cannot say are absent.
     undriven: Vec<String>,
+    /// What the declaration has decided of storage.
+    storage: declaration::Storage,
+    /// Whether the storage rows are started, so a home or state directory can
+    /// be made.
+    storage_started: bool,
+    /// The rows of [`Self::services`] not started yet, by index, in
+    /// [`Self::boot`]'s rank.
+    unstarted: Vec<usize>,
     /// Where a service the supervisor (re)starts writes its stdout and stderr, whichever
     /// process ends up holding its row.
     log: Log,
@@ -1044,18 +1058,20 @@ impl<'a> Supervisor<'a> {
     /// Start `[boot] start`, kept for the machine's life: the supervisor is the only
     /// thing that can kill a daemon, and there is no other way back to a
     /// process it started. The `acpi` claim's holder goes first: it declares
-    /// the memory the PCI root bridges decode, which every PCI claim minted
-    /// after it waits for. Then the disk drivers and the storage rows, the
-    /// block service before the file servers its grants are minted on — every
-    /// other start may make a directory, and a directory is a file server's —
-    /// and the session's home is made before the first row that is neither;
-    /// the ACPI holder's own home with it, which it is started without.
+    /// the memory the PCI root bridges decode, which no PCI claim is handed
+    /// over without; where none is started, a row that may hand a server of
+    /// its own the claim does instead. Storage follows once the device set
+    /// says the declaration is held ([`Self::storage_up`]): the disk drivers,
+    /// the block service before the file servers its grants are minted on,
+    /// the session's home and each state directory, and then every other
+    /// row, whose `HOME` is one of them.
     ///
     /// **Every service holds its acceptors before any is started**, so what a
     /// start mints on another service's port — a role's directories, a
     /// partition, `netstack` — does not depend on the order `[boot] start`
-    /// lists them in. The `drives` processes start last, on what the
-    /// device set says then.
+    /// lists them in, and a request made on one before its server runs waits
+    /// for it. The `drives` processes start last, on what the device set says
+    /// then.
     fn boot(&mut self, role_acceptors: &mut BTreeMap<&str, Acceptor>) {
         let system = self.system;
         let rank = |name: &&String| match system.program(name) {
@@ -1107,46 +1123,82 @@ impl<'a> Supervisor<'a> {
                 self.services.push(service);
             }
         }
-        // The `acpi` claim's holder first, since every claim waits for its
-        // declaration; then the disk drivers, so the block service is started
-        // knowing how many to wait for and a file server's disk is coming
-        // before it asks.
-        // SYSTEM, started before the manifest was read, is first in the list.
-        let (declaring, rest): (Vec<usize>, Vec<usize>) =
-            (0..self.services.len()).partition(|&at| declares(self.services[at].program));
-        let mut homes_made = false;
-        for at in declaring {
-            self.start_service(at, &mut homes_made);
-        }
-        self.undriven = self.drive_where(is_disk_driver);
-        for at in rest {
-            self.start_service(at, &mut homes_made);
-        }
-        if !homes_made {
-            self.make_session_home();
-            for early in self.services.iter().map(|s| s.program).filter(|p| declares(p)).collect::<Vec<_>>() {
-                self.make_state_dir(early);
+        // What the declaration comes through now; storage and every other
+        // row once it is held (`toyos_supervisor::declaration`), in `rank`'s
+        // order, storage first. SYSTEM, started before the manifest was read,
+        // is storage and is running already.
+        let started: Vec<&Program> = self.services.iter().map(|s| s.program).collect();
+        if !declaration::comes(&started, system.program("acpiserver").is_some()) {
+            // Nothing here can declare: every row now, storage first, and no
+            // PCI driver this boot.
+            self.storage = declaration::Storage::Never;
+            if !self.drivers.is_empty() {
+                say!("supervisor: nothing on this boot can declare the root bridges' memory, so no PCI driver starts");
             }
+            self.unstarted = (0..self.services.len()).collect();
+            self.storage_up(false);
+            return;
         }
-        self.load_grants();
+        let (first, rest): (Vec<usize>, Vec<usize>) =
+            (0..self.services.len()).partition(|&at| declaration::starts_first(self.services[at].program, &started));
+        for at in first {
+            self.start_service(at);
+        }
+        self.unstarted = rest;
         self.drive();
     }
 
-    /// [`Self::boot`]'s start of service `at`, making the session's home before
-    /// the first row that is neither storage nor the `acpi` claim's holder.
-    fn start_service(&mut self, at: usize, homes_made: &mut bool) {
+    /// Storage, on the declaration held: the disk drivers, so the block
+    /// service is started knowing how many to wait for and a file server's
+    /// disk is coming before it asks; then the block service and the file
+    /// servers, in [`Self::boot`]'s rank; then the session's home and the
+    /// state directory of every row already running, and the grants the data
+    /// volume keeps; then every row not started yet, each after its home.
+    /// `drivers` where a declaration is held, so disk drivers may claim.
+    fn storage_up(&mut self, drivers: bool) {
+        if drivers {
+            self.undriven = self.start_drivers(is_disk_driver);
+        }
+        let (storage, rest): (Vec<usize>, Vec<usize>) =
+            std::mem::take(&mut self.unstarted).into_iter().partition(|&at| is_storage(self.services[at].program));
+        for at in storage {
+            self.start_service(at);
+        }
+        self.storage_started = true;
+        self.make_session_home();
+        for running in self.services.iter().filter(|s| s.child.is_some()).map(|s| s.program).collect::<Vec<_>>() {
+            self.make_state_dir(running);
+        }
+        self.load_grants();
+        for at in rest {
+            self.start_service(at);
+        }
+    }
+
+    /// Storage given up for the boot, whose declaration will not come or did
+    /// not by its bound: each storage row's ports closed, so a file or block
+    /// request is refused rather than left waiting for a server that will
+    /// not run, and every other row not started yet started with no storage.
+    fn start_without_storage(&mut self) {
+        let (storage, rest): (Vec<usize>, Vec<usize>) =
+            std::mem::take(&mut self.unstarted).into_iter().partition(|&at| is_storage(self.services[at].program));
+        // SYSTEM is storage and running since before the manifest was read.
+        let unstarted: Vec<usize> = storage.into_iter().filter(|&at| self.services[at].child.is_none()).collect();
+        for at in unstarted {
+            let service = &mut self.services[at];
+            service.ports.borrow_mut().clear();
+            say!("supervisor: {} is not started; its ports are closed this boot", service.label());
+        }
+        for at in rest {
+            self.start_service(at);
+        }
+    }
+
+    /// [`Self::boot`]'s start of service `at`.
+    fn start_service(&mut self, at: usize) {
         let system = self.system;
         let program = self.services[at].program;
-        if !is_storage(program) && !declares(program) && !*homes_made {
-            self.make_session_home();
-            *homes_made = true;
-            for early in self.services.iter().map(|s| s.program).filter(|p| declares(p)).collect::<Vec<_>>() {
-                self.make_state_dir(early);
-            }
-        }
-        if !declares(program) {
-            self.make_state_dir(program);
-        }
+        self.make_state_dir(program);
         self.desktop_for(at);
         let block = self.block_args();
         let service = &mut self.services[at];
@@ -1178,30 +1230,57 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Read the device set, say what arrived and what left since the last
-    /// reading, start a `drives` process on each function it says is owed
-    /// one, and say which functions are given up on.
+    /// reading, start storage once it says the root bridges' memory is held,
+    /// then start a `drives` process on each function it says is owed one,
+    /// and say which functions are given up on.
     fn drive(&mut self) {
-        self.drive_where(|_| true);
+        let Some(declaration) = self.read_set() else { return };
+        match self.storage.read(declaration, Instant::now()) {
+            declaration::Step::Start(after) => {
+                say!(
+                    "{}{} ms after the boot's first rows, so storage and the PCI drivers start",
+                    declaration::HELD_SAID,
+                    after.as_millis()
+                );
+                self.storage_up(true);
+            }
+            declaration::Step::Overdue => {
+                say!(
+                    "supervisor: the root bridges' memory is not declared {} s into the boot, so no storage and no PCI \
+                     driver starts this boot, and every other row starts with no storage",
+                    declaration::BOUND.as_secs()
+                );
+                self.start_without_storage();
+            }
+            declaration::Step::Withheld(why) => {
+                say!(
+                    "supervisor: no declaration of the root bridges' memory will be held ({why}), so every other row starts \
+                     with no storage, and no storage and no PCI driver starts this boot"
+                );
+                self.start_without_storage();
+            }
+            declaration::Step::Nothing => {}
+        }
+        if self.storage.up() {
+            self.start_drivers(|_| true);
+        }
     }
 
-    /// [`Self::drive`], for the rows `which` picks; answers each function a
-    /// start was refused on, by its entry and address.
-    fn drive_where(&mut self, which: fn(&Program) -> bool) -> Vec<String> {
-        let mut refused = Vec::new();
-        let rows: Vec<(&'static Program, PciMatch)> = self.drivers.iter().filter(|(row, _)| which(row)).copied().collect();
+    /// Read the device set into [`Self::listed`], saying what arrived and
+    /// what left since the last reading; answers its declaration, or `None`
+    /// where it was not read, which is said.
+    fn read_set(&mut self) -> Option<Declaration> {
         let read = self.devices.read(|n| vec![toyos_abi::inventory::RawRecord::EMPTY; n], |set| {
-            (set.functions().collect::<Vec<Pci>>(), set.header.settle_in)
+            (set.functions().collect::<Vec<Pci>>(), set.header)
         });
-        let records = match read {
-            Ok((records, settle_in)) => {
-                self.settle = settle_in.map(|nanos| Instant::now() + Duration::from_nanos(nanos));
-                records
-            }
+        let (records, header) = match read {
+            Ok(read) => read,
             Err(why) => {
                 say!("supervisor: {why}, so no `drives` process starts on it");
-                return refused;
+                return None;
             }
         };
+        self.settle = header.settle_in.map(|nanos| Instant::now() + Duration::from_nanos(nanos));
         for pci in records.iter().filter(|pci| !self.listed.iter().any(|seen| seen.arrival == pci.arrival)) {
             if !self.listed.is_empty() {
                 say!("supervisor: PCI {} [{:04x}:{:04x}] joined the device set as arrival {}", pci_at(pci.at), pci.vendor, pci.device, pci.arrival.0);
@@ -1211,6 +1290,15 @@ impl<'a> Supervisor<'a> {
             say!("supervisor: PCI {} (arrival {}) left the device set", pci_at(gone.at), gone.arrival.0);
         }
         self.listed = records;
+        Some(header.declaration)
+    }
+
+    /// Start a `drives` process of the rows `which` picks on each function the
+    /// last reading says is owed one; answers each function a start was
+    /// refused on, by its entry and address.
+    fn start_drivers(&mut self, which: fn(&Program) -> bool) -> Vec<String> {
+        let mut refused = Vec::new();
+        let rows: Vec<(&'static Program, PciMatch)> = self.drivers.iter().filter(|(row, _)| which(row)).copied().collect();
         for act in self.drives.decide(&rows, &self.listed, boot_controller(), Instant::now()) {
             match act {
                 Act::Start { row, entry, function } => match self.start_instance(row, entry, function) {
@@ -1407,8 +1495,12 @@ impl<'a> Supervisor<'a> {
     }
 
     /// A row's own directory of machine state, a service's `HOME` among them,
-    /// made before it first runs.
+    /// made before it runs where storage is up, and by [`Self::storage_up`]
+    /// for each row started before it.
     fn make_state_dir(&mut self, program: &Program) {
+        if !self.storage_started {
+            return;
+        }
         let Some(dir) = program.state_dir().filter(|_| !is_storage(program)) else { return };
         let asked = dir.clone();
         match self.files("a row's state directory", move || make_dir(&asked)) {
@@ -1609,6 +1701,7 @@ impl<'a> Supervisor<'a> {
                 .map(|p| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(p.since)))
                 .chain(flight.iter().map(|f| f.deadline().saturating_duration_since(now)))
                 .chain(self.settle.map(|at| at.saturating_duration_since(now)))
+                .chain(self.storage.deadline().map(|at| at.saturating_duration_since(now)))
                 .min()
                 .map_or(u64::MAX, |left| left.as_nanos() as u64);
             ready.clear();
@@ -1744,7 +1837,8 @@ impl<'a> Supervisor<'a> {
             if ready.contains(&TOKEN_LINKS) || self.logins.open.len() != open {
                 self.sessions_changed();
             }
-            if ready.contains(&TOKEN_DEVICES) || self.settle.is_some_and(|at| at <= Instant::now()) {
+            let due = |at: Option<Instant>| at.is_some_and(|at| at <= Instant::now());
+            if ready.contains(&TOKEN_DEVICES) || due(self.settle) || due(self.storage.deadline()) {
                 self.drive();
             }
         }

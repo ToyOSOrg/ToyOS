@@ -216,9 +216,20 @@ const RUST_SKIP: &[&str] = &[
     "tone_after_dc6",
     // It claims the fixed hardware itself, which needs a boot that starts no
     // server, and stages the firmware's side of the Global Lock, which needs
-    // the test kernel: `acpi_mediated_access` and `acpi_press_is_one_sci`
-    // run it on tests/images/acpicase.toml.
+    // the test kernel: `acpi_mediated_access`, `acpi_press_is_one_sci` and
+    // `acpi_holder_is_refused_a_held_functions_configuration` run it on
+    // tests/images/acpicase.toml.
     "acpi_mediated",
+    // It hands the boot's first ACPI claim to a server of its own, which
+    // declares the root bridges' memory, and kills it, which needs a boot that
+    // starts none: the `acpi_server_death` metal row runs it, and on a guest
+    // `acpi_holder_is_refused_a_held_functions_configuration` before its
+    // probe.
+    "acpi_release",
+    // It claims while nothing has declared the root bridges' memory, which
+    // needs a boot with no ACPI server:
+    // `a_claim_before_the_declaration_is_refused_at_once` runs it.
+    "pci_undeclared",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
     "stop_short",
     // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
@@ -496,13 +507,15 @@ const MACHINE_TESTS: &[&str] = &[
     // supervisor's in `toyos-supervisor`.
     "a_function_arrives_and_leaves",
     // A PCI claim on a boot whose `acpi` claim holder never declares the root
-    // bridges' memory: the kernel's wait for it and its deadline, on QEMU
-    // x86-64's q35 with two `edu` and no console port, since no claim can
-    // carry it (`Profile::HeadlessTwoEduNoConsolePort`). The state
-    // machine is `toyos-pci`'s, host-tested; the wait on its watch and the
-    // refusal at its end are a claimant's thread in a booted kernel. No bench
-    // boots without its ACPI server.
-    "a_claim_waits_out_an_undeclared_machine",
+    // bridges' memory: the supervisor starting no driver and saying why, and
+    // the kernel refusing a job's claim at once while the
+    // device set says the declaration is pending, on QEMU x86-64's q35 with two
+    // `edu` and no console port, since no claim can carry it
+    // (`Profile::HeadlessTwoEduNoConsolePort`). The decisions are
+    // `toyos-pci`'s and `toyos-supervisor`'s, host-tested; the set's header
+    // and the refusal are a booted kernel's. No bench boots without its ACPI
+    // server.
+    "a_claim_before_the_declaration_is_refused_at_once",
     // Two HDA controllers, each with an `hda` driver behind VT-d: the one
     // with no codec plays nothing, soundserver plays to the other, and the
     // master job the benches' rows judge steps that output's codec. Which
@@ -560,6 +573,15 @@ const MACHINE_TESTS: &[&str] = &[
     // and its mask have no host build, QEMU raises the event on demand, and
     // nothing presses the T14's button but a hand.
     "acpi_press_is_one_sci",
+    // The `acpi` claim's holder refused a held function's configuration past
+    // its header: the kernel's `held` fed to the fence `toyos-userbound`
+    // host-tests, on a boot whose first job's server declared the root
+    // bridges' memory, so the supervisor started storage and the
+    // virtio-serial driver on it. Needs a boot that starts no server, which a
+    // bench boots only for `acpi_server_death`, and a function its driver
+    // holds whose configuration a broken fence would write; q35 on
+    // `Profile::Headless`.
+    "acpi_holder_is_refused_a_held_functions_configuration",
     // The osbench groups that use the runner's capability for a row of their
     // own, on the image they are measured on, on QEMU x86-64's q35: which
     // endowments a job gets is the image's and the supervisor's, which no
@@ -1015,6 +1037,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: TESTCASES_HELD,
             judge: |b| battery_on_metal(b[0]),
+        },
+    ),
+    (
+        // The server killed: the kernel writes `ACPI_DISABLE` as its claim goes,
+        // and `SCI_EN` reads clear after it. The job's claim is the boot's
+        // first, so the log reaches the stick only through the storage its
+        // server's declaration started.
+        "acpi_server_death",
+        metal::Metal {
+            arms: &[metal::once("acpicase", "tests/images/acpicase.toml", &[], &["test_rs_acpi_release"])],
+            judge: |b| acpi_death_on_metal(b[0]),
         },
     ),
     (
@@ -3058,6 +3091,45 @@ fn acpi_press_is_one_sci() -> Result<(), String> {
     Ok(())
 }
 
+/// Boot `tests/images/acpicase.toml` with two jobs: `acpi_release` hands the
+/// boot's first `acpi` claim to the server, which declares the root bridges'
+/// memory before it is killed, so the supervisor starts storage and the
+/// virtio-serial driver; then `acpi_mediated`'s `held` arm, holding the claim
+/// again, is refused `HeldFunction` on the function that driver holds.
+fn acpi_holder_is_refused_a_held_functions_configuration() -> Result<(), String> {
+    const JOBS: [&str; 2] = ["test_rs_acpi_release", "test_rs_acpi_mediated"];
+    const HELD_SAID: &str = "acpi: a virtio-serial function its driver holds was refused HeldFunction past its header";
+    let committed = compile::repo_root().join("tests/images/acpicase.toml");
+    let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
+    let derived = toyos_metal::image::derive(&text, 120_000, &JOBS, &[]).map_err(|why| why.to_string())?;
+    let config = common::lane::dir().join("acpi-held.toml");
+    fs::write(&config, derived).map_err(|e| format!("{}: {e}", config.display()))?;
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        &[],
+        &[],
+        BootOptions {
+            extra_root_files: vec![
+                suite_bin(toyos_build::arch::Arch::X86_64, "acpi_release"),
+                suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated"),
+                // The arm's name is the file's: `acpi_mediated` asks whether it is there.
+                ("share/acpi_mediated_held".to_string(), b"held\n".to_vec()),
+            ],
+            ..Default::default()
+        },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    let ended = format!("===TEST_END {} ", JOBS[1]);
+    await_guest(&mut qemu, &mut console, "the held arm's end", |said| said.contains(&ended))?;
+    let said = serial::Serial::named("the held boot", console);
+    said.must_say(&format!("===TEST_END {} exit=0===", JOBS[0]))?;
+    said.must_say(&format!("{ended}exit=0==="))?;
+    eprintln!("  [acpi] {}", said.must_say(claims::DECLARED)?.trim());
+    eprintln!("  [acpi] {}", said.must_say("supervisor: the root bridges' memory is declared ")?.trim());
+    eprintln!("  [acpi] {}", said.must_say(HELD_SAID)?.trim());
+    Ok(())
+}
+
 /// `osbench identity`, `osbench fair` and `osbench energy` on
 /// tests/images/benchcase.toml with only those jobs: each exits 0, which it
 /// does only once every row it ran measured or said why not, its capability
@@ -4824,6 +4896,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "a_stepped_tsc_is_slewed_then_demoted" => faults::a_stepped_tsc_is_slewed_then_demoted(test_config),
         "a_stalled_hpet_is_left_out" => faults::a_stalled_hpet_is_left_out(test_config),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
+        "acpi_holder_is_refused_a_held_functions_configuration" => acpi_holder_is_refused_a_held_functions_configuration(),
         "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
@@ -4878,7 +4951,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         ),
         "a_drives_row_holds_one_process_per_function" => a_drives_row_holds_one_process_per_function(),
         "a_function_arrives_and_leaves" => a_function_arrives_and_leaves(),
-        "a_claim_waits_out_an_undeclared_machine" => a_claim_waits_out_an_undeclared_machine(),
+        "a_claim_before_the_declaration_is_refused_at_once" => a_claim_before_the_declaration_is_refused_at_once(),
         "hda_plays_to_the_controller_that_reaches_an_output" => {
             hda_plays_to_the_controller_that_reaches_an_output(test_config)
         }
@@ -5307,45 +5380,36 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// A boot with no ACPI server: nothing declares the root bridges' memory, so
-/// the first claim of an `edu` waits on the declaration's watch until its
-/// deadline, and that claim and the second are each refused by that name,
-/// before either function is touched; nothing is handed over.
-fn a_claim_waits_out_an_undeclared_machine() -> Result<(), String> {
-    const WAITED: &str = "pcidev: a claim waited ";
-    const REFUSED: &str = "NOT HANDED OVER — no declaration of the memory the root bridges decode is held (nothing was declared before a claim's deadline)";
-    const DEADLINE: Duration = Duration::from_secs(30);
-    let options = BootOptions { profile: qemu::Profile::HeadlessTwoEduNoConsolePort, ..Default::default() };
+/// A boot with no ACPI server: nothing can declare the root bridges' memory,
+/// so the supervisor starts no `drives` process and says why; and a job's own
+/// claim of each `edu`, made while the set says the declaration is pending, is
+/// refused at once by that name, before either function is touched. Nothing
+/// is handed over.
+fn a_claim_before_the_declaration_is_refused_at_once() -> Result<(), String> {
+    const JOB: &str = "pci_undeclared";
+    const REFUSED: &str = "NOT HANDED OVER — no declaration of the memory the root bridges decode is held yet";
+    const NONE: &str = "supervisor: nothing on this boot can declare the root bridges' memory, so no PCI driver starts";
+    let options = BootOptions {
+        profile: qemu::Profile::HeadlessTwoEduNoConsolePort,
+        extra_root_files: vec![suite_bin(toyos_build::arch::Arch::X86_64, JOB)],
+        ..Default::default()
+    };
     let config = compile::repo_root().join("tests/images/undeclaredcase.toml");
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-    // The guest is quiet for the whole of the wait, which the deadline bounds:
-    // a ceiling past it, not a quiet guest's verdict.
-    let waited = qemu.drain_until(DEADLINE * 3, |l| l.contains(REFUSED));
-    let mut console = format!("{}\n{waited}", qemu.boot_log());
-    await_guest(&mut qemu, &mut console, "both claims refused", |t| t.matches(REFUSED).count() >= 2)
+    let mut console = format!("{}\n", qemu.boot_log());
+    let ended = format!("===TEST_END test_rs_{JOB} ");
+    await_guest(&mut qemu, &mut console, "the job's end", |t| t.contains(&ended))
         .map_err(|e| format!("{e}\n{console}"))?;
     let said = serial::Serial::named("the undeclared boot", console.clone());
+    said.must_say(&format!("{ended}exit=0"))?;
+    eprintln!("  [undeclared] {}", said.must_say("pci_undeclared: the set says the declaration is pending")?.trim());
+    if said.text().matches(REFUSED).count() != 2 {
+        return Err(format!("the kernel refused {} claims as undeclared, where the job made two:\n{console}", said.text().matches(REFUSED).count()));
+    }
+    eprintln!("  [undeclared] {}", said.must_say(NONE)?.trim());
     said.must_not_say(" [1234:11e8] handed over")?;
     said.must_not_say("pcidev: the acpi claim declared")?;
-    let waited = said.must_say(WAITED)?;
-    let took = waited.split_once(WAITED).and_then(|(_, rest)| rest.split(" for ").next()).unwrap_or_default().to_string();
-    // The kernel writes a wait under a millisecond in ns.
-    let millis: u64 = match (took.strip_suffix("ms"), took.strip_suffix("ns")) {
-        (Some(ms), _) => ms.parse().ok(),
-        (None, Some(ns)) => ns.parse::<u64>().ok().map(|_| 0),
-        (None, None) => None,
-    }
-    .ok_or_else(|| format!("{waited:?} names no duration"))?;
-    if u128::from(millis) < DEADLINE.as_millis() {
-        return Err(format!("the claim waited {took}, short of its {DEADLINE:?} deadline:\n{console}"));
-    }
-    if said.text().matches(WAITED).count() != 1 {
-        return Err(format!("a claim after the deadline waited too:\n{console}"));
-    }
-    eprintln!("  [undeclared] {}", waited.trim());
-    for line in said.text().lines().filter(|l| l.contains(REFUSED)) {
-        eprintln!("  [undeclared] {}", line.trim());
-    }
+    said.must_not_say("spawn: /system/bin/pciholder")?;
     Ok(())
 }
 
@@ -7547,13 +7611,12 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     eprintln!("  [acpi] {}; {}", handed.trim(), kept.trim());
     // The root bridges' memory declared out of the loaded namespace, and what
-    // that cost: the load's time, and each claim's wait for the declaration.
+    // that cost: the load's time, and how long after its first rows the
+    // supervisor read it held and started storage and the PCI drivers.
     eprintln!("  [acpi] {}", log.must_say("acpiserver: the root bridges' memory declared: ")?.trim());
     eprintln!("  [acpi] {}", log.must_say(" tables loaded in ")?.trim());
     eprintln!("  [acpi] {}", kernel.must_say(claims::DECLARED)?.trim());
-    for waited in kernel.text().lines().filter(|l| l.contains("pcidev: a claim waited ")) {
-        eprintln!("  [acpi] {}", waited.trim());
-    }
+    eprintln!("  [acpi] {}", log.must_say("supervisor: the root bridges' memory is declared ")?.trim());
     let others = number_between(kernel.text(), "SMP: ", " of ")? - 1;
     let compared: Vec<&str> = kernel.text().lines().filter(|l| l.contains("mtrr: cpu") && l.contains("'s range registers are ")).collect();
     if compared.len() as u64 != others || compared.iter().any(|l| l.contains("are on and not the boot processor's")) {
@@ -7722,6 +7785,48 @@ fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// The server's death on the T14: the kernel put the machine in ACPI mode for
+/// the job's claim, the boot's first, and when the killed server's claim went
+/// it wrote `ACPI_DISABLE` (the FADT's 0xf1) and read `SCI_EN` clear: the
+/// firmware has the buttons again. Each write was made on the boot processor,
+/// and the enable was asked from another CPU: the job claims from a thread it
+/// found off the boot processor, so that write is the one that crossed. The
+/// server declared the root bridges' memory before it died, and the
+/// supervisor started storage on it, which is how this log is here. And the
+/// Global Lock this machine's firmware keeps: the kernel read the FACS its
+/// FADT names through the direct map and found the lock word in memory the
+/// firmware's own map does not report as `AddressRangeMemory`, which ACPI 6.5
+/// §5.2.10 forbids the FACS.
+fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_acpi_release")?;
+    let kernel = back.kernel();
+    let lock = kernel.must_say("acpi: the Global Lock is the FACS's at ")?.trim();
+    let uefi_type = lock
+        .rsplit_once(", in memory the firmware's map types ")
+        .and_then(|(_, ty)| ty.parse::<u8>().ok())
+        .ok_or_else(|| format!("the Global Lock's line names no memory type: {lock}"))?;
+    if ADDRESS_RANGE_MEMORY.contains(&uefi_type) {
+        return Err(format!("the Global Lock's word is in AddressRangeMemory: {lock}"));
+    }
+    eprintln!("  [acpi] {lock}");
+    eprintln!("  [acpi] {}", kernel.must_say(claims::DECLARED)?.trim());
+    eprintln!("  [acpi] {}", back.log().must_say("supervisor: the root bridges' memory is declared ")?.trim());
+    let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2 ")?;
+    // The kernel says this only of a `PM1a_CNT` it read with `SCI_EN` clear.
+    let left = kernel.must_say("acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD 0xb2 ")?;
+    for line in [enabled, left] {
+        smi_cmd_writer(line)?;
+        eprintln!("  [acpi] {}", line.trim());
+    }
+    if number_between(enabled, ", asked from cpu", "; the write held cpu")? == 0 {
+        return Err(format!("the job's claim was asked from the boot processor, so no CPU asked it for this write: {enabled}"));
+    }
+    Ok(())
+}
+
+/// The UEFI memory types ACPI 6.5 Table 15.6 maps to `AddressRangeMemory`.
+const ADDRESS_RANGE_MEMORY: [u8; 5] = [1, 2, 3, 4, 7];
 
 /// The CPU a kernel line says wrote `SMI_CMD`, read on that CPU beside the
 /// `out`: the boot processor, cpu0, or the line is refused (ACPI 6.5 Table

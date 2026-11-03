@@ -4083,6 +4083,7 @@ dependencies = [
  "toyos-blockring",
  "toyos-devicepath",
  "toyos-gpt",
+ "toyos-logstream",
  "toyos-manifest",
 ]
 

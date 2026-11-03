@@ -35,8 +35,8 @@ receives = ["clipboard"]
 
 [programs.test-runner]
 
-# Started before every PCI claimant: it declares the memory the root bridges
-# decode, which every claim of a PCI function waits for.
+# It declares the memory the root bridges decode: the supervisor starts a PCI
+# driver only once the device set says the declaration is held.
 [programs.acpiserver]
 service = true
 devices = ["acpi"]

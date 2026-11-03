@@ -3212,14 +3212,16 @@ mod tests {
         }
     }
 
-    /// A config whose rows claim a PCI function starts the `acpi` claim's
-    /// holder: every such claim waits for the root bridges' memory it declares,
-    /// and one made on a boot where nothing does is refused, as are all after
-    /// it. `undeclaredcase` is that boot, booted to judge the refusal. A claim
-    /// a program makes at run time through a `device` syscap is not a row's
-    /// and is not seen here: its image's own test meets the refusal.
+    /// A config whose rows claim a PCI function has a declarer: the
+    /// supervisor starts such a row only once the root bridges' memory is
+    /// declared, and a claim made before it is refused. It starts the `acpi`
+    /// claim's holder, or carries the ACPI server for a started row able to
+    /// mint the claim (`device`) to hand it, as `acpicase`'s jobs do.
+    /// `undeclaredcase` is the boot that has neither, booted to judge both. A
+    /// claim a program makes at run time through a `device` syscap is not a
+    /// row's and is not seen here: its image's own test meets the refusal.
     #[test]
-    fn every_config_that_claims_a_pci_function_starts_its_declarer() {
+    fn every_config_that_claims_a_pci_function_has_a_declarer() {
         const UNDECLARED: &str = "tests/images/undeclaredcase.toml";
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for config in ALL_CONFIGS {
@@ -3233,15 +3235,15 @@ mod tests {
                 })
                 .map(|(name, _)| name)
                 .collect();
-            let declares = parsed
-                .boot
-                .start
-                .iter()
-                .any(|name| parsed.programs.get(name).is_some_and(|p| p.devices.iter().any(|d| d == "acpi")));
+            let started = |name: &String| parsed.programs.get(name);
+            let holder = parsed.boot.start.iter().any(|name| started(name).is_some_and(|p| p.devices.iter().any(|d| d == "acpi")));
+            let handed = parsed.programs.contains_key("acpiserver")
+                && parsed.boot.start.iter().any(|name| started(name).is_some_and(|p| p.syscap.iter().any(|r| r == "device")));
+            let declares = holder || handed;
             assert_eq!(
                 declares || claimants.is_empty(),
                 *config != UNDECLARED,
-                "{config}: {claimants:?} claim PCI functions, and starting the `acpi` claim's holder is {declares}",
+                "{config}: {claimants:?} claim PCI functions, and a declarer started or handed the claim is {declares}",
             );
         }
     }

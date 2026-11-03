@@ -5,6 +5,11 @@
 //! lost between them and nothing is replayed. A function that left is absent;
 //! one that returned is listed under a new [`Arrival`].
 //!
+//! **The header says whether the root bridges' memory is declared**
+//! ([`Declaration`]): no function is handed over before it is, so a reader
+//! starts no driver on one until it reads [`Declaration::Held`], and reads
+//! again when the set's watch is posted for the change.
+//!
 //! **One [`Header`] and then one [`Pci`] record per function**, in
 //! the inventory's 64-byte encoding and in rising arrival order. [`decode`] is
 //! the reader's boundary and refuses a snapshot that is anything else.
@@ -16,6 +21,57 @@ use crate::inventory::{Pci, RawRecord, Record, Undecodable, RECORD_BYTES};
 
 /// The first record's kind byte: one no inventory record has.
 const KIND_HEADER: u8 = 0x80;
+
+/// Whether the root bridges' memory is declared, which every claim of a PCI
+/// function needs: an answer leaves [`Self::Pending`] once and stands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Declaration {
+    /// The `acpi` claim's holder has not declared it yet, and may.
+    Pending,
+    /// Declared and held: a claim is handed over inside it.
+    Held,
+    /// None will be held this boot, and no claim is handed over.
+    Withheld(Withheld),
+}
+
+/// Why no declaration will be held.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Withheld {
+    /// The declaration made was refused; the kernel's log says why.
+    Refused,
+    /// The `acpi` claim ended without declaring.
+    Ended,
+}
+
+impl Declaration {
+    fn encode(self) -> [u8; 2] {
+        match self {
+            Self::Pending => [0, 0],
+            Self::Held => [1, 0],
+            Self::Withheld(Withheld::Refused) => [2, 0],
+            Self::Withheld(Withheld::Ended) => [2, 1],
+        }
+    }
+
+    fn decode(bytes: [u8; 2]) -> Option<Self> {
+        Some(match bytes {
+            [0, 0] => Self::Pending,
+            [1, 0] => Self::Held,
+            [2, 0] => Self::Withheld(Withheld::Refused),
+            [2, 1] => Self::Withheld(Withheld::Ended),
+            _ => return None,
+        })
+    }
+}
+
+impl core::fmt::Display for Withheld {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Refused => f.write_str("the declaration was refused"),
+            Self::Ended => f.write_str("the acpi claim ended without declaring"),
+        }
+    }
+}
 
 /// What the snapshot says about itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -29,24 +85,31 @@ pub struct Header {
     pub settle_in: Option<u64>,
     /// How many function records follow.
     pub functions: u32,
+    pub declaration: Declaration,
 }
 
 impl Header {
     pub fn encode(&self) -> RawRecord {
         let mut raw = [0u8; RECORD_BYTES];
         raw[0] = KIND_HEADER;
+        raw[1..3].copy_from_slice(&self.declaration.encode());
         raw[4..8].copy_from_slice(&self.functions.to_le_bytes());
         raw[8..16].copy_from_slice(&self.generation.to_le_bytes());
         raw[16..24].copy_from_slice(&self.settle_in.map_or(0, |nanos| nanos.max(1)).to_le_bytes());
         RawRecord(raw)
     }
 
-    fn decode(raw: &RawRecord) -> Option<Self> {
+    fn decode(raw: &RawRecord) -> Result<Self, Malformed> {
         let word = |at: usize| u64::from_le_bytes(raw.0[at..at + 8].try_into().expect("eight bytes"));
-        (raw.0[0] == KIND_HEADER).then(|| Self {
+        if raw.0[0] != KIND_HEADER {
+            return Err(Malformed::NoHeader);
+        }
+        let bytes = [raw.0[1], raw.0[2]];
+        Ok(Self {
             functions: u32::from_le_bytes(raw.0[4..8].try_into().expect("four bytes")),
             generation: word(8),
             settle_in: Some(word(16)).filter(|nanos| *nanos != 0),
+            declaration: Declaration::decode(bytes).ok_or(Malformed::Declaration { bytes })?,
         })
     }
 }
@@ -56,6 +119,8 @@ impl Header {
 pub enum Malformed {
     /// The first record is no header.
     NoHeader,
+    /// The header's declaration is in no encoding [`Declaration`] has.
+    Declaration { bytes: [u8; 2] },
     /// The header counts `said` functions and `carried` records follow it.
     Count { said: u32, carried: usize },
     /// Record `at` did not decode.
@@ -73,6 +138,7 @@ impl core::fmt::Display for Malformed {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NoHeader => f.write_str("its first record is no header"),
+            Self::Declaration { bytes } => write!(f, "its header's declaration reads {bytes:02x?}"),
             Self::Count { said, carried } => write!(f, "its header counts {said} functions and {carried} records follow"),
             Self::Undecodable { at, why } => write!(f, "record {at}: {why}"),
             Self::NotAFunction { at } => write!(f, "record {at} is no PCI function"),
@@ -102,7 +168,7 @@ impl Snapshot<'_> {
 /// `records` as a snapshot, or why not.
 pub fn decode(records: &[RawRecord]) -> Result<Snapshot<'_>, Malformed> {
     let (first, rest) = records.split_first().ok_or(Malformed::NoHeader)?;
-    let header = Header::decode(first).ok_or(Malformed::NoHeader)?;
+    let header = Header::decode(first)?;
     if usize::try_from(header.functions).ok() != Some(rest.len()) {
         return Err(Malformed::Count { said: header.functions, carried: rest.len() });
     }
@@ -152,7 +218,7 @@ mod tests {
     }
 
     fn header(functions: u32) -> Header {
-        Header { generation: 9, settle_in: Some(100_000_000), functions }
+        Header { generation: 9, settle_in: Some(100_000_000), functions, declaration: Declaration::Held }
     }
 
     #[test]
@@ -161,11 +227,15 @@ mod tests {
         let read = decode(&raw).expect("admitted");
         assert_eq!(read.header, header(2));
         assert_eq!(read.functions().collect::<Vec<_>>(), [pci(3), pci(7)]);
-        let none = Header { generation: 1, settle_in: None, functions: 0 };
+        let none = Header { generation: 1, settle_in: None, functions: 0, declaration: Declaration::Pending };
         assert_eq!(decode(&snapshot(none, &[])).expect("an empty set").header, none);
         // A settle of zero nanoseconds is still a settle.
         let now = Header { settle_in: Some(0), ..none };
         assert_eq!(decode(&snapshot(now, &[])).expect("admitted").header.settle_in, Some(1));
+        for declaration in [Declaration::Pending, Declaration::Held, Declaration::Withheld(Withheld::Refused), Declaration::Withheld(Withheld::Ended)] {
+            let said = Header { declaration, ..none };
+            assert_eq!(decode(&snapshot(said, &[])).expect("admitted").header, said);
+        }
     }
 
     /// Every way a snapshot can be wrong is refused by name, and none is read
@@ -174,6 +244,11 @@ mod tests {
     fn a_malformed_snapshot_is_refused_at_the_boundary() {
         assert_eq!(decode(&[]).unwrap_err(), Malformed::NoHeader);
         assert_eq!(decode(&[function(pci(1))]).unwrap_err(), Malformed::NoHeader);
+        for bytes in [[0, 1], [1, 1], [2, 2], [3, 0], [0xff, 0xff]] {
+            let mut raw = snapshot(header(0), &[]);
+            raw[0].0[1..3].copy_from_slice(&bytes);
+            assert_eq!(decode(&raw).unwrap_err(), Malformed::Declaration { bytes });
+        }
         assert_eq!(decode(&snapshot(header(3), &[pci(1)])).unwrap_err(), Malformed::Count { said: 3, carried: 1 });
         assert_eq!(decode(&snapshot(header(0), &[pci(1)])).unwrap_err(), Malformed::Count { said: 0, carried: 1 });
         assert_eq!(decode(&snapshot(header(2), &[pci(1), pci(1)])).unwrap_err(), Malformed::Order { at: 2 });

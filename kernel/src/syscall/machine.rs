@@ -398,7 +398,7 @@ pub(super) fn sys_device_set_read(set: RawHandle, out: &mut UserBytesMut) -> u64
         Ok(set) => set,
         Err(e) => return e.refuse(),
     };
-    let (generation, settle_in, functions) = crate::pcidev::snapshot();
+    let crate::pcidev::Snapshot { generation, settle_in, declaration, functions } = crate::pcidev::snapshot();
     let count = functions.len() + 1;
     if out.is_empty() {
         return count as u64;
@@ -410,6 +410,7 @@ pub(super) fn sys_device_set_read(set: RawHandle, out: &mut UserBytesMut) -> u64
         generation,
         settle_in,
         functions: u32::try_from(functions.len()).expect("pcidev: fewer functions than a u32 counts"),
+        declaration,
     };
     out.write_at(0, &header.encode().0);
     for (at, pci) in functions.into_iter().enumerate() {

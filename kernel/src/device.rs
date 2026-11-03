@@ -136,6 +136,10 @@ pub enum ClaimError {
     /// remapping entry or LPI a claim spends is held; or no memory is left for
     /// the claim.
     Exhausted,
+    /// No declaration of the memory the root bridges decode is held yet, and
+    /// one may still be: nothing was touched, and the claim may be asked again
+    /// once the device set says it is held.
+    Undeclared,
     /// The function is there and could not be handed over — no MSI-X, no
     /// window to move a BAR into, an address it did not take. The kernel names
     /// which at the site.
