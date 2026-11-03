@@ -111,11 +111,21 @@ pub struct Image {
 
 enum Object {
     /// Read into a region of this process's own, which this mapping alone
-    /// writes: its handle leaves only for a spawn, whose kernel copies each
-    /// page and writes none.
+    /// writes, or one its holder keeps unchanged ([`Image::held`]): its
+    /// handle leaves only for a spawn, whose kernel copies each page and
+    /// writes none.
     Read(SharedMemory),
     /// A region nobody writes: a boot image, or a file its server holds so.
     Immutable(Immutable),
+}
+
+/// Why [`Image::held`] took no image.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NotHeld {
+    /// The kernel would not describe or map it.
+    Kernel(SyscallError),
+    /// It is neither an immutable region nor ordinary memory.
+    NotMemory,
 }
 
 /// Why [`Image::read`] made no image.
@@ -165,6 +175,29 @@ impl Image {
             }
         }
         Ok(Self { object: Object::Read(object), len })
+    }
+
+    /// The program the region `handle` names is, whole: one nobody can
+    /// write, or one of ordinary memory whose holder keeps it unchanged while
+    /// a child pages from it, its bytes up to its last whole page. The
+    /// handle is consumed either way.
+    pub fn held(handle: OwnedHandle) -> Result<Self, NotHeld> {
+        let stat = syscall::fstat(handle.raw()).map_err(NotHeld::Kernel)?;
+        match stat.file_type {
+            syscall::FileType::ImmutableMemory => Immutable::adopt(handle).map(Self::immutable).map_err(|why| match why {
+                crate::shm::NotImmutable::Kernel(e) => NotHeld::Kernel(e),
+                crate::shm::NotImmutable::Writable => NotHeld::NotMemory,
+            }),
+            syscall::FileType::SharedMemory => {
+                let len = usize::try_from(stat.size).map_err(|_| NotHeld::NotMemory)?;
+                let object = SharedMemory::lent(handle, len).map_err(|why| match why {
+                    crate::shm::Lent::Kernel(e) => NotHeld::Kernel(e),
+                    _ => NotHeld::NotMemory,
+                })?;
+                Ok(Self { object: Object::Read(object), len: stat.size })
+            }
+            _ => Err(NotHeld::NotMemory),
+        }
     }
 
     /// The program a region nobody writes is, whole.

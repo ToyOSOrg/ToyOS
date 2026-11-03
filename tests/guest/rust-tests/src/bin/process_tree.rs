@@ -354,7 +354,7 @@ fn link(k: u32) -> ! {
 fn link_command(k: u32, image: toyos::BorrowedHandle<'_>) -> Command {
     let copy = image.try_clone_to_owned().expect("a copy of the image for the link");
     let mut command = Command::new(SELF_PATH);
-    command.args(["link", &k.to_string()]).boot_image(image.into()).endow(LINK_IMAGE, copy.into());
+    command.args(["link", &k.to_string()]).image(image.into()).endow(LINK_IMAGE, copy.into());
     command
 }
 

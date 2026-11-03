@@ -86,12 +86,13 @@ pub trait CommandExt {
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn image_from(&mut self, path: &crate::path::Path) -> &mut Self;
 
-    /// Run the boot image `image` names, an immutable region this process
-    /// holds and keeps, rather than any file: the command's program is the
-    /// child's `argv[0]` and nothing opens it. What the supervisor starts the
-    /// file server with before any file can be read.
+    /// Run the program the memory region `image` names, which this process
+    /// holds, rather than any file: a region nobody can write, such as a boot
+    /// image, or one of this process's own it keeps unchanged while the child
+    /// runs. The command's program is the child's `argv[0]` and nothing opens
+    /// it.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn boot_image(&mut self, image: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
+    fn image(&mut self, image: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
 
     /// Place the child under the process `place` names rather than under this
     /// one, so that its end, not this process's, takes the child down.
@@ -183,8 +184,8 @@ impl CommandExt for crate::process::Command {
         self
     }
 
-    fn boot_image(&mut self, image: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
-        self.as_inner_mut().boot_image(image);
+    fn image(&mut self, image: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
+        self.as_inner_mut().image(image);
         self
     }
 

@@ -5,18 +5,19 @@
 //! **A swap is asked by `/system/bin/swap` and done by the supervisor, and nothing else
 //! can do either.** `swap` is an ordinary program — `ssh <machine> swap netstack <sha256>
 //! <length> < netstack` runs it over a plain `exec` channel, for a login sshserver has already
-//! authenticated — and it stages the bytes it was given under [`STAGING`] and
-//! asks the supervisor over the [`PORT`] the supervisor serves, which the build gate lets no
-//! program but [`HOLDER`] receive. The supervisor is the only process holding the system
+//! authenticated — and it lends the supervisor the bytes it was given, in a
+//! memory region sent with the request over the [`PORT`] the supervisor
+//! serves, which the build gate lets no program but [`HOLDER`] receive. The supervisor is the only process holding the system
 //! capability, so it is the only one that can stop a service, give its device
 //! claims back and start it again holding exactly its manifest row.
 //!
 //! **The order is fixed and every refusal leaves the old service running.**
-//! the supervisor reads the staged file, holds its bytes against the requester's
-//! [`Digest`] ([`verify`]), writes them to the [`installed_path`] — a
-//! temporary name and one rename, so the place a service is started from is
-//! never half-written — answers [`MSG_ACCEPTED`], and waits for the requester
-//! to hang up, at most [`HANGUP_MS`]. `swap` hangs up once its caller has closed
+//! the supervisor copies the lent bytes into a region of its own, which no
+//! other process can write, holds that copy against the requester's
+//! [`Digest`] ([`verify`]), answers [`MSG_ACCEPTED`], and waits for the
+//! requester to hang up, at most [`HANGUP_MS`]. A swapped service runs from
+//! that region, each start of it too: no file is read and no file server
+//! is asked. `swap` hangs up once its caller has closed
 //! its input, or [`ANSWER_MS`] after its answer — the close is the caller's
 //! proof it has the answer: the service being swapped may be
 //! the one carrying it, and is not stopped before it has arrived. Then the supervisor
@@ -27,8 +28,8 @@
 //! the supervisor starts the binary it replaced again — owed the same devices.
 //!
 //! **A swap lasts one boot.** The root volume is the image and is read-only;
-//! a replaced binary lives in the per-boot `/tmp` and a reboot runs the image's
-//! own. A swap that outlived the boot would be a machine booting something its
+//! a replaced binary lives in the supervisor's memory and a reboot runs the
+//! image's own. A swap that outlived the boot would be a machine booting something its
 //! image does not say.
 
 #![forbid(unsafe_code)]
@@ -47,9 +48,6 @@ pub const LABEL: &str = "swap";
 /// The one program a build may let receive [`PORT`]: `/system/bin/swap`,
 /// which a login runs and nothing starts at boot.
 pub const HOLDER: &str = "swap";
-
-/// Where a swap's bytes are staged and where a swapped binary is started from.
-pub const STAGING: &str = "/tmp/swap";
 
 /// The largest binary a swap carries. A bound on the memory `swap` and the supervisor
 /// each spend on one request; a service binary in this tree is a few megabytes.
@@ -77,7 +75,7 @@ const _: () = assert!(HANGUP_MS > ANSWER_MS);
 
 /// The request, `swap` to the supervisor: [`Request::encode`]'s bytes.
 pub const MSG_SWAP: u32 = 1;
-/// The supervisor's answer: verified and installed; the payload is the installed path.
+/// The supervisor's answer: verified and kept; the payload is the digest, in hex.
 pub const MSG_ACCEPTED: u32 = 2;
 /// The supervisor's answer: refused, and the old service untouched; the payload is why.
 pub const MSG_REFUSED: u32 = 3;
@@ -129,16 +127,15 @@ pub enum Refusal {
     NotRunning(String),
     /// Another swap has not finished.
     Busy(String),
-    /// The path is not one [`staged_path`] makes.
-    NotStaged(String),
-    Unreadable { path: String, why: String },
+    /// The lent region is not one the request describes.
+    Unreadable(String),
     TooLarge(u64),
     /// The bytes are not the ones the requester named.
     Mismatch { got: Digest, want: Digest },
     /// The service already runs this binary.
-    AlreadyRuns(String),
-    /// The supervisor could not put the verified bytes where a service is started from.
-    Install { path: String, why: String },
+    AlreadyRuns(Digest),
+    /// The supervisor could not make the region a service is started from.
+    Install(String),
     /// This process was given no [`PORT`]: the image does not let it swap.
     NoAuthority,
 }
@@ -150,16 +147,15 @@ impl core::fmt::Display for Refusal {
             Self::NotAService(name) => write!(f, "{name} is no service the supervisor started at boot"),
             Self::NotRunning(name) => write!(f, "{name} has ended and its port is closed"),
             Self::Busy(name) => write!(f, "a swap of {name} has not finished"),
-            Self::NotStaged(path) => write!(f, "{path:?} is not a staged binary"),
-            Self::Unreadable { path, why } => write!(f, "{path} cannot be read: {why}"),
+            Self::Unreadable(why) => write!(f, "the lent binary cannot be read: {why}"),
             Self::TooLarge(len) => {
                 write!(f, "{len} bytes is more than the {MAX_BINARY_BYTES} a swap carries")
             }
             Self::Mismatch { got, want } => {
                 write!(f, "the binary hashes to {} and the request names {}", hex(got), hex(want))
             }
-            Self::AlreadyRuns(path) => write!(f, "the service already runs {path}"),
-            Self::Install { path, why } => write!(f, "{path} could not be written: {why}"),
+            Self::AlreadyRuns(digest) => write!(f, "the service already runs sha256 {}", hex(digest)),
+            Self::Install(why) => write!(f, "the binary could not be kept: {why}"),
             Self::NoAuthority => write!(f, "this process holds no `{PORT}` connector"),
         }
     }
@@ -175,91 +171,48 @@ pub fn verify(bytes: &[u8], want: &Digest) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Where `swap` stages one request's bytes. `nonce` keeps two requests' files
-/// apart; the name is never one a service is started from.
-pub fn staged_path(service: &str, nonce: u64) -> String {
-    format!("{STAGING}/incoming-{service}-{nonce}")
-}
-
-/// Whether `path` is one [`staged_path`] could have made.
-pub fn is_staged(path: &str) -> bool {
-    let Some(file) = path.strip_prefix(STAGING).and_then(|rest| rest.strip_prefix("/incoming-"))
-    else {
-        return false;
-    };
-    let Some((service, nonce)) = file.rsplit_once('-') else { return false };
-    is_service_name(service) && !nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_digit())
-}
-
-/// Where a verified binary is started from: a directory named by its digest,
-/// holding a file named by the service, so the process a swap starts carries
-/// the service's own name wherever a name is taken from the path.
-pub fn installed_path(service: &str, digest: &Digest) -> String {
-    format!("{}/{service}", installed_dir(digest))
-}
-
-pub fn installed_dir(digest: &Digest) -> String {
-    format!("{STAGING}/{}", hex(digest))
-}
-
-/// Whether `path` is a binary a swap installed, which is what the supervisor may delete
-/// once nothing runs it. A path in the image never is.
-pub fn is_installed(path: &str) -> bool {
-    installed_digest(path).is_some()
-}
-
-/// The digest an installed binary's path names, which its bytes must still
-/// hash to when it is started; `None` for any other path.
-pub fn installed_digest(path: &str) -> Option<Digest> {
-    let rest = path.strip_prefix(STAGING)?.strip_prefix('/')?;
-    let (dir, service) = rest.split_once('/')?;
-    if !is_service_name(service) {
-        return None;
-    }
-    parse_hex(dir)
-}
-
-/// The request `swap` sends the supervisor: the service, the staged path and the digest the
-/// client named.
+/// The request `swap` sends the supervisor: the service, the digest the client
+/// named and the binary's length. The binary is the one region the request's
+/// frame carries, at least that long.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub service: String,
-    pub staged: String,
     pub digest: Digest,
+    pub len: u64,
 }
 
 impl Request {
-    /// `digest ‖ service ‖ 0 ‖ staged`.
+    /// `digest ‖ len (little-endian u64) ‖ service`.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32 + self.service.len() + 1 + self.staged.len());
+        let mut out = Vec::with_capacity(40 + self.service.len());
         out.extend_from_slice(&self.digest);
+        out.extend_from_slice(&self.len.to_le_bytes());
         out.extend_from_slice(self.service.as_bytes());
-        out.push(0);
-        out.extend_from_slice(self.staged.as_bytes());
         out
     }
 
-    /// Everything in it is the requester's claim: a name that is not a service
-    /// name and a path that is not a staged one are refused here, before the supervisor
-    /// looks anything up or opens anything.
+    /// Everything in it is the requester's claim: a name that is not a
+    /// service name and a length past [`MAX_BINARY_BYTES`] are refused here,
+    /// before the supervisor looks anything up or reads anything.
     pub fn decode(bytes: &[u8]) -> Result<Self, Refusal> {
-        if bytes.len() < 32 {
-            return Err(Refusal::Malformed(format!("{} bytes is shorter than a digest", bytes.len())));
+        if bytes.len() < 40 {
+            return Err(Refusal::Malformed(format!("{} bytes is shorter than a digest and a length", bytes.len())));
         }
         let (digest, rest) = bytes.split_at(32);
         let digest: Digest = digest.try_into().expect("split at 32");
-        let text = core::str::from_utf8(rest)
-            .map_err(|_| Refusal::Malformed("the names are not UTF-8".into()))?;
-        let (service, staged) = text
-            .split_once('\0')
-            .ok_or_else(|| Refusal::Malformed("no separator between the service and the path".into()))?;
+        let (len, service) = rest.split_at(8);
+        let len = u64::from_le_bytes(len.try_into().expect("split at 8"));
+        let service = core::str::from_utf8(service).map_err(|_| Refusal::Malformed("the name is not UTF-8".into()))?;
         if !is_service_name(service) {
             return Err(Refusal::Malformed(format!("{service:?} is not a service name")));
         }
-        if !is_staged(staged) {
-            return Err(Refusal::NotStaged(staged.to_string()));
+        if len == 0 {
+            return Err(Refusal::Malformed("an empty binary".into()));
         }
-        Ok(Self { service: service.to_string(), staged: staged.to_string(), digest })
+        if len > MAX_BINARY_BYTES {
+            return Err(Refusal::TooLarge(len));
+        }
+        Ok(Self { service: service.to_string(), digest, len })
     }
 }
 
@@ -268,7 +221,7 @@ impl Request {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Word {
     Refused,
-    /// The bytes matched and are installed; the requester has been answered.
+    /// The bytes matched and are kept; the requester has been answered.
     Accepted,
     /// The old process is being stopped.
     Stopping,
@@ -332,41 +285,18 @@ mod tests {
     }
 
     #[test]
-    fn a_request_round_trips_and_a_path_it_did_not_stage_is_refused() {
-        let request =
-            Request { service: "netstack".into(), staged: staged_path("netstack", 7), digest: digest(b"x") };
+    fn a_request_round_trips_and_a_bent_one_is_refused() {
+        let request = Request { service: "netstack".into(), digest: digest(b"x"), len: 4096 };
         assert_eq!(Request::decode(&request.encode()), Ok(request.clone()));
-        for staged in [
-            "/system/bin/netstack",
-            "/tmp/swap/incoming-netstack-",
-            "/tmp/swap/incoming-netstack-7/../../../system/bin/sh",
-            "/tmp/swap/incoming-../x-7",
-            "/tmp/swap/incoming-netstack-7x",
-            "/tmp/swapincoming-netstack-7",
-        ] {
-            let bent = Request { staged: staged.into(), ..request.clone() };
-            assert_eq!(
-                Request::decode(&bent.encode()),
-                Err(Refusal::NotStaged(staged.into())),
-                "{staged}"
-            );
+        assert!(matches!(Request::decode(&[0; 39]), Err(Refusal::Malformed(_))));
+        for service in ["", "..", "net/stack"] {
+            let bent = Request { service: service.into(), ..request.clone() };
+            assert!(matches!(Request::decode(&bent.encode()), Err(Refusal::Malformed(_))), "{service:?}");
         }
-        assert!(Request::decode(&[0; 31]).is_err());
-        let nameless = Request { service: "".into(), ..request };
-        assert!(matches!(Request::decode(&nameless.encode()), Err(Refusal::Malformed(_))));
-    }
-
-    /// The process a swap starts is named after its path's last component, so
-    /// the installed file carries the service's own name and nothing else.
-    #[test]
-    fn an_installed_binary_is_named_by_its_service_under_its_digest() {
-        let path = installed_path("netstack", &digest(b"abc"));
-        assert_eq!(path, format!("/tmp/swap/{ABC}/netstack"));
-        assert!(is_installed(&path));
-        assert_eq!(installed_digest(&path), Some(digest(b"abc")));
-        assert!(!is_installed("/system/bin/netstack"));
-        assert!(!is_installed(&staged_path("netstack", 1)));
-        assert!(!is_staged(&path));
+        let empty = Request { len: 0, ..request.clone() };
+        assert!(matches!(Request::decode(&empty.encode()), Err(Refusal::Malformed(_))));
+        let past = Request { len: MAX_BINARY_BYTES + 1, ..request };
+        assert_eq!(Request::decode(&past.encode()), Err(Refusal::TooLarge(MAX_BINARY_BYTES + 1)));
     }
 
     #[test]

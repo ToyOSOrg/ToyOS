@@ -43,10 +43,10 @@ pub struct Command {
     /// it read: kept across a later working directory, so a spawn starts the
     /// bytes the caller saw ([`Command::prepared_image`]).
     image: Option<(OsString, toyos::process::Image)>,
-    /// A copy of a boot image this process holds, which the child runs
-    /// instead of any file ([`Command::boot_image`]): each spawn adopts a
-    /// copy of its own.
-    boot_image: Option<io::Result<toyos::OwnedHandle>>,
+    /// A copy of a memory region this process holds, which the child runs
+    /// instead of any file ([`Command::image`]): each spawn adopts a copy of
+    /// its own.
+    held_image: Option<io::Result<toyos::OwnedHandle>>,
 }
 
 /// What the command gives a child for one of its descriptors.
@@ -130,7 +130,7 @@ impl Command {
             image_path: None,
             prepared: None,
             image: None,
-            boot_image: None,
+            held_image: None,
         }
     }
 
@@ -144,14 +144,14 @@ impl Command {
         self.image_path = Some(path.to_owned());
         self.prepared = None;
         self.image = None;
-        self.boot_image = None;
+        self.held_image = None;
     }
 
-    /// Run the immutable region `handle` names, which this process keeps,
-    /// rather than any file: `argv[0]` is the program the command names, and
-    /// nothing opens it.
-    pub fn boot_image(&mut self, handle: crate::os::toyos::io::BorrowedHandle<'_>) {
-        self.boot_image = Some(copy(handle));
+    /// Run the memory region `handle` names, which this process keeps
+    /// unchanged, rather than any file: `argv[0]` is the program the command
+    /// names, and nothing opens it.
+    pub fn image(&mut self, handle: crate::os::toyos::io::BorrowedHandle<'_>) {
+        self.held_image = Some(copy(handle));
         self.image_path = None;
         self.prepared = None;
         self.image = None;
@@ -176,7 +176,7 @@ impl Command {
         let kept = self.image.as_ref().is_some_and(|(read, _)| *read == source);
         if !kept {
             self.image = None;
-            if self.boot_image.is_none() && !self.independent {
+            if self.held_image.is_none() && !self.independent {
                 let image = crate::sys::fs::read_image(Path::new(&source), self.endowed_job())?;
                 self.image = Some((source, image));
             }
@@ -304,7 +304,7 @@ impl Command {
 
     fn resolve_program(&self) -> io::Result<OsString> {
         let prog = self.program.to_str().unwrap_or("");
-        if prog.contains('/') || self.boot_image.is_some() {
+        if prog.contains('/') || self.held_image.is_some() {
             return Ok(self.program.clone());
         }
         // Search PATH for the executable
@@ -430,30 +430,27 @@ impl Command {
             Some(Ok(syscap)) => Some(toyos::AsHandle::as_handle(syscap)),
             Some(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
         };
-        let boot_image = match &self.boot_image {
+        let held_image = match &self.held_image {
             None => None,
             Some(Ok(image)) => Some(image.try_clone().map_err(crate::sys::to_io_error)?),
             Some(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
         };
-        let image_held = prepared_image.is_some() || boot_image.is_some();
+        let image_held = prepared_image.is_some() || held_image.is_some();
         // A helper's program on a file server is taken here as the memory
         // object its server holds it in, or read into one counted to the job
         // the child is endowed to run in or else to this process's, which the
         // kernel pages the child from. A
         // launch runs its row's own program.
         let source = Path::new(image_path.unwrap_or(program));
-        let image = match (prepared_image, boot_image) {
+        let image = match (prepared_image, held_image) {
             _ if self.independent => None,
             (Some(image), _) => Some(image),
-            (None, Some(handle)) => {
-                let region = toyos::shm::Immutable::adopt(handle).map_err(|why| match why {
-                    toyos::shm::NotImmutable::Kernel(e) => crate::sys::to_io_error(e),
-                    toyos::shm::NotImmutable::Writable => {
-                        io::const_error!(io::ErrorKind::InvalidInput, "the boot image is no immutable region")
-                    }
-                })?;
-                Some(toyos::process::Image::immutable(region))
-            }
+            (None, Some(handle)) => Some(toyos::process::Image::held(handle).map_err(|why| match why {
+                toyos::process::NotHeld::Kernel(e) => crate::sys::to_io_error(e),
+                toyos::process::NotHeld::NotMemory => {
+                    io::const_error!(io::ErrorKind::InvalidInput, "the image is no memory region")
+                }
+            })?),
             (None, None) => Some(crate::sys::fs::read_image(source, job_of(&endowments))?),
         };
         let (labels, endowed): (Vec<String>, Vec<toyos::OwnedHandle>) = endowments.into_iter().unzip();

@@ -20,7 +20,7 @@
 //! is the one carrying the caller's connection — at most
 //! [`toyos_swap::ANSWER_MS`], and then lets the supervisor go.
 //!
-//! The answer is one line on standard output: `accepted <path>` with exit
+//! The answer is one line on standard output: `accepted <sha256>` with exit
 //! status 0; `refused <why>`, the supervisor's refusal, with 1; or `unasked <why>`, this
 //! program's own before the supervisor heard of the ask — so a caller knows the supervisor will
 //! say nothing about it — with 1.
@@ -36,7 +36,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (answer, held) = run(&args);
     let line = match &answer {
-        Answer::Accepted(path) => format!("accepted {path}"),
+        Answer::Accepted(digest) => format!("accepted {digest}"),
         Answer::Refused(why) => format!("refused {why}"),
         Answer::Unasked(why) => format!("unasked {why}"),
     };
@@ -50,7 +50,7 @@ fn main() {
 
 /// What this program answers.
 enum Answer {
-    /// The supervisor verified and installed the binary; the path it runs from.
+    /// The supervisor verified and kept the binary; its digest.
     Accepted(String),
     /// The supervisor refused, and said so in its own log.
     Refused(String),
@@ -86,6 +86,9 @@ fn take(args: &[String]) -> Result<Asked, Refusal> {
     if !toyos_swap::is_service_name(service) {
         return Err(Refusal::Malformed(format!("{service:?} is not a service name")));
     }
+    if len == 0 {
+        return Err(Refusal::Malformed("an empty binary".into()));
+    }
     if len > toyos_swap::MAX_BINARY_BYTES {
         return Err(Refusal::TooLarge(len));
     }
@@ -96,8 +99,8 @@ fn take(args: &[String]) -> Result<Asked, Refusal> {
     Ok(Asked { service: service.clone(), digest, body })
 }
 
-/// Stage the binary and ask the supervisor: its answer, and the connection this program
-/// holds until the go where the supervisor accepted.
+/// Lend the supervisor the binary and ask: its answer, and the connection this
+/// program holds until the go where the supervisor accepted.
 fn ask(asked: &Asked) -> (Answer, Option<toyos::ipc::Connection>) {
     let unasked = |why: String| (Answer::Unasked(why), None);
     let Some(held) = Endowments::get().take::<Namespace>(toyos_swap::LABEL) else {
@@ -107,15 +110,17 @@ fn ask(asked: &Asked) -> (Answer, Option<toyos::ipc::Connection>) {
         Ok(conn) => conn,
         Err(e) => return unasked(format!("the supervisor's swap port did not answer: {e:?}")),
     };
-    let staged = toyos_swap::staged_path(&asked.service, u64::from(std::process::id()));
-    let written = std::fs::create_dir_all(toyos_swap::STAGING).and_then(|()| std::fs::write(&staged, &asked.body));
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&staged);
-        return unasked(format!("{staged} could not be written: {e}"));
-    }
-    let request = Request { service: asked.service.clone(), staged, digest: asked.digest };
-    if let Err(e) = supervisor.send_bytes(toyos_swap::MSG_SWAP, &request.encode()) {
-        let _ = std::fs::remove_file(&request.staged);
+    let lent = toyos::shm::SharedMemory::create(asked.body.len())
+        .and_then(|region| {
+            region.bytes().write(0, &asked.body);
+            region.share()
+        });
+    let lent = match lent {
+        Ok(lent) => lent,
+        Err(e) => return unasked(format!("no region would hold the binary: {e:?}")),
+    };
+    let request = Request { service: asked.service.clone(), digest: asked.digest, len: asked.body.len() as u64 };
+    if let Err(e) = supervisor.send_bytes_with(toyos_swap::MSG_SWAP, &request.encode(), [lent]) {
         return unasked(format!("the supervisor did not take the request: {e:?}"));
     }
     let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
