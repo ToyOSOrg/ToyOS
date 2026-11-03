@@ -14,12 +14,10 @@ against the crate:
 read-write mount: `sync()` rewrites both superblocks, and any file operation
 writes the bitmap, btree nodes and data. So mounting a stranger's disk modifies
 it, which is a weaker form of the wrong the designation stamp exists to prevent.
-Accidental collision is not the risk — random block-0 bytes satisfy 4 bytes of
-magic, 4 of version and a 32-bit CRC with probability about 2^-64 — and neither
-is a *genuine* upstream bcachefs volume, which does not begin with ASCII `BCFS`
-(this crate shares the name and nothing else; `issues/bcachefs-crate-is-not-bcachefs.md`). The risk is a **deliberately
-crafted block 0** on a disk somebody hands you, which is the metal track's
-situation exactly.
+Accidental collision is not the risk: random bytes do not pass a superblock's
+magic and checksum. The risk is a volume this machine did not write on a
+partition typed as DATA — a **deliberately crafted** one on a disk somebody
+hands you, which is the metal track's situation exactly.
 
 Recommendation, for the owner to decide:
 

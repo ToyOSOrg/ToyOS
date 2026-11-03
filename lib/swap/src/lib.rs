@@ -27,7 +27,7 @@
 //! the supervisor starts the binary it replaced again — owed the same devices.
 //!
 //! **A swap lasts one boot.** The root volume is the image and is read-only;
-//! a replaced binary lives in the per-boot tmpfs and a reboot runs the image's
+//! a replaced binary lives in the per-boot `/tmp` and a reboot runs the image's
 //! own. A swap that outlived the boot would be a machine booting something its
 //! image does not say.
 

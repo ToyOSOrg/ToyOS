@@ -632,8 +632,7 @@ pub fn package_sensor() -> Result<super::Sensor, String> {
 
 /// Requests straight through the file server's client (`toyos::fs::Dir`),
 /// under none of std's descriptor table and path routing: beside the same
-/// rows through std, what that layer costs. Only for a directory a file
-/// server serves; the kernel's `/tmp` has no client to go around.
+/// rows through std, what that layer costs.
 pub mod direct {
     use toyos::fs::{Base, Dir, Error, O_READ, SEEK_START};
 

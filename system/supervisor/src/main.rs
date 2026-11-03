@@ -2216,7 +2216,7 @@ fn write_store(text: &str) -> Result<(), String> {
 /// A staged or installed binary's bytes, refused past [`toyos_swap::MAX_BINARY_BYTES`]
 /// before any of it is read, and read through that bound: a file grown
 /// between the two is refused, never read whole. Made from the loop: a swap's
-/// files are under [`toyos_swap::STAGING`], which the kernel serves.
+/// files are under [`toyos_swap::STAGING`], on the MEMORY file server.
 fn read_binary(path: &str) -> Result<Vec<u8>, Refusal> {
     use std::io::Read as _;
     let unreadable = |e: std::io::Error| Refusal::Unreadable { path: path.to_string(), why: e.to_string() };
@@ -2776,7 +2776,7 @@ enum Resolved<'a, V> {
 /// before any symlink is followed, never after.** `declared` follows one link,
 /// so asking it first would let `/apps/<anything>/x` — a symlink any process
 /// can plant — resolve to the whole `[programs]` row of the binary it points
-/// at. A path the kernel would normalize is refused before either happens: it
+/// at. A path a client would normalize is refused before either happens: it
 /// classifies as one thing and opens as another, and `start` spawns the string
 /// the client sent, so the two need not even name one file.
 ///

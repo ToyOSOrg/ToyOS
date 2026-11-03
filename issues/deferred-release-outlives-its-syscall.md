@@ -258,9 +258,8 @@ The ruling, in the words it was recorded in, where "wall 4" is this question:
 
 The queue landed with #257 (`7ab9367b0`) and left the kernel in `80a1f1ceb`,
 when nothing the kernel flushed reached a device any more; the conversion it
-was sequenced before is planned by nothing. Today `OpenFileState::drop` calls
-`file_cache::release` and takes "the file cache's lock and no other", so
-`File` needs no release site that parks.
+was sequenced before is planned by nothing. `OpenFileState` and the file cache
+whose release it ran went in #1152.
 
 ## A process's own releases run before its end, ruled 2026-10-13
 

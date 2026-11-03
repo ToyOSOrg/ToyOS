@@ -406,12 +406,11 @@ crate::user_safe! {
         /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
         pub labels_ptr: u64,
         pub labels_len: u64,
-        /// The child's working directory, absolute, or the spawn is refused
-        /// `InvalidArgument`. Under the name the kernel serves (`/tmp`) it
-        /// must be a directory there or the spawn is `NotFound`; under any other
-        /// name it is a file server's directory, which the caller's client asked
-        /// that server about and the kernel cannot. **Always the caller's
-        /// statement**: the kernel never substitutes the caller's own.
+        /// The child's working directory, kept as text for its
+        /// [`SYS_GETCWD`] and judged by nobody here: a file server's
+        /// directory, which the caller's client asked that server about.
+        /// **Always the caller's statement**: the kernel never substitutes the
+        /// caller's own.
         pub cwd_ptr: u64,
         pub cwd_len: u64,
         /// The program's bytes, in a memory object the caller holds — its file
@@ -755,8 +754,8 @@ pub struct Stat {
     /// ROOT's reproducible image.
     pub mtime: u64,
     /// The volume the file is on; 0 for an object that is no file of any
-    /// volume. A kernel mount's is below 2^63, a file server's has bit 63 set
-    /// (`toyos::fs::SERVED_VOLUME`), so the two minters cannot collide.
+    /// volume, which is every kernel object. A file server's has bit 63 set
+    /// (`toyos::fs::SERVED_VOLUME`), so no server's volume reads as 0.
     pub volume: u64,
     /// The file on that volume: the same through every path and handle that
     /// reaches it, for as long as it exists and its volume stays mounted, and

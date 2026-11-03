@@ -351,7 +351,7 @@ Each of these changes at the stage named:
   (the RAM/8 window cap) becomes the compositor's wire allowance over on-screen
   buffers.
 - **Deleted.** `system/fileserver/src/cache.rs` goes at its prerequisite.
-  `kernel/src/file_cache.rs` behind kernel tmpfs goes at P3's memory format.
+  `kernel/src/file_cache.rs` went with kernel tmpfs (#1152).
 - **When text maps its source without the copy**
   (`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`
   stage 5), the copied-segment rule goes with the copies.

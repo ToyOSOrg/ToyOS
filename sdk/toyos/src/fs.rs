@@ -211,8 +211,8 @@ pub const KIND_SYMLINK: u64 = 3;
 /// [`HELLO`]'s answer: the capability's rights in `value`.
 pub const RIGHT_WRITE: u64 = 1;
 
-/// Set by the client on every volume a server answers ([`Stat::volume`]): a
-/// kernel mount's is below it, so no server can name one, whatever it says
+/// Set by the client on every volume a server answers ([`Stat::volume`]), so
+/// none reads as a kernel object's 0, whatever it says
 /// (`toyos_abi::syscall::Stat::volume`).
 pub const SERVED_VOLUME: u64 = 1 << 63;
 

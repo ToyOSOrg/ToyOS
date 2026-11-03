@@ -30,8 +30,8 @@ const DIR: &str = "/tmp/abuse_loader_exe";
 
 /// The two cases about a table larger than one kernel allocation need a file
 /// larger than one kernel allocation, because `read_file_range` clamps a
-/// declared length to what the file actually holds. tmpfs is where that is
-/// cheap: the pages are heap boxes, so a 3 MiB file costs no device I/O, and
+/// declared length to what the file actually holds. `/tmp` is where that is
+/// cheap: its pages are memory, so a 3 MiB file costs no device I/O, and
 /// the case under test is the loader rather than the filesystem.
 ///
 /// Both cases asserted on the *declared* length alone until `/tmp` became

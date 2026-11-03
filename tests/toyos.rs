@@ -601,8 +601,8 @@ const MACHINE_TESTS: &[&str] = &[
     // `bent_supervisor_falls_back` metal row runs it on a bench.
     "a_bent_supervisor_is_refused_and_the_other_slot_boots",
     // A spawn and its child's end leave the census as it was, for a program
-    // the root server holds in memory, one on DATA read whole and one in the
-    // kernel's `/tmp`: the image's
+    // the root server holds in memory, and one each on DATA and `/tmp` read
+    // whole: the image's
     // owners and the kernel's object lifetimes together, which no host test
     // holds. One boot of QEMU's x86-64 machine on the actuator kernel, for the
     // census.
@@ -3119,7 +3119,7 @@ fn console_image_boots() -> Result<(), String> {
 }
 
 /// Eight spawns from each of a file the root server holds in memory, a copy
-/// on DATA that the spawn reads whole, and a copy in the kernel's `/tmp`:
+/// on DATA and a copy on `/tmp`, each of which the spawn reads whole:
 /// each child maps its parent's log ring, and once they have ended the census
 /// is back to its first reading (`spawn_returns_the_census`). A census per kind and not the memory in use:
 /// a served image is a region over pages the server keeps, so one kept past

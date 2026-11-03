@@ -38,6 +38,18 @@ so it waits for one of two exits: a measured parallel build on ToyOS shows
 which bound it reaches and by how much, or a share's streams are bounded by
 the bytes they cost its client's job rather than by count.
 
+**`/tmp` now spends the same bound.** Since #1152 `/tmp` is the MEMORY file
+server's, and the SDK keeps one connection per directory capability for the
+life of the process. So every live process of a share that has touched `/tmp`
+holds one of that share's 32 connections there, and the 33rd is refused. Seen
+on the T14 at `0507cbe36` (`proctreecase`): a chain of processes each
+spawning the next from a copy of its program on `/tmp` stopped at link 32,
+refused "the file server serves as many connections as it takes". A parallel
+build whose compilers and linkers each write a temporary there reaches it at
+32 concurrent processes, before any stream bound. Nothing runs that load now:
+`process_tree`'s chain starts each link from an endowed image and touches no
+file server, and `bounds.rs`' unit tests hold the count alone.
+
 Owner: the file server.
 
 ## Exit condition

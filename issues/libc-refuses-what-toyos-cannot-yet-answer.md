@@ -10,10 +10,6 @@ These answer failure in their POSIX form and do nothing
 (`sdk/libc/src/refused.rs`, `posix_io.rs`), each asserted by
 `tests/corpus/tinycc/206_libc_refusals.c`. Each waits on what it names:
 
-- `symlink` of a link the kernel would hold, `ENOSYS`: `SYS_SYMLINK`
-  displaces what its name held
-  (`issues/a-symbolic-link-on-tmp-displaces-its-name-and-lists-nowhere.md`). A
-  file server makes one and refuses a name that exists, as POSIX has it.
 - `chmod`, `fchmod` and `fchmodat`, `ENOSYS`: a file has no mode bits to set.
 - `statvfs` and `fstatvfs`, `ENOSYS`: no call answers a filesystem's size or
   free space.

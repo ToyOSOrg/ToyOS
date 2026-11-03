@@ -8,7 +8,7 @@ opened: 2026-09-23
 
 A service swap (`toyos-swap`) writes the binary the supervisor verified to
 `/tmp/swap/<sha256>/<service>` and starts the service from that path. `/tmp`
-is a tmpfs every process may write, because the filesystem is ambient by the
+is the MEMORY file server's, which every process may write, because the filesystem is ambient by the
 owner's ruling, so the file the supervisor hashed is not the file the kernel loads by any
 guarantee — only by nobody having rewritten it in between. Two windows:
 
@@ -18,9 +18,9 @@ guarantee — only by nobody having rewritten it in between. Two windows:
   requester has hung up, milliseconds to two seconds later; a process that
   rewrites the file in that window runs its own bytes holding the service's
   manifest row — its device claims included.
-- **For the service's life**, closed: a spawn from `/tmp` runs a snapshot of
-  the file taken at the spawn (`file_cache::Snapshot`), which no later write
-  reaches. A restore after a failed swap spawns the previous installed path
+- **For the service's life**, closed: a spawn from `/tmp` runs a copy of
+  the file read into a memory object at the spawn (`Image::read_for`), which
+  no later write reaches. A restore after a failed swap spawns the previous installed path
   again, so it is the first window again.
 
 Nothing in the tree does either; the authority to ask for a swap is

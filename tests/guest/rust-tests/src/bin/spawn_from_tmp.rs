@@ -1,4 +1,4 @@
-//! A program spawned from a file in the kernel's `/tmp` runs the file's bytes
+//! A program spawned from a file in `/tmp` runs the file's bytes
 //! as they were at the spawn: the file overwritten in place with bytes other
 //! than its own, cut to nothing and deleted the moment the spawn returns, the
 //! child reads every page of its data after that, at each page's first touch,

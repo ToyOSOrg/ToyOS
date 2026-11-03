@@ -147,9 +147,6 @@ Beside the path, and needed by none of its exits:
   loader hands the supervisor and the system file server over as signed
   payloads, and `/system` goes onto the file protocol
   (`the-kernel-is-small-interrupts-post-and-threads-wait`, step 9).
-- **Paths on `/tmp` resolve by the kernel's rules**
-  (`the-kernel-resolves-a-path-by-rules-of-its-own`); a served path resolves
-  by POSIX's (#988).
 - **libc++'s `std::filesystem`** is proven in no guest, and its `remove_all`
   walks by path where a directory handle (`openat`, `unlinkat`) would not
   follow a link swapped in (`no-guest-case-reads-std-filesystem`,

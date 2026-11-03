@@ -4,8 +4,8 @@
 //! asks for durability: each system's cache and write-back decide what reaches
 //! the disk, and that is part of what the rows measure.
 //!
-//! `mem` is Linux's `/dev/shm` through the VFS, and ToyOS's `/tmp`, which the
-//! kernel serves through syscalls. `disk` is each system's
+//! `mem` is Linux's `/dev/shm` through the VFS, and ToyOS's `/tmp`, the MEMORY
+//! file server's, through IPC per request. `disk` is each system's
 //! [`crate::sys::persistent_dir`]: Linux's VFS and page cache over the
 //! runner's home, and ToyOS's DATA file server, through IPC per request but
 //! for a read of a file opened to read, which the kernel answers from the
