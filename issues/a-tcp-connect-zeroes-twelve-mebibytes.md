@@ -1,5 +1,5 @@
 ---
-status: assigned
+status: open
 kind: defect
 opened: 2026-10-27
 ---
@@ -38,6 +38,20 @@ still about 0.6 ms above Linux's; the pipes' 4 MiB are the derived
 candidate for that, not a reading. Evidence:
 [`aeba59fb0/`](https://github.com/ToyOSOrg/evidence/tree/37288c84c175a647145fe83fd51d945806cdb4ff/r1/aeba59fb0) and [`af239c8bb/`](https://github.com/ToyOSOrg/evidence/tree/37288c84c175a647145fe83fd51d945806cdb4ff/r1/af239c8bb).
 
+**#1077, closed on its last A/B (2026-11-03).** The approved design (option B) is on the branch `tcp-region` at `2798d7fa2`:
+- A memory object is committed by an explicit `SYS_SHM_COMMIT`, never by a fault.
+- A connect commits 132 KiB.
+- Each ring doubles under its producer.
+
+Evidence: [r8](https://github.com/ToyOSOrg/evidence/tree/4d6de513cc641c73a3d65a4adc59dcc605c5a993/r8); r1 to r7 are on the same `pr-1077` branch.
+- **It delivers the connect.** On the T14 the p50 went from 3.01 to 2.06 ms (-31.5%, resolved over 4 boots a side). Upload, download and `rtt.64` were unchanged.
+- **It failed on the syscall path.** Its rule was: no `fs`, `pipe`, `ipc`, `mem`, `proc` or `persist` row more than 2% worse. Its last session read the T14's `fs.mem.seq_read`/`seq_write`/`read_4k_at` 4 to 5% worse, `ipc.connect_accept` 2.4% worse, and `mem.anon.touch` about 2% worse on both benches, with none of these explained.
+- **What was learned:**
+  - Every syscall's user window passes `Space::allows`, and anything added there shows in osbench's `fs` and `pipe` rows on both benches. A second inventory walk read +4 to +15%. A per-page commit check cost every image read at spawn.
+  - Folding the check into the one descent, and answering a whole-committed object from a count, removed most of it, not all.
+  - A retry should keep the uncommitted-page refusal off `allows`. For example, the user copy can answer `BadAddress` where its own page lookup finds nothing, instead of dropping the write.
+  - A/B rows that move in opposite directions between sessions with the same code on their path (the T14 `fs.mem` rows, the AMD `mem.anon.map`) are to be read against the instruction-level diff of both binaries before they are believed.
+
 **Direction, the owner's (2026-10-27)**: remove the waste, not shrink a
 constant: size each stream region to what its connection uses, and take
 pipes off 2 MiB pages. The kernel's rule that a fault on a memory object
@@ -48,4 +62,4 @@ connection needs more is the implementer's design for that sizing.
 `lan.wired.tcp.connect` reads within Linux's run-to-run range on the same
 path.
 
-**Owner**: the `tcp-send` assignment, under the orchestrator.
+**Owner**: the orchestrator, who assigns the retry.

@@ -19,6 +19,9 @@ allocates nothing: past it a connect or an accept is refused
 `ResourceExhausted` before anything is made. 128 is libc's `MAX_SOCKETS`, an
 estimate no measurement set, and a new limit for a std program.
 
+The region half was built and closed in #1077. What it measured, and why it closed, is
+`issues/a-tcp-connect-zeroes-twelve-mebibytes.md`'s.
+
 **Exit condition**: regions whose pages are allocated as the rings fill, so a
 stream commits what it holds; and the table grown on demand, or its bound
 read off a measured program's need.
