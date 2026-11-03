@@ -297,9 +297,12 @@ pub fn storm() {
     const ROUNDS: usize = 15;
     const ATTEMPTS: usize = 400;
     let mut waiters = Vec::new();
+    static TIDS: std::sync::Mutex<Vec<sys::Tid>> = std::sync::Mutex::new(Vec::new());
     for width in WIDTHS {
+        let span = crate::ran::start();
         while waiters.len() < width as usize {
             waiters.push(thread::spawn(|| {
+                TIDS.lock().expect("the waiters' ids").push(sys::tid());
                 let mut seen = WORD.load(Ordering::Acquire);
                 while !FINISHED.load(Ordering::Acquire) {
                     sys::futex_wait(&WORD, seen);
@@ -342,8 +345,9 @@ pub fn storm() {
                 refuse(&bench("call"), format!("{} of {ATTEMPTS} wakes found all {width} parked", call.len()))
             }
             None => {
+                let homes = crate::ran::homes_over(span, &TIDS.lock().expect("the waiters' ids"));
                 result(&bench("call"), "ns", &mut call, &[]);
-                result(&bench("drain"), "ns", &mut drain, &[]);
+                result(&bench("drain"), "ns", &mut drain, &[("homes", homes)]);
             }
         }
     }
