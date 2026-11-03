@@ -1258,6 +1258,7 @@ mod admission;
 mod buckets;
 mod crash;
 mod data;
+mod geometry;
 mod compact;
 mod interleave;
 mod journal;

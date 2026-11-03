@@ -41,6 +41,7 @@ mod allocator;
 mod data;
 mod gc;
 mod ops;
+mod publish;
 mod reclaim;
 
 use allocator::{Allocator, Draw, Readers};
@@ -160,6 +161,21 @@ struct State {
     waits: [usize; 2],
     #[cfg(test)]
     journal_bytes: [usize; 3],
+    #[cfg(test)]
+    published: Published,
+    /// Bytes of keys past which a terminal publication splits a new node,
+    /// a node's unless a test lowers it.
+    #[cfg(test)]
+    group_limit: Option<usize>,
+}
+
+/// What the last terminal publication wrote, as tests inspect it.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Published {
+    pub members: usize,
+    /// Bounds added once the publication's own keys overfilled a new node.
+    pub regrouped: usize,
 }
 
 /// A volume mounted read-write.
@@ -462,6 +478,10 @@ impl<D: BlockDev> Mount<D> {
             waits: [0; 2],
             #[cfg(test)]
             journal_bytes: [0; 3],
+            #[cfg(test)]
+            published: Published::default(),
+            #[cfg(test)]
+            group_limit: None,
         };
         let mount = Mount {
             dev,
@@ -1475,20 +1495,34 @@ fn records(txn: &Txn, seq: u64, base: u64) -> (Vec<u8>, BTreeMap<Bpos, Version>)
 /// The clean unmount.
 impl<D: BlockDev> Mount<D> {
     /// Writes everything out and marks the volume clean (A1.42): every
-    /// orphan released; every dirty node written, leaves first, each
-    /// level's pointer updates journaled before the level above is written;
-    /// a final empty entry `S` whose last sequence is its own; then the
+    /// orphan released; everything committed before the unmount written by
+    /// reclaim, oldest first; what reclaim's own updates left, and what
+    /// writing that derives, in one terminal publication
+    /// ([`Mount::publish`]); a final empty entry `S` whose last sequence is
+    /// its own and whose roots reach that publication; then the
     /// superblock, clean, with `clean` naming `S`. Accounting totals that
     /// came to zero stay, as upstream keeps them (A7.23).
     pub async fn unmount(self) -> Result<()> {
         // A clean volume holds no orphan (A8.14), and nothing holds one now.
         self.release_orphans().await?;
         self.check_writable()?;
-        while self.busy() {
-            // Nothing else runs now, so every dirty node is ready to write.
-            assert!(self.reclaim_round(Order::LeavesFirst).await?, "dirty nodes no reclaim round writes");
-        }
         self.flush_open().await?;
+        // Reclaim keeps the working set within the cache while it writes
+        // what was committed; its own updates pin only later sequences.
+        let start = self.st.borrow().journal.next_seq;
+        while self.st.borrow().oldest_pin().is_some_and(|pin| pin < start) {
+            // Nothing else runs now, so every dirty node is ready to write.
+            assert!(self.reclaim_round(Order::OldestPin).await?, "committed changes no reclaim round writes");
+        }
+        self.publish_clean().await
+    }
+
+    /// Everything left published, then the clean entry and superblock.
+    async fn publish_clean(&self) -> Result<()> {
+        self.flush_open().await?;
+        while self.materialize(Order::LeavesFirst).await? {}
+        let seq = self.st.borrow().journal.next_seq;
+        self.publish(seq).await?;
         let upto = {
             let mut st = self.st.borrow_mut();
             let st = &mut *st;
@@ -1496,6 +1530,7 @@ impl<D: BlockDev> Mount<D> {
             self.close(st, true);
             st.journal.closed.back().expect("just closed").seq
         };
+        assert_eq!(upto, seq, "the clean entry publishes the terminal writes");
         self.write_entries(upto).await?;
         let clean = {
             let mut st = self.st.borrow_mut();
@@ -1537,6 +1572,19 @@ impl<D: BlockDev> Mount<D> {
         (st.pending.iter().count(), st.pending.allocated_bytes(), st.cache.dirty + st.cache.unpointed)
     }
 
+    /// Splits a terminal publication's new nodes past `bytes` of keys.
+    pub(crate) fn limit_publication_groups(&self, bytes: usize) {
+        self.st.borrow_mut().group_limit = Some(bytes);
+    }
+
+    /// A clean unmount without reclaim first writing what was committed:
+    /// all of it in the terminal publication, and what that wrote.
+    pub(crate) async fn unmount_in_one_publication(self) -> Result<Published> {
+        self.release_orphans().await?;
+        self.publish_clean().await?;
+        Ok(self.st.borrow().published)
+    }
+
     pub(crate) fn journal_room(&self) -> (u64, u64) {
         let st = self.st.borrow();
         (st.journal.ring_free(), 2 * st.journal.reclaim_entries)
@@ -1557,3 +1605,4 @@ impl<D: BlockDev> Mount<D> {
         alloc::format!("stopped={:?} capacity_free_live_occupied_bytes_baseline_stable={geometry:?} pending={} pending_bytes={} pending_pin={:?} pending_owners={owners:?} journal_entries_payload_encoded={:?} dirty={} unp={} over={} granted={} rg={} limit={} room={} open={:?} closed={} ring_free={} openable={} reclaim_entries={} durable_last={} newest={:?} head={} hs={} pins={:?} slot={} admitq_empty={} reclq={} nodes={:?}", st.read_only, st.pending.iter().count(), st.pending.allocated_bytes(), st.pending.oldest_pin(), st.journal_bytes, st.cache.dirty, st.cache.unpointed, st.cache.oversized, st.granted, st.reclaim_granted, st.limit, st.reclaim_room, j.open.as_ref().map(|o| (o.seq, o.area.len()/8)), j.closed.len(), j.ring_free(), j.openable(), j.reclaim_entries, j.durable_last, j.newest, j.head, j.head_sectors, st.oldest_pin(), self.slot_held.get(), self.admit.is_empty(), self.admit_reclaim.is_empty(), dirty)
     }
 }
+

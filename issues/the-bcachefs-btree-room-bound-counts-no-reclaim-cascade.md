@@ -17,14 +17,20 @@ emptying is durable.
 - **Reclaim's cascade.** Reclaim's own pointer transactions dirty allocator,
   backpointer and accounting leaves, and those leaves can need rewrites of their
   own. The bound counts reclaim's room once, not the rewrites that room causes.
+- **The clean unmount's publication.** It rewrites each changed node, every
+  node its own allocator, backpointer and accounting keys land in, and their
+  parents, once each, in new slots (`mount/publish.rs`). Nothing reserves
+  that closure, which on a volume of scattered nodes can reach far past the
+  dirty nodes.
 - **Buckets of several nodes.** On 2 MiB buckets of 256 KiB nodes, upstream's
   geometry for large devices, a rewrite returns no slot until every node in its
   bucket is dead. Partly dead btree buckets stay until something moves their live
   nodes.
 
-**When either is exceeded,** `take_bucket` finds no bucket. Reclaim then answers
-`NoSpace("no free bucket for a btree node")`, and the mount stops read-only by
-that name. The volume on the medium stays consistent and replays. No B6 test
+**When any is exceeded,** `take_bucket` finds no bucket. Reclaim, or the
+unmount's publication, then answers `NoSpace("no free bucket for a btree
+node")`: the mount stops read-only by that name, or the unmount fails with it
+before the clean entry. The volume on the medium stays consistent and replays. No B6 test
 reaches it: the full-volume tests, crashed or not, unmount clean on 32 KiB nodes.
 
 **Owner:** the storage track.

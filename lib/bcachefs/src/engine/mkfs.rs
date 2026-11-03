@@ -90,7 +90,24 @@ const BTREES: [Btree; 15] = [
 /// drawn from `random`, then flushes. A device too small for it is refused
 /// [`Error::Small`].
 pub async fn mkfs(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, random: &mut impl Random) -> Result<()> {
-    let volume = Encoded::lay_out(dev.blocks() * BLOCK_SECTORS, options, tree, random)?;
+    mkfs_shaped(dev, options, tree, random, Shape::NATIVE).await
+}
+
+/// Block and btree node sizes, in sectors, as upstream's `format` takes
+/// them; no node size takes a bucket's, at most 256 KiB.
+#[derive(Clone, Copy)]
+pub(crate) struct Shape {
+    pub block: u64,
+    pub node: Option<u64>,
+}
+
+impl Shape {
+    pub(crate) const NATIVE: Shape = Shape { block: BLOCK_SECTORS, node: None };
+}
+
+/// [`mkfs`] at `shape`.
+pub(crate) async fn mkfs_shaped(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, random: &mut impl Random, shape: Shape) -> Result<()> {
+    let volume = Encoded::lay_out(dev.blocks() * BLOCK_SECTORS, options, tree, random, shape)?;
     for (sector, bytes) in volume.population.extents() {
         write(dev, sector, bytes).await?;
     }
@@ -119,7 +136,7 @@ pub async fn mkfs(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, r
 pub fn fit<R: Random + Clone>(options: &Options<'_>, tree: &Tree<'_>, random: &R) -> Result<u64> {
     let mut blocks = MIN_BUCKETS * MIN_BUCKET / BLOCK_SECTORS;
     loop {
-        match Encoded::lay_out(blocks * BLOCK_SECTORS, options, tree, &mut random.clone()) {
+        match Encoded::lay_out(blocks * BLOCK_SECTORS, options, tree, &mut random.clone(), Shape::NATIVE) {
             Ok(_) => return Ok(blocks),
             Err(Error::Small { blocks: needs }) => {
                 assert!(needs > blocks, "a refusal at {blocks} blocks that asks for {needs}");
@@ -140,7 +157,7 @@ struct Encoded<'t, 'a> {
 }
 
 impl<'t, 'a> Encoded<'t, 'a> {
-    fn lay_out(sectors: u64, options: &Options<'_>, tree: &'t Tree<'a>, random: &mut impl Random) -> Result<Self> {
+    fn lay_out(sectors: u64, options: &Options<'_>, tree: &'t Tree<'a>, random: &mut impl Random, shape: Shape) -> Result<Self> {
         if options.label.len() > 31 {
             return Err(Error::Invalid("label longer than 31 bytes"));
         }
@@ -154,7 +171,11 @@ impl<'t, 'a> Encoded<'t, 'a> {
         if options.encryption.is_some() && tree.has_data() {
             return Err(Error::Unsupported("file data or a symlink on an encrypted volume"));
         }
-        let mut geometry = Geometry::new(sectors)?;
+        // File data is laid out in device blocks.
+        if shape.block != BLOCK_SECTORS && tree.has_data() {
+            return Err(Error::Unsupported("file data at a block size other than the device's"));
+        }
+        let mut geometry = Geometry::shaped(sectors, shape)?;
         let mut draw = Draw(random);
         let internal_uuid = draw.uuid()?;
         let user_uuid = draw.uuid()?;
@@ -182,7 +203,7 @@ impl<'t, 'a> Encoded<'t, 'a> {
         let mut nodes = Vec::new();
         for n in &laid.nodes {
             let build = Build { btree: n.btree, level: n.level, seq: n.seq, min: n.min, max: n.max, journal_seq: 0, keys: &n.keys };
-            nodes.push((n.sector, node::encode(magic, BLOCK, key.as_ref(), &build)?));
+            nodes.push((n.sector, node::encode(magic, geometry.block_bytes(), key.as_ref(), &build)?));
         }
 
         let member = Member {
@@ -213,7 +234,7 @@ impl<'t, 'a> Encoded<'t, 'a> {
             label,
             offset: 0,
             seq: 1,
-            block_sectors: BLOCK_SECTORS as u16,
+            block_sectors: geometry.block as u16,
             dev_idx: 0,
             nr_devices: 1,
             time_base: options.time,
@@ -348,6 +369,8 @@ impl<R: Random> Draw<'_, R> {
 
 /// Where everything goes on a device of `sectors`.
 struct Geometry {
+    /// Sectors per block.
+    block: u64,
     /// Sectors per bucket.
     bucket: u64,
     nbuckets: u64,
@@ -361,7 +384,12 @@ struct Geometry {
 }
 
 impl Geometry {
+    #[cfg(test)]
     fn new(sectors: u64) -> Result<Geometry> {
+        Self::shaped(sectors, Shape::NATIVE)
+    }
+
+    fn shaped(sectors: u64, shape: Shape) -> Result<Geometry> {
         let wanted = (sectors / WANT_BUCKETS).max(1);
         let bucket = (1u64 << wanted.ilog2()).clamp(MIN_BUCKET, MAX_BUCKET);
         let nbuckets = sectors / bucket;
@@ -375,8 +403,17 @@ impl Geometry {
         }
         let layout = Layout { max_bits: SB_MAX_BITS, offsets: alloc::vec![PRIMARY, second, end] };
         let front = (second + SB_SECTORS).div_ceil(bucket);
-        let journal = (front, (nbuckets / 128).max(8).max(super::mount::journal_buckets(bucket, BLOCK)));
-        Ok(Geometry { bucket, nbuckets, node: bucket.min(MAX_NODE_SECTORS), layout, journal, data_buckets: 0 })
+        let block = shape.block;
+        let node = shape.node.unwrap_or(bucket.min(MAX_NODE_SECTORS));
+        if !block.is_power_of_two() || block < BLOCK_SECTORS || !node.is_power_of_two() || node < block || node > bucket.min(MAX_NODE_SECTORS) {
+            return Err(Error::Invalid("a block or node size format does not take"));
+        }
+        let journal = (front, (nbuckets / 128).max(8).max(super::mount::journal_buckets(bucket, (block * SECTOR as u64) as usize)));
+        Ok(Geometry { block, bucket, nbuckets, node, layout, journal, data_buckets: 0 })
+    }
+
+    fn block_bytes(&self) -> usize {
+        self.block as usize * SECTOR
     }
 
     /// The first bucket of file data, after the journal.
@@ -521,7 +558,7 @@ impl Plan {
                     .collect()
             };
             let sector = g.slot(p.slot);
-            let bytes = node::record_bytes(keys.iter().map(Vec::len)).next_multiple_of(BLOCK);
+            let bytes = node::record_bytes(keys.iter().map(Vec::len)).next_multiple_of(g.block_bytes());
             assert!(bytes as u64 <= g.node * SECTOR as u64, "a node past its size");
             let ptr = NodePtr { seq: seqs[idx], written: (bytes / SECTOR) as u16, min: p.min, ptr: Ptr { sector, dev: 0, gen: 0, cached: false, unwritten: false } };
             written[idx] = Some((ptr, p.max));
