@@ -196,23 +196,9 @@ fn not_revocable() -> ! {
     panic!("watch: a revoke reached a wait that does not end on one");
 }
 
-/// Park once: until a post reaches this registration, the deadline passes, or
-/// this thread is cancelled. A return is not an answer — the caller re-reads
-/// its condition.
-#[track_caller]
-pub fn wait<L: CellLock<List>>(
-    p: &Parkable,
-    armed: &Armed<'_, L>,
-    deadline: Deadline,
-) -> Result<(), Cancelled> {
-    match wait_inner(p, armed, deadline, Cancel::Answers) {
-        Ok(()) => Ok(()),
-        Err(Ended::Cancelled) => Err(Cancelled(())),
-        Err(Ended::Revoked) => not_revocable(),
-    }
-}
-
-/// The same as [`wait`], for a wait a kill may not end.
+/// Park once, for a wait a kill may not end: until a post reaches this
+/// registration or the deadline passes. A return is not an answer — the
+/// caller re-reads its condition.
 #[track_caller]
 pub fn wait_uncancellable<L: CellLock<List>>(p: &Parkable, armed: &Armed<'_, L>, deadline: Deadline) {
     match wait_inner(p, armed, deadline, Cancel::Ignores) {
@@ -254,25 +240,6 @@ pub fn wait_until<L: CellLock<List>>(
         }
     }
     Ok(())
-}
-
-/// Register, then park until `ready()` holds, for a wait a kill may not end
-/// and no deadline bounds.
-#[track_caller]
-pub fn wait_uncancellable_until(p: &Parkable, watch: &Watch, token: u64, ready: impl Fn() -> bool) {
-    if ready() {
-        return;
-    }
-    // No current task cannot be answered by returning: the caller would carry
-    // on believing it holds a lock it never took.
-    // Class is fixed at `Other`: blocked time on a lock is the holder's reason, not the contender's.
-    let armed = arm(watch, token, WaitClass::Other)
-        .expect("watch: an uncancellable wait with no task to park");
-    // Exits only on the predicate: returning without it here means returning
-    // without the lock held.
-    while !ready() {
-        wait_uncancellable(p, &armed, Deadline::never());
-    }
 }
 
 #[track_caller]

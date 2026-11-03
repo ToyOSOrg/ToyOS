@@ -10,7 +10,6 @@ extern crate alloc;
 extern crate std;
 
 pub mod bootwrite;
-pub mod carrier;
 pub mod clock;
 pub mod cpu;
 pub mod dirnodes;

@@ -6,12 +6,12 @@ use crate::io;
 use crate::mem::ManuallyDrop;
 use crate::num::NonZero;
 use crate::ptr;
-use crate::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use crate::sync::atomic::{AtomicU32, Ordering};
 use crate::thread::ThreadInit;
 use crate::time::Duration;
 
 /// A thread's handle. Joined, it frees the thread's stack; dropped, it
-/// detaches the thread, whose stack the next spawn frees once it has ended.
+/// detaches the thread, which frees its own as it ends.
 pub struct Thread {
     block: *mut Block,
 }
@@ -19,8 +19,8 @@ pub struct Thread {
 unsafe impl Send for Thread {}
 unsafe impl Sync for Thread {}
 
-/// What a thread and its handle share. Freed by whoever reaps the thread:
-/// its joiner, or for a detached thread the first spawn after it ended.
+/// What a thread and its handle share. Freed by its joiner, or by a detached
+/// thread itself as it ends.
 struct Block {
     tid: AtomicU32,
     state: AtomicU32,
@@ -29,17 +29,11 @@ struct Block {
     reserved: usize,
     /// Taken by the thread as it starts.
     init: UnsafeCell<Option<Box<ThreadInit>>>,
-    /// The next block on [`REAPED`].
-    next: *mut Block,
 }
 
 const JOINABLE: u32 = 0;
 const DETACHED: u32 = 1;
 const EXITED: u32 = 2;
-
-/// Detached threads that have ended, linked through [`Block::next`]: a thread
-/// cannot free the stack it stands on, and pushing allocates nothing.
-static REAPED: AtomicPtr<Block> = AtomicPtr::new(ptr::null_mut());
 
 pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
 
@@ -65,14 +59,6 @@ unsafe fn reap(block: *mut Block) {
 
 impl Thread {
     pub unsafe fn new(stack: usize, init: Box<ThreadInit>) -> io::Result<Thread> {
-        let mut ended = REAPED.swap(ptr::null_mut(), Ordering::Acquire);
-        while !ended.is_null() {
-            // SAFETY: a block on the list was handed over by its ended thread.
-            let next = unsafe { (*ended).next };
-            unsafe { reap(ended) };
-            ended = next;
-        }
-
         // The size asked for, in whole pages, committed before the thread
         // starts so that no touch of it can find no memory.
         let Some(stack_size) = stack.max(1).checked_next_multiple_of(syscall::PAGE_SIZE) else {
@@ -98,7 +84,6 @@ impl Thread {
             reservation,
             reserved,
             init: UnsafeCell::new(Some(init)),
-            next: ptr::null_mut(),
         }));
 
         // SAFETY: entry point and stack are valid; the block outlives the thread.
@@ -119,7 +104,7 @@ impl Thread {
             return Err(io::const_error!(io::ErrorKind::Uncategorized, "thread spawn failed"));
         }
         // Before the handle exists: only a dropped handle detaches the
-        // thread, so every reaper sees this through the handle or the list.
+        // thread, and a detached thread reads no tid.
         unsafe { (*block).tid.store(tid as u32, Ordering::Relaxed) };
         Ok(Thread { block })
     }
@@ -134,10 +119,10 @@ impl Thread {
 impl Drop for Thread {
     fn drop(&mut self) {
         // SAFETY: the block lives until the thread is reaped, which only this
-        // handle or, once it is detached, the thread's own exit arranges.
+        // handle or, once it is detached, the thread's own exit does.
         let b = unsafe { &*self.block };
         if b.state.compare_exchange(JOINABLE, DETACHED, Ordering::AcqRel, Ordering::Acquire).is_err() {
-            // It has ended already, so nothing will hand it to `REAPED`.
+            // It has ended already, so it left itself to be joined.
             unsafe { reap(self.block) };
         }
     }
@@ -155,16 +140,14 @@ extern "C" fn thread_trampoline(data: u64) {
         crate::sys::thread_local::destructors::run();
     }
     crate::rt::thread_cleanup();
-    // SAFETY: the block is this thread's until it is handed over below.
+    // SAFETY: the block is this thread's until its state says otherwise.
     if unsafe { &*block }.state.swap(EXITED, Ordering::AcqRel) == DETACHED {
-        let mut head = REAPED.load(Ordering::Relaxed);
-        loop {
-            unsafe { (*block).next = head };
-            match REAPED.compare_exchange_weak(head, block, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(now) => head = now,
-            }
-        }
+        // Nobody holds the block but this thread, which frees it and leaves
+        // its stack to the kernel to release.
+        let Block { reservation, reserved, .. } = *unsafe { Box::from_raw(block) };
+        // SAFETY: the stack is this thread's alone, and ends with it.
+        let refused = unsafe { syscall::thread_exit_detached(0, reservation, reserved) };
+        rtabort!("a detached thread's stack was refused at its exit: {refused:?}");
     }
     syscall::thread_exit(0);
 }
@@ -182,8 +165,7 @@ pub fn current_os_id() -> Option<u64> {
 }
 
 pub fn yield_now() {
-    // No yield syscall yet — spin hint
-    core::hint::spin_loop();
+    syscall::yield_now();
 }
 
 pub fn set_name(name: &CStr) {

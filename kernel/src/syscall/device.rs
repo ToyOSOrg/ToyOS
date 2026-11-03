@@ -145,7 +145,7 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
     // A PCI function's second word is the firmware windows its claim is
     // granted at the mint (`toyos_abi::pci::FirmwareWindows`).
     let read = match class {
-        device::DeviceType::Framebuffer | device::DeviceType::Acpi => 0,
+        device::DeviceType::Framebuffer | device::DeviceType::Acpi | device::DeviceType::Uart => 0,
         device::DeviceType::PciFunction => 2,
         device::DeviceType::Isa => 2,
     };

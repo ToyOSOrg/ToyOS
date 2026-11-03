@@ -148,6 +148,7 @@ members = [
     "system/toybox",
     "system/toybox/copies",
     "system/trace",
+    "system/uart",
     "system/update",
     "system/update/copies",
     "system/usbd",

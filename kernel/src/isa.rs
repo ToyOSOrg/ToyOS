@@ -4,8 +4,8 @@
 //!
 //! **What can be claimed is a row the boot filled, matched exactly.** A row is
 //! filled once, before userland runs, and never changes: the i8042's, named by
-//! an `isa:` selector, and the firmware's ACPI fixed hardware, named by its
-//! class. A port no row names is never opened, a set that is not a whole row
+//! an `isa:` selector, and the firmware's ACPI fixed hardware and the console
+//! UART, each named by its class. A port no row names is never opened, a set that is not a whole row
 //! is refused rather than trimmed to one, and a row with a port this kernel
 //! declared (`arch::pio::holder`) is refused naming who holds it.
 //!
@@ -50,8 +50,9 @@ use crate::process::Pid;
 use crate::sync::Lock;
 use crate::watch::IrqWatch;
 
-/// Every row any architecture fills: the i8042's and the ACPI fixed hardware's.
-pub const MAX_ROWS: usize = 2;
+/// Every row any architecture fills: the i8042's, the ACPI fixed hardware's
+/// and the console UART's.
+pub const MAX_ROWS: usize = 3;
 
 /// One function a process may be handed whole.
 pub struct Function {

@@ -49,7 +49,8 @@ struct Console {
 
 pub fn run(mut channel: Channel, probe: Probe, held: Vec<Control>, poller: Poller) -> ! {
     channel.send_control(Control { id: PORT_ID, event: Event::PortOpen, value: 1 });
-    let (conn, served) = logkeeper_api::carry().unwrap_or_else(|why| panic!("virtio-console: logkeeper: {why}"));
+    let (conn, served) =
+        logkeeper_api::carry(toyos_logstream::CARRIER).unwrap_or_else(|why| panic!("virtio-console: logkeeper: {why}"));
     say!("virtio-console: carrying the log on port {PORT_ID}, from its first line");
     let mut console = Console { channel, probe, log: served.pipe, taken: 0, told: 0, silent_since: None };
     for control in held {

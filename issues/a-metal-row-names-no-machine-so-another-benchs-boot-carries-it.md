@@ -12,7 +12,7 @@ arms ride that boot, whichever bench the run is on. On 2026-10-22,
 `amdvi_usbd_drives_its_own_entry`, an AMD-Vi row, rode the T14's `testcases`
 boot. Its deliberate DMA fault (`test_rs_usbd_spare_fault`, aimed at
 `0x50200000`) then failed every judge of that boot that requires a clean
-kernel log, `klogd_hosted` among them. The AMD row's own judge, which accounts
+kernel log, `klogd_hosted` (since `console_uart_driven`) among them. The AMD row's own judge, which accounts
 for that fault, never ran there.
 
 The stick's controller is no longer pinned per machine (the `@boot` place), so

@@ -7,11 +7,17 @@
 # has no way to its stick
 # (`issues/the-acpi-servers-death-has-no-readback-on-the-t14.md`).
 [boot]
-start = ["logkeeper", "test-runner"]
+start = ["logkeeper", "uart", "test-runner"]
 
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 [programs.acpiserver]
 

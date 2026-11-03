@@ -1,6 +1,7 @@
 //! What std's threads take from the kernel and give back: the CPU count and
-//! the mask it is counted from, which a spawned thread and process inherit, and the
-//! stack and table place of a thread once it has ended, joined or not.
+//! the mask it is counted from, which a spawned thread and process inherit, the
+//! stack and table place of a thread once it has ended, joined or not, and the
+//! CPU a yield gives up.
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,6 +11,11 @@ use toyos_abi::syscall::MAX_THREADS;
 
 /// Threads spawned and joined one after another.
 const JOINS: usize = 64;
+
+/// Yields a thread makes on its one CPU before another runnable there runs:
+/// one pass takes the other's arrival and the next yield runs it, and the
+/// rest is slack for a pass that takes the arrival late.
+const YIELDS: u64 = 16;
 
 /// The base of the stack the calling thread runs on.
 fn stack_base() -> u64 {
@@ -99,6 +105,50 @@ fn main() {
         joined.len(),
         bases.len()
     );
+
+    // A thread detached before it ends gives its table place and its stack
+    // back as it ends, with no spawn after it: a join of it finds no thread,
+    // and its stack is no longer this process's to protect.
+    let (said, told) = std::sync::mpsc::channel();
+    let (go, gone) = std::sync::mpsc::channel::<()>();
+    let handle = thread::spawn(move || {
+        said.send((own(), stack_base())).expect("main waits on this");
+        gone.recv().expect("main says go once the handle is dropped");
+    });
+    let (tid, base) = told.recv().expect("the detached thread said who it is");
+    drop(handle);
+    go.send(()).expect("the detached thread waits on this");
+    let joined = toyos_abi::syscall::thread_join(tid);
+    assert_eq!(
+        toyos_abi::syscall::SyscallError::from_u64(joined),
+        Some(toyos_abi::syscall::SyscallError::NotFound),
+        "a join of a thread detached before it ended answered {joined:#x}, not that no such thread is left",
+    );
+    // SAFETY: the range was the ended thread's stack, which nothing here holds.
+    let protected = unsafe {
+        toyos_abi::syscall::vm_protect(base as *mut u8, toyos_abi::syscall::PAGE_SIZE, toyos_abi::syscall::VmProt::ReadWrite)
+    };
+    assert!(protected.is_err(), "the stack of a thread detached before it ended is still this process's");
+    println!("std_threads: a thread detached before it ended left no place and no stack behind it");
+
+    // A yield with another thread of the band runnable gives it the CPU: a
+    // thread that yields until the other has run on its one CPU sees it run
+    // within a few passes, where a yield that kept the CPU would spin until
+    // its quantum ran out, a count of looks in the hundreds of thousands.
+    let mut one = [0u64; toyos_abi::syscall::CPU_MASK_WORDS];
+    one[0] = 1;
+    toyos_abi::syscall::thread_set_affinity(own(), &one).expect("CPU 0 alone");
+    static RAN: AtomicUsize = AtomicUsize::new(0);
+    let other = thread::spawn(|| RAN.store(1, Ordering::Release));
+    let mut yields = 0u64;
+    while RAN.load(Ordering::Acquire) == 0 {
+        thread::yield_now();
+        yields += 1;
+    }
+    other.join().expect("the other thread");
+    assert!(yields <= YIELDS, "a thread yielding on its one CPU let another run only after {yields} yields");
+    toyos_abi::syscall::thread_set_affinity(own(), &all).expect("every online CPU");
+    println!("std_threads: a thread yielding on its one CPU let another run after {yields} yield(s)");
 }
 
 /// The calling thread's id, as the affinity calls name it.

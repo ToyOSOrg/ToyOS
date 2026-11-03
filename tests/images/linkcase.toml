@@ -3,13 +3,18 @@
 # starts `/system/bin/virtio-net` on it and ends it, and only it does.
 
 [boot]
-start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "netstack", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "diskserver", "fileserver", "netstack", "test-runner"]
 
 # `log` is the port the job reads netstack's lines on.
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log", "log-carrier"]
+serves = ["log", "log-carrier", "log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 [programs.netstack]
 service = true

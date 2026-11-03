@@ -16,7 +16,7 @@
 # hold its `login` connector.
 
 [boot]
-start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "diskserver", "fileserver", "test-runner"]
 
 [apps]
 folder = "read-write"
@@ -27,10 +27,16 @@ folder = "read-write"
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log-carrier"]
+serves = ["log-carrier", "log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 # `roster` because the guest asks which of its tree still runs, and `dup`
 # because test-runner hands each binary a duplicate of its capability.
+
 [programs.test-runner]
 syscap = ["dup", "roster"]
 starts = ["toybox", "shell", "grants", "/apps"]

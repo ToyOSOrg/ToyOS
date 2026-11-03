@@ -21,7 +21,7 @@ use std::process::Child;
 use std::time::{Duration, Instant};
 
 use toyos_logstream::death::{died, Died};
-use toyos_logstream::Showing;
+use toyos_logstream::{Showing, CARRIED_ELSEWHERE};
 use toyos_virtio_serial::{CONSOLE_PORT, MAX_PORTS, PORT_ID};
 
 /// The port's QEMU device id, which a test unplugs it by.
@@ -77,11 +77,6 @@ impl Painter {
         out.extend_from_slice(self.showing.line(line).to_string().as_bytes());
     }
 }
-
-/// What the kernel puts on the UART as the console's carrier takes the log
-/// (`kernel/src/log/console.rs`): every UART line before it the console port
-/// carries too, and the ones after it are the UART's alone.
-pub const CARRIED_ELSEWHERE: &str = "console: the log is carried elsewhere from here";
 
 /// Which of a virtio machine's UART lines are shown beside its console port:
 /// the loader, the early boot, and the lines the port cannot carry — the
@@ -481,7 +476,7 @@ mod tests {
         assert!(shown == want, "the terminal was shown other bytes than the {length} painted");
     }
 
-    const QUIET: &str = "[ 6.459 cpu0 kernel] console: the log is carried elsewhere from here; the UART takes the stop's and a fatal path's lines\n";
+    const QUIET: &str = "[ 6.459 logkeeper] console: the log is carried elsewhere from here; the UART takes the stop's and a fatal path's lines\n";
 
     /// The UART's lines before the quiet line are the port's too and are kept
     /// back; the quiet line itself says nothing the operator needs, and every
@@ -489,7 +484,7 @@ mod tests {
     #[test]
     fn the_uart_is_shown_from_the_carriers_word_on() {
         let early = "[ 0.001 cpu0 kernel] boot: early\n[ 4.000 supervisor] supervisor: started logkeeper\n";
-        let late = "[ 9.000 cpu0 kernel] console: the UART carries the log again\n[ 9.100 supervisor] supervisor: x ended\n";
+        let late = "[ 9.000 logkeeper] console: the UART carries the log again\n[ 9.100 supervisor] supervisor: x ended\n";
         let stream = format!("{early}{QUIET}{late}");
         for cut in [1, 7, stream.len()] {
             let mut uart = Uart::default();

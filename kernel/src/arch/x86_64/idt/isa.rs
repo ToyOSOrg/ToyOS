@@ -21,3 +21,4 @@ macro_rules! isa_row {
 
 isa_row!(isa0_handler, isa0_entry, 0);
 isa_row!(isa1_handler, isa1_entry, 1);
+isa_row!(isa2_handler, isa2_entry, 2);

@@ -1,50 +1,78 @@
-//! The machine's console carrier, asked for on [`toyos_logstream::CARRIER`]:
-//! the one reader the console UART goes quiet for.
+//! The console's carriers: a driver that asks for the log here, writes it to
+//! its channel and says how much of its pipe the channel has taken
+//! ([`DELIVERED`]). Two channels, one serving ([`Carriers`]): the VM's console
+//! port, asked for on [`toyos_logstream::CARRIER`], and the console UART, on
+//! [`toyos_logstream::WIRE`]. A carrier is admitted alone on its channel, fed
+//! from where its channel starts, and let go with its connection.
 //!
-//! **The UART goes quiet once the carrier's channel has taken the log's first
-//! byte, and comes back once the carrier goes, the machine stops, or the
-//! channel takes nothing of what it is owed for [`STALL`]** ([`Carriage`]):
-//! a carrier that is stuck but alive never leaves the UART silent. The UART
-//! is quiet again once the channel takes more; meanwhile both carry the log.
+//! **The UART goes quiet once the port's channel has taken the log's first
+//! byte, and comes back once the port's carrier goes, the machine stops, or
+//! the port's channel takes nothing of what it is owed for [`STALL`]**
+//! ([`Carriage`]): a carrier that is stuck but alive never leaves the UART
+//! silent. The UART is quiet again once the channel takes more; meanwhile
+//! both carry the log. The UART says each change on itself
+//! ([`CARRIED_ELSEWHERE`], [`BACK_ON_THE_UART`]) and carries nothing between.
 //!
-//! **A slow channel is never let go**: the carrier is handed the boot from
-//! its first line like any reader, and keeps it however long its channel
-//! takes. It says on its connection how much of its pipe its channel has
-//! taken ([`DELIVERED`]), which is how the stop knows the channel has the log
-//! up to the flush before the UART takes the rest ([`Carrier::stop`]).
+//! **The port's carrier is handed the boot from its first line, and the
+//! UART's from the first line after the records the kernel put on the UART
+//! itself** ([`Hub::wire_from`]). A slow channel is never let go. What a
+//! channel has taken is told the kernel as the newest stamp the console has
+//! spoken (`toyos::log::spoken`), so a fatal path and the stop put on the UART
+//! the kernel's records no channel has delivered.
 //!
-//! **This program's own end is the kernel's to answer**: the console it says
-//! the log is carried on goes with this process, and the kernel gives the log
-//! back to the UART with it, so a crash here cannot leave the UART quiet.
+//! **This program's end is its carriers' pipes'**: what follows on the UART
+//! is the kernel's stop or a fatal path, from the last stamp spoken.
 //!
-//! What the carrier's channel had not taken when the carrier went is on
-//! neither (`issues/the-console-loses-what-its-carrier-had-not-delivered.md`).
+//! What a channel had not taken when its carrier went is on neither
+//! (`issues/the-console-loses-what-its-carrier-had-not-delivered.md`).
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::port::Acceptor;
-use toyos::{say, Console, Pipe};
+use toyos::syscap::SysCap;
+use toyos::{say, Pipe};
+use toyos_abi::log::Severity;
 use toyos_abi::syscall::SyscallError;
-use toyos_logstream::{CARRIER_STALLED, CARRY, DELIVERED};
+use toyos_logstream::{BACK_ON_THE_UART, CARRIED_ELSEWHERE, CARRIER_STALLED, CARRY, DELIVERED};
 
-use crate::serve::Hub;
+use crate::serve::{Fed, Hub};
 
-/// How long the stop waits for the carrier's channel to take the log up to
-/// the flush: policy, well inside the supervisor's flush bound, and far past
-/// what a channel that takes bytes at all needs for the last rounds.
+/// How long the stop waits for the channels to take the log up to the flush:
+/// policy, well inside the supervisor's flush bound, and far past what a
+/// channel that takes bytes at all needs for the last rounds.
 const STOP_WAIT: Duration = Duration::from_secs(2);
 
-/// How long the carrier's channel may take nothing of the bytes it is owed
+/// How long the port's channel may take nothing of the bytes it is owed
 /// before the UART carries the log too. Policy, short because the costs are
 /// lopsided: a false stall only duplicates lines on both channels, and a
 /// missed one leaves both silent.
 pub const STALL: Duration = Duration::from_secs(5);
 
+/// Which of the console's channels a carrier is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    /// The VM's console port, which the UART goes quiet for.
+    Port,
+    /// The console UART.
+    Wire,
+}
 
-/// What the kernel is to be told about the console UART.
+impl Channel {
+    const ALL: [Self; 2] = [Self::Port, Self::Wire];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Port => "the console carrier's channel",
+            Self::Wire => "the UART",
+        }
+    }
+}
+
+/// What a change of the port's carrying makes the UART.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tell {
     /// The log is carried elsewhere: the UART takes only the stop's and a
@@ -54,8 +82,9 @@ pub enum Tell {
     Loud,
 }
 
-/// Whether the UART is quiet, decided from what the carrier and the stop do.
-/// Pure: each event answers what the kernel is told, if anything.
+/// One channel's carrier, its counts and whether it carries the log: what
+/// the UART's quiet is decided from on the port's. Pure: each event answers
+/// the change it makes, if any.
 #[derive(Debug, Default)]
 pub struct Carriage {
     /// The carrier admitted, by the number of its admission.
@@ -70,7 +99,9 @@ pub struct Carriage {
     /// The channel took nothing of what it was owed for [`STALL`].
     stalled: bool,
     stopping: bool,
-    quiet: bool,
+    /// Its channel carries the log: it has taken bytes, has not stalled, and
+    /// the machine is not stopping.
+    carrying: bool,
 }
 
 /// Why a carrier is refused.
@@ -168,113 +199,143 @@ impl Carriage {
         self.settle()
     }
 
-    pub fn quiet(&self) -> bool {
-        self.quiet
+    pub fn carrying(&self) -> bool {
+        self.carrying
     }
 
     fn settle(&mut self) -> Option<Tell> {
-        let quiet = self.carrier.is_some() && self.delivered > 0 && !self.stopping && !self.stalled;
-        if quiet == self.quiet {
+        let carrying = self.carrier.is_some() && self.delivered > 0 && !self.stopping && !self.stalled;
+        if carrying == self.carrying {
             return None;
         }
-        self.quiet = quiet;
-        Some(if quiet { Tell::Quiet } else { Tell::Loud })
+        self.carrying = carrying;
+        Some(if carrying { Tell::Quiet } else { Tell::Loud })
     }
 }
 
-/// The carrier's state, shared by its threads and the main loop.
-pub struct Carrier {
-    console: Arc<Console>,
+/// Both channels' carriers, shared by their threads and the main loop.
+pub struct Carriers {
+    hub: Arc<Hub>,
+    /// What the kernel is told the console has spoken through.
+    cap: Arc<SysCap>,
     state: Mutex<State>,
-    /// Posted when the carrier's channel takes bytes, its feed moves, or it goes.
+    /// Posted when a channel takes bytes, a feed moves, or a carrier goes.
     moved: Condvar,
 }
 
 struct State {
+    feeds: [Feed; 2],
+    /// The newest stamp the kernel was told the console spoke.
+    spoken: u64,
+}
+
+/// One channel's carrier and its feed.
+#[derive(Default)]
+struct Feed {
     carriage: Carriage,
     /// The replay offset the bytes written into the carrier's pipe reach.
     at: u64,
+    /// Each piece of the replay written into the pipe: the pipe's length once
+    /// it is written, and the replay offset it reaches.
+    written: VecDeque<(u64, u64)>,
 }
 
-impl Carrier {
-    /// Serve the carrier on `acceptor` for the life of the process, telling
-    /// the kernel through `console`.
-    pub fn serve(acceptor: Acceptor, console: Arc<Console>, hub: Arc<Hub>) -> Arc<Self> {
-        let carrier = Arc::new(Self {
-            console,
-            state: Mutex::new(State { carriage: Carriage::default(), at: 0 }),
+impl State {
+    fn feed(&mut self, channel: Channel) -> &mut Feed {
+        &mut self.feeds[channel as usize]
+    }
+
+    /// Whether the UART is quiet: the port carries the log.
+    fn quiet(&self) -> bool {
+        self.feeds[Channel::Port as usize].carriage.carrying()
+    }
+}
+
+impl Carriers {
+    /// Serve each channel's carrier on its acceptor for the life of the
+    /// process, telling the kernel what was spoken through `cap`.
+    pub fn serve(port: Option<Acceptor>, wire: Option<Acceptor>, hub: Arc<Hub>, cap: Arc<SysCap>) -> Arc<Self> {
+        let carriers = Arc::new(Self {
+            hub,
+            cap,
+            state: Mutex::new(State { feeds: Default::default(), spoken: 0 }),
             moved: Condvar::new(),
         });
-        let theirs = Arc::clone(&carrier);
-        std::thread::Builder::new()
-            .name("log-carrier".into())
-            .spawn(move || theirs.run(&acceptor, &hub))
-            .expect("logkeeper: the carrier's thread could not be started");
-        let theirs = Arc::clone(&carrier);
+        for (channel, acceptor) in [(Channel::Port, port), (Channel::Wire, wire)] {
+            let Some(acceptor) = acceptor else { continue };
+            let theirs = Arc::clone(&carriers);
+            std::thread::Builder::new()
+                .name("log-carrier".into())
+                .spawn(move || theirs.run(channel, &acceptor))
+                .expect("logkeeper: a carrier's thread could not be started");
+        }
+        let theirs = Arc::clone(&carriers);
         std::thread::Builder::new()
             .name("log-carrier-stall".into())
             .spawn(move || theirs.watch())
-            .expect("logkeeper: the carrier's stall thread could not be started");
-        carrier
-    }
-
-    /// Whether the UART is quiet, so program lines are not written to it.
-    pub fn quiet(&self) -> bool {
-        self.lock().carriage.quiet()
+            .expect("logkeeper: the carriers' stall thread could not be started");
+        carriers
     }
 
     /// The machine stops, and `end` is how long the boot is at the flush:
-    /// wait, bounded, for the carrier's channel to take it all, then give the
-    /// UART what the log says from here.
+    /// wait, bounded, for every channel that carries the log to take it all,
+    /// then give the UART what the log says from here.
     pub fn stop(&self, end: u64) {
         let began = Instant::now();
         let mut state = self.lock();
         loop {
-            let caught_up = state.at >= end && state.carriage.owed() == 0;
-            if state.carriage.carrier.is_none() || caught_up {
-                break;
-            }
+            let quiet = state.quiet();
+            let behind = Channel::ALL.into_iter().find(|&channel| {
+                let feed = &state.feeds[channel as usize];
+                let carries = feed.carriage.carrier.is_some() && !(channel == Channel::Wire && quiet);
+                carries && (feed.at < end || feed.carriage.owed() > 0)
+            });
+            let Some(channel) = behind else { break };
             let Some(left) = STOP_WAIT.checked_sub(began.elapsed()) else {
+                let carriage = &state.feeds[channel as usize].carriage;
                 say!(
-                    "logkeeper: the console carrier's channel had taken {} of {} bytes {} ms into the stop; \
-                     the UART takes the stop's lines, and /log has the rest",
-                    state.carriage.delivered,
-                    state.carriage.sent,
+                    "logkeeper: {} had taken {} of {} bytes {} ms into the stop; the UART takes the \
+                     stop's lines, and /log has the rest",
+                    channel.name(),
+                    carriage.delivered,
+                    carriage.sent,
                     STOP_WAIT.as_millis()
                 );
                 break;
             };
-            state = self.moved.wait_timeout(state, left).expect("logkeeper: the carrier's state is poisoned").0;
+            state = self.moved.wait_timeout(state, left).expect("logkeeper: the carriers' state is poisoned").0;
         }
-        let tell = state.carriage.stop();
-        self.tell(tell);
+        let tell = state.feed(Channel::Port).carriage.stop();
+        self.tell(Channel::Port, tell);
+        drop(state);
+        self.moved.notify_all();
     }
 
-    /// The stop was refused: the carrier carries the log again, past what
-    /// the UART carried meanwhile ([`Hub::append_carried`]).
+    /// The stop was refused: the port carries the log again.
     pub fn resume(&self) {
-        let mut state = self.lock();
-        let tell = state.carriage.resume();
-        self.tell(tell);
+        let tell = self.lock().feed(Channel::Port).carriage.resume();
+        self.tell(Channel::Port, tell);
+        self.moved.notify_all();
     }
 
-    /// Watch the carrier's channel for [`STALL`], telling the kernel the UART
-    /// carries the log while the channel takes nothing it is owed. Waits on
-    /// the carrier's state changing where nothing is owed.
+    /// Watch the port's channel for [`STALL`], letting the UART carry the log
+    /// while the channel takes nothing it is owed. Waits on the carriers'
+    /// state changing where nothing is owed.
     fn watch(&self) -> ! {
         let mut state = self.lock();
         loop {
-            let Some(at) = state.carriage.stall_at() else {
-                state = self.moved.wait(state).expect("logkeeper: the carrier's state is poisoned");
+            let Some(at) = state.feed(Channel::Port).carriage.stall_at() else {
+                state = self.moved.wait(state).expect("logkeeper: the carriers' state is poisoned");
                 continue;
             };
             let now = Instant::now();
             if at > now {
-                state = self.moved.wait_timeout(state, at - now).expect("logkeeper: the carrier's state is poisoned").0;
+                state = self.moved.wait_timeout(state, at - now).expect("logkeeper: the carriers' state is poisoned").0;
                 continue;
             }
-            let owed = state.carriage.owed();
-            let tell = state.carriage.tick(now);
+            let carriage = &mut state.feed(Channel::Port).carriage;
+            let owed = carriage.owed();
+            let tell = carriage.tick(now);
             // A channel that never took the first byte left the UART loud.
             if tell == Some(Tell::Loud) {
                 say!(
@@ -282,31 +343,30 @@ impl Carrier {
                     STALL.as_secs()
                 );
             }
-            self.tell(tell);
+            self.tell(Channel::Port, tell);
+            self.moved.notify_all();
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().expect("logkeeper: the carrier's state is poisoned")
+        self.state.lock().expect("logkeeper: the carriers' state is poisoned")
     }
 
-    /// Tell the kernel, under the state's lock, so two threads' changes reach
-    /// it in the order they were decided.
-    fn tell(&self, tell: Option<Tell>) {
-        let Some(tell) = tell else { return };
-        match self.console.carry_elsewhere(tell == Tell::Quiet) {
-            Ok(()) => match tell {
-                Tell::Quiet => say!("logkeeper: the console carrier's channel takes the log, so the UART is quiet"),
-                Tell::Loud => say!("logkeeper: the UART carries the log again"),
-            },
-            // A fatal path or the stop gave the UART the log for good.
-            Err(SyscallError::NotSupported) => {}
-            Err(e) => panic!("logkeeper: the kernel refused to be told where the log is carried: {e:?}"),
+    /// Say a change of the UART's quiet in the log, which only the port's
+    /// carrying makes; the UART's own feed says it on the UART.
+    fn tell(&self, channel: Channel, tell: Option<Tell>) {
+        if channel != Channel::Port {
+            return;
+        }
+        match tell {
+            Some(Tell::Quiet) => say!("logkeeper: the console carrier's channel takes the log, so the UART is quiet"),
+            Some(Tell::Loud) => say!("logkeeper: the UART carries the log again"),
+            None => {}
         }
     }
 
-    /// The acceptor and the admitted carrier's connection.
-    fn run(self: &Arc<Self>, acceptor: &Acceptor, hub: &Arc<Hub>) -> ! {
+    /// The acceptor and the admitted carrier's connection, on `channel`.
+    fn run(self: &Arc<Self>, channel: Channel, acceptor: &Acceptor) -> ! {
         const ACCEPT: u64 = 0;
         const CONNECTION: u64 = 1;
         let poller = Poller::new(2);
@@ -327,7 +387,7 @@ impl Carrier {
                 && let Ok(conn) = acceptor.accept()
             {
                 if admitted.is_some() || asking.is_some() {
-                    say!("logkeeper: refusing a second console carrier: one is served");
+                    say!("logkeeper: refusing a second carrier for {}: one is served", channel.name());
                 } else {
                     asking = Some((conn, FrameRx::new()));
                 }
@@ -338,112 +398,176 @@ impl Carrier {
             if let Some((conn, mut rx)) = asking.take() {
                 match rx.pump(&conn) {
                     RxStep::Idle => asking = Some((conn, rx)),
-                    RxStep::Frame { msg_type: CARRY, .. } => admitted = self.admit(conn, hub),
+                    RxStep::Frame { msg_type: CARRY, .. } => admitted = self.admit(channel, conn),
                     RxStep::Eof | RxStep::Malformed | RxStep::Frame { .. } => {}
                 }
                 continue;
             }
             let Some((who, conn, mut rx)) = admitted.take() else { continue };
-            if self.read(who, &conn, &mut rx) {
+            if self.read(channel, who, &conn, &mut rx) {
                 admitted = Some((who, conn, rx));
             }
         }
     }
 
-    /// Hand the carrier on `conn` its pipe, and feed it from the boot's first
-    /// line on a thread of its own.
-    fn admit(self: &Arc<Self>, conn: Connection, hub: &Arc<Hub>) -> Option<(u64, Connection, FrameRx<8>)> {
-        let who = match self.lock().carriage.admit() {
+    /// Hand the carrier on `conn` its pipe, and feed it on a thread of its own.
+    fn admit(self: &Arc<Self>, channel: Channel, conn: Connection) -> Option<(u64, Connection, FrameRx<8>)> {
+        let who = match self.lock().feed(channel).carriage.admit() {
             Ok(who) => who,
             Err(why) => {
-                say!("logkeeper: refusing a console carrier: {why:?}");
+                say!("logkeeper: refusing a carrier for {}: {why:?}", channel.name());
                 return None;
             }
         };
-        let Some(pipe) = hub.hand_over(&conn) else {
-            self.went(who);
+        let Some(pipe) = self.hub.hand_over(&conn) else {
+            self.went(channel, who);
             return None;
         };
-        self.lock().at = 0;
-        let (carrier, hub) = (Arc::clone(self), Arc::clone(hub));
+        {
+            let mut state = self.lock();
+            let feed = state.feed(channel);
+            feed.at = 0;
+            feed.written.clear();
+        }
+        let carriers = Arc::clone(self);
         let fed = std::thread::Builder::new().name("log-carried".into()).spawn(move || {
-            carrier.feed(who, &pipe, &hub);
-            carrier.went(who);
+            carriers.feed(channel, who, &pipe);
+            carriers.went(channel, who);
         });
         if let Err(e) = fed {
-            say!("logkeeper: no thread for the console carrier: {e}");
-            self.went(who);
+            say!("logkeeper: no thread for a carrier for {}: {e}", channel.name());
+            self.went(channel, who);
             return None;
         }
         Some((who, conn, FrameRx::new()))
     }
 
     /// Every frame carrier `who` sent: whether it is still served.
-    fn read(&self, who: u64, conn: &Connection, rx: &mut FrameRx<8>) -> bool {
+    fn read(&self, channel: Channel, who: u64, conn: &Connection, rx: &mut FrameRx<8>) -> bool {
         loop {
             match rx.pump(conn) {
                 RxStep::Idle => return true,
                 RxStep::Frame { msg_type: DELIVERED, payload_len: 8, .. } => {
                     let said = u64::from_le_bytes(rx.payload(8).try_into().expect("eight bytes"));
                     let mut state = self.lock();
-                    match state.carriage.delivered(who, said, Instant::now()) {
+                    match state.feed(channel).carriage.delivered(who, said, Instant::now()) {
                         Ok(tell) => {
-                            self.tell(tell);
+                            self.tell(channel, tell);
+                            self.spoken(&mut state, channel, said);
                             drop(state);
                             self.moved.notify_all();
                         }
                         Err(why) => {
                             drop(state);
-                            say!("logkeeper: letting the console carrier go: {why:?}");
-                            self.went(who);
+                            say!("logkeeper: letting the carrier for {} go: {why:?}", channel.name());
+                            self.went(channel, who);
                             return false;
                         }
                     }
                 }
                 RxStep::Eof | RxStep::Malformed | RxStep::Frame { .. } => {
-                    self.went(who);
+                    self.went(channel, who);
                     return false;
                 }
             }
         }
     }
 
-    fn went(&self, who: u64) {
-        let mut state = self.lock();
-        let tell = state.carriage.gone(who);
-        self.tell(tell);
-        drop(state);
+    /// `channel` has taken `delivered` bytes of its pipe: tell the kernel the
+    /// newest stamp of the replay that is all of it, where that is past what
+    /// it was told.
+    fn spoken(&self, state: &mut State, channel: Channel, delivered: u64) {
+        let feed = state.feed(channel);
+        let mut through = None;
+        while feed.written.front().is_some_and(|&(end, _)| end <= delivered) {
+            through = feed.written.pop_front().map(|(_, at)| at);
+        }
+        let Some(stamp) = through.and_then(|at| self.hub.stamp_through(at)) else { return };
+        if stamp <= state.spoken {
+            return;
+        }
+        match toyos::log::spoken(&self.cap, stamp) {
+            Ok(now) => state.spoken = now,
+            Err(e) => panic!("logkeeper: the kernel refused to be told what the console spoke: {e:?}"),
+        }
+    }
+
+    fn went(&self, channel: Channel, who: u64) {
+        let tell = self.lock().feed(channel).carriage.gone(who);
+        self.tell(channel, tell);
         self.moved.notify_all();
     }
 
-    /// Write the boot into carrier `who`'s pipe until the pipe's reader goes.
-    fn feed(&self, who: u64, pipe: &Pipe, hub: &Hub) {
+    /// Write the log into carrier `who`'s pipe until the pipe's reader goes:
+    /// the port's from the boot's first line, the UART's from where the
+    /// kernel left it, and nothing of what the port carries.
+    fn feed(&self, channel: Channel, who: u64, pipe: &Pipe) {
         let poller = Poller::new(1);
-        let mut at = 0u64;
+        let wire = channel == Channel::Wire;
+        let mut at = if wire { self.hub.wire_from() } else { 0 };
+        // Whether the UART last said the port carries the log.
+        let mut said_quiet = false;
         loop {
-            let chunk = hub.next_for_the_carrier(&mut at);
-            // Counted before the pipe has it, so no count the carrier gives
-            // of these bytes is ever past what it was sent.
-            if !self.lock().carriage.fed(who, chunk.len() as u64, Instant::now()) {
-                return;
-            }
-            self.moved.notify_all();
-            let mut written = 0;
-            while written < chunk.len() {
-                match pipe.write_nonblock(&chunk[written..]) {
-                    Ok(n) => written += n,
-                    Err(SyscallError::WouldBlock) => {
-                        // No bound: a slow channel is not a failed one, and
-                        // the pipe's reader going ends the wait.
-                        poller.watch(pipe, WRITABLE, 0);
-                        poller.wait(1, u64::MAX, |_| {});
+            let fed = self.hub.next_for_a_carrier(&mut at, wire);
+            if wire {
+                let quiet = self.lock().quiet();
+                if quiet != said_quiet {
+                    said_quiet = quiet;
+                    let line = if quiet { CARRIED_ELSEWHERE } else { BACK_ON_THE_UART };
+                    if !self.write(channel, who, pipe, &poller, &self.hub.own_line(Severity::Info, line), None) {
+                        return;
                     }
-                    Err(_) => return,
+                }
+                if quiet {
+                    continue;
                 }
             }
-            self.lock().at = at;
-            self.moved.notify_all();
+            let (bytes, reaches) = match fed {
+                Fed::Replay(bytes) => (bytes, Some(at)),
+                Fed::Said(bytes) => (bytes, None),
+            };
+            if !self.write(channel, who, pipe, &poller, &bytes, reaches) {
+                return;
+            }
         }
+    }
+
+    /// `bytes` into carrier `who`'s pipe, which reach replay offset `reaches`
+    /// where they are the replay's: whether `who` is still its channel's
+    /// carrier and the pipe's reader is there.
+    fn write(&self, channel: Channel, who: u64, pipe: &Pipe, poller: &Poller, bytes: &[u8], reaches: Option<u64>) -> bool {
+        // Counted before the pipe has them, so no count the carrier gives of
+        // these bytes is ever past what it was sent.
+        {
+            let mut state = self.lock();
+            let feed = state.feed(channel);
+            if !feed.carriage.fed(who, bytes.len() as u64, Instant::now()) {
+                return false;
+            }
+            if let Some(at) = reaches {
+                let sent = feed.carriage.sent;
+                feed.written.push_back((sent, at));
+            }
+        }
+        self.moved.notify_all();
+        let mut written = 0;
+        while written < bytes.len() {
+            match pipe.write_nonblock(&bytes[written..]) {
+                Ok(n) => written += n,
+                Err(SyscallError::WouldBlock) => {
+                    // No bound: a slow channel is not a failed one, and
+                    // the pipe's reader going ends the wait.
+                    poller.watch(pipe, WRITABLE, 0);
+                    poller.wait(1, u64::MAX, |_| {});
+                }
+                Err(_) => return false,
+            }
+        }
+        if let Some(at) = reaches {
+            self.lock().feed(channel).at = at;
+        }
+        self.moved.notify_all();
+        true
     }
 }
 
@@ -465,11 +589,11 @@ mod tests {
         let t = Instant::now();
         let mut carriage = Carriage::default();
         let who = fed(&mut carriage, 100, t);
-        assert!(!carriage.quiet());
+        assert!(!carriage.carrying());
         assert_eq!(carriage.delivered(who, 0, t), Ok(None));
         assert_eq!(carriage.delivered(who, 40, t), Ok(Some(Tell::Quiet)));
         assert_eq!(carriage.delivered(who, 100, t), Ok(None));
-        assert!(carriage.quiet());
+        assert!(carriage.carrying());
     }
 
     /// The carrier's end, its driver's death among them, gives the log back
@@ -481,7 +605,7 @@ mod tests {
         let who = fed(&mut carriage, 1, t);
         carriage.delivered(who, 1, t).expect("a count it was sent");
         assert_eq!(carriage.gone(who), Some(Tell::Loud));
-        assert!(!carriage.quiet());
+        assert!(!carriage.carrying());
         assert_eq!(carriage.gone(who), None, "one end is answered once");
         // A later carrier carries it again from its own first byte.
         let next = fed(&mut carriage, 5, t);
@@ -535,7 +659,7 @@ mod tests {
         assert_eq!(carriage.stop(), Some(Tell::Loud));
         assert_eq!(carriage.gone(who), None);
         assert_eq!(carriage.resume(), None, "no carrier is left to carry it");
-        assert!(!carriage.quiet());
+        assert!(!carriage.carrying());
     }
 
     /// **A channel that takes nothing it is owed for [`STALL`] has the UART
@@ -548,7 +672,7 @@ mod tests {
         let mut carriage = Carriage::default();
         let who = fed(&mut carriage, 10, t);
         carriage.delivered(who, 4, t).expect("a count it was sent");
-        assert!(carriage.quiet());
+        assert!(carriage.carrying());
         assert_eq!(carriage.stall_at(), Some(t + STALL));
         assert_eq!(carriage.tick(t + STALL / 2), None);
         // Progress moves the bound.
@@ -556,7 +680,7 @@ mod tests {
         carriage.delivered(who, 6, later).expect("a count it was sent");
         assert_eq!(carriage.tick(t + STALL), None, "the bound runs from the last progress");
         assert_eq!(carriage.tick(later + STALL), Some(Tell::Loud));
-        assert!(!carriage.quiet());
+        assert!(!carriage.carrying());
         assert_eq!(carriage.stall_at(), None, "a stall is said once");
         assert_eq!(carriage.tick(later + STALL * 3), None);
         // More fed while stalled keeps the UART carrying it.

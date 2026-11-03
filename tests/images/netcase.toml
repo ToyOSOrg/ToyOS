@@ -10,7 +10,7 @@
 # announce itself.
 
 [boot]
-start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "netstack", "soundserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "diskserver", "fileserver", "netstack", "soundserver", "test-runner"]
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it: the
 # kernel keeps the record ring and writes no file, so such a boot's `/log` is
@@ -18,9 +18,15 @@ start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "netstack", "sou
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log-carrier"]
+serves = ["log-carrier", "log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 # netstack over the link a NIC driver brings on `link`; it claims no device.
+
 [programs.netstack]
 service = true
 serves = ["netstack", "link"]

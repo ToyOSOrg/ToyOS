@@ -677,7 +677,8 @@ const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::
 /// drawn at, the session-admin port, whose holder signs its user's sessions
 /// out, the wifi port, whose holder joins networks and hands over their
 /// passphrases, the radio port, whose holder is sent a network's keys, the
-/// log's carrier port, for whose holder the console UART goes quiet, and the
+/// log's carrier port, for whose holder the console UART goes quiet, the
+/// log's wire port, whose holder puts the log on the console UART, and the
 /// clipboard agent's port, whose holder speaks to the agent as the host.
 const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_swap::PORT, &[toyos_swap::HOLDER]),
@@ -690,6 +691,7 @@ const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_wifi::PORT, toyos_wifi::HOLDERS),
     (toyos_radio::PORT, toyos_radio::HOLDERS),
     (toyos_logstream::CARRIER, &[toyos_logstream::CARRIER_HOLDER]),
+    (toyos_logstream::WIRE, &[toyos_logstream::WIRE_HOLDER]),
     (toyos_vdagent::endpoint::SERVICE, &[toyos_vdagent::endpoint::SERVICE_HOLDER]),
 ];
 
@@ -3196,6 +3198,15 @@ mod tests {
             assert!(
                 parsed.programs.contains_key("logkeeper"),
                 "{config} starts `logkeeper` and has no `[programs.logkeeper]` row to say what it holds",
+            );
+            // The UART carries nothing past the kernel's hand-over but what
+            // its driver puts on it.
+            let wire = toyos_logstream::WIRE_HOLDER;
+            assert!(
+                parsed.boot.start.iter().any(|p| p == wire)
+                    && parsed.programs.get(wire).is_some_and(|row| row.devices.iter().any(|d| d == "uart")),
+                "{config} runs `logkeeper` and does not start `{wire}` holding the `uart` claim, so its console \
+                 UART says nothing from the kernel's hand-over to the machine's stop",
             );
             for (name, program) in &parsed.programs {
                 let holds = program.syscap.iter().any(|s| s == "logread");

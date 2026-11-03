@@ -146,20 +146,13 @@ unsafe fn unregister_stream(f: *mut FILE) {
     }
 }
 
-/// Whether this fd names a device a human is watching.
-///
-/// Deliberately not `isatty`, which answers the narrower POSIX question and
-/// returns false for `FileType::Serial` — which is exactly what every ToyOS
-/// process gets for fds 0, 1 and 2, since `spawn_kernel` hands out
-/// `Descriptor::SerialConsole`. Routing that through `isatty` would make every
-/// program's stdout *fully* buffered: output would appear only at exit, and a
-/// program that wedged or was killed on a timeout would lose all of it — the
-/// failure mode that is hardest to tell apart from the program never having run.
-/// C's rule is "interactive device", not "terminal", and a serial console is one.
+/// Whether this fd names a device a human is watching: a terminal. C's rule
+/// is "interactive device", which `isatty` answers too narrowly where a
+/// device is interactive and not a terminal; ToyOS has no such device.
 unsafe fn fd_is_interactive(fd: i32) -> bool {
     use toyos_abi::syscall::FileType;
     match files::fstat(fd) {
-        Ok(st) => matches!(st.file_type, FileType::Tty | FileType::Serial),
+        Ok(st) => st.file_type == FileType::Tty,
         Err(_) => false,
     }
 }

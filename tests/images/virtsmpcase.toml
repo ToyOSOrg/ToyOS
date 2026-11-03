@@ -6,11 +6,17 @@
 # `test_rs_timing_protection`. The harness puts all three on ROOT. Then the
 # machine powers off, every CPU but one turned off first.
 [boot]
-start = ["logkeeper", "test-runner"]
+start = ["logkeeper", "uart", "test-runner"]
 
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 [programs.test-runner]
 receives = ["power"]

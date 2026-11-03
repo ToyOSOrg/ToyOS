@@ -166,7 +166,6 @@ impl Space {
             inventory: Inventory::new(FLOOR, TOP),
             tables: UserTables::new(job)?,
             usage: Arc::clone(&usage),
-            kernel: false,
             ranges: Charge::none(job),
             job: Arc::clone(job),
         };
@@ -193,39 +192,10 @@ impl Space {
     }
 }
 
-/// The kernel's own space: what a kernel thread and an idle CPU run under,
-/// holding nothing in its user half. Made once, after the kernel's tables.
-static KERNEL: core::sync::atomic::AtomicPtr<PageTables> = core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
-
-/// Make the kernel's space; `mm::init` calls it once its tables are built.
-pub(super) fn init_kernel() {
-    let usage = Arc::new(Usage::default());
-    let space = AddressSpace {
-        inventory: Inventory::new(FLOOR, TOP),
-        tables: UserTables::kernel(),
-        usage: Arc::clone(&usage),
-        kernel: true,
-        ranges: Charge::none(charge::boot()),
-        job: Arc::clone(charge::boot()),
-    };
-    // Leaked: it outlives every task, and its tables are the kernel's.
-    let space: &'static PageTables = alloc::boxed::Box::leak(alloc::boxed::Box::new(Arc::new(Space { inner: Lock::new(space), usage })));
-    KERNEL.store(core::ptr::from_ref(space).cast_mut(), core::sync::atomic::Ordering::Release);
-}
-
-pub fn kernel() -> PageTables {
-    let space = KERNEL.load(core::sync::atomic::Ordering::Acquire);
-    assert!(!space.is_null(), "space: the kernel's before `mm::init`");
-    // SAFETY: `init_kernel` stored a leaked box's pointer, which is never
-    // cleared or freed.
-    Arc::clone(unsafe { &*space })
-}
-
 pub struct AddressSpace {
     inventory: Inventory,
     tables: UserTables,
     usage: Arc<Usage>,
-    kernel: bool,
     /// What its ranges take of the heap, in grains of [`RANGE_GRAIN`].
     ranges: Charge,
     /// The job its memory is counted to: its process's.
@@ -950,7 +920,6 @@ fn copy_in(source: &dyn CopySource, offset: u64, len: u64, phys: u64) {
 /// futex waiter is keyed on its frames and no copy pins them.
 impl Drop for AddressSpace {
     fn drop(&mut self) {
-        assert!(!self.kernel, "space: the kernel's dropped");
         let committed = self.committed_pages(FLOOR, TOP);
         self.tables.edit(FLOOR, TOP, |_, leaf| matches!(leaf, Leaf::Mapped(Mapping { owned: false, .. })).then_some(Leaf::Empty));
         let mut freed = 0;

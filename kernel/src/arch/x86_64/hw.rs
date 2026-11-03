@@ -268,7 +268,7 @@ pub fn sysret_ss_probe(parkable: &crate::scheduler::Parkable) {
     let before = read_ss();
     write_ss(0);
     let deadline = Deadline::at(crate::clock::now() + Duration::from_millis(2));
-    let _ = watch::wait(parkable, &armed, deadline);
+    watch::wait_uncancellable(parkable, &armed, deadline);
     let after = read_ss();
     write_ss(percpu::KERNEL_DS);
     if after == percpu::KERNEL_DS {
@@ -294,13 +294,13 @@ impl Hw for KernelHw {
         let _masked = crate::arch::IrqGuard::close();
         // SAFETY: `save`/`restore` are live Box-backed contexts from `SchedPass::finish`, freed only by a later pass; `incoming.thread_pointer` is this kernel's own canonical value for the thread being installed; `area` is the outgoing task's own, saved as it leaves this CPU and restored when it returns into this frame.
         unsafe {
-            // A thread's user state area lies above its stack's top (`fpu`); a
-            // kernel thread and the idle context have none, and switch with
-            // neither a save nor a restore. The thread resumes in this frame,
-            // so the restore below reads the area its own save wrote.
+            // A thread's user state area lies above its stack's top (`fpu`);
+            // the idle context has none, and switches with neither a save nor a
+            // restore. The thread resumes in this frame, so the restore below
+            // reads the area its own save wrote.
             let area = match (*save).runs {
                 Runs::User(_) => Some((*save).kernel_stack_top),
-                Runs::Kernel(_) | Runs::Idle => None,
+                Runs::Idle => None,
             };
             (*save).thread_pointer = cpu::read_fs_base();
             (*save).preempt = crate::preempt::count();

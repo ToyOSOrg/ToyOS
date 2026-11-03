@@ -6,7 +6,6 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod console;
-mod handoff;
 pub mod read;
 pub mod registry;
 pub mod shard;
@@ -223,21 +222,12 @@ pub fn emit(severity: Severity, args: core::fmt::Arguments) {
     unsafe { origin.shard.commit(seq, &record, &guard) };
     drop(guard);
 
-    // The two `Drain` modes are boot phases, not interchangeable fallbacks,
-    // and `console::mode` is the single word read for it rather than a flag
-    // kept beside it.
-    match console::mode() {
-        // Nothing else can run yet: the producer is the drainer, which is
-        // what makes a boot that wedges before the idle loop say everything
-        // it had logged.
-        console::Drain::Inline => console::drain_inline(),
-        // `emit` may take no lock, so the wake is a fence-guarded post, not a queue wake.
-        console::Drain::Thread => {
-            if shard::signal_after_commit(shard::log_waiter()) {
-                console::post_wake();
-            }
-        }
+    // Until the hand-over the producer is the drainer, which is what makes a
+    // boot that wedges before the idle loop say everything it had logged.
+    if console::inline() {
+        console::drain_inline();
     }
+    user::owe_readiness();
 
     // After the commit, so the record this call made is the one on the panel.
     crate::drivers::panic_console::early_checkpoint();

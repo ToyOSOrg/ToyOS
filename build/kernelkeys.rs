@@ -47,7 +47,7 @@ pub const DECLARED: &[Declared] = &[
         file: "kernel/src/process.rs",
         ty: "HashMap<Pid, ProcessEntry>",
         keys: "the pid of the entry's `ProcessObject`, which only `toyos_proclife::Pids::take` issues, \
-               at a spawn's admission or a kernel thread's start",
+               at a spawn's admission",
     },
 ];
 

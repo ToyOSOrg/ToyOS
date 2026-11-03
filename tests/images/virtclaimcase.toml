@@ -4,16 +4,23 @@
 # IORT routes past the SMMUv3; `test_rs_claim_bar_fault` faults in edu's BAR
 # and names it as a syscall's buffer.
 [boot]
-start = ["acpiserver", "logkeeper", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "test-runner"]
 
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 # `device` because the job mints the claim, `inventory` because it names the
 # function by the arrival the inventory gives it, and `dup` because
 # test-runner hands a job its capability as a duplicate and hands none
 # without it.
+
 [programs.test-runner]
 receives = ["power"]
 args = ["--bound-ms=240000", "test_rs_claim_lpi", "test_rs_claim_unrouted", "test_rs_claim_bar_fault"]

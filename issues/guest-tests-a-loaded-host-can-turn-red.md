@@ -30,7 +30,7 @@ the fastest boot the run has seen, so load that arrives after it is not in it.
 one-minute load averages of 82.78 and 69.67 on 14 cores as their suites began; the first had its
 ceilings priced at 1.00x. The stop's wall-clock budget is owned by
 `issues/timing-verdicts-ruled-off-qemu-have-no-metal-arm.md` and
-`issues/a-woken-klogd-can-wait-seconds-on-an-idle-cpu-under-hvf.md`.
+`issues/a-woken-thread-can-wait-seconds-on-an-idle-cpu-under-hvf.md`.
 
 Owner: the orchestrator, which dispatches the reshape.
 

@@ -6,51 +6,42 @@ opened: 2026-10-24
 
 # The console loses what its carrier had not delivered when it went
 
-While `/system/bin/virtio-console` carries the log, the UART takes none of
-it (`system/logkeeper/src/carrier.rs`, `kernel/src/log/console.rs`). When the
-carrier goes, two runs of lines reach neither the console port nor the UART:
+Each of the console's channels — the VM's console port and the console UART —
+is a userland driver `logkeeper` feeds (`system/logkeeper/src/carrier.rs`).
+While the port carries the log, the UART is fed none of it. Two runs of
+lines can reach neither channel:
 
-- the bytes logkeeper sent the carrier that its channel had not taken,
-  `[delivered, sent)` in `Carrier`'s state;
-- the kernel records `klogd` advanced past between the carrier's end and
-  logkeeper's word that the UART carries the log again — among them the
-  kernel's own record of a driver that crashed, the line that explains the
-  event.
+- the bytes logkeeper sent a carrier that its channel had not taken when the
+  carrier went, `[delivered, sent)` in its `Carriage`; the UART's carrier is
+  fed from the moment the port's goes, not from what the port had not taken;
+- at the machine's stop, the program lines in the UART's pipe that the UART
+  had not taken when userland stopped. The kernel's stop and every fatal path
+  put the kernel's own records on the UART from the newest stamp a channel
+  delivered (`log::console::spoken`), so no kernel record is lost this way.
 
-The same holds across logkeeper's own death, whose console's last handle
-gives the log back: what it had read and not yet written, and the records
-`klogd` advanced past before that handle went. `/log` keeps the first run
-where logkeeper lived to write it, and the kernel's ring and black box the
-second.
+The same holds across logkeeper's own death: its carriers' pipes end, and
+the UART carries nothing until the kernel's stop or a fatal path. `/log`
+keeps what logkeeper lived to write, and the kernel's ring and black box the
+kernel's records.
 
 **A carrier that is stuck but alive** — a driver that stops reading its pipe,
 or a device that never completes a transmit — no longer leaves the UART
-silent: once the channel has taken nothing it is owed for `STALL` (5 s),
-logkeeper tells the kernel the UART carries the log again and keeps feeding
-the carrier, and quiets it once the channel takes more
-(`Carriage::tick`). What the channel had not taken when the stall was
-declared is on neither channel, as above, and while the UART speaks beside a
-carrier that recovers, lines can reach both.
+silent: once the port's channel has taken nothing it is owed for `STALL`
+(5 s), the UART is fed the log again beside it, and quiet once the channel
+takes more (`Carriage::tick`). What the channel had not taken when the stall
+was declared is on neither channel, as above, and while the UART speaks
+beside a carrier that recovers, lines can reach both.
 
-**Residual: logkeeper itself stuck but alive.** A logkeeper that deadlocks,
-or whose stall thread cannot run, still holds its console, so the kernel
-keeps the UART quiet and `klogd` advances past every record until the stop
-or a fatal path. Nothing in the kernel watches whether the holder still
-reads the log, and the kernel keeps no per-reader cursor to watch. The
-proposed exit for this part is a lease: a carry expires unless its holder
-renews it within a bound, and logkeeper's main loop renews it as it reads the
-ring, so a logkeeper that stops reading gives the UART the log back by the
-lease's end.
+**Residual: logkeeper itself stuck but alive.** A logkeeper that deadlocks
+feeds neither channel, and nothing watches whether it still reads the ring.
 
-**Evidence:** the code; `the_uart_carries_the_log_again_once_the_console_carrier_goes`
-shows the restore itself (PR #1062).
+**Evidence:** the code.
 
 **Owner:** unheld; whoever next changes `carrier.rs`.
 
-**Exit:** logkeeper's own stall covered by the lease above, and a carrier
-that goes mid-stream leaves every line on one of the two channels:
-logkeeper, which holds the replay and knows `delivered`, puts the
-undelivered tail on the UART as it gives the log back, and the records
-`klogd` advanced past since the carrier last delivered reach the UART too.
-Shown by a guest test that unplugs the port with lines in flight and finds
-each of them once on the merged capture.
+**Exit:** a carrier that goes mid-stream leaves every line on one of the two
+channels: logkeeper, which holds the replay and knows `delivered`, feeds the
+UART from the port's undelivered tail as it gives the log back; and the stop
+waits, bounded, for the UART to take what it was fed. Shown by a guest test
+that unplugs the port with lines in flight and finds each of them once on the
+merged capture.
