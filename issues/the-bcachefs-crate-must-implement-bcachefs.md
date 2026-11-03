@@ -30,11 +30,12 @@ reclaim reserves are sized for common rewrites
 (`issues/bcachefs-reclaim-reserves-are-sized-for-common-rewrites.md`).
 
 **Exit**: the integrated writer's volumes, ROOT and a used DATA on each bench
-included, pass upstream's `bcachefs fsck -n -K`, with that evidence published;
-and every geometry the writer accepts finishes its clean unmount. At #1152's
-writer before journal reclaim was integrated, both benches' DATA and the host
-fixtures passed upstream's fsck; a volume whose node size equals its block
-size does not yet finish draining.
+included, pass upstream's `bcachefs fsck -n -K`, with that evidence published.
+At #1152's writer before journal reclaim was integrated, both benches' DATA and
+the host fixtures passed upstream's fsck. A clean unmount ends in one terminal
+publication (`mount/publish.rs`) on every geometry the writer accepts; a
+volume whose btree nodes are one block is one upstream cannot check
+(`issues/upstream-cannot-check-written-bcachefs-volumes-of-one-block-nodes.md`).
 
 **How the judge is used, since a judge is not a dependency:** upstream's
 `bcachefs-tools` is a *development* instrument, run by a builder on a volume
