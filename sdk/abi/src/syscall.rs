@@ -409,7 +409,8 @@ crate::user_safe! {
         pub labels_ptr: u64,
         pub labels_len: u64,
         /// The child's working directory, kept as text for its
-        /// [`SYS_GETCWD`] and judged by nobody here: a file server's
+        /// [`SYS_GETCWD`]: absolute and at most [`MAX_PATH`] bytes, or the
+        /// spawn is refused `InvalidArgument`. It names a file server's
         /// directory, which the caller's client asked that server about.
         /// **Always the caller's statement**: the kernel never substitutes the
         /// caller's own.
