@@ -65,20 +65,13 @@ fn desktop(qemu: &mut QemuInstance, console: &mut String) -> Result<(), String> 
     await_marker(qemu, console, "opened for compositor", "the desktop session to open")?;
     await_marker(qemu, console, "compositor: ready", "the compositor to take its panel")?;
     await_marker(qemu, console, ps2server::ARMED_BOTH, "ps2server to arm the i8042")?;
-    let press = |qemu: &QemuInstance, chord: &[&str]| {
-        let mut input = QmpInput::open(qemu.qmp_socket());
-        input.keys(&chord.iter().map(|k| (*k, true)).collect::<Vec<_>>());
-        input.keys(&chord.iter().rev().map(|k| (*k, false)).collect::<Vec<_>>());
-    };
 
     let from = console.len();
     press(qemu, &["ctrl", "n"]);
     await_marker_new(qemu, console, "spawn: /system/bin/shell", from, "Ctrl+N's terminal to start its shell")?;
     await_marker_new(qemu, console, "terminal: ready", from, "the terminal to take keys")?;
     let from = console.len();
-    for key in qcodes("detach /system/bin/hangupholder") {
-        press(qemu, &[key]);
-    }
+    type_paced(qemu, "detach /system/bin/hangupholder")?;
     press(qemu, &["ret"]);
     await_marker_new(qemu, console, "spawn: /system/bin/hangupholder", from, "the shell to detach the holder")?;
 
@@ -102,6 +95,37 @@ fn desktop(qemu: &mut QemuInstance, console: &mut String) -> Result<(), String> 
     }
     await_marker_new(qemu, console, "compositor: a desktop session is open again", from, "the desktop to open again")?;
     eprintln!("  [{JOB}] the desktop's sign-out waited for the holder, Escape kept it, and Enter ended it");
+    Ok(())
+}
+
+/// Press `chord`'s keys in order, then release them in reverse.
+fn press(qemu: &QemuInstance, chord: &[&str]) {
+    let mut input = QmpInput::open(qemu.qmp_socket());
+    input.keys(&chord.iter().map(|k| (*k, true)).collect::<Vec<_>>());
+    input.keys(&chord.iter().rev().map(|k| (*k, false)).collect::<Vec<_>>());
+}
+
+/// How long the panel may take to show a typed key: a liveness ceiling.
+const KEY_SHOWN: Duration = Duration::from_secs(10);
+
+/// Type `text` at the focused terminal one key at a time, each once the panel
+/// has changed since the one before. QEMU's PS/2 queue holds 16 bytes and drops
+/// the rest unsaid, and a guest the host starves drains it late, so typing ahead
+/// of what the guest has drawn loses keys before the guest sees them. A space
+/// may draw nothing, so the next key's change answers for it too.
+fn type_paced(qemu: &mut QemuInstance, text: &str) -> Result<(), String> {
+    let mut shown = qemu.screendump().pixels;
+    for key in qcodes(text) {
+        press(qemu, &[key]);
+        if key == "spc" {
+            continue;
+        }
+        let dump = qemu.screendump_while(KEY_SHOWN, Duration::from_millis(20), |d| d.pixels != shown);
+        if dump.pixels == shown {
+            return Err(format!("the panel never changed after {key:?} of {text:?} was typed"));
+        }
+        shown = dump.pixels;
+    }
     Ok(())
 }
 
