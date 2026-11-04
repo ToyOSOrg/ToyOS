@@ -27,7 +27,9 @@ allocator and accounting state from a volume's keys and compares. It refuses
 to write a volume of blocks under 4 KiB or nodes of 8 KiB and under
 (`issues/the-bcachefs-writer-refuses-small-blocks-and-nodes.md`), and its
 reclaim reserves are sized for common rewrites
-(`issues/bcachefs-reclaim-reserves-are-sized-for-common-rewrites.md`).
+(`issues/bcachefs-reclaim-reserves-are-sized-for-common-rewrites.md`). It
+refuses a superblock, node or extent that declares no checksum, which the
+format allows: a volume made with checksums off does not mount.
 
 **Exit**: the integrated writer's volumes, ROOT and a used DATA on each bench
 included, pass upstream's `bcachefs fsck -n -K`, with that evidence published.
