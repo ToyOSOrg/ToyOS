@@ -38,12 +38,12 @@ The third arm changes only how the lock hands over, which makes the FIFO
 handover the cause. One copy per read (`counters::read`) makes the queue
 shorter, but the queue remains.
 
-**What remains.** Any `sync::Lock` that every vCPU queues on runs at the
-host's scheduling pace when the host starves the guest. A lock that is not
-FIFO under a host is an architectural choice: fairness on metal against convoys
-under a host. AArch64 has no architectural bit that names a hypervisor, and
-TCG at EL2 presents none. That choice is the owner's.
+**What remains.** The ticket lock stays, as decided on 2026-11-04: its FIFO
+fairness is what metal gets, and QEMU must never reduce what metal gets. Any
+`sync::Lock` that every vCPU queues on still runs at the host's scheduling pace
+when the host starves the guest. The guest is starved because the harness runs
+an 8-vCPU guest beside others on a host that cannot give it eight cores.
 
-Exit: the four rows run green beside other guests at load 45 or more, 24 of
-24, or the owner rules that a starved host's convoy is accepted and these rows
-are restated against that ruling.
+Exit: the harness admits a guest only where the host has a CPU for each of its
+vCPUs, and the four rows then pass repeatedly beside other guests under the
+parallel load that silenced them.
