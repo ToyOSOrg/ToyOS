@@ -1,6 +1,8 @@
 //! A volume mounted read-write: one transaction at a time under the writer
-//! slot (§3.3), journal-owned logical changes, and bounded materialization
-//! into btree nodes so the journal can move on.
+//! slot (§3.3). An ordinary transaction's keys go into the nodes it holds;
+//! replayed keys, reclaim's own updates and a change a node cannot take yet
+//! wait in pending, and reclaim materializes them in bounded steps so the
+//! journal can move on.
 //!
 //! **Order of waits.** A transaction takes admission first — journal space
 //! and cache room at its bound — and the slot second. Nothing waits under the
@@ -14,6 +16,7 @@
 //! pointer update that makes it reachable. Until that update is in an entry,
 //! the node's keys keep the journal pinned and the node stays in memory.
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::rc::Rc;
@@ -25,12 +28,12 @@ use toyos_crypto::{scrypt, Random};
 
 use super::bkey::{Bpos, Key, Version, KEY_U64S};
 use super::bucket::Bucket;
-use super::cache::{key_bytes, Cache, Cached, Change, Keys, NodeId};
+use super::cache::{key_bytes, Cache, Cached, NodeId, Unwritten};
 use super::crypt::MasterKey;
 use super::journal::{self, Class, Closed, Jset, Replayed, Writer, SKIP};
 use super::mkfs::{self, COMPAT_CLEAN, ROOT_SNAPSHOT};
 use super::node::{self, Build, FIRST_KEYS};
-use super::pending::Pending;
+use super::pending::{Overlay, Pending};
 use super::read::{self, Inode, Parts, Source, Volume};
 use super::superblock::{field_type, Field, Header, Member, Root, Superblock};
 use super::sync::{Broadcast, Queue};
@@ -711,7 +714,7 @@ impl<D: BlockDev> Mount<D> {
             journal_seq: node.bset_seqs.iter().copied().max().unwrap_or(0),
             bytes: node.keys.iter().map(|(_, v)| key_bytes(v)).sum(),
             keys: Rc::new(node.keys),
-            unwritten: BTreeMap::new(),
+            unwritten: Unwritten::default(),
             captured: None,
             compact: None,
             writing: false,
@@ -740,10 +743,17 @@ impl<D: BlockDev> Mount<D> {
     /// no root is given an empty one, in memory until it is first written.
     /// Nothing holds it: for a caller that changes it before its next await.
     async fn find(&self, btree: Btree, level: u8, pos: Bpos) -> Result<NodeId> {
-        let mut id = match self.root_node(btree).await? {
+        let root = match self.root_node(btree).await? {
             Some(id) => id,
             None => self.new_root(btree),
         };
+        self.descend(root, level, pos).await
+    }
+
+    /// The node at `level` spanning `pos` below `id`, cached; held as
+    /// [`Mount::find`]'s is.
+    async fn descend(&self, mut id: NodeId, level: u8, pos: Bpos) -> Result<NodeId> {
+        let btree = self.st.borrow().cache.node(id).btree;
         loop {
             let (child, ptr, max) = {
                 let st = self.st.borrow();
@@ -754,9 +764,8 @@ impl<D: BlockDev> Mount<D> {
                 if n.level < level {
                     return Err(Error::Corrupt("a key above its btree's root"));
                 }
-                let keys = st.keys(id)?;
-                let (key, value) = keys.get(keys.partition_point(|(k, _)| k.pos < pos)).ok_or(Error::Corrupt("interior node short of its range"))?;
-                (n.level - 1, NodePtr::decode(value)?, key.pos)
+                let (key, value) = st.logical(id, pos).next().ok_or(Error::Corrupt("interior node short of its range"))??;
+                (n.level - 1, NodePtr::decode(&value)?, key.pos)
             };
             id = self.load(btree, child, &ptr, max).await?;
         }
@@ -782,7 +791,7 @@ impl<D: BlockDev> Mount<D> {
             journal_seq: 0,
             bytes: 0,
             keys: Rc::new(Vec::new()),
-            unwritten: BTreeMap::new(),
+            unwritten: Unwritten::default(),
             captured: None,
             compact: None,
             writing: false,
@@ -813,9 +822,8 @@ impl<D: BlockDev> Mount<D> {
                 } else if n.level < level {
                     return Err(Error::Corrupt("a key above its btree's root"));
                 } else {
-                    let keys = st.keys(id)?;
-                    let (key, value) = keys.get(keys.partition_point(|(k, _)| k.pos < pos)).ok_or(Error::Corrupt("interior node short of its range"))?;
-                    Some((n.level - 1, NodePtr::decode(value)?, key.pos))
+                    let (key, value) = st.logical(id, pos).next().ok_or(Error::Corrupt("interior node short of its range"))??;
+                    Some((n.level - 1, NodePtr::decode(&value)?, key.pos))
                 }
             };
             match next {
@@ -888,10 +896,17 @@ impl<D: BlockDev> Mount<D> {
 }
 
 impl State {
-    fn keys(&self, id: NodeId) -> Result<Keys> {
+    /// Node `id`'s keys from `from` on, as the pending keys over them make
+    /// them.
+    fn logical(&self, id: NodeId, from: Bpos) -> Overlay<'_> {
         let n = self.cache.node(id);
-        if self.pending.range(n.btree, n.level, n.min, n.max).next().is_none() { return Ok(Rc::clone(&n.keys)); }
-        Ok(Rc::new(self.pending.over(n.btree, n.level, n.min, n.max, n.keys.to_vec())?))
+        self.pending.overlay(n.btree, n.level, from.max(n.min), n.max, &n.keys)
+    }
+
+    /// The logical key at `pos` of node `id`.
+    fn get(&self, id: NodeId, pos: Bpos) -> Result<Option<(Key, Cow<'_, [u8]>)>> {
+        let n = self.cache.node(id);
+        self.pending.overlay(n.btree, n.level, pos, pos, &n.keys).next().transpose()
     }
 
     fn oldest_pin(&self) -> Option<u64> {
@@ -906,6 +921,25 @@ impl State {
         let last = self.oldest_pin().map_or(next, |p| p.min(next));
         j.newest.iter().enumerate().any(|(i, n)| i != j.head && n.is_some_and(|n| n < last))
     }
+}
+
+/// Puts `key` into `n`, journaled at `seq`: an accounting key adds its
+/// delta to the node's.
+fn put(n: &mut Cached, key: Key, value: Vec<u8>, seq: u64) {
+    let pos = key.pos;
+    if n.btree != Btree::Accounting || n.level != 0 {
+        n.put(pos, (key.kind != kind::DELETED).then_some((key, value)), seq, seq);
+        return;
+    }
+    let (mut sum, mut sums) = match n.keys.get(n.at(pos)) {
+        Some((stored, counters)) if stored.pos == pos => (*stored, journal::counters(counters).expect("cached accounting decodes")),
+        _ => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
+    };
+    let delta = journal::counters(&value).expect("a transaction's accounting decodes");
+    sums.resize(sums.len().max(delta.len()), 0);
+    for (s, d) in sums.iter_mut().zip(delta) { *s = s.wrapping_add(d); }
+    sum.version = sum.version.max(key.version);
+    n.put(pos, Some((sum, value::counters(&sums))), seq, seq);
 }
 
 /// Ends the holds on `ids`.
@@ -927,9 +961,8 @@ fn held(st: &State, btree: Btree, level: u8, pos: Bpos) -> NodeId {
         if n.level == level {
             return id;
         }
-        let keys = st.keys(id).expect("a held logical node decodes");
-        let (_, value) = &keys[keys.partition_point(|(k, _)| k.pos < pos)];
-        let ptr = NodePtr::decode(value).expect("a pointer the cache holds decodes");
+        let (_, value) = st.logical(id, pos).next().expect("a held node spans its range").expect("a held logical node decodes");
+        let ptr = NodePtr::decode(&value).expect("a pointer the cache holds decodes");
         id = st.cache.id_at(ptr.ptr.sector).expect("a held node in the cache");
     }
 }
@@ -961,14 +994,32 @@ impl<D: BlockDev> Source for Mount<D> {
         st.roots.get(&btree).cloned()
     }
 
-    fn rootless(&self, btree: Btree) -> Result<Vec<(Key, Vec<u8>)>> {
-        let st = self.st.borrow();
-        st.new_roots.get(&btree).map_or_else(|| Ok(Vec::new()), |&id| st.keys(id).map(|keys| keys.to_vec()))
+    async fn get(&self, btree: Btree, pos: Bpos) -> Result<Option<(Key, Vec<u8>)>> {
+        let _reading = read::Reading(self, self.begin_read());
+        let Some(root) = self.root_node(btree).await? else { return Ok(None) };
+        let leaf = self.descend(root, 0, pos).await?;
+        Ok(self.st.borrow().get(leaf, pos)?.map(|(k, v)| (k, v.into_owned())))
     }
 
-    async fn keys(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Keys> {
-        let id = self.load(btree, level, ptr, max).await?;
-        self.st.borrow().keys(id)
+    /// A leaf at a time, each found from the root: pending keys are read
+    /// where they lie, never copied over a whole node.
+    async fn walk(&self, btree: Btree, mut from: Bpos, mut visit: impl FnMut(&Key, &[u8]) -> Result<bool>) -> Result<()> {
+        let _reading = read::Reading(self, self.begin_read());
+        loop {
+            let Some(root) = self.root_node(btree).await? else { return Ok(()) };
+            let leaf = self.descend(root, 0, from).await?;
+            let st = self.st.borrow();
+            for kv in st.logical(leaf, from) {
+                let (key, value) = kv?;
+                if !visit(&key, &value)? {
+                    return Ok(());
+                }
+            }
+            match st.cache.node(leaf).max.successor() {
+                Some(next) => from = next,
+                None => return Ok(()),
+            }
+        }
     }
 
     fn begin_read(&self) -> u64 {
@@ -1205,25 +1256,25 @@ impl<D: BlockDev> Mount<D> {
             }
             for (&(btree, level, pos), update) in &txn.updates {
                 if level != 0 { continue; }
-                let keys = st.keys(held(st, btree, level, pos)).expect("a prepared logical node decodes");
-                let prior = keys.get(keys.partition_point(|(k, _)| k.pos < pos)).filter(|(k, _)| k.pos == pos);
-                let charge = |entry: Option<&(Key, Vec<u8>)>| entry.map_or(0, |(_, v)| allocator::charge(btree, v));
-                st.metadata_bytes = st.metadata_bytes + charge(update.as_ref()) - charge(prior);
+                let prior = st.get(held(st, btree, level, pos), pos).expect("a prepared logical node decodes");
+                let prior = prior.as_ref().map(|(_, v)| &v[..]);
+                let update = update.as_ref().map(|(_, v)| &v[..]);
+                let charge = |value: Option<&[u8]>| value.map_or(0, |v| allocator::charge(btree, v));
+                let tree_node = |value: Option<&[u8]>| value.is_some_and(|v| v.get(2) == Some(&data_type::BTREE));
+                let (added, removed, before, after) = (charge(update), charge(prior), tree_node(prior), tree_node(update));
+                st.metadata_bytes = st.metadata_bytes + added - removed;
                 if btree == Btree::Backpointers {
-                    let before = prior.is_some_and(|(_, value)| value.get(2) == Some(&data_type::BTREE));
-                    let after = update.as_ref().is_some_and(|(_, value)| value.get(2) == Some(&data_type::BTREE));
                     st.btree_nodes = st.btree_nodes + u64::from(after) - u64::from(before);
                     if before && !after { st.baseline_nodes.remove(&(pos.offset >> self.bp_shift())); }
                 }
             }
             for (&pos, delta) in &txn.accounting {
-                let keys = st.keys(held(st, Btree::Accounting, 0, pos)).expect("a prepared accounting node decodes");
-                let prior = keys.get(keys.partition_point(|(k, _)| k.pos < pos)).filter(|(k, _)| k.pos == pos);
-                let before = prior.map_or(0, |(_, v)| key_bytes(v) as u64);
-                let counters = prior.map_or(0, |(_, v)| v.len() / 8).max(delta.len());
+                let prior = st.get(held(st, Btree::Accounting, 0, pos), pos).expect("a prepared accounting node decodes");
+                let before = prior.as_ref().map_or(0, |(_, v)| key_bytes(v) as u64);
+                let counters = prior.as_ref().map_or(0, |(_, v)| v.len() / 8).max(delta.len());
                 st.metadata_bytes = st.metadata_bytes + (KEY_U64S * 8 + counters * 8) as u64 - before;
             }
-            self.apply(st, txn, bound);
+            self.apply(st, txn, bound, class);
             for sector in allocated { st.alloc.unpin(sector / u64::from(self.sb.member.bucket_sectors)); }
         } else {
             release(st, &txn.held);
@@ -1245,7 +1296,7 @@ impl<D: BlockDev> Mount<D> {
     /// Appends the transaction's records, transfers its keys to pending
     /// ownership, and publishes roots and completed node writes. No await
     /// separates these logical changes.
-    fn apply(&self, st: &mut State, mut txn: Txn, bound: u64) {
+    fn apply(&self, st: &mut State, mut txn: Txn, bound: u64, class: Class) {
         let installs = core::mem::take(&mut txn.installs);
         let holds = core::mem::take(&mut txn.held);
         let filled = core::mem::take(&mut txn.filled);
@@ -1280,7 +1331,21 @@ impl<D: BlockDev> Mount<D> {
             let key = Key { version: versions[&pos], ..Key::new(kind::ACCOUNTING, pos) };
             (Btree::Accounting, 0, key, value::counters(&delta))
         });
-        st.pending.apply(seq, updates.chain(accounting));
+        // An ordinary transaction's keys go into the nodes it holds, as
+        // reclaim's materialization would put them; each node first takes
+        // what pending holds of its range, so nothing older lies over them.
+        // A node that cannot take them now, and reclaim's own updates,
+        // leave them to pending and reclaim.
+        let mut left = Vec::new();
+        for (btree, level, key, value) in updates.chain(accounting) {
+            let id = (class == Class::Ordinary).then(|| held(st, btree, level, key.pos)).filter(|&id| st.cache.node(id).captured.is_none());
+            let Some(id) = id.filter(|&id| self.drained(st, id, key.pos)) else {
+                left.push((btree, level, key, value));
+                continue;
+            };
+            st.cache.change(id, |n| put(n, key, value, seq));
+        }
+        st.pending.apply(seq, left);
         for root in core::mem::take(&mut txn.roots) {
             st.roots.insert(root.btree, root);
         }
@@ -1289,6 +1354,15 @@ impl<D: BlockDev> Mount<D> {
         for install in installs {
             self.install(st, install);
         }
+    }
+
+    /// Whether node `id` takes a key at `pos` in place: it first takes what
+    /// pending holds of its range, and pending holds nothing at `pos` after.
+    fn drained(&self, st: &mut State, id: NodeId, pos: Bpos) -> bool {
+        let n = st.cache.node(id);
+        let (btree, level, min, max) = (n.btree, n.level, n.min, n.max);
+        if st.pending.holds(btree, level, min, max) && self.take_into(st, id, min).is_err() { return false; }
+        !st.pending.holds(btree, level, pos, pos)
     }
 
     /// Closes the open entry: its last sequence the oldest any node pins,
@@ -1576,6 +1650,11 @@ impl<D: BlockDev> Mount<D> {
 
 #[cfg(test)]
 impl<D: BlockDev> Mount<D> {
+    /// Drops pending's spare workspace, so its next batch allocates.
+    pub(crate) fn shrink_pending(&self) {
+        self.st.borrow_mut().pending.shrink();
+    }
+
     /// The dirty-node limit, reclaim's room, the most dirty and unpointed
     /// nodes held at once, and the ordinary admissions that waited for
     /// journal space and for cache room.

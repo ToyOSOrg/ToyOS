@@ -96,17 +96,16 @@ fn writers(dev: &Image, cache_nodes: usize, dirs: &[u64], writers: usize, per: u
 const SMALL_CACHE: usize = super::super::mount::MIN_CACHE;
 
 #[test]
-fn committed_keys_survive_without_resident_dirty_leaves_and_replay_stays_pending() {
+fn committed_keys_go_into_the_leaves_they_change_and_replay_stays_pending() {
     let dev = formatted(64 << 20, None);
     let options = MountOptions { cache_nodes: SMALL_CACHE };
     let mount = block_on_ready(Mount::open(&dev, options, random())).unwrap();
     for i in 0..64 { block_on_ready(mount.create(mount.root(), format!("pending{i}").as_bytes(), New::File, OWNER, NOW)).unwrap(); }
     let before = mount.pending_pressure();
-    assert!(before.0 >= 128);
-    assert_eq!(before.2, 0, "logical updates need no resident dirty leaf");
+    assert_eq!(before.0, 0, "an ordinary transaction's keys go into the leaves it holds");
+    assert!(before.2 > 0);
     block_on_ready(mount.commit()).unwrap();
     assert_eq!(mount.pending_pressure(), before, "commit journals the updates without a global materialization pass");
-    eprintln!("64-name pending workload: {} records, {} allocated bytes", before.0, before.1);
     drop(mount);
 
     let mount = block_on_ready(Mount::open(&dev, options, random())).unwrap();

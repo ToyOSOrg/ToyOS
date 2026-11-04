@@ -157,7 +157,7 @@ fn encrypted_publications_take_a_nonce_each() {
         let m = open(&dev, Some(&secret), MEMORY);
         oracle::reset();
         Executor::new().block_on(async {
-            for i in 0..400 {
+            for i in 0..1000 {
                 let name = format!("e{i}").into_bytes();
                 let ino = m.create(m.root(), &name, New::File, OWNER, NOW).await.unwrap().ino;
                 expect.dirs.entry(m.root()).or_default().insert(name, ino);
@@ -294,7 +294,8 @@ fn an_encrypted_node_of_one_block_survives_a_crash_at_every_request() {
 /// - Data buckets a quarter full, so the LRU spans several leaves split by
 ///   fill. The first leaf holds the quarter-full entries.
 /// - One inode changed, its leaf and the accounting leaf to be rewritten (as
-///   after an unclean mount); every other node appended to.
+///   after an unclean mount); every other node appended to. Which inode
+///   gives the shape below depends on the layout the churn leaves.
 ///
 /// The inode leaf's new node leaves its bucket a quarter full: that LRU key
 /// lands in the first leaf, which joins. The accounting leaf, joining in
@@ -333,11 +334,11 @@ fn a_member_left_with_nothing_to_append_is_not_written() {
         block_on_ready(super::super::read::Source::walk(&m, btree, Bpos::MIN, |_, _| Ok(true))).unwrap();
         m.rewrite_next(btree);
     }
-    block_on_ready(m.set_mtime(kept[0], NOW + 9)).unwrap();
+    block_on_ready(m.set_mtime(kept[404], NOW + 9)).unwrap();
     let published = block_on_ready(m.unmount_in_one_publication()).unwrap();
     assert!(published.idle > 0, "no member was left with nothing to append: {published:?}");
     let v = block_on_ready(Volume::open(&dev)).unwrap();
-    assert_eq!(block_on_ready(v.inode(kept[0])).unwrap().mtime, NOW + 9);
+    assert_eq!(block_on_ready(v.inode(kept[404])).unwrap().mtime, NOW + 9);
     assert_eq!(block_on_ready(v.names()).unwrap().len(), kept.len());
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }

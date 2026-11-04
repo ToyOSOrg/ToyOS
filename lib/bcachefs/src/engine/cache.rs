@@ -53,7 +53,7 @@ pub(crate) struct Cached {
     pub bytes: usize,
     /// Positions changed since capture, with their oldest lifetime pin and
     /// latest represented journal dependency.
-    pub unwritten: BTreeMap<Bpos, Change>,
+    pub unwritten: Unwritten,
     /// The oldest sequence a written bset holds whose pointer update is not
     /// applied.
     pub captured: Option<u64>,
@@ -72,7 +72,7 @@ pub(crate) struct Cached {
 
 impl Cached {
     pub(crate) fn pin(&self) -> Option<u64> {
-        let oldest = self.unwritten.values().map(|c| c.first).chain(self.compact).min();
+        let oldest = self.unwritten.oldest.into_iter().chain(self.compact).min();
         match (oldest, self.captured) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -113,8 +113,45 @@ impl Cached {
             }
             (None, false) => {}
         }
-        self.unwritten.entry(pos).and_modify(|c| { c.first = c.first.min(first); c.last = c.last.max(last); }).or_insert(Change { first, last });
+        self.unwritten.put(pos, first, last);
     }
+}
+
+/// A node's changes since capture, and the oldest pin among them, which
+/// every change to the node reads.
+#[derive(Default)]
+pub(crate) struct Unwritten {
+    changes: BTreeMap<Bpos, Change>,
+    oldest: Option<u64>,
+}
+
+impl Unwritten {
+    fn put(&mut self, pos: Bpos, first: u64, last: u64) {
+        self.changes.entry(pos).and_modify(|c| { c.first = c.first.min(first); c.last = c.last.max(last); }).or_insert(Change { first, last });
+        self.oldest = Some(self.oldest.map_or(first, |o| o.min(first)));
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(crate) fn take(&mut self) -> BTreeMap<Bpos, Change> {
+        self.oldest = None;
+        core::mem::take(&mut self.changes)
+    }
+}
+
+impl FromIterator<(Bpos, Change)> for Unwritten {
+    fn from_iter<I: IntoIterator<Item = (Bpos, Change)>>(changes: I) -> Self {
+        let changes: BTreeMap<Bpos, Change> = changes.into_iter().collect();
+        let oldest = changes.values().map(|c| c.first).min();
+        Self { changes, oldest }
+    }
+}
+
+impl core::ops::Deref for Unwritten {
+    type Target = BTreeMap<Bpos, Change>;
+    fn deref(&self) -> &Self::Target { &self.changes }
 }
 
 /// The bytes a key with `value` takes in a bset.
@@ -297,7 +334,7 @@ mod tests {
             journal_seq: 1,
             keys: Rc::new(Vec::new()),
             bytes: 0,
-            unwritten: BTreeMap::new(),
+            unwritten: Unwritten::default(),
             captured: None,
             compact: None,
             writing: false,

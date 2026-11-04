@@ -205,6 +205,14 @@ impl<D: BlockDev> Volume<D> {
         self.replay.as_ref()
     }
 
+    /// The keys of `btree` while it has no root.
+    pub(crate) fn rootless(&self, btree: Btree) -> Result<Vec<(Key, Vec<u8>)>> {
+        match &self.replay {
+            Some((_, replay)) => replay.over(btree, 0, Bpos::MIN, Bpos::MAX, Vec::new()),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// The node `ptr` points at, `level` of `btree`, spanning `[min, max]`,
     /// with the journal's replay laid over its keys.
     pub(crate) async fn node(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Node> {
@@ -222,7 +230,7 @@ impl<D: BlockDev> Volume<D> {
 }
 
 /// A traversal in progress, ended when dropped.
-struct Reading<'a, S: Source + ?Sized>(&'a S, u64);
+pub(crate) struct Reading<'a, S: Source + ?Sized>(pub(crate) &'a S, pub(crate) u64);
 
 impl<S: Source + ?Sized> Drop for Reading<'_, S> {
     fn drop(&mut self) {
@@ -242,12 +250,6 @@ pub(crate) trait Source {
     /// The root directory's inode number.
     fn root_dir(&self) -> u64;
     fn root_of(&self, btree: Btree) -> Option<Root>;
-    /// The keys of `btree` while it has no root.
-    fn rootless(&self, btree: Btree) -> Result<Vec<(Key, Vec<u8>)>>;
-    /// The keys of the node `ptr` points at, `level` of `btree`, spanning
-    /// `[ptr.min, max]`.
-    async fn keys(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Keys>;
-
     /// A traversal that may follow pointers it read before an await begins,
     /// and its ticket: until [`Source::end_read`] with it, a mount writes no
     /// bucket that a pointer read now may lead into.
@@ -259,42 +261,7 @@ pub(crate) trait Source {
 
     /// Visits `btree`'s keys from `from` in order until `visit` answers
     /// `false`.
-    async fn walk(&self, btree: Btree, from: Bpos, mut visit: impl FnMut(&Key, &[u8]) -> Result<bool>) -> Result<()> {
-        // Interior keys below are read once and followed after awaits.
-        let _reading = Reading(self, self.begin_read());
-        let Some(root) = self.root_of(btree) else {
-            for (key, value) in self.rootless(btree)?.iter().filter(|(k, _)| k.pos >= from) {
-                if !visit(key, value)? {
-                    break;
-                }
-            }
-            return Ok(());
-        };
-        let keys = self.keys(btree, root.level, &root.ptr, root.key.pos).await?;
-        let start = keys.partition_point(|(k, _)| k.pos < from);
-        let mut stack: Vec<(u8, Keys, usize)> = alloc::vec![(root.level, keys, start)];
-        while let Some((level, keys, i)) = stack.last_mut() {
-            let Some((key, value)) = keys.get(*i) else {
-                stack.pop();
-                continue;
-            };
-            *i += 1;
-            if *level == 0 {
-                if !visit(key, value)? {
-                    return Ok(());
-                }
-                continue;
-            }
-            if key.kind != kind::BTREE_PTR_V2 {
-                return Err(Error::Unsupported("interior key other than btree_ptr_v2, such as a v1 btree_ptr"));
-            }
-            let (level, ptr, max) = (*level - 1, NodePtr::decode(value)?, key.pos);
-            let child = self.keys(btree, level, &ptr, max).await?;
-            let start = child.partition_point(|(k, _)| k.pos < from);
-            stack.push((level, child, start));
-        }
-        Ok(())
-    }
+    async fn walk(&self, btree: Btree, from: Bpos, visit: impl FnMut(&Key, &[u8]) -> Result<bool>) -> Result<()>;
 
     /// The key at `pos` in `btree`, if any.
     async fn get(&self, btree: Btree, pos: Bpos) -> Result<Option<(Key, Vec<u8>)>> {
@@ -666,16 +633,45 @@ impl<D: BlockDev> Source for Volume<D> {
         self.roots.iter().find(|r| r.btree == btree).cloned()
     }
 
-    fn rootless(&self, btree: Btree) -> Result<Vec<(Key, Vec<u8>)>> {
-        match &self.replay {
-            Some((_, replay)) => replay.over(btree, 0, Bpos::MIN, Bpos::MAX, Vec::new()),
-            None => Ok(Vec::new()),
+    /// Visits `btree`'s keys from `from` in order until `visit` answers
+    /// `false`.
+    async fn walk(&self, btree: Btree, from: Bpos, mut visit: impl FnMut(&Key, &[u8]) -> Result<bool>) -> Result<()> {
+        // Interior keys below are read once and followed after awaits.
+        let _reading = Reading(self, self.begin_read());
+        let Some(root) = self.root_of(btree) else {
+            for (key, value) in self.rootless(btree)?.iter().filter(|(k, _)| k.pos >= from) {
+                if !visit(key, value)? {
+                    break;
+                }
+            }
+            return Ok(());
+        };
+        let keys = Rc::new(self.node(btree, root.level, &root.ptr, root.key.pos).await?.keys);
+        let start = keys.partition_point(|(k, _)| k.pos < from);
+        let mut stack: Vec<(u8, Keys, usize)> = alloc::vec![(root.level, keys, start)];
+        while let Some((level, keys, i)) = stack.last_mut() {
+            let Some((key, value)) = keys.get(*i) else {
+                stack.pop();
+                continue;
+            };
+            *i += 1;
+            if *level == 0 {
+                if !visit(key, value)? {
+                    return Ok(());
+                }
+                continue;
+            }
+            if key.kind != kind::BTREE_PTR_V2 {
+                return Err(Error::Unsupported("interior key other than btree_ptr_v2, such as a v1 btree_ptr"));
+            }
+            let (level, ptr, max) = (*level - 1, NodePtr::decode(value)?, key.pos);
+            let child = Rc::new(self.node(btree, level, &ptr, max).await?.keys);
+            let start = child.partition_point(|(k, _)| k.pos < from);
+            stack.push((level, child, start));
         }
+        Ok(())
     }
 
-    async fn keys(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Keys> {
-        Ok(Rc::new(self.node(btree, level, ptr, max).await?.keys))
-    }
 }
 
 /// The namespace reads, as [`Source`] gives them.

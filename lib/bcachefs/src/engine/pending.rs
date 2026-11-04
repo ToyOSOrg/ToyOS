@@ -1,7 +1,16 @@
-//! Journal-owned keys, independent of the leaves that will materialize them.
+//! Journal-owned keys no node holds yet: a replay's, reclaim's own updates,
+//! and an ordinary change to a node that could not take it then. After a
+//! replay it can hold a whole journal, so an operation costs a seek per run
+//! and, amortized, the entries it returns or changes, never a pass over the
+//! whole set.
 
+use alloc::borrow::Cow;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
+#[cfg(test)]
+use core::cell::Cell;
+use core::iter::Peekable;
+use core::slice;
 
 use super::bkey::{Bpos, Key};
 use super::{Btree, Error, Result};
@@ -20,28 +29,103 @@ struct Entry {
     last: u64,
     order: u64,
     live: bool,
-}
-
-struct Run {
-    entries: Vec<Entry>,
-    pins: Vec<usize>,
-    oldest: usize,
-}
-
-impl Run {
-    fn oldest(&self) -> Option<&Entry> {
-        self.pins.get(self.oldest).map(|&i| &self.entries[i])
-    }
-
-    fn retire(&mut self) {
-        while self.pins.get(self.oldest).is_some_and(|&i| !self.entries[i].live) { self.oldest += 1; }
-    }
+    /// Its index once its run is compacted.
+    slot: usize,
 }
 
 impl Entry {
     fn position(&self) -> Position { (self.btree, self.level, self.key.pos) }
     fn ordering(&self) -> (Position, u64) { (self.position(), self.order) }
     fn accounting(&self) -> bool { self.btree == Btree::Accounting && self.level == 0 }
+}
+
+struct Run {
+    entries: Vec<Entry>,
+    /// Each entry's pin as it stood when the run was made, oldest first. A
+    /// pin `durable` later moved is the lifted queue's.
+    pins: Vec<(u64, usize)>,
+    oldest: usize,
+    dead: usize,
+}
+
+// Entries the calling thread's pending operations have looked at: what the
+// tests that pin each operation's cost count.
+#[cfg(test)]
+std::thread_local! { static VISITED: Cell<usize> = const { Cell::new(0) }; }
+
+#[cfg(test)]
+fn visit() { VISITED.with(|v| v.set(v.get() + 1)); }
+#[cfg(not(test))]
+fn visit() {}
+
+#[cfg(test)]
+fn visited() -> usize { VISITED.with(Cell::get) }
+
+/// What `f` returns, and the entries pending looked at meanwhile.
+#[cfg(test)]
+fn visits<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    let before = visited();
+    let out = f();
+    (out, visited() - before)
+}
+
+impl Run {
+    fn pinned(entries: &[Entry], &(first, i): &(u64, usize)) -> bool {
+        entries[i].live && entries[i].first == first
+    }
+
+    fn oldest(&self) -> Option<&Entry> {
+        self.pins.get(self.oldest).map(|&(_, i)| &self.entries[i])
+    }
+
+    fn retire(&mut self) {
+        while self.pins.get(self.oldest).is_some_and(|pin| !Self::pinned(&self.entries, pin)) { self.oldest += 1; }
+    }
+
+    /// The entries at `position`.
+    fn at(&self, position: Position) -> core::ops::Range<usize> {
+        let from = self.entries.partition_point(|e| e.position() < position);
+        from..from + self.entries[from..].partition_point(|e| e.position() == position)
+    }
+
+    fn find(&self, wanted: (Position, u64)) -> Option<usize> {
+        let at = self.entries.partition_point(|e| e.ordering() < wanted);
+        self.entries.get(at).is_some_and(|e| e.live && e.ordering() == wanted).then_some(at)
+    }
+
+    fn kill(&mut self, i: usize, live: &mut Live) {
+        let entry = &mut self.entries[i];
+        entry.live = false;
+        entry.value = Vec::new();
+        live.remove(entry);
+        self.dead += 1;
+    }
+
+    /// Drops the dead entries once they are half the run, in place, so a
+    /// range never walks more dead entries than live ones it passes.
+    fn compact(&mut self) {
+        if self.dead * 2 <= self.entries.len() { return; }
+        for (slot, entry) in self.entries.iter_mut().filter(|e| e.live).enumerate() {
+            entry.slot = slot;
+        }
+        let entries = &self.entries;
+        self.pins.retain(|pin| Self::pinned(entries, pin));
+        for pin in &mut self.pins { pin.1 = entries[pin.1].slot; }
+        self.entries.retain(|e| e.live);
+        self.dead = 0;
+        self.oldest = 0;
+    }
+}
+
+/// Live entries of each btree, its leaves apart from its interior levels:
+/// where none are, a lookup reads the node alone.
+struct Live([[usize; 2]; Btree::ALL.len()]);
+
+impl Live {
+    fn of(&mut self, entry: &Entry) -> &mut usize { &mut self.0[entry.btree as usize][usize::from(entry.level > 0)] }
+    fn add(&mut self, entry: &Entry) { *self.of(entry) += 1; }
+    fn remove(&mut self, entry: &Entry) { *self.of(entry) -= 1; }
+    fn any(&self, btree: Btree, level: u8) -> bool { self.0[btree as usize][usize::from(level > 0)] > 0 }
 }
 
 /// An identity survives run merges; a newer update at its position does not
@@ -58,10 +142,10 @@ pub(crate) struct View<'a> {
     first: u64,
 }
 
-impl View<'_> {
+impl<'a> View<'a> {
     pub fn position(&self) -> Position { self.entry.position() }
-    pub fn key(&self) -> &Key { &self.entry.key }
-    pub fn value(&self) -> &[u8] { &self.entry.value }
+    pub fn key(&self) -> &'a Key { &self.entry.key }
+    pub fn value(&self) -> &'a [u8] { &self.entry.value }
     pub fn capture(&self) -> Capture { Capture { position: self.position(), order: self.entry.order, first: self.first } }
 }
 
@@ -76,14 +160,29 @@ pub(crate) struct Pending {
     runs: [Option<Run>; LEVELS],
     incoming: Vec<Entry>,
     merged: Vec<Entry>,
-    pins: Vec<usize>,
+    pins: Vec<(u64, usize)>,
     next: u64,
     prepared: usize,
+    /// Ordinary updates in sequence order, until `durable` reaches theirs.
+    undurable: VecDeque<(u64, Position)>,
+    /// Entries `durable` moved to their own sequence's pin, in that order.
+    lifted: VecDeque<(u64, Position, u64)>,
+    live: Live,
 }
 
 impl Default for Pending {
     fn default() -> Self {
-        Self { runs: core::array::from_fn(|_| None), incoming: Vec::new(), merged: Vec::new(), pins: Vec::new(), next: 0, prepared: 0 }
+        Self {
+            runs: core::array::from_fn(|_| None),
+            incoming: Vec::new(),
+            merged: Vec::new(),
+            pins: Vec::new(),
+            next: 0,
+            prepared: 0,
+            undurable: VecDeque::new(),
+            lifted: VecDeque::new(),
+            live: Live([[0; 2]; Btree::ALL.len()]),
+        }
     }
 }
 
@@ -96,14 +195,18 @@ impl Pending {
         let mut total = additional;
         for run in &self.runs {
             let Some(run) = run else { break };
-            total = total.checked_add(run.entries.iter().filter(|e| e.live).count()).ok_or(Error::NoMemory)?;
+            total = total.checked_add(run.entries.len() - run.dead).ok_or(Error::NoMemory)?;
         }
         if self.runs.iter().all(Option::is_some) || u64::try_from(additional).ok().and_then(|n| self.next.checked_add(n)).is_none() {
             return Err(Error::NoMemory);
         }
+        // Each update `durable` releases lifts at most one entry.
+        let lifts = self.undurable.len().checked_add(additional).ok_or(Error::NoMemory)?;
         self.incoming.try_reserve(additional).map_err(|_| Error::NoMemory)?;
         self.merged.try_reserve(total).map_err(|_| Error::NoMemory)?;
         self.pins.try_reserve(total).map_err(|_| Error::NoMemory)?;
+        self.undurable.try_reserve(additional).map_err(|_| Error::NoMemory)?;
+        self.lifted.try_reserve(lifts).map_err(|_| Error::NoMemory)?;
         self.prepared = additional;
         Ok(())
     }
@@ -113,7 +216,10 @@ impl Pending {
     pub fn apply(&mut self, seq: u64, updates: impl IntoIterator<Item = Update>) {
         for (btree, level, key, value) in updates {
             assert!(self.incoming.len() < self.prepared, "pending batch exceeded its reservation");
-            self.incoming.push(Entry { btree, level, key, value, first: seq, last: seq, order: self.next, live: true });
+            let entry = Entry { btree, level, key, value, first: seq, last: seq, order: self.next, live: true, slot: 0 };
+            if !entry.accounting() { self.undurable.push_back((seq, entry.position())); }
+            self.live.add(&entry);
+            self.incoming.push(entry);
             self.next += 1;
         }
         self.prepared = 0;
@@ -150,18 +256,22 @@ impl Pending {
             };
             let mut entry = Entry { value: core::mem::take(&mut source.value), ..*source };
             source.live = false;
-            if !entry.accounting() && self.merged.last().is_some_and(|old| old.position() == entry.position()) {
-                entry.first = entry.first.min(self.merged.last().unwrap().first);
-                *self.merged.last_mut().unwrap() = entry;
-            } else {
-                self.merged.push(entry);
+            match self.merged.last_mut() {
+                Some(old) if old.position() == entry.position() && !entry.accounting() => {
+                    entry.first = entry.first.min(old.first);
+                    self.live.remove(old);
+                    *old = entry;
+                }
+                _ => self.merged.push(entry),
             }
         }
         self.incoming.clear();
         for run in &mut self.runs[..level] { *run = None; }
-        self.pins.extend(0..self.merged.len());
-        self.pins.sort_unstable_by_key(|&i| (self.merged[i].first, self.merged[i].order));
-        self.runs[level] = Some(Run { entries: core::mem::take(&mut self.merged), pins: core::mem::take(&mut self.pins), oldest: 0 });
+        let merged = &self.merged;
+        self.pins.extend(merged.iter().enumerate().map(|(i, e)| (e.first, i)));
+        self.pins.sort_unstable_by_key(|&(first, i)| (first, merged[i].order));
+        self.runs[level] = Some(Run { entries: core::mem::take(&mut self.merged), pins: core::mem::take(&mut self.pins), oldest: 0, dead: 0 });
+        self.settle();
     }
 
     pub fn oldest_pin(&self) -> Option<u64> {
@@ -169,70 +279,90 @@ impl Pending {
     }
 
     pub fn oldest(&self) -> Option<Capture> {
-        self.runs.iter().flatten().filter_map(Run::oldest).min_by_key(|e| (e.first, e.order))
+        let lifted = self.lifted.front().and_then(|&(first, position, order)| {
+            self.entry((position, order)).filter(|e| e.first == first)
+        });
+        self.runs.iter().flatten().filter_map(Run::oldest).chain(lifted).min_by_key(|e| (e.first, e.order))
             .map(|e| Capture { position: e.position(), order: e.order, first: e.first })
+    }
+
+    fn entry(&self, wanted: (Position, u64)) -> Option<&Entry> {
+        self.runs.iter().flatten().find_map(|run| run.find(wanted).map(|i| &run.entries[i]))
+    }
+
+    /// Drops lifted pins whose entries moved on, so `oldest` finds a live one
+    /// first.
+    fn settle(&mut self) {
+        while let Some(&(first, position, order)) = self.lifted.front() {
+            if self.entry((position, order)).is_some_and(|e| e.first == first) { break; }
+            self.lifted.pop_front();
+        }
     }
 
     /// A durable ordinary replacement no longer needs the replaced record.
     /// Captures retain their original dependency; accounting remains additive.
+    /// Only positions updated since the last call can change.
     pub fn durable(&mut self, seq: u64) {
-        let mut at = [0; LEVELS];
-        let mut changed = [false; LEVELS];
-        loop {
-            let mut position = None;
-            for (i, run) in self.runs.iter().enumerate() {
-                let Some(run) = run else { continue };
-                while run.entries.get(at[i]).is_some_and(|e| !e.live) { at[i] += 1; }
-                if let Some(entry) = run.entries.get(at[i]) {
-                    position = Some(position.map_or(entry.position(), |p: Position| p.min(entry.position())));
-                }
-            }
-            let Some(position) = position else { break };
-            let mut end = at;
-            let mut replacement = None;
-            for (i, run) in self.runs.iter().enumerate() {
-                let Some(run) = run else { continue };
-                while let Some(entry) = run.entries.get(end[i]).filter(|e| e.position() == position) {
-                    if entry.live && !entry.accounting() && entry.last <= seq {
-                        replacement = Some(replacement.map_or(entry.order, |old: u64| old.max(entry.order)));
-                    }
-                    end[i] += 1;
-                }
-            }
-            for (i, run) in self.runs.iter_mut().enumerate() {
-                let Some(run) = run else { continue };
-                for entry in &mut run.entries[at[i]..end[i]] {
-                    if !entry.live || entry.accounting() { continue; }
-                    if replacement.is_some_and(|newer| newer > entry.order) {
-                        entry.live = false;
-                        entry.value = Vec::new();
-                        changed[i] = true;
-                    } else if entry.last <= seq && entry.first != entry.last {
-                        entry.first = entry.last;
-                        changed[i] = true;
-                    }
-                }
-            }
-            at = end;
+        while let Some(&(at, position)) = self.undurable.front() {
+            if at > seq { break; }
+            self.undurable.pop_front();
+            self.release(position, seq);
         }
-        for (i, run) in self.runs.iter_mut().enumerate() {
-            if !changed[i] { continue; }
-            let run = run.as_mut().unwrap();
-            run.pins.sort_unstable_by_key(|&at| (run.entries[at].first, run.entries[at].order));
-            run.oldest = 0;
-            run.retire();
+        for run in self.runs.iter_mut().flatten() { run.retire(); }
+        self.settle();
+    }
+
+    fn release(&mut self, position: Position, seq: u64) {
+        let replacement = self.runs.iter().flatten()
+            .flat_map(|run| run.entries[run.at(position)].iter())
+            .inspect(|_| visit())
+            .filter(|e| e.live && !e.accounting() && e.last <= seq)
+            .map(|e| e.order)
+            .max();
+        let Some(newer) = replacement else { return };
+        for slot in &mut self.runs {
+            let Some(run) = slot else { continue };
+            for i in run.at(position) {
+                let entry = &mut run.entries[i];
+                if !entry.live || entry.accounting() { continue; }
+                if entry.order < newer {
+                    run.kill(i, &mut self.live);
+                } else if entry.order == newer && entry.first != entry.last {
+                    entry.first = entry.last;
+                    assert!(self.lifted.len() < self.lifted.capacity(), "a lifted pin past its reservation");
+                    self.lifted.push_back((entry.last, position, entry.order));
+                }
+            }
+            run.compact();
+            if run.entries.is_empty() { *slot = None; }
         }
     }
 
     #[cfg(test)]
     pub fn allocated_bytes(&self) -> usize {
         let entries = |entries: &Vec<Entry>| entries.capacity() * core::mem::size_of::<Entry>() + entries.iter().map(|e| e.value.capacity()).sum::<usize>();
-        core::mem::size_of::<Self>() + entries(&self.incoming) + entries(&self.merged) + self.pins.capacity() * core::mem::size_of::<usize>()
-            + self.runs.iter().flatten().map(|r| entries(&r.entries) + r.pins.capacity() * core::mem::size_of::<usize>()).sum::<usize>()
+        let pins = |pins: &Vec<(u64, usize)>| pins.capacity() * core::mem::size_of::<(u64, usize)>();
+        core::mem::size_of::<Self>() + entries(&self.incoming) + entries(&self.merged) + pins(&self.pins)
+            + self.undurable.capacity() * core::mem::size_of::<(u64, Position)>() + self.lifted.capacity() * core::mem::size_of::<(u64, Position, u64)>()
+            + self.runs.iter().flatten().map(|r| entries(&r.entries) + pins(&r.pins)).sum::<usize>()
     }
 
     #[cfg(test)]
     pub fn iter(&self) -> Iter<'_> { self.between(None) }
+
+    #[cfg(test)]
+    pub fn shrink(&mut self) {
+        self.incoming.shrink_to_fit();
+        self.merged.shrink_to_fit();
+        self.pins.shrink_to_fit();
+        self.undurable.shrink_to_fit();
+        self.lifted.shrink_to_fit();
+    }
+
+    /// Whether a live entry lies in `[min, max]` of `btree` at `level`.
+    pub fn holds(&self, btree: Btree, level: u8, min: Bpos, max: Bpos) -> bool {
+        self.live.any(btree, level) && self.range(btree, level, min, max).next().is_some()
+    }
 
     pub fn range(&self, btree: Btree, level: u8, min: Bpos, max: Bpos) -> Iter<'_> {
         self.between(Some(((btree, level, min), (btree, level, max))))
@@ -241,35 +371,17 @@ impl Pending {
     /// The logical range, preserving zero accounting values and their
     /// versions so materialization cannot apply an old delta twice.
     pub fn over(&self, btree: Btree, level: u8, min: Bpos, max: Bpos, keys: Vec<(Key, Vec<u8>)>) -> Result<Vec<(Key, Vec<u8>)>> {
-        let mut merged: BTreeMap<_, _> = keys.into_iter().map(|(k, v)| (k.pos, (k, v))).collect();
-        let mut pending = self.range(btree, level, min, max).peekable();
-        if btree == Btree::Accounting && level == 0 {
-            while let Some(first) = pending.peek() {
-                let pos = first.key().pos;
-                let (mut key, mut sums) = match merged.remove(&pos) {
-                    Some((key, value)) => (key, journal::counters(&value)?),
-                    None => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
-                };
-                let since = key.version;
-                while pending.peek().is_some_and(|entry| entry.key().pos == pos) {
-                    let entry = pending.next().unwrap();
-                    let version = entry.key().version;
-                    if version <= since { continue; }
-                    let delta = journal::counters(entry.value())?;
-                    sums.resize(sums.len().max(delta.len()), 0);
-                    for (sum, d) in sums.iter_mut().zip(delta) { *sum = sum.wrapping_add(d); }
-                    key.version = key.version.max(version);
-                }
-                merged.insert(pos, (key, super::value::counters(&sums)));
-            }
-        } else {
-            for entry in pending {
-                let key = *entry.key();
-                if key.kind == kind::DELETED { merged.remove(&key.pos); }
-                else { merged.insert(key.pos, (key, entry.value().to_vec())); }
-            }
-        }
-        Ok(merged.into_values().collect())
+        self.overlay(btree, level, min, max, &keys).map(|kv| kv.map(|(k, v)| (k, v.into_owned()))).collect()
+    }
+
+    /// `stored`, a node's keys in position order, with the pending keys of
+    /// `[min, max]` laid over them from `min` on: [`Pending::over`] a key at
+    /// a time.
+    pub fn overlay<'a>(&'a self, btree: Btree, level: u8, min: Bpos, max: Bpos, stored: &'a [(Key, Vec<u8>)]) -> Overlay<'a> {
+        let from = stored.partition_point(|(k, _)| k.pos < min);
+        let to = stored.partition_point(|(k, _)| k.pos <= max).max(from);
+        let entries = self.live.any(btree, level).then(|| self.range(btree, level, min, max).peekable());
+        Overlay { pending: self, btree, level, stored: stored[from..to].iter().peekable(), entries }
     }
 
     fn between(&self, bounds: Option<(Position, Position)>) -> Iter<'_> {
@@ -286,25 +398,73 @@ impl Pending {
     /// It is infallible and cannot yield. `false` means capture was superseded.
     pub fn transfer(&mut self, capture: Capture, install: impl FnOnce(Transferred)) -> bool {
         let wanted = (capture.position, capture.order);
-        let source = self.runs.iter_mut().flatten().find_map(|run| {
-            let at = run.entries.partition_point(|e| e.ordering() < wanted);
-            run.entries.get_mut(at).filter(|e| e.live && e.ordering() == wanted)
-        });
-        let Some(source) = source else { return false };
+        let Some(source) = self.runs.iter_mut().flatten().find_map(|run| run.find(wanted).map(|i| &mut run.entries[i])) else { return false };
         let accounting = source.accounting();
         let value = core::mem::take(&mut source.value);
         install(Transferred { key: source.key, value, first: capture.first, last: source.last });
-        for run in self.runs.iter_mut().flatten() {
-            let at = run.entries.partition_point(|e| e.position() < capture.position);
-            for entry in run.entries[at..].iter_mut().take_while(|e| e.position() == capture.position && e.order <= capture.order) {
-                if entry.live && (entry.order == capture.order || !accounting) {
-                    entry.live = false;
-                    entry.value = Vec::new();
-                }
+        for slot in &mut self.runs {
+            let Some(run) = slot else { continue };
+            for i in run.at(capture.position) {
+                let entry = &run.entries[i];
+                if entry.live && entry.order <= capture.order && (entry.order == capture.order || !accounting) { run.kill(i, &mut self.live); }
             }
+            run.compact();
             run.retire();
+            if run.entries.is_empty() { *slot = None; }
         }
+        self.settle();
         true
+    }
+}
+
+/// A node's keys with the pending keys of its range laid over them.
+pub(crate) struct Overlay<'a> {
+    pending: &'a Pending,
+    btree: Btree,
+    level: u8,
+    stored: Peekable<slice::Iter<'a, (Key, Vec<u8>)>>,
+    /// None where pending holds nothing of this btree and level.
+    entries: Option<Peekable<Iter<'a>>>,
+}
+
+impl<'a> Overlay<'a> {
+    /// An accounting key adds every pending delta newer than its version.
+    fn accounted(&self, pos: Bpos, stored: Option<&(Key, Vec<u8>)>) -> Result<(Key, Cow<'a, [u8]>)> {
+        let (mut key, mut sums) = match stored {
+            Some((key, value)) => (*key, journal::counters(value)?),
+            None => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
+        };
+        let since = key.version;
+        for entry in self.pending.range(self.btree, self.level, pos, pos) {
+            let version = entry.key().version;
+            if version <= since { continue; }
+            let delta = journal::counters(entry.value())?;
+            sums.resize(sums.len().max(delta.len()), 0);
+            for (sum, d) in sums.iter_mut().zip(delta) { *sum = sum.wrapping_add(d); }
+            key.version = key.version.max(version);
+        }
+        Ok((key, Cow::Owned(super::value::counters(&sums))))
+    }
+}
+
+impl<'a> Iterator for Overlay<'a> {
+    type Item = Result<(Key, Cow<'a, [u8]>)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let stored_next = |stored: &mut Peekable<slice::Iter<'a, (Key, Vec<u8>)>>| stored.next().map(|(k, v)| Ok((*k, Cow::Borrowed(&v[..]))));
+        let Some(entries) = &mut self.entries else { return stored_next(&mut self.stored) };
+        loop {
+            let stored = self.stored.peek().map(|(k, _)| k.pos);
+            let Some(pos) = entries.peek().map(|e| e.key().pos).filter(|p| stored.is_none_or(|s| *p <= s)) else {
+                return stored_next(&mut self.stored);
+            };
+            let stored = self.stored.next_if(|(k, _)| k.pos == pos);
+            if self.btree == Btree::Accounting && self.level == 0 {
+                while entries.next_if(|e| e.key().pos == pos).is_some() {}
+                return Some(self.accounted(pos, stored));
+            }
+            let latest = entries.next().unwrap();
+            if latest.key().kind != kind::DELETED { return Some(Ok((*latest.key(), Cow::Borrowed(latest.value())))); }
+        }
     }
 }
 
@@ -322,9 +482,14 @@ impl<'a> Iter<'a> {
         let mut best = None;
         for (i, run) in self.pending.runs.iter().enumerate() {
             let Some(Run { entries: run, .. }) = run else { continue };
-            while run.get(self.at[i]).is_some_and(|e| !e.live) { self.at[i] += 1; }
-            if let Some(entry) = run.get(self.at[i]) {
-                if self.end.is_none_or(|end| entry.position() <= end) && best.is_none_or(|old| entry.ordering() < old) {
+            let within = |e: &Entry| self.end.is_none_or(|end| e.position() <= end);
+            while run.get(self.at[i]).is_some_and(|e| !e.live && within(e)) {
+                visit();
+                self.at[i] += 1;
+            }
+            visit();
+            if let Some(entry) = run.get(self.at[i]).filter(|e| within(e)) {
+                if best.is_none_or(|old| entry.ordering() < old) {
                     chosen = Some(i);
                     best = Some(entry.ordering());
                 }
@@ -425,6 +590,51 @@ mod tests {
     fn add(pending: &mut Pending, seq: u64, updates: Vec<Update>) {
         pending.reserve(updates.len()).unwrap();
         pending.apply(seq, updates);
+    }
+
+    fn at(pos: u64) -> Bpos { Bpos::new(0, pos, 0) }
+
+
+    /// 2047 batches of eight positions each, in eleven runs.
+    fn crowded() -> Pending {
+        let mut pending = Pending::default();
+        for batch in 0..2047u64 { add(&mut pending, batch + 1, (0..8).map(|i| update(batch * 8 + i, i)).collect()); }
+        assert_eq!(runs(&pending), 11);
+        pending
+    }
+
+    fn runs(pending: &Pending) -> usize { pending.runs.iter().flatten().count() }
+
+    #[test]
+    fn a_lookup_visits_what_its_position_holds_past_a_materialized_stretch() {
+        let mut pending = crowded();
+        let captures: Vec<_> = pending.range(Btree::Inodes, 0, at(1001), at(4000)).map(|v| v.capture()).collect();
+        for capture in captures { assert!(pending.transfer(capture, |_| ())); }
+        let (found, visited) = visits(|| pending.range(Btree::Inodes, 0, at(1000), at(1000)).count());
+        assert_eq!(found, 1);
+        assert!(visited <= 4 * runs(&pending), "{visited} entries for one position");
+    }
+
+    #[test]
+    fn durable_visits_only_what_changed_since_it_last_ran() {
+        let mut pending = crowded();
+        pending.durable(2047);
+        add(&mut pending, 3000, vec![update(5, 1)]);
+        let (_, visited) = visits(|| pending.durable(3000));
+        assert!(visited <= 2 * runs(&pending), "{visited} entries for one update");
+        assert_eq!(pending.oldest_pin(), Some(1));
+    }
+
+    #[test]
+    fn materialized_entries_leave_no_more_dead_than_live_in_a_run() {
+        let mut pending = Pending::default();
+        for batch in 0..2048u64 { add(&mut pending, batch + 1, (0..8).map(|i| update(batch * 8 + i, i)).collect()); }
+        let captures: Vec<_> = pending.range(Btree::Inodes, 0, at(0), at(12_287)).map(|v| v.capture()).collect();
+        for capture in captures { assert!(pending.transfer(capture, |_| ())); }
+        let live = pending.iter().count();
+        assert_eq!(live, 4096);
+        let held: usize = pending.runs.iter().flatten().map(|r| r.entries.len()).sum();
+        assert!(held <= 2 * live, "{held} entries held for {live} live");
     }
 
     #[test]

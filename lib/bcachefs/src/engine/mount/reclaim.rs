@@ -418,6 +418,15 @@ impl<D: BlockDev> Mount<D> {
         let mut st = self.st.borrow_mut();
         let n = st.cache.node(id);
         if n.writing || n.captured.is_some() || n.held != 0 { return Ok(false); }
+        self.take_into(&mut st, id, pos)
+    }
+
+    /// Transfers pending keys of node `id`'s range into it, from `pos` on
+    /// and round to it, with bounded positive growth. The caller has found
+    /// the node free to change.
+    pub(super) fn take_into(&self, st: &mut State, id: NodeId, pos: Bpos) -> Result<bool> {
+        let n = st.cache.node(id);
+        let (btree, level) = (n.btree, n.level);
         let mut captures = Vec::new();
         let mut growth = 0;
         let mut pending = st.pending.range(btree, level, pos, n.max)
@@ -437,7 +446,6 @@ impl<D: BlockDev> Mount<D> {
             if growth + added > K_TX as usize * 8 && start != 0 { captures.truncate(start); continue; }
             growth += added;
         }
-        let st = &mut *st;
         let durable = st.journal.durable;
         let mut accounting = None;
         let transferred = !captures.is_empty();
@@ -488,7 +496,7 @@ impl<D: BlockDev> Mount<D> {
         let parent = self.find(btree, level + 1, max).await?;
         let adjacent = {
             let mut st = self.st.borrow_mut();
-            let keys = st.keys(parent)?;
+            let keys = st.logical(parent, Bpos::MIN).collect::<Result<Vec<_>>>()?;
             let at = keys.partition_point(|(k, _)| k.pos < max);
             if keys.len() == 1 {
                 let seq = st.journal.open.as_ref().map_or(st.journal.next_seq, |o| o.seq);
@@ -903,7 +911,7 @@ impl<D: BlockDev> Mount<D> {
                     let btree = st.cache.change(id, |n| {
                         n.captured = None;
                         keys.extend(n.keys.iter().cloned());
-                        unwritten.append(&mut n.unwritten);
+                        unwritten.append(&mut n.unwritten.take());
                         n.btree
                     });
                     st.cache.remove(id);
@@ -911,7 +919,7 @@ impl<D: BlockDev> Mount<D> {
                 }
                 for p in by {
                     let mine: Vec<(Key, Vec<u8>)> = keys.iter().filter(|(k, _)| (p.min..=p.max).contains(&k.pos)).cloned().collect();
-                    let changes: BTreeMap<Bpos, Change> = unwritten.range(p.min..=p.max).map(|(k, v)| (*k, *v)).collect();
+                    let changes: Unwritten = unwritten.range(p.min..=p.max).map(|(k, v)| (*k, *v)).collect();
                     let id = st.cache.insert(fresh_cached(&p, mine));
                     let seq = st.journal.open.as_ref().map_or(st.journal.next_seq, |o| o.seq);
                     st.cache.change(id, |n| {
@@ -979,7 +987,7 @@ fn fresh_cached(p: &Planned, keys: Vec<(Key, Vec<u8>)>) -> Cached {
         journal_seq: p.journal_seq,
         bytes: keys.iter().map(|(_, v)| key_bytes(v)).sum(),
         keys: Rc::new(keys),
-        unwritten: BTreeMap::new(),
+        unwritten: Unwritten::default(),
         captured: None,
         compact: None,
         writing: false,

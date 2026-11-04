@@ -431,15 +431,21 @@ fn retained_small_files_reclaim_their_truncated_data_buckets() {
 #[test]
 fn pending_allocation_failure_precedes_data_reservation_and_reserved_write_preparation() {
     let dev = formatted(64 << 20, None);
+    let ino = mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.create(m.root(), b"retry", New::File, OWNER, NOW).await.unwrap().ino;
+        assert_eq!(m.write(ino, 0, &[0x11; 4096], NOW).await.unwrap(), 4096);
+        ino
+    });
+    // Remounted clean, so no reclaim runs before the preflights refused here.
     let mount = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
-    let ino = block_on_ready(mount.create(mount.root(), b"retry", New::File, OWNER, NOW)).unwrap().ino;
-    assert_eq!(block_on_ready(mount.write(ino, 0, &[0x11; 4096], NOW)).unwrap(), 4096);
     let before = mount.space();
     let out = super::super::pending::fail_pending_allocation_after(0, || block_on_ready(mount.reserve(ino, 0, 4096)));
     assert!(matches!(out, Err(Error::NoMemory)));
     assert_eq!(mount.space(), before, "a refused preflight takes no DATA slot");
     let mut reservation = block_on_ready(mount.reserve(ino, 0, 4096)).unwrap();
     block_on_ready(mount.set_mtime(ino, NOW + 1)).unwrap();
+    // The change left nothing in pending, which keeps its workspace.
+    mount.shrink_pending();
     let out = super::super::pending::fail_pending_allocation_after(0, || block_on_ready(mount.write_reserved(&mut reservation, 0, &[0x22; 4096], NOW)));
     assert_eq!(out, Err(Error::NoMemory));
     let mut old = [0; 4096];
