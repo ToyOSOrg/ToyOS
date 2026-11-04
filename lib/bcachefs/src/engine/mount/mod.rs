@@ -73,8 +73,6 @@ const PER_NODE: u64 = fresh_cost(MAX_REWRITE);
 /// dirties, and the nodes a batch's rewrites replace its nodes with.
 const RECLAIM: usize = RECLAIM_ROOM + REWRITTEN;
 pub(crate) const MIN_CACHE: usize = RECLAIM + 3 * FOOTPRINT;
-/// The smallest btree node this writer accepts.
-const MIN_NODE: usize = 32 << 10;
 /// Retries of a failed node or journal write, each of the same bytes.
 const RETRIES: usize = 2;
 /// Feature bits a volume carries once written read-write (A1.41).
@@ -213,10 +211,14 @@ const _: () = assert!(PER_NODE <= K_TX, "a reclaim batch of one node fits one re
 /// The largest key a node holds, as its reader refuses a larger value
 /// (A3.16).
 const MAX_KEY: usize = 8 * (KEY_U64S + super::bkey::MAX_VALUE_U64S);
-// A node read at five times its bytes unpacked, and two transactions more,
-// spread evenly over [`MAX_GROUPS`] nodes: each takes its share and at most
-// a key past it.
-const _: () = assert!((5 * (MIN_NODE - FIRST_KEYS) + 2 * K_TX as usize * 8).div_ceil(MAX_GROUPS) + MAX_KEY <= MIN_NODE - FIRST_KEYS, "seven nodes hold a node read unpacked and two transactions");
+/// Whether nodes of `node` bytes hold reclaim's largest split: a node read
+/// at five times its bytes unpacked, and two transactions more, spread
+/// evenly over [`MAX_GROUPS`] nodes, each taking its share and at most a key
+/// past it.
+const fn splits_fit(node: usize) -> bool {
+    (5 * (node - FIRST_KEYS) + 2 * K_TX as usize * 8).div_ceil(MAX_GROUPS) + MAX_KEY <= node - FIRST_KEYS
+}
+const _: () = assert!(splits_fit(16 << 10), "mkfs's smallest nodes are writable");
 
 /// The writer slot, held until dropped.
 struct Slot<'a, D>(&'a Mount<D>);
@@ -311,8 +313,8 @@ fn writable(sb: &Superblock) -> Result<()> {
     if sb.journal.is_empty() {
         return Err(Error::Unsupported("writing a volume without journal buckets"));
     }
-    if (sb.node_sectors() as usize) * SECTOR < MIN_NODE {
-        return Err(Error::Unsupported("writing a volume of btree nodes under 32 KiB"));
+    if !splits_fit(sb.node_sectors() as usize * SECTOR) {
+        return Err(Error::Unsupported("writing a volume of btree nodes too small for reclaim's largest split"));
     }
     // Every write is of whole device blocks, so entries, bsets and nodes
     // must fall on them.

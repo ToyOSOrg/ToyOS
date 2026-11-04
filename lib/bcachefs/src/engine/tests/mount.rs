@@ -107,7 +107,7 @@ fn an_imported_journal_too_small_for_reclaim_is_read_and_refused_read_write() {
 #[test]
 fn the_unclean_fixture_of_16_kib_nodes_is_read_and_refused_read_write() {
     let dev = fixture("unclean.img.gz");
-    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Unsupported("writing a volume of btree nodes under 32 KiB")));
+    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Unsupported("journal too small for a transaction and worst-case reclaim")));
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     assert_eq!(read_all(&v, path(&v, "f200")).unwrap(), b"200\n");
 }
@@ -215,9 +215,9 @@ fn a_clean_volume_with_an_empty_journal_survives_a_crash_going_read_write() {
 }
 
 /// A volume of 512-byte blocks, which upstream formats below 1 GiB (A1.46),
-/// or of nodes under 32 KiB, is refused by name: every write is of whole
-/// 4 KiB device blocks, and a smaller node leaves too little room for the
-/// appends that let reclaim's own writes settle (`MIN_NODE`). A clean volume
+/// is refused by name, as every write is of whole 4 KiB device blocks; so
+/// is one of nodes too small for reclaim's largest split (`splits_fit`),
+/// 8 KiB and under. mkfs's own smallest, 16 KiB, is written. A clean volume
 /// whose member resumes its journal off a block is corrupt.
 #[test]
 fn small_blocks_and_a_journal_position_off_a_block_are_refused() {
@@ -227,12 +227,18 @@ fn small_blocks_and_a_journal_position_off_a_block_are_refused() {
     let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
     assert_eq!(err, Some(Error::Unsupported("writing a volume of blocks under 4 KiB")));
 
-    for sectors in [8, 32] {
+    for sectors in [8, 16] {
         let dev = formatted(64 << 20, None);
         rewrite_superblock(&dev, |h, _| h.flags[0] = h.flags[0] & !(0xffff << 12) | sectors << 12);
         let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
-        assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes under 32 KiB")), "{sectors} sectors");
+        assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes too small for reclaim's largest split")), "{sectors} sectors");
     }
+    let dev = formatted(32 << 20, None);
+    assert_eq!(block_on_ready(Volume::open(&dev)).unwrap().superblock().node_sectors(), 32, "mkfs's 16 KiB nodes");
+    mounted(&dev, async |m: &Mount<&Image>| { m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap(); });
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(names(&v, v.root()), ["f"]);
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 
     let dev = formatted(64 << 20, None);
     rewrite_superblock(&dev, |_, fields| {

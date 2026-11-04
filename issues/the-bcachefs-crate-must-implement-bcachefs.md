@@ -24,7 +24,7 @@ on a designated partition, and mounts DATA read-write: namespace operations
 and file data as journaled transactions, holes as absent extents, sparse
 bucket evacuation, journal reclaim and a clean unmount. Its fsck derives the
 allocator and accounting state from a volume's keys and compares. It refuses
-to write a volume of blocks under 4 KiB or nodes under 32 KiB
+to write a volume of blocks under 4 KiB or nodes of 8 KiB and under
 (`issues/the-bcachefs-writer-refuses-small-blocks-and-nodes.md`), and its
 reclaim reserves are sized for common rewrites
 (`issues/bcachefs-reclaim-reserves-are-sized-for-common-rewrites.md`).

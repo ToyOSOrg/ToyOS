@@ -24,10 +24,12 @@ pub(super) fn shaped(bytes: usize, block: u64, node: u64, encryption: Option<Enc
     dev
 }
 
-/// Device bytes, block and node sectors: a node of one block filling its
-/// bucket, a node of one block two to a bucket, a node of two blocks, and
-/// the native node of eight.
-pub(super) const GEOMETRIES: [(usize, u64, u64); 4] = [(64 << 20, 64, 64), (128 << 20, 64, 64), (128 << 20, 64, 128), (128 << 20, 8, 64)];
+/// Device bytes, block and node sectors:
+/// - a node of one block filling its bucket, and two to a bucket;
+/// - a node of two blocks;
+/// - the native node of eight blocks;
+/// - mkfs's smallest node, 16 KiB of four blocks, and 16 KiB of one block.
+pub(super) const GEOMETRIES: [(usize, u64, u64); 6] = [(64 << 20, 64, 64), (128 << 20, 64, 64), (128 << 20, 64, 128), (128 << 20, 8, 64), (32 << 20, 8, 32), (64 << 20, 32, 32)];
 
 /// The names under each directory and every file's bytes, as a workload
 /// leaves them.
@@ -270,6 +272,13 @@ fn a_volume_of_one_block_nodes_filled_to_the_refusal_unmounts_clean() {
 fn a_node_of_one_block_survives_a_crash_at_every_request() {
     let image = shaped(64 << 20, 64, 64, None).into_inner();
     super::crash::ops_survive_a_crash_on(image, None, MEMORY, &super::crash::mixed(80), 6, 8);
+}
+
+/// The same on mkfs's smallest node, 16 KiB, one to a bucket.
+#[test]
+fn a_node_of_16_kib_survives_a_crash_at_every_request() {
+    let image = shaped(32 << 20, 8, 32, None).into_inner();
+    super::crash::ops_survive_a_crash_on(image, None, MEMORY, &super::crash::mixed(120), 6, 8);
 }
 
 #[test]
