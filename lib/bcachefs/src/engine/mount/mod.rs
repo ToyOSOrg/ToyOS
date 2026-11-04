@@ -222,6 +222,7 @@ const MAX_KEY: usize = 8 * (KEY_U64S + super::bkey::MAX_VALUE_U64S);
 /// evenly over [`MAX_GROUPS`] nodes, each taking its share and at most a key
 /// past it.
 const fn splits_fit(node: usize) -> bool {
+const _: () = assert!(MAX_KEY <= K_TX as usize * 8, "materialization's room takes any one key, so it always takes its first position");
     (5 * (node - FIRST_KEYS) + 2 * K_TX as usize * 8).div_ceil(MAX_GROUPS) + MAX_KEY <= node - FIRST_KEYS
 }
 const _: () = assert!(splits_fit(super::mkfs::MIN_BUCKET as usize * SECTOR), "mkfs's smallest nodes are writable");

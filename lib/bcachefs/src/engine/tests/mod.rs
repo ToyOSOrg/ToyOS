@@ -247,9 +247,9 @@ fn a_torn_primary_superblock_is_read_from_another_copy_and_named() {
 }
 
 /// A copy's place holding what is not this volume's copy there — nothing,
-/// another volume's copy, whole or damaged, a copy of this one at another offset, or another
-/// layout — is another writer's, and the volume is refused, not opened from
-/// the copies left.
+/// another volume's copy, whole or damaged, a copy of this one at another
+/// offset, or another layout — is another writer's, and the volume is
+/// refused, not opened from the copies left.
 #[test]
 fn a_superblock_place_another_writer_took_refuses_the_volume() {
     let pristine = formatted(32 << 20, None).into_inner();

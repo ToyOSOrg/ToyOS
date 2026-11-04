@@ -11,8 +11,11 @@ use toyos::fs::Error;
 use toyos_blockdev::{BLOCK, BlockDev};
 
 const NODES: usize = 512;
-/// Bytes of paths a volume remembers, at most.
+/// Bytes the paths a volume remembers take, at most.
 const NAME_BYTES: usize = 256 << 10;
+/// What a remembered path costs past its bytes: its key and value, and
+/// about their share of a B-tree node.
+const ENTRY_BYTES: usize = core::mem::size_of::<(String, (u64, DirentType))>() + 16;
 const READ_CHUNK: usize = 256 << 10;
 const OWNER: Owner = Owner { perm: 0o644, uid: 0, gid: 0 };
 struct OsRandom;
@@ -48,7 +51,7 @@ impl Open {
         }
     }
 }
-/// Paths and what they name, bounded by their bytes.
+/// Paths and what they name, bounded by the memory they take.
 #[derive(Default)]
 struct Names {
     by_path: BTreeMap<String, (u64, DirentType)>,
@@ -64,11 +67,11 @@ impl Names {
             *known = entry;
             return;
         }
-        if self.bytes + path.len() > NAME_BYTES {
+        if self.bytes + cost(&path) > NAME_BYTES {
             self.by_path.clear();
             self.bytes = 0;
         }
-        self.bytes += path.len();
+        self.bytes += cost(&path);
         self.by_path.insert(path, entry);
     }
     /// `path` and the paths beneath it, which sort from `path/` to before `path0`.
@@ -76,10 +79,14 @@ impl Names {
         let below: Vec<String> = self.by_path.range(format!("{path}/")..format!("{path}0")).map(|(known, _)| known.clone()).collect();
         for known in below.iter().map(String::as_str).chain([path]) {
             if self.by_path.remove(known).is_some() {
-                self.bytes -= known.len();
+                self.bytes -= cost(known);
             }
         }
     }
+}
+
+fn cost(path: &str) -> usize {
+    path.len() + ENTRY_BYTES
 }
 
 pub struct DataVolume<D: Disk> {
@@ -745,8 +752,6 @@ mod tests {
         let mut v = reopen(v);
         assert!(v.list("home").unwrap().is_empty());
     }
-    /// A path, once looked up, is remembered; an unlink, rmdir or rename
-    /// forgets it and everything under it.
     #[test]
     fn forgetting_a_path_forgets_what_lies_under_it_and_no_neighbour() {
         let mut names = Names::default();
@@ -755,11 +760,13 @@ mod tests {
         }
         names.forget("a");
         assert_eq!(names.by_path.keys().map(String::as_str).collect::<Vec<_>>(), ["a-b", "a0", "ab", "b"]);
-        assert_eq!(names.bytes, names.by_path.keys().map(String::len).sum::<usize>());
+        let counted = |names: &Names| names.by_path.keys().map(|path| cost(path)).sum::<usize>();
+        assert_eq!(names.bytes, counted(&names));
         names.insert("ab".to_string(), (2, DirentType::Regular));
-        assert_eq!(names.bytes, 8, "a path named again is counted once");
+        assert_eq!(names.bytes, counted(&names), "a path named again is counted once");
     }
 
+    /// Long paths and many short ones alike.
     #[test]
     fn remembered_paths_stay_within_their_bytes() {
         let mut names = Names::default();
@@ -768,9 +775,16 @@ mod tests {
             names.insert(format!("{long}{i}"), (i, DirentType::Regular));
             assert!(names.bytes <= NAME_BYTES);
         }
+        for i in 0..100_000u64 {
+            names.insert(format!("{i:x}"), (i, DirentType::Regular));
+            assert!(names.bytes <= NAME_BYTES);
+        }
+        assert!(names.by_path.len() <= NAME_BYTES / ENTRY_BYTES);
         assert!(!names.by_path.is_empty());
     }
 
+    /// A path, once looked up, is remembered; an unlink, rmdir or rename
+    /// forgets it and everything under it.
     #[test]
     fn a_remembered_name_follows_its_renames_and_removal() {
         let mut v = volume();
