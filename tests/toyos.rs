@@ -3170,8 +3170,7 @@ fn osbench_capability_groups_exit_0() -> Result<(), String> {
 /// for `/system/bin/console` to claim, and wait for what that image owes at
 /// boot: the console up on its panel, having read the log and the keyboard,
 /// and ps2server's i8042 armed, its keyboard and QEMU's PS/2 mouse both.
-/// Nothing is typed at its shell, whose only input is the i8042:
-/// `issues/the-console-loses-typed-keystrokes-under-host-load.md`.
+/// Nothing is typed at its shell, whose only input is the i8042.
 fn console_image_boots() -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(
         &compile::repo_root().join("images/console.toml"),

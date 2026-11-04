@@ -15,6 +15,9 @@ twelve 2 MiB images entered a cache whose test budget refuses at the second.
 
 Owed: a mechanism. Nobody has one.
 
+`so_cache_refusals` is deleted: `4505f872d` took it out, and no test now reaches
+the refusal.
+
 **Exit condition.** The cause of the missing refusal is fixed, shown against
 `so_cache_refusals` and the `so-cache-tiny` budget it arms, as both stand at
 `1808fb8d`, restored and green. Owner: orchestrator.

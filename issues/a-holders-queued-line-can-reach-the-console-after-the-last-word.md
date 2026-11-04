@@ -47,3 +47,11 @@ which it reports at alert level. A holder that still runs after the drain
 can queue a line that follows the last word.
 
 `quiesce_stops_the_machine` is deleted; `issues/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md` records the commit that restores it.
+
+The holders' queue and `klogd`'s drain are in the K4 stage of
+`issues/the-kernel-still-creates-threads.md`, whose open pull request is #1165.
+K4 states that `klogd` goes and the console moves to logd, and that one wire's
+driver stays in the kernel whatever K4 moves (`log::console::drain_inline`,
+`serial::panic_flush`). The last word above goes out through `drain_inline`.
+
+**Owner**: whoever holds `issues/the-kernel-still-creates-threads.md`.
