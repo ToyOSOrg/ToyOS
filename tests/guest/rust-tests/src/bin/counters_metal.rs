@@ -11,12 +11,12 @@
 //! three are taken**: a printed line reaches the stick within the second,
 //! through the `/log` fileserver on that fileserver's CPU.
 //!
-//! **`idle0` waits for the ACPI server's word on its controller**
-//! ([`acpi_said`]), the end of what its start writes before any event. What
-//! the machine raises afterwards, at times it chooses (a query or GPE the
-//! server names the first time it takes it, and the kernel's first fixed-
-//! hardware interrupt), may land anywhere, the idle second included: the
-//! `counters` row reports those lines there and refuses any other.
+//! **`idle0` waits for the end of the ACPI server's start** ([`acpi_said`],
+//! `acpiserver_api::STARTED`). What the machine raises at times it chooses (a
+//! query or GPE the server names the first time it takes it, and the kernel's
+//! first fixed-hardware interrupt) may still land anywhere, the idle second
+//! included: the `counters` row reports those lines there and refuses any
+//! other.
 //!
 //! **Then for the log to be quiet** ([`settle`]): a job starts while
 //! logkeeper is still writing the boot so far and the job's own launch lines
@@ -71,9 +71,6 @@ const CHILDREN: u32 = 22_000;
 /// How long [`settle`] waits for each of its lines: two of logkeeper's rounds
 /// at its write budget (`system/logkeeper/src/policy.rs`, 5 s).
 const SETTLE_BOUND: Duration = Duration::from_secs(10);
-
-/// How long [`acpi_said`] waits for the server to say its controller.
-const ACPI_BOUND: Duration = Duration::from_secs(10);
 
 /// What this binary's own children are asked to do: exit at once.
 const EXIT_AT_ONCE: &str = "exit-at-once";
@@ -183,14 +180,10 @@ fn print(phase: &str, read: &Read) {
     }
 }
 
-/// Wait until `acpiserver` has said whether it serves an embedded controller.
+/// Wait until `acpiserver` has ended its start.
 fn acpi_said(log: &mut Log) {
-    log.until("the ACPI server's word on its controller", ACPI_BOUND, |line| {
-        program_line(line).is_some_and(|said| {
-            said.tag == "acpiserver"
-                && (said.text.starts_with(acpiserver_api::CONTROLLER_SERVED)
-                    || said.text.starts_with(acpiserver_api::CONTROLLER_NONE))
-        })
+    log.until("the end of the ACPI server's start", served_log::SERVER_START, |line| {
+        program_line(line).is_some_and(|said| said.tag == "acpiserver" && said.text == acpiserver_api::STARTED)
     });
 }
 

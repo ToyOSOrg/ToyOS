@@ -6,20 +6,19 @@ opened: 2026-10-08
 
 # `acpiserver`'s lines are spelled again by their readers
 
-`lib/acpiserver-api` holds one of the server's lines, its count of the
-embedded controller's queries, and the server, `acpi_hold` and the
-`acpi_server_events` judge read it there. Every other line of the server's
-that a reader matches is still a second spelling, held to the server's by
-nothing: a change of wording in `system/acpiserver/src` is found as a red
+`lib/acpiserver-api` holds some of the server's lines (its count of the
+controller's queries, its word on the controller, its idle and power
+censuses, the first take of a query or GPE, and the end of its start), and
+the server writes them through it and their readers match there. Every other
+line of the server's that a reader matches is still a second spelling, held
+to the server's by nothing: a change of wording in `system/acpiserver/src` is found as a red
 guest test, or on the T14 as a wait that runs to its bound.
 
 - `tests/common/power.rs`: `ACPI_ARMED`, `ACPI_PRESSED`, `ACPI_TABLE`,
   `ACPI_S5_HANDED`.
 - `tests/toyos.rs`, `acpi_events_on_metal` and `acpi_tables_on_metal`: the
-  armed line, `taken for the first time`, `tables loaded in`, the tables'
-  read counts, `refused`.
-- `tests/guest/rust-tests/src/bin/counters_metal.rs`, `acpi_said`:
-  `acpiserver: armed: `, `embedded controller none`, the first-query line.
+  armed line, `tables loaded in`, the tables' read counts, `refused`, and the
+  `acpiserver: GPE ` and `query` words around the first take.
 
 Owner: `system/acpiserver`.
 

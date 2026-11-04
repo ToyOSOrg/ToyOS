@@ -8,10 +8,14 @@
 /// each query number with how often it was taken.
 pub const QUERIES_COUNTED: &str = "embedded controller queries taken: ";
 
-/// What closes the server's word on an event the machine raised, an embedded
-/// controller query or a GPE, the first time this boot takes it: written once
-/// per event, at a time the machine chose.
+/// Follows the event's name in the server's line on the first take of a query
+/// or GPE: written once per event, at a time the machine chose.
 pub const FIRST_TAKEN: &str = " taken for the first time";
+
+/// The server's last line of its start, on every machine: written once its
+/// tables, namespace, idle states, GPEs, power sources and the events latched
+/// meanwhile are served, before it waits on events alone.
+pub const STARTED: &str = "acpiserver: started; serving events";
 
 /// The server's word on the embedded controller, once, after the tables'
 /// load: [`CONTROLLER_SERVED`] and its GPE and ports where it serves one,

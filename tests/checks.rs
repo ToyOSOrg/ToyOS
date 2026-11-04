@@ -334,8 +334,8 @@ mod checks {
     /// [`idle_second_lines`] on lines as the benches' readbacks carry them: the
     /// T14's two first queries and the kernel's first fixed-hardware interrupt
     /// are the machine's events and pass, reported; anything else stamped in
-    /// the second, acpiserver's periodic count among it, is refused; and a
-    /// line outside the second is no line of it.
+    /// the second, acpiserver's periodic count and a first time said twice
+    /// among it, is refused; and a line outside the second is no line of it.
     #[test]
     fn the_idle_second_admits_only_first_time_acpi_events() -> Result<(), String> {
         const QUERY_40: &str = "[2026-11-03 22:34:24 13.414 acpiserver] acpiserver: embedded controller query 0x40 taken for the first time; served by nothing";
@@ -352,6 +352,13 @@ mod checks {
             .map_err(|rest| format!("the machine's own events were refused: {rest:?}"))?;
         if events != [QUERY_40, INTERRUPT, GPE, QUERY_4F] {
             return Err(format!("the events reported are {events:?}"));
+        }
+        // A "first time" the log says twice: the second is no first take.
+        const QUERY_40_AGAIN: &str = "[2026-11-03 22:34:25 13.900 acpiserver] acpiserver: embedded controller query 0x40 taken for the first time; served by nothing";
+        let twice = log(&[QUERY_40, QUERY_40_AGAIN]);
+        match idle_second_lines(&twice, 13_000, 14_100) {
+            Err(rest) if rest == [QUERY_40, QUERY_40_AGAIN] => {}
+            said => return Err(format!("a first time said twice was answered {said:?}")),
         }
         for other in [COUNTED, PROGRAM] {
             let busy = log(&[QUERY_40, other]);

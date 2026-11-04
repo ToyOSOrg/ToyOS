@@ -101,7 +101,7 @@ use toyos::AcpiDev;
 use toyos_abi::acpi::{Access, AcpiInfo, Apertures, Block, IdleDeclaration, FIXED_POWER_BUTTON, HARDWARE_REDUCED};
 use toyos_abi::syscall::{DeviceType, SyscallError};
 
-use acpiserver_api::{CONTROLLER_NONE, CONTROLLER_SERVED, FIRST_TAKEN};
+use acpiserver_api::{CONTROLLER_NONE, CONTROLLER_SERVED, FIRST_TAKEN, STARTED};
 use aml::Aml;
 use battery::Power;
 use devices::{Ec, Queried};
@@ -183,6 +183,7 @@ fn main() {
     server.sources = (batteries.clone(), adapters.clone());
     server.find_power(batteries, adapters);
     server.served_aml();
+    println!("{STARTED}");
     server.serve();
 }
 
