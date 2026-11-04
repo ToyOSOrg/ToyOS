@@ -726,8 +726,9 @@ fn sample(held: &mut Held, now_ns: u64) {
                         settle(held, earlier);
                     }
                     log!(
-                        "clock: the TSC reads {} ns from the chipset's counters over the last span; the RTC's edges \
-                         after it will say which moved: {spans}",
+                        "{}{} ns from the chipset's counters over the last span; the RTC's edges after it will \
+                         say which moved: {spans}",
+                        kernel::clock::TSC_STEP_READ,
                         agreement.apart_ns,
                     );
                     held.pending = Some(Pending { step_ns: agreement.apart_ns, from, to, until_ns: now_ns + RTC_WAIT_NS });

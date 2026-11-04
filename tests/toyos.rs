@@ -7151,8 +7151,11 @@ const ACPI_FIRST_INTERRUPT: &str = "isa: the ACPI fixed hardware took its first 
 /// the boot names once (acpiserver's word on a query or GPE it took for the
 /// first time, [`acpiserver_api::FIRST_TAKEN`], and the kernel's
 /// [`ACPI_FIRST_INTERRUPT`], each a line whose words the whole log holds once,
-/// so a first time said twice is none), and the kernel's scheduled TSC
-/// refinement ([`kernel::clock::TSC_REFINED`]).
+/// so a first time said twice is none), the clock's report of a step the TSC
+/// made ([`kernel::clock::TSC_STEP_READ`]; the AMD bench steps once a boot in
+/// the first spell every CPU idles deep, which the idle second itself makes:
+/// `issues/the-amd-benchs-tsc-steps-1-7-ms-forward-once-a-boot.md`), and the
+/// kernel's scheduled TSC refinement ([`kernel::clock::TSC_REFINED`]).
 fn idle_second_lines(log: &str, from_ms: u64, to_ms: u64) -> Result<Vec<&str>, Vec<&str>> {
     fn words(line: &str) -> Option<&str> {
         toyos_logstream::parse(line).map(|p| p.text)
@@ -7163,9 +7166,11 @@ fn idle_second_lines(log: &str, from_ms: u64, to_ms: u64) -> Result<Vec<&str>, V
             .is_some_and(|said| said.tag == "acpiserver" && said.text.contains(acpiserver_api::FIRST_TAKEN))
             || toyos_logstream::parse(line)
                 .is_some_and(|p| p.source == toyos_logstream::Source::Kernel && p.text == ACPI_FIRST_INTERRUPT);
-        let refined = toyos_logstream::parse(line)
-            .is_some_and(|p| p.source == toyos_logstream::Source::Kernel && p.text.starts_with(kernel::clock::TSC_REFINED));
-        named && once(line) || refined
+        let clock = toyos_logstream::parse(line).is_some_and(|p| {
+            p.source == toyos_logstream::Source::Kernel
+                && (p.text.starts_with(kernel::clock::TSC_REFINED) || p.text.starts_with(kernel::clock::TSC_STEP_READ))
+        });
+        named && once(line) || clock
     };
     let (events, rest): (Vec<&str>, Vec<&str>) = log
         .lines()
@@ -7189,8 +7194,9 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// one its `control_regs:` line holds. No line is stamped in a millisecond
 /// from `idle0`'s to `idle1`'s, which `counters_metal` reads on the log's
 /// clock, both edges included since a line stamped there may follow the read,
-/// except a first-time ACPI event or the kernel's scheduled TSC refinement
-/// ([`idle_second_lines`]), each of which the row reports. The boot ran in ACPI mode, which
+/// except the machine's own events and the kernel's scheduled TSC refinement
+/// ([`idle_second_lines`]), each of which the row reports: what it holds is
+/// that ToyOS itself does not wake the idle machine. The boot ran in ACPI mode, which
 /// `/system/bin/acpiserver`'s claim put it in: `idle0` reads after the
 /// kernel's write of the enable to `SMI_CMD`, which the boot processor
 /// counted with the time it held it, and no other CPU counts one; and from

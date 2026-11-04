@@ -13,6 +13,12 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 /// written at spans the clock schedules after calibration, on no event.
 pub const TSC_REFINED: &str = "clock: over ";
 
+/// What opens the kernel's report of a span in which the TSC moved apart from
+/// the chipset's counters (`clock: the TSC reads <n> ns from the chipset's
+/// counters ...`): the clock's word on a step the machine made, written as
+/// the sampler finds it.
+pub const TSC_STEP_READ: &str = "clock: the TSC reads ";
+
 /// Unix seconds at boot, from a reading of `secs` true when the clock read
 /// `at`, which is after boot where the kernel read the wall clock and before
 /// it where the loader did; both are stamps, nanoseconds since the counter's
