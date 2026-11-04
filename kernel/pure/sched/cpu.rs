@@ -313,8 +313,8 @@ pub struct CpuSched<X: SchedPayload> {
     /// cannot free the stack it is running on.
     zombie: Option<DeadTask<X>>,
     mailbox: MailboxConsumer<Msg<X>>,
-    /// The CPU this one last asked for a task ([`CpuHandle::ask`]): its probe
-    /// is outstanding while that CPU's word still holds this one's bit.
+    /// The CPU this one last asked for a task ([`CpuHandle::ask`]); whether
+    /// that ask is still owed an answer is [`CpuSched::probe_outstanding`]'s.
     asked: Option<CpuId>,
     /// Thieves that asked this pass; answered in `finish` from surplus, after
     /// the pick, so answering can never hand away the task we were about to
@@ -511,6 +511,11 @@ impl<X: SchedPayload> CpuSched<X> {
         self.mailbox.is_empty()
     }
 
+    /// The CPU whose word still holds this one's ask, answering or not.
+    pub fn ask_held(&self, cpus: &CpuHandles<Msg<X>>) -> Option<CpuId> {
+        self.asked.filter(|&victim| cpus.get(victim).asked_by(self.id))
+    }
+
     /// Is a steal probe from this CPU still on its way to a victim?
     ///
     /// Whether this CPU's ask is still coming to an answer at `now`: the CPU
@@ -521,7 +526,7 @@ impl<X: SchedPayload> CpuSched<X> {
     /// outstanding, the quantity [`Balance::PullWithRearm`] and
     /// [`Balance::PushOnSurplus`] are judged on.
     pub fn probe_outstanding(&self, cpus: &CpuHandles<Msg<X>>, now: Nanos) -> bool {
-        self.asked.is_some_and(|victim| cpus.get(victim).asked_by(self.id) && cpus.get(victim).answering(now))
+        self.ask_held(cpus).is_some_and(|victim| cpus.get(victim).answering(now))
     }
 
     /// Lend the running task an RT window: the path for a client
@@ -2156,7 +2161,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         if self.cpu.probe_outstanding(cpus, self.now) {
             return;
         }
-        if let Some(asked) = self.cpu.asked {
+        if let Some(asked) = self.cpu.ask_held(cpus) {
             cpus.get(asked).retract(me);
         }
         self.cpu.asked = Some(victim);
