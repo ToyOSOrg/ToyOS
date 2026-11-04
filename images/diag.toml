@@ -11,11 +11,11 @@
 # guarantee is that this config declares no `devices`, which
 # `no_diag_program_claims_the_screen` checks.
 [boot]
-start = ["logkeeper", "uart", "fileserver", "toybox"]
+start = ["logkeeper", "fileserver", "toybox"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
-# image does. The kernel keeps the record ring and the console and writes no
-# file at all, so a boot config without `logkeeper` is a boot whose `/log` is empty —
+# image does. The kernel keeps the record ring and writes no file at all, so a
+# boot config without `logkeeper` is a boot whose `/log` is empty —
 # `every_boot_config_runs_logkeeper` is what refuses one. It claims no device and
 # serves no port: its row's authority is `logread`, which is
 # `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands it every
@@ -23,12 +23,6 @@ start = ["logkeeper", "uart", "fileserver", "toybox"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log-wire"]
-
-[programs.uart]
-devices = ["uart"]
-receives = ["log-wire"]
-restart = true
 
 [programs.toybox]
 args = ["pwd"]

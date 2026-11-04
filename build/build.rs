@@ -3200,10 +3200,12 @@ mod tests {
                 "{config} starts `logkeeper` and has no `[programs.logkeeper]` row to say what it holds",
             );
             // The UART carries nothing past the kernel's hand-over but what
-            // its driver puts on it.
+            // its driver puts on it. The diagnostic image is for a machine with
+            // no UART, and claims no device (`no_diag_program_claims_the_screen`).
             let wire = toyos_logstream::WIRE_HOLDER;
             assert!(
-                parsed.boot.start.iter().any(|p| p == wire)
+                *config == "images/diag.toml"
+                    || parsed.boot.start.iter().any(|p| p == wire)
                     && parsed.programs.get(wire).is_some_and(|row| row.devices.iter().any(|d| d == "uart")),
                 "{config} runs `logkeeper` and does not start `{wire}` holding the `uart` claim, so its console \
                  UART says nothing from the kernel's hand-over to the machine's stop",
