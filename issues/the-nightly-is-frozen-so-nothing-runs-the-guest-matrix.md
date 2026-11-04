@@ -15,8 +15,9 @@ writer, main's toolchain release, and the fresh-machine and macOS builds.
 Guest rows run only where an agent dispatches them on the guest runner
 (`guest-rows.yml`), so a regression in a row no PR selected goes unseen.
 
-`build/ci/qemu-version` moved to 11.1.2, the guest runner's QEMU, while
-`guest.yml`'s container still installs 11.1.1 from its snapshot archive, so its
-instrument step reds until the container moves to an image carrying 11.1.2.
+`build/ci/qemu-version` moved to 11.1.3, the guest runner's and the dev host's
+QEMU, while `guest.yml`'s container still installs 11.1.1 from its snapshot
+archive, so its instrument step reds until the container moves to an image
+carrying 11.1.3.
 
-**Exit**: the nightly resumes, its guest container on 11.1.2. Held by the owner.
+**Exit**: the nightly resumes, its guest container on 11.1.3. Held by the owner.
