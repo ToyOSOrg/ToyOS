@@ -459,8 +459,7 @@ mechanism for it.
 
 A flaky test is deleted at once. Each commit below takes one out:
 
-- `metal_job_reboot` — `99ee9625d`, also on
-  `issues/metal-job-reboot-drained-no-kernel-output-beside-other-guests.md`;
+- `metal_job_reboot` — `99ee9625d`;
 - `job_deadline_reboots` — `ce4f2965e`;
 - `swap_netd` and `swap_crash_rolls_back` — `4a60c35c8`;
 - `launcher_refusals` — `4c191469f`;
@@ -473,9 +472,9 @@ A flaky test is deleted at once. Each commit below takes one out:
 - `log_poll_outlives_a_close` — `ad6dc0781`, with test-runner's `log-close`
   and `log-close-cancels-any-syscap`;
 - `metal_sim_pointer_churn` — `525e59ad1`;
-- `blocked_dump` — `0a7fc5f70`, red after its retirement here on the
-  sighting `issues/log-reserve-window-negative-times-out-beside-other-guests.md`
-  records and one beside `process_stats`; nothing restores it, since the kernel
+- `blocked_dump` — `0a7fc5f70`, red after its retirement here once in the
+  session that saw `log_reserve_window_negative` red and once beside
+  `process_stats`; nothing restores it, since the kernel
   no longer has the Ctrl+Alt+D report it drove;
 - `metal_sim_input` — `415d9a102`;
 - `xhci_full_speed_device` — `5e4223525`, with `Profile::MetalFullSpeed`.

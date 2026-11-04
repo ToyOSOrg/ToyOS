@@ -19,8 +19,7 @@ its drains and the poll registration all come up — and then the panic path
 panicked too. The log subsystem's known sins live in exactly that
 neighbourhood (an unbounded `BackendGuard::lock` spin with interrupts off is
 one of the redesign track's own exhibits), and the redesign is approved and
-sequenced; this sighting is evidence for it, and a reproduction recipe:
-`cargo test` in two worktrees at once.
+sequenced; this sighting is evidence for it.
 
 **2. The double-panic path reports nothing.** *(Resolved 2026-08-20.)* The
 kernel's complete last words were `[kernel 0.991 cpu0] DOUBLE PANIC` — not what
@@ -64,3 +63,9 @@ every run's concurrent guest count was sampled and the harness's own
 **Finding 1 is not retired by it**: what this entry is about is a double panic
 that said nothing but its name, and only a sighting that carries the first
 crash's identity closes that.
+
+`log_poll_outlives_a_close` is deleted: `ad6dc0781` took it out, and no test
+now stages that boot's edge.
+
+**Owner**: whoever holds the K4 stage of
+`issues/the-kernel-still-creates-threads.md`, open as #1165.

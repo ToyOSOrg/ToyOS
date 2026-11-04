@@ -25,8 +25,7 @@ measurement owed. The one observed red of this shape, `virtio_sound_counts`, is 
 
 The harness's liveness ceiling (`tests/common/qemu.rs`, `host_scale`, `budget_smp`) is scaled by
 the fastest boot the run has seen, so load that arrives after it is not in it.
-`issues/a-netcase-boot-under-host-load-said-nothing-past-the-firmwares-screen-clears.md` records
-`netstack_socket_churn` and `netstack_streams` each red at boot, before any bound above ran, at
+`netstack_socket_churn` and `netstack_streams` were each red at boot, before any bound above ran, at
 one-minute load averages of 82.78 and 69.67 on 14 cores as their suites began; the first had its
 ceilings priced at 1.00x. The stop's wall-clock budget is owned by
 `issues/timing-verdicts-ruled-off-qemu-have-no-metal-arm.md` and

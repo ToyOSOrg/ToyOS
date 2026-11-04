@@ -30,6 +30,13 @@ The kept serial log covers only boot, so nothing yet says which side lost the
 line: the nested shell's stdin read, the surface's report of its foreground
 line, or a wake between them.
 
+One more, 2026-11-04, at the nightly's shape (`--jobs 1`, `TOYOS_HOST_CORES=4`)
+on the dev host, in #1166's head arm: `libc_children` ended
+`tty_interrupt ended Some(2)` after 207 s, `stalled at the nested line held`,
+the same stall. Nothing else in that run was red; it did not wait for host
+CPUs; host load was not recorded. Evidence:
+https://github.com/ToyOSOrg/evidence/tree/a95c798b496d939b4bdb3c7fe0a3cfc2e6d9bfb6/pr-1166/r1
+
 **Exit:** find what the nested shell waits on when it stalls, fix it, and
 show `libc_children` green across repeated runs. `signal_quit`'s stall may be
 the same defect.
