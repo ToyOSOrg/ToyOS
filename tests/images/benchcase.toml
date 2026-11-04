@@ -24,9 +24,11 @@ start = ["logkeeper", "uart", "diskserver", "fileserver", "acpiserver", "netstac
 service = true
 syscap = ["logread"]
 serves = ["log", "log-carrier", "log-wire"]
+holds = ["log-origins"]
 
 [programs.uart]
 devices = ["uart"]
+holds = ["console-input"]
 receives = ["log-wire"]
 restart = true
 

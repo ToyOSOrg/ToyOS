@@ -24,9 +24,11 @@ service = true
 syscap = ["logread"]
 serves = ["log", "log-wire"]
 memory-floor-mib = 32
+holds = ["log-origins"]
 
 [programs.uart]
 devices = ["uart"]
+holds = ["console-input"]
 receives = ["log-wire"]
 restart = true
 

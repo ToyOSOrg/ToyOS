@@ -52,7 +52,8 @@
 //! One `SysCap` duplicate carrying `Rights::LOG | Rights::WAIT`, which its
 //! manifest row asks for by the name `logread`, and with which it tells the
 //! kernel what the console's channels have delivered; the origins acceptor
-//! the supervisor endows it; and what its row adds — the `log` acceptor, where
+//! the supervisor endows the row that holds it (`holds = ["log-origins"]`);
+//! and what its row adds — the `log` acceptor, where
 //! this machine's readers ask for the log and `inspect` asks where it is going
 //! ([`inspect`]'s module, which grants nothing), and the `log-carrier` and
 //! `log-wire` acceptors, where the console's carriers ask. It claims no device

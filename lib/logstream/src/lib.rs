@@ -69,7 +69,7 @@ pub const WIRE_HOLDER: &str = "uart";
 
 /// The endowment label of the write end of the console's input: the pipe the
 /// supervisor makes, whose read end is every program's standard input, and
-/// hands [`WIRE_HOLDER`] alone to write what the UART receives into.
+/// hands the row that holds it to write what the UART receives into.
 pub const CONSOLE_INPUT: &str = "console-input";
 
 /// What the UART says as the carrier's channel takes the log off it: every
@@ -93,14 +93,15 @@ pub const CARRY: u32 = 8;
 /// channel has taken, counted from the pipe's first byte, as a `u64` payload.
 pub const DELIVERED: u32 = 9;
 
-/// The manifest's name for the program that is the log: the supervisor endows it the
-/// [`ORIGINS`] acceptor, and gives it a ring like every other program's, which
-/// it reads like every other.
+/// The manifest's name for the program that is the log: the one row that may
+/// hold [`ORIGINS`], and given a ring like every other program's, which it
+/// reads like every other.
 pub const LOGKEEPER: &str = "logkeeper";
 
-/// The endowment label of the acceptor the supervisor hands `logkeeper` for its frames.
-/// **Named by no manifest row**, so the one connector to it is the supervisor's own and
-/// no program can register a ring under a name of its choosing.
+/// The endowment label of the acceptor the supervisor hands the row that holds it,
+/// `logkeeper`, for its frames. **No row receives its connector**, so the one
+/// connector to it is the supervisor's own and no program can register a ring
+/// under a name of its choosing.
 pub const ORIGINS: &str = "log-origins";
 
 /// The endowment label of a program's waker of the bell [`REGISTER`] hands

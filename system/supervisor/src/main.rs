@@ -140,8 +140,7 @@ use toyos::AsHandle;
 use toyos_abi::Rights;
 use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
-    Registration, Tag, ALIVE, CONSOLE_INPUT, FLUSH, FLUSHED, LOGKEEPER, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
-    WIRE_HOLDER,
+    Registration, Tag, ALIVE, CONSOLE_INPUT, FLUSH, FLUSHED, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
 };
 use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
 use toyos_abi::syscall::{
@@ -297,10 +296,11 @@ const FLUSH_BOUND: Duration = Duration::from_millis(toyos_quiesce::FLUSH_MS);
 /// refusal is therefore a broken invariant and ends the supervisor loudly.
 struct Log {
     conn: Connection,
-    /// The acceptor end, until `logkeeper` is started holding it.
+    /// The acceptor end, until the row that holds the log's origins is
+    /// started holding it.
     acceptor: Option<Acceptor>,
     /// The console's input as every program gets it for its stdin: the read
-    /// end of the pipe whose write end the console UART's driver is handed.
+    /// end of the pipe whose write end the row that holds it is handed.
     stdin: toyos::OwnedHandle,
     /// That write end, kept so a driver started again is handed it again.
     console_input: toyos::Pipe,
@@ -3200,13 +3200,14 @@ fn start<'a>(
     // Where the program's output goes.
     //
     // A service the supervisor starts gets a ring of its own as its stdout and stderr
-    // and the console's input to read as its stdin; `logkeeper` also gets the acceptor
-    // the rings reach it on, and the console UART's driver the input's write end. A
+    // and the console's input to read as its stdin; the row that holds the
+    // log's origins also gets the acceptor the rings reach it on, and the one
+    // that holds the console's input that pipe's write end. A
     // launch keeps the descriptors its caller sent, but for a ring among them
     // — the caller's own log — which is replaced by the program's
     // ([`LaunchFd::Ring`]), and a stdio descriptor it sent nothing for is a
     // null, never this process's own.
-    let mut starts_logkeeper = false;
+    let mut endows_origins = false;
     let (log, ring) = match output {
         Output::Boot { log, job } => {
             // **Every service the supervisor starts is a job of its own**,
@@ -3216,18 +3217,18 @@ fn start<'a>(
             command.inherit_handle(0, log.stdin.as_handle().into());
             command.inherit_handle(1, ring.as_handle().into());
             command.inherit_handle(2, ring.as_handle().into());
-            if program.name == LOGKEEPER {
+            if program.holds.iter().any(|held| held == ORIGINS) {
                 let Some(acceptor) = &log.acceptor else {
-                    panic!("supervisor: `{LOGKEEPER}` is started twice, and the log's origins are the first's");
+                    panic!("supervisor: `{}` holds `{ORIGINS}`, which went to a start before it", program.name);
                 };
                 let origins = acceptor
                     .as_handle()
                     .try_clone_to_owned()
                     .map_err(|e| std::io::Error::other(format!("the log's origins did not duplicate: {e:?}")))?;
                 command.endow(ORIGINS, origins.into());
-                starts_logkeeper = true;
+                endows_origins = true;
             }
-            if program.name == WIRE_HOLDER {
+            if program.holds.iter().any(|held| held == CONSOLE_INPUT) {
                 let input = log
                     .console_input
                     .as_handle()
@@ -3272,7 +3273,7 @@ fn start<'a>(
             acceptors.remove(name.as_str());
         }
     }
-    if starts_logkeeper {
+    if endows_origins {
         log.acceptor = None;
     }
     if let (Some(ring), Some(alive)) = (ring, alive) {

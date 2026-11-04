@@ -196,6 +196,9 @@ struct ProgramConfig {
     syscap: Vec<String>,
     /// The idle slot (`toyos_manifest::Program::slots`).
     slots: bool,
+    /// The machine-wide objects the supervisor makes once and endows this row
+    /// (`toyos_manifest::Program::holds`).
+    holds: Vec<String>,
     /// Disk authorizations minted at its start (`toyos_manifest::authorize`).
     authorize: Vec<String>,
     /// A system service: the supervisor starts it with `HOME` at its own `/state/<name>`
@@ -695,6 +698,16 @@ const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_vdagent::endpoint::SERVICE, &[toyos_vdagent::endpoint::SERVICE_HOLDER]),
 ];
 
+/// The objects the supervisor makes once and endows the row that holds them
+/// (`toyos_manifest::HOLDINGS`), each with the one row that may: the acceptor
+/// every program's log ring reaches `logkeeper` on, whose holder names every
+/// line's writer, and the console's input, whose holder types at every
+/// program's standard input.
+const HOLDINGS: &[(&str, &str)] = &[
+    (toyos_logstream::ORIGINS, toyos_logstream::LOGKEEPER),
+    (toyos_logstream::CONSOLE_INPUT, toyos_logstream::WIRE_HOLDER),
+];
+
 /// Rows, as a refusal names them.
 fn named(rows: &[&str]) -> String {
     rows.iter().map(|r| format!("`{r}`")).collect::<Vec<_>>().join(" and ")
@@ -702,9 +715,9 @@ fn named(rows: &[&str]) -> String {
 
 /// Who may hold the authorities that change what the machine runs or what a
 /// package sees: each of [`HELD_ALONE`]'s ports, its holder and nothing else
-/// — no other `[programs]` row and never `[apps]` — the idle slot,
-/// [`toyos_update::slots::HOLDER`] alone, and the consent port, which no row
-/// receives and its server alone serves.
+/// — no other `[programs]` row and never `[apps]` — each of [`HOLDINGS`], its
+/// one row, the idle slot, [`toyos_update::slots::HOLDER`] alone, and the
+/// consent port, which no row receives and its server alone serves.
 ///
 /// **Checked on every manifest rendered, not only on the committed configs**,
 /// because the swap port's holder can replace any service's binary, the
@@ -724,6 +737,11 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
         }
         if name != consent::SERVER && program.serves.iter().any(|s| s == consent::PORT) {
             return Err(format!("`{name}` serves `{}`, which only `{}` may serve", consent::PORT, consent::SERVER));
+        }
+        for (held, holder) in HOLDINGS {
+            if name != holder && program.holds.iter().any(|h| h == held) {
+                return Err(format!("`{name}` holds `{held}`, which only `{holder}` may hold"));
+            }
         }
         if name != toyos_update::slots::HOLDER && program.slots {
             return Err(format!("`{name}` asks for `slots`, which only `{}` may hold", toyos_update::slots::HOLDER));
@@ -891,6 +909,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     firmware: cfg.firmware.clone(),
                     syscap: cfg.syscap.clone(),
                     slots: cfg.slots,
+                    holds: cfg.holds.clone(),
                     authorize: cfg.authorize.clone(),
                     service: cfg.service,
                     state: cfg.state,
@@ -3196,8 +3215,9 @@ mod tests {
                 parsed.boot.start,
             );
             assert!(
-                parsed.programs.contains_key("logkeeper"),
-                "{config} starts `logkeeper` and has no `[programs.logkeeper]` row to say what it holds",
+                parsed.programs.get("logkeeper").is_some_and(|row| row.holds.iter().any(|h| h == toyos_logstream::ORIGINS)),
+                "{config} starts `logkeeper` and no `[programs.logkeeper]` row holds `{}`, so no program's ring reaches it",
+                toyos_logstream::ORIGINS,
             );
             // The UART carries nothing past the kernel's hand-over but what
             // its driver puts on it. The diagnostic image is for a machine with
@@ -3206,9 +3226,12 @@ mod tests {
             assert!(
                 *config == "images/diag.toml"
                     || parsed.boot.start.iter().any(|p| p == wire)
-                    && parsed.programs.get(wire).is_some_and(|row| row.devices.iter().any(|d| d == "uart")),
-                "{config} runs `logkeeper` and does not start `{wire}` holding the `uart` claim, so its console \
-                 UART says nothing from the kernel's hand-over to the machine's stop",
+                    && parsed.programs.get(wire).is_some_and(|row| {
+                        row.devices.iter().any(|d| d == "uart")
+                            && row.holds.iter().any(|h| h == toyos_logstream::CONSOLE_INPUT)
+                    }),
+                "{config} runs `logkeeper` and does not start `{wire}` holding the `uart` claim and the console's \
+                 input, so its console UART says nothing from the kernel's hand-over to the machine's stop",
             );
             for (name, program) in &parsed.programs {
                 let holds = program.syscap.iter().any(|s| s == "logread");
@@ -3455,6 +3478,15 @@ mod tests {
         assert!(held_by_their_holders_alone(&sshserver).is_err());
         let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"swap\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&apps).is_err());
+        let origins: SystemConfig = toml::from_str("[programs.shell]\nholds = [\"log-origins\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&origins).is_err());
+        let input: SystemConfig = toml::from_str("[programs.shell]\nholds = [\"console-input\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&input).is_err());
+        let held: SystemConfig = toml::from_str(
+            "[programs.logkeeper]\nholds = [\"log-origins\"]\n[programs.uart]\nholds = [\"console-input\"]\n",
+        )
+        .unwrap();
+        assert_eq!(held_by_their_holders_alone(&held), Ok(()));
         let slots: SystemConfig = toml::from_str("[programs.shell]\nslots = true\n").unwrap();
         assert!(held_by_their_holders_alone(&slots).is_err());
         let booted: SystemConfig =
