@@ -76,6 +76,14 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   HVF on this Mac?", he answered: "Yes, once ARM userland boots
   (Recommended)".
 
+## Owner ruling, 2026-11-04
+
+Until an AArch64 metal bench exists, this track's AArch64-only work waits,
+and an aarch64 guest red is recorded as a sighting unless it shows a defect
+in shared code (root `CLAUDE.md`, "AArch64
+waits for a metal bench"). That governs stage 8's "fixed or deleted" until
+then.
+
 ## The default architecture
 
 `cargo run` and the build pick x86-64 when no architecture is named, whatever
