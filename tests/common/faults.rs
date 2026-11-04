@@ -179,7 +179,7 @@ pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), St
 /// leaving the span out, and a report after it.
 const HPET_STALL_STAGED: &str = "hpet-stall: the HPET reads ";
 const HPET_MOVED: &str = "clock: the HPET moved and the TSC did not, so this span is left out: ";
-const CLOCK_REPORT: &str = "clock: over ";
+const CLOCK_REPORT: &str = kernel::clock::TSC_REFINED;
 
 /// An HPET `hpet-stall` reads 10 ms behind while the TSC and the ACPI PM timer
 /// count on: the sampler says the HPET moved, leaves the span out, and the

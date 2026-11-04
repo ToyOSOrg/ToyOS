@@ -833,13 +833,15 @@ fn log_report(held: &Held, report: reference::Report) {
     );
     match (report.kept.measured, report.retuned) {
         (false, _) => log!(
-            "clock: over {span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
+            "{}{span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
              the clock keeps CPUID 15H's {} mHz; {left_out}",
+            kernel::clock::TSC_REFINED,
             kept.millihertz(),
         ),
         (true, retuned) => log!(
-            "clock: over {span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
+            "{}{span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
              the clock {} {} mHz, within {} ppb; {left_out}",
+            kernel::clock::TSC_REFINED,
             if retuned { "now keeps" } else { "keeps" },
             kept.millihertz(),
             report.kept.bound_ppb,

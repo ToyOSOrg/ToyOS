@@ -8,6 +8,11 @@ pub mod reference;
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
+/// What opens the kernel's report each time its scheduled refinement holds the
+/// TSC to the HPET over a span (`clock: over <span> s the TSC counted ...`):
+/// written at spans the clock schedules after calibration, on no event.
+pub const TSC_REFINED: &str = "clock: over ";
+
 /// Unix seconds at boot, from a reading of `secs` true when the clock read
 /// `at`, which is after boot where the kernel read the wall clock and before
 /// it where the loader did; both are stamps, nanoseconds since the counter's
