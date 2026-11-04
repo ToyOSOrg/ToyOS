@@ -320,6 +320,12 @@ fn writable(sb: &Superblock) -> Result<()> {
     if sb.journal.is_empty() {
         return Err(Error::Unsupported("writing a volume without journal buckets"));
     }
+    // An unclean mount replays what the ring holds; mkfs's ring is the
+    // bound on that, so a larger one, another writer's, is not written.
+    let ring: u64 = sb.journal.iter().map(|&(_, count)| count).sum();
+    if ring > super::mkfs::ring_buckets(sb.member.nbuckets, u64::from(sb.member.bucket_sectors), sb.block_bytes()) {
+        return Err(Error::Unsupported("writing a volume whose journal is larger than mkfs lays out"));
+    }
     if !splits_fit(sb.node_sectors() as usize * SECTOR) {
         return Err(Error::Unsupported("writing a volume of btree nodes too small for reclaim's largest split"));
     }

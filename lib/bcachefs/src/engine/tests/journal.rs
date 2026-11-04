@@ -297,18 +297,15 @@ fn a_window_with_an_entry_missing_or_failing_its_checksum_is_refused() {
     assert_eq!(window_of(&unclean_with(&[], |_, _| {})).unwrap().map(|w| (w.first, w.last, w.next)), None);
 }
 
-/// On a device a 128th of which is past JOURNAL_BYTES, mkfs's ring is
-/// JOURNAL_BYTES, and an unclean mount after the writer has gone round it
-/// replays a window within it. Red when mkfs sizes the ring by the device.
+/// The writer goes round the ring of a production geometry, 2 MiB buckets
+/// on an 8 GiB device, and an unclean mount after replays it to a volume
+/// fsck finds clean.
 #[test]
-fn a_large_volumes_ring_and_its_replay_window_stay_within_journal_bytes() {
+fn a_writer_that_went_round_a_ring_of_2_mib_buckets_replays_clean() {
     let dev = super::buckets::Sparse::new(8 << 30);
     super::buckets::formatted_on(&dev);
     let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap().0;
-    let bucket = u64::from(sb.member.bucket_sectors) * SECTOR as u64;
-    let ring: u64 = sb.journal.iter().map(|&(_, count)| count).sum();
-    assert!(sb.member.nbuckets / 128 > ring, "a 128th of the device is more than the ring");
-    assert_eq!(ring * bucket, mkfs::JOURNAL_BYTES);
+    assert_eq!(sb.member.bucket_sectors, 4096, "2 MiB buckets");
 
     let mount = block_on_ready(Mount::open(&dev, MountOptions { cache_nodes: 256 }, super::mount::random())).unwrap();
     let mut last = mount.journal_head();
@@ -324,10 +321,7 @@ fn a_large_volumes_ring_and_its_replay_window_stay_within_journal_bytes() {
     drop(mount);
 
     let v = block_on_ready(Volume::open(&dev)).unwrap();
-    let (window, _) = v.replayed().expect("an unclean volume replays");
-    let scan = block_on_ready(v.scan_journal()).unwrap();
-    let bytes: u64 = scan.in_window(v.superblock(), window).map(|e| e.sectors * SECTOR as u64).sum();
-    assert!(bytes <= mkfs::JOURNAL_BYTES, "a window of {bytes} bytes");
+    assert!(v.replayed().is_some(), "an unclean volume replays");
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }
 

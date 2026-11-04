@@ -92,8 +92,9 @@ struct Slot {
     /// takes a block of its own.
     data: SharedBlock,
     dirty: bool,
-    /// Which write put `data` here, so a flush that carried an older copy
-    /// leaves the block dirty.
+    /// Which write or fetch put `data` here, so a flush that carried an
+    /// older copy leaves the block dirty, and only the newest place in the
+    /// eviction order is live.
     version: u64,
 }
 
@@ -211,8 +212,10 @@ impl<D: Disk> Cache<D> {
                     Some(slot) => *data = **slot.data,
                     None => {
                         if inner.order.try_reserve(1).is_ok() && let Some(data) = boxed(data) {
-                            inner.slots.insert(at, Slot { data: Rc::new(data), dirty: false, version: 0 });
-                            inner.order.push_back((at, 0));
+                            inner.versions += 1;
+                            let version = inner.versions;
+                            inner.slots.insert(at, Slot { data: Rc::new(data), dirty: false, version });
+                            inner.order.push_back((at, version));
                         }
                     }
                 }

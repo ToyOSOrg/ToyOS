@@ -71,6 +71,14 @@ const MIN_BUCKETS: u64 = 512;
 /// replay's memory, reading and work.
 pub(crate) const JOURNAL_BYTES: u64 = 32 << 20;
 
+/// The journal buckets mkfs lays out for `nbuckets` buckets of `bucket`
+/// sectors and blocks of `block` bytes: a 128th of the device, at least
+/// eight buckets and at most JOURNAL_BYTES, and never less than reclaim's
+/// shares need.
+pub(crate) fn ring_buckets(nbuckets: u64, bucket: u64, block: usize) -> u64 {
+    (nbuckets / 128).max(8).min(JOURNAL_BYTES / (bucket * SECTOR as u64)).max(super::mount::journal_buckets(bucket, block))
+}
+
 /// Every btree a v1 volume writes, each given a root here: a node count
 /// that only grows with its keys keeps the layout's fixed point monotone.
 const BTREES: [Btree; 15] = [
@@ -427,10 +435,7 @@ impl Geometry {
         if !block.is_power_of_two() || block < BLOCK_SECTORS || !node.is_power_of_two() || node < block || node > bucket.min(MAX_NODE_SECTORS) {
             return Err(Error::Invalid("a block or node size mkfs does not lay out"));
         }
-        // A 128th of the device, at least eight buckets and at most
-        // JOURNAL_BYTES, and never less than reclaim's shares need.
-        let journal = (nbuckets / 128).max(8).min(JOURNAL_BYTES / (bucket * SECTOR as u64));
-        let journal = (front, journal.max(super::mount::journal_buckets(bucket, (block * SECTOR as u64) as usize)));
+        let journal = (front, ring_buckets(nbuckets, bucket, (block * SECTOR as u64) as usize));
         Ok(Geometry { block, bucket, nbuckets, node, layout, journal, data_buckets: 0 })
     }
 

@@ -112,6 +112,22 @@ fn the_unclean_fixture_of_16_kib_nodes_is_read_and_refused_read_write() {
     assert_eq!(read_all(&v, path(&v, "f200")).unwrap(), b"200\n");
 }
 
+/// A journal ring larger than mkfs lays out, as another writer may make
+/// one, is refused read-write by name, since an unclean mount would replay
+/// what it holds; it is still read.
+#[test]
+fn a_volume_whose_journal_is_larger_than_mkfs_lays_out_is_read_but_not_written() {
+    let dev = formatted(64 << 20, None);
+    rewrite_superblock(&dev, |_, fields| {
+        let ring = fields.iter_mut().find(|f| f.kind == super::super::superblock::field_type::JOURNAL_V2).unwrap();
+        let count = u64::from_le_bytes(ring.body[8..16].try_into().unwrap());
+        ring.body[8..16].copy_from_slice(&(count + 1).to_le_bytes());
+    });
+    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Unsupported("writing a volume whose journal is larger than mkfs lays out")));
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert!(block_on_ready(v.readdir(v.root(), 0, 10)).is_ok());
+}
+
 /// What this writer does not handle in full is refused read-write by name
 /// (§3.1): a superblock field of a type v1.39.4 does not define, and a
 /// malformed logged truncate it cannot safely resume.
