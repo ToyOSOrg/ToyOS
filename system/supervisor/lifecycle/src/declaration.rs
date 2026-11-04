@@ -32,6 +32,14 @@ pub fn is_storage(program: &Program) -> bool {
     !program.roles.is_empty() || is_block(program) || is_disk_driver(program)
 }
 
+/// A row that carries the log: `logkeeper`, which holds the log's origins,
+/// and the console UART's driver, which holds the console's input. Neither
+/// needs the declaration nor a `HOME`, and from the kernel's hand-over the UART
+/// says nothing until both run.
+fn carries_the_log(program: &Program) -> bool {
+    program.holds.iter().any(|held| held == toyos_logstream::ORIGINS || held == toyos_logstream::CONSOLE_INPUT)
+}
+
 /// A row that may mint the `acpi` claim and hand it to a server of its own.
 fn mints(program: &Program) -> bool {
     program.syscap.iter().any(|right| right == "device")
@@ -45,11 +53,11 @@ pub struct Plan {
     /// Whether a declaration can come: where none can, nothing waits for one,
     /// every row starts at once, storage first, and no PCI driver does.
     pub comes: bool,
-    /// Started before the declaration: `logkeeper`, which every program's
-    /// output reaches the log through and which uses no `HOME`; the `acpi`
-    /// claim's holder; and where none is started, a row that may mint the
-    /// claim and hand it on, as a test boot's runner does. Empty where none
-    /// can come.
+    /// Started before the declaration: the rows that carry the log, which
+    /// every program's output reaches the log and the UART through and which
+    /// use no `HOME`; the `acpi` claim's holder; and where none is started, a
+    /// row that may mint the claim and hand it on, as a test boot's runner
+    /// does. Empty where none can come.
     pub first: Vec<usize>,
     /// The storage rows, started once the declaration is held.
     pub storage: Vec<usize>,
@@ -65,7 +73,7 @@ pub fn plan(rows: &[&Program], holder: bool) -> Plan {
     let started = || rows.iter().skip(1);
     let held = started().any(|p| declares(p));
     let comes = held || (holder && started().any(|p| mints(p)));
-    let first_here = |p: &Program| comes && (p.name == toyos_logstream::LOGKEEPER || declares(p) || (!held && mints(p)));
+    let first_here = |p: &Program| comes && (carries_the_log(p) || declares(p) || (!held && mints(p)));
     let mut plan = Plan { comes, first: Vec::new(), storage: Vec::new(), rest: Vec::new() };
     for (at, program) in rows.iter().enumerate().skip(1) {
         match () {
@@ -212,7 +220,25 @@ mod tests {
     }
 
     fn keeper() -> Program {
-        row(toyos_logstream::LOGKEEPER, &[], &["logread"])
+        Program { holds: vec![toyos_logstream::ORIGINS.to_string()], ..row(toyos_logstream::LOGKEEPER, &[], &["logread"]) }
+    }
+
+    fn wire() -> Program {
+        Program {
+            holds: vec![toyos_logstream::CONSOLE_INPUT.to_string()],
+            ..row(toyos_logstream::WIRE_HOLDER, &["uart"], &[])
+        }
+    }
+
+    /// **The console UART's driver starts with `logkeeper`, before the
+    /// declaration**: from the kernel's hand-over the UART is silent until it
+    /// runs, and it needs neither the declaration nor a home, so a boot whose
+    /// storage waits or hangs still says so on the UART.
+    #[test]
+    fn the_uart_starts_with_the_log_before_the_declaration() {
+        let (system, holder, keeper, wire, data) = (system(), row("acpiserver", &["acpi"], &[]), keeper(), wire(), storage("fileserver"));
+        let plan = plan(&[&system, &keeper, &wire, &holder, &data], true);
+        assert_eq!(plan, Plan { comes: true, first: vec![1, 2, 3], storage: vec![4], rest: vec![] });
     }
 
     /// SYSTEM is in no list, whatever the boot: it is never started again by

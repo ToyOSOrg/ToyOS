@@ -392,9 +392,9 @@ mod tests {
 
     /// The UART's carrier starts where the kernel left the UART, owing the
     /// rounds before what the kernel did not put on it, and is handed what
-    /// was said while the machine stopped once it has the replay; a refused
-    /// stop's lines reach it twice, as they were said and again through the
-    /// replay the file takes them into
+    /// was said while the machine stopped once it has the replay; of a refused
+    /// stop's lines, those it took as they were said reach it again through
+    /// the replay the file takes them into
     /// (`issues/the-console-loses-what-its-carrier-had-not-delivered.md`).
     #[test]
     fn the_wire_starts_after_the_kernel_and_takes_the_stops_lines_last() {
