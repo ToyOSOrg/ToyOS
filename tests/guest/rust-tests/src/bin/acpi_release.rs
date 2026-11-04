@@ -1,6 +1,7 @@
 //! The ACPI server's death, on a boot that does not start it: this job claims
-//! the fixed hardware from a thread off the boot processor, which puts the
-//! machine in ACPI mode by a write another CPU asked for, hands the claim to
+//! the fixed hardware, from a thread off the boot processor where one of its
+//! tries runs there, which puts the machine in ACPI mode by a write another
+//! CPU asked for (the T14 judge requires it; a guest's row does not), hands the claim to
 //! `/system/bin/acpiserver`, and kills it once it has declared the root
 //! bridges' memory, which outlives it: the supervisor starts storage and the
 //! PCI drivers on that declaration. The kernel's release of the claim writes

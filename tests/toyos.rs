@@ -3125,7 +3125,7 @@ fn acpi_holder_is_refused_a_held_functions_configuration() -> Result<(), String>
     said.must_say(&format!("===TEST_END {} exit=0===", JOBS[0]))?;
     said.must_say(&format!("{ended}exit=0==="))?;
     eprintln!("  [acpi] {}", said.must_say(claims::DECLARED)?.trim());
-    eprintln!("  [acpi] {}", said.must_say("supervisor: the root bridges' memory is declared ")?.trim());
+    eprintln!("  [acpi] {}", said.must_say(claims::SUPERVISOR_DECLARED)?.trim());
     eprintln!("  [acpi] {}", said.must_say(HELD_SAID)?.trim());
     Ok(())
 }
@@ -7616,7 +7616,7 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     eprintln!("  [acpi] {}", log.must_say("acpiserver: the root bridges' memory declared: ")?.trim());
     eprintln!("  [acpi] {}", log.must_say(" tables loaded in ")?.trim());
     eprintln!("  [acpi] {}", kernel.must_say(claims::DECLARED)?.trim());
-    eprintln!("  [acpi] {}", log.must_say("supervisor: the root bridges' memory is declared ")?.trim());
+    eprintln!("  [acpi] {}", log.must_say(claims::SUPERVISOR_DECLARED)?.trim());
     let others = number_between(kernel.text(), "SMP: ", " of ")? - 1;
     let compared: Vec<&str> = kernel.text().lines().filter(|l| l.contains("mtrr: cpu") && l.contains("'s range registers are ")).collect();
     if compared.len() as u64 != others || compared.iter().any(|l| l.contains("are on and not the boot processor's")) {
@@ -7811,7 +7811,7 @@ fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     eprintln!("  [acpi] {lock}");
     eprintln!("  [acpi] {}", kernel.must_say(claims::DECLARED)?.trim());
-    eprintln!("  [acpi] {}", back.log().must_say("supervisor: the root bridges' memory is declared ")?.trim());
+    eprintln!("  [acpi] {}", back.log().must_say(claims::SUPERVISOR_DECLARED)?.trim());
     let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2 ")?;
     // The kernel says this only of a `PM1a_CNT` it read with `SCI_EN` clear.
     let left = kernel.must_say("acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD 0xb2 ")?;

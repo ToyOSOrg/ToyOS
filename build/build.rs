@@ -3215,8 +3215,8 @@ mod tests {
     /// A config whose rows claim a PCI function has a declarer: the
     /// supervisor starts such a row only once the root bridges' memory is
     /// declared, and a claim made before it is refused. It starts the `acpi`
-    /// claim's holder, or carries the ACPI server for a started row able to
-    /// mint the claim (`device`) to hand it, as `acpicase`'s jobs do.
+    /// claim's holder, or declares one that a started row able to mint the
+    /// claim (`device`) hands it to, as `acpicase`'s jobs do.
     /// `undeclaredcase` is the boot that has neither, booted to judge both. A
     /// claim a program makes at run time through a `device` syscap is not a
     /// row's and is not seen here: its image's own test meets the refusal.
@@ -3237,7 +3237,9 @@ mod tests {
                 .collect();
             let started = |name: &String| parsed.programs.get(name);
             let holder = parsed.boot.start.iter().any(|name| started(name).is_some_and(|p| p.devices.iter().any(|d| d == "acpi")));
-            let handed = parsed.programs.contains_key("acpiserver")
+            // A row holding the claim, started or not, which a started row
+            // that mints it may hand it to (`toyos_supervisor::declaration::plan`).
+            let handed = parsed.programs.values().any(|p| p.devices.iter().any(|d| d == "acpi"))
                 && parsed.boot.start.iter().any(|name| started(name).is_some_and(|p| p.syscap.iter().any(|r| r == "device")));
             let declares = holder || handed;
             assert_eq!(

@@ -38,9 +38,10 @@
 //! **The PCI root bridges are the holder's to declare, once** ([`op::DECLARE`],
 //! [`Apertures`]): each root's memory windows from its `_CRS`, and what its
 //! `_OSC` granted, are AML. Until a declaration is held the kernel hands over
-//! no PCI function, and a claim made meanwhile waits for it; a declaration
-//! the kernel refuses, or a claim that ends without one, leaves every PCI
-//! claim refused for the boot.
+//! no PCI function: a claim made meanwhile is refused `WouldBlock`, and the
+//! device set's header ([`crate::devset::Declaration`]) says when it is held.
+//! A declaration the kernel refuses, or a claim that ends without one, leaves
+//! every PCI claim refused for the boot.
 //!
 //! **A hardware-reduced machine** ([`HARDWARE_REDUCED`]; ACPI 6.5 §4.1) has
 //! no fixed hardware: its claim names no block and raises no SCI, and its

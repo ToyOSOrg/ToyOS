@@ -127,6 +127,10 @@ pub const REFUSED_DECLARATION: &str = "pcidev: the root bridges' memory is refus
 /// What the `acpi` claim's holder declared the root bridges decode.
 pub const DECLARED: &str = "pcidev: the acpi claim declared root bridge memory: ";
 
+/// What the supervisor says once it reads the declaration held in the device set,
+/// before how long that took (`system/supervisor`, `drive`).
+pub const SUPERVISOR_DECLARED: &str = "supervisor: the root bridges' memory is declared ";
+
 fn hex(text: &str) -> Option<u64> {
     u64::from_str_radix(text.trim().strip_prefix("0x")?, 16).ok()
 }

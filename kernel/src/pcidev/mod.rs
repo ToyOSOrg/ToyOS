@@ -825,7 +825,7 @@ fn answer() -> Option<Result<aperture::Declaration<Vec<RootBridgeWindow>>, apert
 /// The declaration's state as the device set says it.
 fn declaration() -> toyos_abi::devset::Declaration {
     use toyos_abi::devset::{Declaration, Withheld};
-    match answer() {
+    match MACHINE.lock().apertures.answer() {
         None => Declaration::Pending,
         Some(Ok(_)) => Declaration::Held,
         Some(Err(aperture::Withheld::Refused(_))) => Declaration::Withheld(Withheld::Refused),

@@ -14,7 +14,9 @@ service = true
 syscap = ["logread"]
 serves = ["log-carrier"]
 
+# Started by no row: a job mints the claim and hands it to the server.
 [programs.acpiserver]
+devices = ["acpi"]
 
 # `device` because the job mints the `acpi` claim the server is handed, and
 # `dup` because test-runner hands a job its capability as a duplicate and

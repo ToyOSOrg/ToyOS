@@ -26,6 +26,8 @@ declaration is held, after `logkeeper` and the rows the declaration comes
 through, the job's runner among them. The row, its judge and its job are registered again on that
 design. They have not run on the T14 yet.
 
+**Held by** #1164, which registers them again; its T14 run decides the exit.
+
 **Owner**: the ACPI track
 (`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`).
 
