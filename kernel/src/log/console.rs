@@ -117,12 +117,10 @@ impl StopWire {
     }
 }
 
-/// The UART, for the stop once it has stopped userland: a line of its own,
-/// since the holder may have been stopped mid-line.
+/// The UART, for the stop once it has stopped userland: from a line of its
+/// own, since the holder may have been stopped mid-line or behind the log.
 pub fn take_for_the_stop() -> StopWire {
-    if !inline() {
-        serial::write(b"\n");
-    }
+    after_the_holder(serial::write);
     StopWire(())
 }
 
@@ -143,10 +141,13 @@ pub unsafe fn drain_bypassed(uart: &mut PanicUart) {
     drain_ordered(&Shards, &mut &DRAINED, &mut Spoken(|bytes: &[u8]| uart.write(bytes)));
 }
 
-/// What a fatal path starts with: a line of its own, where a holder may have
-/// left one unended.
+/// What the stop and a fatal path start with where the UART was its
+/// holder's: a line of their own, which the holder may have left unended,
+/// saying the kernel's lines follow ([`toyos_abi::log::KERNEL_TAKES_THE_UART`]).
 fn after_the_holder(mut write: impl FnMut(&[u8])) {
     if !inline() {
+        write(b"\n");
+        write(toyos_abi::log::KERNEL_TAKES_THE_UART.as_bytes());
         write(b"\n");
     }
 }
