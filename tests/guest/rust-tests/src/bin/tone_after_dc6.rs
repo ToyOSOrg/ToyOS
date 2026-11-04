@@ -5,8 +5,6 @@
 //! The `display_output_presents` metal row runs it on the T14: the tone is
 //! its evidence that `hda`'s analog codec plays on with PG3 down.
 
-use std::time::Duration;
-
 use cpal::traits::{DeviceTrait, HostTrait};
 use toyos_logstream::program_line;
 
@@ -15,13 +13,8 @@ mod served_log;
 #[path = "../tone.rs"]
 mod tone;
 
-/// How long after boot the wait gives up: the runner's bound less a tenth.
-const UNTIL_MS: u64 = toyos_tco::JOB_BOUND_MS - toyos_tco::JOB_BOUND_MS / 10;
-
 fn main() {
-    let since_boot = toyos_abi::clock::nanos_since_boot() / 1_000_000;
-    let bound = Duration::from_millis(UNTIL_MS.saturating_sub(since_boot));
-    served_log::Log::open().until("tgl-display's DC6 allow", bound, |line| {
+    served_log::Log::open().until("tgl-display's DC6 allow", served_log::START_LINE, |line| {
         program_line(line).is_some_and(|said| {
             assert!(!said.text.contains("DC5 and DC6 stay disallowed"), "tgl-display refused DC6: {}", said.text);
             said.tag == "tgl-display" && said.text.contains("DMC package")

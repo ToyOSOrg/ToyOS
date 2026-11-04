@@ -8,6 +8,15 @@
 /// each query number with how often it was taken.
 pub const QUERIES_COUNTED: &str = "embedded controller queries taken: ";
 
+/// Follows the event's name in the server's line on the first take of a query
+/// or GPE: written once per event, at a time the machine chose.
+pub const FIRST_TAKEN: &str = " taken for the first time";
+
+/// The server's last line of its start, on every machine: written once its
+/// tables, namespace, idle states, GPEs, power sources and the events latched
+/// meanwhile are served, before it waits on events alone.
+pub const STARTED: &str = "acpiserver: started; serving events";
+
 /// The server's word on the embedded controller, once, after the tables'
 /// load: [`CONTROLLER_SERVED`] and its GPE and ports where it serves one,
 /// [`CONTROLLER_NONE`] and why where it serves none.
@@ -20,7 +29,7 @@ pub const CONTROLLER_NONE: &str = "acpiserver: embedded controller none: ";
 pub const IDLE_CENSUS: &str = "acpiserver: the processors' idle states: ";
 
 /// The server's census of the batteries and adapters it found, written once
-/// at the end of its start where a battery is present, after their first
+/// near the end of its start where a battery is present, after their first
 /// reading.
 pub const POWER_SOURCES: &str = "acpiserver: power sources: ";
 

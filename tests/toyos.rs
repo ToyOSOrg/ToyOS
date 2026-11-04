@@ -1999,10 +1999,8 @@ fn in_acpi_mode_before_any_job(boot: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// The same boot, its rows ended on the hold, which waits for the ACPI
-/// server's power sources, the last line of its start. The members run
-/// behind it: the hold gives up at a time since boot, which a list of
-/// members before it would spend.
+/// The same boot, its rows ended on the hold, which waits for the end of the
+/// ACPI server's start; the members run behind it.
 const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
     last: Some("test_rs_acpi_hold"),
     ..metal::once("testcases", "tests/images/testcases.toml", &[], &[])
@@ -7195,6 +7193,44 @@ fn field_between<'a>(log: &'a str, head: &str, tail: &str) -> Result<&'a str, St
         .ok_or_else(|| format!("no record carrying {head:?} and then {tail:?}"))
 }
 
+/// The kernel's line for the ACPI fixed hardware's first interrupt
+/// (`kernel/src/isa.rs`).
+const ACPI_FIRST_INTERRUPT: &str = "isa: the ACPI fixed hardware took its first interrupt";
+
+/// The lines of `log` stamped in `from_ms..=to_ms`: `Ok` with the admitted
+/// lines among them where they are all admitted, `Err` with the rest where any
+/// is not. Admitted:
+/// - acpiserver's first take of a query or GPE ([`acpiserver_api::FIRST_TAKEN`])
+///   and [`ACPI_FIRST_INTERRUPT`], each only where the whole log holds its words
+///   once;
+/// - the clock's TSC refinement ([`kernel::clock::TSC_REFINED`]), written on a
+///   scheduler pass and arming no timer;
+/// - its step report ([`kernel::clock::TSC_STEP_READ`]), which the AMD bench's
+///   deep idle provokes once a boot
+///   (`issues/the-amd-benchs-tsc-steps-1-7-ms-forward-once-a-boot.md`).
+fn idle_second_lines(log: &str, from_ms: u64, to_ms: u64) -> Result<Vec<&str>, Vec<&str>> {
+    fn words(line: &str) -> Option<&str> {
+        toyos_logstream::parse(line).map(|p| p.text)
+    }
+    let once = |line: &str| words(line).is_some_and(|said| log.lines().filter(|l| words(l) == Some(said)).count() == 1);
+    let event = |line: &str| {
+        let named = toyos_logstream::program_line(line)
+            .is_some_and(|said| said.tag == "acpiserver" && said.text.contains(acpiserver_api::FIRST_TAKEN))
+            || toyos_logstream::parse(line)
+                .is_some_and(|p| p.source == toyos_logstream::Source::Kernel && p.text == ACPI_FIRST_INTERRUPT);
+        let clock = toyos_logstream::parse(line).is_some_and(|p| {
+            p.source == toyos_logstream::Source::Kernel
+                && (p.text.starts_with(kernel::clock::TSC_REFINED) || p.text.starts_with(kernel::clock::TSC_STEP_READ))
+        });
+        named && once(line) || clock
+    };
+    let (events, rest): (Vec<&str>, Vec<&str>) = log
+        .lines()
+        .filter(|line| toyos_logstream::parse(line).and_then(|p| p.ms).is_some_and(|ms| (from_ms..=to_ms).contains(&ms)))
+        .partition(|line| event(line));
+    if rest.is_empty() { Ok(events) } else { Err(rest) }
+}
+
 /// The shortest span `counters_on_metal` reads the SMI count across: twice the
 /// longest period between the T14's firmware interrupts that has been read
 /// (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
@@ -7207,11 +7243,12 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// bring-up gave that CPU and carrying the counters its `counters: cpuN
 /// reads` line names, and none stale; every CPU's performance request
 /// declared at boot, `pm_enable=1`, and its power envelope in every read the
-/// one its `control_regs:` line holds. No line, the kernel's or a
-/// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
-/// `counters_metal` reads on the log's clock, either
-/// edge's included because a line stamped in it may follow the read: the
-/// second is the idle machine's. The boot ran in ACPI mode, which
+/// one its `control_regs:` line holds. No line is stamped in a millisecond
+/// from `idle0`'s to `idle1`'s, which `counters_metal` reads on the log's
+/// clock, both edges included since a line stamped there may follow the read,
+/// except the lines [`idle_second_lines`] admits, each of which the row
+/// reports: nothing ToyOS writes on its own account lands in the second. The
+/// boot ran in ACPI mode, which
 /// `/system/bin/acpiserver`'s claim put it in: `idle0` reads after the
 /// kernel's write of the enable to `SMI_CMD`, which the boot processor
 /// counted with the time it held it, and no other CPU counts one; and from
@@ -7266,16 +7303,10 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     let (idle0, at0) = phase("idle0")?;
     let (idle1, at1) = phase("idle1")?;
     let (spin, at2) = phase("spin")?;
-    let (from_ms, to_ms) = (at0 / 1_000_000, at1 / 1_000_000);
-    let inside: Vec<&str> = log
-        .text()
-        .lines()
-        .filter(|line| {
-            toyos_logstream::parse(line).and_then(|p| p.ms).is_some_and(|ms| (from_ms..=to_ms).contains(&ms))
-        })
-        .collect();
-    if !inside.is_empty() {
-        return Err(format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"));
+    let events = idle_second_lines(log.text(), at0 / 1_000_000, at1 / 1_000_000)
+        .map_err(|inside| format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"))?;
+    for event in &events {
+        eprintln!("  [counters] admitted inside the idle second: {}", event.trim());
     }
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
     let mut roster = vec![bsp.rsplit("lapic_id=").next().unwrap_or_default().trim().to_string()];
@@ -7432,10 +7463,11 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     if let Some(refused) = lines.iter().find(|l| l.contains("method was refused, so the GPE is served no more")) {
         return Err(format!("a runtime GPE's method was refused: {refused}"));
     }
-    for gpe in lines.iter().filter(|l| l.contains("acpiserver: GPE ") && l.contains(" taken for the first time; its method ran")) {
+    let method_ran = format!("{}; its method ran", acpiserver_api::FIRST_TAKEN);
+    for gpe in lines.iter().filter(|l| l.contains("acpiserver: GPE ") && l.contains(&method_ran)) {
         eprintln!("  [acpi] {}", gpe.trim());
     }
-    let firsts: Vec<&&str> = lines.iter().filter(|l| l.contains("query") && l.contains("taken for the first time")).collect();
+    let firsts: Vec<&&str> = lines.iter().filter(|l| l.contains("query") && l.contains(acpiserver_api::FIRST_TAKEN)).collect();
     let counts = lines.iter().rfind(|l| l.contains(acpiserver_api::QUERIES_COUNTED));
     let (true, Some(counts)) = (!firsts.is_empty(), counts) else {
         return Err(format!("the server logged {} first sighting(s) and {counts:?} for counts", firsts.len()));
@@ -7568,7 +7600,7 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_hold")?;
     let (whole, kernel) = (back.log(), back.kernel());
     let text = whole.text();
-    let at = text.find(acpiserver_api::POWER_SOURCES).ok_or("the server never said its power sources, which the hold waited for")?;
+    let at = text.find(acpiserver_api::POWER_SOURCES).ok_or("the server never said its power sources")?;
     let end = text[at..].find('\n').map_or(text.len(), |n| at + n);
     let log = serial::Serial::named("the log up to the server's power sources", &text[..end]);
     let lines: Vec<&str> = log
@@ -8018,7 +8050,7 @@ struct ClockReport {
 }
 
 fn clock_report(line: &str) -> Option<ClockReport> {
-    let (_, rest) = line.split_once("clock: over ")?;
+    let (_, rest) = line.split_once(kernel::clock::TSC_REFINED)?;
     let (span, rest) = rest.split_once(" s the TSC counted ")?;
     let (measured, rest) = rest.split_once(" mHz against the HPET, within ")?;
     let (measured_ppb, rest) = rest.split_once(" ppb; the clock ")?;

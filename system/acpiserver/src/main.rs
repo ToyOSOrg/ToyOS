@@ -101,7 +101,7 @@ use toyos::AcpiDev;
 use toyos_abi::acpi::{Access, AcpiInfo, Apertures, Block, IdleDeclaration, FIXED_POWER_BUTTON, HARDWARE_REDUCED};
 use toyos_abi::syscall::{DeviceType, SyscallError};
 
-use acpiserver_api::{CONTROLLER_NONE, CONTROLLER_SERVED};
+use acpiserver_api::{CONTROLLER_NONE, CONTROLLER_SERVED, FIRST_TAKEN, STARTED};
 use aml::Aml;
 use battery::Power;
 use devices::{Ec, Queried};
@@ -183,6 +183,7 @@ fn main() {
     server.sources = (batteries.clone(), adapters.clone());
     server.find_power(batteries, adapters);
     server.served_aml();
+    println!("{STARTED}");
     server.serve();
 }
 
@@ -715,7 +716,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             Ok(_) => {
                 self.ports.out8(enable, self.ports.in8(enable) | bit);
                 if *runs == 1 {
-                    println!("acpiserver: GPE {n:#x} taken for the first time; its method ran");
+                    println!("acpiserver: GPE {n:#x}{FIRST_TAKEN}; its method ran");
                 }
             }
             Err(_) if aml.host.stopping => {}
@@ -895,7 +896,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
                     Some((Queried::Absent, _)) => "the controller defines no method for it".into(),
                     Some((Queried::Refused(why), _)) => format!("its method did not finish: {why}"),
                 };
-                println!("acpiserver: embedded controller query {q:#04x} taken for the first time; {said}");
+                println!("acpiserver: embedded controller query {q:#04x}{FIRST_TAKEN}; {said}");
             }
             if served.is_some_and(|(_, presses)| presses != 0) {
                 self.press();

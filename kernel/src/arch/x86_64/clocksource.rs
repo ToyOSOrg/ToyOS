@@ -726,8 +726,9 @@ fn sample(held: &mut Held, now_ns: u64) {
                         settle(held, earlier);
                     }
                     log!(
-                        "clock: the TSC reads {} ns from the chipset's counters over the last span; the RTC's edges \
-                         after it will say which moved: {spans}",
+                        "{}{} ns from the chipset's counters over the last span; the RTC's edges after it will \
+                         say which moved: {spans}",
+                        kernel::clock::TSC_STEP_READ,
                         agreement.apart_ns,
                     );
                     held.pending = Some(Pending { step_ns: agreement.apart_ns, from, to, until_ns: now_ns + RTC_WAIT_NS });
@@ -833,13 +834,15 @@ fn log_report(held: &Held, report: reference::Report) {
     );
     match (report.kept.measured, report.retuned) {
         (false, _) => log!(
-            "clock: over {span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
+            "{}{span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
              the clock keeps CPUID 15H's {} mHz; {left_out}",
+            kernel::clock::TSC_REFINED,
             kept.millihertz(),
         ),
         (true, retuned) => log!(
-            "clock: over {span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
+            "{}{span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
              the clock {} {} mHz, within {} ppb; {left_out}",
+            kernel::clock::TSC_REFINED,
             if retuned { "now keeps" } else { "keeps" },
             kept.millihertz(),
             report.kept.bound_ppb,

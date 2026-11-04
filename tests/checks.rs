@@ -331,6 +331,55 @@ mod checks {
         Ok(())
     }
 
+    /// [`idle_second_lines`] on lines as the benches' readbacks carry them: the
+    /// T14's two first queries, the kernel's first fixed-hardware interrupt, its
+    /// TSC refinement and the AMD's TSC step report pass, reported;
+    /// anything else stamped in the second, acpiserver's periodic count, a
+    /// first time said twice and the clock's slewing of the step among it, is
+    /// refused; and a line outside the second is no line of it.
+    #[test]
+    fn the_idle_second_admits_only_the_machines_own_lines() -> Result<(), String> {
+        const QUERY_40: &str = "[2026-11-03 22:34:24 13.414 acpiserver] acpiserver: embedded controller query 0x40 taken for the first time; served by nothing";
+        const QUERY_4F: &str = "[2026-11-03 22:34:25 14.039 acpiserver] acpiserver: embedded controller query 0x4f taken for the first time; served by nothing";
+        const INTERRUPT: &str = "[2026-11-03 22:34:24 13.500 cpu2 kernel] isa: the ACPI fixed hardware took its first interrupt";
+        const GPE: &str = "[2026-11-03 22:34:24 13.600 acpiserver] acpiserver: GPE 0x6e taken for the first time; its method ran";
+        const COUNTED: &str = "[2026-11-03 22:34:24 13.700 acpiserver] acpiserver: 3 SCIs; embedded controller queries taken: 0x40 x2";
+        const PROGRAM: &str = "[2026-11-03 22:34:24 13.800 test-runner pid=7] counters_metal settle: the log holds this first line";
+        const BEFORE: &str = "[2026-11-03 22:34:23 12.094 cpu2 kernel] isa: a line before the second";
+        const REFINED: &str = "[2026-11-04 06:25:59 13.700 cpu5 kernel] clock: over 1 s the TSC counted 2419185510351 mHz against the HPET, within 11437 ppb; the clock keeps CPUID 15H's 2419200000000 mHz";
+        const STEP: &str = "[2026-11-04 06:26:03 13.750 cpu12 kernel] clock: the TSC reads 1718866 ns from the chipset's counters over the last span; the RTC's edges after it will say which moved";
+        const SLEWED: &str = "[2026-11-04 06:26:03 13.760 cpu12 kernel] clock: the TSC's step is slewed away, 601 ns left";
+        let log = |lines: &[&str]| lines.join("\n");
+
+        let quiet = log(&[BEFORE, QUERY_40, INTERRUPT, GPE, REFINED, STEP, QUERY_4F]);
+        let events = idle_second_lines(&quiet, 13_000, 14_100)
+            .map_err(|rest| format!("the machine's own events were refused: {rest:?}"))?;
+        if events != [QUERY_40, INTERRUPT, GPE, REFINED, STEP, QUERY_4F] {
+            return Err(format!("the events reported are {events:?}"));
+        }
+        // A "first time" the log says twice: the second is no first take.
+        const QUERY_40_AGAIN: &str = "[2026-11-03 22:34:25 13.900 acpiserver] acpiserver: embedded controller query 0x40 taken for the first time; served by nothing";
+        let twice = log(&[QUERY_40, QUERY_40_AGAIN]);
+        match idle_second_lines(&twice, 13_000, 14_100) {
+            Err(rest) if rest == [QUERY_40, QUERY_40_AGAIN] => {}
+            said => return Err(format!("a first time said twice was answered {said:?}")),
+        }
+        // Any other line of the clock's, its slewing of a step among them, is
+        // neither a refinement nor the step's report.
+        for other in [COUNTED, PROGRAM, SLEWED] {
+            let busy = log(&[QUERY_40, other]);
+            match idle_second_lines(&busy, 13_000, 14_100) {
+                Err(rest) if rest == [other] => {}
+                said => return Err(format!("{other:?} in the second was answered {said:?}")),
+            }
+        }
+        let outside = log(&[BEFORE, PROGRAM]);
+        if idle_second_lines(&outside, 13_900, 14_100) != Ok(Vec::new()) {
+            return Err("a line stamped outside the second was judged inside it".into());
+        }
+        Ok(())
+    }
+
     /// [`control_regs`] against machines this host cannot boot, with no guest.
     ///
     /// What is here is the states no actuator reaches — a CPU that differs from
