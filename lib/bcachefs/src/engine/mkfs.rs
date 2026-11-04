@@ -114,8 +114,22 @@ pub(crate) async fn mkfs_shaped(dev: &impl BlockDev, options: &Options<'_>, tree
     for (sector, bytes) in &volume.nodes {
         write(dev, *sector, bytes).await?;
     }
+    // Each copy fills its whole reserve and the device past the last one is
+    // zeroed: no other format's superblock, a backup at the device's end
+    // among them, outlives the format in a place this volume never writes.
+    let reserve = (1usize << volume.header.layout.max_bits) * SECTOR;
     for &offset in &volume.header.layout.offsets {
-        write(dev, offset, &Superblock::encode(&volume.header, &volume.fields, offset)).await?;
+        let mut copy = Superblock::encode(&volume.header, &volume.fields, offset);
+        copy.resize(reserve, 0);
+        write(dev, offset, &copy).await?;
+    }
+    let tail = volume.header.layout.offsets.last().expect("a layout lists copies") * SECTOR as u64 + reserve as u64;
+    let zeros = alloc::vec![[0u8; BLOCK]; 256];
+    let mut block = tail / BLOCK as u64;
+    while block < dev.blocks() {
+        let n = (dev.blocks() - block).min(zeros.len() as u64);
+        dev.write(block, &zeros[..n as usize]).await?;
+        block += n;
     }
     // Sectors 0–6 are zeros here; the layout copy is sector 7.
     let mut first = alloc::vec![0u8; BLOCK];

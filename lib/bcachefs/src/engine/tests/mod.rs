@@ -1394,3 +1394,31 @@ fn metadata_and_data_without_a_checksum_are_refused() {
     });
     assert_eq!(read_all(&block_on_ready(Volume::open(&dev)).unwrap(), ino), Err(Error::Unsupported("data without a checksum")));
 }
+
+/// A device another format filled: past each copy within its reserve and
+/// past the last copy to the device's end, mkfs leaves zeros, so no foreign
+/// superblock there — a backup in the last block among them — survives it.
+/// The device is a bucket's fraction past a whole number of buckets, so the
+/// last copy's reserve ends before the device does, as on the benches.
+#[test]
+fn mkfs_leaves_nothing_of_another_format_in_the_places_it_reserves() {
+    let bytes = (8 << 20) + (8 << 10);
+    let mut foreign = vec![0xabu8; bytes];
+    foreign[bytes - BLOCK..bytes - BLOCK + 4].copy_from_slice(b"BCFS");
+    let dev = Bytes::new(foreign);
+    let options = Options { label: b"toyos", time: 1_761_177_600_000_000_000, encryption: None };
+    block_on_ready(mkfs(&dev, &options, &Tree::new(), &mut Seeded(0x5eed))).unwrap();
+    let sb = block_on_ready(Volume::open(&dev)).unwrap().superblock().clone();
+    let layout = sb.header.layout.clone();
+    let raw = dev.into_inner();
+    let reserve = (1usize << layout.max_bits) * SECTOR;
+    for &offset in &layout.offsets {
+        let at = offset as usize * SECTOR;
+        let copy = super::superblock::Superblock::encode(&sb.header, &sb.fields, offset).len();
+        assert!(raw[at + copy..at + reserve].iter().all(|&b| b == 0), "the reserve of the copy at sector {offset} keeps another writer's bytes");
+    }
+    let tail = *layout.offsets.last().unwrap() as usize * SECTOR + reserve;
+    assert!(tail < bytes - BLOCK, "the last copy's reserve reaches the last block: no tail to clear");
+    assert!(raw[tail..].iter().all(|&b| b == 0), "the tail keeps another writer's bytes");
+    assert!(raw[bytes - BLOCK..].iter().all(|&b| b == 0), "the last block keeps the other format's backup");
+}
