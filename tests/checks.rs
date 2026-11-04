@@ -16,6 +16,8 @@ mod checks {
     mod claims_checks;
     #[path = "clock.rs"]
     mod clock_checks;
+    #[path = "hostload.rs"]
+    mod hostload_checks;
     #[path = "metal.rs"]
     mod metal_checks;
     #[path = "qemu.rs"]
@@ -103,6 +105,11 @@ mod checks {
     #[test]
     fn suspend_detector() -> Result<(), String> {
         clock_checks::self_check()
+    }
+
+    #[test]
+    fn other_work_detector() -> Result<(), String> {
+        hostload_checks::self_check()
     }
 
     /// What a suspend is worth to a verdict, staged rather than reasoned about.
@@ -907,6 +914,22 @@ mod checks {
         suspended.record(outcome("a_suspended_one", None, slept));
         if suspended.exit_code() != 2 {
             return Err(format!("a suspended run exits {}, and it has to be 2", suspended.exit_code()));
+        }
+
+        // Other work beside the run outranks a red, and a quiet host with other
+        // work under a CPU on average changes nothing.
+        let busy = common::hostload::Reading { other: Duration::from_secs(61), over: Duration::from_secs(60) };
+        let calm = common::hostload::Reading { other: Duration::from_secs(59), over: Duration::from_secs(60) };
+        let mut noisy = Tally::new();
+        noisy.record(outcome("a_red", Some("the disk came back short"), Duration::ZERO));
+        noisy.host = Some(busy);
+        let text = noisy.summary(1, Duration::from_secs(60), Duration::ZERO);
+        if noisy.exit_code() != 3 || !text.contains("test result: HOST NOT QUIET.") {
+            return Err(format!("a run beside other work exits {}:\n{text}", noisy.exit_code()));
+        }
+        noisy.host = Some(calm);
+        if noisy.exit_code() != 1 {
+            return Err(format!("a red on a quiet host exits {}, and it has to be 1", noisy.exit_code()));
         }
 
         // The clean case, so that none of the above is passing because everything

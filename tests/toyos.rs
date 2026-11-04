@@ -8608,6 +8608,8 @@ struct Tally {
     invalid: Vec<(String, Duration)>,
     /// Every outcome's `elapsed`, summed.
     tested: Duration,
+    /// What other work used on the host over the run, once it has ended.
+    host: Option<common::hostload::Reading>,
 }
 
 impl Tally {
@@ -8618,6 +8620,7 @@ impl Tally {
             stalls: Vec::new(),
             invalid: Vec::new(),
             tested: Duration::ZERO,
+            host: None,
         }
     }
 
@@ -8636,9 +8639,14 @@ impl Tally {
         }
     }
 
-    /// **Three statuses**: 0 green, 1 red, and 2 when the run established
-    /// nothing, because the host stopped in the middle of it.
+    /// **Four statuses**: 0 green, 1 red, 2 when the host stopped in the
+    /// middle of a test, and 3 when other work on the host shared it with the
+    /// guests. A run on a host that was not quiet establishes nothing, reds
+    /// included.
     fn exit_code(&self) -> i32 {
+        if self.host.is_some_and(|r| !r.quiet()) {
+            return 3;
+        }
         if !self.failures.is_empty() {
             return 1;
         }
@@ -8679,6 +8687,13 @@ impl Tally {
             "host: {} core(s); a guest wider than that waits vcpus/cores longer again",
             qemu::host_cores()
         ));
+        if let Some(host) = self.host {
+            say(format!(
+                "host: other work used {:.0?} of CPU beside this run, {:.2} CPUs on average",
+                host.other,
+                host.cpus()
+            ));
+        }
         if suspended >= common::clock::SUSPENDED_AT_LEAST {
             // The elapsed figure below is monotonic and therefore already
             // excludes it, which is worth saying: the two numbers do not add up
@@ -8736,6 +8751,21 @@ impl Tally {
                 say(
                     "This is not a red. The machine stopped mid-run, so those verdicts \
                      are of nothing; re-run the suite."
+                        .to_string(),
+                );
+            }
+            3 => {
+                say(format!(
+                    "test result: HOST NOT QUIET. {} passed, {} failed, {} invalidated, \
+                     {total} total ({elapsed})",
+                    self.passed,
+                    self.failures.len(),
+                    self.invalid.len(),
+                ));
+                say(
+                    "This is not a red or a green. Other work on the host took more than a CPU \
+                     from the guests, so no verdict here is this tree's alone; re-run on a quiet \
+                     host."
                         .to_string(),
                 );
             }
@@ -9023,8 +9053,8 @@ fn main() {
             }
         };
 
-        // Three statuses for the three things this can establish, as the
-        // ordinary suite has: green, red, and "measured nothing" — a run that
+        // Three statuses for the three things this can establish: green, red,
+        // and "measured nothing" — a run that
         // staged images and never reached the machine has no claim to make.
         run.exit(
             match metal::run(mode, parsed.metal_host, &selected, &boots, &rust_bins, !nocapture && !debug_mode)
@@ -9062,24 +9092,13 @@ fn main() {
     let mut tally = Tally::new();
 
     let suite_start = common::clock::mark();
+    let host_start = common::hostload::mark();
 
     let tasks = build_tasks(&machine_to_run, &screen_to_run);
     let total = tasks.len();
     eprintln!("\nrunning {total} tests, {width} wide\n");
     run_tasks(tasks, width, &test_config).into_iter().for_each(|o| tally.record(o));
 
-    // Three exit statuses, because there are three things a run can establish —
-    // see [`Tally::exit_code`], which is where the whole decision now lives.
-    //
-    // Nor may it be 1. A red sends an agent hunting a defect, and the defect is
-    // not there — the lid was closed. CLAUDE.md already documents the signature
-    // and documents it as something a *human* must notice before recording a
-    // finding, which is exactly the judgement a status code should carry
-    // instead. So: 2, with a headline that names it and says re-run.
-    //
-    // A run with both real failures and invalidated tests exits 1: a red that
-    // survives is still a red, and re-running the suspended ones does not make
-    // it green.
     // What this run cost cargo: a kernel build is ~6.9 s of wall clock and
     // ~29.6 s of CPU after any edit under `kernel/`, and a full run used to
     // make 45 of them.
@@ -9090,6 +9109,8 @@ fn main() {
         kernels.len(),
     );
 
+    // Every worker has joined and every guest and build it started is reaped.
+    tally.host = Some(host_start.reading());
     let summary = tally.summary(total, suite_start.elapsed(), suite_start.suspended());
     summary.lines().for_each(|line| eprintln!("{line}"));
     run.exit(tally.exit_code());

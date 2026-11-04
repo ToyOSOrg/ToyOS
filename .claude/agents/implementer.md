@@ -24,7 +24,7 @@ Keep the branch coherent: change all consumers and declarations affected by an i
 
 ## Verify the behavior
 
-Apply root `CLAUDE.md`'s test selection and scheduling policy. Run host checks with `cargo run -- --ci host`; build an affected image with `cargo run -- --build-only`. Use filtered `cargo test` runs only for behavior that requires the guest. Do not run a broad integration suite merely because a PR needs evidence.
+Apply root `CLAUDE.md`'s test selection and scheduling policy. Run host checks with `cargo run -- --ci host`; build an affected image with `cargo run -- --build-only`. Dispatch filtered guest rows (`tests/CLAUDE.md`) only for behavior that requires the guest. Do not run a broad integration suite merely because a PR needs evidence.
 
 For relevant metal tests, prepare committed images with `cargo test --test toyos-build -- --metal --metal-readback <dir> <row>`. This writes `<dir>/request.txt` without touching a machine. Send the request to the orchestrator so compatible tests can share boots. Never execute metal runs yourself.
 
