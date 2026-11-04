@@ -4,12 +4,15 @@
 use crate::cache::{Cache, Disk};
 use crate::volume::{Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume, WriteBack, parent};
 use bcachefs::engine::{self, DirentType, Mount, MountOptions, New, Owner, Reservation};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use toyos::fs::Error;
 use toyos_blockdev::{BLOCK, BlockDev};
 
 const NODES: usize = 512;
+/// Directories a volume remembers the way to, at most.
+const DIRS: usize = 4096;
 const READ_CHUNK: usize = 256 << 10;
 const OWNER: Owner = Owner { perm: 0o644, uid: 0, gid: 0 };
 struct OsRandom;
@@ -50,6 +53,10 @@ pub struct DataVolume<D: Disk> {
     cache: Rc<Cache<D>>,
     roots: Vec<String>,
     open: BTreeMap<Node, Open>,
+    /// Directories met on the way to a path, by path, so a lookup asks the
+    /// volume for its last name alone. Only a rename or rmdir moves one;
+    /// each forgets what it moves.
+    dirs: RefCell<BTreeMap<String, u64>>,
     next_ticket: u64,
     clock: fn() -> u64,
 }
@@ -167,6 +174,7 @@ impl<D: Disk> DataVolume<D> {
             cache,
             roots: roots.iter().map(|root| root.to_string()).collect(),
             open: BTreeMap::new(),
+            dirs: RefCell::new(BTreeMap::new()),
             next_ticket: 1,
             clock,
         };
@@ -190,15 +198,44 @@ impl<D: Disk> DataVolume<D> {
         Ok(volume)
     }
     fn lookup(&self, path: &str) -> Result<engine::Inode, Error> {
+        let names: Vec<&str> = path.split('/').filter(|name| !name.is_empty()).collect();
         self.cache
             .block_on(async {
-                let mut ino = self.fs.root();
-                for name in path.split('/').filter(|name| !name.is_empty()) {
-                    ino = self.fs.lookup(ino, name.as_bytes()).await?.ok_or(engine::Error::NotFound)?.ino;
-                }
+                let ino = match names.split_last() {
+                    None => self.fs.root(),
+                    Some((name, dirs)) => {
+                        let dir = self.directory(dirs).await?;
+                        self.fs.lookup(dir, name.as_bytes()).await?.ok_or(engine::Error::NotFound)?.ino
+                    }
+                };
                 self.fs.inode(ino).await
             })
             .map_err(word)
+    }
+    /// The directory `names` reach from the root, from the deepest one known.
+    async fn directory(&self, names: &[&str]) -> engine::Result<u64> {
+        let known = (1..=names.len()).rev().find_map(|n| self.dirs.borrow().get(&names[..n].join("/")).map(|&ino| (n, ino)));
+        let (mut at, mut ino) = known.unwrap_or((0, self.fs.root()));
+        while at < names.len() {
+            let entry = self.fs.lookup(ino, names[at].as_bytes()).await?.ok_or(engine::Error::NotFound)?;
+            if entry.kind != DirentType::Directory {
+                return Err(engine::Error::NotDirectory);
+            }
+            ino = entry.ino;
+            at += 1;
+            let mut dirs = self.dirs.borrow_mut();
+            if dirs.len() >= DIRS {
+                dirs.clear();
+            }
+            dirs.insert(names[..at].join("/"), ino);
+        }
+        Ok(ino)
+    }
+    /// `path` and everything beneath it moved or gone.
+    fn forget(&self, path: &str) {
+        let path = path.split('/').filter(|name| !name.is_empty()).collect::<Vec<_>>().join("/");
+        let below = format!("{path}/");
+        self.dirs.borrow_mut().retain(|known, _| *known != path && !known.starts_with(&below));
     }
     fn destination<'a>(&self, path: &'a str) -> Result<(u64, &'a [u8]), Error> {
         let name = path.rsplit('/').next().filter(|name| !name.is_empty()).ok_or(Error::Root)?;
@@ -269,6 +306,22 @@ impl<D: Disk> Volume for DataVolume<D> {
     }
     fn lstat(&mut self, path: &str) -> Result<Meta, Error> {
         self.meta(&self.lookup(path)?)
+    }
+    fn stat(&mut self, path: &str) -> Result<(Meta, u64), Error> {
+        let inode = self.lookup(path)?;
+        Ok((self.meta(&inode)?, inode.ino))
+    }
+    fn link_at(&mut self, path: &str) -> Result<Option<String>, Error> {
+        let known = path.split('/').filter(|name| !name.is_empty()).collect::<Vec<_>>().join("/");
+        if self.dirs.borrow().contains_key(&known) {
+            return Ok(None);
+        }
+        let inode = self.lookup(path)?;
+        if kind(&inode)? != Kind::Symlink {
+            return Ok(None);
+        }
+        let bytes = mapped("readlink", self.cache.block_on(self.fs.readlink(inode.ino)))?;
+        String::from_utf8(bytes).map(Some).map_err(|_| Error::Io)
     }
     fn read_link(&mut self, path: &str) -> Result<String, Error> {
         let inode = self.lookup(path)?;
@@ -513,6 +566,7 @@ impl<D: Disk> Volume for DataVolume<D> {
             return Err(Error::NotADirectory);
         }
         let (dir, name) = self.destination(path)?;
+        self.forget(path);
         mapped("rmdir", self.cache.block_on(self.fs.unlink(dir, name, true, time((self.clock)())))).map(drop)
     }
     fn unlink(&mut self, path: &str) -> Result<(), Error> {
@@ -529,6 +583,8 @@ impl<D: Disk> Volume for DataVolume<D> {
         }
         let source = self.destination(from)?;
         let target = self.destination(to)?;
+        self.forget(from);
+        self.forget(to);
         let removed = mapped(
             "rename",
             self.cache.block_on(self.fs.rename(source, target, engine::Rename::Replace, time((self.clock)()))),
@@ -665,6 +721,28 @@ mod tests {
         let mut v = reopen(v);
         assert!(v.list("home").unwrap().is_empty());
     }
+    /// A path's directories, once looked up, are remembered; a rename or
+    /// rmdir of one forgets it and everything under it.
+    #[test]
+    fn a_remembered_directory_follows_its_renames_and_removal() {
+        let mut v = volume();
+        v.mkdir("home/a").unwrap();
+        v.mkdir("home/a/b").unwrap();
+        let f = v.open("home/a/b/f", CREATE).unwrap();
+        v.close(f).unwrap();
+        assert_eq!(v.lstat("home/a/b/f").unwrap().kind, Kind::File);
+        v.rename("home/a", "home/c").unwrap();
+        assert_eq!(v.lstat("home/a/b/f"), Err(Error::NotFound));
+        assert_eq!(v.lstat("home/c/b/f").unwrap().kind, Kind::File);
+        v.unlink("home/c/b/f").unwrap();
+        v.rmdir("home/c/b").unwrap();
+        v.mkdir("home/c/b").unwrap();
+        let g = v.open("home/c/b/g", CREATE).unwrap();
+        v.close(g).unwrap();
+        assert_eq!(v.stat("home/c/b/g").unwrap().1, g, "the new directory's entry, not the removed one's");
+        assert_eq!(v.lstat("home/c/b/f"), Err(Error::NotFound));
+    }
+
     #[test]
     fn directory_moves_preserve_descendants_and_symlinks() {
         let mut v = volume();

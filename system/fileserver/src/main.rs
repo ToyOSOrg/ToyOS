@@ -706,9 +706,9 @@ impl Server {
         bounds::relative(rel)?;
         let (root, start) = self.start(id, fid)?;
         let volume = &mut self.volume;
-        let mut lookup = |p: &str| match volume.lstat(p) {
-            Ok(meta) if meta.kind == Kind::Symlink => volume.read_link(p).map(Found::Link).map_err(drop),
-            Ok(_) | Err(Error::NotFound) => Ok(Found::Other),
+        let mut lookup = |p: &str| match volume.link_at(p) {
+            Ok(Some(target)) => Ok(Found::Link(target)),
+            Ok(None) | Err(Error::NotFound) => Ok(Found::Other),
             Err(_) => Err(()),
         };
         resolve::resolve(&root, &start, rel, follow_last, &mut lookup).map_err(|e| match e {
@@ -801,8 +801,7 @@ impl Server {
 
     /// What the volume path `path` is.
     fn stat_path(&mut self, path: &str) -> Result<Answer, Error> {
-        let meta = self.volume.lstat(path)?;
-        let identity = self.volume.identity(path)?;
+        let (meta, identity) = self.volume.stat(path)?;
         Ok(Answer::Reply(stat_reply(meta, identity, self.volume_id, 1)))
     }
 
