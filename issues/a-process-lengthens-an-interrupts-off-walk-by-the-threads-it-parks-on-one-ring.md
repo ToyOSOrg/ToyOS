@@ -1,6 +1,7 @@
 ---
 status: assigned
 kind: defect
+severity: [kernel-from-userland]
 opened: 2026-09-30
 ---
 

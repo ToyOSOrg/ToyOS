@@ -1,6 +1,7 @@
 ---
 status: open
 kind: finding
+severity: [hang]
 opened: 2026-09-18
 ---
 
