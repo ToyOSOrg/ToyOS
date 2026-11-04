@@ -46,8 +46,8 @@ what upstream stored in its own volumes, a replayed journal's included; it
 checks the journal against the superblock. It mounts a volume read-write
 (`Mount`): namespace operations as journaled transactions, nodes appended to or
 split by reclaim, a crash replayed and a clean unmount, which upstream's fsck
-also passes. It refuses to write a volume of blocks under 4 KiB or nodes under
-32 KiB (`issues/the-bcachefs-writer-refuses-small-blocks-and-nodes.md`). It
+also passes. It refuses to write a volume of blocks under 4 KiB or nodes of 8 KiB
+and under (`issues/the-bcachefs-writer-refuses-small-blocks-and-nodes.md`). It
 reuses a btree bucket once the entry that emptied it is durable. File data is
 not yet written (B7), so symlinks are not yet created online, and its reclaim reserves are
 sized for common rewrites

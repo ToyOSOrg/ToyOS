@@ -134,7 +134,7 @@ pub(super) const fn fresh_nodes(nodes: usize) -> usize {
 /// the slot, as no transaction enters it while a changed node is oversized
 /// ([`Mount::transact`]), and the pointer update of the one reclaim round in
 /// flight, each at most `K_TX` u64s of keys. Spread evenly, all that fills
-/// this many nodes of at least [`MIN_NODE`], each a key short of full.
+/// this many nodes of any size the writer accepts, each a key short of full.
 /// Materialization takes at most one transaction of distinct key positions,
 /// including during replay.
 pub(super) const MAX_GROUPS: usize = 7;
