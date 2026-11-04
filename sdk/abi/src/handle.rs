@@ -82,22 +82,21 @@ pub enum ObjectKind {
     SharedMem = 6,
     Connector = 7,
     Namespace = 8,
-    Console = 9,
-    SysCap = 10,
-    Process = 11,
-    Null = 12,
-    Job = 13,
-    Notice = 14,
-    WakeLatency = 15,
-    EventSignal = 16,
-    EventWait = 17,
-    Pager = 18,
-    Paged = 19,
-    DeviceSet = 20,
+    SysCap = 9,
+    Process = 10,
+    Null = 11,
+    Job = 12,
+    Notice = 13,
+    WakeLatency = 14,
+    EventSignal = 15,
+    EventWait = 16,
+    Pager = 17,
+    Paged = 18,
+    DeviceSet = 19,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 21] = [
+    pub const ALL: [ObjectKind; 20] = [
         Self::PipeRead,
         Self::PipeWrite,
         Self::Connection,
@@ -107,7 +106,6 @@ impl ObjectKind {
         Self::SharedMem,
         Self::Connector,
         Self::Namespace,
-        Self::Console,
         Self::SysCap,
         Self::Process,
         Self::Null,
@@ -281,10 +279,24 @@ impl Rights {
     /// [`SpawnArgs::pager`]: crate::syscall::SpawnArgs::pager
     /// [`SYS_PAGER_CREATE`]: crate::syscall::SYS_PAGER_CREATE
     pub const PAGER: Rights = Rights(1 << 18);
+    /// On a `SysCap`: say what the console's channels have delivered of the
+    /// kernel's log ([`SYS_LOG_SPOKEN`]). What it says is kept off the UART
+    /// by every fatal path and the stop, so it is not a reader's: the one
+    /// program that feeds the console, `logkeeper`, holds it.
+    ///
+    /// [`SYS_LOG_SPOKEN`]: crate::syscall::SYS_LOG_SPOKEN
+    pub const CONSOLE: Rights = Rights(1 << 19);
+    /// On a `SysCap`: say the caller's last words before its end ends the
+    /// machine ([`SYS_LOG_LAST_WORDS`]), one record every fatal path shows,
+    /// once a boot. The supervisor's alone: the kernel mints it on the system
+    /// capability, and no manifest's `syscap` name maps to it.
+    ///
+    /// [`SYS_LOG_LAST_WORDS`]: crate::syscall::SYS_LOG_LAST_WORDS
+    pub const LAST_WORDS: Rights = Rights(1 << 20);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever
     /// composed it, not a right nobody uses.
-    pub const ALL: Rights = Rights(0x7_ffff);
+    pub const ALL: Rights = Rights(0x1f_ffff);
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
         if bits & !Self::ALL.0 == 0 { Some(Rights(bits)) } else { None }
@@ -315,7 +327,7 @@ impl Rights {
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const NAMES: [(Rights, &str); 19] = [
+        const NAMES: [(Rights, &str); 21] = [
             (Rights::DUP, "DUP"),
             (Rights::TRANSFER, "TRANSFER"),
             (Rights::READ, "READ"),
@@ -335,6 +347,8 @@ impl core::fmt::Debug for Rights {
             (Rights::FLOOR, "FLOOR"),
             (Rights::WAKE_LATENCY, "WAKE_LATENCY"),
             (Rights::PAGER, "PAGER"),
+            (Rights::CONSOLE, "CONSOLE"),
+            (Rights::LAST_WORDS, "LAST_WORDS"),
         ];
         if self.0 == 0 {
             return f.write_str("NONE");

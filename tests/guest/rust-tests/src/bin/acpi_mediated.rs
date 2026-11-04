@@ -47,9 +47,15 @@
 //! the SCI acknowledged, the harness presses it, and the press is read off
 //! the claim as one interrupt with `PWRBTN_STS` latched, and no second while
 //! the status stays set and the claim unacknowledged.
+//!
+//! **A function a driver holds is its driver's whole** ([`held`]), on a boot
+//! whose ROOT carries [`HELD`] and whose first job's server declared the root
+//! bridges' memory, so its drivers run: past its header, its configuration is
+//! refused `HeldFunction`.
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::ioport::{in16, out16, out8};
@@ -73,6 +79,9 @@ const OUTLIVED: &str = "/system/share/acpi_mediated_outlived";
 
 /// The file whose presence on ROOT makes this boot [`press`]'s.
 const PRESS: &str = "/system/share/acpi_mediated_press";
+
+/// The file whose presence on ROOT makes this boot [`held`]'s.
+const HELD: &str = "/system/share/acpi_mediated_held";
 
 /// `EFI_MEMORY_TYPE`s: what the kernel hands out as RAM, and ACPI's two.
 const USABLE: [u8; 5] = [1, 2, 3, 4, 7];
@@ -119,6 +128,7 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         None if std::fs::exists(OUTLIVED).expect("acpi: ask ROOT for this boot's arm") => outlived(),
         None if std::fs::exists(PRESS).expect("acpi: ask ROOT for this boot's arm") => press(),
+        None if std::fs::exists(HELD).expect("acpi: ask ROOT for this boot's arm") => held(),
         None => probe(),
         Some("keeper") => keeper(),
         Some("supplier") => supplier(),
@@ -310,12 +320,18 @@ fn nic_bar(holder: &Holder) -> u64 {
 }
 
 fn ports(holder: &Holder, info: &AcpiInfo) {
-    // COM1 and the CMOS index: the kernel's, both ways.
-    for port in [0x3F8u64, 0x3FD, 0x70, 0x20, 0xCF8] {
+    // The CMOS index, the 8259 and the configuration mechanism: the kernel's, both ways.
+    for port in [0x70u64, 0x20, 0xCF8] {
         assert_eq!(holder.read(Space::SystemIo, port, Width::Byte), Err(Refused::KernelPort), "acpi: port {port:#x} was read");
         assert_eq!(holder.write(Space::SystemIo, port, Width::Byte, b'!'.into()), Err(Refused::KernelPort), "acpi: port {port:#x} was written");
     }
-    assert_eq!(holder.write(Space::SystemIo, 0x3F7, Width::Word, 0), Err(Refused::KernelPort), "acpi: a word that ends on COM1");
+
+    // COM1, the console UART's row, which its own claim is for.
+    for port in [0x3F8u64, 0x3FD] {
+        assert_eq!(holder.read(Space::SystemIo, port, Width::Byte), Err(Refused::ClaimedPort), "acpi: port {port:#x} was read");
+        assert_eq!(holder.write(Space::SystemIo, port, Width::Byte, b'!'.into()), Err(Refused::ClaimedPort), "acpi: port {port:#x} was written");
+    }
+    assert_eq!(holder.write(Space::SystemIo, 0x3F7, Width::Word, 0), Err(Refused::ClaimedPort), "acpi: a word that ends on COM1");
     assert_eq!(holder.read(Space::SystemIo, 0xFFFF, Width::Word), Err(Refused::PortSpan));
     assert_eq!(holder.read(Space::SystemIo, 0x1_0000, Width::Byte), Err(Refused::PortSpan));
     assert_eq!(holder.read(Space::SystemIo, 0x80, Width::QWord), Err(Refused::PortSpan));
@@ -700,4 +716,57 @@ fn press() {
     assert_eq!(in16(status) & PWRBTN, 0, "acpi: PWRBTN_STS stayed set after its clear");
     syscall::write(claim.as_handle().raw(), &ACK.to_ne_bytes()).expect("acpi: the claim's acknowledgement");
     println!("{PRESS_SERVED}");
+}
+
+/// What [`held`] says once each write was refused.
+const HELD_SAID: &str = "acpi: a virtio-serial function its driver holds was refused HeldFunction past its header, by its address and through ECAM";
+
+/// How long [`held`] waits for a driver to hold a virtio-serial function,
+/// which the supervisor starts once the declaration an earlier job's server
+/// made is held: a failure ceiling.
+const HELD_BOUND: Duration = Duration::from_secs(30);
+
+/// The `held` arm, on a boot an earlier job's server declared the root
+/// bridges' memory on (`acpi_release`): a function a driver holds is its
+/// driver's whole. Its configuration past the header, by its address and
+/// through ECAM, is refused `HeldFunction` to the claim's holder. Each write
+/// is of the value the register holds, so one a broken fence let through
+/// would be red here and nowhere else.
+fn held() {
+    use toyos_abi::devset::Declaration;
+    use toyos_abi::inventory::{Driven, RawRecord as Inventory};
+    const VIRTIO_SERIAL: (u16, u16) = (0x1af4, 0x1043);
+    let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
+    let holder = Holder(claim(&cap));
+    let info = bind(&holder.0);
+    let set = cap.device_set().expect("acpi: the device set, minted");
+    let poller = Poller::new(1);
+    let began = Instant::now();
+    let at = loop {
+        let (declaration, found) = set
+            .read(|n| vec![Inventory::EMPTY; n], |snapshot| {
+                let found = snapshot
+                    .functions()
+                    .find(|pci| (pci.vendor, pci.device) == VIRTIO_SERIAL && pci.driven == Driven::Claimed)
+                    .map(|pci| pci.at);
+                (snapshot.header.declaration, found)
+            })
+            .unwrap_or_else(|why| panic!("acpi: {why}"));
+        assert!(!matches!(declaration, Declaration::Withheld(_)), "acpi: the earlier job's declaration was withheld");
+        if let Some(at) = found {
+            break at;
+        }
+        let left = HELD_BOUND.checked_sub(began.elapsed()).unwrap_or_else(|| panic!("acpi: no driver held a virtio-serial function within {HELD_BOUND:?}"));
+        poller.watch(&set, READABLE, 0);
+        poller.wait(1, left.as_nanos() as u64, |_| {});
+    };
+    let ecam = holder.memory(holder.table(info.rsdp, b"MCFG") + 44, Width::QWord);
+    for offset in [0x44u16, 0x100] {
+        let address = pci_address(at.segment, at.bus, at.dev, at.func, offset);
+        let value = holder.read(Space::PciConfig, address, Width::DWord).expect("acpi: a held function reads");
+        assert_eq!(holder.write(Space::PciConfig, address, Width::DWord, value), Err(Refused::HeldFunction), "acpi: the held function's {offset:#x}");
+        let through = ecam + (u64::from(at.bus) << 20 | u64::from(at.dev) << 15 | u64::from(at.func) << 12 | u64::from(offset));
+        assert_eq!(holder.write(Space::SystemMemory, through, Width::DWord, value), Err(Refused::HeldFunction), "acpi: the held function's {offset:#x} through ECAM");
+    }
+    println!("{HELD_SAID}");
 }

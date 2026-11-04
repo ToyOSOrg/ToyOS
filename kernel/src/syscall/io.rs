@@ -9,7 +9,7 @@
 use crate::watch;
 use crate::object::null::NullObject;
 use crate::object::{ops, KObjectRef};
-use crate::time::{Cadence, Deadline, Duration};
+use crate::time::Deadline;
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::{pipe, process};
 
@@ -35,9 +35,6 @@ enum ReadBlock {
     Pipe(pipe::PipeRef),
     /// A notice with no reason in it, until a quit puts one there.
     Notice(alloc::sync::Arc<crate::object::notice::NoticeObject>),
-    /// A console, which reads the serial line and nothing else: nothing posts
-    /// a serial byte, so it parks on its own thread's watch until its re-poll.
-    Console(Deadline),
     /// Nothing to wait for: the answer is this word.
     Refused(u64),
     /// Carried out of the process's lock: `HandleError::refuse` may take the
@@ -83,14 +80,6 @@ fn read_block(object: &KObjectRef) -> ReadBlock {
     match object {
         KObjectRef::Device(_) => unreachable!("a device claim blocks via `read_block_device`"),
         KObjectRef::Notice(n) => ReadBlock::Notice(n.clone()),
-        KObjectRef::Console(_) => {
-            // Nothing posts a serial-console key, so the timer alone wakes it.
-            const CONSOLE_REPOLL: Cadence = Cadence::every(
-                Duration::from_millis(10),
-                "nothing posts a serial-console key, so this rate is the whole of the wake",
-            );
-            ReadBlock::Console(Deadline::at(crate::clock::now() + CONSOLE_REPOLL.duration()))
-        }
         _ => match ops::pipe_read(object).map(|pipe| ReadBlock::Pipe(pipe.clone())) {
             Some(block) => block,
             None => ReadBlock::Refused(SyscallError::NotFound.to_u64()),
@@ -146,22 +135,6 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
                     WaitClass::Other,
                     Deadline::never(),
                     || notice.readable(),
-                )
-                .is_err()
-                {
-                    return cancelled();
-                }
-            }
-            Err(ReadBlock::Console(deadline)) => {
-                let parkable = crate::scheduler::Parkable::at_entry();
-                let Some(handle) = crate::sched::driver::current_handle() else { return cancelled() };
-                if watch::wait_until(
-                    &parkable,
-                    handle.watch(),
-                    0,
-                    WaitClass::Io,
-                    deadline,
-                    crate::drivers::serial::has_data,
                 )
                 .is_err()
                 {
@@ -234,25 +207,4 @@ pub(super) fn sys_null(want: u64) -> u64 {
 pub(super) fn sys_random(out: &mut UserBytesMut) -> u64 {
     crate::random::fill_user(out);
     0
-}
-
-/// `SYS_CONSOLE_CARRIED`: whether the holder of the console `h` carries the
-/// log off the machine ([`crate::object::device::ConsoleObject::carry`]).
-pub(super) fn sys_console_carried(h: RawHandle, elsewhere: u64) -> u64 {
-    let elsewhere = match elsewhere {
-        0 => false,
-        1 => true,
-        _ => return SyscallError::InvalidArgument.to_u64(),
-    };
-    let console = match process::with_process_data(|data| {
-        data.handles.get::<crate::object::device::ConsoleObject>(h, Rights::WRITE)
-    }) {
-        Ok(console) => console,
-        Err(e) => return e.refuse(),
-    };
-    match console.carry(elsewhere) {
-        Ok(()) => 0,
-        Err(kernel::carrier::Refused::Another) => SyscallError::AlreadyExists.to_u64(),
-        Err(kernel::carrier::Refused::ForGood) => SyscallError::NotSupported.to_u64(),
-    }
 }

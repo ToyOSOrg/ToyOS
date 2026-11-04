@@ -14,8 +14,9 @@
 //! [`apply_declaration`], which writes the [`control_regs`](super::control_regs)
 //! declaration whole: at EL2 it writes `HCR_EL2` first, halts in a named
 //! refusal unless it reads back as declared, then programs EL1's registers with
-//! the MMU already on and drops with `ERET`; at EL1 it programs them and turns
-//! the MMU on. Either way the entry resumes at its link address in the view at
+//! the MMU already on and drops with `ERET`; at EL1 it programs them, turns
+//! the MMU on and `ERET`s to EL1, so either way `PSTATE` is the declaration's
+//! (`control_regs::SPSR_ENTRY`). The entry resumes at its link address in the view at
 //! `PHYS_OFFSET`, installs the vectors on its own stack, and calls
 //! `kernel_main` or `smp::ap_entry`.
 
@@ -104,7 +105,7 @@ pub(super) unsafe extern "C" fn ap_start() -> ! {
 }
 
 /// The declaration written on this CPU and its MMU turned on under the root
-/// in `x3`, whichever level it was entered at; then a branch to the link
+/// in `x3`, whichever level it was entered at; then an `ERET` to the link
 /// address in `x22` at EL1 on `SP_EL1`, with `x21` the level entered at.
 /// Keeps `x19`, `x20` and `x22`. Entered by a branch from an entry running at
 /// its physical address, and never returns.
@@ -130,7 +131,8 @@ unsafe extern "C" fn apply_declaration() -> ! {
         "b.eq 2f",
         "cmp x21, #1",
         "b.ne 9f",
-        // EL1: refused with its MMU on; else the declaration, then translation on.
+        // EL1: refused with its MMU on; else the declaration, then translation
+        // on, and an `ERET` to EL1 itself for `SPSR_ENTRY`'s `PAN`.
         "mrs x1, sctlr_el1",
         "tbnz x1, #0, {refuse_mmu}",
         "msr mair_el1, x4",
@@ -146,7 +148,10 @@ unsafe extern "C" fn apply_declaration() -> ! {
         "isb",
         "msr sctlr_el1, x5",
         "isb",
-        "br x22",
+        "ldr x1, ={spsr}",
+        "msr spsr_el1, x1",
+        "msr elr_el1, x22",
+        "eret",
         // EL2: refused with its own MMU on, so the regime `E2H` chooses
         // changes under no walk. Then `HCR_EL2`, since with `E2H` set every
         // `_el1` name below is an EL2 register; refused unless it reads back
@@ -189,7 +194,7 @@ unsafe extern "C" fn apply_declaration() -> ! {
         "msr cptr_el2, x1",
         "tlbi vmalle1",
         "dsb nsh",
-        "mov x1, #{spsr}",
+        "ldr x1, ={spsr}",
         "msr spsr_el2, x1",
         "msr elr_el2, x22",
         "isb",
@@ -210,7 +215,7 @@ unsafe extern "C" fn apply_declaration() -> ! {
         cpacr = const regs::CPACR,
         cntkctl = const regs::CNTKCTL,
         icc_sre_el2 = const regs::ICC_SRE_EL2,
-        spsr = const regs::SPSR_EL2_TO_EL1,
+        spsr = const regs::SPSR_ENTRY,
     );
 }
 
@@ -365,9 +370,10 @@ pub fn timer() {
 }
 
 /// The platform's own devices that are not PCI functions: on an ACPI Arm
-/// machine, the `acpi` claim's row alone.
+/// machine, the `acpi` claim's row and the console UART's.
 pub fn platform_devices(_platform: &Platform, rsdp_addr: u64) {
     super::acpi_mode::init(rsdp_addr);
+    super::console_uart::fill_row();
 }
 
 /// Every other CPU, running.

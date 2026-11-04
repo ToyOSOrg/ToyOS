@@ -21,7 +21,8 @@ use std::process::Child;
 use std::time::{Duration, Instant};
 
 use toyos_logstream::death::{died, Died};
-use toyos_logstream::Showing;
+use toyos_abi::log::KERNEL_TAKES_THE_UART;
+use toyos_logstream::{Showing, CARRIED_ELSEWHERE};
 use toyos_virtio_serial::{CONSOLE_PORT, MAX_PORTS, PORT_ID};
 
 /// The port's QEMU device id, which a test unplugs it by.
@@ -78,11 +79,6 @@ impl Painter {
     }
 }
 
-/// What the kernel puts on the UART as the console's carrier takes the log
-/// (`kernel/src/log/console.rs`): every UART line before it the console port
-/// carries too, and the ones after it are the UART's alone.
-pub const CARRIED_ELSEWHERE: &str = "console: the log is carried elsewhere from here";
-
 /// Which of a virtio machine's UART lines are shown beside its console port:
 /// the loader, the early boot, and the lines the port cannot carry — the
 /// stop's, a fatal path's, and the whole log again once the console's carrier
@@ -90,7 +86,9 @@ pub const CARRIED_ELSEWHERE: &str = "console: the log is carried elsewhere from 
 ///
 /// **Its lines up to [`CARRIED_ELSEWHERE`] are the console port's too**, so
 /// they are not shown, but for a kernel's death, which no other channel will
-/// carry; every line after either is.
+/// carry; every line after either is, and after the kernel taking the UART
+/// back for the stop or a fatal path ([`KERNEL_TAKES_THE_UART`]), which may
+/// come before its driver said the first.
 #[derive(Default)]
 pub struct Uart {
     pending: Vec<u8>,
@@ -109,7 +107,7 @@ impl Uart {
                 self.live = true;
                 continue;
             }
-            self.live |= died(text.trim_end()) == Some(Died::Kernel);
+            self.live |= died(text.trim_end()) == Some(Died::Kernel) || text.contains(KERNEL_TAKES_THE_UART);
             if self.live {
                 shown.push(line);
             }
@@ -481,7 +479,7 @@ mod tests {
         assert!(shown == want, "the terminal was shown other bytes than the {length} painted");
     }
 
-    const QUIET: &str = "[ 6.459 cpu0 kernel] console: the log is carried elsewhere from here; the UART takes the stop's and a fatal path's lines\n";
+    const QUIET: &str = "[ 6.459 logkeeper] console: the log is carried elsewhere from here; the UART takes the stop's and a fatal path's lines\n";
 
     /// The UART's lines before the quiet line are the port's too and are kept
     /// back; the quiet line itself says nothing the operator needs, and every
@@ -489,7 +487,7 @@ mod tests {
     #[test]
     fn the_uart_is_shown_from_the_carriers_word_on() {
         let early = "[ 0.001 cpu0 kernel] boot: early\n[ 4.000 supervisor] supervisor: started logkeeper\n";
-        let late = "[ 9.000 cpu0 kernel] console: the UART carries the log again\n[ 9.100 supervisor] supervisor: x ended\n";
+        let late = "[ 9.000 logkeeper] console: the UART carries the log again\n[ 9.100 supervisor] supervisor: x ended\n";
         let stream = format!("{early}{QUIET}{late}");
         for cut in [1, 7, stream.len()] {
             let mut uart = Uart::default();
@@ -508,6 +506,20 @@ mod tests {
         let mut uart = Uart::default();
         let shown: Vec<u8> = uart.pass(format!("{program}{death}").as_bytes()).concat();
         assert_eq!(String::from_utf8(shown).expect("UTF-8"), death);
+    }
+
+    /// **A stop that takes the UART from a driver still behind the log** is
+    /// shown from the kernel's word on: its driver never reached the quiet
+    /// line, and what it was still sending is the port's.
+    #[test]
+    fn the_kernels_taking_the_uart_is_shown_from() {
+        let behind = "[ 2.035 cpu0 kernel] pcidev: PCI 00:01.";
+        let stop = format!("\n{KERNEL_TAKES_THE_UART}\n[ 2.531 cpu0 kernel] mmio: x\n[ 2.551 cpu0 kernel] Shutting down.\n");
+        let mut uart = Uart::default();
+        let shown: Vec<u8> = uart.pass(format!("{behind}{stop}").as_bytes()).concat();
+        let shown = String::from_utf8(shown).expect("UTF-8");
+        assert!(shown.starts_with(KERNEL_TAKES_THE_UART), "{shown:?}");
+        assert!(shown.ends_with("Shutting down.\n"), "{shown:?}");
     }
 
     /// **The launch's merge**: the port's lines in order, then the UART's from

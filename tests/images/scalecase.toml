@@ -9,13 +9,20 @@
 assets = ["assets"]
 
 [boot]
-start = ["acpiserver", "logkeeper", "compositor", "ps2server", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "compositor", "ps2server", "test-runner"]
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log-carrier"]
+syscap = ["logread", "console"]
+serves = ["log-carrier", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 [programs.compositor]
 service = true
@@ -35,8 +42,8 @@ starts = ["toybox"]
 [programs.toybox]
 receives = ["display"]
 
-# Started before every PCI claimant: it declares the memory the root bridges
-# decode, which every claim of a PCI function waits for.
+# It declares the memory the root bridges decode: the supervisor starts a PCI
+# driver only once the device set says the declaration is held.
 [programs.acpiserver]
 service = true
 devices = ["acpi"]

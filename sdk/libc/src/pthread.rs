@@ -10,12 +10,10 @@
 //! thread waits for its creator to publish the tid before it runs anything,
 //! so every holder of a handle can join it.
 //!
-//! A thread that ends detached hands its block to [`REAPED`], and the next
-//! `pthread_create` joins it and frees its stack, which no thread can free
-//! while standing on it.
+//! A thread that ends detached frees its block and has the kernel release
+//! its stack as it ends, which no thread can free while standing on it.
 
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 use core::cell::Cell;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
@@ -62,9 +60,6 @@ static SELF: Cell<*mut Thread> = Cell::new(ptr::null_mut());
 
 #[thread_local]
 static MARKER: u8 = 0;
-
-/// Blocks of detached threads that have ended, for the next creator to reap.
-static REAPED: Lock<Vec<usize>> = Lock::new(Vec::new());
 
 pub(crate) use toyos::sync::Lock;
 
@@ -129,7 +124,11 @@ unsafe fn exit_thread(result: *mut u8) -> ! {
         }
         t.result.store(result, Ordering::Release);
         if t.state.swap(EXITED, Ordering::AcqRel) == DETACHED {
-            REAPED.lock().push(thread as usize);
+            // Nobody holds the block but this thread.
+            let Thread { reservation, reserved, .. } = *unsafe { Box::from_raw(thread) };
+            // SAFETY: the stack is this thread's alone, and ends with it.
+            let refused = unsafe { syscall::thread_exit_detached(0, reservation, reserved) };
+            panic!("libc: a detached thread's stack was refused at its exit: {refused:?}");
         }
     }
     syscall::thread_exit(0)
@@ -168,11 +167,6 @@ pub(crate) fn spawn_own(start: StartRoutine) {
 /// # Safety
 /// `attr` is null or a `pthread_attr_t`, and `start_routine` takes `arg`.
 unsafe fn create(attr: *const u64, start_routine: StartRoutine, arg: *mut u8, counted: bool) -> Result<*mut Thread, i32> {
-    let reaped = core::mem::take(&mut *REAPED.lock());
-    for block in reaped {
-        unsafe { reap(block as *mut Thread) };
-    }
-
     let attr = if attr.is_null() { attr_default() } else { unsafe { *attr } };
     let stack_size = (attr & !ATTR_DETACHED) as usize;
     let Some((reservation, reserved, stack)) = reserve_stack(stack_size) else {

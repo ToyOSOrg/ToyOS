@@ -6,10 +6,10 @@ opened: 2026-09-29
 
 # FSGSBASE is taken
 
-`CR4.FSGSBASE` is forbidden (`kernel/src/arch/x86_64/control_regs.rs:149-153`):
+`CR4.FSGSBASE` is forbidden (`CR4_FORBIDDEN`, `kernel/src/arch/x86_64/control_regs.rs`):
 GS always holds the kernel's per-CPU base and the kernel runs no `swapgs`.
 Taking it costs a `swapgs` entry and the swapgs barriers of
-`issues/user-pointer-checks-have-no-spectre-v1-fence-and-smap-is-optional.md`.
+`issues/user-pointer-checks-have-no-spectre-v1-fence.md`.
 Intel names what it gives, user programs' FS and GS bases without a system
 call and a more efficient kernel context switch, and has it used "never in
 production environments unless accompanied by a complete OS implementation":

@@ -1,4 +1,4 @@
-//! A device claim, and the one console every kernel-spawned process starts on.
+//! A device claim.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -27,6 +27,9 @@ pub enum DeviceInfo {
     Isa(toyos_abi::syscall::IsaId),
     /// The fixed hardware's blocks.
     Acpi(toyos_abi::acpi::AcpiInfo),
+    /// The console UART, and its register frame where the architecture maps
+    /// one, whose handle the mint installs.
+    Uart(toyos_abi::uart::UartInfo, Option<Arc<SharedMemObject>>),
 }
 
 // MAP and WRITE draw into it; DUP and TRANSFER let a daemon hand the buffer to another process.
@@ -54,6 +57,15 @@ impl DeviceInfo {
             Self::PciFunction(info) => bytes(info).into(),
             Self::Isa(set) => set.wire().iter().flat_map(|word| word.to_ne_bytes()).collect(),
             Self::Acpi(info) => bytes(info).into(),
+            Self::Uart(info, frame) => {
+                let mut info = *info;
+                if let Some(frame) = frame {
+                    // The holder's alone, as the row's ports are: no right moves it on.
+                    let entry = HandleEntry::new(KObjectRef::SharedMem(Arc::clone(frame)), Rights::MAP.union(Rights::WRITE));
+                    info.frame = table.install(entry).map_err(|_| SyscallError::ResourceExhausted)?;
+                }
+                bytes(&info).into()
+            }
         })
     }
 }
@@ -164,63 +176,5 @@ impl ZeroHandles for DeviceClaim {
     fn on_zero_handles(&self) {
         self.pci(|binding| crate::pcidev::revoke_handed(binding.number()));
         self.reference.release();
-    }
-}
-
-/// One holder's view of the machine's serial console — each holder gets its own, never a shared handle.
-pub struct ConsoleObject {
-    pub(super) core: ObjectCore,
-    // Lock order process_data -> line -> the console queue; taking them in reverse deadlocks.
-    line: crate::sync::Lock<crate::drivers::serial::ConsoleLine>,
-}
-
-impl ConsoleObject {
-    /// A console of its own for a holder in `job`, charged to it.
-    pub fn new(job: &Arc<kernel::sched::job::Job>) -> Result<Arc<Self>, Exhausted> {
-        Ok(Arc::new(Self {
-            core: Self::new_core_for(job, 0)?,
-            line: crate::sync::Lock::new(crate::drivers::serial::ConsoleLine::new()),
-        }))
-    }
-
-    /// Take a userland write, queueing every whole line it completes that the
-    /// console has room for; answers the bytes taken.
-    pub fn write(&self, buf: &crate::user_ptr::UserBytes) -> usize {
-        self.line.lock().write(buf)
-    }
-
-    /// Whether this holder carries the log off the machine, so the UART does
-    /// not (`log::console::carried_by`); its last handle lets go of it.
-    pub fn carry(&self, elsewhere: bool) -> Result<(), kernel::carrier::Refused> {
-        match elsewhere {
-            true => {
-                crate::log::console::carried_by(self.holder())?;
-                // A last handle closed beside this call ran its release
-                // before the carry landed: the carry is given back here.
-                core::sync::atomic::fence(Ordering::SeqCst);
-                if self.core.retired() {
-                    crate::log::console::released_by(self.holder());
-                }
-                Ok(())
-            }
-            false => {
-                crate::log::console::released_by(self.holder());
-                Ok(())
-            }
-        }
-    }
-
-    fn holder(&self) -> usize {
-        self as *const Self as usize
-    }
-}
-
-// Flushes the partial line and gives the log back to the UART if this holder
-// carried it, on last handle: a dying holder's releases run before its end is
-// published, so its end never leaves the UART quiet.
-impl ZeroHandles for ConsoleObject {
-    fn on_zero_handles(&self) {
-        self.line.lock().finish();
-        crate::log::console::released_by(self.holder());
     }
 }

@@ -45,23 +45,11 @@ pub fn preempt_off<R>(f: impl FnOnce(&PreemptOff) -> R) -> R {
     result
 }
 
-/// The same proof, bought with `cli`.
-pub struct IrqOff(());
-
-// SAFETY: `do_preempt` needs `IF` set or a voluntary pass; `irq_off` masks `IF` and calls nothing that yields one.
-unsafe impl PreemptGuard for IrqOff {}
-
-/// Run `f` with interrupts masked, holding [`IrqOff`] for exactly that region.
-pub fn irq_off<R>(f: impl FnOnce(&IrqOff) -> R) -> R {
-    let _guard = crate::arch::IrqGuard::close();
-    f(&IrqOff(()))
-}
-
 static CPUS: AtomicPtr<CpuHandles<KMsg>> = AtomicPtr::new(ptr::null_mut());
 static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
 
 
-/// Nanoseconds between two pass-cost reports — wall-clock, not per-pass, since `klogd`'s own wake is itself a pass.
+/// Nanoseconds between two pass-cost reports — wall-clock, not per-pass, since the report's own record owes a pass.
 #[cfg(feature = "sched-check")]
 const PASS_COST_REPORT_EVERY_NS: u64 = 200_000_000;
 
@@ -136,11 +124,6 @@ pub(crate) fn spin_for(ns: u64) {
     while crate::clock::nanos_since_boot() < until {
         core::hint::spin_loop();
     }
-}
-
-/// Whether [`init`] has run: before it there is no task, so nothing can wait.
-pub fn started() -> bool {
-    !CPUS.load(Ordering::Acquire).is_null()
 }
 
 pub fn cpus() -> &'static CpuHandles<KMsg> {
@@ -256,18 +239,13 @@ mod tripwire {
     // no other, inside `with_cpu`'s exclusive region.
     unsafe impl Sync for Shadow {}
 
-    /// The record's bytes as little-endian words, with the remotely-written field's words read back as zero.
+    /// The record's bytes as little-endian words.
     /// Volatile: a non-volatile read could be folded away instead of catching a stray write.
     fn snapshot(sched: &CpuSched<KernelPayload>, out: &mut [u64; WORDS]) {
         let base = (sched as *const CpuSched<KernelPayload>).cast::<u8>();
         let size = core::mem::size_of::<CpuSched<KernelPayload>>();
-        let (lo, hi) = CpuSched::<KernelPayload>::tripwire_remote_range();
         for (i, word) in out.iter_mut().enumerate().take(size.div_ceil(8)) {
             let off = i * 8;
-            if off < hi && off + 8 > lo {
-                *word = 0;
-                continue;
-            }
             let mut bytes = [0u8; 8];
             for (k, byte) in bytes.iter_mut().enumerate() {
                 if off + k >= size {
@@ -401,16 +379,14 @@ fn idle_ctx() -> KernelCtx {
 
 /// Where a spawn goes: the rule is [`CpuHandles::place`]'s; this supplies the rotating start, load-bearing at
 /// boot since every program the supervisor starts is spawned before any CPU has published a load.
-fn placement(now: Nanos, mask: CpuMask) -> CpuId {
+fn placement(now: Nanos, mask: CpuMask, near: Option<kernel::sched::cpu::Near>) -> CpuId {
     static ROTATE: AtomicU64 = AtomicU64::new(0);
     let count = crate::smp::cpu_count() as u64;
     let start = CpuId((ROTATE.fetch_add(1, Ordering::Relaxed) % count) as u32);
-    cpus().place(start, now, mask)
+    cpus().place(start, now, mask, near)
 }
 
-/// Everything a new thread needs. `entry_sp` points at the trampoline frame `alloc_kernel_stack` built;
-/// `address_space` is not `Option` — every kernel thread uses the kernel address space, so one declaration
-/// decides `cr3`.
+/// Everything a new thread needs. `entry_sp` points at the trampoline frame `alloc_kernel_stack` built.
 pub struct NewTask {
     pub id: TaskId,
     pub kernel_stack: KernelStack,
@@ -419,24 +395,25 @@ pub struct NewTask {
     pub thread_pointer: u64,
     /// The job the thread's time is charged to.
     pub job: Arc<kernel::sched::job::Job>,
-    /// The process's image; `None` for a kernel thread.
-    pub image: Option<Arc<crate::process::UserImage>>,
+    /// The process's image.
+    pub image: Arc<crate::process::UserImage>,
     /// The CPUs it may run on.
     pub mask: CpuMask,
+    /// For a thread spawned into its own process, its spawner and its
+    /// process's threads' homes (`CpuHandles::place`); `None` for a new
+    /// process's first thread and a kernel thread.
+    pub near: Option<kernel::sched::cpu::Near>,
 }
 
 /// Place a new task by message — never by reaching into the destination's queue.
 pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
-    // A kernel thread's is the kernel address space, the one every CPU
-    // sits in between user threads — why `idle_ctx` names the same `cr3`.
-    // Nothing is released at teardown: this `Arc` clones a leaked, permanent kernel mapping.
     let root = new.address_space.lock().root();
     let ctx = KernelCtx {
         sp: new.entry_sp,
         root,
         thread_pointer: new.thread_pointer,
         kernel_stack_top: new.kernel_stack.top(),
-        runs: if new.kernel_stack.is_user() { Runs::User(new.id) } else { Runs::Kernel(new.id) },
+        runs: Runs::User(new.id),
         // The one level `trampoline_entry` discharges before the first `iretq`.
         preempt: 1,
     };
@@ -457,7 +434,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
         rt: RtState::default(),
         mask: new.mask,
     }
-    .build(placement(now, new.mask), now);
+    .build(placement(now, new.mask, new.near), now);
     let sched = ThreadSched {
         handle,
         shared: task.shared().clone(),
@@ -521,6 +498,7 @@ pub fn pass(dispose: Dispose) {
     // Before the pass picks, so a wake this posts is in the run queue by the
     // time the pass chooses.
     crate::object::drain_zero_handles();
+    crate::log::user::post_owed();
     let now = HW.now();
     crate::arch::watchdog::feed(now.0);
     crate::arch::clocksource::check(now.0);
@@ -733,13 +711,13 @@ pub fn current_handle() -> Option<Arc<crate::sched::payload::TaskHandle>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handle.clone())).flatten()
 }
 
-/// The image of the task this CPU is running, `None` inside for a kernel thread.
+/// The image of the task this CPU is running.
 ///
 /// Takes no lock: the image is immutable and the `Arc` outlives teardown. `None`: a pass already holds this
 /// record, or none is running.
 ///
 /// No pass can start underneath the read: a fault handler runs with preemption declined.
-pub fn current_image() -> Option<Option<Arc<crate::process::UserImage>>> {
+pub fn current_image() -> Option<Arc<crate::process::UserImage>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().image.clone())).flatten()
 }
 
@@ -817,18 +795,6 @@ pub fn boost_current(until: Nanos) {
 
 pub fn current_is_rt() -> bool {
     try_with_cpu(|cpu| cpu.running().is_some_and(|t| t.rt().is_rt())).unwrap_or(false)
-}
-
-/// Every thread on this CPU's run queue, in pick order, for a staging that
-/// says why a woken thread has not run. `false` means a pass owns the state.
-#[cfg(feature = "boot-actuators")]
-pub fn for_each_ready(mut f: impl FnMut(TaskId)) -> bool {
-    try_with_cpu(|cpu| {
-        for task in cpu.rq().tasks() {
-            f(task.ext().id);
-        }
-    })
-    .is_some()
 }
 
 /// Tail of the first switch into a fresh task. No lock to release, no outgoing task to park: only the
@@ -933,7 +899,7 @@ fn stack_depth(payload: &KernelPayload) {
     let bottom = payload.kernel_stack.bottom();
     // SAFETY: the running task's own stack, allocated with exactly its
     // `layout()`; running on this CPU, so nothing is freeing it.
-    unsafe { crate::mm::check_heap_bands(bottom, payload.kernel_stack.layout(), "kernel stack") };
+    unsafe { crate::mm::check_heap_bands(bottom, KernelStack::layout(), "kernel stack") };
     let mut used = 0;
     for rung in DEPTH_RUNGS {
         // SAFETY: `rung < KERNEL_STACK_SIZE`, so this reads a word of that

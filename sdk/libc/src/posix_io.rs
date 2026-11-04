@@ -257,7 +257,6 @@ unsafe fn answered(answer: Result<files::Stat, files::Error>, buf: *mut Stat) ->
             syscall::FileType::Symlink => S_IFLNK | 0o777,
             syscall::FileType::Pipe => S_IFIFO | 0o644,
             syscall::FileType::Tty => S_IFCHR | 0o644,
-            syscall::FileType::Serial => S_IFCHR | 0o644,
             syscall::FileType::Null => S_IFCHR | 0o666,
             _ => 0o644,
         };

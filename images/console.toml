@@ -21,7 +21,7 @@ assets = ["assets"]
 memory-floor-mib = 96
 
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "console", "acpiserver", "ps2server"]
+start = ["logkeeper", "uart", "diskserver", "fileserver", "console", "acpiserver", "ps2server"]
 
 # `/system/bin/console` owns the screen and provides the surface its shell and the
 # shell's children inherit. No compositor here, so nothing receives one.
@@ -33,13 +33,21 @@ start = ["logkeeper", "diskserver", "fileserver", "console", "acpiserver", "ps2s
 # Rights::WAIT` on a `SysCap` duplicate, and serves `log` to the console.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log"]
+syscap = ["logread", "console"]
+serves = ["log", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 # The machine's ACPI fixed hardware, as `images/system.toml` serves it: `shutdown`
 # powers this machine off with the sleep type this program reads out of the
 # firmware's tables and hands the kernel, which refuses a power-off without
 # one. The claim hands it the firmware's own access, as there.
+
 [programs.acpiserver]
 service = true
 devices = ["acpi"]
@@ -69,7 +77,6 @@ restart = true
 receives = ["input"]
 devices = ["isa:0060,0064:1,12"]
 memory-floor-mib = 24
-
 
 # `power` because `bin/shutdown` below is this binary, and on the machine this
 # image exists for — no serial port, a prompt on the panel — there is no other

@@ -39,8 +39,8 @@ pub struct Claim {
 
 /// What one claim holds. A class is at most one device on this machine and a
 /// per-class flag says whether it is taken; a PCI function is one of several,
-/// so what it gives back is its `pcidev` slot; an ISA function's and the ACPI
-/// fixed hardware's exclusivity is its `isa` row's.
+/// so what it gives back is its `pcidev` slot; an ISA function's, the ACPI
+/// fixed hardware's and the console UART's exclusivity is its `isa` row's.
 ///
 /// The slot and the row are held as what their modules' calls take, and the
 /// drop of each is its release: a call borrows one from the claim's `Held`, so
@@ -50,6 +50,7 @@ enum Claimed {
     PciFunction(crate::pcidev::Binding),
     Isa(crate::isa::Row),
     Acpi(crate::isa::Row),
+    Uart(crate::isa::Row),
 }
 
 impl Claim {
@@ -72,15 +73,16 @@ impl Claim {
     pub(crate) fn binding(&self) -> Option<&crate::pcidev::Binding> {
         match &self.what {
             Claimed::PciFunction(binding) => Some(binding),
-            Claimed::Class(_) | Claimed::Isa(_) | Claimed::Acpi(_) => None,
+            Claimed::Class(_) | Claimed::Isa(_) | Claimed::Acpi(_) | Claimed::Uart(_) => None,
         }
     }
 
     /// What `isa`'s calls on this claim are made with, or `None` for a claim
-    /// on anything but an ISA function or the ACPI fixed hardware.
+    /// on anything but an ISA function, the ACPI fixed hardware or the
+    /// console UART.
     pub(crate) fn row(&self) -> Option<&crate::isa::Row> {
         match &self.what {
-            Claimed::Isa(row) | Claimed::Acpi(row) => Some(row),
+            Claimed::Isa(row) | Claimed::Acpi(row) | Claimed::Uart(row) => Some(row),
             Claimed::Class(_) | Claimed::PciFunction(_) => None,
         }
     }
@@ -89,7 +91,7 @@ impl Claim {
     pub(crate) fn add_poll(&self, entry: crate::inbox::PollEntry) {
         match &self.what {
             Claimed::PciFunction(binding) => crate::pcidev::add_poll(binding, entry),
-            Claimed::Isa(row) | Claimed::Acpi(row) => crate::isa::add_poll(row, entry),
+            Claimed::Isa(row) | Claimed::Acpi(row) | Claimed::Uart(row) => crate::isa::add_poll(row, entry),
             Claimed::Class(_) => unreachable!("a poll registered through a claim on no function or row"),
         }
     }
@@ -104,7 +106,7 @@ impl Drop for Claim {
             // process reaches it.
             Claimed::PciFunction(_) => {}
             // The row's drop is its release.
-            Claimed::Isa(_) => {}
+            Claimed::Isa(_) | Claimed::Uart(_) => {}
             // Back to the mode the firmware handed over, and then the row's
             // drop; and no declaration of the root bridges' memory will
             // come where its holder made none.
@@ -136,6 +138,10 @@ pub enum ClaimError {
     /// remapping entry or LPI a claim spends is held; or no memory is left for
     /// the claim.
     Exhausted,
+    /// No declaration of the memory the root bridges decode is held yet, and
+    /// one may still be: nothing was touched, and the claim may be asked again
+    /// once the device set says it is held.
+    Undeclared,
     /// The function is there and could not be handed over — no MSI-X, no
     /// window to move a BAR into, an address it did not take. The kernel names
     /// which at the site.
@@ -191,6 +197,12 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let (row, info) = crate::arch::acpi_mode::claim()?;
             let claim = Claim { what: Claimed::Acpi(row) };
             Ok(DeviceClaim::new(class, DeviceInfo::Acpi(info), claim)?)
+        }
+        DeviceType::Uart => {
+            // The row's own guard, taken inside.
+            let (row, info) = crate::arch::console_uart::claim()?;
+            let claim = Claim { what: Claimed::Uart(row) };
+            Ok(DeviceClaim::new(class, info, claim)?)
         }
     }
 }

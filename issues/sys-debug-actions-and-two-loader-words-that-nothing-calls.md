@@ -13,9 +13,9 @@ names in `sdk/abi/src`, because a deletion there is an ABI change and that pull 
 one. Each kernel arm still answers its action. `git grep -w <name> -- tests userland toyos src`
 finds no caller of:
 
-- `debug_action::PANIC` (0), `NULL_READ` (1), `HEAP_OVER_CEILING` (6) and `IDLE_GUARD_READ`
-  (9), which `test_panic_child` took by number for stage B's `syscall_panic_halts`,
-  `syscall_fault_halts` and `heap_over_ceiling_halts` and stage C's `idle_stack_guard`;
+- `debug_action::PANIC` (0), `HEAP_OVER_CEILING` (6) and `IDLE_GUARD_READ` (9), which
+  `test_panic_child` took by number for stage B's `syscall_panic_halts` and
+  `heap_over_ceiling_halts` and stage C's `idle_stack_guard`;
 - `HEAP_AT_CEILING` (5), `HEAP_AT_CEILING_PAGE_ALIGNED` (7) and `LOWER_SYSINFO_BOUND` (19),
   `heap_ceiling`'s, for stage C's `heap_ceiling_bounds`;
 - `LOCK_ACROSS_SWITCH` (2), `test_panic_child`'s. Its stage C item is a type

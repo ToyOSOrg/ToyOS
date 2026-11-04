@@ -3,15 +3,23 @@
 # `/system/bin/shell -c`; and `/tmp`'s file server, whose file
 # `spawn_served_stdout` puts at the stdout `system`'s child inherits.
 [boot]
-start = ["acpiserver", "logkeeper", "fileserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "fileserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log-carrier"]
+syscap = ["logread", "console"]
+serves = ["log-carrier", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 # `roster` for `libc_read_restarts`, which orders a child's end after its
 # own read is parked by the kernel's roster, and `dup` to hand it on.
+
 [programs.test-runner]
 syscap = ["dup", "roster"]
 
@@ -23,8 +31,8 @@ syscap = ["dup", "roster"]
 "bin/echo" = "/system/bin/toybox"
 "bin/cat" = "/system/bin/toybox"
 
-# Started before every PCI claimant: it declares the memory the root bridges
-# decode, which every claim of a PCI function waits for.
+# It declares the memory the root bridges decode: the supervisor starts a PCI
+# driver only once the device set says the declaration is held.
 [programs.acpiserver]
 service = true
 devices = ["acpi"]

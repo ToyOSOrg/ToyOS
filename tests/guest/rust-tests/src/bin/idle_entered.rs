@@ -24,10 +24,6 @@ mod served_log;
 /// The idle span: a thousand residencies of a 1 ms state.
 const IDLE: Duration = Duration::from_secs(1);
 
-/// How long after boot the wait for the server's census gives up: the
-/// runner's bound less a tenth, as `acpi_hold`'s.
-const UNTIL_MS: u64 = toyos_tco::JOB_BOUND_MS - toyos_tco::JOB_BOUND_MS / 10;
-
 fn round(cap: &SysCap) -> Vec<Record> {
     let mut raw = vec![RawRecord::EMPTY; syscall::cpu_count() as usize];
     let n = cap.counters(&mut raw).expect("the estate's capability reads the counters");
@@ -36,8 +32,7 @@ fn round(cap: &SysCap) -> Vec<Record> {
 
 fn main() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a capability");
-    let since_boot = toyos_abi::clock::nanos_since_boot() / 1_000_000;
-    served_log::Log::open().until("the ACPI server's idle states", Duration::from_millis(UNTIL_MS.saturating_sub(since_boot)), |line| {
+    served_log::Log::open().until("the ACPI server's idle states", served_log::START_LINE, |line| {
         program_line(line).is_some_and(|said| said.tag == "acpiserver" && said.text.starts_with(acpiserver_api::IDLE_CENSUS))
     });
     let before = round(&cap);

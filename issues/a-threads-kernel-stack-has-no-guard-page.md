@@ -21,3 +21,10 @@ the first write past the end faults.
 `boot-actuators` arm that recurses a thread past its stack gets a double fault
 naming that thread's guard page, and a stack allocated without the guard reds
 it.
+
+Every kernel stack is a user thread's or a CPU's idle loop's. What the design
+has to meet: AArch64's vectors run on the interrupted `SP_EL1`, so a guard
+is reached only once an EL1 entry checks `sp` against the running stack's
+bound and reports from a per-CPU overflow stack, which the idle stacks' guard
+lacks today too; and a stack slot's guard hole in the direct map decides when
+its memory can go back to the PMM.

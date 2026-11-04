@@ -8,6 +8,17 @@ pub mod reference;
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
+/// What opens the kernel's report each time its refinement holds the TSC to
+/// the HPET over a span (`clock: over <span> s the TSC counted ...`): written
+/// by the first scheduler pass after each doubling span.
+pub const TSC_REFINED: &str = "clock: over ";
+
+/// What opens the kernel's report of a span in which the TSC moved apart from
+/// the chipset's counters (`clock: the TSC reads <n> ns from the chipset's
+/// counters ...`): the clock's word on a step the machine made, written as
+/// the sampler finds it.
+pub const TSC_STEP_READ: &str = "clock: the TSC reads ";
+
 /// Unix seconds at boot, from a reading of `secs` true when the clock read
 /// `at`, which is after boot where the kernel read the wall clock and before
 /// it where the loader did; both are stamps, nanoseconds since the counter's

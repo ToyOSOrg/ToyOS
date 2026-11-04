@@ -19,8 +19,9 @@ pub(super) extern "sysv64" fn spurious_entry() {
     naked_asm!(
         // Not routed through `ring3_naked_asm!`: this vector can interrupt any
         // instruction, `memmove`'s `std` … `cld` window included, so it owes
-        // itself the `cld` every Ring 0 entry needs.
+        // itself the `cld` and `clac` every Ring 0 entry needs.
         "cld",
+        "clac",
         "push rax",
         "push rcx",
         "push rdx",

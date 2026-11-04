@@ -3,12 +3,19 @@
 # holds a launcher, and `cat` and `echo` are links to it, so a spawn of
 # either is a launch.
 [boot]
-start = ["acpiserver", "logkeeper", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "test-runner"]
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log-carrier"]
+syscap = ["logread", "console"]
+serves = ["log-carrier", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 [programs.test-runner]
 starts = ["toybox"]
@@ -19,8 +26,8 @@ starts = ["toybox"]
 "bin/cat" = "/system/bin/toybox"
 "bin/echo" = "/system/bin/toybox"
 
-# Started before every PCI claimant: it declares the memory the root bridges
-# decode, which every claim of a PCI function waits for.
+# It declares the memory the root bridges decode: the supervisor starts a PCI
+# driver only once the device set says the declaration is held.
 [programs.acpiserver]
 service = true
 devices = ["acpi"]

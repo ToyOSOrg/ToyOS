@@ -94,8 +94,27 @@ impl CpuMask {
         Self(core::array::from_fn(|i| self.0[i] | other.0[i]))
     }
 
+    pub fn insert(&mut self, cpu: CpuId) {
+        self.0[cpu.0 as usize / 64] |= 1 << (cpu.0 % 64);
+    }
+
+    /// Whether this mask names every CPU `other` does.
+    pub fn covers(&self, other: Self) -> bool {
+        self.0.iter().zip(other.0).all(|(&mine, theirs)| theirs & !mine == 0)
+    }
+
     pub fn words(&self) -> &[u64; MASK_WORDS] {
         &self.0
+    }
+}
+
+impl FromIterator<CpuId> for CpuMask {
+    fn from_iter<I: IntoIterator<Item = CpuId>>(cpus: I) -> Self {
+        let mut mask = Self::NONE;
+        for cpu in cpus {
+            mask.insert(cpu);
+        }
+        mask
     }
 }
 

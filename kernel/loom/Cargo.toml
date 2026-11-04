@@ -22,16 +22,6 @@ publish = false
 [features]
 default = ["loom"]
 loom = []
-# The negative control for W3. It removes the two `SeqCst` fences from
-# `shard.rs`'s wake pair, and `log_wake.rs` must red under it — the one command
-# that proves the model has teeth:
-#
-#   cargo test --manifest-path kernel/loom/Cargo.toml --features wake-fence-off \
-#     --test log_wake
-#
-# Never on by default and never reachable from a kernel build, which declares
-# the same name only so `cfg` checking knows it.
-wake-fence-off = []
 # The negative control for a poll ring's one-shot answer. It splits
 # `inbox/once.rs`'s exchange into a load and a store, so a post and the
 # registrant's own recheck can both answer one poll, and `poll_once.rs` must red:
@@ -142,18 +132,6 @@ log-commit-release-off = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 shard-publish-relaxed = []
-# The negative control for the sleep lock's acquire edge. It makes
-# `sleeplock.rs`'s two loads of `now` — the ones that decide whose turn it is —
-# `Relaxed`, so the previous holder's writes are unordered against the next
-# holder's reads, and `sleep_lock.rs` must red with loom's own words,
-# `Causality violation: Concurrent write accesses to UnsafeCell`:
-#
-#   cargo test --manifest-path kernel/loom/Cargo.toml --features sleeplock-acquire-off \
-#     --test sleep_lock
-#
-# Never on by default and never reachable from a kernel build, which declares
-# the same name only so `cfg` checking knows it.
-sleeplock-acquire-off = []
 # The negative control for a claimed PCI function's interrupt record. The
 # reader's `swap` of the count becomes a load and a store, which is the whole of
 # what this record's design is, and `device_irq.rs` must red:
@@ -257,18 +235,13 @@ push-fence-relaxed = []
 #   cargo test -p kernel-loom --features affinity-fence-relaxed --test loom_affinity
 #
 affinity-fence-relaxed = []
-# The one feature here that models nothing away. It lets the mailbox model's
-# victim stop taking passes — what a CPU that stops does — and the model must
-# red, because `MailboxNode::in_flight` is the consumer's to clear and a
-# retired consumer clears nothing. It reproduces an open defect rather than
-# proving a lie is caught, so unlike its siblings it goes away with the fix:
+# The negative control for the steal probe. `cpu.rs`'s `CpuHandle::ask`
+# rings the victim's doorbell before it sets the thief's bit, so the pass the
+# ring owes can take nothing, and `loom_sleep.rs` must red:
 #
-#   cargo test -p kernel-loom --features victim-retires-mid-probe \
-#     --test loom_mailbox
+#   cargo test -p kernel-loom --features ask-rings-first --test loom_sleep
 #
-# The kernel declares no twin, because this decides nothing in
-# `kernel/pure/sched/`.
-victim-retires-mid-probe = []
+ask-rings-first = []
 # The negative control for the watch. It makes `task.rs`'s `begin_commit`
 # blind to the notified bit, which is a waiter that registers, checks and parks
 # without the post that landed in between being able to stop it — the lost wake

@@ -17,6 +17,7 @@ pub const PT_LOAD: u32 = 1;
 pub const PT_DYNAMIC: u32 = 2;
 pub const PT_TLS: u32 = 7;
 pub const PT_GNU_EH_FRAME: u32 = 0x6474_e550;
+pub const PT_GNU_RELRO: u32 = 0x6474_e552;
 
 pub const PF_X: u32 = 1;
 pub const PF_W: u32 = 2;

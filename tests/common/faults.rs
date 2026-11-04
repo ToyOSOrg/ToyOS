@@ -106,8 +106,8 @@ const AUDIT_REFUSED: &str = " kernel leaves, writable and executable: ";
 
 /// The boot's audit of the kernel's tables against one direct-map leaf
 /// `kernel-wx-leaf` made writable and executable: the refusal names that leaf
-/// under both rules and counts no other, so every leaf the boot made itself
-/// passed the same walk.
+/// under both rules and counts no other, nor any writable over the RELRO, so
+/// every leaf the boot made itself passed the same walk.
 pub fn kernel_wx_leaf_is_refused(test_config: &Path, profile: qemu::Profile) -> Result<(), String> {
     let qemu = QemuInstance::boot_with_options(
         test_config,
@@ -126,9 +126,12 @@ pub fn kernel_wx_leaf_is_refused(test_config: &Path, profile: qemu::Profile) -> 
         .map(str::trim_end)
         .ok_or_else(|| format!("no audit refusal\n{serial}"))?;
     let once = format!(": 1 (the first at {at})");
-    let (both, outside) = (format!("writable and executable{once}"), "; executable outside the text ");
-    match refusal.split_once(outside) {
-        Some((writable, executable)) if writable.ends_with(&both) && executable.ends_with(&once) => {
+    let (both, outside, relro) =
+        (format!("writable and executable{once}"), "; executable outside the text ", "; writable over the RELRO ");
+    match refusal.split_once(outside).and_then(|(writable, rest)| Some((writable, rest.split_once(relro)?))) {
+        Some((writable, (executable, read_only)))
+            if writable.ends_with(&both) && executable.ends_with(&once) && read_only.ends_with(": none") =>
+        {
             eprintln!("  [kernel_wx] {refusal}");
             Ok(())
         }
@@ -147,7 +150,8 @@ const TSC_DEMOTED: &str = "clock: DEMOTED: ";
 const DEMOTED_READS: &str = "clock: a process's reading of now asked the kernel since the TSC was demoted";
 
 /// A TSC `tsc-step` reads 10 ms ahead, and 10 ms further once the clock has
-/// slewed the first step away: the first is slewed, the second demotes the
+/// slewed the first step away: the clock reports the first
+/// ([`kernel::clock::TSC_STEP_READ`]) and slews it, the second demotes the
 /// TSC, and processes' readings of now reach the kernel after it.
 pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(
@@ -161,15 +165,23 @@ pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), St
     serial.push_str(&qemu.drain_until(std::time::Duration::from_secs(120), |l| l.contains(DEMOTED_READS) || l.contains("PANIC")));
     let lines: Vec<&str> = serial.lines().collect();
     let at = |marker: &str| lines.iter().position(|l| l.contains(marker)).ok_or_else(|| format!("no {marker:?} line\n{serial}"));
-    let order = [at(TSC_STEP_STAGED)?, at(TSC_STEP_SLEWED)?, at(TSC_SLEWED_AWAY)?, at(TSC_STEP_AGAIN)?, at(TSC_DEMOTED)?, at(DEMOTED_READS)?];
+    let order = [
+        at(TSC_STEP_STAGED)?,
+        at(kernel::clock::TSC_STEP_READ)?,
+        at(TSC_STEP_SLEWED)?,
+        at(TSC_SLEWED_AWAY)?,
+        at(TSC_STEP_AGAIN)?,
+        at(TSC_DEMOTED)?,
+        at(DEMOTED_READS)?,
+    ];
     if !order.is_sorted() || serial.contains("PANIC") {
         return Err(format!("the steps, the slew and the demotion are out of order: {order:?}\n{serial}"));
     }
-    let stepped: Option<i64> = lines[order[1]].split(TSC_STEP_SLEWED).nth(1).and_then(|r| r.split(" ns").next()).and_then(|n| n.parse().ok());
+    let stepped: Option<i64> = lines[order[2]].split(TSC_STEP_SLEWED).nth(1).and_then(|r| r.split(" ns").next()).and_then(|n| n.parse().ok());
     if !stepped.is_some_and(|ns| (9_000_000..=11_000_000).contains(&ns)) {
-        return Err(format!("the slewed step is not the staged 10 ms: {}\n{serial}", lines[order[1]].trim()));
+        return Err(format!("the slewed step is not the staged 10 ms: {}\n{serial}", lines[order[2]].trim()));
     }
-    for i in [1, 4, 5] {
+    for i in [1, 2, 5, 6] {
         eprintln!("  [tsc_step] {}", lines[order[i]].trim());
     }
     Ok(())
@@ -179,7 +191,7 @@ pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), St
 /// leaving the span out, and a report after it.
 const HPET_STALL_STAGED: &str = "hpet-stall: the HPET reads ";
 const HPET_MOVED: &str = "clock: the HPET moved and the TSC did not, so this span is left out: ";
-const CLOCK_REPORT: &str = "clock: over ";
+const CLOCK_REPORT: &str = kernel::clock::TSC_REFINED;
 
 /// An HPET `hpet-stall` reads 10 ms behind while the TSC and the ACPI PM timer
 /// count on: the sampler says the HPET moved, leaves the span out, and the

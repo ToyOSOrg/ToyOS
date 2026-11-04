@@ -207,15 +207,22 @@ started. Nothing reaches userland when a device arrives or leaves.
    - On AArch64's SMMUv3 a function that arrived after the unit was
      programmed is listed and refused a claim by name: its routes are read
      for the functions enumerated at boot.
-   - **Next, by the owner's ruling of 1–2 Nov 2026: claims are the
-     supervisor's to time.** The kernel's wait at claim time for the root
-     bridges' declaration goes; the supervisor starts `drives` processes off
-     the device set once the declaration is in it. That restores
-     `acpi_server_death` (`issues/the-acpi-servers-death-has-no-readback-on-the-t14.md`)
-     and the guest arm on a held function's configuration
-     (`issues/no-guest-reads-a-held-functions-configuration-refused-to-the-acpi-holder.md`),
-     both lost because a boot whose first `acpi` holder is a job can hold no
-     claim. Its own PR, after #934.
+   - **Claims are the supervisor's to time**, by the owner's ruling of
+     1–2 Nov 2026. The kernel refuses a claim made before the declaration
+     at once (`ClaimError::Undeclared`, `WouldBlock`); the device set's
+     header carries the declaration's state, and its watch is posted when
+     that changes. The supervisor starts `logkeeper` and what the
+     declaration comes through first: the `acpi` claim's holder, or where
+     none is started a row that may hand one the claim. Storage, then the
+     homes and state directories, then every other row, then the `drives`
+     rows follow once the set reads the declaration held
+     (`toyos_supervisor::declaration`), so no row starts before its `HOME`
+     exists. A declaration withheld, or none by a 30 s bound, is said once:
+     storage and the PCI drivers are given up, their ports closed, and the
+     rest starts without them. Where nothing can declare, nothing waits. So a
+     boot whose first `acpi` holder is a job may still have storage:
+     `acpi_server_death` is registered again, and the held-function arm is
+     `acpi_holder_is_refused_a_held_functions_configuration`.
 3. **Drivers leave the shared services.** netstack, soundserver and diskserver
    each become a driver per function plus the service its clients use. The
    client port carries a per-device source and `gone`.

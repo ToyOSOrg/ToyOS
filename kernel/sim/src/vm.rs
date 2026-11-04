@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc as StdArc;
 
 use kernel::sched::affinity::CpuMask;
-use kernel::sched::cpu::{Action, CpuHandle, CpuSched, Env, SchedPass};
+use kernel::sched::cpu::{homes, Action, CpuHandle, CpuSched, Env, Near, SchedPass};
 use kernel::sched::job::{Job, JobKey};
 use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent, TraceKind};
 use kernel::sched::invariants::Container;
@@ -260,6 +260,8 @@ pub struct Vm<'q> {
     pub programs: BTreeMap<TaskKey, Program>,
     /// Every task ever created, so a finalize-twice is detectable.
     pub spawned: BTreeSet<TaskKey>,
+    /// The CPU each spawn was placed on, in spawn order.
+    pub placed: Vec<usize>,
     /// Every task that ever executed a single op. The difference against
     /// [`Self::spawned`] is what a stopped CPU costs the machine, and it is the
     /// only quantity that can be read off a run where some tasks never run at
@@ -536,9 +538,10 @@ pub struct Vm<'q> {
     pub rounds_to_run: u64,
     /// What the run did at each level of [`Scenario::topology`].
     pub levels: LevelCounts,
-    /// Per CPU: a steal probe outstanding before the step being executed, so a
-    /// probe the step consumed without handing a task over is a failed steal.
-    probing: Vec<bool>,
+    /// Per CPU: the CPU holding its ask before the step being executed, so an
+    /// ask that holder's step took without handing a task over is a failed
+    /// steal.
+    probing: Vec<Option<CpuId>>,
 }
 
 /// The surplus at which a victim is worth probing —
@@ -616,6 +619,7 @@ impl<'q> Vm<'q> {
             procs,
             programs: BTreeMap::new(),
             spawned: BTreeSet::new(),
+            placed: Vec::new(),
             ran: BTreeSet::new(),
             live: BTreeSet::new(),
             shared: BTreeMap::new(),
@@ -669,7 +673,7 @@ impl<'q> Vm<'q> {
             wc_rounds: 0,
             rounds_to_run: 0,
             levels: LevelCounts::default(),
-            probing: vec![false; n],
+            probing: vec![None; n],
             next_irq,
             next_key: 1,
             next_spawn_cpu: 0,
@@ -687,7 +691,7 @@ impl<'q> Vm<'q> {
         };
         for (index, spec) in vm.scenario.procs.clone().iter().enumerate() {
             for &template in &spec.initial {
-                vm.spawn(index, template, CpuMask::ANY);
+                vm.spawn(index, template, CpuMask::ANY, None);
             }
         }
         // Spawned before any CPU took a step, so sent by none of them.
@@ -711,7 +715,9 @@ impl<'q> Vm<'q> {
         all
     }
 
-    fn spawn(&mut self, process: usize, template: usize, mask: CpuMask) {
+    /// `near` names the thread spawning this one into its process, as
+    /// `CpuHandles::place` takes it.
+    fn spawn(&mut self, process: usize, template: usize, mask: CpuMask, near: Option<Near>) {
         if self.live.len() >= self.scenario.max_tasks {
             return;
         }
@@ -747,7 +753,7 @@ impl<'q> Vm<'q> {
         // differ in where a task lands and in nothing else.
         let least_loaded = self
             .handles
-            .place(CpuId(self.next_spawn_cpu as u32), self.clock, mask)
+            .place(CpuId(self.next_spawn_cpu as u32), self.clock, mask, near)
             .0 as usize;
         self.next_spawn_cpu = (least_loaded + 1) % self.scenario.cpus();
         let dst = match self.scenario.placement {
@@ -755,6 +761,7 @@ impl<'q> Vm<'q> {
             PlacementShape::AllOn(cpu) => cpu,
             PlacementShape::Listed(cpus) => cpus[self.spawned.len()],
         };
+        self.placed.push(dst);
         let builder = TaskBuilder {
             key,
             job,
@@ -993,7 +1000,7 @@ impl<'q> Vm<'q> {
             }
         }
         for cpu in 0..self.scenario.cpus() {
-            self.probing[cpu] = self.cpus[cpu].probe_outstanding();
+            self.probing[cpu] = self.cpus[cpu].ask_held(&self.handles);
         }
         let actor = crate::explore::actor(&step);
         // Only a CPU's own step takes a task out of its parked set.
@@ -1126,18 +1133,18 @@ impl<'q> Vm<'q> {
                 self.levels.wakes[at(home, placed)] += 1;
             }
         }
-        // A probe is consumed only by its victim's drain, so the step that
-        // consumed it is that victim's.
+        // An ask leaves its holder's word by that holder's take or by the
+        // thief's own retraction; only the take is an answer.
         for thief in 0..self.scenario.cpus() {
-            if !self.probing[thief] || self.cpus[thief].probe_outstanding() {
+            let Some(victim) = self.probing[thief] else { continue };
+            if self.handles.get(victim).asked_by(CpuId(thief as u32)) || actor != Some(victim.0 as usize) {
                 continue;
             }
             let answered = self.step_trace.iter().any(|event| {
                 matches!(event.kind, TraceKind::Migrate { to, .. } if to.0 as usize == thief)
             });
             if !answered {
-                let victim = actor.expect("a probe is consumed inside its victim's pass");
-                self.levels.failed_steals[at(victim, CpuId(thief as u32))] += 1;
+                self.levels.failed_steals[at(victim.0 as usize, CpuId(thief as u32))] += 1;
             }
         }
     }
@@ -1160,7 +1167,7 @@ impl<'q> Vm<'q> {
         #[allow(clippy::needless_range_loop)]
         for cpu in 0..self.scenario.cpus() {
             let surplus_next_door = surpluses > usize::from(worth(cpu));
-            let blind = halted[cpu] && surplus_next_door && !self.cpus[cpu].probe_outstanding();
+            let blind = halted[cpu] && surplus_next_door && !self.cpus[cpu].probe_outstanding(&self.handles, self.clock);
             match (blind, self.probe_gap_since[cpu]) {
                 (true, None) => self.probe_gap_since[cpu] = Some(self.clock),
                 (true, Some(since)) => {
@@ -1530,7 +1537,15 @@ impl<'q> Vm<'q> {
                 let process = self.programs[&key].process;
                 // A new thread starts with its spawner's mask.
                 let mask = self.shared[&key].mask().load().0;
-                self.spawn(process, template, mask);
+                // Newest first, as the kernel reads them.
+                let siblings = self
+                    .programs
+                    .iter()
+                    .rev()
+                    .filter(|(_, program)| program.process == process)
+                    .filter_map(|(key, _)| self.shared.get(key).map(|shared| shared.state()));
+                let homes = homes(siblings, mask.within(self.scenario.cpus()));
+                self.spawn(process, template, mask, Some(Near { spawner: CpuId(cpu as u32), homes }));
                 self.programs.get_mut(&key).expect("live").pc += 1;
             }
             Op::Wake { queue, all, boost } => {

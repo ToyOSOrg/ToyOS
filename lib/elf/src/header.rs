@@ -161,6 +161,7 @@ pub const PT_INTERP: u32 = 3;
 pub const PT_NOTE: u32 = 4;
 pub const PT_TLS: u32 = 7;
 pub const PT_GNU_EH_FRAME: u32 = 0x6474_e550;
+pub const PT_GNU_RELRO: u32 = 0x6474_e552;
 
 impl ProgramHeader {
     /// Decode the `i`th entry of a program header table, or `None` past its

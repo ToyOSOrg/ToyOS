@@ -28,6 +28,8 @@ pub(super) extern "sysv64" fn nmi_entry() {
     naked_asm!(
         // Not routed through `arch::entry::ring3_naked_asm`: cld must run here, since `note`'s sysv64 call requires DF clear.
         "cld",
+        // And from Ring 3 it arrives with that thread's `AC`, as every gate does.
+        "clac",
         // Checked before any push: cmp sets flags, and iretq restores RFLAGS from the frame, so flags are free here.
         "cmp dword ptr gs:[{active}], 0",
         "jne 2f",

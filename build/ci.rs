@@ -50,6 +50,10 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   image             the shipped image of every architecture, on the sysroot its
                     job restored (ci.yml)
   guest             the guest suite, on the sysroot its job restored (nightly)
+  rows [<args>...]  `cargo test --test toyos-build -- <args>...`, each split at
+                    whitespace, on this host's own toolchain store, held to the
+                    instrument as `guest` is, after removing the serial logs
+                    earlier runs kept (guest-rows.yml)
   release           put the sysroot main's nightly restored up as its toolchain release
   publish           put main's SDK crates on crates.io (publish.yml)";
 
@@ -64,6 +68,8 @@ enum Job {
     Bootstrap,
     Image,
     Guest,
+    /// The harness's arguments.
+    Rows(Vec<String>),
     Release,
     Publish,
 }
@@ -95,6 +101,10 @@ fn parse(words: &[String]) -> Result<Job, String> {
             other => return Err(format!("`host` has no part called {other:?}")),
         };
         return Ok(Job::Host(Some(part)));
+    }
+    // Split again at whitespace: a workflow hands the arguments over as one.
+    if words.first().map(String::as_str) == Some("rows") {
+        return Ok(Job::Rows(words[1..].iter().flat_map(|w| w.split_whitespace()).map(String::from).collect()));
     }
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host(None),
@@ -130,7 +140,13 @@ pub fn dispatch(root: &Path, args: &[String]) {
         Job::Toolchain => vec![step("the stores of this tree's toolchain", || release::toolchain(root))],
         Job::Bootstrap => vec![step("this tree's toolchain", || release::bootstrap(root))],
         Job::Image => image(root),
-        Job::Guest => guest(root, &suite_args(&["--jobs", "1"])),
+        Job::Guest => guest(root, &suite_args(&["--jobs", "1"]), true),
+        Job::Rows(args) => {
+            let suite = suite_args(&args.iter().map(String::as_str).collect::<Vec<_>>());
+            let mut steps = vec![step("no serial logs kept by an earlier run", || forget_kept_serial(root))];
+            steps.extend(guest(root, &suite, false));
+            steps
+        }
         Job::Release => vec![step("main's toolchain release", || release::release(root))],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
@@ -525,9 +541,6 @@ const REGISTERED: &[Verdict] = &[
 /// Every negative control a model crate declares; `build/build.rs`'s
 /// `every_model_control_is_run` holds this against the manifests.
 pub(crate) const CONTROLS: &[Control] = &[
-    red(KERNEL_LOOM, "wake-fence-off", Some("log_wake"), &[
-        Fails("a_commit_and_an_arm_cannot_both_miss"),
-    ]),
     red(KERNEL_LOOM, "lock-acquire-off", Some("ticket_lock"), &[
         Fails("try_lock_observes_the_previous_owners_writes"),
     ]),
@@ -589,10 +602,6 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "poll-fire-load-store", Some("poll_once"), &[
         Fails("a_post_and_a_recheck_answer_a_poll_once"),
         Fails("a_withdrawal_and_a_post_never_both_take_a_poll"),
-    ]),
-    red(KERNEL_LOOM, "sleeplock-acquire-off", Some("sleep_lock"), &[
-        Fails("a_parking_contender_observes_the_holders_writes"),
-        Fails("two_holders_never_overlap"),
     ]),
     red(KERNEL_LOOM, "device-irq-lossy", Some("device_irq"), &[
         Fails("every_message_is_counted_once"),
@@ -656,20 +665,11 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("a_poll_registered_racing_a_post_completes_exactly_once"),
         Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
     ]),
-    // Reproduces an open defect
-    // (`issues/steal-probe-node-dies-with-its-victim.md`) rather than
-    // proving a lie is caught, and goes with its fix.
-    Control {
-        krate: KERNEL_LOOM,
-        feature: "victim-retires-mid-probe",
-        test: Some("loom_mailbox"),
-        must_red: false,
-        verdicts: &[Says {
-            test: "a_probe_outstanding_when_its_victim_retires_is_never_reclaimed",
-            message: "caught the verdict: the victim retired with a probe still linked in its \
-                      queue",
-        }],
-    },
+    // A steal probe that rings its victim before setting its bit.
+    red(KERNEL_LOOM, "ask-rings-first", Some("loom_sleep"), &[Says {
+        test: "an_ask_is_taken_by_the_pass_its_ring_owes",
+        message: "the ask was neither taken nor owed a pass: it is lost",
+    }]),
     // The isolation test reds, and the SDM's own judge of the allocator sees
     // the cross-space read it lets through.
     red(KERNEL, "counting-allocator", None, &[
@@ -1307,7 +1307,10 @@ fn suite_args(args: &[&str]) -> Vec<String> {
 /// A guest job's own `$TMPDIR`, same rule as [`host`]: nothing the suite
 /// writes past a `toyos_tmpdir::TempDir` — the harness's own `Run`, its lanes,
 /// every boot image — survives past the last step, which reds on it.
-fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
+///
+/// `install`: the sysroot the job restored ([`release::install`]). Without it
+/// the suite builds from the host's own store, as a dev host does.
+fn guest(root: &Path, suite: &[String], install: bool) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-guest");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
     let before = toyos_tmpdir::gone_roots(short);
@@ -1319,7 +1322,7 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
         .iter()
         .map(|&arch| step(&format!("the {} instrument", arch.name()), || instrument(root, arch)))
         .collect();
-    if steps.iter().all(|s| s.verdict.is_ok()) {
+    if install && steps.iter().all(|s| s.verdict.is_ok()) {
         steps.push(step("the toolchain", || release::install(root)));
     }
     if steps.iter().all(|s| s.verdict.is_ok()) {
@@ -1338,6 +1341,17 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
     // process's own to judge, and a leak past a failing suite is still a leak.
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before, true)));
     steps
+}
+
+/// An empty `target/red-run-serial`: a runner that keeps its workspace
+/// uploads only what this run kept.
+fn forget_kept_serial(root: &Path) -> Result<String, String> {
+    let kept = root.join("target/red-run-serial");
+    match std::fs::remove_dir_all(&kept) {
+        Ok(()) => Ok(format!("removed {}", kept.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("none".to_string()),
+        Err(e) => Err(format!("remove {}: {e}", kept.display())),
+    }
 }
 
 /// The suite's own count line and every line naming a verdict worth reading
@@ -1393,8 +1407,8 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
     if have != want {
         return Err(format!(
             "{line}: this runs QEMU {have} and build/ci/qemu-version declares {want}. The \
-             container image's digest is what pins it, so moving it is a commit that says the \
-             instrument moved"
+             host's QEMU is held to the declaration, and moving the declaration is a commit \
+             that says the instrument moved"
         ));
     }
     if native && node && !arch.accel().is_hardware() {
@@ -1804,6 +1818,10 @@ mod tests {
         assert_eq!(parse(&words("scope")), Ok(Job::Scope));
         assert_eq!(parse(&words("image")), Ok(Job::Image));
         assert_eq!(parse(&words("guest")), Ok(Job::Guest));
+        assert_eq!(parse(&words("rows")), Ok(Job::Rows(vec![])));
+        assert_eq!(parse(&words("rows virtsmp --jobs 1")), Ok(Job::Rows(words("virtsmp --jobs 1"))));
+        let one = vec!["rows".to_string(), " virtsmp  --jobs 1 ".to_string()];
+        assert_eq!(parse(&one), Ok(Job::Rows(words("virtsmp --jobs 1"))));
         assert_eq!(parse(&words("release")), Ok(Job::Release));
         assert!(parse(&words("guest 3/12")).is_err());
         assert!(parse(&words("tcg")).is_err());
@@ -1937,13 +1955,44 @@ mod tests {
         assert!(text.contains("\n  host:"), "ci.yml runs no job `host`");
     }
 
-    /// Every workflow's `pull_request:` trigger names `main` alone, and none
-    /// asks for a runner this project does not have — a self-hosted label
-    /// queues until it times out, silently.
+    /// The events a workflow's `on:` names, in its block form or either inline
+    /// form; a shape this does not read is refused.
+    fn triggers(name: &str, text: &str) -> Vec<String> {
+        let line = text.lines().find(|l| l.starts_with("on:")).unwrap_or_else(|| panic!("{name}: no `on:`"));
+        let inline = line["on:".len()..].trim();
+        if !inline.is_empty() {
+            return inline.trim_matches(['[', ']']).split(',').map(|t| t.trim().to_string()).collect();
+        }
+        let block = text.split_once("\non:\n").expect("`on:` is a line of its own").1;
+        block
+            .lines()
+            .take_while(|l| l.is_empty() || l.starts_with(' ') || l.starts_with('#'))
+            .filter_map(|l| l.strip_prefix("  "))
+            .filter(|l| !l.starts_with([' ', '#']) && !l.is_empty())
+            .map(|l| l.split(':').next().unwrap_or("").trim().to_string())
+            .collect()
+    }
+
+    /// A `runs-on:` value naming one of GitHub's hosted images. Anything else —
+    /// a self-hosted label, a list, an expression, a value on later lines — is
+    /// treated as a self-hosted runner.
+    fn hosted(runner: &str) -> bool {
+        let runner = runner.trim();
+        ["ubuntu-", "macos-", "windows-"].iter().any(|p| runner.starts_with(p))
+            && runner.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+    }
+
+    /// Every workflow's `pull_request:` trigger names `main` alone, and a job
+    /// off GitHub's hosted runners is only in a workflow `workflow_dispatch`
+    /// alone starts: a dispatch needs write access to the repository, and no
+    /// pull request, its target, a push, a schedule or another workflow's call
+    /// reaches the self-hosted runner from this repository's own workflows,
+    /// directly or through a reusable workflow.
     #[test]
-    fn workflows_run_against_main_on_hosted_runners() {
+    fn only_a_dispatch_reaches_a_self_hosted_runner() {
         let dir = repo_root().join(".github/workflows");
         let mut seen = 0;
+        let mut self_hosted = Vec::new();
         for entry in std::fs::read_dir(&dir).expect(".github/workflows is readable").flatten() {
             let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -1952,14 +2001,58 @@ mod tests {
                 let branches = after.lines().next().unwrap_or("").trim();
                 assert_eq!(branches, "branches: [main]", "{name}");
             }
-            for runner in text.lines().filter_map(|l| l.trim_start().strip_prefix("runs-on:")) {
-                assert!(
-                    !runner.contains("self-hosted") && !runner.contains("toyos"),
-                    "{name}: runs-on:{runner}"
-                );
+            let on = triggers(&name, &text);
+            assert!(!on.is_empty(), "{name}: no trigger read");
+            // A reusable workflow runs its jobs in this repository's context:
+            // one from elsewhere could name the self-hosted label.
+            for called in text.lines().filter_map(|l| l.strip_prefix("    uses:")) {
+                assert!(called.trim().starts_with("./.github/workflows/"), "{name}: a job uses{called}");
+            }
+            let runners: Vec<&str> = text.lines().filter_map(|l| l.trim_start().strip_prefix("runs-on:")).collect();
+            if runners.iter().any(|runner| !hosted(runner)) {
+                assert_eq!(on, ["workflow_dispatch"], "{name}: a self-hosted job is started by {on:?}");
+                refuses_main_and_writes_nothing(&name, &text, runners.len());
+                self_hosted.push(name.clone());
             }
         }
-        assert_eq!(seen, 5, "ci.yml, nightly.yml and publish.yml, and guest.yml and toolchain.yml");
+        assert_eq!(self_hosted, ["guest-rows.yml"], "the workflows that reach a self-hosted runner");
+        assert_eq!(seen, 6, "ci.yml, nightly.yml, publish.yml and guest-rows.yml, and guest.yml and toolchain.yml");
+    }
+
+    /// A self-hosted workflow's job never runs on main's ref, whose token
+    /// writes the caches every other ref restores; it holds no permission and
+    /// uses no cache action, since the runner's own workspace is its cache.
+    fn refuses_main_and_writes_nothing(name: &str, text: &str, jobs: usize) {
+        let permissions: Vec<&str> = text.lines().filter(|l| l.trim_start().starts_with("permissions:")).collect();
+        assert_eq!(permissions, ["permissions: {}"], "{name}: its permissions");
+        let caches = text.lines().filter(|l| l.contains("uses:") && l.contains("actions/cache"));
+        assert_eq!(caches.count(), 0, "{name} uses a cache action");
+        let conditions: Vec<&str> = text.lines().filter_map(|l| l.strip_prefix("    if:")).map(str::trim).collect();
+        assert_eq!(conditions, vec!["github.ref != 'refs/heads/main'"; jobs], "{name}: each job's condition");
+    }
+
+    #[test]
+    fn the_trigger_and_runner_readers_read_what_they_refuse() {
+        let block = "name: x\non:\n  # why\n  pull_request:\n    branches: [main]\n  merge_group:\n\njobs:\n";
+        assert_eq!(triggers("x", block), ["pull_request", "merge_group"]);
+        assert_eq!(triggers("x", "on: [push, pull_request_target]\n"), ["push", "pull_request_target"]);
+        assert_eq!(triggers("x", "on: workflow_dispatch\n"), ["workflow_dispatch"]);
+        assert!(hosted(" ubuntu-24.04") && hosted(" macos-latest"));
+        for runner in [" [self-hosted, toyos-guest]", " toyos-guest", " ${{ inputs.runner }}", "", " ubuntu-24.04 # x"] {
+            assert!(!hosted(runner), "{runner:?}");
+        }
+        let good = "permissions: {}\njobs:\n  rows:\n    if: github.ref != 'refs/heads/main'\n    runs-on: [self-hosted]\n";
+        refuses_main_and_writes_nothing("good", good, 1);
+        let refused = [
+            good.replace("    if: github.ref != 'refs/heads/main'\n", ""),
+            good.replace("    if: github.ref != 'refs/heads/main'", "    if: always()"),
+            good.replace("permissions: {}", "permissions:\n  contents: read"),
+            good.replace("    runs-on:", "    permissions:\n      actions: write\n    runs-on:"),
+            format!("{good}    steps:\n      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830\n"),
+        ];
+        for text in refused {
+            assert!(std::panic::catch_unwind(|| refuses_main_and_writes_nothing("bad", &text, 1)).is_err(), "{text}");
+        }
     }
 
     #[test]

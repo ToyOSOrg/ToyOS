@@ -144,12 +144,60 @@ pub const CR0: u64 = cr0::PE | cr0::MP | cr0::ET | cr0::NE | cr0::WP | cr0::PG;
 
 /// `CR4` bits every CPU must have. `DE` is zero legacy, not need — this kernel
 /// touches no debug register. `PGE` makes a kernel leaf global
-/// (`paging::kernel_leaf`). `FSGSBASE` is [`CR4_FORBIDDEN`], not here.
-const CR4_REQUIRED: u64 =
-    cr4::DE | cr4::PAE | cr4::MCE | cr4::PGE | cr4::OSFXSR | cr4::OSXMMEXCPT | cr4::OSXSAVE;
+/// (`paging::kernel_leaf`). `SMEP` and `SMAP` make Ring 0 fault on fetching
+/// from or touching a user page (SDM Vol. 3A §4.6), which every CPU of this
+/// kernel's range (2020 on) offers, so one without them is refused rather than
+/// run with the user half open to a kernel bug; and every Ring 0 entry's
+/// `clac` (`arch::entry`) is `#UD` without `SMAP`. `FSGSBASE` is
+/// [`CR4_FORBIDDEN`], not here.
+const CR4_REQUIRED: u64 = cr4::DE
+    | cr4::PAE
+    | cr4::MCE
+    | cr4::PGE
+    | cr4::OSFXSR
+    | cr4::OSXMMEXCPT
+    | cr4::OSXSAVE
+    | cr4::SMEP
+    | cr4::SMAP;
+
+/// [`CR4_REQUIRED`]'s bits by name, for a refusal to say which a CPU lacks.
+const CR4_REQUIRED_NAMES: [(u64, &str); 9] = [
+    (cr4::DE, "DE"),
+    (cr4::PAE, "PAE"),
+    (cr4::MCE, "MCE"),
+    (cr4::PGE, "PGE"),
+    (cr4::OSFXSR, "OSFXSR"),
+    (cr4::OSXMMEXCPT, "OSXMMEXCPT"),
+    (cr4::OSXSAVE, "OSXSAVE"),
+    (cr4::SMEP, "SMEP"),
+    (cr4::SMAP, "SMAP"),
+];
+
+const _: () = {
+    let mut named = 0;
+    let mut i = 0;
+    while i < CR4_REQUIRED_NAMES.len() {
+        named |= CR4_REQUIRED_NAMES[i].0;
+        i += 1;
+    }
+    assert!(named == CR4_REQUIRED, "every required CR4 bit has a name");
+};
+
+/// The names of `bits`' [`CR4_REQUIRED_NAMES`], space-separated.
+struct Cr4Names(u64);
+
+impl core::fmt::Display for Cr4Names {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut names = CR4_REQUIRED_NAMES.iter().filter(|(bit, _)| self.0 & bit != 0).map(|(_, name)| name);
+        if let Some(first) = names.next() {
+            f.write_str(first)?;
+        }
+        names.try_for_each(|name| write!(f, " {name}"))
+    }
+}
 
 /// `CR4` bits this kernel takes when the CPU offers them (checked against CPUID first: an undefined bit is `#GP`).
-const CR4_OPTIONAL: u64 = cr4::SMEP | cr4::SMAP | cr4::PCIDE | cr4::UMIP;
+const CR4_OPTIONAL: u64 = cr4::PCIDE | cr4::UMIP;
 
 /// The `CR4` bit no shipping CPU may hold: `FSGSBASE` gives Ring 3 `WRGSBASE`,
 /// and `GS.base` aims the first memory access of every kernel entry
@@ -285,11 +333,9 @@ pub fn init(cpu_id: u32) {
                 cpu::wrmsr(xss::MSR, XSS);
             }
         }
-        if declared & cr4::SMAP != 0 {
-            // Nothing in this kernel sets `RFLAGS.AC`, so this is the only
-            // `clac` the kernel needs.
-            cpu::clac();
-        }
+        // What firmware left in `RFLAGS.AC`; from here on every entry from
+        // Ring 3 clears it, and nothing in this kernel sets it.
+        cpu::clac();
     }
     self_check(cpu_id, declared, xcr0, form, has_xss);
     super::fpu::declare_area(cpu_id, xcr0, form);
@@ -450,7 +496,8 @@ fn declaration(cpu_id: u32) -> u64 {
     let missing = CR4_REQUIRED & !have;
     assert!(
         missing == 0,
-        "control_regs: cpu{cpu_id} lacks CR4 bits {missing:#x} that this kernel requires",
+        "control_regs: cpu{cpu_id} lacks CR4 bits {missing:#x} ({}) that this kernel requires",
+        Cr4Names(missing),
     );
     let declared = CR4_REQUIRED | (have & CR4_OPTIONAL);
 

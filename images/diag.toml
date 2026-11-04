@@ -14,15 +14,16 @@
 start = ["logkeeper", "fileserver", "toybox"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
-# image does. The kernel keeps the record ring and the console and writes no
-# file at all, so a boot config without `logkeeper` is a boot whose `/log` is empty —
+# image does. The kernel keeps the record ring and writes no file at all, so a
+# boot config without `logkeeper` is a boot whose `/log` is empty —
 # `every_boot_config_runs_logkeeper` is what refuses one. It claims no device and
 # serves no port: its row's authority is `logread`, which is
 # `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands it every
 # program's output beside that.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
+holds = ["log-origins"]
 
 [programs.toybox]
 args = ["pwd"]

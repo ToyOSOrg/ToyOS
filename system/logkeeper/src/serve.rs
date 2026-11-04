@@ -12,7 +12,14 @@
 //!
 //! **A reader that is caught up waits on the replay growing**, and nothing
 //! else wakes it: there is no poll and no timer.
+//!
+//! The console's carriers read the same replay (`crate::carrier`): the hub
+//! keeps the kernel's read positions each round is written through
+//! ([`Hub::positions_through`]), where the console UART's carrier starts with
+//! what it owes of the rounds before ([`Hub::wire_start`]), and the lines said
+//! while the machine stops, which the file holds back and the UART carries.
 
+use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -38,12 +45,25 @@ const MAX_READERS: usize = 2;
 /// slot is let go: a wait on its sink taking bytes, bounded by this.
 const STALLED: Duration = Duration::from_secs(10);
 
-/// The replay, and what of it the carrier is not owed.
+/// Rounds whose positions the hub keeps: a carrier whose channel is further
+/// behind than this speaks for none of it until it catches up.
+const ROUNDS: usize = 4096;
+
+/// The kernel's read positions a round is written through, one per shard.
+pub type Positions = Arc<[u64]>;
+
+/// The replay, and what the console's carriers read beside it.
 struct Held {
     replay: Replay,
-    /// Bytes the console UART carried while the machine stopped, which the
-    /// carrier skips ([`Hub::append_carried`]).
-    carried: Option<(u64, u64)>,
+    /// Each round's end in the replay and the positions it is written
+    /// through, oldest first, the last [`ROUNDS`] of them.
+    rounds: VecDeque<(u64, Positions)>,
+    /// Where the console UART's carrier starts, and what it owes of the
+    /// rounds before: their lines but the kernel's records it carried itself.
+    wire_from: Option<(u64, Arc<[u8]>)>,
+    /// Lines said while the machine stops, held back from the file and owed
+    /// the UART's carrier.
+    stopping: Vec<u8>,
 }
 
 /// The replay, and the wake a caught-up reader waits on.
@@ -63,7 +83,12 @@ impl Hub {
     /// A reader is handed over by the `log` port's thread ([`Hub::read`]).
     pub fn start(cap: usize, boot_secs: Option<u64>) -> Self {
         let shared = Arc::new(Shared {
-            replay: Mutex::new(Held { replay: Replay::new(cap), carried: None }),
+            replay: Mutex::new(Held {
+                replay: Replay::new(cap),
+                rounds: VecDeque::new(),
+                wire_from: None,
+                stopping: Vec::new(),
+            }),
             grew: Condvar::new(),
             readers: AtomicUsize::new(0),
             boot_secs,
@@ -78,27 +103,73 @@ impl Hub {
         admit(&self.shared, format!("reader {}", conn.as_handle().raw().0), PipeSink::new(pipe));
     }
 
-    /// The lines the file has just taken, for every reader.
-    pub fn append(&self, lines: &[u8]) {
-        self.shared.replay.lock().expect("logkeeper: the replay is poisoned").replay.append(lines);
-        self.shared.grew.notify_all();
-    }
-
-    /// [`Self::append`], of lines the console UART has carried already, which
-    /// the carrier skips: what the machine said while it stopped, once the
-    /// stop was refused.
-    pub fn append_carried(&self, lines: &[u8]) {
-        let mut held = self.shared.replay.lock().expect("logkeeper: the replay is poisoned");
-        let from = held.replay.end();
+    /// The lines the file has just taken, for every reader, and the kernel's
+    /// read positions they are written through where they are a round's.
+    pub fn append(&self, lines: &[u8], through: Option<Positions>) {
+        let mut held = self.lock();
         held.replay.append(lines);
-        held.carried = Some((from, held.replay.end()));
+        if let Some(positions) = through {
+            let end = held.replay.end();
+            if held.rounds.len() == ROUNDS {
+                held.rounds.pop_front();
+            }
+            held.rounds.push_back((end, positions));
+        }
         drop(held);
         self.shared.grew.notify_all();
     }
 
+    /// The positions of the last round wholly before `at`: what a channel
+    /// that has taken the replay up to `at` has spoken of the kernel's log.
+    pub fn positions_through(&self, at: u64) -> Option<Positions> {
+        let held = self.lock();
+        held.rounds.iter().rev().find(|(end, _)| *end <= at).map(|(_, positions)| Arc::clone(positions))
+    }
+
+    /// The console UART's carrier starts at `at`, past every kernel record the
+    /// kernel put on the UART itself, owing `owed` of the rounds before. Once.
+    pub fn set_wire_from(&self, at: u64, owed: Vec<u8>) {
+        let mut held = self.lock();
+        assert!(held.wire_from.is_none(), "logkeeper: where the UART's carrier starts is said twice");
+        held.wire_from = Some((at, owed.into()));
+        drop(held);
+        self.shared.grew.notify_all();
+    }
+
+    /// Where a carrier of the UART starts, once the rounds have said, given
+    /// the replay offset `resumed` its channel had taken or passed over
+    /// before: there, or where the kernel left the UART with what the rounds
+    /// before that owe it, which a channel that took less is handed again.
+    pub fn wire_start(&self, resumed: u64) -> (u64, Option<Arc<[u8]>>) {
+        let mut held = self.lock();
+        loop {
+            if let Some((from, owed)) = &held.wire_from {
+                return if resumed >= *from { (resumed, None) } else { (*from, Some(Arc::clone(owed))) };
+            }
+            held = self.shared.grew.wait(held).expect("logkeeper: the replay is poisoned");
+        }
+    }
+
+    /// Lines said while the machine stops, for the UART's carrier alone.
+    pub fn append_stopping(&self, lines: &[u8]) {
+        self.lock().stopping.extend_from_slice(lines);
+        self.shared.grew.notify_all();
+    }
+
+    /// The stop was refused: what was said while it stood, which the file
+    /// takes now, for every reader, and none of it owed the UART beside.
+    pub fn resume(&self, lines: &[u8]) {
+        self.lock().stopping.clear();
+        self.append(lines, None);
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Held> {
+        self.shared.replay.lock().expect("logkeeper: the replay is poisoned")
+    }
+
     /// How long the boot is so far.
     pub fn end(&self) -> u64 {
-        self.shared.replay.lock().expect("logkeeper: the replay is poisoned").replay.end()
+        self.lock().replay.end()
     }
 
     /// The pipe a reader on `conn` is handed, and the boot's length it starts
@@ -107,13 +178,47 @@ impl Hub {
         hand_over(conn, self.end())
     }
 
-    /// The bytes after `at` for the carrier, at most [`CHUNK`] of them, once
-    /// there are any, skipping what the UART carried; `at` moves past them. A
-    /// carrier the replay no longer holds the bytes of is handed the line that
-    /// says so instead.
-    pub fn next_for_the_carrier(&self, at: &mut u64) -> Vec<u8> {
-        next(&self.shared, at, true)
+    /// What a carrier at `at` is fed next, once there is any: at most
+    /// [`CHUNK`] bytes of the replay, and `at` past them, or the line that
+    /// says what the replay no longer holds; or, for the UART's carrier
+    /// caught up with the replay, the lines said while the machine stops.
+    pub fn next_for_a_carrier(&self, at: &mut u64, wire: bool) -> Fed {
+        let mut held = self.lock();
+        loop {
+            match held.replay.next(*at, CHUNK) {
+                Next::Bytes(bytes) => {
+                    *at += bytes.len() as u64;
+                    return Fed::Replay(bytes.to_vec());
+                }
+                Next::Evicted { lost, at: resume } => {
+                    *at = resume;
+                    return Fed::Gap(evicted(self.shared.boot_secs, lost));
+                }
+                Next::CaughtUp if wire && !held.stopping.is_empty() => {
+                    return Fed::Said(std::mem::take(&mut held.stopping));
+                }
+                Next::CaughtUp => held = self.shared.grew.wait(held).expect("logkeeper: the replay is poisoned"),
+            }
+        }
     }
+
+    /// One of this program's own lines, as the log renders it, which no ring
+    /// carries: what a carrier is told on its own channel.
+    pub fn own_line(&self, severity: Severity, text: &str) -> Vec<u8> {
+        own_line(self.shared.boot_secs, severity, text)
+    }
+}
+
+/// What a carrier is fed.
+pub enum Fed {
+    /// Bytes of the replay, which a channel taking them speaks for.
+    Replay(Vec<u8>),
+    /// Lines that are not the replay's.
+    Said(Vec<u8>),
+    /// The line that says what the replay no longer holds, which the carrier
+    /// is past: its channel speaks for none of what follows, whose rounds the
+    /// skipped bytes are part of.
+    Gap(Vec<u8>),
 }
 
 /// The read end goes to the reader with the boot's length so far, the write
@@ -175,7 +280,7 @@ fn feed(shared: &Shared, mut sink: impl Write) -> (u64, Left) {
     let mut at = 0u64;
     let mut sent = 0u64;
     loop {
-        let chunk = next(shared, &mut at, false);
+        let chunk = next(shared, &mut at);
         match sink.write_all(&chunk) {
             Ok(()) => sent += chunk.len() as u64,
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return (sent, Left::Stalled),
@@ -184,21 +289,13 @@ fn feed(shared: &Shared, mut sink: impl Write) -> (u64, Left) {
     }
 }
 
-/// The bytes after `at`, as [`Hub::next_for_the_carrier`] says, skipping what
-/// the UART carried where `carrier` asks.
-fn next(shared: &Shared, at: &mut u64, carrier: bool) -> Vec<u8> {
+/// The bytes after `at`, at most [`CHUNK`] of them, once there are any; `at`
+/// moves past them. A reader the replay no longer holds the bytes of is
+/// handed the line that says so instead.
+fn next(shared: &Shared, at: &mut u64) -> Vec<u8> {
     let mut held = shared.replay.lock().expect("logkeeper: the replay is poisoned");
     loop {
-        let mut most = CHUNK;
-        if let (true, Some((from, to))) = (carrier, held.carried) {
-            if *at >= from {
-                *at = (*at).max(to);
-                held.carried = None;
-            } else {
-                most = most.min((from - *at) as usize);
-            }
-        }
-        match held.replay.next(*at, most) {
+        match held.replay.next(*at, CHUNK) {
             Next::Bytes(bytes) => {
                 *at += bytes.len() as u64;
                 return bytes.to_vec();
@@ -214,19 +311,16 @@ fn next(shared: &Shared, at: &mut u64, carrier: bool) -> Vec<u8> {
 
 /// The line a reader gets in place of what the replay no longer holds.
 fn evicted(boot_secs: Option<u64>, lost: u64) -> Vec<u8> {
-    let at_ns = toyos_abi::clock::stamp_ns();
     let text = format!("logkeeper: the first {lost} bytes of this boot are no longer held here; /log has them");
+    own_line(boot_secs, Severity::Warn, &text)
+}
+
+/// One of this program's lines, stamped now, rendered as the log renders it.
+fn own_line(boot_secs: Option<u64>, severity: Severity, text: &str) -> Vec<u8> {
+    let at_ns = toyos_abi::clock::stamp_ns();
     let tag = Tag::new(LOGKEEPER).expect("logkeeper's own name is a tag");
     let stamp = crate::stamp(boot_secs, Some(at_ns));
-    let line = ProgramLine {
-        stamp: &stamp,
-        at_ns,
-        severity: Severity::Warn,
-        tid: 0,
-        pid: None,
-        tag,
-        text: text.as_bytes(),
-    };
+    let line = ProgramLine { stamp: &stamp, at_ns, severity, tid: 0, pid: None, tag, text: text.as_bytes() };
     format!("{line}\n").into_bytes()
 }
 
@@ -262,5 +356,79 @@ impl Write for PipeSink {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn replay(fed: Fed) -> Vec<u8> {
+        match fed {
+            Fed::Replay(bytes) => bytes,
+            Fed::Said(_) | Fed::Gap(_) => panic!("lines that are not the replay's"),
+        }
+    }
+
+    fn at(positions: &[u64]) -> Option<Positions> {
+        Some(positions.into())
+    }
+
+    /// A channel that has taken the replay up to an offset has spoken the
+    /// kernel's log through the positions of the last round wholly before it,
+    /// and nothing of a round it has only begun.
+    #[test]
+    fn what_a_channel_took_speaks_for_the_rounds_it_took_whole() {
+        let hub = Hub::start(1 << 20, None);
+        hub.append(b"a\nb\n", at(&[3, 1]));
+        hub.append(b"c\n", at(&[3, 2]));
+        hub.resume(b"held\n");
+        assert_eq!(hub.positions_through(0), None);
+        assert_eq!(hub.positions_through(3), None, "half the first round is none of it");
+        assert_eq!(hub.positions_through(4), at(&[3, 1]));
+        assert_eq!(hub.positions_through(6), at(&[3, 2]));
+        assert_eq!(hub.positions_through(11), at(&[3, 2]), "lines with no round speak for nothing");
+    }
+
+    /// The UART's carrier starts where the kernel left the UART, owing the
+    /// rounds before what the kernel did not put on it, and is handed what
+    /// was said while the machine stopped once it has the replay; of a refused
+    /// stop's lines, those it took as they were said reach it again through
+    /// the replay the file takes them into
+    /// (`issues/the-console-loses-what-its-carrier-had-not-delivered.md`).
+    #[test]
+    fn the_wire_starts_after_the_kernel_and_takes_the_stops_lines_last() {
+        let hub = Hub::start(1 << 20, None);
+        hub.append(b"kernel 1\nprogram 1\nkernel 2\n", at(&[2]));
+        hub.set_wire_from(28, b"program 1\n".to_vec());
+        hub.append(b"program 2\n", at(&[2]));
+        let (mut from, owed) = hub.wire_start(0);
+        assert_eq!((from, owed.as_deref()), (28, Some(&b"program 1\n"[..])));
+        assert_eq!(replay(hub.next_for_a_carrier(&mut from, true)), b"program 2\n");
+        hub.append_stopping(b"stopping\n");
+        match hub.next_for_a_carrier(&mut from, true) {
+            Fed::Said(bytes) => assert_eq!(bytes, b"stopping\n"),
+            _ => panic!("the replay where the stop's lines were owed"),
+        }
+        hub.append_stopping(b"again\n");
+        hub.resume(b"stopping\nagain\n");
+        assert_eq!(replay(hub.next_for_a_carrier(&mut from, true)), b"stopping\nagain\n");
+        let mut port = 0;
+        assert_eq!(replay(hub.next_for_a_carrier(&mut port, false)).len(), 53, "the port is fed from the first line");
+    }
+
+    /// **A UART carrier started again resumes where its channel left off**,
+    /// never from the hand-over: a channel that had taken the rounds the
+    /// kernel left it owes nothing of them again, and one that had not is
+    /// handed them again.
+    #[test]
+    fn a_uart_carrier_started_again_resumes_where_its_channel_left_off() {
+        let hub = Hub::start(1 << 20, None);
+        hub.append(b"kernel\nprogram\n", at(&[1]));
+        hub.set_wire_from(15, b"program\n".to_vec());
+        hub.append(b"later\n", at(&[1]));
+        assert_eq!(hub.wire_start(21), (21, None), "a channel that took the rounds after resumes after them");
+        assert_eq!(hub.wire_start(15), (15, None));
+        assert_eq!(hub.wire_start(3).1.as_deref(), Some(&b"program\n"[..]), "one that took less owes them again");
     }
 }

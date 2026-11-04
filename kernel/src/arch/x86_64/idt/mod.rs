@@ -32,7 +32,7 @@ pub const KICK_VECTOR: u8 = Vector::Kick as u8;
 
 /// The vector each `isa` row's lines are routed to, by row: the vector is
 /// how the kernel knows whose record an interrupt belongs to.
-pub const ISA_VECTORS: [u8; crate::isa::MAX_ROWS] = [Vector::Isa0 as u8, Vector::Isa1 as u8];
+pub const ISA_VECTORS: [u8; crate::isa::MAX_ROWS] = [Vector::Isa0 as u8, Vector::Isa1 as u8, Vector::Isa2 as u8];
 
 /// The vector an IOMMU writes into its own `FEDATA`.
 pub const DMA_FAULT_VECTOR: u8 = Vector::DmaFault as u8;
@@ -249,6 +249,7 @@ idt_vectors! {
         Rtc          = 0x26, rtc::rtc_entry;
         Isa0         = 0x2C, isa::isa0_entry;
         Isa1         = 0x2D, isa::isa1_entry;
+        Isa2         = 0x2E, isa::isa2_entry;
         Kick         = 0xFC, kick::kick_entry;
         // Never returns: `cli; hlt` forever.
         HaltAll      = 0xFD, stub_halt_all;
@@ -334,6 +335,8 @@ pub(crate) extern "sysv64" fn kernel_exit_to_user_check() {
 extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("trap_dispatch");
+    #[cfg(feature = "test-actuators")]
+    crate::arch::cpu::ac_witness("trap_dispatch");
     // SAFETY: `frame` is `rsp` from common_entry's pushes on this CPU's kernel stack, held nowhere else.
     let frame = unsafe { &mut *frame };
     // **First, and before every handler below it.** A handler that faults again

@@ -44,7 +44,7 @@ pub struct Node {
 }
 
 impl Node {
-    /// A process placed under none: the supervisor at depth 0, and a kernel thread's.
+    /// A process placed under none: the supervisor, at depth 0.
     pub fn root() -> Self {
         Self { parent: None, depth: 0, children: Vec::new(), holds: 1 }
     }

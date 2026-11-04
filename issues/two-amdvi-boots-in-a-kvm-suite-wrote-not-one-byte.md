@@ -11,10 +11,9 @@ host went red on `amdvi_selftest` and `amdvi_firmware_left`, and on nothing
 else. Both boots used `tests/images/testcases.toml`, finished building in the
 same second and timed out together after 63 s. Both reported `the console
 carried: nothing at all` and `uart: nothing at all`. So the 16550 file was
-empty, without even the firmware's screen-clearing escapes that the netcase
-boots in
-`issues/a-netcase-boot-under-host-load-said-nothing-past-the-firmwares-screen-clears.md`
-wrote. Both tests passed in that host's suites at `e4bdb0a5d` and `7745af98d`.
+empty, without even the firmware's screen-clearing escapes that two netcase
+boots on a loaded host wrote. Both tests passed in that host's suites at
+`e4bdb0a5d` and `7745af98d`.
 `7745af98d` differs from `0eb2c09d0` only in a host-side wait inside
 `the_log_lands_on_the_boot_stick`. That suite ran alone on the host, and its
 load during these boots was not recorded. Log:

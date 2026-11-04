@@ -95,7 +95,8 @@ impl Watch {
     }
 
     /// Wake at most `limit` threads waiting with `token`, and answer how many
-    /// were parked; one that was not is told anyway and spends nothing.
+    /// were claimed, parked or committing; one that was neither is told anyway
+    /// and spends nothing.
     pub fn post_n(&self, token: u64, limit: usize) -> usize {
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
@@ -151,6 +152,7 @@ impl<L: CellLock<List>> Waitable<L> {
 #[must_use = "a registration must outlive the park it was made for"]
 pub struct Armed<'a, L: CellLock<List> = KernelLock<List>> {
     watch: &'a Waitable<L>,
+    token: u64,
     shared: Arc<KShared>,
     task: Arc<TaskHandle>,
     /// Wait class for the blocked-time breakdown; the park carries no subject
@@ -174,7 +176,7 @@ pub fn arm<L: CellLock<List>>(
     let task = crate::sched::driver::current_handle()?;
     let shared = crate::sched::driver::current_shared()?;
     watch.0.register(&shared, token);
-    Some(Armed { watch, shared, task, class })
+    Some(Armed { watch, token, shared, task, class })
 }
 
 /// The answer a killed thread gets instead of a wake; kernel code cannot
@@ -196,23 +198,9 @@ fn not_revocable() -> ! {
     panic!("watch: a revoke reached a wait that does not end on one");
 }
 
-/// Park once: until a post reaches this registration, the deadline passes, or
-/// this thread is cancelled. A return is not an answer — the caller re-reads
-/// its condition.
-#[track_caller]
-pub fn wait<L: CellLock<List>>(
-    p: &Parkable,
-    armed: &Armed<'_, L>,
-    deadline: Deadline,
-) -> Result<(), Cancelled> {
-    match wait_inner(p, armed, deadline, Cancel::Answers) {
-        Ok(()) => Ok(()),
-        Err(Ended::Cancelled) => Err(Cancelled(())),
-        Err(Ended::Revoked) => not_revocable(),
-    }
-}
-
-/// The same as [`wait`], for a wait a kill may not end.
+/// Park once, for a wait a kill may not end: until a post reaches this
+/// registration or the deadline passes. A return is not an answer — the
+/// caller re-reads its condition.
 #[track_caller]
 pub fn wait_uncancellable<L: CellLock<List>>(p: &Parkable, armed: &Armed<'_, L>, deadline: Deadline) {
     match wait_inner(p, armed, deadline, Cancel::Ignores) {
@@ -256,25 +244,6 @@ pub fn wait_until<L: CellLock<List>>(
     Ok(())
 }
 
-/// Register, then park until `ready()` holds, for a wait a kill may not end
-/// and no deadline bounds.
-#[track_caller]
-pub fn wait_uncancellable_until(p: &Parkable, watch: &Watch, token: u64, ready: impl Fn() -> bool) {
-    if ready() {
-        return;
-    }
-    // No current task cannot be answered by returning: the caller would carry
-    // on believing it holds a lock it never took.
-    // Class is fixed at `Other`: blocked time on a lock is the holder's reason, not the contender's.
-    let armed = arm(watch, token, WaitClass::Other)
-        .expect("watch: an uncancellable wait with no task to park");
-    // Exits only on the predicate: returning without it here means returning
-    // without the lock held.
-    while !ready() {
-        wait_uncancellable(p, &armed, Deadline::never());
-    }
-}
-
 #[track_caller]
 fn wait_inner<L: CellLock<List>>(
     _p: &Parkable,
@@ -299,6 +268,13 @@ fn wait_inner<L: CellLock<List>>(
     };
     crate::scheduler::block_on(ticket, deadline);
     if killed() {
+        // This wait may hold a bounded post's count, from a claim at its
+        // commit or its park; pass one on before unwinding. Where none was
+        // spent, another waiter rechecks.
+        preempt_off(|p| {
+            let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
+            armed.watch.0.post_n(armed.token, 1, WakeCause::new(WakeReason::Woken), &env);
+        });
         return Err(Ended::Cancelled);
     }
     Ok(())

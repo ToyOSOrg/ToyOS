@@ -76,6 +76,14 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   HVF on this Mac?", he answered: "Yes, once ARM userland boots
   (Recommended)".
 
+## Owner ruling, 2026-11-04
+
+Until an AArch64 metal bench exists, this track's AArch64-only work waits,
+stage 7's desktop among it, as root `CLAUDE.md`'s
+"AArch64 waits for a metal bench" rules. Until then this supersedes the
+2026-10-09 direction "then we need the arm desktop asap" and stage 8's
+"fixed or deleted".
+
 ## The default architecture
 
 `cargo run` and the build pick x86-64 when no architecture is named, whatever
@@ -293,8 +301,8 @@ Each stage names its exit; "measured" means a number from a run.
    answers from a virtio-rng (`kernel/src/random.rs`); `virt_el2_drop`,
    `virt_smp` and `virt_jobs_at_el2`, one boot of the job case with the timer
    and FP jobs in it, stay emulated at EL2, which HVF gives no guest, and
-   `virt_reboot` and five more stay emulated until
-   `issues/a-woken-klogd-can-wait-seconds-on-an-idle-cpu-under-hvf.md`
+   `virt_reboot` and three more stay emulated until
+   `issues/a-woken-thread-can-wait-seconds-on-an-idle-cpu-under-hvf.md`
    is fixed. Each judges an event, never a rate: no QEMU test measures time.
    **Accepted with the move to HVF:** `virt_user_mode`, `virt_irq_storm`,
    `virt_timer_floor`, `virt_failed_ap_leaves_no_hole` and

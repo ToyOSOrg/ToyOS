@@ -5,12 +5,19 @@
 # boot but the one that is for it; no row here starts another, so no login
 # holds it.
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "acpiserver", "test-runner"]
+start = ["logkeeper", "uart", "diskserver", "fileserver", "acpiserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log"]
+syscap = ["logread", "console"]
+serves = ["log", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 [programs.acpiserver]
 service = true

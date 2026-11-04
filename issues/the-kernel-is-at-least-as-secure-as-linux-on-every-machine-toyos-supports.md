@@ -28,7 +28,7 @@ work needs.
 - `issues/no-program-runs-with-speculative-store-bypass-disabled.md`
 - `issues/no-gate-decodes-kernel-elfs-instructions.md`
 - `issues/no-entry-or-switch-clears-the-bhb-fills-the-rsb-or-issues-an-ibpb.md`
-- `issues/user-pointer-checks-have-no-spectre-v1-fence-and-smap-is-optional.md`
+- `issues/user-pointer-checks-have-no-spectre-v1-fence.md`
 - `issues/indirect-branches-and-returns-run-without-thunks.md`
 - `issues/tsx-stays-as-firmware-left-it.md`
 - `issues/no-user-address-is-drawn-per-spawn.md`
@@ -37,7 +37,6 @@ work needs.
 - `issues/every-syscall-runs-at-one-kernel-stack-offset.md`
 - `issues/kernel-functions-return-with-their-used-registers-intact.md`
 - `issues/a-threads-kernel-stack-has-no-guard-page.md`
-- `issues/the-kernels-relro-stays-writable.md`
 - `issues/x86-64s-boot-map-is-writable-and-executable.md`
 - `issues/the-kernel-heap-has-none-of-slubs-hardening.md`
 - `issues/a-device-without-a-domain-of-its-own-reaches-all-memory.md`

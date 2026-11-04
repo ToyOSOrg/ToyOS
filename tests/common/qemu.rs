@@ -220,7 +220,8 @@ pub fn host_speed() -> (Option<u32>, u32, u32, u32) {
 /// it exists so a large host can reproduce a small one's oversubscription for a
 /// measurement, and so a run can pin the number a verdict was read against. It
 /// can only *widen* a liveness ceiling, never shorten one, so a stale value
-/// costs a slower wedge report and never a false pass.
+/// costs a slower wedge report and never a false pass. The guest CPU budget
+/// takes it only where it is below what the host has ([`admitted_cpus`]).
 pub fn host_cores() -> u32 {
     static CORES: AtomicU32 = AtomicU32::new(0);
     let cached = CORES.load(Ordering::Relaxed);
@@ -236,6 +237,13 @@ pub fn host_cores() -> u32 {
         });
     CORES.store(detected, Ordering::Relaxed);
     detected
+}
+
+/// The host CPUs guests are admitted against: [`host_cores`], never more than
+/// the host has, so an override can narrow the budget and never widen it.
+fn admitted_cpus() -> u32 {
+    let real = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
+    host_cores().min(real)
 }
 
 /// How much an `smp`-vCPU guest is oversubscribed on `cores` host cores, as a
@@ -358,9 +366,12 @@ pub const TIMED_OUT: &str = "timed out after";
 /// It is not a verdict: no assertion in this suite is satisfied by the guest
 /// merely talking.
 ///
-/// On a shared boot the kernel itself is a periodic speaker, on a 10 s cadence,
-/// so a wait whose predicate never comes true is never ended by this bound —
-/// the guest keeps talking, and the wait runs the whole of [`GUEST_WEDGED`].
+/// Not paid out for the host. A guest no wider than the host has a host CPU for
+/// each of its vCPUs among the guests (`toyos_build::buildlock::guest_cpus`);
+/// one wider than the host, or beside builds, can still be starved
+/// (`issues/a-budgeted-guest-can-still-share-host-cpus.md`). Nothing in a guest
+/// speaks on a cadence, so a step that goes this long without a word ends the
+/// wait.
 pub const GUEST_QUIET: Duration = Duration::from_secs(15);
 
 /// The other end of the same guard: a guest can be stuck and chatty, and a
@@ -483,11 +494,10 @@ pub const VERDICT_POLL: Duration = Duration::from_millis(100);
 ///
 /// **`elapsed > ceiling` stays a necessary condition, and that is what keeps
 /// this safe.** Silence alone is not a wedge on this suite's boots: a healthy
-/// but idle guest on a config with no live periodic speaker — an idle
-/// soundserver, and the kernel's own ~10 s line halting with the idle loop — was
-/// measured quiet for as long as 102 s, so a guard that fired on 15 s of silence
-/// by itself would red a working machine. A guest's own budget is what says how
-/// long its silence is allowed; only past *that* does quiet mean stopped.
+/// guest with nothing to do says nothing (one was measured quiet for 102 s), so
+/// a guard that fired on 15 s of silence by itself would red a working machine.
+/// A guest's own budget is what says how long its silence is allowed; only past
+/// *that* does quiet mean stopped.
 pub fn ceiling_verdict(
     dying: Option<&str>,
     elapsed: Duration,
@@ -680,8 +690,8 @@ pub enum Profile {
     HeadlessNoIommu,
     /// [`Profile::Headless`] without the console's port, for a boot nothing
     /// declares the root bridges' memory on, where every claim is refused and
-    /// the UART is the console: `tests/images/acpicase.toml`'s, whose `acpi`
-    /// holders are jobs that declare nothing.
+    /// the UART is the console: `tests/images/acpicase.toml`'s probe rows,
+    /// whose `acpi` holders are jobs that declare nothing.
     HeadlessNoConsolePort,
     /// [`Profile::Headless`] with no USB controller: the machine whose NVMe
     /// disk is the only storage it has, and the only device its firmware can
@@ -766,7 +776,7 @@ pub enum Profile {
     /// emulated at EL1 elsewhere, and the only profile that is not a q35.
     Virt,
     /// [`Profile::Virt`] with no virtio-rng, on a CPU with no RNDR: the host's
-    /// under HVF, and `cortex-a72` where it is emulated. Firmware then has no
+    /// under HVF, and `cortex-a76` where it is emulated. Firmware then has no
     /// `EFI_RNG_PROTOCOL`, so the kernel's generator has nothing to be keyed
     /// from.
     VirtNoRng,
@@ -774,10 +784,11 @@ pub enum Profile {
     /// firmware then hands the loader the CPU at EL2, and the kernel's entry
     /// has to drop from it. HVF gives a guest EL1 only.
     VirtEl2,
-    /// [`Profile::VirtEl2`] on `-cpu cortex-a72`, which has no FEAT_VHE: any
-    /// firmware hands the loader EL2 with `HCR_EL2.E2H` clear, where an `_el1`
-    /// register name is EL1's own, so the loader's EL2 arm alone turns EL2's
-    /// MMU off.
+    /// [`Profile::VirtEl2`] on `-cpu cortex-a72`, an Armv8.0 CPU, so with no
+    /// FEAT_VHE and no FEAT_PAN: any firmware hands the loader EL2 with
+    /// `HCR_EL2.E2H` clear, where an `_el1` register name is EL1's own, so the
+    /// loader's EL2 arm alone turns EL2's MMU off; and the kernel, once
+    /// dropped to EL1, refuses the CPU by name.
     VirtEl2NoVhe,
     /// [`Profile::Virt`] emulated on `-cpu max` whatever the host: firmware
     /// hands the loader the CPU at EL1 and QEMU's FADT names PSCI's conduit
@@ -850,7 +861,7 @@ impl Profile {
     fn cpu(self) -> String {
         match self {
             Self::VirtEl2NoVhe => "cortex-a72".to_string(),
-            Self::VirtNoRng if !self.accel().is_hardware() => "cortex-a72".to_string(),
+            Self::VirtNoRng if !self.accel().is_hardware() => "cortex-a76".to_string(),
             // The one declaration's CPU with its x2APIC taken away, refused by
             // name the day that declaration stops offering one.
             Self::MetalNoX2apic => {
@@ -1240,6 +1251,9 @@ pub struct BootOptions {
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
+    /// Files of the image's own ROOT left out, each by its ROOT-relative
+    /// path: a boot staged on a `/system` missing one.
+    pub root_omits: &'static [&'static str],
     /// DATA's size in place of the profile's, for a boot that writes more
     /// than [`NVME_SMALL`] holds, on a profile whose disk carries the image.
     pub data_bytes: Option<u64>,
@@ -1294,6 +1308,7 @@ impl Default for BootOptions {
             mute: false,
             ready_marker: DEFAULT_READY,
             extra_root_files: Vec::new(),
+            root_omits: &[],
             data_bytes: None,
             psci_trace: None,
             rtc_base: None,
@@ -1351,6 +1366,40 @@ pub struct QemuInstance {
     smp: u32,
     /// The test binaries this boot put on ROOT, by the name `run` takes.
     carried: BTreeSet<String>,
+    /// The guest's host CPUs, given back after [`Drop`] reaps QEMU.
+    _cpus: HeldCpus,
+}
+
+thread_local! {
+    /// Whether this thread holds a live guest's CPUs.
+    static HOLDS_CPUS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A guest's host CPUs, and this thread's mark that it holds them: a thread that
+/// asked for a second guest's while holding one could wait on itself, or on a
+/// wide waiter that waits on it, until the budget's six-hour ceiling.
+struct HeldCpus {
+    _cpus: toyos_build::buildlock::GuestCpus,
+}
+
+impl HeldCpus {
+    fn take(smp: u32, config: &Path) -> Self {
+        assert!(
+            !HOLDS_CPUS.get(),
+            "[qemu] a thread booted a guest of {} while it holds another's host CPUs: drop the first",
+            config.display(),
+        );
+        let what = format!("a {smp}-vCPU guest of {}", config.display());
+        let cpus = toyos_build::buildlock::guest_cpus(&toyos_build::keystore::host(), smp, admitted_cpus(), &what);
+        HOLDS_CPUS.set(true);
+        Self { _cpus: cpus }
+    }
+}
+
+impl Drop for HeldCpus {
+    fn drop(&mut self) {
+        HOLDS_CPUS.set(false);
+    }
 }
 
 /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants.
@@ -1372,7 +1421,7 @@ fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
     toyos_build::build::TEST_KERNEL.to_vec()
 }
 
-// Nine, because an image is its architecture and its slots as much as its files and its kernel.
+// Ten, because an image is its architecture and its slots as much as its files and its kernel.
 #[allow(clippy::too_many_arguments)]
 fn build_boot_image_with(
     arch: Arch,
@@ -1380,6 +1429,7 @@ fn build_boot_image_with(
     c_tests: &[(String, Vec<u8>)],
     rust_tests: &[(String, Vec<u8>)],
     staged: &[(String, Vec<u8>)],
+    omits: &[&str],
     kernel_features: &[&str],
     kernel_params: &[&str],
     debug_wait: bool,
@@ -1449,7 +1499,8 @@ fn build_boot_image_with(
     assert!(config.is_file(), "no image config at {}", config.display());
 
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    let plan = toyos_build::build::Plan::new(arch, config, kernel_features, kernel_params);
+    let mut plan = toyos_build::build::Plan::new(arch, config, kernel_features, kernel_params);
+    plan.root_omits = omits.iter().map(|omitted| (*omitted).to_string()).collect();
     let root = compile::repo_root();
     match bent {
         None => toyos_build::build::build_test_image(&root, &plan, quiet, &extra_files),
@@ -1481,8 +1532,8 @@ pub fn build_toyos_bin_as(arch: Arch, crate_path: &Path, name: &str, profile: &s
     toyos_build::build::build_toyos_bin_as(&compile::repo_root(), arch, crate_path, name, profile, quiet)
 }
 
-/// A kernel record's line, whichever writer spelled its head: `klogd`'s console
-/// and a `/log` file's alike. Nothing else writes one — a program's line
+/// A kernel record's line, whichever writer spelled its head: the kernel's own
+/// console lines and a `/log` file's alike. Nothing else writes one — a program's line
 /// reaches both only through `logkeeper`, under the program's own head.
 pub fn is_kernel_line(line: &str) -> bool {
     toyos_logstream::is_kernel_line(line)
@@ -1497,7 +1548,7 @@ pub fn user_text(line: &str) -> &str {
 
 /// File the userland half of one captured console line under `stdout`: a
 /// program's text, and nothing of the kernel's. Every console line is one
-/// writer's whole — `klogd` is the wire's one writer — so a line is one or
+/// writer's whole — the UART has one writer at a time — so a line is one or
 /// the other.
 fn push_user_half(line: &str, stdout: &mut String) {
     if is_kernel_line(line) {
@@ -1534,8 +1585,7 @@ impl QemuInstance {
 
         // Named for the boot rather than for the process. Two guests handed one
         // image file is not a slow test, it is a guest reading bytes another
-        // boot is in the middle of writing — and the lane directory alone would
-        // not settle it, since one test may hold two instances at once.
+        // boot is in the middle of writing.
         let boot_image = test_dir.join(format!("boot-{seq}.img"));
         let params = options.params();
         let params: Vec<&str> = params.iter().map(String::as_str).collect();
@@ -1545,6 +1595,7 @@ impl QemuInstance {
             c_tests,
             rust_tests,
             &options.extra_root_files,
+            options.root_omits,
             &features,
             &params,
             options.debug_wait,
@@ -1614,6 +1665,9 @@ impl QemuInstance {
             .unwrap_or_else(|why| panic!("[qemu] {why}"));
 
         let qemu = qemu_command(&boot_image, nvme.path(), &sockets.dir, &vars, &options);
+        // After the image is built, and before QEMU and every clock of this boot
+        // start: the wait for CPUs is the host's, never the guest's.
+        let cpus = HeldCpus::take(options.smp, config);
         spawn_and_wait_ready(
             qemu,
             options,
@@ -1626,6 +1680,7 @@ impl QemuInstance {
                 boot_image,
                 vars,
                 carried,
+                cpus,
             },
         )
     }
@@ -1943,11 +1998,10 @@ impl QemuInstance {
                     }
                     if line.contains(&format!("===TEST_START {want}===")) {
                         in_test = true;
-                        // **The runner's marker reaches the console through
-                        // `logkeeper` and the kernel's records through `klogd`**, so
-                        // the kernel's record of this test's spawn, and what
-                        // followed it, may arrive before the marker that opens
-                        // the window. Everything from that record on is this
+                        // **The console carries `logkeeper`'s rounds in stamp
+                        // order**, so the kernel's record of this test's spawn,
+                        // and what followed it, may arrive before the marker
+                        // that opens the window. Everything from that record on is this
                         // test's, and moves into the window.
                         let spawned = format!("/{want} pid=");
                         let from = before
@@ -2331,6 +2385,9 @@ impl QmpInput {
 
     /// Every key transition in `events` as one batch, so a chord like Shift+B
     /// arrives as a chord rather than as a race.
+    ///
+    /// QEMU's PS/2 queue holds 16 bytes and drops the rest without a word, so
+    /// a caller typing more than that paces it against what the guest shows.
     pub fn keys(&mut self, events: &[(&str, bool)]) {
         let body: Vec<String> = events
             .iter()
@@ -2733,10 +2790,11 @@ struct Files {
     boot_image: PathBuf,
     vars: PathBuf,
     carried: BTreeSet<String>,
+    cpus: HeldCpus,
 }
 
 fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -> QemuInstance {
-    let Files { seq, uart_log, nvme, sockets, screendump, boot_image, vars, carried } = files;
+    let Files { seq, uart_log, nvme, sockets, screendump, boot_image, vars, carried, cpus } = files;
 
     // Inherited: `orphan` reads QEMU's exit as the end of its harness's stderr.
     qemu.stdin(Stdio::piped())
@@ -2759,6 +2817,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
     let uart = listener.map(|listener| {
         toyos_build::vmconsole::UartSocket::accept(&listener, &mut child, &uart_log).unwrap_or_else(|why| {
             let _ = child.kill();
+            let _ = child.wait();
             panic!("[qemu] {why}")
         })
     });
@@ -2787,10 +2846,17 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
     // Both are read off the image this boot was handed, never off the
     // checkout, which may have moved since.
     if options.ready_marker == DEFAULT_READY && !options.mute {
-        let (root, bytes) = toyos_build::image::root_file_on(&boot_image, toyos_osrelease::PATH)
-            .unwrap_or_else(|why| panic!("[qemu] {why}"));
-        let release = toyos_osrelease::parse(&bytes)
-            .unwrap_or_else(|why| panic!("[qemu] {} on {} is not the build's: {why:?}", toyos_osrelease::PATH, boot_image.display()));
+        // Reaped before the panic: the CPUs and the NVMe claim drop after it.
+        let mut refuse = |why: String| -> ! {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("[qemu] {why}")
+        };
+        let (root, bytes) =
+            toyos_build::image::root_file_on(&boot_image, toyos_osrelease::PATH).unwrap_or_else(|why| refuse(why));
+        let release = toyos_osrelease::parse(&bytes).unwrap_or_else(|why| {
+            refuse(format!("{} on {} is not the build's: {why:?}", toyos_osrelease::PATH, boot_image.display()))
+        });
         let named = format!("{}{root}", toyos_osrelease::ROOT_SAID);
         let said = format!(
             "{}{} {}, committed {} UTC, toolchain {}, {}",
@@ -2804,6 +2870,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         for line in [&named, &said] {
             if !boot_log.lines().any(|l| l.contains(line.as_str())) {
                 let _ = child.kill();
+                let _ = child.wait();
                 panic!("[qemu] the boot never said `{line}`, of the image this run built\nconsole:\n{boot_log}");
             }
         }
@@ -2825,6 +2892,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         boot_log,
         smp: options.smp,
         carried,
+        _cpus: cpus,
     }
 }
 
@@ -2916,6 +2984,7 @@ fn wait_for_ready(
     loop {
         if !no_timeout && start.elapsed() > boot_timeout {
             let _ = child.kill();
+            let _ = child.wait();
             // With what it did say. A timeout that discards the console is the
             // one failure in this harness that arrives with no evidence at all,
             // and "the guest printed nothing" and "the guest printed sixty
@@ -2973,6 +3042,7 @@ fn wait_for_ready(
                     }
                 }
                 let _ = child.kill();
+                let _ = child.wait();
                 panic!("[qemu] The supervisor process crashed during boot:\n{crash_msg}");
             }
             Ok(line) => {

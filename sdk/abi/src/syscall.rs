@@ -342,8 +342,9 @@ pub const SYS_PAGED_OP: u64 = 157;
 pub const SYS_PAGED_NOTICES: u64 = 158;
 /// Take a connection's next whole message. See [`message_recv`].
 pub const SYS_MESSAGE_RECV: u64 = 159;
-/// Whether a console holder carries the log off the machine. See [`console_carried`].
-pub const SYS_CONSOLE_CARRIED: u64 = 160;
+/// What the console's channels have carried of the kernel's records. See
+/// [`log_spoken`].
+pub const SYS_LOG_SPOKEN: u64 = 160;
 /// Set the CPUs one of the caller's own threads may run on. See [`thread_set_affinity`].
 pub const SYS_THREAD_SET_AFFINITY: u64 = 161;
 /// Read them back into a buffer of at least [`CPU_MASK_WORDS`] words, or
@@ -366,8 +367,14 @@ pub const SYS_DEVICE_SET: u64 = 166;
 
 /// The device set's snapshot, read whole. See [`device_set_read`].
 pub const SYS_DEVICE_SET_READ: u64 = 167;
+
+/// Give the CPU to another runnable thread of the caller's band. See
+/// [`yield_now`].
+pub const SYS_YIELD: u64 = 168;
+/// The caller's last words, once per boot. See [`log_last_words`].
+pub const SYS_LOG_LAST_WORDS: u64 = 169;
 /// List the names held by a namespace, without opening any connector.
-pub const SYS_NAMESPACE_NAMES: u64 = 168;
+pub const SYS_NAMESPACE_NAMES: u64 = 170;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -375,7 +382,7 @@ pub const SYS_NAMESPACE_NAMES: u64 = 168;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 170;
+pub const SYSCALL_PROFILE_BINS: usize = 172;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
@@ -396,8 +403,7 @@ crate::user_safe! {
     /// what makes endowing a device claim work with no special case: a claim
     /// carries no [`Rights::DUP`], so the move is the only expressible form and
     /// the parent provably no longer holds it. A child's descriptors are
-    /// endowments labelled [`FD_PREFIX`] and their number; a console among
-    /// them is the child's own, minted for it.
+    /// endowments labelled [`FD_PREFIX`] and their number.
     ///
     /// [`Rights::DUP`]: crate::handle::Rights::DUP
     #[derive(Clone, Copy)]
@@ -655,8 +661,8 @@ pub enum FileType {
     File = 1,
     Pipe = 2,
     // 3 was `Keyboard` and 7 `Mouse`, the kernel's input streams: input is
-    // userland's, over the `input` port.
-    Serial = 4,
+    // userland's, over the `input` port. 4 was `Serial`, the kernel's console:
+    // the UART is its driver's.
     Framebuffer = 5,
     Tty = 6,
     Socket = 8,
@@ -688,7 +694,6 @@ impl FileType {
             0 => Some(Self::Unknown),
             1 => Some(Self::File),
             2 => Some(Self::Pipe),
-            4 => Some(Self::Serial),
             5 => Some(Self::Framebuffer),
             6 => Some(Self::Tty),
             8 => Some(Self::Socket),
@@ -838,10 +843,34 @@ pub fn read(handle: RawHandle, buf: &mut [u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_READ, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }
 
-/// Exit the current thread only. Does not return.
-/// Use `exit()` to exit the entire process (all threads).
+/// Exit the current thread only, leaving its code for [`thread_join`]. Does
+/// not return. Use `exit()` to exit the entire process (all threads).
 pub fn thread_exit(code: i32) -> ! {
     loop { syscall(SYS_THREAD_EXIT, code as u64, 0, 0, 0); }
+}
+
+/// [`SYS_THREAD_EXIT`]'s flag for a thread nobody will join: its place in its
+/// process goes as it ends, and the range it names is released as
+/// [`vm_release`] releases it, once the thread no longer runs on it.
+pub const THREAD_EXIT_DETACHED: u64 = 1;
+
+/// Exit the current thread, which nobody will join, releasing `stack`'s
+/// `len` bytes (none where `len` is 0): the stack it stands on, which only
+/// the kernel can take away once the thread has left it. Returns only where
+/// the range is refused, as [`vm_release`] would refuse it; a main thread's
+/// exit is its process's, whatever this says.
+///
+/// # Safety
+/// Nothing but this thread uses `stack`, which ends with it.
+pub unsafe fn thread_exit_detached(code: i32, stack: *mut u8, len: usize) -> SyscallError {
+    let word = syscall(SYS_THREAD_EXIT, code as u64, THREAD_EXIT_DETACHED, stack as u64, len as u64);
+    SyscallError::from_u64(word).unwrap_or(SyscallError::InvalidArgument)
+}
+
+/// Let another runnable thread of the caller's band have the CPU, if one is
+/// waiting for it; the caller runs on at once where none is.
+pub fn yield_now() {
+    syscall(SYS_YIELD, 0, 0, 0, 0);
 }
 
 /// Exit the entire process (all threads) with `code`. Does not return.
@@ -1417,6 +1446,9 @@ device_classes! {
     /// ([`crate::acpi`]): the kernel puts the machine in ACPI mode at the
     /// mint, and the ports the firmware's tables name are the holder's.
     Acpi = 10 => "acpi",
+    /// The machine's console UART, the holder's between the kernel's boot and
+    /// its stop ([`crate::uart`]).
+    Uart = 11 => "uart",
 }
 
 /// What identifies a PCI *card*, not the slot firmware put it in: the same
@@ -1700,6 +1732,8 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// has mounted. A partition GUID two partitions carry answers
 /// `InvalidArgument`, because an ambiguous name is refused rather than resolved
 /// to the first match; so does a nonzero selector word the class does not read.
+/// A PCI function asked for before the root bridges' memory is declared is
+/// `WouldBlock`: the device set's header says when to ask again.
 ///
 /// The claim comes back **without** [`Rights::DUP`], so it can only be moved,
 /// which is what makes endowing one to a child a provable hand-off.
@@ -2199,17 +2233,33 @@ pub unsafe fn shm_sub(shm: RawHandle, offset: u64, len: u64) -> Result<RawHandle
     check(syscall(SYS_SHM_SUB, shm.0 as u64, offset, len, 0)).map(|v| RawHandle(v as u32))
 }
 
-/// Say whether the holder of `console` carries the machine's log off it by
-/// another channel, so the kernel puts on the console UART only a fatal
-/// path's and the stop's lines; the console's end lets go of it.
+/// Say the console's channels have delivered every kernel record before
+/// `cursor`'s positions, a [`log_read`] cursor's, and have `cursor` answered
+/// what the console has spoken: what the kernel put on the UART before
+/// userland ran, and what was said since. A fatal path and the machine's stop
+/// put every record past it on the UART. Positions of zero only read it; a
+/// position past what its shard has issued is `InvalidArgument`.
 ///
-/// Needs [`Rights::WRITE`]. `AlreadyExists` while another holder carries it,
-/// and `NotSupported` once a fatal path or the stop has given the log to the
-/// UART for good; letting go always answers `Ok`.
+/// Needs a `SysCap` carrying [`Rights::CONSOLE`].
 ///
-/// [`Rights::WRITE`]: crate::handle::Rights::WRITE
-pub fn console_carried(console: RawHandle, elsewhere: bool) -> Result<(), SyscallError> {
-    check(syscall(SYS_CONSOLE_CARRIED, console.0 as u64, elsewhere as u64, 0, 0)).map(drop)
+/// [`Rights::CONSOLE`]: crate::handle::Rights::CONSOLE
+pub fn log_spoken(syscap: RawHandle, cursor: &mut [u64]) -> Result<(), SyscallError> {
+    let cursor = sized_cursor(cursor)?;
+    check(syscall(SYS_LOG_SPOKEN, syscap.0 as u64, cursor as u64, 0, 0)).map(drop)
+}
+
+/// Say `text` as the caller's last words: one kernel record, the first such
+/// call of the boot alone, before an end that ends the machine. The
+/// supervisor's is one (the kernel ends the machine on it), and the fatal path
+/// puts the record on the console with the rest the console has not spoken.
+///
+/// `text` is what [`crate::log::last_words`] takes, or `InvalidArgument`; a
+/// boot's second call is `AlreadyExists`. Needs a `SysCap` carrying
+/// [`Rights::LAST_WORDS`], which only the supervisor's has.
+///
+/// [`Rights::LAST_WORDS`]: crate::handle::Rights::LAST_WORDS
+pub fn log_last_words(syscap: RawHandle, text: &[u8]) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_LOG_LAST_WORDS, syscap.0 as u64, text.as_ptr() as u64, text.len() as u64, 0))
 }
 
 /// The machine's [header](SYSINFO_HEADER_SIZE), then as much of the process

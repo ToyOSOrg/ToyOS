@@ -56,8 +56,6 @@ pub struct KernelCtx {
 pub enum Runs {
     /// This CPU's idle loop.
     Idle,
-    /// A kernel thread, which never enters Ring 3.
-    Kernel(TaskId),
     /// A thread of a process.
     User(TaskId),
 }
@@ -67,7 +65,7 @@ impl Runs {
     pub fn id(self) -> Option<TaskId> {
         match self {
             Self::Idle => None,
-            Self::Kernel(id) | Self::User(id) => Some(id),
+            Self::User(id) => Some(id),
         }
     }
 }
@@ -76,12 +74,12 @@ impl Runs {
 pub struct KernelPayload {
     pub id: TaskId,
     pub kernel_stack: KernelStack,
-    /// The address space this task runs in; never `Option` — a kernel thread runs in the kernel's own.
+    /// The address space this task runs in.
     pub address_space: PageTables,
     /// The cross-CPU-readable face of this task; a `CpuSched` is `!Sync` and cannot be walked remotely.
     pub handle: Arc<TaskHandle>,
-    /// This task's process's image, as a crash report records a frame in it; kept here, not looked up via the process table, so a crash report never takes that lock. `None` for a kernel thread.
-    pub image: Option<Arc<UserImage>>,
+    /// This task's process's image, as a crash report records a frame in it; kept here, not looked up via the process table, so a crash report never takes that lock.
+    pub image: Arc<UserImage>,
 }
 
 impl SchedPayload for KernelPayload {

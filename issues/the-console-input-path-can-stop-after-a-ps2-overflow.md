@@ -71,6 +71,12 @@ available on a wedged boot, and the reported `drained 0` *while bytes were
 still being injected* is the ISR side having stopped taking them off the
 controller — not the console having stopped reading the kernel's queue.
 
+**The i8042 is userland's now**: `/system/bin/ps2server` reads it, and the
+kernel ISR and drain counter above are gone. One overflowed boot on 2026-11-04
+(jan-pc, KVM, `session_lifecycle` with a scratch hook, #1169) kept one queue's
+16 bytes of a 62-event batch and took every later byte: 86 read by the
+holder's spawn, 4 + 16 + 2 + 64.
+
 **Exit condition.** The input path is fixed so that no PS/2 overflow stops
 it, the staging above takes every line after the first on twenty boots, and
 `console_locale_detect`, restored, is green beside other guests. Owner: orchestrator.

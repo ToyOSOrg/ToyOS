@@ -147,6 +147,7 @@ pub fn timer() {
 /// The platform's own devices that are not PCI functions.
 pub fn platform_devices(platform: &Platform, rsdp_addr: u64) {
     super::pio::fill_i8042_row();
+    super::pio::fill_uart_row();
     super::acpi_mode::init(rsdp_addr, platform.facs);
     if let Err(why) = super::rtc::arm_update_edges() {
         log!("clock: no RTC edges time the TSC: {why}");

@@ -196,6 +196,9 @@ struct ProgramConfig {
     syscap: Vec<String>,
     /// The idle slot (`toyos_manifest::Program::slots`).
     slots: bool,
+    /// The machine-wide objects the supervisor makes once and endows this row
+    /// (`toyos_manifest::Program::holds`).
+    holds: Vec<String>,
     /// Disk authorizations minted at its start (`toyos_manifest::authorize`).
     authorize: Vec<String>,
     /// A system service: the supervisor starts it with `HOME` at its own `/state/<name>`
@@ -677,7 +680,8 @@ const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::
 /// drawn at, the session-admin port, whose holder signs its user's sessions
 /// out, the wifi port, whose holder joins networks and hands over their
 /// passphrases, the radio port, whose holder is sent a network's keys, the
-/// log's carrier port, for whose holder the console UART goes quiet, and the
+/// log's carrier port, for whose holder the console UART goes quiet, the
+/// log's wire port, whose holder puts the log on the console UART, and the
 /// clipboard agent's port, whose holder speaks to the agent as the host.
 const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_swap::PORT, &[toyos_swap::HOLDER]),
@@ -690,7 +694,18 @@ const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_wifi::PORT, toyos_wifi::HOLDERS),
     (toyos_radio::PORT, toyos_radio::HOLDERS),
     (toyos_logstream::CARRIER, &[toyos_logstream::CARRIER_HOLDER]),
+    (toyos_logstream::WIRE, &[toyos_logstream::WIRE_HOLDER]),
     (toyos_vdagent::endpoint::SERVICE, &[toyos_vdagent::endpoint::SERVICE_HOLDER]),
+];
+
+/// The objects the supervisor makes once and endows the row that holds them
+/// (`toyos_manifest::HOLDINGS`), each with the one row that may: the acceptor
+/// every program's log ring reaches `logkeeper` on, whose holder names every
+/// line's writer, and the console's input, whose holder types at every
+/// program's standard input.
+const HOLDINGS: &[(&str, &str)] = &[
+    (toyos_logstream::ORIGINS, toyos_logstream::LOGKEEPER),
+    (toyos_logstream::CONSOLE_INPUT, toyos_logstream::WIRE_HOLDER),
 ];
 
 /// Rows, as a refusal names them.
@@ -700,7 +715,9 @@ fn named(rows: &[&str]) -> String {
 
 /// Who may hold the authorities that change what the machine runs or what a
 /// package sees: each of [`HELD_ALONE`]'s ports, its holder and nothing else
-/// — no other `[programs]` row and never `[apps]` — the idle slot,
+/// — no other `[programs]` row and never `[apps]` — each of [`HOLDINGS`], its
+/// one row, the `console` syscap, which keeps the kernel's records off a fatal
+/// path's output, `logkeeper` alone, the idle slot,
 /// [`toyos_update::slots::HOLDER`] alone, and the consent port, which no row
 /// receives and its server alone serves.
 ///
@@ -722,6 +739,14 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
         }
         if name != consent::SERVER && program.serves.iter().any(|s| s == consent::PORT) {
             return Err(format!("`{name}` serves `{}`, which only `{}` may serve", consent::PORT, consent::SERVER));
+        }
+        for (held, holder) in HOLDINGS {
+            if name != holder && program.holds.iter().any(|h| h == held) {
+                return Err(format!("`{name}` holds `{held}`, which only `{holder}` may hold"));
+            }
+        }
+        if name != toyos_logstream::LOGKEEPER && program.syscap.iter().any(|s| s == "console") {
+            return Err(format!("`{name}` asks for the `console` syscap, which only `{}` may hold", toyos_logstream::LOGKEEPER));
         }
         if name != toyos_update::slots::HOLDER && program.slots {
             return Err(format!("`{name}` asks for `slots`, which only `{}` may hold", toyos_update::slots::HOLDER));
@@ -889,6 +914,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     firmware: cfg.firmware.clone(),
                     syscap: cfg.syscap.clone(),
                     slots: cfg.slots,
+                    holds: cfg.holds.clone(),
                     authorize: cfg.authorize.clone(),
                     service: cfg.service,
                     state: cfg.state,
@@ -988,11 +1014,13 @@ pub fn trust_roots() -> Vec<u8> {
     roots.map(|cert| pem::encode_config(&pem::Pem::new("CERTIFICATE", cert.to_vec()), config)).collect::<String>().into_bytes()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_and_assemble(
     root: &Path,
     config: &SystemConfig,
     env: &GuestEnv,
     extra_files: &[(String, Vec<u8>)],
+    omits: &[String],
     quiet: bool,
     arch: Arch,
     machines: crate::microcode::Machines,
@@ -1035,6 +1063,12 @@ fn build_and_assemble(
     // Extra files (test binaries, shared libs)
     for (name, data) in extra_files {
         root_files.push((name.clone(), data.clone()));
+    }
+    for omitted in omits {
+        let Some(at) = root_files.iter().position(|(name, _)| name == omitted) else {
+            panic!("root: '{omitted}' is to be left out, and the image has no such file");
+        };
+        root_files.remove(at);
     }
 
     let symlinks: Vec<(String, String)> = config.symlinks.iter()
@@ -1173,6 +1207,9 @@ pub struct Plan {
     pub machines: crate::microcode::Machines,
     /// The scale `cargo run --scale` starts the desktop at.
     pub scale: Option<String>,
+    /// Files of the image's own ROOT a test boot is staged without, each by
+    /// its ROOT-relative path: a `/system` missing one.
+    pub root_omits: Vec<String>,
 }
 
 impl Plan {
@@ -1185,6 +1222,7 @@ impl Plan {
             version: image::version_now(),
             machines: crate::microcode::Machines::Qemu,
             scale: None,
+            root_omits: Vec::new(),
         }
     }
 }
@@ -1222,6 +1260,7 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
             crate::microcode::Machines::Qemu
         },
         scale: flags::CARGO_RUN.value(args, &flags::SCALE).map(String::from),
+        root_omits: Vec::new(),
     }
 }
 
@@ -1743,7 +1782,7 @@ fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
 /// disambiguator that stands in front of it.
 const SYSCALL_ENTRY_SYMBOL: &str = "6kernel4arch6x86_647syscall13syscall_entry";
 
-/// `cld`, which `arch::entry::ring3_naked_asm` puts first in every Ring 0 entry.
+/// `cld`, which `arch::entry::cld` puts first in `syscall_entry`.
 const CLD: u8 = 0xfc;
 /// `mov gs:[disp32], rsp` less its displacement: the `gs` override, `REX.W`,
 /// the opcode, and the ModRM/SIB pair that says `rsp` against an absolute
@@ -2039,7 +2078,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Us
         )
     };
 
-    let userland = build_and_assemble(root, &config, &env, &[], false, arch, plan.machines);
+    let userland = build_and_assemble(root, &config, &env, &[], &plan.root_omits, false, arch, plan.machines);
 
     let bl_bytes = fs::read(&bl_art).expect("Failed to read staged bootloader");
     (kernel_bytes, bl_bytes, userland)
@@ -2142,6 +2181,7 @@ fn root_image_key(plan: &Plan, image_key: &str, extra_files: &[(String, Vec<u8>)
     plan.config.hash(&mut h);
     plan.arch.hash(&mut h);
     plan.machines.hash(&mut h);
+    plan.root_omits.hash(&mut h);
     image_key.hash(&mut h);
     for (name, data) in extra_files {
         name.hash(&mut h);
@@ -2258,7 +2298,7 @@ pub fn build_test_parts(
     };
 
     let userland = USERLAND.get_or_build(root_image_key, || {
-        build_and_assemble(root, &config, &env, extra_files, quiet, arch, plan.machines)
+        build_and_assemble(root, &config, &env, extra_files, &plan.root_omits, quiet, arch, plan.machines)
     });
 
     drop(building);
@@ -3196,13 +3236,32 @@ mod tests {
                 parsed.boot.start,
             );
             assert!(
-                parsed.programs.contains_key("logkeeper"),
-                "{config} starts `logkeeper` and has no `[programs.logkeeper]` row to say what it holds",
+                parsed.programs.get("logkeeper").is_some_and(|row| row.holds.iter().any(|h| h == toyos_logstream::ORIGINS)),
+                "{config} starts `logkeeper` and no `[programs.logkeeper]` row holds `{}`, so no program's ring reaches it",
+                toyos_logstream::ORIGINS,
+            );
+            // The UART carries nothing past the kernel's hand-over but what
+            // its driver puts on it. The diagnostic image is for a machine with
+            // no UART, and claims no device (`no_diag_program_claims_the_screen`).
+            let wire = toyos_logstream::WIRE_HOLDER;
+            assert!(
+                *config == "images/diag.toml"
+                    || parsed.boot.start.iter().any(|p| p == wire)
+                    && parsed.programs.get(wire).is_some_and(|row| {
+                        row.devices.iter().any(|d| d == "uart")
+                            && row.holds.iter().any(|h| h == toyos_logstream::CONSOLE_INPUT)
+                    }),
+                "{config} runs `logkeeper` and does not start `{wire}` holding the `uart` claim and the console's \
+                 input, so its console UART says nothing from the kernel's hand-over to the machine's stop",
             );
             for (name, program) in &parsed.programs {
                 let holds = program.syscap.iter().any(|s| s == "logread");
                 if name == "logkeeper" {
                     assert!(holds, "{config}: `logkeeper` writes the file and must read the cursor");
+                    assert!(
+                        program.syscap.iter().any(|s| s == "console"),
+                        "{config}: `logkeeper` feeds the console and must say what it spoke"
+                    );
                     continue;
                 }
                 assert!(
@@ -3214,14 +3273,16 @@ mod tests {
         }
     }
 
-    /// A config whose rows claim a PCI function starts the `acpi` claim's
-    /// holder: every such claim waits for the root bridges' memory it declares,
-    /// and one made on a boot where nothing does is refused, as are all after
-    /// it. `undeclaredcase` is that boot, booted to judge the refusal. A claim
-    /// a program makes at run time through a `device` syscap is not a row's
-    /// and is not seen here: its image's own test meets the refusal.
+    /// A config whose rows claim a PCI function has a declarer: the
+    /// supervisor starts such a row only once the root bridges' memory is
+    /// declared, and a claim made before it is refused. It starts the `acpi`
+    /// claim's holder, or declares one that a started row able to mint the
+    /// claim (`device`) hands it to, as `acpicase`'s jobs do.
+    /// `undeclaredcase` is the boot that has neither, booted to judge both. A
+    /// claim a program makes at run time through a `device` syscap is not a
+    /// row's and is not seen here: its image's own test meets the refusal.
     #[test]
-    fn every_config_that_claims_a_pci_function_starts_its_declarer() {
+    fn every_config_that_claims_a_pci_function_has_a_declarer() {
         const UNDECLARED: &str = "tests/images/undeclaredcase.toml";
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for config in ALL_CONFIGS {
@@ -3235,15 +3296,17 @@ mod tests {
                 })
                 .map(|(name, _)| name)
                 .collect();
-            let declares = parsed
-                .boot
-                .start
-                .iter()
-                .any(|name| parsed.programs.get(name).is_some_and(|p| p.devices.iter().any(|d| d == "acpi")));
+            let started = |name: &String| parsed.programs.get(name);
+            let holder = parsed.boot.start.iter().any(|name| started(name).is_some_and(|p| p.devices.iter().any(|d| d == "acpi")));
+            // A row holding the claim, started or not, which a started row
+            // that mints it may hand it to (`toyos_supervisor::declaration::plan`).
+            let handed = parsed.programs.values().any(|p| p.devices.iter().any(|d| d == "acpi"))
+                && parsed.boot.start.iter().any(|name| started(name).is_some_and(|p| p.syscap.iter().any(|r| r == "device")));
+            let declares = holder || handed;
             assert_eq!(
                 declares || claimants.is_empty(),
                 *config != UNDECLARED,
-                "{config}: {claimants:?} claim PCI functions, and starting the `acpi` claim's holder is {declares}",
+                "{config}: {claimants:?} claim PCI functions, and a declarer started or handed the claim is {declares}",
             );
         }
     }
@@ -3364,6 +3427,7 @@ mod tests {
         "tests/images/undeclaredcase.toml",
         "tests/images/virtclaimcase.toml",
         "tests/images/virtjobcase.toml",
+        "tests/images/virtpancase.toml",
         "tests/images/virtpaniccase.toml",
         "tests/images/virtrebootcase.toml",
         "tests/images/virtsmpcase.toml",
@@ -3445,6 +3509,17 @@ mod tests {
         assert!(held_by_their_holders_alone(&sshserver).is_err());
         let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"swap\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&apps).is_err());
+        let origins: SystemConfig = toml::from_str("[programs.shell]\nholds = [\"log-origins\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&origins).is_err());
+        let input: SystemConfig = toml::from_str("[programs.shell]\nholds = [\"console-input\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&input).is_err());
+        let console: SystemConfig = toml::from_str("[programs.test-runner]\nsyscap = [\"logread\", \"console\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&console).is_err());
+        let held: SystemConfig = toml::from_str(
+            "[programs.logkeeper]\nholds = [\"log-origins\"]\n[programs.uart]\nholds = [\"console-input\"]\n",
+        )
+        .unwrap();
+        assert_eq!(held_by_their_holders_alone(&held), Ok(()));
         let slots: SystemConfig = toml::from_str("[programs.shell]\nslots = true\n").unwrap();
         assert!(held_by_their_holders_alone(&slots).is_err());
         let booted: SystemConfig =

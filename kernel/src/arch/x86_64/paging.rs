@@ -425,23 +425,6 @@ impl Drop for PcidGuard {
     }
 }
 
-/// Which tag an address space carries, and who returns it.
-enum PcidHandle {
-    /// The reserved tag 0; the kernel space is leaked, so it is never returned.
-    Kernel,
-    /// A user tag, returned to the pool when this handle drops.
-    User(PcidGuard),
-}
-
-impl PcidHandle {
-    fn value(&self) -> u16 {
-        match self {
-            Self::Kernel => kernel::pcid::KERNEL_PCID,
-            Self::User(g) => g.0.get(),
-        }
-    }
-}
-
 /// `None` when all 4095 tags are held by live spaces. The pool lock is held
 /// across the reclaim shootdown — safe under it because a CPU spinning for the
 /// lock polls shootdowns, and so that one CPU reclaims at a time.
@@ -806,9 +789,9 @@ impl Unlinked {
 /// otherwise.
 pub struct UserTables {
     root: u64,
-    /// Owned for this space's life: dropping it returns a user tag, so two live
+    /// Owned for this space's life: dropping it returns the tag, so two live
     /// spaces can never share one.
-    pcid: PcidHandle,
+    pcid: PcidGuard,
     /// The job its tables are counted to.
     job: Arc<Job>,
 }
@@ -833,19 +816,11 @@ impl UserTables {
             );
             pml4.init_entry(slot, entry);
         }
-        Some(Self { root: pml4.phys(), pcid: PcidHandle::User(pcid), job: Arc::clone(job) })
-    }
-
-    /// The kernel's own space, whose user half is empty: what a kernel thread
-    /// and an idle CPU run under. Never dropped.
-    pub fn kernel() -> Self {
-        let root = KERNEL.lock().root;
-        assert!(root != 0, "paging: the kernel's space before `init`");
-        Self { root, pcid: PcidHandle::Kernel, job: Arc::clone(crate::mm::charge::boot()) }
+        Some(Self { root: pml4.phys(), pcid, job: Arc::clone(job) })
     }
 
     pub fn root(&self) -> Cr3 {
-        Cr3(self.root | self.pcid.value() as u64)
+        Cr3(self.root | self.pcid.0.get() as u64)
     }
 
     fn root_table(&self) -> &PageTablePage {
@@ -1047,7 +1022,7 @@ impl UserTables {
         // A table taken away is cached apart from the leaves: by page is not
         // enough for it.
         let (start, end) = if unlinked.is_empty() { (start, end) } else { (0, u64::MAX) };
-        crate::arch::tlb::user_change(crate::invalidation::Origin::Unmap, self.pcid.value(), start, end)
+        crate::arch::tlb::user_change(crate::invalidation::Origin::Unmap, self.pcid.0.get(), start, end)
     }
 }
 
@@ -1058,7 +1033,6 @@ impl UserTables {
 /// again.
 impl Drop for UserTables {
     fn drop(&mut self) {
-        assert!(matches!(self.pcid, PcidHandle::User(_)), "paging: the kernel's address space dropped");
         let all = self.unlink(0, (ROOT_HIGH_HALF as u64) << 39, |_, _| false);
         all.free(&self.job);
         free_table(&self.job, self.root);
@@ -1279,12 +1253,12 @@ pub(crate) fn seal_kernel_half() {
 
 /// [`kernel::wx::audit`] of the kernel's tables, whose kernel half every
 /// address space shares.
-pub fn audit_wx(text: core::ops::Range<u64>) -> kernel::wx::Verdict {
+pub fn audit_wx(bounds: kernel::wx::Bounds) -> kernel::wx::Verdict {
     let space = KERNEL.lock();
     // SAFETY: every table the kernel's root names is one this module linked,
     // and the lock held keeps them in place while they are read.
     let table = |phys: u64| unsafe { &PageTablePage::from_phys(phys).0 };
-    kernel::wx::audit::<kernel::wx::X86_64>(&space.root_table().0, text, &table)
+    kernel::wx::audit::<kernel::wx::X86_64>(&space.root_table().0, bounds, &table)
 }
 
 /// `kernel-wx-leaf`: the direct map's leaf over `phys` made executable, so

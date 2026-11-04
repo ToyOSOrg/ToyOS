@@ -9,7 +9,6 @@ use alloc::sync::Arc;
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{FileType, SyscallError, MAX_WHOLE_PIPE_WRITE};
 
-use crate::drivers::serial;
 use crate::pipe::{self, PipeRef};
 use kernel::pipe::End;
 use crate::user_ptr::{UserBytes, UserBytesMut};
@@ -34,7 +33,6 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::Device(_) => {
             Rights::TRANSFER.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE)
         }
-        KObjectRef::Console(_) => BASE.union(Rights::READ).union(Rights::WRITE),
         KObjectRef::Acceptor(_) => BASE.union(Rights::READ),
         KObjectRef::Inbox(_) => {
             BASE.union(Rights::READ).union(Rights::WRITE).union(Rights::MAP)
@@ -115,7 +113,7 @@ pub fn pipe_read(object: &KObjectRef) -> Option<&PipeRef> {
     match object {
         KObjectRef::PipeRead(r) => Some(r.pipe()),
         KObjectRef::Connection(_) | KObjectRef::PipeWrite(_) | KObjectRef::Device(_)
-        | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
@@ -128,7 +126,7 @@ pub fn pipe_write(object: &KObjectRef) -> Option<&PipeRef> {
     match object {
         KObjectRef::PipeWrite(w) => Some(w.pipe()),
         KObjectRef::Connection(_) | KObjectRef::PipeRead(_) | KObjectRef::Device(_)
-        | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
@@ -183,13 +181,11 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::EventWait(e) => Some(WatchRef::Shared(e.watch().clone())),
         KObjectRef::Pager(p) => Some(WatchRef::Shared(p.watch().clone())),
         KObjectRef::Job(_) => Some(WatchRef::InPlace(crate::mm::pmm::returned())),
-        // Nothing posts for a serial byte, so a console's readable poll has
-        // no source (`issues/a-console-watch-waits-on-the-keyboard-not-the-serial-line.md`).
-        KObjectRef::Console(_) => None,
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
-            | device_registry::DeviceType::Acpi => Some(WatchRef::Claim(d.clone())),
+            | device_registry::DeviceType::Acpi
+            | device_registry::DeviceType::Uart => Some(WatchRef::Claim(d.clone())),
             device_registry::DeviceType::Framebuffer => None,
         },
         // Named unconditionally: the watch alone cannot enforce rights.
@@ -207,7 +203,7 @@ pub fn watched_readable(object: &KObjectRef) {
         KObjectRef::Notice(n) => n.listen(),
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) | KObjectRef::Device(_)
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
-        | KObjectRef::Namespace(_) | KObjectRef::Console(_) | KObjectRef::SysCap(_)
+        | KObjectRef::Namespace(_) | KObjectRef::SysCap(_)
         | KObjectRef::Process(_) | KObjectRef::Null(_) | KObjectRef::Job(_) | KObjectRef::DeviceSet(_) => {}
     }
 }
@@ -217,7 +213,6 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
         KObjectRef::PipeWrite(w) => Some(WatchRef::Shared(w.pipe().write_watch().clone())),
         KObjectRef::Connection(c) => Some(WatchRef::Shared(c.tx().write_watch().clone())),
-        KObjectRef::Console(_) => Some(WatchRef::Static(&crate::log::console::SPACE)),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_)
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
@@ -235,7 +230,7 @@ pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::PipeWrite(w) => Some(WatchRef::Shared(w.pipe().left_watch(End::Write).clone())),
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Notice(_)
-        | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
+        | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
         | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => None,
     }
@@ -249,7 +244,7 @@ pub fn other_end_gone(object: &KObjectRef) -> bool {
         KObjectRef::PipeWrite(w) => w.pipe().other_end_gone(End::Write),
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Notice(_)
-        | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
+        | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
         | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => false,
     }
@@ -265,14 +260,14 @@ pub fn other_end_gone(object: &KObjectRef) -> bool {
 fn close_ends_polls(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::SysCap(_) => false,
-        KObjectRef::Console(_) => false,
         KObjectRef::Process(_) | KObjectRef::Job(_) => false,
         // The set's watch is every handle's: one handle's close ends none.
         KObjectRef::DeviceSet(_) => false,
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
-            | device_registry::DeviceType::Acpi => false,
+            | device_registry::DeviceType::Acpi
+            | device_registry::DeviceType::Uart => false,
             device_registry::DeviceType::Framebuffer => true,
         },
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
@@ -310,7 +305,7 @@ pub fn read_device(
         }
         // The PCI shape, but the description is what binds the ports to the
         // reader, and nothing after it answers any other process.
-        device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
+        device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi | device_registry::DeviceType::Uart => {
             let pid = crate::process::current_process();
             if !claim.info_read() {
                 if claim.isa(|row| crate::isa::bind(row, pid)).is_none() {
@@ -362,23 +357,6 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
     match object {
         KObjectRef::PipeRead(r) => r.pipe().try_read(buf).map(|n| n as u64),
         KObjectRef::Device(_) => unreachable!("a device claim is read by `read_device`"),
-        KObjectRef::Console(_) => {
-            let mut count = 0usize;
-            while count < buf.len() {
-                if let Some(b) = serial::try_read_byte() {
-                    buf.write_at(count, &[b]);
-                    count += 1;
-                    if b == b'\n' || b == b'\r' {
-                        break;
-                    }
-                } else if count > 0 {
-                    break;
-                } else {
-                    return None;
-                }
-            }
-            Some(count as u64)
-        }
         KObjectRef::Null(_) => Some(0),
         // An empty read listens and takes nothing: the reason would have nowhere to go.
         KObjectRef::Notice(n) if buf.is_empty() => {
@@ -411,9 +389,6 @@ fn write_pipe(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
 pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
     match object {
         KObjectRef::PipeWrite(_) => write_pipe(object, buf),
-        // The whole lines `klogd`'s queue has room for, and a trailing partial one:
-        // a short count is a writer ahead of the console, told so.
-        KObjectRef::Console(c) => Some(c.write(buf) as u64),
         KObjectRef::Device(d) => Some(write_device(d, buf)),
         KObjectRef::Null(_) => Some(buf.len() as u64),
         // A connection carries whole messages, which `SYS_MESSAGE_SEND` sends.
@@ -448,7 +423,6 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             plain(if w.is_tty() { FileType::Tty } else { FileType::Pipe })
         }
         KObjectRef::Connection(_) => plain(FileType::Socket),
-        KObjectRef::Console(_) => plain(FileType::Serial),
         KObjectRef::Null(_) => plain(FileType::Null),
         KObjectRef::Acceptor(_) => plain(FileType::Pipe),
         KObjectRef::SharedMem(m) => Stat {
@@ -472,7 +446,8 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             device_registry::DeviceType::Framebuffer => FileType::Framebuffer,
             device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
-            | device_registry::DeviceType::Acpi => FileType::Unknown,
+            | device_registry::DeviceType::Acpi
+            | device_registry::DeviceType::Uart => FileType::Unknown,
         }),
     }
 }
@@ -481,7 +456,6 @@ pub fn has_data(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::PipeRead(r) => r.pipe().has_data(),
         KObjectRef::Connection(c) => c.rx().readable(),
-        KObjectRef::Console(_) => serial::has_data(),
         KObjectRef::Acceptor(a) => a.has_pending(),
         KObjectRef::Process(p) => p.finished(),
         KObjectRef::DeviceSet(set) => set.changed(),
@@ -496,9 +470,9 @@ pub fn has_data(object: &KObjectRef) -> bool {
             device_registry::DeviceType::PciFunction => {
                 !d.info_read() || d.pci(crate::pcidev::has_irq).unwrap_or(false)
             }
-            device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
-                !d.info_read() || d.isa(crate::isa::has_irq).unwrap_or(false)
-            }
+            device_registry::DeviceType::Isa
+            | device_registry::DeviceType::Acpi
+            | device_registry::DeviceType::Uart => !d.info_read() || d.isa(crate::isa::has_irq).unwrap_or(false),
             device_registry::DeviceType::Framebuffer => true,
         },
         KObjectRef::PipeWrite(_) | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
@@ -513,7 +487,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
 pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::SysCap(_) => true,
-        KObjectRef::Console(_) | KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
+        KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::Device(_)
         | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
@@ -528,7 +502,6 @@ pub fn has_space(object: &KObjectRef) -> bool {
         KObjectRef::PipeWrite(w) => w.pipe().has_space(MAX_WHOLE_PIPE_WRITE),
         KObjectRef::Connection(c) => c.tx().writable(),
         KObjectRef::Null(_) => true,
-        KObjectRef::Console(_) => crate::log::console::has_room(),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
@@ -548,7 +521,7 @@ pub fn mark_tty(object: &KObjectRef) -> u64 {
             0
         }
         KObjectRef::Connection(_) | KObjectRef::Device(_)
-        | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_) | KObjectRef::SharedMem(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => {
@@ -561,19 +534,20 @@ pub fn mark_tty(object: &KObjectRef) -> u64 {
 /// ports are bound to, which unmasks the row's level lines. Nothing else
 /// writes to a claim.
 fn write_device(claim: &DeviceClaim, buf: &UserBytes) -> u64 {
-    match claim.class() {
-        device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {}
+    let ack = match claim.class() {
+        device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => toyos_abi::acpi::ACK,
+        device_registry::DeviceType::Uart => toyos_abi::uart::ACK,
         device_registry::DeviceType::Framebuffer | device_registry::DeviceType::PciFunction => {
             return SyscallError::PermissionDenied.to_u64();
         }
-    }
+    };
     if !claim.info_read() {
         return SyscallError::PermissionDenied.to_u64();
     }
     let mut word = [0u8; 4];
     let acknowledges = buf.len() == word.len() && {
         buf.read_at(0, &mut word);
-        u32::from_ne_bytes(word) == toyos_abi::acpi::ACK
+        u32::from_ne_bytes(word) == ack
     };
     let pid = crate::process::current_process();
     // The holder's check and the unmask are one borrow of the row.

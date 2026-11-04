@@ -3864,6 +3864,7 @@ version = "0.1.0"
 dependencies = [
  "toyos",
  "toyos-abi",
+ "toyos-logstream",
 ]
 
 [[package]]
@@ -4089,6 +4090,7 @@ dependencies = [
  "toyos-blockring",
  "toyos-devicepath",
  "toyos-gpt",
+ "toyos-logstream",
  "toyos-manifest",
 ]
 
@@ -4332,6 +4334,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "uart"
+version = "0.1.0"
+dependencies = [
+ "logkeeper-api",
+ "toyos",
+ "toyos-abi",
+ "toyos-logstream",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4480,6 +4492,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-device-memory",
+ "toyos-logstream",
  "toyos-manifest",
  "toyos-pci-claim",
  "toyos-vdagent",

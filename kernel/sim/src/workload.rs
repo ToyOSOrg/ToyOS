@@ -283,7 +283,7 @@ pub enum SurplusShape {
 /// Which teardown/balance algorithm the VM drives the core with.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Protocol {
-    /// This spec's protocol: balance by `StealRequest` message, retire by
+    /// This spec's protocol: balance by a thief's ask, retire by
     /// message to the home CPU named in the state word.
     New,
     /// The OLD kernel's: an idle CPU pops a ready task straight out of a

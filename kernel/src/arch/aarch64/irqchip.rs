@@ -5,9 +5,10 @@
 //! GTDT names.
 //!
 //! **What this kernel takes is SGIs, the timer's PPI, the IOMMU's event SPI
-//! ([`route_iommu_events`]) and one LPI per claimed function ([`its`]), and
-//! nothing else.** No other SPI is routed: a device's interrupt is a message the ITS
-//! translates, and only a claimed function's is.
+//! ([`route_iommu_events`]), the SPI of a claimed `isa` row's function
+//! ([`route_spi`]) and one LPI per claimed function ([`its`]), and nothing
+//! else.** A PCI function's interrupt is a message the ITS translates, and
+//! only a claimed function's is.
 //!
 //! **The virtual timer, not the physical**: it is the one EL1 owns outright —
 //! under a hypervisor the physical one traps — and with `CNTVOFF_EL2` written
@@ -107,6 +108,8 @@ static TIMER_EDGE: AtomicBool = AtomicBool::new(false);
 static DISTRIBUTOR: AtomicU64 = AtomicU64::new(0);
 /// The IOMMU's event SPI; zero until [`route_iommu_events`].
 static IOMMU_EVENTS: AtomicU32 = AtomicU32::new(0);
+/// The boot CPU's packed affinity, from [`init`], which every SPI is routed to.
+static BOOT_CPU: AtomicU32 = AtomicU32::new(0);
 
 /// Wait until `done`, for at most `1 / per_second` of a second counted at the
 /// rate firmware states: the boot has no calibrated clock yet.
@@ -181,6 +184,7 @@ pub fn init(rsdp_addr: u64) -> Gic {
     let gicd = gicd.expect("GIC: the MADT names no distributor");
     let distributor = crate::mm::paging::map_mmio(gicd, FRAME, MmioPolicy::Uncacheable);
     DISTRIBUTOR.store(gicd, Relaxed);
+    BOOT_CPU.store(cpu::hardware_id(), Relaxed);
     let revision = distributor.read_u32(GICD_PIDR2) >> 4 & 0xF;
     assert!(revision >= 3, "GIC: GICD_PIDR2.ArchRev is {revision}, and this kernel drives a GICv3 or later");
 
@@ -307,31 +311,64 @@ pub(super) fn timer_intid() -> u32 {
     TIMER_INTID.load(Relaxed)
 }
 
-/// Take SPI `intid` on this CPU at [`PRIORITY`], edge-triggered, as the
+/// Take SPI `intid` on the boot CPU at [`PRIORITY`], edge-triggered, as the
 /// IOMMU's event interrupt: an SMMUv3's wired interrupts are edge-triggered
 /// (IHI 0070 H.a §3.18.2, §12.4), and the IORT names no trigger. Refused
 /// with the distributor's limit where it takes no such SPI.
 pub(super) fn route_iommu_events(intid: u32) -> Result<(), u32> {
-    let gicd = Mmio::new(DirectMap::from_phys(DISTRIBUTOR.load(Relaxed)), FRAME);
+    route_spi(intid, false)?;
+    IOMMU_EVENTS.store(intid, Relaxed);
+    set_spi_masked(intid, false);
+    Ok(())
+}
+
+/// Route SPI `intid` to the boot CPU at [`PRIORITY`], level- or
+/// edge-triggered, masked and with nothing pending; [`set_spi_masked`] lets
+/// it in. Refused with the distributor's limit where it takes no such SPI.
+pub(super) fn route_spi(intid: u32, level: bool) -> Result<(), u32> {
+    let gicd = distributor();
     let limit = (32 * ((gicd.read_u32(GICD_TYPER) & 0x1F) + 1)).min(1020);
     if !(32..limit).contains(&intid) {
         return Err(limit);
     }
-    let (word, bit) = (u64::from(intid / 32) * 4, 1 << (intid % 32));
-    gicd.write_u32(GICD_ICENABLER + word, bit);
-    settles(100, "GICD_CTLR after disabling an SPI", || gicd.read_u32(GICD_CTLR) & RWP == 0);
+    let (word, bit) = spi_bit(intid);
+    set_spi_masked(intid, true);
     gicd.write_u32(GICD_IGROUPR + word, gicd.read_u32(GICD_IGROUPR + word) | bit);
     gicd.write_u32(GICD_IGRPMODR + word, gicd.read_u32(GICD_IGRPMODR + word) & !bit);
     let priority = GICD_IPRIORITYR + u64::from(intid & !3);
     let shift = 8 * (intid % 4);
     gicd.write_u32(priority, gicd.read_u32(priority) & !(0xFF << shift) | u32::from(PRIORITY) << shift);
+    // `GICD_ICFGR`'s upper bit of the pair: edge-triggered where set.
     let config = GICD_ICFGR + u64::from(intid / 16) * 4;
-    gicd.write_u32(config, gicd.read_u32(config) | 0b10 << (2 * (intid % 16)));
-    gicd.write_u64(GICD_IROUTER + 8 * u64::from(intid), toyos_gicv3::unpacked_affinity(cpu::hardware_id()));
+    let edge = 0b10 << (2 * (intid % 16));
+    let configured = gicd.read_u32(config);
+    gicd.write_u32(config, if level { configured & !edge } else { configured | edge });
+    gicd.write_u64(GICD_IROUTER + 8 * u64::from(intid), toyos_gicv3::unpacked_affinity(BOOT_CPU.load(Relaxed)));
     gicd.write_u32(GICD_ICPENDR + word, bit);
-    IOMMU_EVENTS.store(intid, Relaxed);
-    gicd.write_u32(GICD_ISENABLER + word, bit);
     Ok(())
+}
+
+/// Stop or start taking SPI `intid`; a mask waits for the distributor to
+/// have applied it (IHI 0069H §12.9.4, `GICD_CTLR.RWP`). Callable from the
+/// SPI's own handler.
+pub(super) fn set_spi_masked(intid: u32, masked: bool) {
+    let gicd = distributor();
+    let (word, bit) = spi_bit(intid);
+    if masked {
+        gicd.write_u32(GICD_ICENABLER + word, bit);
+        settles(100, "GICD_CTLR after disabling an SPI", || gicd.read_u32(GICD_CTLR) & RWP == 0);
+    } else {
+        gicd.write_u32(GICD_ISENABLER + word, bit);
+    }
+}
+
+fn distributor() -> Mmio {
+    Mmio::new(DirectMap::from_phys(DISTRIBUTOR.load(Relaxed)), FRAME)
+}
+
+/// SPI `intid`'s word offset and bit in the distributor's word-per-32 registers.
+fn spi_bit(intid: u32) -> (u64, u32) {
+    (u64::from(intid / 32) * 4, 1 << (intid % 32))
 }
 
 /// Pend the IOMMU's event SPI again, for records its handler left behind: the

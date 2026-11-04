@@ -1,14 +1,29 @@
-# A boot no `acpi` claim holder declares on: two `edu` a `drives` row claims,
-# and no acpiserver. `a_claim_waits_out_an_undeclared_machine` judges the
-# first claim waiting its deadline out and both refused by name.
+# A boot no `acpi` claim holder declares on: two `edu` a `drives` row would
+# claim, and no acpiserver. `a_claim_before_the_declaration_is_refused_at_once`
+# judges the supervisor starting no driver and saying why, and a job's own
+# claim of each refused at once.
 [boot]
-start = ["logkeeper", "test-runner"]
+start = ["logkeeper", "uart", "test-runner"]
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
+serves = ["log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 [programs.pciholder]
 drives = ["pci:00:ff:00/1234:11e8"]
 
+# `device` because the job mints the device set and claims, `dup` because
+# test-runner hands a job its capability as a duplicate, and `power` because
+# a job list is refused without a way to end the boot.
 [programs.test-runner]
+receives = ["power"]
+syscap = ["device", "dup"]
+args = ["test_rs_pci_undeclared"]

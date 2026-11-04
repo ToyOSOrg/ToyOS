@@ -387,9 +387,10 @@ pub fn spawn<C: Commit>(
             address_space: child_pt.clone(),
             thread_pointer,
             job,
-            image: Some(image),
+            image,
             // The spawning thread's, as a new thread's is.
             mask: crate::sched::driver::current_mask(),
+            near: None,
         });
         table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
     });
@@ -425,17 +426,6 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
     let mut handles = HandleTable::new(&job);
     let mut entries = Vec::new();
     let mut labels = Vec::new();
-    // One console, the supervisor's descriptors 0 to 2.
-    let console = KObjectRef::Console(crate::object::device::ConsoleObject::new(&job).expect("spawn_supervisor: no heap for its console"));
-    for fd in ["0", "1", "2"] {
-        let entry = crate::object::HandleEntry::new(console.clone(), ops::initial_rights(&console));
-        let handle = handles.install(entry).expect("spawn_supervisor: three handles cannot exhaust an empty table");
-        let label_off = labels.len() as u32;
-        labels.extend_from_slice(toyos_abi::syscall::FD_PREFIX.as_bytes());
-        labels.extend_from_slice(fd.as_bytes());
-        let label_len = labels.len() as u32 - label_off;
-        entries.push(toyos_abi::syscall::EndowEntry { label_off, label_len, handle, _pad: 0 });
-    }
     let cap = KObjectRef::SysCap(crate::object::syscap::SysCap::new().expect("spawn_supervisor: no heap for the system capability"));
     // Every machine-wide authority the system has: rights only shrink from
     // here, so a bit absent here is a bit no manifest can ever name. LOG and
@@ -455,7 +445,9 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
         .union(Rights::INVENTORY)
         .union(Rights::COUNTERS)
         .union(Rights::TRACE)
-        .union(Rights::PAGER);
+        .union(Rights::PAGER)
+        .union(Rights::CONSOLE)
+        .union(Rights::LAST_WORDS);
     let cap_handle = handles
         .install(crate::object::HandleEntry::new(cap, rights))
         .expect("spawn_supervisor: an empty table refused the system capability");
@@ -475,7 +467,7 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
         let rights = ops::initial_rights(&object);
         let handle = handles
             .install(crate::object::HandleEntry::new(object, rights))
-            .expect("spawn_supervisor: a table of five handles refused a boot image");
+            .expect("spawn_supervisor: a table of three handles refused a boot image");
         entries.push(toyos_abi::syscall::EndowEntry {
             label_off: labels.len() as u32,
             label_len: label.len() as u32,

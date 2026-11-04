@@ -23,6 +23,7 @@
 //! drive <matcher>           one process of it per PCI function the matcher names
 //! syscap <right>            a right on the SysCap dup the supervisor endows
 //! slots                     the idle slot's partitions and the slot table
+//! hold <name>               one of the objects the supervisor makes once and endows its one holder ([`HOLDINGS`])
 //! authorize <word>          a disk authorization the supervisor mints at its start ([`authorize`])
 //! service                   a system service: its `HOME` is `/state/<name>`, not the session's
 //! state                     it keeps machine state of its own in `/state/<name>`
@@ -215,6 +216,10 @@ const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
     // holder that has to spin — a name that looks complete and traps the one
     // program whose whole loop is read-then-park.
     ("logread", Rights::LOG.union(Rights::WAIT)),
+    // Say what the console's channels have delivered of the kernel's log,
+    // which every fatal path and the stop then leave off the UART: the console
+    // feeder's, never a reader's.
+    ("console", Rights::CONSOLE),
     // Power the machine off. The largest authority on the list — it ends every
     // process there is, including the ones that hold every other right here — and the
     // last but one to have been free: `SYS_SHUTDOWN` took no handle at all, so
@@ -329,6 +334,10 @@ pub struct Program {
     /// runs is never among them. One program holds it — `build/build.rs` gates
     /// which.
     pub slots: bool,
+    /// Objects the supervisor makes once, for the whole machine, and endows
+    /// this row under their names ([`HOLDINGS`]): the signed image's word
+    /// alone, and `build/build.rs` gates which rows.
+    pub holds: Vec<String>,
     /// Disk authorizations the supervisor mints at its start, by
     /// [`authorize::Authorization::word`]: the signed image's word alone, and
     /// `build/build.rs` gates which rows.
@@ -509,6 +518,8 @@ pub enum RenderError {
     NoSuchRole { program: String, role: String },
     /// An `authorize` entry naming no [`authorize::Authorization`].
     NoSuchAuthorization { program: String, word: String },
+    /// A `holds` entry naming none of [`HOLDINGS`].
+    NoSuchHolding { program: String, name: String },
     /// A `devices` entry that names no device, or a `drives` entry that is
     /// no PCI matcher.
     NoSuchDevice { program: String, entry: String },
@@ -525,6 +536,11 @@ pub enum RenderError {
     /// A `firmware` entry on a row with no `drives`, whose claim it would be.
     FirmwareWithoutDrives(String),
 }
+
+/// What a row's `holds` may name: the acceptor every program's log ring
+/// reaches `logkeeper` on, and the write end of the console's input, whose
+/// read end is every program's standard input.
+pub const HOLDINGS: &[&str] = &[toyos_logstream::ORIGINS, toyos_logstream::CONSOLE_INPUT];
 
 /// The firmware window a row's `firmware` entry names.
 pub fn firmware_window(word: &str) -> Option<toyos_abi::pci::FirmwareWindow> {
@@ -588,6 +604,12 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         }
         if program.slots {
             out.push_str("slots\n");
+        }
+        for name in &program.holds {
+            if !HOLDINGS.contains(&name.as_str()) {
+                return Err(RenderError::NoSuchHolding { program: program.name.clone(), name: name.clone() });
+            }
+            out.push_str(&format!("hold {name}\n"));
         }
         for word in &program.authorize {
             if authorize::Authorization::parse(word).is_none() {
@@ -780,6 +802,7 @@ pub fn parse(text: &str) -> Manifest {
                     "firmware" if firmware_window(rest).is_some() => program.firmware.push(rest.to_string()),
                     "syscap" => program.syscap.push(rest.to_string()),
                     "slots" if rest.is_empty() => program.slots = true,
+                    "hold" if HOLDINGS.contains(&rest) => program.holds.push(rest.to_string()),
                     "authorize" if authorize::Authorization::parse(rest).is_some() => program.authorize.push(rest.to_string()),
                     "service" => program.service = true,
                     "state" if rest.is_empty() => program.state = true,
@@ -828,6 +851,7 @@ mod tests {
                     name: "update".into(),
                     source: Source::Path("/system/bin/update".into()),
                     slots: true,
+                    holds: vec![toyos_logstream::CONSOLE_INPUT.into()],
                     state: true,
                     authorize: vec!["tables".into(), "designate:data".into(), "format:data".into()],
                     ..Program::default()
@@ -1110,6 +1134,7 @@ mod tests {
         );
         assert!(!syscap_rights(&["roster".into()]).unwrap().contains(Rights::LOG));
         assert!(!syscap_rights(&["logread".into()]).unwrap().contains(Rights::ROSTER));
+        assert!(!syscap_rights(&["logread".into()]).unwrap().contains(Rights::CONSOLE), "reading is not speaking");
         // Not the applet's name, and not the syscall's.
         assert!(syscap_rights(&["ps".into()]).is_err());
         assert!(syscap_rights(&["sysinfo".into()]).is_err());
@@ -1126,6 +1151,15 @@ mod tests {
         let every: Vec<String> = SYSCAP_RIGHTS.iter().map(|(n, _)| (*n).to_string()).collect();
         assert!(!syscap_rights(&every).unwrap().contains(Rights::PAGER));
         assert!(syscap_rights(&["pager".into()]).is_err());
+    }
+
+    /// **No `syscap` name confers last words**: the supervisor's system
+    /// capability alone carries them, so no row can write a record every
+    /// fatal path shows, nor spend the boot's one.
+    #[test]
+    fn no_syscap_name_is_the_last_words_right() {
+        let every: Vec<String> = SYSCAP_RIGHTS.iter().map(|(n, _)| (*n).to_string()).collect();
+        assert!(!syscap_rights(&every).unwrap().contains(Rights::LAST_WORDS));
     }
 
     /// A file server's roles reach the supervisor as records, and a name that is no

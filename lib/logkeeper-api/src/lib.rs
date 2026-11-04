@@ -1,12 +1,12 @@
 //! Asking `logkeeper` for this boot's log on this machine: one [`READ`] on
 //! its [`SERVICE`] port, answered by one [`SERVED`] frame carrying how many
 //! bytes are the boot so far and the read end of a pipe the log is written
-//! into, from its first line; or the same as the machine's console carrier
+//! into, from its first line; or the same as one of the console's carriers
 //! ([`carry`]).
 
 use toyos::endow;
 use toyos::{Connection, Pipe};
-use toyos_logstream::{CARRIER, CARRY, DELIVERED, READ, SERVED, SERVICE};
+use toyos_logstream::{CARRY, DELIVERED, READ, SERVED, SERVICE};
 
 /// `logkeeper`'s answer.
 pub struct Served {
@@ -36,12 +36,12 @@ fn answer(conn: &Connection) -> Result<Served, String> {
     Ok(Served { pipe, boot_so_far })
 }
 
-/// Ask for the log as the machine's console carrier, on
-/// [`toyos_logstream::CARRIER`]: the answer is [`read`]'s, and the connection
-/// stays open for the carrier to say what its channel has taken
-/// ([`delivered`]).
-pub fn carry() -> Result<(Connection, Served), String> {
-    let conn = endow::service(CARRIER).map_err(|e| format!("no `{CARRIER}` service: {e:?}"))?;
+/// Ask for the log as one of the console's carriers, on `channel`
+/// ([`toyos_logstream::CARRIER`] or [`toyos_logstream::WIRE`]): the answer is
+/// [`read`]'s, and the connection stays open for the carrier to say what its
+/// channel has taken ([`delivered`]).
+pub fn carry(channel: &str) -> Result<(Connection, Served), String> {
+    let conn = endow::service(channel).map_err(|e| format!("no `{channel}` service: {e:?}"))?;
     conn.signal(CARRY).map_err(|e| format!("logkeeper would not take the request: {e:?}"))?;
     let served = answer(&conn)?;
     Ok((conn, served))

@@ -61,6 +61,10 @@ const ACTUATOR_TESTS: &[&str] = &[
     // Action 26: the timer's interrupt inside a syscall's body, which only a
     // running gate decides and nothing in a guest puts there on demand.
     "ring0_timer_in_syscall",
+    // Action 29, asked only to learn that this is the kernel whose entries
+    // check `RFLAGS.AC`: the shipping one does not, and the binary's verdict is
+    // that check not firing.
+    "ring0_clears_ac",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`.
@@ -216,9 +220,20 @@ const RUST_SKIP: &[&str] = &[
     "tone_after_dc6",
     // It claims the fixed hardware itself, which needs a boot that starts no
     // server, and stages the firmware's side of the Global Lock, which needs
-    // the test kernel: `acpi_mediated_access` and `acpi_press_is_one_sci`
-    // run it on tests/images/acpicase.toml.
+    // the test kernel: `acpi_mediated_access`, `acpi_press_is_one_sci` and
+    // `acpi_holder_is_refused_a_held_functions_configuration` run it on
+    // tests/images/acpicase.toml.
     "acpi_mediated",
+    // It hands the boot's first ACPI claim to a server of its own, which
+    // declares the root bridges' memory, and kills it, which needs a boot that
+    // starts none: the `acpi_server_death` metal row runs it, and on a guest
+    // `acpi_holder_is_refused_a_held_functions_configuration` before its
+    // probe.
+    "acpi_release",
+    // It claims while nothing has declared the root bridges' memory, which
+    // needs a boot with no ACPI server:
+    // `a_claim_before_the_declaration_is_refused_at_once` runs it.
+    "pci_undeclared",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
     "stop_short",
     // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
@@ -367,8 +382,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
 ];
 
 /// What the boot's audit of the kernel's tables says when every leaf passed
-/// (`kernel/src/mm/mod.rs`).
+/// (`kernel/src/mm/mod.rs`): its two halves, the text's bounds between them.
 const KERNEL_WX_HOLDS: &str = " kernel leaves, none writable and executable, none executable outside the text ";
+const KERNEL_RELRO_HOLDS: &str = ", none writable over the RELRO 0x";
 
 /// What `test-early-panic` panics with (`kernel/src/main.rs`): the last line its
 /// report puts on serial.
@@ -403,14 +419,15 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_timer_floor", qemu::Profile::Virt),
     ("virt_fp_isolation", qemu::Profile::Virt),
     ("virt_first_entry", qemu::Profile::Virt),
+    // Under HVF, an Apple CPU's own PAN.
+    ("virt_pan_refuses_el1_a_user_page", qemu::Profile::Virt),
     ("virt_unmap_touch", qemu::Profile::Virt),
     ("virt_debug_refused", qemu::Profile::Virt),
     ("virt_readonly_copyout", qemu::Profile::Virt),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt),
-    // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and the
-    // reboots: under HVF a `klogd` the stop wakes can go undispatched past the
-    // stop's whole wait for the console's wire
-    // (issues/a-woken-klogd-can-wait-seconds-on-an-idle-cpu-under-hvf.md).
+    // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and
+    // `virt_reboot`: under HVF a woken thread can go undispatched for seconds
+    // (issues/a-woken-thread-can-wait-seconds-on-an-idle-cpu-under-hvf.md).
     ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
@@ -421,8 +438,6 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_reboot", qemu::Profile::VirtEl2),
     ("virt_off_names_the_cpus_left_on", qemu::Profile::VirtEl2),
     ("virt_reboot_refused_without_psci", qemu::Profile::Virt),
-    ("virt_reboot_wire_held", qemu::Profile::VirtEl2),
-    ("virt_reboot_wire_kept", qemu::Profile::VirtEl2),
     // The job case entered at EL2, once: the entry's EL2 writes for the timer
     // and FP, which no boot under HVF runs.
     ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
@@ -496,13 +511,15 @@ const MACHINE_TESTS: &[&str] = &[
     // supervisor's in `toyos-supervisor`.
     "a_function_arrives_and_leaves",
     // A PCI claim on a boot whose `acpi` claim holder never declares the root
-    // bridges' memory: the kernel's wait for it and its deadline, on QEMU
-    // x86-64's q35 with two `edu` and no console port, since no claim can
-    // carry it (`Profile::HeadlessTwoEduNoConsolePort`). The state
-    // machine is `toyos-pci`'s, host-tested; the wait on its watch and the
-    // refusal at its end are a claimant's thread in a booted kernel. No bench
-    // boots without its ACPI server.
-    "a_claim_waits_out_an_undeclared_machine",
+    // bridges' memory: the supervisor starting no driver and saying why, and
+    // the kernel refusing a job's claim at once while the
+    // device set says the declaration is pending, on QEMU x86-64's q35 with two
+    // `edu` and no console port, since no claim can carry it
+    // (`Profile::HeadlessTwoEduNoConsolePort`). The decisions are
+    // `toyos-pci`'s and `toyos-supervisor`'s, host-tested; the set's header
+    // and the refusal are a booted kernel's. No bench boots without its ACPI
+    // server.
+    "a_claim_before_the_declaration_is_refused_at_once",
     // Two HDA controllers, each with an `hda` driver behind VT-d: the one
     // with no codec plays nothing, soundserver plays to the other, and the
     // master job the benches' rows judge steps that output's codec. Which
@@ -524,6 +541,18 @@ const MACHINE_TESTS: &[&str] = &[
     // again. Three processes, the kernel and QEMU's hot-unplug, which no host
     // build has. q35 only: no other machine carries a console port.
     "the_uart_carries_the_log_again_once_the_console_carrier_goes",
+    // The UART carries the boot once across the kernel's hand-over to its
+    // driver: the kernel's last inline record once, and the driver's first
+    // after it. The kernel's drain, logkeeper's start offset and the driver
+    // are three components only a boot has; q35 with no console port, so the
+    // UART is the one console, read whole, which no bench's is.
+    "the_uart_carries_the_boot_once_across_the_hand_over",
+    // A supervisor that fails before `logkeeper` runs says why on the UART,
+    // and the kernel ends the machine on its end: its last words and the
+    // kernel's fatal path, which only a boot has, on a `/system` missing the
+    // first file it reads, which only a staged image is. q35 with no console
+    // port, so the UART is the one console.
+    "a_supervisor_that_fails_early_says_why_on_the_uart",
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot disk is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
@@ -560,6 +589,15 @@ const MACHINE_TESTS: &[&str] = &[
     // and its mask have no host build, QEMU raises the event on demand, and
     // nothing presses the T14's button but a hand.
     "acpi_press_is_one_sci",
+    // The `acpi` claim's holder refused a held function's configuration past
+    // its header: the kernel's `held` fed to the fence `toyos-userbound`
+    // host-tests, on a boot whose first job's server declared the root
+    // bridges' memory, so the supervisor started storage and the
+    // virtio-serial driver on it. Needs a boot that starts no server, which a
+    // bench boots only for `acpi_server_death`, and a function its driver
+    // holds whose configuration a broken fence would write; q35 on
+    // `Profile::Headless`.
+    "acpi_holder_is_refused_a_held_functions_configuration",
     // The osbench groups that use the runner's capability for a row of their
     // own, on the image they are measured on, on QEMU x86-64's q35: which
     // endowments a job gets is the image's and the supervisor's, which no
@@ -574,7 +612,7 @@ const MACHINE_TESTS: &[&str] = &[
     "acpi_mediated_access",
     // The same boot on one CPU, where the power-off's CPU is the only one
     // there is: what it logs reaches the console by the stop's own drain or
-    // not at all, since no other CPU runs `klogd` beside it.
+    // not at all.
     "acpi_lock_given_back_on_one_cpu",
     // A power-off on the sleep type of a holder that is gone: the kernel's
     // static across a claim's release, and a machine that answers the write
@@ -585,16 +623,6 @@ const MACHINE_TESTS: &[&str] = &[
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
     "machine_shutdown_short_stop",
-    // The power-off with `klogd` holding the console's wire as the stop
-    // begins, on one CPU: a staged hold of a kernel thread, read off a console
-    // QEMU keeps past the power-off, and the T14 is never asked to power off.
-    "machine_shutdown_wire_held",
-    // The same with `klogd` keeping the wire through the stop's budget.
-    "machine_shutdown_wire_kept",
-    // The same with `klogd` staged inside its hold of the wire from the boot's
-    // last word past the seal, where the stop does not hold it: the one CPU
-    // runs nothing but the stop from the seal on.
-    "machine_shutdown_wire_at_the_seal",
     // A claimable function with a mappable BAR that no program of the boot
     // holds: QEMU's virtio NIC on `tests/images/testcases.toml`. The T14's one such
     // function is its I219, and a kernel that dies on this takes the bench's
@@ -846,8 +874,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| ioapic_topology(b[0].kernel().text()) },
     ),
     (
-        "klogd_hosted",
-        metal::Metal { arms: TESTCASES, judge: |b| klogd_hosted(&b[0].kernel()) },
+        "console_uart_driven",
+        metal::Metal { arms: TESTCASES, judge: |b| console_uart_driven(&b[0].log()) },
     ),
     (
         "irq_census_conservation",
@@ -1018,6 +1046,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The server killed: the kernel writes `ACPI_DISABLE` as its claim goes,
+        // and `SCI_EN` reads clear after it. The job's claim is the boot's
+        // first, so the log reaches the stick only through the storage its
+        // server's declaration started.
+        "acpi_server_death",
+        metal::Metal {
+            arms: &[metal::once("acpicase", "tests/images/acpicase.toml", &[], &["test_rs_acpi_release"])],
+            judge: |b| acpi_death_on_metal(b[0]),
+        },
+    ),
+    (
         // The two numbers `syscall_cost` measures, printed by the job and read
         // off the log: that it ran, and what it said, are the verdict.
         "syscall_cost",
@@ -1176,7 +1215,11 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES,
             judge: |b| {
                 let kernel = b[0].kernel();
-                eprintln!("  [kernel_wx] {}", kernel.must_say(KERNEL_WX_HOLDS)?);
+                let line = kernel.must_say(KERNEL_WX_HOLDS)?;
+                if !line.contains(KERNEL_RELRO_HOLDS) {
+                    return Err(format!("the audit's line names no RELRO it held read-only: {line}"));
+                }
+                eprintln!("  [kernel_wx] {line}");
                 Ok(())
             },
         },
@@ -2025,10 +2068,8 @@ fn in_acpi_mode_before_any_job(boot: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// The same boot, its rows ended on the hold, which waits for the ACPI
-/// server's power sources, the last line of its start. The members run
-/// behind it: the hold gives up at a time since boot, which a list of
-/// members before it would spend.
+/// The same boot, its rows ended on the hold, which waits for the end of the
+/// ACPI server's start; the members run behind it.
 const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
     last: Some("test_rs_acpi_hold"),
     ..metal::once("testcases", "tests/images/testcases.toml", &[], &[])
@@ -3089,6 +3130,45 @@ fn acpi_press_is_one_sci() -> Result<(), String> {
     Ok(())
 }
 
+/// Boot `tests/images/acpicase.toml` with two jobs: `acpi_release` hands the
+/// boot's first `acpi` claim to the server, which declares the root bridges'
+/// memory before it is killed, so the supervisor starts storage and the
+/// virtio-serial driver; then `acpi_mediated`'s `held` arm, holding the claim
+/// again, is refused `HeldFunction` on the function that driver holds.
+fn acpi_holder_is_refused_a_held_functions_configuration() -> Result<(), String> {
+    const JOBS: [&str; 2] = ["test_rs_acpi_release", "test_rs_acpi_mediated"];
+    const HELD_SAID: &str = "acpi: a virtio-serial function its driver holds was refused HeldFunction past its header";
+    let committed = compile::repo_root().join("tests/images/acpicase.toml");
+    let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
+    let derived = toyos_metal::image::derive(&text, 120_000, &JOBS, &[]).map_err(|why| why.to_string())?;
+    let config = common::lane::dir().join("acpi-held.toml");
+    fs::write(&config, derived).map_err(|e| format!("{}: {e}", config.display()))?;
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        &[],
+        &[],
+        BootOptions {
+            extra_root_files: vec![
+                suite_bin(toyos_build::arch::Arch::X86_64, "acpi_release"),
+                suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated"),
+                // The arm's name is the file's: `acpi_mediated` asks whether it is there.
+                ("share/acpi_mediated_held".to_string(), b"held\n".to_vec()),
+            ],
+            ..Default::default()
+        },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    let ended = format!("===TEST_END {} ", JOBS[1]);
+    await_guest(&mut qemu, &mut console, "the held arm's end", |said| said.contains(&ended))?;
+    let said = serial::Serial::named("the held boot", console);
+    said.must_say(&format!("===TEST_END {} exit=0===", JOBS[0]))?;
+    said.must_say(&format!("{ended}exit=0==="))?;
+    eprintln!("  [acpi] {}", said.must_say(claims::DECLARED)?.trim());
+    eprintln!("  [acpi] {}", said.must_say(claims::SUPERVISOR_DECLARED)?.trim());
+    eprintln!("  [acpi] {}", said.must_say(HELD_SAID)?.trim());
+    Ok(())
+}
+
 /// `osbench identity`, `osbench fair` and `osbench energy` on
 /// tests/images/benchcase.toml with only those jobs: each exits 0, which it
 /// does only once every row it ran measured or said why not, its capability
@@ -3120,8 +3200,7 @@ fn osbench_capability_groups_exit_0() -> Result<(), String> {
 /// for `/system/bin/console` to claim, and wait for what that image owes at
 /// boot: the console up on its panel, having read the log and the keyboard,
 /// and ps2server's i8042 armed, its keyboard and QEMU's PS/2 mouse both.
-/// Nothing is typed at its shell, whose only input is the i8042:
-/// `issues/the-console-loses-typed-keystrokes-under-host-load.md`.
+/// Nothing is typed at its shell, whose only input is the i8042.
 fn console_image_boots() -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(
         &compile::repo_root().join("images/console.toml"),
@@ -3135,6 +3214,62 @@ fn console_image_boots() -> Result<(), String> {
     let said = serial::Serial::named("the console image's boot", console);
     eprintln!("  [ps2server] {}", said.must_say(ps2server::KEYBOARD_RESET)?.trim());
     said.must_be_clean()
+}
+
+/// On a machine whose UART is its one console, the kernel puts the boot on it
+/// up to the hand-over and the UART's driver everything after, from
+/// `logkeeper`: the boot's last inline record and the driver's claim are
+/// each on it once. A start at the boot's first line repeats the first; one
+/// past the hand-over loses the second.
+fn the_uart_carries_the_boot_once_across_the_hand_over() -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/testcases.toml"),
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::HeadlessNoConsolePort, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, UART_CARRIES, "the UART's driver to carry the log")?;
+    let said = serial::Serial::named("the UART", console.clone());
+    said.must_be_clean()?;
+    for (needle, what) in [(bootlog::COMPLETE, "the boot's last inline record"), (UART_BOUND, "the driver's claim")] {
+        let times = console.lines().filter(|l| l.contains(needle)).count();
+        if times != 1 {
+            return Err(format!("{what} ({needle:?}) is on the UART {times} times\n{console}"));
+        }
+    }
+    eprintln!("  [uart] {}", said.must_say(UART_BOUND)?.trim());
+    Ok(())
+}
+
+/// What the kernel's fatal path says of the supervisor's end.
+const SUPERVISOR_ENDED: &str = "the supervisor ended, ";
+
+/// A boot whose `/system` lacks the release file the supervisor reads first:
+/// the supervisor's reason is on the UART as its last words, before the
+/// kernel's panic for its end, though nothing carries the log yet.
+fn a_supervisor_that_fails_early_says_why_on_the_uart() -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/testcases.toml"),
+        &[],
+        &[],
+        BootOptions {
+            profile: qemu::Profile::HeadlessNoConsolePort,
+            root_omits: &[toyos_osrelease::PATH],
+            ready_marker: SUPERVISOR_ENDED,
+            ..Default::default()
+        },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, SUPERVISOR_ENDED, "the kernel to end the machine on the supervisor's end")?;
+    let why = format!("last words: supervisor: cannot read {}", toyos_osrelease::GUEST_PATH);
+    let said = console.find(&why).ok_or_else(|| format!("the UART does not say {why:?}\n{console}"))?;
+    let ended = console.find(SUPERVISOR_ENDED).expect("awaited above");
+    if said > ended {
+        return Err(format!("the supervisor's reason is on the UART after the kernel's panic\n{console}"));
+    }
+    eprintln!("  [supervisor] {}", console[said..].lines().next().unwrap_or_default());
+    Ok(())
 }
 
 /// Eight spawns from each of a file the root server holds in memory, a copy
@@ -3474,6 +3609,51 @@ fn virt_no_seed_refused(profile: qemu::Profile, test_config: &Path) -> Result<()
             return Err(format!("{never:?} on the PL011 of a machine with no source\nserial:\n{serial}"));
         }
     }
+    Ok(())
+}
+
+/// `PSTATE.PAN` at EL1: `tests/images/virtpancase.toml`'s one job has the test
+/// kernel read its page at the user address, and the kernel ends in a
+/// permission fault (Arm ARM `ESR_ELx.DFSC` 0b0011xx) on exactly that address.
+/// A kernel without PAN reads it, and the job ends instead, its read answered.
+fn virt_pan_refuses_el1_a_user_page(profile: qemu::Profile) -> Result<(), String> {
+    const READ: &str = "SYS_DEBUG: a Ring 0 read of 0x";
+    let config = compile::repo_root().join("tests/images/virtpancase.toml");
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        &[],
+        &[],
+        BootOptions {
+            profile,
+            smp: 1,
+            kernel_features: toyos_build::build::TEST_KERNEL,
+            ready_marker: "control registers: SCTLR_EL1=",
+            ..Default::default()
+        },
+    );
+    let mut serial = virt_console(&qemu);
+    await_guest(&mut qemu, &mut serial, "the read's fault or the job's end", |log| {
+        log.split_once(READ).is_some_and(|(_, after)| after.contains("  elr=")) || log.contains("===TEST_END pan_read ")
+    })
+    .map_err(|why| format!("{why}\nserial:\n{serial}"))?;
+    let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok();
+    let read = serial.lines().find_map(|l| l.split_once(READ)).and_then(|(_, a)| hex(a.trim()));
+    let esr = serial
+        .lines()
+        .find(|l| l.contains("KERNEL PANIC: ") && l.contains("(ESR="))
+        .and_then(|l| l.split_once("(ESR=")).and_then(|(_, e)| hex(e.trim_end_matches(')')));
+    let far = serial.lines().find_map(|l| l.split_once("far=")).and_then(|(_, f)| hex(f.split_whitespace().next()?));
+    let (Some(read), Some(esr), Some(far)) = (read, esr, far) else {
+        return Err(format!("no read, fault class and address to judge\nserial:\n{serial}"));
+    };
+    // EC 0x25, a data abort taken without a change of level; DFSC 0b0011xx, a
+    // permission fault at any level.
+    if esr >> 26 != 0x25 || esr & 0x3c != 0x0c || far != read {
+        return Err(format!(
+            "the kernel's read of {read:#x} ended in ESR={esr:#x} at far={far:#x}, not a permission fault there\nserial:\n{serial}"
+        ));
+    }
+    eprintln!("  [virt_pan] the EL1 read of {read:#x} was a permission fault (ESR={esr:#x})");
     Ok(())
 }
 
@@ -4068,10 +4248,8 @@ fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
 
 /// `tests/images/virtrebootcase.toml`'s one job asks for a reboot: the boot's last word is
 /// `Rebooting.`, QEMU stops for `guest-reset`, and its trace of PSCI holds one
-/// `SYSTEM_RESET` and neither `CPU_OFF` nor `SYSTEM_OFF`. With `staged`
-/// actuators `klogd` holds the console's wire as the stop begins, judged by
-/// [`power::judge_the_held_wire`].
-fn virt_reboot(profile: qemu::Profile, staged: &'static [&'static str]) -> Result<(), String> {
+/// `SYSTEM_RESET` and neither `CPU_OFF` nor `SYSTEM_OFF`.
+fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
     let config = compile::repo_root().join("tests/images/virtrebootcase.toml");
     let trace = common::lane::dir().join("virt_reboot.psci");
     let mut qemu = QemuInstance::boot_with_options(
@@ -4082,7 +4260,6 @@ fn virt_reboot(profile: qemu::Profile, staged: &'static [&'static str]) -> Resul
             profile,
             qmp: true,
             psci_trace: Some(trace.clone()),
-            kernel_params: staged,
             ready_marker: "control registers: SCTLR_EL1=",
             ..Default::default()
         },
@@ -4102,9 +4279,6 @@ fn virt_reboot(profile: qemu::Profile, staged: &'static [&'static str]) -> Resul
         .collect();
     if asked != [PSCI_SYSTEM_RESET] {
         return Err(format!("QEMU traced {asked:x?} of CPU_OFF, SYSTEM_OFF and SYSTEM_RESET, not one SYSTEM_RESET"));
-    }
-    if !staged.is_empty() {
-        power::judge_the_held_wire(&console, bootlog::REBOOTING, staged == power::wire_staged(true))?;
     }
     eprintln!("  [virt] Rebooting., then one SYSTEM_RESET, and QEMU stopped for guest-reset");
     Ok(())
@@ -4425,34 +4599,30 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             Ok(())
         }
         "virt_el2_drop" => {
-            // The entry's drop from EL2, which HVF never exercises: `virt` with
-            // EL2 under TCG, where firmware hands the loader the CPU at EL2. A
-            // loader that refuses the CPU says so and stops; a handover with
-            // EL2's MMU on halts in a named refusal, or faults first where
-            // firmware maps the image execute-never; a drop that leaves
-            // `HCR_EL2` other than declared halts in a named refusal and says
-            // nothing; one that lands anywhere but EL1 on `SP_EL1` panics in the
-            // declaration's read-back. Each way the line this waits for never
-            // comes.
+            // The entry's drop from EL2 on a CPU with neither FEAT_VHE nor
+            // FEAT_PAN, which HVF never exercises: `virt` with EL2 under TCG,
+            // where firmware hands the loader the CPU at EL2. A loader that
+            // refuses the CPU says so and stops; a handover with EL2's MMU on
+            // halts in a named refusal, or faults first where firmware maps the
+            // image execute-never; a drop that leaves `HCR_EL2` other than
+            // declared halts in a named refusal and says nothing; one that
+            // lands anywhere but EL1 on `SP_EL1` panics in the declaration's
+            // read-back before it reaches FEAT_PAN. Each way the refusal this
+            // waits for never comes.
+            const REFUSED: &str = "control registers: this CPU, entered at EL2, has no FEAT_PAN";
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 &[],
                 &[],
-                BootOptions {
-                    profile,
-                    kernel_params: &["test-early-panic"],
-                    ready_marker: "EARLY PANIC:",
-                    ..Default::default()
-                },
+                BootOptions { profile, ready_marker: "EARLY PANIC:", ..Default::default() },
             );
-            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
+            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(REFUSED));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
                 "CPU: entered at EL2, HCR_EL2.E2H 0,",
                 "ID_AA64MMFR4_EL1.E2H0 0x0: the kernel's entry writes E2H clear",
-                "as declared; entered at EL2, HCR_EL2 read back as declared",
                 "EARLY PANIC: panicked at",
-                EARLY_PANIC_MESSAGE,
+                REFUSED,
             ] {
                 if !serial.contains(want) {
                     return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
@@ -4544,6 +4714,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_random_differs" => virt_random_differs(profile),
         "virt_wall_clock_utc" => virt_wall_clock_utc(profile),
         "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
+        "virt_pan_refuses_el1_a_user_page" => virt_pan_refuses_el1_a_user_page(profile),
         "virt_smmu" => virt_smmu(profile, test_config),
         "virt_claim_lpi" => virt_claim_lpi(profile),
         "virt_low_ecam" => virt_low_ecam(profile, test_config),
@@ -4562,11 +4733,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_el1_smp" => virt_smp(profile, "HVC", 1),
         "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(profile),
         "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(profile),
-        "virt_reboot" => virt_reboot(profile, &[]),
-        // The reboot with `klogd` holding the PL011's wire as the stop begins,
-        // then keeping it through the stop's budget.
-        "virt_reboot_wire_held" => virt_reboot(profile, power::wire_staged(false)),
-        "virt_reboot_wire_kept" => virt_reboot(profile, power::wire_staged(true)),
+        "virt_reboot" => virt_reboot(profile),
         "virt_off_names_the_cpus_left_on" => virt_off_names_the_cpus_left_on(profile),
         "virt_reboot_refused_without_psci" => virt_reboot_refused_without_psci(profile),
         "screen_fatal_behind_a_painter" => {
@@ -4855,18 +5022,18 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "a_stepped_tsc_is_slewed_then_demoted" => faults::a_stepped_tsc_is_slewed_then_demoted(test_config),
         "a_stalled_hpet_is_left_out" => faults::a_stalled_hpet_is_left_out(test_config),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
+        "acpi_holder_is_refused_a_held_functions_configuration" => acpi_holder_is_refused_a_held_functions_configuration(),
         "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
-        "machine_shutdown_wire_held" => power::machine_shutdown_wire_held(test_config, false),
-        "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
-        "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
+        "the_uart_carries_the_boot_once_across_the_hand_over" => the_uart_carries_the_boot_once_across_the_hand_over(),
+        "a_supervisor_that_fails_early_says_why_on_the_uart" => a_supervisor_that_fails_early_says_why_on_the_uart(),
         "a_spawn_from_an_image_frees_it_when_the_child_ends" => a_spawn_from_an_image_frees_it_when_the_child_ends(test_config),
         "a_bent_supervisor_is_refused_and_the_other_slot_boots" => {
             [qemu::Profile::Headless, qemu::Profile::Virt].into_iter().try_for_each(|profile| {
@@ -4909,7 +5076,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         ),
         "a_drives_row_holds_one_process_per_function" => a_drives_row_holds_one_process_per_function(),
         "a_function_arrives_and_leaves" => a_function_arrives_and_leaves(),
-        "a_claim_waits_out_an_undeclared_machine" => a_claim_waits_out_an_undeclared_machine(),
+        "a_claim_before_the_declaration_is_refused_at_once" => a_claim_before_the_declaration_is_refused_at_once(),
         "hda_plays_to_the_controller_that_reaches_an_output" => {
             hda_plays_to_the_controller_that_reaches_an_output(test_config)
         }
@@ -5347,45 +5514,36 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// A boot with no ACPI server: nothing declares the root bridges' memory, so
-/// the first claim of an `edu` waits on the declaration's watch until its
-/// deadline, and that claim and the second are each refused by that name,
-/// before either function is touched; nothing is handed over.
-fn a_claim_waits_out_an_undeclared_machine() -> Result<(), String> {
-    const WAITED: &str = "pcidev: a claim waited ";
-    const REFUSED: &str = "NOT HANDED OVER — no declaration of the memory the root bridges decode is held (nothing was declared before a claim's deadline)";
-    const DEADLINE: Duration = Duration::from_secs(30);
-    let options = BootOptions { profile: qemu::Profile::HeadlessTwoEduNoConsolePort, ..Default::default() };
+/// A boot with no ACPI server: nothing can declare the root bridges' memory,
+/// so the supervisor starts no `drives` process and says why; and a job's own
+/// claim of each `edu`, made while the set says the declaration is pending, is
+/// refused at once by that name, before either function is touched. Nothing
+/// is handed over.
+fn a_claim_before_the_declaration_is_refused_at_once() -> Result<(), String> {
+    const JOB: &str = "pci_undeclared";
+    const REFUSED: &str = "NOT HANDED OVER — no declaration of the memory the root bridges decode is held yet";
+    const NONE: &str = "supervisor: nothing on this boot can declare the root bridges' memory, so no PCI driver starts";
+    let options = BootOptions {
+        profile: qemu::Profile::HeadlessTwoEduNoConsolePort,
+        extra_root_files: vec![suite_bin(toyos_build::arch::Arch::X86_64, JOB)],
+        ..Default::default()
+    };
     let config = compile::repo_root().join("tests/images/undeclaredcase.toml");
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-    // The guest is quiet for the whole of the wait, which the deadline bounds:
-    // a ceiling past it, not a quiet guest's verdict.
-    let waited = qemu.drain_until(DEADLINE * 3, |l| l.contains(REFUSED));
-    let mut console = format!("{}\n{waited}", qemu.boot_log());
-    await_guest(&mut qemu, &mut console, "both claims refused", |t| t.matches(REFUSED).count() >= 2)
+    let mut console = format!("{}\n", qemu.boot_log());
+    let ended = format!("===TEST_END test_rs_{JOB} ");
+    await_guest(&mut qemu, &mut console, "the job's end", |t| t.contains(&ended))
         .map_err(|e| format!("{e}\n{console}"))?;
     let said = serial::Serial::named("the undeclared boot", console.clone());
+    said.must_say(&format!("{ended}exit=0"))?;
+    eprintln!("  [undeclared] {}", said.must_say("pci_undeclared: the set says the declaration is pending")?.trim());
+    if said.text().matches(REFUSED).count() != 2 {
+        return Err(format!("the kernel refused {} claims as undeclared, where the job made two:\n{console}", said.text().matches(REFUSED).count()));
+    }
+    eprintln!("  [undeclared] {}", said.must_say(NONE)?.trim());
     said.must_not_say(" [1234:11e8] handed over")?;
     said.must_not_say("pcidev: the acpi claim declared")?;
-    let waited = said.must_say(WAITED)?;
-    let took = waited.split_once(WAITED).and_then(|(_, rest)| rest.split(" for ").next()).unwrap_or_default().to_string();
-    // The kernel writes a wait under a millisecond in ns.
-    let millis: u64 = match (took.strip_suffix("ms"), took.strip_suffix("ns")) {
-        (Some(ms), _) => ms.parse().ok(),
-        (None, Some(ns)) => ns.parse::<u64>().ok().map(|_| 0),
-        (None, None) => None,
-    }
-    .ok_or_else(|| format!("{waited:?} names no duration"))?;
-    if u128::from(millis) < DEADLINE.as_millis() {
-        return Err(format!("the claim waited {took}, short of its {DEADLINE:?} deadline:\n{console}"));
-    }
-    if said.text().matches(WAITED).count() != 1 {
-        return Err(format!("a claim after the deadline waited too:\n{console}"));
-    }
-    eprintln!("  [undeclared] {}", waited.trim());
-    for line in said.text().lines().filter(|l| l.contains(REFUSED)) {
-        eprintln!("  [undeclared] {}", line.trim());
-    }
+    said.must_not_say("spawn: /system/bin/pciholder")?;
     Ok(())
 }
 
@@ -6793,13 +6951,28 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The machine's kernel thread is hosted.
-fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
-    boot.must_be_clean()?;
-    let line = boot.must_say("kthread: klogd")?;
-    eprintln!("  [kthread] {}", line.trim());
+/// The console UART is its driver's from the kernel's hand-over: the claim's
+/// ports went to a process and the driver carries the log, or the machine
+/// has no UART and the driver said so and ended.
+fn console_uart_driven(log: &serial::Serial) -> Result<(), String> {
+    log.must_be_clean()?;
+    let line = match log.text().lines().find(|l| l.contains(NO_UART)) {
+        Some(none) => none,
+        None => {
+            log.must_say(UART_BOUND)?;
+            log.must_say(UART_CARRIES)?
+        }
+    };
+    eprintln!("  [uart] {}", line.trim());
     Ok(())
 }
+
+/// What `/system/bin/uart` says on a machine with no console UART.
+const NO_UART: &str = "uart: no console UART claim";
+/// What the kernel says as the console UART's claim binds its ports.
+const UART_BOUND: &str = "isa: the console UART's ports are pid";
+/// What `/system/bin/uart` says once its claim is read and its log asked for.
+const UART_CARRIES: &str = "uart: carrying the log";
 
 /// Every I/O APIC this machine has, and whether its redirection table is a
 /// chip's rather than a floating bus's.
@@ -7049,14 +7222,14 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         (16, "FSGSBASE", false),
         // Set: user programs use AVX, whose state only `XSAVE` moves.
         (18, "OSXSAVE", true),
-        // Not a bit the machine may withhold: `Arch::cpu`'s two x86-64 CPUs
-        // are the only x86-64 CPUs this repository launches and both name
-        // `+smep`, so a boot without supervisor-mode execution prevention is a
-        // kernel that stopped enabling it or a launcher that stopped asking.
+        // Required by the kernel's declaration, which refuses a CPU without
+        // them: a boot that holds either clear is a kernel that stopped
+        // enabling it.
         (20, "SMEP", true),
+        (21, "SMAP", true),
     ];
     /// The `CR4` bits the CPU may withhold, so neither answer is wrong.
-    const CR4_MAY: &[(u32, &str)] = &[(11, "UMIP"), (17, "PCIDE"), (21, "SMAP")];
+    const CR4_MAY: &[(u32, &str)] = &[(11, "UMIP"), (17, "PCIDE")];
     const XCR0_BITS: &[(u32, &str, bool)] = &[(0, "x87", true), (1, "SSE", true), (2, "AVX", true)];
     /// AVX-512's components, which a CPU without AVX-512 does not have.
     const XCR0_AVX512: &[(u32, &str)] = &[(5, "opmask"), (6, "ZMM_Hi256"), (7, "Hi16_ZMM")];
@@ -7169,6 +7342,44 @@ fn field_between<'a>(log: &'a str, head: &str, tail: &str) -> Result<&'a str, St
         .ok_or_else(|| format!("no record carrying {head:?} and then {tail:?}"))
 }
 
+/// The kernel's line for the ACPI fixed hardware's first interrupt
+/// (`kernel/src/isa.rs`).
+const ACPI_FIRST_INTERRUPT: &str = "isa: the ACPI fixed hardware took its first interrupt";
+
+/// The lines of `log` stamped in `from_ms..=to_ms`: `Ok` with the admitted
+/// lines among them where they are all admitted, `Err` with the rest where any
+/// is not. Admitted:
+/// - acpiserver's first take of a query or GPE ([`acpiserver_api::FIRST_TAKEN`])
+///   and [`ACPI_FIRST_INTERRUPT`], each only where the whole log holds its words
+///   once;
+/// - the clock's TSC refinement ([`kernel::clock::TSC_REFINED`]), written on a
+///   scheduler pass and arming no timer;
+/// - its step report ([`kernel::clock::TSC_STEP_READ`]), which the AMD bench's
+///   deep idle provokes once a boot
+///   (`issues/the-amd-benchs-tsc-steps-1-7-ms-forward-once-a-boot.md`).
+fn idle_second_lines(log: &str, from_ms: u64, to_ms: u64) -> Result<Vec<&str>, Vec<&str>> {
+    fn words(line: &str) -> Option<&str> {
+        toyos_logstream::parse(line).map(|p| p.text)
+    }
+    let once = |line: &str| words(line).is_some_and(|said| log.lines().filter(|l| words(l) == Some(said)).count() == 1);
+    let event = |line: &str| {
+        let named = toyos_logstream::program_line(line)
+            .is_some_and(|said| said.tag == "acpiserver" && said.text.contains(acpiserver_api::FIRST_TAKEN))
+            || toyos_logstream::parse(line)
+                .is_some_and(|p| p.source == toyos_logstream::Source::Kernel && p.text == ACPI_FIRST_INTERRUPT);
+        let clock = toyos_logstream::parse(line).is_some_and(|p| {
+            p.source == toyos_logstream::Source::Kernel
+                && (p.text.starts_with(kernel::clock::TSC_REFINED) || p.text.starts_with(kernel::clock::TSC_STEP_READ))
+        });
+        named && once(line) || clock
+    };
+    let (events, rest): (Vec<&str>, Vec<&str>) = log
+        .lines()
+        .filter(|line| toyos_logstream::parse(line).and_then(|p| p.ms).is_some_and(|ms| (from_ms..=to_ms).contains(&ms)))
+        .partition(|line| event(line));
+    if rest.is_empty() { Ok(events) } else { Err(rest) }
+}
+
 /// The shortest span `counters_on_metal` reads the SMI count across: twice the
 /// longest period between the T14's firmware interrupts that has been read
 /// (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
@@ -7181,11 +7392,12 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// bring-up gave that CPU and carrying the counters its `counters: cpuN
 /// reads` line names, and none stale; every CPU's performance request
 /// declared at boot, `pm_enable=1`, and its power envelope in every read the
-/// one its `control_regs:` line holds. No line, the kernel's or a
-/// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
-/// `counters_metal` reads on the log's clock, either
-/// edge's included because a line stamped in it may follow the read: the
-/// second is the idle machine's. The boot ran in ACPI mode, which
+/// one its `control_regs:` line holds. No line is stamped in a millisecond
+/// from `idle0`'s to `idle1`'s, which `counters_metal` reads on the log's
+/// clock, both edges included since a line stamped there may follow the read,
+/// except the lines [`idle_second_lines`] admits, each of which the row
+/// reports: nothing ToyOS writes on its own account lands in the second. The
+/// boot ran in ACPI mode, which
 /// `/system/bin/acpiserver`'s claim put it in: `idle0` reads after the
 /// kernel's write of the enable to `SMI_CMD`, which the boot processor
 /// counted with the time it held it, and no other CPU counts one; and from
@@ -7240,16 +7452,10 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     let (idle0, at0) = phase("idle0")?;
     let (idle1, at1) = phase("idle1")?;
     let (spin, at2) = phase("spin")?;
-    let (from_ms, to_ms) = (at0 / 1_000_000, at1 / 1_000_000);
-    let inside: Vec<&str> = log
-        .text()
-        .lines()
-        .filter(|line| {
-            toyos_logstream::parse(line).and_then(|p| p.ms).is_some_and(|ms| (from_ms..=to_ms).contains(&ms))
-        })
-        .collect();
-    if !inside.is_empty() {
-        return Err(format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"));
+    let events = idle_second_lines(log.text(), at0 / 1_000_000, at1 / 1_000_000)
+        .map_err(|inside| format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"))?;
+    for event in &events {
+        eprintln!("  [counters] admitted inside the idle second: {}", event.trim());
     }
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
     let mut roster = vec![bsp.rsplit("lapic_id=").next().unwrap_or_default().trim().to_string()];
@@ -7406,10 +7612,11 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     if let Some(refused) = lines.iter().find(|l| l.contains("method was refused, so the GPE is served no more")) {
         return Err(format!("a runtime GPE's method was refused: {refused}"));
     }
-    for gpe in lines.iter().filter(|l| l.contains("acpiserver: GPE ") && l.contains(" taken for the first time; its method ran")) {
+    let method_ran = format!("{}; its method ran", acpiserver_api::FIRST_TAKEN);
+    for gpe in lines.iter().filter(|l| l.contains("acpiserver: GPE ") && l.contains(&method_ran)) {
         eprintln!("  [acpi] {}", gpe.trim());
     }
-    let firsts: Vec<&&str> = lines.iter().filter(|l| l.contains("query") && l.contains("taken for the first time")).collect();
+    let firsts: Vec<&&str> = lines.iter().filter(|l| l.contains("query") && l.contains(acpiserver_api::FIRST_TAKEN)).collect();
     let counts = lines.iter().rfind(|l| l.contains(acpiserver_api::QUERIES_COUNTED));
     let (true, Some(counts)) = (!firsts.is_empty(), counts) else {
         return Err(format!("the server logged {} first sighting(s) and {counts:?} for counts", firsts.len()));
@@ -7542,7 +7749,7 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_hold")?;
     let (whole, kernel) = (back.log(), back.kernel());
     let text = whole.text();
-    let at = text.find(acpiserver_api::POWER_SOURCES).ok_or("the server never said its power sources, which the hold waited for")?;
+    let at = text.find(acpiserver_api::POWER_SOURCES).ok_or("the server never said its power sources")?;
     let end = text[at..].find('\n').map_or(text.len(), |n| at + n);
     let log = serial::Serial::named("the log up to the server's power sources", &text[..end]);
     let lines: Vec<&str> = log
@@ -7574,13 +7781,12 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     eprintln!("  [acpi] {}; {}", handed.trim(), kept.trim());
     // The root bridges' memory declared out of the loaded namespace, and what
-    // that cost: the load's time, and each claim's wait for the declaration.
+    // that cost: the load's time, and how long after its first rows the
+    // supervisor read it held and started storage and the PCI drivers.
     eprintln!("  [acpi] {}", log.must_say("acpiserver: the root bridges' memory declared: ")?.trim());
     eprintln!("  [acpi] {}", log.must_say(" tables loaded in ")?.trim());
     eprintln!("  [acpi] {}", kernel.must_say(claims::DECLARED)?.trim());
-    for waited in kernel.text().lines().filter(|l| l.contains("pcidev: a claim waited ")) {
-        eprintln!("  [acpi] {}", waited.trim());
-    }
+    eprintln!("  [acpi] {}", log.must_say(claims::SUPERVISOR_DECLARED)?.trim());
     let others = number_between(kernel.text(), "SMP: ", " of ")? - 1;
     let compared: Vec<&str> = kernel.text().lines().filter(|l| l.contains("mtrr: cpu") && l.contains("'s range registers are ")).collect();
     if compared.len() as u64 != others || compared.iter().any(|l| l.contains("are on and not the boot processor's")) {
@@ -7749,6 +7955,48 @@ fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// The server's death on the T14: the kernel put the machine in ACPI mode for
+/// the job's claim, the boot's first, and when the killed server's claim went
+/// it wrote `ACPI_DISABLE` (the FADT's 0xf1) and read `SCI_EN` clear: the
+/// firmware has the buttons again. Each write was made on the boot processor,
+/// and the enable was asked from another CPU: the job claims from a thread it
+/// found off the boot processor, so that write is the one that crossed. The
+/// server declared the root bridges' memory before it died, and the
+/// supervisor started storage on it, which is how this log is here. And the
+/// Global Lock this machine's firmware keeps: the kernel read the FACS its
+/// FADT names through the direct map and found the lock word in memory the
+/// firmware's own map does not report as `AddressRangeMemory`, which ACPI 6.5
+/// §5.2.10 forbids the FACS.
+fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_acpi_release")?;
+    let kernel = back.kernel();
+    let lock = kernel.must_say("acpi: the Global Lock is the FACS's at ")?.trim();
+    let uefi_type = lock
+        .rsplit_once(", in memory the firmware's map types ")
+        .and_then(|(_, ty)| ty.parse::<u8>().ok())
+        .ok_or_else(|| format!("the Global Lock's line names no memory type: {lock}"))?;
+    if ADDRESS_RANGE_MEMORY.contains(&uefi_type) {
+        return Err(format!("the Global Lock's word is in AddressRangeMemory: {lock}"));
+    }
+    eprintln!("  [acpi] {lock}");
+    eprintln!("  [acpi] {}", kernel.must_say(claims::DECLARED)?.trim());
+    eprintln!("  [acpi] {}", back.log().must_say(claims::SUPERVISOR_DECLARED)?.trim());
+    let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2 ")?;
+    // The kernel says this only of a `PM1a_CNT` it read with `SCI_EN` clear.
+    let left = kernel.must_say("acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD 0xb2 ")?;
+    for line in [enabled, left] {
+        smi_cmd_writer(line)?;
+        eprintln!("  [acpi] {}", line.trim());
+    }
+    if number_between(enabled, ", asked from cpu", "; the write held cpu")? == 0 {
+        return Err(format!("the job's claim was asked from the boot processor, so no CPU asked it for this write: {enabled}"));
+    }
+    Ok(())
+}
+
+/// The UEFI memory types ACPI 6.5 Table 15.6 maps to `AddressRangeMemory`.
+const ADDRESS_RANGE_MEMORY: [u8; 5] = [1, 2, 3, 4, 7];
 
 /// The CPU a kernel line says wrote `SMI_CMD`, read on that CPU beside the
 /// `out`: the boot processor, cpu0, or the line is refused (ACPI 6.5 Table
@@ -7992,7 +8240,7 @@ struct ClockReport {
 }
 
 fn clock_report(line: &str) -> Option<ClockReport> {
-    let (_, rest) = line.split_once("clock: over ")?;
+    let (_, rest) = line.split_once(kernel::clock::TSC_REFINED)?;
     let (span, rest) = rest.split_once(" s the TSC counted ")?;
     let (measured, rest) = rest.split_once(" mHz against the HPET, within ")?;
     let (measured_ppb, rest) = rest.split_once(" ppb; the clock ")?;
@@ -8445,6 +8693,8 @@ struct Tally {
     invalid: Vec<(String, Duration)>,
     /// Every outcome's `elapsed`, summed.
     tested: Duration,
+    /// What other work used on the host over the run, once it has ended.
+    host: Option<common::hostload::Reading>,
 }
 
 impl Tally {
@@ -8455,6 +8705,7 @@ impl Tally {
             stalls: Vec::new(),
             invalid: Vec::new(),
             tested: Duration::ZERO,
+            host: None,
         }
     }
 
@@ -8473,9 +8724,14 @@ impl Tally {
         }
     }
 
-    /// **Three statuses**: 0 green, 1 red, and 2 when the run established
-    /// nothing, because the host stopped in the middle of it.
+    /// **Four statuses**: 0 green, 1 red, 2 when the host stopped in the
+    /// middle of a test, and 3 when other work on the host shared it with the
+    /// guests. A run on a host that was not quiet establishes nothing, reds
+    /// included.
     fn exit_code(&self) -> i32 {
+        if self.host.is_some_and(|r| !r.quiet()) {
+            return 3;
+        }
         if !self.failures.is_empty() {
             return 1;
         }
@@ -8516,6 +8772,13 @@ impl Tally {
             "host: {} core(s); a guest wider than that waits vcpus/cores longer again",
             qemu::host_cores()
         ));
+        if let Some(host) = self.host {
+            say(format!(
+                "host: other work used {:.0?} of CPU beside this run, {:.2} CPUs on average",
+                host.other,
+                host.cpus()
+            ));
+        }
         if suspended >= common::clock::SUSPENDED_AT_LEAST {
             // The elapsed figure below is monotonic and therefore already
             // excludes it, which is worth saying: the two numbers do not add up
@@ -8573,6 +8836,21 @@ impl Tally {
                 say(
                     "This is not a red. The machine stopped mid-run, so those verdicts \
                      are of nothing; re-run the suite."
+                        .to_string(),
+                );
+            }
+            3 => {
+                say(format!(
+                    "test result: HOST NOT QUIET. {} passed, {} failed, {} invalidated, \
+                     {total} total ({elapsed})",
+                    self.passed,
+                    self.failures.len(),
+                    self.invalid.len(),
+                ));
+                say(
+                    "This is not a red or a green. Other work on the host took more than a CPU \
+                     from the guests, so no verdict here is this tree's alone; re-run on a quiet \
+                     host."
                         .to_string(),
                 );
             }
@@ -8860,9 +9138,9 @@ fn main() {
             }
         };
 
-        // Three statuses for the three things this can establish, as the
-        // ordinary suite has: green, red, and "measured nothing" — a run that
-        // staged images and never reached the machine has no claim to make.
+        // Three statuses for the three things this can establish: green, red,
+        // and "measured nothing" — a run that staged images and never reached
+        // the machine has no claim to make.
         run.exit(
             match metal::run(mode, parsed.metal_host, &selected, &boots, &rust_bins, !nocapture && !debug_mode)
             {
@@ -8899,24 +9177,13 @@ fn main() {
     let mut tally = Tally::new();
 
     let suite_start = common::clock::mark();
+    let host_start = common::hostload::mark();
 
     let tasks = build_tasks(&machine_to_run, &screen_to_run);
     let total = tasks.len();
     eprintln!("\nrunning {total} tests, {width} wide\n");
     run_tasks(tasks, width, &test_config).into_iter().for_each(|o| tally.record(o));
 
-    // Three exit statuses, because there are three things a run can establish —
-    // see [`Tally::exit_code`], which is where the whole decision now lives.
-    //
-    // Nor may it be 1. A red sends an agent hunting a defect, and the defect is
-    // not there — the lid was closed. CLAUDE.md already documents the signature
-    // and documents it as something a *human* must notice before recording a
-    // finding, which is exactly the judgement a status code should carry
-    // instead. So: 2, with a headline that names it and says re-run.
-    //
-    // A run with both real failures and invalidated tests exits 1: a red that
-    // survives is still a red, and re-running the suspended ones does not make
-    // it green.
     // What this run cost cargo: a kernel build is ~6.9 s of wall clock and
     // ~29.6 s of CPU after any edit under `kernel/`, and a full run used to
     // make 45 of them.
@@ -8927,6 +9194,8 @@ fn main() {
         kernels.len(),
     );
 
+    // Every worker has joined and every guest and build it started is reaped.
+    tally.host = Some(host_start.reading());
     let summary = tally.summary(total, suite_start.elapsed(), suite_start.suspended());
     summary.lines().for_each(|line| eprintln!("{line}"));
     run.exit(tally.exit_code());

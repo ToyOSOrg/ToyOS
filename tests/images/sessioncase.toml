@@ -17,15 +17,23 @@
 assets = ["assets"]
 
 [boot]
-start = ["acpiserver", "logkeeper", "compositor", "ps2server", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "compositor", "ps2server", "test-runner"]
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log-carrier"]
+syscap = ["logread", "console"]
+serves = ["log-carrier", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 # `roster`, which the job reads to find the holder it detached and see it end
 # when forced; `dup`, because test-runner hands each job its capability.
+
 [programs.test-runner]
 syscap = ["dup", "roster"]
 receives = ["power"]
@@ -61,8 +69,8 @@ starts = ["hangupholder"]
 [programs.logout]
 receives = ["session-admin"]
 
-# Started before every PCI claimant: it declares the memory the root bridges
-# decode, which every claim of a PCI function waits for.
+# It declares the memory the root bridges decode: the supervisor starts a PCI
+# driver only once the device set says the declaration is held.
 [programs.acpiserver]
 service = true
 devices = ["acpi"]

@@ -20,7 +20,7 @@ use crate::time::Deadline;
 use crate::DirectMap;
 
 pub use crate::sched::driver::{
-    current_address_space, enter_idle_loop, in_pass as in_schedule_self, started, total_cpu_ns,
+    current_address_space, enter_idle_loop, in_pass as in_schedule_self, total_cpu_ns,
     write_stack_canary, NewTask, Ticket,
 };
 
@@ -43,23 +43,14 @@ const BASELINE_TRAP: u32 = 1;
 /// are past the trap entry level.
 const BASELINE_IRQ_EXIT: u32 = 0;
 
-/// Read from `sched::kthread`'s rows rather than the `CpuSched`, which a
-/// preempting pass may be holding `&mut` at this point.
-fn blocking_baseline() -> u32 {
-    if crate::sched::kthread::current_is_kernel_thread() {
-        0
-    } else {
-        BASELINE_TRAP
-    }
-}
 
 /// Proof that the calling context may park; threaded by reference rather
 /// than stored, with no public constructor beside [`Parkable::at_entry`].
 pub struct Parkable(());
 
 impl Parkable {
-    /// Asserts this context is a trap entry or a kernel thread's body, and
-    /// nothing below one, then mints the proof.
+    /// Asserts this context is a trap entry, and nothing below one, then
+    /// mints the proof.
     #[track_caller]
     pub fn at_entry() -> Parkable {
         Parkable::mint()
@@ -67,7 +58,7 @@ impl Parkable {
 
     #[track_caller]
     fn mint() -> Parkable {
-        assert_baseline(blocking_baseline());
+        assert_baseline(BASELINE_TRAP);
         Parkable(())
     }
 }
@@ -79,18 +70,6 @@ pub struct TaskId(pub Pid, pub Tid);
 impl TaskId {
     pub fn pack(self) -> u64 {
         self.1.raw() as u64 | (self.0.raw() as u64) << 32
-    }
-    pub fn unpack(v: u64) -> Self {
-        Self(Pid::from_raw((v >> 32) as u32), Tid::from_raw(v as u32))
-    }
-}
-
-/// The running task, or `None` for boot and an idle CPU. No lock: called
-/// with preemption still on, aliasing a preempting pass's `&mut CpuSched`.
-pub fn current_task() -> Option<TaskId> {
-    match (percpu::current_pid(), percpu::current_tid()) {
-        (Some(pid), Some(tid)) => Some(TaskId(pid, tid)),
-        _ => None,
     }
 }
 
@@ -124,19 +103,17 @@ pub fn prepare_wait(cancel: Cancel, class: WaitClass) -> Result<Ticket, Refused>
 /// reaches the machine without phase 1 behind it is the lost-wake window.
 #[track_caller]
 pub fn block_on(ticket: Ticket, deadline: Deadline) {
-    // One level above the calling context's baseline: the ticket has held the
-    // registration window's own level since `prepare_wait`.
-    assert_baseline(blocking_baseline() + 1);
+    // One level above the trap's: the ticket has held the registration
+    // window's own level since `prepare_wait`.
+    assert_baseline(BASELINE_TRAP + 1);
     driver::pass_block(ticket, (!deadline.is_never()).then(|| Nanos(deadline.nanos())));
 }
 
 /// Give the CPU up voluntarily, keeping the claim on it: the pass decides
-/// whether anything else deserves the quantum. Asserts the calling context's
-/// own baseline, not a flat trap level, since a kernel thread yields at zero
-/// and a flat assert would panic it.
+/// whether anything else deserves the quantum.
 #[track_caller]
 pub fn yield_now() {
-    assert_baseline(blocking_baseline());
+    assert_baseline(BASELINE_TRAP);
     driver::pass(Dispose::Yield);
 }
 
@@ -182,7 +159,7 @@ pub fn leave_user_if_due() {
             // closes and address-space drop are no interrupt latency. The
             // depth stays this boundary's, which is `do_preempt`'s own.
             crate::arch::cpu::enable_interrupts();
-            process::leave(None);
+            process::leave();
             crate::arch::cpu::disable_interrupts();
             driver::pass(Dispose::Exit);
             unreachable!("leave_user_if_due: returned from the exit pass");
@@ -202,8 +179,7 @@ pub fn exit_to_user() {
         leave_user_if_due();
         // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
         if !crate::preempt::need_resched() {
-            // Every caller's next unmask is the return to user mode, or a
-            // kernel thread's first.
+            // Every caller's next unmask is the return to user mode.
             #[cfg(feature = "mask-windows")]
             crate::windows::irqs_unmasking();
             return;

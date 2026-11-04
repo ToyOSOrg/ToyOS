@@ -1195,6 +1195,59 @@ pub fn turn_taking_pair() -> Scenario {
 /// How many turns each of [`turn_taking_pair`]'s threads takes.
 pub const TURN_TAKING_ROUNDS: usize = 8;
 
+/// **A thread spawned to work with its spawner**: on the AMD bench's shape,
+/// with balancing off, a thread moves itself to cpu8, in the second LLC, and
+/// spawns the thread it then takes turns with. Only spawn placement decides
+/// whether the two share an LLC, since the rotation's next start is cpu1, in
+/// the first.
+pub fn spawned_partner() -> Scenario {
+    let turn = MS / 10;
+    let wake = |queue| Op::Wake { queue, all: false, boost: None };
+    let block = |queue| Op::Block { queue, deadline: None };
+    let mut spawner = vec![Op::SetAffinity(1 << 8), Op::Run(MS), Op::SetAffinity(0xffff), Op::Spawn { template: 1 }];
+    for _ in 0..TURN_TAKING_ROUNDS {
+        spawner.extend([Op::Run(turn), wake(1), block(0)]);
+    }
+    scenario(
+        "spawned_partner",
+        16,
+        vec![queue(WaitClass::Io), queue(WaitClass::Io)],
+        vec![process(
+            "pair",
+            vec![0],
+            vec![Script::new(spawner), Script::looping(vec![block(1), Op::Run(turn), wake(0)], TURN_TAKING_ROUNDS)],
+        )],
+    )
+    .with_topology(Shape::amd_bench())
+    .with_balance(Balance::None)
+}
+
+/// **A burst of threads that park**: on the AMD bench's shape, with
+/// balancing off, a thread on cpu7 spawns [`SPAWNED_BURST`] threads, more than
+/// the free cores of its LLC, each of which parks for a millisecond. A parked
+/// thread raises no published load, so only spawn placement keeps the burst
+/// from piling onto the spawner's LLC.
+pub fn spawned_burst() -> Scenario {
+    let mut spawner = vec![Op::SetAffinity(1 << 7), Op::Run(MS), Op::SetAffinity(0xffff)];
+    spawner.extend((0..SPAWNED_BURST).map(|_| Op::Spawn { template: 1 }));
+    scenario(
+        "spawned_burst",
+        16,
+        vec![queue(WaitClass::Io)],
+        vec![process(
+            "burst",
+            vec![0],
+            vec![Script::new(spawner), Script::new(vec![Op::Block { queue: 0, deadline: Some(MS) }])],
+        )],
+    )
+    .with_topology(Shape::amd_bench())
+    .with_balance(Balance::None)
+}
+
+/// How many threads [`spawned_burst`]'s spawner starts: more than its LLC's
+/// free cores and fewer than the machine's.
+pub const SPAWNED_BURST: usize = 10;
+
 /// **Masks under stealing**, every thread spawned on cpu0 of four with the
 /// shipped balance policy: two threads pinned to cpu0, two masked to cpu1 and
 /// cpu2, one that moves itself between halves of the machine as it runs, and

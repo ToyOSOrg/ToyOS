@@ -1,5 +1,6 @@
 //! The boot's audit of the kernel's own translation tables: no leaf is both
-//! writable and executable, and none is executable outside the kernel's text.
+//! writable and executable, none is executable outside the kernel's text, and
+//! none over the kernel's RELRO is writable.
 //!
 //! A leaf is judged by its own bits. A table entry above it can only narrow
 //! what the leaf grants, and no narrowing is credited, so the audit can be
@@ -101,20 +102,29 @@ pub struct Verdict {
     pub writable_executable: Option<Finding>,
     /// An executable leaf not wholly inside the text.
     pub executable_outside_text: Option<Finding>,
+    /// A writable leaf over any byte of the read-only range.
+    pub writable_read_only: Option<Finding>,
 }
 
 impl Verdict {
     pub fn holds(&self) -> bool {
-        self.writable_executable.is_none() && self.executable_outside_text.is_none()
+        self.writable_executable.is_none() && self.executable_outside_text.is_none() && self.writable_read_only.is_none()
     }
 }
 
+/// The virtual addresses a leaf is judged against: `text` may be executable,
+/// and no byte of `read_only` may be writable.
+#[derive(Clone, Debug)]
+pub struct Bounds {
+    pub text: Range<u64>,
+    pub read_only: Range<u64>,
+}
+
 /// Walk every table under `root`, reading a table at a physical address
-/// through `table`, and judge each leaf against `text`, the virtual addresses
-/// that may be executable.
-pub fn audit<'t, F: Format>(root: &'t [u64; 512], text: Range<u64>, table: &impl Fn(u64) -> &'t [u64; 512]) -> Verdict {
+/// through `table`, and judge each leaf against `bounds`.
+pub fn audit<'t, F: Format>(root: &'t [u64; 512], bounds: Bounds, table: &impl Fn(u64) -> &'t [u64; 512]) -> Verdict {
     let mut verdict = Verdict::default();
-    descend::<F>(root, 0, 0, &text, table, &mut verdict);
+    descend::<F>(root, 0, 0, &bounds, table, &mut verdict);
     verdict
 }
 
@@ -122,7 +132,7 @@ fn descend<'t, F: Format>(
     entries: &'t [u64; 512],
     level: usize,
     base: u64,
-    text: &Range<u64>,
+    bounds: &Bounds,
     table: &impl Fn(u64) -> &'t [u64; 512],
     verdict: &mut Verdict,
 ) {
@@ -131,7 +141,7 @@ fn descend<'t, F: Format>(
         let bits = base | (index as u64) << shift;
         match F::read(level, entry) {
             Entry::Absent => {}
-            Entry::Table(phys) => descend::<F>(table(phys), level + 1, bits, text, table, verdict),
+            Entry::Table(phys) => descend::<F>(table(phys), level + 1, bits, bounds, table, verdict),
             Entry::Leaf { writable, executable } => {
                 verdict.leaves += 1;
                 let start = F::address(bits);
@@ -139,8 +149,11 @@ fn descend<'t, F: Format>(
                 if executable && writable {
                     note(&mut verdict.writable_executable, start);
                 }
-                if executable && !(text.start <= start && end <= text.end) {
+                if executable && !(bounds.text.start <= start && end <= bounds.text.end) {
                     note(&mut verdict.executable_outside_text, start);
+                }
+                if writable && start < bounds.read_only.end && bounds.read_only.start < end {
+                    note(&mut verdict.writable_read_only, start);
                 }
             }
         }
@@ -174,8 +187,12 @@ mod tests {
         }
 
         fn audit<F: Format>(&self, text: Range<u64>) -> Verdict {
+            self.audit_read_only::<F>(text, 0..0)
+        }
+
+        fn audit_read_only<F: Format>(&self, text: Range<u64>, read_only: Range<u64>) -> Verdict {
             let table = |phys: u64| -> &[u64; 512] { &self.0[(phys / 0x1000 - 1) as usize] };
-            audit::<F>(&self.0[0], text, &table)
+            audit::<F>(&self.0[0], Bounds { text, read_only }, &table)
         }
     }
 
@@ -209,7 +226,7 @@ mod tests {
             t.0[3][2] = 0x2000 | P | XD;
             t.0[3][3] = 0x3000 | P | RW | XD;
             let verdict = t.audit::<X86_64>(HIGH + 0x1000..HIGH + 0x2000);
-            assert_eq!(verdict, Verdict { leaves: 4 + 511, writable_executable: None, executable_outside_text: None });
+            assert_eq!(verdict, Verdict { leaves: 4 + 511, writable_executable: None, executable_outside_text: None, writable_read_only: None });
             assert!(verdict.holds());
         }
 
@@ -257,6 +274,21 @@ mod tests {
             assert_eq!(verdict.writable_executable, Some(Finding { leaves: 1, first: HIGH + (3 << 30) }));
         }
 
+        /// A writable 4 KiB leaf over any byte of the read-only range is caught,
+        /// a read-only one there and a writable one beside it are not.
+        #[test]
+        fn a_writable_leaf_over_the_read_only_range_is_caught() {
+            let mut t = direct_map();
+            t.0[3][4] = 0x4000 | P | XD;
+            t.0[3][5] = 0x5000 | P | RW | XD;
+            t.0[3][6] = 0x6000 | P | RW | XD;
+            let verdict = t.audit_read_only::<X86_64>(0..0, HIGH + 0x4000..HIGH + 0x5001);
+            assert_eq!(verdict.writable_read_only, Some(Finding { leaves: 1, first: HIGH + 0x5000 }));
+            assert!(!verdict.holds());
+            let verdict = t.audit_read_only::<X86_64>(0..0, HIGH + 0x4000..HIGH + 0x5000);
+            assert_eq!(verdict.writable_read_only, None);
+        }
+
         /// The user half's addresses stay canonical, and a not-present entry's other bits are nothing.
         #[test]
         fn absent_entries_are_skipped_and_addresses_are_canonical() {
@@ -297,7 +329,7 @@ mod tests {
             t.0[3][1] = 0x1000 | VALID | TABLE | RO | UXN;
             t.0[3][2] = 0x2000 | VALID | TABLE | RO | PXN | UXN;
             let verdict = t.audit::<Aarch64>(HIGH + 0x1000..HIGH + 0x2000);
-            assert_eq!(verdict, Verdict { leaves: 4, writable_executable: None, executable_outside_text: None });
+            assert_eq!(verdict, Verdict { leaves: 4, writable_executable: None, executable_outside_text: None, writable_read_only: None });
         }
 
         /// `UXN` is EL0's: a block with `PXN` clear is executable at EL1 whatever it says.
@@ -307,6 +339,17 @@ mod tests {
             t.0[2][1] = 1 << 21 | VALID | UXN;
             let verdict = t.audit::<Aarch64>(HIGH + 0x1000..HIGH + 0x2000);
             assert_eq!(verdict.writable_executable, Some(Finding { leaves: 1, first: HIGH + (1 << 21) }));
+        }
+
+        /// A writable block over the read-only range is caught; `AP[2]` set is not.
+        #[test]
+        fn a_writable_block_over_the_read_only_range_is_caught() {
+            let mut t = direct_map();
+            t.0[3][1] = 0x1000 | VALID | TABLE | RO | PXN | UXN;
+            let verdict = t.audit_read_only::<Aarch64>(0..0, HIGH + 0x1000..HIGH + 0x2000);
+            assert_eq!(verdict.writable_read_only, None);
+            let verdict = t.audit_read_only::<Aarch64>(0..0, HIGH + (1 << 21)..HIGH + (1 << 21) + 1);
+            assert_eq!(verdict.writable_read_only, Some(Finding { leaves: 1, first: HIGH + (1 << 21) }));
         }
 
         /// A level 1 block is a leaf; bit 1 clear at level 3 is no page at all.
