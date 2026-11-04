@@ -50,6 +50,9 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   image             the shipped image of every architecture, on the sysroot its
                     job restored (ci.yml)
   guest             the guest suite, on the sysroot its job restored (nightly)
+  rows [<args>...]  `cargo test --test toyos-build -- <args>...`, each split at
+                    whitespace, on this host's own toolchain store, held to the
+                    instrument as `guest` is (guest-rows.yml)
   release           put the sysroot main's nightly restored up as its toolchain release
   publish           put main's SDK crates on crates.io (publish.yml)";
 
@@ -64,6 +67,8 @@ enum Job {
     Bootstrap,
     Image,
     Guest,
+    /// The harness's arguments.
+    Rows(Vec<String>),
     Release,
     Publish,
 }
@@ -95,6 +100,10 @@ fn parse(words: &[String]) -> Result<Job, String> {
             other => return Err(format!("`host` has no part called {other:?}")),
         };
         return Ok(Job::Host(Some(part)));
+    }
+    // Split again at whitespace: a workflow hands the arguments over as one.
+    if words.first().map(String::as_str) == Some("rows") {
+        return Ok(Job::Rows(words[1..].iter().flat_map(|w| w.split_whitespace()).map(String::from).collect()));
     }
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host(None),
@@ -130,7 +139,8 @@ pub fn dispatch(root: &Path, args: &[String]) {
         Job::Toolchain => vec![step("the stores of this tree's toolchain", || release::toolchain(root))],
         Job::Bootstrap => vec![step("this tree's toolchain", || release::bootstrap(root))],
         Job::Image => image(root),
-        Job::Guest => guest(root, &suite_args(&["--jobs", "1"])),
+        Job::Guest => guest(root, &suite_args(&["--jobs", "1"]), true),
+        Job::Rows(args) => guest(root, &suite_args(&args.iter().map(String::as_str).collect::<Vec<_>>()), false),
         Job::Release => vec![step("main's toolchain release", || release::release(root))],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
@@ -1298,7 +1308,10 @@ fn suite_args(args: &[&str]) -> Vec<String> {
 /// A guest job's own `$TMPDIR`, same rule as [`host`]: nothing the suite
 /// writes past a `toyos_tmpdir::TempDir` — the harness's own `Run`, its lanes,
 /// every boot image — survives past the last step, which reds on it.
-fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
+///
+/// `install`: the sysroot the job restored ([`release::install`]). Without it
+/// the suite builds from the host's own store, as a dev host does.
+fn guest(root: &Path, suite: &[String], install: bool) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-guest");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
     let before = toyos_tmpdir::gone_roots(short);
@@ -1310,7 +1323,7 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
         .iter()
         .map(|&arch| step(&format!("the {} instrument", arch.name()), || instrument(root, arch)))
         .collect();
-    if steps.iter().all(|s| s.verdict.is_ok()) {
+    if install && steps.iter().all(|s| s.verdict.is_ok()) {
         steps.push(step("the toolchain", || release::install(root)));
     }
     if steps.iter().all(|s| s.verdict.is_ok()) {
@@ -1384,8 +1397,8 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
     if have != want {
         return Err(format!(
             "{line}: this runs QEMU {have} and build/ci/qemu-version declares {want}. The \
-             container image's digest is what pins it, so moving it is a commit that says the \
-             instrument moved"
+             host's QEMU is held to the declaration, and moving the declaration is a commit \
+             that says the instrument moved"
         ));
     }
     if native && node && !arch.accel().is_hardware() {
@@ -1795,6 +1808,10 @@ mod tests {
         assert_eq!(parse(&words("scope")), Ok(Job::Scope));
         assert_eq!(parse(&words("image")), Ok(Job::Image));
         assert_eq!(parse(&words("guest")), Ok(Job::Guest));
+        assert_eq!(parse(&words("rows")), Ok(Job::Rows(vec![])));
+        assert_eq!(parse(&words("rows virtsmp --jobs 1")), Ok(Job::Rows(words("virtsmp --jobs 1"))));
+        let one = vec!["rows".to_string(), " virtsmp  --jobs 1 ".to_string()];
+        assert_eq!(parse(&one), Ok(Job::Rows(words("virtsmp --jobs 1"))));
         assert_eq!(parse(&words("release")), Ok(Job::Release));
         assert!(parse(&words("guest 3/12")).is_err());
         assert!(parse(&words("tcg")).is_err());
@@ -1928,13 +1945,44 @@ mod tests {
         assert!(text.contains("\n  host:"), "ci.yml runs no job `host`");
     }
 
-    /// Every workflow's `pull_request:` trigger names `main` alone, and none
-    /// asks for a runner this project does not have — a self-hosted label
-    /// queues until it times out, silently.
+    /// The events a workflow's `on:` names, in its block form or either inline
+    /// form; a shape this does not read is refused.
+    fn triggers(name: &str, text: &str) -> Vec<String> {
+        let line = text.lines().find(|l| l.starts_with("on:")).unwrap_or_else(|| panic!("{name}: no `on:`"));
+        let inline = line["on:".len()..].trim();
+        if !inline.is_empty() {
+            return inline.trim_matches(['[', ']']).split(',').map(|t| t.trim().to_string()).collect();
+        }
+        let block = text.split_once("\non:\n").expect("`on:` is a line of its own").1;
+        block
+            .lines()
+            .take_while(|l| l.is_empty() || l.starts_with(' ') || l.starts_with('#'))
+            .filter_map(|l| l.strip_prefix("  "))
+            .filter(|l| !l.starts_with([' ', '#']) && !l.is_empty())
+            .map(|l| l.split(':').next().unwrap_or("").trim().to_string())
+            .collect()
+    }
+
+    /// A `runs-on:` value naming one of GitHub's hosted images. Anything else —
+    /// a self-hosted label, a list, an expression, a value on later lines — is
+    /// treated as a self-hosted runner.
+    fn hosted(runner: &str) -> bool {
+        let runner = runner.trim();
+        ["ubuntu-", "macos-", "windows-"].iter().any(|p| runner.starts_with(p))
+            && runner.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+    }
+
+    /// Every workflow's `pull_request:` trigger names `main` alone, and a job
+    /// off GitHub's hosted runners is only in a workflow `workflow_dispatch`
+    /// alone starts: a dispatch needs write access to the repository, and no
+    /// pull request, its target, a push, a schedule or another workflow's call
+    /// reaches the self-hosted runner from this repository's own workflows,
+    /// directly or through a reusable workflow.
     #[test]
-    fn workflows_run_against_main_on_hosted_runners() {
+    fn only_a_dispatch_reaches_a_self_hosted_runner() {
         let dir = repo_root().join(".github/workflows");
         let mut seen = 0;
+        let mut self_hosted = Vec::new();
         for entry in std::fs::read_dir(&dir).expect(".github/workflows is readable").flatten() {
             let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -1943,14 +1991,34 @@ mod tests {
                 let branches = after.lines().next().unwrap_or("").trim();
                 assert_eq!(branches, "branches: [main]", "{name}");
             }
+            let on = triggers(&name, &text);
+            assert!(!on.is_empty(), "{name}: no trigger read");
+            // A reusable workflow runs its jobs in this repository's context:
+            // one from elsewhere could name the self-hosted label.
+            for called in text.lines().filter_map(|l| l.strip_prefix("    uses:")) {
+                assert!(called.trim().starts_with("./.github/workflows/"), "{name}: a job uses{called}");
+            }
             for runner in text.lines().filter_map(|l| l.trim_start().strip_prefix("runs-on:")) {
-                assert!(
-                    !runner.contains("self-hosted") && !runner.contains("toyos"),
-                    "{name}: runs-on:{runner}"
-                );
+                if !hosted(runner) {
+                    assert_eq!(on, ["workflow_dispatch"], "{name}: runs-on:{runner} is started by {on:?}");
+                    self_hosted.push(name.clone());
+                }
             }
         }
-        assert_eq!(seen, 5, "ci.yml, nightly.yml and publish.yml, and guest.yml and toolchain.yml");
+        assert_eq!(self_hosted, ["guest-rows.yml"], "the workflows that reach a self-hosted runner");
+        assert_eq!(seen, 6, "ci.yml, nightly.yml, publish.yml and guest-rows.yml, and guest.yml and toolchain.yml");
+    }
+
+    #[test]
+    fn the_trigger_and_runner_readers_read_what_they_refuse() {
+        let block = "name: x\non:\n  # why\n  pull_request:\n    branches: [main]\n  merge_group:\n\njobs:\n";
+        assert_eq!(triggers("x", block), ["pull_request", "merge_group"]);
+        assert_eq!(triggers("x", "on: [push, pull_request_target]\n"), ["push", "pull_request_target"]);
+        assert_eq!(triggers("x", "on: workflow_dispatch\n"), ["workflow_dispatch"]);
+        assert!(hosted(" ubuntu-24.04") && hosted(" macos-latest"));
+        for runner in [" [self-hosted, toyos-guest]", " toyos-guest", " ${{ inputs.runner }}", "", " ubuntu-24.04 # x"] {
+            assert!(!hosted(runner), "{runner:?}");
+        }
     }
 
     #[test]

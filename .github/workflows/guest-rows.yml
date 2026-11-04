@@ -1,0 +1,56 @@
+name: guest-rows
+# What a dispatcher finds its own run by.
+run-name: guest-rows ${{ inputs.rev }} ${{ inputs.filter }}
+
+# Guest rows on demand: `cargo test --test toyos-build -- <args>` at `rev`, on
+# the guest runner (`cargo run -- --ci rows`, build/ci.rs). The runner is a
+# dedicated, otherwise idle host that takes one job at a time, so this queue is
+# the only one its guests wait in. It keeps its workspace and its toolchain
+# store (`~/.cache/toyos`) between jobs; a revision whose toolchain is not in
+# the store builds it here first.
+#
+# The host provides: x86-64 Linux with `/dev/kvm` the runner's user opens; QEMU
+# at build/ci/qemu-version for both architectures, with the firmware
+# descriptors of its x86-64 and AArch64 UEFI firmware; rustup's stable on
+# `PATH`; git, a C and C++ toolchain, CMake and Python 3 for a toolchain build.
+#
+# `workflow_dispatch` alone, and never callable: a dispatch needs write access
+# to the repository, and no pull request reaches this runner's label from this
+# repository's workflows (build/ci.rs's `only_a_dispatch_reaches_a_self_hosted_runner`).
+# The job reads no secret.
+on:
+  workflow_dispatch:
+    inputs:
+      rev:
+        description: The commit to test, as a full hash
+        required: true
+        type: string
+      filter:
+        description: The harness's arguments after `--`, split at whitespace; empty runs the whole suite
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rows:
+    runs-on: [self-hosted, toyos-guest]
+    # A wedge guard, wide enough for a toolchain the store does not hold.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.rev }}
+          # `target/` is the warm build; `git clean -ffdx` would remove it.
+          clean: false
+          # The fork a toolchain the store lacks is built from; the build
+          # fetches its nested submodules itself.
+          submodules: true
+          # Nothing on this machine outlives the job holding the token.
+          persist-credentials: false
+
+      # One argument, which the driver splits at whitespace.
+      - env:
+          FILTER: ${{ inputs.filter }}
+        run: cargo run -- --ci rows "$FILTER"

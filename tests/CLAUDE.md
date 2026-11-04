@@ -2,6 +2,10 @@
 
 The mechanics live where the work is: profiles and shapes in `tests/common/`, registration in `tests/toyos.rs` — read those, not this file, for how the harness works.
 
+## Where guests run
+
+Guest rows run on the guest runner, a dedicated idle host that takes one job at a time: `gh workflow run guest-rows.yml -f rev=<pushed full hash> -f filter='<harness args>'`, found by its title in `gh run list --workflow guest-rows.yml` and read with `gh run view <id> --log`. A run that other work on its host shared ends `HOST NOT QUIET` with exit 3: neither red nor green, and re-run.
+
 ## Caveats that bite every agent
 
 - **A host that sleeps mid-run is reported, not measured** — a run whose wall clock jumped against the monotonic one reports `INVL` per test and exits 2. A wild outlier *not* marked that way is a real finding.
