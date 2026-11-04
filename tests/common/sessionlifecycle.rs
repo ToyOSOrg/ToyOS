@@ -20,6 +20,7 @@ use std::time::Duration;
 use toyos_build::bootlog::REBOOTING;
 
 use super::qemu::{self, await_marker, await_marker_new, BootOptions, QemuInstance, QmpInput};
+use super::screen::Ppm;
 use super::{compile, power, ps2server};
 
 const JOB: &str = "session_lifecycle";
@@ -111,20 +112,31 @@ const KEY_SHOWN: Duration = Duration::from_secs(10);
 /// Type `text` at the focused terminal one key at a time, each once the panel
 /// has changed since the one before. QEMU's PS/2 queue holds 16 bytes and drops
 /// the rest unsaid, and a guest the host starves drains it late, so typing ahead
-/// of what the guest has drawn loses keys before the guest sees them. A space
-/// may draw nothing, so the next key's change answers for it too.
+/// of what the guest has drawn loses keys before the guest sees them. Every key
+/// moves the terminal's inverse-cell cursor, so every key changes the panel.
+///
+/// Only the screen's top half is compared: Ctrl+N's terminal is the only window,
+/// placed at the top-left margin with its line its first row, and the taskbar's
+/// readout at the bottom redraws every second whatever is typed.
 fn type_paced(qemu: &mut QemuInstance, text: &str) -> Result<(), String> {
-    let mut shown = qemu.screendump().pixels;
+    let top = |d: &Ppm| d.pixels[..d.width * d.height / 2].to_vec();
+    // One frame twice in a row first: the window's own first paint is not a key.
+    let mut shown = top(&qemu.screendump());
+    let settled = std::cell::RefCell::new(shown.clone());
+    let dump = qemu.screendump_while(KEY_SHOWN, Duration::from_millis(20), |d| {
+        let now = top(d);
+        let same = now == *settled.borrow();
+        *settled.borrow_mut() = now;
+        same
+    });
+    shown = top(&dump);
     for key in qcodes(text) {
         press(qemu, &[key]);
-        if key == "spc" {
-            continue;
-        }
-        let dump = qemu.screendump_while(KEY_SHOWN, Duration::from_millis(20), |d| d.pixels != shown);
-        if dump.pixels == shown {
+        let dump = qemu.screendump_while(KEY_SHOWN, Duration::from_millis(20), |d| top(d) != shown);
+        if top(&dump) == shown {
             return Err(format!("the panel never changed after {key:?} of {text:?} was typed"));
         }
-        shown = dump.pixels;
+        shown = top(&dump);
     }
     Ok(())
 }
