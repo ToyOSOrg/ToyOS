@@ -20,7 +20,7 @@ pub const CPU1: CpuId = CpuId(1);
 pub enum Msg {
     Wake(TaskKey, WakeReason),
     Retire(TaskKey),
-    /// Stands in for the ownership-carrying `Adopt`/`StealRequest` traffic;
+    /// Stands in for the ownership-carrying `Adopt` traffic;
     /// the mailbox models only need distinguishable payloads.
     Probe(u32),
 }

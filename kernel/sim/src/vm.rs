@@ -999,7 +999,7 @@ impl<'q> Vm<'q> {
             }
         }
         for cpu in 0..self.scenario.cpus() {
-            self.probing[cpu] = self.cpus[cpu].probe_outstanding();
+            self.probing[cpu] = self.cpus[cpu].probe_outstanding(&self.handles);
         }
         let actor = crate::explore::actor(&step);
         // Only a CPU's own step takes a task out of its parked set.
@@ -1135,7 +1135,7 @@ impl<'q> Vm<'q> {
         // A probe is consumed only by its victim's drain, so the step that
         // consumed it is that victim's.
         for thief in 0..self.scenario.cpus() {
-            if !self.probing[thief] || self.cpus[thief].probe_outstanding() {
+            if !self.probing[thief] || self.cpus[thief].probe_outstanding(&self.handles) {
                 continue;
             }
             let answered = self.step_trace.iter().any(|event| {
@@ -1166,7 +1166,7 @@ impl<'q> Vm<'q> {
         #[allow(clippy::needless_range_loop)]
         for cpu in 0..self.scenario.cpus() {
             let surplus_next_door = surpluses > usize::from(worth(cpu));
-            let blind = halted[cpu] && surplus_next_door && !self.cpus[cpu].probe_outstanding();
+            let blind = halted[cpu] && surplus_next_door && !self.cpus[cpu].probe_outstanding(&self.handles);
             match (blind, self.probe_gap_since[cpu]) {
                 (true, None) => self.probe_gap_since[cpu] = Some(self.clock),
                 (true, Some(since)) => {

@@ -312,10 +312,9 @@ pub struct CpuSched<X: SchedPayload> {
     /// cannot free the stack it is running on.
     zombie: Option<DeadTask<X>>,
     mailbox: MailboxConsumer<Msg<X>>,
-    /// This CPU's single reusable `StealRequest` node. Its
-    /// in-flight flag *is* the "a probe is already outstanding" answer — one
-    /// mechanism for every node kind.
-    steal_probe: MailboxNode<Msg<X>>,
+    /// The CPU this one last asked for a task ([`CpuHandle::ask`]): its probe
+    /// is outstanding while that CPU's word still holds this one's bit.
+    asked: Option<CpuId>,
     /// Thieves that asked this pass; answered in `finish` from surplus, after
     /// the pick, so answering can never hand away the task we were about to
     /// run.
@@ -411,7 +410,7 @@ impl<X: SchedPayload> CpuSched<X> {
             outbound: Vec::new(),
             zombie: None,
             mailbox,
-            steal_probe: MailboxNode::new(),
+            asked: None,
             steal_requests: Vec::new(),
             decide_at: Nanos::ZERO,
             cut: None,
@@ -513,14 +512,14 @@ impl<X: SchedPayload> CpuSched<X> {
 
     /// Is a steal probe from this CPU still on its way to a victim?
     ///
-    /// The node's in-flight flag *is* the answer, so this asks the
-    /// mechanism rather than a shadow of it. It exists for one reader: the
-    /// simulator's probe-gap instrument, which measures how long a halted CPU
-    /// sits with a surplus published next door and no probe outstanding — the
-    /// quantity [`Balance::PullWithRearm`] and [`Balance::PushOnSurplus`] are
-    /// judged on.
-    pub fn probe_outstanding(&self) -> bool {
-        self.steal_probe.in_flight()
+    /// Whether the CPU this one asked has yet to take its ask: the asked
+    /// CPU's word is the answer, so this asks the mechanism rather than a
+    /// shadow of it. Besides the probe itself, the simulator's probe-gap
+    /// instrument reads it, which measures how long a halted CPU sits with a
+    /// surplus published next door and no probe outstanding, the quantity
+    /// [`Balance::PullWithRearm`] and [`Balance::PushOnSurplus`] are judged on.
+    pub fn probe_outstanding(&self, cpus: &CpuHandles<Msg<X>>) -> bool {
+        self.asked.is_some_and(|victim| cpus.get(victim).asked_by(self.id))
     }
 
     /// Lend the running task an RT window: the path for a client
@@ -581,14 +580,7 @@ impl<X: SchedPayload> CpuSched<X> {
 /// record" — which is where that class sits — and an offset, a field, and the
 /// value that landed.
 ///
-/// **The one field a sibling legitimately writes is excluded.** `steal_probe` is
-/// a [`MailboxNode`] embedded in this record and posted into *another* CPU's
-/// mailbox: that CPU links it, and its consumer clears `in_flight` when it
-/// unlinks it. Those are remote writes into these bytes by design, so the words
-/// covering that field read back as zero and the tripwire says nothing about
-/// them.
-///
-/// Everything else here is written by the owning CPU alone, inside the driver's
+/// Every byte here is written by the owning CPU alone, inside the driver's
 /// exclusive region, so any difference across a window in which that region was
 /// not entered is a write nothing in the scheduler core made.
 #[cfg(feature = "sched-tripwire")]
@@ -596,13 +588,6 @@ impl<X: SchedPayload> CpuSched<X> {
     /// How many `u64` words a whole-record shadow takes.
     pub fn tripwire_words() -> usize {
         core::mem::size_of::<Self>().div_ceil(8)
-    }
-
-    /// The half-open byte range of the one field a remote CPU may write, which a
-    /// shadow must leave out.
-    pub fn tripwire_remote_range() -> (usize, usize) {
-        let lo = core::mem::offset_of!(Self, steal_probe);
-        (lo, lo + core::mem::size_of::<MailboxNode<Msg<X>>>())
     }
 
     /// Which field a byte offset lands in — the field with the greatest offset
@@ -640,7 +625,7 @@ impl<X: SchedPayload> CpuSched<X> {
                 (core::mem::offset_of!(Self, outbound), "outbound"),
                 (core::mem::offset_of!(Self, zombie), "zombie"),
                 (core::mem::offset_of!(Self, mailbox), "mailbox"),
-                (core::mem::offset_of!(Self, steal_probe), "steal_probe (excluded: a sibling writes it)"),
+                (core::mem::offset_of!(Self, asked), "asked"),
                 (core::mem::offset_of!(Self, steal_requests), "steal_requests"),
                 (core::mem::offset_of!(Self, decide_at), "decide_at"),
                 (core::mem::offset_of!(Self, cut), "cut"),
@@ -804,7 +789,7 @@ pub const STALE_PASS_NS: u64 = 10 * QUANTUM_NS;
 
 impl Balance {
     /// Does the pull half run at all? Every cure is built on it — a push and a
-    /// re-arm both end in a `StealRequest` that a loaded pass has to answer.
+    /// re-arm both end in an ask ([`CpuHandle::ask`]) that a loaded pass has to answer.
     pub fn pulls(self) -> bool {
         !matches!(self, Balance::None)
     }
@@ -1286,8 +1271,19 @@ impl<X: SchedPayload> CpuSched<X> {
             match msg {
                 Msg::Wake { key, cause } => self.handle_wake(key, cause, env, now),
                 Msg::Adopt { task } => self.handle_adopt(task, env, now),
-                Msg::StealRequest { thief, load } => self.steal_requests.push((thief, load)),
                 Msg::Retire { shared } => self.handle_retire(&shared, env, now),
+            }
+        }
+        // Behind the mailbox, under the same `begin_pass`: an ask's ring is
+        // what owes this pass, so the bit it set is visible here. Each thief
+        // asks at the weight its last pass published, zero for an idle one.
+        let asks = env.cpus.get(self.id).take_asks();
+        for (word, bits) in asks.into_iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let thief = CpuId((word * 64) as u32 + bits.trailing_zeros());
+                bits &= bits - 1;
+                self.steal_requests.push((thief, env.cpus.get(thief).weight()));
             }
         }
     }
@@ -2145,12 +2141,23 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let Some((_, victim)) = heaviest.filter(|&(weight, _)| weight > mine) else {
             return;
         };
-        let Some(slot) = self.cpu.steal_probe.claim() else {
-            return;
-        };
-        if cpus.get(victim).post(slot, Msg::StealRequest { thief: me, load: mine }, Urgency::Normal, self.env.preempt)
-            == Kick::Send
-        {
+        self.ask_for_work(victim);
+    }
+
+    /// Ask `victim` for a task, one probe at a time: while the last CPU asked
+    /// still holds this one's bit, its answer is coming and nothing is asked.
+    /// A CPU that stopped answering keeps the bit and never takes it, so the
+    /// bit is withdrawn and `victim` asked instead.
+    fn ask_for_work(&mut self, victim: CpuId) {
+        let (cpus, me) = (self.env.cpus, self.cpu.id);
+        if let Some(asked) = self.cpu.asked.filter(|&asked| cpus.get(asked).asked_by(me)) {
+            if cpus.get(asked).answering(self.now) {
+                return;
+            }
+            cpus.get(asked).retract(me);
+        }
+        self.cpu.asked = Some(victim);
+        if cpus.get(victim).ask(me) == Kick::Send {
             self.env.hw.kick(victim);
         }
     }
@@ -2309,17 +2316,15 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         if self.env.balance.push_threshold().is_none() {
             return false;
         }
-        if self.cpu.probe_outstanding() {
+        if self.cpu.probe_outstanding(self.env.cpus) {
             return false;
         }
         balance_fence();
         self.best_victim().is_some()
     }
 
-    /// One probe at a time: if the previous one is still in
-    /// flight the claim fails and we simply do not post another — the
-    /// outstanding probe will be answered, and this CPU sleeps with its
-    /// doorbell armed.
+    /// One probe at a time ([`SchedPass::ask_for_work`]): an outstanding
+    /// probe will be answered, and this CPU sleeps with its doorbell armed.
     fn post_steal_probe(&mut self) {
         if !self.env.balance.pulls() {
             return;
@@ -2327,19 +2332,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let Some(victim) = self.best_victim() else {
             return;
         };
-        let Some(slot) = self.cpu.steal_probe.claim() else {
-            return;
-        };
-        let thief = self.cpu.id;
-        if self.env.cpus.get(victim).post(
-            slot,
-            Msg::StealRequest { thief, load: 0 },
-            Urgency::Normal,
-            self.env.preempt,
-        ) == Kick::Send
-        {
-            self.env.hw.kick(victim);
-        }
+        self.ask_for_work(victim);
     }
 
     /// The CPU a probe would be spent on, or `None` if none is worth probing.
@@ -2357,10 +2350,8 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// publishing SLEEPING; two spellings of one inequality is how a push that
     /// wakes a CPU its victim would refuse gets written.
     ///
-    /// The staleness test is load-bearing here in a way it is nowhere else: the
-    /// probe rides one node per thief, and a node posted into a CPU that never
-    /// drains is never freed, so one probe spent on a stopped CPU costs this one
-    /// the pull half for the rest of the machine's life.
+    /// The staleness test is what keeps a probe off a CPU that has stopped,
+    /// and what [`SchedPass::ask_for_work`] reads to withdraw one it sent there.
     ///
     /// **Nearest first**: an SMT sibling, then the LLC, the package and the
     /// machine, the most surplus winning inside the first of those holding any
@@ -2460,6 +2451,12 @@ pub struct CpuHandle<M> {
     /// can tell a claim about the present from one a stopped CPU left behind.
     /// See [`CpuHandle::answering`].
     last_pass: AtomicU64,
+    /// **The CPUs asking this one for a task**, a bit each: a steal probe.
+    /// A thief sets its bit and rings the doorbell ([`Self::ask`]); this
+    /// CPU's next pass takes the word whole ([`Self::take_asks`]). A bit and
+    /// not a message, so a CPU that stops taking passes strands nothing its
+    /// thieves need back: a thief clears its own bit and asks another.
+    asks: [AtomicU64; MASK_WORDS],
     /// **How long this CPU takes to wake from the state it is waiting in**,
     /// in nanoseconds, 0 for C1 and while awake. The wait publishes it and
     /// then fences before it reads the wake bound, which is what lets a hold
@@ -2495,6 +2492,7 @@ impl<M: SchedMsg> CpuHandle<M> {
             takers: core::array::from_fn(|_| AtomicU64::new(0)),
             weight: AtomicU64::new(0),
             last_pass: AtomicU64::new(0),
+            asks: core::array::from_fn(|_| AtomicU64::new(0)),
             idle_exit: AtomicU64::new(0),
             #[cfg(feature = "sched-check")]
             pass_costs: PassCosts::new(),
@@ -2534,6 +2532,34 @@ impl<M: SchedMsg> CpuHandle<M> {
 
     pub fn weight(&self) -> u64 {
         self.weight.load(Ordering::Relaxed)
+    }
+
+    /// `thief` asks this CPU for a task: its bit, then the doorbell, so the
+    /// pass the ring owes reads the bit (the ring's `AcqRel` against
+    /// `begin_pass`'s). The [`Kick`] is the caller's, as [`Self::post`]'s is.
+    pub fn ask(&self, thief: CpuId) -> Kick {
+        #[cfg(feature = "ask-rings-first")]
+        let kick = self.doorbell.ring(Urgency::Normal);
+        self.asks[thief.0 as usize / 64].fetch_or(1 << (thief.0 % 64), Ordering::Relaxed);
+        #[cfg(not(feature = "ask-rings-first"))]
+        let kick = self.doorbell.ring(Urgency::Normal);
+        kick
+    }
+
+    /// Whether `thief`'s ask is still waiting for this CPU's pass.
+    pub fn asked_by(&self, thief: CpuId) -> bool {
+        self.asks[thief.0 as usize / 64].load(Ordering::Relaxed) & 1 << (thief.0 % 64) != 0
+    }
+
+    /// `thief` withdraws its ask, from a CPU that stopped answering.
+    pub fn retract(&self, thief: CpuId) {
+        self.asks[thief.0 as usize / 64].fetch_and(!(1 << (thief.0 % 64)), Ordering::Relaxed);
+    }
+
+    /// Every ask since the last take, emptied: this CPU's own pass, after its
+    /// `begin_pass`.
+    pub fn take_asks(&self) -> [u64; MASK_WORDS] {
+        core::array::from_fn(|word| self.asks[word].swap(0, Ordering::Relaxed))
     }
 
     pub fn publish_weight(&self, weight: u64) {
@@ -5046,7 +5072,7 @@ mod tests {
             w.handles.publish_surplus(CpuId(near), 1, CpuMask::ANY);
             w.handles.publish_surplus(CpuId(1), 5, CpuMask::ANY);
             w.run_a_pass(C0);
-            let asked: Vec<u32> = (0..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
+            let asked: Vec<u32> = (0..8u32).filter(|&cpu| w.handles.get(CpuId(cpu)).asked_by(C0)).collect();
             assert_eq!(asked, [victim], "the probe's victim");
             w.abandon();
         }
@@ -5071,9 +5097,34 @@ mod tests {
         w.spawn(C0);
         w.run_a_pass(C0);
         assert!(w.cpus[0].running().is_some(), "cpu0 runs a fair task, so its pass balances busy");
-        let asked: Vec<u32> = (1..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
+        let asked: Vec<u32> = (1..8u32).filter(|&cpu| w.handles.get(CpuId(cpu)).asked_by(C0)).collect();
         w.abandon();
         assert_eq!(asked, [1], "the busy balance asked a CPU that would answer it with nothing");
+    }
+
+    /// **A victim that stops answering keeps nothing its thief needs**: cpu0
+    /// asks cpu1, which then takes no pass. Once cpu1 is stale, cpu0's next
+    /// idle pass withdraws its ask and asks cpu2, which is answering, instead
+    /// of waiting on cpu1 for good.
+    #[test]
+    fn a_thief_whose_victim_stopped_asks_another() {
+        let mut w = World::on(two_llcs());
+        w.balance = Balance::Pull;
+        for cpu in 0..8 {
+            w.handles.get(CpuId(cpu)).publish_pass(NOW);
+        }
+        w.handles.publish_surplus(CpuId(1), 1, CpuMask::ANY);
+        w.run_a_pass(C0);
+        assert!(w.handles.get(CpuId(1)).asked_by(C0), "the first probe's victim");
+        assert!(w.cpus[0].probe_outstanding(&w.handles));
+
+        let later = NOW.after(STALE_PASS_NS + 1);
+        w.handles.get(CpuId(2)).publish_pass(later);
+        w.handles.publish_surplus(CpuId(2), 1, CpuMask::ANY);
+        w.run_a_pass_at(C0, later);
+        assert!(!w.handles.get(CpuId(1)).asked_by(C0), "the ask stayed with a CPU that stopped answering");
+        assert!(w.handles.get(CpuId(2)).asked_by(C0), "the thief asked no live victim");
+        w.abandon();
     }
 
     /// **A probe skips a victim whose surplus it may not take**: cpu0's SMT
@@ -5090,7 +5141,7 @@ mod tests {
         w.handles.publish_surplus(CpuId(4), 1, not_c0);
         w.handles.publish_surplus(CpuId(1), 1, CpuMask::ANY);
         w.run_a_pass(C0);
-        let asked: Vec<u32> = (0..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
+        let asked: Vec<u32> = (0..8u32).filter(|&cpu| w.handles.get(CpuId(cpu)).asked_by(C0)).collect();
         w.abandon();
         assert_eq!(asked, [1], "the probe went to a victim that would answer it with nothing");
     }

@@ -656,20 +656,11 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("a_poll_registered_racing_a_post_completes_exactly_once"),
         Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
     ]),
-    // Reproduces an open defect
-    // (`issues/steal-probe-node-dies-with-its-victim.md`) rather than
-    // proving a lie is caught, and goes with its fix.
-    Control {
-        krate: KERNEL_LOOM,
-        feature: "victim-retires-mid-probe",
-        test: Some("loom_mailbox"),
-        must_red: false,
-        verdicts: &[Says {
-            test: "a_probe_outstanding_when_its_victim_retires_is_never_reclaimed",
-            message: "caught the verdict: the victim retired with a probe still linked in its \
-                      queue",
-        }],
-    },
+    // A steal probe that rings its victim before setting its bit.
+    red(KERNEL_LOOM, "ask-rings-first", Some("loom_mailbox"), &[Says {
+        test: "an_ask_is_taken_by_the_pass_its_ring_owes",
+        message: "the ask was neither taken nor owed a pass: it is lost",
+    }]),
     // The isolation test reds, and the SDM's own judge of the allocator sees
     // the cross-space read it lets through.
     red(KERNEL, "counting-allocator", None, &[

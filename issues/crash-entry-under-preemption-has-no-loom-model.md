@@ -11,10 +11,8 @@ already this tree's, and already enforced. `kernel/loom/src/lib.rs` pulls
 every scheduler source in by `#[path]` (`:26-49`), and its header at `:6-8` says
 why: "loom explores the interleavings of the *real* primitives, not of a
 re-implementation — a re-implementation is exactly the divergence risk this
-crate is meant to remove." What is owed is not the principle. It is one edge:
-the steal probe's victim-retire is modelled now, and
-`issues/steal-probe-node-dies-with-its-victim.md` carries the command
-that reproduces it.
+crate is meant to remove." What is owed is not the principle; the steal probe's ask is modelled
+on the real `CpuHandle` (`kernel/loom/tests/loom_mailbox.rs`).
 
 **Crash entry under preemption — no model at all.** Real preemption state is two
 words, not one: `kernel/src/preempt.rs` carries a `preempt_count` and a separate

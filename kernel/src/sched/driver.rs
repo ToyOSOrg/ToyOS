@@ -256,18 +256,13 @@ mod tripwire {
     // no other, inside `with_cpu`'s exclusive region.
     unsafe impl Sync for Shadow {}
 
-    /// The record's bytes as little-endian words, with the remotely-written field's words read back as zero.
+    /// The record's bytes as little-endian words.
     /// Volatile: a non-volatile read could be folded away instead of catching a stray write.
     fn snapshot(sched: &CpuSched<KernelPayload>, out: &mut [u64; WORDS]) {
         let base = (sched as *const CpuSched<KernelPayload>).cast::<u8>();
         let size = core::mem::size_of::<CpuSched<KernelPayload>>();
-        let (lo, hi) = CpuSched::<KernelPayload>::tripwire_remote_range();
         for (i, word) in out.iter_mut().enumerate().take(size.div_ceil(8)) {
             let off = i * 8;
-            if off < hi && off + 8 > lo {
-                *word = 0;
-                continue;
-            }
             let mut bytes = [0u8; 8];
             for (k, byte) in bytes.iter_mut().enumerate() {
                 if off + k >= size {
