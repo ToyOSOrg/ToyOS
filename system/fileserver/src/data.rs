@@ -26,6 +26,9 @@ struct Capacity {
     reservation: Reservation,
     pages: usize,
 }
+pub static LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static INODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 struct Open {
     holders: usize,
     size: u64,
@@ -205,9 +208,11 @@ impl<D: Disk> DataVolume<D> {
                     None => self.fs.root(),
                     Some((name, dirs)) => {
                         let dir = self.directory(dirs).await?;
+                        LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         self.fs.lookup(dir, name.as_bytes()).await?.ok_or(engine::Error::NotFound)?.ino
                     }
                 };
+                INODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.fs.inode(ino).await
             })
             .map_err(word)
@@ -217,6 +222,7 @@ impl<D: Disk> DataVolume<D> {
         let known = (1..=names.len()).rev().find_map(|n| self.dirs.borrow().get(&names[..n].join("/")).map(|&ino| (n, ino)));
         let (mut at, mut ino) = known.unwrap_or((0, self.fs.root()));
         while at < names.len() {
+            LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let entry = self.fs.lookup(ino, names[at].as_bytes()).await?.ok_or(engine::Error::NotFound)?;
             if entry.kind != DirentType::Directory {
                 return Err(engine::Error::NotDirectory);
