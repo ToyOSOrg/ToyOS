@@ -18,17 +18,32 @@ impl toyos_crypto::Random for OsRandom {
         getrandom::fill(out).map_err(|_| toyos_crypto::Error::Entropy)
     }
 }
-struct Pending {
-    ticket: u64,
+/// A write's capacity, and how many of its pages still need it.
+struct Capacity {
     reservation: Reservation,
+    pages: usize,
 }
 struct Open {
     holders: usize,
     size: u64,
     mtime: u64,
     changed: bool,
-    pages: BTreeMap<u64, Pending>,
-    incoming: BTreeMap<u64, Pending>,
+    /// Each write's capacity, by its ticket.
+    capacity: BTreeMap<u64, Capacity>,
+    /// Pages copied and not yet written back, each with its write's ticket.
+    pages: BTreeMap<u64, u64>,
+    /// Pages the current write reserved and has not copied yet.
+    incoming: BTreeMap<u64, u64>,
+}
+impl Open {
+    /// A page no longer needs `ticket`'s capacity.
+    fn release(&mut self, ticket: u64) {
+        let capacity = self.capacity.get_mut(&ticket).expect("a page's write holds capacity");
+        capacity.pages -= 1;
+        if capacity.pages == 0 {
+            self.capacity.remove(&ticket);
+        }
+    }
 }
 pub struct DataVolume<D: Disk> {
     fs: Mount<Rc<Cache<D>>>,
@@ -317,6 +332,7 @@ impl<D: Disk> Volume for DataVolume<D> {
                 size: inode.size,
                 mtime: inode.mtime.max(0) as u64,
                 changed: false,
+                capacity: BTreeMap::new(),
                 pages: BTreeMap::new(),
                 incoming: BTreeMap::new(),
             })
@@ -340,6 +356,7 @@ impl<D: Disk> Volume for DataVolume<D> {
             let open = self.open.get_mut(&node).unwrap();
             open.pages.clear();
             open.incoming.clear();
+            open.capacity.clear();
             mapped("orphan close", self.cache.block_on(self.fs.release(node)))?;
         } else {
             self.persist(node)?;
@@ -381,18 +398,12 @@ impl<D: Disk> Volume for DataVolume<D> {
         if len == 0 {
             return Ok(reserved);
         }
-        for page in offset / BLOCK as u64..end.div_ceil(BLOCK as u64) {
-            match self.cache.block_on(self.fs.reserve(node, page * BLOCK as u64, BLOCK)) {
-                Ok(reservation) => {
-                    self.open.get_mut(&node).unwrap().incoming.insert(page, Pending { ticket, reservation });
-                }
-                Err(error) => {
-                    self.unreserve(node, reserved, 0)?;
-                    return Err(word(error));
-                }
-            }
-        }
+        let pages = offset / BLOCK as u64..end.div_ceil(BLOCK as u64);
+        let bytes = ((pages.end - pages.start) as usize).checked_mul(BLOCK).ok_or(Error::FileTooLarge)?;
+        let reservation = self.cache.block_on(self.fs.reserve(node, pages.start * BLOCK as u64, bytes)).map_err(word)?;
         let open = self.open.get_mut(&node).unwrap();
+        open.capacity.insert(ticket, Capacity { reservation, pages: (pages.end - pages.start) as usize });
+        open.incoming.extend(pages.map(|page| (page, ticket)));
         open.size = open.size.max(end);
         open.mtime = (self.clock)();
         open.changed = true;
@@ -402,15 +413,24 @@ impl<D: Disk> Volume for DataVolume<D> {
         if len == 0 { return; }
         let open = self.open.get_mut(&node).expect("a reserved inode");
         for page in offset / BLOCK as u64..(offset + len as u64).div_ceil(BLOCK as u64) {
-            let pending = open.incoming.remove(&page).expect("each copied page has incoming capacity");
-            assert_eq!(pending.ticket, reserved.ticket, "the write's incoming capacity");
-            open.pages.insert(page, pending);
+            let ticket = open.incoming.remove(&page).expect("each copied page has incoming capacity");
+            assert_eq!(ticket, reserved.ticket, "the write's incoming capacity");
+            if let Some(older) = open.pages.insert(page, ticket) {
+                open.release(older);
+            }
         }
     }
     fn unreserve(&mut self, node: Node, reserved: Reserved, landed: u64) -> Result<(), Error> {
         let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
-        open.incoming.retain(|_, pending| pending.ticket != reserved.ticket);
-        open.pages.retain(|&page, pending| pending.ticket != reserved.ticket || page * (BLOCK as u64) < landed);
+        let ticket = reserved.ticket;
+        let cut = |page: u64, held: u64, from: u64| held == ticket && page * BLOCK as u64 >= from;
+        let gone: Vec<u64> = open.incoming.iter().filter(|&(&p, &t)| cut(p, t, 0)).map(|(&p, _)| p)
+            .chain(open.pages.iter().filter(|&(&p, &t)| cut(p, t, landed)).map(|(&p, _)| p)).collect();
+        for page in gone {
+            if open.incoming.remove(&page).or_else(|| open.pages.remove(&page)).is_some() {
+                open.release(ticket);
+            }
+        }
         open.size = reserved.size.max(landed);
         Ok(())
     }
@@ -421,23 +441,31 @@ impl<D: Disk> Volume for DataVolume<D> {
         {
             return Err((0, Error::InvalidRequest));
         }
-        for (i, bytes) in data.chunks(BLOCK).enumerate() {
-            let page = offset / BLOCK as u64 + i as u64;
-            let done = i * BLOCK;
-            let pending = open.pages.get_mut(&page).ok_or((done, Error::Io))?;
+        let first = offset / BLOCK as u64;
+        let pages = data.len().div_ceil(BLOCK) as u64;
+        let mut done = 0;
+        // Each run of pages under one write's capacity goes out at once.
+        while done < data.len() {
+            let page = first + (done / BLOCK) as u64;
+            let ticket = *open.pages.get(&page).ok_or((done, Error::Io))?;
+            let run = (page..first + pages).take_while(|p| open.pages.get(p) == Some(&ticket)).count();
+            let len = (run * BLOCK).min(data.len() - done);
+            let capacity = &mut open.capacity.get_mut(&ticket).expect("a page's write holds capacity").reservation;
             let written = mapped(
                 "writeback",
-                self.cache.block_on(self.fs.write_reserved(
-                    &mut pending.reservation,
-                    page * BLOCK as u64,
-                    bytes,
-                    time(open.mtime),
-                )),
-            ).map_err(|error| (done, error))?;
-            if written != bytes.len() {
-                return Err((done, Error::Io));
+                self.cache.block_on(self.fs.write_reserved(capacity, offset + done as u64, &data[done..done + len], time(open.mtime))),
+            )
+            .map_err(|error| (done, error))?;
+            for p in page..page + written.div_ceil(BLOCK).min(run) as u64 {
+                if written >= ((p - page + 1) as usize * BLOCK).min(len) {
+                    open.pages.remove(&p);
+                    open.release(ticket);
+                }
             }
-            open.pages.remove(&page);
+            if written != len {
+                return Err((done + written / BLOCK * BLOCK, Error::Io));
+            }
+            done += len;
         }
         Ok(())
     }
@@ -449,7 +477,9 @@ impl<D: Disk> Volume for DataVolume<D> {
         let now = (self.clock)();
         mapped("truncate", self.cache.block_on(self.fs.truncate(node, size, time(now))))?;
         let open = self.open.get_mut(&node).unwrap();
-        open.pages.split_off(&size.div_ceil(BLOCK as u64));
+        for (_, ticket) in open.pages.split_off(&size.div_ceil(BLOCK as u64)) {
+            open.release(ticket);
+        }
         open.size = size;
         open.mtime = now;
         open.changed = true;

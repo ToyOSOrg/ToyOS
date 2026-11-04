@@ -10,6 +10,9 @@ use crate::ram::Ram;
 use crate::volume::OpenHow;
 use toyos_blockdev::{Block, BlockDev};
 
+/// The bytes past the first page of the partial write-back's file.
+const TAIL: usize = 100;
+
 struct RefusingRead {
     ram: Ram,
     refusing: Rc<Cell<bool>>,
@@ -19,7 +22,7 @@ impl BlockDev for RefusingRead {
     fn blocks(&self) -> u64 { self.ram.blocks() }
     async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), toyos_blockdev::Error> {
         self.ram.read(lba, out).await?;
-        if self.refusing.get() && out.contains(&[0xb2; toyos_blockdev::BLOCK]) {
+        if self.refusing.get() && out.iter().any(|block| block[..TAIL] == [0xb2; TAIL]) {
             return Err(toyos_blockdev::Error::Device);
         }
         Ok(())
@@ -521,13 +524,16 @@ fn an_overwrite_keeps_incoming_capacity_while_its_older_dirty_page_is_flushed() 
 }
 
 #[test]
+/// Two pages each under its own write's capacity, written back in one run:
+/// the second, the file's last page in part, reads the old block it keeps
+/// the rest of, and that read is refused.
 fn a_partial_writeback_cleans_only_its_prefix_and_retries_the_same_reserved_suffix() {
     let refusing = Rc::new(Cell::new(false));
     let disk = RefusingRead { ram: Ram::new(16384), refusing: Rc::clone(&refusing) };
     let mut v = DataVolume::format(disk, 256, &["home"], clock).unwrap();
     let node = v.open("home/f", CREATE).unwrap();
     let mut old = vec![0xa1; PAGE as usize];
-    old.extend(vec![0xb2; PAGE as usize]);
+    old.extend([0xb2; TAIL]);
     v.write(node, 0, &old).unwrap();
     v.close(node).unwrap();
     v.sync().unwrap();
@@ -535,8 +541,9 @@ fn a_partial_writeback_cleans_only_its_prefix_and_retries_the_same_reserved_suff
     let fake = Fake::new(4, 4);
     let mut files = Files::new(Some(fake.clone()));
     let (node, id) = open(&mut files, &mut v, "home/f");
-    let new = pattern(2 * PAGE as usize, 8);
-    files.write(&mut v, id, node, 0, &new).unwrap();
+    let new = pattern(PAGE as usize + TAIL, 8);
+    files.write(&mut v, id, node, 0, &new[..PAGE as usize]).unwrap();
+    files.write(&mut v, id, node, PAGE, &new[PAGE as usize..]).unwrap();
     refusing.set(true);
     assert_eq!(files.fsync(&mut v, Some((id, node))), Err(Error::Io));
     let object = files.object(id).unwrap();

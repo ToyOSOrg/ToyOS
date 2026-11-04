@@ -252,42 +252,38 @@ impl Reserved {
 
 /// A write straight to the volume, for a file with no paged object — on a
 /// server with no pager, or one whose object went — and for a volume's
-/// tests: the reserve, then each page it touches written back, what the page
-/// held below the old contents' end read first.
+/// tests: the reserve, then the pages it touches written back at once, what
+/// a page it covers in part held below the old contents' end read first.
 pub trait Writes: Volume {
     fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
         const PAGE: u64 = toyos_blockdev::BLOCK as u64;
         if data.is_empty() { return Ok(()); }
         let reserved = self.reserve(node, offset, data.len() as u64)?;
-        let size = match self.node_meta(node) {
-            Ok(meta) => meta.size,
-            Err(error) => {
-                self.unreserve(node, reserved, 0)?;
-                return Err(error);
-            }
-        };
         let end = offset + data.len() as u64;
-        let mut landed = 0;
-        for start in (offset / PAGE * PAGE..end).step_by(PAGE as usize) {
-            let mut page = vec![0u8; PAGE as usize];
-            let below = reserved.contents().saturating_sub(start).min(PAGE) as usize;
-            let (from, to) = (offset.max(start), end.min(start + PAGE));
-            let written = self.read(node, start, &mut Buf(&mut page[..below])).and_then(|_| {
-                page[(from - start) as usize..(to - start) as usize]
-                    .copy_from_slice(&data[(from - offset) as usize..(to - offset) as usize]);
-                self.landed(node, reserved, from, (to - from) as usize);
-                self.write_back(node, start, &page[..(size - start).min(PAGE) as usize])
-                    .map_err(|(_, error)| error)
-            });
-            if let Err(e) = written {
-                if let Err(again) = self.unreserve(node, reserved, landed) {
-                    println!("fileserver: a refused write was not cut back ({again:?})");
+        let (first, last) = (offset / PAGE * PAGE, end.div_ceil(PAGE) * PAGE);
+        let mut pages = vec![0u8; (last - first) as usize];
+        let mut put = || -> Result<(), (u64, Error)> {
+            let size = self.node_meta(node).map_err(|error| (0, error))?.size;
+            // A page the bytes cover whole needs nothing read.
+            let partial = [first, last - PAGE].into_iter().filter(|&start| offset > start || end < start + PAGE);
+            for start in partial.collect::<std::collections::BTreeSet<_>>() {
+                let below = reserved.contents().saturating_sub(start).min(PAGE) as usize;
+                let at = (start - first) as usize;
+                if below > 0 {
+                    self.read(node, start, &mut Buf(&mut pages[at..at + below])).map_err(|error| (0, error))?;
                 }
-                return Err(e);
             }
-            landed = to;
+            pages[(offset - first) as usize..(end - first) as usize].copy_from_slice(data);
+            self.landed(node, reserved, offset, data.len());
+            self.write_back(node, first, &pages[..(size - first).min(last - first) as usize])
+                .map_err(|(done, error)| ((first + done as u64).min(end).max(offset) - offset, error))
+        };
+        let Err((landed, error)) = put() else { return Ok(()) };
+        let landed = if landed == 0 { 0 } else { offset + landed };
+        if let Err(again) = self.unreserve(node, reserved, landed) {
+            println!("fileserver: a refused write was not cut back ({again:?})");
         }
-        Ok(())
+        Err(error)
     }
 }
 

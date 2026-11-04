@@ -309,13 +309,13 @@ fn a_member_left_with_nothing_to_append_is_not_written() {
     let m = open(&dev, None, MEMORY);
     let kept = Executor::new().block_on(async {
         let mut kept = Vec::new();
-        for i in 0..2800usize {
+        for i in 0..3600usize {
             let ino = m.create(m.root(), format!("d{i}").as_bytes(), New::File, OWNER, NOW).await.unwrap().ino;
             m.write(ino, 0, &vec![i as u8; quarter], NOW).await.unwrap();
             if i % 4 == 0 { kept.push(ino); }
             if i % 64 == 63 { m.commit().await.unwrap(); }
         }
-        for i in 0..2800usize {
+        for i in 0..3600usize {
             if i % 4 != 0 {
                 let removed = m.unlink(m.root(), format!("d{i}").as_bytes(), false, NOW).await.unwrap();
                 m.release(removed.node).await.unwrap();
@@ -334,11 +334,11 @@ fn a_member_left_with_nothing_to_append_is_not_written() {
         block_on_ready(super::super::read::Source::walk(&m, btree, Bpos::MIN, |_, _| Ok(true))).unwrap();
         m.rewrite_next(btree);
     }
-    block_on_ready(m.set_mtime(kept[404], NOW + 9)).unwrap();
+    block_on_ready(m.set_mtime(kept[485], NOW + 9)).unwrap();
     let published = block_on_ready(m.unmount_in_one_publication()).unwrap();
     assert!(published.idle > 0, "no member was left with nothing to append: {published:?}");
     let v = block_on_ready(Volume::open(&dev)).unwrap();
-    assert_eq!(block_on_ready(v.inode(kept[404])).unwrap().mtime, NOW + 9);
+    assert_eq!(block_on_ready(v.inode(kept[485])).unwrap().mtime, NOW + 9);
     assert_eq!(block_on_ready(v.names()).unwrap().len(), kept.len());
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }

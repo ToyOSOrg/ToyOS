@@ -7,49 +7,74 @@ use super::*;
 
 const VERSIONS: u64 = 1024;
 
-#[derive(Clone, Copy)]
-pub(super) struct ReservedBlock {
-    ino: u64,
+/// The largest extent this writer makes, upstream's default: what a read of
+/// one block past the page cache verifies at most.
+const EXTENT_MAX: u64 = 64 << 10;
+
+/// Contiguous sectors for consecutive blocks of a file, each written once.
+struct Run {
+    first: u64,
     sector: u64,
+    blocks: u32,
+    written: u128,
+}
+
+pub(super) struct Reserved {
+    ino: u64,
+    block_sectors: u64,
+    runs: Vec<Run>,
+}
+
+impl Reserved {
+    fn unwritten(&self) -> u64 {
+        self.runs.iter().map(|r| u64::from(r.blocks - r.written.count_ones())).sum()
+    }
 }
 
 #[derive(Default)]
 pub(super) struct Reservations {
-    pub(super) active: BTreeMap<u64, ReservedBlock>,
+    pub(super) active: BTreeMap<u64, Reserved>,
     canceled: Vec<u64>,
     next: u64,
 }
 
 impl Reservations {
+    /// Metadata credit the others hold: a transaction's worth for each
+    /// block not yet written, which a part's own transaction may then spend.
     pub(super) fn pending(&self, draw: Draw) -> u64 {
         let own = match draw {
-            Draw::Reserved(id) => usize::from(self.active.contains_key(&id)),
-            _ => 0,
+            Draw::Reserved(id) => Some(id),
+            _ => None,
         };
-        (self.active.len() - own) as u64 * K_TX * 8
+        self.active.iter().filter(|(&id, _)| Some(id) != own).map(|(_, r)| r.unwritten()).sum::<u64>() * K_TX * 8
     }
 }
 
-/// Capacity for one filesystem block. Dropping an unused reservation
-/// returns its physical slot and metadata credit on the next operation.
+/// Capacity for the whole blocks of a range: runs of contiguous sectors of at
+/// most [`EXTENT_MAX`]. Dropping it returns the blocks never written on the
+/// next operation.
 pub struct Reservation {
     owner: Rc<RefCell<Reservations>>,
     id: u64,
     first: u64,
-    bytes: usize,
+    bytes: u64,
 }
 
 impl Reservation {
     pub fn range(&self) -> (u64, u64) {
-        (self.first, self.first + self.bytes as u64)
+        (self.first, self.first + self.bytes)
     }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
         let mut pool = self.owner.borrow_mut();
-        if let Some(block) = pool.active.remove(&self.id) {
-            pool.canceled.push(block.sector);
+        if let Some(reserved) = pool.active.remove(&self.id) {
+            for run in &reserved.runs {
+                for block in (0..run.blocks).filter(|b| run.written & 1 << b == 0) {
+                    pool.canceled.push(run.sector + u64::from(block) * reserved.block_sectors);
+                }
+            }
         }
     }
 }
@@ -84,60 +109,108 @@ impl<D: BlockDev> Mount<D> {
         }
     }
 
-    /// Reserves the complete block containing `[offset, offset + len)`.
-    /// A range crossing a filesystem block needs separate reservations.
+    /// Reserves the whole blocks of `[offset, offset + len)`, a run of
+    /// contiguous sectors at a time: a later write into it cannot be refused
+    /// for space.
     pub async fn reserve(&self, ino: u64, offset: u64, len: usize) -> Result<Reservation> {
-        let bytes = self.sb.block_bytes();
-        let first = offset / bytes as u64 * bytes as u64;
-        if len == 0 || offset.checked_add(len as u64).is_none_or(|end| end > i64::MAX as u64 || end > first.saturating_add(bytes as u64)) {
-            return Err(Error::Invalid("reservation outside one filesystem block"));
-        }
+        let block = self.sb.block_bytes() as u64;
+        let first = offset / block * block;
+        let end = offset.checked_add(len as u64).filter(|&end| len > 0 && end <= i64::MAX as u64).ok_or(Error::Invalid("reservation of nothing or past 2^63-1"))?.div_ceil(block) * block;
+        let bucket = u64::from(self.sb.member.bucket_sectors);
+        let longest = EXTENT_MAX.min(bucket * SECTOR as u64) / block * block;
         let _data = self.data_slot().await;
-        let id = loop {
-            let out = self
-            .transact(K_TX, FOOTPRINT, Draw::Ordinary, async |txn: &mut Txn| {
-                regular(&self.inode_in(txn, ino).await?)?;
-                self.block_extents(ino, first, first + bytes as u64).await?;
-                let (sector, _) = self.data_sector(self.sb.block_bytes() as u64 / SECTOR as u64, Draw::Ordinary, true).await?;
-                self.st.borrow_mut().alloc.pin(sector / u64::from(self.sb.member.bucket_sectors));
-                let mut pool = self.reservations.borrow_mut();
-                let id = pool.next;
-                pool.next = pool.next.checked_add(1).expect("reservation identifiers exhausted");
-                pool.active.insert(id, ReservedBlock { ino, sector });
-                Ok(id)
-            })
-            .await;
-            match out {
-                Err(Error::NoSpace(_)) if self.compact_user().await? => continue,
-                other => break other?,
-            }
+        let id = {
+            let mut pool = self.reservations.borrow_mut();
+            let id = pool.next;
+            pool.next = pool.next.checked_add(1).expect("reservation identifiers exhausted");
+            pool.active.insert(id, Reserved { ino, block_sectors: block / SECTOR as u64, runs: Vec::new() });
+            id
         };
-        Ok(Reservation { owner: Rc::clone(&self.reservations), id, first, bytes })
+        let reservation = Reservation { owner: Rc::clone(&self.reservations), id, first, bytes: end - first };
+        let mut at = first;
+        while at < end {
+            let wanted = (end - at).min(longest) / SECTOR as u64;
+            let got = loop {
+                let out = self
+                    .transact(K_TX, FOOTPRINT, Draw::Ordinary, async |txn: &mut Txn| {
+                        regular(&self.inode_in(txn, ino).await?)?;
+                        let (sector, got) = if wanted * SECTOR as u64 == block {
+                            (self.data_sector(wanted, Draw::Ordinary, true).await?.0, wanted)
+                        } else {
+                            self.data_run(wanted, Draw::Ordinary).await?
+                        };
+                        let blocks = (got * SECTOR as u64 / block) as u32;
+                        let mut st = self.st.borrow_mut();
+                        for _ in 0..blocks { st.alloc.pin(sector / bucket); }
+                        let run = Run { first: at, sector, blocks, written: 0 };
+                        self.reservations.borrow_mut().active.get_mut(&id).expect("a reservation being made").runs.push(run);
+                        Ok(got)
+                    })
+                    .await;
+                match out {
+                    Err(Error::NoSpace(_)) if self.compact_user().await? => continue,
+                    other => break other?,
+                }
+            };
+            at += got * SECTOR as u64;
+        }
+        Ok(reservation)
     }
 
-    /// Writes inside the reserved block. Successful application consumes the
-    /// reservation; a failed write leaves it reserved for retry until dropped.
+    /// Writes into blocks of the reservation not yet written, as one extent
+    /// for each run the bytes cross; a block written in part keeps the rest
+    /// of its bytes, and counts as written. Bytes written; a
+    /// failure after some returns their count, and the rest stay reserved
+    /// for a retry until dropped.
     pub async fn write_reserved(&self, reservation: &mut Reservation, offset: u64, data: &[u8], now: i64) -> Result<usize> {
         if !Rc::ptr_eq(&reservation.owner, &self.reservations) {
             return Err(Error::Invalid("reservation belongs to another mount"));
         }
+        let block = self.sb.block_bytes() as u64;
         if offset < reservation.first || data.is_empty() || offset.checked_add(data.len() as u64).is_none_or(|end| end > reservation.range().1) {
-            return Err(Error::Invalid("write outside its reserved block"));
+            return Err(Error::Invalid("write outside its reserved blocks"));
         }
         let _slot = self.data_slot().await;
-        let block = self.reservations.borrow().active.get(&reservation.id).copied().ok_or(Error::Invalid("reservation already consumed"))?;
         self.observe(now);
-        let version = self.data_version().await?;
-        let out = self.write_chunk(block.ino, offset, data, now, version, Some((reservation.id, block.sector))).await;
-        if !self.reservations.borrow().active.contains_key(&reservation.id) {
+        let bucket = u64::from(self.sb.member.bucket_sectors);
+        let mut done = 0;
+        while done < data.len() {
+            let at = offset + done as u64;
+            let (ino, sector, end) = {
+                let pool = self.reservations.borrow();
+                let reserved = pool.active.get(&reservation.id).ok_or(Error::Invalid("reservation already written"))?;
+                let run = reserved.runs.iter().find(|r| (r.first..r.first + u64::from(r.blocks) * block).contains(&at)).expect("a reservation covers its range");
+                let end = (offset + data.len() as u64).min(run.first + u64::from(run.blocks) * block);
+                let (from, to) = (((at - run.first) / block) as u32, ((end - run.first).div_ceil(block)) as u32);
+                if (from..to).any(|b| run.written & 1 << b != 0) {
+                    return Err(Error::Invalid("a reserved block written twice"));
+                }
+                (reserved.ino, run.sector + (at - run.first) / SECTOR as u64, end)
+            };
+            let version = match self.data_version().await {
+                Ok(version) => version,
+                Err(_) if done > 0 => return Ok(done),
+                Err(e) => return Err(e),
+            };
+            let n = match self.write_run(ino, at, &data[done..(end - offset) as usize], now, version, Some((reservation.id, sector))).await {
+                Ok(n) => n,
+                Err(_) if done > 0 => return Ok(done),
+                Err(e) => return Err(e),
+            };
+            let mut pool = self.reservations.borrow_mut();
             let mut st = self.st.borrow_mut();
-            if out.is_ok() {
-                st.alloc.unpin(block.sector / u64::from(self.sb.member.bucket_sectors));
-            } else {
-                st.alloc.cancel_data(block.sector, u64::from(self.sb.member.bucket_sectors));
+            let reserved = pool.active.get_mut(&reservation.id).expect("a reservation being written");
+            let run = reserved.runs.iter_mut().find(|r| (r.first..r.first + u64::from(r.blocks) * block).contains(&at)).expect("the run just written");
+            for b in ((at - run.first) / block) as u32..((at + n as u64 - run.first).div_ceil(block)) as u32 {
+                run.written |= 1 << b;
+                st.alloc.unpin(run.sector / bucket);
             }
+            if reserved.unwritten() == 0 {
+                pool.active.remove(&reservation.id);
+            }
+            done += n;
         }
-        out
+        Ok(done)
     }
 
     pub(super) async fn create_symlink(&self, dir: u64, name: &[u8], target: &[u8], owner: Owner, now: i64) -> Result<Inode> {
@@ -180,17 +253,22 @@ impl<D: BlockDev> Mount<D> {
         Source::readlink(self, ino).await
     }
 
-    /// Writes as many bytes as fit. A later chunk's failure returns the
-    /// completed byte count; `commit` is the durability barrier.
+    /// Writes as many bytes as fit, an extent of at most [`EXTENT_MAX`] at a
+    /// time. A later extent's failure returns the completed byte count;
+    /// `commit` is the durability barrier.
     pub async fn write(&self, ino: u64, offset: u64, data: &[u8], now: i64) -> Result<usize> {
         offset.checked_add(data.len() as u64).filter(|n| i64::try_from(*n).is_ok()).ok_or(Error::Invalid("file size past 2^63-1"))?;
         let _slot = self.data_slot().await;
         self.observe(now);
+        let block = self.sb.block_bytes() as u64;
+        let longest = EXTENT_MAX.min(u64::from(self.sb.member.bucket_sectors) * SECTOR as u64) / block * block;
         let mut done = 0;
         while done < data.len() {
-            let version = self.data_version().await;
-            let out = match version {
-                Ok(version) => self.write_chunk(ino, offset + done as u64, &data[done..], now, version, None).await,
+            let at = offset + done as u64;
+            let room = (at / block * block + longest - at) as usize;
+            let part = &data[done..done + room.min(data.len() - done)];
+            let out = match self.data_version().await {
+                Ok(version) => self.write_run(ino, at, part, now, version, None).await,
                 Err(e) => Err(e),
             };
             let out = match out {
@@ -309,20 +387,55 @@ impl<D: BlockDev> Mount<D> {
         Ok(found)
     }
 
-    async fn write_chunk(&self, ino: u64, offset: u64, input: &[u8], now: i64, version: Version, reserved: Option<(u64, u64)>) -> Result<usize> {
+    /// One extent of `input` at `at`, onto `reserved`'s sectors or new ones:
+    /// the whole blocks it spans, the first and last read first where it
+    /// covers them in part. A transaction removes at most two old extents,
+    /// as one block's write always could, so a write over more stops before
+    /// the third. Bytes written.
+    async fn write_run(&self, ino: u64, at: u64, input: &[u8], now: i64, version: Version, reserved: Option<(u64, u64)>) -> Result<usize> {
         let draw = reserved.map_or(Draw::Ordinary, |(id, _)| Draw::Reserved(id));
         self.transact(K_TX, FOOTPRINT, draw, async |txn: &mut Txn| {
             let mut inode = self.inode_in(txn, ino).await?;
             regular(&inode)?;
             let block = self.sb.block_bytes() as u64;
-            let first = offset / block * block;
-            let mut bytes = alloc::vec![0u8; block as usize];
-            Source::read(self, ino, first, &mut bytes).await?;
-            let at = (offset - first) as usize;
-            let n = input.len().min(bytes.len() - at);
-            bytes[at..at + n].copy_from_slice(&input[..n]);
-            self.replace_block(txn, ino, &mut inode, first, &bytes, version, reserved.map(|(_, sector)| sector)).await?;
-            inode.size = inode.size.max(offset + n as u64);
+            let first = at / block * block;
+            let mut end = (at + input.len() as u64).div_ceil(block) * block;
+            let mut old = self.extents_in(ino, first, end, 3).await?;
+            if old.len() == 3 {
+                end = start(&old[2].0)? / block * block;
+                if end <= first {
+                    return Err(Error::Unsupported("more than two data extents in one filesystem block"));
+                }
+                old.truncate(2);
+                old.retain(|(k, _)| start(k).is_ok_and(|s| s < end));
+            }
+            let sector = match reserved {
+                Some((_, sector)) => sector,
+                None => {
+                    let (sector, got) = if end - first == block {
+                        (self.data_sector(block / SECTOR as u64, Draw::Ordinary, true).await?.0, block / SECTOR as u64)
+                    } else {
+                        self.data_run((end - first) / SECTOR as u64, Draw::Ordinary).await?
+                    };
+                    end = first + got * SECTOR as u64;
+                    old.retain(|(k, _)| start(k).is_ok_and(|s| s < end));
+                    self.st.borrow_mut().alloc.pin(sector / u64::from(self.sb.member.bucket_sectors));
+                    txn.allocated_data.push(sector);
+                    sector
+                }
+            };
+            let n = (input.len() as u64).min(end - at) as usize;
+            let mut bytes = alloc::vec![0u8; (end - first) as usize];
+            if at > first {
+                Source::read(self, ino, first, &mut bytes[..block as usize]).await?;
+            }
+            if (at + n as u64) < end {
+                let last = (end - block - first) as usize;
+                Source::read(self, ino, end - block, &mut bytes[last..]).await?;
+            }
+            bytes[(at - first) as usize..(at - first) as usize + n].copy_from_slice(&input[..n]);
+            self.replace_range(txn, ino, &mut inode, first, &bytes, old, version, sector).await?;
+            inode.size = inode.size.max(at + n as u64);
             self.touch(&mut inode, now);
             self.set_inode(txn, ino, &inode).await?;
             Ok(n)
@@ -331,11 +444,21 @@ impl<D: BlockDev> Mount<D> {
     }
 
     pub(super) async fn data_sector(&self, sectors: u64, draw: Draw, fixed: bool) -> Result<(u64, u8)> {
+        self.data_space(sectors, draw, fixed, false).await.map(|(sector, gen, _)| (sector, gen))
+    }
+
+    /// Up to `sectors` contiguous data sectors, as many as the open bucket
+    /// has left before another is taken: where an extent ends.
+    async fn data_run(&self, sectors: u64, draw: Draw) -> Result<(u64, u64)> {
+        self.data_space(sectors, draw, false, true).await.map(|(sector, _, got)| (sector, got))
+    }
+
+    async fn data_space(&self, sectors: u64, draw: Draw, fixed: bool, partial: bool) -> Result<(u64, u8, u64)> {
         let bucket = u64::from(self.sb.member.bucket_sectors);
         if sectors > bucket {
             return Err(Error::Unsupported("data extent larger than a bucket"));
         }
-        if let Some(at) = self.st.borrow_mut().alloc.next_data(bucket, sectors, fixed) {
+        if let Some(at) = self.st.borrow_mut().alloc.next_data(bucket, sectors, fixed, partial) {
             return Ok(at);
         }
         {
@@ -347,10 +470,12 @@ impl<D: BlockDev> Mount<D> {
             }
         }
         self.take_bucket(true).await?;
-        Ok(self.st.borrow_mut().alloc.next_data(bucket, sectors, fixed).expect("a fresh bucket holds the extent"))
+        Ok(self.st.borrow_mut().alloc.next_data(bucket, sectors, fixed, partial).expect("a fresh bucket holds the extent"))
     }
 
-    async fn block_extents(&self, ino: u64, first: u64, end: u64) -> Result<Vec<(Key, Vec<u8>)>> {
+    /// Up to `most` live extents of `ino` overlapping `[first, end)`, in
+    /// order, each of a kind this writer can replace on this volume.
+    async fn extents_in(&self, ino: u64, first: u64, end: u64, most: usize) -> Result<Vec<(Key, Vec<u8>)>> {
         let mut old = Vec::new();
         Source::walk(self, Btree::Extents, Bpos::new(ino, first / SECTOR as u64 + 1, 0), |k, v| {
             if k.pos.inode != ino || start(k)? >= end {
@@ -359,12 +484,9 @@ impl<D: BlockDev> Mount<D> {
             if k.pos.snapshot == ROOT_SNAPSHOT {
                 old.push((*k, v.to_vec()));
             }
-            Ok(true)
+            Ok(old.len() < most)
         })
         .await?;
-        if old.len() > 2 || (old.len() == 2 && !old.iter().any(|(k, _)| k.kind == kind::INLINE_DATA)) {
-            return Err(Error::Unsupported("multiple data extents in one filesystem block"));
-        }
         for (k, v) in &old {
             match k.kind {
                 kind::EXTENT => {
@@ -380,10 +502,11 @@ impl<D: BlockDev> Mount<D> {
         Ok(old)
     }
 
+    /// `bytes`, whole blocks from `first`, as one new extent at `sector` in
+    /// place of `old`, whose parts outside the range stay.
     #[allow(clippy::too_many_arguments)]
-    async fn replace_block(&self, txn: &mut Txn, ino: u64, inode: &mut InodeValue, first: u64, bytes: &[u8], version: Version, reserved: Option<u64>) -> Result<()> {
+    async fn replace_range(&self, txn: &mut Txn, ino: u64, inode: &mut InodeValue, first: u64, bytes: &[u8], old: Vec<(Key, Vec<u8>)>, version: Version, sector: u64) -> Result<()> {
         let end = first + bytes.len() as u64;
-        let old = self.block_extents(ino, first, end).await?;
         let mut retained = Vec::new();
         for (k, v) in &old {
             let from = start(k)?;
@@ -395,23 +518,15 @@ impl<D: BlockDev> Mount<D> {
                 retained.push(slice(k, v, end, to)?);
             }
         }
-        let blocks = bytes.len().div_ceil(self.sb.block_bytes()) * self.sb.block_bytes() / BLOCK;
+        let blocks = bytes.len() / BLOCK;
         let mut data = alloc::vec![[0u8; BLOCK]; blocks];
-        data.as_flattened_mut()[..bytes.len()].copy_from_slice(bytes);
-        let physical = (blocks * BLOCK / SECTOR) as u32;
-        let sector = match reserved {
-            Some(sector) => sector,
-            None => self.data_sector(u64::from(physical), Draw::Ordinary, true).await?.0,
-        };
-        if reserved.is_none() {
-            self.st.borrow_mut().alloc.pin(sector / u64::from(self.sb.member.bucket_sectors));
-            txn.allocated_data.push(sector);
-        }
+        data.as_flattened_mut().copy_from_slice(bytes);
+        let physical = (bytes.len() / SECTOR) as u32;
         let gen = self.bucket(txn, sector / u64::from(self.sb.member.bucket_sectors)).await?.reused_gen();
         let ptr = Ptr { sector, dev: 0, gen, cached: false, unwritten: false };
         let value = self.encode_data(&mut data, version, ptr, self.sb.flag(1, 9, 1) != 0)?;
-        let pos = Bpos::new(ino, (first + bytes.len() as u64) / SECTOR as u64, ROOT_SNAPSHOT);
-        let key = Key { size: (bytes.len() / SECTOR) as u32, version, ..Key::new(kind::EXTENT, pos) };
+        let pos = Bpos::new(ino, end / SECTOR as u64, ROOT_SNAPSHOT);
+        let key = Key { size: physical, version, ..Key::new(kind::EXTENT, pos) };
         self.reissue("file data write failed", async || {
             self.dev.write_data(sector * SECTOR as u64 / BLOCK as u64, &data).await?;
             Ok(())
