@@ -1,35 +1,17 @@
-//! A clean unmount's last write: every change still held, and every key
-//! that writing it derives, in one set of node writes that describes
-//! itself. The clean entry's roots alone make it reachable (A1.42), so it
-//! leaves nothing to write after it.
+//! A clean unmount's last write. Every change still held, and every key
+//! writing it derives, is written once, into nodes that describe
+//! themselves. No journal entry carries them: the clean entry's roots alone
+//! publish them (A1.42). Their bsets name that entry, which a crash
+//! blacklists (A2.15), and new nodes take only slots free on the medium.
 //!
-//! **Why reclaim alone cannot finish.** Reclaim writes a node and then
-//! journals the update that reaches it; a rewrite to a new node also
-//! changes allocator, backpointer and accounting keys, which dirty further
-//! nodes. Where a node is one block every write is such a rewrite, so the
-//! last write always leaves another. A longer node takes appends until its
-//! tail is spent, then rewrites again: a tail delays the cascade, it does
-//! not bound it.
-//!
-//! **What this does instead.** The changed nodes are the first members. A
-//! member is written once: appended to when its bset fits after its written
-//! sectors, otherwise rewritten into new nodes split at fixed bounds. Every
-//! key those writes derive is computed from the plan alone, before
-//! anything is written, and a node it lands in joins the plan. Nothing is
-//! journaled; the keys go into the members' own bytes, whose bsets carry
-//! the clean entry's sequence, so a crash before that entry reads none of
-//! them (A2.15). New nodes take only slots the durable volume leaves free:
-//! a bucket this publication empties is not taken again before then.
-//!
-//! **Termination.** A plan only grows: members join and stay, an append
-//! may become a rewrite but never back, and a rewrite's bounds are only
-//! added, each new one splitting an overfull group at one of its keys. All
-//! of these are drawn from the volume's finite nodes and positions, so
-//! growth stops. Every derived key's position and size depends on the plan
-//! alone: a pointer's on its node's bounds, a backpointer's on its slot,
-//! an allocator key's on the buckets the plan fills and empties. Only
-//! values (written sectors, a node's maximum) follow from sizes. So once
-//! the plan stops growing the derivation repeats within two rounds.
+//! **Invariants.** The plan only grows: members join and stay, an append may
+//! become a rewrite but never back, and bounds and slots are only added, all
+//! drawn from the volume's finite nodes, positions and slots. A member with
+//! nothing left to append is neither written nor reached again. A derived
+//! key's position and size at one level follow from the plan and from which
+//! members below it have something to write; values (written sectors, a
+//! node's maximum) follow from sizes. So growth stops, and the derivation
+//! then settles upward, level by level.
 
 use super::reclaim::{mark_bitmap, Pointing};
 use super::*;
@@ -40,12 +22,12 @@ enum Out {
     Append,
     /// New nodes: the maximum of every one but the last, a slot for each,
     /// and a root above them when a root splits.
-    Fresh { bounds: Vec<Bpos>, slots: Vec<Slot>, above: Option<Slot> },
+    Fresh { bounds: Vec<Bpos>, slots: Vec<Placed>, above: Option<Placed> },
 }
 
 /// A new node's place and sequence.
 #[derive(Clone, Copy)]
-struct Slot {
+struct Placed {
     at: (u64, u8),
     seq: u64,
 }
@@ -59,8 +41,11 @@ struct Derived {
     roots: Vec<Root>,
 }
 
-/// Plans settle within this many rounds of the last growth.
-const SETTLE: usize = 3;
+/// Rounds a derivation takes to settle once its plan stops growing: the
+/// leaves' keys in the first; each level's after the one below it, as which
+/// members have something to write is known; then values, and the round
+/// that finds them unchanged.
+const SETTLE: usize = 4 + 2;
 
 impl<D: BlockDev> Mount<D> {
     /// Writes every changed node as one self-describing set, the clean
@@ -101,7 +86,8 @@ impl<D: BlockDev> Mount<D> {
         let mut st = self.st.borrow_mut();
         #[cfg(test)]
         {
-            st.published = super::Published { members: plan.len(), regrouped: st.published.regrouped };
+            let idle = plan.iter().filter(|(id, out)| matches!(out, Out::Append) && changed_positions(st.cache.node(**id), &derived).is_empty()).count();
+            st.published = super::Published { members: plan.len(), regrouped: st.published.regrouped, idle };
         }
         for root in &derived.roots {
             st.roots.insert(root.btree, *root);
@@ -162,12 +148,9 @@ impl<D: BlockDev> Mount<D> {
             };
             match out {
                 Out::Append => {
-                    let sectors = {
-                        let st = self.st.borrow();
-                        let n = st.cache.node(id);
-                        let keys = content(&st, id, prev, Version::default());
-                        n.on_disk + (appended_bytes(self.sb.block_bytes(), n, &keys, prev) / SECTOR) as u16
-                    };
+                    // Nothing left to append: the node is neither written
+                    // nor reached again.
+                    let Some(sectors) = self.appended_sectors(&self.st.borrow(), id, prev) else { continue };
                     self.reach(&mut txn, &[id], btree, level, root, Pointing::Append { sectors }).await?;
                 }
                 Out::Fresh { .. } => {
@@ -264,7 +247,7 @@ impl<D: BlockDev> Mount<D> {
         for (&id, out) in plan.iter_mut() {
             let Out::Fresh { bounds, slots, above } = out else { continue };
             while slots.len() <= bounds.len() {
-                slots.push(Slot { at: self.alloc_sector().await?, seq: self.nonzero()? });
+                slots.push(Placed { at: self.alloc_sector().await?, seq: self.nonzero()? });
             }
             let (level, root) = {
                 let st = self.st.borrow();
@@ -274,7 +257,7 @@ impl<D: BlockDev> Mount<D> {
                 if level == 3 {
                     return Err(Error::Unsupported("a btree deeper than four levels"));
                 }
-                *above = Some(Slot { at: self.alloc_sector().await?, seq: self.nonzero()? });
+                *above = Some(Placed { at: self.alloc_sector().await?, seq: self.nonzero()? });
             }
         }
         Ok(())
@@ -312,6 +295,7 @@ impl<D: BlockDev> Mount<D> {
             match out {
                 Out::Append => {
                     let st = self.st.borrow();
+                    let Some(sectors) = self.appended_sectors(&st, id, derived) else { continue };
                     let n = st.cache.node(id);
                     let keys = content(&st, id, derived, Version { hi: (seq >> 32) as u32, lo: seq << 32 });
                     let changed: Vec<Vec<u8>> = changed_positions(n, derived)
@@ -323,13 +307,16 @@ impl<D: BlockDev> Mount<D> {
                         .collect();
                     let at = usize::from(n.on_disk) * SECTOR;
                     let later = node::Later { btree: n.btree, level: n.level, seq: n.seq, offset: at, journal_seq: seq, keys: &changed };
-                    writes.push((n.sector + u64::from(n.on_disk), node::encode_later(block, self.key.as_ref(), &later)?));
+                    let bytes = node::encode_later(block, self.key.as_ref(), &later)?;
+                    assert_eq!(n.on_disk + (bytes.len() / SECTOR) as u16, sectors, "an appended bset's size moved from its derived pointer");
+                    writes.push((n.sector + u64::from(n.on_disk), bytes));
                 }
                 Out::Fresh { .. } => {
                     let (by, above) = self.planned(id, out, derived, seq);
                     for p in by.into_iter().chain(above) {
                         let (written, bytes) = self.fresh_node(p.btree, p.level, p.min, p.max, seq, p.keys, (p.sector, p.gen), p.seq, magic)?;
                         assert_eq!(written.sectors, p.sectors, "a new node's size moved from its derived pointer");
+                        assert!(u32::from(p.sectors) <= self.sb.node_sectors(), "a new node past its slot");
                         writes.push((p.sector, bytes));
                     }
                 }
@@ -400,6 +387,19 @@ fn changed_positions(n: &Cached, derived: &Derived) -> BTreeSet<Bpos> {
         positions.extend(derived.accounting.range(n.min..=n.max).map(|(&pos, _)| pos));
     }
     positions
+}
+
+impl<D: BlockDev> Mount<D> {
+    /// Sectors `id` holds once its append is written, its changes as
+    /// `derived` leaves them; `None` when it has none left to append.
+    fn appended_sectors(&self, st: &State, id: NodeId, derived: &Derived) -> Option<u16> {
+        let n = st.cache.node(id);
+        if changed_positions(n, derived).is_empty() {
+            return None;
+        }
+        let keys = content(st, id, derived, Version::default());
+        Some(n.on_disk + (appended_bytes(self.sb.block_bytes(), n, &keys, derived) / SECTOR) as u16)
+    }
 }
 
 /// Bytes on the medium of the bset an append to `n` writes, `keys` its

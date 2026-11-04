@@ -313,6 +313,8 @@ pub(crate) struct Later<'a> {
 pub(crate) fn encode_later(block: usize, key: Option<&MasterKey>, later: &Later) -> Result<Vec<u8>> {
     let Later { btree, level, seq, offset, journal_seq, keys } = *later;
     assert!(offset > 0 && offset.is_multiple_of(block), "a later bset at byte {offset}");
+    // The reader refuses one (`decode`).
+    assert!(!keys.is_empty(), "a later bset with no keys");
     let end = later_record_bytes(keys.iter().map(Vec::len));
     let mut b = alloc::vec![0u8; end.next_multiple_of(block)];
     put64(&mut b, 16, seq);
