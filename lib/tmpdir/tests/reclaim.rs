@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use toyos_tmpdir::{TempDir, GLOBAL, OWNER, ROOT_PREFIX, SHORT_BASE};
+use toyos_tmpdir::{private, TempDir, GLOBAL, OWNER, PRIVATE_PREFIX, ROOT_PREFIX, SHORT_BASE};
 
 const HOLD: &str = "TOYOS_TMPDIR_TEST_HOLD";
 const HOLDING: &str = "holding ";
@@ -138,17 +138,20 @@ fn entries(tmp: &Path) -> Vec<String> {
 /// **The whole contract, over a `$TMPDIR` and over `/tmp`**: a killed process's
 /// scratch is taken by the next process's first directory, a live process's is
 /// left alone however many processes sweep past it, and a process that returns
-/// leaves nothing but the lock.
+/// leaves nothing but its user's private directory and the lock in it.
 #[test]
 fn a_killed_process_is_reclaimed_and_a_live_one_is_never_touched() {
     let _spawning = spawning();
     let tmp = TempDir::new("reclaim");
-    reclaimed(|| Holder::start(&tmp), &tmp);
-    assert_eq!(entries(&tmp), [GLOBAL], "a returned process left something behind");
+    let mine = private(&tmp);
+    reclaimed(|| Holder::start(&tmp), &mine);
+    let name = mine.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(entries(&tmp), [name], "a returned process left something outside its private directory");
+    assert_eq!(entries(&mine), [GLOBAL], "a returned process left something behind");
     // A short directory is under `/tmp` however deep `$TMPDIR` (here `tmp`) is,
     // so a socket's path in it fits Darwin's `sun_path`, the shorter of the
     // hosts'.
-    let short_base = std::fs::canonicalize(SHORT_BASE).unwrap();
+    let short_base = private(&std::fs::canonicalize(SHORT_BASE).unwrap());
     reclaimed(|| Holder::short(&tmp), &short_base);
 }
 
@@ -176,18 +179,28 @@ fn reclaimed(start: impl Fn() -> Holder, base: &Path) {
 }
 
 /// A root whose making or removal was cut short, with no owner file, is a gone
-/// process's too; nothing that is not a root is the sweep's.
+/// process's too; nothing that is not a root in this user's private directory
+/// is the sweep's: not another user's root, nor one in the shared base itself.
 #[test]
 fn a_root_without_an_owner_goes_and_nothing_else_is_touched() {
     let _spawning = spawning();
     let tmp = TempDir::new("ownerless");
-    let cut = tmp.join(format!("{ROOT_PREFIX}1-0"));
+    let mine = private(&tmp);
+    let cut = mine.join(format!("{ROOT_PREFIX}1-0"));
     std::fs::create_dir(&cut).unwrap();
     std::fs::write(cut.join("half"), b"").unwrap();
-    let other = tmp.join("toyos-tests-1");
+    let other = mine.join("toyos-tests-1");
     std::fs::create_dir(&other).unwrap();
+    let shared = tmp.join(format!("{ROOT_PREFIX}1-0"));
+    std::fs::create_dir(&shared).unwrap();
+    // Another user's private directory, made by this one as a test can only
+    // be one user: the sweep never enters it, whoever owns it.
+    let theirs = tmp.join(format!("{PRIVATE_PREFIX}{}", u32::MAX)).join(format!("{ROOT_PREFIX}1-0"));
+    std::fs::create_dir_all(&theirs).unwrap();
 
     Holder::start(&tmp).finish();
+    assert!(shared.exists(), "a sweep took a root outside its user's private directory");
+    assert!(theirs.exists(), "a sweep took another user's root");
     assert!(!cut.exists(), "an ownerless root survived a sweep");
     assert!(other.exists(), "a sweep took a directory that is not a root");
     assert!(!cut.join(OWNER).exists());
@@ -221,7 +234,8 @@ fn a_directory_goes_on_a_return_and_on_a_panic() {
 fn making_a_root_waits_for_global() {
     let _spawning = spawning();
     let tmp = TempDir::new("global-gate-make");
-    let lock_path = tmp.join(GLOBAL);
+    let mine = private(&tmp);
+    let lock_path = mine.join(GLOBAL);
     let held = OpenOptions::new()
         .write(true)
         .create(true)
@@ -234,7 +248,7 @@ fn making_a_root_waits_for_global() {
     let handle = std::thread::spawn(move || Holder::start(&tmp_path));
     std::thread::sleep(Duration::from_millis(500));
     let before: Vec<String> =
-        entries(&tmp).into_iter().filter(|n| n.starts_with(ROOT_PREFIX)).collect();
+        entries(&mine).into_iter().filter(|n| n.starts_with(ROOT_PREFIX)).collect();
     assert!(before.is_empty(), "a root was made while GLOBAL was held: {before:?}");
     assert!(!handle.is_finished(), "the holder made its directory without GLOBAL");
 
@@ -253,7 +267,7 @@ fn removing_a_root_waits_for_global() {
     let holder = Holder::start(&tmp);
     let root = holder.root();
 
-    let lock_path = tmp.join(GLOBAL);
+    let lock_path = private(&tmp).join(GLOBAL);
     let held = OpenOptions::new()
         .write(true)
         .create(true)
@@ -283,12 +297,13 @@ fn an_adopted_root_goes_with_its_adopter() {
     let killed = Holder::start(&tmp);
     let (pid, root, held) = (killed.child.id(), killed.root(), killed.dir.clone());
     killed.kill();
-    let other = tmp.join(format!("{ROOT_PREFIX}{pid}0-0"));
+    let mine = private(&tmp);
+    let other = mine.join(format!("{ROOT_PREFIX}{pid}0-0"));
     std::fs::create_dir(&other).unwrap();
 
     // The adopted pid reused, so its name matches the prefix `adopt` filters
     // on; only its owner's lock says it is live, and that must still hold.
-    let reused = tmp.join(format!("{ROOT_PREFIX}{pid}-9"));
+    let reused = mine.join(format!("{ROOT_PREFIX}{pid}-9"));
     std::fs::create_dir(&reused).unwrap();
     let reused_owner = OpenOptions::new()
         .write(true)

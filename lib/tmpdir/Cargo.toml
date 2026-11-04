@@ -11,3 +11,7 @@ publish = false
 
 [lints.rust]
 warnings = "deny"
+
+[dependencies]
+# `geteuid`, which names the user's private directory and checks its owner.
+libc = "0.2"

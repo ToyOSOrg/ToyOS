@@ -889,7 +889,8 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// libraries built for a guest ([`crate::hostws::guest_libraries`]).
 ///
 /// **Every step runs against a `$TMPDIR` of this job's own, and the last step
-/// reds on anything left in it** but the lock `toyos_tmpdir` keeps there: a test
+/// reds on anything left in it** but the lock `toyos_tmpdir` keeps in this
+/// user's private directory there: a test
 /// that writes scratch past a `toyos_tmpdir::TempDir`, or holds one past its
 /// end, is a test that fills the host's disk one run at a time.
 ///
@@ -1151,29 +1152,39 @@ fn attempted(programs: &[Program], os: Os) -> (Vec<&Program>, Vec<&str>) {
     (attempted, declared)
 }
 
-/// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, and every root
-/// under `short` whose process is gone that `before` does not name.
+/// What `tmp` holds but this user's [`toyos_tmpdir::private`] directory and
+/// the lock `toyos_tmpdir` keeps in it, and every root under `short` whose
+/// process is gone that `before` does not name.
 ///
-/// With `owed`, refuses if `tmp` holds no [`toyos_tmpdir::GLOBAL`]: the caller
-/// ran a step that makes a `toyos_tmpdir::TempDir`, which always writes that
-/// lock file first, so its absence means this `$TMPDIR` never saw the steps at
-/// all — the guard reading an empty directory it was never given, rather than
-/// one every test actually cleaned.
+/// With `owed`, refuses if that directory holds no [`toyos_tmpdir::GLOBAL`]:
+/// the caller ran a step that makes a `toyos_tmpdir::TempDir`, which always
+/// writes that lock file first, so its absence means this `$TMPDIR` never saw
+/// the steps at all — the guard reading an empty directory it was never given,
+/// rather than one every test actually cleaned.
 fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf], owed: bool) -> Result<String, String> {
-    let mut left: Vec<String> = std::fs::read_dir(tmp)
-        .map_err(|e| format!("read {}: {e}", tmp.display()))?
-        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
-        .collect::<Result<_, _>>()
-        .map_err(|e| format!("read {}: {e}", tmp.display()))?;
+    let names = |dir: &Path| -> Result<Vec<String>, String> {
+        std::fs::read_dir(dir)
+            .map_err(|e| format!("read {}: {e}", dir.display()))?
+            .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("read {}: {e}", dir.display()))
+    };
+    let mine = toyos_tmpdir::private(tmp);
+    let mut left = names(&mine)?;
     if owed && !left.iter().any(|name| name == toyos_tmpdir::GLOBAL) {
         return Err(format!(
             "{} holds no {}: every step above makes a `toyos_tmpdir::TempDir`, so its absence \
              means this $TMPDIR was never the one the steps actually wrote to",
-            tmp.display(),
+            mine.display(),
             toyos_tmpdir::GLOBAL
         ));
     }
+    let private = mine.file_name().expect("a private directory has a name").to_string_lossy();
     left.retain(|name| name != toyos_tmpdir::GLOBAL);
+    for name in &mut left {
+        *name = format!("{private}/{name}");
+    }
+    left.extend(names(tmp)?.into_iter().filter(|name| *name != private));
     left.sort();
     let mut dead: Vec<String> = toyos_tmpdir::gone_roots(short)
         .into_iter()
@@ -1543,16 +1554,19 @@ mod tests {
         assert!(refusal.contains("stale-1-current"), "{refusal}");
     }
 
-    /// The lock is the one thing a `$TMPDIR` keeps; anything else is named.
+    /// The private directory's lock is the one thing a `$TMPDIR` keeps;
+    /// anything else, in that directory or beside it, is named.
     #[test]
     fn the_host_job_names_what_its_tests_left_behind() {
         let tmp = toyos_tmpdir::TempDir::new("left-behind");
         let short = toyos_tmpdir::TempDir::new("left-behind-short");
-        std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
+        let mine = toyos_tmpdir::private(&tmp);
+        std::fs::write(mine.join(toyos_tmpdir::GLOBAL), b"").unwrap();
         assert!(left_behind(&tmp, &short, &[], true).is_ok());
         std::fs::create_dir(tmp.join("stale-1-current")).unwrap();
+        std::fs::create_dir(mine.join("stale-2-current")).unwrap();
         let refusal = left_behind(&tmp, &short, &[], true).expect_err("a directory left behind is a red");
-        assert!(refusal.contains("stale-1-current"), "{refusal}");
+        assert!(refusal.contains("stale-1-current") && refusal.contains("stale-2-current"), "{refusal}");
     }
 
     /// A short root whose process died while the steps ran is named; one already
@@ -1561,13 +1575,14 @@ mod tests {
     fn the_job_names_a_short_root_a_step_left_when_it_died() {
         let tmp = toyos_tmpdir::TempDir::new("left-behind-died");
         let short = toyos_tmpdir::TempDir::new("left-behind-died-short");
-        std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
+        std::fs::write(toyos_tmpdir::private(&tmp).join(toyos_tmpdir::GLOBAL), b"").unwrap();
+        let short_mine = toyos_tmpdir::private(&short);
         let earlier = format!("{}1-0", toyos_tmpdir::ROOT_PREFIX);
-        std::fs::create_dir(short.join(&earlier)).unwrap();
+        std::fs::create_dir(short_mine.join(&earlier)).unwrap();
         let before = toyos_tmpdir::gone_roots(&short);
         assert!(left_behind(&tmp, &short, &before, true).is_ok());
         let died = format!("{}2-0", toyos_tmpdir::ROOT_PREFIX);
-        std::fs::create_dir(short.join(&died)).unwrap();
+        std::fs::create_dir(short_mine.join(&died)).unwrap();
         let refusal = left_behind(&tmp, &short, &before, true).expect_err("a dead step's root is a red");
         assert!(refusal.contains(&died) && !refusal.contains(&earlier), "{refusal}");
     }
