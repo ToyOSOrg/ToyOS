@@ -218,7 +218,7 @@ const MAX_KEY: usize = 8 * (KEY_U64S + super::bkey::MAX_VALUE_U64S);
 const fn splits_fit(node: usize) -> bool {
     (5 * (node - FIRST_KEYS) + 2 * K_TX as usize * 8).div_ceil(MAX_GROUPS) + MAX_KEY <= node - FIRST_KEYS
 }
-const _: () = assert!(splits_fit(16 << 10), "mkfs's smallest nodes are writable");
+const _: () = assert!(splits_fit(super::mkfs::MIN_BUCKET as usize * SECTOR), "mkfs's smallest nodes are writable");
 
 /// The writer slot, held until dropped.
 struct Slot<'a, D>(&'a Mount<D>);
@@ -348,6 +348,8 @@ impl<D: BlockDev> Mount<D> {
     /// One not cleanly unmounted is replayed first, and its journal resumes
     /// past the post-crash skip.
     pub async fn open(dev: D, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
+        // Early, so a volume refused is refused by name before it is read;
+        // `from` judges again the copy the open read.
         writable(&read::read_superblock(&dev).await?)?;
         let volume = Volume::open(dev).await?;
         no_logged_ops(&volume).await?;
@@ -359,6 +361,8 @@ impl<D: BlockDev> Mount<D> {
     /// An encrypted volume, unlocked as [`Volume::unlock`] does, mounted
     /// read-write.
     pub async fn unlock(dev: D, passphrase: &[u8], limits: scrypt::Limits, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
+        // Early, so a volume refused costs no scrypt and is refused by name;
+        // `from` judges again the copy the unlock read.
         writable(&read::read_superblock(&dev).await?)?;
         let volume = Volume::unlock(dev, passphrase, limits).await?;
         no_logged_ops(&volume).await?;
@@ -370,6 +374,9 @@ impl<D: BlockDev> Mount<D> {
     /// `empty` is the volume's count of empty buckets.
     async fn from(parts: Parts<D>, empty: u64, metadata: allocator::Metadata, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
         let Parts { dev, mut sb, key, roots, key_version, replay, root } = parts;
+        // The superblock this mount runs on, which a device may answer
+        // differently from an earlier read.
+        writable(&sb)?;
         let key_version = key_version.checked_add(if replay.is_some() && key.is_some() { 65_536 } else { 0 }).ok_or(Error::NoSpace("encrypted extent versions"))?;
         let ring: Vec<u64> = sb.journal.iter().flat_map(|&(first, count)| first..first + count).collect();
         let bucket_sectors = u64::from(sb.member.bucket_sectors);

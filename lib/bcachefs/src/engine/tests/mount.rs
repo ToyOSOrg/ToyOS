@@ -214,6 +214,55 @@ fn a_clean_volume_with_an_empty_journal_survives_a_crash_going_read_write() {
     assert!(judged.get() > 500, "{} crash states judged", judged.get());
 }
 
+/// A device that answers the primary superblock's block from `first` once,
+/// and every read from `then` after it.
+struct Turncoat {
+    first: Image,
+    then: Image,
+    primary_reads: core::cell::Cell<u32>,
+}
+
+impl BlockDev for Turncoat {
+    fn blocks(&self) -> u64 {
+        self.then.blocks()
+    }
+
+    async fn read(&self, lba: u64, out: &mut [toyos_blockdev::Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        if lba <= 1 && lba + out.len() as u64 > 1 {
+            self.primary_reads.set(self.primary_reads.get() + 1);
+        }
+        match self.primary_reads.get() {
+            0 | 1 => self.first.read(lba, out).await,
+            _ => self.then.read(lba, out).await,
+        }
+    }
+
+    async fn write(&self, lba: u64, data: &[toyos_blockdev::Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.then.write(lba, data).await
+    }
+
+    async fn flush(&self) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.then.flush().await
+    }
+}
+
+/// A mount judges the superblock it runs on. An unlock reads one early, so
+/// a volume refused costs no scrypt, and its own after (an open does the
+/// same): a device whose
+/// second answer is a volume of 8 KiB nodes, after a first of mkfs's own,
+/// is refused by name, never mounted on geometry nothing judged.
+#[test]
+fn a_superblock_answered_differently_the_second_time_is_judged_as_answered() {
+    let secret = hex_secret();
+    let encrypted = || formatted(64 << 20, Some(Encryption { passphrase: &secret, kdf: MIN_KDF }));
+    let then = super::geometry::shaped(64 << 20, 8, 16, Some(Encryption { passphrase: &secret, kdf: MIN_KDF }));
+    let turncoat = Turncoat { first: encrypted(), then, primary_reads: core::cell::Cell::new(0) };
+    let limits = toyos_crypto::scrypt::Limits { memory: 1 << 20, work: 1 << 20 };
+    let err = block_on_ready(Mount::unlock(&turncoat, &secret, limits, MEMORY, random())).err();
+    assert!(turncoat.primary_reads.get() >= 2, "the device was asked for its superblock once");
+    assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes too small for reclaim's largest split")));
+}
+
 /// A volume of 512-byte blocks, which upstream formats below 1 GiB (A1.46),
 /// is refused by name, as every write is of whole 4 KiB device blocks; so
 /// is one of nodes too small for reclaim's largest split (`splits_fit`),

@@ -61,7 +61,7 @@ const MAX_EXTENT: u64 = 1 << ENCODED_EXTENT_BITS;
 const BACKPOINTER_SHIFT: u32 = 16;
 /// Bucket sizes from 16 KiB to 2 MiB, at least 2 048 buckets where the
 /// device allows.
-const MIN_BUCKET: u64 = 32;
+pub(crate) const MIN_BUCKET: u64 = 32;
 const MAX_BUCKET: u64 = 4096;
 const WANT_BUCKETS: u64 = 2048;
 const MIN_BUCKETS: u64 = 512;
