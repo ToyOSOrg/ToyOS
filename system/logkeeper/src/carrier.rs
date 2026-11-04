@@ -519,6 +519,8 @@ impl Carriers {
                     }
                 }
                 if quiet {
+                    // Passed over, which is what the stop's wait reads.
+                    self.lock().feed(channel).at = at;
                     continue;
                 }
             }
