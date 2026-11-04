@@ -245,13 +245,15 @@ pub const I8042_ROW: usize = 0;
 pub const UART_ROW: usize = 2;
 
 /// Fill the console UART's row, where the boot found one: COM1's ports and
-/// its line, IRQ 4. Only its class claims it.
+/// its line, IRQ 4. Only its class claims it. A UART with no line stays the
+/// kernel's, which the stop and the fatal paths still write.
 pub fn fill_uart_row() {
     if !crate::drivers::serial::has_console() {
         return;
     }
     let Some(wire) = ioapic::gsi_for_isa_irq(4) else {
-        return log!("isa: no console UART row — no I/O APIC carries its line");
+        declare("the kernel's console UART", COM1.ports(), Mediated::Kept).expect("pio: COM1 is declared once, here");
+        return log!("isa: no console UART row — no I/O APIC carries its line, so COM1 stays the kernel's");
     };
     crate::isa::fill(
         UART_ROW,

@@ -33,7 +33,7 @@ start = ["logkeeper", "uart", "diskserver", "fileserver", "console", "acpiserver
 # Rights::WAIT` on a `SysCap` duplicate, and serves `log` to the console.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
 serves = ["log", "log-wire"]
 holds = ["log-origins"]
 

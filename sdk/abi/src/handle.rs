@@ -281,10 +281,17 @@ impl Rights {
     /// [`SpawnArgs::pager`]: crate::syscall::SpawnArgs::pager
     /// [`SYS_PAGER_CREATE`]: crate::syscall::SYS_PAGER_CREATE
     pub const PAGER: Rights = Rights(1 << 18);
+    /// On a `SysCap`: say what the console's channels have delivered of the
+    /// kernel's log ([`SYS_LOG_SPOKEN`]). What it says is kept off the UART
+    /// by every fatal path and the stop, so it is not a reader's: the one
+    /// program that feeds the console, `logkeeper`, holds it.
+    ///
+    /// [`SYS_LOG_SPOKEN`]: crate::syscall::SYS_LOG_SPOKEN
+    pub const CONSOLE: Rights = Rights(1 << 19);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever
     /// composed it, not a right nobody uses.
-    pub const ALL: Rights = Rights(0x7_ffff);
+    pub const ALL: Rights = Rights(0xf_ffff);
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
         if bits & !Self::ALL.0 == 0 { Some(Rights(bits)) } else { None }
@@ -315,7 +322,7 @@ impl Rights {
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const NAMES: [(Rights, &str); 19] = [
+        const NAMES: [(Rights, &str); 20] = [
             (Rights::DUP, "DUP"),
             (Rights::TRANSFER, "TRANSFER"),
             (Rights::READ, "READ"),
@@ -335,6 +342,7 @@ impl core::fmt::Debug for Rights {
             (Rights::FLOOR, "FLOOR"),
             (Rights::WAKE_LATENCY, "WAKE_LATENCY"),
             (Rights::PAGER, "PAGER"),
+            (Rights::CONSOLE, "CONSOLE"),
         ];
         if self.0 == 0 {
             return f.write_str("NONE");

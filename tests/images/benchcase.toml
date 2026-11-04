@@ -22,7 +22,7 @@ start = ["logkeeper", "uart", "diskserver", "fileserver", "acpiserver", "netstac
 # `log`, which `lan_lease` waits for netstack's lease on.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
 serves = ["log", "log-carrier", "log-wire"]
 holds = ["log-origins"]
 

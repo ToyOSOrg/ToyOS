@@ -210,6 +210,10 @@ const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
     // holder that has to spin — a name that looks complete and traps the one
     // program whose whole loop is read-then-park.
     ("logread", Rights::LOG.union(Rights::WAIT)),
+    // Say what the console's channels have delivered of the kernel's log,
+    // which every fatal path and the stop then leave off the UART: the console
+    // feeder's, never a reader's.
+    ("console", Rights::CONSOLE),
     // Power the machine off. The largest authority on the list — it ends every
     // process there is, including the ones that hold every other right here — and the
     // last but one to have been free: `SYS_SHUTDOWN` took no handle at all, so
@@ -1122,6 +1126,7 @@ mod tests {
         );
         assert!(!syscap_rights(&["roster".into()]).unwrap().contains(Rights::LOG));
         assert!(!syscap_rights(&["logread".into()]).unwrap().contains(Rights::ROSTER));
+        assert!(!syscap_rights(&["logread".into()]).unwrap().contains(Rights::CONSOLE), "reading is not speaking");
         // Not the applet's name, and not the syscall's.
         assert!(syscap_rights(&["ps".into()]).is_err());
         assert!(syscap_rights(&["sysinfo".into()]).is_err());

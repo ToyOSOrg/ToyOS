@@ -16,8 +16,9 @@ lines can reach neither channel:
   fed from the moment the port's goes, not from what the port had not taken;
 - at the machine's stop, the program lines in the UART's pipe that the UART
   had not taken when userland stopped. The kernel's stop and every fatal path
-  put the kernel's own records on the UART from the newest stamp a channel
-  delivered (`log::console::spoken`), so no kernel record is lost this way.
+  put on the UART every kernel record past the read positions of the rounds
+  a channel delivered whole (`log::console`), so no kernel record is lost
+  this way.
 
 The same holds across logkeeper's own death: its carriers' pipes end, and
 the UART carries nothing until the kernel's stop or a fatal path. `/log`

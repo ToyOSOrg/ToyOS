@@ -76,7 +76,10 @@ pub fn init(_: &mut Registers, rsdp_addr: u64) -> bool {
         return false;
     }
     BASE.store(spcr.base.address, Ordering::Relaxed);
-    GSIV.store(spcr.gsiv, Ordering::Relaxed);
+    // A UART whose interrupt the SPCR names for no GIC has none this kernel takes.
+    if spcr.interrupt_type & toyos_acpi::ARM_GIC != 0 {
+        GSIV.store(spcr.gsiv, Ordering::Relaxed);
+    }
     log!("serial: {kind} at {:#x} (SPCR, GSIV {})", spcr.base.address, spcr.gsiv);
     true
 }
@@ -91,7 +94,7 @@ pub fn fill_row() {
         return;
     }
     if gsiv < 32 {
-        return log!("isa: no console UART row — the SPCR names its interrupt GSIV {gsiv}, which is no SPI");
+        return log!("isa: no console UART row — the SPCR names no GIC interrupt or GSIV {gsiv}, which is no SPI");
     }
     crate::isa::fill(
         UART_ROW,

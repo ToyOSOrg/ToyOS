@@ -14,14 +14,16 @@
 //! ([`CARRIED_ELSEWHERE`], [`BACK_ON_THE_UART`]) and carries nothing between.
 //!
 //! **The port's carrier is handed the boot from its first line, and the
-//! UART's from the first line after the records the kernel put on the UART
-//! itself** ([`Hub::wire_from`]). A slow channel is never let go. What a
-//! channel has taken is told the kernel as the newest stamp the console has
-//! spoken (`toyos::log::spoken`), so a fatal path and the stop put on the UART
-//! the kernel's records no channel has delivered.
+//! UART's from where the UART's last carrier left off, or else from the
+//! hand-over with every line before it but the records the kernel put on the
+//! UART itself** ([`Hub::wire_start`]). A slow channel is never let go. What a
+//! channel has taken is told the kernel as the read positions of the rounds it
+//! has taken whole (`toyos::log::spoken`), so a fatal path and the stop put on
+//! the UART exactly the kernel's records no channel has delivered; a channel
+//! handed a gap in the replay speaks for nothing after it.
 //!
 //! **This program's end is its carriers' pipes'**: what follows on the UART
-//! is the kernel's stop or a fatal path, from the last stamp spoken.
+//! is the kernel's stop or a fatal path, from what was last spoken.
 //!
 //! What a channel had not taken when its carrier went is on neither
 //! (`issues/the-console-loses-what-its-carrier-had-not-delivered.md`).
@@ -39,7 +41,7 @@ use toyos_abi::log::Severity;
 use toyos_abi::syscall::SyscallError;
 use toyos_logstream::{BACK_ON_THE_UART, CARRIED_ELSEWHERE, CARRIER_STALLED, CARRY, DELIVERED};
 
-use crate::serve::{Fed, Hub};
+use crate::serve::{Fed, Hub, Positions};
 
 /// How long the stop waits for the channels to take the log up to the flush:
 /// policy, well inside the supervisor's flush bound, and far past what a
@@ -225,8 +227,8 @@ pub struct Carriers {
 
 struct State {
     feeds: [Feed; 2],
-    /// The newest stamp the kernel was told the console spoke.
-    spoken: u64,
+    /// The positions the kernel was last told the console spoke through.
+    spoken: Option<Positions>,
 }
 
 /// One channel's carrier and its feed.
@@ -238,6 +240,11 @@ struct Feed {
     /// Each piece of the replay written into the pipe: the pipe's length once
     /// it is written, and the replay offset it reaches.
     written: VecDeque<(u64, u64)>,
+    /// The replay offset the channel has taken, or passed over while quiet,
+    /// across its carriers: where the next one starts.
+    resumed: u64,
+    /// The carrier was handed a gap in the replay: it speaks for nothing.
+    gap: bool,
 }
 
 impl State {
@@ -258,7 +265,7 @@ impl Carriers {
         let carriers = Arc::new(Self {
             hub,
             cap,
-            state: Mutex::new(State { feeds: Default::default(), spoken: 0 }),
+            state: Mutex::new(State { feeds: Default::default(), spoken: None }),
             moved: Condvar::new(),
         });
         for (channel, acceptor) in [(Channel::Port, port), (Channel::Wire, wire)] {
@@ -428,6 +435,7 @@ impl Carriers {
             let feed = state.feed(channel);
             feed.at = 0;
             feed.written.clear();
+            feed.gap = false;
         }
         let carriers = Arc::clone(self);
         let fed = std::thread::Builder::new().name("log-carried".into()).spawn(move || {
@@ -474,22 +482,27 @@ impl Carriers {
     }
 
     /// `channel` has taken `delivered` bytes of its pipe: tell the kernel the
-    /// newest stamp of the replay that is all of it, where that is past what
-    /// it was told.
+    /// positions of the rounds that is all of, where they are not what it was
+    /// told last.
     fn spoken(&self, state: &mut State, channel: Channel, delivered: u64) {
         let feed = state.feed(channel);
         let mut through = None;
         while feed.written.front().is_some_and(|&(end, _)| end <= delivered) {
             through = feed.written.pop_front().map(|(_, at)| at);
         }
-        let Some(stamp) = through.and_then(|at| self.hub.stamp_through(at)) else { return };
-        if stamp <= state.spoken {
+        let Some(at) = through else { return };
+        feed.resumed = feed.resumed.max(at);
+        if feed.gap {
             return;
         }
-        match toyos::log::spoken(&self.cap, stamp) {
-            Ok(now) => state.spoken = now,
-            Err(e) => panic!("logkeeper: the kernel refused to be told what the console spoke: {e:?}"),
+        let Some(positions) = self.hub.positions_through(at) else { return };
+        if state.spoken.as_ref().is_some_and(|told| Arc::ptr_eq(told, &positions)) {
+            return;
         }
+        if let Err(e) = toyos::log::spoken(&self.cap, &positions) {
+            panic!("logkeeper: the kernel refused to be told what the console spoke: {e:?}");
+        }
+        state.spoken = Some(positions);
     }
 
     fn went(&self, channel: Channel, who: u64) {
@@ -499,16 +512,25 @@ impl Carriers {
     }
 
     /// Write the log into carrier `who`'s pipe until the pipe's reader goes:
-    /// the port's from the boot's first line, the UART's from where the
-    /// kernel left it, and nothing of what the port carries.
+    /// the port's from the boot's first line, the UART's from where its
+    /// channel left off ([`Hub::wire_start`]), and nothing of what the port
+    /// carries.
     fn feed(&self, channel: Channel, who: u64, pipe: &Pipe) {
         let poller = Poller::new(1);
         let wire = channel == Channel::Wire;
-        let mut at = if wire { self.hub.wire_from() } else { 0 };
+        let (mut at, mut owed) = if wire {
+            let resumed = self.lock().feed(channel).resumed;
+            self.hub.wire_start(resumed)
+        } else {
+            (0, None)
+        };
         // Whether the UART last said the port carries the log.
         let mut said_quiet = false;
         loop {
-            let fed = self.hub.next_for_a_carrier(&mut at, wire);
+            let fed = match owed.take() {
+                Some(owed) => Fed::Replay(owed.to_vec()),
+                None => self.hub.next_for_a_carrier(&mut at, wire),
+            };
             if wire {
                 let quiet = self.lock().quiet();
                 if quiet != said_quiet {
@@ -519,14 +541,22 @@ impl Carriers {
                     }
                 }
                 if quiet {
-                    // Passed over, which is what the stop's wait reads.
-                    self.lock().feed(channel).at = at;
+                    // Passed over, which is what the stop's wait reads, and
+                    // where a carrier started again resumes.
+                    let mut state = self.lock();
+                    let feed = state.feed(channel);
+                    feed.at = at;
+                    feed.resumed = feed.resumed.max(at);
                     continue;
                 }
             }
             let (bytes, reaches) = match fed {
                 Fed::Replay(bytes) => (bytes, Some(at)),
                 Fed::Said(bytes) => (bytes, None),
+                Fed::Gap(bytes) => {
+                    self.lock().feed(channel).gap = true;
+                    (bytes, None)
+                }
             };
             if !self.write(channel, who, pipe, &poller, &bytes, reaches) {
                 return;

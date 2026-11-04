@@ -18,7 +18,7 @@ start = ["acpiserver", "logkeeper", "uart", "compositor", "vdagent", "test-runne
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
 serves = ["log-carrier", "log-wire"]
 holds = ["log-origins"]
 

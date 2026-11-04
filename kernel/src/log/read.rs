@@ -84,6 +84,11 @@ impl Cursor {
         &self.next
     }
 
+    /// Positions answered as they are, with no loss of their own.
+    pub fn at(next: Vec<u64>) -> Self {
+        Self { next, lost: 0 }
+    }
+
     pub fn lost(&self) -> u64 {
         self.lost
     }
@@ -130,6 +135,11 @@ impl Published {
     /// A position for each of `cpus` CPUs' rings.
     pub fn size(&self, cpus: usize) {
         self.aps.size(cpus.saturating_sub(1), |_| AtomicU64::new(FIRST_SEQ));
+    }
+
+    /// Move each ring's position to at least `next`'s, and answer them all.
+    pub fn advance(&self, next: &[u64]) -> Vec<u64> {
+        next.iter().enumerate().map(|(ring, &at)| self.word(ring).fetch_max(at, Ordering::Relaxed).max(at)).collect()
     }
 
     fn word(&self, ring: usize) -> &AtomicU64 {

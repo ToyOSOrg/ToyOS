@@ -690,7 +690,7 @@ pub fn spawn_thread(
     let proc = table.get_mut(parent_process)
         .expect("spawn_thread: the entry the insert admission just answered for");
     // Every thread carries the same image, so a crash report never asks this table.
-    let image = proc.image.clone()?;
+    let image = proc.image.clone().expect("spawn_thread: an admitted thread's process keeps its image until its last thread is out");
     let tid = proc.threads.insert(ThreadEntry::new(thread_data));
     // Before the thread's first instruction, which is the enqueue below: the
     // thread reads its own id here without a syscall (`toyos_abi::TCB_TID`).
@@ -848,12 +848,13 @@ pub fn stats_from(
 /// The thread is in the process until the last table section marks it, so a machine stop waits for every record and release here.
 /// Waits on nothing: it runs on a killed thread whose one cancel may be spent, and at the exit boundary's preempt depth, where a park asserts.
 /// The section that marks it also lets the teardown's own hold on the publication go: the exit is published here when nothing below it is left, and otherwise by the last end below it.
+/// The supervisor's end, whatever ended it, ends the machine: nothing starts it again.
 fn teardown(pid: Pid, tid: Tid, end: End, mark: i32, process_data: &Arc<Lock<ProcessData>>) {
-    let main_thread = {
+    let (main_thread, supervisor) = {
         let guard = PROCESS_TABLE.lock();
         let proc = guard.as_ref().unwrap().get(pid).expect("teardown: the process its last thread is in");
         let main = proc.threads.get(proc.main_tid).expect("teardown: a claimed process gives up no thread");
-        (Arc::clone(&main.thread_data), main.sched().cloned())
+        ((Arc::clone(&main.thread_data), main.sched().cloned()), proc.node.parent().is_none())
     };
     let releases = crate::object::Releases::open();
     let consumed = teardown_resources(process_data, &main_thread, pid);
@@ -874,6 +875,9 @@ fn teardown(pid: Pid, tid: Tid, end: End, mark: i32, process_data: &Arc<Lock<Pro
     // The table says zombie now, which a sweep counts as nothing left to stop.
     crate::quiesce::note_progress();
     publish_climb(ready);
+    if supervisor {
+        panic!("the supervisor ended, {end}, and nothing starts it again");
+    }
 }
 
 /// Take the running thread out of its ended process ([`leave_as`]).

@@ -534,6 +534,12 @@ const MACHINE_TESTS: &[&str] = &[
     // are three components only a boot has; q35 with no console port, so the
     // UART is the one console, read whole, which no bench's is.
     "the_uart_carries_the_boot_once_across_the_hand_over",
+    // A supervisor that fails before `logkeeper` runs says why on the UART,
+    // and the kernel ends the machine on its end: its last words and the
+    // kernel's fatal path, which only a boot has, on a `/system` missing the
+    // first file it reads, which only a staged image is. q35 with no console
+    // port, so the UART is the one console.
+    "a_supervisor_that_fails_early_says_why_on_the_uart",
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot disk is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
@@ -3136,6 +3142,36 @@ fn the_uart_carries_the_boot_once_across_the_hand_over() -> Result<(), String> {
     Ok(())
 }
 
+/// What the kernel's fatal path says of the supervisor's end.
+const SUPERVISOR_ENDED: &str = "the supervisor ended, ";
+
+/// A boot whose `/system` lacks the release file the supervisor reads first:
+/// the supervisor's reason is on the UART as its last words, before the
+/// kernel's panic for its end, though nothing carries the log yet.
+fn a_supervisor_that_fails_early_says_why_on_the_uart() -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/testcases.toml"),
+        &[],
+        &[],
+        BootOptions {
+            profile: qemu::Profile::HeadlessNoConsolePort,
+            root_omits: &[toyos_osrelease::PATH],
+            ready_marker: SUPERVISOR_ENDED,
+            ..Default::default()
+        },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, SUPERVISOR_ENDED, "the kernel to end the machine on the supervisor's end")?;
+    let why = format!("last words: supervisor: cannot read {}", toyos_osrelease::GUEST_PATH);
+    let said = console.find(&why).ok_or_else(|| format!("the UART does not say {why:?}\n{console}"))?;
+    let ended = console.find(SUPERVISOR_ENDED).expect("awaited above");
+    if said > ended {
+        return Err(format!("the supervisor's reason is on the UART after the kernel's panic\n{console}"));
+    }
+    eprintln!("  [supervisor] {}", console[said..].lines().next().unwrap_or_default());
+    Ok(())
+}
+
 /// Eight spawns from each of a file the root server holds in memory, a copy
 /// on DATA that the spawn reads whole, and a copy in the kernel's `/tmp`:
 /// each child maps its parent's log ring, and once they have ended the census
@@ -4896,6 +4932,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
         "the_uart_carries_the_boot_once_across_the_hand_over" => the_uart_carries_the_boot_once_across_the_hand_over(),
+        "a_supervisor_that_fails_early_says_why_on_the_uart" => a_supervisor_that_fails_early_says_why_on_the_uart(),
         "a_spawn_from_an_image_frees_it_when_the_child_ends" => a_spawn_from_an_image_frees_it_when_the_child_ends(test_config),
         "a_bent_supervisor_is_refused_and_the_other_slot_boots" => {
             [qemu::Profile::Headless, qemu::Profile::Virt].into_iter().try_for_each(|profile| {
