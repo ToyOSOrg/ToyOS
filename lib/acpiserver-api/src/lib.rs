@@ -3,9 +3,6 @@
 
 #![no_std]
 
-/// How often the server writes [`QUERIES_COUNTED`] where a count moved.
-pub const COUNT_INTERVAL: core::time::Duration = core::time::Duration::from_secs(30);
-
 /// The server's count of the embedded controller's queries, written once a
 /// count interval where a count moved: after its count of SCIs, and before
 /// each query number with how often it was taken.
