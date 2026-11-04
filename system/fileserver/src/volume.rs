@@ -125,6 +125,20 @@ pub trait Volume {
     /// What the symlink at `path` holds.
     fn read_link(&mut self, path: &str) -> Result<String, Error>;
 
+    /// What `path` is and its [`Self::identity`], without following it.
+    fn stat(&mut self, path: &str) -> Result<(Meta, u64), Error> {
+        Ok((self.lstat(path)?, self.identity(path)?))
+    }
+
+    /// What the symlink at `path` holds, or `None` for anything else: a
+    /// component of a path being resolved.
+    fn link_at(&mut self, path: &str) -> Result<Option<String>, Error> {
+        match self.lstat(path)?.kind {
+            Kind::Symlink => self.read_link(path).map(Some),
+            _ => Ok(None),
+        }
+    }
+
     /// The entries directly under `dir`.
     fn list(&mut self, dir: &str) -> Result<Vec<Listed>, Error>;
 
