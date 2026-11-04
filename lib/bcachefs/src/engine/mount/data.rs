@@ -176,6 +176,7 @@ impl<D: BlockDev> Mount<D> {
         let mut done = 0;
         while done < data.len() {
             let at = offset + done as u64;
+            // The extent starts at the block holding `at`, and so do its sectors.
             let (ino, sector, end) = {
                 let pool = self.reservations.borrow();
                 let reserved = pool.active.get(&reservation.id).ok_or(Error::Invalid("reservation already written"))?;
@@ -185,7 +186,7 @@ impl<D: BlockDev> Mount<D> {
                 if (from..to).any(|b| run.written & 1 << b != 0) {
                     return Err(Error::Invalid("a reserved block written twice"));
                 }
-                (reserved.ino, run.sector + (at - run.first) / SECTOR as u64, end)
+                (reserved.ino, run.sector + (at / block * block - run.first) / SECTOR as u64, end)
             };
             let version = match self.data_version().await {
                 Ok(version) => version,

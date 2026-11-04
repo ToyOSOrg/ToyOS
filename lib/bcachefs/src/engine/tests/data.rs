@@ -624,3 +624,25 @@ fn a_dropped_reservation_returns_its_unwritten_blocks() {
         }
     });
 }
+
+/// A reserved write into a block past its first 4 KiB, on 16 KiB blocks:
+/// the extent is the block's, at the block's own sectors. Its neighbour,
+/// written just after the reservation took its run, keeps its bytes.
+#[test]
+fn a_reserved_write_inside_a_large_block_lands_on_that_block() {
+    let dev = super::geometry::shaped(64 << 20, 32, 32, None);
+    let (reserved, neighbour) = mounted(&dev, async |m: &Mount<&Image>| {
+        let reserved = m.create(m.root(), b"reserved", New::File, OWNER, NOW).await.unwrap().ino;
+        let mut token = m.reserve(reserved, 4096, 4096).await.unwrap();
+        let neighbour = m.create(m.root(), b"neighbour", New::File, OWNER, NOW).await.unwrap().ino;
+        assert_eq!(m.write(neighbour, 0, &[0x5a; 16 << 10], NOW).await.unwrap(), 16 << 10);
+        assert_eq!(m.write_reserved(&mut token, 4096, &[0xc3; 4096], NOW).await.unwrap(), 4096);
+        (reserved, neighbour)
+    });
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    let mut want = vec![0u8; 8192];
+    want[4096..].fill(0xc3);
+    assert_eq!(read_all(&v, reserved).unwrap(), want);
+    assert_eq!(read_all(&v, neighbour).unwrap(), [0x5a; 16 << 10], "the neighbour's bytes");
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
