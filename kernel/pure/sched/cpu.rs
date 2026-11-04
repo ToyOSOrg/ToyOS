@@ -1241,7 +1241,7 @@ impl<X: SchedPayload> CpuSched<X> {
             // safe point honours it. **The pick reaps nothing.** What ends the
             // task:
             //
-            // * `watch::wait` answers `Cancelled` and the caller `?`s it
+            // * `watch::wait_until` answers `Cancelled` and the caller `?`s it
             //   out, dropping every guard on the way, so the unwind reaches the
             //   thread's own exit;
             // * `WaitTicket::commit` still refuses to park a killed task, which
