@@ -4,7 +4,7 @@ kind: finding
 opened: 2026-09-18
 ---
 
-# A CPU that stops passing takes the console with it when `klogd` is queued there
+# A CPU that stops passing takes the console with it when its driver is queued there
 
 Seen while bounding `nmi_gate`'s hold (PR #470), under a mutation that leaves
 the storm's CPU spinning inside its idle-loop hook forever, dev host, TCG,
@@ -21,13 +21,15 @@ though the dead CPU had logged `syscall-window-nmi: held cpu=…` and another CP
 logged after it. Userland's own lines kept arriving, so the machine and the
 UART were alive.
 
-The reading, not yet separated from others: `log::console`'s only drainer once
-boot is over is the `klogd` thread, a commit wakes it with `wake_direct`, and a
-task queued on a CPU leaves it only when that CPU answers a steal request in a
-scheduler pass. A CPU that never passes again answers nothing, so `klogd` woken
-onto it stays there and every later record commits to its shard and reaches no
-wire. The reviewer's run of the same mutation got the `held cpu=` line out on
-one boot of two, which fits: it depends on where `klogd` was queued.
+The reading, not yet separated from others: the console's drainer once boot
+was over was the `klogd` thread, and a task queued on a CPU leaves it only
+when that CPU answers a steal request in a scheduler pass. A CPU that never
+passes again answers nothing, so `klogd` woken onto it stayed there and every
+later record reached no wire. `klogd` is deleted; the console's writers are
+now `logkeeper` and the UART's driver, both threads, and the same holds for
+either queued on such a CPU. The reviewer's run of the same mutation got the
+`held cpu=` line out on one boot of two, which fits: it depends on where the
+writer was queued.
 
 What this costs is the evidence of the failure it coincides with: a wedged CPU
 is the case a reader most wants the console for, and

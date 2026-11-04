@@ -2,16 +2,22 @@
 # job list is the manifest's own and the last thing it does is hand the machine
 # back to firmware. This is the shape a T14 boot has.
 [boot]
-start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "diskserver", "fileserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log-carrier"]
+serves = ["log-carrier", "log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 # One binary name per job, never a command line: the stdin path's `run <name>`
 # has the only parser. `power` because the one job ends the machine, asking
 # the supervisor.
+
 [programs.test-runner]
 receives = ["power"]
 args = ["reboot"]

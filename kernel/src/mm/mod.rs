@@ -182,7 +182,6 @@ pub fn init(memory_map: &'static [MemoryMapEntry], reserved: &[Region], image: &
     alloc::init();
     charge::init();
     paging::seal_kernel_half();
-    space::init_kernel();
 }
 
 /// Walk the kernel's tables and stop the boot on a leaf that is writable and

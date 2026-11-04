@@ -28,6 +28,17 @@ pub(super) fn sys_log_read(
     read_on_cursor(ctx, syscap, Rights::LOG, cursor, log::shard_count(), |next| log::user::read(next, out, capacity))
 }
 
+/// The console's channels have delivered every record stamped at or before
+/// `at_ns`; answers the newest stamp the console has spoken. Requires a
+/// `SysCap` carrying [`Rights::LOG`], whose holder carries the log to the
+/// console (`log::console`).
+pub(super) fn sys_log_spoken(syscap: RawHandle, at_ns: u64) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::LOG) {
+        return e.refuse();
+    }
+    log::console::speak(at_ns)
+}
+
 /// Copies the diary's records into the caller's buffer; requires a `SysCap` carrying [`Rights::TRACE`].
 pub(super) fn sys_trace_read(
     ctx: &SyscallContext,
@@ -104,24 +115,17 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     if crate::actuator::wedge_before_reset() {
         crate::deadline::stage_a_wedge();
     }
-    let parkable = crate::scheduler::Parkable::at_entry();
-    // The console's writer holding the wire as the stop begins, which a
-    // shipping `klogd` does at any moment.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::wire_held_across_the_stop() {
-        crate::log::console::hold_across_the_stop(&parkable);
-    }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::arch::watchdog::disarm();
-    // Every userland thread stops here, the log's writer with the rest:
-    // the supervisor had it flush before it asked for this stop.
+    // Every userland thread stops here, the log's writer and the UART's holder
+    // with the rest: the supervisor had the log flush before it asked for this stop.
     let (stopped, stopping) = crate::quiesce::stop();
     // From here on nothing carries a record to a file: the seal below takes
     // every one stamped after this one, the newest the stop found.
     let stop_began = crate::log::read::newest_committed();
-    // Held to the machine's end: every record below reaches the wire before a
-    // CPU is taken down, whoever was writing it when the stop began.
-    let mut wire = crate::log::console::take_for_the_stop(&parkable);
+    // Held to the machine's end: every record below reaches the UART before a
+    // CPU is taken down.
+    let mut wire = crate::log::console::take_for_the_stop();
     // The machine's census, which no process's start or end takes.
     crate::census::log();
     #[cfg(feature = "mask-windows")]
@@ -132,12 +136,6 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
         log!("{stopped}");
     } else {
         crate::alert!("{stopped}");
-    }
-    // `klogd` inside its hold of the wire as the last word is logged, which a
-    // stop that did not hold the wire would leave it in at the seal below.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::wire_held_at_the_last_word() {
-        crate::log::console::hold_at_the_last_word(&parkable);
     }
     log!("{last}");
     // Order is load-bearing: the console drain, the seal, then the caller's
@@ -153,10 +151,6 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     // census and the last word among them. Nothing wrote them to `/log`,
     // and on a machine with no serial port this is their only reader.
     crate::log::seal_tail(stop_began);
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::wire_held_at_the_last_word() {
-        crate::log::console::sealed();
-    }
     Ok((stopping, wire))
 }
 

@@ -10,7 +10,7 @@
 # supervisor starts again once the memory is given back. Neither has a floor.
 
 [boot]
-start = ["logkeeper", "acpiserver", "diskserver", "fileserver", "ps2server", "inputsink", "starveling", "test-runner"]
+start = ["logkeeper", "uart", "acpiserver", "diskserver", "fileserver", "ps2server", "inputsink", "starveling", "test-runner"]
 
 [supervisor]
 memory-floor-mib = 64
@@ -22,11 +22,17 @@ memory-floor-mib = 64
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log"]
+serves = ["log", "log-wire"]
 memory-floor-mib = 32
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 # The machine's ACPI fixed hardware, as `images/system.toml` serves it: the
 # boot's last job hands the machine back to firmware through it.
+
 [programs.acpiserver]
 service = true
 devices = ["acpi"]

@@ -68,6 +68,13 @@ pub fn cursor_words(cap: &SysCap) -> Result<usize, SyscallError> {
     words_for(|cursor| syscall::log_read(cap.as_handle().raw(), cursor, &mut [LogRecord::EMPTY]))
 }
 
+/// Say the console's channels have delivered every kernel record stamped at or
+/// before `at_ns`, and answer the newest stamp the console has spoken
+/// (`toyos_abi::syscall::log_spoken`); `at_ns` 0 only reads it.
+pub fn spoken(cap: &SysCap, at_ns: u64) -> Result<u64, SyscallError> {
+    syscall::log_spoken(cap.as_handle().raw(), at_ns)
+}
+
 /// [`cursor_words`] for a read of either kind.
 pub(crate) fn words_for(read: impl FnOnce(&mut [u64]) -> Result<usize, SyscallError>) -> Result<usize, SyscallError> {
     let mut head = [0; CURSOR_HEAD_WORDS];

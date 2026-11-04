@@ -20,8 +20,29 @@ use kernel::sched::task::WaitClass;
 use super::cancelled;
 use super::handles::demand_syscap;
 
-pub(super) fn sys_thread_exit(code: i32) -> u64 {
-    process::thread_exit(code);
+/// End the calling thread. A detached one first gives back the range it
+/// names, its own stack, which it no longer runs on here; a range refused is
+/// answered and the thread runs on.
+pub(super) fn sys_thread_exit(code: i32, flags: u64, at: u64, len: u64) -> u64 {
+    let joined = match flags {
+        0 if at == 0 && len == 0 => process::Joined::Joinable,
+        THREAD_EXIT_DETACHED => {
+            if len != 0 {
+                if let Err(e) = super::vm::release(at, len) {
+                    return e.to_u64();
+                }
+            }
+            process::Joined::Detached
+        }
+        _ => return SyscallError::InvalidArgument.to_u64(),
+    };
+    process::thread_exit(code, joined);
+}
+
+/// Let another runnable thread of the caller's band have this CPU.
+pub(super) fn sys_yield() -> u64 {
+    crate::scheduler::yield_now();
+    0
 }
 
 pub(super) fn sys_exit(code: i32) -> u64 {

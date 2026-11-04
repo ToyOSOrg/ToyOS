@@ -22,6 +22,7 @@ device_info!(
     toyos_abi::FramebufferInfo,
     toyos_abi::pci::PciFunctionInfo,
     toyos_abi::acpi::AcpiInfo,
+    toyos_abi::uart::UartInfo,
 );
 
 /// Read a claim's description, whose buffer fields are handles this call
@@ -274,6 +275,39 @@ impl AcpiDev {
     pub fn declare(&self, declared: &toyos_abi::acpi::Apertures) -> Result<(), SyscallError> {
         syscall::acpi_declare(self.as_handle().raw(), declared)
     }
+}
+
+/// The machine's console UART, driven by this process between the kernel's
+/// boot and its stop ([`toyos_abi::uart`]).
+///
+/// **Read once as a description, which binds a 16550's ports to this process
+/// and installs a PL011's register frame, and afterwards as interrupts**, as
+/// an [`AcpiDev`] is.
+pub struct UartDev(pub(crate) Device);
+
+impl UartDev {
+    /// The description, and the register frame mapped where it names one.
+    pub fn open(&self) -> Result<(toyos_abi::uart::UartInfo, Option<crate::shm::SharedMemory>), SyscallError> {
+        let info: toyos_abi::uart::UartInfo = read_info(&self.0)?;
+        let frame = match info.frame == toyos_abi::HANDLE_INVALID {
+            true => None,
+            false => Some(crate::shm::SharedMemory::adopt(crate::OwnedHandle(info.frame), info.frame_len as usize)?),
+        };
+        Ok((info, frame))
+    }
+
+    pub fn irq(&self) -> Result<toyos_abi::pci::DeviceIrqRecord, SyscallError> {
+        irq_record(&self.0)
+    }
+
+    /// What raised a level line is served: unmask it.
+    pub fn ack(&self) -> Result<(), SyscallError> {
+        syscall::write(self.0.0.0, &toyos_abi::uart::ACK.to_ne_bytes()).map(|_| ())
+    }
+}
+
+impl AsHandle for UartDev {
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> { self.0.as_handle() }
 }
 
 impl AsHandle for AcpiDev {

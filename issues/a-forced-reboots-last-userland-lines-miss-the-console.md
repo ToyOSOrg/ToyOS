@@ -25,8 +25,9 @@ Faster connections shorten the time from the terminate to the stop, so the
 window opens more often, but it is there without them.
 
 Where the lines go between a program's log ring and the wire at a stop
-(`logkeeper`'s flush answers the supervisor before the stop goes on;
-`console: klogd let the wire go to the stop`) is not yet traced.
+(`logkeeper`'s flush answers the supervisor before the stop goes on, and the
+UART's driver is stopped with the rest of userland) is not yet traced; both
+runs above were of the kernel's console thread, since deleted.
 
 **Exit**: every userland line written before a forced stop's request reaches
 the console before the machine resets, and `session_lifecycle` is green 20

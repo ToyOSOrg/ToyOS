@@ -4,11 +4,17 @@
 # asserts on; each job's line comes only if the kernel kept what that job asks
 # about.
 [boot]
-start = ["logkeeper", "test-runner"]
+start = ["logkeeper", "uart", "test-runner"]
 
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 [programs.test-runner]
 receives = ["power"]

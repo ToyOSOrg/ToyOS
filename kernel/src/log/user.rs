@@ -4,6 +4,8 @@
 //!
 //! [`Rights::LOG`]: toyos_abi::handle::Rights::LOG
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::UserSafe;
 
@@ -16,11 +18,25 @@ use super::shard::Ring;
 /// What a log poll waits on: edge-triggered, since a reader's position is its own cursor and the kernel holds none.
 pub static WATCH: Watch = Watch::new();
 
-/// Tell every ring watching the log that records have moved.
-// Posted only by `klogd` after a drain batch — `emit` runs under sync.rs/IRQ/scheduler locks and may not lock.
-// Edge, not level: whether a caller has unread records is a property of its cursor, which the kernel does not hold.
-pub fn post_readiness() {
-    WATCH.post();
+/// A record committed since [`WATCH`] was last posted.
+static OWED: AtomicBool = AtomicBool::new(false);
+
+/// A record committed: [`post_owed`] posts [`WATCH`] for it. `emit`'s, which
+/// runs under any lock, and so may post nothing itself.
+pub fn owe_readiness() {
+    OWED.store(true, Ordering::Release);
+}
+
+/// Tell every ring watching the log that records have moved, where any were
+/// committed since the last post: at every syscall's end and every scheduler
+/// pass, which hold no lock a post takes. Edge, not level: whether a caller
+/// has unread records is a property of its cursor, which the kernel does not
+/// hold.
+pub fn post_owed() {
+    // Relaxed first: no read-modify-write on a pass with nothing owed.
+    if OWED.load(Ordering::Relaxed) && OWED.swap(false, Ordering::Acquire) {
+        WATCH.post();
+    }
 }
 
 // Fixed stride, never packed: the caller indexes by shift, so the kernel does no length arithmetic.

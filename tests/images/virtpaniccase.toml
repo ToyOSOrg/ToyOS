@@ -2,11 +2,17 @@
 # while its siblings make kernel records on the other CPUs, and takes the
 # machine with it, so nothing runs after it.
 [boot]
-start = ["logkeeper", "test-runner"]
+start = ["logkeeper", "uart", "test-runner"]
 
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 [programs.test-runner]
 receives = ["power"]

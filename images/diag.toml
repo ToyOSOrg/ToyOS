@@ -11,7 +11,7 @@
 # guarantee is that this config declares no `devices`, which
 # `no_diag_program_claims_the_screen` checks.
 [boot]
-start = ["logkeeper", "fileserver", "toybox"]
+start = ["logkeeper", "uart", "fileserver", "toybox"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and the console and writes no
@@ -23,6 +23,12 @@ start = ["logkeeper", "fileserver", "toybox"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 [programs.toybox]
 args = ["pwd"]

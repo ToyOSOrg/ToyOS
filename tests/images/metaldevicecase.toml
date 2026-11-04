@@ -12,11 +12,17 @@
 # output-path choice are the only exercise of `toyos-hda` that hardware can
 # give.
 [boot]
-start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "soundserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "diskserver", "fileserver", "soundserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 [programs.soundserver]
 service = true

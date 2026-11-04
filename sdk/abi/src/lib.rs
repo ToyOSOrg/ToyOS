@@ -31,6 +31,7 @@ pub mod pci;
 pub mod quit;
 pub mod syscall;
 pub mod trace;
+pub mod uart;
 pub mod usersafe;
 
 pub use handle::{RawHandle, Rights, HANDLE_INVALID};

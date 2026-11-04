@@ -1,20 +1,21 @@
 //! The console UART: the 16550 at COM1's I/O ports, where every PC this
-//! kernel boots puts one if it has one.
+//! kernel boots puts one if it has one, and its claim ([`claim`]).
 
 use super::cpu::{inb, outb};
-use super::pio::{Port, COM1};
+use super::pio::{Port, COM1, UART_ROW};
+use crate::device::ClaimError;
 use crate::drivers::serial::Registers;
 use crate::log;
+use crate::object::device::DeviceInfo;
+use toyos_abi::uart::{UartInfo, NS16550};
 
 /// COM1's register `n`.
 const fn reg(n: u16) -> Port {
     COM1.port(n)
 }
 
-/// Line status register bits: a received byte waits, and the transmitter
-/// holding register is empty.
+/// Line status register bit: the transmitter holding register is empty.
 const LSR: Port = reg(5);
-const LSR_DATA_READY: u8 = 0x01;
 const LSR_THR_EMPTY: u8 = 0x20;
 
 /// Bytes the transmitter takes once [`tx_ready`] says so: in FIFO mode
@@ -56,16 +57,6 @@ pub fn init(_: &mut Registers, _rsdp_addr: u64) -> bool {
     loopback == 0xAE
 }
 
-/// Whether a received byte waits.
-pub fn rx_ready(_: &mut Registers) -> bool {
-    inb(LSR) & LSR_DATA_READY != 0
-}
-
-/// The received byte; only after [`rx_ready`] said one waits.
-pub fn read_byte(_: &mut Registers) -> u8 {
-    inb(reg(0))
-}
-
 /// Whether the transmitter will take a byte.
 pub fn tx_ready(_: &mut Registers) -> bool {
     inb(LSR) & LSR_THR_EMPTY != 0
@@ -77,4 +68,18 @@ pub fn write_byte(_: &mut Registers, byte: u8) {
     // holds the registers, register 0 is COM1's own data register, and the byte is
     // console output only.
     unsafe { outb(reg(0), byte) };
+}
+
+/// The claim on the UART's row: COM1's ports, from its first read, and IRQ 4,
+/// an ISA line and so an edge.
+pub fn claim() -> Result<(crate::isa::Row, DeviceInfo), ClaimError> {
+    let row = crate::isa::claim_row(UART_ROW)?;
+    let info = UartInfo {
+        kind: NS16550,
+        port: u32::from(COM1.ports().first()),
+        frame: toyos_abi::HANDLE_INVALID,
+        frame_len: 0,
+        level: 0,
+    };
+    Ok((row, DeviceInfo::Uart(info, None)))
 }

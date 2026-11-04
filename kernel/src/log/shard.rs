@@ -7,10 +7,10 @@
 //! Compiled a second time by `kernel-loom`, which shims only the atomics and `arch::percpu_fetch_add`.
 
 #[cfg(not(feature = "loom"))]
-use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicU64, Ordering};
 
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use loom::sync::atomic::{fence, AtomicU64, Ordering};
 
 use toyos_abi::log::{LogRecord, MAX_RECORD_MESSAGE};
 #[cfg(not(feature = "loom"))]
@@ -254,38 +254,3 @@ impl Shard {
 }
 
 // `Ring` is `Sync` by auto-derivation (every word is `AtomicU64`); no hand-written `unsafe impl` needed.
-
-/// Is a reader parked on this machine's records? Kept as one flag so the producer's fast path avoids a locked read-modify-write.
-#[cfg(not(feature = "loom"))]
-static LOG_WAITER: AtomicBool = AtomicBool::new(false);
-
-/// The machine's one waiter flag.
-#[cfg(not(feature = "loom"))]
-pub fn log_waiter() -> &'static AtomicBool {
-    &LOG_WAITER
-}
-
-#[cfg(feature = "loom")]
-pub fn waiter() -> AtomicBool {
-    AtomicBool::new(false)
-}
-
-/// Read the waiter flag after the guarded commit store; `true` means this caller owns the post.
-pub fn signal_after_commit(waiter: &AtomicBool) -> bool {
-    // Load-bearing on x86 too: without this fence a committed record can leave a parked reader unposted.
-    #[cfg(not(feature = "wake-fence-off"))]
-    fence(Ordering::SeqCst);
-    if !waiter.load(Ordering::Relaxed) {
-        return false;
-    }
-    waiter.swap(false, Ordering::AcqRel)
-}
-
-/// Arm the flag, fence, and re-scan; `true` means do not park.
-/// `committed_record_waiting` must test for a commit, not for `head` moving: `head` counts reservations, so that would busy-wait on a writer still mid-publish.
-pub fn arm_waiter(waiter: &AtomicBool, committed_record_waiting: impl Fn() -> bool) -> bool {
-    waiter.store(true, Ordering::Relaxed);
-    #[cfg(not(feature = "wake-fence-off"))]
-    fence(Ordering::SeqCst);
-    committed_record_waiting()
-}

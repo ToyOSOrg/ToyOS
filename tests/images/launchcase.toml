@@ -3,12 +3,17 @@
 # holds a launcher, and `cat` and `echo` are links to it, so a spawn of
 # either is a launch.
 [boot]
-start = ["acpiserver", "logkeeper", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "test-runner"]
 
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log-carrier"]
+serves = ["log-carrier", "log-wire"]
+
+[programs.uart]
+devices = ["uart"]
+receives = ["log-wire"]
+restart = true
 
 [programs.test-runner]
 starts = ["toybox"]

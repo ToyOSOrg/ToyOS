@@ -16,8 +16,9 @@ Twelve-wide TCG boot storm, six minutes: four guests wedged, every one in the
 spawn burst with the previously logged rung as its last line, all recorded as
 hangs. The landed version, the same `sched-tripwire heap-tripwire` kernel
 without the log, ran 7,205 boots with 0 deaths. Its commit
-blamed "the log's readiness path", which `log::emit` does not reach, then or now
-(`log::user::post_readiness` has one caller, `klogd`'s loop). No capture of the
+blamed "the log's readiness path", which `log::emit` did not reach then
+(`log::user::post_readiness` had one caller, `klogd`'s loop); it reaches
+`log::user::owe_readiness` now, one store. No capture of the
 four guests' registers was kept.
 
 That kernel had no `cld` on any Ring 0 entry and `IA32_FMASK` was `0x40200`.

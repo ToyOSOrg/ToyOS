@@ -125,10 +125,6 @@ impl HandleEntry {
         &self.object
     }
 
-    pub fn rights(&self) -> Rights {
-        self.rights
-    }
-
     /// A second handle to the same object, carrying no more than this one.
     pub fn duplicate(&self, rights: Rights) -> Result<Self, HandleError> {
         if !self.rights.contains(Rights::DUP) {

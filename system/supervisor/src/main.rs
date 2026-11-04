@@ -142,7 +142,8 @@ use toyos::AsHandle;
 use toyos_abi::Rights;
 use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
-    Registration, Tag, ALIVE, CONSOLE, FLUSH, FLUSHED, LOGKEEPER, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
+    Registration, Tag, ALIVE, CONSOLE_INPUT, FLUSH, FLUSHED, LOGKEEPER, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
+    WIRE_HOLDER,
 };
 use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
 use toyos_abi::syscall::{
@@ -300,10 +301,11 @@ struct Log {
     conn: Connection,
     /// The acceptor end, until `logkeeper` is started holding it.
     acceptor: Option<Acceptor>,
-    /// The supervisor's console as every program but `logkeeper` gets it for its stdin: one
-    /// it may read and not write, so no program puts a line on the console but
-    /// through `logkeeper` and under its name.
+    /// The console's input as every program gets it for its stdin: the read
+    /// end of the pipe whose write end the console UART's driver is handed.
     stdin: toyos::OwnedHandle,
+    /// That write end, kept so a driver started again is handed it again.
+    console_input: toyos::Pipe,
     /// What `logkeeper` answers on the connection, kept across flushes.
     rx: RefCell<ipc::FrameRx<8>>,
     /// Flushes asked for and not answered yet: one waited out past
@@ -311,8 +313,8 @@ struct Log {
     unanswered: Cell<u32>,
 }
 
-/// The rights a program's stdin console keeps: it reads it and polls it, and a
-/// spawn duplicates it; it does not write it.
+/// The rights a program's stdin keeps: it reads it and polls it, and a spawn
+/// duplicates it.
 const STDIN_RIGHTS: Rights =
     Rights::READ.union(Rights::WAIT).union(Rights::DUP).union(Rights::TRANSFER);
 
@@ -359,27 +361,25 @@ impl Log {
             .finish()
             .expect("supervisor: no namespace for the log's origins");
         let conn = names.open(ORIGINS).expect("supervisor: the log's origins port refused the supervisor");
-        let stdin = toyos::fd::with(0, |o| o.handle().map(|console| console.try_clone_narrowed(STDIN_RIGHTS)))
-            .ok()
-            .flatten()
-            .expect("supervisor: the kernel gave it no console as descriptor 0")
-            .expect("supervisor: its console would not narrow");
+        let (input, console_input) = toyos::pipe_pair().expect("supervisor: no pipe for the console's input");
+        let stdin = input.as_handle().try_clone_narrowed(STDIN_RIGHTS).expect("supervisor: the console's input would not narrow");
         let log = Self {
             conn,
             acceptor: Some(acceptor),
             stdin,
+            console_input,
             rx: RefCell::new(ipc::FrameRx::new()),
             unanswered: Cell::new(0),
         };
-        // The supervisor's own lines: a ring like every program's, as the two
-        // descriptors the kernel gave its console.
+        // The supervisor's own lines: a ring like every program's, as its
+        // stdout and stderr.
         let ring = new_ring();
         let copy = ring.as_handle().try_clone_to_owned().expect("supervisor: its ring would not duplicate");
         let held = toyos::fd::install(toyos::fd::Object::handle(copy), false, 0)
             .expect("supervisor: no descriptor for its own ring");
         for (fd, stream) in [(1, toyos::log::stdio::Stream::Out), (2, toyos::log::stdio::Stream::Err)] {
-            // SAFETY: the kernel's console descriptors, which nothing in this
-            // process owns: std's stdio names them by number and asks again.
+            // SAFETY: std's stdio descriptors, which the kernel starts this
+            // process with none of: std names them by number and asks again.
             unsafe { toyos::fd::dup2(held, fd, false) }.expect("supervisor: its ring would not take its own descriptor");
             toyos::log::stdio::forget(stream);
         }
@@ -3247,8 +3247,8 @@ fn start<'a>(
     // Where the program's output goes.
     //
     // A service the supervisor starts gets a ring of its own as its stdout and stderr
-    // and the supervisor's console to read as its stdin; `logkeeper` also gets the acceptor
-    // the rings reach it on and the one console handle that may write. A
+    // and the console's input to read as its stdin; `logkeeper` also gets the acceptor
+    // the rings reach it on, and the console UART's driver the input's write end. A
     // launch keeps the descriptors its caller sent, but for a ring among them
     // — the caller's own log — which is replaced by the program's
     // ([`LaunchFd::Ring`]), and a stdio descriptor it sent nothing for is a
@@ -3272,13 +3272,15 @@ fn start<'a>(
                     .try_clone_to_owned()
                     .map_err(|e| std::io::Error::other(format!("the log's origins did not duplicate: {e:?}")))?;
                 command.endow(ORIGINS, origins.into());
-                let console = toyos::fd::with(0, |o| o.handle().map(|console| console.try_clone_to_owned()))
-                    .ok()
-                    .flatten()
-                    .expect("supervisor: its console is descriptor 0")
-                    .expect("supervisor: its console would not duplicate for logkeeper");
-                command.endow(CONSOLE, console.into());
                 starts_logkeeper = true;
+            }
+            if program.name == WIRE_HOLDER {
+                let input = log
+                    .console_input
+                    .as_handle()
+                    .try_clone_to_owned()
+                    .map_err(|e| std::io::Error::other(format!("the console's input did not duplicate: {e:?}")))?;
+                command.endow(CONSOLE_INPUT, input.into());
             }
             (log, Some(ring))
         }
@@ -3775,11 +3777,10 @@ fn read_system(path: &'static str, server: &Service<'_>) -> String {
     }
 }
 
-/// The boot's end before `logkeeper` runs, which no ring reaches yet: said on
-/// the console the kernel gave the supervisor, then a panic like any other.
+/// The boot's end before `logkeeper` runs, which no reader of the
+/// supervisor's ring reaches yet
+/// (`issues/a-supervisor-that-fails-before-logkeeper-runs-says-why-nowhere.md`).
 fn bootstrap_fails(why: String) -> ! {
-    let line = format!("supervisor: {why}\n");
-    let _ = toyos::fd::with(0, |console| console.handle().map(|console| toyos_abi::syscall::write(console.raw(), line.as_bytes())));
     panic!("supervisor: {why}");
 }
 

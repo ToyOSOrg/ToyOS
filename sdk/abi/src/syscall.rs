@@ -361,8 +361,9 @@ pub const SYS_PAGED_OP: u64 = 157;
 pub const SYS_PAGED_NOTICES: u64 = 158;
 /// Take a connection's next whole message. See [`message_recv`].
 pub const SYS_MESSAGE_RECV: u64 = 159;
-/// Whether a console holder carries the log off the machine. See [`console_carried`].
-pub const SYS_CONSOLE_CARRIED: u64 = 160;
+/// How far the console's channels have carried the kernel's records. See
+/// [`log_spoken`].
+pub const SYS_LOG_SPOKEN: u64 = 160;
 /// Set the CPUs one of the caller's own threads may run on. See [`thread_set_affinity`].
 pub const SYS_THREAD_SET_AFFINITY: u64 = 161;
 /// Read them back into a buffer of at least [`CPU_MASK_WORDS`] words, or
@@ -387,19 +388,23 @@ pub const SYS_DEVICE_SET: u64 = 166;
 /// The device set's snapshot, read whole. See [`device_set_read`].
 pub const SYS_DEVICE_SET_READ: u64 = 167;
 
+/// Give the CPU to another runnable thread of the caller's band. See
+/// [`yield_now`].
+pub const SYS_YIELD: u64 = 168;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 169;
+pub const SYSCALL_PROFILE_BINS: usize = 170;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_DEVICE_SET_READ < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_YIELD < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -414,8 +419,7 @@ crate::user_safe! {
     /// what makes endowing a device claim work with no special case: a claim
     /// carries no [`Rights::DUP`], so the move is the only expressible form and
     /// the parent provably no longer holds it. A child's descriptors are
-    /// endowments labelled [`FD_PREFIX`] and their number; a console among
-    /// them is the child's own, minted for it.
+    /// endowments labelled [`FD_PREFIX`] and their number.
     ///
     /// [`Rights::DUP`]: crate::handle::Rights::DUP
     #[derive(Clone, Copy)]
@@ -685,8 +689,8 @@ pub enum FileType {
     File = 1,
     Pipe = 2,
     // 3 was `Keyboard` and 7 `Mouse`, the kernel's input streams: input is
-    // userland's, over the `input` port.
-    Serial = 4,
+    // userland's, over the `input` port. 4 was `Serial`, the kernel's console:
+    // the UART is its driver's.
     Framebuffer = 5,
     Tty = 6,
     Socket = 8,
@@ -718,7 +722,6 @@ impl FileType {
             0 => Some(Self::Unknown),
             1 => Some(Self::File),
             2 => Some(Self::Pipe),
-            4 => Some(Self::Serial),
             5 => Some(Self::Framebuffer),
             6 => Some(Self::Tty),
             8 => Some(Self::Socket),
@@ -918,10 +921,34 @@ pub fn pwrite(handle: RawHandle, buf: &[u8], offset: u64) -> Result<usize, Sysca
     check(syscall(SYS_PWRITE, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, offset)).map(|n| n as usize)
 }
 
-/// Exit the current thread only. Does not return.
-/// Use `exit()` to exit the entire process (all threads).
+/// Exit the current thread only, leaving its code for [`thread_join`]. Does
+/// not return. Use `exit()` to exit the entire process (all threads).
 pub fn thread_exit(code: i32) -> ! {
     loop { syscall(SYS_THREAD_EXIT, code as u64, 0, 0, 0); }
+}
+
+/// [`SYS_THREAD_EXIT`]'s flag for a thread nobody will join: its place in its
+/// process goes as it ends, and the range it names is released as
+/// [`vm_release`] releases it, once the thread no longer runs on it.
+pub const THREAD_EXIT_DETACHED: u64 = 1;
+
+/// Exit the current thread, which nobody will join, releasing `stack`'s
+/// `len` bytes (none where `len` is 0): the stack it stands on, which only
+/// the kernel can take away once the thread has left it. Returns only where
+/// the range is refused, as [`vm_release`] would refuse it; a main thread's
+/// exit is its process's, whatever this says.
+///
+/// # Safety
+/// Nothing but this thread uses `stack`, which ends with it.
+pub unsafe fn thread_exit_detached(code: i32, stack: *mut u8, len: usize) -> SyscallError {
+    let word = syscall(SYS_THREAD_EXIT, code as u64, THREAD_EXIT_DETACHED, stack as u64, len as u64);
+    SyscallError::from_u64(word).unwrap_or(SyscallError::InvalidArgument)
+}
+
+/// Let another runnable thread of the caller's band have the CPU, if one is
+/// waiting for it; the caller runs on at once where none is.
+pub fn yield_now() {
+    syscall(SYS_YIELD, 0, 0, 0, 0);
 }
 
 /// Exit the entire process (all threads) with `code`. Does not return.
@@ -1589,6 +1616,9 @@ device_classes! {
     /// ([`crate::acpi`]): the kernel puts the machine in ACPI mode at the
     /// mint, and the ports the firmware's tables name are the holder's.
     Acpi = 10 => "acpi",
+    /// The machine's console UART, the holder's between the kernel's boot and
+    /// its stop ([`crate::uart`]).
+    Uart = 11 => "uart",
 }
 
 /// What identifies a PCI *card*, not the slot firmware put it in: the same
@@ -2364,17 +2394,17 @@ pub unsafe fn shm_sub(shm: RawHandle, offset: u64, len: u64) -> Result<RawHandle
     check(syscall(SYS_SHM_SUB, shm.0 as u64, offset, len, 0)).map(|v| RawHandle(v as u32))
 }
 
-/// Say whether the holder of `console` carries the machine's log off it by
-/// another channel, so the kernel puts on the console UART only a fatal
-/// path's and the stop's lines; the console's end lets go of it.
+/// Say the console's channels have delivered every kernel record stamped at or
+/// before `at_ns`, and answer the newest stamp the console has spoken: what
+/// the kernel put on the UART before userland ran, and what was said since,
+/// clamped to the clock. A fatal path and the machine's stop put every record
+/// stamped after it on the UART. `at_ns` 0 only reads it.
 ///
-/// Needs [`Rights::WRITE`]. `AlreadyExists` while another holder carries it,
-/// and `NotSupported` once a fatal path or the stop has given the log to the
-/// UART for good; letting go always answers `Ok`.
+/// Needs a `SysCap` carrying [`Rights::LOG`].
 ///
-/// [`Rights::WRITE`]: crate::handle::Rights::WRITE
-pub fn console_carried(console: RawHandle, elsewhere: bool) -> Result<(), SyscallError> {
-    check(syscall(SYS_CONSOLE_CARRIED, console.0 as u64, elsewhere as u64, 0, 0)).map(drop)
+/// [`Rights::LOG`]: crate::handle::Rights::LOG
+pub fn log_spoken(syscap: RawHandle, at_ns: u64) -> Result<u64, SyscallError> {
+    check(syscall(SYS_LOG_SPOKEN, syscap.0 as u64, at_ns, 0, 0))
 }
 
 /// The machine's [header](SYSINFO_HEADER_SIZE), then as much of the process

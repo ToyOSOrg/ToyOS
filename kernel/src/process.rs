@@ -156,7 +156,7 @@ pub struct ProcessEntry {
     object: Arc<crate::object::process::ProcessObject>,
     name: [u8; THREAD_NAME_LEN],
     process_data: Arc<Lock<ProcessData>>,
-    /// No `Lock`: written once by the loader, then read-only — a crash report reaches it through the task it is reporting on, never through this table. `None` for a kernel thread's.
+    /// No `Lock`: written once by the loader, then read-only — a crash report reaches it through the task it is reporting on, never through this table. `None` once the process is torn down.
     image: Option<Arc<UserImage>>,
     main_tid: Tid,
     threads: crate::id_map::IdMap<Tid, ThreadEntry>,
@@ -292,25 +292,6 @@ pub struct ElfInfo {
 // The ledger stops at `MAX_LIBRARIES`, and a doubling from below it stays inside one heap allocation.
 const _: () = assert!(2 * MAX_LIBRARIES * core::mem::size_of::<elf::LoadedLib>() <= crate::mm::MAX_HEAP_ALLOC);
 
-impl ElfInfo {
-    /// The state of a process with no ELF at all (a kernel thread). Not `Default`: `next_tls_module_id`'s only honest default is 1, not 0; written here, not at the one call site, so a field added to [`ElfInfo`] stops this build too.
-    pub fn none() -> Self {
-        Self {
-            elf_alloc: None,
-            tls_modules: Vec::new(),
-            tls: toyos_elf::tls::Static::empty(crate::loader::TLS_VARIANT),
-            next_tls_module_id: 1,
-            dynamic_tls_blocks: alloc::collections::BTreeMap::new(),
-            loaded_libs: Vec::new(),
-            elf_base: UserAddr::new(0),
-            exe_eh_frame_hdr: (0, 0),
-            exe_vaddr_max: 0,
-            exe_phdrs: (0, 0),
-            lib_paths: Vec::new(),
-        }
-    }
-}
-
 /// Process-level data shared across all threads via `Arc<Lock<ProcessData>>`.
 pub struct ProcessData {
     /// Every kernel object this process can name; stdio is handles `0`, `1`, `2`.
@@ -389,10 +370,6 @@ pub struct Endowments {
 }
 
 impl Endowments {
-    pub fn empty() -> Self {
-        Self { entries: alloc::boxed::Box::new([]), labels: alloc::boxed::Box::new([]) }
-    }
-
     pub fn new(entries: Vec<EndowEntry>, labels: Vec<u8>) -> Self {
         Self { entries: entries.into_boxed_slice(), labels: labels.into_boxed_slice() }
     }
@@ -715,7 +692,7 @@ pub fn spawn_thread(
     let proc = table.get_mut(parent_process)
         .expect("spawn_thread: the entry the insert admission just answered for");
     // Every thread carries the same image, so a crash report never asks this table.
-    let image = proc.image.clone();
+    let image = proc.image.clone()?;
     let mask = driver::current_mask();
     // Newest first, as `homes` reads them: the threads a burst has just made.
     let siblings = proc.threads.iter().rev().filter_map(|(_, thread)| thread.sched().map(|sched| sched.shared.state()));
@@ -906,19 +883,39 @@ fn teardown(pid: Pid, tid: Tid, end: End, mark: i32, process_data: &Arc<Lock<Pro
     publish_climb(ready);
 }
 
+/// Take the running thread out of its ended process ([`leave_as`]).
+pub fn leave() {
+    leave_as(Leaving::Ended);
+}
+
+/// How the running thread leaves its process.
+enum Leaving {
+    /// Its process ended; the table marks it.
+    Ended,
+    /// With its own code, for a join.
+    Joinable(i32),
+    /// With its own code, which nobody will join, so its place goes with it.
+    Detached(i32),
+}
+
 /// Take the running thread out of its process: out of its address space, its accounting into the process's, and its own mark in the table. The last thread out of a claimed process tears the process down here.
 /// Returns rather than diverging: the exit pass never comes back, and the live `Arc`s here would leak with no scope left to drop them.
-pub fn leave(chosen: Option<i32>) {
+fn leave_as(leaving: Leaving) {
     let (pid, tid) = (current_process(), current_tid());
     crate::mm::paging::activate_kernel();
     let process_data = process_data();
     scheduler::flush_current_stats(&mut process_data.lock().accounting);
     let out = {
         let mut guard = PROCESS_TABLE.lock();
-        proclife::leave(guard.as_mut().unwrap(), pid, tid, chosen)
+        let table = guard.as_mut().unwrap();
+        match leaving {
+            Leaving::Ended => proclife::leave(table, pid, tid, None),
+            Leaving::Joinable(code) => proclife::leave(table, pid, tid, Some(code)),
+            Leaving::Detached(code) => proclife::leave_detached(table, pid, tid, code),
+        }
     };
     match out {
-        // The table says zombie now, which a sweep counts as nothing left to stop.
+        // The table says zombie, or has it no more, which a sweep counts as nothing left to stop.
         proclife::Leave::NotLast => crate::quiesce::note_progress(),
         proclife::Leave::Last { end, mark } => teardown(pid, tid, end, mark, &process_data),
     }
@@ -966,12 +963,20 @@ pub fn exit(end: End) -> ! {
         scheduler::post_retire(&sched);
     }
     walk(owed);
-    leave(None);
+    leave();
     scheduler::exit_current();
 }
 
+/// Whether anyone will join an exiting thread.
+pub enum Joined {
+    /// Its code waits in the table for a join.
+    Joinable,
+    /// Nobody will: its place goes as it leaves.
+    Detached,
+}
+
 /// Exit the current thread. If this is the main thread, it is the process's exit. For a child thread, frees its own mappings and leaves.
-pub fn thread_exit(code: i32) -> ! {
+pub fn thread_exit(code: i32, joined: Joined) -> ! {
     let process_pid = current_process();
     let tid = current_tid();
     let route = {
@@ -985,7 +990,10 @@ pub fn thread_exit(code: i32) -> ! {
     };
 
     release_thread(tid);
-    leave(Some(code));
+    match joined {
+        Joined::Joinable => leave_as(Leaving::Joinable(code)),
+        Joined::Detached => leave_as(Leaving::Detached(code)),
+    }
     // Whoever joined this thread armed on it; post before the exit pass — after it this thread never runs again.
     if let Some(handle) = crate::sched::driver::current_handle() {
         // Held together by assertion, not shared state: the decision names the subject, this performs it via the CPU's own handle.
@@ -1228,10 +1236,7 @@ fn with_current_image(f: impl FnOnce(&UserImage) -> bool) -> FrameRecord {
             FrameRecord::NoTask
         };
     };
-    match image {
-        Some(image) if f(&image) => FrameRecord::Recorded,
-        _ => FrameRecord::Outside,
-    }
+    if f(&image) { FrameRecord::Recorded } else { FrameRecord::Outside }
 }
 
 /// Kill the process an object names, and everything below it.

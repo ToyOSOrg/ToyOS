@@ -67,14 +67,10 @@ fn sleeps(suffix: &str) {
     }
 }
 
-/// `thread::yield_now` with nothing else to run, `sched_yield` on Linux: 15
-/// rounds of 100,000 calls after one, picoseconds per call. ToyOS has no
-/// yield to measure: its std's `yield_now` is a spin-loop hint
-/// (`sdk/std/sys/thread.rs`).
+/// `thread::yield_now` with nothing else to run, `sched_yield` on Linux and
+/// `SYS_YIELD` on ToyOS: 15 rounds of 100,000 calls after one, picoseconds
+/// per call.
 fn yields() {
-    if cfg!(target_os = "toyos") {
-        return crate::report::unsupported("time.yield", "no yield syscall: std's yield_now is a spin-loop hint");
-    }
     const CALLS: u64 = 100_000;
     let round = || {
         let t = Instant::now();

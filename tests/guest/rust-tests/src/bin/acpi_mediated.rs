@@ -320,12 +320,18 @@ fn nic_bar(holder: &Holder) -> u64 {
 }
 
 fn ports(holder: &Holder, info: &AcpiInfo) {
-    // COM1 and the CMOS index: the kernel's, both ways.
-    for port in [0x3F8u64, 0x3FD, 0x70, 0x20, 0xCF8] {
+    // The CMOS index, the 8259 and the configuration mechanism: the kernel's, both ways.
+    for port in [0x70u64, 0x20, 0xCF8] {
         assert_eq!(holder.read(Space::SystemIo, port, Width::Byte), Err(Refused::KernelPort), "acpi: port {port:#x} was read");
         assert_eq!(holder.write(Space::SystemIo, port, Width::Byte, b'!'.into()), Err(Refused::KernelPort), "acpi: port {port:#x} was written");
     }
-    assert_eq!(holder.write(Space::SystemIo, 0x3F7, Width::Word, 0), Err(Refused::KernelPort), "acpi: a word that ends on COM1");
+
+    // COM1, the console UART's row, which its own claim is for.
+    for port in [0x3F8u64, 0x3FD] {
+        assert_eq!(holder.read(Space::SystemIo, port, Width::Byte), Err(Refused::ClaimedPort), "acpi: port {port:#x} was read");
+        assert_eq!(holder.write(Space::SystemIo, port, Width::Byte, b'!'.into()), Err(Refused::ClaimedPort), "acpi: port {port:#x} was written");
+    }
+    assert_eq!(holder.write(Space::SystemIo, 0x3F7, Width::Word, 0), Err(Refused::ClaimedPort), "acpi: a word that ends on COM1");
     assert_eq!(holder.read(Space::SystemIo, 0xFFFF, Width::Word), Err(Refused::PortSpan));
     assert_eq!(holder.read(Space::SystemIo, 0x1_0000, Width::Byte), Err(Refused::PortSpan));
     assert_eq!(holder.read(Space::SystemIo, 0x80, Width::QWord), Err(Refused::PortSpan));

@@ -1,18 +1,17 @@
-//! The console UART and the two locks that serialise it. Where the UART is
-//! and what it is are the architecture's (`arch::console_uart`).
+//! The console UART, as the kernel writes it (`log::console`), and the lock
+//! that serialises the kernel's writers. Where the UART is and what it is are
+//! the architecture's (`arch::console_uart`).
 //!
 //! [`BackendGuard`] is the registers' lock, held with interrupts off for one
-//! burst: what the UART's transmitter takes at once, or a byte read. The
-//! panic path takes the registers alone, as a [`PanicUart`], and bypasses them
-//! once they stay held. Nothing that holds a kernel lock formats here.
+//! burst: what the UART's transmitter takes at once. The panic path takes the
+//! registers alone, as a [`PanicUart`], and bypasses them once they stay held.
+//! Nothing that holds a kernel lock formats here.
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::IrqGuard;
 use crate::log;
 use super::serial_lock::{BackendLock, Held, Seized};
-use crate::scheduler::Parkable;
-use crate::sleeplock::{Holder, SleepGuard, SleepLock};
 use crate::time::{Budget, Duration};
 
 use crate::arch::console_uart as uart;
@@ -62,24 +61,6 @@ impl BackendGuard {
     pub fn write_raw(&mut self, bytes: &[u8]) {
         uart_write_bytes(&mut self.registers, bytes);
     }
-
-    pub fn has_data(&mut self) -> bool {
-        has_console() && uart::rx_ready(&mut self.registers)
-    }
-
-    pub fn try_read_byte(&mut self) -> Option<u8> {
-        self.has_data().then(|| uart::read_byte(&mut self.registers))
-    }
-}
-
-pub fn has_data() -> bool {
-    let mut g = BackendGuard::lock();
-    g.has_data()
-}
-
-pub fn try_read_byte() -> Option<u8> {
-    let mut g = BackendGuard::lock();
-    g.try_read_byte()
 }
 
 /// How long, on the clock, a fatal path waits for another holder to let the
@@ -91,7 +72,7 @@ const PANIC_LOCK_WAIT: Budget = Budget::of(
 );
 
 /// The console UART's registers for a fatal path, from [`panic_registers`].
-/// A `log!` under one before `klogd` runs may drain inline on this CPU, as a
+/// A `log!` under one before the hand-over may drain inline on this CPU, as a
 /// burst that `BackendLock::lock` refuses while this CPU's fatal path holds
 /// the registers.
 pub struct PanicUart(Hold);
@@ -122,7 +103,6 @@ const DRAINED_RAW: &[u8] =
 /// The registers for a fatal path: waited for while another holder may still
 /// let them go, and had at once where this CPU's fatal path holds them.
 pub fn panic_registers() -> PanicUart {
-    crate::log::console::on_the_uart_for_good();
     let irq = IrqGuard::close();
     let seized = Cell::new(None);
     // Uncalibrated, this asks once: only the boot CPU runs, so a holder is beneath this frame and never lets go.
@@ -214,62 +194,14 @@ pub unsafe fn panic_flush() {
     unsafe { crate::log::console::drain_bypassed(&mut uart) };
 }
 
-/// The registers for a stop whose wire `klogd` kept, to write its records
-/// over the holder through: a line of the holder's still in flight may
-/// interleave with them. Never bypasses: every CPU is still live here.
-pub fn over_the_wire(write: impl FnOnce(&mut BackendGuard)) {
-    if !has_console() {
-        return;
-    }
-    let mut uart = panic_registers();
-    match &mut uart.0 {
-        Hold::Held(guard) => write(guard),
-        Hold::Reentered(_) | Hold::Expired(_) => uart.write(NOT_DRAINED),
-    }
-}
-
-/// What a stop whose registers stayed held too writes in place of its records.
-const NOT_DRAINED: &[u8] =
-    b"\n[serial] the stop's records are not on the console: its wire and its registers stayed held\n";
-
-/// Who may put a line on the wire: `klogd`, the drains that stand in for it
-/// before it runs, and the stop, which takes it from `klogd` for good. **Held with
-/// interrupts on and preemption allowed**, for a whole line, so a line is one
-/// holder's; [`BackendGuard`] is taken inside it once per burst, which is the
-/// only interrupts-off window the console costs.
-static WIRE: SleepLock<()> = SleepLock::new(());
-
-/// The wire, for a task that may park until it is free.
-pub fn wire(parkable: &Parkable) -> SleepGuard<'_, ()> {
-    WIRE.lock(parkable)
-}
-
-/// The wire, if it is free, from any context — the boot before per-CPU state
-/// exists included, which has no task to hold it as; and who holds it where
-/// it is not.
-pub fn try_wire() -> Result<SleepGuard<'static, ()>, Holder> {
-    let taken = if crate::log::PERCPU_READY.load(Ordering::Acquire) {
-        WIRE.try_lock()
-    } else {
-        WIRE.try_lock_untasked()
-    };
-    taken.ok_or_else(|| WIRE.holder_name())
-}
-
-/// Whether the running task holds the wire, for a staging that asks who holds
-/// it at the boot's last word.
-#[cfg(feature = "boot-actuators")]
-pub fn wire_is_mine() -> bool {
-    WIRE.holder().is_some_and(|holder| Some(holder) == crate::scheduler::current_task())
-}
-
 /// Whether the UART has refused a write, which is said once.
 static UART_REFUSED: AtomicBool = AtomicBool::new(false);
 
-/// `bytes` onto the wire the caller holds, in bursts of what the UART's
-/// transmitter takes at once: each burst waits for the transmitter with
-/// interrupts on, and takes the register lock only to ask it and fill it.
-pub fn write_wire(_wire: &SleepGuard<'_, ()>, bytes: &[u8]) {
+/// `bytes` onto the UART, in bursts of what its transmitter takes at once:
+/// each burst waits for the transmitter with interrupts on, and takes the
+/// register lock only to ask it and fill it. The boot's and the stop's,
+/// whose drains are the UART's one writer while they write.
+pub fn write(bytes: &[u8]) {
     if !has_console() {
         return;
     }
@@ -287,7 +219,7 @@ pub fn write_wire(_wire: &SleepGuard<'_, ()>, bytes: &[u8]) {
             drop(burst);
             asked += 1;
             // A UART that never empties its FIFO takes the rest of this write
-            // with it rather than holding the wire for ever, and is said once:
+            // with it rather than holding the boot for ever, and is said once:
             // the saying is itself a write it would drop.
             if asked == THRE_SPIN_LIMIT {
                 if !UART_REFUSED.swap(true, Ordering::Relaxed) {
@@ -302,109 +234,6 @@ pub fn write_wire(_wire: &SleepGuard<'_, ()>, bytes: &[u8]) {
         }
     }
 }
-
-/// One console holder's partly-written line. Must live per holder, never
-/// shared: one buffer used by two processes splices their output.
-///
-/// **A console holder does not write the wire.** A whole line goes to
-/// `klogd`'s queue ([`crate::log::console::queue`]), and `klogd` puts it on
-/// the wire between its own records — so the kernel has one console writer,
-/// and a write here never waits on a device. The bytes go as they came: the
-/// only holder that writes is `/system/bin/logkeeper`, which renders every control
-/// byte a program wrote as text before it gets here.
-///
-/// **A write takes the whole lines the queue has room for and no more**, and
-/// says how many bytes that was, so a writer that is ahead of the console is
-/// told so rather than losing lines it cannot see; its poll for `WRITABLE` is
-/// answered when `klogd` frees room.
-pub struct ConsoleLine {
-    buf: [u8; MAX_CONSOLE_LINE],
-    len: usize,
-    /// `buf` is a whole piece of a line the queue had no room for, which goes
-    /// before anything after it; the holder still has the rest of the line.
-    held: bool,
-}
-
-impl ConsoleLine {
-    pub const fn new() -> Self {
-        Self { buf: [0; MAX_CONSOLE_LINE], len: 0, held: false }
-    }
-
-    /// Take as much of a userland write as ends in lines the queue has room
-    /// for, and a trailing partial line; answer how many bytes were taken.
-    ///
-    /// **A line that does not fit is not taken**: its bytes in this write go
-    /// back to the holder, which writes them again once it has room. Taken and
-    /// held here, the last line of a holder with nothing more to say would
-    /// wait for a write that never comes.
-    pub fn write(&mut self, src: &crate::user_ptr::UserBytes) -> usize {
-        if self.held && !self.piece() {
-            return 0;
-        }
-        let mut chunk = [0u8; STRIP_CHUNK];
-        let mut off = 0;
-        // Where this write's part of the line `buf` holds begins.
-        let mut line = 0;
-        while off < src.len() {
-            let n = chunk.len().min(src.len() - off);
-            src.read_at(off, &mut chunk[..n]);
-            for (i, &b) in chunk[..n].iter().enumerate() {
-                let at = off + i;
-                if self.len == MAX_CONSOLE_LINE {
-                    self.held = true;
-                    if !self.piece() {
-                        return at;
-                    }
-                    line = at;
-                }
-                self.buf[self.len] = b;
-                self.len += 1;
-                if b == b'\n' {
-                    if !crate::log::console::queue(&self.buf[..self.len], false) {
-                        self.len -= at + 1 - line;
-                        return line;
-                    }
-                    self.len = 0;
-                    line = at + 1;
-                }
-            }
-            off += n;
-        }
-        src.len()
-    }
-
-    /// Queue the whole piece `buf` holds, which the next goes on from.
-    fn piece(&mut self) -> bool {
-        if !crate::log::console::queue(&self.buf[..self.len], true) {
-            return false;
-        }
-        self.len = 0;
-        self.held = false;
-        true
-    }
-
-    /// Queues whatever is held, whether or not a newline came, as the holder
-    /// goes. With the queue full it is counted unshown: nothing waits here.
-    pub fn finish(&mut self) {
-        if self.len > 0 && !crate::log::console::queue(&self.buf[..self.len], false) {
-            crate::log::console::unshown();
-        }
-        self.len = 0;
-        self.held = false;
-    }
-}
-
-impl Default for ConsoleLine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Size of one copy out of user memory.
-const STRIP_CHUNK: usize = 256;
-
-/// The longest piece of a line one queue entry carries.
-pub const MAX_CONSOLE_LINE: usize = 1024;
 
 /// Bounded, not belt-and-braces: a UART wedged with THRE clear would spin
 /// forever here, on `panic_flush`'s bypass path where nothing else can help.
