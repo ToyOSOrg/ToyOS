@@ -20,9 +20,11 @@ start = ["acpiserver", "logkeeper", "uart", "compositor", "vdagent", "test-runne
 service = true
 syscap = ["logread"]
 serves = ["log-carrier", "log-wire"]
+holds = ["log-origins"]
 
 [programs.uart]
 devices = ["uart"]
+holds = ["console-input"]
 receives = ["log-wire"]
 restart = true
 

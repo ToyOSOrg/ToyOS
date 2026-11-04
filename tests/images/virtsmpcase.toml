@@ -12,9 +12,11 @@ start = ["logkeeper", "uart", "test-runner"]
 service = true
 syscap = ["logread"]
 serves = ["log-wire"]
+holds = ["log-origins"]
 
 [programs.uart]
 devices = ["uart"]
+holds = ["console-input"]
 receives = ["log-wire"]
 restart = true
 

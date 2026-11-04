@@ -43,7 +43,9 @@ fn main() {
     let (info, frame) = claim.open().unwrap_or_else(|e| panic!("uart: the claim's description: {e:?}"));
     let level = info.level != 0;
     let mut uart = Machine::open(&info, frame).unwrap_or_else(|| panic!("uart: a UART this program does not know: {info:?}"));
-    let input: Option<Pipe> = endow::Endowments::get().take(CONSOLE_INPUT);
+    let input: Pipe = endow::Endowments::get()
+        .take(CONSOLE_INPUT)
+        .unwrap_or_else(|| panic!("uart: started without `{CONSOLE_INPUT}`, which its row holds"));
     let mut log = match logkeeper_api::carry(WIRE) {
         Ok((conn, served)) => {
             say!("uart: carrying the log on the console UART, from where the kernel left it");
@@ -64,10 +66,8 @@ fn main() {
     let mut buf = vec![0u8; READ];
     loop {
         let standing = line.serve(&mut uart, &mut received);
-        if let Some(input) = &input
-            && !received.is_empty()
-        {
-            match hand_on(input, &received) {
+        if !received.is_empty() {
+            match hand_on(&input, &received) {
                 0 if dropped > 0 => {
                     say!("uart: the console's input takes bytes again, after {dropped} were dropped");
                     dropped = 0;

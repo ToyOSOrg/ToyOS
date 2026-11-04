@@ -23,6 +23,7 @@ start = ["logkeeper", "fileserver", "toybox"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+holds = ["log-origins"]
 
 [programs.toybox]
 args = ["pwd"]
