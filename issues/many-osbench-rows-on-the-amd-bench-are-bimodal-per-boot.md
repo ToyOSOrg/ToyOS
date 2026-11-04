@@ -18,7 +18,7 @@ Evidence: #1129's ab9 and ab10, 18 benchcase boots across six arms
 |---|---|---|
 | `pipe.throughput.*` | per round 2.0 / 5.0, 3.5 / 8.4, 4.8 / 10.0 GB/s (4096, 16384, 65536) | the round's writer thread in the other LLC from its reader: measured per round, no exception in 18 boots |
 | `thread.spawn_join` | 20 / 27 µs | the joined thread in the other LLC: 20.4–20.5 µs in all three boots of a near-placing spawn (#1153), 27 µs in 2 of 3 base boots |
-| `proc.spawn_wait.tiny`, `proc.posix_spawn_wait.tiny`, `proc.spawn_wait_loop.100` | e.g. 3.9 / 5.6 ms per hundred | the share of tiny children ending in the other LLC from the parent (1–76% per boot, read off the kernel log's spawn and exit lines), which tracks the row |
+| `proc.spawn_wait.tiny`, `proc.posix_spawn_wait.tiny`, `proc.spawn_wait_loop.100` | e.g. 3.9 / 5.6 ms per hundred | the share of tiny children ending in the other LLC from the parent (1–76% per boot, read off the kernel log's spawn and exit lines: [per boot](https://github.com/ToyOSOrg/evidence/blob/dd851b0675c29b428a0e46b817863f08e71cd2e3/pr-1153/r2/ab10-proc/proc-spawn-llc.txt)), which tracks the row |
 | `ipc.reqrep.*`, `fs.disk.*` and `fs.disk.direct.*` metadata rows, `fs.mem.pread_8`, `persist.fsync_clean` | about 0.8× in one LLC | the client and its server in one LLC or split |
 | `wake.periodic.idle` | 6 / 35 µs | not established |
 | `crunch.single.deflate` | 63.7 / 67.5 ms | not established |
