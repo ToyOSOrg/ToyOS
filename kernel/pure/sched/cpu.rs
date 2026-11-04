@@ -1348,8 +1348,7 @@ impl<X: SchedPayload> CpuSched<X> {
     }
 }
 
-/// The CPU a task in `state` calls home, if it is alive.
-pub fn home_of(state: TaskState) -> Option<CpuId> {
+fn home_of(state: TaskState) -> Option<CpuId> {
     match state {
         TaskState::Running(cpu)
         | TaskState::Ready(cpu)
@@ -2636,16 +2635,36 @@ pub struct CpuHandles<M> {
 }
 
 /// A thread spawned into its own process, as [`CpuHandles::place`] weighs it:
-/// its spawner's CPU, near which it starts, and the CPUs the process's threads
-/// call home. The thread usually works with its spawner, and a pair split
-/// across LLCs moves every line it shares between L3s. A parked thread raises
-/// no published load, so without `homes` a burst of threads that park would
-/// pile into the spawner's LLC while the rest of the machine sat idle, and be
-/// woken there together.
+/// its spawner's CPU, whose LLC it prefers, and the CPUs its process's threads
+/// call home ([`homes`]). A parked thread raises no published load, so `homes`
+/// stands in for its siblings.
 #[derive(Clone, Copy, Debug)]
 pub struct Near {
     pub spawner: CpuId,
     pub homes: CpuMask,
+}
+
+/// How many of a process's threads [`homes`] reads. A process with no more
+/// threads than this places exactly as if every one were read; past it, the
+/// oldest go unseen, so a CPU only they call home may look free. The bound
+/// is what a spawn costs under the process table's lock.
+pub const HOMES_READ: usize = 64;
+
+/// The CPUs the tasks in `states` call home, for [`Near::homes`], read
+/// newest first: at most [`HOMES_READ`] of them, and none past the point
+/// where the homes cover every CPU of `within`, the new thread's mask on the
+/// CPUs online, from which the homed term ranks every candidate alike.
+pub fn homes(states: impl Iterator<Item = TaskState>, within: CpuMask) -> CpuMask {
+    let mut homes = CpuMask::NONE;
+    for state in states.take(HOMES_READ) {
+        if let Some(cpu) = home_of(state) {
+            homes.insert(cpu);
+        }
+        if homes.covers(within) {
+            break;
+        }
+    }
+    homes
 }
 
 /// The CPUs an idle CPU is chosen among, nearest first: `me`'s LLC, then the
@@ -4961,7 +4980,7 @@ mod tests {
             handles.get(CpuId(cpu)).publish_pass(NOW);
         }
         sleep(&handles, &[0, 2, 3, 4, 5, 6, 7]);
-        let homes = |cpus: &[u32]| cpus.iter().fold(CpuMask::NONE, |mask, &cpu| mask.union(CpuMask::one(CpuId(cpu))));
+        let homes = |cpus: &[u32]| cpus.iter().map(|&cpu| CpuId(cpu)).collect::<CpuMask>();
         let near = |cpus: &[u32]| Some(Near { spawner: C1, homes: homes(cpus) });
         assert_eq!(handles.place(C0, NOW, CpuMask::ANY, near(&[1, 3, 7])), C0, "cpu0, a free core no thread of it calls home");
         assert_eq!(
@@ -4969,6 +4988,29 @@ mod tests {
             CpuId(3),
             "every free core is someone's home: then the spawner's LLC, and a free core before cpu5's shared one",
         );
+    }
+
+    /// **The homes walk stops once every CPU the mask allows is someone's
+    /// home**: a sibling read past that changes no placement.
+    #[test]
+    fn homes_stop_once_they_cover_the_mask() {
+        let within: CpuMask = [C0, C1].into_iter().collect();
+        let states = [TaskState::Running(C0), TaskState::Blocked(C1), TaskState::Blocked(CpuId(2))];
+        let read = homes(states.into_iter(), within);
+        assert!(read.contains(C0) && read.contains(C1), "both of the mask's CPUs are homes");
+        assert!(!read.contains(CpuId(2)), "the walk read past the point where the homes covered the mask");
+    }
+
+    /// **The homes walk reads at most [`HOMES_READ`] siblings, newest
+    /// first**, and a dead one is nobody's home.
+    #[test]
+    fn homes_read_at_most_their_bound() {
+        let n = HOMES_READ as u32;
+        let states = (0..=n).map(|cpu| TaskState::Blocked(CpuId(cpu)));
+        let read = homes(states, CpuMask::ANY);
+        assert!(read.contains(CpuId(n - 1)), "the bound's last sibling is read");
+        assert!(!read.contains(CpuId(n)), "a sibling past the bound was read");
+        assert_eq!(homes([TaskState::Dead].into_iter(), CpuMask::ANY), CpuMask::NONE, "a dead sibling counted as a home");
     }
 
     /// **A spawn passes over a sleeper already being woken**: it keeps its

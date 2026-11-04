@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc as StdArc;
 
 use kernel::sched::affinity::CpuMask;
-use kernel::sched::cpu::{home_of, Action, CpuHandle, CpuSched, Env, Near, SchedPass};
+use kernel::sched::cpu::{homes, Action, CpuHandle, CpuSched, Env, Near, SchedPass};
 use kernel::sched::job::{Job, JobKey};
 use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent, TraceKind};
 use kernel::sched::invariants::Container;
@@ -1536,12 +1536,14 @@ impl<'q> Vm<'q> {
                 let process = self.programs[&key].process;
                 // A new thread starts with its spawner's mask.
                 let mask = self.shared[&key].mask().load().0;
-                let homes = self
+                // Newest first, as the kernel reads them.
+                let siblings = self
                     .programs
                     .iter()
+                    .rev()
                     .filter(|(_, program)| program.process == process)
-                    .filter_map(|(key, _)| self.shared.get(key).and_then(|shared| home_of(shared.state())))
-                    .fold(CpuMask::NONE, |homes, cpu| homes.union(CpuMask::one(cpu)));
+                    .filter_map(|(key, _)| self.shared.get(key).map(|shared| shared.state()));
+                let homes = homes(siblings, mask.within(self.scenario.cpus()));
                 self.spawn(process, template, mask, Some(Near { spawner: CpuId(cpu as u32), homes }));
                 self.programs.get_mut(&key).expect("live").pc += 1;
             }

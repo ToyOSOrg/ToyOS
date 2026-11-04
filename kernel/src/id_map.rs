@@ -51,7 +51,7 @@ impl<K: IdKey, V> IdMap<K, V> {
         self.map.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (K, &V)> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (K, &V)> {
         self.map.iter().map(|(&k, v)| (k, v))
     }
 
