@@ -11,8 +11,8 @@ use toyos::fs::Error;
 use toyos_blockdev::{BLOCK, BlockDev};
 
 const NODES: usize = 512;
-/// Names a volume remembers, at most.
-const NAMES: usize = 4096;
+/// Bytes of paths a volume remembers, at most.
+const NAME_BYTES: usize = 256 << 10;
 const READ_CHUNK: usize = 256 << 10;
 const OWNER: Owner = Owner { perm: 0o644, uid: 0, gid: 0 };
 struct OsRandom;
@@ -48,15 +48,49 @@ impl Open {
         }
     }
 }
+/// Paths and what they name, bounded by their bytes.
+#[derive(Default)]
+struct Names {
+    by_path: BTreeMap<String, (u64, DirentType)>,
+    bytes: usize,
+}
+
+impl Names {
+    fn get(&self, path: &str) -> Option<&(u64, DirentType)> {
+        self.by_path.get(path)
+    }
+    fn insert(&mut self, path: String, entry: (u64, DirentType)) {
+        if let Some(known) = self.by_path.get_mut(&path) {
+            *known = entry;
+            return;
+        }
+        if self.bytes + path.len() > NAME_BYTES {
+            self.by_path.clear();
+            self.bytes = 0;
+        }
+        self.bytes += path.len();
+        self.by_path.insert(path, entry);
+    }
+    /// `path` and the paths beneath it, which sort from `path/` to before `path0`.
+    fn forget(&mut self, path: &str) {
+        let below: Vec<String> = self.by_path.range(format!("{path}/")..format!("{path}0")).map(|(known, _)| known.clone()).collect();
+        for known in below.iter().map(String::as_str).chain([path]) {
+            if self.by_path.remove(known).is_some() {
+                self.bytes -= known.len();
+            }
+        }
+    }
+}
+
 pub struct DataVolume<D: Disk> {
     fs: Mount<Rc<Cache<D>>>,
     cache: Rc<Cache<D>>,
     roots: Vec<String>,
     open: BTreeMap<Node, Open>,
-    /// What each path looked up names, by path, so the next lookup of it
-    /// reads its inode alone. Only an unlink, rmdir or rename takes a name
-    /// away; each forgets the path and what lies under it.
-    names: RefCell<BTreeMap<String, (u64, DirentType)>>,
+    /// What each path looked up names, so the next lookup of it reads its
+    /// inode alone. Only an unlink, rmdir or rename takes a name away; each
+    /// forgets the path and what lies under it.
+    names: RefCell<Names>,
     next_ticket: u64,
     clock: fn() -> u64,
 }
@@ -174,7 +208,7 @@ impl<D: Disk> DataVolume<D> {
             cache,
             roots: roots.iter().map(|root| root.to_string()).collect(),
             open: BTreeMap::new(),
-            names: RefCell::new(BTreeMap::new()),
+            names: RefCell::new(Names::default()),
             next_ticket: 1,
             clock,
         };
@@ -217,19 +251,14 @@ impl<D: Disk> DataVolume<D> {
             let entry = self.fs.lookup(found.0, names[at].as_bytes()).await?.ok_or(engine::Error::NotFound)?;
             found = (entry.ino, entry.kind);
             at += 1;
-            let mut known = self.names.borrow_mut();
-            if known.len() >= NAMES {
-                known.clear();
-            }
-            known.insert(names[..at].join("/"), found);
+            self.names.borrow_mut().insert(names[..at].join("/"), found);
         }
         Ok(found)
     }
     /// `path` and everything beneath it moved or gone.
     fn forget(&self, path: &str) {
         let path = path.split('/').filter(|name| !name.is_empty()).collect::<Vec<_>>().join("/");
-        let below = format!("{path}/");
-        self.names.borrow_mut().retain(|known, _| *known != path && !known.starts_with(&below));
+        self.names.borrow_mut().forget(&path);
     }
     fn destination<'a>(&self, path: &'a str) -> Result<(u64, &'a [u8]), Error> {
         let name = path.rsplit('/').next().filter(|name| !name.is_empty()).ok_or(Error::Root)?;
@@ -718,6 +747,30 @@ mod tests {
     }
     /// A path, once looked up, is remembered; an unlink, rmdir or rename
     /// forgets it and everything under it.
+    #[test]
+    fn forgetting_a_path_forgets_what_lies_under_it_and_no_neighbour() {
+        let mut names = Names::default();
+        for path in ["a", "a/b", "a/b/c", "a-b", "a0", "ab", "b"] {
+            names.insert(path.to_string(), (1, DirentType::Regular));
+        }
+        names.forget("a");
+        assert_eq!(names.by_path.keys().map(String::as_str).collect::<Vec<_>>(), ["a-b", "a0", "ab", "b"]);
+        assert_eq!(names.bytes, names.by_path.keys().map(String::len).sum::<usize>());
+        names.insert("ab".to_string(), (2, DirentType::Regular));
+        assert_eq!(names.bytes, 8, "a path named again is counted once");
+    }
+
+    #[test]
+    fn remembered_paths_stay_within_their_bytes() {
+        let mut names = Names::default();
+        let long = "n".repeat(4000);
+        for i in 0..1000 {
+            names.insert(format!("{long}{i}"), (i, DirentType::Regular));
+            assert!(names.bytes <= NAME_BYTES);
+        }
+        assert!(!names.by_path.is_empty());
+    }
+
     #[test]
     fn a_remembered_name_follows_its_renames_and_removal() {
         let mut v = volume();
