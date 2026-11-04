@@ -63,7 +63,7 @@ fn visited() -> usize { VISITED.with(Cell::get) }
 
 /// What `f` returns, and the entries pending looked at meanwhile.
 #[cfg(test)]
-fn visits<T>(f: impl FnOnce() -> T) -> (T, usize) {
+pub(crate) fn visits<T>(f: impl FnOnce() -> T) -> (T, usize) {
     let before = visited();
     let out = f();
     (out, visited() - before)
@@ -394,19 +394,23 @@ impl Pending {
         Iter { pending: self, at, end: bounds.map(|(_, max)| max), saved: None }
     }
 
-    /// The callback installs the value and its pin before the source retires.
-    /// It is infallible and cannot yield. `false` means capture was superseded.
-    pub fn transfer(&mut self, capture: Capture, install: impl FnOnce(Transferred)) -> bool {
-        let wanted = (capture.position, capture.order);
-        let Some(source) = self.runs.iter_mut().flatten().find_map(|run| run.find(wanted).map(|i| &mut run.entries[i])) else { return false };
-        let accounting = source.accounting();
-        let value = core::mem::take(&mut source.value);
-        install(Transferred { key: source.key, value, first: capture.first, last: source.last });
+    /// The callback installs the captured value, or every accounting delta
+    /// at its position up to it, each with its pin, before the sources
+    /// retire: one pass over the position. It is infallible and cannot
+    /// yield. `false` means capture was superseded.
+    pub fn transfer(&mut self, capture: Capture, mut install: impl FnMut(Transferred)) -> bool {
+        if self.entry((capture.position, capture.order)).is_none() { return false; }
         for slot in &mut self.runs {
             let Some(run) = slot else { continue };
             for i in run.at(capture.position) {
-                let entry = &run.entries[i];
-                if entry.live && entry.order <= capture.order && (entry.order == capture.order || !accounting) { run.kill(i, &mut self.live); }
+                visit();
+                let entry = &mut run.entries[i];
+                if !entry.live || entry.order > capture.order { continue; }
+                if entry.accounting() || entry.order == capture.order {
+                    let first = if entry.accounting() { entry.first } else { capture.first };
+                    install(Transferred { key: entry.key, value: core::mem::take(&mut entry.value), first, last: entry.last });
+                }
+                run.kill(i, &mut self.live);
             }
             run.compact();
             run.retire();

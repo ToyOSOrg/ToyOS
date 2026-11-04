@@ -156,6 +156,9 @@ struct State {
     /// The most dirty and unpointed nodes ever held together.
     #[cfg(test)]
     peak: usize,
+    /// The most bytes one ordinary apply grew a node by.
+    #[cfg(test)]
+    grown: usize,
     /// Ordinary admissions that waited for journal space, and for cache
     /// room, as tests construct them.
     #[cfg(test)]
@@ -484,6 +487,8 @@ impl<D: BlockDev> Mount<D> {
             read_only: None,
             #[cfg(test)]
             peak: 0,
+            #[cfg(test)]
+            grown: 0,
             #[cfg(test)]
             waits: [0; 2],
             #[cfg(test)]
@@ -1329,18 +1334,26 @@ impl<D: BlockDev> Mount<D> {
             (Btree::Accounting, 0, key, value::counters(&delta))
         });
         // An ordinary transaction's keys go into the nodes it holds, as
-        // reclaim's materialization would put them; each node first takes
-        // what pending holds of its range, so nothing older lies over them.
-        // A node that cannot take them now, and reclaim's own updates,
-        // leave them to pending and reclaim.
+        // reclaim's materialization would put them, where pending holds
+        // nothing older at their position. A node that cannot take them now,
+        // and reclaim's own updates, leave them to pending and reclaim.
+        let room = match class {
+            Class::Ordinary => K_TX.checked_sub(size).expect("an ordinary transaction within K_TX") as usize * 8,
+            Class::Reclaim => 0,
+        };
+        let mut drained = Vec::new();
         let mut left = Vec::new();
         for (btree, level, key, value) in updates.chain(accounting) {
             let id = (class == Class::Ordinary).then(|| held(st, btree, level, key.pos)).filter(|&id| st.cache.node(id).captured.is_none());
-            let Some(id) = id.filter(|&id| self.drained(st, id, key.pos)) else {
+            let Some(id) = id.filter(|&id| self.drained(st, id, key.pos, room, &mut drained)) else {
                 left.push((btree, level, key, value));
                 continue;
             };
             st.cache.change(id, |n| put(n, key, value, seq));
+        }
+        #[cfg(test)]
+        for &(id, before) in &drained {
+            st.grown = st.grown.max(st.cache.node(id).bytes.saturating_sub(before));
         }
         st.pending.apply(seq, left);
         for root in core::mem::take(&mut txn.roots) {
@@ -1353,12 +1366,18 @@ impl<D: BlockDev> Mount<D> {
         }
     }
 
-    /// Whether node `id` takes a key at `pos` in place: it first takes what
-    /// pending holds of its range, and pending holds nothing at `pos` after.
-    fn drained(&self, st: &mut State, id: NodeId, pos: Bpos) -> bool {
+    /// Whether node `id` takes a key at `pos` in place: pending holds
+    /// nothing at `pos`. A node the transaction has not yet `drained` first
+    /// takes what pending holds of its range within `room`, the transaction
+    /// bound its own keys leave, so together they grow it by at most one
+    /// transaction's.
+    fn drained(&self, st: &mut State, id: NodeId, pos: Bpos, room: usize, drained: &mut Vec<(NodeId, usize)>) -> bool {
         let n = st.cache.node(id);
         let (btree, level, min, max) = (n.btree, n.level, n.min, n.max);
-        if st.pending.holds(btree, level, min, max) && self.take_into(st, id, min).is_err() { return false; }
+        if !drained.iter().any(|&(d, _)| d == id) {
+            drained.push((id, n.bytes));
+            if st.pending.holds(btree, level, min, max) && self.take_into(st, id, min, room).is_err() { return false; }
+        }
         !st.pending.holds(btree, level, pos, pos)
     }
 
@@ -1650,6 +1669,13 @@ impl<D: BlockDev> Mount<D> {
     /// Drops pending's spare workspace, so its next batch allocates.
     pub(crate) fn shrink_pending(&self) {
         self.st.borrow_mut().pending.shrink();
+    }
+
+    /// The most bytes one ordinary transaction grew a node by, its keys and
+    /// what the node took from pending together.
+    #[cfg(test)]
+    pub(crate) fn grown(&self) -> usize {
+        self.st.borrow().grown
     }
 
     /// The dirty-node limit, reclaim's room, the most dirty and unpointed

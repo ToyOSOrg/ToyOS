@@ -125,6 +125,66 @@ fn committed_keys_go_into_the_leaves_they_change_and_replay_stays_pending() {
     assert_eq!(block_on_ready(fsck(&volume)).unwrap(), []);
 }
 
+/// An unclean mount replays every transaction's accounting deltas, many at
+/// each accounting position. The first transaction after takes its nodes'
+/// pending keys, each entry looked at a bounded number of times. Red when
+/// each delta's transfer passes over all its position's: quadratic in the
+/// journal, which stalled the first write after a crash on a large volume.
+#[test]
+fn the_first_transaction_after_a_replay_takes_each_delta_once() {
+    let dev = formatted(64 << 20, None);
+    let options = MountOptions { cache_nodes: SMALL_CACHE };
+    let mount = block_on_ready(Mount::open(&dev, options, random())).unwrap();
+    for i in 0..2000 { block_on_ready(mount.create(mount.root(), format!("delta{i}").as_bytes(), New::File, OWNER, NOW)).unwrap(); }
+    drop(mount);
+
+    let mount = block_on_ready(Mount::open(&dev, options, random())).unwrap();
+    let (replayed, _, _) = mount.pending_pressure();
+    assert!(replayed >= 1000, "replay holds a thousand entries and more: {replayed}");
+    let (created, visited) = super::super::pending::visits(|| block_on_ready(mount.create(mount.root(), b"after", New::File, OWNER, NOW)));
+    created.unwrap();
+    // A few passes over each entry, where a delta's transfer passing over
+    // its position's would look at about a thousand per delta.
+    assert!(visited <= 16 * replayed, "{visited} pending entries looked at for {replayed} replayed");
+    block_on_ready(mount.unmount()).unwrap();
+    let volume = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(block_on_ready(fsck(&volume)).unwrap(), []);
+}
+
+/// After a replay left many pending keys in the ranges of the root's leaves:
+/// renames over other files, each changing two neighbouring inodes, and, on
+/// another such replay, creates. What a leaf takes from pending and a
+/// transaction's keys grow it by at most one transaction's bound, as
+/// reclaim's split bound assumes (`MAX_GROUPS`). Red when a node takes from
+/// pending for each key (the renames), or past the room the keys leave (the
+/// creates).
+#[test]
+fn a_transaction_after_a_replay_grows_a_node_by_one_transaction_at_most() {
+    const OPTIONS: MountOptions = MountOptions { cache_nodes: SMALL_CACHE };
+    for what in ["renames", "creates"] {
+        let dev = formatted(64 << 20, None);
+        let mount = block_on_ready(Mount::open(&dev, OPTIONS, random())).unwrap();
+        for i in 0..2000 { block_on_ready(mount.create(mount.root(), format!("file{i}").as_bytes(), New::File, OWNER, NOW)).unwrap(); }
+        block_on_ready(mount.commit()).unwrap();
+        drop(mount);
+        let mount = block_on_ready(Mount::open(&dev, OPTIONS, random())).unwrap();
+        if what == "renames" {
+            for i in (1960..2000).step_by(2) {
+                let (from, to) = (format!("file{i}"), format!("file{}", i + 1));
+                block_on_ready(mount.rename((mount.root(), from.as_bytes()), (mount.root(), to.as_bytes()), Rename::Replace, NOW)).unwrap();
+            }
+        } else {
+            for i in 0..16 { block_on_ready(mount.create(mount.root(), format!("after{i}").as_bytes(), New::File, OWNER, NOW)).unwrap(); }
+        }
+        let grown = mount.grown();
+        assert!(grown > 0, "{what} put keys in place");
+        assert!(grown <= super::super::mount::K_TX as usize * 8, "{what} grew a node by {grown} bytes in one transaction");
+        block_on_ready(mount.unmount()).unwrap();
+        let volume = block_on_ready(Volume::open(&dev)).unwrap();
+        assert_eq!(block_on_ready(fsck(&volume)).unwrap(), [], "{what}");
+    }
+}
+
 /// Creates past what the journal holds, with no commit: entries fill and are
 /// written, the ring fills with entries the dirty nodes pin, and a writer
 /// waits for journal space until reclaim writes the nodes. Red when a

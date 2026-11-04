@@ -132,8 +132,9 @@ pub(super) const fn fresh_nodes(nodes: usize) -> usize {
 /// five (A3.15-A3.17). Either takes at most two transactions more before
 /// reclaim, which takes an oversized node first, plans it: the one holding
 /// the slot, as no transaction enters it while a changed node is oversized
-/// ([`Mount::transact`]), and the pointer update of the one reclaim round in
-/// flight, each at most `K_TX` u64s of keys. Spread evenly, all that fills
+/// ([`Mount::transact`]), its keys and what its nodes take from pending
+/// together, and the pointer update of the one reclaim round in flight,
+/// each at most `K_TX` u64s of keys. Spread evenly, all that fills
 /// this many nodes of any size the writer accepts, each a key short of full.
 /// Materialization takes at most one transaction of distinct key positions,
 /// including during replay.
@@ -418,13 +419,13 @@ impl<D: BlockDev> Mount<D> {
         let mut st = self.st.borrow_mut();
         let n = st.cache.node(id);
         if n.writing || n.captured.is_some() || n.held != 0 { return Ok(false); }
-        self.take_into(&mut st, id, pos)
+        self.take_into(&mut st, id, pos, K_TX as usize * 8)
     }
 
     /// Transfers pending keys of node `id`'s range into it, from `pos` on
-    /// and round to it, with bounded positive growth. The caller has found
-    /// the node free to change.
-    pub(super) fn take_into(&self, st: &mut State, id: NodeId, pos: Bpos) -> Result<bool> {
+    /// and round to it, each position whose growth still fits `room` bytes;
+    /// deletions take none. The caller has found the node free to change.
+    pub(super) fn take_into(&self, st: &mut State, id: NodeId, pos: Bpos, room: usize) -> Result<bool> {
         let n = st.cache.node(id);
         let (btree, level) = (n.btree, n.level);
         let mut captures = Vec::new();
@@ -433,18 +434,19 @@ impl<D: BlockDev> Mount<D> {
             .chain(st.pending.range(btree, level, n.min, pos).take_while(|e| e.key().pos < pos)).peekable();
         while let Some(first) = pending.peek() {
             let at = first.key().pos;
-            let start = captures.len();
             let before = n.keys.get(n.at(at)).filter(|(k, _)| k.pos == at).map_or(0, |(_, v)| key_bytes(v));
             let mut size = if btree == Btree::Accounting && level == 0 { before } else { 0 };
+            let mut newest = None;
             while pending.peek().is_some_and(|e| e.key().pos == at) {
                 let entry = pending.next().unwrap();
                 if entry.key().kind != kind::DELETED { size = size.max(key_bytes(entry.value())); }
-                captures.try_reserve(1).map_err(|_| Error::NoMemory)?;
-                captures.push(entry.capture());
+                newest = Some(entry.capture());
             }
             let added = size.saturating_sub(before);
-            if growth + added > K_TX as usize * 8 && start != 0 { captures.truncate(start); continue; }
+            if growth + added > room { continue; }
             growth += added;
+            captures.try_reserve(1).map_err(|_| Error::NoMemory)?;
+            captures.push(newest.expect("a position pending holds has an entry"));
         }
         let durable = st.journal.durable;
         let mut accounting = None;
