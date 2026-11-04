@@ -95,7 +95,8 @@ impl Watch {
     }
 
     /// Wake at most `limit` threads waiting with `token`, and answer how many
-    /// were parked; one that was not is told anyway and spends nothing.
+    /// were claimed, parked or committing; one that was neither is told anyway
+    /// and spends nothing.
     pub fn post_n(&self, token: u64, limit: usize) -> usize {
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
@@ -151,6 +152,7 @@ impl<L: CellLock<List>> Waitable<L> {
 #[must_use = "a registration must outlive the park it was made for"]
 pub struct Armed<'a, L: CellLock<List> = KernelLock<List>> {
     watch: &'a Waitable<L>,
+    token: u64,
     shared: Arc<KShared>,
     task: Arc<TaskHandle>,
     /// Wait class for the blocked-time breakdown; the park carries no subject
@@ -174,7 +176,7 @@ pub fn arm<L: CellLock<List>>(
     let task = crate::sched::driver::current_handle()?;
     let shared = crate::sched::driver::current_shared()?;
     watch.0.register(&shared, token);
-    Some(Armed { watch, shared, task, class })
+    Some(Armed { watch, token, shared, task, class })
 }
 
 /// The answer a killed thread gets instead of a wake; kernel code cannot
@@ -299,6 +301,13 @@ fn wait_inner<L: CellLock<List>>(
     };
     crate::scheduler::block_on(ticket, deadline);
     if killed() {
+        // This wait may hold a bounded post's count, from a claim at its
+        // commit or its park; pass one on before unwinding. Where none was
+        // spent, another waiter rechecks.
+        preempt_off(|p| {
+            let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
+            armed.watch.0.post_n(armed.token, 1, WakeCause::new(WakeReason::Woken), &env);
+        });
         return Err(Ended::Cancelled);
     }
     Ok(())
