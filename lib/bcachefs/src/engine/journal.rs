@@ -157,8 +157,12 @@ pub(crate) struct Found {
     pub offset: u64,
     /// Sectors it occupies, its last block's padding included.
     pub sectors: u64,
-    /// Its records, decrypted; empty when it is not `good`.
+    /// Its records, decrypted; empty when it is not `good`, or when it is
+    /// `past`.
     pub area: Vec<u8>,
+    /// Older than a good flush entry's last sequence: before the window,
+    /// so its records were not kept.
+    pub past: bool,
 }
 
 /// Every entry the ring holds, by sequence.
@@ -167,18 +171,33 @@ pub(crate) struct Scan {
 }
 
 /// Reads every journal bucket in ring order (A2.9), each as
-/// [`scan_bucket`] does.
+/// [`scan_bucket`] does. An entry older than the last sequence of some good
+/// flush entry the blacklist leaves keeps no records: the ring can hold far more than any window,
+/// and [`Scan::window`] refuses a window that reaches one.
 pub(crate) async fn scan(dev: &impl BlockDev, sb: &Superblock, key: Option<&MasterKey>) -> Result<Scan> {
     let mut entries: BTreeMap<u64, Found> = BTreeMap::new();
+    let mut floor = 0;
     for index in 0..sb.journal.iter().map(|&(_, count)| count as usize).sum() {
-        for found in scan_bucket(dev, sb, key, index).await? {
+        for mut found in scan_bucket(dev, sb, key, index).await? {
+            if found.seq < floor {
+                found.area = Vec::new();
+                found.past = true;
+            }
             match entries.get(&found.seq) {
-                Some(had) if had.good && found.good && had.area != found.area => {
+                Some(had) if had.good && found.good && !had.past && !found.past && had.area != found.area => {
                     return Err(Error::Corrupt("two journal entries of one sequence"));
                 }
                 Some(had) if had.good || !found.good => {}
                 _ => {
+                    let raised = (found.good && found.flush && found.last_seq <= found.seq && !sb.blacklisted(found.seq)).then_some(found.last_seq).filter(|&l| l > floor);
                     entries.insert(found.seq, found);
+                    if let Some(last_seq) = raised {
+                        for (_, e) in entries.range_mut(floor..last_seq) {
+                            e.area = Vec::new();
+                            e.past = true;
+                        }
+                        floor = last_seq;
+                    }
                 }
             }
         }
@@ -235,7 +254,7 @@ fn entry(sb: &Superblock, key: Option<&MasterKey>, b: &[u8], bucket: usize, at: 
     // An entry that runs past its bucket is cut there and fails its checksum.
     let Some(end) = end.filter(|&end| end <= b.len()) else {
         let sectors = (b.len() / SECTOR) as u64;
-        return Ok(Found { seq, last_seq: 0, flush, good: false, bucket, offset, sectors, area: Vec::new() });
+        return Ok(Found { seq, last_seq: 0, flush, good: false, bucket, offset, sectors, area: Vec::new(), past: false });
     };
     let sectors = (end.next_multiple_of(block) / SECTOR) as u64;
     let mut bytes = b[..end].to_vec();
@@ -254,7 +273,7 @@ fn entry(sb: &Superblock, key: Option<&MasterKey>, b: &[u8], bucket: usize, at: 
     };
     let last_seq = if flush { le64(&bytes, 48) } else { 0 };
     let area = if good { bytes.split_off(HEADER) } else { Vec::new() };
-    Ok(Found { seq, last_seq, flush, good, bucket, offset, sectors, area })
+    Ok(Found { seq, last_seq, flush, good, bucket, offset, sectors, area, past: false })
 }
 
 /// The entries replay takes: from the newest flush entry `F`'s last
@@ -298,6 +317,9 @@ impl Scan {
             }
             if !e.good && !sb.blacklisted(e.seq) {
                 return Err(Error::Checksum("journal entry"));
+            }
+            if e.past {
+                return Err(Error::Corrupt("a journal window reaching behind another flush entry's last sequence"));
             }
             next = e.seq.saturating_add(1);
         }
@@ -489,6 +511,8 @@ pub(crate) struct Closed {
 pub(crate) struct Writer {
     /// Each ring bucket's device bucket.
     pub ring: Vec<u64>,
+    /// Ring buckets live entries may hold at once: what a replay reads.
+    live: usize,
     pub bucket_sectors: u64,
     /// Entries are at most this many bytes, `per_bucket` of them to a bucket.
     entry: usize,
@@ -525,6 +549,7 @@ impl Writer {
         assert!(entry > HEADER + TAIL + 2 * max_tx as usize * 8, "journal buckets of {bucket} bytes hold no transaction");
         let newest = alloc::vec![None; ring.len()];
         Writer {
+            live: ring.len(),
             ring,
             bucket_sectors,
             entry,
@@ -545,9 +570,15 @@ impl Writer {
         }
     }
 
-    /// Entries the whole ring holds.
+    /// Keeps live entries to at most `buckets` of the ring, so a replay
+    /// reads no more, wherever on the ring they lie.
+    pub(crate) fn hold_live_to(&mut self, buckets: usize) {
+        self.live = buckets.clamp(1, self.ring.len());
+    }
+
+    /// Entries the live part of the ring holds.
     pub(crate) fn slots(&self) -> u64 {
-        self.ring.len() as u64 * self.per_bucket
+        self.live as u64 * self.per_bucket
     }
 
     /// Body u64s an entry holds for transactions.
@@ -559,6 +590,7 @@ impl Writer {
     pub(crate) fn ring_free(&self) -> u64 {
         let outstanding = (self.closed.len() + usize::from(self.open.is_some())) as u64;
         let free = (0..self.ring.len()).filter(|&i| i != self.head && self.newest[i].is_none()).count() as u64;
+        let free = free.saturating_sub((self.ring.len() - self.live) as u64);
         let entry_sectors = (self.entry / SECTOR) as u64;
         (free * self.per_bucket + (self.bucket_sectors - self.head_sectors) / entry_sectors).saturating_sub(outstanding)
     }

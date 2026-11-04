@@ -297,6 +297,53 @@ fn a_window_with_an_entry_missing_or_failing_its_checksum_is_refused() {
     assert_eq!(window_of(&unclean_with(&[], |_, _| {})).unwrap().map(|w| (w.first, w.last, w.next)), None);
 }
 
+/// A writer holding its live entries to three buckets of an eight-bucket
+/// ring offers what a writer of a three-bucket ring does, as its buckets
+/// fill, wherever on the ring they lie.
+#[test]
+fn a_writer_held_to_some_buckets_offers_what_a_ring_of_that_many_does() {
+    let (bucket_sectors, block) = (512, BLOCK);
+    let mut held = journal::Writer::new((0..8).collect(), bucket_sectors, block, super::super::mount::K_TX);
+    held.hold_live_to(3);
+    let mut small = journal::Writer::new((0..3).collect(), bucket_sectors, block, super::super::mount::K_TX);
+    assert_eq!(held.slots(), small.slots());
+    assert_eq!(held.ring_free(), small.ring_free());
+    (held.head, small.head) = (5, 1);
+    held.newest[4] = Some(9);
+    small.newest[0] = Some(9);
+    assert_eq!(held.ring_free(), small.ring_free());
+    held.newest[6] = Some(10);
+    small.newest[2] = Some(10);
+    // Only what the head bucket has left.
+    assert_eq!(held.ring_free(), small.ring_free());
+    held.head_sectors = bucket_sectors;
+    small.head_sectors = bucket_sectors;
+    assert_eq!((held.ring_free(), small.ring_free()), (0, 0));
+}
+
+/// The ring can hold far more than a window: an entry older than a good
+/// flush entry's last sequence keeps no records, wherever in the ring it
+/// lies. A window that reaches one has last sequences that went back, and
+/// is refused.
+#[test]
+fn a_scan_keeps_no_records_of_entries_behind_a_flush_entrys_last_sequence() {
+    let roots = Ring::of(&formatted(8 << 20, None), None).roots;
+    let mut area = Vec::new();
+    tail(&mut area, &roots);
+    let scanned = |dev: &Image| -> Vec<(u64, bool, bool)> {
+        block_on_ready(async {
+            let sb = super::super::read::read_superblock(dev).await.unwrap().0;
+            journal::scan(dev, &sb, None).await.unwrap().entries.values().map(|e| (e.seq, e.past, e.area.is_empty())).collect()
+        })
+    };
+    let moving = unclean_with(&[(1, 1, area.clone(), 0), (2, 1, area.clone(), 0), (3, 2, area.clone(), 0), (4, 3, area.clone(), 0)], |_, _| {});
+    assert_eq!(scanned(&moving), [(1, true, true), (2, true, true), (3, false, false), (4, false, false)]);
+    assert_eq!(window_of(&moving).unwrap().map(|w| (w.first, w.last)), Some((3, 4)));
+    // Entry 3 said its window starts at 3, the newest that it starts at 2.
+    let back = unclean_with(&[(1, 1, area.clone(), 0), (2, 1, area.clone(), 0), (3, 3, area.clone(), 0), (4, 2, area.clone(), 0)], |_, _| {});
+    assert_eq!(window_of(&back), Err(Error::Corrupt("a journal window reaching behind another flush entry's last sequence")));
+}
+
 /// What the ring holds past a bucket's newest entry is left over from an
 /// earlier pass and is not read; past a damaged entry, the reader steps a
 /// block at a time to the next.

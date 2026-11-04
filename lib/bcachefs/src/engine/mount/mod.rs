@@ -83,6 +83,11 @@ const RW_FEATURES: u64 = 1 << 8 | 1 << 9 | 1 << 12 | 1 << 13 | 1 << 17 | 1 << 18
 /// Feature bit 5: the superblock holds a blacklist.
 const BLACKLIST_FEATURE: u64 = 1 << 5;
 
+/// Journal bytes live entries hold at most. A replay holds every key of
+/// them in memory until its nodes take them, so this, not the journal
+/// mkfs sized by the device, bounds an unclean mount's memory and time.
+const JOURNAL_LIVE: u64 = 32 << 20;
+
 /// Ring geometry that leaves two cache-sized reclaim shares and an ordinary
 /// quarter, with room for at least one maximum-size ordinary transaction.
 pub(crate) fn journal_buckets(bucket_sectors: u64, block: usize) -> u64 {
@@ -217,12 +222,12 @@ const _: () = assert!(PER_NODE <= K_TX, "a reclaim batch of one node fits one re
 /// The largest key a node holds, as its reader refuses a larger value
 /// (A3.16).
 const MAX_KEY: usize = 8 * (KEY_U64S + super::bkey::MAX_VALUE_U64S);
+const _: () = assert!(MAX_KEY <= K_TX as usize * 8, "materialization's room takes any one key, so it always takes its first position");
 /// Whether nodes of `node` bytes hold reclaim's largest split: a node read
 /// at five times its bytes unpacked, and two transactions more, spread
 /// evenly over [`MAX_GROUPS`] nodes, each taking its share and at most a key
 /// past it.
 const fn splits_fit(node: usize) -> bool {
-const _: () = assert!(MAX_KEY <= K_TX as usize * 8, "materialization's room takes any one key, so it always takes its first position");
     (5 * (node - FIRST_KEYS) + 2 * K_TX as usize * 8).div_ceil(MAX_GROUPS) + MAX_KEY <= node - FIRST_KEYS
 }
 const _: () = assert!(splits_fit(super::mkfs::MIN_BUCKET as usize * SECTOR), "mkfs's smallest nodes are writable");
@@ -388,6 +393,8 @@ impl<D: BlockDev> Mount<D> {
         let ring: Vec<u64> = sb.journal.iter().flat_map(|&(first, count)| first..first + count).collect();
         let bucket_sectors = u64::from(sb.member.bucket_sectors);
         let mut journal = Writer::new(ring, bucket_sectors, sb.block_bytes(), K_TX);
+        let live = (JOURNAL_LIVE / (bucket_sectors * SECTOR as u64)).max(journal_buckets(bucket_sectors, sb.block_bytes()));
+        journal.hold_live_to(usize::try_from(live).unwrap_or(usize::MAX));
         let mut blacklist = sb.blacklist.clone();
         let (clocks, restate) = match &replay {
             None => {
