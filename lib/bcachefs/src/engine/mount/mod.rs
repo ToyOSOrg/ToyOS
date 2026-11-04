@@ -176,6 +176,8 @@ pub(crate) struct Published {
     pub members: usize,
     /// Bounds added once the publication's own keys overfilled a new node.
     pub regrouped: usize,
+    /// Members appended to with no change left once the plan settled.
+    pub idle: usize,
 }
 
 /// A volume mounted read-write.
@@ -1510,6 +1512,10 @@ impl<D: BlockDev> Mount<D> {
     /// superblock, clean, with `clean` naming `S`. Accounting totals that
     /// came to zero stay, as upstream keeps them (A7.23).
     pub async fn unmount(self) -> Result<()> {
+        self.unmount_clean().await
+    }
+
+    async fn unmount_clean(&self) -> Result<()> {
         // A clean volume holds no orphan (A8.14), and nothing holds one now.
         self.release_orphans().await?;
         self.check_writable()?;
@@ -1586,6 +1592,15 @@ impl<D: BlockDev> Mount<D> {
 
     /// A clean unmount without reclaim first writing what was committed:
     /// all of it in the terminal publication, and what that wrote.
+    /// Every cached node of `btree` written to a fresh node next, as one
+    /// read after an unclean mount and not yet rewritten is (§3.5).
+    pub(crate) fn rewrite_next(&self, btree: Btree) {
+        let mut st = self.st.borrow_mut();
+        for id in st.cache.ids() {
+            st.cache.change(id, |n| n.fresh |= n.btree == btree);
+        }
+    }
+
     pub(crate) async fn unmount_in_one_publication(self) -> Result<Published> {
         self.release_orphans().await?;
         self.publish_clean().await?;

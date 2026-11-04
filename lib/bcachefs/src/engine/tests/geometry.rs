@@ -243,3 +243,57 @@ fn an_encrypted_node_of_one_block_survives_a_crash_at_every_request() {
     let image = shaped(64 << 20, 64, 64, Some(Encryption { passphrase: &secret, kdf: MIN_KDF })).into_inner();
     super::crash::ops_survive_a_crash_on(image, Some(&secret), MEMORY, &super::crash::mixed(70), 5, 8);
 }
+
+/// A publication whose own later round moves an LRU key out of the leaf an
+/// earlier round put it in, leaving that leaf nothing to append.
+/// - Four nodes to a bucket, eight blocks to a node.
+/// - Data buckets a quarter full, so the LRU spans several leaves split by
+///   fill. The first leaf holds the quarter-full entries.
+/// - One inode changed, its leaf and the accounting leaf to be rewritten (as
+///   after an unclean mount); every other node appended to.
+///
+/// The inode leaf's new node leaves its bucket a quarter full: that LRU key
+/// lands in the first leaf, which joins. The accounting leaf, joining in
+/// the same round, takes the next slot: the key moves to the half-full
+/// range, and the first leaf has nothing left. Red when such a member is
+/// written anyway: an empty later bset, which the volume's reader refuses.
+#[test]
+fn a_member_left_with_nothing_to_append_is_not_written() {
+    let dev = shaped(256 << 20, 8, 64, None);
+    let quarter = super::super::read::Source::superblock(&block_on_ready(Volume::open(&dev)).unwrap()).member.bucket_sectors as usize * SECTOR / 4;
+    let m = open(&dev, None, MEMORY);
+    let kept = Executor::new().block_on(async {
+        let mut kept = Vec::new();
+        for i in 0..2800usize {
+            let ino = m.create(m.root(), format!("d{i}").as_bytes(), New::File, OWNER, NOW).await.unwrap().ino;
+            m.write(ino, 0, &vec![i as u8; quarter], NOW).await.unwrap();
+            if i % 4 == 0 { kept.push(ino); }
+            if i % 64 == 63 { m.commit().await.unwrap(); }
+        }
+        for i in 0..2800usize {
+            if i % 4 != 0 {
+                let removed = m.unlink(m.root(), format!("d{i}").as_bytes(), false, NOW).await.unwrap();
+                m.release(removed.node).await.unwrap();
+            }
+            if i % 64 == 0 { m.commit().await.unwrap(); }
+        }
+        m.commit().await.unwrap();
+        kept
+    }, || panic!("stalled; {}", m.dump()));
+    block_on_ready(m.unmount()).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert!(v.roots().iter().any(|r| r.btree == Btree::Lru && r.level > 0), "the LRU spans several leaves");
+    drop(v);
+    let m = open(&dev, None, MountOptions { cache_nodes: 4096 });
+    for btree in [Btree::Inodes, Btree::Accounting] {
+        block_on_ready(super::super::read::Source::walk(&m, btree, Bpos::MIN, |_, _| Ok(true))).unwrap();
+        m.rewrite_next(btree);
+    }
+    block_on_ready(m.set_mtime(kept[0], NOW + 9)).unwrap();
+    let published = block_on_ready(m.unmount_in_one_publication()).unwrap();
+    assert!(published.idle > 0, "no member was left with nothing to append: {published:?}");
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(block_on_ready(v.inode(kept[0])).unwrap().mtime, NOW + 9);
+    assert_eq!(block_on_ready(v.names()).unwrap().len(), kept.len());
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
