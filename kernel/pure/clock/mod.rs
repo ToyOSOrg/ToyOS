@@ -8,9 +8,9 @@ pub mod reference;
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
-/// What opens the kernel's report each time its scheduled refinement holds the
-/// TSC to the HPET over a span (`clock: over <span> s the TSC counted ...`):
-/// written at spans the clock schedules after calibration, on no event.
+/// What opens the kernel's report each time its refinement holds the TSC to
+/// the HPET over a span (`clock: over <span> s the TSC counted ...`): written
+/// by the first scheduler pass after each doubling span.
 pub const TSC_REFINED: &str = "clock: over ";
 
 /// What opens the kernel's report of a span in which the TSC moved apart from

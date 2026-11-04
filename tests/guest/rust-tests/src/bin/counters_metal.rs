@@ -12,11 +12,8 @@
 //! through the `/log` fileserver on that fileserver's CPU.
 //!
 //! **`idle0` waits for the end of the ACPI server's start** ([`acpi_said`],
-//! `acpiserver_api::STARTED`). What the machine raises at times it chooses (a
-//! query or GPE the server names the first time it takes it, and the kernel's
-//! first fixed-hardware interrupt) may still land anywhere, the idle second
-//! included: the `counters` row reports those lines there and refuses any
-//! other.
+//! `acpiserver_api::STARTED`). What the `counters` row admits inside the idle
+//! second is `idle_second_lines`'s (`tests/toyos.rs`).
 //!
 //! **Then for the log to be quiet** ([`settle`]): a job starts while
 //! logkeeper is still writing the boot so far and the job's own launch lines

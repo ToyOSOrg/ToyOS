@@ -333,7 +333,7 @@ mod checks {
 
     /// [`idle_second_lines`] on lines as the benches' readbacks carry them: the
     /// T14's two first queries, the kernel's first fixed-hardware interrupt, its
-    /// scheduled TSC refinement and the AMD's TSC step report pass, reported;
+    /// TSC refinement and the AMD's TSC step report pass, reported;
     /// anything else stamped in the second, acpiserver's periodic count, a
     /// first time said twice and the clock's slewing of the step among it, is
     /// refused; and a line outside the second is no line of it.
