@@ -17,7 +17,8 @@ pub(super) fn pointer(max: Bpos, ptr: &NodePtr) -> (Key, Vec<u8>) {
 pub(crate) enum Order {
     /// The oldest pin first, at any level: what frees journal buckets.
     OldestPin,
-    /// The lowest level's first: a clean unmount's level-by-level writes.
+    /// The lowest level's first: how a clean unmount materializes what is
+    /// left pending.
     LeavesFirst,
 }
 

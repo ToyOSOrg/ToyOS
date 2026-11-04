@@ -142,28 +142,32 @@ fn every_accepted_geometry_unmounts_clean_after_churn() {
     }
 }
 
-/// The same on an encrypted volume of a node per block and bucket: every
-/// new node and appended bset under a nonce of its own.
+/// The same on encrypted volumes, a node of one block and one of eight:
+/// every new node and appended bset under a nonce of its own, and the
+/// eight-block publication appending.
 #[test]
-fn an_encrypted_node_of_one_block_unmounts_clean() {
+fn encrypted_publications_take_a_nonce_each() {
     use super::super::crypt::oracle;
     let secret = hex_secret();
-    let dev = shaped(64 << 20, 64, 64, Some(Encryption { passphrase: &secret, kdf: MIN_KDF }));
-    let mut expect = Expect::default();
-    let m = open(&dev, Some(&secret), MEMORY);
-    oracle::reset();
-    Executor::new().block_on(async {
-        for i in 0..400 {
-            let name = format!("e{i}").into_bytes();
-            let ino = m.create(m.root(), &name, New::File, OWNER, NOW).await.unwrap().ino;
-            expect.dirs.entry(m.root()).or_default().insert(name, ino);
-            if i % 50 == 49 { m.commit().await.unwrap(); }
-        }
-    }, || panic!("stalled; {}", m.dump()));
-    block_on_ready(m.unmount()).unwrap();
-    holds_and_checks(&dev, Some(&secret), &expect);
-    assert!(oracle::nonces() > 20, "{} nonces recorded", oracle::nonces());
-    assert_eq!(oracle::reused(), Vec::<[u32; 4]>::new(), "nonces used over two plaintexts");
+    for (bytes, block, node) in [(64usize << 20, 64u64, 64u64), (128 << 20, 8, 64)] {
+        let dev = shaped(bytes, block, node, Some(Encryption { passphrase: &secret, kdf: MIN_KDF }));
+        let mut expect = Expect::default();
+        let m = open(&dev, Some(&secret), MEMORY);
+        oracle::reset();
+        Executor::new().block_on(async {
+            for i in 0..400 {
+                let name = format!("e{i}").into_bytes();
+                let ino = m.create(m.root(), &name, New::File, OWNER, NOW).await.unwrap().ino;
+                expect.dirs.entry(m.root()).or_default().insert(name, ino);
+                if i % 50 == 49 { m.commit().await.unwrap(); }
+            }
+        }, || panic!("stalled; {}", m.dump()));
+        let published = block_on_ready(m.unmount_published()).unwrap();
+        assert!(node == block || published.appended > 0, "block {block} node {node}: {published:?}");
+        holds_and_checks(&dev, Some(&secret), &expect);
+        assert!(oracle::nonces() > 20, "{} nonces recorded", oracle::nonces());
+        assert_eq!(oracle::reused(), Vec::<[u32; 4]>::new(), "nonces used over two plaintexts");
+    }
 }
 
 /// Everything committed written by the terminal publication alone, on a
@@ -224,7 +228,38 @@ fn a_publication_split_again_by_its_own_keys_settles_self_describing() {
 /// last create spins in reclaim forever.
 #[test]
 fn a_full_volume_of_one_block_nodes_crashes_removes_everything_and_unmounts_clean() {
-    super::buckets::full_crash_removal_and_reuse(shaped(64 << 20, 64, 64, None), 0);
+    for bytes in [64 << 20, 128 << 20] {
+        super::buckets::full_crash_removal_and_reuse(shaped(bytes, 64, 64, None), 0);
+    }
+}
+
+/// Nodes of one block, one or two to a bucket, filled with names to the
+/// refusal, then unmounted clean with nothing removed: the publication
+/// finds its slots in what the refusal left.
+#[test]
+fn a_volume_of_one_block_nodes_filled_to_the_refusal_unmounts_clean() {
+    for bytes in [64 << 20, 128 << 20] {
+        let dev = shaped(bytes, 64, 64, None);
+        let m = open(&dev, None, MEMORY);
+        let made = Executor::new().block_on(async {
+            let mut n = 0;
+            loop {
+                match m.create(m.root(), format!("f{n:06}-{}", "x".repeat(240)).as_bytes(), New::File, OWNER, NOW).await {
+                    Ok(_) => n += 1,
+                    Err(e) => {
+                        assert_eq!(e, Error::NoSpace("no room left for the btree nodes a change may write"), "after {n} creates");
+                        break;
+                    }
+                }
+            }
+            m.commit().await.unwrap();
+            n
+        }, || panic!("stalled; {}", m.dump()));
+        block_on_ready(m.unmount()).unwrap();
+        let v = block_on_ready(Volume::open(&dev)).unwrap();
+        assert_eq!(block_on_ready(v.names()).unwrap().len(), made);
+        assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+    }
 }
 
 /// A crash at every request of a mixed workload on a node of one block,

@@ -93,8 +93,8 @@ pub async fn mkfs(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, r
     mkfs_shaped(dev, options, tree, random, Shape::NATIVE).await
 }
 
-/// Block and btree node sizes, in sectors, as upstream's `format` takes
-/// them; no node size takes a bucket's, at most 256 KiB.
+/// Block and btree node sizes, in sectors: a block at least the device's,
+/// a node of whole blocks, at most a bucket and 256 KiB.
 #[derive(Clone, Copy)]
 pub(crate) struct Shape {
     pub block: u64,
@@ -406,7 +406,7 @@ impl Geometry {
         let block = shape.block;
         let node = shape.node.unwrap_or(bucket.min(MAX_NODE_SECTORS));
         if !block.is_power_of_two() || block < BLOCK_SECTORS || !node.is_power_of_two() || node < block || node > bucket.min(MAX_NODE_SECTORS) {
-            return Err(Error::Invalid("a block or node size format does not take"));
+            return Err(Error::Invalid("a block or node size mkfs does not lay out"));
         }
         let journal = (front, (nbuckets / 128).max(8).max(super::mount::journal_buckets(bucket, (block * SECTOR as u64) as usize)));
         Ok(Geometry { block, bucket, nbuckets, node, layout, journal, data_buckets: 0 })
