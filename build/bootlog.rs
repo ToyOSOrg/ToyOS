@@ -22,9 +22,8 @@ pub const REBOOTING: &str = "Rebooting.";
 pub const STOPPING: &str = toyos_logstream::STOPPING;
 
 /// What `tests/guest/test-runner` says when its job list runs past
-/// `toyos_tco::JOB_BOUND_MS`, with the job it was inside as the next word.
-/// **Console only**: a userland write reaches the serial backend and never a
-/// log record, so no stick carries it.
+/// `toyos_tco::JOB_BOUND_MS`, with the job it was inside as the next word,
+/// before it kills that job and reboots: a boot that says it is no pass.
 pub const JOB_DEADLINE_SAID: &str =
     "test-runner: the job list ran past its bound, and the job it was inside is";
 
@@ -337,6 +336,9 @@ pub enum Unfit {
     /// The loader pass after the foreign-identity arm's reset read no
     /// [`FOREIGN_DONE`]: the stop it staged never finished.
     NoForeignDone,
+    /// The test runner's word that its job list ran past its bound: the
+    /// line, naming the job it killed.
+    JobsPastBound(String),
 }
 
 impl fmt::Display for Unfit {
@@ -353,6 +355,10 @@ impl fmt::Display for Unfit {
                 f,
                 "the loader's pass after the reset carries no {HANDED_BACK:?} with {REBOOTING:?} \
                  under {LOG_TAIL:?}: the stop this boot asked for never reached the reset"
+            ),
+            Self::JobsPastBound(said) => write!(
+                f,
+                "the test runner killed a job and rebooted at its bound: {said:?}"
             ),
             Self::NoForeignDone => write!(
                 f,
@@ -541,6 +547,12 @@ pub fn boot_millis(log: &str) -> Option<u64> {
 /// pass's ([`HANDED_BACK`], and [`REBOOTING`] under [`LOG_TAIL`]).
 pub fn verdict(log: &str) -> Result<u64, Unfit> {
     let boot_ms = boot_millis(log).ok_or(Unfit::NoBootRecord)?;
+    let past_bound = |line: &&str| {
+        toyos_logstream::program_line(line).is_some_and(|said| said.tag == "test-runner" && said.text.starts_with(JOB_DEADLINE_SAID))
+    };
+    if let Some(line) = log.lines().find(past_bound) {
+        return Err(Unfit::JobsPastBound(line.trim().to_string()));
+    }
     if stopping_line(log).is_none() {
         let last = log.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default();
         return Err(Unfit::Unfinished(last.trim().to_string()));
@@ -576,6 +588,19 @@ mod tests {
         assert!(matches!(verdict(&quoted), Err(Unfit::Unfinished(_))));
         assert_eq!(verdict(&stopping), Err(Unfit::NoBootRecord));
         assert_eq!(verdict(""), Err(Unfit::NoBootRecord));
+    }
+
+    /// A boot the test runner ended at its job bound stopped as a passing
+    /// one does, and is none.
+    #[test]
+    fn a_boot_whose_job_list_ran_past_its_bound_is_not_a_pass() {
+        let past = format!("[2026-11-04 17:07:50 535.506 test-runner tid=1] {JOB_DEADLINE_SAID} osbench_persist (525000 ms)\n");
+        let log = format!(
+            "[ 1.151 cpu0 kernel] Boot: complete (1151ms)\n{past}[ 535.507 supervisor] {STOPPING} (Reboot)\n"
+        );
+        assert_eq!(verdict(&log), Err(Unfit::JobsPastBound(past.trim().to_string())));
+        let quoted = log.replace("test-runner tid=1] ", "osbench tid=4] said ");
+        assert_eq!(verdict(&quoted), Ok(1151));
     }
 
     /// Only the supervisor's own stop line, naming a shutdown, is a power-off.
