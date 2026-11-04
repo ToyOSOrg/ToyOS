@@ -10,7 +10,7 @@ opened: 2026-10-04
 harness's 15 s `GUEST_QUIET` when the host starves the guest's vCPUs, and
 `virt_smp`, `virt_el1_smp`, `virt_mask_windows` and
 `virt_off_names_the_cpus_left_on` red as `STALLED`. It was sighted eleven
-times from 2026-10-04 to 2026-11-02, at host loads of 30 to 85, on TCG and on
+times from 2026-10-04 to 2026-10-10, at host loads of 30 to 85, on TCG and on
 HVF.
 
 **What the silent guest is doing.** Every vCPU is in `sync::Lock::lock` on the

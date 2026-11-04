@@ -253,8 +253,8 @@ pub fn read(rights: Rights, out: &mut UserBytesMut) -> Result<usize, SyscallErro
     if watch::wait_until(&parkable, &ANSWERED, 0, WaitClass::Other, deadline, answered).is_err() {
         return Err(SyscallError::Gone);
     }
-    // One copy: a copy takes the caller's space lock, which every reader of a
-    // round wants the moment the round completes.
+    // One copy: each copy takes the caller's space lock, which its other
+    // readers of the round want at the same moment.
     let records: Vec<u8> = (0..cpus).flat_map(|cpu| record(cpu, generation, rights).encode().0).collect();
     out.write_at(0, &records);
     Ok(cpus)
