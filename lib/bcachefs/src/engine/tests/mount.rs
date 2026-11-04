@@ -334,7 +334,7 @@ fn a_pointer_to_a_cached_node_of_another_btree_is_refused() {
 fn pack_accounting_leaf(dev: &Image) -> u64 {
     use super::super::journal;
     use super::super::superblock::field_type;
-    let sb = block_on_ready(super::super::read::read_superblock(dev)).unwrap();
+    let sb = block_on_ready(super::super::read::read_superblock(dev)).unwrap().0;
     let clean = sb.clean.clone().unwrap();
     let mut roots = clean.roots.clone();
     let root = roots.iter_mut().find(|r| r.btree == Btree::Accounting).unwrap();

@@ -85,7 +85,7 @@ struct Ring {
 
 impl Ring {
     fn of(dev: &Image, passphrase: Option<&[u8]>) -> Ring {
-        let sb = block_on_ready(super::super::read::read_superblock(dev)).unwrap();
+        let sb = block_on_ready(super::super::read::read_superblock(dev)).unwrap().0;
         let key = passphrase.map(|p| super::super::crypt::MasterKey::unwrap(sb.crypt.as_ref().unwrap(), &sb.header.internal_uuid, p, MIN_LIMITS).unwrap());
         let first = sb.journal[0].0 * u64::from(sb.member.bucket_sectors) / 8;
         Ring { roots: sb.clean.as_ref().unwrap().roots.clone(), uuid: sb.header.internal_uuid, key, first }
@@ -271,7 +271,7 @@ fn every_entry_of_the_window_carries_its_records_and_none_is_blacklisted() {
 
 fn window_of(dev: &Image) -> Result<Option<journal::Window>> {
     block_on_ready(async {
-        let sb = super::super::read::read_superblock(dev).await?;
+        let sb = super::super::read::read_superblock(dev).await?.0;
         journal::scan(dev, &sb, None).await?.window(&sb)
     })
 }
@@ -308,7 +308,7 @@ fn a_bucket_is_read_up_to_an_older_entry_and_past_a_damaged_one() {
     let stale = unclean_with(&[(5, 5, area.clone(), 0), (2, 2, area.clone(), 0)], |_, _| {});
     let seqs = |dev: &Image| -> Vec<(u64, bool)> {
         block_on_ready(async {
-            let sb = super::super::read::read_superblock(dev).await.unwrap();
+            let sb = super::super::read::read_superblock(dev).await.unwrap().0;
             journal::scan(dev, &sb, None).await.unwrap().entries.values().map(|e| (e.seq, e.good)).collect()
         })
     };

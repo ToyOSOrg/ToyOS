@@ -276,7 +276,7 @@ fn a_failed_write_is_reissued_byte_for_byte(journal: bool) {
     // The journal's blocks, and the nodes' beyond them short of the end
     // superblock copy.
     let (ring, nodes) = {
-        let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap();
+        let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap().0;
         let bucket = u64::from(sb.member.bucket_sectors) / 8;
         let (first, count) = sb.journal[0];
         (first * bucket..(first + count) * bucket, (first + count) * bucket..sb.header.layout.offsets[2] / 8)

@@ -15,7 +15,7 @@ use super::journal::{self, Replay, Window};
 use super::node::{self, Expect, Node};
 use super::cache::Keys;
 use super::mkfs::ROOT_SNAPSHOT;
-use super::superblock::{Layout, Root, Superblock, HEADER, LAYOUT, MAX_BYTES, PRIMARY};
+use super::superblock::{Layout, Root, Superblock, HEADER, LAYOUT, MAGIC, MAX_BYTES, PRIMARY};
 use super::value::mode::{S_IFDIR, S_IFLNK, S_IFMT};
 use super::value::csum_type as csum;
 use super::value::{inode_field, inode_flag, Dirent, DirentType, Extent, InodeValue, NodePtr, Subvolume};
@@ -36,6 +36,8 @@ pub struct Volume<D> {
     /// What an unclean volume's journal lays over its nodes.
     replay: Option<(Window, Replay)>,
     root: u64,
+    /// The superblock copies a crash left unreadable ([`read_superblock`]).
+    torn: Vec<u64>,
 }
 
 /// What a [`Volume`] opened: the parts a read-write mount takes over.
@@ -47,6 +49,7 @@ pub(crate) struct Parts<D> {
     pub key_version: u64,
     pub replay: Option<(Window, Replay)>,
     pub root: u64,
+    pub torn: Vec<u64>,
 }
 
 /// A file's attributes.
@@ -103,25 +106,25 @@ impl Inode {
 impl<D: BlockDev> Volume<D> {
     /// An unencrypted volume, or one formatted without a passphrase.
     pub async fn open(dev: D) -> Result<Self> {
-        let sb = read_superblock(&dev).await?;
+        let (sb, torn) = read_superblock(&dev).await?;
         let key = match &sb.crypt {
             Some(crypt) => Some(MasterKey::stored(crypt).ok_or(Error::Locked)?),
             None => None,
         };
-        Self::with(dev, sb, key).await
+        Self::with(dev, sb, torn, key).await
     }
 
     /// An encrypted volume, its key unwrapped under `passphrase` with no more
     /// scrypt cost than `limits`, which the superblock asks and the caller
     /// bounds.
     pub async fn unlock(dev: D, passphrase: &[u8], limits: scrypt::Limits) -> Result<Self> {
-        let sb = read_superblock(&dev).await?;
+        let (sb, torn) = read_superblock(&dev).await?;
         let crypt = sb.crypt.ok_or(Error::Invalid("a passphrase for an unencrypted volume"))?;
         let key = MasterKey::unwrap(&crypt, &sb.header.internal_uuid, passphrase, limits)?;
-        Self::with(dev, sb, Some(key)).await
+        Self::with(dev, sb, torn, Some(key)).await
     }
 
-    async fn with(dev: D, sb: Superblock, key: Option<MasterKey>) -> Result<Self> {
+    async fn with(dev: D, sb: Superblock, torn: Vec<u64>, key: Option<MasterKey>) -> Result<Self> {
         if sb.encrypted() != sb.crypt.is_some() {
             return Err(Error::Corrupt("encryption option and crypt field disagree"));
         }
@@ -138,7 +141,7 @@ impl<D: BlockDev> Volume<D> {
             let replay = journal::replay(&scan, &sb, &window)?;
             (replay.roots.clone(), replay.key_version.unwrap_or(0), window.last, Some((window, replay)))
         };
-        let mut volume = Volume { dev, sb, key, roots, key_version, journal_seq, replay, root: 0 };
+        let mut volume = Volume { dev, sb, key, roots, key_version, journal_seq, replay, root: 0, torn };
         let (k, v) = volume.get(Btree::Subvolumes, Bpos::new(0, u64::from(super::mkfs::ROOT_SUBVOLUME), 0)).await?.ok_or(Error::Corrupt("no root subvolume"))?;
         if k.kind != kind::SUBVOLUME {
             return Err(Error::Corrupt("root subvolume of another type"));
@@ -155,12 +158,17 @@ impl<D: BlockDev> Volume<D> {
 
     /// Its parts, for a read-write mount to take over.
     pub(crate) fn into_parts(self) -> Parts<D> {
-        let Volume { dev, sb, key, roots, key_version, replay, root, .. } = self;
-        Parts { dev, sb, key, roots, key_version, replay, root }
+        let Volume { dev, sb, key, roots, key_version, replay, root, torn, .. } = self;
+        Parts { dev, sb, key, roots, key_version, replay, root, torn }
     }
 
     pub fn superblock(&self) -> &Superblock {
         &self.sb
+    }
+
+    /// The superblock copies, by sector, that a crash left unreadable.
+    pub fn torn_copies(&self) -> &[u64] {
+        &self.torn
     }
 
     pub(crate) fn dev(&self) -> &D {
@@ -813,28 +821,62 @@ pub(crate) async fn read_bytes(dev: &impl BlockDev, at: u64, len: usize) -> Resu
 
 /// The primary copy's layout, or the layout copy's when the primary
 /// is unreadable; then of every copy it lists, the valid one of highest
-/// sequence, the later on a tie.
-pub(crate) async fn read_superblock(dev: &impl BlockDev) -> Result<Superblock> {
+/// sequence, the later on a tie, and the copies that are this volume's but
+/// did not read whole: what a crash in a copy's write leaves.
+///
+/// Every place the layout gives the volume must hold the volume's own bytes:
+/// a copy whose first sector does not name this volume and its own offset,
+/// or a layout copy other than the chosen copy's layout, is another writer's,
+/// and the volume is refused as [`Error::Overwritten`] rather than mounted
+/// from what is left.
+pub(crate) async fn read_superblock(dev: &impl BlockDev) -> Result<(Superblock, Vec<u64>)> {
     let primary = read_copy(dev, PRIMARY).await;
+    let layout_copy = read_bytes(dev, LAYOUT * SECTOR as u64, Layout::BYTES).await?;
     let layout = match &primary {
         Ok(sb) => sb.header.layout.clone(),
         Err(Error::Device(e)) => return Err(Error::Device(*e)),
-        Err(_) => Layout::decode(&read_bytes(dev, LAYOUT * SECTOR as u64, Layout::BYTES).await?)?,
+        Err(failure) => match Layout::decode(&layout_copy) {
+            Ok(layout) => layout,
+            // A primary that still claims to be a copy, with no layout
+            // beside it, is a volume another writer took the front of.
+            Err(_) if read_bytes(dev, PRIMARY * SECTOR as u64, 40).await?[24..40] == MAGIC => {
+                return Err(Error::Overwritten { sector: LAYOUT });
+            }
+            Err(_) => return Err(*failure),
+        },
     };
-    let mut best: Option<Superblock> = primary.as_ref().ok().cloned();
-    let mut failure = primary.err();
-    for &offset in &layout.offsets {
-        if offset == PRIMARY {
-            continue;
-        }
+    let mut copies = alloc::vec![(PRIMARY, primary)];
+    for &offset in layout.offsets.iter().filter(|&&o| o != PRIMARY) {
         match read_copy(dev, offset).await {
-            Ok(sb) if best.as_ref().is_none_or(|b| sb.header.seq >= b.header.seq) => best = Some(sb),
-            Ok(_) => {}
             Err(Error::Device(e)) => return Err(Error::Device(e)),
-            Err(e) => failure = failure.or(Some(e)),
+            read => copies.push((offset, read)),
         }
     }
-    best.ok_or(failure.unwrap_or(Error::Corrupt("no superblock copy")))
+    let best = copies
+        .iter()
+        .filter_map(|(_, read)| read.as_ref().ok())
+        .reduce(|best, sb| if sb.header.seq >= best.header.seq { sb } else { best })
+        .cloned();
+    let Some(best) = best else {
+        let (_, failure) = copies.into_iter().next().expect("the primary is read");
+        return Err(failure.err().unwrap_or(Error::Corrupt("no superblock copy")));
+    };
+    if Layout::decode(&layout_copy).ok().as_ref() != Some(&best.header.layout) {
+        return Err(Error::Overwritten { sector: LAYOUT });
+    }
+    let mut torn = Vec::new();
+    let device = dev.blocks() * BLOCK as u64;
+    for (offset, read) in copies {
+        let Err(failure) = read else { continue };
+        let Some(at) = offset.checked_mul(SECTOR as u64).filter(|at| at.checked_add(SECTOR as u64).is_some_and(|end| end <= device)) else {
+            return Err(failure);
+        };
+        if !Superblock::names(&read_bytes(dev, at, SECTOR).await?, &best.header.internal_uuid, offset) {
+            return Err(Error::Overwritten { sector: offset });
+        }
+        torn.push(offset);
+    }
+    Ok((best, torn))
 }
 
 pub(crate) async fn read_copy(dev: &impl BlockDev, sector: u64) -> Result<Superblock> {

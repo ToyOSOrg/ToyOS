@@ -308,6 +308,13 @@ pub(crate) fn flag(flags: &[u64; 7], word: usize, lo: u32, len: u32) -> u64 {
 }
 
 impl Superblock {
+    /// Whether the copy whose first sector is `head` claims to be one of the
+    /// volume `internal_uuid` names, at `sector`: true of a copy a crash tore,
+    /// whose first sector is whole either way.
+    pub(crate) fn names(head: &[u8], internal_uuid: &[u8; 16], sector: u64) -> bool {
+        head.len() >= 112 && head[24..40] == MAGIC && head[40..56] == *internal_uuid && le64(head, 104) == sector
+    }
+
     /// The copy in `b`, read at `sector`, validated.
     pub(crate) fn decode(b: &[u8], sector: u64) -> Result<Superblock> {
         let header = decode_header(b)?;

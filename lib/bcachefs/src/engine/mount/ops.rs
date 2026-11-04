@@ -133,6 +133,12 @@ impl<D: BlockDev> Mount<D> {
         sectors / u64::from(self.sb.member.bucket_sectors) == self.sb.member.nbuckets
     }
 
+    /// The superblock copies, by sector, that a crash left unreadable and
+    /// the next publication rewrites first.
+    pub fn torn_copies(&self) -> Vec<u64> {
+        self.st.borrow().torn_copies.clone()
+    }
+
     pub async fn inode(&self, ino: u64) -> Result<Inode> {
         Source::inode(self, ino).await
     }

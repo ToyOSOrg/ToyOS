@@ -231,13 +231,55 @@ fn mkfs_is_a_function_of_its_random_source_and_time() {
     assert!(a == b);
 }
 
+/// A crash in the primary's write leaves its first sector whole and the
+/// rest unreadable: the volume opens from another copy and names the torn one.
 #[test]
-fn a_lost_primary_superblock_is_read_from_another_copy_and_found() {
+fn a_torn_primary_superblock_is_read_from_another_copy_and_named() {
     let dev = formatted(32 << 20, None);
-    block_on_ready(dev.write(1, &[[0u8; BLOCK]])).unwrap();
+    let mut block = [[0u8; BLOCK]];
+    block_on_ready(dev.read(1, &mut block)).unwrap();
+    block[0][SECTOR..].fill(0xff);
+    block_on_ready(dev.write(1, &block)).unwrap();
     let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(v.torn_copies(), [8]);
     assert_eq!(names(&v, v.root()), Vec::<String>::new());
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), [Finding::Copy(8)]);
+}
+
+/// A copy's place holding what is not this volume's copy there — nothing,
+/// another volume's copy, a copy of this one at another offset, or another
+/// layout — is another writer's, and the volume is refused, not opened from
+/// the copies left.
+#[test]
+fn a_superblock_place_another_writer_took_refuses_the_volume() {
+    let pristine = formatted(32 << 20, None).into_inner();
+    let image = |edit: &dyn Fn(&mut Vec<u8>)| {
+        let mut raw = pristine.clone();
+        edit(&mut raw);
+        Bytes::new(raw)
+    };
+    let primary = 8 * SECTOR;
+    let second = 2056 * SECTOR;
+    type Edit<'a> = &'a dyn Fn(&mut Vec<u8>);
+    let cases: [(&str, Edit, u64); 6] = [
+        ("a zeroed primary", &|raw| raw[primary..primary + BLOCK].fill(0), 8),
+        ("another volume's UUID", &|raw| raw[second + 40] ^= 1, 2056),
+        ("the primary's bytes in the second copy's place", &|raw| raw.copy_within(primary..primary + BLOCK, second), 2056),
+        ("a zeroed layout copy", &|raw| raw[7 * SECTOR..8 * SECTOR].fill(0), 7),
+        ("another format's superblock over the front", &|raw| {
+            raw[..BLOCK].fill(0);
+            raw[..4].copy_from_slice(b"BCFS");
+        }, 7),
+        ("another format's superblock over the front and its bitmap over the primary past its header", &|raw| {
+            raw[..BLOCK].fill(0);
+            raw[..4].copy_from_slice(b"BCFS");
+            raw[primary + 216..primary + BLOCK].fill(0xff);
+        }, 7),
+    ];
+    for (what, edit, sector) in cases {
+        assert_eq!(open_err(&image(edit)), Error::Overwritten { sector }, "{what}");
+    }
+    assert!(block_on_ready(Volume::open(&image(&|_| {}))).unwrap().torn_copies().is_empty());
 }
 
 /// The leaf of `btree` whose range holds `at`: its pointer and max key.
@@ -349,7 +391,8 @@ fn a_scrypt_cost_past_any_limit_is_refused_at_mkfs() {
     assert!(matches!(block_on_ready(mkfs(&dev, &options, &Tree::new(), &mut Seeded(1))), Err(Error::Unsupported(_))));
 }
 
-/// The primary copy re-encoded after `edit`, written over every copy.
+/// The primary copy re-encoded after `edit`, written over every copy and
+/// its layout over the layout copy, as an image's author writes both.
 fn rewrite_superblock(dev: &Image, edit: impl FnOnce(&mut super::superblock::Header, &mut Vec<super::superblock::Field>)) {
     let mut block = [[0u8; BLOCK]];
     block_on_ready(dev.read(1, &mut block)).unwrap();
@@ -362,6 +405,11 @@ fn rewrite_superblock(dev: &Image, edit: impl FnOnce(&mut super::superblock::Hea
         blocks.as_flattened_mut()[..bytes.len()].copy_from_slice(&bytes);
         block_on_ready(dev.write(offset / 8, &blocks)).unwrap();
     }
+    let mut first = [[0u8; BLOCK]];
+    block_on_ready(dev.read(0, &mut first)).unwrap();
+    let at = super::superblock::LAYOUT as usize * SECTOR;
+    first[0][at..at + super::superblock::Layout::BYTES].copy_from_slice(&header.layout.encode());
+    block_on_ready(dev.write(0, &first)).unwrap();
 }
 
 fn open_err(dev: &Image) -> Error {
@@ -389,11 +437,10 @@ fn journal_buckets_whose_counts_overflow_are_refused() {
 }
 
 #[test]
-fn a_superblock_copy_past_the_device_is_found_not_read() {
+fn a_superblock_copy_past_the_device_is_refused_not_read() {
     let dev = formatted(8 << 20, None);
     rewrite_superblock(&dev, |header, _| header.layout.offsets[2] = 1 << 60);
-    let v = block_on_ready(Volume::open(&dev)).unwrap();
-    assert!(block_on_ready(fsck(&v)).unwrap().contains(&Finding::Copy(1 << 60)));
+    assert_eq!(open_err(&dev), Error::Corrupt("superblock copy past the device"));
 }
 
 #[test]

@@ -350,7 +350,7 @@ impl<D: BlockDev> Mount<D> {
     pub async fn open(dev: D, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
         // Early, so a volume refused is refused by name before it is read;
         // `from` judges again the copy the open read.
-        writable(&read::read_superblock(&dev).await?)?;
+        writable(&read::read_superblock(&dev).await?.0)?;
         let volume = Volume::open(dev).await?;
         no_logged_ops(&volume).await?;
         let empty = allocator::empty_buckets(&volume).await?;
@@ -363,7 +363,7 @@ impl<D: BlockDev> Mount<D> {
     pub async fn unlock(dev: D, passphrase: &[u8], limits: scrypt::Limits, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
         // Early, so a volume refused costs no scrypt and is refused by name;
         // `from` judges again the copy the unlock read.
-        writable(&read::read_superblock(&dev).await?)?;
+        writable(&read::read_superblock(&dev).await?.0)?;
         let volume = Volume::unlock(dev, passphrase, limits).await?;
         no_logged_ops(&volume).await?;
         let empty = allocator::empty_buckets(&volume).await?;
@@ -373,7 +373,7 @@ impl<D: BlockDev> Mount<D> {
 
     /// `empty` is the volume's count of empty buckets.
     async fn from(parts: Parts<D>, empty: u64, metadata: allocator::Metadata, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
-        let Parts { dev, mut sb, key, roots, key_version, replay, root } = parts;
+        let Parts { dev, mut sb, key, roots, key_version, replay, root, torn: torn_copies } = parts;
         // The superblock this mount runs on, which a device may answer
         // differently from an earlier read.
         writable(&sb)?;
@@ -450,12 +450,6 @@ impl<D: BlockDev> Mount<D> {
         journal.reclaim_entries = ((limit + reclaim_room) as u64 * PER_NODE).div_ceil(per_entry) + 1;
 
         let journal_next = journal.next_seq;
-        let mut torn_copies = Vec::new();
-        for &offset in &sb.header.layout.offsets {
-            if read::read_copy(&dev, offset).await.is_err() {
-                torn_copies.push(offset);
-            }
-        }
         let state = State {
             header: sb.header.clone(),
             fields: sb.fields.clone(),

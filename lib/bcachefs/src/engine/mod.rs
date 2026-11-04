@@ -73,6 +73,10 @@ pub enum Error {
     NoSpace(&'static str),
     /// The mount stopped writing, and why.
     ReadOnly(&'static str),
+    /// A place the volume's layout gives it, by sector, holds another
+    /// writer's bytes: a superblock copy not naming this volume and its own
+    /// offset, or a layout copy other than the volume's.
+    Overwritten { sector: u64 },
 }
 
 impl From<toyos_blockdev::Error> for Error {

@@ -101,7 +101,13 @@ impl<D: Disk> DataVolume<D> {
             Ok(fs) if !fs.spans_its_device() => {
                 return Probed::Unmountable("the volume's buckets are not this partition's: it was made on another".into());
             }
-            Ok(fs) => fs,
+            Ok(fs) => {
+                let torn = fs.torn_copies();
+                if !torn.is_empty() {
+                    println!("fileserver: the DATA volume's superblock copies at sectors {torn:?} did not read whole; mounted from the newest whole copy, and the next publication rewrites them");
+                }
+                fs
+            }
             Err(error) => {
                 let mut block = [[0; BLOCK]; 2];
                 if let Err(read) = cache.block_on(cache.read(0, &mut block)) {

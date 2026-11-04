@@ -382,7 +382,7 @@ fn journal_pressure_recovers_after_torn_reordered_publication() {
 /// recover from.
 fn upstream_f(image: &[u8], passphrase: Option<&[u8]>) -> core::result::Result<Option<u64>, String> {
     let dev = ReadOnlyBytes::new(image).unwrap();
-    let sb = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("superblock: {e:?}"))?;
+    let sb = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("superblock: {e:?}"))?.0;
     let key = match passphrase {
         Some(p) => Some(super::super::crypt::MasterKey::unwrap(sb.crypt.as_ref().ok_or("no crypt field")?, &sb.header.internal_uuid, p, MIN_LIMITS).map_err(|e| format!("unlock: {e:?}"))?),
         None => None,
@@ -413,7 +413,7 @@ fn upstream_finds_f_at_every_request(image: Vec<u8>, passphrase: Option<&[u8]>, 
             seed.set(seed.get() + 1);
             m.check(64, seed.get(), |image| {
                 let dev = ReadOnlyBytes::new(image).unwrap();
-                let clean = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("{e:?}"))?.clean_flag();
+                let clean = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("{e:?}"))?.0.clean_flag();
                 if clean {
                     return Ok(());
                 }
@@ -422,7 +422,7 @@ fn upstream_finds_f_at_every_request(image: Vec<u8>, passphrase: Option<&[u8]>, 
                     Some(_) => Ok(()),
                     None => {
                         let dev = ReadOnlyBytes::new(image).unwrap();
-                        let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap();
+                        let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap().0;
                         let scan = block_on_ready(super::super::journal::scan(&dev, &sb, None)).ok();
                         let entries: Vec<_> = scan.iter().flat_map(|s| s.entries.values()).map(|e| (e.seq, e.last_seq, e.flush, e.good)).collect();
                         Err(format!("unclean, and upstream's reader finds no entry to replay: {entries:?}"))
