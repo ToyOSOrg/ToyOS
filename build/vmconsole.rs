@@ -21,6 +21,7 @@ use std::process::Child;
 use std::time::{Duration, Instant};
 
 use toyos_logstream::death::{died, Died};
+use toyos_abi::log::KERNEL_TAKES_THE_UART;
 use toyos_logstream::{Showing, CARRIED_ELSEWHERE};
 use toyos_virtio_serial::{CONSOLE_PORT, MAX_PORTS, PORT_ID};
 
@@ -85,7 +86,9 @@ impl Painter {
 ///
 /// **Its lines up to [`CARRIED_ELSEWHERE`] are the console port's too**, so
 /// they are not shown, but for a kernel's death, which no other channel will
-/// carry; every line after either is.
+/// carry; every line after either is, and after the kernel taking the UART
+/// back for the stop or a fatal path ([`KERNEL_TAKES_THE_UART`]), which may
+/// come before its driver said the first.
 #[derive(Default)]
 pub struct Uart {
     pending: Vec<u8>,
@@ -104,7 +107,7 @@ impl Uart {
                 self.live = true;
                 continue;
             }
-            self.live |= died(text.trim_end()) == Some(Died::Kernel);
+            self.live |= died(text.trim_end()) == Some(Died::Kernel) || text.contains(KERNEL_TAKES_THE_UART);
             if self.live {
                 shown.push(line);
             }
@@ -503,6 +506,20 @@ mod tests {
         let mut uart = Uart::default();
         let shown: Vec<u8> = uart.pass(format!("{program}{death}").as_bytes()).concat();
         assert_eq!(String::from_utf8(shown).expect("UTF-8"), death);
+    }
+
+    /// **A stop that takes the UART from a driver still behind the log** is
+    /// shown from the kernel's word on: its driver never reached the quiet
+    /// line, and what it was still sending is the port's.
+    #[test]
+    fn the_kernels_taking_the_uart_is_shown_from() {
+        let behind = "[ 2.035 cpu0 kernel] pcidev: PCI 00:01.";
+        let stop = format!("\n{KERNEL_TAKES_THE_UART}\n[ 2.531 cpu0 kernel] mmio: x\n[ 2.551 cpu0 kernel] Shutting down.\n");
+        let mut uart = Uart::default();
+        let shown: Vec<u8> = uart.pass(format!("{behind}{stop}").as_bytes()).concat();
+        let shown = String::from_utf8(shown).expect("UTF-8");
+        assert!(shown.starts_with(KERNEL_TAKES_THE_UART), "{shown:?}");
+        assert!(shown.ends_with("Shutting down.\n"), "{shown:?}");
     }
 
     /// **The launch's merge**: the port's lines in order, then the UART's from
