@@ -176,6 +176,8 @@ pub(crate) struct Published {
     pub members: usize,
     /// Bounds added once the publication's own keys overfilled a new node.
     pub regrouped: usize,
+    /// Members appended to.
+    pub appended: usize,
     /// Members appended to with no change left once the plan settled.
     pub idle: usize,
 }
@@ -984,8 +986,8 @@ impl<D: BlockDev> Mount<D> {
     /// head of the ordinary queue, holding nothing, frees what it lacks
     /// itself: it writes closed entries, reclaims, or writes the journal so
     /// its last sequence moves on, keeping its place; with nothing to free
-    /// it waits for what is granted to apply. Changes committed from its
-    /// arrival on are reclaim's own and need not settle before a refusal. Reclaim's own share never waits
+    /// it waits for what is granted to apply. A refusal waits only for what
+    /// was committed before its arrival ([`Mount::grant`]). Reclaim's own share never waits
     /// on reclaim: past its closed entries, a short share is a bug, and the
     /// mount stops.
     async fn admit(&self, class: Class, draw: Draw, journal: u64, nodes: usize) -> Result<()> {
@@ -1024,11 +1026,12 @@ impl<D: BlockDev> Mount<D> {
 
     /// Grants `class` its request now if it fits. An ordinary one that the
     /// room left could not hold is refused `NoSpace` once nothing written or
-    /// emptied can change that: no other grant outstanding, no emptying
-    /// awaiting durability, and nothing committed before sequence `arrived`
-    /// left unwritten. Reclaim's own later changes need not settle: they
-    /// leave the room ledgers as they are, and on a node of one block they
-    /// never settle, as each write's keys dirty another node.
+    /// emptied can change that: no other grant outstanding, as the ledgers
+    /// `keeps` judges change when a transaction applies; no emptying
+    /// awaiting durability; and nothing committed before sequence `arrived`
+    /// left unwritten. Writing later changes leaves those ledgers as they
+    /// are, and on a node of one block reclaim's writes never settle, as
+    /// each one's keys dirty another node.
     fn grant(&self, class: Class, draw: Draw, journal: u64, nodes: usize, arrived: u64) -> Result<bool> {
         self.cancel_dropped();
         let pending = self.reservations.borrow().pending(draw);
@@ -1599,6 +1602,12 @@ impl<D: BlockDev> Mount<D> {
         for id in st.cache.ids() {
             st.cache.change(id, |n| n.fresh |= n.btree == btree);
         }
+    }
+
+    /// A clean unmount, and what its terminal publication wrote.
+    pub(crate) async fn unmount_published(self) -> Result<Published> {
+        self.unmount_clean().await?;
+        Ok(self.st.borrow().published)
     }
 
     pub(crate) async fn unmount_in_one_publication(self) -> Result<Published> {

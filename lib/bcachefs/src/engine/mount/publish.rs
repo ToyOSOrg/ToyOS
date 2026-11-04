@@ -87,7 +87,8 @@ impl<D: BlockDev> Mount<D> {
         #[cfg(test)]
         {
             let idle = plan.iter().filter(|(id, out)| matches!(out, Out::Append) && changed_positions(st.cache.node(**id), &derived).is_empty()).count();
-            st.published = super::Published { members: plan.len(), regrouped: st.published.regrouped, idle };
+            let appended = plan.values().filter(|out| matches!(out, Out::Append)).count() - idle;
+            st.published = super::Published { members: plan.len(), regrouped: st.published.regrouped, appended, idle };
         }
         for root in &derived.roots {
             st.roots.insert(root.btree, *root);
