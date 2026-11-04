@@ -168,6 +168,8 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
         }
         Err(device::ClaimError::Exhausted) => return SyscallError::ResourceExhausted.to_u64(),
         Err(device::ClaimError::Unusable) => return SyscallError::NotSupported.to_u64(),
+        // Not yet, rather than never: the device set says when.
+        Err(device::ClaimError::Undeclared) => return SyscallError::WouldBlock.to_u64(),
     };
     process::with_process_data(|data| {
         handle_result(ops::install(&mut data.handles, KObjectRef::Device(claim)))

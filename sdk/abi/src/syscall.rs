@@ -1872,6 +1872,8 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// has mounted. A partition GUID two partitions carry answers
 /// `InvalidArgument`, because an ambiguous name is refused rather than resolved
 /// to the first match; so does a nonzero selector word the class does not read.
+/// A PCI function asked for before the root bridges' memory is declared is
+/// `WouldBlock`: the device set's header says when to ask again.
 ///
 /// The claim comes back **without** [`Rights::DUP`], so it can only be moved,
 /// which is what makes endowing one to a child a provable hand-off.

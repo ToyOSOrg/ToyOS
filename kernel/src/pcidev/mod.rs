@@ -34,10 +34,11 @@
 //! real hardware: it does not complete, and the CPU cannot be interrupted out
 //! of it. The declaration is the one the holder of the `acpi` claim makes,
 //! once, out of each root's `_CRS` ([`declare`]), and with none held no
-//! function is handed over. **A claim made before one waits for it**, on
-//! [`DECLARATION`], for at most [`DECLARATION_DEADLINE`]; a claim that waits it
-//! out, the holder's claim ending without one, and a declaration refused each
-//! leave every claim of the boot refused by name.
+//! function is handed over. **A claim made before one is refused at once**
+//! ([`ClaimError::Undeclared`]): when to claim is the device set's reader's,
+//! which reads the declaration's state in the set's header ([`declaration`])
+//! and is posted when it changes. The holder's claim ending without one, and
+//! a declaration refused, each leave every claim of the boot refused by name.
 //!
 //! **A function behind an armed hot-plug slot arrives and leaves** ([`slot`]):
 //! every arrival is a new number on its requester's one record, and every call
@@ -146,7 +147,7 @@ use crate::mm::{align_2m, PAGE_2M};
 use crate::object::shm::SharedMemObject;
 use crate::sync::Lock;
 use crate::inbox::PollEntry;
-use crate::watch::{IrqWatch, Watch};
+use crate::watch::IrqWatch;
 
 /// The most one grant may be. A driver's rings and buffers are kilobytes to a
 /// megabyte; this is room for a queue depth nothing in reach uses, and a bound
@@ -464,15 +465,6 @@ struct RootBridge {
     committed: Option<u32>,
 }
 
-/// Posted once, when [`Machine::apertures`] leaves `Unknown`.
-static DECLARATION: Watch = Watch::new();
-
-/// How long a claim made before the declaration waits for it: a failure
-/// ceiling, not an expectation, since the server that declares is started
-/// before every claimant. A claim that waits it out answers every claim of
-/// the boot, so no later one waits again.
-const DECLARATION_DEADLINE: crate::time::Duration = crate::time::Duration::from_secs(30);
-
 static MACHINE: Lock<Machine> = Lock::new(Machine {
     identities: Vec::new(),
     next_arrival: 1,
@@ -517,10 +509,19 @@ pub fn generation() -> u64 {
 /// The device set, after acting on what every armed slot is owed — the work
 /// a slot's arrival costs is its reader's: its generation, every function in
 /// it, and how long until it may change with no interrupt to say so.
-pub fn snapshot() -> (u64, Option<u64>, Vec<toyos_abi::inventory::Pci>) {
-    let settle = slot::refresh();
+pub fn snapshot() -> Snapshot {
+    let settle_in = slot::refresh();
+    // Before what it covers: a change after this read posts the watch again.
     let generation = generation();
-    (generation, settle, inventory())
+    Snapshot { generation, settle_in, declaration: declaration(), functions: inventory() }
+}
+
+/// [`snapshot`]'s answer, for the device set's header and its records.
+pub struct Snapshot {
+    pub generation: u64,
+    pub settle_in: Option<u64>,
+    pub declaration: toyos_abi::devset::Declaration,
+    pub functions: Vec<toyos_abi::inventory::Pci>,
 }
 
 /// One claim's hold on a function, from its reservation to the release its
@@ -798,7 +799,7 @@ pub fn declare(declared: &toyos_abi::acpi::Apertures) -> Result<(), aperture::De
         (Ok(()), _) => unreachable!("a declaration taken is the answer"),
     }
     drop(machine);
-    DECLARATION.post();
+    changed();
     answer
 }
 
@@ -811,31 +812,25 @@ fn withhold(why: aperture::Withheld) {
     let _declaring = DECLARING.lock();
     if MACHINE.lock().apertures.withhold(why) {
         log!("pcidev: no declaration of the root bridges' memory will be held: {why}, so no function is handed over");
-        DECLARATION.post();
+        changed();
     }
 }
 
-/// The root bridges' memory, or why none is held; waited for, up to
-/// [`DECLARATION_DEADLINE`], where nothing is held yet. `None` is a
-/// claimant killed while it waited.
-fn answered() -> Option<Result<aperture::Declaration<Vec<RootBridgeWindow>>, aperture::Withheld>> {
-    let answer = || MACHINE.lock().apertures.answer().map(|answer| answer.cloned());
-    if let Some(answer) = answer() {
-        return Some(answer);
+/// The root bridges' memory, or why none is held; `None` while nothing is
+/// answered yet.
+fn answer() -> Option<Result<aperture::Declaration<Vec<RootBridgeWindow>>, aperture::Withheld>> {
+    MACHINE.lock().apertures.answer().map(|answer| answer.cloned())
+}
+
+/// The declaration's state as the device set says it.
+fn declaration() -> toyos_abi::devset::Declaration {
+    use toyos_abi::devset::{Declaration, Withheld};
+    match MACHINE.lock().apertures.answer() {
+        None => Declaration::Pending,
+        Some(Ok(_)) => Declaration::Held,
+        Some(Err(aperture::Withheld::Refused(_))) => Declaration::Withheld(Withheld::Refused),
+        Some(Err(aperture::Withheld::Ended)) => Declaration::Withheld(Withheld::Ended),
     }
-    let began = crate::clock::now();
-    let deadline = crate::time::Deadline::at(began + DECLARATION_DEADLINE);
-    let parkable = crate::scheduler::Parkable::at_entry();
-    let waited = crate::watch::wait_until(&parkable, &DECLARATION, 0, kernel::sched::task::WaitClass::Other, deadline, || {
-        MACHINE.lock().apertures.answer().is_some()
-    });
-    waited.ok()?;
-    if answer().is_none() {
-        withhold(aperture::Withheld::Unanswered);
-    }
-    let answer = answer().expect("pcidev: the declaration is answered or withheld");
-    log!("pcidev: a claim waited {} for the root bridges' memory", crate::clock::now() - began);
-    Some(answer)
 }
 
 /// Say what memory the root bridges were declared to decode, and every
@@ -1006,9 +1001,18 @@ pub fn claim(arrival: Arrival, firmware: FirmwareWindows) -> Result<(PciFunction
 
     // Before anything is taken or touched: with no declaration held, no
     // read this claim would make is known to reach the bus.
-    let declaration = match answered().ok_or(ClaimError::Unusable)? {
-        Ok(declaration) => declaration,
-        Err(why) => {
+    let declaration = match answer() {
+        None => {
+            log!(
+                "pcidev: PCI {:02x}:{:02x}.{} NOT HANDED OVER — no declaration of the memory the root bridges decode is held yet",
+                pci.bus,
+                pci.dev,
+                pci.func
+            );
+            return Err(ClaimError::Undeclared);
+        }
+        Some(Ok(declaration)) => declaration,
+        Some(Err(why)) => {
             log!("pcidev: PCI {:02x}:{:02x}.{} NOT HANDED OVER — {}", pci.bus, pci.dev, pci.func, Refusal::Withheld(why));
             return Err(ClaimError::Unusable);
         }

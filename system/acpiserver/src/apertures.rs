@@ -1,7 +1,7 @@
 //! The PCI root bridges, declared to the kernel once ([`Kernel::declare`]):
 //! each one's segment, buses and memory windows, and what its `_OSC`
-//! offers. Every PCI claim on the machine waits for the declaration, so it
-//! is read as soon as the namespace is initialised (ACPI 6.5 §6.5.1).
+//! offers. No PCI claim on the machine is handed over before the declaration,
+//! so it is read as soon as the namespace is initialised (ACPI 6.5 §6.5.1).
 //!
 //! **A root is a PCI host bridge by its `_HID` or a `_CID`** (PNP0A03 or
 //! PNP0A08, §6.1.5, §6.1.2) **below no other one**; a root whose `_STA` says

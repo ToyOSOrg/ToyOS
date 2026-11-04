@@ -690,8 +690,8 @@ pub enum Profile {
     HeadlessNoIommu,
     /// [`Profile::Headless`] without the console's port, for a boot nothing
     /// declares the root bridges' memory on, where every claim is refused and
-    /// the UART is the console: `tests/images/acpicase.toml`'s, whose `acpi`
-    /// holders are jobs that declare nothing.
+    /// the UART is the console: `tests/images/acpicase.toml`'s probe rows,
+    /// whose `acpi` holders are jobs that declare nothing.
     HeadlessNoConsolePort,
     /// [`Profile::Headless`] with no USB controller: the machine whose NVMe
     /// disk is the only storage it has, and the only device its firmware can

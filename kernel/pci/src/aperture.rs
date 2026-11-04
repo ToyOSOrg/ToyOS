@@ -115,8 +115,6 @@ pub enum Withheld {
     /// The only holder who may declare let go of its authority without
     /// declaring.
     Ended,
-    /// A claim waited the whole of its deadline and nothing was declared.
-    Unanswered,
 }
 
 impl core::fmt::Display for Withheld {
@@ -124,7 +122,6 @@ impl core::fmt::Display for Withheld {
         match self {
             Self::Refused(why) => write!(f, "the declaration was refused: {why}"),
             Self::Ended => write!(f, "the acpi claim ended without declaring"),
-            Self::Unanswered => write!(f, "nothing was declared before a claim's deadline"),
         }
     }
 }
@@ -305,8 +302,8 @@ mod tests {
 
     /// The state leaves `Unknown` once: a declaration is held and a second
     /// one, whatever it says, is late; a refused declaration is the answer
-    /// and the next one is late too; the holder's end and a claim's deadline
-    /// answer only where nothing had, and change no answer held.
+    /// and the next one is late too; the holder's end answers only where
+    /// nothing had, and changes no answer held.
     #[test]
     fn the_declaration_is_answered_once_and_never_replaced() {
         let w = |base, length| RootBridgeWindow { base, length };
@@ -317,7 +314,6 @@ mod tests {
         assert_eq!(held.declare(virt, &[]), Ok(()));
         assert_eq!(held.declare([w(0x1000, 0x1000); 2], &[]), Err(Declined::Late));
         assert!(!held.withhold(Withheld::Ended));
-        assert!(!held.withhold(Withheld::Unanswered));
         assert_eq!(held.answer().map(|a| a.map(|d| d.windows().to_vec())), Some(Ok(virt.to_vec())));
 
         let mut refused = Held::Unknown;
@@ -325,13 +321,11 @@ mod tests {
         assert_eq!(refused.declare(virt, &[]), Err(Declined::Late));
         assert_eq!(refused.answer().map(|a| a.err()), Some(Some(Withheld::Refused(Refused::Malformed(w(0, 0))))));
 
-        for why in [Withheld::Ended, Withheld::Unanswered] {
-            let mut ended = Held::<[RootBridgeWindow; 2]>::Unknown;
-            assert!(ended.withhold(why));
-            assert!(!ended.withhold(Withheld::Unanswered));
-            assert_eq!(ended.declare(virt, &[]), Err(Declined::Late));
-            assert_eq!(ended.answer().map(|a| a.err()), Some(Some(why)));
-        }
+        let mut ended = Held::<[RootBridgeWindow; 2]>::Unknown;
+        assert!(ended.withhold(Withheld::Ended));
+        assert!(!ended.withhold(Withheld::Ended));
+        assert_eq!(ended.declare(virt, &[]), Err(Declined::Late));
+        assert_eq!(ended.answer().map(|a| a.err()), Some(Some(Withheld::Ended)));
     }
 
     /// Each malformed record is refused by name before a window is read: a

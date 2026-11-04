@@ -112,8 +112,8 @@ issue's exit defines, every CPU's delta equal to the boot processor's
 `firmware_calls` delta, and the machine still in ACPI mode; `acpi_server_events` reads each EC query number
 once with its count; and `acpi_server_death` killed the server and read
 `SCI_EN` clear in `PM1_CNT` afterwards, the kernel having written
-`ACPI_DISABLE` to `SMI_CMD`, a row unregistered until its boot has a log
-again (`issues/the-acpi-servers-death-has-no-readback-on-the-t14.md`).
+`ACPI_DISABLE` to `SMI_CMD`, a row registered again by #1164, whose
+storage now starts on the declaration its job's server makes.
 
 Two things stage 1 lands are read by no T14 row, and neither is in its exit.
 The T14's own button, and that every press of it stops the machine, is

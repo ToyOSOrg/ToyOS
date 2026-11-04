@@ -76,8 +76,9 @@ serves = ["log", "log-carrier"]
 # inside the fences of `toyos_userbound::firmware`. `power` is how a press
 # stops the machine: through the supervisor, which has `logkeeper` make the
 # log whole. It declares the memory the PCI root bridges decode out of each
-# root's `_CRS`, which every PCI claim waits for, so the supervisor starts it
-# before every other row; an image that claims a PCI function starts it.
+# root's `_CRS`, which every PCI claim needs, so the supervisor starts it
+# before every other row and starts PCI drivers once the declaration is held;
+# an image that claims a PCI function starts it.
 [programs.acpiserver]
 service = true
 devices = ["acpi"]
