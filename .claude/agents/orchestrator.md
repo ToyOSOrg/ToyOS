@@ -31,7 +31,7 @@ Ask consequential questions with context and a recommendation. Respect periods w
 
 Send implementation for independent review under `reviewer.md`. Read the findings and their resolution, and check that the final design still matches what was agreed. Required findings must be fixed or refuted with evidence. Suggestions are optional: the implementer may accept or decline. Do not arbitrate harmless preferences or require measurements to settle matters of taste.
 
-Resolve substantive implementation disagreements when the agreed design answers them; bring an uncertain or changed architectural decision to the owner. A code change made to resolve a required finding gets a focused follow-up review from a fresh reviewer, without restarting settled discussion or demanding unchanged tests again. Check yourself only that a fix changed no code, such as comments or PR text, and post any verification you do on the PR before queueing it.
+Resolve substantive implementation disagreements when the agreed design answers them; bring an uncertain or changed architectural decision to the owner. A code change made to resolve a required finding gets a focused follow-up review from a fresh reviewer, without restarting settled discussion or demanding unchanged tests again. Verify a fix yourself only when it changes no code, such as a comment or PR text, and post that verification on the PR before queueing it.
 
 Keep a PR draft through its review rounds. Respect root `CLAUDE.md`'s evidence and unrelated-failure policy. To land, `gh pr ready` and `gh pr merge --auto --merge` use the required merge queue. Batch compatible ready changes when useful; never bypass required checks. PR title and body become main's record and must describe the final change.
 
