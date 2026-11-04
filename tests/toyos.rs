@@ -603,6 +603,7 @@ const MACHINE_TESTS: &[&str] = &[
     // endowments a job gets is the image's and the supervisor's, which no
     // host build has, and the benches run osbench only nightly.
     "osbench_capability_groups_exit_0",
+    "probe_osbench_files",
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the
     // firmware's tables, to COM1, to `PM1a_CNT`, to a function's configuration
@@ -3196,6 +3197,24 @@ fn osbench_capability_groups_exit_0() -> Result<(), String> {
     Ok(())
 }
 
+/// Probe (scratch): `osbench files` with the server's per-request profile.
+fn probe_osbench_files() -> Result<(), String> {
+    const JOBS: [&str; 1] = ["osbench_persist"];
+    let committed = compile::repo_root().join("tests/images/benchcase.toml");
+    let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
+    let derived = toyos_metal::image::derive(&text, 600_000, &JOBS, &[]).map_err(|why| why.to_string())?;
+    let config = common::lane::dir().join("probe-osbench-files.toml");
+    fs::write(&config, derived).map_err(|e| format!("{}: {e}", config.display()))?;
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], BootOptions { profile: qemu::Profile::HeadlessNoUsb, ready_marker: bootlog::COMPLETE, ..Default::default() });
+    let mut console = format!("{}\n", qemu.boot_log());
+    let last = format!("===TEST_END {} ", JOBS[0]);
+    await_guest(&mut qemu, &mut console, "osbench files to end", |said| said.contains(&last))?;
+    for line in console.lines().filter(|l| l.contains("PROBE") || l.contains("bench=fs.") || l.contains("served_by")) {
+        eprintln!("PROBELINE {line}");
+    }
+    Ok(())
+}
+
 /// Boot the image `--console-boot` builds, on the machine shape with a panel
 /// for `/system/bin/console` to claim, and wait for what that image owes at
 /// boot: the console up on its panel, having read the log and the keyboard,
@@ -5024,6 +5043,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "acpi_holder_is_refused_a_held_functions_configuration" => acpi_holder_is_refused_a_held_functions_configuration(),
         "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),
+        "probe_osbench_files" => probe_osbench_files(),
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),

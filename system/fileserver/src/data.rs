@@ -26,6 +26,9 @@ struct Capacity {
     reservation: Reservation,
     pages: usize,
 }
+pub static LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static INODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 struct Open {
     holders: usize,
     size: u64,
@@ -202,6 +205,7 @@ impl<D: Disk> DataVolume<D> {
         self.cache
             .block_on(async {
                 let (ino, _) = self.entry(&names).await?;
+                INODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.fs.inode(ino).await
             })
             .map_err(word)
@@ -214,6 +218,7 @@ impl<D: Disk> DataVolume<D> {
             if found.1 != DirentType::Directory {
                 return Err(engine::Error::NotDirectory);
             }
+            LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let entry = self.fs.lookup(found.0, names[at].as_bytes()).await?.ok_or(engine::Error::NotFound)?;
             found = (entry.ino, entry.kind);
             at += 1;

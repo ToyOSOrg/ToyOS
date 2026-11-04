@@ -219,6 +219,8 @@ impl Exports {
     }
 }
 
+std::thread_local! { static PROBE: core::cell::RefCell<std::collections::BTreeMap<u32, (u64, u64, u64, u64)>> = core::cell::RefCell::new(std::collections::BTreeMap::new()); }
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let role = args.get(1).and_then(|r| Role::parse(r)).unwrap_or_else(|| {
@@ -740,6 +742,24 @@ impl Server {
     }
 
     fn answer(&mut self, id: u64, op: u32, r: Request) -> Answer {
+        let started = std::time::Instant::now();
+        let (l0, i0) = (fileserver::data::LOOKUPS.load(std::sync::atomic::Ordering::Relaxed), fileserver::data::INODES.load(std::sync::atomic::Ordering::Relaxed));
+        let out = self.answer_probed(id, op, r);
+        let ns = started.elapsed().as_nanos() as u64;
+        let (l1, i1) = (fileserver::data::LOOKUPS.load(std::sync::atomic::Ordering::Relaxed), fileserver::data::INODES.load(std::sync::atomic::Ordering::Relaxed));
+        PROBE.with(|p| {
+            let mut p = p.borrow_mut();
+            let e = p.entry(op).or_insert((0u64, 0u64, 0u64, 0u64));
+            e.0 += 1; e.1 += ns; e.2 += l1 - l0; e.3 += i1 - i0;
+            if e.0 % 1000 == 0 {
+                println!("fileserver: PROBE {} op={op} n={} server_mean_ns={} lookups_per={:.2} inodes_per={:.2}", self.volume.describe().split(' ').next().unwrap_or(""), e.0, e.1 / e.0, e.2 as f64 / e.0 as f64, e.3 as f64 / e.0 as f64);
+                *e = (0, 0, 0, 0);
+            }
+        });
+        out
+    }
+
+    fn answer_probed(&mut self, id: u64, op: u32, r: Request) -> Answer {
         if op == HELLO {
             let (all, mine) = self.served(self.clients[&id].share);
             let client = self.clients.get_mut(&id).expect("pumped");
