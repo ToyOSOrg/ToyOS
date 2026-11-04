@@ -2379,6 +2379,9 @@ impl QmpInput {
 
     /// Every key transition in `events` as one batch, so a chord like Shift+B
     /// arrives as a chord rather than as a race.
+    ///
+    /// QEMU's PS/2 queue holds 16 bytes and drops the rest without a word, so
+    /// a caller typing more than that paces it against what the guest shows.
     pub fn keys(&mut self, events: &[(&str, bool)]) {
         let body: Vec<String> = events
             .iter()
