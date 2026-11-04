@@ -111,7 +111,7 @@ commit-ignores-notify = []
 # `kernel/loom/tests/loom_watch.rs` must red.
 notify-flag-load-only = []
 # `pure/sched/cpu.rs`'s steal probe rings its victim before it sets the
-# thief's bit, and `kernel/loom/tests/loom_mailbox.rs` must red.
+# thief's bit, and `kernel/loom/tests/loom_sleep.rs` must red.
 ask-rings-first = []
 # The two `SeqCst` fences of `pure/sched/watch.rs`'s `Gate` go, and
 # `kernel/loom/tests/loom_watch.rs` must red — the stop's store-buffering pair.

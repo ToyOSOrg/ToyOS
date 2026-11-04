@@ -259,9 +259,9 @@ push-fence-relaxed = []
 affinity-fence-relaxed = []
 # The negative control for the steal probe. `cpu.rs`'s `CpuHandle::ask`
 # rings the victim's doorbell before it sets the thief's bit, so the pass the
-# ring owes can take nothing, and `loom_mailbox.rs` must red:
+# ring owes can take nothing, and `loom_sleep.rs` must red:
 #
-#   cargo test -p kernel-loom --features ask-rings-first --test loom_mailbox
+#   cargo test -p kernel-loom --features ask-rings-first --test loom_sleep
 #
 ask-rings-first = []
 # The negative control for the watch. It makes `task.rs`'s `begin_commit`

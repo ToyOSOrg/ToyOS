@@ -657,7 +657,7 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
     ]),
     // A steal probe that rings its victim before setting its bit.
-    red(KERNEL_LOOM, "ask-rings-first", Some("loom_mailbox"), &[Says {
+    red(KERNEL_LOOM, "ask-rings-first", Some("loom_sleep"), &[Says {
         test: "an_ask_is_taken_by_the_pass_its_ring_owes",
         message: "the ask was neither taken nor owed a pass: it is lost",
     }]),

@@ -10,7 +10,7 @@ opened: 2026-09-28
 syscall with interrupts off until the racing process maps again, and panics
 after `BOUND` (10 s). The thread that has to map is the program's main thread.
 Nothing puts it on another CPU: `CpuHandles::place` puts the copier on the
-least-loaded CPU that is answering, and a steal is a `StealRequest` that only
+least-loaded CPU that is answering, and a steal is an ask that only
 the victim's own pass answers (`SchedPass::answer_steal_requests`). A CPU
 spinning with `IF` clear takes no pass. If the main thread is queued on that
 CPU, no other CPU can take it, and the kernel panics.

@@ -3,7 +3,8 @@
 //! A CPU's scheduler state is a `!Sync` value reachable only through that
 //! CPU's own pointer; there is no global runqueue array, because a `static` of
 //! a `!Sync` type does not compile. Everything a remote CPU can do is post a
-//! message into [`CpuHandle`] and ring its doorbell.
+//! message into [`CpuHandle`], set or clear its own ask bit there, and ring
+//! its doorbell.
 //!
 //! Every entry is a [`SchedPass`]: a type-state that must be disposed exactly
 //! once and can only end in [`SchedPass::finish`], which returns an [`Action`]
@@ -318,8 +319,8 @@ pub struct CpuSched<X: SchedPayload> {
     /// Thieves that asked this pass; answered in `finish` from surplus, after
     /// the pick, so answering can never hand away the task we were about to
     /// run.
-    /// Each asker, with the summed group weight it asked at: zero for an
-    /// idle one.
+    /// Each asker, with the summed group weight its last pass published:
+    /// zero for an idle one.
     steal_requests: Vec<(CpuId, u64)>,
     /// When this CPU next decides for its running task, absent other events:
     /// a real-time or dying task's turn end as its dispatch set it, and a fair
@@ -512,14 +513,15 @@ impl<X: SchedPayload> CpuSched<X> {
 
     /// Is a steal probe from this CPU still on its way to a victim?
     ///
-    /// Whether the CPU this one asked has yet to take its ask: the asked
-    /// CPU's word is the answer, so this asks the mechanism rather than a
-    /// shadow of it. Besides the probe itself, the simulator's probe-gap
-    /// instrument reads it, which measures how long a halted CPU sits with a
-    /// surplus published next door and no probe outstanding, the quantity
-    /// [`Balance::PullWithRearm`] and [`Balance::PushOnSurplus`] are judged on.
-    pub fn probe_outstanding(&self, cpus: &CpuHandles<Msg<X>>) -> bool {
-        self.asked.is_some_and(|victim| cpus.get(victim).asked_by(self.id))
+    /// Whether this CPU's ask is still coming to an answer at `now`: the CPU
+    /// it asked still holds its bit and is still answering. An ask held by a
+    /// CPU that has stopped answering is no answer. Besides the probe itself,
+    /// the simulator's probe-gap instrument reads it, which measures how long
+    /// a halted CPU sits with a surplus published next door and no probe
+    /// outstanding, the quantity [`Balance::PullWithRearm`] and
+    /// [`Balance::PushOnSurplus`] are judged on.
+    pub fn probe_outstanding(&self, cpus: &CpuHandles<Msg<X>>, now: Nanos) -> bool {
+        self.asked.is_some_and(|victim| cpus.get(victim).asked_by(self.id) && cpus.get(victim).answering(now))
     }
 
     /// Lend the running task an RT window: the path for a client
@@ -566,8 +568,8 @@ impl<X: SchedPayload> CpuSched<X> {
 /// The reading itself is the driver's: the scheduler core writes `unsafe` in
 /// [`crate::sched::mailbox`] and nowhere else, and a byte-level copy of a
 /// record is exactly the kind of thing that rule exists to keep out of the state
-/// machine. What is here is what only this module can compute — where the one
-/// remotely-written field sits, and which field a byte offset lands in.
+/// machine. What is here is what only this module can compute: which field a
+/// byte offset lands in.
 ///
 /// **Why bytes and not an invariant.** Four kernel deaths are on record whose
 /// whole content is a per-CPU scheduler record reading as a value no operation on
@@ -2144,16 +2146,17 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         self.ask_for_work(victim);
     }
 
-    /// Ask `victim` for a task, one probe at a time: while the last CPU asked
-    /// still holds this one's bit, its answer is coming and nothing is asked.
-    /// A CPU that stopped answering keeps the bit and never takes it, so the
-    /// bit is withdrawn and `victim` asked instead.
+    /// Ask `victim` for a task, one probe at a time: while the last ask is
+    /// outstanding ([`CpuSched::probe_outstanding`]) nothing is asked. An ask
+    /// held by a CPU that stopped answering is withdrawn and `victim` asked
+    /// instead; a CPU only judged stopped may still take it, and the thief is
+    /// then answered twice.
     fn ask_for_work(&mut self, victim: CpuId) {
         let (cpus, me) = (self.env.cpus, self.cpu.id);
-        if let Some(asked) = self.cpu.asked.filter(|&asked| cpus.get(asked).asked_by(me)) {
-            if cpus.get(asked).answering(self.now) {
-                return;
-            }
+        if self.cpu.probe_outstanding(cpus, self.now) {
+            return;
+        }
+        if let Some(asked) = self.cpu.asked {
             cpus.get(asked).retract(me);
         }
         self.cpu.asked = Some(victim);
@@ -2316,7 +2319,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         if self.env.balance.push_threshold().is_none() {
             return false;
         }
-        if self.cpu.probe_outstanding(self.env.cpus) {
+        if self.cpu.probe_outstanding(self.env.cpus, self.now) {
             return false;
         }
         balance_fence();
@@ -2409,7 +2412,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
 }
 
 /// The globally shared, `Sync` face of a CPU, and the whole remote surface:
-/// post a message, ring the doorbell, read the published load.
+/// post a message, ask for a task, ring the doorbell, read the published load.
 pub struct CpuHandle<M> {
     id: CpuId,
     post: MailboxProducer<M>,
@@ -5116,9 +5119,11 @@ mod tests {
         w.handles.publish_surplus(CpuId(1), 1, CpuMask::ANY);
         w.run_a_pass(C0);
         assert!(w.handles.get(CpuId(1)).asked_by(C0), "the first probe's victim");
-        assert!(w.cpus[0].probe_outstanding(&w.handles));
+        assert!(w.cpus[0].probe_outstanding(&w.handles, NOW));
 
         let later = NOW.after(STALE_PASS_NS + 1);
+        assert!(w.handles.get(CpuId(1)).asked_by(C0));
+        assert!(!w.cpus[0].probe_outstanding(&w.handles, later), "an ask a stopped CPU holds counted as an answer coming");
         w.handles.get(CpuId(2)).publish_pass(later);
         w.handles.publish_surplus(CpuId(2), 1, CpuMask::ANY);
         w.run_a_pass_at(C0, later);
