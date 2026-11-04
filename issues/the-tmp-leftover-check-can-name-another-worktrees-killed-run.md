@@ -9,10 +9,11 @@ opened: 2026-09-28
 `build/ci.rs`'s `left_behind` names every root `toyos_tmpdir::gone_roots(short)`
 finds that `before` does not: a `toyos_tmpdir::TempDir::short` whose owning
 process died during the steps that ran between the two calls. `gone_roots`
-reads `SHORT_BASE` (`/tmp`), and every worktree on the host shares that base
-and its `GLOBAL` lock — the reclaim is deliberately cross-worktree
-(`lib/tmpdir/src/lib.rs`'s module header: "Every process that shares a
-base — every worktree on the host — shares the lock file"). Nothing in
+reads this user's private directory of `SHORT_BASE` (`/tmp`), and every
+worktree of that user shares that directory and its `GLOBAL` lock — the
+reclaim is deliberately cross-worktree (`lib/tmpdir/src/lib.rs`'s module
+header: "Every process of one user sharing a base, every worktree included,
+shares the lock file"). Nothing in
 `gone_roots` or in `left_behind`'s call sites records which pids belong to
 *this* job's own steps, so a root left by another worktree's harness,
 SIGKILLed on the same host in the same window, is named as this job's own
@@ -23,8 +24,8 @@ relies on — a SIGKILLed holder's root is reclaimed by the next process to make
 a directory in the same base, whichever process that is
 (`lib/tmpdir/tests/reclaim.rs`'s `a_killed_process_is_reclaimed_and_a_live_one_is_never_touched`).
 `left_behind` has no notion of a job or a worktree; it is a diff of
-`gone_roots(short)` against a snapshot taken before the steps ran, over a base
-every process on the host writes into. On the hosted runners the gate uses,
+`gone_roots(short)` against a snapshot taken before the steps ran, over a directory
+every process of this user on the host writes into. On the hosted runners the gate uses,
 each job has its own host, so the check is exact there; a developer running
 `cargo run -- --ci host` on a machine also running another worktree's harness
 can see a red that is not this job's.

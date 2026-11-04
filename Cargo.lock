@@ -4127,6 +4127,9 @@ dependencies = [
 [[package]]
 name = "toyos-tmpdir"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "toyos-trace"

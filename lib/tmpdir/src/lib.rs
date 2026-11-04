@@ -10,32 +10,39 @@
 //! a Unix socket: `sockaddr_un.sun_path` is 104 bytes on Darwin, and `$TMPDIR`'s
 //! depth is the host's to choose. Everything below holds of each base apart.
 //!
+//! **A base may be shared by every user on the host; nothing in it is.** A
+//! process works only in its user's [`private`] directory of the base,
+//! `<base>/toyos-<euid>/`, mode 0700 and owned by that user, and refuses one
+//! that is not. In a sticky base such as `/tmp` no other user can replace it,
+//! so no other user's process reads, locks, sweeps or removes anything in it.
+//!
 //! **A process that dies without unwinding is reclaimed by the next one.**
 //! Every directory a process holds lives under its root,
-//! `<base>/toyos-tmp-<pid>-<n>/`, beside an [`OWNER`] file the process holds an
-//! exclusive lock on for as long as the root exists. The kernel lets go of that
-//! lock when the process dies, by any signal, `SIGKILL` included. The first
-//! directory a process makes under a base sweeps it: a root whose owner can be
-//! locked belongs to a process that is gone, and is removed.
+//! `<private>/toyos-tmp-<pid>-<n>/`, beside an [`OWNER`] file the process holds
+//! an exclusive lock on for as long as the root exists. The kernel lets go of
+//! that lock when the process dies, by any signal, `SIGKILL` included. The
+//! first directory a process makes under a base sweeps it: a root whose owner
+//! can be locked belongs to a process that is gone, and is removed.
 //!
 //! **A live process's root is never touched.** Making a root, removing one, and
 //! the sweep each hold [`GLOBAL`] exclusively, so no sweep sees a root between
 //! its `mkdir` and its owner's lock, or halfway through its removal. Liveness
 //! is the lock and never the pid, so a reused pid cannot make a dead root look
 //! live or a live one look dead; the pid only keeps two roots' names apart.
-//! Every process that shares a base — every worktree on the host — shares
-//! the lock file, because it is in that base. A hold on it past
+//! Every process of one user sharing a base, every worktree included, shares
+//! the lock file in its private directory. A hold on it past
 //! `GLOBAL_PATIENCE` panics naming the pid that holds it, rather than hanging
-//! every worktree on the host behind a stopped process.
+//! every worktree behind a stopped process.
 //!
 //! **A directory the sweep cannot remove does not cost any process but this
 //! one.** It is moved back out of this process's root under a name no sweep
-//! reads as a root, and reported; the next process on the host still makes its
-//! first directory.
+//! reads as a root, and reported; the next process still makes its first
+//! directory.
 
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::ops::Deref;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -43,16 +50,20 @@ use std::time::{Duration, Instant};
 /// What every root's name starts with; the rest is `<pid>-<n>`.
 pub const ROOT_PREFIX: &str = "toyos-tmp-";
 
-/// The lock every root's making and removal and every sweep holds, in
-/// its base. Never removed: a lock file deleted while another process waits
-/// on it would let two holders in at once.
+/// The lock every root's making and removal and every sweep holds, in its
+/// [`private`] directory. Never removed: a lock file deleted while another
+/// process waits on it would let two holders in at once.
 pub const GLOBAL: &str = "toyos-tmp.lock";
 
 /// The file in a root its process holds locked for the root's whole life.
 pub const OWNER: &str = "owner";
 
-/// Where [`TempDir::short`] makes its roots.
+/// The base [`TempDir::short`] makes its roots under.
 pub const SHORT_BASE: &str = "/tmp";
+
+/// What a [`private`] directory's name starts with; the rest is its user's id.
+/// [`ROOT_PREFIX`] is not a prefix of it, so no sweep reads it as a root.
+pub const PRIVATE_PREFIX: &str = "toyos-";
 
 /// A directory of its own under its base, removed with everything in it when
 /// this is dropped.
@@ -86,6 +97,7 @@ impl TempDir {
             let tmp = base.dir();
             let tmp = fs::canonicalize(&tmp)
                 .unwrap_or_else(|e| panic!("resolve {}: {e}", tmp.display()));
+            let tmp = private(&tmp);
             let root = Root::make(&tmp, &mut state.roots);
             state.root = Some(root);
         }
@@ -107,14 +119,15 @@ impl TempDir {
         &self.path
     }
 
-    /// Move every root under `base` that process `pid` made and is gone from
-    /// into this directory, so it goes when this does: for a caller that
-    /// `SIGKILL`ed `pid` after this process's one sweep of `base`. A live root
-    /// is left alone, whatever its name.
+    /// Move every root in `base`'s [`private`] directory that process `pid`
+    /// made and is gone from into this directory, so it goes when this does:
+    /// for a caller that `SIGKILL`ed `pid` after this process's one sweep of
+    /// `base`. A live root is left alone, whatever its name.
     pub fn adopt(&self, base: &Path, pid: u32) {
         let prefix = format!("{ROOT_PREFIX}{pid}-");
-        let _global = global(base);
-        reap_into(base, &self.path, |root| {
+        let base = private(base);
+        let _global = global(&base);
+        reap_into(&base, &self.path, |root| {
             root.file_name().expect("a root has a name").to_string_lossy().starts_with(&prefix)
         });
     }
@@ -168,8 +181,8 @@ fn fail(what: String) {
 }
 
 /// Remove every directory the sweep moved into this process's root, under the
-/// shared directory `tmp`, with `remove`, so a test can make one fail; one that
-/// is not removed is [`stuck`].
+/// private directory `tmp`, with `remove`, so a test can make one fail; one
+/// that is not removed is [`stuck`].
 fn reclaim(tmp: &Path, reap: Vec<PathBuf>, remove: impl Fn(&Path) -> std::io::Result<()>) {
     for dir in reap {
         if let Err(e) = remove(&dir) {
@@ -179,12 +192,12 @@ fn reclaim(tmp: &Path, reap: Vec<PathBuf>, remove: impl Fn(&Path) -> std::io::Re
 }
 
 /// A gone process's directory the sweep moved into this process's own root but
-/// could not then remove: reported once, and moved back out to its base under
-/// a name no sweep reads as a root — `ROOT_PREFIX` is not a prefix of it — so
-/// this is the only process it ever costs, and no later process on the host
-/// inherits it and panics in turn. `tmp` is the shared directory the reap
-/// happened under, not `dir`'s own parent, so this never guesses at the layout
-/// a future reap chooses.
+/// could not then remove: reported once, and moved back out to its private
+/// directory under a name no sweep reads as a root — `ROOT_PREFIX` is not a
+/// prefix of it — so this is the only process it ever costs, and no later
+/// process inherits it and panics in turn. `tmp` is the private directory the
+/// reap happened under, not `dir`'s own parent, so this never guesses at the
+/// layout a future reap chooses.
 fn stuck(tmp: &Path, dir: &Path, e: std::io::Error) {
     let name = dir.file_name().expect("a reaped directory has a name");
     let out = tmp.join(format!("stuck-{}", name.to_string_lossy()));
@@ -295,8 +308,8 @@ impl Root {
 }
 
 impl State {
-    /// Move every root under its base whose process is gone into this
-    /// process's own root, and return where each went: the caller removes them
+    /// Move every root in its private directory whose process is gone into
+    /// this process's own root, and return where each went: the caller removes them
     /// holding nothing, and a caller that dies meanwhile leaves them in a root
     /// the next sweep takes.
     fn sweep(&mut self) -> Vec<PathBuf> {
@@ -307,11 +320,51 @@ impl State {
     }
 }
 
-/// Every root under `base` whose process is gone: what a process that died
-/// there left, until the next sweep of `base` takes it.
+/// Every root in `base`'s [`private`] directory whose process is gone: what a
+/// process of this user that died there left, until the next sweep takes it.
 pub fn gone_roots(base: &Path) -> Vec<PathBuf> {
-    let _global = global(base);
-    gone_under(base)
+    let base = private(base);
+    let _global = global(&base);
+    gone_under(&base)
+}
+
+/// This user's directory of `base`, which any user may share: made if absent,
+/// and refused with a panic unless it is a directory, not a symlink, that this
+/// user owns with mode 0700, since one another user made could be read or
+/// emptied by them.
+pub fn private(base: &Path) -> PathBuf {
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    private_for(base, unsafe { libc::geteuid() })
+}
+
+/// [`private`] for the user `uid`, so a test can be a user other than the one
+/// that owns what it made.
+fn private_for(base: &Path, uid: u32) -> PathBuf {
+    let dir = base.join(format!("{PRIVATE_PREFIX}{uid}"));
+    match DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+        Err(e) => panic!("create {}: {e}", dir.display()),
+    }
+    let meta =
+        fs::symlink_metadata(&dir).unwrap_or_else(|e| panic!("inspect {}: {e}", dir.display()));
+    let refused = if !meta.file_type().is_dir() {
+        Some("is not a directory".to_string())
+    } else if meta.uid() != uid {
+        Some(format!("is owned by uid {}, not by this process's user, uid {uid}", meta.uid()))
+    } else if meta.mode() & 0o777 != 0o700 {
+        Some(format!("has mode {:o}, not 700", meta.mode() & 0o777))
+    } else {
+        None
+    };
+    if let Some(why) = refused {
+        panic!(
+            "{} {why}: it holds this user's scratch, so it must be this user's alone; \
+             have its owner or root remove it",
+            dir.display()
+        );
+    }
+    dir
 }
 
 /// Every gone root under `base` that `take` passes, renamed into `dest` as
@@ -459,5 +512,63 @@ mod tests {
         assert!(!reaped.exists(), "{} stayed in the root it was reaped into", reaped.display());
         let stuck = tmp.join(format!("stuck-{name}"));
         assert!(stuck.join("locked").is_dir(), "{} was not moved aside to {}", reaped.display(), stuck.display());
+    }
+
+    /// The panic `f` raises, which it must.
+    fn refusal(f: impl FnOnce() -> PathBuf) -> String {
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            .expect_err("a directory that is not this user's alone was accepted");
+        panic.downcast_ref::<String>().cloned().unwrap_or_default()
+    }
+
+    fn me() -> u32 {
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        unsafe { libc::geteuid() }
+    }
+
+    /// A user's private directory is made a directory of its own, mode 0700.
+    #[test]
+    fn a_private_directory_is_made_this_users_alone() {
+        let base = TempDir::new("private-made");
+        let dir = private(&base);
+        assert_eq!(dir, base.join(format!("{PRIVATE_PREFIX}{}", me())));
+        let meta = fs::symlink_metadata(&dir).unwrap();
+        assert!(meta.file_type().is_dir());
+        assert_eq!((meta.uid(), meta.mode() & 0o777), (me(), 0o700));
+        assert_eq!(private(&base), dir, "a second use refused the first's directory");
+    }
+
+    /// A directory another user owns is theirs to read and empty: this user
+    /// refuses it. Here the other user is the one this process is not, and the
+    /// directory is this process's own, mode 0700, so ownership alone refuses it.
+    #[test]
+    fn a_private_directory_another_user_owns_is_refused() {
+        let base = TempDir::new("private-theirs");
+        let other = me().wrapping_add(1);
+        let message = refusal(|| private_for(&base, other));
+        assert!(message.contains(&format!("owned by uid {}", me())), "{message}");
+    }
+
+    /// One this user owns that others may enter is refused too.
+    #[test]
+    fn a_private_directory_with_another_mode_is_refused() {
+        let base = TempDir::new("private-mode");
+        let dir = base.join(format!("{PRIVATE_PREFIX}{}", me()));
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let message = refusal(|| private(&base));
+        assert!(message.contains("mode 755"), "{message}");
+    }
+
+    /// A symlink in its place is refused, even to a directory that would pass:
+    /// another user could have planted it, or point it elsewhere.
+    #[test]
+    fn a_symlink_in_place_of_a_private_directory_is_refused() {
+        let base = TempDir::new("private-link");
+        let target = base.join("target");
+        DirBuilder::new().mode(0o700).create(&target).unwrap();
+        std::os::unix::fs::symlink(&target, base.join(format!("{PRIVATE_PREFIX}{}", me()))).unwrap();
+        let message = refusal(|| private(&base));
+        assert!(message.contains("not a directory"), "{message}");
     }
 }
