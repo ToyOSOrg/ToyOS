@@ -1145,6 +1145,15 @@ mod tests {
         assert!(syscap_rights(&["pager".into()]).is_err());
     }
 
+    /// **No `syscap` name confers last words**: the supervisor's system
+    /// capability alone carries them, so no row can write a record every
+    /// fatal path shows, nor spend the boot's one.
+    #[test]
+    fn no_syscap_name_is_the_last_words_right() {
+        let every: Vec<String> = SYSCAP_RIGHTS.iter().map(|(n, _)| (*n).to_string()).collect();
+        assert!(!syscap_rights(&every).unwrap().contains(Rights::LAST_WORDS));
+    }
+
     /// A file server's roles reach the supervisor as records, and a name that is no
     /// role is refused where it is written: the supervisor would start a server for
     /// directories nobody named.

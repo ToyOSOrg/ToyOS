@@ -2418,9 +2418,9 @@ pub fn log_spoken(syscap: RawHandle, cursor: &mut [u64]) -> Result<(), SyscallEr
 ///
 /// `text` is what [`crate::log::last_words`] takes, or `InvalidArgument`; a
 /// boot's second call is `AlreadyExists`. Needs a `SysCap` carrying
-/// [`Rights::LOG`].
+/// [`Rights::LAST_WORDS`], which only the supervisor's has.
 ///
-/// [`Rights::LOG`]: crate::handle::Rights::LOG
+/// [`Rights::LAST_WORDS`]: crate::handle::Rights::LAST_WORDS
 pub fn log_last_words(syscap: RawHandle, text: &[u8]) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_LOG_LAST_WORDS, syscap.0 as u64, text.as_ptr() as u64, text.len() as u64, 0))
 }

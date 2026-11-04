@@ -288,10 +288,17 @@ impl Rights {
     ///
     /// [`SYS_LOG_SPOKEN`]: crate::syscall::SYS_LOG_SPOKEN
     pub const CONSOLE: Rights = Rights(1 << 19);
+    /// On a `SysCap`: say the caller's last words before its end ends the
+    /// machine ([`SYS_LOG_LAST_WORDS`]), one record every fatal path shows,
+    /// once a boot. The supervisor's alone: the kernel mints it on the system
+    /// capability, and no manifest's `syscap` name maps to it.
+    ///
+    /// [`SYS_LOG_LAST_WORDS`]: crate::syscall::SYS_LOG_LAST_WORDS
+    pub const LAST_WORDS: Rights = Rights(1 << 20);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever
     /// composed it, not a right nobody uses.
-    pub const ALL: Rights = Rights(0xf_ffff);
+    pub const ALL: Rights = Rights(0x1f_ffff);
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
         if bits & !Self::ALL.0 == 0 { Some(Rights(bits)) } else { None }
@@ -322,7 +329,7 @@ impl Rights {
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const NAMES: [(Rights, &str); 20] = [
+        const NAMES: [(Rights, &str); 21] = [
             (Rights::DUP, "DUP"),
             (Rights::TRANSFER, "TRANSFER"),
             (Rights::READ, "READ"),
@@ -343,6 +350,7 @@ impl core::fmt::Debug for Rights {
             (Rights::WAKE_LATENCY, "WAKE_LATENCY"),
             (Rights::PAGER, "PAGER"),
             (Rights::CONSOLE, "CONSOLE"),
+            (Rights::LAST_WORDS, "LAST_WORDS"),
         ];
         if self.0 == 0 {
             return f.write_str("NONE");

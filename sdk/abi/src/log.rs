@@ -22,8 +22,8 @@ pub const MAX_RECORD_MESSAGE: usize = 992;
 
 /// The line the kernel puts on the console UART as it takes the UART back
 /// from its driver, for the stop or a fatal path: what follows is the
-/// kernel's, whatever the driver had not yet sent of the log before it.
-pub const KERNEL_TAKES_THE_UART: &str = "console: the kernel writes the UART from here; what its driver had not sent is in /log";
+/// kernel's, whatever the driver had not yet sent before it.
+pub const KERNEL_TAKES_THE_UART: &str = "console: the kernel writes the UART from here";
 
 /// The longest last words a caller may say (`crate::syscall::log_last_words`),
 /// in bytes: a reason, with room in its record for what the kernel says of it.

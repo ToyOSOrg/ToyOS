@@ -33,6 +33,12 @@ takes more (`Carriage::tick`). What the channel had not taken when the stall
 was declared is on neither channel, as above, and while the UART speaks
 beside a carrier that recovers, lines can reach both.
 
+**A refused stop's lines reach the UART twice.** While the machine stops,
+the lines said are held back from `/log` and handed the UART's carrier as
+they are said (`Hub::append_stopping`); a refused stop writes them to the
+file and the replay (`Hub::resume`), and the UART's carrier, past where it
+was, is fed them again. `/log` holds them once.
+
 **Residual: logkeeper itself stuck but alive.** A logkeeper that deadlocks
 feeds neither channel, and nothing watches whether it still reads the ring.
 
@@ -40,8 +46,9 @@ feeds neither channel, and nothing watches whether it still reads the ring.
 
 **Owner:** unheld; whoever next changes `carrier.rs`.
 
-**Exit:** a carrier that goes mid-stream leaves every line on one of the two
-channels: logkeeper, which holds the replay and knows `delivered`, feeds the
+**Exit:** a refused stop's lines reach the UART once: `Hub::resume` moves the
+UART's carrier past the bytes it already took as the stop's. And a carrier
+that goes mid-stream leaves every line on one of the two channels: logkeeper, which holds the replay and knows `delivered`, feeds the
 UART from the port's undelivered tail as it gives the log back; and the stop
 waits, bounded, for the UART to take what it was fed. Shown by a guest test
 that unplugs the port with lines in flight and finds each of them once on the

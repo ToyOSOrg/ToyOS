@@ -311,7 +311,7 @@ pub(super) fn timer_intid() -> u32 {
     TIMER_INTID.load(Relaxed)
 }
 
-/// Take SPI `intid` on this CPU at [`PRIORITY`], edge-triggered, as the
+/// Take SPI `intid` on the boot CPU at [`PRIORITY`], edge-triggered, as the
 /// IOMMU's event interrupt: an SMMUv3's wired interrupts are edge-triggered
 /// (IHI 0070 H.a §3.18.2, §12.4), and the IORT names no trigger. Refused
 /// with the distributor's limit where it takes no such SPI.

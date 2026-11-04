@@ -40,11 +40,12 @@ pub(super) fn sys_log_spoken(ctx: &SyscallContext, syscap: RawHandle, cursor: Us
 /// The caller's last words, one alert record, the boot's first such call
 /// alone: what the supervisor says before its end ends the machine
 /// (`process::teardown`), for the fatal path to put on the console. Requires a
-/// `SysCap` carrying [`Rights::LOG`]; text [`toyos_abi::log::last_words`]
-/// refuses is `InvalidArgument`, and a second call `AlreadyExists`.
+/// `SysCap` carrying [`Rights::LAST_WORDS`], the supervisor's alone; text
+/// [`toyos_abi::log::last_words`] refuses is `InvalidArgument`, and a second
+/// call `AlreadyExists`.
 pub(super) fn sys_log_last_words(syscap: RawHandle, text: &UserBytes) -> u64 {
     static SAID: AtomicBool = AtomicBool::new(false);
-    if let Err(e) = demand_syscap(syscap, Rights::LOG) {
+    if let Err(e) = demand_syscap(syscap, Rights::LAST_WORDS) {
         return e.refuse();
     }
     let mut copy = [0u8; toyos_abi::log::MAX_LAST_WORDS];
