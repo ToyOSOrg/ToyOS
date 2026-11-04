@@ -1,6 +1,7 @@
 ---
 status: assigned
 kind: defect
+severity: [hang]
 opened: 2026-09-27
 ---
 

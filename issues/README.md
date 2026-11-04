@@ -6,14 +6,18 @@ numbering: **`ls` is the index and the frontmatter is the query.**
 `ls issues/` lists everything. To ask a question of the set:
 
 ```
-rg -l '^status: open' issues/       # every unheld piece of work
-rg -l '^status: assigned' issues/   # what somebody is holding
-rg -l '^status: owner' issues/      # what is waiting on the owner
+rg -l '^status: open' issues/                     # every unheld piece of work
+rg -l '^status: assigned' issues/                 # what somebody is holding
+rg -l '^status: owner' issues/                    # what is waiting on the owner
+rg -l '^severity:.*security' issues/              # breaks isolation or authority
+rg -l '^severity:.*data-loss' issues/             # loses or corrupts data
+rg -l '^severity:.*hang' issues/                  # waits with no bound, or loses progress
+rg -l '^severity:.*kernel-from-userland' issues/  # userland can panic or degrade the kernel
 ```
 
 ## Frontmatter
 
-Four fields, three required, no defaults.
+Five fields, three required, no defaults.
 
 | field | values | means |
 |---|---|---|
@@ -29,6 +33,14 @@ Four fields, three required, no defaults.
 | | `rejected` | considered and declined, recorded so nobody re-proposes it |
 | `opened` | `YYYY-MM-DD` | the first commit whose issue tracker carried this heading |
 | `task` | a number | optional; present only where the issue names one |
+| `severity` | a list of flags, `[security, hang]` | optional; absent means none applies |
+| | `security` | breaks an isolation boundary or an authority by itself; a missing hardening layer that needs another bug is not |
+| | `data-loss` | loses or corrupts stored or in-flight data; a failure reported to the caller is not |
+| | `hang` | a wait with no failure timeout, or lost progress |
+| | `kernel-from-userland` | userland input can panic or degrade the kernel |
+
+Only a `defect`, or a `finding` that describes one, carries `severity`.
+There is no scale, and performance is not a flag.
 
 **`status` and `kind` are not free of each other.**
 `kind` says what the entry is; `status` says what is owed. Two of the kinds
