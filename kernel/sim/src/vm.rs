@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc as StdArc;
 
 use kernel::sched::affinity::CpuMask;
-use kernel::sched::cpu::{Action, CpuHandle, CpuSched, Env, SchedPass};
+use kernel::sched::cpu::{homes, Action, CpuHandle, CpuSched, Env, Near, SchedPass};
 use kernel::sched::job::{Job, JobKey};
 use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent, TraceKind};
 use kernel::sched::invariants::Container;
@@ -260,6 +260,8 @@ pub struct Vm<'q> {
     pub programs: BTreeMap<TaskKey, Program>,
     /// Every task ever created, so a finalize-twice is detectable.
     pub spawned: BTreeSet<TaskKey>,
+    /// The CPU each spawn was placed on, in spawn order.
+    pub placed: Vec<usize>,
     /// Every task that ever executed a single op. The difference against
     /// [`Self::spawned`] is what a stopped CPU costs the machine, and it is the
     /// only quantity that can be read off a run where some tasks never run at
@@ -616,6 +618,7 @@ impl<'q> Vm<'q> {
             procs,
             programs: BTreeMap::new(),
             spawned: BTreeSet::new(),
+            placed: Vec::new(),
             ran: BTreeSet::new(),
             live: BTreeSet::new(),
             shared: BTreeMap::new(),
@@ -687,7 +690,7 @@ impl<'q> Vm<'q> {
         };
         for (index, spec) in vm.scenario.procs.clone().iter().enumerate() {
             for &template in &spec.initial {
-                vm.spawn(index, template, CpuMask::ANY);
+                vm.spawn(index, template, CpuMask::ANY, None);
             }
         }
         // Spawned before any CPU took a step, so sent by none of them.
@@ -711,7 +714,9 @@ impl<'q> Vm<'q> {
         all
     }
 
-    fn spawn(&mut self, process: usize, template: usize, mask: CpuMask) {
+    /// `near` names the thread spawning this one into its process, as
+    /// `CpuHandles::place` takes it.
+    fn spawn(&mut self, process: usize, template: usize, mask: CpuMask, near: Option<Near>) {
         if self.live.len() >= self.scenario.max_tasks {
             return;
         }
@@ -747,7 +752,7 @@ impl<'q> Vm<'q> {
         // differ in where a task lands and in nothing else.
         let least_loaded = self
             .handles
-            .place(CpuId(self.next_spawn_cpu as u32), self.clock, mask)
+            .place(CpuId(self.next_spawn_cpu as u32), self.clock, mask, near)
             .0 as usize;
         self.next_spawn_cpu = (least_loaded + 1) % self.scenario.cpus();
         let dst = match self.scenario.placement {
@@ -755,6 +760,7 @@ impl<'q> Vm<'q> {
             PlacementShape::AllOn(cpu) => cpu,
             PlacementShape::Listed(cpus) => cpus[self.spawned.len()],
         };
+        self.placed.push(dst);
         let builder = TaskBuilder {
             key,
             job,
@@ -1530,7 +1536,15 @@ impl<'q> Vm<'q> {
                 let process = self.programs[&key].process;
                 // A new thread starts with its spawner's mask.
                 let mask = self.shared[&key].mask().load().0;
-                self.spawn(process, template, mask);
+                // Newest first, as the kernel reads them.
+                let siblings = self
+                    .programs
+                    .iter()
+                    .rev()
+                    .filter(|(_, program)| program.process == process)
+                    .filter_map(|(key, _)| self.shared.get(key).map(|shared| shared.state()));
+                let homes = homes(siblings, mask.within(self.scenario.cpus()));
+                self.spawn(process, template, mask, Some(Near { spawner: CpuId(cpu as u32), homes }));
                 self.programs.get_mut(&key).expect("live").pc += 1;
             }
             Op::Wake { queue, all, boost } => {

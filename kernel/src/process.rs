@@ -33,7 +33,9 @@ use crate::arch::percpu;
 use crate::mm::charge::{self, Charge, Exhausted};
 use crate::object::{ops, HandleTable};
 use crate::sync::Lock;
+use crate::sched::driver;
 use crate::sched::payload::ThreadSched;
+use kernel::sched::cpu::{homes, Near};
 use crate::time::{Deadline, Duration};
 use crate::{elf, pipe, scheduler};
 use crate::object::shm::SharedMemObject;
@@ -714,6 +716,10 @@ pub fn spawn_thread(
         .expect("spawn_thread: the entry the insert admission just answered for");
     // Every thread carries the same image, so a crash report never asks this table.
     let image = proc.image.clone();
+    let mask = driver::current_mask();
+    // Newest first, as `homes` reads them: the threads a burst has just made.
+    let siblings = proc.threads.iter().rev().filter_map(|(_, thread)| thread.sched().map(|sched| sched.shared.state()));
+    let homes = homes(siblings, mask.within(crate::smp::cpu_count() as usize));
     let tid = proc.threads.insert(ThreadEntry::new(thread_data));
     // Before the thread's first instruction, which is the enqueue below: the
     // thread reads its own id here without a syscall (`toyos_abi::TCB_TID`).
@@ -728,7 +734,8 @@ pub fn spawn_thread(
         thread_pointer,
         job,
         image,
-        mask: crate::sched::driver::current_mask(),
+        mask,
+        near: Some(Near { spawner: driver::current_cpu(), homes }),
     });
     proc.threads.get_mut(tid).unwrap().set_sched(sched);
     drop(guard);

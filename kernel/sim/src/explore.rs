@@ -95,6 +95,8 @@ pub struct Outcome {
     /// Per thread: the instant it was released — see
     /// [`crate::vm::Vm::thread_finish_ns`].
     pub thread_finish_ns: std::collections::BTreeMap<kernel::sched::task::TaskKey, u64>,
+    /// The CPU each spawn was placed on, in spawn order.
+    pub placed: Vec<usize>,
     /// How many tasks the balance path moved between CPUs.
     pub migrations: u64,
     /// See [`crate::vm::Vm::migrations_before_exit`].
@@ -329,6 +331,7 @@ fn outcome_of(scenario: &'static str, vm: &Vm<'_>, choices: &ChoiceStream) -> Ou
         process_service_ns: vm.service_ns.clone(),
         process_finish_ns: vm.finish_ns.clone(),
         thread_finish_ns: vm.thread_finish_ns.clone(),
+        placed: vm.placed.clone(),
         migrations: vm.migrations,
         migrations_before_exit: vm.migrations_before_exit,
         call_site_commits: vm.call_site_commits,
