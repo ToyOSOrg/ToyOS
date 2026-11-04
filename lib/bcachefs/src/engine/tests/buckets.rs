@@ -58,7 +58,7 @@ impl BlockDev for Sparse {
     }
 }
 
-fn formatted_on<D: BlockDev>(dev: &D) {
+pub(super) fn formatted_on<D: BlockDev>(dev: &D) {
     let options = Options { label: b"toyos", time: 1_761_177_600_000_000_000, encryption: None };
     block_on_ready(mkfs(dev, &options, &Tree::new(), &mut Seeded(0x5eed))).unwrap();
 }

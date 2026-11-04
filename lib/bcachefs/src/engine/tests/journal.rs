@@ -297,31 +297,41 @@ fn a_window_with_an_entry_missing_or_failing_its_checksum_is_refused() {
     assert_eq!(window_of(&unclean_with(&[], |_, _| {})).unwrap().map(|w| (w.first, w.last, w.next)), None);
 }
 
-/// A writer holding its live entries to three buckets of an eight-bucket
-/// ring offers what a writer of a three-bucket ring does, as its buckets
-/// fill, wherever on the ring they lie.
+/// On a device a 128th of which is past JOURNAL_BYTES, mkfs's ring is
+/// JOURNAL_BYTES, and an unclean mount after the writer has gone round it
+/// replays a window within it. Red when mkfs sizes the ring by the device.
 #[test]
-fn a_writer_held_to_some_buckets_offers_what_a_ring_of_that_many_does() {
-    let (bucket_sectors, block) = (512, BLOCK);
-    let mut held = journal::Writer::new((0..8).collect(), bucket_sectors, block, super::super::mount::K_TX);
-    held.hold_live_to(3);
-    let mut small = journal::Writer::new((0..3).collect(), bucket_sectors, block, super::super::mount::K_TX);
-    assert_eq!(held.slots(), small.slots());
-    assert_eq!(held.ring_free(), small.ring_free());
-    (held.head, small.head) = (5, 1);
-    held.newest[4] = Some(9);
-    small.newest[0] = Some(9);
-    assert_eq!(held.ring_free(), small.ring_free());
-    held.newest[6] = Some(10);
-    small.newest[2] = Some(10);
-    // Only what the head bucket has left.
-    assert_eq!(held.ring_free(), small.ring_free());
-    held.head_sectors = bucket_sectors;
-    small.head_sectors = bucket_sectors;
-    assert_eq!((held.ring_free(), small.ring_free()), (0, 0));
+fn a_large_volumes_ring_and_its_replay_window_stay_within_journal_bytes() {
+    let dev = super::buckets::Sparse::new(8 << 30);
+    super::buckets::formatted_on(&dev);
+    let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap().0;
+    let bucket = u64::from(sb.member.bucket_sectors) * SECTOR as u64;
+    let ring: u64 = sb.journal.iter().map(|&(_, count)| count).sum();
+    assert!(sb.member.nbuckets / 128 > ring, "a 128th of the device is more than the ring");
+    assert_eq!(ring * bucket, mkfs::JOURNAL_BYTES);
+
+    let mount = block_on_ready(Mount::open(&dev, MountOptions { cache_nodes: 256 }, super::mount::random())).unwrap();
+    let mut last = mount.journal_head();
+    let wrapped = (0..100_000).any(|i| {
+        block_on_ready(mount.create(mount.root(), format!("f{i}").as_bytes(), New::File, super::mount::OWNER, super::mount::NOW)).unwrap();
+        block_on_ready(mount.commit()).unwrap();
+        let head = mount.journal_head();
+        let back = head < last;
+        last = head;
+        back
+    });
+    assert!(wrapped, "the writer went round the ring");
+    drop(mount);
+
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    let (window, _) = v.replayed().expect("an unclean volume replays");
+    let scan = block_on_ready(v.scan_journal()).unwrap();
+    let bytes: u64 = scan.in_window(v.superblock(), window).map(|e| e.sectors * SECTOR as u64).sum();
+    assert!(bytes <= mkfs::JOURNAL_BYTES, "a window of {bytes} bytes");
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }
 
-/// The ring can hold far more than a window: an entry older than a good
+/// A ring can hold far more than a window: an entry older than a good
 /// flush entry's last sequence keeps no records, wherever in the ring it
 /// lies. A window that reaches one has last sequences that went back, and
 /// is refused.
@@ -339,6 +349,15 @@ fn a_scan_keeps_no_records_of_entries_behind_a_flush_entrys_last_sequence() {
     let moving = unclean_with(&[(1, 1, area.clone(), 0), (2, 1, area.clone(), 0), (3, 2, area.clone(), 0), (4, 3, area.clone(), 0)], |_, _| {});
     assert_eq!(scanned(&moving), [(1, true, true), (2, true, true), (3, false, false), (4, false, false)]);
     assert_eq!(window_of(&moving).unwrap().map(|w| (w.first, w.last)), Some((3, 4)));
+    // A stale entry in a later bucket than the window, as a wrapped ring
+    // leaves it: read after the floor is known.
+    let dev = formatted(8 << 20, None);
+    let bucket_blocks = u64::from(block_on_ready(super::super::read::read_superblock(&dev)).unwrap().0.member.bucket_sectors) / 8;
+    let ring = Ring::of(&dev, None);
+    let used = (ring.entry(3, 2, &area).len() + ring.entry(4, 3, &area).len()) as u64;
+    let wrapped = unclean_with(&[(3, 2, area.clone(), 0), (4, 3, area.clone(), bucket_blocks - used), (1, 1, area.clone(), 0)], |_, _| {});
+    assert_eq!(scanned(&wrapped), [(1, true, true), (3, false, false), (4, false, false)]);
+    assert_eq!(window_of(&wrapped).unwrap().map(|w| (w.first, w.last)), Some((3, 4)));
     // Entry 3 said its window starts at 3, the newest that it starts at 2.
     let back = unclean_with(&[(1, 1, area.clone(), 0), (2, 1, area.clone(), 0), (3, 3, area.clone(), 0), (4, 2, area.clone(), 0)], |_, _| {});
     assert_eq!(window_of(&back), Err(Error::Corrupt("a journal window reaching behind another flush entry's last sequence")));

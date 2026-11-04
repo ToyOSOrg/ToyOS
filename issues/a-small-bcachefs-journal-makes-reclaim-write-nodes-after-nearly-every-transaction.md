@@ -14,9 +14,9 @@ ordinary transaction is admitted only with a transaction's journal room left
 on the 64 MiB host test images and QEMU-sized DATA, a few dirty nodes fill
 it, so reclaim writes nodes after nearly every transaction and the eager
 put-in-place of #1152 gains nothing there. mkfs sizes the journal at 1/128
-of the device, at least eight buckets (`mkfs.rs`), and the writer holds its
-live entries to 32 MiB of it (`JOURNAL_LIVE`), so the benches' DATA
-partitions are far from this; only DATA mounts this engine read-write.
+of the device, at least eight buckets and at most 32 MiB (`JOURNAL_BYTES`
+in `mkfs.rs`), so the benches' DATA partitions are far from this; only
+DATA mounts this engine read-write.
 
 **Evidence.** The 64 MiB host images' tests: a crash after 2 000 creates
 replays about a thousand journal keys of them

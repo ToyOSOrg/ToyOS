@@ -171,9 +171,10 @@ pub(crate) struct Scan {
 }
 
 /// Reads every journal bucket in ring order (A2.9), each as
-/// [`scan_bucket`] does. An entry older than the last sequence of some good
-/// flush entry the blacklist leaves keeps no records: the ring can hold far more than any window,
-/// and [`Scan::window`] refuses a window that reaches one.
+/// [`scan_bucket`] does. A ring another writer laid out can hold far more
+/// than any window, so an entry older than the last sequence of a good flush
+/// entry the blacklist leaves keeps no records, and [`Scan::window`] refuses
+/// a window that reaches one.
 pub(crate) async fn scan(dev: &impl BlockDev, sb: &Superblock, key: Option<&MasterKey>) -> Result<Scan> {
     let mut entries: BTreeMap<u64, Found> = BTreeMap::new();
     let mut floor = 0;
@@ -511,8 +512,6 @@ pub(crate) struct Closed {
 pub(crate) struct Writer {
     /// Each ring bucket's device bucket.
     pub ring: Vec<u64>,
-    /// Ring buckets live entries may hold at once: what a replay reads.
-    live: usize,
     pub bucket_sectors: u64,
     /// Entries are at most this many bytes, `per_bucket` of them to a bucket.
     entry: usize,
@@ -525,6 +524,9 @@ pub(crate) struct Writer {
     pub newest: Vec<Option<u64>>,
     /// The last sequence of the newest durable flush entry.
     pub durable_last: u64,
+    /// The last sequence of the newest entry closed. No later one names an
+    /// older: the scan refuses a window that does.
+    pub closed_last: u64,
     /// The sequence of the newest flush entry on the medium.
     pub durable: u64,
     pub open: Option<Open>,
@@ -549,7 +551,6 @@ impl Writer {
         assert!(entry > HEADER + TAIL + 2 * max_tx as usize * 8, "journal buckets of {bucket} bytes hold no transaction");
         let newest = alloc::vec![None; ring.len()];
         Writer {
-            live: ring.len(),
             ring,
             bucket_sectors,
             entry,
@@ -558,6 +559,7 @@ impl Writer {
             head_sectors: 0,
             newest,
             durable_last: 0,
+            closed_last: 0,
             durable: 0,
             open: None,
             closed: VecDeque::new(),
@@ -570,15 +572,9 @@ impl Writer {
         }
     }
 
-    /// Keeps live entries to at most `buckets` of the ring, so a replay
-    /// reads no more, wherever on the ring they lie.
-    pub(crate) fn hold_live_to(&mut self, buckets: usize) {
-        self.live = buckets.clamp(1, self.ring.len());
-    }
-
-    /// Entries the live part of the ring holds.
+    /// Entries the whole ring holds.
     pub(crate) fn slots(&self) -> u64 {
-        self.live as u64 * self.per_bucket
+        self.ring.len() as u64 * self.per_bucket
     }
 
     /// Body u64s an entry holds for transactions.
@@ -590,7 +586,6 @@ impl Writer {
     pub(crate) fn ring_free(&self) -> u64 {
         let outstanding = (self.closed.len() + usize::from(self.open.is_some())) as u64;
         let free = (0..self.ring.len()).filter(|&i| i != self.head && self.newest[i].is_none()).count() as u64;
-        let free = free.saturating_sub((self.ring.len() - self.live) as u64);
         let entry_sectors = (self.entry / SECTOR) as u64;
         (free * self.per_bucket + (self.bucket_sectors - self.head_sectors) / entry_sectors).saturating_sub(outstanding)
     }

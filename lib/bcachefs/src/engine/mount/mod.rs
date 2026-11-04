@@ -83,11 +83,6 @@ const RW_FEATURES: u64 = 1 << 8 | 1 << 9 | 1 << 12 | 1 << 13 | 1 << 17 | 1 << 18
 /// Feature bit 5: the superblock holds a blacklist.
 const BLACKLIST_FEATURE: u64 = 1 << 5;
 
-/// Journal bytes live entries hold at most. A replay holds every key of
-/// them in memory until its nodes take them, so this, not the journal
-/// mkfs sized by the device, bounds an unclean mount's memory and time.
-const JOURNAL_LIVE: u64 = 32 << 20;
-
 /// Ring geometry that leaves two cache-sized reclaim shares and an ordinary
 /// quarter, with room for at least one maximum-size ordinary transaction.
 pub(crate) fn journal_buckets(bucket_sectors: u64, block: usize) -> u64 {
@@ -393,8 +388,6 @@ impl<D: BlockDev> Mount<D> {
         let ring: Vec<u64> = sb.journal.iter().flat_map(|&(first, count)| first..first + count).collect();
         let bucket_sectors = u64::from(sb.member.bucket_sectors);
         let mut journal = Writer::new(ring, bucket_sectors, sb.block_bytes(), K_TX);
-        let live = (JOURNAL_LIVE / (bucket_sectors * SECTOR as u64)).max(journal_buckets(bucket_sectors, sb.block_bytes()));
-        journal.hold_live_to(usize::try_from(live).unwrap_or(usize::MAX));
         let mut blacklist = sb.blacklist.clone();
         let (clocks, restate) = match &replay {
             None => {
@@ -1405,7 +1398,8 @@ impl<D: BlockDev> Mount<D> {
         let mut open = st.journal.open.take().expect("an entry open");
         let pinned = st.oldest_pin().map_or(open.seq, |p| p.min(open.seq));
         let last_seq = if own { pinned } else { pinned.min(st.journal.durable) };
-        assert!(last_seq >= st.journal.durable_last, "a journal entry's last sequence moved back");
+        assert!(last_seq >= st.journal.durable_last.max(st.journal.closed_last), "a journal entry's last sequence moved back");
+        st.journal.closed_last = last_seq;
         let roots = encoded_roots(&st.roots);
         journal::tail(&mut open.area, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), Some(st.now), st.key_version, st.clocks);
         let entry = Jset { seq: open.seq, last_seq, area: &open.area };
@@ -1730,6 +1724,12 @@ impl<D: BlockDev> Mount<D> {
         self.release_orphans().await?;
         self.publish_clean().await?;
         Ok(self.st.borrow().published)
+    }
+
+    /// The ring bucket the journal writes into.
+    #[cfg(test)]
+    pub(crate) fn journal_head(&self) -> usize {
+        self.st.borrow().journal.head
     }
 
     pub(crate) fn journal_room(&self) -> (u64, u64) {

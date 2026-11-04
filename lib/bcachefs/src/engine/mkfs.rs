@@ -65,6 +65,11 @@ pub(crate) const MIN_BUCKET: u64 = 32;
 const MAX_BUCKET: u64 = 4096;
 const WANT_BUCKETS: u64 = 2048;
 const MIN_BUCKETS: u64 = 512;
+/// The journal's bytes at most. Its live entries are what an unclean mount
+/// replays, every key of them held in memory until its nodes take them, and
+/// a mount reads the whole ring: so the ring, not the device, bounds a
+/// replay's memory, reading and work.
+pub(crate) const JOURNAL_BYTES: u64 = 32 << 20;
 
 /// Every btree a v1 volume writes, each given a root here: a node count
 /// that only grows with its keys keeps the layout's fixed point monotone.
@@ -422,7 +427,10 @@ impl Geometry {
         if !block.is_power_of_two() || block < BLOCK_SECTORS || !node.is_power_of_two() || node < block || node > bucket.min(MAX_NODE_SECTORS) {
             return Err(Error::Invalid("a block or node size mkfs does not lay out"));
         }
-        let journal = (front, (nbuckets / 128).max(8).max(super::mount::journal_buckets(bucket, (block * SECTOR as u64) as usize)));
+        // A 128th of the device, at least eight buckets and at most
+        // JOURNAL_BYTES, and never less than reclaim's shares need.
+        let journal = (nbuckets / 128).max(8).min(JOURNAL_BYTES / (bucket * SECTOR as u64));
+        let journal = (front, journal.max(super::mount::journal_buckets(bucket, (block * SECTOR as u64) as usize)));
         Ok(Geometry { block, bucket, nbuckets, node, layout, journal, data_buckets: 0 })
     }
 
@@ -777,7 +785,9 @@ mod tests {
         // 171 GiB, as `format` lays out a partition that size.
         let g = Geometry::new(171 << 21).unwrap();
         assert_eq!((g.bucket, g.node), (4096, 512));
-        assert_eq!(g.journal.1, g.nbuckets / 128);
+        // JOURNAL_BYTES, where a 128th would be 1.3 GiB.
+        assert_eq!(g.journal.1 * g.bucket * SECTOR as u64, JOURNAL_BYTES);
+        assert!(g.nbuckets / 128 > g.journal.1);
     }
 
     #[test]
