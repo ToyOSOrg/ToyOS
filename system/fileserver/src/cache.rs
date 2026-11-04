@@ -108,9 +108,10 @@ struct Inner {
     /// The most clean blocks kept.
     clean_limit: usize,
     slots: BTreeMap<u64, Slot>,
-    /// Clean blocks in the order they were read or cleaned; stale entries are
-    /// skipped when popped.
-    order: VecDeque<u64>,
+    /// Clean blocks in the order they were read or cleaned, each with the
+    /// version it was clean at: an entry whose block was written since is
+    /// stale and skipped, so each clean block has one live entry.
+    order: VecDeque<(u64, u64)>,
     dirty: usize,
     versions: u64,
     fetches: BTreeMap<u64, Fetch>,
@@ -211,7 +212,7 @@ impl<D: Disk> Cache<D> {
                     None => {
                         if inner.order.try_reserve(1).is_ok() && let Some(data) = boxed(data) {
                             inner.slots.insert(at, Slot { data: Rc::new(data), dirty: false, version: 0 });
-                            inner.order.push_back(at);
+                            inner.order.push_back((at, 0));
                         }
                     }
                 }
@@ -450,7 +451,7 @@ impl<D: Disk> Cache<D> {
                 // The disk holds it now, so a block whose place in the
                 // eviction order is refused is dropped rather than kept.
                 if inner.order.try_reserve(1).is_ok() {
-                    inner.order.push_back(block);
+                    inner.order.push_back((block, version));
                 } else {
                     inner.slots.remove(&block);
                 }
@@ -464,17 +465,23 @@ impl Inner {
     /// Drop the oldest clean blocks past the limit.
     fn evict(&mut self) {
         while self.slots.len() - self.dirty > self.clean_limit {
-            let Some(block) = self.order.pop_front() else { break };
-            if self.slots.get(&block).is_some_and(|s| !s.dirty) {
-                self.slots.remove(&block);
+            let Some(entry) = self.order.pop_front() else { break };
+            if self.live(entry) {
+                self.slots.remove(&entry.0);
             }
         }
         // A queue of mostly stale entries is compacted, so it stays the size
         // of what it orders.
         if self.order.len() > 4 * (self.clean_limit + DIRTY_LIMIT) {
-            let slots = &self.slots;
-            self.order.retain(|b| slots.get(b).is_some_and(|s| !s.dirty));
+            let mut order = core::mem::take(&mut self.order);
+            order.retain(|&entry| self.live(entry));
+            self.order = order;
         }
+    }
+    /// Whether `entry` is its block's place in the order: the block is
+    /// clean at the version the entry was queued at.
+    fn live(&self, (block, version): (u64, u64)) -> bool {
+        self.slots.get(&block).is_some_and(|s| !s.dirty && s.version == version)
     }
 }
 
@@ -544,6 +551,32 @@ mod tests {
         let mut out = [[0; BLOCK]];
         block_on_ready(c.read(block, &mut out))?;
         Ok(out[0])
+    }
+
+    /// A block written and flushed again takes its place in the eviction
+    /// order anew; its earlier place no longer evicts it, and a queue of a
+    /// few blocks written over and over stays their size.
+    #[test]
+    fn a_block_cleaned_again_is_evicted_by_its_newest_place() {
+        let c = Cache::new(Counting::new(1024), 2);
+        block_on_ready(c.write(1, &[[1; BLOCK]])).unwrap();
+        block_on_ready(c.flush()).unwrap();
+        read_one(&c, 2).unwrap();
+        block_on_ready(c.write(1, &[[2; BLOCK]])).unwrap();
+        block_on_ready(c.flush()).unwrap();
+        // A third clean block evicts the oldest place: block 2's.
+        read_one(&c, 3).unwrap();
+        let reads = c.disk.reads.get();
+        assert_eq!(read_one(&c, 1).unwrap(), [2; BLOCK]);
+        assert_eq!(c.disk.reads.get(), reads, "block 1 was cleaned after block 2 was read");
+        read_one(&c, 2).unwrap();
+        assert_eq!(c.disk.reads.get(), reads + 1, "block 2 was evicted");
+
+        for round in 0..100_000u64 {
+            block_on_ready(c.write(round % 2, &[[round as u8; BLOCK]])).unwrap();
+            block_on_ready(c.flush()).unwrap();
+        }
+        assert!(c.inner.borrow().order.len() <= 4 * (2 + DIRTY_LIMIT) + 2);
     }
 
     #[test]
