@@ -66,17 +66,18 @@ static RUN: OnceLock<PathBuf> = OnceLock::new();
 /// it, and it is gone when the run is, green or red (`toyos_tmpdir` is the
 /// policy, and what reclaims the directory of a run that was killed).
 ///
-/// A red run's serial logs are the parts of it read afterwards, so they are
+/// A run's serial logs are the parts of it read afterwards when it is not
+/// green, so they are
 /// copied to a directory of their own under [`RED_RUN_SERIAL`] first:
 /// megabytes, where the images are gigabytes. Named for this run's own root —
-/// unique across every process a shared `$TMPDIR` ever holds — so two red runs
-/// of one worktree never share, and neither overwrites, a destination.
+/// unique across every process a shared `$TMPDIR` ever holds — so two runs of
+/// one worktree never share, and neither overwrites, a destination.
 ///
 /// [`Run::exit`] is the one way out of the suite with a status; returning from
 /// `main` drops this as green, and unwinding out of it as red.
 pub struct Run(TempDir);
 
-/// Where a red run's `uart-*.log` files and suspect audio captures are kept,
+/// Where a run's `uart-*.log` files and suspect audio captures are kept,
 /// one directory per run, under the repository root.
 pub const RED_RUN_SERIAL: &str = "target/red-run-serial";
 
@@ -89,11 +90,14 @@ impl Run {
         Run(dir)
     }
 
-    /// Leave with `code`, 1 being red, once the run's directory is gone.
+    /// Leave with `code` once the run's directory is gone, its serial logs
+    /// kept first unless `code` is green.
     pub fn exit(self, code: i32) -> ! {
-        if code == 1 {
+        if code != 0 {
             let kept = keep_serial(&self.0).unwrap_or_else(|e| panic!("{e}"));
-            eprintln!("[toyos] this red run's serial logs are kept at {}", kept.display());
+            if kept.exists() {
+                eprintln!("[toyos] this run's serial logs are kept at {}", kept.display());
+            }
         }
         drop(self);
         std::process::exit(code)
@@ -105,7 +109,7 @@ impl Drop for Run {
         if std::thread::panicking() {
             // A second panic here would abort and lose the first one's message.
             match keep_serial(&self.0) {
-                Ok(kept) => eprintln!("[toyos] this red run's serial logs are kept at {}", kept.display()),
+                Ok(kept) => eprintln!("[toyos] this run's serial logs are kept at {}", kept.display()),
                 Err(e) => eprintln!("[toyos] {e}"),
             }
         }
@@ -137,8 +141,8 @@ fn worth_keeping(name: &str) -> bool {
     name.starts_with("uart-") && name.ends_with(".log")
 }
 
+/// Makes a directory under `into` only for a log it copies.
 fn copy_serial(dir: &Path, into: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(into).map_err(|e| format!("create {}: {e}", into.display()))?;
     let entries = std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
@@ -147,6 +151,7 @@ fn copy_serial(dir: &Path, into: &Path) -> Result<(), String> {
         if entry.file_type().map_err(|e| format!("{}: {e}", path.display()))?.is_dir() {
             copy_serial(&path, &into.join(&name))?;
         } else if name.to_str().is_some_and(worth_keeping) {
+            std::fs::create_dir_all(into).map_err(|e| format!("create {}: {e}", into.display()))?;
             std::fs::copy(&path, into.join(&name))
                 .map_err(|e| format!("copy {}: {e}", path.display()))?;
         }

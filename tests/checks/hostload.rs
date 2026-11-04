@@ -79,3 +79,19 @@ pub fn self_check() -> Result<(), String> {
     );
     Ok(())
 }
+
+/// Two `/proc/stat` readings across which the kernel moved iowait to idle:
+/// iowait went down by 20 ticks and idle up by 100.
+pub fn iowait_going_back() -> Result<(), String> {
+    let before = hostload::proc_stat("cpu  100 0 50 1000 40 0 0 0 0 0\ncpu0 100 0 50 1000 40 0 0 0 0 0\n");
+    let after = hostload::proc_stat("cpu  110 0 55 1100 20 0 0 0 0 0\ncpu0 110 0 55 1100 20 0 0 0 0 0\n");
+    let (busy, total) = after.since(&before);
+    if (busy, total) != (hostload::ticks(15), hostload::ticks(95)) {
+        return Err(format!(
+            "busy {busy:?} of {total:?}, and it is {:?} of {:?}: iowait going down is not idle going down",
+            hostload::ticks(15),
+            hostload::ticks(95)
+        ));
+    }
+    Ok(())
+}
