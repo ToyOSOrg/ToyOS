@@ -60,9 +60,7 @@ fn control_features() -> Vec<String> {
 /// without `test-actuators`, whose dead code neither of the others can see.
 /// `undocumented_unsafe_blocks` is adopted per area as each area's
 /// justifications land. `toyos-pci-claim` has one because `$GUESTS` excludes it and
-/// only netstack's host tests build its `host-grant`. `kernel-loom` has one
-/// because `victim-retires-mid-probe`'s test arm excludes `no-preempt-guard`,
-/// which `$CONTROLS` turns on beside it. `toyos-crypto` has three because the
+/// only netstack's host tests build its `host-grant`. `toyos-crypto` has three because the
 /// workspace run builds it only with the features its consumers unify onto it,
 /// and each of its forms compiles arms the others do not.
 /// The kernel's library is linted on the host apart from them: its tests as
@@ -174,17 +172,6 @@ const SHAPES: &[Shape] = &[
             "--no-deps",
             "--target-dir",
             "target/clippy-pci-claim",
-        ],
-        after: &["$ADOPTED", "-D", "warnings"],
-    },
-    Shape {
-        before: &[
-            "-p",
-            "kernel-loom",
-            "--test",
-            "loom_mailbox",
-            "--features",
-            "victim-retires-mid-probe",
         ],
         after: &["$ADOPTED", "-D", "warnings"],
     },

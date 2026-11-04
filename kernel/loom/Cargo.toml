@@ -257,18 +257,13 @@ push-fence-relaxed = []
 #   cargo test -p kernel-loom --features affinity-fence-relaxed --test loom_affinity
 #
 affinity-fence-relaxed = []
-# The one feature here that models nothing away. It lets the mailbox model's
-# victim stop taking passes — what a CPU that stops does — and the model must
-# red, because `MailboxNode::in_flight` is the consumer's to clear and a
-# retired consumer clears nothing. It reproduces an open defect rather than
-# proving a lie is caught, so unlike its siblings it goes away with the fix:
+# The negative control for the steal probe. `cpu.rs`'s `CpuHandle::ask`
+# rings the victim's doorbell before it sets the thief's bit, so the pass the
+# ring owes can take nothing, and `loom_sleep.rs` must red:
 #
-#   cargo test -p kernel-loom --features victim-retires-mid-probe \
-#     --test loom_mailbox
+#   cargo test -p kernel-loom --features ask-rings-first --test loom_sleep
 #
-# The kernel declares no twin, because this decides nothing in
-# `kernel/pure/sched/`.
-victim-retires-mid-probe = []
+ask-rings-first = []
 # The negative control for the watch. It makes `task.rs`'s `begin_commit`
 # blind to the notified bit, which is a waiter that registers, checks and parks
 # without the post that landed in between being able to stop it — the lost wake

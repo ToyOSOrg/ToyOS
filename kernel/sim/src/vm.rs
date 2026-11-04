@@ -538,9 +538,10 @@ pub struct Vm<'q> {
     pub rounds_to_run: u64,
     /// What the run did at each level of [`Scenario::topology`].
     pub levels: LevelCounts,
-    /// Per CPU: a steal probe outstanding before the step being executed, so a
-    /// probe the step consumed without handing a task over is a failed steal.
-    probing: Vec<bool>,
+    /// Per CPU: the CPU holding its ask before the step being executed, so an
+    /// ask that holder's step took without handing a task over is a failed
+    /// steal.
+    probing: Vec<Option<CpuId>>,
 }
 
 /// The surplus at which a victim is worth probing —
@@ -672,7 +673,7 @@ impl<'q> Vm<'q> {
             wc_rounds: 0,
             rounds_to_run: 0,
             levels: LevelCounts::default(),
-            probing: vec![false; n],
+            probing: vec![None; n],
             next_irq,
             next_key: 1,
             next_spawn_cpu: 0,
@@ -999,7 +1000,7 @@ impl<'q> Vm<'q> {
             }
         }
         for cpu in 0..self.scenario.cpus() {
-            self.probing[cpu] = self.cpus[cpu].probe_outstanding();
+            self.probing[cpu] = self.cpus[cpu].ask_held(&self.handles);
         }
         let actor = crate::explore::actor(&step);
         // Only a CPU's own step takes a task out of its parked set.
@@ -1132,18 +1133,18 @@ impl<'q> Vm<'q> {
                 self.levels.wakes[at(home, placed)] += 1;
             }
         }
-        // A probe is consumed only by its victim's drain, so the step that
-        // consumed it is that victim's.
+        // An ask leaves its holder's word by that holder's take or by the
+        // thief's own retraction; only the take is an answer.
         for thief in 0..self.scenario.cpus() {
-            if !self.probing[thief] || self.cpus[thief].probe_outstanding() {
+            let Some(victim) = self.probing[thief] else { continue };
+            if self.handles.get(victim).asked_by(CpuId(thief as u32)) || actor != Some(victim.0 as usize) {
                 continue;
             }
             let answered = self.step_trace.iter().any(|event| {
                 matches!(event.kind, TraceKind::Migrate { to, .. } if to.0 as usize == thief)
             });
             if !answered {
-                let victim = actor.expect("a probe is consumed inside its victim's pass");
-                self.levels.failed_steals[at(victim, CpuId(thief as u32))] += 1;
+                self.levels.failed_steals[at(victim.0 as usize, CpuId(thief as u32))] += 1;
             }
         }
     }
@@ -1166,7 +1167,7 @@ impl<'q> Vm<'q> {
         #[allow(clippy::needless_range_loop)]
         for cpu in 0..self.scenario.cpus() {
             let surplus_next_door = surpluses > usize::from(worth(cpu));
-            let blind = halted[cpu] && surplus_next_door && !self.cpus[cpu].probe_outstanding();
+            let blind = halted[cpu] && surplus_next_door && !self.cpus[cpu].probe_outstanding(&self.handles, self.clock);
             match (blind, self.probe_gap_since[cpu]) {
                 (true, None) => self.probe_gap_since[cpu] = Some(self.clock),
                 (true, Some(since)) => {

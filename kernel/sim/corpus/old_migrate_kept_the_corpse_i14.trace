@@ -7,6 +7,8 @@
 # note: re-shrunk after an awake CPU with nothing loaded came to owe its pass at
 # note: once, which renumbers every decision, and again after a busy CPU is kicked
 # note: and a fair wake behind fair work is forwarded too, and again for the
-# note: job-group scheduler's request-length decisions.
-2 0 1 2 0 2 3 0 3 1 3 1 3 0 0 1 1 0 0 1 0 1 0 1 0 2 0 1 0 0 0 0
-3 0 3 0 2 0 0 0 3 1 1 2 0 0 1 1 2 0 1 2 2 2 3 1 3 1 2 0 1 2 1 
+# note: job-group scheduler's request-length decisions, and again when a steal
+# note: probe became a bit in its victim's word instead of a message.
+# note: it fails I14's "killed and then migrated" half.
+4 3 3 0 0 0 1 1 2 0 2 0 2 0 0 0 0 1 2 1 1 2 1 0 1 0 0 1 1 0 1 1
+0 0 0 0 0 0 0 1 1 1 0 2 0 0 1 1 0 1 0 1 1 2 

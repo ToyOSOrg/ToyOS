@@ -38,6 +38,10 @@ use loom::sync::Arc;
 use kernel_loom::sched::mailbox::{
     mailbox, Doorbell, Kick, MailboxConsumer, MailboxNode, MailboxProducer, Urgency,
 };
+use kernel_loom::sched::affinity::MASK_WORDS;
+use kernel_loom::sched::cpu::{CpuHandle, CpuHandles};
+use kernel_loom::sched::hw::CpuId;
+use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched_model::{model, Msg, PreemptModel, RemoteGuard};
 
 struct World {
@@ -164,5 +168,39 @@ fn a_kicked_cpu_comes_back_and_drains_everything() {
             world.ipis.load(Ordering::SeqCst) <= 2,
             "at most one IPI per post; coalesced edges send none",
         );
+    });
+}
+
+/// **A steal probe is a bit and a ring, and never lost.** A thief asks while
+/// the victim begins a pass and takes its asks: either that pass takes the
+/// ask, or the ring is still pending and owes the victim another pass, whose
+/// take finds it. Ringing before the bit is set (`ask-rings-first`) lets the
+/// pass the ring owed take nothing and clear the ring, and the ask waits on a
+/// CPU nothing will wake.
+#[test]
+fn an_ask_is_taken_by_the_pass_its_ring_owes() {
+    model(|| {
+        let (tx, _rx) = mailbox::<Msg>();
+        let handles = Arc::new(CpuHandles::new(vec![CpuHandle::new(CpuId(0), tx)], Topology::flat(1)));
+        let thief = CpuId(5);
+
+        let asking = {
+            let handles = handles.clone();
+            loom::thread::spawn(move || {
+                let _ = handles.get(CpuId(0)).ask(thief);
+            })
+        };
+        let victim = handles.get(CpuId(0));
+        victim.doorbell().begin_pass();
+        let first = victim.take_asks();
+        asking.join().unwrap();
+
+        let taken = |asks: [u64; MASK_WORDS]| asks[0] & 1 << 5 != 0;
+        if taken(first) {
+            return;
+        }
+        assert!(victim.doorbell().kick_pending(), "the ask was neither taken nor owed a pass: it is lost");
+        victim.doorbell().begin_pass();
+        assert!(taken(victim.take_asks()), "the pass the ask's ring owed did not find it");
     });
 }
