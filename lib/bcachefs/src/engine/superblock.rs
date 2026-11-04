@@ -448,7 +448,7 @@ fn decode_header(b: &[u8]) -> Result<Header> {
     }
     let flags: [u64; 7] = core::array::from_fn(|i| le64(b, 144 + 8 * i));
     match field(flags[0], 2, 6) {
-        0 => {}
+        0 => return Err(Error::Unsupported("superblock without a checksum")),
         1 if crc32c(&b[16..total]) == le32(b, 0) => {}
         1 => return Err(Error::Checksum("superblock")),
         _ => return Err(Error::Unsupported("superblock checksum other than crc32c")),

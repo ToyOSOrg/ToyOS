@@ -131,7 +131,7 @@ fn check_bset(sb: &Superblock, flags: u32, version: u16, at: usize) -> Result<()
 /// Verifies a record's checksum or MAC, then decrypts it in place.
 fn open(key: Option<&MasterKey>, seq: u64, journal_seq: u64, csum_type: u8, r: &Record, bytes: &mut [u8]) -> Result<()> {
     match csum_type {
-        csum::NONE => Ok(()),
+        csum::NONE => Err(Error::Unsupported("btree node without a checksum")),
         csum::CRC32C_NONZERO if crc32c(&bytes[r.at + 16..r.end]) == le32(bytes, r.at) => Ok(()),
         csum::CRC32C_NONZERO => Err(Error::Checksum("btree node")),
         csum::CHACHA_POLY_128 => {

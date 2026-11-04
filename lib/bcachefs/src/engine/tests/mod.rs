@@ -1358,3 +1358,39 @@ fn an_upstream_volumes_file_in_one_run_is_in_place_and_inline_data_is_not() {
     let (at, len) = block_on_ready(v.in_place(path(&v, "Documents/deep/seq.txt"))).unwrap().expect("one run");
     assert_eq!(dev.get()[at as usize..(at + len) as usize], seq()[..]);
 }
+
+/// What ToyOS writes always carries a checksum, so a superblock, a btree
+/// node or an extent that declares none is refused rather than read
+/// unverified.
+#[test]
+fn metadata_and_data_without_a_checksum_are_refused() {
+    let dev = formatted(8 << 20, None);
+    rewrite_superblock(&dev, |header, _| header.flags[0] &= !(0x3f << 2));
+    assert_eq!(open_err(&dev), Error::Unsupported("superblock without a checksum"));
+
+    let dev = formatted(8 << 20, None);
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    let (ptr, _) = leaf_of(&v, Btree::Inodes, Bpos::MIN);
+    let flags = ptr.ptr.sector * SECTOR as u64 + 152;
+    let mut block = [[0u8; BLOCK]];
+    block_on_ready(dev.read(flags / BLOCK as u64, &mut block)).unwrap();
+    block[0][(flags % BLOCK as u64) as usize] &= !0xf;
+    block_on_ready(dev.write(flags / BLOCK as u64, &block)).unwrap();
+    assert_eq!(block_on_ready(v.inode(4096)), Err(Error::Unsupported("btree node without a checksum")));
+
+    let data = [0x5au8; BLOCK];
+    let mut tree = Tree::new();
+    tree.file(Tree::ROOT, b"f", &data, Meta { perm: 0o644, uid: 0, gid: 0 }).unwrap();
+    let dev = Bytes::new(vec![0u8; 8 << 20]);
+    let options = Options { label: b"toyos", time: 1_761_177_600_000_000_000, encryption: None };
+    block_on_ready(mkfs(&dev, &options, &tree, &mut Seeded(0x5eed))).unwrap();
+    let ino = path(&block_on_ready(Volume::open(&dev)).unwrap(), "f");
+    assert_eq!(read_all(&block_on_ready(Volume::open(&dev)).unwrap(), ino).unwrap(), data, "the file reads before its checksum goes");
+    rewrite_leaf(&dev, Btree::Extents, Bpos::MIN, 0, |keys| {
+        for (key, value) in keys.iter_mut().filter(|(k, _)| k.kind == crate::engine::kind::EXTENT) {
+            let extent = Extent::decode(value).unwrap();
+            *value = Extent::encode(key.size, 0, 0, extent.ptr);
+        }
+    });
+    assert_eq!(read_all(&block_on_ready(Volume::open(&dev)).unwrap(), ino), Err(Error::Unsupported("data without a checksum")));
+}

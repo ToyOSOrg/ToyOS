@@ -571,8 +571,7 @@ pub(crate) trait Source {
             let Some(crc) = extent.crc else { return Ok(None) };
             let len = u64::from(key.size) * SECTOR as u64;
             let at = extent.ptr.sector.checked_mul(SECTOR as u64).ok_or(Error::Corrupt("extent past 2^64 bytes"))?;
-            let unchecked = crc.csum_type == csum::NONE;
-            if unchecked || extent.ptr.unwritten || crc.offset != 0 || crc.uncompressed != key.size || start.is_some_and(|_| at != next) {
+            if extent.ptr.unwritten || crc.offset != 0 || crc.uncompressed != key.size || start.is_some_and(|_| at != next) {
                 return Ok(None);
             }
             // Checks the whole extent and copies none of it.
@@ -613,7 +612,7 @@ pub(crate) trait Source {
         self.dev().read_data(at / BLOCK as u64, &mut blocks).await?;
         let mut data = blocks.as_flattened()[skip_block..skip_block + len].to_vec();
         match crc.csum_type {
-            csum::NONE => {}
+            csum::NONE => return Err(Error::Unsupported("data without a checksum")),
             // Over the whole encoded extent, the value zero-extended to the
             // entry's checksum bytes.
             csum::CRC32C_NONZERO | csum::CRC32C => {

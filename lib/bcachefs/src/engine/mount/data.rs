@@ -621,7 +621,7 @@ pub(super) fn checked_extent(v: &[u8]) -> Result<Extent> {
         return Err(Error::Unsupported("modifying cached, unwritten, compressed or other-device data"));
     }
     match crc.csum_type {
-        csum_type::NONE | csum_type::CRC32C_NONZERO | csum_type::CRC32C => {}
+        csum_type::CRC32C_NONZERO | csum_type::CRC32C => {}
         csum_type::CHACHA_POLY_80 | csum_type::CHACHA_POLY_128 if crc.csum_len == csum_type::bytes(crc.csum_type) => {}
         _ => return Err(Error::Unsupported("modifying data with a checksum this reader cannot verify")),
     }
