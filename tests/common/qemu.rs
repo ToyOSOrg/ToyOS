@@ -2844,7 +2844,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
             panic!("[qemu] {why}")
         };
         let (root, bytes) =
-            toyos_build::image::root_file_on(&boot_image, toyos_osrelease::PATH).unwrap_or_else(|why| refuse(why.to_string()));
+            toyos_build::image::root_file_on(&boot_image, toyos_osrelease::PATH).unwrap_or_else(|why| refuse(why));
         let release = toyos_osrelease::parse(&bytes).unwrap_or_else(|why| {
             refuse(format!("{} on {} is not the build's: {why:?}", toyos_osrelease::PATH, boot_image.display()))
         });
