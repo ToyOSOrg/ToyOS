@@ -88,9 +88,10 @@ pub enum Storage {
     /// Not started: the declaration is awaited since `since`.
     Awaiting { since: Instant },
     /// Being started: the storage rows, the homes and every other row, in
-    /// that order. A service that ends meanwhile is started again, but no
-    /// `drives` row starts until [`Storage::finish`], so none starts before
-    /// its home exists. `drivers` as in [`Storage::Up`].
+    /// that order. A service that ends meanwhile is started again, and so is a
+    /// disk driver, which the homes are made through; no other `drives` row
+    /// starts until [`Storage::finish`], so none starts before its home
+    /// exists ([`Storage::may_start`]). `drivers` as in [`Storage::Up`].
     Starting { drivers: bool },
     /// Started: `drivers` where a declaration is held, so the PCI drivers may
     /// claim; not where nothing can declare.
@@ -179,6 +180,13 @@ impl Storage {
     /// are being started.
     pub fn drivers(&self) -> bool {
         *self == Self::Up { drivers: true }
+    }
+
+    /// Whether `program`'s `drives` row may start a process now: every one
+    /// once storage is up on a declaration; inside storage's window a disk
+    /// driver alone, since the homes the window makes go through it.
+    pub fn may_start(&self, program: &Program) -> bool {
+        self.drivers() || (self.declared() && is_disk_driver(program))
     }
 }
 
@@ -270,21 +278,33 @@ mod tests {
         assert_eq!(storage.deadline(), None);
     }
 
-    /// A service that ends while storage and the homes are being started is
-    /// started again, and the reading of the set its end causes starts no
-    /// `drives` row: that waits for [`Storage::finish`], after every home.
+    /// A row's end inside storage's window: the reading of the set it causes
+    /// starts a disk driver again, which the homes are made through, and no
+    /// other `drives` row, which waits for [`Storage::finish`], after every
+    /// home. On a boot nothing can declare on, neither starts.
     #[test]
-    fn no_drives_row_starts_inside_storages_window() {
+    fn only_a_disk_driver_starts_inside_storages_window() {
+        let disk = Program {
+            drives: vec!["pci:01:08:02".to_string()],
+            receives: vec![toyos_blockring::disk::PORT.to_string()],
+            ..row("nvme", &[], &[])
+        };
+        let console = Program { drives: vec!["pci:07:80:00/1af4:1043".to_string()], ..row("virtio-console", &[], &[]) };
         let at = Instant::now();
         let mut storage = Storage::new(true, at);
+        assert!(!storage.may_start(&disk) && !storage.may_start(&console), "nothing before the declaration");
         assert_eq!(storage.read(Declaration::Held, at), Step::Start(Duration::ZERO));
         // The end's reading of the set, inside the window.
         assert_eq!(storage.read(Declaration::Held, at + Duration::from_millis(5)), Step::Nothing);
         assert!(storage.started(), "homes may be made in the window");
-        assert!(!storage.drivers(), "a drives row inside the window starts before its home");
-        assert!(storage.declared(), "the disk drivers start the window");
+        assert!(storage.may_start(&disk), "a disk driver that ends inside the window is the homes' way to disk");
+        assert!(!storage.may_start(&console), "a drives row inside the window starts before its home");
         storage.finish();
-        assert!(storage.drivers());
+        assert!(storage.may_start(&disk) && storage.may_start(&console));
+        let mut none = Storage::new(false, at);
+        assert!(!none.may_start(&disk) && !none.may_start(&console));
+        none.finish();
+        assert!(!none.may_start(&disk) && !none.may_start(&console));
     }
 
     /// A declaration read at its bound, or past it while the boot still

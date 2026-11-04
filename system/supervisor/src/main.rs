@@ -1116,8 +1116,8 @@ impl<'a> Supervisor<'a> {
     ///    and the grants the data volume keeps;
     /// 4. every other row, each after its home;
     /// 5. the other `drives` rows, from [`Self::drive`] once this returns: a
-    ///    service that ends meanwhile is started again, but its end's reading
-    ///    of the set starts none ([`declaration::Storage::Starting`]).
+    ///    service or disk driver that ends meanwhile is started again, but its
+    ///    end's reading of the set starts no other ([`declaration::Storage::may_start`]).
     fn storage_up(&mut self) {
         if self.storage.declared() {
             self.undriven = self.start_drivers(is_disk_driver);
@@ -1215,9 +1215,8 @@ impl<'a> Supervisor<'a> {
             }
             declaration::Step::Nothing => {}
         }
-        if self.storage.drivers() {
-            self.start_drivers(|_| true);
-        }
+        let storage = self.storage;
+        self.start_drivers(|row| storage.may_start(row));
     }
 
     /// Read the device set into [`Self::listed`], saying what arrived and
@@ -1250,7 +1249,7 @@ impl<'a> Supervisor<'a> {
     /// Start a `drives` process of the rows `which` picks on each function the
     /// last reading says is owed one; answers each function a start was
     /// refused on, by its entry and address.
-    fn start_drivers(&mut self, which: fn(&Program) -> bool) -> Vec<String> {
+    fn start_drivers(&mut self, which: impl Fn(&Program) -> bool) -> Vec<String> {
         let mut refused = Vec::new();
         let rows: Vec<(&'static Program, PciMatch)> = self.drivers.iter().filter(|(row, _)| which(row)).copied().collect();
         for act in self.drives.decide(&rows, &self.listed, boot_controller(), Instant::now()) {
