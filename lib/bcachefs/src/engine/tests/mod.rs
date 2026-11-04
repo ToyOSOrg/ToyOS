@@ -247,7 +247,7 @@ fn a_torn_primary_superblock_is_read_from_another_copy_and_named() {
 }
 
 /// A copy's place holding what is not this volume's copy there — nothing,
-/// another volume's copy, a copy of this one at another offset, or another
+/// another volume's copy, whole or damaged, a copy of this one at another offset, or another
 /// layout — is another writer's, and the volume is refused, not opened from
 /// the copies left.
 #[test]
@@ -260,10 +260,15 @@ fn a_superblock_place_another_writer_took_refuses_the_volume() {
     };
     let primary = 8 * SECTOR;
     let second = 2056 * SECTOR;
+    let other = Bytes::new(vec![0u8; 32 << 20]);
+    let options = Options { label: b"toyos", time: 1_761_177_600_000_000_000, encryption: None };
+    block_on_ready(mkfs(&other, &options, &Tree::new(), &mut Seeded(0x07e4))).unwrap();
+    let other = other.into_inner();
     type Edit<'a> = &'a dyn Fn(&mut Vec<u8>);
-    let cases: [(&str, Edit, u64); 6] = [
+    let cases: [(&str, Edit, u64); 7] = [
         ("a zeroed primary", &|raw| raw[primary..primary + BLOCK].fill(0), 8),
-        ("another volume's UUID", &|raw| raw[second + 40] ^= 1, 2056),
+        ("another volume's damaged copy", &|raw| raw[second + 40] ^= 1, 2056),
+        ("another volume's whole copy", &|raw| raw[second..second + BLOCK].copy_from_slice(&other[second..second + BLOCK]), 2056),
         ("the primary's bytes in the second copy's place", &|raw| raw.copy_within(primary..primary + BLOCK, second), 2056),
         ("a zeroed layout copy", &|raw| raw[7 * SECTOR..8 * SECTOR].fill(0), 7),
         ("another format's superblock over the front", &|raw| {

@@ -820,10 +820,11 @@ pub(crate) async fn read_bytes(dev: &impl BlockDev, at: u64, len: usize) -> Resu
 /// did not read whole: what a crash in a copy's write leaves.
 ///
 /// Every place the layout gives the volume must hold the volume's own bytes:
-/// a copy whose first sector does not name this volume and its own offset,
-/// or a layout copy other than the chosen copy's layout, is another writer's,
-/// and the volume is refused as [`Error::Overwritten`] rather than mounted
-/// from what is left.
+/// a whole copy of another volume than the primary's, a copy whose first
+/// sector does not name this volume and its own offset, or a layout copy
+/// other than the chosen copy's layout, is another writer's, and the volume
+/// is refused as [`Error::Overwritten`] rather than mounted from what is
+/// left.
 pub(crate) async fn read_superblock(dev: &impl BlockDev) -> Result<(Superblock, Vec<u64>)> {
     let primary = read_copy(dev, PRIMARY).await;
     let layout_copy = read_bytes(dev, LAYOUT * SECTOR as u64, Layout::BYTES).await?;
@@ -856,6 +857,10 @@ pub(crate) async fn read_superblock(dev: &impl BlockDev) -> Result<(Superblock, 
         let (_, failure) = copies.into_iter().next().expect("the primary is read");
         return Err(failure.err().unwrap_or(Error::Corrupt("no superblock copy")));
     };
+    let own = copies[0].1.as_ref().map_or(best.header.internal_uuid, |sb| sb.header.internal_uuid);
+    if let Some((offset, _)) = copies.iter().find(|(_, read)| read.as_ref().is_ok_and(|sb| sb.header.internal_uuid != own)) {
+        return Err(Error::Overwritten { sector: *offset });
+    }
     if Layout::decode(&layout_copy).ok().as_ref() != Some(&best.header.layout) {
         return Err(Error::Overwritten { sector: LAYOUT });
     }
