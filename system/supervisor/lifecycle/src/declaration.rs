@@ -40,7 +40,7 @@ fn mints(program: &Program) -> bool {
 /// When each started row starts, by its index among the rows [`plan`] was
 /// given. Index 0 is SYSTEM, running since before the manifest was read, and
 /// is in none of them.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Plan {
     /// Whether a declaration can come: where none can, nothing waits for one,
     /// every row starts at once, storage first, and no PCI driver does.
@@ -87,8 +87,13 @@ pub const BOUND: Duration = Duration::from_secs(30);
 pub enum Storage {
     /// Not started: the declaration is awaited since `since`.
     Awaiting { since: Instant },
-    /// Started: on a declaration held, `drivers` and the PCI drivers start
-    /// beside it; on a boot nothing can declare on, not.
+    /// Being started: the storage rows, the homes and every other row, in
+    /// that order. A service that ends meanwhile is started again, but no
+    /// `drives` row starts until [`Storage::finish`], so none starts before
+    /// its home exists. `drivers` as in [`Storage::Up`].
+    Starting { drivers: bool },
+    /// Started: `drivers` where a declaration is held, so the PCI drivers may
+    /// claim; not where nothing can declare.
     Up { drivers: bool },
     /// Never started: no declaration will be held this boot, or none was by
     /// [`BOUND`].
@@ -112,13 +117,20 @@ pub enum Step {
 }
 
 impl Storage {
-    /// Awaiting the declaration from `now`, or up with no driver where
+    /// Awaiting the declaration from `now`, or starting with no driver where
     /// none can come ([`Plan::comes`]).
     pub fn new(comes: bool, now: Instant) -> Self {
         match comes {
             true => Self::Awaiting { since: now },
-            false => Self::Up { drivers: false },
+            false => Self::Starting { drivers: false },
         }
+    }
+
+    /// Storage, the homes and every other row are started: the `drives` rows
+    /// may follow.
+    pub fn finish(&mut self) {
+        let Self::Starting { drivers } = *self else { panic!("supervisor: storage finished from {self:?}") };
+        *self = Self::Up { drivers };
     }
 
     /// What `declaration`, read at `now`, asks of the boot. A declaration
@@ -128,7 +140,7 @@ impl Storage {
         let Self::Awaiting { since } = *self else { return Step::Nothing };
         match declaration {
             Declaration::Held => {
-                *self = Self::Up { drivers: true };
+                *self = Self::Starting { drivers: true };
                 Step::Start(now.duration_since(since))
             }
             Declaration::Withheld(why) => {
@@ -154,10 +166,17 @@ impl Storage {
 
     /// Whether storage is started, so a home or state directory can be made.
     pub fn started(&self) -> bool {
-        matches!(self, Self::Up { .. })
+        matches!(self, Self::Starting { .. } | Self::Up { .. })
     }
 
-    /// Whether the PCI drivers may be started.
+    /// Whether a declaration is held, so storage's own disk drivers may claim
+    /// at the start of its window.
+    pub fn declared(&self) -> bool {
+        matches!(self, Self::Starting { drivers: true } | Self::Up { drivers: true })
+    }
+
+    /// Whether the PCI drivers may be started: not while storage and the homes
+    /// are being started.
     pub fn drivers(&self) -> bool {
         *self == Self::Up { drivers: true }
     }
@@ -227,7 +246,11 @@ mod tests {
             let plan = plan(&rows, holder);
             assert!(!plan.comes && plan.first.is_empty(), "{plan:?}");
         }
-        assert_eq!(Storage::new(false, Instant::now()), Storage::Up { drivers: false });
+        let mut storage = Storage::new(false, Instant::now());
+        assert_eq!(storage, Storage::Starting { drivers: false });
+        storage.finish();
+        assert_eq!(storage, Storage::Up { drivers: false });
+        assert!(storage.started() && !storage.drivers());
     }
 
     /// Held starts storage once, and nothing after it changes that.
@@ -238,11 +261,30 @@ mod tests {
         assert!(!storage.started() && !storage.drivers());
         assert_eq!(storage.read(Declaration::Pending, at), Step::Nothing);
         assert_eq!(storage.read(Declaration::Held, at + Duration::from_millis(80)), Step::Start(Duration::from_millis(80)));
+        assert!(storage.started() && !storage.drivers());
+        storage.finish();
         assert!(storage.started() && storage.drivers());
         for later in [Declaration::Held, Declaration::Pending, Declaration::Withheld(Withheld::Ended)] {
             assert_eq!(storage.read(later, at + BOUND * 2), Step::Nothing);
         }
         assert_eq!(storage.deadline(), None);
+    }
+
+    /// A service that ends while storage and the homes are being started is
+    /// started again, and the reading of the set its end causes starts no
+    /// `drives` row: that waits for [`Storage::finish`], after every home.
+    #[test]
+    fn no_drives_row_starts_inside_storages_window() {
+        let at = Instant::now();
+        let mut storage = Storage::new(true, at);
+        assert_eq!(storage.read(Declaration::Held, at), Step::Start(Duration::ZERO));
+        // The end's reading of the set, inside the window.
+        assert_eq!(storage.read(Declaration::Held, at + Duration::from_millis(5)), Step::Nothing);
+        assert!(storage.started(), "homes may be made in the window");
+        assert!(!storage.drivers(), "a drives row inside the window starts before its home");
+        assert!(storage.declared(), "the disk drivers start the window");
+        storage.finish();
+        assert!(storage.drivers());
     }
 
     /// A declaration read at its bound, or past it while the boot still

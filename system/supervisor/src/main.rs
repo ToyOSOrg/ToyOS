@@ -650,7 +650,7 @@ fn main() {
         instances: Vec::new(),
         undriven: Vec::new(),
         storage: declaration::Storage::new(true, Instant::now()),
-        plan: declaration::Plan { comes: true, first: Vec::new(), storage: Vec::new(), rest: Vec::new() },
+        plan: declaration::Plan::default(),
         log,
         worker: Worker::start(),
         restarting: false,
@@ -1115,9 +1115,11 @@ impl<'a> Supervisor<'a> {
     /// 3. the session's home and the state directory of every row running,
     ///    and the grants the data volume keeps;
     /// 4. every other row, each after its home;
-    /// 5. the other `drives` rows, from [`Self::drive`].
+    /// 5. the other `drives` rows, from [`Self::drive`] once this returns: a
+    ///    service that ends meanwhile is started again, but its end's reading
+    ///    of the set starts none ([`declaration::Storage::Starting`]).
     fn storage_up(&mut self) {
-        if self.storage.drivers() {
+        if self.storage.declared() {
             self.undriven = self.start_drivers(is_disk_driver);
         }
         for at in std::mem::take(&mut self.plan.storage) {
@@ -1131,6 +1133,7 @@ impl<'a> Supervisor<'a> {
         for at in std::mem::take(&mut self.plan.rest) {
             self.start_service(at);
         }
+        self.storage.finish();
     }
 
     /// Storage given up for the boot, whose declaration will not come or did
@@ -1156,10 +1159,7 @@ impl<'a> Supervisor<'a> {
         self.desktop_for(at);
         let block = self.block_args();
         let service = &mut self.services[at];
-        // SYSTEM was started before the manifest was read.
-        if service.child.is_some() {
-            return;
-        }
+        assert!(service.child.is_none(), "supervisor: {} is started twice", service.label());
         let started = service.spawn(
             &program.source,
             &[],
