@@ -1,6 +1,7 @@
 ---
 status: open
 kind: defect
+severity: [security]
 opened: 2026-08-06
 ---
 

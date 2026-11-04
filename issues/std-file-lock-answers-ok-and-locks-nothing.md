@@ -1,6 +1,7 @@
 ---
 status: open
 kind: defect
+severity: [data-loss]
 opened: 2026-10-03
 ---
 

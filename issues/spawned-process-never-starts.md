@@ -1,6 +1,7 @@
 ---
 status: open
 kind: defect
+severity: [hang]
 opened: 2026-08-05
 task: 142
 ---
