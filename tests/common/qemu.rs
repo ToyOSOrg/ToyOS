@@ -358,9 +358,9 @@ pub const TIMED_OUT: &str = "timed out after";
 /// It is not a verdict: no assertion in this suite is satisfied by the guest
 /// merely talking.
 ///
-/// On a shared boot the kernel itself is a periodic speaker, on a 10 s cadence,
-/// so a wait whose predicate never comes true is never ended by this bound —
-/// the guest keeps talking, and the wait runs the whole of [`GUEST_WEDGED`].
+/// Not paid out for the host: every vCPU a guest runs has a host CPU of its own
+/// (`toyos_build::buildlock::guest_cpus`). Nothing in a guest speaks on a
+/// cadence, so a step that goes this long without a word ends the wait.
 pub const GUEST_QUIET: Duration = Duration::from_secs(15);
 
 /// The other end of the same guard: a guest can be stuck and chatty, and a
@@ -483,10 +483,8 @@ pub const VERDICT_POLL: Duration = Duration::from_millis(100);
 ///
 /// **`elapsed > ceiling` stays a necessary condition, and that is what keeps
 /// this safe.** Silence alone is not a wedge on this suite's boots: a healthy
-/// but idle guest on a config with no live periodic speaker — an idle
-/// soundserver, and the kernel's own ~10 s line halting with the idle loop — was
-/// measured quiet for as long as 102 s, so a guard that fired on 15 s of silence
-/// by itself would red a working machine. A guest's own budget is what says how
+/// guest with nothing to do says nothing (one was measured quiet for 102 s), so
+/// a guard that fired on 15 s of silence by itself would red a working machine. A guest's own budget is what says how
 /// long its silence is allowed; only past *that* does quiet mean stopped.
 pub fn ceiling_verdict(
     dying: Option<&str>,
@@ -1352,6 +1350,9 @@ pub struct QemuInstance {
     smp: u32,
     /// The test binaries this boot put on ROOT, by the name `run` takes.
     carried: BTreeSet<String>,
+    /// A host CPU for each of the guest's vCPUs, given back after [`Drop`]
+    /// reaps QEMU.
+    _cpus: toyos_build::buildlock::GuestCpus,
 }
 
 /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants.
@@ -1615,6 +1616,14 @@ impl QemuInstance {
             .unwrap_or_else(|why| panic!("[qemu] {why}"));
 
         let qemu = qemu_command(&boot_image, nvme.path(), &sockets.dir, &vars, &options);
+        // After the image is built, and before QEMU and every clock of this boot
+        // start: the wait for CPUs is the host's, never the guest's.
+        let cpus = toyos_build::buildlock::guest_cpus(
+            &toyos_build::keystore::host(),
+            options.smp,
+            host_cores(),
+            &format!("a {}-vCPU guest of {}", options.smp, config.display()),
+        );
         spawn_and_wait_ready(
             qemu,
             options,
@@ -1627,6 +1636,7 @@ impl QemuInstance {
                 boot_image,
                 vars,
                 carried,
+                cpus,
             },
         )
     }
@@ -2734,10 +2744,11 @@ struct Files {
     boot_image: PathBuf,
     vars: PathBuf,
     carried: BTreeSet<String>,
+    cpus: toyos_build::buildlock::GuestCpus,
 }
 
 fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -> QemuInstance {
-    let Files { seq, uart_log, nvme, sockets, screendump, boot_image, vars, carried } = files;
+    let Files { seq, uart_log, nvme, sockets, screendump, boot_image, vars, carried, cpus } = files;
 
     // Inherited: `orphan` reads QEMU's exit as the end of its harness's stderr.
     qemu.stdin(Stdio::piped())
@@ -2826,6 +2837,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         boot_log,
         smp: options.smp,
         carried,
+        _cpus: cpus,
     }
 }
 

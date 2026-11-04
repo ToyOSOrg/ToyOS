@@ -36,6 +36,11 @@
 //! writes; a ToyOS-hosted clang key's inside the worktree lock and the use of
 //! the sysroot it builds against, writing only the store.
 //!
+//! **Host CPUs are the guests'** ([`guest_cpus`]): one lock per CPU in the
+//! store, so every worktree's guests share them, and a guest holds one per vCPU
+//! for its life. Taken with no other lock of this file held, once its image is
+//! built.
+//!
 //! Holder death: `flock` is released by the kernel when the open file
 //! description closes, so a builder that is SIGKILLed mid-phase — routine here
 //! — strands nothing, which a lock file with a pid in it could not promise.
@@ -177,6 +182,50 @@ pub fn worktree_exclusive(root: &Path, what: &str) -> Guard {
 /// lock in *shared* mode by design.
 pub fn artifact(root: &Path) -> Guard {
     exclusive(&root.join(LOCK_DIR).join("artifact"), "artifact lock", "artifact staging")
+}
+
+/// The host CPUs a running guest holds, one per vCPU; released when the guest's
+/// QEMU has been reaped and this drops.
+#[must_use]
+pub struct GuestCpus {
+    _cpus: Vec<Guard>,
+}
+
+/// `vcpus` of the host's `cpus`, for the guest `what`, from `store`'s one lock
+/// per CPU: a guest wider than the host takes all of them.
+///
+/// **All or nothing.** An attempt keeps the CPUs it locked only when it has as
+/// many as it asked for, so no guest holds some while it waits for more, and no
+/// two waiters can each hold what the other needs. The waiter at the head of
+/// the queue holds `queue` while it waits, so narrower guests arriving after a
+/// wide one wait behind it instead of taking every CPU that frees; nothing
+/// waits on `queue` while holding a CPU.
+pub fn guest_cpus(store: &Path, vcpus: u32, cpus: u32, what: &str) -> GuestCpus {
+    let dir = store.join("locks").join("guest-cpus");
+    let want = vcpus.clamp(1, cpus.max(1)) as usize;
+    let deadline = Instant::now() + CEILING;
+    let queue_path = dir.join("queue");
+    let queue = open_lock_file(&queue_path);
+    take(&queue, Mode::Exclusive, &queue_path, "guest CPU queue", what, "a wider guest is waiting for host CPUs", deadline);
+    let label = format!("{want} of {cpus}, {what}");
+    let mut held = poll(&dir.join("cpu-0"), "host CPUs", &label, "held by running guests", deadline, || {
+        let mut held = Vec::with_capacity(want);
+        for cpu in 0..cpus {
+            let file = open_lock_file(&dir.join(format!("cpu-{cpu}")));
+            if try_lock(&file, Mode::Exclusive) {
+                held.push(Guard { file, records_holder: true });
+                if held.len() == want {
+                    return Some(held);
+                }
+            }
+        }
+        None
+    });
+    drop(queue);
+    for cpu in &mut held {
+        write_note(&mut cpu.file, &note_text(what));
+    }
+    GuestCpus { _cpus: held }
 }
 
 /// A content-addressed product of the host, locked per key: a sysroot, the
@@ -803,6 +852,85 @@ pub(crate) mod tests {
     /// `flock` alone would let a stream of builds starve the rebuild they are
     /// all waiting for; the `intent` file is what stops that, and this is the
     /// gate on it.
+    /// A take of `vcpus` of `cpus` on a thread of its own, which reports on
+    /// `done` once it holds them and keeps them until `release` says.
+    fn guest(
+        store: &Path,
+        vcpus: u32,
+        cpus: u32,
+        name: &'static str,
+        done: std::sync::mpsc::Sender<&'static str>,
+    ) -> std::sync::mpsc::Sender<()> {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let store = store.to_path_buf();
+        std::thread::spawn(move || {
+            let held = guest_cpus(&store, vcpus, cpus, name);
+            done.send(name).unwrap();
+            let _ = wait.recv();
+            drop(held);
+        });
+        release
+    }
+
+    /// What `done` says within `wait`, if anything.
+    fn said(done: &std::sync::mpsc::Receiver<&'static str>, wait: Duration) -> Option<&'static str> {
+        done.recv_timeout(wait).ok()
+    }
+
+    #[test]
+    fn a_guest_waits_until_the_host_has_a_cpu_for_each_of_its_vcpus() {
+        let store = scratch("guest-cpus");
+        let (tx, done) = std::sync::mpsc::channel();
+        let a = guest(&store, 3, 4, "a", tx.clone());
+        assert_eq!(said(&done, Duration::from_secs(20)), Some("a"));
+        let b = guest(&store, 2, 4, "b", tx.clone());
+        assert_eq!(said(&done, Duration::from_millis(300)), None, "two guests of 3 and 2 vCPUs ran on 4 CPUs");
+        // The waiter holds none of the CPUs while it waits: the fourth is free.
+        let fourth = open_lock_file(&store.join("locks/guest-cpus/cpu-3"));
+        assert!(try_lock(&fourth, Mode::Exclusive), "a waiting guest held a CPU");
+        drop(fourth);
+        a.send(()).unwrap();
+        assert_eq!(said(&done, Duration::from_secs(20)), Some("b"));
+        b.send(()).unwrap();
+    }
+
+    #[test]
+    fn a_guest_wider_than_the_host_takes_all_of_it() {
+        let store = scratch("guest-cpus-wide");
+        let (tx, done) = std::sync::mpsc::channel();
+        let wide = guest(&store, 8, 4, "wide", tx.clone());
+        assert_eq!(said(&done, Duration::from_secs(20)), Some("wide"));
+        let one = guest(&store, 1, 4, "one", tx.clone());
+        assert_eq!(said(&done, Duration::from_millis(300)), None, "a guest ran beside one that holds the whole host");
+        wide.send(()).unwrap();
+        assert_eq!(said(&done, Duration::from_secs(20)), Some("one"));
+        one.send(()).unwrap();
+    }
+
+    #[test]
+    fn a_narrow_guest_does_not_overtake_a_wide_one_waiting() {
+        let store = scratch("guest-cpus-queue");
+        let (tx, done) = std::sync::mpsc::channel();
+        let first = guest(&store, 3, 4, "first", tx.clone());
+        assert_eq!(said(&done, Duration::from_secs(20)), Some("first"));
+        let wide = guest(&store, 4, 4, "wide", tx.clone());
+        let queue = open_lock_file(&store.join("locks/guest-cpus/queue"));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while try_lock(&queue, Mode::Exclusive) {
+            let _ = queue.unlock();
+            assert!(Instant::now() < deadline, "the wide guest never queued");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let narrow = guest(&store, 1, 4, "narrow", tx.clone());
+        assert_eq!(said(&done, Duration::from_millis(300)), None, "a narrow guest took the CPU a queued wide one waits for");
+        first.send(()).unwrap();
+        assert_eq!(said(&done, Duration::from_secs(20)), Some("wide"));
+        assert_eq!(said(&done, Duration::from_millis(300)), None, "a guest ran beside one that holds the whole host");
+        wide.send(()).unwrap();
+        assert_eq!(said(&done, Duration::from_secs(20)), Some("narrow"));
+        narrow.send(()).unwrap();
+    }
+
     #[test]
     fn a_queued_exclusive_phase_goes_first() {
         let root = scratch("preference");
