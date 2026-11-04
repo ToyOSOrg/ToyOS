@@ -82,41 +82,56 @@ pub(crate) fn ticks(ticks: u64) -> Duration {
     Duration::from_nanos(ticks.saturating_mul(1_000_000_000 / hz as u64))
 }
 
-/// The host's cumulative CPU counters, summed over its CPUs.
-struct Host {
-    /// Linux: user nice system idle iowait irq softirq steal. macOS: user
-    /// system idle nice, 32-bit and wrapping.
-    fields: Vec<u64>,
+/// The host's cumulative CPU counters in ticks, summed over its CPUs.
+pub(crate) struct Host {
+    busy: u64,
+    idle: u64,
     cpus: u32,
+}
+
+/// The width the counters wrap at: Linux's are 64-bit, Mach's `natural_t`.
+#[cfg(target_os = "linux")]
+const WRAP: u64 = u64::MAX;
+#[cfg(target_os = "macos")]
+const WRAP: u64 = u32::MAX as u64;
+
+impl Host {
+    /// Busy and total time since `earlier`.
+    pub(crate) fn since(&self, earlier: &Host) -> (Duration, Duration) {
+        let busy = self.busy.wrapping_sub(earlier.busy) & WRAP;
+        let idle = self.idle.wrapping_sub(earlier.idle) & WRAP;
+        (ticks(busy), ticks(busy + idle))
+    }
+}
+
+/// `/proc/stat`'s aggregate line: user nice system idle iowait irq softirq
+/// steal, then guest and guest_nice, which user and nice already include.
+/// Steal is busy, because a hypervisor ran something else. Idle and iowait are
+/// idle as one sum: the kernel moves time from iowait to idle, so iowait alone
+/// can decrease (`Documentation/filesystems/proc.rst`, `/proc/stat`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "the checks read it on every host"))]
+pub(crate) fn proc_stat(stat: &str) -> Host {
+    let line = stat.lines().find(|l| l.starts_with("cpu ")).expect("/proc/stat has a cpu line");
+    let fields: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .take(8)
+        .map(|f| f.parse().expect("/proc/stat's cpu fields are numbers"))
+        .collect();
+    assert_eq!(fields.len(), 8, "/proc/stat's cpu line: {line}");
+    let idle = fields[3].wrapping_add(fields[4]);
+    let busy = fields.iter().fold(0u64, |sum, f| sum.wrapping_add(*f)).wrapping_sub(idle);
+    let cpus = stat
+        .lines()
+        .filter(|l| l.strip_prefix("cpu").is_some_and(|n| n.starts_with(|c: char| c.is_ascii_digit())))
+        .count() as u32;
+    Host { busy, idle, cpus }
 }
 
 #[cfg(target_os = "linux")]
 impl Host {
-    /// `/proc/stat`'s aggregate line. Its guest and guest_nice fields are
-    /// left out because user and nice already include them.
     fn read() -> Host {
-        let stat = std::fs::read_to_string("/proc/stat").expect("/proc/stat is readable");
-        let line = stat.lines().find(|l| l.starts_with("cpu ")).expect("/proc/stat has a cpu line");
-        let fields: Vec<u64> = line
-            .split_whitespace()
-            .skip(1)
-            .take(8)
-            .map(|f| f.parse().expect("/proc/stat's cpu fields are numbers"))
-            .collect();
-        assert_eq!(fields.len(), 8, "/proc/stat's cpu line: {line}");
-        let cpus = stat
-            .lines()
-            .filter(|l| l.strip_prefix("cpu").is_some_and(|n| n.starts_with(|c: char| c.is_ascii_digit())))
-            .count() as u32;
-        Host { fields, cpus }
-    }
-
-    /// Busy and total time since `earlier`. Idle and iowait are idle; steal is
-    /// busy, because a hypervisor ran something else.
-    fn since(&self, earlier: &Host) -> (Duration, Duration) {
-        let d: Vec<u64> = self.fields.iter().zip(&earlier.fields).map(|(a, b)| a - b).collect();
-        let total: u64 = d.iter().sum();
-        (ticks(total - d[3] - d[4]), ticks(total))
+        proc_stat(&std::fs::read_to_string("/proc/stat").expect("/proc/stat is readable"))
     }
 }
 
@@ -145,19 +160,11 @@ impl Host {
             status
         };
         assert_eq!(status, 0, "host_statistics(HOST_CPU_LOAD_INFO)");
+        let ticks = info.cpu_ticks.map(u64::from);
+        let idle = ticks[libc::CPU_STATE_IDLE as usize];
+        let busy = ticks.iter().sum::<u64>() - idle;
         // SAFETY: no preconditions.
         let cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as u32;
-        Host { fields: info.cpu_ticks.map(u64::from).to_vec(), cpus }
-    }
-
-    fn since(&self, earlier: &Host) -> (Duration, Duration) {
-        let d: Vec<u64> = self
-            .fields
-            .iter()
-            .zip(&earlier.fields)
-            .map(|(&a, &b)| u64::from((a as u32).wrapping_sub(b as u32)))
-            .collect();
-        let total: u64 = d.iter().sum();
-        (ticks(total - d[libc::CPU_STATE_IDLE as usize]), ticks(total))
+        Host { busy, idle, cpus }
     }
 }

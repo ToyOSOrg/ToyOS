@@ -112,6 +112,11 @@ mod checks {
         hostload_checks::self_check()
     }
 
+    #[test]
+    fn iowait_going_back() -> Result<(), String> {
+        hostload_checks::iowait_going_back()
+    }
+
     /// What a suspend is worth to a verdict, staged rather than reasoned about.
     ///
     /// `clock_checks::self_check` gates the detector; this gates what the suite

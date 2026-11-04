@@ -52,7 +52,8 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   guest             the guest suite, on the sysroot its job restored (nightly)
   rows [<args>...]  `cargo test --test toyos-build -- <args>...`, each split at
                     whitespace, on this host's own toolchain store, held to the
-                    instrument as `guest` is (guest-rows.yml)
+                    instrument as `guest` is, after removing the serial logs
+                    earlier runs kept (guest-rows.yml)
   release           put the sysroot main's nightly restored up as its toolchain release
   publish           put main's SDK crates on crates.io (publish.yml)";
 
@@ -140,7 +141,12 @@ pub fn dispatch(root: &Path, args: &[String]) {
         Job::Bootstrap => vec![step("this tree's toolchain", || release::bootstrap(root))],
         Job::Image => image(root),
         Job::Guest => guest(root, &suite_args(&["--jobs", "1"]), true),
-        Job::Rows(args) => guest(root, &suite_args(&args.iter().map(String::as_str).collect::<Vec<_>>()), false),
+        Job::Rows(args) => {
+            let suite = suite_args(&args.iter().map(String::as_str).collect::<Vec<_>>());
+            let mut steps = vec![step("no serial logs kept by an earlier run", || forget_kept_serial(root))];
+            steps.extend(guest(root, &suite, false));
+            steps
+        }
         Job::Release => vec![step("main's toolchain release", || release::release(root))],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
@@ -1353,6 +1359,17 @@ fn guest(root: &Path, suite: &[String], install: bool) -> Vec<Step> {
     steps
 }
 
+/// An empty `target/red-run-serial`: a runner that keeps its workspace
+/// uploads only what this run kept.
+fn forget_kept_serial(root: &Path) -> Result<String, String> {
+    let kept = root.join("target/red-run-serial");
+    match std::fs::remove_dir_all(&kept) {
+        Ok(()) => Ok(format!("removed {}", kept.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("none".to_string()),
+        Err(e) => Err(format!("remove {}: {e}", kept.display())),
+    }
+}
+
 /// The suite's own count line and every line naming a verdict worth reading
 /// without the log: a failure.
 fn verdicts(log: &str) -> String {
@@ -2007,15 +2024,27 @@ mod tests {
             for called in text.lines().filter_map(|l| l.strip_prefix("    uses:")) {
                 assert!(called.trim().starts_with("./.github/workflows/"), "{name}: a job uses{called}");
             }
-            for runner in text.lines().filter_map(|l| l.trim_start().strip_prefix("runs-on:")) {
-                if !hosted(runner) {
-                    assert_eq!(on, ["workflow_dispatch"], "{name}: runs-on:{runner} is started by {on:?}");
-                    self_hosted.push(name.clone());
-                }
+            let runners: Vec<&str> = text.lines().filter_map(|l| l.trim_start().strip_prefix("runs-on:")).collect();
+            if runners.iter().any(|runner| !hosted(runner)) {
+                assert_eq!(on, ["workflow_dispatch"], "{name}: a self-hosted job is started by {on:?}");
+                refuses_main_and_writes_nothing(&name, &text, runners.len());
+                self_hosted.push(name.clone());
             }
         }
         assert_eq!(self_hosted, ["guest-rows.yml"], "the workflows that reach a self-hosted runner");
         assert_eq!(seen, 6, "ci.yml, nightly.yml, publish.yml and guest-rows.yml, and guest.yml and toolchain.yml");
+    }
+
+    /// A self-hosted workflow's job never runs on main's ref, whose token
+    /// writes the caches every other ref restores; it holds no permission and
+    /// uses no cache action, since the runner's own workspace is its cache.
+    fn refuses_main_and_writes_nothing(name: &str, text: &str, jobs: usize) {
+        let permissions: Vec<&str> = text.lines().filter(|l| l.trim_start().starts_with("permissions:")).collect();
+        assert_eq!(permissions, ["permissions: {}"], "{name}: its permissions");
+        let caches = text.lines().filter(|l| l.contains("uses:") && l.contains("actions/cache"));
+        assert_eq!(caches.count(), 0, "{name} uses a cache action");
+        let conditions: Vec<&str> = text.lines().filter_map(|l| l.strip_prefix("    if:")).map(str::trim).collect();
+        assert_eq!(conditions, vec!["github.ref != 'refs/heads/main'"; jobs], "{name}: each job's condition");
     }
 
     #[test]
@@ -2027,6 +2056,18 @@ mod tests {
         assert!(hosted(" ubuntu-24.04") && hosted(" macos-latest"));
         for runner in [" [self-hosted, toyos-guest]", " toyos-guest", " ${{ inputs.runner }}", "", " ubuntu-24.04 # x"] {
             assert!(!hosted(runner), "{runner:?}");
+        }
+        let good = "permissions: {}\njobs:\n  rows:\n    if: github.ref != 'refs/heads/main'\n    runs-on: [self-hosted]\n";
+        refuses_main_and_writes_nothing("good", good, 1);
+        let refused = [
+            good.replace("    if: github.ref != 'refs/heads/main'\n", ""),
+            good.replace("    if: github.ref != 'refs/heads/main'", "    if: always()"),
+            good.replace("permissions: {}", "permissions:\n  contents: read"),
+            good.replace("    runs-on:", "    permissions:\n      actions: write\n    runs-on:"),
+            format!("{good}    steps:\n      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830\n"),
+        ];
+        for text in refused {
+            assert!(std::panic::catch_unwind(|| refuses_main_and_writes_nothing("bad", &text, 1)).is_err(), "{text}");
         }
     }
 
