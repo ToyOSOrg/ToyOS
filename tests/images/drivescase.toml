@@ -3,15 +3,23 @@
 # its own until the job that judges them has run.
 
 [boot]
-start = ["acpiserver", "logkeeper", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "test-runner"]
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log-carrier"]
+syscap = ["logread", "console"]
+serves = ["log-carrier", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 # Started on each function the kernel does not drive, never by `[boot] start`.
+
 [programs.pciholder]
 drives = ["pci:00:ff:00/1234:11e8"]
 

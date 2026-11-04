@@ -1,0 +1,15 @@
+[package]
+name = "uart"
+description = "The console UART's driver: the log logkeeper hands it onto the UART between the kernel's hand-over and the machine's stop, and what the UART receives into the console's input."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
+toyos-logstream = { path = "../../lib/logstream" }
+logkeeper-api = { path = "../../lib/logkeeper-api" }
+
+[package.metadata.toyos.host]
+exempt.owns = "the machine's console UART, claimed from the kernel between its boot and its stop"

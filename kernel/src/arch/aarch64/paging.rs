@@ -348,21 +348,6 @@ impl Drop for AsidGuard {
     }
 }
 
-enum Asid {
-    /// ASID 0, the kernel space's, whose user half is empty.
-    Kernel,
-    User(AsidGuard),
-}
-
-impl Asid {
-    fn value(&self) -> u16 {
-        match self {
-            Self::Kernel => kernel::pcid::KERNEL_PCID,
-            Self::User(guard) => guard.0.get(),
-        }
-    }
-}
-
 /// `None` when every user ASID is held by a live space.
 fn alloc_asid() -> Option<AsidGuard> {
     let mut pool = ASIDS.lock();
@@ -579,7 +564,8 @@ impl Unlinked {
 /// invalid, and the caller's [`shoot_down`](Self::shoot_down) otherwise.
 pub struct UserTables {
     tables: Tables,
-    asid: Asid,
+    /// Owned for this space's life: dropping it returns the ASID.
+    asid: AsidGuard,
     /// The job its tables are counted to.
     job: Arc<Job>,
 }
@@ -593,19 +579,11 @@ impl UserTables {
             free_table(job, root);
             return None;
         };
-        Some(Self { tables: Tables { root }, asid: Asid::User(asid), job: Arc::clone(job) })
-    }
-
-    /// The kernel's own space, whose user half is empty: what a kernel thread
-    /// and an idle CPU run under. Never dropped.
-    pub fn kernel() -> Self {
-        let root = KERNEL_TTBR0.load(core::sync::atomic::Ordering::Acquire) & ADDR;
-        assert!(root != 0, "paging: the kernel's space before `init`");
-        Self { tables: Tables { root }, asid: Asid::Kernel, job: Arc::clone(crate::mm::charge::boot()) }
+        Some(Self { tables: Tables { root }, asid, job: Arc::clone(job) })
     }
 
     pub fn root(&self) -> Root {
-        Root(u64::from(self.asid.value()) << 48 | self.tables.root)
+        Root(u64::from(self.asid.0.get()) << 48 | self.tables.root)
     }
 
     /// The table of leaves over `va`, if one is built.
@@ -814,7 +792,7 @@ impl UserTables {
     /// the invalidations broadcast in hardware.
     pub fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) -> bool {
         const BY_PAGE: u64 = 64;
-        let asid = self.asid.value();
+        let asid = self.asid.0.get();
         if !unlinked.is_empty() || (end - start) / PAGE_4K > BY_PAGE {
             tlb::asid(asid);
         } else {
@@ -830,7 +808,6 @@ impl UserTables {
 /// issued again.
 impl Drop for UserTables {
     fn drop(&mut self) {
-        assert!(matches!(self.asid, Asid::User(_)), "paging: the kernel's address space dropped");
         let all = self.unlink(0, toyos_userbound::USER_TOP, |_, _| false);
         all.free(&self.job);
         free_table(&self.job, self.tables.root);

@@ -3,11 +3,19 @@
 # judges the supervisor starting no driver and saying why, and a job's own
 # claim of each refused at once.
 [boot]
-start = ["logkeeper", "test-runner"]
+start = ["logkeeper", "uart", "test-runner"]
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
+serves = ["log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 [programs.pciholder]
 drives = ["pci:00:ff:00/1234:11e8"]

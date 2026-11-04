@@ -18,7 +18,6 @@ mod shootdown;
 mod tlb_tags;
 mod cpu_local;
 mod cpu_slice;
-mod sleeplock;
 mod smp;
 mod smp_roster;
 mod sync;
@@ -109,8 +108,6 @@ use toyos_rootimage::handoff::{held, Descriptor};
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     cpu::disable_interrupts();
-    // Before the first record of the report: no holder carries it off the UART.
-    log::console::on_the_uart_for_good();
     // A handler's own panic reports through locks like any other.
     #[cfg(feature = "mask-windows")]
     windows::stand_down();
@@ -533,8 +530,9 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
             late_panic::Nest<late_panic::Nest<()>>>>>>>>>>::on_screen_console_check();
     }
 
-    // Last thing before enter_idle_loop: nothing can run before it, and a klogd spawned earlier would idle through phases 5-7 with no drainer.
-    log::console::start();
+    // Last thing before the release: from here the UART is its claim's
+    // holder's, and nothing earlier can claim it.
+    log::console::hand_over();
 
     smp::set_ready();
 

@@ -18,10 +18,10 @@
 //!   newline. A program's text never does: a record ends at a newline, and
 //!   [`Text`] writes every control byte as text.
 //!
-//! The same form goes to the console, where `logkeeper` is the one writer of
-//! program lines, without the wall-clock stamp. A terminal shows either in
-//! the console's form and in colour ([`Shown`]); no line of the log carries a
-//! colour.
+//! The same form goes to the console's channels, which `logkeeper` feeds; the
+//! kernel's own console lines, before userland runs and from the machine's
+//! stop, carry no wall-clock stamp. A terminal shows either in the console's
+//! form and in colour ([`Shown`]); no line of the log carries a colour.
 //!
 //! Pure: `core` and `alloc`, no `unsafe`, no I/O.
 
@@ -58,6 +58,29 @@ pub const CARRIER: &str = "log-carrier";
 /// The one row that may receive [`CARRIER`]: the virtio console device's driver.
 pub const CARRIER_HOLDER: &str = "virtio-console";
 
+/// The name of the port the console UART's driver asks `logkeeper` for the log
+/// on, as [`CARRIER`]'s carrier asks: from the first line the kernel did not
+/// put on the UART itself before userland ran, and none of what the carrier's
+/// channel takes. Its row alone receives it.
+pub const WIRE: &str = "log-wire";
+
+/// The one row that may receive [`WIRE`]: the console UART's driver.
+pub const WIRE_HOLDER: &str = "uart";
+
+/// The endowment label of the write end of the console's input: the pipe the
+/// supervisor makes, whose read end is every program's standard input, and
+/// hands the row that holds it to write what the UART receives into.
+pub const CONSOLE_INPUT: &str = "console-input";
+
+/// What the UART says as the carrier's channel takes the log off it: every
+/// UART line before it the carrier's channel carries too, and the ones after
+/// it are the UART's alone.
+pub const CARRIED_ELSEWHERE: &str =
+    "console: the log is carried elsewhere from here; the UART takes the stop's and a fatal path's lines";
+
+/// What the UART says as it carries the log again.
+pub const BACK_ON_THE_UART: &str = "console: the UART carries the log again";
+
 /// What `logkeeper` says once the carrier's channel has taken nothing it is
 /// owed for its bound and the UART carries the log beside it: lines can then
 /// reach both channels, out of order.
@@ -70,19 +93,16 @@ pub const CARRY: u32 = 8;
 /// channel has taken, counted from the pipe's first byte, as a `u64` payload.
 pub const DELIVERED: u32 = 9;
 
-/// The manifest's name for the program that is the log: the supervisor endows it the
-/// [`ORIGINS`] acceptor and a console it may write ([`CONSOLE`]), and gives
-/// it a ring like every other program's, which it reads like every other.
+/// The manifest's name for the program that is the log: the one row that may
+/// hold [`ORIGINS`], and given a ring like every other program's, which it
+/// reads like every other.
 pub const LOGKEEPER: &str = "logkeeper";
 
-/// The endowment label of the acceptor the supervisor hands `logkeeper` for its frames.
-/// **Named by no manifest row**, so the one connector to it is the supervisor's own and
-/// no program can register a ring under a name of its choosing.
+/// The endowment label of the acceptor the supervisor hands the row that holds it,
+/// `logkeeper`, for its frames. **No row receives its connector**, so the one
+/// connector to it is the supervisor's own and no program can register a ring
+/// under a name of its choosing.
 pub const ORIGINS: &str = "log-origins";
-
-/// The endowment label of the one console the supervisor gives a writable handle to:
-/// `logkeeper`'s, where it puts every program's line with its head.
-pub const CONSOLE: &str = "log-console";
 
 /// The endowment label of a program's waker of the bell [`REGISTER`] hands
 /// `logkeeper`: nothing rings it, and the program's waker closing — which only

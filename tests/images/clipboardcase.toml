@@ -13,13 +13,20 @@
 assets = ["assets"]
 
 [boot]
-start = ["acpiserver", "logkeeper", "compositor", "vdagent", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "compositor", "vdagent", "test-runner"]
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log-carrier"]
+syscap = ["logread", "console"]
+serves = ["log-carrier", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 [programs.compositor]
 service = true

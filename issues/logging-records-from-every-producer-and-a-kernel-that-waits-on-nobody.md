@@ -10,9 +10,10 @@ What is built: every program init starts or launches writes records into a
 log ring of its own that init makes and names to `logd` (`sdk/toyos/src/log/`);
 writing never waits, allocates or makes a syscall, a full ring is a count
 `logd` says, and soundd's mix thread writes a lane of its own wait-free. The
-clock is a page (`sdk/abi/src/clock.rs`). `klogd` is the console's one
-writer, with interrupts on, and a program's line reaches the console only
-through `logd`, under its name. The kernel waits on `logd` neither at a
+clock is a page (`sdk/abi/src/clock.rs`). Between the kernel's boot and its
+stop the console UART is its userland driver's, which `logd` feeds the log it
+writes, so a program's line reaches the console only through `logd`, under
+its name. The kernel waits on `logd` neither at a
 panic, which halts the other CPUs first and seals its tail in the black box,
 nor at a stop, which init sequences through `logd`'s flush. `logd` syncs on an
 alert or an interval, keeps every boot's first part, and holds each program
@@ -75,7 +76,7 @@ Constraints a reader would otherwise re-derive:
   slots and that outlives it writes into a ring nobody reads.
 - A shared-memory region is a 2 MiB page, so a ring costs 2 MiB per program —
   what the pipe it replaced cost once written to.
-- The console queue `klogd` drains is 64 lines; `logd` holds up to 1 MiB of
-  program lines behind it and counts what does not fit.
+- The UART's driver takes the log at the UART's own rate, and `logd` holds
+  what it has not taken in its replay, as for every reader.
 - A raw `SYS_REBOOT` or `SYS_SHUTDOWN` loses whatever a ring holds unread: the
   one caller that has `logd` flush first is init's `power` port.

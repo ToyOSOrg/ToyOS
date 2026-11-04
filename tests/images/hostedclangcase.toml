@@ -2,12 +2,19 @@
 # from the package staged on its ROOT: a ROOT of its own, since the package is
 # a hundred megabytes and no other test reads it, and DATA, where `/apps` is.
 [boot]
-start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "diskserver", "fileserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log-carrier"]
+syscap = ["logread", "console"]
+serves = ["log-carrier", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 [programs.test-runner]
 

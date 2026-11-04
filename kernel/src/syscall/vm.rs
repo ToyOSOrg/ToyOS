@@ -64,13 +64,18 @@ pub(super) fn sys_vm_reserve(len: u64, prot: u64, place: u64, kind: u64) -> u64 
 
 /// Take every page of `[addr, addr + len)` away, as POSIX `munmap` does.
 pub(super) fn sys_vm_release(addr: u64, len: u64) -> u64 {
-    answer(range(addr, len).and_then(|(start, len)| {
-        let space = process::current_address_space();
-        let mut space = space.lock();
-        space.room(start.raw(), start.raw() + len, 0)?;
-        space.release(start, len);
-        Ok(())
-    }))
+    answer(release(addr, len))
+}
+
+/// Take `len` bytes at `addr` out of the caller's space, as `SYS_VM_RELEASE`
+/// and a detached thread's exit do.
+pub(super) fn release(addr: u64, len: u64) -> Result<(), SyscallError> {
+    let (start, len) = range(addr, len)?;
+    let space = process::current_address_space();
+    let mut space = space.lock();
+    space.room(start.raw(), start.raw() + len, 0)?;
+    space.release(start, len);
+    Ok(())
 }
 
 pub(super) fn sys_vm_protect(addr: u64, len: u64, prot: u64) -> u64 {

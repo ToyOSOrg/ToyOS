@@ -5,8 +5,7 @@
 //! stays in the registers across every entry, and `arch::fpu` moves it only
 //! where a switch takes a thread off its CPU. A thread's trampoline loads the
 //! declared state before anything that can switch, so every save of its area
-//! follows a restore on that CPU (`arch::fpu`'s invariant); a kernel thread's
-//! loads none, having no user state.
+//! follows a restore on that CPU (`arch::fpu`'s invariant).
 
 /// `cld`, which every Ring 0 entry runs first: no gate clears `DF`, and this
 /// kernel's forward-only `memmove`/`memcpy` write backward if a tick
@@ -100,26 +99,6 @@ pub(crate) extern "C" fn process_start() {
 #[unsafe(naked)]
 pub(crate) extern "C" fn thread_start() {
     first_entry!("sub r13, 8")
-}
-
-/// Entry point for a kernel thread: r12 = body, r14 = argument. Never reaches Ring 3.
-// The `sti` is load-bearing: `alloc_kernel_stack` leaves `IF` clear, and `trampoline_entry` requires it clear on entry.
-#[unsafe(naked)]
-pub(crate) extern "C" fn kernel_start() {
-    core::arch::naked_asm!(
-        "call {unlock}",
-        "sti",
-        "mov rdi, r14",
-        "call r12",
-        "call {returned}",
-        unlock = sym crate::sched::driver::trampoline_entry,
-        returned = sym kernel_thread_returned,
-    );
-}
-
-/// What [`kernel_start`] calls when a kernel thread's body returns: panics rather than halting silently.
-extern "C" fn kernel_thread_returned() -> ! {
-    panic!("a kernel thread's body returned; nothing runs on this stack now");
 }
 
 

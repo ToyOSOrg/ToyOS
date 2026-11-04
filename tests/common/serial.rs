@@ -252,7 +252,4 @@ const NEVER_CLEAN: &[&str] = &[
     // The same file — a requester no enumerated function is: refused by the
     // unit, and on a boot that staged none, a device nothing here accounts for.
     "iommu: DMA FAULT owner=none",
-    // kernel/src/log/console.rs — the stop waited out its whole budget for
-    // `klogd` to let the console's wire go.
-    super::power::WIRE_LATE,
 ];

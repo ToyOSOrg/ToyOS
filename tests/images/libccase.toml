@@ -2,15 +2,23 @@
 # its own, `echo` among them, and `system` and `popen` run their commands by
 # `/system/bin/shell -c`.
 [boot]
-start = ["acpiserver", "logkeeper", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "test-runner"]
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log-carrier"]
+syscap = ["logread", "console"]
+serves = ["log-carrier", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 # `roster` for `libc_read_restarts`, which orders a child's end after its
 # own read is parked by the kernel's roster, and `dup` to hand it on.
+
 [programs.test-runner]
 syscap = ["dup", "roster"]
 

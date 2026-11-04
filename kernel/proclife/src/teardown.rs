@@ -109,6 +109,18 @@ pub fn leave<T: Processes>(table: &mut T, pid: Pid, tid: Tid, chosen: Option<i32
     }
 }
 
+/// [`leave`] with the code a thread nobody will join chose: its place in the
+/// process goes with it, as a join would take it, unless its process is
+/// being torn down, whose teardown takes every thread it holds.
+pub fn leave_detached<T: Processes>(table: &mut T, pid: Pid, tid: Tid, code: i32) -> Leave {
+    let left = leave(table, pid, tid, Some(code));
+    let proc = table.get_mut(pid).expect("leave_detached: a thread's process is not in the table");
+    if left == Leave::NotLast && !proc.tearing_down() {
+        proc.forget_thread(tid);
+    }
+    left
+}
+
 /// The last one out has torn its process down: it is dead with `mark`.
 pub fn torn_down<T: Processes>(table: &mut T, pid: Pid, tid: Tid, mark: i32) {
     let proc = table.get_mut(pid).expect("torn_down: a process is in the table until its exit is published");
@@ -229,6 +241,26 @@ mod tests {
         assert_eq!(proc.location(main), Some(ThreadLocation::Zombie(42)));
         assert_eq!(proc.location(t1), Some(ThreadLocation::Zombie(TORN_DOWN_THREAD_CODE)));
         assert_eq!(proc.location(t2), Some(ThreadLocation::Zombie(5)));
+    }
+
+    /// A detached thread's place goes as it leaves, with no join to take it;
+    /// in a process being torn down it stays for the teardown, as a joinable
+    /// one does, and the last one out still tears the process down.
+    #[test]
+    fn a_detached_thread_leaves_no_zombie_unless_its_process_is_being_torn_down() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let main = world.main_tid(pid);
+        let t1 = world.spawn_thread(pid);
+        let t2 = world.spawn_thread(pid);
+        assert_eq!(leave_detached(&mut world, pid, t1, 0), Leave::NotLast);
+        assert_eq!(world.get(pid).unwrap().location(t1), None, "its place went with it");
+        assert_eq!(crate::join::collect_zombie(&mut world, pid, t1), Err(crate::join::JoinRefused::NoSuchThread));
+
+        assert!(claim_teardown(&mut world, pid, End::Exited(3)));
+        assert_eq!(leave_detached(&mut world, pid, t2, 7), Leave::NotLast);
+        assert_eq!(world.get(pid).unwrap().location(t2), Some(ThreadLocation::Zombie(7)), "the teardown takes it");
+        assert_eq!(leave(&mut world, pid, main, None), Leave::Last { end: End::Exited(3), mark: 3 });
     }
 
     #[test]

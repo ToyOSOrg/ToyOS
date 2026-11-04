@@ -8,7 +8,11 @@ use crate::{find_table, Phys, TableError, SDT_HEADER_LEN};
 /// Interrupt at 54..58.
 const INTERFACE_TYPE: usize = SDT_HEADER_LEN;
 const BASE_ADDRESS: usize = 40;
+const INTERRUPT_TYPE: usize = 52;
 const GSIV: usize = 54;
+/// Interrupt Type's bit 3: the UART's interrupt is an Arm GIC interrupt,
+/// [`Spcr::gsiv`] its INTID.
+pub const ARM_GIC: u8 = 1 << 3;
 /// Every field this decoder reads lies below the GSIV's end.
 pub const SPCR_NEEDED: usize = GSIV + 4;
 
@@ -60,6 +64,9 @@ impl SerialInterface {
 pub struct Spcr {
     pub interface: SerialInterface,
     pub base: Gas,
+    /// Which interrupt controllers the UART's interrupt is named for, a bit
+    /// each ([`ARM_GIC`] among them); zero for a UART that raises none.
+    pub interrupt_type: u8,
     /// The UART's interrupt as a global system interrupt.
     pub gsiv: u32,
 }
@@ -78,6 +85,7 @@ pub fn spcr<P: Phys>(phys: P, rsdp_addr: u64) -> Result<Spcr, TableError> {
             access_size: byte(BASE_ADDRESS + 3)?,
             address: table.u64_at(BASE_ADDRESS + 4).ok_or(short)?,
         },
+        interrupt_type: byte(INTERRUPT_TYPE)?,
         gsiv: table.u32_at(GSIV).ok_or(short)?,
     })
 }

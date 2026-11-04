@@ -23,9 +23,6 @@
 //! the boot's last word needs. Freezing CPUs inside a pass instead would strand
 //! whatever lock the thread on that CPU was holding.
 //!
-//! Kernel threads are exempt by identity, not by accident:
-//! [`crate::sched::kthread::is_kernel_task`] is what tells them apart.
-//!
 //! # What the stop waits on
 //!
 //! [`PROGRESS`], posted by [`note_progress`] from the three transitions that
@@ -45,7 +42,6 @@ use kernel::sched::watch::Gate;
 use crate::arch::percpu;
 use crate::watch::{self, Watch};
 use crate::process;
-use crate::scheduler::TaskId;
 use crate::time::{Budget, Deadline, Duration};
 
 /// How long the machine gets to stop.
@@ -97,11 +93,6 @@ fn stops(stage: u32) -> bool {
     let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
         return false;
     };
-    // A kernel thread reaches this boundary on its first dispatch and has no
-    // Ring 3 to be stopped from.
-    if crate::sched::kthread::is_kernel_task(TaskId(pid, tid)) {
-        return false;
-    }
     must_stop(ThreadId { pid: pid.raw(), tid: tid.raw() }, caller())
 }
 
@@ -206,9 +197,6 @@ fn sweep(caller: ThreadId) -> Sweep {
                 continue;
             }
             if matches!(thread.state(), process::ThreadLocation::Zombie(_)) {
-                continue;
-            }
-            if crate::sched::kthread::is_kernel_task(TaskId(pid, tid)) {
                 continue;
             }
             let sched = thread

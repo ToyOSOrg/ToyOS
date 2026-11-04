@@ -33,7 +33,7 @@ use super::fs::{
 };
 use super::handles::{sys_close, sys_handle_dup, with_object, with_object_ref};
 use super::io::{
-    sys_console_carried, sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
+    sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
 };
 use super::ipc::{
     Incoming, Outgoing,
@@ -42,7 +42,8 @@ use super::ipc::{
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map, sys_shm_sub,
 };
 use super::machine::{
-    sys_boot_sources, sys_counters, sys_device_inventory, sys_device_set, sys_device_set_read, sys_log_read,
+    sys_boot_sources, sys_counters, sys_device_inventory, sys_device_set, sys_device_set_read, sys_log_last_words, sys_log_read,
+    sys_log_spoken,
     sys_machine_stops, sys_reboot, sys_shutdown, sys_sysinfo, sys_trace_read,
     MAX_INVENTORY_RECORDS,
 };
@@ -51,7 +52,7 @@ use super::machine::lower_sysinfo_bound;
 use super::paged::{sys_paged_create, sys_paged_holder, sys_paged_notices, sys_paged_op, sys_paged_read, sys_pager_create};
 use super::proc::{
     spawn_pager, spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
-    sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_get_affinity, sys_thread_join, sys_thread_set_affinity, sys_thread_spawn, sys_wake_latency_hold,
+    sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_get_affinity, sys_thread_join, sys_thread_set_affinity, sys_thread_spawn, sys_wake_latency_hold, sys_yield,
 };
 use super::vm::{
     shared_image, sys_dlopen, sys_dlsym, sys_query_modules, sys_tls_alloc_block, sys_vm_decommit, sys_vm_discard, sys_vm_remap,
@@ -90,7 +91,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
             sys_read(RawHandle(a1 as u32), &mut buf)
         }
-        SYS_THREAD_EXIT => sys_thread_exit(a1 as i32),
+        SYS_THREAD_EXIT => sys_thread_exit(a1 as i32, a2, a3, a4),
         SYS_RANDOM => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
             sys_random(&mut buf)
@@ -257,6 +258,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_MARK_TTY => with_object(RawHandle(a1 as u32), Rights::NONE, ops::mark_tty),
         SYS_THREAD_SPAWN => sys_thread_spawn(a1, a2, a3, a4),
         SYS_THREAD_JOIN => sys_thread_join(a1),
+        SYS_YIELD => sys_yield(),
         // Answers from the boot-time anchor, never the CMOS: NotSupported beats a
         // 1970-epoch number a caller cannot tell from real time.
         SYS_CLOCK_EPOCH => {
@@ -486,7 +488,14 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_SHM_CREATE => sys_shm_create(a1, a2, RawHandle(a3 as u32)),
         SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32), a2),
         SYS_SHM_SUB => sys_shm_sub(RawHandle(a1 as u32), a2, a3),
-        SYS_CONSOLE_CARRIED => sys_console_carried(RawHandle(a1 as u32), a2),
+        SYS_LOG_SPOKEN => sys_log_spoken(&ctx, RawHandle(a1 as u32), UserAddr::new(a2)),
+        SYS_LOG_LAST_WORDS => {
+            if a3 == 0 || a3 > toyos_abi::log::MAX_LAST_WORDS as u64 {
+                return SyscallError::InvalidArgument.to_u64();
+            }
+            let Some(text) = ctx.user_bytes(UserAddr::new(a2), a3) else { return bad_addr };
+            sys_log_last_words(RawHandle(a1 as u32), &text)
+        }
         SYS_PORT_CREATE => sys_port_create(),
         SYS_PORT_MINT => {
             // Copied in before any handle is looked up: the kernel holds the badge, never the caller's page.
@@ -550,7 +559,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 0
             }
             DA::FATAL_HALT => {
-                crate::log::console::on_the_uart_for_good();
                 log!("{}", FATAL_HALT_NONCE);
                 crate::panic::halt_all_cpus();
             }
@@ -720,6 +728,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     // queued it: a hook must not run under whatever guard the syscall held when the
     // last handle went.
     crate::object::drain_zero_handles();
+    crate::log::user::post_owed();
 
     // Wall-clock, not CPU time: elapsed includes any preemption.
     let elapsed = crate::arch::cpu::counter().saturating_sub(entered);

@@ -1,10 +1,11 @@
 //! `/system/bin/logkeeper` — the machine's log, written to a file by a process that can be
 //! killed without taking the kernel with it.
 //!
-//! The kernel keeps the record ring and the console and writes no file; every
-//! policy about where records go — what the files are called, how many there
-//! are, when they are made durable, what happens when the stick stops
-//! answering, who may read the log as it is written — is here.
+//! The kernel keeps the record ring, writes the console only before userland
+//! runs and from the machine's stop, and writes no file; every policy about
+//! where records go — what the files are called, how many there are, when they
+//! are made durable, what happens when the stick stops answering, who may read
+//! the log as it is written, which channel carries the console — is here.
 //!
 //! # What goes in the log
 //!
@@ -41,27 +42,22 @@
 //!
 //! The file is. [`serve`]'s readers are the second: the same lines, in the same
 //! order, to whoever asks, from the boot's first line however late they ask.
-//! The console is the third: each program's line with its head and no wall
-//! clock, written on the one console handle the supervisor gives this program. The
-//! kernel puts its own records on the console, and this program never does.
-//! Neither of the two can slow the file: a reader is a thread with an offset
-//! into what the file already has, and the console takes only the whole lines
-//! it has room for — the rest waits here, bounded ([`CONSOLE_BYTES`]).
-//!
-//! **One reader can carry the console instead** ([`carrier`]): a VM's console
-//! channel, asked for on [`toyos_logstream::CARRIER`]. Once its channel takes
-//! the log, the kernel is told the UART is quiet, and no program line is
-//! written to it; its end, or the stop, gives the console back.
+//! The console's carriers are the third ([`carrier`]): the console UART's
+//! driver, and a VM's console channel, which the UART goes quiet for while it
+//! carries the log. Neither of the two can slow the file: each is a thread
+//! with an offset into what the file already has.
 //!
 //! # Its whole authority
 //!
 //! One `SysCap` duplicate carrying `Rights::LOG | Rights::WAIT`, which its
-//! manifest row asks for by the name `logread`; the origins acceptor and the
-//! writable console the supervisor endows it; and what its row adds — the `log` acceptor, where this
-//! machine's readers ask for the log and `inspect` asks where it is going
-//! ([`inspect`]'s module, which grants nothing), and the `log-carrier`
-//! acceptor, where the console's carrier asks. It claims no device and can
-//! name no process. Writing files is ambient — a known residual of the
+//! manifest row asks for by the name `logread`, and with which it tells the
+//! kernel what the console's channels have delivered; the origins acceptor
+//! the supervisor endows the row that holds it (`holds = ["log-origins"]`);
+//! and what its row adds — the `log` acceptor, where
+//! this machine's readers ask for the log and `inspect` asks where it is going
+//! ([`inspect`]'s module, which grants nothing), and the `log-carrier` and
+//! `log-wire` acceptors, where the console's carriers ask. It claims no device
+//! and can name no process. Writing files is ambient — a known residual of the
 //! capability endowment, and not this program's to close.
 //!
 //! # Durability, which is a contract and not a hope
@@ -70,8 +66,8 @@
 //! round**, and again when the supervisor asks before the machine stops
 //! ([`toyos_logstream::FLUSH`]). The kernel waits on none of it: a panicking kernel's report is in its black box, and so are the stop's
 //! own last records.
-//! **A line after that flush reaches the console and is held back from the
-//! file**, to a bound ([`STOPPING_BYTES`]): the stop syncs no file still open,
+//! **A program's line after that flush reaches the UART and is held back from
+//! the file**, to a bound ([`STOPPING_BYTES`]): the stop syncs no file still open,
 //! so the file ends where the flush made it durable, and a reader of the
 //! served log is handed what the file holds and no more. A stop the kernel
 //! refused is the supervisor's [`toyos_logstream::RESUME`], and what was held is written
@@ -90,20 +86,19 @@ use std::time::{Duration, Instant};
 use toyos::endow::{self, Endowments, SYSCAP_LABEL};
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::log::{LogTail, Record};
-use toyos::poller::{Poller, READABLE, WRITABLE};
+use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::say;
 use toyos::syscap::SysCap;
 use toyos::wake::Bell;
-use toyos::Console;
-use toyos_abi::syscall::SyscallError;
 use toyos_logstream::{
-    ProgramLine, Registration, Tag, CARRIER, CONSOLE, FLUSH, FLUSHED, LOG_OPENED, MAX_TAG, ORIGINS, REGISTER,
-    RESUME, SERVICE,
+    ProgramLine, Registration, Tag, CARRIER, FLUSH, FLUSHED, LOG_OPENED, MAX_TAG, ORIGINS, REGISTER, RESUME,
+    SERVICE, WIRE,
 };
 use toyos_wallclock::Civil;
 
-use carrier::Carrier;
+use carrier::Carriers;
+use serve::Positions;
 use origin::{Origin, Said};
 use policy::{Step, LOG_WRITE_BUDGET};
 use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES};
@@ -112,15 +107,14 @@ use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES};
 /// boot's burst is a handful of syscalls rather than one per line.
 const BATCH: usize = 64;
 
-/// The poll's tokens: the kernel's readiness, the supervisor's connection, the console's
-/// room, and each program's end from [`ORIGIN_BASE`] up.
+/// The poll's tokens: the kernel's readiness, the supervisor's connection, and
+/// each program's end from [`ORIGIN_BASE`] up.
 const KERNEL_TOKEN: u64 = 0;
 const ORIGINS_TOKEN: u64 = 1;
-const CONSOLE_TOKEN: u64 = 2;
-const ORIGIN_BASE: u64 = 3;
+const ORIGIN_BASE: u64 = 2;
 
 /// Programs whose rings this program reads at once: what one poller can watch
-/// beside the other three sources. One past it is refused by name.
+/// beside the other two sources. One past it is refused by name.
 const MAX_ORIGINS: usize = Poller::MAX_HANDLES as usize - ORIGIN_BASE as usize;
 
 /// How soon the rings are read again after a round that read any, and the
@@ -134,10 +128,6 @@ const POLL_SLOW: Duration = Duration::from_millis(250);
 /// the volume keeps, so the stream is never the shorter of the two.
 const REPLAY_BYTES: usize = MAX_LOG_FILES * MAX_LOG_BYTES as usize;
 
-/// Program lines the console may fall behind the log by. Past it the oldest
-/// whole lines are counted and said, and `/log` has them.
-const CONSOLE_BYTES: usize = 1 << 20;
-
 fn main() {
     let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
         panic!("logkeeper: this program holds no system capability, so it holds no `logread`");
@@ -145,10 +135,6 @@ fn main() {
     let Some(acceptor) = Endowments::get().take::<Acceptor>(ORIGINS) else {
         panic!("logkeeper: the supervisor endowed no `{ORIGINS}`, so no program's log can reach this one");
     };
-    let Some(console) = Endowments::get().take::<Console>(CONSOLE) else {
-        panic!("logkeeper: the supervisor endowed no `{CONSOLE}`, so no program's line can reach the console");
-    };
-    let console = Arc::new(console);
     // The supervisor connected before it started anything, so this is already queued.
     let from_supervisor: Connection = acceptor.accept().expect("logkeeper: the supervisor's origins connection");
 
@@ -174,19 +160,26 @@ fn main() {
     if let Some(acceptor) = endow::acceptor(SERVICE) {
         inspect::serve(acceptor, Arc::clone(&published), Arc::clone(&hub));
     }
-    let carrier = endow::acceptor(CARRIER).map(|acceptor| Carrier::serve(acceptor, Arc::clone(&console), Arc::clone(&hub)));
-
+    let cap = Arc::new(cap);
     let words =
         toyos::log::cursor_words(&cap).unwrap_or_else(|e| panic!("logkeeper: SYS_LOG_READ sized no cursor ({e:?})"));
+    // What the kernel put on the UART itself before userland ran, which the
+    // UART's carrier is not handed again.
+    let shards = words - toyos_abi::log::CURSOR_HEAD_WORDS;
+    let spoken =
+        toyos::log::spoken(&cap, &vec![0; shards]).unwrap_or_else(|e| panic!("logkeeper: SYS_LOG_SPOKEN refused ({e:?})"));
+    let (port, wire) = (endow::acceptor(CARRIER), endow::acceptor(WIRE));
+    let carriers =
+        (port.is_some() || wire.is_some()).then(|| Carriers::serve(port, wire, Arc::clone(&hub), Arc::clone(&cap)));
+
     let tail = LogTail::new(vec![0; words]);
     let mut log = Log {
         cap,
         from_supervisor,
         supervisor_rx: ipc::FrameRx::new(),
-        console,
-        carrier,
-        console_held: Vec::new(),
-        console_unshown: 0,
+        carriers,
+        spoken: Some(spoken),
+        owed_wire: String::new(),
         origins: Vec::new(),
         tail,
         records: vec![Record::EMPTY; BATCH],
@@ -203,14 +196,16 @@ fn main() {
 
 /// Everything the loop owns.
 struct Log {
-    cap: SysCap,
+    cap: Arc<SysCap>,
     from_supervisor: Connection,
     supervisor_rx: ipc::FrameRx<{ 4 + MAX_TAG }>,
-    console: Arc<Console>,
-    carrier: Option<Arc<Carrier>>,
-    /// Program lines the console has not taken yet, whole lines only.
-    console_held: Vec<u8>,
-    console_unshown: u64,
+    carriers: Option<Arc<Carriers>>,
+    /// What the kernel put on the UART itself, a read position per shard,
+    /// until the rounds have read past it and said where the UART's carrier
+    /// starts.
+    spoken: Option<Vec<u64>>,
+    /// Those rounds' lines but the kernel's records the UART carried.
+    owed_wire: String,
     origins: Vec<Origin>,
     tail: LogTail<Vec<u64>>,
     records: Vec<Record>,
@@ -269,11 +264,8 @@ impl Log {
             // an edge needs: what arrives after a read and before the park has
             // a registration waiting for it. A watch is one-shot, so one that
             // answered here is spent and its source is read below.
-            poller.watch(&self.cap, READABLE, KERNEL_TOKEN);
+            poller.watch(&*self.cap, READABLE, KERNEL_TOKEN);
             poller.watch(&self.from_supervisor, READABLE, ORIGINS_TOKEN);
-            if !self.console_held.is_empty() {
-                poller.watch(&*self.console, WRITABLE, CONSOLE_TOKEN);
-            }
             for (i, origin) in self.origins.iter().enumerate() {
                 poller.watch(&origin.alive, READABLE, ORIGIN_BASE + i as u64);
             }
@@ -297,14 +289,13 @@ impl Log {
                 self.flushed();
                 read_any = true;
             }
-            self.feed_console();
 
             cadence = if read_any { POLL_QUICK } else { (cadence * 2).min(POLL_SLOW) };
             if spent || read_any {
                 continue;
             }
             // Nothing new: park until the kernel posts, the supervisor speaks, a program
-            // ends, the console has room, or the cadence comes round.
+            // ends, or the cadence comes round.
             poller.wait(1, cadence.as_nanos() as u64, |token| {
                 if token >= ORIGIN_BASE {
                     ended.push((token - ORIGIN_BASE) as usize);
@@ -458,8 +449,9 @@ impl Log {
         }
         let (now, later): (Vec<Line>, Vec<Line>) =
             lines.into_iter().partition(|line| all || line.at_ns <= cut);
+        let through = written_through(self.tail.positions(), &later);
         self.waiting = later;
-        self.write(now, all);
+        self.write(now, all, through);
         oldest
     }
 
@@ -498,43 +490,55 @@ impl Log {
         out
     }
 
-    /// The lines, in stamp order, into the file, the readers and the console.
-    fn write(&mut self, mut lines: Vec<Line>, flushing: bool) {
+    /// The lines, in stamp order, into the file, the readers and the console's
+    /// carriers, which are the kernel's log through the read positions
+    /// `through`; while the machine stops, held back from the file, and each
+    /// program's line to the UART's carrier.
+    fn write(&mut self, mut lines: Vec<Line>, flushing: bool, through: Positions) {
         if lines.is_empty() {
             return;
         }
         lines.sort_by_key(|line| line.at_ns);
-        let carried = self.carried();
         let mut file = String::new();
+        // What the UART is owed of these lines, while the kernel's own on it
+        // are yet to be read past.
+        let mut wire = String::new();
+        let mut programs = String::new();
         for line in &lines {
             match &line.kind {
                 Kind::Kernel(record) => {
-                    file.push_str(&format!("{}\n", record.dated(&stamp(self.boot_secs, record.at_ns()))));
+                    let text = format!("{}\n", record.dated(&stamp(self.boot_secs, record.at_ns())));
+                    if !self.spoken.as_ref().is_some_and(|spoken| on_the_uart(record, spoken)) {
+                        wire.push_str(&text);
+                    }
+                    file.push_str(&text);
                 }
                 Kind::Program { tag, owner, said } => {
-                    let severity = said.severity;
                     let tag = Tag::new(tag).expect("an origin's name is a tag");
                     let pid = (said.pid != *owner).then_some(said.pid);
                     let at = stamp(self.boot_secs, Some(said.at_ns));
-                    let mut line = ProgramLine {
+                    let line = ProgramLine {
                         stamp: &at,
                         at_ns: said.at_ns,
-                        severity,
+                        severity: said.severity,
                         tid: said.tid,
                         pid,
                         tag,
                         text: &said.text,
                     };
-                    file.push_str(&format!("{line}\n"));
-                    if !carried {
-                        line.stamp = "";
-                        let console = format!("{line}\n");
-                        self.console_line(console.as_bytes());
+                    let line = format!("{line}\n");
+                    file.push_str(&line);
+                    wire.push_str(&line);
+                    if self.stopping.is_some() {
+                        programs.push_str(&line);
                     }
                 }
             }
         }
         if let Some(held) = &mut self.stopping {
+            // The kernel's records from the flush on are the stop's to put on
+            // the UART; a program's reach it only through its carrier.
+            self.hub.append_stopping(programs.as_bytes());
             if held.text.len() + file.len() > STOPPING_BYTES {
                 held.unwritten += lines.len() as u64;
             } else {
@@ -545,63 +549,13 @@ impl Log {
         // The file first: a reader is served only what /log already holds,
         // whenever the machine stops between the two.
         self.to_volume(file.as_bytes(), !flushing);
-        self.hub.append(file.as_bytes());
-    }
-
-    /// One rendered program line for the console, held whole until it takes it.
-    ///
-    /// **Past the bound the oldest lines go, never the newest**: the newest
-    /// line is the one a watcher waits on — a test runner's end marker after
-    /// a flood — and every line gone is in `/log`. They go down to half the
-    /// bound at once, so a flood moves the held bytes once per half and not
-    /// once per line. The first held line stays: the console may have taken
-    /// its head.
-    fn console_line(&mut self, line: &[u8]) {
-        let held = &mut self.console_held;
-        if held.len() + line.len() > CONSOLE_BYTES {
-            let first = held.iter().position(|&b| b == b'\n').map_or(held.len(), |at| at + 1);
-            let mut cut = first;
-            while cut < held.len() && held.len() - (cut - first) + line.len() > CONSOLE_BYTES / 2 {
-                cut += held[cut..].iter().position(|&b| b == b'\n').expect("held lines are whole") + 1;
-                self.console_unshown += 1;
+        self.hub.append(file.as_bytes(), Some(Arc::clone(&through)));
+        if let Some(spoken) = &self.spoken {
+            self.owed_wire.push_str(&wire);
+            if through.iter().zip(spoken).all(|(read, spoken)| read >= spoken) {
+                self.hub.set_wire_from(self.hub.end(), std::mem::take(&mut self.owed_wire).into_bytes());
+                self.spoken = None;
             }
-            held.drain(first..cut);
-            if held.len() + line.len() > CONSOLE_BYTES {
-                self.console_unshown += 1;
-                return;
-            }
-        }
-        held.extend_from_slice(line);
-    }
-
-    /// Whether the console's carrier carries the program lines, so the UART
-    /// takes none.
-    fn carried(&self) -> bool {
-        self.carrier.as_ref().is_some_and(|carrier| carrier.quiet())
-    }
-
-    /// As many held lines as the console takes now; the rest wait for its
-    /// room. None while the carrier carries them, which has them all.
-    fn feed_console(&mut self) {
-        if self.carried() {
-            self.console_held.clear();
-            self.console_unshown = 0;
-        }
-        while !self.console_held.is_empty() {
-            match self.console.write_nonblock(&self.console_held) {
-                Ok(0) | Err(SyscallError::WouldBlock) => break,
-                Ok(n) => {
-                    self.console_held.drain(..n);
-                }
-                Err(e) => panic!("logkeeper: its console refused a write: {e:?}"),
-            }
-        }
-        if self.console_unshown > 0 && self.console_held.len() < CONSOLE_BYTES / 2 {
-            toyos::warn!(
-                "logkeeper: {} line(s) went unshown on the console: it is slower than the log, and \
-                 {DIR} has them",
-                std::mem::replace(&mut self.console_unshown, 0)
-            );
         }
     }
 
@@ -681,13 +635,12 @@ impl Log {
     fn flushed(&mut self) {
         let refused = self.sync().err();
         self.answered(refused);
-        // The console's carrier takes the log up to here, and the UART what
+        // The console's carriers take the log up to here, and the UART what
         // the machine says from here as it stops.
-        if let Some(carrier) = &self.carrier {
-            carrier.stop(self.hub.end());
+        if let Some(carriers) = &self.carriers {
+            carriers.stop(self.hub.end());
         }
         self.stopping = Some(Stopping { text: String::new(), unwritten: 0 });
-        self.feed_console();
         if let Err(e) = self.from_supervisor.signal(FLUSHED) {
             panic!("logkeeper: the supervisor could not be told the log is whole: {e:?}");
         }
@@ -708,11 +661,32 @@ impl Log {
             );
         }
         self.to_volume(held.text.as_bytes(), true);
-        self.hub.append_carried(held.text.as_bytes());
-        if let Some(carrier) = &self.carrier {
-            carrier.resume();
+        self.hub.resume(held.text.as_bytes());
+        if let Some(carriers) = &self.carriers {
+            carriers.resume();
         }
     }
+}
+
+/// Whether the kernel put `record` on the UART itself, by the read positions
+/// it had spoken through.
+fn on_the_uart(record: &Record, spoken: &[u64]) -> bool {
+    spoken.get(usize::from(record.cpu)).is_some_and(|&through| record.seq < through)
+}
+
+/// The kernel's read positions a round's written lines are the log through:
+/// the cursor's, each shard's held back to its first record still `waiting`
+/// for a later round.
+fn written_through(cursor: &[u64], waiting: &[Line]) -> Positions {
+    let mut through = cursor.to_vec();
+    for line in waiting {
+        if let Kind::Kernel(record) = &line.kind
+            && let Some(at) = through.get_mut(usize::from(record.cpu))
+        {
+            *at = (*at).min(record.seq);
+        }
+    }
+    through.into()
 }
 
 fn ahead_note(ahead: u64, tag: &str) -> String {
@@ -754,5 +728,36 @@ mod tests {
     fn readers_and_inspect_share_one_port_and_never_one_request() {
         assert_eq!(toyos_inspect::LOG.port, toyos_logstream::SERVICE);
         assert_ne!(toyos_logstream::READ, toyos_inspect::MSG_INSPECT);
+    }
+
+    fn kernel(cpu: u16, seq: u64) -> super::Line {
+        let record = super::Record { cpu, seq, ..super::Record::EMPTY };
+        super::Line { at_ns: 0, kind: super::Kind::Kernel(Box::new(record)) }
+    }
+
+    /// **A round speaks for the kernel's log only as far as it wrote it**: a
+    /// shard's position is held back to its first record still waiting for
+    /// a later round, and the others' are the cursor's.
+    #[test]
+    fn a_round_is_through_the_cursor_but_what_waits() {
+        let waiting = [kernel(1, 7), kernel(1, 9)];
+        assert_eq!(&*super::written_through(&[5, 12, 3], &waiting), &[5, 7, 3]);
+        assert_eq!(&*super::written_through(&[5, 12], &[]), &[5, 12]);
+    }
+
+    /// The kernel's records the UART carried before the hand-over are those
+    /// before the position it spoke through in their shard, whatever their
+    /// stamps say.
+    #[test]
+    fn what_the_uart_carried_is_told_by_position() {
+        let on = |cpu, seq| match kernel(cpu, seq).kind {
+            super::Kind::Kernel(record) => super::on_the_uart(&record, &[4, 2]),
+            super::Kind::Program { .. } => unreachable!(),
+        };
+        assert!(on(0, 3));
+        assert!(!on(0, 4));
+        assert!(on(1, 1));
+        assert!(!on(1, 2));
+        assert!(!on(2, 0), "a shard it spoke nothing of");
     }
 }

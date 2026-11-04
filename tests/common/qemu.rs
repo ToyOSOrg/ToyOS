@@ -1251,6 +1251,9 @@ pub struct BootOptions {
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
+    /// Files of the image's own ROOT left out, each by its ROOT-relative
+    /// path: a boot staged on a `/system` missing one.
+    pub root_omits: &'static [&'static str],
     /// DATA's size in place of the profile's, for a boot that writes more
     /// than [`NVME_SMALL`] holds, on a profile whose disk carries the image.
     pub data_bytes: Option<u64>,
@@ -1305,6 +1308,7 @@ impl Default for BootOptions {
             mute: false,
             ready_marker: DEFAULT_READY,
             extra_root_files: Vec::new(),
+            root_omits: &[],
             data_bytes: None,
             psci_trace: None,
             rtc_base: None,
@@ -1417,7 +1421,7 @@ fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
     toyos_build::build::TEST_KERNEL.to_vec()
 }
 
-// Nine, because an image is its architecture and its slots as much as its files and its kernel.
+// Ten, because an image is its architecture and its slots as much as its files and its kernel.
 #[allow(clippy::too_many_arguments)]
 fn build_boot_image_with(
     arch: Arch,
@@ -1425,6 +1429,7 @@ fn build_boot_image_with(
     c_tests: &[(String, Vec<u8>)],
     rust_tests: &[(String, Vec<u8>)],
     staged: &[(String, Vec<u8>)],
+    omits: &[&str],
     kernel_features: &[&str],
     kernel_params: &[&str],
     debug_wait: bool,
@@ -1494,7 +1499,8 @@ fn build_boot_image_with(
     assert!(config.is_file(), "no image config at {}", config.display());
 
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    let plan = toyos_build::build::Plan::new(arch, config, kernel_features, kernel_params);
+    let mut plan = toyos_build::build::Plan::new(arch, config, kernel_features, kernel_params);
+    plan.root_omits = omits.iter().map(|omitted| (*omitted).to_string()).collect();
     let root = compile::repo_root();
     match bent {
         None => toyos_build::build::build_test_image(&root, &plan, quiet, &extra_files),
@@ -1526,8 +1532,8 @@ pub fn build_toyos_bin_as(arch: Arch, crate_path: &Path, name: &str, profile: &s
     toyos_build::build::build_toyos_bin_as(&compile::repo_root(), arch, crate_path, name, profile, quiet)
 }
 
-/// A kernel record's line, whichever writer spelled its head: `klogd`'s console
-/// and a `/log` file's alike. Nothing else writes one — a program's line
+/// A kernel record's line, whichever writer spelled its head: the kernel's own
+/// console lines and a `/log` file's alike. Nothing else writes one — a program's line
 /// reaches both only through `logkeeper`, under the program's own head.
 pub fn is_kernel_line(line: &str) -> bool {
     toyos_logstream::is_kernel_line(line)
@@ -1542,7 +1548,7 @@ pub fn user_text(line: &str) -> &str {
 
 /// File the userland half of one captured console line under `stdout`: a
 /// program's text, and nothing of the kernel's. Every console line is one
-/// writer's whole — `klogd` is the wire's one writer — so a line is one or
+/// writer's whole — the UART has one writer at a time — so a line is one or
 /// the other.
 fn push_user_half(line: &str, stdout: &mut String) {
     if is_kernel_line(line) {
@@ -1589,6 +1595,7 @@ impl QemuInstance {
             c_tests,
             rust_tests,
             &options.extra_root_files,
+            options.root_omits,
             &features,
             &params,
             options.debug_wait,
@@ -1991,11 +1998,10 @@ impl QemuInstance {
                     }
                     if line.contains(&format!("===TEST_START {want}===")) {
                         in_test = true;
-                        // **The runner's marker reaches the console through
-                        // `logkeeper` and the kernel's records through `klogd`**, so
-                        // the kernel's record of this test's spawn, and what
-                        // followed it, may arrive before the marker that opens
-                        // the window. Everything from that record on is this
+                        // **The console carries `logkeeper`'s rounds in stamp
+                        // order**, so the kernel's record of this test's spawn,
+                        // and what followed it, may arrive before the marker
+                        // that opens the window. Everything from that record on is this
                         // test's, and moves into the window.
                         let spawned = format!("/{want} pid=");
                         let from = before

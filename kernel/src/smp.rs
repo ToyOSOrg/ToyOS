@@ -68,8 +68,8 @@ pub fn set_ready() {
 
 /// Whether [`set_ready`] has run: the machine's own word for "the scheduler is
 /// what runs now". `kernel_main` calls it immediately before
-/// `scheduler::enter_idle_loop`, so a `false` here means no task and no
-/// kernel thread can make progress, and the panic path waits for none of them.
+/// `scheduler::enter_idle_loop`, so a `false` here means no task can make
+/// progress, and the panic path waits for none of them.
 pub fn is_ready() -> bool {
     ROSTER.released()
 }

@@ -17,18 +17,26 @@
 # duplicate. No other benchmark's path uses them. An unprivileged
 # Linux program has no observation rights to match, which the report says.
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "acpiserver", "netstack", "test-runner"]
+start = ["logkeeper", "uart", "diskserver", "fileserver", "acpiserver", "netstack", "test-runner"]
 
 # `log`, which `lan_lease` waits for netstack's lease on.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log", "log-carrier"]
+syscap = ["logread", "console"]
+serves = ["log", "log-carrier", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 # ACPI mode, as a shipped image and the bench's Linux run it. In the legacy
 # mode the T14's firmware hands over, it stops every CPU for 4.5 ms every 2.2 s
 # (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
 # Started before `test-runner`, so its claim's enable precedes every job.
+
 [programs.acpiserver]
 service = true
 devices = ["acpi"]

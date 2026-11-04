@@ -7,7 +7,9 @@
 //! reaches a declared port**: [`FIXED`] holds what every machine has, and
 //! [`declare`] what a probe or a firmware table names at boot, each refused
 //! where it shares a port with a run declared before it. `crate::isa` asks
-//! [`holder`] before it opens a row.
+//! [`holder`] before it opens a row. The one exception is COM1, the console
+//! UART's row ([`fill_uart_row`]), which the kernel writes only where no
+//! process holds it (`log::console`).
 //!
 //! **Every declaration says what its ports answer the `acpi` claim's holder**
 //! ([`Mediated`]), whose AML may name any port: [`standing`] is what
@@ -74,7 +76,6 @@ pub const CMOS: Declared = Declared::fixed(0x70, 2);
 /// round every claim. `CONFIG_ADDRESS` is a dword at 0xCF8, so its first port
 /// alone keeps it refused, and 0xCF9 free for a reset register.
 const FIXED: &[(&str, Declared, Mediated)] = &[
-    ("COM1", COM1, Mediated::Kept),
     ("the 8259 pair", PIC_PRIMARY, Mediated::Kept),
     ("the 8259 pair", PIC_SECONDARY, Mediated::Kept),
     // A write nothing decodes costs the kernel nothing whoever makes it.
@@ -239,6 +240,26 @@ pub fn refused_port(access: PortAccess) -> Option<u16> {
 
 /// `isa`'s row for the i8042.
 pub const I8042_ROW: usize = 0;
+
+/// `isa`'s row for the console UART.
+pub const UART_ROW: usize = 2;
+
+/// Fill the console UART's row, where the boot found one: COM1's ports and
+/// its line, IRQ 4. Only its class claims it. A UART with no line stays the
+/// kernel's, which the stop and the fatal paths still write.
+pub fn fill_uart_row() {
+    if !crate::drivers::serial::has_console() {
+        return;
+    }
+    let Some(wire) = ioapic::gsi_for_isa_irq(4) else {
+        declare("the kernel's console UART", COM1.ports(), Mediated::Kept).expect("pio: COM1 is declared once, here");
+        return log!("isa: no console UART row — no I/O APIC carries its line, so COM1 stays the kernel's");
+    };
+    crate::isa::fill(
+        UART_ROW,
+        crate::isa::Function { name: "the console UART", runs: alloc::vec![COM1.ports()], irqs: alloc::vec![], wires: alloc::vec![wire] },
+    );
+}
 
 /// Fill the i8042's row: its data and command ports, its keyboard line and
 /// its aux line, as `isa:0060,0064:1,12` names them.

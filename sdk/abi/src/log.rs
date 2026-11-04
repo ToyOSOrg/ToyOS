@@ -20,6 +20,39 @@
 /// (`toyos-elide`).
 pub const MAX_RECORD_MESSAGE: usize = 992;
 
+/// The line the kernel puts on the console UART as it takes the UART back
+/// from its driver, for the stop or a fatal path: what follows is the
+/// kernel's, whatever the driver had not yet sent before it.
+pub const KERNEL_TAKES_THE_UART: &str = "console: the kernel writes the UART from here";
+
+/// The longest last words a caller may say (`crate::syscall::log_last_words`),
+/// in bytes: a reason, with room in its record for what the kernel says of it.
+pub const MAX_LAST_WORDS: usize = 512;
+
+/// `text` as last words are taken: one line of 1 to [`MAX_LAST_WORDS`] bytes of
+/// UTF-8 holding no control character, which the console and the panel
+/// show as it is.
+pub fn last_words(text: &[u8]) -> Option<&str> {
+    if text.is_empty() || text.len() > MAX_LAST_WORDS {
+        return None;
+    }
+    let text = core::str::from_utf8(text).ok()?;
+    (!text.chars().any(char::is_control)).then_some(text)
+}
+
+/// `text` fitted into `buf` as [`last_words`] takes it: each control character
+/// a space, cut at the last whole character that fits.
+pub fn fit_last_words<'a>(text: &str, buf: &'a mut [u8; MAX_LAST_WORDS]) -> &'a str {
+    let mut len = 0;
+    for c in text.chars().map(|c| if c.is_control() { ' ' } else { c }) {
+        if len + c.len_utf8() > MAX_LAST_WORDS {
+            break;
+        }
+        len += c.encode_utf8(&mut buf[len..]).len();
+    }
+    core::str::from_utf8(&buf[..len]).expect("whole characters are UTF-8")
+}
+
 /// One record on the wire, and one slot in a shard. A power of two so a reader
 /// indexes by shift and the kernel never does length arithmetic.
 pub const RECORD_BYTES: usize = 1024;
@@ -462,5 +495,27 @@ mod tests {
         assert_eq!(head.to_words(), [16 | 3 << 32, 9]);
         assert_eq!(CursorHead::from_words(head.to_words()), head);
         assert_eq!(CursorHead::from_words([0; CURSOR_HEAD_WORDS]), CursorHead::default());
+    }
+
+    /// Last words are one line of text the console shows as it is: none, too
+    /// many bytes, broken UTF-8 or a control character is refused, and what
+    /// the fitting makes of any text is taken.
+    #[test]
+    fn last_words_are_one_line_of_text_and_any_text_fits_into_them() {
+        assert_eq!(last_words(b"supervisor: cannot read /system/etc/os-release"), Some("supervisor: cannot read /system/etc/os-release"));
+        assert_eq!(last_words("é".repeat(MAX_LAST_WORDS / 2).as_bytes()).map(str::len), Some(MAX_LAST_WORDS));
+        for refused in [&b""[..], &[b'x'; MAX_LAST_WORDS + 1], b"two\nlines", b"\x1b[2Jcleared", b"\xff"] {
+            assert_eq!(last_words(refused), None, "{refused:?}");
+        }
+        let mut buf = [0; MAX_LAST_WORDS];
+        assert_eq!(fit_last_words("panicked at x.rs:1:2:\nwhy\t\u{9b}", &mut buf), "panicked at x.rs:1:2: why  ");
+        let long = "x".repeat(MAX_LAST_WORDS - 1) + "é";
+        let fitted = fit_last_words(&long, &mut buf).len();
+        assert_eq!(fitted, MAX_LAST_WORDS - 1, "a character that does not fit whole is left out");
+        for text in ["a\nb", &long, "\u{7f}\u{0}", "plain"] {
+            let mut buf = [0; MAX_LAST_WORDS];
+            let fitted = fit_last_words(text, &mut buf);
+            assert_eq!(last_words(fitted.as_bytes()), Some(fitted), "{text:?}");
+        }
     }
 }

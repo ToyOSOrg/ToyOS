@@ -63,7 +63,7 @@ console's renderer. Exit: as stage A.
 - metal `panic_outlives_the_deadline`: a panic crosses the deadline's reset as a panic report.
 - metal `hang_bounded_by_the_stick`: a hanging image costs one boot and never traps the machine.
 - metal `double_fault_stack`, `syscall_panic_halts`, `syscall_fault_halts`,
-  `heap_over_ceiling_halts`, `klogd_fault_halts`: each fatal path halts with its own report.
+  `heap_over_ceiling_halts`: each fatal path halts with its own report.
 - metal `reentry_names_the_first_panic`, `double_panic_names_the_fault`,
   `nested_fault_is_recursive`: a fault inside the report names the first.
 - metal `pre_idle_wedge_speaks`: a boot stopped in phase 3 says where.

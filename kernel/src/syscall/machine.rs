@@ -5,10 +5,11 @@
 //! the supervisor's `system.toml`; `SYS_SYSINFO`'s header is ambient.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::log::console::StopWire;
 use crate::power;
-use crate::user_ptr::{SyscallContext, UserBytesMut};
+use crate::user_ptr::{SyscallContext, UserBytes, UserBytesMut};
 use crate::UserAddr;
 use crate::{log, process};
 
@@ -26,6 +27,38 @@ pub(super) fn sys_log_read(
     capacity: usize,
 ) -> u64 {
     read_on_cursor(ctx, syscap, Rights::LOG, cursor, log::shard_count(), |next| log::user::read(next, out, capacity))
+}
+
+/// The console's channels have delivered every record before the cursor's
+/// positions at `cursor`, which answers what the console has spoken
+/// (`log::console::speak`). Requires a `SysCap` carrying [`Rights::CONSOLE`]:
+/// what it moves is kept off every fatal path's output.
+pub(super) fn sys_log_spoken(ctx: &SyscallContext, syscap: RawHandle, cursor: UserAddr) -> u64 {
+    read_on_cursor(ctx, syscap, Rights::CONSOLE, cursor, log::shard_count(), log::console::speak)
+}
+
+/// The caller's last words, one alert record, the boot's first such call
+/// alone: what the supervisor says before its end ends the machine
+/// (`process::teardown`), for the fatal path to put on the console. Requires a
+/// `SysCap` carrying [`Rights::LAST_WORDS`], the supervisor's alone; text
+/// [`toyos_abi::log::last_words`] refuses is `InvalidArgument`, and a second
+/// call `AlreadyExists`.
+pub(super) fn sys_log_last_words(syscap: RawHandle, text: &UserBytes) -> u64 {
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if let Err(e) = demand_syscap(syscap, Rights::LAST_WORDS) {
+        return e.refuse();
+    }
+    let mut copy = [0u8; toyos_abi::log::MAX_LAST_WORDS];
+    let copy = &mut copy[..text.len()];
+    text.read_at(0, copy);
+    let Some(words) = toyos_abi::log::last_words(copy) else {
+        return SyscallError::InvalidArgument.to_u64();
+    };
+    if SAID.swap(true, Ordering::Relaxed) {
+        return SyscallError::AlreadyExists.to_u64();
+    }
+    crate::alert!("pid {}'s last words: {words}", process::current_process());
+    0
 }
 
 /// Copies the diary's records into the caller's buffer; requires a `SysCap` carrying [`Rights::TRACE`].
@@ -104,24 +137,17 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     if crate::actuator::wedge_before_reset() {
         crate::deadline::stage_a_wedge();
     }
-    let parkable = crate::scheduler::Parkable::at_entry();
-    // The console's writer holding the wire as the stop begins, which a
-    // shipping `klogd` does at any moment.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::wire_held_across_the_stop() {
-        crate::log::console::hold_across_the_stop(&parkable);
-    }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::arch::watchdog::disarm();
-    // Every userland thread stops here, the log's writer with the rest:
-    // the supervisor had it flush before it asked for this stop.
+    // Every userland thread stops here, the log's writer and the UART's holder
+    // with the rest: the supervisor had the log flush before it asked for this stop.
     let (stopped, stopping) = crate::quiesce::stop();
     // From here on nothing carries a record to a file: the seal below takes
     // every one stamped after this one, the newest the stop found.
     let stop_began = crate::log::read::newest_committed();
-    // Held to the machine's end: every record below reaches the wire before a
-    // CPU is taken down, whoever was writing it when the stop began.
-    let mut wire = crate::log::console::take_for_the_stop(&parkable);
+    // Held to the machine's end: every record below reaches the UART before a
+    // CPU is taken down.
+    let mut wire = crate::log::console::take_for_the_stop();
     // The machine's census, which no process's start or end takes.
     crate::census::log();
     #[cfg(feature = "mask-windows")]
@@ -132,12 +158,6 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
         log!("{stopped}");
     } else {
         crate::alert!("{stopped}");
-    }
-    // `klogd` inside its hold of the wire as the last word is logged, which a
-    // stop that did not hold the wire would leave it in at the seal below.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::wire_held_at_the_last_word() {
-        crate::log::console::hold_at_the_last_word(&parkable);
     }
     log!("{last}");
     // Order is load-bearing: the console drain, the seal, then the caller's
@@ -153,10 +173,6 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     // census and the last word among them. Nothing wrote them to `/log`,
     // and on a machine with no serial port this is their only reader.
     crate::log::seal_tail(stop_began);
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::wire_held_at_the_last_word() {
-        crate::log::console::sealed();
-    }
     Ok((stopping, wire))
 }
 

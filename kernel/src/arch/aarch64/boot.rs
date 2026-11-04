@@ -370,9 +370,10 @@ pub fn timer() {
 }
 
 /// The platform's own devices that are not PCI functions: on an ACPI Arm
-/// machine, the `acpi` claim's row alone.
+/// machine, the `acpi` claim's row and the console UART's.
 pub fn platform_devices(_platform: &Platform, rsdp_addr: u64) {
     super::acpi_mode::init(rsdp_addr);
+    super::console_uart::fill_row();
 }
 
 /// Every other CPU, running.

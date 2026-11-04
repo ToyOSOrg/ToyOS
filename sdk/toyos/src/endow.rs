@@ -69,7 +69,6 @@ from_handle! {
     SysCap => SysCap,
     Job => Job,
     Device => Device,
-    crate::Console => crate::Console,
     crate::Pipe => crate::Pipe,
     crate::wake::Waker => crate::wake::Waker::from,
     crate::wake::Bell => crate::wake::Bell::from,
@@ -77,6 +76,7 @@ from_handle! {
     crate::FramebufferDev => |h| crate::FramebufferDev(Device(h)),
     crate::PciDev => |h| crate::PciDev(Device(h)),
     crate::AcpiDev => |h| crate::AcpiDev(Device(h)),
+    crate::UartDev => |h| crate::UartDev(Device(h)),
 }
 
 /// This process's endowment table, parsed once.

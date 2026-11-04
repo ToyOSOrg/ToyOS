@@ -30,29 +30,26 @@ pub(crate) enum Start {
     Process { entry: toyos_userbound::Entry, sp: u64 },
     /// A thread's, on a stack its process chose, with its argument.
     Thread { entry: toyos_userbound::Entry, sp: u64, arg: u64 },
-    /// A kernel thread's body, which never returns to userland.
-    Kernel { body: extern "C" fn(u64) -> !, arg: u64 },
 }
 
-/// A task's kernel stack, which only [`alloc_kernel_stack`] builds. A thread
-/// of a process has above its top the area its user machine state is kept in
-/// while it is switched out (`arch::fpu`), and a kernel thread has none: a
-/// switch's save above [`top`](Self::top) lands inside this allocation.
+/// A task's kernel stack, which only [`alloc_kernel_stack`] builds, and above
+/// its top the area its thread's user machine state is kept in while it is
+/// switched out (`arch::fpu`): a switch's save above [`top`](Self::top) lands
+/// inside this allocation.
 pub(crate) struct KernelStack {
     alloc: OwnedAlloc,
-    user: bool,
     /// The stack, and the records its task keeps for as long as it does.
     _charge: Charge,
 }
 
 impl KernelStack {
     /// The heap a thread takes: its stack, its scheduler records, its place
-    /// on the one watch it may wait on, whose list doubles, and, for a thread
-    /// of a process, its place in the process's thread table, its own data,
-    /// and what one of its calls copies in and may hold while it is preempted
-    /// — two strings at their bound, as a rename's paths, and a page besides,
-    /// as a namespace's names. A spawn charges what it copies past that.
-    fn heap(user: bool) -> usize {
+    /// on the one watch it may wait on, whose list doubles, its place in its
+    /// process's thread table, its own data, and what one of its calls copies
+    /// in and may hold while it is preempted — two strings at their bound, as
+    /// a rename's paths, and a page besides, as a namespace's names. A spawn
+    /// charges what it copies past that.
+    fn heap() -> usize {
         let waiter = 2 * core::mem::size_of::<(usize, u64)>();
         let call = 2 * crate::user_ptr::MAX_USER_STR as usize + crate::mm::PAGE_BYTES;
         let records = kernel::sched::task::TaskBuilder::<crate::sched::payload::KernelPayload>::allocations().into_iter().map(charge::heap).sum::<usize>()
@@ -61,13 +58,12 @@ impl KernelStack {
         let process = charge::map_entry::<toyos_abi::Tid, crate::process::ThreadEntry>()
             + charge::arc::<crate::sync::Lock<crate::process::ThreadData>>()
             + call;
-        charge::heap(Self::layout_for(user)) + records + if user { process } else { 0 }
+        charge::heap(Self::layout()) + records + process
     }
 
-    /// What one is allocated as, with the area or without it.
-    fn layout_for(user: bool) -> core::alloc::Layout {
-        let area = if user { crate::arch::fpu::area_bytes() } else { 0 };
-        core::alloc::Layout::from_size_align(KERNEL_STACK_SIZE + area, crate::mm::PAGE_BYTES)
+    /// What one is allocated as.
+    pub(crate) fn layout() -> core::alloc::Layout {
+        core::alloc::Layout::from_size_align(KERNEL_STACK_SIZE + crate::arch::fpu::area_bytes(), crate::mm::PAGE_BYTES)
             .expect("a kernel stack's layout")
     }
 
@@ -81,32 +77,21 @@ impl KernelStack {
         self.alloc.ptr() as u64 + KERNEL_STACK_SIZE as u64
     }
 
-    /// Whether its task is a thread of a process, which has the area.
-    pub(crate) fn is_user(&self) -> bool {
-        self.user
-    }
-
-    /// The layout it was allocated with.
-    #[cfg(feature = "heap-tripwire")]
-    pub(crate) fn layout(&self) -> core::alloc::Layout {
-        Self::layout_for(self.user)
-    }
 }
 
 /// Allocate a kernel stack, charged to the job its task runs in, and lay out
 /// the frame `context_switch` will restore.
 pub(crate) fn alloc_kernel_stack(job: &Arc<Job>, start: Start) -> Option<(KernelStack, u64)> {
-    use crate::arch::entry::{kernel_start, process_start, thread_start};
-    let (trampoline, user_entry, user_sp, arg, user): (unsafe extern "C" fn(), _, _, _, _) = match start {
-        Start::Process { entry, sp } => (process_start, entry.addr(), sp, 0, true),
-        Start::Thread { entry, sp, arg } => (thread_start, entry.addr(), sp, arg, true),
-        Start::Kernel { body, arg } => (kernel_start, body as usize as u64, 0, arg, false),
+    use crate::arch::entry::{process_start, thread_start};
+    let (trampoline, user_entry, user_sp, arg): (unsafe extern "C" fn(), _, _, _) = match start {
+        Start::Process { entry, sp } => (process_start, entry.addr(), sp, 0),
+        Start::Thread { entry, sp, arg } => (thread_start, entry.addr(), sp, arg),
     };
-    let charge = Charge::new(job, KernelStack::heap(user)).ok()?;
-    let layout = KernelStack::layout_for(user);
+    let charge = Charge::new(job, KernelStack::heap()).ok()?;
+    let layout = KernelStack::layout();
     let alloc = OwnedAlloc::new(layout.size(), layout.align())?;
     scheduler::write_stack_canary(&alloc);
-    let stack = KernelStack { alloc, user, _charge: charge };
+    let stack = KernelStack { alloc, _charge: charge };
     // SAFETY: `stack` is fresh and exclusively owned, and its `top` ends the stack.
     let frame = unsafe { crate::arch::entry::initial_frame(stack.top(), trampoline, user_entry, user_sp, arg) };
     Some((stack, frame))
@@ -215,26 +200,7 @@ impl Commit for PendingHandles {
         if !table.make_room(moving.len() + Own::LABELS.len()) || !data.handles.make_room(1) {
             return Err(SyscallError::ResourceExhausted.into());
         }
-        // The consoles this spawn endowed, by the parent's object, each with
-        // the child's own: minted before any removal too, since one can be
-        // refused. A console is minted, not moved: it is its own line buffer,
-        // and one shared would splice two processes' half-lines. Two
-        // endowments of one parent console are one child console, or aliased
-        // stdout and stderr would split in two.
-        let mut minted: Vec<(usize, KObjectRef)> = Vec::new();
-        for (_, handle) in &moving {
-            if let KObjectRef::Console(parent_console) = data.handles.get_ref(*handle, Rights::NONE)? {
-                let key = Arc::as_ptr(parent_console) as usize;
-                if !minted.iter().any(|(seen, _)| *seen == key) {
-                    let console = crate::object::device::ConsoleObject::new(&job).map_err(SyscallError::from)?;
-                    minted.push((key, KObjectRef::Console(console)));
-                }
-            }
-        }
-
         let mut entries = Vec::with_capacity(moving.len());
-        // Moved-out console handles, dropped once the parent's lock is let go.
-        let mut displaced = Vec::new();
         // What each device claim moving into the child handed out, taken off
         // it under the caller's lock and revoked once that lock is let go.
         let mut handed = Vec::new();
@@ -243,21 +209,9 @@ impl Commit for PendingHandles {
                 .handles
                 .remove(parent_handle)
                 .expect("an endowed handle verified under this lock stopped resolving");
-            let moved = match moved.object() {
-                KObjectRef::Console(parent_console) => {
-                    let key = Arc::as_ptr(parent_console) as usize;
-                    let (_, object) = minted.iter().find(|(seen, _)| *seen == key).expect("each endowed console was minted");
-                    let object = object.clone();
-                    let rights = moved.rights();
-                    displaced.push(moved);
-                    HandleEntry::new(object, rights)
-                }
-                KObjectRef::Device(claim) => {
-                    handed.extend(claim.take_mappings());
-                    moved
-                }
-                _ => moved,
-            };
+            if let KObjectRef::Device(claim) = moved.object() {
+                handed.extend(claim.take_mappings());
+            }
             entry.handle = table
                 .install(moved)
                 .expect("a child table with verified room refused an endowment");
@@ -267,7 +221,6 @@ impl Commit for PendingHandles {
         let held = ops::install(&mut data.handles, own.process.object().clone())
             .expect("a caller's table with verified room refused its child");
         drop(data);
-        drop(displaced);
         for handed in handed {
             handed.revoke();
         }

@@ -7,12 +7,19 @@
 # `acpi_holder_is_refused_a_held_functions_configuration`); the probe's own
 # rows declare nothing, so on those boots nothing is.
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["logkeeper", "uart", "diskserver", "fileserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log-carrier"]
+syscap = ["logread", "console"]
+serves = ["log-carrier", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 # Started by no row: a job mints the claim and hands it to the server.
 [programs.acpiserver]

@@ -84,6 +84,11 @@ impl Cursor {
         &self.next
     }
 
+    /// Positions answered as they are, with no loss of their own.
+    pub fn at(next: Vec<u64>) -> Self {
+        Self { next, lost: 0 }
+    }
+
     pub fn lost(&self) -> u64 {
         self.lost
     }
@@ -132,30 +137,16 @@ impl Published {
         self.aps.size(cpus.saturating_sub(1), |_| AtomicU64::new(FIRST_SEQ));
     }
 
+    /// Move each ring's position to at least `next`'s, and answer them all.
+    pub fn advance(&self, next: &[u64]) -> Vec<u64> {
+        next.iter().enumerate().map(|(ring, &at)| self.word(ring).fetch_max(at, Ordering::Relaxed).max(at)).collect()
+    }
+
     fn word(&self, ring: usize) -> &AtomicU64 {
         match ring.checked_sub(1) {
             None => &self.boot,
             Some(ap) => &self.aps[ap],
         }
-    }
-
-    /// Records the walks over this position counted lost.
-    pub fn lost(&self) -> u64 {
-        self.lost.load(Ordering::Relaxed)
-    }
-
-    /// Take `other`'s place: what a walk from here reads, `other`'s walkers no
-    /// longer move.
-    pub fn copy_from(&self, other: &Published) {
-        for ring in 0..self.count() {
-            self.word(ring).store(other.word(ring).load(Ordering::Relaxed), Ordering::Relaxed);
-        }
-        self.lost.store(other.lost(), Ordering::Relaxed);
-    }
-
-    /// Is there a committed record this position has not taken? Lock-free.
-    pub fn any_pending(&self) -> bool {
-        any_committed(self)
     }
 }
 
@@ -275,17 +266,6 @@ pub fn newest_committed() -> LogStamp {
         .max()
         .unwrap_or(0);
     LogStamp::since_zero(newest)
-}
-
-/// Is there a committed record `at` has not taken, without taking it?
-pub fn any_committed(at: &Published) -> bool {
-    (0..super::shard_count().min(at.count())).any(|i| match super::shard(i) {
-        Some(shard) => {
-            let want = (&at).next(i).max(FIRST_SEQ).max(shard.oldest_readable());
-            shard.stamp(want).is_some()
-        }
-        None => false,
-    })
 }
 
 /// Every committed record stamped in `from..=to`, newest first merged by

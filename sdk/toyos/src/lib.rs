@@ -50,7 +50,7 @@ pub mod volatile;
 
 pub use ipc::Connection;
 pub use device::{
-    AcpiDev, DmaRegion, FramebufferDev, PciDev,
+    AcpiDev, DmaRegion, FramebufferDev, PciDev, UartDev,
 };
 
 pub use toyos_abi::RawHandle;
@@ -290,7 +290,6 @@ macro_rules! owned_from {
 owned_from! {
     Pipe => |p| p.0;
     Device => |d| d.0;
-    Console => |c| c.0;
     ipc::Connection => |c| c.0;
     port::Acceptor => |a| a.0;
     port::Connector => |c| c.0;
@@ -301,6 +300,7 @@ owned_from! {
     device::FramebufferDev => |d| d.0 .0;
     device::PciDev => |d| d.0 .0;
     device::AcpiDev => |d| d.0 .0;
+    device::UartDev => |d| d.0 .0;
 }
 
 #[cfg(all(feature = "std", target_os = "toyos", not(test)))]
@@ -383,7 +383,6 @@ mod std_io {
         super::wake::Waker,
         super::wake::Bell,
         super::Device,
-        super::Console,
         super::ipc::Connection,
         super::port::Acceptor,
         super::port::Connector,
@@ -394,31 +393,7 @@ mod std_io {
         super::device::FramebufferDev,
         super::device::PciDev,
         super::device::AcpiDev,
+        super::device::UartDev,
     );
 }
 
-/// A console handle: the one the supervisor endows `/system/bin/logkeeper` with,
-/// the only one in the machine that may write.
-///
-/// **A write takes whole lines and says how many bytes that was.** The
-/// kernel queues each line for its console writer and takes only what its
-/// queue has room for, so a short count is a writer ahead of the console —
-/// poll for `WRITABLE` and send the rest.
-pub struct Console(pub(crate) OwnedHandle);
-
-impl Console {
-    pub fn write_nonblock(&self, buf: &[u8]) -> Result<usize, toyos_abi::syscall::SyscallError> {
-        self.0.write_nonblock(buf)
-    }
-
-    /// Say whether this holder carries the log off the machine by another
-    /// channel (`toyos_abi::syscall::console_carried`); the console's end
-    /// lets go of it.
-    pub fn carry_elsewhere(&self, elsewhere: bool) -> Result<(), toyos_abi::syscall::SyscallError> {
-        toyos_abi::syscall::console_carried(self.0.raw(), elsewhere)
-    }
-}
-
-impl AsHandle for Console {
-    fn as_handle(&self) -> BorrowedHandle<'_> { self.0.as_handle() }
-}

@@ -29,7 +29,7 @@ memory-floor-mib = 96
 # while the compositor had no way to ask for a program's *declared* authority —
 # the launcher gives it one, and starting a service from `[boot] start` is not
 # the thing that needed fixing.
-start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver", "ps2server", "wlan", "vdagent"]
+start = ["logkeeper", "uart", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver", "ps2server", "wlan", "vdagent"]
 
 # What every program launched out of `/apps` holds, whatever its own directory
 # says. A package is unpacked by `/system/bin/pkg` into a writable directory, so
@@ -58,15 +58,29 @@ folder = "read-write"
 pkg = { state = true }
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
-# image does. The kernel keeps the record ring and the console and writes no
-# file at all, so a boot config without `logkeeper` is a boot whose `/log` is empty —
+# image does. The kernel keeps the record ring, writes the console only before
+# userland runs and from the stop, and writes no file at all, so a boot config
+# without `logkeeper` is a boot whose `/log` is empty —
 # `every_boot_config_runs_logkeeper` is what refuses one. It claims no device, and
 # `log` is the port it answers `inspect` on. `log-carrier` is where the VM's
-# console asks to carry the log, which quiets the UART while it does.
+# console asks to carry the log, which quiets the UART while it does, and
+# `log-wire` where the UART's driver asks. It holds `log-origins`, the
+# acceptor every program's ring reaches it on, which no other row may hold.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log", "log-carrier"]
+syscap = ["logread", "console"]
+serves = ["log", "log-carrier", "log-wire"]
+holds = ["log-origins"]
+
+# The console UART's driver: the log `logkeeper` hands it over `log-wire` onto
+# the UART, from the kernel's hand-over to the machine's stop, and what the UART
+# receives into the console's input, whose write end it holds and no other
+# row may. A machine with no console UART exits it 0.
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 # The machine's ACPI fixed hardware: the kernel puts the machine in ACPI mode
 # when it mints the `acpi` claim and back when the claim goes, so the SCI,

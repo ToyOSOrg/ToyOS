@@ -1,6 +1,6 @@
 //! Where a new context starts: the frame [`super::switch::context_switch`]
-//! restores it from, and the trampolines its return lands in — to EL0 for the
-//! first time, or into a kernel thread's body.
+//! restores it from, and the trampolines its return lands in, to EL0 for the
+//! first time.
 //!
 //! A trampoline to EL0 leaves nothing of the kernel in a register: every
 //! general register but the argument is zeroed, and the FP/SIMD state is the
@@ -46,27 +46,6 @@ pub(crate) extern "C" fn process_start() {
 
 /// A thread's first entry is a process's, with its argument in `x0`.
 pub(crate) use process_start as thread_start;
-
-/// Entry point for a kernel thread: `x19` = body, `x21` = argument. Never
-/// reaches EL0; unmasks interrupts once `trampoline_entry`, which requires
-/// them masked, is done.
-#[unsafe(naked)]
-pub(crate) extern "C" fn kernel_start() {
-    core::arch::naked_asm!(
-        "bl {unlock}",
-        "msr daifclr, #3",
-        "mov x0, x21",
-        "blr x19",
-        "bl {returned}",
-        unlock = sym crate::sched::driver::trampoline_entry,
-        returned = sym kernel_thread_returned,
-    );
-}
-
-/// What [`kernel_start`] calls when a kernel thread's body returns: panics rather than halting silently.
-extern "C" fn kernel_thread_returned() -> ! {
-    panic!("a kernel thread's body returned; nothing runs on this stack now");
-}
 
 /// Lay out, just below `top`, the frame `context_switch` restores a new
 /// context from, and answer the stack pointer that names it: `trampoline` is

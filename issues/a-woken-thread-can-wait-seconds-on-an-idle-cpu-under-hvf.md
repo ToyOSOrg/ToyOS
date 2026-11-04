@@ -4,10 +4,14 @@ kind: defect
 opened: 2026-10-09
 ---
 
-# A woken `klogd` can wait seconds on an idle CPU under HVF
+# A woken thread can wait seconds on an idle CPU under HVF
 
-A wake that makes `klogd` runnable on an AArch64 CPU under HVF can leave it
-undispatched for seconds, until something else wakes that CPU.
+A wake that makes a thread runnable on an AArch64 CPU under HVF can leave it
+undispatched for seconds, until something else wakes that CPU. Every
+measurement below is of `klogd`, the kernel's console thread, which is
+deleted: no thread of the kernel's is left to wait so, and the stop waits on
+none. The delay itself is unexplained, and any userland thread woken onto an
+idle CPU under HVF may pay it.
 
 **What it cost before the stop held the wire.** A boot asked to stop could
 power off without `Shutting down.` on its console. The last word's drain
@@ -40,28 +44,19 @@ was parked the whole time. `klogd` ran 5 ms after the stop's deadline, when
 a probe on that path kicked every CPU. That staging's wait timed out in 6 of
 10 runs of that test.
 
-**What it costs now.** The stop holds the console's wire from right after it
-stops userland to the machine's end (`log::console::take_for_the_stop`), so
-no record waits on `klogd` past it. A `klogd` not dispatched when the stop
-asks costs the stop `log::console::LET_GO`, 5 s, and an alert, which reds
-every test (`tests/common/serial.rs`, `NEVER_CLEAN`); where it never lets
-go, the lines console holders had queued are not on the console, which the
-alert says.
-
 **Until it is fixed** these stay emulated (`tests/toyos.rs`):
-`virt_mask_windows`, `virt_off_names_the_cpus_left_on`, `virt_reboot`,
-`virt_reboot_wire_held` and `virt_reboot_wire_kept` at EL2, and
-`virt_el1_smp` on `Profile::VirtTcg`.
+`virt_mask_windows`, `virt_off_names_the_cpus_left_on` and `virt_reboot` at
+EL2, and `virt_el1_smp` on `Profile::VirtTcg`.
 
 **Not known.** Whether the wake reached the idle CPU, whether its sleep
 handshake missed it, or whether HVF delivered the kick late: no register
 capture of the idle CPU exists.
 
 **Exit**: the cause named from a capture of the idle CPU, and fixed; then
-`virt_el1_smp`, `virt_mask_windows`, `virt_off_names_the_cpus_left_on`,
-`virt_reboot` and the two `virt_reboot_wire_` tests under `Profile::Virt` on
-an Apple host, 300 side-by-side runs at load 30 or more with no red, the
-harness's PSCI trace allowed under HVF; they then move to `Profile::Virt`,
+`virt_el1_smp`, `virt_mask_windows`, `virt_off_names_the_cpus_left_on` and
+`virt_reboot` under `Profile::Virt` on an Apple host, 300 side-by-side runs
+at load 30 or more with no red, the harness's PSCI trace allowed under HVF;
+they then move to `Profile::Virt`,
 `virt_reboot` keeping an EL2 row of its own for `SYSTEM_RESET` through the
 SMC conduit, and `Profile::VirtTcg` is deleted.
 

@@ -425,10 +425,9 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_debug_refused", qemu::Profile::Virt),
     ("virt_readonly_copyout", qemu::Profile::Virt),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt),
-    // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and the
-    // reboots: under HVF a `klogd` the stop wakes can go undispatched past the
-    // stop's whole wait for the console's wire
-    // (issues/a-woken-klogd-can-wait-seconds-on-an-idle-cpu-under-hvf.md).
+    // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and
+    // `virt_reboot`: under HVF a woken thread can go undispatched for seconds
+    // (issues/a-woken-thread-can-wait-seconds-on-an-idle-cpu-under-hvf.md).
     ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
@@ -439,8 +438,6 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_reboot", qemu::Profile::VirtEl2),
     ("virt_off_names_the_cpus_left_on", qemu::Profile::VirtEl2),
     ("virt_reboot_refused_without_psci", qemu::Profile::Virt),
-    ("virt_reboot_wire_held", qemu::Profile::VirtEl2),
-    ("virt_reboot_wire_kept", qemu::Profile::VirtEl2),
     // The job case entered at EL2, once: the entry's EL2 writes for the timer
     // and FP, which no boot under HVF runs.
     ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
@@ -544,6 +541,18 @@ const MACHINE_TESTS: &[&str] = &[
     // again. Three processes, the kernel and QEMU's hot-unplug, which no host
     // build has. q35 only: no other machine carries a console port.
     "the_uart_carries_the_log_again_once_the_console_carrier_goes",
+    // The UART carries the boot once across the kernel's hand-over to its
+    // driver: the kernel's last inline record once, and the driver's first
+    // after it. The kernel's drain, logkeeper's start offset and the driver
+    // are three components only a boot has; q35 with no console port, so the
+    // UART is the one console, read whole, which no bench's is.
+    "the_uart_carries_the_boot_once_across_the_hand_over",
+    // A supervisor that fails before `logkeeper` runs says why on the UART,
+    // and the kernel ends the machine on its end: its last words and the
+    // kernel's fatal path, which only a boot has, on a `/system` missing the
+    // first file it reads, which only a staged image is. q35 with no console
+    // port, so the UART is the one console.
+    "a_supervisor_that_fails_early_says_why_on_the_uart",
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot disk is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
@@ -603,7 +612,7 @@ const MACHINE_TESTS: &[&str] = &[
     "acpi_mediated_access",
     // The same boot on one CPU, where the power-off's CPU is the only one
     // there is: what it logs reaches the console by the stop's own drain or
-    // not at all, since no other CPU runs `klogd` beside it.
+    // not at all.
     "acpi_lock_given_back_on_one_cpu",
     // A power-off on the sleep type of a holder that is gone: the kernel's
     // static across a claim's release, and a machine that answers the write
@@ -614,16 +623,6 @@ const MACHINE_TESTS: &[&str] = &[
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
     "machine_shutdown_short_stop",
-    // The power-off with `klogd` holding the console's wire as the stop
-    // begins, on one CPU: a staged hold of a kernel thread, read off a console
-    // QEMU keeps past the power-off, and the T14 is never asked to power off.
-    "machine_shutdown_wire_held",
-    // The same with `klogd` keeping the wire through the stop's budget.
-    "machine_shutdown_wire_kept",
-    // The same with `klogd` staged inside its hold of the wire from the boot's
-    // last word past the seal, where the stop does not hold it: the one CPU
-    // runs nothing but the stop from the seal on.
-    "machine_shutdown_wire_at_the_seal",
     // A claimable function with a mappable BAR that no program of the boot
     // holds: QEMU's virtio NIC on `tests/images/testcases.toml`. The T14's one such
     // function is its I219, and a kernel that dies on this takes the bench's
@@ -875,8 +874,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| ioapic_topology(b[0].kernel().text()) },
     ),
     (
-        "klogd_hosted",
-        metal::Metal { arms: TESTCASES, judge: |b| klogd_hosted(&b[0].kernel()) },
+        "console_uart_driven",
+        metal::Metal { arms: TESTCASES, judge: |b| console_uart_driven(&b[0].log()) },
     ),
     (
         "irq_census_conservation",
@@ -3186,6 +3185,62 @@ fn console_image_boots() -> Result<(), String> {
     said.must_be_clean()
 }
 
+/// On a machine whose UART is its one console, the kernel puts the boot on it
+/// up to the hand-over and the UART's driver everything after, from
+/// `logkeeper`: the boot's last inline record and the driver's claim are
+/// each on it once. A start at the boot's first line repeats the first; one
+/// past the hand-over loses the second.
+fn the_uart_carries_the_boot_once_across_the_hand_over() -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/testcases.toml"),
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::HeadlessNoConsolePort, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, UART_CARRIES, "the UART's driver to carry the log")?;
+    let said = serial::Serial::named("the UART", console.clone());
+    said.must_be_clean()?;
+    for (needle, what) in [(bootlog::COMPLETE, "the boot's last inline record"), (UART_BOUND, "the driver's claim")] {
+        let times = console.lines().filter(|l| l.contains(needle)).count();
+        if times != 1 {
+            return Err(format!("{what} ({needle:?}) is on the UART {times} times\n{console}"));
+        }
+    }
+    eprintln!("  [uart] {}", said.must_say(UART_BOUND)?.trim());
+    Ok(())
+}
+
+/// What the kernel's fatal path says of the supervisor's end.
+const SUPERVISOR_ENDED: &str = "the supervisor ended, ";
+
+/// A boot whose `/system` lacks the release file the supervisor reads first:
+/// the supervisor's reason is on the UART as its last words, before the
+/// kernel's panic for its end, though nothing carries the log yet.
+fn a_supervisor_that_fails_early_says_why_on_the_uart() -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/testcases.toml"),
+        &[],
+        &[],
+        BootOptions {
+            profile: qemu::Profile::HeadlessNoConsolePort,
+            root_omits: &[toyos_osrelease::PATH],
+            ready_marker: SUPERVISOR_ENDED,
+            ..Default::default()
+        },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, SUPERVISOR_ENDED, "the kernel to end the machine on the supervisor's end")?;
+    let why = format!("last words: supervisor: cannot read {}", toyos_osrelease::GUEST_PATH);
+    let said = console.find(&why).ok_or_else(|| format!("the UART does not say {why:?}\n{console}"))?;
+    let ended = console.find(SUPERVISOR_ENDED).expect("awaited above");
+    if said > ended {
+        return Err(format!("the supervisor's reason is on the UART after the kernel's panic\n{console}"));
+    }
+    eprintln!("  [supervisor] {}", console[said..].lines().next().unwrap_or_default());
+    Ok(())
+}
+
 /// Eight spawns from each of a file the root server holds in memory, a copy
 /// on DATA that the spawn reads whole, and a copy in the kernel's `/tmp`:
 /// each child maps its parent's log ring, and once they have ended the census
@@ -4162,10 +4217,8 @@ fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
 
 /// `tests/images/virtrebootcase.toml`'s one job asks for a reboot: the boot's last word is
 /// `Rebooting.`, QEMU stops for `guest-reset`, and its trace of PSCI holds one
-/// `SYSTEM_RESET` and neither `CPU_OFF` nor `SYSTEM_OFF`. With `staged`
-/// actuators `klogd` holds the console's wire as the stop begins, judged by
-/// [`power::judge_the_held_wire`].
-fn virt_reboot(profile: qemu::Profile, staged: &'static [&'static str]) -> Result<(), String> {
+/// `SYSTEM_RESET` and neither `CPU_OFF` nor `SYSTEM_OFF`.
+fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
     let config = compile::repo_root().join("tests/images/virtrebootcase.toml");
     let trace = common::lane::dir().join("virt_reboot.psci");
     let mut qemu = QemuInstance::boot_with_options(
@@ -4176,7 +4229,6 @@ fn virt_reboot(profile: qemu::Profile, staged: &'static [&'static str]) -> Resul
             profile,
             qmp: true,
             psci_trace: Some(trace.clone()),
-            kernel_params: staged,
             ready_marker: "control registers: SCTLR_EL1=",
             ..Default::default()
         },
@@ -4196,9 +4248,6 @@ fn virt_reboot(profile: qemu::Profile, staged: &'static [&'static str]) -> Resul
         .collect();
     if asked != [PSCI_SYSTEM_RESET] {
         return Err(format!("QEMU traced {asked:x?} of CPU_OFF, SYSTEM_OFF and SYSTEM_RESET, not one SYSTEM_RESET"));
-    }
-    if !staged.is_empty() {
-        power::judge_the_held_wire(&console, bootlog::REBOOTING, staged == power::wire_staged(true))?;
     }
     eprintln!("  [virt] Rebooting., then one SYSTEM_RESET, and QEMU stopped for guest-reset");
     Ok(())
@@ -4653,11 +4702,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_el1_smp" => virt_smp(profile, "HVC", 1),
         "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(profile),
         "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(profile),
-        "virt_reboot" => virt_reboot(profile, &[]),
-        // The reboot with `klogd` holding the PL011's wire as the stop begins,
-        // then keeping it through the stop's budget.
-        "virt_reboot_wire_held" => virt_reboot(profile, power::wire_staged(false)),
-        "virt_reboot_wire_kept" => virt_reboot(profile, power::wire_staged(true)),
+        "virt_reboot" => virt_reboot(profile),
         "virt_off_names_the_cpus_left_on" => virt_off_names_the_cpus_left_on(profile),
         "virt_reboot_refused_without_psci" => virt_reboot_refused_without_psci(profile),
         "screen_fatal_behind_a_painter" => {
@@ -4952,13 +4997,12 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
-        "machine_shutdown_wire_held" => power::machine_shutdown_wire_held(test_config, false),
-        "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
-        "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
+        "the_uart_carries_the_boot_once_across_the_hand_over" => the_uart_carries_the_boot_once_across_the_hand_over(),
+        "a_supervisor_that_fails_early_says_why_on_the_uart" => a_supervisor_that_fails_early_says_why_on_the_uart(),
         "a_spawn_from_an_image_frees_it_when_the_child_ends" => a_spawn_from_an_image_frees_it_when_the_child_ends(test_config),
         "a_bent_supervisor_is_refused_and_the_other_slot_boots" => {
             [qemu::Profile::Headless, qemu::Profile::Virt].into_iter().try_for_each(|profile| {
@@ -6880,13 +6924,28 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The machine's kernel thread is hosted.
-fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
-    boot.must_be_clean()?;
-    let line = boot.must_say("kthread: klogd")?;
-    eprintln!("  [kthread] {}", line.trim());
+/// The console UART is its driver's from the kernel's hand-over: the claim's
+/// ports went to a process and the driver carries the log, or the machine
+/// has no UART and the driver said so and ended.
+fn console_uart_driven(log: &serial::Serial) -> Result<(), String> {
+    log.must_be_clean()?;
+    let line = match log.text().lines().find(|l| l.contains(NO_UART)) {
+        Some(none) => none,
+        None => {
+            log.must_say(UART_BOUND)?;
+            log.must_say(UART_CARRIES)?
+        }
+    };
+    eprintln!("  [uart] {}", line.trim());
     Ok(())
 }
+
+/// What `/system/bin/uart` says on a machine with no console UART.
+const NO_UART: &str = "uart: no console UART claim";
+/// What the kernel says as the console UART's claim binds its ports.
+const UART_BOUND: &str = "isa: the console UART's ports are pid";
+/// What `/system/bin/uart` says once its claim is read and its log asked for.
+const UART_CARRIES: &str = "uart: carrying the log";
 
 /// Every I/O APIC this machine has, and whether its redirection table is a
 /// chip's rather than a floating bus's.

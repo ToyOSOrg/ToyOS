@@ -14,6 +14,7 @@ toyos-vdagent = { path = "../../lib/vdagent" }
 toyos-virtio = { path = "../../lib/virtio" }
 toyos-virtio-serial = { path = "../../lib/virtio-serial" }
 logkeeper-api = { path = "../../lib/logkeeper-api" }
+toyos-logstream = { path = "../../lib/logstream" }
 
 [package.metadata.toyos.host]
 exempt.owns = "one virtio-serial function, claimed from the kernel, and the endpoints its named port is handed to"

@@ -535,9 +535,6 @@ const REGISTERED: &[Verdict] = &[
 /// Every negative control a model crate declares; `build/build.rs`'s
 /// `every_model_control_is_run` holds this against the manifests.
 pub(crate) const CONTROLS: &[Control] = &[
-    red(KERNEL_LOOM, "wake-fence-off", Some("log_wake"), &[
-        Fails("a_commit_and_an_arm_cannot_both_miss"),
-    ]),
     red(KERNEL_LOOM, "lock-acquire-off", Some("ticket_lock"), &[
         Fails("try_lock_observes_the_previous_owners_writes"),
     ]),
@@ -599,10 +596,6 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "poll-fire-load-store", Some("poll_once"), &[
         Fails("a_post_and_a_recheck_answer_a_poll_once"),
         Fails("a_withdrawal_and_a_post_never_both_take_a_poll"),
-    ]),
-    red(KERNEL_LOOM, "sleeplock-acquire-off", Some("sleep_lock"), &[
-        Fails("a_parking_contender_observes_the_holders_writes"),
-        Fails("two_holders_never_overlap"),
     ]),
     red(KERNEL_LOOM, "device-irq-lossy", Some("device_irq"), &[
         Fails("every_message_is_counted_once"),

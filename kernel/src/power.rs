@@ -11,9 +11,9 @@
 //! power loss — are outside it and always will be.
 //!
 //! **Nothing an end says is logged after the console's last drain.** The
-//! stop holds the console's wire (`log::console::StopWire`), or writes over
-//! the holder that kept it, and its drain here is the log ring's last reader
-//! for the console: a record committed past it reaches no wire. What an end says
+//! stop holds the console's UART (`log::console::StopWire`), and its drain
+//! here is the log ring's last reader for the console: a record committed
+//! past it reaches no wire. What an end says
 //! through the ring it says above the drain (`arch::power::settle`);
 //! `arch::power::off` and `arch::power::reset` log nothing, and a panic in
 //! either drains for itself. The black box's page is another reader and an
@@ -43,7 +43,7 @@ pub fn reboot(mut wire: StopWire) -> ! {
 /// Reset the machine and do nothing else.
 ///
 /// **[`reboot`] is not reachable from a wedge**, which is why this exists
-/// beside it: that path is the stop's, which waits on `klogd` and the
+/// beside it: that path is the stop's, which waits on userland's stop and the
 /// console's registers, and a `BackendGuard` masks interrupts for its whole
 /// life — so a CPU stuck inside one holds what the stop would wait for, on
 /// exactly the boots `crate::deadline` exists for. This takes no lock.
