@@ -1,12 +1,19 @@
 # Explicit destructive DATA preparation only. No DATA file server holds the
 # partition; only this image's boot-started runner gets raw DATA authority.
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "acpiserver", "test-runner"]
+start = ["logkeeper", "uart", "diskserver", "fileserver", "acpiserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
-serves = ["log"]
+syscap = ["logread", "console"]
+serves = ["log", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
 
 [programs.acpiserver]
 service = true
