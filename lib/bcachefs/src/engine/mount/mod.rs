@@ -1209,9 +1209,6 @@ impl<D: BlockDev> Mount<D> {
         let mut txn = Txn::default();
         let out = prepare(&mut txn).await;
         self.finish(txn, out.is_ok(), Class::Ordinary, bound, nodes)?;
-        if out.is_ok() {
-            if let Draw::Reserved(id) = draw { self.reservations.borrow_mut().active.remove(&id).expect("a completed reserved write consumes its reservation"); }
-        }
         out
     }
 

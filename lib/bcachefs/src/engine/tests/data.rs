@@ -552,3 +552,75 @@ fn evacuation_keeps_small_reads_within_one_physical_block() {
         block_on_ready(m.unmount()).unwrap();
     }
 }
+
+/// Every live extent of `ino`: its start and length in bytes.
+fn extents(v: &Volume<&Image>, ino: u64) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    block_on_ready(Source::walk(v, Btree::Extents, Bpos::new(ino, 0, 0), |k, _| {
+        if k.pos.inode != ino { return Ok(false); }
+        if k.kind == kind::EXTENT {
+            out.push(((k.pos.offset - u64::from(k.size)) * SECTOR as u64, u64::from(k.size) * SECTOR as u64));
+        }
+        Ok(true)
+    }))
+    .unwrap();
+    out
+}
+
+/// A write is an extent for each 64 KiB run, reserved or not: 256 KiB is
+/// four, not a block each.
+#[test]
+fn a_write_is_one_extent_for_each_run_of_contiguous_blocks() {
+    let dev = formatted(256 << 20, None);
+    let data: Vec<u8> = (0..256 << 10).map(|i| (i * 7) as u8).collect();
+    let (plain, reserved) = mounted(&dev, async |m: &Mount<&Image>| {
+        let plain = m.create(m.root(), b"plain", New::File, OWNER, NOW).await.unwrap().ino;
+        assert_eq!(m.write(plain, 0, &data, NOW).await.unwrap(), data.len());
+        let reserved = m.create(m.root(), b"reserved", New::File, OWNER, NOW).await.unwrap().ino;
+        let mut token = m.reserve(reserved, 0, data.len()).await.unwrap();
+        assert_eq!(m.write_reserved(&mut token, 0, &data, NOW).await.unwrap(), data.len());
+        (plain, reserved)
+    });
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    for ino in [plain, reserved] {
+        assert_eq!(read_all(&v, ino).unwrap(), data);
+        assert_eq!(extents(&v, ino), [(0, 65536), (65536, 65536), (131072, 65536), (196608, 65536)]);
+    }
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+/// A write over more old extents than one transaction may remove goes in
+/// parts, each removing at most two, and the file reads as written.
+#[test]
+fn an_overwrite_across_many_old_extents_goes_in_parts() {
+    let dev = formatted(256 << 20, None);
+    let ino = mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap().ino;
+        // Every block its own extent: each written alone, in reverse.
+        for b in (0..16u64).rev() { m.write(ino, b * 4096, &[b as u8; 4096], NOW).await.unwrap(); }
+        let mut token = m.reserve(ino, 0, 64 << 10).await.unwrap();
+        assert_eq!(m.write_reserved(&mut token, 0, &[0xab; 64 << 10], NOW).await.unwrap(), 64 << 10);
+        ino
+    });
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(read_all(&v, ino).unwrap(), [0xab; 64 << 10]);
+    let parts = extents(&v, ino);
+    assert!(parts.len() >= 8 && parts.iter().all(|&(_, len)| len >= 2 * 4096), "{parts:?}");
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+/// Blocks of a reservation never written return when it is dropped: a
+/// reservation of 64 KiB written 16 KiB and dropped, 2000 times over one
+/// file, fits a 64 MiB volume that could not hold the blocks never written.
+#[test]
+fn a_dropped_reservation_returns_its_unwritten_blocks() {
+    let dev = formatted(64 << 20, None);
+    mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap().ino;
+        for i in 0..2000u32 {
+            let mut token = m.reserve(ino, 0, 64 << 10).await.unwrap_or_else(|e| panic!("reservation {i}: {e:?}"));
+            assert_eq!(m.write_reserved(&mut token, 0, &[i as u8; 16 << 10], NOW).await.unwrap(), 16 << 10);
+            if i % 64 == 0 { m.commit().await.unwrap(); }
+        }
+    });
+}

@@ -234,17 +234,22 @@ impl Allocator {
         self.data = Some((b, 0, gen));
     }
 
-    pub(super) fn next_data(&mut self, bucket_sectors: u64, sectors: u64, fixed: bool) -> Option<(u64, u8)> {
+    /// Contiguous data sectors: `sectors` of them, or with `partial` as many
+    /// as the open bucket has left, so it is filled before another opens. A
+    /// hole, one block a reservation gave back, serves `fixed` alone.
+    pub(super) fn next_data(&mut self, bucket_sectors: u64, sectors: u64, fixed: bool, partial: bool) -> Option<(u64, u8, u64)> {
         if fixed {
-            if let Some((_, sector)) = self.holes.pop_first() { return Some((sector, 0)); }
+            if let Some((_, sector)) = self.holes.pop_first() { return Some((sector, 0, sectors)); }
         }
         let (b, next, gen) = self.data?;
-        if sectors > bucket_sectors - next {
+        let room = bucket_sectors - next;
+        if sectors > room && !partial {
             self.data = None;
             return None;
         }
-        self.data = (next + sectors < bucket_sectors).then_some((b, next + sectors, gen));
-        Some((b * bucket_sectors + next, gen))
+        let got = sectors.min(room);
+        self.data = (next + got < bucket_sectors).then_some((b, next + got, gen));
+        Some((b * bucket_sectors + next, gen, got))
     }
 
     pub(super) fn data_fits(&self, nodes: usize, reclaim_room: usize, draw: Draw) -> bool {
