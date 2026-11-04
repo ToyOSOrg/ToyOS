@@ -5387,7 +5387,7 @@ fn a_host_disk_beside_the_stick_is_left_alone(test_config: &Path) -> Result<(), 
 const NVME_ROLES: [&str; 3] = [
     "Log serving /log — FAT32, ",
     "Boot serving /boot — FAT32 read-only, ",
-    "Data serving /apps, /config, /home, /state — bcachefs, ",
+    "Data serving /apps, /config, /home, /state — bcachefs DATA: ",
 ];
 /// Run `command` as a job of the boot, to exit 0: everything said in its
 /// window, the kernel's records with the program lines.
