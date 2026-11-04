@@ -206,7 +206,7 @@ pub fn guest_cpus(store: &Path, vcpus: u32, cpus: u32, what: &str) -> GuestCpus 
     let deadline = Instant::now() + CEILING;
     let queue_path = dir.join("queue");
     let queue = open_lock_file(&queue_path);
-    take(&queue, Mode::Exclusive, &queue_path, "guest CPU queue", what, "a wider guest is waiting for host CPUs", deadline);
+    take(&queue, Mode::Exclusive, &queue_path, "guest CPU queue", what, "another guest is waiting for host CPUs", deadline);
     let label = format!("{want} of {cpus}, {what}");
     let mut held = poll(&dir.join("cpu-0"), "host CPUs", &label, "held by running guests", deadline, || {
         let mut held = Vec::with_capacity(want);
@@ -849,9 +849,6 @@ pub(crate) mod tests {
         assert!(!try_lock(&third, Mode::Exclusive), "a clean got in while a build was running");
     }
 
-    /// `flock` alone would let a stream of builds starve the rebuild they are
-    /// all waiting for; the `intent` file is what stops that, and this is the
-    /// gate on it.
     /// A take of `vcpus` of `cpus` on a thread of its own, which reports on
     /// `done` once it holds them and keeps them until `release` says.
     fn guest(
@@ -886,8 +883,14 @@ pub(crate) mod tests {
         let b = guest(&store, 2, 4, "b", tx.clone());
         assert_eq!(said(&done, Duration::from_millis(300)), None, "two guests of 3 and 2 vCPUs ran on 4 CPUs");
         // The waiter holds none of the CPUs while it waits: the fourth is free.
+        // Each of its attempts takes it for a moment, as does a sibling test's
+        // fork until its exec, so a probe tries until one lands.
         let fourth = open_lock_file(&store.join("locks/guest-cpus/cpu-3"));
-        assert!(try_lock(&fourth, Mode::Exclusive), "a waiting guest held a CPU");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !try_lock(&fourth, Mode::Exclusive) {
+            assert!(Instant::now() < deadline, "a waiting guest held a CPU");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         drop(fourth);
         a.send(()).unwrap();
         assert_eq!(said(&done, Duration::from_secs(20)), Some("b"));
@@ -931,6 +934,9 @@ pub(crate) mod tests {
         narrow.send(()).unwrap();
     }
 
+    /// `flock` alone would let a stream of builds starve the rebuild they are
+    /// all waiting for; the `intent` file is what stops that, and this is the
+    /// gate on it.
     #[test]
     fn a_queued_exclusive_phase_goes_first() {
         let root = scratch("preference");
