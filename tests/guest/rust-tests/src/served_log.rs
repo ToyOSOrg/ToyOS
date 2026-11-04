@@ -9,13 +9,13 @@ use toyos::Pipe;
 use toyos_abi::syscall::SyscallError;
 use toyos_logstream::Lines;
 
-/// How long a job waits for a line of the ACPI server's start, from the job's
-/// own start: a liveness ceiling, not a timing claim. The server's start ends
-/// within seconds of boot, so a job begun before then waits only for the rest
-/// and one begun after finds the line already served, whatever the jobs
+/// How long a job waits, from its own start, for a line a system service
+/// writes during its start: a liveness ceiling, not a timing claim. A start
+/// ends within seconds of boot, so a job begun before then waits only for the
+/// rest and one begun after finds the line already served, whatever the jobs
 /// before it took.
-#[allow(dead_code, reason = "read by the jobs that wait on the server's start, not by every reader of the log")]
-pub const SERVER_START: Duration = Duration::from_secs(30);
+#[allow(dead_code, reason = "read by the jobs that wait on a service's start, not by every reader of the log")]
+pub const START_LINE: Duration = Duration::from_secs(30);
 
 pub struct Log {
     pipe: Pipe,

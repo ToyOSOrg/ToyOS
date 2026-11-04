@@ -182,7 +182,7 @@ fn print(phase: &str, read: &Read) {
 
 /// Wait until `acpiserver` has ended its start.
 fn acpi_said(log: &mut Log) {
-    log.until("the end of the ACPI server's start", served_log::SERVER_START, |line| {
+    log.until("the end of the ACPI server's start", served_log::START_LINE, |line| {
         program_line(line).is_some_and(|said| said.tag == "acpiserver" && said.text == acpiserver_api::STARTED)
     });
 }

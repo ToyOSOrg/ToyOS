@@ -1988,10 +1988,8 @@ fn in_acpi_mode_before_any_job(boot: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// The same boot, its rows ended on the hold, which waits for the ACPI
-/// server's power sources, the last line of its start. The members run
-/// behind it: the hold gives up at a time since boot, which a list of
-/// members before it would spend.
+/// The same boot, its rows ended on the hold, which waits for the end of the
+/// ACPI server's start; the members run behind it.
 const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
     last: Some("test_rs_acpi_hold"),
     ..metal::once("testcases", "tests/images/testcases.toml", &[], &[])
@@ -7540,7 +7538,7 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_hold")?;
     let (whole, kernel) = (back.log(), back.kernel());
     let text = whole.text();
-    let at = text.find(acpiserver_api::POWER_SOURCES).ok_or("the server never said its power sources, which the hold waited for")?;
+    let at = text.find(acpiserver_api::POWER_SOURCES).ok_or("the server never said its power sources")?;
     let end = text[at..].find('\n').map_or(text.len(), |n| at + n);
     let log = serial::Serial::named("the log up to the server's power sources", &text[..end]);
     let lines: Vec<&str> = log

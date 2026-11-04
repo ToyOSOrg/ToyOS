@@ -113,7 +113,7 @@ use sci::{Bits, Event, Fixed, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 /// The most queries one drain takes before the controller is a storm.
 const QUERIES: usize = 32;
 /// How often the log is told the queries' counts, where they moved.
-const COUNTS: Duration = Duration::from_secs(30);
+const COUNTS: Duration = acpiserver_api::COUNT_INTERVAL;
 
 struct Server<'a, K, P> {
     kernel: &'a K,

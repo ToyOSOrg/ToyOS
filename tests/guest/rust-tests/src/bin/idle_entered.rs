@@ -32,7 +32,7 @@ fn round(cap: &SysCap) -> Vec<Record> {
 
 fn main() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a capability");
-    served_log::Log::open().until("the ACPI server's idle states", served_log::SERVER_START, |line| {
+    served_log::Log::open().until("the ACPI server's idle states", served_log::START_LINE, |line| {
         program_line(line).is_some_and(|said| said.tag == "acpiserver" && said.text.starts_with(acpiserver_api::IDLE_CENSUS))
     });
     let before = round(&cap);
