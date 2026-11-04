@@ -476,7 +476,8 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
         .union(Rights::INVENTORY)
         .union(Rights::COUNTERS)
         .union(Rights::TRACE)
-        .union(Rights::PAGER);
+        .union(Rights::PAGER)
+        .union(Rights::CONSOLE);
     let cap_handle = handles
         .install(crate::object::HandleEntry::new(cap, rights))
         .expect("spawn_supervisor: an empty table refused the system capability");

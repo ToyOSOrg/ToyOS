@@ -98,6 +98,7 @@ use toyos_logstream::{
 use toyos_wallclock::Civil;
 
 use carrier::Carriers;
+use serve::Positions;
 use origin::{Origin, Said};
 use policy::{Step, LOG_WRITE_BUDGET};
 use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES};
@@ -160,15 +161,17 @@ fn main() {
         inspect::serve(acceptor, Arc::clone(&published), Arc::clone(&hub));
     }
     let cap = Arc::new(cap);
+    let words =
+        toyos::log::cursor_words(&cap).unwrap_or_else(|e| panic!("logkeeper: SYS_LOG_READ sized no cursor ({e:?})"));
     // What the kernel put on the UART itself before userland ran, which the
-    // UART's carrier starts after.
-    let spoken = toyos::log::spoken(&cap, 0).unwrap_or_else(|e| panic!("logkeeper: SYS_LOG_SPOKEN refused ({e:?})"));
+    // UART's carrier is not handed again.
+    let shards = words - toyos_abi::log::CURSOR_HEAD_WORDS;
+    let spoken =
+        toyos::log::spoken(&cap, &vec![0; shards]).unwrap_or_else(|e| panic!("logkeeper: SYS_LOG_SPOKEN refused ({e:?})"));
     let (port, wire) = (endow::acceptor(CARRIER), endow::acceptor(WIRE));
     let carriers =
         (port.is_some() || wire.is_some()).then(|| Carriers::serve(port, wire, Arc::clone(&hub), Arc::clone(&cap)));
 
-    let words =
-        toyos::log::cursor_words(&cap).unwrap_or_else(|e| panic!("logkeeper: SYS_LOG_READ sized no cursor ({e:?})"));
     let tail = LogTail::new(vec![0; words]);
     let mut log = Log {
         cap,
@@ -176,6 +179,7 @@ fn main() {
         supervisor_rx: ipc::FrameRx::new(),
         carriers,
         spoken: Some(spoken),
+        owed_wire: String::new(),
         origins: Vec::new(),
         tail,
         records: vec![Record::EMPTY; BATCH],
@@ -196,9 +200,12 @@ struct Log {
     from_supervisor: Connection,
     supervisor_rx: ipc::FrameRx<{ 4 + MAX_TAG }>,
     carriers: Option<Arc<Carriers>>,
-    /// The newest stamp the kernel put on the UART itself, until the first
-    /// round has said where the UART's carrier starts after it.
-    spoken: Option<u64>,
+    /// What the kernel put on the UART itself, a read position per shard,
+    /// until the rounds have read past it and said where the UART's carrier
+    /// starts.
+    spoken: Option<Vec<u64>>,
+    /// Those rounds' lines but the kernel's records the UART carried.
+    owed_wire: String,
     origins: Vec<Origin>,
     tail: LogTail<Vec<u64>>,
     records: Vec<Record>,
@@ -442,8 +449,9 @@ impl Log {
         }
         let (now, later): (Vec<Line>, Vec<Line>) =
             lines.into_iter().partition(|line| all || line.at_ns <= cut);
+        let through = written_through(self.tail.positions(), &later);
         self.waiting = later;
-        self.write(now, all);
+        self.write(now, all, through);
         oldest
     }
 
@@ -483,24 +491,27 @@ impl Log {
     }
 
     /// The lines, in stamp order, into the file, the readers and the console's
-    /// carriers; while the machine stops, held back from the file, and each
+    /// carriers, which are the kernel's log through the read positions
+    /// `through`; while the machine stops, held back from the file, and each
     /// program's line to the UART's carrier.
-    fn write(&mut self, mut lines: Vec<Line>, flushing: bool) {
+    fn write(&mut self, mut lines: Vec<Line>, flushing: bool, through: Positions) {
         if lines.is_empty() {
             return;
         }
         lines.sort_by_key(|line| line.at_ns);
         let mut file = String::new();
-        // The kernel's own lines on the UART: what ends them in `file`.
-        let mut spoken_through = 0;
+        // What the UART is owed of these lines, while the kernel's own on it
+        // are yet to be read past.
+        let mut wire = String::new();
         let mut programs = String::new();
         for line in &lines {
             match &line.kind {
                 Kind::Kernel(record) => {
-                    file.push_str(&format!("{}\n", record.dated(&stamp(self.boot_secs, record.at_ns()))));
-                    if self.spoken.is_some_and(|spoken| line.at_ns <= spoken) {
-                        spoken_through = file.len();
+                    let text = format!("{}\n", record.dated(&stamp(self.boot_secs, record.at_ns())));
+                    if !self.spoken.as_ref().is_some_and(|spoken| on_the_uart(record, spoken)) {
+                        wire.push_str(&text);
                     }
+                    file.push_str(&text);
                 }
                 Kind::Program { tag, owner, said } => {
                     let tag = Tag::new(tag).expect("an origin's name is a tag");
@@ -517,6 +528,7 @@ impl Log {
                     };
                     let line = format!("{line}\n");
                     file.push_str(&line);
+                    wire.push_str(&line);
                     if self.stopping.is_some() {
                         programs.push_str(&line);
                     }
@@ -537,12 +549,13 @@ impl Log {
         // The file first: a reader is served only what /log already holds,
         // whenever the machine stops between the two.
         self.to_volume(file.as_bytes(), !flushing);
-        let from = self.hub.end();
-        self.hub.append(file.as_bytes(), lines.last().map(|line| line.at_ns));
-        // Every record the kernel put on the UART itself is committed before
-        // userland runs, so the first round has them all.
-        if self.spoken.take().is_some() {
-            self.hub.set_wire_from(from + spoken_through as u64);
+        self.hub.append(file.as_bytes(), Some(Arc::clone(&through)));
+        if let Some(spoken) = &self.spoken {
+            self.owed_wire.push_str(&wire);
+            if through.iter().zip(spoken).all(|(read, spoken)| read >= spoken) {
+                self.hub.set_wire_from(self.hub.end(), std::mem::take(&mut self.owed_wire).into_bytes());
+                self.spoken = None;
+            }
         }
     }
 
@@ -655,6 +668,27 @@ impl Log {
     }
 }
 
+/// Whether the kernel put `record` on the UART itself, by the read positions
+/// it had spoken through.
+fn on_the_uart(record: &Record, spoken: &[u64]) -> bool {
+    spoken.get(usize::from(record.cpu)).is_some_and(|&through| record.seq < through)
+}
+
+/// The kernel's read positions a round's written lines are the log through:
+/// the cursor's, each shard's held back to its first record still `waiting`
+/// for a later round.
+fn written_through(cursor: &[u64], waiting: &[Line]) -> Positions {
+    let mut through = cursor.to_vec();
+    for line in waiting {
+        if let Kind::Kernel(record) = &line.kind
+            && let Some(at) = through.get_mut(usize::from(record.cpu))
+        {
+            *at = (*at).min(record.seq);
+        }
+    }
+    through.into()
+}
+
 fn ahead_note(ahead: u64, tag: &str) -> String {
     format!("logkeeper: {ahead} record(s) of {tag}'s were stamped ahead of the clock and are written as read")
 }
@@ -694,5 +728,36 @@ mod tests {
     fn readers_and_inspect_share_one_port_and_never_one_request() {
         assert_eq!(toyos_inspect::LOG.port, toyos_logstream::SERVICE);
         assert_ne!(toyos_logstream::READ, toyos_inspect::MSG_INSPECT);
+    }
+
+    fn kernel(cpu: u16, seq: u64) -> super::Line {
+        let record = super::Record { cpu, seq, ..super::Record::EMPTY };
+        super::Line { at_ns: 0, kind: super::Kind::Kernel(Box::new(record)) }
+    }
+
+    /// **A round speaks for the kernel's log only as far as it wrote it**: a
+    /// shard's position is held back to its first record still waiting for
+    /// a later round, and the others' are the cursor's.
+    #[test]
+    fn a_round_is_through_the_cursor_but_what_waits() {
+        let waiting = [kernel(1, 7), kernel(1, 9)];
+        assert_eq!(&*super::written_through(&[5, 12, 3], &waiting), &[5, 7, 3]);
+        assert_eq!(&*super::written_through(&[5, 12], &[]), &[5, 12]);
+    }
+
+    /// The kernel's records the UART carried before the hand-over are those
+    /// before the position it spoke through in their shard, whatever their
+    /// stamps say.
+    #[test]
+    fn what_the_uart_carried_is_told_by_position() {
+        let on = |cpu, seq| match kernel(cpu, seq).kind {
+            super::Kind::Kernel(record) => super::on_the_uart(&record, &[4, 2]),
+            super::Kind::Program { .. } => unreachable!(),
+        };
+        assert!(on(0, 3));
+        assert!(!on(0, 4));
+        assert!(on(1, 1));
+        assert!(!on(1, 2));
+        assert!(!on(2, 0), "a shard it spoke nothing of");
     }
 }

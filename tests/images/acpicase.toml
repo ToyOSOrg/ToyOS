@@ -11,7 +11,7 @@ start = ["logkeeper", "uart", "diskserver", "fileserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
 serves = ["log-carrier", "log-wire"]
 holds = ["log-origins"]
 

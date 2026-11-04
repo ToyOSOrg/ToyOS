@@ -17,7 +17,7 @@ start = ["acpiserver", "logkeeper", "uart", "diskserver", "fileserver", "netstac
 # empty. It claims no device and serves no port.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
 serves = ["log-carrier", "log-wire"]
 holds = ["log-origins"]
 

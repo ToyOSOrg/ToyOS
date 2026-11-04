@@ -716,8 +716,10 @@ fn named(rows: &[&str]) -> String {
 /// Who may hold the authorities that change what the machine runs or what a
 /// package sees: each of [`HELD_ALONE`]'s ports, its holder and nothing else
 /// — no other `[programs]` row and never `[apps]` — each of [`HOLDINGS`], its
-/// one row, the idle slot, [`toyos_update::slots::HOLDER`] alone, and the
-/// consent port, which no row receives and its server alone serves.
+/// one row, the `console` syscap, which keeps the kernel's records off a fatal
+/// path's output, `logkeeper` alone, the idle slot,
+/// [`toyos_update::slots::HOLDER`] alone, and the consent port, which no row
+/// receives and its server alone serves.
 ///
 /// **Checked on every manifest rendered, not only on the committed configs**,
 /// because the swap port's holder can replace any service's binary, the
@@ -742,6 +744,9 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
             if name != holder && program.holds.iter().any(|h| h == held) {
                 return Err(format!("`{name}` holds `{held}`, which only `{holder}` may hold"));
             }
+        }
+        if name != toyos_logstream::LOGKEEPER && program.syscap.iter().any(|s| s == "console") {
+            return Err(format!("`{name}` asks for the `console` syscap, which only `{}` may hold", toyos_logstream::LOGKEEPER));
         }
         if name != toyos_update::slots::HOLDER && program.slots {
             return Err(format!("`{name}` asks for `slots`, which only `{}` may hold", toyos_update::slots::HOLDER));
@@ -1009,11 +1014,13 @@ pub fn trust_roots() -> Vec<u8> {
     roots.map(|cert| pem::encode_config(&pem::Pem::new("CERTIFICATE", cert.to_vec()), config)).collect::<String>().into_bytes()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_and_assemble(
     root: &Path,
     config: &SystemConfig,
     env: &GuestEnv,
     extra_files: &[(String, Vec<u8>)],
+    omits: &[String],
     quiet: bool,
     arch: Arch,
     machines: crate::microcode::Machines,
@@ -1056,6 +1063,12 @@ fn build_and_assemble(
     // Extra files (test binaries, shared libs)
     for (name, data) in extra_files {
         root_files.push((name.clone(), data.clone()));
+    }
+    for omitted in omits {
+        let Some(at) = root_files.iter().position(|(name, _)| name == omitted) else {
+            panic!("root: '{omitted}' is to be left out, and the image has no such file");
+        };
+        root_files.remove(at);
     }
 
     let symlinks: Vec<(String, String)> = config.symlinks.iter()
@@ -1194,6 +1207,9 @@ pub struct Plan {
     pub machines: crate::microcode::Machines,
     /// The scale `cargo run --scale` starts the desktop at.
     pub scale: Option<String>,
+    /// Files of the image's own ROOT a test boot is staged without, each by
+    /// its ROOT-relative path: a `/system` missing one.
+    pub root_omits: Vec<String>,
 }
 
 impl Plan {
@@ -1206,6 +1222,7 @@ impl Plan {
             version: image::version_now(),
             machines: crate::microcode::Machines::Qemu,
             scale: None,
+            root_omits: Vec::new(),
         }
     }
 }
@@ -1243,6 +1260,7 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
             crate::microcode::Machines::Qemu
         },
         scale: flags::CARGO_RUN.value(args, &flags::SCALE).map(String::from),
+        root_omits: Vec::new(),
     }
 }
 
@@ -2060,7 +2078,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Us
         )
     };
 
-    let userland = build_and_assemble(root, &config, &env, &[], false, arch, plan.machines);
+    let userland = build_and_assemble(root, &config, &env, &[], &plan.root_omits, false, arch, plan.machines);
 
     let bl_bytes = fs::read(&bl_art).expect("Failed to read staged bootloader");
     (kernel_bytes, bl_bytes, userland)
@@ -2163,6 +2181,7 @@ fn root_image_key(plan: &Plan, image_key: &str, extra_files: &[(String, Vec<u8>)
     plan.config.hash(&mut h);
     plan.arch.hash(&mut h);
     plan.machines.hash(&mut h);
+    plan.root_omits.hash(&mut h);
     image_key.hash(&mut h);
     for (name, data) in extra_files {
         name.hash(&mut h);
@@ -2279,7 +2298,7 @@ pub fn build_test_parts(
     };
 
     let userland = USERLAND.get_or_build(root_image_key, || {
-        build_and_assemble(root, &config, &env, extra_files, quiet, arch, plan.machines)
+        build_and_assemble(root, &config, &env, extra_files, &plan.root_omits, quiet, arch, plan.machines)
     });
 
     drop(building);
@@ -3237,6 +3256,10 @@ mod tests {
                 let holds = program.syscap.iter().any(|s| s == "logread");
                 if name == "logkeeper" {
                     assert!(holds, "{config}: `logkeeper` writes the file and must read the cursor");
+                    assert!(
+                        program.syscap.iter().any(|s| s == "console"),
+                        "{config}: `logkeeper` feeds the console and must say what it spoke"
+                    );
                     continue;
                 }
                 assert!(
@@ -3486,6 +3509,8 @@ mod tests {
         assert!(held_by_their_holders_alone(&origins).is_err());
         let input: SystemConfig = toml::from_str("[programs.shell]\nholds = [\"console-input\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&input).is_err());
+        let console: SystemConfig = toml::from_str("[programs.test-runner]\nsyscap = [\"logread\", \"console\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&console).is_err());
         let held: SystemConfig = toml::from_str(
             "[programs.logkeeper]\nholds = [\"log-origins\"]\n[programs.uart]\nholds = [\"console-input\"]\n",
         )

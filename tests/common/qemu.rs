@@ -1251,6 +1251,9 @@ pub struct BootOptions {
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
+    /// Files of the image's own ROOT left out, each by its ROOT-relative
+    /// path: a boot staged on a `/system` missing one.
+    pub root_omits: &'static [&'static str],
     /// DATA's size in place of the profile's, for a boot that writes more
     /// than [`NVME_SMALL`] holds, on a profile whose disk carries the image.
     pub data_bytes: Option<u64>,
@@ -1305,6 +1308,7 @@ impl Default for BootOptions {
             mute: false,
             ready_marker: DEFAULT_READY,
             extra_root_files: Vec::new(),
+            root_omits: &[],
             data_bytes: None,
             psci_trace: None,
             rtc_base: None,
@@ -1417,7 +1421,7 @@ fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
     toyos_build::build::TEST_KERNEL.to_vec()
 }
 
-// Nine, because an image is its architecture and its slots as much as its files and its kernel.
+// Ten, because an image is its architecture and its slots as much as its files and its kernel.
 #[allow(clippy::too_many_arguments)]
 fn build_boot_image_with(
     arch: Arch,
@@ -1425,6 +1429,7 @@ fn build_boot_image_with(
     c_tests: &[(String, Vec<u8>)],
     rust_tests: &[(String, Vec<u8>)],
     staged: &[(String, Vec<u8>)],
+    omits: &[&str],
     kernel_features: &[&str],
     kernel_params: &[&str],
     debug_wait: bool,
@@ -1494,7 +1499,8 @@ fn build_boot_image_with(
     assert!(config.is_file(), "no image config at {}", config.display());
 
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    let plan = toyos_build::build::Plan::new(arch, config, kernel_features, kernel_params);
+    let mut plan = toyos_build::build::Plan::new(arch, config, kernel_features, kernel_params);
+    plan.root_omits = omits.iter().map(|omitted| (*omitted).to_string()).collect();
     let root = compile::repo_root();
     match bent {
         None => toyos_build::build::build_test_image(&root, &plan, quiet, &extra_files),
@@ -1589,6 +1595,7 @@ impl QemuInstance {
             c_tests,
             rust_tests,
             &options.extra_root_files,
+            options.root_omits,
             &features,
             &params,
             options.debug_wait,

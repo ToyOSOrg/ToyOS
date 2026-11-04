@@ -108,6 +108,8 @@ static TIMER_EDGE: AtomicBool = AtomicBool::new(false);
 static DISTRIBUTOR: AtomicU64 = AtomicU64::new(0);
 /// The IOMMU's event SPI; zero until [`route_iommu_events`].
 static IOMMU_EVENTS: AtomicU32 = AtomicU32::new(0);
+/// The boot CPU's packed affinity, from [`init`], which every SPI is routed to.
+static BOOT_CPU: AtomicU32 = AtomicU32::new(0);
 
 /// Wait until `done`, for at most `1 / per_second` of a second counted at the
 /// rate firmware states: the boot has no calibrated clock yet.
@@ -182,6 +184,7 @@ pub fn init(rsdp_addr: u64) -> Gic {
     let gicd = gicd.expect("GIC: the MADT names no distributor");
     let distributor = crate::mm::paging::map_mmio(gicd, FRAME, MmioPolicy::Uncacheable);
     DISTRIBUTOR.store(gicd, Relaxed);
+    BOOT_CPU.store(cpu::hardware_id(), Relaxed);
     let revision = distributor.read_u32(GICD_PIDR2) >> 4 & 0xF;
     assert!(revision >= 3, "GIC: GICD_PIDR2.ArchRev is {revision}, and this kernel drives a GICv3 or later");
 
@@ -319,9 +322,9 @@ pub(super) fn route_iommu_events(intid: u32) -> Result<(), u32> {
     Ok(())
 }
 
-/// Route SPI `intid` to this CPU at [`PRIORITY`], level- or edge-triggered,
-/// masked and with nothing pending; [`set_spi_masked`] lets it in. Refused
-/// with the distributor's limit where it takes no such SPI.
+/// Route SPI `intid` to the boot CPU at [`PRIORITY`], level- or
+/// edge-triggered, masked and with nothing pending; [`set_spi_masked`] lets
+/// it in. Refused with the distributor's limit where it takes no such SPI.
 pub(super) fn route_spi(intid: u32, level: bool) -> Result<(), u32> {
     let gicd = distributor();
     let limit = (32 * ((gicd.read_u32(GICD_TYPER) & 0x1F) + 1)).min(1020);
@@ -340,7 +343,7 @@ pub(super) fn route_spi(intid: u32, level: bool) -> Result<(), u32> {
     let edge = 0b10 << (2 * (intid % 16));
     let configured = gicd.read_u32(config);
     gicd.write_u32(config, if level { configured & !edge } else { configured | edge });
-    gicd.write_u64(GICD_IROUTER + 8 * u64::from(intid), toyos_gicv3::unpacked_affinity(cpu::hardware_id()));
+    gicd.write_u64(GICD_IROUTER + 8 * u64::from(intid), toyos_gicv3::unpacked_affinity(BOOT_CPU.load(Relaxed)));
     gicd.write_u32(GICD_ICPENDR + word, bit);
     Ok(())
 }

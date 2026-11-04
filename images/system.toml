@@ -68,7 +68,7 @@ pkg = { state = true }
 # acceptor every program's ring reaches it on, which no other row may hold.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
 serves = ["log", "log-carrier", "log-wire"]
 holds = ["log-origins"]
 

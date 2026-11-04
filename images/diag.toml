@@ -22,7 +22,7 @@ start = ["logkeeper", "fileserver", "toybox"]
 # program's output beside that.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
 holds = ["log-origins"]
 
 [programs.toybox]

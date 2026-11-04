@@ -12,7 +12,7 @@ start = ["logkeeper", "uart", "diskserver", "fileserver", "soundserver", "acpise
 # the log on.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
 serves = ["log", "log-carrier", "log-wire"]
 holds = ["log-origins"]
 

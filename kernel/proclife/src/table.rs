@@ -40,8 +40,9 @@ pub trait Lifecycle {
     /// this decision has nothing left to say about.
     fn set_location(&mut self, tid: Tid, to: ThreadLocation);
 
-    /// Take `tid` out of the table. Only a join does this — a zombie is
-    /// collected by whoever was entitled to its code.
+    /// Take `tid` out of the table: a join collecting the zombie it was
+    /// entitled to the code of, or a detached thread leaving, whose code
+    /// nobody is.
     fn forget_thread(&mut self, tid: Tid);
 
     /// Every thread of this process, in whatever order the container has.

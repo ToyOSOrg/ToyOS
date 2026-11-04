@@ -486,13 +486,16 @@ fn make_dir(path: &str) -> std::io::Result<()> {
 }
 
 fn main() {
+    let syscap: &'static SysCap = Box::leak(Box::new(
+        Endowments::get()
+            .take(SYSCAP_LABEL)
+            .expect("supervisor: the kernel spawns this program holding the system capability"),
+    ));
+    say_last_words_on_panic(syscap);
     // Before anything is started, and before the supervisor says anything: from here
     // the supervisor's own lines are records in its ring.
     let mut log = Log::open();
 
-    let syscap: SysCap = Endowments::get()
-        .take(SYSCAP_LABEL)
-        .expect("supervisor: the kernel spawns this program holding the system capability");
     let boot: &'static Boot = Box::leak(Box::new(Boot::take()));
     let sources = syscap.boot_sources().expect("supervisor: the kernel answers the system capability its boot sources");
     let booted = toyos_supervisor::boot::read(&sources);
@@ -562,7 +565,7 @@ fn main() {
         &[],
         Vec::new(),
         &unread,
-        &syscap,
+        syscap,
         &BTreeMap::new(),
         &no_grants,
         &minted,
@@ -634,7 +637,7 @@ fn main() {
         minted,
         store: Store::default(),
         consent,
-        syscap: &syscap,
+        syscap,
         boot,
         acceptors,
         connectors,
@@ -3779,10 +3782,25 @@ fn read_system(path: &'static str, server: &Service<'_>) -> String {
 }
 
 /// The boot's end before `logkeeper` runs, which no reader of the
-/// supervisor's ring reaches yet
-/// (`issues/a-supervisor-that-fails-before-logkeeper-runs-says-why-nowhere.md`).
+/// supervisor's ring reaches yet: said as its last words.
 fn bootstrap_fails(why: String) -> ! {
     panic!("supervisor: {why}");
+}
+
+/// **The supervisor's end is the machine's**: the kernel ends the machine on
+/// it, and puts on the console every record the console has not spoken. A
+/// panic's message is first said as the supervisor's last words, the one
+/// kernel record that says why, since its ring reaches nobody before
+/// `logkeeper` runs; then to that ring, as every program's.
+fn say_last_words_on_panic(syscap: &'static SysCap) {
+    let ring = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let why = info.payload_as_str().unwrap_or("a panic with no message");
+        let at = info.location().map(|at| format!(" (at {}:{})", at.file(), at.line())).unwrap_or_default();
+        // A second panic finds them said, and the first panic's are the reason.
+        let _ = toyos::log::last_words(syscap, &format!("{why}{at}"));
+        ring(info);
+    }));
 }
 
 /// The images the kernel hands the supervisor beside the system capability:

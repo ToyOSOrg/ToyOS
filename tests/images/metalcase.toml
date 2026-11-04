@@ -21,7 +21,7 @@ start = ["acpiserver", "logkeeper", "uart", "diskserver", "fileserver", "composi
 # the log on.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
 serves = ["log", "log-wire"]
 holds = ["log-origins"]
 

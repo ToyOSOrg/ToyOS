@@ -21,7 +21,7 @@ start = ["acpiserver", "logkeeper", "uart", "compositor", "ps2server", "test-run
 
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
 serves = ["log-carrier", "log-wire"]
 holds = ["log-origins"]
 

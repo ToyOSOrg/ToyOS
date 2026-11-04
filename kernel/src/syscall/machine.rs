@@ -5,10 +5,11 @@
 //! the supervisor's `system.toml`; `SYS_SYSINFO`'s header is ambient.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::log::console::StopWire;
 use crate::power;
-use crate::user_ptr::{SyscallContext, UserBytesMut};
+use crate::user_ptr::{SyscallContext, UserBytes, UserBytesMut};
 use crate::UserAddr;
 use crate::{log, process};
 
@@ -28,15 +29,35 @@ pub(super) fn sys_log_read(
     read_on_cursor(ctx, syscap, Rights::LOG, cursor, log::shard_count(), |next| log::user::read(next, out, capacity))
 }
 
-/// The console's channels have delivered every record stamped at or before
-/// `at_ns`; answers the newest stamp the console has spoken. Requires a
-/// `SysCap` carrying [`Rights::LOG`], whose holder carries the log to the
-/// console (`log::console`).
-pub(super) fn sys_log_spoken(syscap: RawHandle, at_ns: u64) -> u64 {
+/// The console's channels have delivered every record before the cursor's
+/// positions at `cursor`, which answers what the console has spoken
+/// (`log::console::speak`). Requires a `SysCap` carrying [`Rights::CONSOLE`]:
+/// what it moves is kept off every fatal path's output.
+pub(super) fn sys_log_spoken(ctx: &SyscallContext, syscap: RawHandle, cursor: UserAddr) -> u64 {
+    read_on_cursor(ctx, syscap, Rights::CONSOLE, cursor, log::shard_count(), log::console::speak)
+}
+
+/// The caller's last words, one alert record, the boot's first such call
+/// alone: what the supervisor says before its end ends the machine
+/// (`process::teardown`), for the fatal path to put on the console. Requires a
+/// `SysCap` carrying [`Rights::LOG`]; text [`toyos_abi::log::last_words`]
+/// refuses is `InvalidArgument`, and a second call `AlreadyExists`.
+pub(super) fn sys_log_last_words(syscap: RawHandle, text: &UserBytes) -> u64 {
+    static SAID: AtomicBool = AtomicBool::new(false);
     if let Err(e) = demand_syscap(syscap, Rights::LOG) {
         return e.refuse();
     }
-    log::console::speak(at_ns)
+    let mut copy = [0u8; toyos_abi::log::MAX_LAST_WORDS];
+    let copy = &mut copy[..text.len()];
+    text.read_at(0, copy);
+    let Some(words) = toyos_abi::log::last_words(copy) else {
+        return SyscallError::InvalidArgument.to_u64();
+    };
+    if SAID.swap(true, Ordering::Relaxed) {
+        return SyscallError::AlreadyExists.to_u64();
+    }
+    crate::alert!("pid {}'s last words: {words}", process::current_process());
+    0
 }
 
 /// Copies the diary's records into the caller's buffer; requires a `SysCap` carrying [`Rights::TRACE`].

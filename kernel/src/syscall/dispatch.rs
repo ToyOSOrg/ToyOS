@@ -42,7 +42,8 @@ use super::ipc::{
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map, sys_shm_sub,
 };
 use super::machine::{
-    sys_boot_sources, sys_counters, sys_device_inventory, sys_device_set, sys_device_set_read, sys_log_read, sys_log_spoken,
+    sys_boot_sources, sys_counters, sys_device_inventory, sys_device_set, sys_device_set_read, sys_log_last_words, sys_log_read,
+    sys_log_spoken,
     sys_machine_stops, sys_reboot, sys_shutdown, sys_sysinfo, sys_trace_read,
     MAX_INVENTORY_RECORDS,
 };
@@ -487,7 +488,14 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_SHM_CREATE => sys_shm_create(a1, a2, RawHandle(a3 as u32)),
         SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32), a2),
         SYS_SHM_SUB => sys_shm_sub(RawHandle(a1 as u32), a2, a3),
-        SYS_LOG_SPOKEN => sys_log_spoken(RawHandle(a1 as u32), a2),
+        SYS_LOG_SPOKEN => sys_log_spoken(&ctx, RawHandle(a1 as u32), UserAddr::new(a2)),
+        SYS_LOG_LAST_WORDS => {
+            if a3 == 0 || a3 > toyos_abi::log::MAX_LAST_WORDS as u64 {
+                return SyscallError::InvalidArgument.to_u64();
+            }
+            let Some(text) = ctx.user_bytes(UserAddr::new(a2), a3) else { return bad_addr };
+            sys_log_last_words(RawHandle(a1 as u32), &text)
+        }
         SYS_PORT_CREATE => sys_port_create(),
         SYS_PORT_MINT => {
             // Copied in before any handle is looked up: the kernel holds the badge, never the caller's page.

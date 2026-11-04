@@ -14,8 +14,9 @@
 //! else wakes it: there is no poll and no timer.
 //!
 //! The console's carriers read the same replay (`crate::carrier`): the hub
-//! keeps the newest stamp each round reaches ([`Hub::stamp_through`]), where
-//! the console UART's carrier starts ([`Hub::wire_from`]), and the lines said
+//! keeps the kernel's read positions each round is written through
+//! ([`Hub::positions_through`]), where the console UART's carrier starts with
+//! what it owes of the rounds before ([`Hub::wire_start`]), and the lines said
 //! while the machine stops, which the file holds back and the UART carries.
 
 use std::collections::VecDeque;
@@ -44,18 +45,22 @@ const MAX_READERS: usize = 2;
 /// slot is let go: a wait on its sink taking bytes, bounded by this.
 const STALLED: Duration = Duration::from_secs(10);
 
-/// Rounds whose stamps the hub keeps: a carrier whose channel is further
+/// Rounds whose positions the hub keeps: a carrier whose channel is further
 /// behind than this speaks for none of it until it catches up.
 const ROUNDS: usize = 4096;
+
+/// The kernel's read positions a round is written through, one per shard.
+pub type Positions = Arc<[u64]>;
 
 /// The replay, and what the console's carriers read beside it.
 struct Held {
     replay: Replay,
-    /// Each round's end in the replay and the newest stamp of its records,
-    /// oldest first, the last [`ROUNDS`] of them.
-    rounds: VecDeque<(u64, u64)>,
-    /// Where the console UART's carrier starts, once the first round says.
-    wire_from: Option<u64>,
+    /// Each round's end in the replay and the positions it is written
+    /// through, oldest first, the last [`ROUNDS`] of them.
+    rounds: VecDeque<(u64, Positions)>,
+    /// Where the console UART's carrier starts, and what it owes of the
+    /// rounds before: their lines but the kernel's records it carried itself.
+    wire_from: Option<(u64, Arc<[u8]>)>,
     /// Lines said while the machine stops, held back from the file and owed
     /// the UART's carrier.
     stopping: Vec<u8>,
@@ -98,45 +103,48 @@ impl Hub {
         admit(&self.shared, format!("reader {}", conn.as_handle().raw().0), PipeSink::new(pipe));
     }
 
-    /// The lines the file has just taken, for every reader, and the newest
-    /// stamp among them where they are a round's.
-    pub fn append(&self, lines: &[u8], newest: Option<u64>) {
+    /// The lines the file has just taken, for every reader, and the kernel's
+    /// read positions they are written through where they are a round's.
+    pub fn append(&self, lines: &[u8], through: Option<Positions>) {
         let mut held = self.lock();
         held.replay.append(lines);
-        if let Some(at_ns) = newest {
+        if let Some(positions) = through {
             let end = held.replay.end();
             if held.rounds.len() == ROUNDS {
                 held.rounds.pop_front();
             }
-            held.rounds.push_back((end, at_ns));
+            held.rounds.push_back((end, positions));
         }
         drop(held);
         self.shared.grew.notify_all();
     }
 
-    /// The newest stamp of the last round wholly before `at`: what a channel
-    /// that has taken the replay up to `at` has spoken.
-    pub fn stamp_through(&self, at: u64) -> Option<u64> {
+    /// The positions of the last round wholly before `at`: what a channel
+    /// that has taken the replay up to `at` has spoken of the kernel's log.
+    pub fn positions_through(&self, at: u64) -> Option<Positions> {
         let held = self.lock();
-        held.rounds.iter().rev().find(|&&(end, _)| end <= at).map(|&(_, at_ns)| at_ns)
+        held.rounds.iter().rev().find(|(end, _)| *end <= at).map(|(_, positions)| Arc::clone(positions))
     }
 
-    /// The console UART's carrier starts at `at`, the end of the last line
-    /// the kernel put on the UART itself. Once.
-    pub fn set_wire_from(&self, at: u64) {
+    /// The console UART's carrier starts at `at`, past every kernel record the
+    /// kernel put on the UART itself, owing `owed` of the rounds before. Once.
+    pub fn set_wire_from(&self, at: u64, owed: Vec<u8>) {
         let mut held = self.lock();
         assert!(held.wire_from.is_none(), "logkeeper: where the UART's carrier starts is said twice");
-        held.wire_from = Some(at);
+        held.wire_from = Some((at, owed.into()));
         drop(held);
         self.shared.grew.notify_all();
     }
 
-    /// Where the console UART's carrier starts, once the first round said.
-    pub fn wire_from(&self) -> u64 {
+    /// Where a carrier of the UART starts, once the rounds have said, given
+    /// the replay offset `resumed` its channel had taken or passed over
+    /// before: there, or where the kernel left the UART with what the rounds
+    /// before that owe it, which a channel that took less is handed again.
+    pub fn wire_start(&self, resumed: u64) -> (u64, Option<Arc<[u8]>>) {
         let mut held = self.lock();
         loop {
-            if let Some(at) = held.wire_from {
-                return at;
+            if let Some((from, owed)) = &held.wire_from {
+                return if resumed >= *from { (resumed, None) } else { (*from, Some(Arc::clone(owed))) };
             }
             held = self.shared.grew.wait(held).expect("logkeeper: the replay is poisoned");
         }
@@ -184,7 +192,7 @@ impl Hub {
                 }
                 Next::Evicted { lost, at: resume } => {
                     *at = resume;
-                    return Fed::Said(evicted(self.shared.boot_secs, lost));
+                    return Fed::Gap(evicted(self.shared.boot_secs, lost));
                 }
                 Next::CaughtUp if wire && !held.stopping.is_empty() => {
                     return Fed::Said(std::mem::take(&mut held.stopping));
@@ -207,6 +215,10 @@ pub enum Fed {
     Replay(Vec<u8>),
     /// Lines that are not the replay's.
     Said(Vec<u8>),
+    /// The line that says what the replay no longer holds, which the carrier
+    /// is past: its channel speaks for none of what follows, whose rounds the
+    /// skipped bytes are part of.
+    Gap(Vec<u8>),
 }
 
 /// The read end goes to the reader with the boot's length so far, the write
@@ -354,45 +366,67 @@ mod tests {
     fn replay(fed: Fed) -> Vec<u8> {
         match fed {
             Fed::Replay(bytes) => bytes,
-            Fed::Said(_) => panic!("lines that are not the replay's"),
+            Fed::Said(_) | Fed::Gap(_) => panic!("lines that are not the replay's"),
         }
+    }
+
+    fn at(positions: &[u64]) -> Option<Positions> {
+        Some(positions.into())
     }
 
     /// A channel that has taken the replay up to an offset has spoken the
-    /// newest stamp of the last round wholly before it, and nothing of a round
-    /// it has only begun.
+    /// kernel's log through the positions of the last round wholly before it,
+    /// and nothing of a round it has only begun.
     #[test]
     fn what_a_channel_took_speaks_for_the_rounds_it_took_whole() {
         let hub = Hub::start(1 << 20, None);
-        hub.append(b"a\nb\n", Some(10));
-        hub.append(b"c\n", Some(20));
+        hub.append(b"a\nb\n", at(&[3, 1]));
+        hub.append(b"c\n", at(&[3, 2]));
         hub.resume(b"held\n");
-        assert_eq!(hub.stamp_through(0), None);
-        assert_eq!(hub.stamp_through(3), None, "half the first round is none of it");
-        assert_eq!(hub.stamp_through(4), Some(10));
-        assert_eq!(hub.stamp_through(6), Some(20));
-        assert_eq!(hub.stamp_through(11), Some(20), "lines with no round speak for nothing");
+        assert_eq!(hub.positions_through(0), None);
+        assert_eq!(hub.positions_through(3), None, "half the first round is none of it");
+        assert_eq!(hub.positions_through(4), at(&[3, 1]));
+        assert_eq!(hub.positions_through(6), at(&[3, 2]));
+        assert_eq!(hub.positions_through(11), at(&[3, 2]), "lines with no round speak for nothing");
     }
 
-    /// The UART's carrier starts where the kernel left the UART, and is handed
-    /// what was said while the machine stopped once it has the replay; a
-    /// refused stop's lines reach it through the replay, once.
+    /// The UART's carrier starts where the kernel left the UART, owing the
+    /// rounds before what the kernel did not put on it, and is handed what
+    /// was said while the machine stopped once it has the replay; a refused
+    /// stop's lines reach it through the replay, once.
     #[test]
     fn the_wire_starts_after_the_kernel_and_takes_the_stops_lines_last() {
         let hub = Hub::start(1 << 20, None);
-        hub.append(b"kernel 1\nkernel 2\nprogram\n", Some(30));
-        hub.set_wire_from(18);
-        let mut at = hub.wire_from();
-        assert_eq!(replay(hub.next_for_a_carrier(&mut at, true)), b"program\n");
+        hub.append(b"kernel 1\nprogram 1\nkernel 2\n", at(&[2]));
+        hub.set_wire_from(28, b"program 1\n".to_vec());
+        hub.append(b"program 2\n", at(&[2]));
+        let (mut from, owed) = hub.wire_start(0);
+        assert_eq!((from, owed.as_deref()), (28, Some(&b"program 1\n"[..])));
+        assert_eq!(replay(hub.next_for_a_carrier(&mut from, true)), b"program 2\n");
         hub.append_stopping(b"stopping\n");
-        match hub.next_for_a_carrier(&mut at, true) {
+        match hub.next_for_a_carrier(&mut from, true) {
             Fed::Said(bytes) => assert_eq!(bytes, b"stopping\n"),
-            Fed::Replay(bytes) => panic!("the replay's {bytes:?} where the stop's lines were owed"),
+            _ => panic!("the replay where the stop's lines were owed"),
         }
         hub.append_stopping(b"again\n");
         hub.resume(b"stopping\nagain\n");
-        assert_eq!(replay(hub.next_for_a_carrier(&mut at, true)), b"stopping\nagain\n");
+        assert_eq!(replay(hub.next_for_a_carrier(&mut from, true)), b"stopping\nagain\n");
         let mut port = 0;
-        assert_eq!(replay(hub.next_for_a_carrier(&mut port, false)).len(), 41, "the port is fed from the first line");
+        assert_eq!(replay(hub.next_for_a_carrier(&mut port, false)).len(), 53, "the port is fed from the first line");
+    }
+
+    /// **A UART carrier started again resumes where its channel left off**,
+    /// never from the hand-over: a channel that had taken the rounds the
+    /// kernel left it owes nothing of them again, and one that had not is
+    /// handed them again.
+    #[test]
+    fn a_uart_carrier_started_again_resumes_where_its_channel_left_off() {
+        let hub = Hub::start(1 << 20, None);
+        hub.append(b"kernel\nprogram\n", at(&[1]));
+        hub.set_wire_from(15, b"program\n".to_vec());
+        hub.append(b"later\n", at(&[1]));
+        assert_eq!(hub.wire_start(21), (21, None), "a channel that took the rounds after resumes after them");
+        assert_eq!(hub.wire_start(15), (15, None));
+        assert_eq!(hub.wire_start(3).1.as_deref(), Some(&b"program\n"[..]), "one that took less owes them again");
     }
 }

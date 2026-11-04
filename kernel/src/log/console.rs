@@ -6,40 +6,48 @@
 //! end the UART is the holder's, which `logkeeper` feeds, and no record of
 //! the kernel's touches it.
 //!
-//! **The console has spoken every record stamped at or before [`spoken`]**:
-//! what the inline drain put on the UART, and from the hand-over what
-//! `logkeeper` says the console's channels have delivered ([`speak`]). The
-//! stop and a fatal path put every record stamped after it on the UART, so
-//! they repeat at most what a channel delivered and had not said yet, and
-//! lose none of the kernel's.
+//! **The console has spoken every record before [`DRAINED`]'s position in
+//! its ring**: what the inline drain put on the UART, and from the hand-over
+//! what `logkeeper` says the console's channels have delivered, by the
+//! positions its own read reached ([`speak`]). The stop and a fatal path put
+//! every record past them on the UART, so they repeat at most what a channel
+//! delivered and had not said yet, and miss none of the kernel's.
 //!
 //! **One writer at a time**: the boot's, whose drains take turns through a
-//! claim on the wire; then the holder's; then the stop's, once userland is
-//! stopped, or a fatal path's, once every other CPU is. A holder the stop did
-//! not stop within its budget, which the stop's record names, may still write
-//! over it.
+//! claim on the wire, which the hand-over takes for good; then the holder's;
+//! then the stop's, once userland is stopped, or a fatal path's, once every
+//! other CPU is. A holder the stop did not stop within its budget, which the
+//! stop's record names, may still write over it.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use toyos_abi::syscall::SyscallError;
 
 use toyos_abi::log::LogRecord;
 
 use crate::drivers::serial::{self, BackendGuard, PanicUart};
 
-use super::read::{drain_ordered, Published, RecordSink, Shards};
+use super::read::{drain_ordered, Cursor, Published, RecordSink, Shards};
+use crate::time::{Duration, Tripwire};
 
 /// Whether the UART is its claim's holder's; set once, at [`hand_over`].
 static HANDED: AtomicBool = AtomicBool::new(false);
 
-/// One position for every drain context, so a record never reaches the wire
-/// twice: moved by the inline drain, then by the stop and the fatal paths.
+/// What the console has spoken, a position per ring: moved by the inline
+/// drain, by [`speak`] for the console's channels, and by the stop and the
+/// fatal paths, so a record never reaches the wire twice from the kernel.
 static DRAINED: Published = Published::new();
-
-/// The newest stamp the console has spoken: see the module's header.
-static SPOKEN: AtomicU64 = AtomicU64::new(0);
 
 /// A boot drain's claim on the wire, which a drain that finds it held leaves
 /// to its holder: that drain walks to the newest commit before letting go.
+/// The hand-over takes it and never gives it back.
 static WIRE: AtomicBool = AtomicBool::new(false);
+
+/// How long the hand-over waits for a boot drain on another CPU to end.
+const DRAIN_HELD: Tripwire = Tripwire::absurd(
+    Duration::from_secs(60),
+    "a boot drain writes what the boot committed, and no boot commits a minute of the UART's rate",
+);
 
 /// Positions for each of the `cpus` CPUs' shards.
 pub fn size(cpus: usize) {
@@ -66,39 +74,34 @@ pub fn drain_inline() {
 }
 
 /// Give the UART to its claim's holder, having spoken every record committed
-/// so far: the boot's last inline drain. The boot CPU's, once, before
-/// userland can claim the UART.
+/// so far: the boot's last inline drain, under the wire's claim, which a
+/// drain on another CPU finishes its walk with first, and which is never given
+/// back. The boot CPU's, once, before userland can claim the UART.
 pub fn hand_over() {
-    drain_inline();
+    let deadline = crate::clock::nanos_since_boot() + DRAIN_HELD.nanos();
+    while WIRE.swap(true, Ordering::Acquire) {
+        assert!(crate::clock::nanos_since_boot() < deadline, "log: a boot drain held the UART past {DRAIN_HELD}");
+        core::hint::spin_loop();
+    }
+    if serial::has_console() {
+        drain_records();
+    }
     HANDED.store(true, Ordering::Release);
 }
 
-/// Every committed record onto the UART, through its registers a burst at a
-/// time, and the newest spoken stamp moved past each.
+/// Every record the console has not spoken onto the UART, through its
+/// registers a burst at a time.
 fn drain_records() {
-    struct Wire;
-    impl RecordSink for Wire {
-        fn put(&mut self, record: &LogRecord) -> bool {
-            write_line(record, serial::write);
-            SPOKEN.fetch_max(record.at_ns, Ordering::Relaxed);
-            true
-        }
-    }
-    drain_ordered(&Shards, &mut &DRAINED, &mut Wire);
+    drain_ordered(&Shards, &mut &DRAINED, &mut Spoken(serial::write));
 }
 
-/// The newest stamp the console has spoken.
-pub fn spoken() -> u64 {
-    SPOKEN.load(Ordering::Relaxed)
-}
-
-/// The console's channels have delivered every record stamped at or before
-/// `at_ns`, as `logkeeper` counts them; answers the newest spoken stamp,
-/// which never moves back, nor past the clock: no record committed after the
-/// word, a fatal path's among them, is kept off the UART by it.
-pub fn speak(at_ns: u64) -> u64 {
-    let at_ns = at_ns.min(crate::clock::stamp().map_or(0, |now| now.nanos()));
-    SPOKEN.fetch_max(at_ns, Ordering::Relaxed).max(at_ns)
+/// The console's channels have delivered every record before the positions
+/// `next`, one per ring, which `logkeeper`'s own read reached: what the
+/// console has spoken moves to at least them, never back, and is answered.
+/// A position past what its ring has issued is refused.
+pub fn speak(next: &[u64]) -> Result<(usize, Cursor), SyscallError> {
+    Cursor::from_reader(next, &Shards).ok_or(SyscallError::InvalidArgument)?;
+    Ok((0, Cursor::at(DRAINED.advance(next))))
 }
 
 /// The console as the stop holds it, from the moment userland has stopped to
@@ -108,16 +111,14 @@ pub struct StopWire(());
 impl StopWire {
     /// Every committed record the console has not spoken onto the UART.
     pub fn drain(&mut self) {
-        if !serial::has_console() {
-            return;
+        if serial::has_console() {
+            drain_records();
         }
-        let mut sink = Unspoken { spoken: Some(spoken()), out: serial::write };
-        drain_ordered(&Shards, &mut &DRAINED, &mut sink);
     }
 }
 
-/// The UART, for the stop once it has stopped userland: the holder's last
-/// line ended, so the stop's first is a line of its own.
+/// The UART, for the stop once it has stopped userland: a line of its own,
+/// since the holder may have been stopped mid-line.
 pub fn take_for_the_stop() -> StopWire {
     if !inline() {
         serial::write(b"\n");
@@ -129,8 +130,8 @@ pub fn take_for_the_stop() -> StopWire {
 /// path holds. Unbounded because interrupt latency doesn't matter while
 /// halting, and the report should be whole.
 pub fn drain_locked(guard: &mut BackendGuard) {
-    let spoken = after_the_holder(|bytes| guard.write_raw(bytes));
-    drain_ordered(&Shards, &mut &DRAINED, &mut Unspoken { spoken, out: |bytes: &[u8]| guard.write_raw(bytes) });
+    after_the_holder(|bytes| guard.write_raw(bytes));
+    drain_ordered(&Shards, &mut &DRAINED, &mut Spoken(|bytes: &[u8]| guard.write_raw(bytes)));
 }
 
 /// Drain straight to the UART, over whoever holds its registers.
@@ -138,33 +139,24 @@ pub fn drain_locked(guard: &mut BackendGuard) {
 /// # Safety
 /// Panic path only, once `serial::panic_flush` found no clean handoff; the position is unsynchronised and a record may reach the wire twice.
 pub unsafe fn drain_bypassed(uart: &mut PanicUart) {
-    let spoken = after_the_holder(|bytes| uart.write(bytes));
-    drain_ordered(&Shards, &mut &DRAINED, &mut Unspoken { spoken, out: |bytes: &[u8]| uart.write(bytes) });
+    after_the_holder(|bytes| uart.write(bytes));
+    drain_ordered(&Shards, &mut &DRAINED, &mut Spoken(|bytes: &[u8]| uart.write(bytes)));
 }
 
 /// What a fatal path starts with: a line of its own, where a holder may have
-/// left one unended, and the newest stamp spoken; before the hand-over the
-/// position alone says what is spoken, an untimed boot's records among it.
-fn after_the_holder(mut write: impl FnMut(&[u8])) -> Option<u64> {
-    if inline() {
-        return None;
+/// left one unended.
+fn after_the_holder(mut write: impl FnMut(&[u8])) {
+    if !inline() {
+        write(b"\n");
     }
-    write(b"\n");
-    Some(spoken())
 }
 
-/// Records stamped after `spoken` onto `out`; the rest advance the position
-/// with no byte built.
-struct Unspoken<F: FnMut(&[u8])> {
-    spoken: Option<u64>,
-    out: F,
-}
+/// Each record a drain walks, onto its output.
+struct Spoken<F: FnMut(&[u8])>(F);
 
-impl<F: FnMut(&[u8])> RecordSink for Unspoken<F> {
+impl<F: FnMut(&[u8])> RecordSink for Spoken<F> {
     fn put(&mut self, record: &LogRecord) -> bool {
-        if self.spoken.is_none_or(|spoken| record.at_ns > spoken) {
-            write_line(record, &mut self.out);
-        }
+        write_line(record, &mut self.0);
         true
     }
 }

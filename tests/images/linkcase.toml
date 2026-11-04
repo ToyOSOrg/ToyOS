@@ -8,7 +8,7 @@ start = ["acpiserver", "logkeeper", "uart", "diskserver", "fileserver", "netstac
 # `log` is the port the job reads netstack's lines on.
 [programs.logkeeper]
 service = true
-syscap = ["logread"]
+syscap = ["logread", "console"]
 serves = ["log", "log-carrier", "log-wire"]
 holds = ["log-origins"]
 

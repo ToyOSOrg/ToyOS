@@ -361,7 +361,7 @@ pub const SYS_PAGED_OP: u64 = 157;
 pub const SYS_PAGED_NOTICES: u64 = 158;
 /// Take a connection's next whole message. See [`message_recv`].
 pub const SYS_MESSAGE_RECV: u64 = 159;
-/// How far the console's channels have carried the kernel's records. See
+/// What the console's channels have carried of the kernel's records. See
 /// [`log_spoken`].
 pub const SYS_LOG_SPOKEN: u64 = 160;
 /// Set the CPUs one of the caller's own threads may run on. See [`thread_set_affinity`].
@@ -391,6 +391,8 @@ pub const SYS_DEVICE_SET_READ: u64 = 167;
 /// Give the CPU to another runnable thread of the caller's band. See
 /// [`yield_now`].
 pub const SYS_YIELD: u64 = 168;
+/// The caller's last words, once per boot. See [`log_last_words`].
+pub const SYS_LOG_LAST_WORDS: u64 = 169;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -398,13 +400,13 @@ pub const SYS_YIELD: u64 = 168;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 170;
+pub const SYSCALL_PROFILE_BINS: usize = 171;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_YIELD < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_LOG_LAST_WORDS < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -2394,17 +2396,33 @@ pub unsafe fn shm_sub(shm: RawHandle, offset: u64, len: u64) -> Result<RawHandle
     check(syscall(SYS_SHM_SUB, shm.0 as u64, offset, len, 0)).map(|v| RawHandle(v as u32))
 }
 
-/// Say the console's channels have delivered every kernel record stamped at or
-/// before `at_ns`, and answer the newest stamp the console has spoken: what
-/// the kernel put on the UART before userland ran, and what was said since,
-/// clamped to the clock. A fatal path and the machine's stop put every record
-/// stamped after it on the UART. `at_ns` 0 only reads it.
+/// Say the console's channels have delivered every kernel record before
+/// `cursor`'s positions, a [`log_read`] cursor's, and have `cursor` answered
+/// what the console has spoken: what the kernel put on the UART before
+/// userland ran, and what was said since. A fatal path and the machine's stop
+/// put every record past it on the UART. Positions of zero only read it; a
+/// position past what its shard has issued is `InvalidArgument`.
 ///
-/// Needs a `SysCap` carrying [`Rights::LOG`].
+/// Needs a `SysCap` carrying [`Rights::CONSOLE`].
+///
+/// [`Rights::CONSOLE`]: crate::handle::Rights::CONSOLE
+pub fn log_spoken(syscap: RawHandle, cursor: &mut [u64]) -> Result<(), SyscallError> {
+    let cursor = sized_cursor(cursor)?;
+    check(syscall(SYS_LOG_SPOKEN, syscap.0 as u64, cursor as u64, 0, 0)).map(drop)
+}
+
+/// Say `text` as the caller's last words: one kernel record, the first such
+/// call of the boot alone, before an end that ends the machine. The
+/// supervisor's is one (the kernel ends the machine on it), and the fatal path
+/// puts the record on the console with the rest the console has not spoken.
+///
+/// `text` is what [`crate::log::last_words`] takes, or `InvalidArgument`; a
+/// boot's second call is `AlreadyExists`. Needs a `SysCap` carrying
+/// [`Rights::LOG`].
 ///
 /// [`Rights::LOG`]: crate::handle::Rights::LOG
-pub fn log_spoken(syscap: RawHandle, at_ns: u64) -> Result<u64, SyscallError> {
-    check(syscall(SYS_LOG_SPOKEN, syscap.0 as u64, at_ns, 0, 0))
+pub fn log_last_words(syscap: RawHandle, text: &[u8]) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_LOG_LAST_WORDS, syscap.0 as u64, text.as_ptr() as u64, text.len() as u64, 0))
 }
 
 /// The machine's [header](SYSINFO_HEADER_SIZE), then as much of the process

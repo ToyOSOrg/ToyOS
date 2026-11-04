@@ -47,6 +47,9 @@ macro_rules! error {
     };
 }
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use toyos_abi::log::{CursorHead, LogRecord, CURSOR_HEAD_WORDS};
 use toyos_abi::syscall::{self, SyscallError};
 
@@ -68,11 +71,23 @@ pub fn cursor_words(cap: &SysCap) -> Result<usize, SyscallError> {
     words_for(|cursor| syscall::log_read(cap.as_handle().raw(), cursor, &mut [LogRecord::EMPTY]))
 }
 
-/// Say the console's channels have delivered every kernel record stamped at or
-/// before `at_ns`, and answer the newest stamp the console has spoken
-/// (`toyos_abi::syscall::log_spoken`); `at_ns` 0 only reads it.
-pub fn spoken(cap: &SysCap, at_ns: u64) -> Result<u64, SyscallError> {
-    syscall::log_spoken(cap.as_handle().raw(), at_ns)
+/// Say the console's channels have delivered every kernel record before the
+/// positions `at`, one per shard, and answer what the console has spoken
+/// (`toyos_abi::syscall::log_spoken`); positions of zero only read it.
+pub fn spoken(cap: &SysCap, at: &[u64]) -> Result<Vec<u64>, SyscallError> {
+    let mut cursor = vec![0; CURSOR_HEAD_WORDS + at.len()];
+    cursor[CURSOR_HEAD_WORDS..].copy_from_slice(at);
+    syscall::log_spoken(cap.as_handle().raw(), &mut cursor)?;
+    Ok(cursor.split_off(CURSOR_HEAD_WORDS))
+}
+
+/// Say `text` as the caller's last words, fitted first to what the kernel
+/// takes (`toyos_abi::log::fit_last_words`): one kernel record, the boot's
+/// first such call alone (`toyos_abi::syscall::log_last_words`).
+pub fn last_words(cap: &SysCap, text: &str) -> Result<(), SyscallError> {
+    let mut buf = [0; toyos_abi::log::MAX_LAST_WORDS];
+    let fitted = toyos_abi::log::fit_last_words(text, &mut buf);
+    syscall::log_last_words(cap.as_handle().raw(), fitted.as_bytes())
 }
 
 /// [`cursor_words`] for a read of either kind.
@@ -119,6 +134,11 @@ impl<W: AsRef<[u64]> + AsMut<[u64]>> LogTail<W> {
     /// Shards the machine has, once a read has answered. Zero before that.
     pub fn shards(&self) -> u32 {
         head_of(self.words.as_ref()).shards
+    }
+
+    /// The next record wanted from each shard.
+    pub fn positions(&self) -> &[u64] {
+        &self.words.as_ref()[CURSOR_HEAD_WORDS..]
     }
 
     /// Fill as much of `out` as there is, oldest first, merged by timestamp.
