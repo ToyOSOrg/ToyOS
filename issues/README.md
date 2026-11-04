@@ -9,10 +9,10 @@ numbering: **`ls` is the index and the frontmatter is the query.**
 rg -l '^status: open' issues/                     # every unheld piece of work
 rg -l '^status: assigned' issues/                 # what somebody is holding
 rg -l '^status: owner' issues/                    # what is waiting on the owner
-rg -l '^severity:.*security' issues/              # breaks isolation or authority
-rg -l '^severity:.*data-loss' issues/             # loses or corrupts data
-rg -l '^severity:.*hang' issues/                  # waits with no bound, or loses progress
-rg -l '^severity:.*kernel-from-userland' issues/  # userland can panic or degrade the kernel
+rg -l '^severity:.*security' issues/              # broken isolation or authority, by itself
+rg -l '^severity:.*data-loss' issues/             # lost or corrupted data
+rg -l '^severity:.*hang' issues/                  # unbounded waits, lost progress
+rg -l '^severity:.*kernel-from-userland' issues/  # userland harming the kernel
 ```
 
 ## Frontmatter
@@ -34,8 +34,8 @@ Five fields, three required, no defaults.
 | `opened` | `YYYY-MM-DD` | the first commit whose issue tracker carried this heading |
 | `task` | a number | optional; present only where the issue names one |
 | `severity` | a list of flags, `[security, hang]` | optional; absent means none applies |
-| | `security` | breaks an isolation boundary or an authority by itself; a missing hardening layer that needs another bug is not |
-| | `data-loss` | loses or corrupts stored or in-flight data; a failure reported to the caller is not |
+| | `security` | breaks an isolation boundary or an authority by itself, including one client exhausting a resource other clients need; a missing hardening layer that needs another bug is not |
+| | `data-loss` | loses or corrupts stored or in-flight data, including accepted data later reported lost; a refusal that loses nothing already accepted is not |
 | | `hang` | a wait with no failure timeout, or lost progress |
 | | `kernel-from-userland` | userland input can panic or degrade the kernel |
 
