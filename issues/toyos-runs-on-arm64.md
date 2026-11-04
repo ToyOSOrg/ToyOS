@@ -79,10 +79,10 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
 ## Owner ruling, 2026-11-04
 
 Until an AArch64 metal bench exists, this track's AArch64-only work waits,
-and an aarch64 guest red is recorded as a sighting unless it shows a defect
-in shared code (root `CLAUDE.md`, "AArch64
-waits for a metal bench"). That governs stage 8's "fixed or deleted" until
-then.
+stage 7's desktop among it, as root `CLAUDE.md`'s
+"AArch64 waits for a metal bench" rules. Until then this supersedes the
+2026-10-09 direction "then we need the arm desktop asap" and stage 8's
+"fixed or deleted".
 
 ## The default architecture
 
