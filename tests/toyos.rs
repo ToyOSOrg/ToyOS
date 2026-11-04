@@ -9054,8 +9054,8 @@ fn main() {
         };
 
         // Three statuses for the three things this can establish: green, red,
-        // and "measured nothing" — a run that
-        // staged images and never reached the machine has no claim to make.
+        // and "measured nothing" — a run that staged images and never reached
+        // the machine has no claim to make.
         run.exit(
             match metal::run(mode, parsed.metal_host, &selected, &boots, &rust_bins, !nocapture && !debug_mode)
             {

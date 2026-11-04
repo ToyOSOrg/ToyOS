@@ -48,7 +48,7 @@ impl Mark {
     pub fn reading(&self) -> Reading {
         let (host, own) = (Host::read(), own());
         let (busy, _) = host.since(&self.host);
-        Reading { other: busy.saturating_sub(own - self.own), over: self.at.elapsed() }
+        Reading { other: busy.saturating_sub(own.saturating_sub(self.own)), over: self.at.elapsed() }
     }
 
     /// The host's busy and total CPU time since this mark, and the CPUs they

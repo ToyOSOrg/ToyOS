@@ -51,9 +51,8 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
                     job restored (ci.yml)
   guest             the guest suite, on the sysroot its job restored (nightly)
   rows [<args>...]  `cargo test --test toyos-build -- <args>...`, each split at
-                    whitespace, on this host's own
-                    toolchain store, as `guest` holds the suite to its instrument
-                    (guest-rows.yml)
+                    whitespace, on this host's own toolchain store, held to the
+                    instrument as `guest` is (guest-rows.yml)
   release           put the sysroot main's nightly restored up as its toolchain release
   publish           put main's SDK crates on crates.io (publish.yml)";
 
