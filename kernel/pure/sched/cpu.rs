@@ -1012,11 +1012,10 @@ impl<X: SchedPayload> CpuSched<X> {
         }
     }
 
-    /// The CPU [`CpuHandles::idle_near`] chooses for a wake forward among those
-    /// in `mask` that have published SLEEPING and have no kick coming: one an earlier
-    /// forward kicked is already being handed work, and a burst of wakes
-    /// drained in one pass would otherwise all land on it. Reading the doorbells is a heuristic: a CPU that woke up
-    /// in the meantime simply gets an ordinary adopt.
+    /// The CPU [`CpuHandles::idle_near`] chooses for a wake forward among the
+    /// [`Doorbell::sleeping_unrung`] ones in `mask`. Reading the doorbells is a
+    /// heuristic: a CPU that woke up in the meantime simply gets an ordinary
+    /// adopt.
     ///
     /// A CPU that stopped mid-idle publishes SLEEPING for ever, and forwarding
     /// a real-time task to one is the worst outcome this scan has — RT is the
@@ -1028,7 +1027,7 @@ impl<X: SchedPayload> CpuSched<X> {
         env: Env<'_, H, P>,
     ) -> Option<CpuId> {
         let cpu = env.cpus.idle_near(self.id, self.cursor, |cpu| {
-            mask.contains(cpu.id()) && cpu.doorbell().sleeping() && !cpu.doorbell().kick_pending()
+            mask.contains(cpu.id()) && cpu.doorbell().sleeping_unrung()
         })?;
         self.cursor = env.cpus.topology().position(cpu) + 1;
         Some(cpu)
@@ -2465,8 +2464,8 @@ pub struct CpuHandle<M> {
     /// in nanoseconds, 0 for C1 and while awake. The wait publishes it and
     /// then fences before it reads the wake bound, which is what lets a hold
     /// find every CPU slower than its bound ([`CpuHandles::wake_slower_than`],
-    /// `kernel::idle`). A wake forward weighs it between sleepers as a
-    /// tiebreak ([`CpuHandles::idle_near`]).
+    /// `kernel::idle`). A wake forward and a spawn weigh it between sleepers
+    /// as a tiebreak ([`CpuHandles::idle_near`], [`CpuHandles::place`]).
     idle_exit: AtomicU64,
     /// The on-target counterpart to the simulator's invariants: the sim asserts
     /// what a pass *does*, this measures what a pass *costs*.
@@ -2781,9 +2780,12 @@ impl<M: SchedMsg> CpuHandles<M> {
     }
 
     /// Where a new task goes: the CPU in `mask` still answering whose queue it would wait
-    /// least behind, and among those one that sleeps, then one whose SMT
-    /// siblings run least. Scanned from `start` so that ties spread instead of
-    /// piling on one CPU.
+    /// least behind, and among those one that sleeps with no kick on its way
+    /// ([`Doorbell::sleeping_unrung`]: a spawn raises no published load, so a
+    /// burst would otherwise pile on the first sleeper while it wakes), then
+    /// one whose SMT siblings run least, then the one quickest to wake
+    /// ([`CpuHandle::idle_exit`]), as [`Self::idle_near`] weighs its sleepers.
+    /// Scanned from `start` so that ties spread instead of piling on one CPU.
     ///
     /// **It lives here rather than in the driver because the simulator places
     /// tasks too**, and a placement rule written twice is one the sim is not
@@ -2801,7 +2803,7 @@ impl<M: SchedMsg> CpuHandles<M> {
                 .filter(|&cpu| mask.contains(cpu) && (!answering_only || self.get(cpu).answering(now)))
                 .min_by_key(|&cpu| {
                     let handle = self.get(cpu);
-                    (handle.load(), !handle.doorbell().sleeping(), self.busy_siblings(cpu))
+                    (handle.load(), !handle.doorbell().sleeping_unrung(), self.busy_siblings(cpu), handle.idle_exit())
                 })
         };
         scan(true)
@@ -4788,22 +4790,6 @@ mod tests {
         }
     }
 
-    /// **A spawn's placement reads no idle exit**: the shallowest-sleeper
-    /// preference is a wake forward's, so a new thread, the crunch row's or a
-    /// churn worker's, lands where it would with every CPU in C1, and a
-    /// thread that never blocks is never moved by it.
-    #[test]
-    fn a_spawn_lands_where_it_would_whatever_the_sleepers_exits() {
-        let (handles, _consumers) = bare_handles(two_llcs());
-        sleep(&handles, &[0, 1, 2, 3, 4, 5, 6, 7]);
-        let plain: Vec<CpuId> = (0..8).map(|start| handles.place(CpuId(start), NOW, CpuMask::ANY)).collect();
-        for (cpu, exit) in [(0, 1_048_000), (2, 253_000), (5, 1_048_000), (7, 253_000)] {
-            handles.get(CpuId(cpu)).publish_idle_exit(exit);
-        }
-        let deep: Vec<CpuId> = (0..8).map(|start| handles.place(CpuId(start), NOW, CpuMask::ANY)).collect();
-        assert_eq!(plain, deep);
-    }
-
     /// **An idle CPU's plan joins its pass's one timer write**: the revisit
     /// the plan asks is the instant the timer is armed for, written once, and
     /// the sleep token carries the plan to the wait.
@@ -4903,6 +4889,47 @@ mod tests {
         assert_eq!(handles.place(CpuId(0), NOW, CpuMask::ANY), CpuId(4), "the one sleeper is placed on, sibling or not");
         handles.get(CpuId(4)).publish_load(1);
         assert_eq!(handles.place(CpuId(0), NOW, CpuMask::ANY), CpuId(0), "a queue outweighs who runs");
+    }
+
+    /// **Among free cores' sleepers a spawn wakes the shallowest**: the wake
+    /// cost decides only after the queue, the sleep and the free core.
+    #[test]
+    fn a_spawn_wakes_the_shallowest_free_core_sleeper() {
+        let (handles, _consumers) = bare_handles(two_llcs());
+        for cpu in 0..8 {
+            handles.get(CpuId(cpu)).publish_pass(NOW);
+        }
+        sleep(&handles, &[1, 2, 3, 4, 5, 6, 7]);
+        for cpu in 1..8 {
+            handles.get(CpuId(cpu)).publish_idle_exit(1_048_000);
+        }
+        handles.get(CpuId(7)).publish_idle_exit(253_000);
+        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY), CpuId(7), "cpu7 wakes in 253 µs, every other sleeper in 1048");
+        handles.get(CpuId(7)).publish_idle_exit(1_048_000);
+        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY), CpuId(1), "equals go to the rotation's first");
+        assert_eq!(handles.place(CpuId(2), NOW, CpuMask::ANY), CpuId(2), "and rotate");
+        handles.get(CpuId(4)).publish_idle_exit(0);
+        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY), CpuId(1), "cpu4 waits shallowest, but its sibling runs: a free core first");
+    }
+
+    /// **A spawn passes over a sleeper already being woken**: it keeps its
+    /// published exit until it wakes, so without the kick a burst of spawns
+    /// would all choose it.
+    #[test]
+    fn a_spawn_passes_over_a_rung_sleeper() {
+        let (handles, _consumers) = bare_handles(two_llcs());
+        for cpu in 0..8 {
+            handles.get(CpuId(cpu)).publish_pass(NOW);
+        }
+        sleep(&handles, &[1, 2, 3, 4, 5, 6, 7]);
+        for cpu in 1..8 {
+            handles.get(CpuId(cpu)).publish_idle_exit(1_048_000);
+        }
+        handles.get(CpuId(7)).publish_idle_exit(253_000);
+        assert_eq!(handles.place(CpuId(1), NOW, CpuMask::ANY), CpuId(7), "cpu7 is the shallowest sleeper");
+        let _ = handles.get(CpuId(7)).doorbell().ring(Urgency::Normal);
+        let next = handles.place(CpuId(1), NOW, CpuMask::ANY);
+        assert!(next != CpuId(7) && handles.get(next).doorbell().sleeping(), "the next spawn goes to another sleeper, not {next:?}");
     }
 
     /// **A probe goes to the nearest CPU with surplus**: an SMT sibling's one
