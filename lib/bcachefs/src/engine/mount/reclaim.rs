@@ -268,12 +268,12 @@ impl<D: BlockDev> Mount<D> {
         // reclaim never waits on what it would itself have to do.
         self.flush_closed().await?;
         // Reclaim's room for nodes is its own share; no draw limits it.
-        self.admit(Class::Reclaim, Draw::Freeing, bound, nodes).await?;
+        self.admit(Class::Reclaim, Draw::Freeing, bound, bound * 8, nodes).await?;
         let _slot = self.slot(Class::Reclaim).await;
-        self.prepare_pending(Class::Reclaim, bound, nodes)?;
+        self.prepare_pending(Class::Reclaim, bound, bound * 8, nodes)?;
         let mut txn = Txn::default();
         let out = self.point(&mut txn, plans).await;
-        self.finish(txn, out.is_ok(), Class::Reclaim, bound, nodes)?;
+        self.finish(txn, out.is_ok(), Class::Reclaim, bound, bound * 8, nodes)?;
         out
     }
 

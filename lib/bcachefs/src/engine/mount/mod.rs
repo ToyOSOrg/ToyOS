@@ -1058,7 +1058,7 @@ impl<D: BlockDev> Mount<D> {
     /// was committed before its arrival ([`Mount::grant`]). Reclaim's own share never waits
     /// on reclaim: past its closed entries, a short share is a bug, and the
     /// mount stops.
-    async fn admit(&self, class: Class, draw: Draw, journal: u64, nodes: usize) -> Result<()> {
+    async fn admit(&self, class: Class, draw: Draw, journal: u64, credit: u64, nodes: usize) -> Result<()> {
         let queue = match class {
             Class::Ordinary => &self.admit,
             Class::Reclaim => &self.admit_reclaim,
@@ -1067,7 +1067,7 @@ impl<D: BlockDev> Mount<D> {
         let arrived = self.st.borrow().journal.next_seq;
         loop {
             let granted = place
-                .until(|| match self.grant(class, draw, journal, nodes, arrived) {
+                .until(|| match self.grant(class, draw, journal, credit, nodes, arrived) {
                     Ok(true) => Some(Ok(true)),
                     Err(e) => Some(Err(e)),
                     Ok(false) if self.can_free() => Some(Ok(false)),
@@ -1082,7 +1082,7 @@ impl<D: BlockDev> Mount<D> {
                 Class::Ordinary => Box::pin(self.free()).await?,
                 Class::Reclaim => {
                     self.flush_closed().await?;
-                    if !self.grant(class, draw, journal, nodes, arrived)? {
+                    if !self.grant(class, draw, journal, credit, nodes, arrived)? {
                         self.stop("journal reclaim's share exhausted");
                         return Err(Error::ReadOnly("journal reclaim's share exhausted"));
                     }
@@ -1111,7 +1111,7 @@ impl<D: BlockDev> Mount<D> {
     /// left unwritten. Writing later changes leaves those ledgers as they
     /// are, and on a node of one block reclaim's writes never settle, as
     /// each one's keys dirty another node.
-    fn grant(&self, class: Class, draw: Draw, journal: u64, nodes: usize, arrived: u64) -> Result<bool> {
+    fn grant(&self, class: Class, draw: Draw, journal: u64, credit: u64, nodes: usize, arrived: u64) -> Result<bool> {
         self.cancel_dropped();
         let pending = self.reservations.borrow().pending(draw);
         let mut st = self.st.borrow_mut();
@@ -1121,7 +1121,7 @@ impl<D: BlockDev> Mount<D> {
         let room = match class {
             Class::Ordinary => {
                 let held = st.cache.dirty + st.cache.unpointed + st.granted;
-                let stable = self.metadata_nodes(&st, pending + st.granted_bytes + journal * 8);
+                let stable = self.metadata_nodes(&st, pending + st.granted_bytes + credit);
                 let keeps = st.alloc.keeps(st.metadata_buckets, stable, nodes, st.reclaim_room, draw, false);
                 let physical = st.alloc.fits(nodes, st.reclaim_room, draw);
                 let can_compact = st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b));
@@ -1140,7 +1140,7 @@ impl<D: BlockDev> Mount<D> {
         };
         if room && st.journal.reserve(journal, class) {
             match class {
-                Class::Ordinary => { st.granted += nodes; st.granted_bytes += journal * 8; }
+                Class::Ordinary => { st.granted += nodes; st.granted_bytes += credit; }
                 Class::Reclaim => st.reclaim_granted += nodes,
             }
             return Ok(true);
@@ -1184,10 +1184,10 @@ impl<D: BlockDev> Mount<D> {
     }
 
     /// Returns what [`Mount::admit`] took.
-    fn ungrant(&self, st: &mut State, class: Class, journal: u64, nodes: usize) {
+    fn ungrant(&self, st: &mut State, class: Class, journal: u64, credit: u64, nodes: usize) {
         st.journal.unreserve(journal);
         match class {
-            Class::Ordinary => { st.granted -= nodes; st.granted_bytes -= journal * 8; }
+            Class::Ordinary => { st.granted -= nodes; st.granted_bytes -= credit; }
             Class::Reclaim => st.reclaim_granted -= nodes,
         }
         self.admit_reclaim.wake();
@@ -1219,28 +1219,36 @@ impl<D: BlockDev> Mount<D> {
     /// a transaction before it left so sends it back to wait for reclaim to
     /// split that node ([`MAX_GROUPS`]).
     async fn transact<T>(&self, bound: u64, nodes: usize, draw: Draw, prepare: impl AsyncFnOnce(&mut Txn) -> Result<T>) -> Result<T> {
+        self.transact_holding(bound, bound * 8, nodes, draw, prepare).await
+    }
+
+    /// [`Mount::transact`], its grant judging and holding `credit` bytes of
+    /// metadata room rather than its journal bound's: what it promises past
+    /// its own records, as a reservation's blocks each owe a transaction.
+    async fn transact_holding<T>(&self, bound: u64, credit: u64, nodes: usize, draw: Draw, prepare: impl AsyncFnOnce(&mut Txn) -> Result<T>) -> Result<T> {
         assert!(nodes <= FOOTPRINT, "a grant of {nodes} nodes, past the largest any operation takes");
+        assert!(credit >= bound * 8, "a grant's credit covers its own records");
         self.check_writable()?;
         let _slot = loop {
-            self.admit(Class::Ordinary, draw, bound, nodes).await?;
+            self.admit(Class::Ordinary, draw, bound, credit, nodes).await?;
             let slot = self.slot(Class::Ordinary).await;
             let mut st = self.st.borrow_mut();
             if st.cache.oversized == 0 {
                 break slot;
             }
-            self.ungrant(&mut st, Class::Ordinary, bound, nodes);
+            self.ungrant(&mut st, Class::Ordinary, bound, credit, nodes);
         };
-        self.prepare_pending(Class::Ordinary, bound, nodes)?;
+        self.prepare_pending(Class::Ordinary, bound, credit, nodes)?;
         let mut txn = Txn::default();
         let out = prepare(&mut txn).await;
-        self.finish(txn, out.is_ok(), Class::Ordinary, bound, nodes)?;
+        self.finish(txn, out.is_ok(), Class::Ordinary, bound, credit, nodes)?;
         out
     }
 
-    fn prepare_pending(&self, class: Class, bound: u64, nodes: usize) -> Result<()> {
+    fn prepare_pending(&self, class: Class, bound: u64, credit: u64, nodes: usize) -> Result<()> {
         let mut st = self.st.borrow_mut();
         if let Err(error) = st.pending.reserve(bound as usize / KEY_U64S) {
-            self.ungrant(&mut st, class, bound, nodes);
+            self.ungrant(&mut st, class, bound, credit, nodes);
             self.written.wake();
             return Err(error);
         }
@@ -1250,7 +1258,7 @@ impl<D: BlockDev> Mount<D> {
     /// Applies `txn` when `apply`, else drops it; either way releases its
     /// holds and its grant. `ReadOnly` when the mount stopped writing while
     /// it was prepared.
-    fn finish(&self, mut txn: Txn, apply: bool, class: Class, bound: u64, nodes: usize) -> Result<()> {
+    fn finish(&self, mut txn: Txn, apply: bool, class: Class, bound: u64, credit: u64, nodes: usize) -> Result<()> {
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
         // An ordinary grant is each operation's bound; reclaim's is capped
@@ -1307,7 +1315,7 @@ impl<D: BlockDev> Mount<D> {
             st.peak = st.peak.max(st.cache.dirty + st.cache.unpointed);
         }
         assert!(st.cache.dirty + st.cache.unpointed <= st.limit + st.reclaim_room, "dirty and unpointed nodes past the cache's limit and reclaim's room");
-        self.ungrant(st, class, bound, nodes);
+        self.ungrant(st, class, bound, credit, nodes);
         self.written.wake();
         match stopped {
             Some(why) if apply => Err(Error::ReadOnly(why)),

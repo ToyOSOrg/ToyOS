@@ -655,6 +655,44 @@ fn a_refused_extension_gives_back_what_it_took() {
     });
 }
 
+/// Near full, reservations of several blocks fill the 64 MiB image's
+/// 32 KiB buckets: of 32 KiB, a whole bucket each, every take opens a
+/// bucket through a transaction; of 16 KiB, every second take is from the
+/// open bucket, in memory. Each take owes a transaction's credit for each
+/// of its blocks and is judged for all of it, so after each the promises
+/// still fit the room (asserted in the take; red when the grant holds one
+/// transaction's credit for a take), and every block reserved is then
+/// written.
+#[test]
+fn reservations_of_several_blocks_fill_a_volume_and_are_all_written() {
+    for run in [32usize << 10, 16 << 10] {
+        let dev = formatted(64 << 20, None);
+        let ino = mounted(&dev, async |m: &Mount<&Image>| {
+            assert_eq!(m.superblock().member.bucket_sectors, 64, "32 KiB buckets");
+            let ino = m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap().ino;
+            let mut tokens = Vec::new();
+            loop {
+                match m.reserve(ino, (tokens.len() * run) as u64, run).await {
+                    Ok(token) => tokens.push(token),
+                    Err(Error::NoSpace(_)) => break,
+                    Err(e) => panic!("reserve: {e:?}"),
+                }
+            }
+            assert!(tokens.len() >= 16, "{} reservations of {run} bytes", tokens.len());
+            for (i, token) in tokens.iter_mut().enumerate() {
+                assert_eq!(m.write_reserved(token, (i * run) as u64, &vec![i as u8; run], NOW).await.unwrap(), run);
+            }
+            m.commit().await.unwrap();
+            ino
+        });
+        let v = block_on_ready(Volume::open(&dev)).unwrap();
+        for (i, chunk) in read_all(&v, ino).unwrap().chunks(run).enumerate() {
+            assert!(chunk.iter().all(|&b| b == i as u8), "chunk {i} of {run} bytes");
+        }
+        assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+    }
+}
+
 /// A write over more old extents than one transaction may remove goes in
 /// parts, each removing at most two, and the file reads as written.
 #[test]

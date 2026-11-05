@@ -172,13 +172,11 @@ impl<D: BlockDev> Mount<D> {
             let taken = if self.room_for(credit, FOOTPRINT) { self.st.borrow_mut().alloc.next_data(bucket, wanted, single, !single).map(|(sector, _, got)| (sector, got)) } else { None };
             let (sector, got) = match taken {
                 Some(taken) => taken,
+                // The grant judges and holds the take's whole credit, so a
+                // bucket it opens is judged with it too.
                 None => loop {
                     let out = self
-                        .transact(K_TX, FOOTPRINT, Draw::Ordinary, async |_: &mut Txn| {
-                            // The grant judged one transaction's credit.
-                            if !self.room_for(credit - K_TX * 8, FOOTPRINT) {
-                                return Err(Error::NoSpace("no room left for the btree nodes reserved blocks' writes may write"));
-                            }
+                        .transact_holding(K_TX, credit, FOOTPRINT, Draw::Ordinary, async |_: &mut Txn| {
                             if single { self.data_sector(wanted, Draw::Ordinary, true).await.map(|(sector, _)| (sector, wanted)) } else { self.data_run(wanted, Draw::Ordinary).await }
                         })
                         .await;
@@ -189,7 +187,6 @@ impl<D: BlockDev> Mount<D> {
                 },
             };
             let blocks = (got * SECTOR as u64 / block) as u32;
-            assert!(u64::from(blocks) * K_TX * 8 <= credit, "a take promises more credit than was judged");
             {
                 let mut st = self.st.borrow_mut();
                 for _ in 0..blocks { st.alloc.pin(sector / bucket); }
@@ -205,6 +202,9 @@ impl<D: BlockDev> Mount<D> {
             }
             at += got * SECTOR as u64;
             reservation.bytes = at - from;
+            drop(pool);
+            #[cfg(test)]
+            assert!(self.room_for(0, FOOTPRINT), "a take promised more than the room keeps");
         }
         Ok(())
     }

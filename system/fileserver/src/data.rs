@@ -43,8 +43,8 @@ struct Open {
     /// The last write's ticket, which a write starting where its
     /// reservation ends extends, so a write-back of both is one extent.
     tail: Option<u64>,
-    /// Where the tail's reservation ended before this write extended it,
-    /// until the write lands or is cut.
+    /// Where the tail's reservation ended before the current write extended
+    /// it.
     extended_from: Option<u64>,
 }
 impl Open {
