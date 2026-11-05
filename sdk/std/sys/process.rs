@@ -319,8 +319,8 @@ impl Command {
         Err(io::Error::from(io::ErrorKind::NotFound))
     }
 
-    /// The directory the child starts in, always absolute: the kernel starts a
-    /// child only where its spawn says, and a relative `cwd` is relative to ours.
+    /// The directory the child starts in, always absolute: a child starts
+    /// only where its spawn says, and a relative `cwd` is relative to ours.
     fn child_cwd(&self) -> io::Result<String> {
         let dir = match &self.cwd {
             Some(dir) if Path::new(dir).is_absolute() => Path::new(dir).to_path_buf(),

@@ -6,8 +6,8 @@
 //! returned a bare one, and a caller had no way to size a retry and no way to
 //! learn that was why it failed. A doc comment is a claim to verify.
 //!
-//! The contract now is `sys_getcwd`'s and `sys_readdir`'s: the return is the
-//! length in bytes either way, and nothing is written unless all of it fits.
+//! The contract now: the return is the length in bytes either way, and
+//! nothing is written unless all of it fits.
 
 use core::mem::size_of;
 

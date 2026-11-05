@@ -486,6 +486,44 @@ pub fn getcwd(out: &mut [u8]) -> usize {
     unsafe { toyos_fs_getcwd(out.as_mut_ptr(), out.len()) }
 }
 
+/// The environment variable a spawn states its child's starting directory in,
+/// POSIX's: [`starting_in`] writes it, and the child's working directory
+/// starts there ([`starting_directory`]).
+pub const START: &str = "PWD";
+
+/// `env`, `KEY=VALUE\0` repeated, stating `dir` as the child's starting
+/// directory in place of any [`START`] it held. `None` for a `dir` that is not
+/// absolute, is past [`fs::MAX_PATH`] or holds a NUL, which no child reads back.
+pub fn starting_in(env: &[u8], dir: &str) -> Option<Vec<u8>> {
+    if !dir.starts_with('/') || dir.len() > fs::MAX_PATH || dir.contains('\0') {
+        return None;
+    }
+    let mut out = Vec::with_capacity(env.len() + START.len() + dir.len() + 2);
+    for entry in env.split(|&b| b == 0).filter(|e| !e.is_empty() && stated(e).is_none()) {
+        out.extend_from_slice(entry);
+        out.push(0);
+    }
+    out.extend_from_slice(START.as_bytes());
+    out.push(b'=');
+    out.extend_from_slice(dir.as_bytes());
+    out.push(0);
+    Some(out)
+}
+
+/// The directory a process starts in, read from the environment its spawn
+/// gave it: its [`START`], lexically clean, or `/`, its view's root, where it
+/// states none. `None` for one [`starting_in`] would not have written.
+pub fn starting_directory(env: &[u8]) -> Option<String> {
+    let Some(dir) = env.split(|&b| b == 0).find_map(stated) else { return Some(String::from("/")) };
+    let dir = core::str::from_utf8(dir).ok().filter(|d| d.starts_with('/') && d.len() <= fs::MAX_PATH)?;
+    Some(absolute("/", dir))
+}
+
+/// The value of an environment entry naming [`START`].
+fn stated(entry: &[u8]) -> Option<&[u8]> {
+    entry.strip_prefix(START.as_bytes())?.strip_prefix(b"=")
+}
+
 /// `path`, absolute against `cwd` and without `.` or `..`, which are read off
 /// the text (`issues/a-working-directory-path-reads-its-dot-dot-off-the-text.md`).
 pub fn absolute(cwd: &str, path: &str) -> String {
@@ -520,6 +558,36 @@ mod tests {
         assert_eq!(absolute("/home/a", "../b"), "/home/b");
         assert_eq!(absolute("/home/a", "/tmp//x/"), "/tmp/x");
         assert_eq!(absolute("/", "../../.."), "/");
+    }
+
+    /// What a parent states is what its child starts in, whatever the
+    /// environment it was given already said.
+    #[test]
+    fn a_child_starts_where_its_spawn_says_and_nowhere_its_environment_said() {
+        let given = b"HOME=/home/toy\0PWD=/elsewhere\0PWDX=/x\0TERM=toyos\0";
+        let env = starting_in(given, "/home/toy/Games").expect("an absolute directory");
+        assert_eq!(starting_directory(&env).as_deref(), Some("/home/toy/Games"));
+        assert_eq!(env, b"HOME=/home/toy\0PWDX=/x\0TERM=toyos\0PWD=/home/toy/Games\0");
+        assert_eq!(starting_directory(&starting_in(b"", "/").unwrap()).as_deref(), Some("/"));
+        assert_eq!(starting_directory(b"PWD=/a/./b/../c\0").as_deref(), Some("/a/c"));
+    }
+
+    #[test]
+    fn a_spawn_stating_no_directory_starts_its_child_at_the_root() {
+        assert_eq!(starting_directory(b"").as_deref(), Some("/"));
+        assert_eq!(starting_directory(b"PWDX=/x\0HOME=/home\0").as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn a_directory_no_child_can_read_back_is_never_stated() {
+        let longest = alloc::format!("/{}", "a".repeat(fs::MAX_PATH - 1));
+        assert!(starting_in(b"", &longest).is_some());
+        for dir in ["", "home/toy", "./x", "/a\0b", &alloc::format!("/{}", "a".repeat(fs::MAX_PATH))] {
+            assert_eq!(starting_in(b"", dir), None, "{dir:?}");
+        }
+        for env in [&b"PWD=home\0"[..], b"PWD=\0", b"PWD=/\xff\0"] {
+            assert_eq!(starting_directory(env), None, "{env:?}");
+        }
     }
 
     /// The path boundary refuses empty, non-UTF-8 and oversized names.

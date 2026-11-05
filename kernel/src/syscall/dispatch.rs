@@ -27,7 +27,6 @@ use super::device::{
     sys_device_reg_read,
 };
 use super::event::{sys_event_create, sys_event_signal, sys_event_take, sys_handle_wait};
-use super::proc::sys_getcwd;
 use super::handles::{sys_close, sys_handle_dup, with_object, with_object_ref};
 use super::io::{
     sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
@@ -107,10 +106,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_SHUTDOWN => sys_shutdown(RawHandle(a1 as u32)),
         SYS_REBOOT => sys_reboot(RawHandle(a1 as u32)),
         SYS_MACHINE_STOPS => sys_machine_stops(RawHandle(a1 as u32), a2),
-        SYS_GETCWD => {
-            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
-            sys_getcwd(&mut buf)
-        }
         SYS_PIPE => sys_pipe(),
         SYS_SPAWN => {
             let Ok(args) = ctx.copy_in::<SpawnArgs>(UserAddr::new(a1)) else { return bad_addr };
@@ -137,7 +132,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // for every two bytes at most, held until the call returns; each
             // length is refused past its bound below, so this charges no more
             // than that.
-            let copies = [args.path_len, args.argv_len, args.cwd_len, args.labels_len, args.env_len]
+            let copies = [args.path_len, args.argv_len, args.labels_len, args.env_len]
                 .map(|len| len.min(crate::user_ptr::MAX_USER_STR) as usize);
             let argv = crate::mm::charge::array::<&str>(copies[1] / 2 + 1);
             let past = (copies.iter().sum::<usize>() + argv).saturating_sub(2 * crate::user_ptr::MAX_USER_STR as usize);
@@ -147,11 +142,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             };
             let path = match ctx.user_str(UserAddr::new(args.path_ptr), args.path_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
-            let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len) {
-                Ok(cwd) if kernel::cwd::spawnable(&cwd) => cwd,
-                Ok(_) => return SyscallError::InvalidArgument.to_u64(),
-                Err(e) => return e.to_u64(),
-            };
             if args.endow_count as usize > toyos_abi::syscall::MAX_SPAWN_ENDOWMENTS
                 || args.labels_len > toyos_abi::syscall::MAX_SPAWN_LABELS_LEN as u64
             {
@@ -187,7 +177,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 alloc::vec::Vec::new()
             };
             let argv: alloc::vec::Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
-            sys_spawn(&path, &argv, pending, cwd, env, image, parent)
+            sys_spawn(&path, &argv, pending, env, image, parent)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {

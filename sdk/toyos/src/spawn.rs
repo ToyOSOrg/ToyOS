@@ -5,9 +5,9 @@
 //! answers is the one way to start that kind.
 //!
 //! **A helper inherits.** It holds this process's namespace under `svc`, its
-//! environment as given, and exactly the descriptors and endowments its spawn
-//! names; never this process's launcher, which only an endowment the caller
-//! names hands on.
+//! environment as given but for its starting directory, and exactly the
+//! descriptors and endowments its spawn names; never this process's launcher,
+//! which only an endowment the caller names hands on.
 //!
 //! **An independent launch runs its row.** The launcher starts the program a
 //! manifest row declares, holding that row's authority and the connectors
@@ -59,7 +59,8 @@ pub struct Spawn<'a> {
     pub argv: &'a [u8],
     /// `KEY=VALUE\0` repeated: the child's environment.
     pub env: &'a [u8],
-    /// Absolute: the kernel starts a child only where its spawn says.
+    /// Absolute: the child starts only where its spawn says, which a helper
+    /// states in its environment ([`crate::files::starting_in`]).
     pub cwd: &'a str,
     /// `(child descriptor, caller's handle, its kind)`, each a number once:
     /// the child starts with these and no other descriptors. The caller keeps
@@ -200,6 +201,8 @@ impl Helper<'_> {
     pub fn spawn(self, image: Option<&Image>) -> Result<Process, Refused> {
         let s = self.0;
         let path = image_and_name(s.program, s.image).0;
+        let env = crate::files::starting_in(s.env, s.cwd)
+            .ok_or(Refused::Invalid("a working directory that is not absolute, is too long or holds a NUL"))?;
         let names_svc = s.endow.iter().any(|(label, _)| *label == SVC_LABEL);
         if s.endow.len() + s.fds.len() + usize::from(!names_svc) > MAX_SPAWN_ENDOWMENTS {
             return Err(Refused::Invalid("more endowments and descriptors than a spawn carries"));
@@ -258,14 +261,12 @@ impl Helper<'_> {
             path_len: path.len() as u64,
             argv_ptr: s.argv.as_ptr() as u64,
             argv_len: s.argv.len() as u64,
-            env_ptr: s.env.as_ptr() as u64,
-            env_len: s.env.len() as u64,
+            env_ptr: env.as_ptr() as u64,
+            env_len: env.len() as u64,
             endow_ptr: entries.as_ptr() as u64,
             endow_count: count as u64,
             labels_ptr: labels.as_ptr() as u64,
             labels_len: used as u64,
-            cwd_ptr: s.cwd.as_ptr() as u64,
-            cwd_len: s.cwd.len() as u64,
             image,
             image_len,
             place: match s.parent {

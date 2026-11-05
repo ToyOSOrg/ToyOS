@@ -296,7 +296,6 @@ const _: () = assert!(2 * MAX_LIBRARIES * core::mem::size_of::<elf::LoadedLib>()
 pub struct ProcessData {
     /// Every kernel object this process can name; stdio is handles `0`, `1`, `2`.
     pub handles: HandleTable,
-    pub cwd: String,
     /// Inherited environment variables (KEY=VALUE\0KEY2=VALUE2\0...)
     pub env: Vec<u8>,
 

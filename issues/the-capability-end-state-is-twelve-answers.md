@@ -211,12 +211,11 @@ and nothing else is:**
    `DUP|TRANSFER|WAIT|READ|MANAGE` by type (`kernel/src/object/ops.rs:74`), and
    must dup-narrow and close if it wants to hold less.
 
-The child's cwd is not implicit: `SpawnArgs` states it (`cwd_ptr`/`cwd_len`),
-and the kernel starts the child there or refuses the spawn — `InvalidArgument`
-for a path that is not absolute, `NotFound` for one naming no directory — with
-no default to the caller's (`spawn_cwd` in `kernel/src/syscall/fs.rs`).
+The child's cwd is no kernel state: the SDK's spawn states it as the child's
+`PWD` (`toyos::files::starting_in`), refusing one that is not absolute, and
+the child's SDK starts its working directory there (`starting_directory`).
 std states `Command::current_dir`, or the caller's own directory when there is
-none, and `tests/guest/rust-tests/src/bin/spawn_cwd.rs` holds both routes to it.
+none.
 
 Beyond that a child holds nothing, plus question 5's ambient set, which every
 process has.

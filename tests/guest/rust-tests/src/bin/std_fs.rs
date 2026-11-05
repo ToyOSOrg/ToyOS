@@ -5,6 +5,10 @@ use std::os::toyos::io::{AsRawFd, FromRawFd};
 use std::process::{Command, Stdio};
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some(CWD_ARG) {
+        println!("{}", std::env::current_dir().expect("a working directory").display());
+        return;
+    }
     let entries: Vec<_> = fs::read_dir("/system/bin")
         .expect("should be able to read /system/bin")
         .filter_map(|e| e.ok())
@@ -25,8 +29,29 @@ fn main() {
     file_types();
     create_new_is_exclusive_on_tmp();
     the_empty_path_names_nothing();
+    a_child_starts_where_its_spawn_says();
 
     println!("all fs tests passed");
+}
+
+/// What this binary, run with it, prints: its working directory.
+const CWD_ARG: &str = "cwd";
+
+/// A child starts in the directory its spawn names, and not in one the
+/// environment it inherits names.
+fn a_child_starts_where_its_spawn_says() {
+    let dir = "/tmp/std_fs_child_start";
+    let _ = fs::remove_dir(dir);
+    fs::create_dir(dir).expect("make the child's directory");
+    let ran = Command::new("/system/bin/test_rs_std_fs")
+        .arg(CWD_ARG)
+        .current_dir(dir)
+        .env("PWD", "/system")
+        .output()
+        .expect("spawn this binary");
+    assert!(ran.status.success(), "the child exited {:?}", ran.status);
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), format!("{dir}\n"), "where the child started");
+    fs::remove_dir(dir).expect("remove the child's directory");
 }
 
 /// The empty path names nothing, wherever the working directory is served:

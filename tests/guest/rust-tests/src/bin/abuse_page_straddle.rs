@@ -21,8 +21,6 @@ use toyos_abi::syscall::{
     SYS_PROCESS_STATS,
 };
 
-/// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
-const CWD: &str = "/";
 
 const PAGE: u64 = 4096;
 const STAT_LEN: usize = core::mem::size_of::<Stat>();
@@ -103,8 +101,6 @@ fn main() {
         endow_count: 0,
         labels_ptr: 0,
         labels_len: 0,
-        cwd_ptr: CWD.as_ptr() as u64,
-        cwd_len: CWD.len() as u64,
         image,
         image_len,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),

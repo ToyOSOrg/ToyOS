@@ -17,7 +17,6 @@ use toyos_abi::end::End;
 
 const SELF: &str = "/system/bin/test_rs_spawn_image_object";
 const CHILD: &str = "spawned-from-an-object";
-const CWD: &str = "/";
 
 /// `path` read whole into a memory object of this process's own.
 fn object_of(path: &str) -> (SharedMemory, u64) {
@@ -42,8 +41,6 @@ fn spawn(image: RawHandle, len: u64) -> Result<RawHandle, SyscallError> {
             endow_count: 0,
             labels_ptr: 0,
             labels_len: 0,
-            cwd_ptr: CWD.as_ptr() as u64,
-            cwd_len: CWD.len() as u64,
             image: image.0 as u64,
             image_len: len,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
