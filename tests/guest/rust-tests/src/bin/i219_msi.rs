@@ -1,8 +1,8 @@
 //! The T14's I219, judged on what `toyos-i219` rests on where its interrupts
 //! are concerned, on one claim: a capability list with MSI and no MSI-X,
 //! causes forced through `ICS` counted on the claim's vector unmasked and
-//! masked, an asserted read of `ICR` under auto-mask, and then the driver
-//! itself under traffic. Every reading is printed; the exit is whether each
+//! masked, a storm of them with the record left unread, an asserted read of
+//! `ICR` under auto-mask, and then the driver itself under traffic. Every reading is printed; the exit is whether each
 //! held.
 //!
 //! The PCH datasheet (631120 §8.1) and the 82574's (§10.2.4) are what each
@@ -36,6 +36,15 @@ const RXSEQ: u32 = 1 << 3;
 const FORCES: u32 = 4;
 /// How long a forced cause is given to arrive, and a masked one to stay away.
 const WINDOW_NANOS: u64 = toyos_i219::DELIVERY_DEADLINE_NANOS;
+/// Causes forced back to back with the claim's record left unread: a holder
+/// making its function speak as fast as its own register writes go.
+const STORM: u32 = 10_000;
+/// The most of them that may land: the first masks the claim's entry, and
+/// what follows is only what was already past the unit when the handler's
+/// invalidation completed (VT-d §6.5.2.7 drains it). The handler finishes
+/// within tens of microseconds, and each forced cause here is a register
+/// write and read, so a few dozen at most; unmasked, every one lands.
+const STORM_BOUND: u32 = 64;
 /// How long the link is given to come up after the driver's reset.
 const LINK_NANOS: u64 = 15_000_000_000;
 /// How long frames are listened for after the DHCP discover.
@@ -138,6 +147,24 @@ fn force<R: Registers>(regs: &R, claim: &Claim, forced: u32, unmask: u32) -> (u3
     regs.write32(regs::IMC, u32::MAX);
     let icr = regs.read32(regs::ICR);
     (count, after, icr)
+}
+
+/// `STORM` causes forced with `ITR` off and the record unread, each read off
+/// `ICR` as asserted, then the messages that landed: the claim's interrupt
+/// is masked from the first until this read.
+fn storm<R: Registers>(regs: &R, claim: &Claim) -> (u32, u32) {
+    regs.write32(regs::IMC, u32::MAX);
+    regs.write32(regs::ITR, 0);
+    let _ = regs.read32(regs::ICR);
+    let _ = claim.taken();
+    regs.write32(regs::IMS, RXSEQ);
+    let mut asserted = 0;
+    for _ in 0..STORM {
+        regs.write32(regs::ICS, RXSEQ);
+        asserted += u32::from(regs.read32(regs::ICR) & (cause::INT_ASSERTED | RXSEQ) == cause::INT_ASSERTED | RXSEQ);
+    }
+    regs.write32(regs::IMC, u32::MAX);
+    (asserted, messages(claim, WINDOW_NANOS))
 }
 
 /// One read of `ICR` with an interrupt asserted under auto-mask, as every
@@ -288,6 +315,20 @@ fn main() {
     }
     if !held {
         fail("a forced cause was not exactly one message unmasked and none masked");
+    }
+
+    let (asserted, landed) = storm(&regs, &claim);
+    say(&format!("storm: {asserted} of {STORM} forced causes asserted, {landed} message(s) landed unread"));
+    if asserted != STORM {
+        fail("the storm did not assert every cause it forced");
+    }
+    if landed == 0 || landed > STORM_BOUND {
+        fail(&format!("a storm landed {landed} message(s) on an unread claim, outside 1..={STORM_BOUND}"));
+    }
+    let (count, _, _) = force(&regs, &claim, RXSEQ, RXSEQ);
+    say(&format!("after the storm's read, RXSEQ forced unmasked: {count} message(s)"));
+    if count != 1 {
+        fail("the read that took the storm's record did not open the claim's interrupt again");
     }
 
     let (first, mask, second) = auto_masked_read(&regs, &claim);
