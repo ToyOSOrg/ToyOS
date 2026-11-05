@@ -142,7 +142,7 @@ use toyos::AsHandle;
 use toyos_abi::Rights;
 use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
-    Registration, Tag, ALIVE, CONSOLE_INPUT, FLUSH, FLUSHED, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
+    Registration, Tag, ALIVE, CONSOLE_INPUT, FLUSH, FLUSHED, MARK, MARKED, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
 };
 use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
 use toyos_abi::syscall::{
@@ -422,32 +422,49 @@ impl Log {
             return;
         }
         self.unanswered.set(self.unanswered.get() + 1);
+        self.answered(None, "flush", "this stop's last lines are on the console only");
+    }
+
+    /// Have `logkeeper` write the stop mark, the last thing this stop asks of
+    /// the log volume before its drivers stop, and wait for it, bounded.
+    fn mark(&self) {
+        if let Err(e) = self.conn.signal(MARK) {
+            toyos::warn!("supervisor: logkeeper could not be asked to mark the stop ({e:?}); the next boot proves nothing");
+            return;
+        }
+        self.answered(Some(MARKED), "stop mark", "the next boot may prove nothing");
+    }
+
+    /// Wait for `wanted`, or for every flush still unanswered where `wanted`
+    /// is `None`, within [`FLUSH_BOUND`]. A flush answered late is counted
+    /// whatever is waited for.
+    fn answered(&self, wanted: Option<u32>, what: &str, lost: &str) {
         let began = Instant::now();
         loop {
+            if wanted.is_none() && self.unanswered.get() == 0 {
+                return;
+            }
             let step = self.rx.borrow_mut().pump(&self.conn);
             match step {
                 RxStep::Frame { msg_type: FLUSHED, .. } => {
-                    self.unanswered.set(self.unanswered.get() - 1);
-                    if self.unanswered.get() == 0 {
-                        return;
-                    }
+                    self.unanswered.set(self.unanswered.get().saturating_sub(1));
                     continue;
                 }
+                RxStep::Frame { msg_type, .. } if Some(msg_type) == wanted => return,
                 RxStep::Frame { msg_type, .. } => {
-                    panic!("supervisor: logkeeper answered a flush with frame type {msg_type}")
+                    panic!("supervisor: logkeeper answered a {what} with frame type {msg_type}")
                 }
                 RxStep::Eof => {
-                    toyos::warn!("supervisor: logkeeper is gone, so this stop has no log to flush");
+                    toyos::warn!("supervisor: logkeeper is gone, so this stop's {what} is not made");
                     return;
                 }
-                RxStep::Malformed => panic!("supervisor: logkeeper answered a flush with a malformed frame"),
+                RxStep::Malformed => panic!("supervisor: logkeeper answered a {what} with a malformed frame"),
                 RxStep::Idle => {}
             }
             let left = FLUSH_BOUND.saturating_sub(began.elapsed());
             if left.is_zero() {
                 toyos::warn!(
-                    "supervisor: logkeeper did not answer the flush in {} ms; this stop's last lines are on \
-                     the console only",
+                    "supervisor: logkeeper did not answer the {what} in {} ms; {lost}",
                     FLUSH_BOUND.as_millis()
                 );
                 return;

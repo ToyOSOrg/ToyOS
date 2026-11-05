@@ -16,8 +16,8 @@ stdin — and the machine installs nothing the owner did not sign.
 
 Done: the signed image (`toyos-update`), the two slots and their table, and
 the loader's verification. The loader boots the marked slot and today the
-other where the marked one is refused or died on its last boot; the kernel
-logs which and why. That fallback leaves in stage 2.
+other where the marked one is refused; the kernel logs which and why. That
+fallback leaves in stage 2.
 
 - **`update`** holds the slot table and the idle slot's two partitions, which
   init claims against the ROOT the kernel holds, writes the image and moves the

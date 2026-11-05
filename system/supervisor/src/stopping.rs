@@ -181,6 +181,9 @@ impl Supervisor<'_> {
         say!("{STOPPING} ({how:?})");
         self.log.flush();
         self.sync_files();
+        // As late as the log volume is still written: its storage driver is one
+        // of those stopped next.
+        self.log.mark();
         let stopped = self.stop_drivers();
         let kernel = match how {
             Stop::Reboot => self.syscap.reboot(),

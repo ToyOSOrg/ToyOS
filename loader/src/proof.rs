@@ -1,10 +1,12 @@
 //! Whether the last boot stopped cleanly, and which image it ran: the record
 //! this loader writes on the log partition before each handoff
 //! (`toyos_update::record`), and the mark `logkeeper` writes there once a stop
-//! has made the log durable (`toyos_logstream::STOPPED`).
+//! has synced its files (`toyos_logstream::STOPPED`).
 //!
-//! **Both are taken before the next kernel runs**, so a mark found here is
-//! always the last boot's, and a boot that dies before its stop leaves none.
+//! **The mark is taken before the next kernel runs, and the record is written
+//! only once it is gone**, so a mark found here is always the boot's that the
+//! record names. Only `logkeeper`'s view holds `/log` read-write; a boot that
+//! hangs after its stop asked for the mark still leaves one.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -24,12 +26,12 @@ pub struct Last {
     pub proven: Option<Booted>,
     /// Lines to say once the log is open.
     pub notes: Vec<String>,
-    /// Whether the record and the mark are both gone, which is what lets this
-    /// pass write a record that names only its own boot.
-    pub cleared: bool,
+    /// Whether the mark is gone, which is what lets this pass write a record
+    /// that a later mark can only be this boot's.
+    pub unmarked: bool,
 }
 
-/// Read the last boot's record and mark, and delete both.
+/// Read the last boot's record and mark, and take the mark.
 ///
 /// Runs before `loaderlog::open`, which takes the volume exclusively.
 pub fn take(system_table: &SystemTable, guid: &[u8; 16]) -> Last {
@@ -51,7 +53,6 @@ pub fn take(system_table: &SystemTable, guid: &[u8; 16]) -> Last {
             Err(Status::NOT_FOUND) => Ok(false),
             Err(e) => Err(alloc::format!("{} would not open ({e})", toyos_logstream::STOPPED)),
         };
-        let deleted = delete(root, RECORD);
         let proven = match (&stopped, booted) {
             (Ok(true), Some(booted)) => {
                 let mut hex = [0u8; 64];
@@ -75,28 +76,27 @@ pub fn take(system_table: &SystemTable, guid: &[u8; 16]) -> Last {
                 None
             }
         };
-        if let Err(why) = &deleted {
-            notes.push(alloc::format!("{HEAD} {why}"));
-        }
-        Last { proven, notes, cleared: stopped.is_ok() && deleted.is_ok() }
+        Last { proven, notes, unmarked: stopped.is_ok() }
     });
     taken.unwrap_or_else(|why| Last {
         proven: None,
         notes: alloc::vec![alloc::format!("{HEAD} {why}, so no image is credited and none is recorded")],
-        cleared: false,
+        unmarked: false,
     })
 }
 
-/// Write down the image this pass boots, through the log's own open volume.
+/// Write down the image this pass boots, through the log's own open volume,
+/// over the last record in place: the record is a fixed length, so nothing
+/// of the last one survives a write that took.
 pub fn write(guid: &[u8; 16], booted: Booted) -> Result<(), String> {
     loaderlog::with_open_volume(|root| {
         let file = root
             .open(RECORD, Mode::CreateReadWrite)
-            .map_err(|e| alloc::format!("{RECORD} would not be created ({e})"))?;
+            .map_err(|e| alloc::format!("{RECORD} would not open ({e})"))?;
         let Some(mut file) = file.into_regular_file() else {
             return Err(alloc::format!("{RECORD} on the log partition is a directory"));
         };
-        file.write(&record::encode(Some(booted), guid))
+        file.write(&record::encode(booted, guid))
             .map_err(|(e, _)| alloc::format!("{RECORD} would not write ({e})"))?;
         // Flushed here and not at the handoff: a byte in a cache survives no
         // power cut.
@@ -117,13 +117,5 @@ fn read(root: &mut File, guid: &[u8; 16]) -> Result<Option<Booted>, String> {
     // One byte more than a record, so a longer file is told from a whole one.
     let mut buffer = [0u8; record::BYTES + 1];
     let n = file.read(&mut buffer).map_err(|e| alloc::format!("would not read ({e})"))?;
-    record::decode(&buffer[..n], guid).map_err(|why| alloc::format!("{why}"))
-}
-
-fn delete(root: &mut File, name: &CStr16) -> Result<(), String> {
-    match root.open(name, Mode::ReadWrite) {
-        Ok(file) => file.delete().map_err(|e| alloc::format!("{name} would not delete ({e})")),
-        Err(Status::NOT_FOUND) => Ok(()),
-        Err(e) => Err(alloc::format!("{name} would not open ({e})")),
-    }
+    record::decode(&buffer[..n], guid).map(Some).map_err(|why| alloc::format!("{why}"))
 }

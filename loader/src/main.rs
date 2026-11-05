@@ -793,16 +793,18 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     // from, and a slot whose ROOT is refused has no use for the kernel's.
     let chosen = slot::choose(handle, &system_table, image_floor.value)
         .unwrap_or_else(|why| panic!("Slots: {why}"));
-    // Only over a cleared record and mark: otherwise the next pass could credit
-    // this boot with a stop mark an earlier boot left.
-    if last.cleared {
-        let booted = Booted { slot: chosen.which, version: chosen.version, digest: chosen.digest };
+    // Only once the mark is gone: otherwise the next pass could credit this
+    // boot with a stop mark an earlier boot left.
+    if last.unmarked {
+        let booted = Booted { slot: chosen.which, digest: chosen.digest };
         match proof::write(&log_guid, booted) {
             Ok(()) => println!("Proof: slot {}'s image is written down as the one this pass boots", chosen.which.letter()),
-            Err(why) => println!("Proof: {why}, so a clean stop of this boot proves nothing"),
+            Err(why) => println!(
+                "Proof: {why}, so a clean stop of this boot may credit the image the last record names"
+            ),
         }
     } else {
-        println!("Proof: the last boot's record or mark is still on the partition, so this boot is not written down");
+        println!("Proof: the last boot's stop mark is still on the partition, so this boot is not written down");
     }
     let kernel_bytes = chosen.kernel;
     println!("Kernel: {} bytes", kernel_bytes.len());

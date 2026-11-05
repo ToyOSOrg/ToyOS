@@ -12,9 +12,9 @@
 //! volume deletes older parts of its own and never another boot's start.
 //!
 //! **`toyos_wallclock::classify` and the stop mark are the whole of what this
-//! program may delete.** `/log` is userland-writable, `toybox` writes there and
-//! the bootloader writes its own files there, and the only thing standing
-//! between somebody else's file and `delete_file` is that neither names it.
+//! program may delete.** Only this program's view and the supervisor's write
+//! `/log`, but the bootloader writes its own files there, and the only thing
+//! standing between those and `delete_file` is that neither names them.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

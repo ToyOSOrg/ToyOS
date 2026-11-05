@@ -69,8 +69,8 @@
 //!
 //! **A round's lines are written and the volume made durable before the next
 //! round**, and again when the supervisor asks before the machine stops
-//! ([`toyos_logstream::FLUSH`]), and the stop's flush ends by writing the stop
-//! mark ([`toyos_logstream::STOPPED`]). The kernel waits on none of it, so
+//! ([`toyos_logstream::FLUSH`]); once the stop has synced its files it asks
+//! for the stop mark ([`toyos_logstream::MARK`]). The kernel waits on none of it, so
 //! what it says after the flush, at a panic or in the stop, reaches only its
 //! console and panel.
 //! **A program's line after that flush reaches the UART and is held back from
@@ -100,7 +100,7 @@ use toyos::say;
 use toyos::syscap::SysCap;
 use toyos::wake::Bell;
 use toyos_logstream::{
-    ProgramLine, Registration, Severity, Tag, CARRIER, FLUSH, FLUSHED, LOG_OPENED, MAX_TAG, ORIGINS, REGISTER, RESUME,
+    ProgramLine, Registration, Severity, Tag, CARRIER, FLUSH, FLUSHED, LOG_OPENED, MARK, MARKED, MAX_TAG, ORIGINS, REGISTER, RESUME,
     SERVICE, WIRE,
 };
 use toyos_wallclock::Civil;
@@ -357,6 +357,7 @@ impl Log {
                 // RESUME when the stop it flushed for was refused, which can be
                 // before this program got to the flush, and RESUME answers it.
                 RxStep::Frame { msg_type: FLUSH, .. } => return true,
+                RxStep::Frame { msg_type: MARK, .. } => self.mark(),
                 RxStep::Frame { msg_type: RESUME, .. } => self.resume(),
                 RxStep::Frame { msg_type, .. } => {
                     panic!("logkeeper: the supervisor sent frame type {msg_type} on the origins connection")
@@ -695,23 +696,32 @@ impl Log {
         }
         let refused = self.sync().err();
         self.answered(refused);
-        // Only over a durable log: the mark is what lets the next boot's loader
-        // treat this image as proven. No volume, no call: `/log`'s server may
-        // never have answered.
-        let marked = self.volume.is_some()
-            && store::mark_stopped()
-                .inspect_err(|e| {
-                    toyos::error!("logkeeper: {DIR} would not take the stop mark ({e}) - the next boot will not count this one as clean")
-                })
-                .is_ok();
         // The console's carriers take the log up to here, and the UART what
         // the machine says from here as it stops.
         if let Some(carriers) = &self.carriers {
             carriers.stop(self.hub.end());
         }
-        self.stopping = Some(Stopping { text: String::new(), unwritten: 0, marked });
+        self.stopping = Some(Stopping { text: String::new(), unwritten: 0, marked: false });
         if let Err(e) = self.from_supervisor.signal(FLUSHED) {
             panic!("logkeeper: the supervisor could not be told the log is whole: {e:?}");
+        }
+    }
+
+    /// The supervisor's stop has synced its files and is about to stop its
+    /// drivers: write the stop mark over a durable log, and say so. No volume,
+    /// no call: `/log`'s server may never have answered.
+    fn mark(&mut self) {
+        let Some(stopping) = self.stopping.as_mut() else {
+            panic!("logkeeper: the supervisor asked for the stop mark, and no stop was flushed for");
+        };
+        stopping.marked = self.volume.is_some()
+            && store::mark_stopped()
+                .inspect_err(|e| {
+                    toyos::error!("logkeeper: {DIR} would not take the stop mark ({e}) - the next boot will not count this one as clean")
+                })
+                .is_ok();
+        if let Err(e) = self.from_supervisor.signal(MARKED) {
+            panic!("logkeeper: the supervisor could not be told the stop is marked: {e:?}");
         }
     }
 

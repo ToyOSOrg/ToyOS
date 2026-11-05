@@ -132,11 +132,18 @@ pub const FLUSHED: u32 = 6;
 /// runs on. `logkeeper` writes the file again, from the first line it held back.
 pub const RESUME: u32 = 7;
 
+/// The supervisor → `logkeeper`, after a [`FLUSH`] and the stop's file syncs and
+/// before its drivers stop: write [`STOPPED`] and answer [`MARKED`].
+pub const MARK: u32 = 10;
+pub const MARKED: u32 = 11;
+
 /// The file at the root of the log volume that says the boot which wrote it
-/// stopped cleanly: `logkeeper` writes it once a stop's [`FLUSH`] has made the
-/// log durable and deletes it on [`RESUME`]; the loader reads and deletes it
-/// before it hands the machine to the next kernel. The anti-rollback floor
-/// rises only for a boot that left it.
+/// reached its stop with the log volume still written: `logkeeper` writes it on
+/// [`MARK`] and deletes it on [`RESUME`], and the loader reads and deletes it
+/// before it hands the machine to the next kernel. Only `logkeeper`'s view
+/// holds `/log` read-write (`toyos_manifest::Program::view`), and a hang in
+/// what the stop does after it — its drivers' stop, the kernel's quiesce and
+/// the reset — still leaves it.
 pub const STOPPED: &str = "stopped";
 
 /// The supervisor's line before it asks `logkeeper` to flush for a stop: the last line of a

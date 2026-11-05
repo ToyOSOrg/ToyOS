@@ -1,53 +1,44 @@
 //! Which image the loader handed the machine to, kept on the log partition so
-//! the next pass can raise the anti-rollback floor to it once that boot proved
-//! itself by stopping cleanly ([`crate::policy`]).
+//! the next pass can raise the anti-rollback floor to it once that boot
+//! stopped cleanly ([`crate::policy`]).
 //!
 //! ```text
-//! partition guid [16] | booted u8 ('A', 'B' or 0) | 0 [7] | version u64 | signed-header sha256 [32]
+//! partition guid [16] | booted u8 ('A' or 'B') | 0 [15] | signed-header sha256 [32]
 //! ```
 
 use crate::slots::Which;
 use crate::Digest;
 
 /// The file's length.
-pub const BYTES: usize = 16 + 1 + 7 + 8 + 32;
+pub const BYTES: usize = 16 + 1 + 15 + 32;
 
 /// The image a pass handed the machine to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Booted {
     pub slot: Which,
-    pub version: u64,
     /// The SHA-256 of its signed header, which names the image exactly.
     pub digest: Digest,
 }
 
-/// The file's bytes for the partition `guid` names; `None` is a record of no
-/// boot.
-pub fn encode(booted: Option<Booted>, guid: &[u8; 16]) -> [u8; BYTES] {
+/// The file's bytes for the partition `guid` names.
+pub fn encode(booted: Booted, guid: &[u8; 16]) -> [u8; BYTES] {
     let mut out = [0u8; BYTES];
     out[..16].copy_from_slice(guid);
-    if let Some(booted) = booted {
-        out[16] = booted.slot.letter() as u8;
-        out[24..32].copy_from_slice(&booted.version.to_le_bytes());
-        out[32..64].copy_from_slice(&booted.digest);
-    }
+    out[16] = booted.slot.letter() as u8;
+    out[32..].copy_from_slice(&booted.digest);
     out
 }
 
 /// The image the file names, or why it is not a record for `guid`'s partition.
-pub fn decode(bytes: &[u8], guid: &[u8; 16]) -> Result<Option<Booted>, Foreign> {
+pub fn decode(bytes: &[u8], guid: &[u8; 16]) -> Result<Booted, Foreign> {
     let bytes: &[u8; BYTES] = bytes.try_into().map_err(|_| Foreign::Length(bytes.len()))?;
     if bytes[..16] != guid[..] {
         return Err(Foreign::Partition(bytes[..16].try_into().expect("sixteen bytes")));
     }
     let letter = bytes[16];
-    if letter == 0 {
-        return Ok(None);
-    }
-    let digest: Digest = bytes[32..64].try_into().expect("32 bytes");
+    let digest: Digest = bytes[32..].try_into().expect("32 bytes");
     let slot = Which::from_letter(letter as char).filter(|_| digest != [0; 32]).ok_or(Foreign::Slot(letter))?;
-    let version = u64::from_le_bytes(bytes[24..32].try_into().expect("eight bytes"));
-    Ok(Some(Booted { slot, version, digest }))
+    Ok(Booted { slot, digest })
 }
 
 /// Why the file is not this partition's record.
@@ -76,13 +67,13 @@ mod tests {
 
     const GUID: [u8; 16] = [7; 16];
 
-    fn booted(slot: Which) -> Option<Booted> {
-        Some(Booted { slot, version: 42, digest: [9; 32] })
+    fn booted(slot: Which) -> Booted {
+        Booted { slot, digest: [9; 32] }
     }
 
     #[test]
     fn a_record_reads_back_and_anothers_is_refused() {
-        for r in [None, booted(Which::A), booted(Which::B)] {
+        for r in [booted(Which::A), booted(Which::B)] {
             assert_eq!(decode(&encode(r, &GUID), &GUID), Ok(r));
         }
         assert_eq!(decode(&encode(booted(Which::A), &[1; 16]), &GUID), Err(Foreign::Partition([1; 16])));

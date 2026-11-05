@@ -29,9 +29,9 @@ exports them.
 ## Crashes
 
 A kernel panic halts the other CPUs and paints its report on the panel and the
-console. Nothing in RAM survives the reset: the loader asks the firmware to
-overwrite memory before every next boot, so no crash record crosses a reset
-today. A killed program is reported as its file, offset and build id; one
+console. The loader asks the firmware to overwrite memory before every next
+boot, so where the firmware honours that request nothing in RAM survives the
+reset, and no crash record crosses one today. A killed program is reported as its file, offset and build id; one
 userland naming service turns those into function names using the same lookup
 the kernel uses for itself.
 

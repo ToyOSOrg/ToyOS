@@ -107,6 +107,9 @@ pub fn app_temporary(name: &str) -> String {
 /// data, cache and state. English on disk, as every home folder is.
 pub const APP_FOLDERS: [&str; 4] = ["Config", "Data", "Cache", "State"];
 
+/// The log volume, as every view names it.
+pub const LOG: &str = "/log";
+
 /// Where machine state lives, one directory per program key that keeps any
 /// ([`Program::state_dir`]); a row's view holds its own and no other.
 pub const STATE: &str = "/state";
@@ -137,7 +140,7 @@ pub const SYSTEM: &str = "system";
 pub const ROLES: [(&str, &[RoleDir]); 5] = [
     (SYSTEM, &[RoleDir { dir: "/system", root: "", write: false }]),
     ("data", &[dir("/apps", "apps"), dir("/config", "config"), dir("/home", "home"), dir("/state", "state")]),
-    ("log", &[dir("/log", "")]),
+    ("log", &[dir(LOG, "")]),
     ("boot", &[dir("/boot", "")]),
     ("memory", &[dir("/tmp", "")]),
 ];
@@ -405,6 +408,12 @@ impl Program {
         package::package_of(self.source.path()?)
     }
 
+    /// Whether this row keeps the machine's log: it holds the acceptor every
+    /// program's log ring reaches the log keeper on, which one row can.
+    pub fn keeps_the_log(&self) -> bool {
+        self.holds.iter().any(|held| held == toyos_logstream::ORIGINS)
+    }
+
     /// Its own directory of machine state, which its view holds and no other
     /// row's does: a service's, or a row's that declares [`Self::state`].
     pub fn state_dir(&self) -> Option<String> {
@@ -431,6 +440,9 @@ impl Program {
     /// own [`Self::state_dir`]**: no row's view holds another row's, the
     /// supervisor's included. The rest stays whole until each row
     /// declares its own view (`issues/every-program-sees-only-the-files-it-was-given.md`, stage 2).
+    /// **`/log` is read-only but to the row that keeps the log**
+    /// ([`Self::keeps_the_log`]): what is there proves a boot to the next
+    /// loader pass (`toyos_logstream::STOPPED`).
     pub fn view(&self) -> Vec<View> {
         match self.package() {
             Some(name) => {
@@ -444,6 +456,10 @@ impl Program {
             None => whole_tree()
                 .into_iter()
                 .filter(|view| view.dir != STATE)
+                .map(|view| match view.dir == LOG {
+                    true => View { write: self.keeps_the_log(), ..view },
+                    false => view,
+                })
                 .chain(self.state_dir().map(|dir| data_dir(&dir, true)))
                 .collect(),
         }
@@ -1050,7 +1066,7 @@ mod tests {
                         .iter()
                         .zip(["apps", "config", "home", "", "", ""])
                         .zip(["data", "data", "data", "log", "boot", "memory"])
-                        .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), true)),
+                        .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), *dir != "/log")),
                 )
                 .chain(own.map(|name| ("data", format!("/state/{name}"), format!("state/{name}"), true)))
                 .collect()
@@ -1067,6 +1083,21 @@ mod tests {
         assert_eq!(m.program("pkg").unwrap().home(), session_home());
         assert_eq!(s.program("compositor").unwrap().home(), "/state/compositor");
         assert_eq!(m.program("shell").unwrap().state_dir(), None);
+    }
+
+    /// **Only the row that keeps the log writes `/log`**: the row holding the
+    /// log's origins, and no row that merely receives its wire or is named
+    /// like it.
+    #[test]
+    fn only_the_log_keeper_writes_the_log() {
+        let m = parse(&format!(
+            "program logkeeper /system/bin/logkeeper\nhold {}\nprogram uart /system/bin/uart\nprogram shell /system/bin/shell\n",
+            toyos_logstream::ORIGINS
+        ));
+        let log = |row: &str| views(m.program(row).unwrap()).into_iter().find(|v| v.1 == LOG).map(|v| v.3);
+        assert_eq!(log("logkeeper"), Some(true));
+        assert_eq!(log("uart"), Some(false));
+        assert_eq!(log("shell"), Some(false));
     }
 
     #[test]

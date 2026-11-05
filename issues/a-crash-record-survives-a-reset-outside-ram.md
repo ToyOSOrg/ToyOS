@@ -19,7 +19,10 @@ metal rows that judged a sealed record (`boot_deadline_ends_a_wedge`,
 `wedge-before-reset` and `hard-lockup-probe` arms they staged), the
 records a stop writes after `logkeeper`'s last flush (its stop record, the
 machine's census and the panel's, which `irq_census_conservation` and the
-boot's panel timings read).
+boot's panel timings read), and the window between `logkeeper`'s stop mark
+and the reset: a hang in the drivers' stop, the kernel's quiesce or the
+reset, which the deadline then ends, leaves the volume of a clean stop and
+proves its image, and shows on metal only as a boot that came back late.
 
 The routes other systems take, none chosen:
 

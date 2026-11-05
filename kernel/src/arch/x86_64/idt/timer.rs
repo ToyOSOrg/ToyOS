@@ -60,7 +60,7 @@ pub(super) extern "sysv64" fn timer_entry() {
         "pop rax",
         "iretq",
         #[cfg(not(feature = "mask-windows"))]
-        deadline = sym crate::deadline::poll,
+        deadline = sym ring0_deadline,
         #[cfg(feature = "mask-windows")]
         deadline = sym ring0_tick,
         handler = sym timer_handler,
@@ -71,6 +71,12 @@ pub(super) extern "sysv64" fn timer_entry() {
         ring0_fires = const crate::arch::percpu::OFF_RING0_TIMER_FIRES,
         irq_timer = const crate::arch::percpu::irq_slot_offset(crate::irq_census::Source::Timer as usize),
     );
+}
+
+/// The Ring 0 branch's deadline poll, at the ABI the naked stub calls with.
+#[cfg(not(feature = "mask-windows"))]
+extern "sysv64" fn ring0_deadline() {
+    crate::deadline::poll();
 }
 
 /// The Ring 0 branch's Rust half under `mask-windows`: it interrupted a CPU

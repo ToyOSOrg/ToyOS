@@ -3,8 +3,11 @@
 //!
 //! **The anti-rollback floor** is the highest version a boot has proven by
 //! stopping cleanly. The loader refuses an image below it, and raises it only
-//! for an image whose boot `logkeeper` marked stopped cleanly — never for one
-//! merely booted. The loader keeps the floor in a UEFI variable it creates
+//! for an image whose boot left `logkeeper`'s stop mark on the log partition —
+//! never for one merely booted. The mark and the loader's record are writable
+//! only by `logkeeper`'s view and the supervisor's (`toyos_manifest::Program::view`),
+//! and the mark is written before the stop's drivers stop, so a boot that hangs
+//! after it still proves its image. The loader keeps the floor in a UEFI variable it creates
 //! without runtime access, so no kernel it hands the machine to, however
 //! compromised, can lower it ([`crate::floor`]).
 //!

@@ -1,8 +1,8 @@
 //! Vector 2: where `crate::hardlockup` samples the CPU it landed on, which is
 //! the one bound a CPU with `IF` clear is under: the frame's `rflags` says
-//! whether it was. That path may reset from here and never return. Never logs, since the interrupted context may hold the log ring's
-//! lock, and never reschedules, so no preempt-count or exit-to-user check
-//! either.
+//! whether it was. That path may reset from here and never return. Never
+//! logs, since the interrupted context may hold the log ring's lock, and never
+//! reschedules, so no preempt-count or exit-to-user check either.
 //! Runs on IST2 for the `#DF` `arch::syscall`'s CPL-0/user-`rsp` window would
 //! otherwise take; `PerCpu::nmi_active` guards IST2's non-reentrancy by
 //! routing a second NMI to [`nested_nmi`] instead of corrupting the stack.

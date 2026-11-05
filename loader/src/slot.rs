@@ -38,7 +38,6 @@ const HEAD: &str = "Slot";
 /// A slot every byte of which its signature vouches for.
 pub struct Chosen {
     pub which: Which,
-    pub version: u64,
     /// The SHA-256 of its signed header, which names the image exactly.
     pub digest: Digest,
     pub kernel: Vec<u8>,
@@ -150,7 +149,6 @@ fn verify(
     println!("{HEAD} {letter}: kernel, cmdline, supervisor, fileserver and ROOT are the bytes the signed header names");
     Ok(Chosen {
         which,
-        version: header.version,
         digest,
         kernel,
         cmdline,

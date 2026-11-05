@@ -1,10 +1,15 @@
 //! What a boot's own log says about that boot, and nothing else: the records
 //! that make a boot a pass, and the grammar for reading them.
 //!
-//! **A boot is judged by what survives it on the log partition**: the loader's
-//! file, `logkeeper`'s files and its stop mark. The memory-overwrite request
-//! wipes whatever a boot left in RAM, and what the kernel says after
-//! `logkeeper`'s last flush reaches only its console and panel.
+//! **A metal boot is judged by what survives it**: the log partition — the
+//! loader's file, `logkeeper`'s files and its stop mark — and the machine
+//! coming back within its bench's recorded time. Nothing a boot leaves in RAM
+//! survives where the firmware honours the memory-overwrite request, and what
+//! the kernel says after `logkeeper`'s last flush reaches only its console and
+//! panel. **What neither half sees**: a hang between the stop mark and the
+//! reset — the drivers' stop, the kernel's quiesce, the reset itself — that
+//! the boot deadline then ends leaves the same volume as a clean stop, and is
+//! told apart only by coming back late by about that deadline.
 //!
 //! Neither the T14 driver's nor the QEMU harness's — `tests/metal` reads a log
 //! off a flashed stick and `tests/common/power.rs` reads one off a guest's log
