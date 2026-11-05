@@ -195,7 +195,9 @@ pub fn a_number_fails_with_its_owner_alone() {
         names,
         [
             "beside.failing.us",
+            "boot.failing.back_secs",
             "boot.failing.complete_ms",
+            "boot.passing.back_secs",
             "boot.passing.complete_ms",
             "span.passing.us"
         ]
@@ -261,19 +263,20 @@ pub fn a_name_two_owners_measured_is_refused() {
         assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "one name twice judged green");
         let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
         assert!(!record.measured.contains_key("latency.p99_us"), "{:?}", record.measured);
-        assert_eq!(record.measured.len(), 2, "{:?}", record.measured);
+        assert_eq!(record.measured.len(), 4, "{:?}", record.measured);
     }
 }
 
-/// `passing`'s two rows under `bios`: its planted readings, with `complete_ms`
-/// as given.
-fn kept(bios: &str, complete_ms: u64) -> Record {
+/// `passing`'s three rows under `bios`: its planted readings, with
+/// `complete_ms` and `back_secs` as given.
+fn kept_back(bios: &str, complete_ms: u64, back_secs: u64) -> Record {
     let machine = t14();
     Record {
         vendor: machine.vendor,
         product: machine.product,
         bios: bios.to_string(),
         measured: [
+            ("boot.passing.back_secs", back_secs),
             ("boot.passing.complete_ms", complete_ms),
             ("span.passing.us", 7),
         ]
@@ -281,6 +284,11 @@ fn kept(bios: &str, complete_ms: u64) -> Record {
         .map(|(name, value)| (name.to_string(), value))
         .collect(),
     }
+}
+
+/// [`kept_back`] at the 40 s the planted boot file came back in.
+fn kept(bios: &str, complete_ms: u64) -> Record {
+    kept_back(bios, complete_ms, 40)
 }
 
 /// `passing`'s readback judged against `record`, saved first: whether the
@@ -305,6 +313,10 @@ pub fn a_reading_past_its_record_fails_and_moves_nothing() {
     // 1165 ms against a ceiling of 1164.
     let past = kept(&bios, 582);
     assert_eq!(judged_against(&past), (true, past));
+    // **The come-back half of the contract**: back in 40 s against a ceiling
+    // of 38, which is a stop the deadline ended rather than a clean one.
+    let late = kept_back(&bios, 1165, 19);
+    assert_eq!(judged_against(&late), (true, late));
 }
 
 /// **A run under another BIOS reds and records nothing**, though every reading
@@ -360,7 +372,7 @@ pub fn a_failing_shared_member_fails_itself_alone() {
     let names: Vec<&str> = record.measured.keys().map(String::as_str).collect();
     assert_eq!(
         names,
-        ["boot.failing.complete_ms", "boot.passing.complete_ms"]
+        ["boot.failing.back_secs", "boot.failing.complete_ms", "boot.passing.back_secs", "boot.passing.complete_ms"]
     );
 }
 
