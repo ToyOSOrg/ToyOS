@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn an_overlapping_forward_copy_a_page_apart_agrees() {
         for gap in [3584, 3600, 4000, 4080, 4095] {
-            for over in [1, 64, 500, 4096] {
+            for over in [1, 200, 500, 4096] {
                 let n = gap + over;
                 let base = pattern(n + gap);
                 let mut want = base.clone();

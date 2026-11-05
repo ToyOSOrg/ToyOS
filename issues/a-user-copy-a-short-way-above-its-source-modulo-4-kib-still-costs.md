@@ -49,9 +49,9 @@ destination `d` bytes above the source:
 
 - **AMD, below 4 KiB.** Round 8 (base a049276a6, two boots, p50s within
   10%) read, at d = 0 and d = 16: 256 B 30 and 90 ns, 1 KiB 31 and 270,
-  2 KiB 40 and 511 (4 KiB: 60 and 992). Those copies are routed from 256 B
-  since round 9, which C6 judges. Nothing below 256 B is routed; round 9
-  measures 64 and 128 B.
+  2 KiB 40 and 511 (4 KiB: 60 and 992). Copies from 256 B are routed
+  (`ROUTED_LEAST`), which C6 judges. Nothing below 256 B is routed, and no
+  copy under 256 B has been timed at a stalling distance.
 
 One T14 head boot read `mem.memcpy.64` at 6873 MB/s in all 15 rounds. The
 other three boots read 16649–18226. That copy is page-aligned at d = 0 and
@@ -71,8 +71,9 @@ Evidence: `ToyOSOrg/evidence` branch `pr-1133`, commit
   times base's d = 0 row of that size.
 
 - C6: `copyat.<size>.libc.s0.d16` for 256 B, 1 KiB and 2 KiB within 1.5
-  times that size's d = 0 on the AMD, with every `mem.memcpy.*` row within
-  1.1 times main's; or a recorded decision that short copies keep the stall
+  times that size's d = 0 on the AMD, with `mem.memcpy.256`, `.1024` and
+  `.4096`, the rows whose copies are short and ask the distance, within 1.1
+  times main's; or a recorded decision that short copies keep the stall
   because routing them costs more than it saves.
 
 The `mem.memcpy.64` outlier is reproduced and explained, or shown to be
