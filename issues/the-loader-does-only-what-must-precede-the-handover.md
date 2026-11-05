@@ -21,7 +21,7 @@ PR #539 does not land. Its pieces:
   `update_boot_first_puts_the_loader_first`, which also takes
   `update_boot_next_boots_the_entry_once`'s read-only half; the harness's
   `stick_readonly`; and `update_trial_writes_nothing_of_the_kept_slot`,
-  rewritten for priorities;
+  rewritten for the good flag;
 - stage 6 takes the bench: `src/metalbench.rs`, `tests/common/bench.rs`,
   `tests/bench*case`, `--bench-image` with `build::bench_image`,
   `build/image.rs`' `update_of`, `tests/common/metal.rs`' `Reach`, `stage` and
@@ -160,9 +160,9 @@ Each stage lands on its own, in this order.
      build. That prefix stays flat. After the word, `KernelArgs` is typed:
      `repr(C)` sub-structs, and `#[repr(C, u32)]` enums for the optional parts
      in place of `u32` presence flags and zero sentinels; a field the typing
-     changes moves after the word. The slot booted and why (the one the table
-     chose, or the other one after a refusal and its reason) and the black-box
-     page are fields, not `boot-slot=`, `slot-refused=` and `blackbox=` text.
+     changes moves after the word. The slot booted and the black-box page are
+     fields, not `boot-slot=` and `blackbox=` text; `slot-refused=` leaves with
+     the fallback.
      `params.rs`' last-one-wins and kernel `main.rs`' branch for a format
      never emitted go. `kernel_stack_addr` is renamed for the offset it
      holds. x86's `_start` reads by `const offset_of!`.
@@ -195,27 +195,22 @@ Each stage lands on its own, in this order.
    `bar_placement_is_proven`, `root_withheld_refused`, `blackbox_*` and
    `update_*`.
 
-5. **Tries and a good flag per slot, decided on the host.** Each slot in the
-   table carries a priority, the tries it has left and a good flag, in the
-   word the format reserves; the table's format rises. They replace the
-   attempts file (`attempt.rs`, `lib/update/src/record.rs` and `main.rs`'
-   accounting), the dead-slot retry and `slot::proven`.
-   - A freshly built image's slot A starts untried with 3 tries. An install
-     writes its slot untried with 3 tries, the good flag clear and a priority
-     above the kept slot's, whatever the slot held before.
-   - A pass boots the highest-priority slot that verifies and is good or has
-     tries left. A slot out of tries and never good is not booted again.
+5. **A good flag per slot, decided on the host.** Each slot in the table
+   carries a good flag, in the word the format reserves; the table's format
+   rises. It replaces the attempts file (`attempt.rs`, `lib/update/src/record.rs`
+   and `main.rs`' accounting) and `slot::proven` as how an image is proven.
+   Which slot a pass boots is the marked one or none: updates fix forward, and
+   the loader's fallback leaves in stage 2 of
+   `issues/the-machine-updates-itself-without-ubuntu.md`, which this stage
+   follows. The good flag replaces the black-box page's `DONE` record as the
+   proof of an image; #1196 decides whether this stage must land with the
+   page's removal.
+   - An install writes its slot with the good flag clear, whatever the slot
+     held before.
    - Any failure after `verify` in `start_kernel` that the image causes is a
-     refusal of that slot, like a bad signature, and the pass falls to the
-     other slot. Stage 5's PR lists which `start_kernel` refusals count as the
-     image's — every `load_kernel_elf` refusal of the kernel's bytes — and
-     which count as the loader's own.
-   - The loader spends a try of an untried slot before it hands over. That
-     write, with sealing `ARMED`, is the pass's last, after every refusal
-     `start_kernel` can make, so a loader refusal is never booked as the
-     image's. Where the decrement cannot be persisted, that slot is not booted.
-   - Where no slot can boot, the loader says so on the panel and in
-     `loader.log`, and powers the machine off.
+     refusal of that slot, like a bad signature. Stage 5's PR lists which
+     `start_kernel` refusals count as the image's — every `load_kernel_elf`
+     refusal of the kernel's bytes — and which count as the loader's own.
    - The health gate: `system.toml`'s `[boot] up` names the services that
      make the image up. The tree has no readiness signal (a swap's probation
      only asks whether a process still runs), so this stage adds the smallest
@@ -227,19 +222,15 @@ Each stage lands on its own, in this order.
      `update` holds the `slots` claim's table and writes the running slot's
      good flag and nothing else.
    - An image whose `system.toml` grants no program the `slots` claim is never
-     good, so each boot spends a try and it boots three times. Today only
-     `system.toml` and `tests/updatecase/system.toml` grant it.
-   - `update_refusals_boot_the_other_slot` boots slot A five times and
-     `update_grant_refuses_a_stray_partition` four. Both run `updatecase`, and
-     each boot waits for the good flag before the guest is dropped. Every
-     other test hands one image's kernel at most three times.
+     good. Today only `system.toml` and `tests/updatecase/system.toml` grant
+     it.
    - The floor rises on a pass that boots a good slot, to the security version
      of the signed header that pass verified, never to a version the table
      names.
    - A one-shot request (`update --once`, `update --boot-first`) is cleared
      and saved before it is acted on, and ignored where the save fails.
-   - `update --once` asks for the idle slot once and leaves it at priority 0,
-     so its good flag is never read. The kept slot boots after it, and no floor
+   - `update --once` asks for the idle slot once, without moving the mark, so
+     its good flag is never read. The marked slot boots after it, and no floor
      rises for it. `KernelArgs`' slot field gains the once variant. The kernel
      reads the field's discriminant as a raw `u32` and refuses one it does not
      name, so an unrecognized value is a refusal rather than an out-of-range
@@ -257,56 +248,43 @@ Each stage lands on its own, in this order.
 
    The decisions are pure `toyos-update` functions:
    `verify(signed, kernel, cmdline, root, key, floor) -> Result<Verified, Refusal>`
-   and `pass::decide(inputs) -> Decision` over the table, the verified slots,
-   the floor, the request and whether the last write persisted. The loader does
-   the I/O and carries the decision out.
+   and `pass::decide(inputs) -> Decision` over the table, the verified marked
+   slot, the floor, the request and whether the request's clearing persisted.
+   The loader does the I/O and carries the decision out.
 
    **Exit**: `decide`'s host tests hold each rule above, and `verify`'s hold
    each refusal; deleting the cmdline hash check or `policy::admits` fails a
-   host test. The `update_*` tests and `hang_bounded_by_the_stick`, rewritten
-   for tries, pass. The hang tests boot an image that never reaches its health
-   gate, instead of killing QEMU on `LOADER_LAST_LINE`. #539's
+   host test. The `update_*` tests pass, and #539's
    `update_boot_first_puts_the_loader_first` passes, and so do its host tests
    of the entry rules that survive.
 
    Negative controls:
-   - Skipping the countdown fails `update_hang_kills_an_unproven_image`.
    - Raising the floor on any pass that boots a slot fails
      `update_floor_waits_for_good`. It installs into B an image at the running
-     security version + 1 whose kernel hangs, signed by
-     `tests/common/update.rs`' `Rig::update` at the version it is handed. B
-     spends its tries and A boots, and `fwvars::live` reads the floor at A's
-     version.
-   - An install that leaves the good flag set, or its priority below the kept
-     slot's, fails `update_over_a_good_slot_starts_it_untried`. It updates
-     into B and boots B to good, then updates over A, which was good, with a
-     kernel that hangs. The slot table read after each pass shows A's kernel
-     booted three times, then B boots.
+     security version + 1 whose `[boot] up` names a service that never writes
+     its byte; B boots, and `fwvars::live` reads the floor at A's version.
+   - An install that leaves the good flag set fails
+     `update_over_a_good_slot_clears_its_flag`, which updates over a slot that
+     was good and reads its flag clear in the slot table.
    - Raising the floor to the table's version fails
      `update_floor_is_the_headers`, which plants a table version above the
      header's and reads the floor at the header's.
-   - `let persisted = true;` in the loader fails
-     `update_readonly_stick_boots_nothing`. It boots a fresh image off a
-     read-only stick: nothing boots, the no-bootable-slot line is on the
-     console, and QEMU reports `guest-shutdown`.
    - Turning the refusal of an unloadable kernel back into a panic fails
-     `update_unloadable_kernel_boots_the_other_slot`, which updates B with a
-     signed non-ELF kernel, finds the loader's refusal of B naming a kernel
-     that is not an ELF, and finds A booted.
+     `update_unloadable_kernel_is_refused`, which updates B with a signed
+     non-ELF kernel and finds the loader's refusal of B naming a kernel that
+     is not an ELF.
    - Running `update --good` right after init spawns `[boot] start` fails
      `update_dead_service_is_never_good`. It updates B with an image whose
      `[boot] up` names a live service beside one that exits at start; the live
-     service writes its byte and the dead one never does. B boots three
-     times, its good flag never set because one named service never wrote,
-     and then A boots.
+     service writes its byte and the dead one never does, and B's good flag is
+     never set.
    - Acting on a request before taking it off the table fails
      `update_boot_first_puts_the_loader_first`.
 
-   Oracles: Android's A/B and Fuchsia libabr's rules, except that libabr boots
-   a slot whose decrement failed; the floor `fwvars::live` reads out of the
-   vars store; the slot table after each boot, decoded by the test from the
-   format's bytes and not by `toyos_update::slots::Table::decode`; and OVMF's
-   boot manager booting the entry the loader wrote.
+   Oracles: the floor `fwvars::live` reads out of the vars store; the slot
+   table after each boot, decoded by the test from the format's bytes and not
+   by `toyos_update::slots::Table::decode`; and OVMF's boot manager booting the
+   entry the loader wrote.
 
 6. **The T14 bench.**
    - It opens with a timed `ssh t14 update < image` of a session image of
@@ -347,9 +325,8 @@ Each stage lands on its own, in this order.
    goes by `--once` (`deadlinewedge`, `hardlockup`, `usbload` and
    `foreignrecord` among them), gives the verdicts a per-boot run gave at the
    commit this stage branches from; a kernel change boots; a slot with a
-   flipped byte, no signature or a lower security version is refused and the
-   other boots; a slot that dies falls back on its own, and one whose `sshd`
-   refuses the host's key is never marked good; a `--once` image that panics
+   flipped byte, no signature or a lower security version is refused by name;
+   a slot whose `sshd` refuses the host's key is never marked good; a `--once` image that panics
    returns the machine to its session with its record judged; and a loader
    sent over ssh boots once, and one that brings no slot to good leaves the
    old one booting.

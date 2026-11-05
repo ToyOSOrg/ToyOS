@@ -40,9 +40,7 @@ kernel arms the chipset's watchdog only on the `watchdog` parameter
   which
   `issues/every-job-test-runner-starts-holds-its-whole-system-capability.md`
   fences.
-- `watchdogd` feeds from a thread under `rt`, until
-  `issues/cpu-time-is-a-band-and-not-a-reservation.md` gives it a
-  reservation.
+- `watchdogd` feeds from a thread under `rt`.
 - **Every guest runs with `-action watchdog=none`.** q35's TCO counts
   `QEMU_CLOCK_VIRTUAL`, which a loaded host advances while it starves a guest,
   and its second expiry does what `-action watchdog=` says (QEMU 11.1.1,

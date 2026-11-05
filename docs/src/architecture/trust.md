@@ -29,9 +29,9 @@ DMA stays behind the IOMMU.
 
 - The same driver runs with and without an IOMMU; there is never a second
   driver.
-- Where the hardware genuinely has no isolation, a driver the signed image
-  ships may claim a device and no other may, and the machine states plainly
-  that it runs without device isolation.
+- Where the hardware genuinely has no isolation, any driver the signed image
+  ships may claim its device with its ordinary claim, and no other driver may.
+  The machine states plainly that it runs without device isolation.
 - External DMA-capable devices always need isolation.
 - Unknown isolation, unsupported isolation hardware and a failed setup are
   errors, not evidence that isolation is absent. There is no machine-specific
