@@ -30,13 +30,9 @@ pub fn init(cmdline: &str) {
 /// `actuator::init` refusing it as a name it does not know.
 ///
 /// **No parameter that carries a value is in [`PARAMS`]**, which is a table of
-/// flags matched whole; each is a prefix matched here. The black-box
-/// page's address is not read by [`init`] either — it comes out of the raw
-/// buffer in `kernel_main`'s first statements (`crate::blackbox::arm`), because
-/// a panic before [`init`] runs still has to be able to seal.
+/// flags matched whole; each is a prefix matched here.
 pub fn claims(token: &str) -> bool {
     PARAMS.iter().any(|(name, _)| *name == token)
-        || token.starts_with(toyos_blackbox::PARAM)
         || token.starts_with(toyos_tco::DEADLINE_PARAM)
         || token.starts_with(toyos_abi::boot::SLOT_PARAM)
         || token.starts_with(toyos_abi::boot::SLOT_REFUSED_PARAM)

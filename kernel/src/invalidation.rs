@@ -35,7 +35,7 @@ pub enum Half {
 
 impl Origin {
     pub const COUNT: usize = 6;
-    /// Order matches the variants; `tests/toyos.rs`'s `irq_census_conservation` reads the line back.
+    /// Order matches the variants.
     pub const NAMES: [&'static str; Self::COUNT] =
         ["pcid", "mmio", "unmap", "staged", "bench", "stop"];
 }

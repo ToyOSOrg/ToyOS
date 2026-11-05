@@ -8,12 +8,11 @@
 //!
 //! **Nothing is carved out.** The log's writer stops with every other thread:
 //! the supervisor has it flush before it asks for the stop, and what the
-//! kernel says after that goes to its console and its black box, never to a
-//! process it would have to keep running.
+//! kernel says after that goes to its console, never to a process it would
+//! have to keep running.
 //!
-//! [`Record`] is written by the kernel and read back off a stick by
-//! `tests/metal` and by the harness, so its wire form is rendered and parsed
-//! here and nowhere else.
+//! [`Record`] is written by the kernel and read back off a console by the
+//! harness, so its wire form is rendered and parsed here and nowhere else.
 
 #![no_std]
 #![forbid(unsafe_code)]

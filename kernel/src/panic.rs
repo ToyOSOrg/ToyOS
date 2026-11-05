@@ -202,42 +202,6 @@ fn state_name(state: CpuFaultState) -> &'static str {
 /// this module refused to run a formatter to find out.
 const NOT_CAPTURED: &str = "<formatted at runtime; not captured>";
 
-/// This CPU's captured crash, as the one or two lines a black-box report opens
-/// with.
-///
-/// **The first thing in that report, before any tail of records.** The panel's
-/// newest lines are the ones written *after* the crash — the register dump, the
-/// page walk, the backtrace, the reboot bound's own line — so a report cut to
-/// its tail is a report with the crash missing, which is what run 14's stick
-/// carried. `out` is written into the page directly and drops what does not fit.
-pub fn first_words(out: &mut impl core::fmt::Write) {
-    let slot = evidence();
-    let mut file_bytes = [0u8; FILE_BYTES];
-    let mut msg_bytes = [0u8; MSG_BYTES];
-    let kind = Kind::of(slot.kind.load(Ordering::Relaxed));
-    let file = read(&slot.file, &slot.file_len, &mut file_bytes);
-    let message = read(&slot.msg, &slot.msg_len, &mut msg_bytes);
-    let cut = if slot.file_cut.load(Ordering::Relaxed) == 0 { "" } else { "..." };
-    let (line, column) = (slot.line.load(Ordering::Relaxed), slot.column.load(Ordering::Relaxed));
-    let apic = slot.apic.load(Ordering::Relaxed);
-    let _ = match kind {
-        Kind::Panic => core::writeln!(
-            out,
-            "PANIC (apic {apic}): panicked at {cut}{file}:{line}:{column}: {message}"
-        ),
-        Kind::Fault => core::writeln!(
-            out,
-            "FAULT (apic {apic}): {message} rip={:#018x} cr2={:#018x} err={:#018x}",
-            slot.rip.load(Ordering::Relaxed),
-            slot.cr2.load(Ordering::Relaxed),
-            slot.error_code.load(Ordering::Relaxed),
-        ),
-        // The panic path ran without `record_panic` having claimed a slot,
-        // which is a state worth saying rather than an empty first line.
-        Kind::None => core::writeln!(out, "PANIC (apic {apic}): nothing was captured on this cpu"),
-    };
-}
-
 /// Reports this CPU's captured crash and the panic (`second`) that just
 /// reentered it. `prev` is `None` where the caller has no fault state to
 /// give — the reentry guard runs before the state swap. `on_the_record` also
@@ -350,16 +314,14 @@ pub fn halt_all_cpus() -> ! {
     // whoever is in front of it, with interrupts masked and under a bound of its
     // own — which to a hard-lockup sample or a deadline poll is
     // indistinguishable from a wedge, and is the opposite of one. Both bounds,
-    // because a `WEDGED` record either of them sealed would replace the report
-    // this path exists to deliver.
+    // because either would reset the machine out from under the report.
     crate::hardlockup::stand_down();
     crate::deadline::stand_down();
     #[cfg(feature = "mask-windows")]
     crate::windows::stand_down();
     // **The other CPUs first, before anything else here runs.** A kernel that
     // has declared itself corrupt runs no userland again and no write path:
-    // the report reaches the console, the panel and the black box, and
-    // `/log` gets it from the next boot's loader.
+    // the report reaches the console and the panel.
     crate::arch::irqchip::stop_other_cpus();
     let bound = crate::panic_reboot::arm(true);
     // Folded into the still-unpainted capture only where the panel is this

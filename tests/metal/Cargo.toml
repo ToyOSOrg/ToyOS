@@ -14,7 +14,6 @@ toyos-build = { path = "../.." }
 # The outside judge of the log volume the boot left on the bench's disk.
 toyos-fat32-check = { path = "../../lib/fat32/check" }
 toyos-gpt = { path = "../../lib/gpt" }
-toyos-quiesce = { path = "../../lib/quiesce" }
 toyos-tco = { path = "../../lib/tco" }
 
 [dev-dependencies]

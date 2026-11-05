@@ -23,8 +23,8 @@ lines can reach neither channel:
 
 The same holds across logkeeper's own death: its carriers' pipes end, and
 the UART carries nothing until the kernel's stop or a fatal path. `/log`
-keeps what logkeeper lived to write, and the kernel's ring and black box the
-kernel's records.
+keeps what logkeeper lived to write, and the kernel's ring the kernel's
+records.
 
 **A carrier that is stuck but alive** — a driver that stops reading its pipe,
 or a device that never completes a transmit — no longer leaves the UART

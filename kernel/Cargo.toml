@@ -396,7 +396,6 @@ toyos-abi = { path = "../sdk/abi" }
 toyos-proclife = { path = "proclife" }
 toyos-acpi = { path = "../lib/acpi" }
 toyos-amdvi = { path = "amdvi" }
-toyos-blackbox = { path = "../lib/blackbox" }
 toyos-bootmap = { path = "../lib/bootmap" }
 toyos-gicv3 = { path = "gicv3" }
 toyos-its = { path = "its" }

@@ -126,8 +126,8 @@ nothing in it explains it. In a guest, `info registers -a` over QMP
 (`build/qemu.rs`) gives every vCPU's `RIP`, `RFL` and `HLT`, and is taken before
 injecting anything, since a keystroke revives a halted CPU. On metal, a CPU
 that has stopped taking interrupts is ended by `crate::hardlockup` on a boot
-armed with a deadline and a CPU that states a PMU, and its record in the black
-box (`kernel/src/blackbox.rs`) names where it stood. That reaches one of the
+armed with a deadline and a CPU that states a PMU, which resets the machine
+and leaves no record of where it stood (`issues/a-crash-record-survives-a-reset-outside-ram.md`). That reaches one of the
 three causes the removed dump's NMI probe told apart, a CPU spinning with `IF`
 clear: its header excludes a halted CPU, which its counter never samples, and
 a CPU with `IF` set, which it never ends. Neither has been fired at a machine

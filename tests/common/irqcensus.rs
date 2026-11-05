@@ -1,99 +1,49 @@
 //! The kernel's interrupt census, and the windows a `mask-windows` kernel
 //! reports, read back on the host.
 //!
-//! The kernel says `irq: cpuN timer=… kick=… …` per online CPU where the
-//! machine ends, as records at its stop and in the record its death seals
-//! (`kernel/src/census.rs`); at no process's end. The counters are cumulative since boot, so the
-//! largest count each source reaches on a CPU's lines is that boot's whole
-//! census ([`Census::raise`]). `irq_census_conservation` asks whether one
-//! boot's census is internally consistent.
+//! The kernel says `irq: cpuN timer=… kick=… …` per online CPU at its stop
+//! (`kernel/src/census.rs`).
 
 use std::collections::BTreeMap;
 
 /// The census's source names, in the order `kernel/src/irq_census.rs` prints
 /// them. The kernel's `Source::NAMES` is the definition; this is the host's copy
-/// and [`Census::parse`] refuses a line whose fields are not exactly these, so
+/// and [`census_sources`] refuses a line whose fields are not exactly these, so
 /// a source added on one side and not the other is a red rather than a silently
 /// dropped column.
 pub const SOURCES: [&str; 9] = ["timer", "kick", "userdev", "dmafault", "rtc", "tlb", "nmi", "spurious", "unclaimed"];
 
-/// The sources whose delivery CPU is chosen by the interrupt controller rather
-/// than by the CPU that took the work — every device vector, in other words.
-/// `MSG_ADDR` names physical destination 0 and the one I/O APIC pin this kernel
-/// routes goes to the BSP, so today every one of these is cpu0's alone. The day
-/// that stops being true is the day the track's change lands.
-pub const DEVICE_SOURCES: [&str; 3] = ["userdev", "dmafault", "rtc"];
-
-/// One CPU's counters out of one `irq:` line.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Census {
-    pub cpu: u32,
-    /// Indexed the same as [`SOURCES`].
-    pub by_source: [u64; SOURCES.len()],
-}
-
-impl Census {
-    /// Parse one line, or say why it is not one.
-    ///
-    /// Anything before `irq: cpu` is ignored, so the same parser reads a raw
-    /// guest line, a kernel record's line and a `[serial N]` echo of either.
-    pub fn parse(line: &str) -> Option<Result<Self, String>> {
-        let rest = line.split("irq: cpu").nth(1)?;
-        Some(Self::parse_body(rest))
-    }
-
-    fn parse_body(rest: &str) -> Result<Self, String> {
-        let mut fields = rest.split_whitespace();
-        let cpu: u32 = fields
+/// Whether one line is a census line whose sources are exactly [`SOURCES`],
+/// or `None` for a line that is no census.
+///
+/// Anything before `irq: cpu` is ignored, so the same reader takes a raw guest
+/// line, a kernel record's line and a `[serial N]` echo of either.
+pub fn census_sources(line: &str) -> Option<Result<(), String>> {
+    let rest = line.split("irq: cpu").nth(1)?;
+    let mut fields = rest.split_whitespace();
+    let read = (|| {
+        fields
             .next()
             .ok_or_else(|| format!("no cpu number in {rest:?}"))?
-            .parse()
+            .parse::<u32>()
             .map_err(|_| format!("unreadable cpu number in {rest:?}"))?;
-        let mut named = Vec::new();
+        let mut got = Vec::new();
         for field in fields {
             let (name, value) = field
                 .split_once('=')
                 .ok_or_else(|| format!("field {field:?} is not name=value in {rest:?}"))?;
-            let value: u64 = value
-                .parse()
-                .map_err(|_| format!("field {field:?} has no count in {rest:?}"))?;
-            named.push((name, value));
+            value.parse::<u64>().map_err(|_| format!("field {field:?} has no count in {rest:?}"))?;
+            got.push(name);
         }
-        let got: Vec<&str> = named.iter().map(|(n, _)| *n).collect();
         if got != SOURCES {
             return Err(format!(
                 "census fields {got:?}, want {SOURCES:?} — the kernel's `Source::NAMES` and \
                  `common::irqcensus::SOURCES` disagree"
             ));
         }
-        let mut by_source = [0u64; SOURCES.len()];
-        for (slot, (_, value)) in by_source.iter_mut().zip(&named) {
-            *slot = *value;
-        }
-        Ok(Self { cpu, by_source })
-    }
-
-    pub fn source(&self, name: &str) -> u64 {
-        let i = SOURCES.iter().position(|s| *s == name).expect("no such census source");
-        self.by_source[i]
-    }
-
-    /// Raise each source to its count in `read`, another line of this CPU.
-    ///
-    /// **Lines are in no read order.** The stop's census comes back on the
-    /// black-box page newest first. The counters are monotonic, so the
-    /// largest count per source is the newest read whatever the order of the
-    /// lines.
-    pub fn raise(&mut self, read: &Self) {
-        for (most, count) in self.by_source.iter_mut().zip(read.by_source) {
-            *most = (*most).max(count);
-        }
-    }
-
-    /// Every interrupt this CPU took: the kernel keeps no total apart from its sources.
-    pub fn total(&self) -> u64 {
-        self.by_source.iter().sum()
-    }
+        Ok(())
+    })();
+    Some(read)
 }
 
 /// One CPU's longest interrupts-off and preemption-off windows since the report

@@ -69,8 +69,10 @@
 //!
 //! **A round's lines are written and the volume made durable before the next
 //! round**, and again when the supervisor asks before the machine stops
-//! ([`toyos_logstream::FLUSH`]). The kernel waits on none of it: a panicking kernel's report is in its black box, and so are the stop's
-//! own last records.
+//! ([`toyos_logstream::FLUSH`]), and the stop's flush ends by writing the stop
+//! mark ([`toyos_logstream::STOPPED`]). The kernel waits on none of it, so
+//! what it says after the flush, at a panic or in the stop, reaches only its
+//! console and panel.
 //! **A program's line after that flush reaches the UART and is held back from
 //! the file**, to a bound ([`STOPPING_BYTES`]): the stop syncs no file still open,
 //! so the file ends where the flush made it durable, and a reader of the
@@ -691,6 +693,13 @@ impl Log {
         }
         let refused = self.sync().err();
         self.answered(refused);
+        // Only over a durable log: the mark is what lets the next boot's loader
+        // treat this image as proven.
+        if self.volume.is_some()
+            && let Err(e) = store::mark_stopped()
+        {
+            toyos::error!("logkeeper: {DIR} would not take the stop mark ({e}) - the next boot will not count this one as clean");
+        }
         // The console's carriers take the log up to here, and the UART what
         // the machine says from here as it stops.
         if let Some(carriers) = &self.carriers {
@@ -709,6 +718,9 @@ impl Log {
             panic!("logkeeper: the supervisor said the machine runs on, and no stop was flushed for");
         };
         toyos::warn!("logkeeper: the stop was refused, so {DIR} takes this boot's lines again");
+        if let Err(e) = store::unmark_stopped() {
+            toyos::error!("logkeeper: {DIR} would not give back the stop mark ({e}) - a later death of this boot will read as clean");
+        }
         if held.unwritten > 0 {
             toyos::warn!(
                 "logkeeper: {} line(s) said while the machine stopped were past {STOPPING_BYTES} bytes \

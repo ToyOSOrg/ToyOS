@@ -256,18 +256,6 @@ fn newest_in(shard: &Shard, mut next: u64, from: u64, to: u64) -> (u64, Option<(
     (0, None)
 }
 
-/// The stamp of the newest committed record, or zero if none: the upper bound
-/// of a snapshot that must not chase records committed while it walks.
-pub fn newest_committed() -> LogStamp {
-    let newest = (0..super::shard_count())
-        .filter_map(super::shard)
-        .filter_map(|shard| newest_in(shard, shard.head().saturating_sub(1), 0, u64::MAX).1)
-        .map(|(_, at_ns)| at_ns)
-        .max()
-        .unwrap_or(0);
-    LogStamp::since_zero(newest)
-}
-
 /// Every committed record stamped in `from..=to`, newest first merged by
 /// `at_ns` until `out` is full, walking with `scratch`'s positions, which the
 /// caller holds alone; returns nothing, since no caller counts.

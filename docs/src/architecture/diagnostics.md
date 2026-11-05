@@ -28,10 +28,10 @@ exports them.
 
 ## Crashes
 
-A kernel panic halts the other CPUs, paints its report on the panel and seals
-its tail in a black-box page that survives the reset, which the next boot
-carries into `/log`. A machine with no serial port can therefore always be read
-afterwards. A killed program is reported as its file, offset and build id; one
+A kernel panic halts the other CPUs and paints its report on the panel and the
+console. Nothing in RAM survives the reset: the loader asks the firmware to
+overwrite memory before every next boot, so no crash record crosses a reset
+today. A killed program is reported as its file, offset and build id; one
 userland naming service turns those into function names using the same lookup
 the kernel uses for itself.
 

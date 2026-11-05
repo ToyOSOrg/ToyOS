@@ -132,6 +132,13 @@ pub const FLUSHED: u32 = 6;
 /// runs on. `logkeeper` writes the file again, from the first line it held back.
 pub const RESUME: u32 = 7;
 
+/// The file at the root of the log volume that says the boot which wrote it
+/// stopped cleanly: `logkeeper` writes it once a stop's [`FLUSH`] has made the
+/// log durable and deletes it on [`RESUME`]; the loader reads and deletes it
+/// before it hands the machine to the next kernel. The anti-rollback floor
+/// rises only for a boot that left it.
+pub const STOPPED: &str = "stopped";
+
 /// The supervisor's line before it asks `logkeeper` to flush for a stop: the last line of a
 /// boot `/log` is owed, since `logkeeper` answers only once it is durable.
 pub const STOPPING: &str = "supervisor: power: the machine stops, and logkeeper makes the log whole first";
@@ -409,7 +416,7 @@ pub fn is_program_line(line: &str) -> bool {
 }
 
 /// Whether `line` is a kernel record's, whichever writer spelled it: the
-/// console's, the panel's, the black box's or `/log`'s.
+/// console's, the panel's or `/log`'s.
 pub fn is_kernel_line(line: &str) -> bool {
     parse(line).is_some_and(|parsed| parsed.source == Source::Kernel)
 }

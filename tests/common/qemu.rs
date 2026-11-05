@@ -1701,56 +1701,6 @@ impl QemuInstance {
         qmp.await_event("DEVICE_DELETED", self.budget(budget))
     }
 
-    /// A span of the guest's *physical* memory, as QEMU reads it.
-    ///
-    /// **The oracle for anything a guest leaves in DRAM for a later boot.** The
-    /// guest cannot be asked — the claim is precisely about what survives it —
-    /// and a screendump says nothing about bytes. `pmemsave` is the monitor
-    /// command that answers, so what a test judges is memory QEMU dumped and not
-    /// a report the guest wrote about itself.
-    pub fn guest_memory(&mut self, phys: u64, bytes: usize) -> Result<Vec<u8>, String> {
-        let socket = self.sockets.qmp.clone().expect("guest_memory needs BootOptions { qmp: true }");
-        // Beside the screendump, which is this instance's own scratch path.
-        let out = self.screendump.with_extension(format!("mem-{phys:#x}"));
-        let _ = fs::remove_file(&out);
-        // Quoted for the monitor, whose unquoted filename is read as an
-        // expression and stops on the first letter of the path; the backslashes
-        // are the JSON `human-monitor-command` carries it in.
-        let command = format!("pmemsave {phys:#x} {bytes} \\\"{}\\\"", out.display());
-        let said = QmpMonitor::open(&socket).human(&command);
-        let read = fs::read(&out).map_err(|e| {
-            format!("{command:?} wrote no file ({e}); the monitor said {said:?}")
-        })?;
-        if read.len() != bytes {
-            return Err(format!(
-                "pmemsave {phys:#x} wrote {} bytes and not {bytes}; the monitor said {said:?}",
-                read.len()
-            ));
-        }
-        Ok(read)
-    }
-
-    /// Reset the machine with its memory kept, and hold it at the next reset
-    /// the guest itself asks for: the boot that follows keeps its screen,
-    /// stopped, where a `-no-reboot` QEMU would have exited with it. The
-    /// machine is stopped while QEMU's reset actions change, so the guest has
-    /// no reset of its own to land between them.
-    pub fn reset_and_hold_the_next(&mut self, budget: Duration) -> Result<(), String> {
-        let socket = self.sockets.qmp.clone().expect("reset_and_hold_the_next needs BootOptions { qmp: true }");
-        let mut qmp = Qmp::connect(&socket);
-        qmp.execute("{\"execute\":\"stop\"}");
-        qmp.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"reset\"}}");
-        qmp.execute("{\"execute\":\"system_reset\"}");
-        qmp.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"shutdown\",\"shutdown\":\"pause\"}}");
-        qmp.execute("{\"execute\":\"cont\"}");
-        qmp.stream.set_read_timeout(Some(self.budget(budget))).expect("qmp: the hold's budget");
-        match QmpShutdown(qmp).reason().as_deref() {
-            Some("guest-reset") => Ok(()),
-            Some(other) => Err(format!("the boot after the reset stopped by {other:?}, not by a reset of its own")),
-            None => Err(format!("the boot after the reset never asked for a reset within {budget:?}")),
-        }
-    }
-
     /// Capture the guest's scanout through QMP and return the decoded PPM.
     ///
     /// After a halt the guest is stopped, so the dump is stable. QEMU writes

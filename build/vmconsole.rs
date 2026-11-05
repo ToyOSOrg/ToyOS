@@ -326,8 +326,8 @@ mod tests {
     use super::*;
     use std::os::fd::FromRawFd;
 
-    const KERNEL: &str = "[--.--- cpu0 kernel] black box: 0x8000000 is this boot's, 16344 bytes \
-         for the next boot's loader\n\
+    const KERNEL: &str = "[--.--- cpu0 kernel] boot deadline: 120000 ms, after which this kernel writes the \
+         reset register itself\n\
          [--.--- cpu0 kernel] pmm: the firmware map calls 4288393216 bytes usable\n";
 
     /// What the terminal is shown of `stream` fed in pieces cut at each of `cuts`.

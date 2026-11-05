@@ -63,8 +63,9 @@ Owner: the stop path, `kernel/src/quiesce.rs`; held by the orchestrator.
 **Unrun since it was disabled**: PR #562 deleted the stop's completion from
 every QEMU verdict: `stopped_boot`'s `stopped_the_machine` check, whose message
 the sightings above quote, and `woken_by_its_threads`. The stop gives up at a
-budget of the kernel's own clock, so on metal alone
-(`metal::Readback::stop_completed`) does a stop that gave up red. This test now
+budget of the kernel's own clock, and the metal check that redded a stop
+that gave up (`metal::Readback::stop_completed`) read the stop record off the
+black-box page and went with it, so nothing reds one now. This test now
 judges the held thread before the sync and more than one sweep, and the failure
 quoted above no longer reds it. That change has never run: the test's first run
 back is also that change's.

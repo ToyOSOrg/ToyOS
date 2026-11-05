@@ -103,7 +103,7 @@ extern "C" fn dispatch(frame: &mut Frame, entry: u64) {
                 crate::windows::irqs_masked();
                 crate::windows::handler_entered();
             }
-            irq(frame, false);
+            irq(false);
             #[cfg(feature = "mask-windows")]
             {
                 crate::windows::handler_leaving();
@@ -122,7 +122,7 @@ extern "C" fn dispatch(frame: &mut Frame, entry: u64) {
                 crate::windows::irqs_masked();
                 crate::windows::handler_entered();
             }
-            let preempt = irq(frame, true);
+            let preempt = irq(true);
             #[cfg(feature = "mask-windows")]
             crate::windows::handler_leaving();
             if preempt {
@@ -205,7 +205,7 @@ fn exception(frame: &Frame, entry: u64) -> ! {
 /// `device_irq_entry` brackets its handler: an arm that posts a watch or lets
 /// go of a `Lock` reaches `preempt::enable`, whose pass at depth zero would
 /// otherwise run inside the handler, before its `end`.
-fn irq(frame: &Frame, from_el0: bool) -> bool {
+fn irq(from_el0: bool) -> bool {
     let Some(intid) = irqchip::acknowledge() else {
         percpu::irq_took(Source::Spurious);
         return false;
@@ -221,11 +221,7 @@ fn irq(frame: &Frame, from_el0: bool) -> bool {
         percpu::irq_took(Source::Timer);
         // Before anything that can take a lock, in both levels: a CPU spinning
         // on one still takes this interrupt, which is why the poll is here.
-        if from_el0 {
-            crate::deadline::poll();
-        } else {
-            crate::deadline::poll_in_kernel(frame.elr);
-        }
+        crate::deadline::poll();
         #[cfg(feature = "boot-actuators")]
         storm::tick();
         if from_el0 {

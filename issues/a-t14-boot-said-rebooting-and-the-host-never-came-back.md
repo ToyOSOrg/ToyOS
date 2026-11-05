@@ -18,9 +18,8 @@ entry records), is whole and ends:
 ```
 
 So the kernel ran the whole quiesce and made its last word durable; what
-follows `Rebooting.` — the black box seal, `xhci::seal_shut`, the reset
-register — writes nothing the stick keeps, and the black box is read only by
-the next boot of a ToyOS loader, which did not happen. Whether the reset was
+follows `Rebooting.` — `xhci::seal_shut`, the reset register — writes
+nothing the stick keeps. Whether the reset was
 written, whether firmware came back, and whether the host's Linux came up
 without its network (the host is reached over the same I219 this boot's netd
 left faulted) are not separable from anything on the stick. A 454-line copy of
@@ -29,5 +28,5 @@ truncated read, not the file.
 
 **Exit condition**: a metal run whose machine does not come back says which of
 those three it was — the owner's panel photograph, the host's own boot log for
-the window, or the black box read by a ToyOS boot — rather than "did not come
-back".
+the window, or a record that survives the reset (`issues/a-crash-record-survives-a-reset-outside-ram.md`) —
+rather than "did not come back".

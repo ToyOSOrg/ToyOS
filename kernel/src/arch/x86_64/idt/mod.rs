@@ -339,22 +339,6 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
     crate::arch::cpu::ac_witness("trap_dispatch");
     // SAFETY: `frame` is `rsp` from common_entry's pushes on this CPU's kernel stack, held nowhere else.
     let frame = unsafe { &mut *frame };
-    // **First, and before every handler below it.** A handler that faults again
-    // is a double and then a triple fault, and a triple fault is a reset that
-    // wrote nothing; the registers are what this entry can say without risking
-    // that, and the report overwrites them if the machine gets that far. Every
-    // vector seals but a Ring 3 page fault, which every first touch of a page
-    // takes, and a user copy's (`arch::uaccess`): it is served or ends its
-    // process through the crash path, which reports, or the copy answers what
-    // it did not copy; any other fault inside its handler is a Ring 0 fault and
-    // seals.
-    let page_fault = Vector::from_raw(frame.vector) == Vector::PageFault;
-    // A copy's fault on its kernel side is a kernel fault, and seals.
-    let copy_fault = super::uaccess::fixup(frame.rip).is_some() && toyos_userbound::is_user_addr(cpu::read_cr2());
-    let user_page_fault = page_fault && (toyos_userbound::Ring::of_cs(frame.cs).is_user() || copy_fault);
-    if !user_page_fault {
-        crate::blackbox::record_fault(&fault_of(frame));
-    }
     match Vector::from_raw(frame.vector) {
         Vector::DoubleFault => exceptions::double_fault_handler(frame),
         Vector::MachineCheck => exceptions::machine_check_handler(frame),
@@ -389,32 +373,6 @@ fn windows_entered(frame: &TrapFrame) {
     }
     crate::windows::irqs_masked();
     crate::windows::preempt_raised();
-}
-
-/// This CPU's state as the black box records it, read out of the frame the stub
-/// pushed and the three control registers the frame does not carry.
-///
-/// `gs` is not trusted for the CPU id: this runs on a machine that has already
-/// faulted once, and a per-CPU block that is what faulted would fault again here.
-fn fault_of(frame: &TrapFrame) -> toyos_blackbox::Fault {
-    toyos_blackbox::Fault {
-        vector: frame.vector,
-        error_code: frame.error_code,
-        rip: frame.rip,
-        rsp: frame.rsp,
-        rflags: frame.rflags,
-        cr2: cpu::read_cr2(),
-        cr3: cpu::read_cr3(),
-        cpu: if crate::log::PERCPU_READY.load(core::sync::atomic::Ordering::Relaxed) {
-            u64::from(percpu::cpu_id())
-        } else {
-            toyos_blackbox::Fault::NO_CPU
-        },
-        registers: [
-            frame.rax, frame.rbx, frame.rcx, frame.rdx, frame.rsi, frame.rdi, frame.rbp,
-            frame.r8, frame.r9, frame.r10, frame.r11, frame.r12, frame.r13, frame.r14, frame.r15,
-        ],
-    }
 }
 
 /// Disable the legacy 8259 PIC.

@@ -34,11 +34,6 @@ macro_rules! actuators {
 }
 
 actuators! {
-    /// Wedge the machine at the shutdown syscall — after the job list has run
-    /// and before anything is torn down — instead of resetting. The negative
-    /// control on `crate::deadline`: nothing else in this kernel ends it.
-    wedge_before_reset = "wedge-before-reset";
-
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
@@ -60,14 +55,6 @@ actuators! {
     /// Give the machine's stop no time: one sweep, and a thread not parked at
     /// it outlasts the stop. Judged by `machine_shutdown_short_stop`.
     stop_budget_spent = "stop-budget-spent";
-
-    /// Wedge one CPU with interrupts off, spinning on a lock another CPU holds
-    /// and never gives back: the negative control on `crate::hardlockup`, and a
-    /// machine nothing else in this tree ends. Where CPUID states no
-    /// performance counter it also has one CPU send the victim the NMI the
-    /// counter would have, which is the only way a TCG guest reaches that
-    /// decision; on hardware the counter does it and nothing is sent.
-    hard_lockup_probe = "hard-lockup-probe";
 
     /// Send one NMI from the idle loop, and return from its handler via `iretq` with a second NMI already pending.
     nmi_nested = "nmi-nested";
@@ -171,12 +158,6 @@ actuators! {
     /// Panic once boot phases are done, with no thread current.
     test_late_panic = "test-late-panic";
 
-    /// Seal the black box under an identity that is not this stick's, which is
-    /// what a record another image left in the same memory looks like. The
-    /// loader pass after it must clear the record and boot its kernel, not
-    /// report it and end the chain.
-    blackbox_foreign_identity = "blackbox-foreign-identity";
-
     /// Panic a few seconds after a compositor claims the framebuffer, from an idle CPU.
     metal_panic_probe = "metal-panic-probe";
 
@@ -197,11 +178,6 @@ actuators! {
 #[cfg(feature = "boot-actuators")]
 const IMPLIES: &[(&str, &[&str])] = &[
     ("metal-panic-probe", &["diag-tick"]),
-    // The staged CPU has to still be deaf when its bound passes, and this boot
-    // would otherwise have handed the machine back at the end of its job list —
-    // so the control that ends a machine no other bound ends is staged over the
-    // one that stops this machine ending itself.
-    ("hard-lockup-probe", &["wedge-before-reset"]),
 ];
 
 #[cfg(feature = "boot-actuators")]

@@ -81,14 +81,13 @@ guest's call runs a handler:
   (`kernel/src/hardlockup/mod.rs`; half the deadline). Its sample is an NMI,
   delivered to the boot processor when the handler returns and before the
   kernel's own judgement above. It finds `IF` clear in `smi_cmd::answer` and
-  no interrupt taken, and where that has lasted its bound it seals a `WEDGED`
-  record that names cpu0 and that `pc` and resets the machine, unless an
-  asker's panic stood it down first. Whether the counter that raises the
+  no interrupt taken, and where that has lasted its bound it resets the
+  machine, unless an asker's panic stood it down first. Whether the counter that raises the
   sample counts in system management mode on the T14 is unread.
 - **The boot deadline, on such an image** (`kernel/src/deadline.rs`), is
   polled from a timer entry, and none is taken while every CPU is stopped:
-  the first tick after a handler that outlasted it seals `the boot deadline
-  expired`, where nothing above took the seal.
+  the first tick after a handler that outlasted it resets the machine, where
+  nothing above took the reset first.
 - **A handler that never returns.** Where its interrupt stopped every CPU,
   no instruction of this kernel runs again and it says nothing: the machine
   is the firmware's, and a hand on the power button ends it. Where it

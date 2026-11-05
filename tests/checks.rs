@@ -655,62 +655,6 @@ mod checks {
         assert!(clock_kept_its_counter(&demoted).is_err());
     }
 
-    /// [`irq_census`] over two censuses, X's from cpu2 and Y's from cpu3, whose
-    /// lines are in no read order: a CPU's census is the largest count each
-    /// source reaches on any of its lines, and the largest issuer total bounds
-    /// every delivery.
-    #[test]
-    fn irq_census_verdict() -> Result<(), String> {
-        let census = |at: &str, on: u32, cpu: u32, kick: u64, tlb: u64| {
-            let userdev = if cpu == 0 { 40 } else { 0 };
-            format!(
-                "[ {at} cpu{on} kernel] irq: cpu{cpu} timer=100 kick={kick} userdev={userdev} \
-                 dmafault=0 rtc=0 tlb={tlb} nmi=0 spurious=0 unclaimed=0\n"
-            )
-        };
-        let issued = |at: &str, on: u32, total: u64| {
-            format!(
-                "[ {at} cpu{on} kernel] tlb: shootdowns={total} wait=12us max=3us dlopen=0 pcid=0 \
-                 mmio=0 unmap={total} pipe=0 staged=0 bench=0\n"
-            )
-        };
-        let y_cpu2 = census("2.001", 3, 2, 2, 7);
-        let x_cpu3 = census("2.004", 2, 3, 2, 9);
-        let (x_issued, y_issued) = (issued("2.005", 2, 9), issued("2.006", 3, 7));
-        let good = [
-            census("2.000", 2, 0, 3, 0),
-            census("2.001", 3, 0, 3, 0),
-            census("2.001", 3, 1, 6, 7),
-            y_cpu2.clone(),
-            census("2.001", 3, 3, 2, 7),
-            census("2.004", 2, 1, 5, 7),
-            census("2.004", 2, 2, 2, 9),
-            x_cpu3.clone(),
-            x_issued.clone(),
-            y_issued.clone(),
-        ]
-        .concat();
-        irq_census(&good).map_err(|e| format!("two censuses out of read order were refused: {e}"))?;
-
-        let refused = |what: &str, capture: &str, says: &str| match irq_census(capture) {
-            Ok(()) => Err(format!("{what} was accepted")),
-            Err(e) if e.contains(says) => Ok(()),
-            Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
-        };
-        refused(
-            "an AP's device delivery on a line that is not that AP's last",
-            &good.replace(&y_cpu2, &y_cpu2.replace("userdev=0", "userdev=1")),
-            "addressed to physical destination 0",
-        )?;
-        refused(
-            "a delivery past the largest issued count",
-            &good.replace(&x_cpu3, &census("2.004", 2, 3, 2, 10)),
-            "without being counted",
-        )?;
-        refused("no issuer line", &good.replace(&x_issued, "").replace(&y_issued, ""), "said nothing")?;
-        Ok(())
-    }
-
     /// What the declaration itself has to be, before any of it means anything.
     /// Which shared-boot binaries need `SYS_DEBUG`, asked of their source.
     ///
@@ -1046,16 +990,6 @@ mod checks {
     }
 
     #[test]
-    fn metal_stop_owes_its_record() {
-        metal_checks::the_stop_owes_its_record();
-    }
-
-    #[test]
-    fn metal_bound_fires_within_one_period_of_itself() {
-        metal_checks::a_bound_fires_within_one_period_of_itself();
-    }
-
-    #[test]
     fn metal_name_measured_twice_is_refused() {
         metal_checks::a_name_measured_twice_is_refused();
     }
@@ -1126,11 +1060,6 @@ mod checks {
     }
 
     #[test]
-    fn metal_cleared_page_owes_no_panel() {
-        metal_checks::a_cleared_page_owes_no_panel();
-    }
-
-    #[test]
     fn metal_loader_kernel_and_program_count_from_one_zero() {
         metal_checks::the_loader_the_kernel_and_a_program_count_from_one_zero();
     }
@@ -1146,9 +1075,9 @@ mod checks {
         }
         let selected: Vec<(&str, &'static metal::Metal)> = METAL
             .iter()
-            .find(|(name, _)| *name == "blackbox_unclaimed_page")
+            .find(|(name, _)| *name == "memory_overwrite_requested")
             .map(|(name, decl)| vec![(*name, decl)])
-            .ok_or_else(|| "blackbox_unclaimed_page is not registered".to_string())?;
+            .ok_or_else(|| "memory_overwrite_requested is not registered".to_string())?;
         let verdict = metal::run(mode, None, &selected, &[], &[], true);
         if verdict != metal::Verdict::Green {
             return Err(format!("--metal --list produced {verdict:?}, not Green"));
@@ -1173,132 +1102,43 @@ mod checks {
     /// The pass before the handoff, which every `loader.log` opens with.
     const HANDOFF: &str = "Loader log: the kernel handoff begins, so this file ends here\n";
 
-    /// Four judges fed a T14 readback's lines: each record they ask for is
-    /// written after the file was made whole, so it crosses only on the sealed
-    /// page — and a page without it still reds.
+    /// The judges that read the loader's file and the kernel's records off the
+    /// volume, fed a T14 readback's lines: the memory-overwrite request the
+    /// loader set, the reset register's decode, and the disk load's lines under
+    /// a boot its deadline ended rather than one that stopped.
     #[test]
-    fn metal_judges_read_the_page_for_what_only_the_page_carries() {
-        let done = |tail: &str| {
-            format!(
-                "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
-                 Black box: the last boot read DONE, so it handed the machine back on purpose and \
-                 this chain ends here\n\
-                 | log: this boot's newest records follow, newest first\n{tail}\
-                 Loader log: the last boot is accounted for, so this pass resets the machine\n",
-                bootlog::SEPARATOR
-            )
-        };
-        let rebooted = "| log-tail: [ 1.516 cpu0 kernel] Rebooting.\n";
-        let stopped = "| log-tail: [ 1.209 cpu0 kernel] stop: 13 of 13 userland thread(s) stopped across 8 \
-                       cpu(s) in 0 ms of a 2010 ms budget over 1 sweep(s), 0 of 38 userland block \
-                       operation(s) still open\n";
+    fn metal_judges_read_the_volume() {
+        let judge = metal_judge("memory_overwrite_requested");
+        let set = format!(
+            "{HANDOFF}[ 9.809 cpu0 loader] Memory overwrite: MemoryOverwriteRequestControl read [00] \
+             (attributes 0x7) and is now [01], so firmware overwrites memory before the next boot\n"
+        );
+        assert_eq!(judge(&[&readback("testcases", &set, "")]), Ok(()));
+        let refused = set.replace("read [00]", "reads [00]").replace("and is now [01]", "and firmware refused [01] (WRITE_PROTECTED)");
+        assert!(judge(&[&readback("testcases", &refused, "")]).is_err());
+        let undefined = format!(
+            "{HANDOFF}Memory overwrite: firmware defines no MemoryOverwriteRequestControl, so it \
+             promises no wipe after a reset and nothing is written\n"
+        );
+        assert!(judge(&[&readback("testcases", &undefined, "")]).is_err());
 
         let jobcase =
             "[2026-09-29 10:40:36  0.000 cpu0 kernel] ACPI: reset register SystemIO 0xcf9 <- 0x06\n";
         let judge = metal_judge("machine_reboot");
-        assert_eq!(judge(&[&readback("jobcase", &done(rebooted), jobcase)]), Ok(()));
-        assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
+        assert_eq!(judge(&[&readback("jobcase", HANDOFF, jobcase)]), Ok(()));
+        let none = "[2026-09-29 10:40:36  0.000 cpu0 kernel] ACPI: no reset register this kernel writes\n";
+        assert!(judge(&[&readback("jobcase", HANDOFF, none)]).is_err());
 
-        // What the seal itself writes of the machine, above the ring's tail.
-        let census = "| irq: cpu0 timer=9 kick=2 userdev=1729 dmafault=0 rtc=0 tlb=0 \
-                      nmi=0 spurious=0 unclaimed=0\n\
-                      | tlb: shootdowns=4 wait=12us max=3us dlopen=0 pcid=0 mmio=0 unmap=4 pipe=0 staged=0 \
-                      bench=0\n\
-                      | irq: unclaimed vectors no-isr=0\n\
-                      | panel: paints=9 px=2896256 us=5688 max_us=1285\n";
-        let sealed = |census: &str, tail: &str| {
-            format!(
-                "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
-                 Previous boot's panic: the last boot read WEDGED, so a bound of its own ended it \
-                 and this chain ends here\n\
-                 | the boot deadline expired: a bound of 120000 ms, reached at 120061 ms, with this \
-                 machine in `complete`. Where each CPU's timer last found the kernel:\n\
-                 | The tail of the log ring follows ... which is what nothing was draining.\n{census}\
-                 | usb-quiesce: no barrier was taken, so this reset is not the shutdown's\n{tail}\
-                 Loader log: the last boot is accounted for, so this pass resets the machine\n",
-                bootlog::SEPARATOR
-            )
-        };
-        let wedged = |tail: &str| sealed(census, tail);
+        let judge = metal_judge("the_disk_survives_a_reset_under_load");
         let kernel = "[2026-09-29 10:33:28  0.000 cpu0 kernel] panic console: armed 1920x1080 \
                       stride=1920 format=1 at 0x4000000000, write-combining\n";
-        let staged = "| [ 1.509 cpu1 kernel] wedge: staged, and only a bound this machine runs under ends it: \
-                      every CPU stops taking scheduler passes from here\n";
-        let awake = |cpu: u32| format!("| [ 1.509 cpu{cpu} kernel] wedge: cpu{cpu} arrived with interrupts on\n");
-        let deaf = "| [ 1.509 cpu1 kernel] wedge: cpu1 arrived with interrupts off, through the syscall \
-                    gate, and takes them again here\n";
-        let judge = metal_judge("boot_deadline_ends_a_wedge");
-        // The seal's line for each CPU, cpu1's being `staging`.
-        let spin = "kernel::deadline::this_cpu+0x42";
-        let pcs = |staging: &str| format!("|   cpu0 pc=0xffff80006051b0b2  {spin}\n|   cpu1 pc={staging}\n");
-        let inside = pcs(&format!("0xffff80006051b0b2  {spin}"));
-        let wedge = format!("{staged}{}{}{inside}", awake(1), awake(0));
-        assert_eq!(judge(&[&readback("deadlinewedge", &wedged(&wedge), kernel)]), Ok(()));
-        assert!(judge(&[&readback("deadlinewedge", &wedged(""), kernel)]).is_err());
-        // A death that sealed no census of the machine, and one that sealed all but the shootdowns'.
-        assert!(judge(&[&readback("deadlinewedge", &sealed("", &wedge), kernel)]).is_err());
-        let no_tlb: String = census.split_inclusive('\n').filter(|line| !line.contains("tlb: ")).collect();
-        assert!(judge(&[&readback("deadlinewedge", &sealed(&no_tlb, &wedge), kernel)]).is_err());
-        // The staging CPU arrived deaf: the gate masked the syscall's body, and
-        // the others' awake lines say nothing of it.
-        let gated = format!("{staged}{deaf}{}{inside}", awake(0));
-        assert!(judge(&[&readback("deadlinewedge", &wedged(&gated), kernel)]).is_err());
-        // Awake, but not the CPU that staged it.
-        let elsewhere = format!("{staged}{}{inside}", awake(0));
-        assert!(judge(&[&readback("deadlinewedge", &wedged(&elsewhere), kernel)]).is_err());
-        // The seal puts the staging CPU somewhere else, or at no symbol: the
-        // entry handed the record a word that is not the interrupted `rip`.
-        for staging in ["0xffff8000605490fe  <kernel::sync::Lock<bool>>::lock+0xee", "0x0000000000000003"] {
-            let misplaced = format!("{staged}{}{}{}", awake(1), awake(0), pcs(staging));
-            assert!(judge(&[&readback("deadlinewedge", &wedged(&misplaced), kernel)]).is_err());
-        }
-        // No line for the staging CPU.
-        let unnamed = format!("{staged}{}{}|   cpu0 pc=0xffff80006051b0b2  {spin}\n", awake(1), awake(0));
-        assert!(judge(&[&readback("deadlinewedge", &wedged(&unnamed), kernel)]).is_err());
-
-        // The disk load's boot: its deadline ended it while the job's lines
-        // were reaching /log; one whose job never wrote, or that handed the
-        // machine back, is no reset under load.
-        let judge = metal_judge("the_disk_survives_a_reset_under_load");
         let line = |n: u32| format!("[2026-09-29 10:33:40 20.100 test-runner pid=12] stick_load: line {n} {}\n", "x".repeat(840));
         let wrote = format!("{kernel}{}", (0..1200).map(line).collect::<String>());
         let short = format!("{kernel}{}", (0..10).map(line).collect::<String>());
-        assert!(judge(&[&readback("usbload", &wedged(""), &short)]).is_err(), "ten lines are no mebibyte");
-        assert_eq!(judge(&[&readback("usbload", &wedged(""), &wrote)]), Ok(()));
-        assert!(judge(&[&readback("usbload", &wedged(""), kernel)]).is_err());
-        let handed_back = format!("{}| log-tail: [20.200 cpu0 kernel] Rebooting.\n", wedged(""));
-        assert!(judge(&[&readback("usbload", &handed_back, &wrote)]).is_err());
-    }
-
-    /// The foreign-identity arm's pass after the reset: the record it cleared
-    /// was sealed `DONE`, so the stop the arm staged finished.
-    #[test]
-    fn the_foreign_record_judge_demands_the_stop_sealed_done() {
-        let loader = format!(
-            "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
-             Black box: 0x8000000 held a DONE record another image left in this memory ([3e, d4, \
-             0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, 81], and this stick is [c1, d4, \
-             0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, 81]), armed at 2026-09-29-131341. \
-             It has been cleared and this pass boots its kernel\n\
-             Boot attempts: this image has had the machine 1 time(s) without reporting; now 0\n\
-             {}\n\
-             Loader log: the last boot is accounted for, so this pass resets the machine\n",
-            bootlog::SEPARATOR,
-            bootlog::HUNG_WITHOUT_A_RECORD
-        );
-        let kernel = "[2026-09-29 13:13:43  1.171 cpu0 kernel] Boot: complete (1171ms)\n";
-        let judge = metal_judge("blackbox_foreign_record");
-        assert_eq!(judge(&[&readback("foreignrecord", &loader, kernel)]), Ok(()));
-        for state in ["PANIC", "WEDGED"] {
-            let ended = loader.replace("held a DONE record", &format!("held a {state} record"));
-            assert!(judge(&[&readback("foreignrecord", &ended, kernel)]).is_err());
-            let stale = format!(
-                "Black box: 0x8000000 held a DONE record another image left in this memory\n{ended}"
-            );
-            assert!(judge(&[&readback("foreignrecord", &stale, kernel)]).is_err());
-        }
-        let unbounded = loader.replace(bootlog::HUNG_WITHOUT_A_RECORD, "");
-        assert!(judge(&[&readback("foreignrecord", &unbounded, kernel)]).is_err());
+        assert!(judge(&[&readback("usbload", HANDOFF, &short)]).is_err(), "ten lines are no mebibyte");
+        assert_eq!(judge(&[&readback("usbload", HANDOFF, &wrote)]), Ok(()));
+        let stopped = format!("{wrote}[2026-09-29 10:33:52 32.000 supervisor] {} (Reboot)\n", bootlog::STOPPING);
+        assert!(judge(&[&readback("usbload", HANDOFF, &stopped)]).is_err(), "a boot that stopped had no reset under load");
     }
 
     /// A member that reads another test binary by path.

@@ -47,8 +47,8 @@ every CPU.
 
 ## Failure
 
-- A broken kernel invariant stops the machine with a report that survives the
-  reset ([Logs and diagnostics](diagnostics.md)).
+- A broken kernel invariant stops the machine with a report on its panel and
+  console ([Logs and diagnostics](diagnostics.md)).
 - A device that DMAs outside its grant is recorded and stopped, never a crash.
 
 Programs reach the kernel through its system-call ABI

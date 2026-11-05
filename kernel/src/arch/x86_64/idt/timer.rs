@@ -51,8 +51,6 @@ pub(super) extern "sysv64" fn timer_entry() {
         // The boot deadline, from the one branch that runs while a lock is
         // held: a CPU spinning on a ticket still takes this interrupt, and that
         // is the whole reason the poll is here and not only in the Rust half.
-        // The interrupted `rip`, above the ten registers pushed on this branch.
-        "mov rdi, [rbp + 80]",
         "call {deadline}",
         "mov rsp, rbp",
         "pop rbp",
@@ -62,7 +60,7 @@ pub(super) extern "sysv64" fn timer_entry() {
         "pop rax",
         "iretq",
         #[cfg(not(feature = "mask-windows"))]
-        deadline = sym crate::deadline::poll_in_kernel,
+        deadline = sym crate::deadline::poll,
         #[cfg(feature = "mask-windows")]
         deadline = sym ring0_tick,
         handler = sym timer_handler,
@@ -78,10 +76,10 @@ pub(super) extern "sysv64" fn timer_entry() {
 /// The Ring 0 branch's Rust half under `mask-windows`: it interrupted a CPU
 /// with interrupts open, and its `iretq` opens them again.
 #[cfg(feature = "mask-windows")]
-extern "sysv64" fn ring0_tick(pc: u64) {
+extern "sysv64" fn ring0_tick() {
     crate::windows::irqs_masked();
     crate::windows::handler_entered();
-    crate::deadline::poll_in_kernel(pc);
+    crate::deadline::poll();
     crate::windows::handler_leaving();
     crate::windows::irqs_unmasking();
 }

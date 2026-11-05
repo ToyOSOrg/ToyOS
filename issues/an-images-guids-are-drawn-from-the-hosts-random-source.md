@@ -38,19 +38,16 @@ The log partition's GUID is what keeps a throwaway key's anti-rollback floor
 per image: the floor's UEFI variable is named by it
 (`lib/update/src/floor.rs`), so that no image the key signs holds another to
 a floor (`build/signing.rs`). The loader finds the log volume by it
-(`loader/src/loaderlog.rs`). Its black box takes it as the owner of a record
-left in memory, and clears a record another image left rather than report it
-as this one's (`loader/src/main.rs`, `loader/src/blackbox.rs`). Its attempts
-record on the log partition names it, and one that names another partition
-is refused (`loader/src/attempt.rs`, `lib/update/src/record.rs`). Whatever
+(`loader/src/loaderlog.rs`). Its proof record on the log partition names
+it, and one that names another partition is refused (`loader/src/proof.rs`,
+`lib/update/src/record.rs`). Whatever
 replaces the draw still gives two images that differ two log GUIDs, and
 decides what a second build of one image inherits from the first one's floor.
 The floor's need ends at stage 3 of
 `issues/the-loader-does-only-what-must-precede-the-handover.md`, which
 deletes `floor::Scope` and names every floor for its key alone, and the
-attempts record's at its stage 5, which replaces that record with the slot
-table's good flag. The black box's does not: stage 9 moves its check into the
-kernel, still keyed on the log GUID.
+proof record's at its stage 5, which replaces that record with the slot
+table's good flag.
 
 **Owner**: `issues/toyos-builds-itself.md`, whose M4 exits on a guest build
 of the image whose hashes match the host build of the same commit, which no

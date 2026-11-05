@@ -72,9 +72,7 @@ the event it stands for has no word a test can read:
 - Drains of work handed to another thread: the 200 ms `iod` drains in
   `writeback_durability` and `home_backing_revoked`, `fat_backing_revoked`'s
   drain, and `log_gate`'s `QUIET_READS`.
-- Product clocks a QEMU boot races: `boot_deadline_ends_a_wedge`'s 15 s
-  deadline against the job list reaching its shutdown,
-  `hard_lockup_ends_a_deaf_cpu`'s 30 s, `loader_watchdog_arms` reading
+- Product clocks a QEMU boot races: `loader_watchdog_arms` reading
   `timeout=0` before the TCO expires, and the stop's 2010 ms budget (a stop
   that gives up is not judged in QEMU).
 

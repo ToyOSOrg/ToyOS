@@ -16,10 +16,11 @@ toyos-acpi = { path = "../lib/acpi" }
 # from the pointers that write it and host-tested against machines this one is
 # not.
 toyos-bootmap = { path = "../lib/bootmap" }
-toyos-blackbox = { path = "../lib/blackbox" }
 toyos-wallclock = { path = "../lib/wallclock" }
 # The kernel section, laid out by the build: no ELF is parsed here.
 toyos-kimage = { path = "../lib/kimage" }
+# The stop mark `logkeeper` writes on the log volume, which proves a boot.
+toyos-logstream = { path = "../lib/logstream" }
 # ROOT is picked off the boot disk by the GPT.
 toyos-gpt = { path = "../lib/gpt" }
 # Which ROOT, how it is read in bounded chunks, and the handoff the kernel

@@ -37,7 +37,7 @@ PR #539 does not land. Its pieces:
   `update_no_slot_boots_the_recovery_stick`, and the harness's
   `recovery_stick` and `RECOVERY_STICK_*`; the `bootvars::state` line;
   `policy::order`'s once and `policy::told`, whose rules `pass::decide` takes;
-  `record.rs`' `once`, with the attempts file; `SLOT_ONCE`, because stage 5's
+  `record.rs`' `once`; `SLOT_ONCE`, because stage 5's
   `KernelArgs` carries a once boot as a field; `LOADER_IS`, because the
   loader names no hash of its own file.
 
@@ -54,8 +54,8 @@ Each stage lands on its own, in this order.
    - `KernelArgs::layout`, at offset 164, carries `LAYOUT`: `0x5459_0000 |
      size_of::<KernelArgs>() as u32`, so a size change moves the word with no
      literal to remember. At this stage that is `0x5459_0000 | 1272`, the size
-     PR #583 asserts. The kernel compares it right after arming the panel and
-     before `blackbox::arm`, and refuses any other value by name. `update`
+     PR #583 asserts. The kernel compares it right after arming the panel,
+     and refuses any other value by name. `update`
      never replaces the ESP loader, so a slot's kernel can meet a loader built
      to another layout. Every field before the word keeps its offset in every
      layout.
@@ -72,17 +72,16 @@ Each stage lands on its own, in this order.
    hours east, and under `SYS_CLOCK_REALTIME` patched to `utc_secs + 7200`.
    `kernel_args_layout_refused` boots with the `loader-writes-no-layout`
    actuator, which makes the loader write 0. It finds the kernel's refusal
-   naming both words, and no `black box:` record before it. No test fails
+   naming both words. No test fails
    where the `IA32_TSC_ADJUST` line is missing.
 
 2. **One boot disk.**
    - `toyos_update::entry::partition` is the one HARDDRIVE rule, taken by
-     `boot_partition`, `rootimage::boot_disk` and `bootnext.rs`. The loader's
-     two decoders go into it: `efi::HardDrive::parse` (`efi/proto.rs`), which
-     reads firmware-built paths, and `bootnext::gpt_signature`, which reads a
-     load option's.
+     `boot_partition` and `rootimage::boot_disk`. The loader's decoder goes
+     into it: `efi::HardDrive::parse` (`efi/proto.rs`), which reads
+     firmware-built paths.
    - Every volume the loader opens (the slot's FAT partition, the log
-     partition and the attempts file on it) is found on the boot disk, where
+     partition and the proof record on it) is found on the boot disk, where
      exactly one match is taken. `loaderlog::volume_handle`'s machine-wide
      first match goes. Every stick written from one image carries the same
      unique GUIDs: `build/image.rs`'s `create_boot_image` draws them once per
@@ -91,7 +90,7 @@ Each stage lands on its own, in this order.
      one `Disk::open` and slot-table read, and one file reader.
      `load_file_bytes`, `MAX_ESP_FILE` and the unsound `alloc_uninit` go.
 
-   **Exit**: `rg 'fn gpt_signature|fn parse' loader/src/{bootnext.rs,efi/proto.rs}`
+   **Exit**: `rg 'fn parse' loader/src/efi/proto.rs`
    finds nothing. `a_path_names_the_partition_of_its_one_hard_drive_node` and
    `a_partitions_disk_is_the_path_before_its_hard_drive_node` pass on the host,
    and fail under two mutations: cutting the disk before the path's last node,
@@ -153,16 +152,14 @@ Each stage lands on its own, in this order.
      The refused-floor site stops writing its reason to `loader.log` before
      its `panic!`: the handler writes it.
    - `alloc_kernel_memory` stops building a `Vec<u8>` over a 2 MiB-aligned
-     allocation. Both relocation unsafes go. `blackbox::Page` is not `Copy`, so
-     `bytes()` mints no second `&'static mut`.
+     allocation. Both relocation unsafes go.
    - The layout word and every field before it keep their offsets, each
      pinned by a compile-time `offset_of!` assert, so moving `layout` fails to
      build. That prefix stays flat. After the word, `KernelArgs` is typed:
      `repr(C)` sub-structs, and `#[repr(C, u32)]` enums for the optional parts
      in place of `u32` presence flags and zero sentinels; a field the typing
-     changes moves after the word. The slot booted and the black-box page are
-     fields, not `boot-slot=` and `blackbox=` text; `slot-refused=` leaves with
-     the fallback.
+     changes moves after the word. The slot booted is a field, not
+     `boot-slot=` text; `slot-refused=` leaves with the fallback.
      `params.rs`' last-one-wins and kernel `main.rs`' branch for a format
      never emitted go. `kernel_stack_addr` is renamed for the offset it
      holds. x86's `_start` reads by `const offset_of!`.
@@ -186,25 +183,23 @@ Each stage lands on its own, in this order.
    writes no `loader.log`.
    `kernel_args_last_layout_refused` boots with
    `loader-writes-the-last-layout` and finds the kernel's refusal naming both
-   words before any `black box:` record. Moving `layout` after
+   words. Moving `layout` after
    `root_read_ticks` fails to build, and so does padding `KernelArgs` back to
    1272 bytes: `size_of::<KernelArgs>()` is then stage 1's size again, the
    derived `LAYOUT` collapses onto the literal `LAST_LAYOUT`
    (`0x5459_0000 | 1272`), and `assert!(LAYOUT != LAST_LAYOUT)` fails the
    build. The tests that read `KernelArgs` pass: `boot_from_power_on`,
-   `bar_placement_is_proven`, `root_withheld_refused`, `blackbox_*` and
-   `update_*`.
+   `bar_placement_is_proven`, `root_withheld_refused` and `update_*`.
 
 5. **A good flag per slot, decided on the host.** Each slot in the table
    carries a good flag, in the word the format reserves; the table's format
-   rises. It replaces the attempts file (`attempt.rs`, `lib/update/src/record.rs`
-   and `main.rs`' accounting) and `slot::proven` as how an image is proven.
+   rises. It replaces the proof record (`loader/src/proof.rs`,
+   `lib/update/src/record.rs`), logkeeper's stop mark and `slot::proven` as
+   how an image is proven.
    Which slot a pass boots is the marked one or none: updates fix forward, and
    the loader's fallback leaves in stage 2 of
    `issues/the-machine-updates-itself-without-ubuntu.md`, which this stage
-   follows. The good flag replaces the black-box page's `DONE` record as the
-   proof of an image; #1196 decides whether this stage must land with the
-   page's removal.
+   follows. #1196 moved that proof from the black-box page to the stop mark.
    - An install writes its slot with the good flag clear, whatever the slot
      held before.
    - Any failure after `verify` in `start_kernel` that the image causes is a
@@ -242,8 +237,9 @@ Each stage lands on its own, in this order.
      differs from `LAST_LAYOUT` (stage 4's derived value, pinned as a literal)
      and `assert!(LAYOUT != LAST_LAYOUT)` builds. This stage is an ABI change.
    - `update --boot-first` writes only the request. The loader writes its own
-     `HD(…)/File(…)` entry and puts it first. Once stage 7 deletes
-     `bootnext.rs`, that is the only boot-variable write.
+     `HD(…)/File(…)` entry and puts it first. The loader no longer writes
+     `BootNext`, so that is the only boot-variable write besides the floor and
+     the memory-overwrite request.
    - This stage deletes the floor issue's "a floor that never rises" bullet
      and its exit's second half.
 
@@ -323,8 +319,7 @@ Each stage lands on its own, in this order.
 
    **Exit**: `bench_loop_drives_a_toyos_machine` passes in QEMU. On the T14,
    with Ubuntu never started: a whole run, its sessions and every boot that
-   goes by `--once` (`deadlinewedge`, `hardlockup`, `usbload` and
-   `foreignrecord` among them), gives the verdicts a per-boot run gave at the
+   goes by `--once` (`usbload` among them), gives the verdicts a per-boot run gave at the
    commit this stage branches from; a kernel change boots; a slot with a
    flipped byte, no signature or a lower security version is refused by name;
    a slot whose `sshd` refuses the host's key is never marked good; a `--once` image that panics
@@ -333,8 +328,7 @@ Each stage lands on its own, in this order.
    old one booting.
 
 7. **Ubuntu leaves the loop.** Delete `toyos-metal`'s `--via-ubuntu` path,
-   `--metal-via-ubuntu`, `loader/src/bootnext.rs` and test-runner's
-   job-list mode. After a reset the firmware comes back to the loader because
+   `--metal-via-ubuntu` and test-runner's job-list mode. After a reset the firmware comes back to the loader because
    ToyOS's entry is first (stage 5).
    - `issues/a-hung-boots-log-partition-is-wiped-by-the-next-runs-flash.md`,
      `issues/the-metal-loop-writes-the-readback-volume-into-a-directory-it-has-not-made.md`
@@ -366,11 +360,9 @@ Each stage lands on its own, in this order.
      uses, and a window `map_mmio` maps is refused the `acpi` claim's holder
      for the machine's life. How the kernel reaches it and leaves the page to
      AML is not decided.
-   - `loader/src/watchdog.rs`' `survey` stays: on every pass, the passes
-     that boot no kernel among them, it reads and clears the FCH's
-     `S5ResetStat` and `WatchdogFired` and stops a count the last boot left.
-     It goes to the kernel with stage 9, which removes those passes, and
-     needs the same PM access.
+   - `loader/src/watchdog.rs`' `survey` stays: on every pass it reads and
+     clears the FCH's `S5ResetStat` and `WatchdogFired` and stops a count the
+     last boot left. It goes to the kernel with the same PM access.
    - Deleted: `loader/src/watchdog.rs`' arm, `arch::pio`, the kernel's
      on-arrival read with `ARMED_ON_ARRIVAL` and `UNARMED_ON_ARRIVAL`, and
      `tests/common/power.rs`' `loader_armed` and `watchdog_quiet`'s loader
@@ -384,22 +376,3 @@ Each stage lands on its own, in this order.
    seen the TCO reset the T14, a boot there that hangs right after the arm,
    before `mm::init`, is reset by the TCO; moving the arm back after
    `pci::enumerate` makes that row fail.
-
-9. **The crash report belongs to the kernel.** The loader hands the last
-   boot's record to the kernel instead of decoding it. The kernel logs it, and
-   `logd` carries it to `/log`.
-   - The kernel takes `harvest`'s check that a record belongs to the stick
-     that wrote it (the log partition's GUID).
-   - The kernel's report carries the record's byte count and
-     `DROPPED_OPENS_WITH`'s count.
-   - The report pass goes, taking with it `end_this_pass`, the chain
-     constants, `loaderlog`'s chain lines, `armed_at`'s `GetTime`, everything
-     else in `loader/src/blackbox.rs` except the claim and the arm.
-   - `ENDS_AT_CHAIN` goes, so this stage rewrites the exit of
-     `issues/a-wedged-reports-newest-records-were-cut-by-the-loaders-own-log-file.md`:
-     a `deadlinewedge` rerun whose `/log` carries the `WEDGED` report with its
-     byte count and drop line.
-
-   **Exit**: `blackbox_panic_chain` reads the previous boot's panic out of
-   `/log`, with none of it in `loader.log`, and every pass boots a kernel.
-   Withholding the handover makes the test fail.

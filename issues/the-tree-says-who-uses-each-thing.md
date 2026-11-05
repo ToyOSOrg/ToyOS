@@ -129,7 +129,7 @@ apps/     CLAUDE.md (sdk/ and registries only; Linux under Wayland, macOS, Windo
           toyfetch when built
 sdk/      CLAUDE.md (identity, sysroot, publication; std links abi and toyos)
           abi/ toyos/ std/ keymap/ font/ window/ filepicker/ osrelease/ libc/ (arch/)
-lib/      acpi bcachefs blackbox blockhold blockring bootmap elf elide fat32 gpt hda inspect
+lib/      acpi bcachefs blockhold blockring bootmap elf elide fat32 gpt hda inspect
           logstream manifest quiesce rootimage swap symbols tco tmpdir tsc untrusted
           update userbound wallclock xhci
 share/    mirrors /system/share: fonts/ (+ OFL) icons/ (+ MIT)

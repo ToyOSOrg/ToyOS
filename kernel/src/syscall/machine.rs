@@ -132,21 +132,11 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
         log!("power: this machine is already stopping, so this caller stops with the rest");
         return Err(SyscallError::AlreadyExists);
     }
-    // Before the watchdog is disarmed and before a byte is synced: what the
-    // control stages is a boot that ran its job list and then stopped, which is
-    // the shape the T14 hangs in.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::wedge_before_reset() {
-        crate::deadline::stage_a_wedge();
-    }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::arch::watchdog::disarm();
     // Every userland thread stops here, the log's writer and the UART's holder
     // with the rest: the supervisor had the log flush before it asked for this stop.
     let (stopped, stopping) = crate::quiesce::stop();
-    // From here on nothing carries a record to a file: the seal below takes
-    // every one stamped after this one, the newest the stop found.
-    let stop_began = crate::log::read::newest_committed();
     // Held to the machine's end: every record below reaches the UART before a
     // CPU is taken down.
     let mut wire = crate::log::console::take_for_the_stop();
@@ -162,19 +152,7 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
         crate::alert!("{stopped}");
     }
     log!("{last}");
-    // Order is load-bearing: the console drain, the seal, then the caller's
-    // non-returning call.
     wire.drain();
-    // The next boot's loader reads this page to learn how the last one ended,
-    // and a machine that was asked to stop is the one answer that is not a
-    // death. Without it the loader would find the loader's own `ARMED` and
-    // report a kernel that vanished. The reset's own account is appended under
-    // it.
-    crate::blackbox::record_done();
-    // Under that seal, because it extends it: the stop's own records, the
-    // census and the last word among them. Nothing wrote them to `/log`,
-    // and on a machine with no serial port this is their only reader.
-    crate::log::seal_tail(stop_began);
     Ok((stopping, wire))
 }
 

@@ -250,11 +250,11 @@ dependencies = [
  "bcachefs",
  "toyos-abi",
  "toyos-acpi",
- "toyos-blackbox",
  "toyos-bootmap",
  "toyos-devicepath",
  "toyos-gpt",
  "toyos-kimage",
+ "toyos-logstream",
  "toyos-microcode",
  "toyos-random",
  "toyos-rootimage",
@@ -1555,7 +1555,6 @@ dependencies = [
  "toyos-abi",
  "toyos-acpi",
  "toyos-amdvi",
- "toyos-blackbox",
  "toyos-bootmap",
  "toyos-devicepath",
  "toyos-gicv3",
@@ -3578,10 +3577,6 @@ name = "toyos-ax2xx"
 version = "0.1.0"
 
 [[package]]
-name = "toyos-blackbox"
-version = "0.1.0"
-
-[[package]]
 name = "toyos-blockdev"
 version = "0.1.0"
 
@@ -3638,7 +3633,6 @@ dependencies = [
  "toml",
  "toyos",
  "toyos-abi",
- "toyos-blackbox",
  "toyos-blockdev",
  "toyos-crypto",
  "toyos-fat32",
@@ -3886,7 +3880,6 @@ dependencies = [
  "toyos-build",
  "toyos-fat32-check",
  "toyos-gpt",
- "toyos-quiesce",
  "toyos-tco",
  "toyos-tmpdir",
  "toyos-update",

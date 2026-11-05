@@ -49,9 +49,9 @@ the machine's, and every device shares it.
 `kernel/src/irq_census.rs` counts every delivery per CPU per source in
 `PerCpu`, one `add qword ptr gs:[<off>], 1` for the source; a CPU's total is
 their sum. `irq: cpuN timer=… kick=… …` is printed per CPU once a boot, where
-the machine stops. `irq_census_conservation`
-gates the present-state fact on the T14, off the stop's census on the
-black-box page, and prints cpu0's share of that boot.
+the machine stops, after `logkeeper`'s last flush: on the T14 it reaches no
+file, and no metal row reads it since the black-box page that carried it went
+with the memory-overwrite request.
 
 The QEMU suite reads no census: the harness kills its guests, so none reaches
 the stop. The summary that aggregated every guest's census over a run read the
@@ -60,7 +60,8 @@ stopped taking a reading of the whole machine.
 
 **So this track has no instrument for the loaded suites today**, which is a
 present weakness of it: the distribution under load, the number step 4 was
-for, can be taken on no run. What is left is one boot's census on the T14.
+for, can be taken on no run, and since the black-box page went neither can one
+boot's census on the T14.
 The change that lands a placement policy brings a reading a killed guest can
 give, and takes its own baseline with it before it changes anything.
 

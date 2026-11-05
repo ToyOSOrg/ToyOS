@@ -25,10 +25,11 @@ It is intermittent **across job lists**: `ccorpus` had passed, `testcases-mkdir`
 hung in run 22, `metaldevicecase` in run 20 showed the same span of
 `LOCK CONTENTION` at `kernel/src/vfs.rs:32` under stick writes.
 
-**The record exists and could not be read.** The deadline seals `EXPIRED` and
-the tail of the log ring into the black box, and the next loader pass prints it
-into `loader.log` on the stick — but this reset cut a bulk transfer in its data
-phase and left the stick unenumerable, so there was no readback at all. The kernel
+**There was no record to read.** The black-box page that then carried the
+deadline's `EXPIRED` and the log ring's tail across the reset is gone with the
+memory-overwrite request (a record that survives a reset is
+`issues/a-crash-record-survives-a-reset-outside-ram.md`), and this reset also cut a bulk transfer in its data phase and
+left the stick unenumerable, so there was no readback at all. The kernel
 drives no USB now (`af1c5af25`): the stick is usbd's, and a reset this kernel
 performs stops every claimed function's mastering first, usbd's controller
 among them (`pcidev::stop_before_reset`, from `kernel/src/power.rs`). What a
@@ -42,5 +43,5 @@ file header` — and its subject is a storage transport dying
 not a job list hanging with interrupts on; this file's exit condition is
 still unmet.
 
-**Exit condition**: a `loader.log` from a T14 boot that ran to its deadline,
-with the ring tail naming what the machine was doing when it stopped.
+**Exit condition**: a record from a T14 boot that ran to its deadline,
+naming what the machine was doing when it stopped.

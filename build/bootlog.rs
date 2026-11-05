@@ -1,5 +1,10 @@
-//! What a boot's own log says about that boot, and nothing else: the two
-//! records that make a boot a pass, and the grammar for reading them.
+//! What a boot's own log says about that boot, and nothing else: the records
+//! that make a boot a pass, and the grammar for reading them.
+//!
+//! **A boot is judged by what survives it on the log partition**: the loader's
+//! file, `logkeeper`'s files and its stop mark. The memory-overwrite request
+//! wipes whatever a boot left in RAM, and what the kernel says after
+//! `logkeeper`'s last flush reaches only its console and panel.
 //!
 //! Neither the T14 driver's nor the QEMU harness's — `tests/metal` reads a log
 //! off a flashed stick and `tests/common/power.rs` reads one off a guest's log
@@ -11,9 +16,8 @@
 use std::fmt;
 
 /// The word the kernel writes as it hands the machine back to the firmware,
-/// in `kernel/src/syscall/machine.rs`'s `quiesce`. On the console and in
-/// the black-box page's [`LOG_TAIL`], and never in `/log`: nothing is left
-/// running to write it there.
+/// in `kernel/src/syscall/machine.rs`'s `quiesce`. On the console and never in
+/// `/log`: nothing is left running to write it there.
 pub const REBOOTING: &str = "Rebooting.";
 
 /// What the supervisor says as it asks `logkeeper` to make the log whole, before
@@ -27,91 +31,8 @@ pub const STOPPING: &str = toyos_logstream::STOPPING;
 pub const JOB_DEADLINE_SAID: &str =
     "test-runner: the job list ran past its bound, and the job it was inside is";
 
-/// What the kernel's own boot deadline writes into the black box as it ends the
-/// machine, in `kernel/src/deadline.rs`. The loader prints it back under
-/// [`PREVIOUS_PANIC`] on the pass after the reset, and that is the only channel
-/// it has: a wedged boot's `logkeeper` wrote nothing.
-pub const DEADLINE_EXPIRED: &str = "the boot deadline expired";
-
-/// What the kernel logs as it arms that deadline, in `kernel/src/deadline.rs`:
-/// the record whose time the bound is counted from.
+/// What the kernel logs as it arms its boot deadline, in `kernel/src/deadline.rs`.
 pub const DEADLINE_ARMED: &str = "boot deadline: ";
-
-/// What the `wedge-before-reset` actuator says before it stops every CPU, in
-/// `kernel/src/deadline.rs`. The witness that a deadline ended a wedge and not
-/// a boot merely slower than its bound, which is what makes that control one.
-pub const WEDGE_STAGED: &str = "wedge: staged, and only a bound this machine runs under ends it";
-
-/// What each CPU the wedge takes says about the state it arrived in, also in
-/// `kernel/src/deadline.rs`: [`WEDGE_AWAKE`] with interrupts open, and
-/// [`WEDGE_ARRIVED_DEAF`] with them masked.
-///
-/// **The lines that measure that control's own claim.** The CPU that stages it
-/// arrives through the shutdown syscall, whose body runs with interrupts open,
-/// so it must say [`WEDGE_AWAKE`] and no CPU may say [`WEDGE_ARRIVED_DEAF`]: a
-/// syscall that kept them masked is one CPU per boot taking no interrupt at
-/// all, which is not a wedge but a hard lockup. Every other CPU arrives from a
-/// scheduler pass and is awake whatever the gate does, so the awake line is
-/// read of the staging CPU alone.
-pub const WEDGE_ARRIVED_DEAF: &str =
-    "arrived with interrupts off, through the syscall gate, and takes them again here";
-pub const WEDGE_AWAKE: &str = "arrived with interrupts on";
-
-/// What the deadline's seal says before a CPU's last kernel `pc`, after its
-/// `cpuN`, in `kernel/src/deadline.rs`.
-pub const SEAL_PC: &str = " pc=";
-
-/// The function the wedge spins in, in `kernel/src/deadline.rs`, as the seal's
-/// `pc` line names it: the staging CPU's line naming anything else is a seal
-/// that names the wrong instruction.
-pub const WEDGE_SPIN: &str = "kernel::deadline::this_cpu+";
-
-/// What one CPU's own NMI writes into the black box when that CPU has taken no
-/// interrupt for its bound, in `kernel/src/hardlockup/mod.rs`.
-///
-/// The *other* record a machine that stopped can leave, and which of the two it
-/// left is most of the verdict: [`DEADLINE_EXPIRED`] is a machine that stopped
-/// making progress while some CPU still took interrupts, and this one names a
-/// single cpu that stopped taking them and where it was standing when it did —
-/// whatever the rest of the machine was doing.
-pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
-
-/// What the [`LOCKED_UP`] record says before the stuck CPU's `pc`, the `rip`
-/// of the NMI frame that sampled it, in `kernel/src/hardlockup/mod.rs`.
-pub const LOCKUP_PC: &str = "  pc=";
-
-/// The function the hard-lockup control's CPU spins in, as that `pc` line
-/// names it: `sync::Lock::lock`, whichever `Lock<T>` the linker folded it
-/// under. A line naming anything else is an NMI entry that handed the sample
-/// the wrong word of its frame.
-pub const LOCK_SPIN: [&str; 2] = ["<kernel::sync::Lock<", ">>::lock+"];
-
-/// What the kernel seals under its own `DONE` record, in
-/// `kernel/src/log/mod.rs`'s `seal_tail`: the head of the boot's newest
-/// records. The next loader pass prints it back under [`PREVIOUS_PANIC`].
-///
-/// **The one reader a boot's own tail has.** The stop stops `logkeeper` with every
-/// other thread, so what the kernel says from there on — the stop's record,
-/// its census, [`REBOOTING`] — is on the console and here, and on a machine
-/// with no serial port a console is nothing.
-pub const LOG_TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
-/// One of them, on the black-box page.
-pub const LOG_TAIL: &str = "log-tail: ";
-
-/// What the loader says about a boot that reached its own shutdown, in
-/// `loader/src/blackbox.rs`'s `State::Done` arm.
-///
-/// **The only boot that owes a log tail.** A boot ended by its own deadline or
-/// by the lockup detector never finishes `quiesce`, so its record is `Wedged`
-/// rather than `Done`; asking such a boot for [`LOG_TAIL_HEAD`] would red the
-/// two registrations whose whole subject is that it stopped.
-pub const HANDED_BACK: &str = "the last boot read DONE";
-
-/// What the loader says, in `loader/src/blackbox.rs`, of a `DONE` record
-/// sealed under another stick's identity: the foreign-identity arm's
-/// [`HANDED_BACK`]. The kernel seals every state under that identity, so only
-/// this word says the stop finished rather than panicked or wedged.
-pub const FOREIGN_DONE: &str = "held a DONE record another image left in this memory";
 
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
@@ -119,94 +40,6 @@ pub const LOADER_LOG: &str = "loader.log";
 /// That file's first line and its last.
 pub const LOADER_FIRST_LINE: &str = "ToyOS Bootloader 1.0";
 pub const LOADER_LAST_LINE: &str = "Loader log: the kernel handoff begins, so this file ends here";
-
-/// The head the loader writes every line about the black-box page under, and
-/// the line a harvested report goes under.
-pub const BLACKBOX_HEAD: &str = "Black box:";
-pub const PREVIOUS_PANIC: &str = "Previous boot's panic:";
-
-/// What the loader prints in place of a record's tail, with the count of the
-/// records it filed instead.
-pub const TAIL_IN_THE_FILE: &str =
-    "Black box: that record's log ring is in loader.log, not on a console the firmware scrolls:";
-
-/// What the loader closes the one line of a record the page's end cut with.
-///
-/// **The loader re-terminates every line it prints off the page**, so this is
-/// the only mark a cut leaves: without it a field read off such a line is a
-/// number the page cut rather than the one the kernel wrote.
-pub const CUT_BY_THE_PAGE: &str = " <the page ended here, mid-line>";
-
-/// The loader's last line on a pass that read that page and boots no kernel,
-/// which is what tells a chain that ended from one that went round again —
-/// [`LOADER_LAST_LINE`] is the other.
-pub const CHAIN_ENDS_LINE: &str =
-    "Loader log: the last boot is accounted for, so this pass resets the machine";
-
-/// **What a boot that hung looks like from the next one.**
-///
-/// `bootnext` aims `BootNext` at the loader before every kernel handoff, so a
-/// kernel that hangs and an owner who cuts power boot the same kernel again for
-/// ever — the power cut is exactly what empties the black box, so the next pass
-/// has nothing to report and arms a fresh record. The loader counts attempts on
-/// the stick instead, and the second attempt of an image whose first never
-/// reported boots no kernel at all: it writes this and hands the machine back to
-/// the firmware's own boot order.
-pub const HUNG_WITHOUT_A_RECORD: &str =
-    "Boot attempts: the previous boot of this image never reported; the machine is handed back";
-
-/// The head the loader writes before the pass that read what the boot above
-/// left. **One `toyos-metal` run is one kernel boot and two loader passes**,
-/// both in one `loader.log`: the loader points `BootNext` at itself before every
-/// handoff, and a pass with a finding appends under this rather than truncating.
-pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot above left";
-
-/// What the on-screen panel cost the boot, in
-/// `kernel/src/drivers/panic_console/mod.rs`.
-///
-/// **One channel carries it after the console**: the black-box page, where a
-/// boot that handed the machine back seals it among its [`LOG_TAIL`] records
-/// and a boot a bound ended seals it with its record. The stop writes it after
-/// `logkeeper` has stopped, so no file does.
-pub const PANEL_CENSUS: &str = "panel: paints=";
-
-/// What one boot's panel census says: how often the panel painted, how many
-/// pixels it put on the glass, how long it spent inside the painter, and the
-/// slowest single paint of the boot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Panel {
-    pub paints: u64,
-    pub pixels: u64,
-    pub micros: u64,
-    pub max_micros: u64,
-}
-
-/// The census `log` carries, or `None` for a boot that left neither channel.
-///
-/// **This boot's census whole, or nothing.** A `max_us=` whose digits a cut
-/// took the end of parses as a cheaper panel than the boot had, and each
-/// channel says a line ended itself in its own way: `logkeeper`'s file terminates
-/// one, and the black-box page is a fixed size whose one cut line the loader
-/// closes with [`CUT_BY_THE_PAGE`]. An older census standing in for a cut one
-/// would be a second boot's number under this boot's name, so the cut line is
-/// refused rather than skipped.
-pub fn panel_census(log: &str) -> Option<Panel> {
-    let line =
-        log.split_inclusive('\n').rev().find(|line| !is_program_line(line) && line.contains(PANEL_CENSUS))?;
-    if !line.ends_with('\n') || line.contains(CUT_BY_THE_PAGE) {
-        return None;
-    }
-    let field = |name: &str| -> Option<u64> {
-        let (_, rest) = line.split_once(name)?;
-        rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
-    };
-    Some(Panel {
-        paints: field("paints=")?,
-        pixels: field("px=")?,
-        micros: field(" us=")?,
-        max_micros: field("max_us=")?,
-    })
-}
 
 /// The kernel's record for a process that ended, in `kernel/src/process.rs`.
 ///
@@ -280,6 +113,16 @@ pub fn split_listing(listing: &str) -> (Option<&str>, Vec<&str>) {
     (loader, logkeeper)
 }
 
+/// Whether a mounted log volume's listing carries `logkeeper`'s stop mark
+/// ([`toyos_logstream::STOPPED`]): the boot made its log durable at its stop.
+/// Matched without case, as [`LOADER_LOG`] is.
+pub fn stop_marked(listing: &str) -> Result<(), Unfit> {
+    match listing.lines().map(str::trim).any(|name| name.eq_ignore_ascii_case(toyos_logstream::STOPPED)) {
+        true => Ok(()),
+        false => Err(Unfit::NoStopMark),
+    }
+}
+
 /// The parts of its own log the boot `log` ends in no longer has, first and
 /// last, or `None` for a log that is whole.
 ///
@@ -330,12 +173,9 @@ pub enum Unfit {
     /// The log carries no word from the supervisor that the machine stops: the last
     /// line it carries instead.
     Unfinished(String),
-    /// The loader pass after the reset read no `DONE`, or read one with no
-    /// [`REBOOTING`] in its tail: the stop never finished.
-    NotHandedBack,
-    /// The loader pass after the foreign-identity arm's reset read no
-    /// [`FOREIGN_DONE`]: the stop it staged never finished.
-    NoForeignDone,
+    /// The volume carries no stop mark: `logkeeper` never made the log
+    /// durable at a stop.
+    NoStopMark,
     /// The test runner's word that its job list ran past its bound: the
     /// line, naming the job it killed.
     JobsPastBound(String),
@@ -351,58 +191,17 @@ impl fmt::Display for Unfit {
                  boot never asked to hand the machine back to the firmware, or logkeeper never made \
                  the log whole before it did"
             ),
-            Self::NotHandedBack => write!(
+            Self::NoStopMark => write!(
                 f,
-                "the loader's pass after the reset carries no {HANDED_BACK:?} with {REBOOTING:?} \
-                 under {LOG_TAIL:?}: the stop this boot asked for never reached the reset"
+                "the log partition carries no `{}`: logkeeper never made the log durable at a stop",
+                toyos_logstream::STOPPED
             ),
             Self::JobsPastBound(said) => write!(
                 f,
                 "the test runner killed a job and rebooted at its bound: {said:?}"
             ),
-            Self::NoForeignDone => write!(
-                f,
-                "the loader's pass after the reset carries no {FOREIGN_DONE:?}: the stop this \
-                 boot asked for never sealed its record DONE"
-            ),
         }
     }
-}
-
-/// The loader's half of a passing boot: the pass after the reset read the
-/// boot's `DONE`, and the tail sealed under it ends in the kernel's own last
-/// word.
-pub fn handed_back(loader: &str) -> Result<(), Unfit> {
-    let tail_says_it = loader.lines().any(|line| line.contains(LOG_TAIL) && line.contains(REBOOTING));
-    if loader.contains(HANDED_BACK) && tail_says_it {
-        Ok(())
-    } else {
-        Err(Unfit::NotHandedBack)
-    }
-}
-
-/// The loader's half of a passing foreign-identity boot, whose own chain the
-/// loader ends as a hang: the record it cleared was sealed `DONE`.
-pub fn foreign_done(loader: &str) -> Result<(), Unfit> {
-    // The pass before the handoff clears a stale foreign record the same way.
-    match after_the_reset(loader) {
-        Some(after) if after.contains(FOREIGN_DONE) => Ok(()),
-        _ => Err(Unfit::NoForeignDone),
-    }
-}
-
-/// Whether the pass after the reset found the page as the loader armed it: a
-/// kernel that sealed nothing, its panel census among it. What a reset from
-/// outside the kernel, such as the chipset watchdog's, leaves.
-pub fn sealed_nothing(loader: &str) -> bool {
-    let armed = format!("{PREVIOUS_PANIC} the page still reads {}", toyos_blackbox::State::Armed.named());
-    after_the_reset(loader).is_some_and(|after| after.contains(&armed))
-}
-
-/// `loader.log` from [`SEPARATOR`] on: the pass that read what this boot left,
-/// or `None` where the chain did not go round.
-pub fn after_the_reset(loader: &str) -> Option<&str> {
-    loader.find(SEPARATOR).map(|at| &loader[at..])
 }
 
 /// The supervisor's line saying the machine stops, the last one `log` carries.
@@ -543,8 +342,8 @@ pub fn boot_millis(log: &str) -> Option<u64> {
 /// A boot's duration if its log is a passing boot's, which takes both lines:
 /// the kernel's boot record, and the supervisor's word that the machine stops — said
 /// before `logkeeper` made the log whole, so a log that carries it is whole to it.
-/// That the reset then came is the console's to say, or the next loader
-/// pass's ([`HANDED_BACK`], and [`REBOOTING`] under [`LOG_TAIL`]).
+/// That the stop then made the log durable is [`stop_marked`]'s to say, and that
+/// the reset came is the console's, or whoever watched the machine come back.
 pub fn verdict(log: &str) -> Result<u64, Unfit> {
     let boot_ms = boot_millis(log).ok_or(Unfit::NoBootRecord)?;
     let past_bound = |line: &&str| {
@@ -615,19 +414,6 @@ mod tests {
         assert!(!asked_to_power_off(&forged));
     }
 
-    /// The reset is the next pass's to say: its `DONE`, and the kernel's last
-    /// word in the tail sealed under it — neither alone.
-    #[test]
-    fn a_boot_is_handed_back_by_its_done_and_its_last_word() {
-        let done = format!("Black box: {HANDED_BACK} at 2026-09-08-160844\n");
-        let tail = format!("| {LOG_TAIL}[23.340 cpu1 kernel] {REBOOTING}\n");
-        assert_eq!(handed_back(&format!("{done}{tail}")), Ok(()));
-        assert_eq!(handed_back(&done), Err(Unfit::NotHandedBack));
-        assert_eq!(handed_back(&tail), Err(Unfit::NotHandedBack));
-        let elsewhere = format!("{done}| [23.340 cpu1 kernel] {REBOOTING}\n");
-        assert_eq!(handed_back(&elsewhere), Err(Unfit::NotHandedBack));
-    }
-
     #[test]
     fn only_a_declaration_of_the_whole_value_counts() {
         assert!(declares("const A: &str = \"x\";", "\"x\""));
@@ -651,13 +437,6 @@ mod tests {
             ("loader/src/loaderlog.rs", format!("cstr16!(\"{LOADER_LOG}\")")),
             ("loader/src/loaderlog.rs", format!("\"{LOADER_FIRST_LINE}\"")),
             ("loader/src/loaderlog.rs", format!("\"{LOADER_LAST_LINE}\"")),
-            ("loader/src/loaderlog.rs", format!("\"{CHAIN_ENDS_LINE}\"")),
-            ("loader/src/loaderlog.rs", format!("\"{SEPARATOR}\"")),
-            ("loader/src/main.rs", format!("\"{HUNG_WITHOUT_A_RECORD}\"")),
-            ("loader/src/blackbox.rs", format!("\"{BLACKBOX_HEAD}\"")),
-            ("loader/src/blackbox.rs", format!("\"{PREVIOUS_PANIC}\"")),
-            ("loader/src/blackbox.rs", format!("\"{TAIL_IN_THE_FILE}\"")),
-            ("loader/src/blackbox.rs", format!("\"{CUT_BY_THE_PAGE}\"")),
         ];
         for (file, rhs) in wanted {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
@@ -677,22 +456,6 @@ mod tests {
         for said in [format!("{LOADER_CLOCK_STATED}{{hz}} Hz\""), format!("\"{LOADER_CLOCK_NONE}\"")] {
             assert!(main.contains(&said), "loader/src/main.rs prints no {said:?}");
         }
-        // A format and not a constant: the loader fills its hole with the
-        // state's own word.
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("loader/src/blackbox.rs");
-        let source = std::fs::read_to_string(&path).expect("a loader module");
-        let format = FOREIGN_DONE.replacen(toyos_blackbox::State::Done.named(), "{}", 1);
-        assert!(source.contains(&format), "{} formats no {format:?}", path.display());
-    }
-
-    /// Only the pass after the reset speaks of this boot's page.
-    #[test]
-    fn a_page_no_kernel_sealed_is_read_off_the_pass_after_the_reset() {
-        let armed = format!("{PREVIOUS_PANIC} the page still reads {}, so that kernel died\n", toyos_blackbox::State::Armed.named());
-        assert!(sealed_nothing(&format!("first pass\n{SEPARATOR}\n{armed}")));
-        assert!(!sealed_nothing(&format!("{armed}{SEPARATOR}\n{PREVIOUS_PANIC} the last boot read WEDGED\n")));
-        assert!(!sealed_nothing(&armed), "a loader.log with no pass after the reset");
     }
 
     #[test]
@@ -713,6 +476,16 @@ mod tests {
         assert_eq!(split_listing("boot.log\n"), (None, Vec::new()));
     }
 
+    /// The stop mark is `logkeeper`'s one name, under either spelling a FAT
+    /// driver yields, and no other file is it.
+    #[test]
+    fn a_stopped_boot_is_told_by_its_mark() {
+        assert_eq!(stop_marked("loader.log\nstopped\n"), Ok(()));
+        assert_eq!(stop_marked("LOADER.LOG\nSTOPPED\n"), Ok(()));
+        assert_eq!(stop_marked("loader.log\nstopped.log\nbooted\n"), Err(Unfit::NoStopMark));
+        assert_eq!(stop_marked(""), Err(Unfit::NoStopMark));
+    }
+
     /// The two kernel spellings a metal readback is judged on, and the length
     /// it truncates a name to — held to the kernel's own source, because
     /// nothing links this crate to it either.
@@ -723,25 +496,7 @@ mod tests {
             ("kernel/src/process.rs", format!("log!(\"{EXIT}{{name}} pid=")),
             ("kernel/src/arch/x86_64/smp.rs", format!("log!(\"{AP_BRINGUP}")),
             ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
-            ("kernel/src/deadline.rs", format!("EXPIRED: &str = \"{DEADLINE_EXPIRED}\"")),
             ("kernel/src/deadline.rs", format!("\"{DEADLINE_ARMED}{{ms}} ms")),
-            ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
-            ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
-            ("kernel/src/deadline.rs", format!("WEDGE_AWAKE: &str = \"{WEDGE_AWAKE}\"")),
-            ("kernel/src/deadline.rs", format!("\"  cpu{{cpu}}{SEAL_PC}{{}}\"")),
-            (
-                "kernel/src/deadline.rs",
-                format!("fn {}() -> !", WEDGE_SPIN.trim_end_matches('+').rsplit("::").next().expect("a path")),
-            ),
-            ("kernel/src/hardlockup/mod.rs", format!("LOCKED_UP: &str = \"{LOCKED_UP}\"")),
-            ("kernel/src/hardlockup/mod.rs", format!("\"{LOCKUP_PC}{{}}\", At(pc)")),
-            ("kernel/src/sync.rs", "pub fn lock(&self) -> LockGuard<'_, T>".to_string()),
-            (
-                "kernel/src/drivers/panic_console/mod.rs",
-                format!("CENSUS: &str = \"{PANEL_CENSUS}\""),
-            ),
-            ("kernel/src/log/mod.rs", format!("TAIL_HEAD: &str = \"{LOG_TAIL_HEAD}\"")),
-            ("kernel/src/log/mod.rs", format!("\"{LOG_TAIL}")),
         ] {
             let at = root.join(file);
             let source = std::fs::read_to_string(&at).expect("a kernel module");
@@ -871,55 +626,6 @@ mod record_time_tests {
         // first `cpu` would answer with a duration instead of a timestamp.
         assert_eq!(record_millis("no timestamp here, cpu=1ms"), None);
         assert_eq!(record_millis(""), None);
-    }
-
-    /// The two channels the census crosses, read by one reader: `logkeeper`'s file,
-    /// and the black-box page the loader prints back with its own margin and
-    /// with the kernel's dashes flattened to ASCII.
-    #[test]
-    fn the_panel_census_is_read_off_either_channel() {
-        let logkeeper = "[2026-09-08 06:50:53  2.500 cpu0 kernel] panel: paints=3 px=6220800 us=1500000 \
-                    max_us=520000\n";
-        assert_eq!(
-            panel_census(logkeeper),
-            Some(Panel { paints: 3, pixels: 6_220_800, micros: 1_500_000, max_micros: 520_000 })
-        );
-
-        // A wedge boot's page as the pass after the reset prints it back, line
-        // for line off run 44's deadlinewedge `loader.log`: head lines, the
-        // count of what went to the file, and the filed records under it. Only
-        // the page's last line can be cut, and `cut` is where it fell.
-        let page = |census: &str, cut: &str| {
-            format!(
-                "Previous boot's panic: the last boot read WEDGED, so a bound of its own ended \
-                 it and this chain ends here\n\
-                 | the boot deadline expired: a bound of 120000 ms, reached at 120066 ms, with \
-                 this machine in `complete`. The tail of the log ring follows ... which is what \
-                 nothing was draining.\n\
-                 | panel: {census}\n\
-                 | older records dropped to fit this page: 84\n\
-                 | usb-quiesce: no barrier was taken, so this reset is not the shutdown's\n\
-                 | usb-quiesce: no bulk transfer was outstan{cut}\n\
-                 {TAIL_IN_THE_FILE} 221 record(s)\n\
-                 | [ 0.148 cpu0 kernel] iommu: unit3 scope ioapic 00:1e.7 id=2\n"
-            )
-        };
-        // Run 44's own reading, with the cut two lines under the census.
-        assert_eq!(
-            panel_census(&page("paints=10 px=8886656 us=18693 max_us=3867", CUT_BY_THE_PAGE)),
-            Some(Panel { paints: 10, pixels: 8_886_656, micros: 18_693, max_micros: 3_867 })
-        );
-        // The same page with the cut inside the census's last number instead —
-        // a 38 us panel, and every line under it still terminated.
-        let mid_number = format!("paints=10 px=8886656 us=18693 max_us=38{CUT_BY_THE_PAGE}");
-        assert_eq!(panel_census(&page(&mid_number, "")), None);
-
-        // `logkeeper`'s file ends a record with the newline, so its own cut is a
-        // last line that never got one.
-        assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000 max_us=52"), None);
-        // A field the cut took whole, and a log with no census at all.
-        assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000\n"), None);
-        assert_eq!(panel_census("nothing here\n"), None);
     }
 
     #[test]

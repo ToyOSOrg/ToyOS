@@ -32,11 +32,8 @@ A second rate source is the fix, and the choice of one is open: the
 `EFI_TIMESTAMP_PROTOCOL`'s stated frequency, the ACPI PM timer or the HPET, each
 a calibration the loader then pays for before its first timed line.
 
-Until then no guest test asserts a time on the screen: `screen_loader_clears`
-(`tests/toyos.rs`) measures the screen's first line, head and all, whose head
-reads `--.---` under `qemu64` and whatever the runner's CPU states under
-`-cpu host`. The fix is where that test starts asserting a time in it.
+No guest test asserts a time on the loader's screen: the test that read it is
+`issues/the-loaders-screen-clear-is-tested-by-nothing.md`.
 
 Exit: a loader line and a kernel record written before the clock starts carry
-their time on an x86-64 CPU whose leaf 15H states no rate, and
-`screen_loader_clears` asserts that line's time on the screen.
+their time on an x86-64 CPU whose leaf 15H states no rate.

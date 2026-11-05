@@ -53,59 +53,11 @@ pub fn shard_for(cpu: u32) -> &'static Shard {
     }
 }
 
-/// The positions every walk inside the black box's page writer takes — this
-/// tail and the recovery section — which one CPU at a time runs: the panic
-/// path holds the panel, and the stop has stopped every other CPU.
-pub static SEALING: read::Published = read::Published::new();
-
-/// The head the tail is sealed under, read back by `build/bootlog.rs`.
-const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
-
-/// Seal the stop's own records onto the black box, the one channel a boot's
-/// tail has once the stop has begun: every record stamped after `after`,
-/// which is the newest one the stop found, newest first.
-///
-/// **Bounded by the page and by nothing else.** The head and the records may
-/// spend what a report may ([`toyos_blackbox::REPORT_BYTES`]), which leaves
-/// the reset's own account its reserve; [`toyos_blackbox::Whole`] keeps the
-/// newest that fit, counts the rest and says the count last, in the words a
-/// death's tail says it ([`toyos_blackbox::DROPPED_OPENS_WITH`]). How many
-/// records a stop writes is the machine's to decide, by its CPUs and its disks.
-///
-/// **The kernel does not wait for `/system/bin/logkeeper`, so it does not know what
-/// reached `/log`.** The supervisor has `logkeeper` flush before it asks for the
-/// stop; everything committed after that — the stop's own record, the last
-/// word — is on the console, and here, where the next
-/// loader pass prints it into `loader.log`.
-///
-/// Called from the quiesce path under [`crate::blackbox::record_done`], where
-/// the page already carries this boot's seal and every lock is still ordinary.
-pub fn seal_tail(after: LogStamp) {
-    struct Tail<'a>(toyos_blackbox::Whole<'static, &'a mut dyn core::fmt::Write>);
-    impl read::RecordSink for Tail<'_> {
-        fn put(&mut self, record: &LogRecord) -> bool {
-            // No prefix of its own: the loader that prints this page puts one
-            // on every line it reads back.
-            self.0.put(format_args!("log-tail: {record}"));
-            true
-        }
-    }
-    let from = LogStamp::since_zero(after.nanos().saturating_add(1));
-    crate::blackbox::append(|out| {
-        let _ = writeln!(out, "{TAIL_HEAD}");
-        let room = toyos_blackbox::REPORT_BYTES - TAIL_HEAD.len() - 1;
-        let mut tail = Tail(toyos_blackbox::Whole::within(out, room, toyos_blackbox::DROPPED_OPENS_WITH));
-        read::snapshot_committed(from, read::newest_committed(), &mut tail, &SEALING);
-        tail.0.close();
-    });
-}
-
 /// A shard slot for each of the `cpus` CPUs the firmware names, and the
 /// positions the console and the fatal paths walk them with.
 pub fn size(cpus: usize) {
     registry::size(registry::kernel_slots(), cpus);
     console::size(cpus);
-    SEALING.size(cpus);
     crate::drivers::panic_console::size(cpus);
 }
 
@@ -265,8 +217,5 @@ macro_rules! boot_phase {
             ),
         );
         $crate::drivers::panic_console::boot_checkpoint();
-        // The deadline seals where the machine was, and this is the only word
-        // for it: a phase not in `deadline::PHASES` does not compile.
-        $crate::deadline::reached($crate::deadline::index_of($name));
     }};
 }
