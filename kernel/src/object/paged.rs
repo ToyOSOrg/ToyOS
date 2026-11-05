@@ -487,6 +487,12 @@ impl PagerObject {
             };
             match step {
                 Step::Copy(count) => {
+                    // A chunk of frames is copied a frame at a time: populated
+                    // first, fresh memory takes one hold rather than a fault
+                    // for each page. One frame's copy faults at most once anyway.
+                    if count > 1 {
+                        out.fault_in(done, pieces[..count].iter().map(|piece| piece.len).sum());
+                    }
                     let mut faulted = false;
                     for piece in &pieces[..count] {
                         let copied = match piece.phys {
