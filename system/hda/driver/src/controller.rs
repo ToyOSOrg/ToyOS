@@ -146,10 +146,6 @@ impl Gcap {
         (self.0 >> 3 & 0x1F) as usize
     }
 
-    pub fn wide(self) -> bool {
-        self.0 & 1 != 0
-    }
-
     fn descriptors(self) -> usize {
         self.input_streams() + self.output_streams() + self.bidirectional_streams()
     }
@@ -182,8 +178,6 @@ pub enum Refusal {
     /// CORBRPRST never read back 1 after the reset, or 0 after the clear
     /// (§3.3.21).
     ReadPointerReset { set: bool },
-    /// The grant lies above 4 GiB on a controller without 64OK (§3.3.2).
-    Beyond32Bits { device_addr: u64 },
     /// GCAP reports no output stream descriptor.
     NoOutputStream { gcap: Gcap },
     /// The lent ring is where §4.5.1 puts no buffer: off a 128-byte boundary.
@@ -206,9 +200,6 @@ impl core::fmt::Display for Refusal {
             Self::RingSize { ring, size } => write!(f, "its {ring:?} size register {size:#04x} offers no size this driver sets"),
             Self::ReadPointerReset { set: true } => write!(f, "its CORB read pointer reset never read back 1"),
             Self::ReadPointerReset { set: false } => write!(f, "its CORB read pointer reset never read back 0"),
-            Self::Beyond32Bits { device_addr } => {
-                write!(f, "it addresses 32 bits and the grant is at {device_addr:#x}")
-            }
             Self::NoOutputStream { gcap } => write!(f, "it has no output stream (GCAP {:#06x})", gcap.0),
             Self::RingUnaligned { device_addr } => write!(f, "the lent ring at {device_addr:#x} is off a 128-byte boundary"),
             Self::StreamReset { entered: true } => write!(f, "its output stream never entered reset"),
@@ -370,10 +361,7 @@ fn set_ring_size<R: Registers>(regs: &R, at: usize, ring: Ring) -> Result<u16, R
     Ok(entries)
 }
 
-fn base<R: Registers>(regs: &R, low: usize, high: usize, device_addr: u64, gcap: Gcap) -> Result<(), Refusal> {
-    if !gcap.wide() && device_addr >> 32 != 0 {
-        return Err(Refusal::Beyond32Bits { device_addr });
-    }
+fn base<R: Registers>(regs: &R, low: usize, high: usize, device_addr: u64) -> Result<(), Refusal> {
     regs.write32(low, device_addr as u32);
     regs.write32(high, (device_addr >> 32) as u32);
     Ok(())
@@ -393,16 +381,17 @@ pub struct Link<R: Registers, M: DmaBuffers> {
 }
 
 impl<R: Registers, M: DmaBuffers> Link<R, M> {
-    /// §4.4.1.3 and §4.4.2.2, on a controller [`reset`] brought up.
+    /// §4.4.1.3 and §4.4.2.2, on a controller [`reset`] brought up, which
+    /// `_brought_up` witnesses.
     ///
     /// # Panics
     /// If the grant is shorter than [`GRANT_BYTES`]: the caller's own mistake.
-    pub fn open(regs: R, mem: M, reset: &Reset) -> Result<Self, Refusal> {
+    pub fn open(regs: R, mem: M, _brought_up: &Reset) -> Result<Self, Refusal> {
         assert!(mem.bytes() >= GRANT_BYTES, "hda: a grant of {:#x} bytes holds no layout", mem.bytes());
         let corb_entries = set_ring_size(&regs, CORBSIZE, Ring::Corb)?;
         let rirb_entries = set_ring_size(&regs, RIRBSIZE, Ring::Rirb)?;
-        base(&regs, CORBLBASE, CORBUBASE, mem.device_addr(CORB), reset.gcap)?;
-        base(&regs, RIRBLBASE, RIRBUBASE, mem.device_addr(RIRB), reset.gcap)?;
+        base(&regs, CORBLBASE, CORBUBASE, mem.device_addr(CORB))?;
+        base(&regs, RIRBLBASE, RIRBUBASE, mem.device_addr(RIRB))?;
 
         regs.write16(CORBRP, regs.read16(CORBRP) | CORBRP_RST);
         if !settles(|| regs.read16(CORBRP) & CORBRP_RST != 0) {
@@ -539,10 +528,6 @@ impl<R: Registers> Stream<R> {
         if !ring.is_multiple_of(BUFFER_ALIGN) {
             return Err(Refusal::RingUnaligned { device_addr: ring });
         }
-        let end = ring + (PERIODS * PERIOD_BYTES) as u64 - 1;
-        if !gcap.wide() && end >> 32 != 0 {
-            return Err(Refusal::Beyond32Bits { device_addr: ring });
-        }
         // §3.3.14: input descriptors are numbered first.
         let index = gcap.input_streams();
         let at = SD_BASE + index * SD_STRIDE;
@@ -567,7 +552,7 @@ impl<R: Registers> Stream<R> {
         }
         mem.publish();
 
-        base(&regs, at + SD_BDPL, at + SD_BDPU, mem.device_addr(BDL), gcap)?;
+        base(&regs, at + SD_BDPL, at + SD_BDPU, mem.device_addr(BDL))?;
         let cbl = stream::cyclic_length(PERIOD_BYTES as u32, PERIODS).expect("fits a u32");
         regs.write32(at + SD_CBL, cbl);
         let lvi = stream::last_valid_index(PERIODS).expect("a ring of eight");

@@ -10,7 +10,7 @@ A virtio function on q35's root bus has no function-level reset and no power
 management capability, so `pcidev`'s release cannot reset it: it keeps every
 address the last holder's grants and lends were at as the function's residue
 (`kernel/src/pcidev/mod.rs`, `Function::residue`), and a residue address is
-never lent again (`Bound::lend_room`). A compositor started again on the same
+never lent again (`kernel::claimspace::Window::lend_room`). A compositor started again on the same
 virtio-gpu therefore lends its scanouts in `toyos_abi::pci::LEND_WINDOW` less
 what the last one lent: after a holder at the largest mode, which lends two
 scanouts' worth, the window has no room for a flip at that mode and it is

@@ -438,21 +438,6 @@ fn a_read_pointer_reset_that_never_reads_back_is_refused() {
     );
 }
 
-#[test]
-fn a_grant_above_four_gib_is_refused_only_where_the_controller_is_narrow() {
-    let high = 0x1_2000_0000;
-    let narrow = Model::new(LAPTOP_GCAP & !1, 0b1).with(|s| s.device_base = high);
-    let reset = brought_up(&narrow);
-    assert_eq!(
-        Link::open(narrow.regs(), narrow.mem(), &reset).err(),
-        Some(Refusal::Beyond32Bits { device_addr: high + CORB as u64 })
-    );
-    let wide = Model::laptop().with(|s| s.device_base = high);
-    linked(&wide);
-    assert_eq!(wide.reg32(CORBUBASE), 1);
-    assert_eq!(wide.reg32(RIRBLBASE), 0x2000_0000 + RIRB as u32);
-}
-
 /// Every malformed answer is refused by name, and the link answers nothing
 /// after it: the CORB is not touched again.
 fn refused_for_good(model: Model, want: LinkFault) {
@@ -606,12 +591,6 @@ fn a_ring_the_engine_cannot_be_pointed_at_is_refused() {
     assert!(matches!(
         Stream::open(model.regs(), &model.mem(), RING_AT + 64, &reset, 0x4011),
         Err(Refusal::RingUnaligned { device_addr }) if device_addr == RING_AT + 64
-    ));
-    let narrow = Model::new(LAPTOP_GCAP & !1, 0b1);
-    let reset = brought_up(&narrow);
-    assert!(matches!(
-        Stream::open(narrow.regs(), &narrow.mem(), 0xFFFF_FF80, &reset, 0x4011),
-        Err(Refusal::Beyond32Bits { .. })
     ));
 }
 

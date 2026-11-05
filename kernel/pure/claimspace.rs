@@ -171,13 +171,8 @@ mod tests {
         assert_eq!(residue, []);
     }
 
-    /// A function no reset quiets ends each claim aimed at all it was given and
-    /// all it never covered of what it was aimed at before. Whatever layout
-    /// each holder chooses, every grant its claim may hold is served, never
-    /// outside the window, a lent region never over residue — and the residue
-    /// never leaves the window either, so nothing a function was ever aimed
-    /// at is an address its window does not keep, and the residue's ranges
-    /// never overlap, so what it holds is bounded by the window too.
+    /// Each claim ends leaving everything residue, whatever the last holder
+    /// laid out: the next is still served, and the residue stays bounded.
     #[test]
     fn a_function_no_reset_quiets_serves_every_holder_whatever_the_last_one_laid_out() {
         let mut seed = 0x0123_4567_89AB_CDEFu64;

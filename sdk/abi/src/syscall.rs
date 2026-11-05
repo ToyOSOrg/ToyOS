@@ -2690,7 +2690,8 @@ pub fn device_firmware_window(
 /// An address the caller invents instead of the one this answers is one the
 /// function's domain does not map, and the unit refuses the access. `bytes` is
 /// rounded up to whole 2 MiB pages, below 4 GiB, which every function
-/// reaches; `ResourceExhausted` once the claim holds all it may.
+/// reaches; `ResourceExhausted` where no run of that length is free in the
+/// claim's 32 MiB of grants.
 pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, SyscallError> {
     let mut grant =
         DmaGrant { shm: HANDLE_INVALID, _pad: 0, device_addr: 0, bytes: 0 };

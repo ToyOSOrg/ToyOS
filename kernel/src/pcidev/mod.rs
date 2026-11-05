@@ -1818,8 +1818,9 @@ pub fn dma_alloc(
             return Err(SyscallError::InvalidArgument);
         }
         let span = align_2m(bytes as usize) as u64;
-        // The grant part is `MAX_GRANT_TOTAL` long and holds only grants, so
-        // no room there is also more than a claim may hold.
+        // First fit in the grant part, `MAX_GRANT_TOTAL` long: refused where no
+        // run of `span` is free there, which a claim whose grants were taken
+        // back out of order can meet below that total.
         let memory = SharedMemObject::create_run(&crate::mm::charge::current(), span)?;
         let (phys, _) = memory.run().expect("pcidev: a grant is one run");
         // The function may still be aimed at what this covers of the residue,
@@ -1853,7 +1854,7 @@ pub fn dma_start(binding: &Binding) -> Result<(), SyscallError> {
 /// Take a grant back, for a caller that could not be given a handle to it.
 ///
 /// **A partial success is not left behind.** Without this the grant would stay
-/// mapped in the function's domain and counted against [`MAX_GRANT_TOTAL`] with
+/// mapped in the function's domain, holding room in its grant part with
 /// nothing naming it, so a caller that hit a full handle table once would be
 /// refused every later grant with no way back but dying.
 ///
@@ -2017,9 +2018,6 @@ pub fn isr(number: usize) {
 /// The unit refused requester `who` an access: `true` where a claim holds it,
 /// a claim held it, or it has left the device set, so that no driver of this
 /// kernel's is to blame, and its bus mastering is then cleared.
-///
-/// A released function is still its last holder's: a transfer it issued
-/// before its release, or before a reset quieted it, may fault after.
 ///
 /// Called from the fault handler, so it takes no lock: every call the claim
 /// answers refuses from here on, its interrupt read included, and the post

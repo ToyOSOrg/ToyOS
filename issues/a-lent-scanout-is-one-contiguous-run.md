@@ -16,8 +16,8 @@ largest bound is 64 such pages; on a machine whose memory is fragmented there
 may be no run that long, and the mode change is then declined by name and the
 old mode stays, though the memory exists.
 
-The window a claim lends in is placed first-fit too (`kernel/src/pcidev/mod.rs`,
-`Bound::lend_room`). `toyos-desktop` sizes `LEND_WINDOW` for two scanouts at
+The window a claim lends in is placed first-fit too, as its grants are
+(`kernel::claimspace::Window::lend_room`). `toyos-desktop` sizes `LEND_WINDOW` for two scanouts at
 the largest mode, which holds only while nothing splits it: boot at 1280x800
 (2 MiB pages 0-1), flip to 7680x4320 (pages 2-65, freeing 0-1), then ask for
 7680x4300 (63 pages) — the free runs are 2 and 62 pages and the flip is
