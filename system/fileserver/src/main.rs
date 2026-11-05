@@ -679,9 +679,9 @@ impl Server {
     }
 
     /// The directory a path from `fid` starts in, on the volume, and the
-    /// grant's root beneath which it must stay: a directory moved out from
-    /// under the root is refused `Escapes`, one removed names nothing, and a
-    /// connection given no directory names no path.
+    /// grant's root beneath which it must stay (`resolve::resolve`): one
+    /// removed names nothing, and a connection given no directory names no
+    /// path.
     fn start(&self, id: u64, fid: u64) -> Result<(String, String), Error> {
         let client = &self.clients[&id];
         let root = client.root.clone().ok_or(Error::NoDirectory)?;
@@ -694,11 +694,7 @@ impl Server {
             Held::Dir { path, .. } => path.clone(),
             Held::File(_) => return Err(Error::NotADirectory),
         };
-        let beneath = root.is_empty() || start == root || start.strip_prefix(&root).is_some_and(|rest| rest.starts_with('/'));
-        match beneath {
-            true => Ok((root, start)),
-            false => Err(Error::Escapes),
-        }
+        Ok((root, start))
     }
 
     /// `rel` from `fid`, as a volume path.

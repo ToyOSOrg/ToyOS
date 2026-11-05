@@ -16,7 +16,9 @@
 //!
 //! **One resolution sees one volume.** The server is one thread and a request
 //! is answered before the next is read, so no rename can land between two
-//! component lookups of the same path.
+//! component lookups of the same path. A rename between two requests moves a
+//! held directory where the volume moved it (`descriptions::renamed`), and a
+//! start a rename left outside the root is refused [`Escape`] like a `..`.
 //!
 //! [`Escape`]: Refusal::Escape
 
@@ -37,7 +39,8 @@ pub enum Resolved {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// A link's `..` climbed above the connection's root.
+    /// A `..` climbed above the connection's root, or a rename left the
+    /// directory a path starts from outside it.
     Escape,
     /// More than [`MAX_LINKS`] links, or a cycle.
     Loop,
@@ -54,10 +57,10 @@ pub enum Found {
     Other,
 }
 
-/// Resolve `rel` from `start`, a directory at or beneath `root` that the
-/// caller has checked is. `follow_last` follows a symlink in the final
-/// component too; an operation on the link itself (`lstat`, `unlink`,
-/// `readlink`, a `rename`'s ends) passes `false`.
+/// Resolve `rel` from `start`, the root or a held directory, which is refused
+/// [`Refusal::Escape`] unless it is at or beneath `root`. `follow_last`
+/// follows a symlink in the final component too; an operation on the link
+/// itself (`lstat`, `unlink`, `readlink`, a `rename`'s ends) passes `false`.
 pub fn resolve(
     root: &str,
     start: &str,
@@ -65,8 +68,13 @@ pub fn resolve(
     follow_last: bool,
     lookup: &mut dyn FnMut(&str) -> Result<Found, ()>,
 ) -> Result<Resolved, Refusal> {
+    let below = match (root, start.strip_prefix(root)) {
+        ("", _) => start,
+        (_, Some("")) => "",
+        (_, Some(rest)) if rest.starts_with('/') => rest,
+        _ => return Err(Refusal::Escape),
+    };
     // What is resolved so far, as components under `root`, and what is left.
-    let below = start.strip_prefix(root).expect("a start beneath the root").trim_start_matches('/');
     let mut done: Vec<String> = below.split('/').filter(|c| !c.is_empty()).map(String::from).collect();
     let mut left: Vec<String> = rel.split('/').filter(|c| !c.is_empty()).rev().map(String::from).collect();
     let mut links = 0;
@@ -225,6 +233,62 @@ mod tests {
         assert_eq!(from("home", ".."), Err(Refusal::Escape));
         assert_eq!(from("home/toy", "../.."), Err(Refusal::Escape));
         assert_eq!(from("home/toy", "../../home/toy"), Err(Refusal::Escape), "an escape that would come back is refused");
+    }
+
+    /// `rel` from the directory a connection holds at `held`, after another
+    /// connection renamed `from` to `to` between its two requests, as the
+    /// server moves a held directory (`descriptions::renamed`).
+    fn after_rename(root: &str, held: &str, (from, to): (&str, &str), links: &[(&str, &str)], rel: &str) -> Result<Resolved, Refusal> {
+        let (mut start, mut removed) = (held.to_string(), false);
+        crate::descriptions::renamed(&mut start, &mut removed, from, to);
+        assert!(!removed, "{held} after {from} -> {to}");
+        let links = vol(links);
+        resolve(root, &start, rel, true, &mut |path| Ok(links.get(path).map_or(Found::Other, |t| Found::Link(t.clone()))))
+    }
+
+    /// The escape suite's second half: a rename racing a lookup. A directory
+    /// the connection holds open, moved out of its root by a rename it did not
+    /// make, names nothing from there: not by a plain name, not by `..`, and
+    /// not when only its spelling still begins with the root's.
+    #[test]
+    fn a_held_directory_renamed_out_of_the_root_names_nothing() {
+        let root = "home/toy";
+        for (from, to) in [
+            ("home/toy/a", "home/other/a"),
+            ("home/toy/a", "state/sshserver/a"),
+            ("home/toy/a", "home/toy2/a"),
+            ("home/toy/a", "a"),
+        ] {
+            for rel in ["", "x", "..", "../..", "b/../c"] {
+                assert_eq!(after_rename(root, "home/toy/a", (from, to), &[], rel), Err(Refusal::Escape), "{from} -> {to}, then {rel:?}");
+            }
+        }
+    }
+
+    /// The root itself renamed away under a held directory: the directory
+    /// moved with it, and the grant still names the old root, so it is
+    /// outside the root it started under.
+    #[test]
+    fn a_held_directory_whose_root_was_renamed_names_nothing() {
+        let rename = ("home/toy/Games", "home/toy/Old");
+        for rel in ["", "a.gba", "..", "../Games"] {
+            assert_eq!(after_rename("home/toy/Games", "home/toy/Games/GBA", rename, &[], rel), Err(Refusal::Escape), "{rel:?}");
+        }
+    }
+
+    /// A rename inside the root moves the held directory with it, and a link
+    /// planted at its old name changes nothing the description names: `..`
+    /// climbs from where it is now and stops at the root, and the planted link
+    /// is refused by a path that goes through it.
+    #[test]
+    fn a_held_directory_renamed_inside_the_root_resolves_where_it_now_is() {
+        let root = "home/toy";
+        let planted = [("home/toy/a", "../../state")];
+        let moved = ("home/toy/a", "home/toy/b/a");
+        assert_eq!(after_rename(root, "home/toy/a", moved, &planted, "f"), path("home/toy/b/a/f"));
+        assert_eq!(after_rename(root, "home/toy/a", moved, &planted, "../.."), path("home/toy"));
+        assert_eq!(after_rename(root, "home/toy/a", moved, &planted, "../../.."), Err(Refusal::Escape));
+        assert_eq!(after_rename(root, "home/toy", moved, &planted, "a/sshserver"), Err(Refusal::Escape));
     }
 
     #[test]
