@@ -21,7 +21,19 @@ unsafe extern "C" fn _start() -> ! {
 }
 
 /// Copy `n` bytes from `src` to `dest` as a forward copy would: correct for
-/// any `dest` not above an overlapping `src`.
+/// any `dest` not above an overlapping `src`. A copy shorter than
+/// [`ROUTED_LEAST`] is one `rep movsb` behind one compare; only a longer one
+/// asks where its ends sit.
+#[inline(always)]
+pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
+    if n >= ROUTED_LEAST {
+        // SAFETY: as this function's caller promises.
+        return unsafe { copy_long(dest, src, n) };
+    }
+    unsafe { movsb(dest, src, n) };
+}
+
+/// [`copy_forward`] from [`ROUTED_LEAST`] up, out of line.
 ///
 /// A forward copy whose destination is a short way above its source modulo
 /// 4 KiB loads each byte soon after storing to an unrelated address with the
@@ -31,24 +43,16 @@ unsafe extern "C" fn _start() -> ! {
 /// 56305 rev. 3.02, §2.12), and Intel calls it 4K aliasing (Intel 64 and
 /// IA-32 Architectures Optimization Reference Manual). Copied highest first,
 /// every store such a load could match is 4 KiB minus the distance behind it
-/// and long retired.
-pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
+/// and long retired. Only disjoint ranges go down.
+#[inline(never)]
+unsafe fn copy_long(dest: *mut u8, src: *const u8, n: usize) {
     let distance = (dest as usize).wrapping_sub(src as usize) % 4096;
     // `distance` in 1..SHORT_ALIAS, as one compare.
-    if n >= 64 && distance.wrapping_sub(1) < SHORT_ALIAS - 1 {
-        // SAFETY: as this function's caller promises.
-        return unsafe { copy_short_alias(dest, src, n) };
-    }
-    unsafe { movsb(dest, src, n) };
-}
-
-/// [`copy_forward`] at a short distance: down where the ranges are disjoint,
-/// out of line so the common copy carries none of it.
-#[inline(never)]
-unsafe fn copy_short_alias(dest: *mut u8, src: *const u8, n: usize) {
-    // SAFETY: `n` is at least 64; down only between disjoint ranges.
+    let short = distance.wrapping_sub(1) < SHORT_ALIAS - 1;
+    // SAFETY: `n` is at least `ROUTED_LEAST`, above the loops' 64; down only
+    // between disjoint ranges.
     unsafe {
-        if n > ROUTED_MOST || (dest as usize).abs_diff(src as usize) < n {
+        if !short || n > ROUTED_MOST || (dest as usize).abs_diff(src as usize) < n {
             movsb(dest, src, n);
         } else if has_avx() {
             copy_down_avx(dest, src, n);
@@ -71,10 +75,14 @@ unsafe fn movsb(dest: *mut u8, src: *const u8, n: usize) {
     }
 }
 
-/// The distance under which [`copy_forward`] copies highest first.
+/// The distance under which [`copy_long`] copies highest first.
 const SHORT_ALIAS: usize = 512;
 
-/// The longest copy [`copy_forward`] copies highest first. A longer one runs
+/// The shortest copy that asks where its ends sit, the shortest length a
+/// stall has been measured at. Whether a shorter copy stalls is unmeasured.
+const ROUTED_LEAST: usize = 4096;
+
+/// The longest copy [`copy_long`] copies highest first. A longer one runs
 /// from beyond the caches, where the loop's stores read each line before
 /// writing it and measured slower than `rep movsb` at distances that do not
 /// stall.

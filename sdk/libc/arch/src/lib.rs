@@ -224,13 +224,13 @@ mod tests {
     /// 4 KiB, the source `at` bytes past a 64-byte boundary, both ends in one
     /// buffer: the whole buffer against `copy_within`.
     fn agrees_at(what: &str, copy: unsafe fn(*mut u8, *const u8, usize), distance: usize, at: usize, n: usize) {
-        let mut got = pattern(4 * 4096 + 256);
+        let mut got = pattern(6 * 4096 + 256);
         let base = got.as_ptr().align_offset(64);
         let (from, to) = (base + at, base + at + 8192 + distance);
         let mut want = got.clone();
         want.copy_within(from..from + n, to);
         let p = got.as_mut_ptr();
-        // SAFETY: both ranges are inside `got`, 8 KiB or more apart, `n` at most 4096.
+        // SAFETY: both ranges are inside `got`, 8 KiB or more apart, `n` at most 8192.
         unsafe { copy(p.add(to), p.add(from), n) };
         assert_eq!(got, want, "{what}: n {n} at {at} distance {distance}");
     }
@@ -242,7 +242,7 @@ mod tests {
     fn a_forward_copy_agrees_at_every_page_distance() {
         for distance in (0..1024).chain([2048, 4032, 4095]) {
             for at in [0, 1, 17, 63] {
-                for n in [0, 1, 63, 64, 65, 127, 128, 200, 1000, 4096] {
+                for n in [0, 1, 63, 64, 65, 127, 128, 200, 1000, 4095, 4096, 4097, 5000, 8192] {
                     agrees_at("copy_forward", arch::copy_forward, distance, at, n);
                 }
             }
@@ -278,7 +278,8 @@ mod tests {
     #[test]
     fn an_overlapping_forward_copy_a_page_apart_agrees() {
         for gap in [3584, 3600, 4000, 4080, 4095] {
-            for over in [1, 64, 500] {
+            // Every `n` at least 4096, the shortest copy that asks for the distance.
+            for over in [512, 600, 4096] {
                 let n = gap + over;
                 let base = pattern(n + gap);
                 let mut want = base.clone();
