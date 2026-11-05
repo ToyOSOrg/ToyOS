@@ -910,8 +910,20 @@ pub(crate) mod tests {
         one.send(()).unwrap();
     }
 
+    /// Alone in a process ([`rerun`]): a sibling test's fork holds every lock
+    /// description this process has locked until it execs, so a queue left
+    /// held by the first guest's dropped handle would read as the wide one
+    /// queued.
     #[test]
     fn a_narrow_guest_does_not_overtake_a_wide_one_waiting() {
+        let out = rerun("buildlock::tests::a_narrow_guest_behind_a_wide_one").output().expect("run the scenario alone");
+        let said = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("test result: ok. 1 passed"), "{said}");
+    }
+
+    #[test]
+    #[ignore = "the scenario of the test above, alone in its process; never runs on its own"]
+    fn a_narrow_guest_behind_a_wide_one() {
         let store = scratch("guest-cpus-queue");
         let (tx, done) = std::sync::mpsc::channel();
         let first = guest(&store, 3, 4, "first", tx.clone());

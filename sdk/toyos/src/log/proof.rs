@@ -146,17 +146,19 @@ fn a_lane_gives_its_reader_every_record_in_order_or_counts_it_refused() {
     let mut reader = Reader::new();
     let mut got = Vec::new();
     let mut counted = 0;
-    loop {
-        let finished = writer.is_finished();
+    let mut read = || {
         while let Some((_, seq)) = reader.next_lane(&*lane) {
             got.push(seq);
         }
         counted += reader.refused(&*lane);
-        if finished {
-            break;
-        }
+    };
+    while !writer.is_finished() {
+        read();
     }
+    // The join orders the writer's last push before the last read;
+    // `is_finished` orders nothing.
     let refused = writer.join().unwrap() as u64;
+    read();
     assert_eq!(counted, refused);
     assert_eq!(got.len() as u64 + counted, EACH);
     assert!(got.windows(2).all(|w| w[0] < w[1]), "a lane reordered its records");
