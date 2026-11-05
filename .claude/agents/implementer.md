@@ -18,7 +18,7 @@ Use vendor documentation, specifications and research under root's source policy
 
 ## Workspace and changes
 
-Use one worktree and branch for the assignment, and keep no more than one worktree at a time. Remove it when its work lands or is abandoned. Reuse the worktree named in the brief, or create it from `origin/main` with `git worktree add -b <branch> <path> origin/main` after fetching. Never clone ToyOS or run `git submodule` in its worktree. Shared fork sources require particular care below.
+Use one worktree and branch for the assignment. Reuse the worktree named in the brief, or create it from `origin/main` with `git worktree add -b <branch> <path> origin/main` after fetching. Never clone ToyOS or run `git submodule` in its worktree. Shared fork sources require particular care below.
 
 Keep the branch coherent: change all consumers and declarations affected by an interface change, including fork consumers. Record unrelated defects with evidence rather than fixing them on the way. Remove obsolete paths and stale comments from what you change. Inspect the final diff and affected module contracts before reporting.
 
@@ -52,7 +52,7 @@ Commit with `git commit -F <file>`. Push your branch, never `main`, and create a
 
 Keep the title and body true of the final change: problem and resulting behavior, consequential decisions, checks and evidence, unresolved risks. Explain why any integration test needs its environment, which targets support it and why a new dependency or mechanism earns its place. Use `gh pr edit --title <title> --body-file <file>`, not `--fill`. Do not mark ready, arm merging or wait on CI unless briefed to do so.
 
-Before handoff, commit the work and ensure `git status --porcelain --ignore-submodules=none` is empty; push any consumed fork commits you made. Remove the worktree's `target/` whenever you stop working, at handoff included. Save `handoff.md` in the assignment's scratch directory with the branch head, PR, outcome, verification and evidence links, and unresolved decisions or risks. Return its path with a short summary so the report survives a lost return message. Do not hide risks to meet a line limit. End a T14 request with `T14 RUN REQUESTED: <dir>/request.txt`.
+Before handoff, commit the work and ensure `git status --porcelain --ignore-submodules=none` is empty; push any consumed fork commits you made. Save `handoff.md` in the assignment's scratch directory with the branch head, PR, outcome, verification and evidence links, and unresolved decisions or risks. Return its path with a short summary so the report survives a lost return message. Do not hide risks to meet a line limit. End a T14 request with `T14 RUN REQUESTED: <dir>/request.txt`.
 
 ## Review response
 
