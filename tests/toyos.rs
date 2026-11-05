@@ -2934,8 +2934,8 @@ const ACPI_MEDIATED_SAID: [&str; 10] = [
 /// this kernel makes on a guest, whose firmware hands it over in ACPI mode:
 /// the kernel says the first call of each byte, five of them, each written
 /// on the boot processor by that CPU's own reading beside the `out`, and
-/// where there is a second CPU one at least asked from it, the probe having
-/// asked three from a thread that read itself there.
+/// the three the probe asked from a thread held to the last CPU asked from
+/// that CPU.
 fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
     const JOB: &str = "test_rs_acpi_mediated";
     const HELD_INTO_THE_STOP: &str = "acpi: holding the Global Lock, and asking for the power-off with it";
@@ -2989,14 +2989,16 @@ fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
     if calls.len() != 5 {
         return Err(format!("the kernel said {} first firmware calls where the probe made calls of five bytes: {calls:#?}", calls.len()));
     }
-    let mut crossed = 0;
+    let held = u64::from(cpus - 1);
     for line in &calls {
         smi_cmd_writer(line)?;
-        crossed += usize::from(number_between(line, ", asked from cpu", "; the write held cpu")? != 0);
+        let byte = field_between(line, "acpi: firmware call ", " written to SMI_CMD ")?;
+        let asker = number_between(line, ", asked from cpu", "; the write held cpu")?;
+        // The probe's `CROSSED`.
+        if ["0x51", "0x52", "0x53"].contains(&byte) && asker != held {
+            return Err(format!("firmware call {byte} was asked from cpu{asker}, where the probe held its asker to cpu{held}: {line}"));
+        }
         eprintln!("  [acpi] {}", line.trim());
-    }
-    if cpus > 1 && crossed == 0 {
-        return Err(format!("no firmware call was asked from another CPU than the boot processor, so none crossed to it: {calls:#?}"));
     }
     // The shutdown refused by the kernel's own name for it, before anything
     // was stopped: the probe ran on and said every line above.

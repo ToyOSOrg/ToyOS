@@ -20,6 +20,14 @@ QEMU, while `guest.yml`'s container still installs 11.1.1 from its snapshot
 archive, so its instrument step reds until the container moves to an image
 carrying 11.1.3.
 
+`nightly.yml`'s `portability-linux` job runs in
+`public.ecr.aws/docker/library/debian:sid`, a moving tag pulled from the
+public internet on every run, so a pull refused for rate is a red: six
+nightlies from 2026-10-24 to 10-31 failed that job at `Error response from
+daemon: toomanyrequests: Data limit exceeded` before any step ran
+(e.g. run 41187139929, job 124496246843). Resumption owes it an image pinned by
+digest from a mirror the build controls.
+
 **Exit**: the nightly resumes with its guest lanes on the guest runner rather
 than GitHub's machines. Only a `workflow_dispatch`-only workflow may name that
 runner, so resumption owes a design for a scheduled job under that guard. Held
