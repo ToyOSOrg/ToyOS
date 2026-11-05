@@ -2214,7 +2214,9 @@ pub fn build_test_image(
     )
 }
 
-/// The three parts one image is made of, each memoized for this process.
+/// The three parts one image is made of: the kernel section
+/// ([`crate::kimage`]) of the memoized kernel and userland, and the memoized
+/// loader and userland.
 pub struct Parts {
     pub kernel: Arc<Vec<u8>>,
     pub bootloader: Arc<Vec<u8>>,
@@ -2254,7 +2256,7 @@ pub fn build_test_parts(
     // staleness sweep to protect.
     let memo = (KERNEL.get(kernel_key), BOOTLOADER.get(bl_key), USERLAND.get(root_image_key));
     if let (Some(kernel), Some(bootloader), Some(userland)) = memo {
-        return Parts { kernel, bootloader, userland };
+        return Parts { kernel: Arc::new(crate::kimage::section(&kernel, &userland.supervisor, arch)), bootloader, userland };
     }
 
     // A cache miss is shared setup, not a property of whichever test happened
