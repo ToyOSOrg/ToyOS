@@ -421,9 +421,10 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libloading"
 version = "0.8.9"
-source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12#fbfc60c73509f321abab280b6f2d74785664e338"
+source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12#1eb166595120d44ccac6b02a67d103707a9246c2"
 dependencies = [
  "cfg-if",
+ "toyos",
  "windows-link",
 ]
 
@@ -938,6 +939,7 @@ name = "toyos"
 version = "0.18.0"
 dependencies = [
  "toyos-abi",
+ "toyos-elf",
 ]
 
 [[package]]
@@ -953,6 +955,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-device-memory"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-elf"
 version = "0.1.0"
 
 [[package]]
