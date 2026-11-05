@@ -20,14 +20,112 @@ unsafe extern "C" fn _start() -> ! {
     );
 }
 
-/// Copy `n` bytes from `src` to `dest`, lowest address first.
-pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
+/// Copy `n` bytes from `src` to `dest` as a forward copy would: correct for
+/// any `dest` not above an overlapping `src`; returns `dest`.
+///
+/// A forward copy whose destination is a short way above its source modulo
+/// 4 KiB loads each byte soon after storing to an unrelated address with the
+/// same bits 11:0, and the load waits on that store: AMD's Family 17h judges
+/// store-to-load forwarding eligibility by those bits alone (Software
+/// Optimization Guide for AMD Family 17h Models 30h and Greater Processors,
+/// 56305 rev. 3.02, §2.12), and Intel calls it 4K aliasing (Intel 64 and
+/// IA-32 Architectures Optimization Reference Manual). Such a copy of at
+/// least [`ROUTED_LEAST`] bytes jumps to [`copy_short_alias`]; every other copy
+/// is one `rep movsb`, behind the length compare and, from `ROUTED_LEAST`,
+/// the distance compare, both inline so no call is made.
+#[inline(always)]
+pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    // The distance modulo 4 KiB in 1..SHORT_ALIAS, as one compare.
+    if n >= ROUTED_LEAST && ((dest as usize).wrapping_sub(src as usize) % 4096).wrapping_sub(1) < SHORT_ALIAS - 1 {
+        // SAFETY: as this function's caller promises.
+        return unsafe { copy_short_alias(dest, src, n) };
+    }
+    unsafe { movsb(dest, src, n) };
+    dest
+}
+
+/// [`copy_forward`] at a short distance, out of line: highest first, so every
+/// store a load could match is 4 KiB minus the distance behind it and long
+/// retired, where the ranges are disjoint and the copy at most
+/// [`ROUTED_MOST`]; otherwise one `rep movsb`.
+#[inline(never)]
+unsafe fn copy_short_alias(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    // SAFETY: `n` is at least `ROUTED_LEAST`, above the loops' 64; down only
+    // between disjoint ranges.
+    unsafe {
+        if n > ROUTED_MOST || (dest as usize).abs_diff(src as usize) < n {
+            movsb(dest, src, n);
+        } else {
+            copy_down_sse2(dest, src, n);
+        }
+    }
+    dest
+}
+
+#[inline(always)]
+unsafe fn movsb(dest: *mut u8, src: *const u8, n: usize) {
     unsafe {
         core::arch::asm!(
             "rep movsb",
             inout("rdi") dest => _,
             inout("rsi") src => _,
             inout("rcx") n => _,
+            options(nostack),
+        );
+    }
+}
+
+/// The distance under which [`copy_forward`] copies highest first.
+const SHORT_ALIAS: usize = 512;
+
+/// The shortest copy that asks where its ends sit; a shorter one pays one
+/// compare over a bare `rep movsb`.
+const ROUTED_LEAST: usize = 256;
+
+/// The longest copy [`copy_short_alias`] copies highest first. A longer one runs
+/// from beyond the caches, where the loop's stores read each line before
+/// writing it and measured slower than `rep movsb` at distances that do not
+/// stall.
+const ROUTED_MOST: usize = 1 << 20;
+
+/// Where [`copy_down_sse2`] starts: the offset of the last 16-byte boundary
+/// of the destination at or below its end. The bytes above it go in one
+/// unaligned 64-byte store; every store below it is aligned, since a store
+/// split across two lines costs both benches' cores as much as the stall the
+/// loop avoids.
+fn aligned_end(dest: *mut u8, n: usize) -> usize {
+    ((dest as usize + n) & !15) - dest as usize
+}
+
+/// Copy `n` bytes, at least 64, between disjoint ranges by SSE2 from the
+/// top, 64 bytes a step from [`aligned_end`]: the first and last 64 bytes are
+/// loaded first and stored last, so the steps may overlap them.
+pub(crate) unsafe fn copy_down_sse2(dest: *mut u8, src: *const u8, n: usize) {
+    unsafe {
+        core::arch::asm!(
+            "movups xmm4, [{s}]", "movups xmm5, [{s} + 16]", "movups xmm6, [{s} + 32]", "movups xmm7, [{s} + 48]",
+            "movups xmm8, [{s} + {n} - 64]", "movups xmm9, [{s} + {n} - 48]",
+            "movups xmm10, [{s} + {n} - 32]", "movups xmm11, [{s} + {n} - 16]",
+            "2:",
+            "cmp {p}, 64",
+            "jbe 3f",
+            "sub {p}, 64",
+            "movups xmm0, [{s} + {p}]", "movups xmm1, [{s} + {p} + 16]",
+            "movups xmm2, [{s} + {p} + 32]", "movups xmm3, [{s} + {p} + 48]",
+            "movaps [{d} + {p}], xmm0", "movaps [{d} + {p} + 16], xmm1",
+            "movaps [{d} + {p} + 32], xmm2", "movaps [{d} + {p} + 48], xmm3",
+            "jmp 2b",
+            "3:",
+            "movups [{d} + {n} - 64], xmm8", "movups [{d} + {n} - 48], xmm9",
+            "movups [{d} + {n} - 32], xmm10", "movups [{d} + {n} - 16], xmm11",
+            "movups [{d}], xmm4", "movups [{d} + 16], xmm5", "movups [{d} + 32], xmm6", "movups [{d} + 48], xmm7",
+            s = in(reg) src,
+            d = in(reg) dest,
+            n = in(reg) n,
+            p = inout(reg) aligned_end(dest, n) => _,
+            out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+            out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+            out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm11") _,
             options(nostack),
         );
     }

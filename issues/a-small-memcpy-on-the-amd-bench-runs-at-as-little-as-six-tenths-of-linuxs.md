@@ -8,7 +8,8 @@ opened: 2026-10-28
 
 `osbench mem`'s `mem.memcpy.<bytes>` copies a buffer of that size with each
 system's own `memcpy`. On ToyOS that is `sdk/libc`'s, whose `copy_forward` is
-one `rep movsb` at every length (`sdk/libc/src/arch/x86_64.rs`). On Linux it
+one `rep movsb` at every length between buffers page-aligned alike, as these
+are (`sdk/libc/src/arch/x86_64.rs`). On Linux it
 is the static musl build's.
 
 From the 2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`):
