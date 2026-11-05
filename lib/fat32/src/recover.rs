@@ -1,20 +1,32 @@
 //! What a writable mount takes back of a volume a stop left: the states
-//! [`crate::repair`]'s open windows name, made consistent before the first
-//! write. Each step moves towards consistency on its own, so a stop inside
-//! this leaves no worse a volume than it found.
+//! [`crate::repair`]'s open windows name, and the one a rename stopped
+//! between its writes leaves.
 //!
-//! - **A split FAT entry** takes the active copy's value, which holds a state
-//!   the stopped call or its repair passed through.
+//! **Nothing is written unless everything found is one of those states.**
+//! The volume is read whole first: every directory walked, every chain
+//! followed to its file's size, the FAT copies compared. Anything a stop of
+//! this crate cannot leave — a link that is not one, a directory that does
+//! not read whole, a cluster two different entries reach, a chain short of
+//! its size, FAT copies that differ where one does not read whole — refuses
+//! the recovery by name and leaves every byte as it was, since a walk that
+//! did not reach a cluster cannot say it is lost. Then, in this order, each write moving towards
+//! consistency so a stop inside it leaves no worse a volume:
+//!
+//! - **A split FAT entry** takes the active copy's value, a state the stopped
+//!   call, its repair or the stopped flush passed through.
+//! - **A rename's second name** — an entry equal in every field but the name
+//!   to one the walk already met, reaching the same chain — is erased, so the
+//!   file keeps its old name or its new one, and each directory's `..` names
+//!   the parent its kept entry is in.
+//! - **A long-name entry no short entry completes** is freed.
 //! - **A file's chain longer than its size** is ended at the size, so the
 //!   bytes a growth wrote past its entry are lost, as the entry says.
-//! - **A long-name entry no short entry completes** is freed.
-//! - **A cluster no entry reaches** is freed.
-//! - **The free count** is counted again.
-//!
-//! What a stop cannot leave and this cannot settle — a cluster two entries
-//! reach, a link that is not one, a chain shorter than its size — is counted
-//! as [`Recovered::unrepaired`] and left as it is.
+//! - **A cluster no entry reaches** is freed, and the free count is counted
+//!   again.
 
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -23,23 +35,35 @@ use crate::device::Volume as _;
 use crate::dir::{DirScan, EntryCursor, RawEntry};
 use crate::error::Error;
 use crate::fat::{END_OF_CHAIN, ENTRY_MASK};
-use crate::fs::Fat32;
+use crate::fs::{Fat32, Loc};
 use toyos_blockdev::BlockDev;
 
-/// What [`Fat32::recover`] changed, and what it found and left.
+/// What [`Fat32::recover`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// Every finding was a stop's, and this is what was written.
+    Recovered(Recovered),
+    /// The volume holds what no stop of this crate leaves, named here, and
+    /// nothing was written.
+    Refused(String),
+}
+
+/// What a recovery changed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Recovered {
-    /// FAT entries whose mirrors took the active copy's value.
+    /// Split FAT entries whose mirrors took the active copy's value.
     pub mirrors: u32,
-    /// Files whose chain was ended at their size; what it held past that is
-    /// counted in [`Self::lost`].
-    pub cut: u32,
+    /// Second names a stopped rename left, erased.
+    pub renames: u32,
+    /// Directories whose `..` was repointed at the parent their entry is in.
+    pub parents: u32,
     /// Long-name entries no short entry completed, freed.
     pub long_names: u32,
+    /// Files whose chain was ended at their size; the clusters past it are
+    /// counted in [`Self::lost`].
+    pub ended: u32,
     /// Allocated clusters no entry reached, freed.
     pub lost: u32,
-    /// Inconsistencies left as they were.
-    pub unrepaired: u32,
 }
 
 impl Recovered {
@@ -75,121 +99,243 @@ impl Reached {
     }
 }
 
+/// What the read-only pass found, every item a stop's.
+struct Findings {
+    /// Each FAT entry whose copies differ, and the active copy's value.
+    splits: Vec<(Cluster, u32)>,
+    seconds: Vec<Loc>,
+    /// Directories whose `..` does not name their parent, and that parent.
+    parents: Vec<(Cluster, Cluster)>,
+    /// Offsets of long-name entries no short entry completes.
+    names: Vec<u64>,
+    /// Each long chain's cluster at its file's size.
+    ends: Vec<Cluster>,
+    reached: Reached,
+}
+
+/// The walk met what no stop leaves.
+type Unexplained = String;
+
 impl<D: BlockDev> Fat32<D> {
-    /// Take back what a stop left, then sync. For a writable mount, before
-    /// its first write: the volume must not be written by anything else
-    /// meanwhile.
-    pub async fn recover(&mut self) -> Result<Recovered, Error> {
+    /// Take back what a stop left, then sync; or refuse, writing nothing.
+    /// For a writable mount, before its first write: the volume must not be
+    /// written by anything else meanwhile.
+    pub async fn recover(&mut self) -> Result<Recovery, Error> {
         assert!(!self.in_call, "toyos-fat32: recover inside a mutating call");
         self.settle().await?;
-        let mut done = Recovered { mirrors: self.reconcile_mirrors().await?, ..Recovered::default() };
-        let mut reached = Reached::new(self.geom.cluster_count);
-        self.reach_tree(&mut reached, &mut done).await?;
+        let found = match self.examine().await? {
+            Ok(found) => found,
+            Err(why) => return Ok(Recovery::Refused(why)),
+        };
+        let mut done = Recovered::default();
+        for &(cluster, value) in &found.splits {
+            for fat in self.geom.fat_mirrors().filter(|&f| f != 0) {
+                self.write_fat_entry(fat, cluster, value).await?;
+            }
+            done.mirrors += 1;
+        }
+        for loc in found.seconds {
+            let mark = self.repair.len();
+            self.erase_entries(loc).await?;
+            self.repair.truncate(mark);
+            done.renames += 1;
+        }
+        for (dir, parent) in found.parents {
+            let mark = self.repair.len();
+            self.set_dot_dot(dir, parent).await?;
+            self.repair.truncate(mark);
+            done.parents += 1;
+        }
+        for offset in found.names {
+            let mut raw = self.read_entry_at(offset).await?;
+            raw.0[0] = DELETED;
+            self.put_entry_at(offset, &raw).await?;
+            done.long_names += 1;
+        }
+        for last in found.ends {
+            self.set_fat_entry(last, END_OF_CHAIN).await?;
+            done.ended += 1;
+        }
         let free;
-        (done.lost, free) = self.free_unreached(&reached).await?;
+        (done.lost, free) = self.free_unreached(&found.reached).await?;
         self.fsinfo.free_count = Some(free);
         self.fsinfo.next_free = None;
         self.fsinfo.dirty = true;
         self.sync().await?;
-        Ok(done)
+        Ok(Recovery::Recovered(done))
     }
 
-    /// Every mirror's entry that differs from the active FAT's takes its
-    /// value.
-    async fn reconcile_mirrors(&mut self) -> Result<u32, Error> {
-        // Mirroring off: the other copies are not the volume's.
-        if self.geom.active_fat.is_some() {
-            return Ok(0);
+    /// Read the volume whole and say what a recovery would write, or what it
+    /// found that no stop leaves.
+    ///
+    /// **Copies that differ are a stop's only where each reads whole.** The
+    /// file server's cache writes a flush's FAT blocks of both copies in any
+    /// order, so a stop inside one splits every entry of the blocks it had
+    /// not written. Each copy then holds the volume before or after that
+    /// flush, which the walk over it reads whole; a copy torn or written by
+    /// something else does not, and then neither is written over.
+    async fn examine(&mut self) -> Result<Result<Findings, Unexplained>, Error> {
+        let splits = self.splits().await?;
+        let mut found = Findings {
+            splits,
+            seconds: Vec::new(),
+            parents: Vec::new(),
+            names: Vec::new(),
+            ends: Vec::new(),
+            reached: Reached::new(self.geom.cluster_count),
+        };
+        if let Err(why) = self.walk_tree(&mut found).await? {
+            return Ok(Err(why));
         }
-        let active = 0;
+        if !found.splits.is_empty() {
+            for copy in self.geom.fat_mirrors().filter(|&f| f != 0) {
+                if let Err(why) = self.walk_copy(copy).await? {
+                    let n = found.splits.len();
+                    return Ok(Err(format!("the FAT copies differ in {n} entries, and copy {copy} does not read whole: {why}")));
+                }
+            }
+        }
+        Ok(Ok(found))
+    }
+
+    /// The walk, reading FAT `copy` in place of the active one.
+    async fn walk_copy(&mut self, copy: u32) -> Result<Result<(), Unexplained>, Error> {
+        let mut found = Findings {
+            splits: Vec::new(),
+            seconds: Vec::new(),
+            parents: Vec::new(),
+            names: Vec::new(),
+            ends: Vec::new(),
+            reached: Reached::new(self.geom.cluster_count),
+        };
+        let active = self.geom.active_fat.replace(copy);
+        let walked = self.walk_tree(&mut found).await;
+        self.geom.active_fat = active;
+        walked
+    }
+
+    /// Every FAT entry whose mirrors differ from FAT 0, with FAT 0's value;
+    /// none where mirroring is off, since the other copies are not the
+    /// volume's then.
+    async fn splits(&mut self) -> Result<Vec<(Cluster, u32)>, Error> {
+        let mut splits = Vec::new();
+        if self.geom.active_fat.is_some() {
+            return Ok(splits);
+        }
         let bps = self.geom.bytes_per_sector as usize;
         let sectors = self.geom.max_cluster() as u64 * 4 / bps as u64 + 1;
-        let mut fixed = 0;
         let mut ours = vec![0u8; bps];
         let mut theirs = vec![0u8; bps];
-        self.invalidate_sector();
         for sector in 0..sectors {
             let at = sector * bps as u64;
-            self.dev.read_at(self.geom.fat_base_offset(active) + at, &mut ours).await?;
-            for fat in self.geom.fat_mirrors().filter(|&f| f != active) {
+            self.dev.read_at(self.geom.fat_base_offset(0) + at, &mut ours).await?;
+            for fat in self.geom.fat_mirrors().filter(|&f| f != 0) {
                 self.dev.read_at(self.geom.fat_base_offset(fat) + at, &mut theirs).await?;
                 for e in 0..bps / 4 {
                     let entry = |b: &[u8]| u32::from_le_bytes(b[e * 4..e * 4 + 4].try_into().expect("4 bytes")) & ENTRY_MASK;
                     let number = (sector as usize * bps / 4 + e) as u32;
                     let Some(cluster) = self.geom.cluster(number) else { continue };
-                    let value = entry(&ours);
-                    if entry(&theirs) != value {
-                        self.write_fat_entry(fat, cluster, value).await?;
-                        fixed += 1;
+                    if entry(&theirs) != entry(&ours) && splits.last().is_none_or(|&(c, _)| c != cluster) {
+                        splits.push((cluster, entry(&ours)));
                     }
                 }
             }
         }
-        Ok(fixed)
+        Ok(splits)
     }
 
-    /// Mark every cluster the tree reaches from the root, freeing each
-    /// long-name entry no short entry completes, then end each file's chain
-    /// at its size: the rest is reached by nothing, and freed with the lost.
-    async fn reach_tree(&mut self, reached: &mut Reached, done: &mut Recovered) -> Result<(), Error> {
+    /// Walk the tree from the root, marking every cluster it reaches and
+    /// noting what a stop left; the first thing no stop leaves ends it.
+    async fn walk_tree(&mut self, found: &mut Findings) -> Result<Result<(), Unexplained>, Error> {
         let whole = self.geom.cluster_count as u64;
         let bpc = self.geom.bytes_per_cluster() as u64;
-        let mut dirs = Vec::new();
-        let mut long = Vec::new();
         let root = self.geom.root();
-        match self.reach_chain(root, whole, reached).await? {
-            Ok(_) => dirs.push(root),
-            Err(()) => done.unrepaired += 1,
+        if self.reach_chain(root, whole, &mut found.reached).await?.is_err() {
+            return Ok(Err("the root directory's chain does not read whole".into()));
         }
+        // Each entry's first cluster, and every field of the entry but its name.
+        let mut named: BTreeMap<u32, [u8; 21]> = BTreeMap::new();
+        let mut dirs = vec![root];
         while let Some(dir) = dirs.pop() {
             let mut scan = DirScan::new(dir);
             let mut after = 0u32;
             loop {
-                let found = match scan.next(self).await {
-                    Ok(found) => found,
+                let located = match scan.next(self).await {
+                    Ok(located) => located,
                     Err(Error::CorruptDirectory | Error::CorruptChain) => {
-                        done.unrepaired += 1;
-                        break;
+                        return Ok(Err(format!("the directory at cluster {} does not read whole", dir.raw())));
                     }
                     Err(e) => return Err(e),
                 };
-                let end = found.as_ref().map_or(scan.scanned(), |l| l.first_index);
-                done.long_names += self.free_orphan_names(dir, after, end).await?;
-                let Some(located) = found else { break };
+                let end = located.as_ref().map_or(scan.scanned(), |l| l.first_index);
+                self.orphan_names(dir, after, end, &mut found.names).await?;
+                let Some(located) = located else { break };
                 after = located.index + 1;
                 let (raw, size) = (located.raw, located.raw.size() as u64);
                 let Some(first) = self.geom.cluster(raw.first_cluster()) else {
                     if raw.first_cluster() != 0 || (!raw.is_dir() && size != 0) {
-                        done.unrepaired += 1;
+                        return Ok(Err(format!(
+                            "an entry in the directory at cluster {} names cluster {} for {size} bytes",
+                            dir.raw(),
+                            raw.first_cluster()
+                        )));
                     }
                     continue;
                 };
-                if raw.is_dir() {
-                    match self.reach_chain(first, whole, reached).await? {
-                        Ok(_) => dirs.push(first),
-                        Err(()) => done.unrepaired += 1,
+                let fields: [u8; 21] = raw.0[11..].try_into().expect("21 bytes");
+                if found.reached.has(first.raw()) {
+                    if named.get(&first.raw()) != Some(&fields) {
+                        return Ok(Err(format!("cluster {} is reached by two different entries", first.raw())));
                     }
+                    found.seconds.push(Loc {
+                        dir_start: dir,
+                        first_index: located.first_index,
+                        index: located.index,
+                        entry_offset: located.offset,
+                    });
+                    continue;
+                }
+                named.insert(first.raw(), fields);
+                let unexplained = |what: &str| format!("the chain from cluster {} {what}", first.raw());
+                if raw.is_dir() {
+                    if self.reach_chain(first, whole, &mut found.reached).await?.is_err() {
+                        return Ok(Err(unexplained("of a directory does not read whole")));
+                    }
+                    match self.names_parent(first, dir).await? {
+                        Some(true) => {}
+                        Some(false) => found.parents.push((first, dir)),
+                        None => return Ok(Err(format!("the directory at cluster {} has no `..`", first.raw()))),
+                    }
+                    dirs.push(first);
                 } else if size == 0 {
-                    // An empty file names no cluster.
-                    let mut emptied = raw;
-                    emptied.set_first_cluster(0);
-                    self.put_entry_at(located.offset, &emptied).await?;
-                    done.cut += 1;
+                    return Ok(Err(unexplained("is named by an empty file")));
                 } else {
-                    match self.reach_chain(first, size.div_ceil(bpc), reached).await? {
-                        Ok((n, last)) if n == size.div_ceil(bpc) => long.push(last),
-                        _ => done.unrepaired += 1,
+                    let keep = size.div_ceil(bpc);
+                    match self.reach_chain(first, keep, &mut found.reached).await? {
+                        Ok((n, last)) if n == keep => match self.next_cluster(last).await {
+                            Ok(Some(_)) => found.ends.push(last),
+                            Ok(None) => {}
+                            Err(Error::CorruptChain) => return Ok(Err(unexplained("ends in a link that is not one"))),
+                            Err(e) => return Err(e),
+                        },
+                        Ok(_) => return Ok(Err(unexplained(&format!("is short of its file's {size} bytes")))),
+                        Err(()) => return Ok(Err(unexplained("of a file does not read whole"))),
                     }
                 }
             }
         }
-        for last in long {
-            if self.next_cluster(last).await?.is_some() {
-                self.set_fat_entry(last, END_OF_CHAIN).await?;
-                done.cut += 1;
-            }
+        Ok(Ok(()))
+    }
+
+    /// Whether `dir`'s `..` names `parent`; `None` for a directory with no
+    /// `..` entry.
+    async fn names_parent(&mut self, dir: Cluster, parent: Cluster) -> Result<Option<bool>, Error> {
+        let Some(offset) = EntryCursor::new(dir).offset_of(self, 1).await? else { return Ok(None) };
+        let raw = self.read_entry_at(offset).await?;
+        if raw.0[..2] != *b".." {
+            return Ok(None);
         }
-        Ok(())
+        Ok(Some(raw.first_cluster() == self.dotdot_target(parent)))
     }
 
     /// Mark up to `limit` clusters of the chain from `start`: their count and
@@ -220,21 +366,18 @@ impl<D: BlockDev> Fat32<D> {
         }
     }
 
-    /// Free each long-name entry of `dir` from index `from` before `to`:
-    /// none of them is part of a name a short entry completes.
-    async fn free_orphan_names(&mut self, dir: Cluster, from: u32, to: u32) -> Result<u32, Error> {
-        let mut freed = 0;
+    /// Note each live long-name entry of `dir` from index `from` before
+    /// `to`: none of them is part of a name a short entry completes.
+    async fn orphan_names(&mut self, dir: Cluster, from: u32, to: u32, names: &mut Vec<u64>) -> Result<(), Error> {
         let mut cursor = EntryCursor::new(dir);
         for index in from..to {
             let Some(offset) = cursor.offset_of(self, index).await? else { break };
-            let mut raw: RawEntry = self.read_entry_at(offset).await?;
+            let raw: RawEntry = self.read_entry_at(offset).await?;
             if raw.is_lfn() && raw.0[0] != DELETED {
-                raw.0[0] = DELETED;
-                self.put_entry_at(offset, &raw).await?;
-                freed += 1;
+                names.push(offset);
             }
         }
-        Ok(freed)
+        Ok(())
     }
 
     /// Free every allocated cluster `reached` does not hold: how many, and

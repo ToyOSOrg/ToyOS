@@ -27,7 +27,7 @@ use std::cell::{Cell, Ref, RefCell};
 use common::now;
 use spec_volume::{fat_offset, Volume, BYTES_PER_SECTOR, CLUSTERS, FAT_SECTORS, NUM_FATS};
 use toyos_blockdev::{within, Block, BlockDev, Error as DevError, BLOCK};
-use toyos_fat32::{Error, Fat32, FatTime, File, Recovered, MAX_LFN_CHARS, MAX_REPAIR_STEPS};
+use toyos_fat32::{Error, Fat32, FatTime, File, Recovered, Recovery, MAX_LFN_CHARS, MAX_REPAIR_STEPS};
 use toyos_fat32_check::Complaint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -665,10 +665,9 @@ fn all() -> [Scenario; 11] {
 #[test]
 fn a_stop_at_any_write_leaves_only_the_named_windows() {
     for s in all() {
-        // What rename's own write order leaves at a stop, owned by its issue
-        // file and not by this repair.
+        // What rename's own write order leaves at a stop: one chain under
+        // both names, which `Fat32::recover` resolves by keeping one.
         let own: fn(&Complaint) -> bool = match s.name {
-            // issues/a-rename-that-stops-between-its-writes-leaves-a-chain-two-entries-reach.md
             "rename" => |c| {
                 matches!(
                     c,
@@ -727,9 +726,8 @@ fn a_stop_at_any_write_leaves_only_the_named_windows() {
 }
 
 /// **What a stop leaves, a writable mount takes back.** Every state the test
-/// above admits, mounted again and recovered, is one the checker finds
-/// nothing in — but rename's own, which recovery leaves and counts — and a
-/// second recovery finds nothing to do.
+/// above admits, rename's own included, mounted again and recovered, is one
+/// the checker finds nothing in, and a second recovery finds nothing to do.
 #[test]
 fn a_recovery_after_a_stop_at_any_write_leaves_a_consistent_volume() {
     let mut seen = Recovered::default();
@@ -747,28 +745,136 @@ fn a_recovery_after_a_stop_at_any_write_leaves_a_consistent_volume() {
                 let context = format!("{}: stopped at write {from}, {outcome:?}", s.name);
                 let stopped = fs.into_device().into_medium();
                 let mut fs = now(Fat32::mount(Faulty::new(stopped))).expect("mount the stopped volume");
-                let recovered = now(fs.recover()).unwrap_or_else(|e| panic!("{context}: recover: {e}"));
-                seen.mirrors += recovered.mirrors;
-                seen.cut += recovered.cut;
-                seen.long_names += recovered.long_names;
-                seen.lost += recovered.lost;
-                let said = complaints(&fs.device().medium(), true);
-                let rename_own = |c: &Complaint| {
-                    matches!(c, Complaint::CrossLinked { .. } | Complaint::DotDotCluster { .. } | Complaint::DotEntry { .. })
+                let recovered = match now(fs.recover()) {
+                    Ok(Recovery::Recovered(done)) => done,
+                    other => panic!("{context}: {other:?}"),
                 };
-                let left: Vec<Complaint> = said.into_iter().filter(|c| !(s.name == "rename" && rename_own(c))).collect();
+                seen.mirrors += recovered.mirrors;
+                seen.renames += recovered.renames;
+                seen.parents += recovered.parents;
+                seen.long_names += recovered.long_names;
+                seen.ended += recovered.ended;
+                seen.lost += recovered.lost;
+                let left = complaints(&fs.device().medium(), true);
                 assert!(left.is_empty(), "{context}: {recovered:?}, and still\n{}", toyos_fat32_check::describe(&left));
                 common::assert_fats_agree(&fs.geometry().clone(), &fs.device().medium());
-                if s.name != "rename" {
-                    assert_eq!(recovered.unrepaired, 0, "{context}");
-                }
                 let again = now(fs.recover()).expect("recover again");
-                assert!(again.nothing() || s.name == "rename", "{context}: a second recovery did {again:?}");
+                assert_eq!(again, Recovery::Recovered(Recovered::default()), "{context}: a second recovery");
+                if s.name == "rename" {
+                    let moved = now(fs.exists("moving/kept.bin")).expect("exists")
+                        || now(fs.exists("into/A moved directory/kept.bin")).expect("exists");
+                    assert!(moved, "{context}: the moved directory's file is under neither name");
+                }
             }
         }
     }
     // Each repair met at least one stop that needed it, or this shows nothing of it.
-    assert!(seen.mirrors > 0 && seen.cut > 0 && seen.long_names > 0 && seen.lost > 0, "{seen:?}");
+    let Recovered { mirrors, renames, parents, long_names, ended, lost } = seen;
+    assert!([mirrors, renames, parents, long_names, ended, lost].iter().all(|&n| n > 0), "{seen:?}");
+}
+
+/// A clean volume with a file and a directory holding one, as a writer that
+/// is not this crate might leave it, and where each lies.
+fn foreign() -> (Vec<u8>, usize, usize, usize) {
+    let mut v = Volume::new();
+    v.finish();
+    let mut fs = now(Fat32::mount(Faulty::new(v.bytes))).expect("mount");
+    common::write_new(&mut fs, "A.BIN", &common::pattern(700, 1), stamp());
+    now(fs.create_dir("DIR", stamp())).expect("mkdir");
+    common::write_new(&mut fs, "DIR/B.BIN", &common::pattern(900, 2), stamp());
+    now(fs.sync()).expect("sync");
+    let a = now(fs.entry_offset("A.BIN")).unwrap() as usize;
+    let dir = now(fs.entry_offset("DIR")).unwrap() as usize;
+    let b = now(fs.entry_offset("DIR/B.BIN")).unwrap() as usize;
+    (fs.into_device().into_medium(), a, dir, b)
+}
+
+fn first_cluster(medium: &[u8], entry: usize) -> u32 {
+    let lo = u16::from_le_bytes([medium[entry + 26], medium[entry + 27]]) as u32;
+    let hi = u16::from_le_bytes([medium[entry + 20], medium[entry + 21]]) as u32;
+    hi << 16 | lo
+}
+
+/// Recovery of `medium` refuses, naming `why`, and leaves every byte.
+fn refused_untouched(medium: Vec<u8>, why: &str) {
+    let mut fs = now(Fat32::mount(Faulty::new(medium.clone()))).expect("mount");
+    match now(fs.recover()).expect("recover") {
+        Recovery::Refused(said) => assert!(said.contains(why), "refused for {said:?}, not {why:?}"),
+        done => panic!("recovered {done:?} a volume no stop leaves"),
+    }
+    assert!(*fs.device().medium() == medium[..], "a refused recovery wrote to the volume");
+}
+
+/// A directory whose chain has a link that is not one: the walk cannot see
+/// what is under it, so it cannot say anything there is lost.
+#[test]
+fn a_directory_with_a_broken_link_is_refused_and_left() {
+    let (mut medium, _, dir, _) = foreign();
+    let cluster = first_cluster(&medium, dir);
+    for copy in 0..NUM_FATS {
+        medium[fat_offset(copy, cluster)..][..4].copy_from_slice(&0u32.to_le_bytes());
+    }
+    refused_untouched(medium, "of a directory does not read whole");
+}
+
+/// A file's chain run into a directory's: one cluster two different entries
+/// reach, whichever the walk meets first.
+#[test]
+fn a_file_cross_linked_into_a_directory_is_refused_and_left() {
+    let (mut medium, a, dir, _) = foreign();
+    let into = first_cluster(&medium, dir);
+    let from = first_cluster(&medium, a);
+    for copy in 0..NUM_FATS {
+        medium[fat_offset(copy, from)..][..4].copy_from_slice(&into.to_le_bytes());
+    }
+    // A.BIN's 700 bytes need two clusters, the second now the directory's.
+    refused_untouched(medium, "is reached by two different entries");
+}
+
+/// Two files reaching one chain that differ in more than their name are no
+/// rename a stop left.
+#[test]
+fn a_cross_link_between_two_files_is_refused_and_left() {
+    let (mut medium, a, _, b) = foreign();
+    let first = medium[a + 26..a + 28].to_vec();
+    medium[b + 26..b + 28].copy_from_slice(&first);
+    refused_untouched(medium, "is reached by two different entries");
+}
+
+/// The copies differing where one of them does not read whole: a torn or
+/// foreign copy, which a stop of ours never leaves, and the other copy is
+/// not written over it. FAT 0 torn, then the mirror.
+#[test]
+fn copies_that_differ_where_one_does_not_read_whole_are_refused_and_left() {
+    for (copy, why) in [(0, "of a file does not read whole"), (1, "copy 1 does not read whole")] {
+        let (mut medium, a, ..) = foreign();
+        // A.BIN's first link, and a sector's worth of entries no file uses,
+        // in this copy alone.
+        let first = first_cluster(&medium, a);
+        medium[fat_offset(copy, first)..][..4].copy_from_slice(&0u32.to_le_bytes());
+        for cluster in 100..228 {
+            medium[fat_offset(copy, cluster)..][..4].copy_from_slice(&0x0FFF_FFFFu32.to_le_bytes());
+        }
+        refused_untouched(medium, why);
+    }
+}
+
+/// The copies differing in many entries where each reads whole: what a
+/// stopped flush of the file server's cache leaves, which takes FAT 0.
+#[test]
+fn copies_that_differ_where_each_reads_whole_are_recovered() {
+    let (mut medium, ..) = foreign();
+    for cluster in 100..228 {
+        medium[fat_offset(0, cluster)..][..4].copy_from_slice(&0x0FFF_FFFFu32.to_le_bytes());
+    }
+    let mut fs = now(Fat32::mount(Faulty::new(medium))).expect("mount");
+    match now(fs.recover()).expect("recover") {
+        Recovery::Recovered(done) => assert_eq!((done.mirrors, done.lost), (128, 128), "{done:?}"),
+        refused => panic!("{refused:?}"),
+    }
+    let left = complaints(&fs.device().medium(), true);
+    assert!(left.is_empty(), "{}", toyos_fat32_check::describe(&left));
+    assert_eq!(common::read_all(&mut fs, "DIR/B.BIN"), common::pattern(900, 2));
 }
 
 // ----------------------------------------------- the shape a stop produces

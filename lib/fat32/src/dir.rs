@@ -595,7 +595,7 @@ impl<D: BlockDev> Fat32<D> {
     /// What a `..` entry must name for a given parent. Zero when the parent is
     /// the root, which is what the format requires and what `fsck` checks: the
     /// root has no cluster number a `..` entry may name.
-    fn dotdot_target(&self, parent: Cluster) -> u32 {
+    pub(crate) fn dotdot_target(&self, parent: Cluster) -> u32 {
         if parent == self.geometry().root() { 0 } else { parent.raw() }
     }
 

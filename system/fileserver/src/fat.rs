@@ -18,7 +18,9 @@
 //! written as a file its reader would take for one.
 //!
 //! **A writable mount first takes back what a stop left** (`Fat32::recover`):
-//! leaks, a split FAT entry, a partial long name and a chain past its size.
+//! leaks, a split FAT entry, a half-done rename, a partial long name and a
+//! chain past its size. A volume holding anything else is served read-only,
+//! untouched.
 //!
 //! A volume that is not FAT32 is left untouched: `toyos-fat32` has no format
 //! path and its probe writes nothing.
@@ -28,7 +30,7 @@ use std::rc::Rc;
 
 use toyos::fs;
 use toyos_blockdev::BlockDev;
-use toyos_fat32::{Error, Fat32, FatTime, Recovered};
+use toyos_fat32::{Error, Fat32, FatTime, Recovered, Recovery};
 
 use crate::cache::{Cache, Disk};
 use crate::volume::{parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume, WriteBack, NANOS_PER_SEC};
@@ -112,18 +114,29 @@ impl<D: Disk> FatVolume<D> {
             geom.bytes_per_cluster()
         );
         // Before the first write: a stop leaves leaks and splits nothing else
-        // takes back. One that fails leaves the volume no worse than it was.
-        if writable {
-            match cache.block_on(fs.recover()) {
-                Ok(done) if done.nothing() => {}
-                Ok(Recovered { mirrors, cut, long_names, lost, unrepaired }) => println!(
-                    "fileserver: the FAT volume was not left whole: {mirrors} split FAT entries mended, {cut} \
-                     clusters past a file's size and {lost} no entry reached freed, {long_names} partial long \
-                     names erased; {unrepaired} inconsistencies left as they are"
-                ),
-                Err(e) => println!("fileserver: recovering the FAT volume failed ({e}); it is mounted as it is"),
-            }
-        }
+        // takes back. A volume holding what no stop of ours leaves, or one the
+        // recovery could not finish reading or writing, is served read-only.
+        let writable = writable
+            && match cache.block_on(fs.recover()) {
+                Ok(Recovery::Recovered(done)) if done.nothing() => true,
+                Ok(Recovery::Recovered(Recovered { mirrors, renames, parents, long_names, ended, lost })) => {
+                    println!(
+                        "fileserver: the FAT volume a stop left was recovered: {mirrors} split FAT entries \
+                         mended, {renames} second names of a stopped rename erased, {parents} `..` \
+                         repointed, {long_names} partial long names erased, {ended} files ended at their \
+                         size, {lost} clusters no entry reached freed"
+                    );
+                    true
+                }
+                Ok(Recovery::Refused(why)) => {
+                    println!("fileserver: the FAT volume holds what no stop of ours leaves ({why}); it is served read-only");
+                    false
+                }
+                Err(e) => {
+                    println!("fileserver: recovering the FAT volume failed ({e}); it is served read-only");
+                    false
+                }
+            };
         Ok(Self {
             fs,
             cache,
@@ -959,6 +972,26 @@ mod tests {
             written(&mut image, epoch);
         }
         assert!(grown_before_its_size, "no stop fell between the chain's growth and the size's write");
+    }
+
+    /// A volume holding what no stop of ours leaves — here a directory whose
+    /// chain has a link that is not one — is served read-only and not a byte
+    /// of it is written.
+    #[test]
+    fn a_volume_recovery_refuses_is_served_read_only_and_untouched() {
+        let clock = || 1_717_245_296 * NANOS_PER_SEC;
+        let spec = spec_volume::fixture();
+        let mut image = spec.bytes.clone();
+        image.resize(spec.bytes.len().div_ceil(BLOCK) * BLOCK, 0);
+        let sub = spec.at("sub").first;
+        for copy in 0..spec_volume::NUM_FATS {
+            image[spec_volume::fat_offset(copy, sub)..][..4].copy_from_slice(&0u32.to_le_bytes());
+        }
+        let epochs: Epochs = Rc::new(std::cell::RefCell::new(vec![Vec::new()]));
+        let v = FatVolume::mount(Traced { image: Bytes::new(image), epochs: Rc::clone(&epochs) }, CLEAN_LIMIT, true, clock)
+            .unwrap();
+        assert!(!v.writable(), "a volume recovery refused is served writable");
+        assert!(epochs.borrow().iter().all(Vec::is_empty), "a refused recovery wrote {:?}", epochs.borrow());
     }
 
     /// What the driver says of a volume that stopped answering is `Io`, which
