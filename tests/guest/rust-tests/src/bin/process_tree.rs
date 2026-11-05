@@ -245,8 +245,6 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
         endow_count: 0,
         labels_ptr: 0,
         labels_len: 0,
-        cwd_ptr: "/".as_ptr() as u64,
-        cwd_len: 1,
         image,
         image_len,
         place: u64::from(place.0),

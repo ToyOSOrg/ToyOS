@@ -17,8 +17,6 @@ use std::fs;
 
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 
-/// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
-const CWD: &str = "/";
 
 /// Kernel-served, so a path spawn reaches the kernel's own open; every refusal
 /// is asked again with the same bytes handed over as an image.
@@ -152,8 +150,6 @@ fn spawn_as(path: &str, image: &[u8]) -> SyscallError {
             endow_count: 0,
             labels_ptr: 0,
             labels_len: 0,
-            cwd_ptr: CWD.as_ptr() as u64,
-            cwd_len: CWD.len() as u64,
             image: toyos::AsHandle::as_handle(&object).raw().0 as u64,
             image_len: image.len() as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),

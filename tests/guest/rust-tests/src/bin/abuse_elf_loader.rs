@@ -24,8 +24,6 @@ use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
 use toyos_abi::end::End;
 
-/// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
-const CWD: &str = "/";
 
 /// Where each case's file is written. A spawn reads it back into a memory
 /// object and hands the kernel that, as every spawn of a served program does.
@@ -258,8 +256,6 @@ fn spawn_argv(path: &str, argv: &str) -> Result<RawHandle, SyscallError> {
             endow_count: 0,
             labels_ptr: 0,
             labels_len: 0,
-            cwd_ptr: CWD.as_ptr() as u64,
-            cwd_len: CWD.len() as u64,
             image,
             image_len,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),

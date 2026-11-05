@@ -1,12 +1,10 @@
-//! The kernel must survive a process that hands `SYS_SPAWN` absurd path, argv,
-//! env or working directory, and refuse each at its boundary.
+//! The kernel must survive a process that hands `SYS_SPAWN` absurd path, argv
+//! or env, and refuse each at its boundary.
 //!
 //! `path_len`, `argv_len` and `env_len` are raw `u64` fields of a user-supplied
 //! `SpawnArgs`. The path is copied, the argv blob is split into a `Vec<&str>`
 //! (16 bytes per token) and the env blob is copied with `to_vec()`, so each one
 //! sizes a kernel allocation. An argv with no non-empty token also has no `argv[0]`.
-//! A working directory that is empty, relative or longer than `MAX_PATH` would
-//! reach a child that cannot read it back.
 //!
 //! Every case carries a real image, and the same arguments with an honest argv
 //! start a child, so each refusal is its own field's.
@@ -17,10 +15,7 @@ mod image;
 use std::process::Command;
 
 use toyos::process::Process;
-use toyos_abi::syscall::{self, VmAt, VmProt, SpawnArgs, SyscallError, MAX_PATH};
-
-/// Where the child starts.
-const CWD: &str = "/";
+use toyos_abi::syscall::{self, VmAt, VmProt, SpawnArgs, SyscallError};
 
 /// The program every case hands over, whatever its argv names.
 const PROGRAM: &str = "/system/bin/echo";
@@ -56,8 +51,6 @@ fn main() {
         endow_count: 0,
         labels_ptr: 0,
         labels_len: 0,
-        cwd_ptr: CWD.as_ptr() as u64,
-        cwd_len: CWD.len() as u64,
         image,
         image_len,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
@@ -90,16 +83,6 @@ fn main() {
     let child = unsafe { syscall::spawn(&SpawnArgs { argv_len: 2, ..base }) }.expect("an honest argv starts a child");
     // SAFETY: the handle `SYS_SPAWN` just answered, held nowhere else.
     unsafe { Process::from_raw(child) }.wait().expect("wait for the honest child");
-
-    let relative = "tmp";
-    let overlong = format!("/{}", "a".repeat(MAX_PATH));
-    for (what, cwd) in [("an empty", ""), ("a relative", relative), ("an overlong", overlong.as_str())] {
-        let err = unsafe {
-            syscall::spawn(&SpawnArgs { argv_len: 2, cwd_ptr: cwd.as_ptr() as u64, cwd_len: cwd.len() as u64, ..base })
-        }
-        .expect_err("a working directory a child cannot read back must be refused");
-        assert_eq!(err, SyscallError::InvalidArgument, "wrong error for {what} working directory");
-    }
 
     // No non-empty token: there is no argv[0] to load.
     let err = unsafe { syscall::spawn(&base) }.expect_err("an empty argv must be rejected");

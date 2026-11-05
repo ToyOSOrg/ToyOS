@@ -112,8 +112,6 @@ fn spawn(own: &Image, role: &str, stdout: Option<RawHandle>) -> Result<RawHandle
         endow_count: endow.len() as u64,
         labels_ptr: LABEL.as_ptr() as u64,
         labels_len: LABEL.len() as u64,
-        cwd_ptr: "/".as_ptr() as u64,
-        cwd_len: 1,
         image,
         image_len,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),

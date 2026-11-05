@@ -178,7 +178,6 @@ pub fn spawn<C: Commit>(
     path: &str,
     argv: &[&str],
     commit: C,
-    cwd: String,
     env: Vec<u8>,
     backing: Arc<crate::file_backing::SharedImage>,
     parent: Parent,
@@ -329,7 +328,6 @@ pub fn spawn<C: Commit>(
     let (handles, endowments, held) = commit.commit(start::Own::new(&object, &notice))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
-        cwd,
         env,
         elf: ElfInfo {
             elf_alloc: exe_tls_template,
@@ -483,7 +481,7 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
     );
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
     let table = SupervisorTable { job, handles, entries, labels };
-    match spawn(SUPERVISOR, &[SUPERVISOR], table, String::from("/"), Vec::new(), image, Parent::Root) {
+    match spawn(SUPERVISOR, &[SUPERVISOR], table, Vec::new(), image, Parent::Root) {
         Ok((pid, ())) => pid,
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_supervisor: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_supervisor: {e}"),

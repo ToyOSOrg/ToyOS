@@ -7,7 +7,6 @@ pub const SYS_CLOSE: u64 = 10;
 pub const SYS_FSTAT: u64 = 14;
 /// What a path names, as a [`Stat`]: [`stat`].
 pub const SYS_SHUTDOWN: u64 = 19;
-pub const SYS_GETCWD: u64 = 21;
 pub const SYS_PIPE: u64 = 24;
 /// Start a program, endowing it exactly what the caller names. Answers a
 /// `Process` handle — see [`spawn`].
@@ -423,14 +422,6 @@ crate::user_safe! {
         /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
         pub labels_ptr: u64,
         pub labels_len: u64,
-        /// The child's working directory, kept as text for its
-        /// [`SYS_GETCWD`]: absolute and at most [`MAX_PATH`] bytes, or the
-        /// spawn is refused `InvalidArgument`. It names a file server's
-        /// directory, which the caller's client asked that server about.
-        /// **Always the caller's statement**: the kernel never substitutes the
-        /// caller's own.
-        pub cwd_ptr: u64,
-        pub cwd_len: u64,
         /// The program's bytes, in a memory object the caller holds — its file
         /// server's for the file, or one the caller read the program into:
         /// `image` is a handle to it carrying `MAP`, and `image_len` how many of
@@ -1284,22 +1275,6 @@ pub fn fstat(handle: RawHandle) -> Result<Stat, SyscallError> {
     let mut stat = Stat::default();
     check_unit(syscall(SYS_FSTAT, handle.0 as u64, &mut stat as *mut Stat as u64, 0, 0))?;
     Ok(stat)
-}
-
-/// Get the initial working directory supplied by spawn. Runtime changes
-/// belong to the SDK process state (`toyos::files::getcwd`).
-///
-/// Returns the length the path *needs*, not the number of bytes written:
-/// `n <= buf.len()` means the path is in `buf[..n]`, and `n > buf.len()` means
-/// nothing was written and `n` is the size to allocate before retrying. Pass an
-/// empty buffer to ask the length alone. `0` is the error return.
-///
-/// The required length rather than a truncated count, because a count cannot
-/// distinguish an exact fit from a silent truncation — and a caller with a fixed
-/// buffer would take a valid-looking path to the wrong directory.
-pub fn getcwd(buf: &mut [u8]) -> usize {
-    let n = syscall(SYS_GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
-    if SyscallError::from_u64(n).is_some() { 0 } else { n as usize }
 }
 
 /// Fill `buf` with cryptographically secure random bytes.

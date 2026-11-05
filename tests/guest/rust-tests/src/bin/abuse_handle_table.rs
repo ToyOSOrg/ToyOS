@@ -41,8 +41,6 @@ const SELF: &str = "/system/bin/test_rs_abuse_handle_table";
 /// The role a spawned copy of this binary takes: it exits at once.
 const CHILD: &str = "endowed";
 
-/// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
-const CWD: &str = "/";
 
 /// Mirrors `RawHandle::MAX_SLOTS`. A cap that moves should fail this test
 /// loudly.
@@ -90,8 +88,6 @@ fn main() {
             endow_count,
             labels_ptr: (region as u64) + (REGION / 8) as u64,
             labels_len: LABELS.len() as u64,
-            cwd_ptr: CWD.as_ptr() as u64,
-            cwd_len: CWD.len() as u64,
             image,
             image_len,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
@@ -210,8 +206,6 @@ fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, Sys
             endow_count: entries.len() as u64,
             labels_ptr: labels.as_ptr() as u64,
             labels_len: labels.len() as u64,
-            cwd_ptr: CWD.as_ptr() as u64,
-            cwd_len: CWD.len() as u64,
             image,
             image_len,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
