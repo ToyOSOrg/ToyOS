@@ -38,9 +38,11 @@ struct Thread {
     /// Nonzero once `tid` is written; the thread waits for it before it runs.
     published: AtomicU32,
     state: AtomicU32,
-    /// The stack's reservation: [`GUARD`] reserved, then the stack committed.
+    /// The thread's memory (`toyos::tls::ThreadMemory`): its area, a guard and its stack.
     reservation: *mut u8,
     reserved: usize,
+    /// What the thread names as its thread pointer first.
+    tp: usize,
     start: StartRoutine,
     arg: *mut u8,
     result: AtomicPtr<u8>,
@@ -63,28 +65,6 @@ static MARKER: u8 = 0;
 
 pub(crate) use toyos::sync::Lock;
 
-/// Reserved pages below a thread's stack, so that running off it faults:
-/// one page, which C's frames reach through only by skipping it, as a guard
-/// page on every POSIX system can be skipped.
-const GUARD: usize = syscall::PAGE_SIZE;
-
-/// A stack of `size` bytes in whole pages above a [`GUARD`], committed before
-/// the thread starts: the reservation, its length, and the stack's base.
-fn reserve_stack(size: usize) -> Option<(*mut u8, usize, *mut u8)> {
-    let pages = size.checked_next_multiple_of(syscall::PAGE_SIZE)?;
-    let reserved = pages.checked_add(GUARD)?;
-    // SAFETY: placed anywhere, so it replaces nothing.
-    let reservation = unsafe { syscall::vm_reserve(reserved, syscall::VmProt::None, syscall::VmAt::ANYWHERE) }.ok()?;
-    let base = reservation.wrapping_add(GUARD);
-    // SAFETY: the stack's pages, inside the reservation just made.
-    if unsafe { syscall::vm_protect(base, pages, syscall::VmProt::ReadWrite) }.is_err() {
-        // SAFETY: the reservation just made, which nothing reaches.
-        let _ = unsafe { syscall::vm_release(reservation, reserved) };
-        return None;
-    }
-    Some((reservation, reserved, base))
-}
-
 /// Wait for `thread` to be gone, free its stack and block, and answer what it
 /// returned.
 unsafe fn reap(thread: *mut Thread) -> *mut u8 {
@@ -101,6 +81,8 @@ unsafe fn reap(thread: *mut Thread) -> *mut u8 {
 unsafe extern "C" fn thread_entry(arg: u64) {
     let thread = arg as *mut Thread;
     let t = unsafe { &*thread };
+    // Before anything reads a thread-local.
+    toyos::tls::enter(t.tp).expect("libc: the kernel refused a thread's thread pointer");
     while t.published.load(Ordering::Acquire) == 0 {
         // SAFETY: `published` is a live, aligned u32.
         unsafe { syscall::futex_wait(t.published.as_ptr(), 0, None) };
@@ -116,11 +98,13 @@ unsafe fn exit_thread(result: *mut u8) -> ! {
         run_thread_dtors();
         run_key_destructors();
     }
+    // Its tid is read below off the TCB, which outlives this.
+    toyos::tls::leave();
     let thread = SELF.get();
     if !thread.is_null() {
         let t = unsafe { &*thread };
         if t.counted {
-            crate::signal::thread_ended(toyos_abi::current_tid().raw());
+            crate::signal::thread_ended(toyos::tls::current_tid().raw());
         }
         t.result.store(result, Ordering::Release);
         if t.state.swap(EXITED, Ordering::AcqRel) == DETACHED {
@@ -169,9 +153,12 @@ pub(crate) fn spawn_own(start: StartRoutine) {
 unsafe fn create(attr: *const u64, start_routine: StartRoutine, arg: *mut u8, counted: bool) -> Result<*mut Thread, i32> {
     let attr = if attr.is_null() { attr_default() } else { unsafe { *attr } };
     let stack_size = (attr & !ATTR_DETACHED) as usize;
-    let Some((reservation, reserved, stack)) = reserve_stack(stack_size) else {
+    // A guard page below the stack, which C's frames reach through only by
+    // skipping it, as a guard page on every POSIX system can be skipped.
+    let Some(memory) = toyos::tls::ThreadMemory::reserve(stack_size) else {
         return Err(EAGAIN);
     };
+    let toyos::tls::ThreadMemory { reservation, reserved, stack_base: stack, stack_top, tp } = memory;
     let state = if attr & ATTR_DETACHED != 0 { DETACHED } else { JOINABLE };
     let block = Box::into_raw(Box::new(Thread {
         tid: AtomicU64::new(0),
@@ -179,12 +166,13 @@ unsafe fn create(attr: *const u64, start_routine: StartRoutine, arg: *mut u8, co
         state: AtomicU32::new(state),
         reservation,
         reserved,
+        tp,
         start: start_routine,
         arg,
         result: AtomicPtr::new(ptr::null_mut()),
         counted,
     }));
-    let top = (reservation as usize + reserved) & !(STACK_ALIGN - 1);
+    let top = stack_top as usize & !(STACK_ALIGN - 1);
     // SAFETY: the entry is a function of this library, and the stack is the
     // committed top of a fresh reservation.
     let tid = unsafe { syscall::thread_spawn(thread_entry as *const () as u64, top as u64, block as u64, stack as u64) };
@@ -298,7 +286,7 @@ pub unsafe extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *c
     }
     let set = unsafe { core::slice::from_raw_parts(mask, cpusetsize) };
     match crate::affinity::requested(set, toyos_abi::syscall::cpu_count() as usize) {
-        Ok(words) => match toyos_abi::syscall::thread_set_affinity(u64::from(toyos_abi::current_tid().0), &words) {
+        Ok(words) => match toyos_abi::syscall::thread_set_affinity(u64::from(toyos::tls::current_tid().0), &words) {
             Ok(()) => 0,
             Err(e) => crate::posix_io::set_errno(e),
         },
@@ -313,7 +301,7 @@ pub unsafe extern "C" fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *m
     if pid != 0 {
         return crate::posix_io::refuse(ESRCH);
     }
-    let words = match toyos_abi::syscall::thread_affinity(u64::from(toyos_abi::current_tid().0)) {
+    let words = match toyos_abi::syscall::thread_affinity(u64::from(toyos::tls::current_tid().0)) {
         Ok(words) => words,
         Err(e) => return crate::posix_io::set_errno(e),
     };

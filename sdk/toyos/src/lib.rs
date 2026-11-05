@@ -20,6 +20,8 @@ pub mod audio;
 pub mod census;
 pub mod device;
 pub mod devset;
+pub mod dl;
+pub mod elf;
 pub mod endow;
 pub mod fd;
 pub mod files;
@@ -45,6 +47,7 @@ pub mod syscap;
 pub mod sync;
 pub mod system;
 pub mod timing;
+pub mod tls;
 pub mod transport;
 pub mod volatile;
 

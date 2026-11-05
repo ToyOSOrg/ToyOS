@@ -75,7 +75,7 @@ fn main() {
     unsafe { core::ptr::copy_nonoverlapping(ARGV0.as_ptr(), argv, ARGV0.len()) };
 
     let echo = image::image_of("/system/bin/echo");
-    let (image, image_len) = echo.spawn_words();
+    let laid = image::laid(&echo);
     let spawn_with = |endow_count: u64| {
         let args = SpawnArgs {
             path_ptr: argv as u64,
@@ -88,8 +88,12 @@ fn main() {
             endow_count,
             labels_ptr: (region as u64) + (REGION / 8) as u64,
             labels_len: LABELS.len() as u64,
-            image,
-            image_len,
+            maps_ptr: laid.maps().as_ptr() as u64,
+            maps_count: laid.maps().len() as u64,
+            entry: laid.entry,
+            image_base: laid.image_base,
+            build_id_ptr: laid.build_id().as_ptr() as u64,
+            build_id_len: laid.build_id().len() as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         };
@@ -192,7 +196,7 @@ fn a_pair_is_refused_whole(filled: &mut Vec<RawHandle>) {
 /// `entries` into the blob `labels`.
 fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, SyscallError> {
     let argv = format!("{SELF}\0{CHILD}");
-    let (image, image_len) = own().spawn_words();
+    let laid = image::laid(&own());
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {
@@ -206,8 +210,12 @@ fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, Sys
             endow_count: entries.len() as u64,
             labels_ptr: labels.as_ptr() as u64,
             labels_len: labels.len() as u64,
-            image,
-            image_len,
+            maps_ptr: laid.maps().as_ptr() as u64,
+            maps_count: laid.maps().len() as u64,
+            entry: laid.entry,
+            image_base: laid.image_base,
+            build_id_ptr: laid.build_id().as_ptr() as u64,
+            build_id_len: laid.build_id().len() as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })

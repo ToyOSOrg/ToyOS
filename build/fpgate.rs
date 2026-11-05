@@ -19,8 +19,8 @@
 //! pass, and only in a function of the [`OWNER`] module.
 
 use iced_x86::{CpuidFeature, Decoder, DecoderOptions, Instruction, InstructionInfoFactory, Mnemonic, Register};
-use toyos_elf::section::SectionHeader;
-use toyos_elf::{FileHeader, Layout, Machine, SectionTable, SymTab};
+use toyos::elf::section::SectionHeader;
+use toyos::elf::{FileHeader, Layout, Machine, SectionTable, SymTab};
 
 /// `SHT_PROGBITS` and `SHF_EXECINSTR` (System V gABI, "Sections").
 const SHT_PROGBITS: u32 = 1;
@@ -86,7 +86,7 @@ pub fn judge(kernel: &[u8]) -> Result<(), String> {
     if header.machine != Machine::X86_64 {
         return Err(format!("the kernel is for {:?}, and this reads x86-64", header.machine));
     }
-    let table = toyos_symbols::file_range(kernel, header.shoff, toyos_symbols::shdr_table_len(&header))
+    let table = toyos::elf::file_range(kernel, header.shoff, u64::from(header.shnum) * u64::from(header.shentsize))
         .ok_or("the kernel's section headers lie outside it")?;
     let sections: Vec<SectionHeader> = SectionTable::new(table)
         .iter()
@@ -103,7 +103,7 @@ pub fn judge(kernel: &[u8]) -> Result<(), String> {
         boundaries.push((at, bitness));
     }
     for section in &sections {
-        let bytes = toyos_symbols::file_range(kernel, section.offset, section.size)
+        let bytes = toyos::elf::file_range(kernel, section.offset, section.size)
             .ok_or("an executable section lies outside the kernel")?;
         let end = section.addr + section.size;
         let mut cuts: Vec<(u64, u32)> = vec![(section.addr, 64)];
@@ -137,13 +137,13 @@ struct Functions<'a> {
 
 impl<'a> Functions<'a> {
     fn of(kernel: &'a [u8], header: &FileHeader, sections: &[SectionHeader]) -> Result<Self, String> {
-        let (syms, strs) = toyos_symbols::locate(kernel).ok_or("the kernel has no readable `.symtab`")?;
+        let (syms, strs) = toyos::elf::section::symbol_tables(kernel).ok_or("the kernel has no readable `.symtab`")?;
         let table = SymTab::new(syms, strs);
         let extent = Layout::parse(kernel, header.machine).map_err(|e| format!("{e}"))?.extent();
         let in_code = |at: u64| sections.iter().any(|s| at >= s.addr && at < s.addr + s.size);
         let mut starts: Vec<(u64, &str)> = table
             .defined()
-            .filter(|(_, sym)| matches!(sym.kind(), toyos_elf::sym::STT_FUNC | STT_NOTYPE))
+            .filter(|(_, sym)| matches!(sym.kind(), toyos::elf::sym::STT_FUNC | STT_NOTYPE))
             .filter_map(|(i, sym)| Some((extent.min() + sym.address(extent)?.get(), table.name(i))))
             .filter(|&(at, name)| in_code(at) && !name.is_empty())
             .collect();

@@ -1,19 +1,38 @@
 //! A repeat `dlopen` of one library shares that module rather than mapping a
-//! new copy — `SYS_DLOPEN` used to grow the address space without bound. Read
+//! new copy — the kernel's loader used to grow the address space without bound. Read
 //! two ways: handle identity (64 loads of one path return one handle, not
 //! 0, 1, 2, …), and the ELF/POSIX same-object guarantee (a TLS global written
 //! through the first handle's symbol is read back through the last's — one
-//! module, one TLS block; a fresh second module would read zero). The SDK's
-//! `dl_open` and raw `dl_sym`, not `libloading`, so the handle integer is
-//! observable.
+//! module, one TLS block; a fresh second module would read zero). libc's
+//! `dlopen` and `dlsym`, not `libloading`, so the handle is observable.
 
+use std::ffi::{c_char, c_void, CStr};
 use std::sync::{Arc, Barrier};
 
-use toyos_abi::syscall;
+// The C library's loader.
+#[link(name = "toyos_c", kind = "static")]
+unsafe extern "C" {
+    fn dlopen(path: *const c_char, flags: i32) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+}
 
-const LIB: &[u8] = b"/system/lib/libtls_dlopen_lib.so";
+const LIB: &CStr = c"/system/lib/libtls_dlopen_lib.so";
 /// A name this binary loads nowhere else, so the concurrent arm starts clean.
-const OTHER_LIB: &[u8] = b"/system/lib/libtls_multi_crate.so";
+const OTHER_LIB: &CStr = c"/system/lib/libtls_multi_crate.so";
+
+/// libc's handle for `path`, as an integer so it can be compared and sent.
+fn open(path: &CStr) -> Option<usize> {
+    // SAFETY: a NUL-terminated path.
+    let handle = unsafe { dlopen(path.as_ptr(), 2) };
+    (!handle.is_null()).then_some(handle as usize)
+}
+
+/// The address `handle`'s module gives `name`.
+fn sym(handle: usize, name: &CStr) -> Option<usize> {
+    // SAFETY: a handle `dlopen` answered, and a NUL-terminated name.
+    let at = unsafe { dlsym(handle as *mut c_void, name.as_ptr()) };
+    (!at.is_null()).then_some(at as usize)
+}
 const LOADS: usize = 64;
 
 fn main() {
@@ -24,9 +43,9 @@ fn main() {
 }
 
 /// The mechanism: repeated loads of one name are one handle.
-fn handle_identity() -> Vec<u64> {
-    let handles: Vec<u64> = (0..LOADS)
-        .map(|i| toyos::files::dl_open(LIB).unwrap_or_else(|e| panic!("dlopen #{i}: {e:?}")))
+fn handle_identity() -> Vec<usize> {
+    let handles: Vec<usize> = (0..LOADS)
+        .map(|i| open(LIB).unwrap_or_else(|| panic!("dlopen #{i}")))
         .collect();
 
     assert!(
@@ -40,21 +59,18 @@ fn handle_identity() -> Vec<u64> {
 
 /// The ELF/POSIX same-object guarantee: two handles to one name share the
 /// module's TLS. Written through `first`, read through `last`.
-fn object_identity(first: u64, last: u64) {
+fn object_identity(first: usize, last: usize) {
     // Same symbol, same address: a second, cheaper witness of the one mapping.
-    let get_via_first =
-        unsafe { syscall::dl_sym(first, b"dl_tls_get_a") }.expect("dl_tls_get_a via first");
-    let get_via_last =
-        unsafe { syscall::dl_sym(last, b"dl_tls_get_a") }.expect("dl_tls_get_a via last");
+    let get_via_first = sym(first, c"dl_tls_get_a").expect("dl_tls_get_a via first");
+    let get_via_last = sym(last, c"dl_tls_get_a").expect("dl_tls_get_a via last");
     assert_eq!(
         get_via_first, get_via_last,
         "the same symbol resolved to two addresses — the library is mapped twice"
     );
 
-    let inc =
-        unsafe { syscall::dl_sym(first, b"dl_tls_increment_a") }.expect("dl_tls_increment_a");
-    let inc: extern "C" fn() -> u64 = unsafe { core::mem::transmute(inc as usize) };
-    let get_last: extern "C" fn() -> u64 = unsafe { core::mem::transmute(get_via_last as usize) };
+    let inc = sym(first, c"dl_tls_increment_a").expect("dl_tls_increment_a");
+    let inc: extern "C" fn() -> u64 = unsafe { core::mem::transmute(inc) };
+    let get_last: extern "C" fn() -> u64 = unsafe { core::mem::transmute(get_via_last) };
 
     inc();
     inc();
@@ -81,11 +97,11 @@ fn one_name_under_contention() {
             let line = Arc::clone(&line);
             std::thread::spawn(move || {
                 line.wait();
-                toyos::files::dl_open(OTHER_LIB).unwrap_or_else(|e| panic!("racer {i}: {e:?}"))
+                open(OTHER_LIB).unwrap_or_else(|| panic!("racer {i}"))
             })
         })
         .collect();
-    let handles: Vec<u64> = racers.into_iter().map(|t| t.join().expect("a racer")).collect();
+    let handles: Vec<usize> = racers.into_iter().map(|t| t.join().expect("a racer")).collect();
     assert!(
         handles.iter().all(|&h| h == handles[0]),
         "{RACERS} threads loading one name concurrently got {handles:?} — the dedup holds \

@@ -306,7 +306,7 @@ mod target {
     fn stamp(body: &mut Body) {
         body.at_ns = toyos_abi::clock::stamp_ns();
         body.pid = PID.load(Ordering::Relaxed);
-        body.tid = toyos_abi::current_tid().0;
+        body.tid = crate::tls::current_tid().0;
     }
 
     fn push(ring: &Ring) -> impl FnMut(&mut Body) + '_ {
@@ -361,7 +361,7 @@ mod target {
     /// lane is claimed.
     pub fn claim_lane() -> Option<Lane> {
         match sink(Stream::Err) {
-            Sink::Ring(ring) => ring.claim_lane(PID.load(Ordering::Relaxed), toyos_abi::current_tid().0),
+            Sink::Ring(ring) => ring.claim_lane(PID.load(Ordering::Relaxed), crate::tls::current_tid().0),
             Sink::Descriptor(_) => None,
         }
     }

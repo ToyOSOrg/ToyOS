@@ -1,46 +1,40 @@
-//! Building a process out of an ELF file.
+//! Building a process out of the ranges its parent laid out.
 //!
-//! The kernel reads an executable's program headers, its `PT_TLS` template
-//! and its build-id note, copies its `PT_LOAD`s into memory of the new
-//! process's own and jumps to its entry;
-//! it reads no dynamic section, applies no relocation and loads no library at
-//! spawn. The program relocates itself (`toyos::relocate`).
-//!
-//! Every number the file names is untrusted: a refusal is
-//! `SyscallError::{InvalidArgument, ResourceExhausted}`, never a panic.
+//! The kernel parses no program. A parent reads its child's program and names
+//! the child's memory as ranges ([`Program`], `toyos_abi::syscall::SpawnMap`),
+//! each checked as an ordinary mapping is, the entry point and the stack's
+//! arguments; the kernel builds the space, places the stack and starts the
+//! main thread. Everything else is the program's: it relocates itself
+//! (`toyos::relocate`), lays out its own thread-local storage (`toyos::tls`)
+//! and loads its own libraries (`toyos::dl`).
 //!
 //! A spawn that lands writes one record, `spawn: <path> pid=N (…ms)`, once
 //! the process is in the table and placed; a spawn that is refused writes
-//! one, naming why. Nothing is said on the way, by this file or by
-//! `crate::elf` under it (`crate::process`'s header).
+//! one, naming why. Nothing is said on the way (`crate::process`'s header).
 
 // `warn`, not `deny`: the rest of the kernel is not yet swept for undocumented unsafe blocks.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 mod start;
-mod tls;
 
 pub use start::{build_child_handles, Commit, PendingHandles};
 pub(crate) use start::{alloc_kernel_stack, KernelStack, Start};
-pub use tls::{TlsBlock, DTV_INITIAL_CAPACITY, VARIANT as TLS_VARIANT};
 
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::elf;
 use crate::object::{ops, HandleTable, KObjectRef};
 use crate::mm::space::CopySource;
-use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::process::{
-    Admission, ElfInfo, Endowments, OwnedAlloc, Parent, Pid, ProcessAccounting, ProcessData,
+    Admission, Endowments, Parent, Pid, ProcessAccounting, ProcessData,
     ProcessEntry, ThreadData, ThreadEntry, UserImage, PROCESS_TABLE,
 };
 use crate::sync::Lock;
 use crate::{scheduler, UserAddr};
 use toyos_abi::handle::Rights;
-use toyos_abi::syscall::SyscallError;
-use toyos_elf::{Layout, TlsSegment};
+use crate::object::shm::SharedMemObject;
+use toyos_abi::syscall::{SpawnMap, SyscallError};
 use toyos_symbols::frame::BuildId;
 
 /// The main thread's stack: committed whole, populated as it is touched.
@@ -49,73 +43,74 @@ const USER_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// The reserved range below the main stack.
 const STACK_GUARD: u64 = 1024 * 1024;
 
-/// Read a byte range from the supplied executable image.
-///
-/// Returns only the part of the request the file actually holds — callers
-/// treat a short result as truncated and length-check before indexing; `len`
-/// comes from untrusted ELF fields, so the read is clamped rather than sized
-/// by it.
-pub(crate) fn read_file_range(
-    backing: &crate::file_backing::SharedImage,
-    offset: u64,
-    len: usize,
-) -> Vec<u8> {
-    let available = backing.file_size().saturating_sub(offset);
-    let len = len.min(available as usize);
-    let mut result = Vec::with_capacity(len);
-    let mut remaining = len;
-    let mut file_off = offset;
-    let mut page_buf = [0u8; PAGE_BYTES];
-
-    while remaining > 0 {
-        let off_in_block = (file_off % 4096) as usize;
-        let chunk = (4096 - off_in_block).min(remaining);
-
-        backing.read_page(file_off - off_in_block as u64, &mut page_buf);
-        result.extend_from_slice(&page_buf[off_in_block..off_in_block + chunk]);
-
-        file_off += chunk as u64;
-        remaining -= chunk;
-    }
-
-    result
+/// One range of a child's memory, its numbers checked where the request was
+/// read (`syscall::proc::spawn_program`): whole pages, and a copy's bytes inside
+/// an object of ordinary memory.
+pub struct Map {
+    pub at: UserAddr,
+    pub len: u64,
+    pub prot: kernel::vm::Prot,
+    /// The object its pages start as a copy of, from which page boundary, and
+    /// how many bytes; zeros past them, and `None` for zeros alone.
+    pub copy: Option<(Arc<dyn CopySource>, u64, u64)>,
 }
 
-
-/// Commit one range of private memory per `PT_LOAD` segment at `image_start`
-/// plus its offset, its file bytes and the rest of it zero, each page copied
-/// out of `source` at its first touch.
-///
-/// `Err` when two segments would share a page, which their ranges cannot:
-/// checked before the first range, and a refusal after it leaves ranges in a
-/// space nothing runs in yet.
-fn load_segments(
-    space: &mut crate::mm::space::AddressSpace,
-    layout: &Layout,
-    image_start: UserAddr,
-    source: &Arc<dyn CopySource>,
-) -> Result<(), SyscallError> {
-    use crate::mm::space::At;
-
-    if let Some((a, b)) = layout.overlapping_load_pages(4096) {
-        log!("spawn: PT_LOAD segments {} and {} contend for a page", a, b);
-        return Err(SyscallError::InvalidArgument);
+impl Map {
+    /// `raw`, checked as an ordinary mapping is: whole pages of the user half,
+    /// a protection, and a copy only of ordinary memory `object` holds from a
+    /// page boundary, `object` being `None` for zeros.
+    pub fn checked(raw: &SpawnMap, object: Option<Arc<SharedMemObject>>) -> Result<Map, SyscallError> {
+        let page = crate::mm::PAGE_SIZE;
+        let prot = crate::syscall::vm::vm_prot(raw.prot)?;
+        let at = UserAddr::checked(raw.addr).filter(|at| at.raw().is_multiple_of(page));
+        let ends = raw.addr.checked_add(raw.len).is_some_and(|end| end <= toyos_userbound::USER_TOP);
+        let (Some(at), true) = (at, ends && raw.len != 0 && raw.len.is_multiple_of(page) && raw.copied <= raw.len) else {
+            return Err(SyscallError::InvalidArgument);
+        };
+        let copy = match object {
+            None if raw.copied == 0 => None,
+            None => return Err(SyscallError::InvalidArgument),
+            Some(_) if !raw.offset.is_multiple_of(page) => return Err(SyscallError::InvalidArgument),
+            // Ordinary memory alone: a device aperture is no program, and a
+            // read of one is a device access. Each page is copied once, at
+            // its first touch, so a holder that writes the object later
+            // changes only pages not yet read: its own child's.
+            Some(object) => {
+                let held = raw.offset.checked_add(raw.copied).ok_or(SyscallError::InvalidArgument)?;
+                if held > object.size() || !object.is_ordinary() {
+                    return Err(SyscallError::InvalidArgument);
+                }
+                Some((object as Arc<dyn CopySource>, raw.offset, raw.copied))
+            }
+        };
+        Ok(Map { at, len: raw.len, prot, copy })
     }
-    for seg in layout.segments() {
-        let (lo, hi) = seg.page_range(4096);
-        let (seg_start, seg_end) = ((image_start + lo).raw(), (image_start + hi).raw());
-        if seg_end == seg_start {
-            continue;
+}
+
+/// What a parent laid out of its child's program.
+pub struct Program {
+    pub maps: Vec<Map>,
+    pub entry: u64,
+    /// Where the program's address 0 lands: what a crash record names a
+    /// frame's offset from.
+    pub image_base: u64,
+    pub build_id: Option<BuildId>,
+}
+
+/// Lay `maps` into `space`, a fresh one holding nothing but the clock page.
+/// `InvalidArgument` for a range that meets another or the clock page; a
+/// refusal after the first range leaves ranges in a space nothing runs in yet.
+fn lay(space: &mut crate::mm::space::AddressSpace, maps: &[Map]) -> Result<(), SyscallError> {
+    use crate::mm::space::At;
+    for map in maps {
+        if !space.vacant(map.at.raw(), map.len) {
+            return Err(SyscallError::InvalidArgument);
         }
-        // The file's bytes from the segment's first page: the bytes of that
-        // page before the segment are the file's too, as a linker lays them.
-        // Past the file's end and the segment's file size, the range reads
-        // zeros.
-        let file_start = seg.file_offset() & !4095;
-        let file_bytes = seg.filesz() + seg.file_offset() % 4096;
-        let copied = file_bytes.min(source.size().saturating_sub(file_start));
-        let at = At::Fixed(UserAddr::new(seg_start));
-        space.copy(seg_end - seg_start, at, segment_prot(seg), Arc::clone(source), file_start, copied)?;
+        let at = At::Fixed(map.at);
+        match &map.copy {
+            Some((source, offset, copied)) => space.copy(map.len, at, map.prot, Arc::clone(source), *offset, *copied)?,
+            None => space.reserve(map.len, at, map.prot)?,
+        };
     }
     Ok(())
 }
@@ -146,30 +141,14 @@ fn argv_block(top: u64, args: &[&str]) -> (u64, Vec<u8>) {
     (sp, block)
 }
 
-/// What one `PT_LOAD` segment's pages may be used for.
-///
-/// `PF_W | PF_X` refuses the write, not the execution: taking `X` away would
-/// let a hostile ELF run as data instead.
-fn segment_prot(seg: &toyos_elf::Segment) -> kernel::vm::Prot {
-    use kernel::vm::Prot;
-    if seg.flags().executable() {
-        Prot::ReadExec
-    } else if seg.flags().writable() {
-        Prot::ReadWrite
-    } else {
-        Prot::Read
-    }
-}
-
-
-/// Load a program and place its main thread under `parent`, answering its pid
+/// Build the process `program` describes and place its main thread under `parent`, answering its pid
 /// and what `commit` left its caller holding of it. Everything built for the
 /// child is counted to [`Commit::job`], which it runs in, and `commit` builds
 /// the child's handle table around its handle to itself once nothing is left
 /// to refuse.
 ///
-/// `path` labels the supplied executable image; the kernel resolves no path.
-/// `argv[0]` is the name the child goes by.
+/// `path` labels the program; the kernel resolves no path. `argv[0]` is the
+/// name the child goes by.
 ///
 /// `Refusal`, not `-> !`, is the error type: every failure below owns a
 /// partly built process (address space, stack, kernel stack), and nothing
@@ -179,7 +158,7 @@ pub fn spawn<C: Commit>(
     argv: &[&str],
     commit: C,
     env: Vec<u8>,
-    backing: Arc<crate::file_backing::SharedImage>,
+    program: Program,
     parent: Parent,
 ) -> Result<(Pid, C::Held), crate::object::Refusal> {
     let job = Arc::clone(commit.job());
@@ -190,56 +169,32 @@ pub fn spawn<C: Commit>(
     };
     // Before anything is built; dropped on every way out below but the insert.
     let admission = Admission::ask(parent)?;
-    let mut charge = ProcessData::charge(&job, path, &env).map_err(SyscallError::from)?;
+    let charge = ProcessData::charge(&job, path, &env).map_err(SyscallError::from)?;
     let t0 = crate::clock::nanos_since_boot();
 
-    let header_size = 4096.min(backing.file_size() as usize);
-    let header_data = read_file_range(backing.as_ref(), 0, header_size);
-    let layout = match elf::parse_layout(&header_data) {
-        Ok(l) => l,
-        Err(msg) => {
-            log!("spawn: {}: {}", path, msg);
-            return Err(SyscallError::InvalidArgument.into());
-        }
-    };
-
-    // The program reads the mapped table to relocate itself, and
-    // `SYS_QUERY_MODULES` answers with it: an image without one has neither.
-    let Some(phdrs) = layout.program_headers() else {
-        log!("spawn: {}: no PT_LOAD maps the program header table", path);
+    let Program { maps, entry, image_base, build_id } = program;
+    // Inside a range the child may execute, which `spawn_program` placed in the user half.
+    let executes = |map: &Map| map.prot == kernel::vm::Prot::ReadExec && (map.at.raw()..map.at.raw() + map.len).contains(&entry);
+    let Some(entry) = maps.iter().any(executes).then(|| toyos_userbound::Entry::new(entry)).flatten() else {
+        log!("spawn: {}: the entry {:#x} is in no executable range", path, entry);
         return Err(SyscallError::InvalidArgument.into());
     };
-
-    let source = backing.source();
-
-    let t1 = crate::clock::nanos_since_boot();
+    let start = maps.iter().map(|map| map.at.raw()).min().ok_or(SyscallError::InvalidArgument)?;
+    let end = maps.iter().map(|map| map.at.raw() + map.len).max().ok_or(SyscallError::InvalidArgument)?;
 
     let Some(child_pt) = crate::mm::space::Space::new_user(&job) else {
         log!("spawn: {}: no address space: every user PCID is held, or no frame is left for its root", path);
         return Err(SyscallError::ResourceExhausted.into());
     };
-    let (image_start, base, stack_base, sp) = {
+    let (stack_base, sp) = {
         use crate::mm::space::At;
         use kernel::vm::Prot;
         let mut space = child_pt.lock();
         crate::clock::map_page(&mut space);
-        // The image's span is placed whole, so its segments keep the distances
-        // the file gave them; the holes between them stay reserved.
-        let extent = layout.extent();
-        let Some(span) = layout.span().checked_next_multiple_of(crate::mm::PAGE_SIZE).filter(|&s| s != 0) else {
-            log!("spawn: {}: an image spanning {:#x}", path, layout.span());
-            return Err(SyscallError::InvalidArgument.into());
-        };
-        let image_start = space.reserve(span, At::Anywhere(PAGE_2M), Prot::None)?;
-        // The rebase base is the file's numbers, so `rebase_base` refuses a
-        // vaddr_min that underflows the subtraction or a span that leaves the
-        // user half.
-        let Some(base) = toyos_userbound::rebase_base(image_start.raw(), extent.min(), layout.span()) else {
-            log!("spawn: {}: image at vaddr_min {:#x} spanning {:#x} cannot rebase to {image_start:#x}",
-                path, extent.min(), layout.span());
-            return Err(SyscallError::InvalidArgument.into());
-        };
-        load_segments(&mut space, &layout, image_start, &source)?;
+        if let Err(e) = lay(&mut space, &maps) {
+            log!("spawn: {}: a range meets another or the clock page, or is refused: {:?}", path, e);
+            return Err(e.into());
+        }
         // Never executable, and a reserved guard below it, so running off the
         // stack's bottom faults instead of writing what lies there.
         let stack = space.reserve(STACK_GUARD + USER_STACK_SIZE as u64, At::ANYWHERE, Prot::None)?;
@@ -250,67 +205,11 @@ pub fn spawn<C: Commit>(
             return Err(SyscallError::InvalidArgument.into());
         }
         space.fill(sp, &block);
-        (image_start, base, stack_base, sp)
+        (stack_base, sp)
     };
 
-    let exe_tls_template = match layout.tls().and_then(TlsSegment::occupied) {
-        Some(tls) => {
-            let Some(tls_file_off) = layout.file_offset_of(tls.template()) else {
-                log!("spawn: {}: PT_TLS's template is in no PT_LOAD's file bytes", path);
-                return Err(SyscallError::InvalidArgument.into());
-            };
-            // Read directly into the `memsz`-sized buffer: `OwnedAlloc` zeroes
-            // (no second pass for `.tbss`) and refuses a size past one heap
-            // allocation itself.
-            let template = core::alloc::Layout::from_size_align(tls.memsz() as usize, 16).map_err(|_| SyscallError::InvalidArgument)?;
-            charge.grow(crate::mm::charge::heap(template)).map_err(SyscallError::from)?;
-            let Some(tls_buf) = OwnedAlloc::new(tls.memsz() as usize, 16) else {
-                log!("spawn: {}: cannot allocate a {}-byte TLS template", path, tls.memsz());
-                return Err(SyscallError::ResourceExhausted.into());
-            };
-            // `slice` bounds `filesz` against the `memsz` allocation, re-checking what `Layout::parse` already refused.
-            elf::read_backing_into(
-                backing.as_ref(),
-                tls_file_off,
-                tls_buf.slice(tls.template().len() as usize),
-            );
-            Some(tls_buf)
-        }
-        None => None,
-    };
-
-    let Some((tls_modules, tls)) = tls::build_tls_layout(&layout, exe_tls_template.as_ref()) else {
-        log!("spawn: {}: the TLS module does not fit one block", path);
-        return Err(SyscallError::ResourceExhausted.into());
-    };
-
-    let Some((tls_pages, thread_pointer, _)) =
-        tls::TlsBlock::build(&tls_modules, tls).and_then(|b| b.publish(&child_pt))
-    else {
-        log!("spawn: {}: failed to allocate TLS ({} bytes)", path, tls.total_memsz());
-        return Err(SyscallError::ResourceExhausted.into());
-    };
-
-    // Inside the image, which `rebase_base` placed inside the user half.
-    let Some(entry) = toyos_userbound::Entry::new((image_start + layout.entry().get()).raw())
-    else {
-        log!("spawn: {}: the entry is outside the user half", path);
-        return Err(SyscallError::InvalidArgument.into());
-    };
-    let image_end = (image_start + layout.span()).raw();
-    let t_tls = crate::clock::nanos_since_boot();
-
-    // What a crash record names a frame by. The build-id is read at each
-    // `PT_NOTE`'s own offset, a page of it at most.
-    let image = Arc::new(UserImage {
-        name: String::from(path),
-        build_id: BuildId::find(&header_data, |note| {
-            Some(read_file_range(backing.as_ref(), note.offset, note.filesz.min(PAGE_BYTES as u64) as usize))
-        }),
-        start: image_start.raw(),
-        end: image_end,
-        bias: base,
-    });
+    // What a crash record names a frame by.
+    let image = Arc::new(UserImage { name: String::from(path), build_id, start, end, bias: image_base });
 
     let (ks_alloc, ks_sp) = match alloc_kernel_stack(&job, Start::Process { entry, sp }) {
         Some(ks) => ks,
@@ -329,33 +228,16 @@ pub fn spawn<C: Commit>(
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         env,
-        elf: ElfInfo {
-            elf_alloc: exe_tls_template,
-            tls_modules,
-            tls,
-            next_tls_module_id: tls::FIRST_DLOPEN_MODULE,
-            dynamic_tls_blocks: alloc::collections::BTreeMap::new(),
-            loaded_libs: Vec::new(),
-            elf_base: UserAddr::new(base),
-            exe_eh_frame_hdr: layout
-                .eh_frame_hdr()
-                .map_or((0, 0), |r| ((image_start + r.start().get()).raw(), r.len())),
-            exe_vaddr_max: image_end,
-            exe_phdrs: ((image_start + phdrs.image().start().get()).raw(), phdrs.count()),
-            lib_paths: Vec::new(),
-        },
         space: Arc::clone(&child_pt),
-        exe_path: String::from(path),
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
         endowments,
         job: job.clone(),
-        charge,
+        _charge: charge,
         pager,
     }));
 
     let thread_data = Arc::new(Lock::new(ThreadData {
-        tls: Some(tls_pages),
         user_stack_base: stack_base,
         user_stack_size: USER_STACK_SIZE as u64,
     }));
@@ -383,7 +265,7 @@ pub fn spawn<C: Commit>(
             kernel_stack: ks_alloc,
             entry_sp: ks_sp,
             address_space: child_pt.clone(),
-            thread_pointer,
+            thread_pointer: 0,
             job,
             image,
             // The spawning thread's, as a new thread's is.
@@ -403,8 +285,7 @@ pub fn spawn<C: Commit>(
     crate::process::debug_hold_marked_spawn(parent, &object);
 
     let t3 = crate::clock::nanos_since_boot();
-    log!("spawn: {} pid={} (layout={}ms tls={}ms total={}ms)",
-        path, pid, (t1 - t0) / 1_000_000, (t_tls - t1) / 1_000_000, (t3 - t0) / 1_000_000);
+    log!("spawn: {} pid={} (total={}ms)", path, pid, (t3 - t0) / 1_000_000);
 
     Ok((pid, held))
 }
@@ -412,14 +293,14 @@ pub fn spawn<C: Commit>(
 /// The name the supervisor runs under: no file, since it runs from its boot image.
 const SUPERVISOR: &str = "supervisor";
 
-/// Start the supervisor from its boot image, holding the machine's one
+/// Start the supervisor from its boot image as the build laid it out, holding the machine's one
 /// full-rights `SysCap` and the file server's image and ROOT's
 /// (`toyos_abi::syscall::FILESERVER_IMAGE_LABEL`, `ROOT_IMAGE_LABEL`).
 ///
 /// Nothing else can construct one: what the supervisor endows is the entire set of
 /// processes that can ever claim a device, enter the RT band, or power off.
 /// Panics on failure: a boot that cannot start the supervisor has nowhere to report to.
-pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
+pub fn spawn_supervisor(images: crate::bootimage::Objects, laid: &toyos_kimage::Supervisor<'_>) -> Pid {
     let job = crate::object::job::new_job();
     let mut handles = HandleTable::new(&job);
     let mut entries = Vec::new();
@@ -474,14 +355,21 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
         });
         labels.extend_from_slice(label.as_bytes());
     }
-    let len = images.supervisor.immutable().expect("a boot image is immutable");
-    let image: Arc<crate::file_backing::SharedImage> = Arc::new(
-        crate::file_backing::SharedImage::over(images.supervisor, len)
-            .expect("spawn_supervisor: a boot image is ordinary memory, its length inside it"),
-    );
+    // Its ranges as the build laid them out of the supervisor section
+    // (`toyos_kimage`), checked as a spawn's are.
+    let maps = laid.maps().map(|raw| {
+        let object = (raw.object == toyos_kimage::SUPERVISOR_OBJECT).then(|| Arc::clone(&images.supervisor));
+        Map::checked(&raw, object).unwrap_or_else(|e| panic!("spawn_supervisor: the build's range {raw:?}: {e:?}"))
+    });
+    let program = Program {
+        maps: maps.collect(),
+        entry: laid.entry,
+        image_base: laid.image_base,
+        build_id: BuildId::new(laid.build_id),
+    };
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
     let table = SupervisorTable { job, handles, entries, labels };
-    match spawn(SUPERVISOR, &[SUPERVISOR], table, Vec::new(), image, Parent::Root) {
+    match spawn(SUPERVISOR, &[SUPERVISOR], table, Vec::new(), program, Parent::Root) {
         Ok((pid, ())) => pid,
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_supervisor: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_supervisor: {e}"),

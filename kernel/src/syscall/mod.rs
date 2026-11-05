@@ -13,7 +13,7 @@ mod ipc;
 mod machine;
 mod paged;
 mod proc;
-mod vm;
+pub(crate) mod vm;
 
 use toyos_abi::handle::RawHandle;
 use toyos_abi::syscall::SyscallError;

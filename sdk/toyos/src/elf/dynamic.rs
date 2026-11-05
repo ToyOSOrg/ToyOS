@@ -1,0 +1,178 @@
+//! `PT_DYNAMIC`: the tags a dynamic linker acts on.
+//!
+//! Every tag is `Option`, never zero-means-absent. A `DT_SYMTAB` of 0 is a
+//! symbol table at vaddr zero, which is a legal address in a `ET_DYN` image —
+//! and the loader has to tell "the file did not say" from "the file said
+//! zero", because those two get different treatment at every use site.
+
+use crate::elf::gnu_hash::GnuHash;
+use crate::elf::layout::{Extent, ImageRange};
+use crate::elf::{read, sym, Error};
+
+/// A table named by a (location, size) pair of tags.
+///
+/// Present only when *both* tags are, and the size is non-zero. A `DT_RELA`
+/// with no `DT_RELASZ` names a table of unknown length, which is not a table
+/// anything can read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Table {
+    pub vaddr: u64,
+    pub size: u64,
+}
+
+pub const DT_NULL: i64 = 0;
+pub const DT_PLTRELSZ: i64 = 2;
+pub const DT_STRTAB: i64 = 5;
+pub const DT_SYMTAB: i64 = 6;
+pub const DT_RELA: i64 = 7;
+pub const DT_RELASZ: i64 = 8;
+pub const DT_STRSZ: i64 = 10;
+pub const DT_INIT_ARRAY: i64 = 25;
+pub const DT_JMPREL: i64 = 23;
+pub const DT_INIT_ARRAYSZ: i64 = 27;
+pub const DT_BIND_NOW: i64 = 24;
+pub const DT_FLAGS: i64 = 30;
+pub const DT_FLAGS_1: i64 = 0x6fff_fffb;
+/// `DT_FLAGS`' and `DT_FLAGS_1`'s bind-now bits.
+pub const DF_BIND_NOW: u64 = 8;
+pub const DF_1_NOW: u64 = 1;
+pub const DT_GNU_HASH: i64 = 0x6fff_fef5u32 as i32 as i64;
+
+/// Bytes in one `Elf64_Dyn`.
+pub const ENTRY_SIZE: usize = 16;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Dynamic {
+    pub rela: Option<Table>,
+    pub jmprel: Option<Table>,
+    pub init_array: Option<Table>,
+    pub strtab: Option<u64>,
+    pub strsz: Option<u64>,
+    pub symtab: Option<u64>,
+    pub gnu_hash: Option<u64>,
+    /// `DT_BIND_NOW`, `DF_BIND_NOW` or `DF_1_NOW`: every symbol is bound as
+    /// the image is loaded, a function's too, so one nothing defines refuses
+    /// the image rather than its first call.
+    pub bind_now: bool,
+}
+
+impl Dynamic {
+    /// Decode the tags this loader acts on, stopping at `DT_NULL` or at the
+    /// end of the segment.
+    pub fn parse(data: &[u8]) -> Dynamic {
+        let mut rela_at = None;
+        let mut rela_sz = None;
+        let mut jmprel_at = None;
+        let mut jmprel_sz = None;
+        let mut init_at = None;
+        let mut init_sz = None;
+        let mut out = Dynamic::default();
+
+        for (tag, val) in Entries::new(data) {
+            match tag {
+                DT_RELA => rela_at = Some(val),
+                DT_RELASZ => rela_sz = Some(val),
+                DT_JMPREL => jmprel_at = Some(val),
+                DT_PLTRELSZ => jmprel_sz = Some(val),
+                DT_INIT_ARRAY => init_at = Some(val),
+                DT_INIT_ARRAYSZ => init_sz = Some(val),
+                DT_STRTAB => out.strtab = Some(val),
+                DT_STRSZ => out.strsz = Some(val),
+                DT_SYMTAB => out.symtab = Some(val),
+                DT_GNU_HASH => out.gnu_hash = Some(val),
+                DT_BIND_NOW => out.bind_now = true,
+                DT_FLAGS if val & DF_BIND_NOW != 0 => out.bind_now = true,
+                DT_FLAGS_1 if val & DF_1_NOW != 0 => out.bind_now = true,
+                _ => {}
+            }
+        }
+
+        out.rela = Table::from_tags(rela_at, rela_sz);
+        out.jmprel = Table::from_tags(jmprel_at, jmprel_sz);
+        out.init_array = Table::from_tags(init_at, init_sz);
+        out
+    }
+
+    /// `.dynsym`'s entry count where no section header says it: what the
+    /// `.gnu.hash` table describes, `gnu_hash` being its bytes from
+    /// `DT_GNU_HASH` on, or else the gap from `DT_SYMTAB` to `DT_STRTAB`,
+    /// adjacent in every layout a linker makes. A `.gnu.hash` that describes
+    /// no count is `Err`, carrying the gap.
+    pub fn sym_count(&self, gnu_hash: Option<&[u8]>) -> Result<usize, usize> {
+        let gap = match (self.symtab, self.strtab) {
+            (Some(symtab), Some(strtab)) if strtab > symtab => ((strtab - symtab) / sym::ENTRY_SIZE as u64) as usize,
+            _ => 0,
+        };
+        match gnu_hash {
+            None => Ok(gap),
+            Some(table) => GnuHash::parse(table).and_then(|h| h.sym_count()).ok_or(gap),
+        }
+    }
+}
+
+/// Bytes in one `.init_array` entry, an ELF64 address.
+const POINTER_SIZE: u64 = 8;
+
+/// `DT_INIT_ARRAY` and `DT_INIT_ARRAYSZ`: a whole number of pointers, every
+/// one of them inside the image. Made only by [`InitArray::parse`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InitArray {
+    range: ImageRange,
+}
+
+impl InitArray {
+    /// The array `table` names, placed in the image `extent` describes, or why
+    /// it is no array of this image's pointers. No table is no array.
+    pub fn parse(table: Option<Table>, extent: Extent) -> Result<Option<InitArray>, Error> {
+        let Some(table) = table else { return Ok(None) };
+        if !table.size.is_multiple_of(POINTER_SIZE) {
+            return Err(Error::InitArrayNotWholePointers);
+        }
+        let range = extent.range(table.vaddr, table.size).ok_or(Error::InitArrayOutsideImage)?;
+        Ok(Some(InitArray { range }))
+    }
+
+    pub const fn range(self) -> ImageRange {
+        self.range
+    }
+
+    /// How many constructors the array holds.
+    pub const fn count(self) -> u64 {
+        self.range.len() / POINTER_SIZE
+    }
+}
+
+impl Table {
+    fn from_tags(vaddr: Option<u64>, size: Option<u64>) -> Option<Table> {
+        match (vaddr, size) {
+            (Some(vaddr), Some(size)) if size > 0 => Some(Table { vaddr, size }),
+            _ => None,
+        }
+    }
+}
+
+/// `(d_tag, d_val)` pairs up to `DT_NULL`.
+struct Entries<'a> {
+    data: &'a [u8],
+    off: usize,
+}
+
+impl<'a> Entries<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Entries { data, off: 0 }
+    }
+}
+
+impl Iterator for Entries<'_> {
+    type Item = (i64, u64);
+
+    fn next(&mut self) -> Option<(i64, u64)> {
+        let tag = read::i64_at(self.data, self.off)?;
+        let val = read::u64_at(self.data, self.off + 8)?;
+        if tag == DT_NULL {
+            return None;
+        }
+        self.off += ENTRY_SIZE;
+        Some((tag, val))
+    }
+}

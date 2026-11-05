@@ -62,7 +62,7 @@ fn main() {
         mask[cpu as usize / 64] = 1 << (cpu % 64);
         mask
     };
-    assert_eq!(toyos_abi::current_tid().0, 0, "the main thread is tid 0");
+    assert_eq!(toyos::tls::current_tid().0, 0, "the main thread is tid 0");
     thread::spawn(move || syscall::thread_set_affinity(0, &words(first)).expect("pin the main thread by its tid"))
         .join()
         .expect("the pinning thread panicked");

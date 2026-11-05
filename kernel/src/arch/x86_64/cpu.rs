@@ -538,6 +538,14 @@ pub fn thread_pointer() -> u64 {
     read_fs_base()
 }
 
+/// Install the thread pointer this thread returns to Ring 3 with.
+/// # Safety
+/// `tp` is canonical, and the running thread's.
+pub unsafe fn write_thread_pointer(tp: u64) {
+    // SAFETY: the caller's.
+    unsafe { write_fs_base(tp) };
+}
+
 /// Leave the current stack for good and run `func` on the one ending at `top`,
 /// with a zeroed frame chain so a panic there backtraces instead of walking off
 /// the top.

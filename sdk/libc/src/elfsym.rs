@@ -1,5 +1,5 @@
 //! What `dladdr` reads of a loaded image: whether an address lies in it, where
-//! its first mapped byte is, and the tables `toyos-elf` chooses its symbol
+//! its first mapped byte is, and the tables `toyos::elf` chooses its symbol
 //! from, each a slice of what the image maps. It reads nothing but the image
 //! it is handed, so the host tests it on an image it lays out
 //! (`toyos-libc-copies`).
@@ -9,8 +9,8 @@
 
 use core::ffi::CStr;
 
-use toyos_elf::header::{ProgramHeader, PROGRAM_HEADER_SIZE, PT_DYNAMIC, PT_LOAD};
-use toyos_elf::{sym, Dynamic, SymTab};
+use toyos::elf::header::{ProgramHeader, PROGRAM_HEADER_SIZE, PT_DYNAMIC, PT_LOAD};
+use toyos::elf::{sym, Dynamic, SymTab};
 
 /// A loaded image, as `dl_iterate_phdr` describes it.
 #[derive(Clone, Copy)]

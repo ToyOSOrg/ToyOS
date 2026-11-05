@@ -18,7 +18,8 @@ kernel's part of a restart, and named module tests hold each program's
 
 1. **What step 9's file half left** (stage 4): its windows, by stage 6
    step 2's rule. Its lines are measured: `kernel/src` held 230 files and
-   59,012 lines before #1152 and 223 and 56,800 after #1182.
+   59,012 lines before #1152 and 223 and 56,800 after #1182, and 218 and
+   55,286 once the loader left it (#1189).
 2. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
    where firmware put it, handed over in 4 KiB pages with its MSI-X table's
    page, under the owner's Q2 ruling. The orchestrator ruled on #900 that
@@ -121,13 +122,12 @@ Beside that order, each waiting on something outside it:
    5. **Spawn and dlopen from an image handle.** **Exit**: a program in
       `/apps` runs having been read by userland, its faults served from the
       image object and not the VFS; and `SYS_DLOPEN` takes no path.
-      **Done**: spawn (#536, `SpawnArgs::image`), and dlopen: libc's and the
-      SDK's `dlopen` read the library through `toyos::files::read_image`
-      wherever it is served, `SYS_DLOPEN` loads it from the image handle
-      (`DlopenArgs`) under a name it opens nothing by, and the kernel's
-      cross-process library cache is deleted, each process holding its own
-      library pages (orchestrator, under the memory design, whose later
-      stages bring sharing back through memory objects).
+      **Done**: spawn (#536, `SpawnArgs::image`), and dlopen: the SDK's
+      loader (`toyos::dl`) reads the library through `toyos::files::read_image` wherever it is
+      served and loads it itself, each process holding its own library pages
+      (orchestrator, under the memory design, whose later stages bring sharing
+      back through memory objects); `SYS_DLOPEN` is gone with the kernel's
+      loader (`issues/the-kernel-still-parses-what-userland-writes.md`).
    6. **fileserver for DATA over diskserver.** **Done** (#536). #660 cut
       its guest tests and #890 keeps them cut.
       `apps_and_home_are_one_filesystem`'s claim, `/apps` and `/home` one

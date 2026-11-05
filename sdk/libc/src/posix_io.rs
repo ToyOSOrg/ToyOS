@@ -813,7 +813,8 @@ fn vm_prot(prot: i32) -> Result<syscall::VmProt, i32> {
     match crate::memreq::access(prot) {
         None => Err(EINVAL),
         // POSIX's ENOTSUP, which is EOPNOTSUPP here.
-        Some(Access::Exec) => Err(crate::errcode::EOPNOTSUPP),
+        Some(Access::WriteExec) => Err(crate::errcode::EOPNOTSUPP),
+        Some(Access::ReadExec) => Ok(syscall::VmProt::ReadExec),
         Some(Access::None) => Ok(syscall::VmProt::None),
         Some(Access::Read) => Ok(syscall::VmProt::Read),
         Some(Access::ReadWrite) => Ok(syscall::VmProt::ReadWrite),
@@ -841,7 +842,7 @@ pub unsafe extern "C" fn mmap(
         crate::errno::set(match refusal {
             MapRefusal::Invalid => EINVAL,
             MapRefusal::File => crate::errcode::ENODEV,
-            MapRefusal::Exec => crate::errcode::EOPNOTSUPP,
+            MapRefusal::WriteExec => crate::errcode::EOPNOTSUPP,
         });
         return MAP_FAILED;
     }

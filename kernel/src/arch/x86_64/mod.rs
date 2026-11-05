@@ -66,8 +66,8 @@ pub use iommu_unit::interrupt as message_unit;
 
 pub use apic::MSI_DOORBELL;
 
-/// The machine every program image this kernel loads must be built for.
-pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::X86_64;
+/// `e_machine` of this kernel's image (`toyos_kimage::Kernel::machine`).
+pub const E_MACHINE: u16 = toyos_kimage::EM_X86_64;
 
 /// Interrupts masked on this CPU for as long as the guard lives, and then put
 /// back as they were — restored, not enabled — so a guard nests inside a region

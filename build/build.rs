@@ -1796,21 +1796,21 @@ const MOV_RSP_GS_LEN: usize = 9;
 /// A kernel's `syscall_entry` from its first instruction to the end of the
 /// segment it is in, found at its symbol.
 fn syscall_entry_bytes(kernel: &[u8]) -> Result<&[u8], String> {
-    use toyos_elf::header::{ProgramHeader, PT_LOAD};
+    use toyos::elf::header::{ProgramHeader, PT_LOAD};
 
     let (syms, strs) =
-        toyos_symbols::locate(kernel).ok_or("the kernel has no readable `.symtab`")?;
-    let table = toyos_elf::SymTab::new(syms, strs);
+        toyos::elf::section::symbol_tables(kernel).ok_or("the kernel has no readable `.symtab`")?;
+    let table = toyos::elf::SymTab::new(syms, strs);
     let mut entries = table.defined().filter(|&(i, sym)| {
-        sym.kind() == toyos_elf::sym::STT_FUNC && table.name(i).ends_with(SYSCALL_ENTRY_SYMBOL)
+        sym.kind() == toyos::elf::sym::STT_FUNC && table.name(i).ends_with(SYSCALL_ENTRY_SYMBOL)
     });
     let (Some((_, entry)), None) = (entries.next(), entries.next()) else {
         return Err(format!(
             "the kernel's `.symtab` does not name exactly one function `…{SYSCALL_ENTRY_SYMBOL}`"
         ));
     };
-    let header = toyos_elf::FileHeader::parse(kernel).map_err(|e| format!("{e:?}"))?;
-    let extent = toyos_elf::Layout::parse(kernel, header.machine).map_err(|e| format!("{e}"))?.extent();
+    let header = toyos::elf::FileHeader::parse(kernel).map_err(|e| format!("{e:?}"))?;
+    let extent = toyos::elf::Layout::parse(kernel, header.machine).map_err(|e| format!("{e}"))?.extent();
     let value = entry
         .address(extent)
         .map(|at| extent.min() + at.get())
@@ -1822,7 +1822,7 @@ fn syscall_entry_bytes(kernel: &[u8]) -> Result<&[u8], String> {
         .find_map(|segment| {
             let within = value.checked_sub(segment.vaddr)?;
             let left = segment.filesz.checked_sub(within).filter(|&left| left != 0)?;
-            toyos_symbols::file_range(kernel, segment.offset.checked_add(within)?, left)
+            toyos::elf::file_range(kernel, segment.offset.checked_add(within)?, left)
         })
         .ok_or_else(|| format!("no `PT_LOAD` holds `syscall_entry` at {value:#x} in the file"))
 }
@@ -2050,7 +2050,8 @@ fn said_key(plan: &Plan) -> &'static crate::signing::Key {
     key
 }
 
-/// The kernel, the loader and the userland a mode's image is made of.
+/// The kernel section (`build::kimage`), the loader and the userland a mode's
+/// image is made of.
 fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Userland) {
     let kernel_features = plan.features.join(",");
     let arch = plan.arch;
@@ -2081,7 +2082,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Us
     let userland = build_and_assemble(root, &config, &env, &[], &plan.root_omits, false, arch, plan.machines);
 
     let bl_bytes = fs::read(&bl_art).expect("Failed to read staged bootloader");
-    (kernel_bytes, bl_bytes, userland)
+    (crate::kimage::section(&kernel_bytes, &userland.supervisor, arch), bl_bytes, userland)
 }
 
 /// Create an empty disk image the guest sees at full size and the host pays
@@ -2213,7 +2214,9 @@ pub fn build_test_image(
     )
 }
 
-/// The three parts one image is made of, each memoized for this process.
+/// The three parts one image is made of: the kernel section
+/// ([`crate::kimage`]) of the memoized kernel and userland, and the memoized
+/// loader and userland.
 pub struct Parts {
     pub kernel: Arc<Vec<u8>>,
     pub bootloader: Arc<Vec<u8>>,
@@ -2253,7 +2256,7 @@ pub fn build_test_parts(
     // staleness sweep to protect.
     let memo = (KERNEL.get(kernel_key), BOOTLOADER.get(bl_key), USERLAND.get(root_image_key));
     if let (Some(kernel), Some(bootloader), Some(userland)) = memo {
-        return Parts { kernel, bootloader, userland };
+        return Parts { kernel: Arc::new(crate::kimage::section(&kernel, &userland.supervisor, arch)), bootloader, userland };
     }
 
     // A cache miss is shared setup, not a property of whichever test happened
@@ -2303,7 +2306,8 @@ pub fn build_test_parts(
 
     drop(building);
 
-    Parts { kernel: kernel_bytes, bootloader: bl_bytes, userland }
+    let kernel = Arc::new(crate::kimage::section(&kernel_bytes, &userland.supervisor, arch));
+    Parts { kernel, bootloader: bl_bytes, userland }
 }
 
 /// Build all binaries in a multi-binary crate. Returns vec of (binary_name, bytes).

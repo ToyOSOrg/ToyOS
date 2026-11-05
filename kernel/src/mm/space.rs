@@ -237,11 +237,6 @@ impl AddressSpace {
         self.tables.root()
     }
 
-    /// The job its memory is counted to.
-    pub fn job(&self) -> &Arc<Job> {
-        &self.job
-    }
-
     /// Where a range of `len` bytes goes, changing nothing: a `Fixed` one is
     /// put in place of what is there by [`put`](Self::put). `len` is whole
     /// pages.
@@ -324,6 +319,12 @@ impl AddressSpace {
             At::Fixed(start) => self.room(start.raw(), start.raw().saturating_add(len), 1),
             At::Anywhere(_) => self.room(0, 0, 1),
         }
+    }
+
+    /// Whether `[start, start + len)` is whole pages of the user half that
+    /// nothing in the space holds.
+    pub fn vacant(&self, start: u64, len: u64) -> bool {
+        pages(start, len).is_some_and(|end| self.inventory.holds(start, end) && self.inventory.is_free(start, end))
     }
 
     /// `len` bytes of private memory, committed unless `prot` is `None`, which

@@ -35,7 +35,7 @@ pub fn core_of(cpu: u32) -> u32 {
 pub type Tid = u64;
 
 pub fn tid() -> Tid {
-    u64::from(toyos_abi::current_tid().0)
+    u64::from(toyos::tls::current_tid().0)
 }
 
 /// The CPUs the calling thread may run on.

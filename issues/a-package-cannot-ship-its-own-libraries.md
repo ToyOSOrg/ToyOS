@@ -6,13 +6,11 @@ opened: 2026-09-27
 
 # A package cannot ship its own libraries
 
-A program on a file server is spawned from a memory image its parent read
-(`SpawnArgs::image`), and nothing loads a `DT_NEEDED` library for it: the
-kernel loads none at spawn, and an executable that names one is refused at its
-own start (`toyos::relocate`) until the userland loader of
-`issues/the-kernel-still-parses-what-userland-writes.md` loads them. A package
-under `/apps/<name>/` whose binary needs a library it carries beside it fails
-to start.
+A program's own start loads the `DT_NEEDED` libraries it names
+(`toyos::dl::start`), but a name without a `/` is looked for in
+`/system/lib` alone (`sdk/toyos/src/dl/mod.rs`, `LIBRARY_DIR`). A package under
+`/apps/<name>/` whose binary needs a library it carries beside it fails to
+start.
 
 ## Exit condition
 

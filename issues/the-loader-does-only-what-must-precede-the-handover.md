@@ -209,8 +209,9 @@ Each stage lands on its own, in this order.
      held before.
    - Any failure after `verify` in `start_kernel` that the image causes is a
      refusal of that slot, like a bad signature. Stage 5's PR lists which
-     `start_kernel` refusals count as the image's — every `load_kernel_elf`
-     refusal of the kernel's bytes — and which count as the loader's own.
+     `start_kernel` refusals count as the image's — every `load_kernel`
+     refusal of the kernel section (`toyos_kimage::Kernel::parse`) — and
+     which count as the loader's own.
    - The health gate: `system.toml`'s `[boot] up` names the services that
      make the image up. The tree has no readiness signal (a swap's probation
      only asks whether a process still runs), so this stage adds the smallest

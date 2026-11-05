@@ -8,8 +8,6 @@ use core::mem;
 use alloc::vec;
 use alloc::alloc::Layout;
 use toyos_devicepath::HardDrive;
-use toyos_elf::section::SectionTable;
-use toyos_elf::{rela, ImageOffset, Op, RelaTable, SymTab};
 use efi::{
     cstr16, CStr16, DevicePath, EdidActive, Gop, Handle, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
     SimpleFileSystem, Status, SystemTable, ACPI2_GUID, PAGE_SIZE,
@@ -247,125 +245,43 @@ const _: () = assert!(WATCHDOG_CODE > 0xffff);
 /// Kernel virtual base: all physical memory is mapped here in the kernel's address space.
 const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
-/// `[offset, offset + len)` of the file, or `None` when that is not wholly
-/// inside it.
-///
-/// Every `offset` and `len` passed here came out of the image's own headers, so
-/// both are numbers the file chose: the addition is checked and the bytes are
-/// taken with `get` rather than indexed. Each caller refuses on `None` — a
-/// table this cannot cover is never read short.
-fn file_range(bytes: &[u8], offset: u64, len: u64) -> Option<&[u8]> {
-    let start = usize::try_from(offset).ok()?;
-    let end = usize::try_from(offset.checked_add(len)?).ok()?;
-    bytes.get(start..end)
-}
-
-fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
-    let layout = toyos_elf::Layout::parse(kernel_elf_bytes, arch::ELF_MACHINE)
-        .unwrap_or_else(|e| panic!("kernel.elf: {e}"));
-
-    // Section headers are optional to `toyos-elf`, which loads programs whose
-    // sections carry only symbol names. Here they carry the relocations that
-    // make the image runnable, so a file with no readable table is refused
-    // rather than started unrelocated.
-    let sections = layout
-        .section_headers()
-        .and_then(|table| file_range(kernel_elf_bytes, table.file_offset, table.byte_len() as u64))
-        .map(SectionTable::new)
-        .expect("kernel.elf: no section header table inside the file");
-
+/// Lay out the kernel the signed section describes (`toyos_kimage`): its
+/// bytes at their own addresses in one allocation with its stack after it,
+/// and every `RELATIVE` relocation written with that allocation's address.
+/// The build parsed its ELF; nothing here does.
+fn load_kernel(section: &[u8]) -> LoadedKernel {
+    let kernel = toyos_kimage::Kernel::parse(section).unwrap_or_else(|why| panic!("{why}"));
+    assert_eq!(kernel.machine, arch::E_MACHINE, "kernel image: another machine's");
     let stack_size: usize = 8 * 1024 * 1024; // 8MB
-
     println!("Kernel stack size: {}", stack_size);
-    // The extent's end is the largest `p_vaddr + p_memsz` over the `PT_LOAD`
-    // segments, and the image is laid out at its own vaddrs — so it is what the
-    // kernel's memory has to cover before the stack is added after it.
-    let extent = layout.extent();
-    let placed = toyos_elf::StackedImage::place(extent.max(), stack_size as u64)
-        .expect("kernel.elf: image plus stack does not fit an allocation");
-    let mem_size = usize::try_from(placed.size).expect("kernel.elf: image plus stack does not fit an allocation");
-    // Where an image offset lies in `process_mem`: the image sits at its own
-    // vaddrs, which begin at the extent's start.
-    let at = |offset: ImageOffset| (extent.min() + offset.get()) as usize;
-
+    let placed = toyos_kimage::StackedImage::place(kernel.memory, stack_size as u64)
+        .expect("kernel image: image plus stack does not fit an allocation");
+    let mem_size = usize::try_from(placed.size).expect("kernel image: image plus stack does not fit an allocation");
     println!("Kernel memory size: {}", mem_size);
-
     let mut process_mem = alloc_kernel_memory(mem_size);
     println!("Kernel memory located at: {:?}", process_mem.as_ptr());
-
-    for segment in layout.segments() {
-        println!("Loading segment: {:?}", segment);
-        let src = file_range(kernel_elf_bytes, segment.file_offset(), segment.filesz())
-            .expect("kernel.elf: PT_LOAD file extent is past the end of the file");
-        let vstart = at(segment.image().start());
-        // In bounds by construction: `mem_size` is at least
-        // `p_vaddr + p_memsz` for this segment and `p_filesz <= p_memsz`.
-        process_mem[vstart..vstart + src.len()].copy_from_slice(src);
-    }
+    // In bounds: `parse` holds the bytes inside `memory`, below `mem_size`.
+    process_mem[..kernel.image.len()].copy_from_slice(kernel.image);
 
     // The boot map's read-only text (`toyos_bootmap::Access`): the image's one
-    // executable segment, which no writable byte shares a page with.
-    let page = PAGE_SIZE as u64;
-    let mut executable = layout.segments().iter().filter(|segment| segment.flags().executable());
-    let (Some(text), None) = (executable.next(), executable.next()) else {
-        panic!("kernel.elf: the boot map maps one executable segment, and this image has another number of them");
-    };
-    assert!(!text.writable(), "kernel.elf: its executable segment is writable");
-    if let Some((a, b)) = layout.overlapping_load_pages(page) {
-        panic!("kernel.elf: PT_LOAD segments {a} and {b} share a page, which cannot have both their protections");
-    }
-    let (text_start, text_end) = text.page_range(page);
-    let text = ((extent.min() + text_start) as usize, (text_end - text_start) as usize);
+    // executable range, which no writable byte shares a page with.
+    let text = kernel.text().unwrap_or_else(|why| panic!("{why}"));
+    let text = (text.lo as usize, (text.hi - text.lo) as usize);
 
-    let rela_sections =
-        sections.rela_sections().unwrap_or_else(|form| panic!("kernel.elf: {form} is not supported"));
-
-    // Both fields of a relocation index the image and both come out of the
-    // file: `r_offset` is the destination of an 8-byte store and `r_addend` the
-    // address stored. Unchecked, the store is an arbitrary write anywhere in the
-    // machine, made before ExitBootServices with firmware still live — so every
-    // entry goes through the parse the kernel's own loader uses.
-    let rules = rela::Rules {
-        extent,
-        window: (0, mem_size as u64),
-        tls: None,
-    };
+    // `parse` put every `offset + 8` and every addend inside the image, so
+    // each store lands in `process_mem` and stores an address inside it.
+    let base = PHYS_OFFSET + process_mem.as_ptr() as u64;
     let mut reloc_count = 0u64;
-    for section in rela_sections {
-        let table = file_range(kernel_elf_bytes, section.offset, section.size)
-            .expect("kernel.elf: SHT_RELA section is past the end of the file");
-        for raw in RelaTable::new(table, arch::ELF_MACHINE).iter() {
-            let parsed = rela::parse(raw, &rules, SymTab::empty()).unwrap_or_else(|e| panic!("kernel.elf: {e}"));
-            let Some((offset, Op::Relative(target))) = parsed.map(|r| (r.offset(), r.op())) else {
-                panic!("kernel.elf: unsupported relocation type {:?}", raw.kind());
-            };
-            // SAFETY: `target` is inside the image, so this is at most one byte
-            // past the end of `process_mem`'s allocation — in bounds for
-            // pointer arithmetic, and never dereferenced: only the resulting
-            // address is used.
-            let value = PHYS_OFFSET + unsafe { process_mem.as_ptr().add(at(target)) } as u64;
-            unsafe {
-                // SAFETY: the parse put `offset + 8` inside `[0, mem_size)`, so
-                // the 8-byte write lands fully inside `process_mem`'s
-                // allocation. `write_unaligned`, not `write`: an `r_offset`
-                // from the file is not guaranteed 8-byte aligned by anything
-                // checked here, only by the linker emitting
-                // `R_X86_64_RELATIVE` against aligned slots — a fact this
-                // reader has no way to verify.
-                process_mem
-                    .as_mut_ptr()
-                    .add(offset as usize)
-                    .cast::<u64>()
-                    .write_unaligned(value);
-            }
-            reloc_count += 1;
-        }
+    for (offset, addend) in kernel.relocations() {
+        let at = offset as usize;
+        process_mem[at..at + 8].copy_from_slice(&(base + addend).to_le_bytes());
+        reloc_count += 1;
     }
     println!("Applied {} relocations", reloc_count);
 
     LoadedKernel {
         memory: process_mem,
-        entry_offset: at(layout.entry()),
+        entry_offset: kernel.entry as usize,
         stack_offset: placed.stack as usize,
         stack_size,
         text,
@@ -540,7 +456,7 @@ fn report_reach(what: &str, at: u64, len: u64) {
     );
 }
 
-/// What the chosen slot hands the kernel beside its ELF and parameter.
+/// What the chosen slot hands the kernel beside its own image and parameter.
 struct Handed {
     root: rootimage::RootImage,
     supervisor: payload::Payload,
@@ -548,7 +464,7 @@ struct Handed {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], handed: Handed, slot_volume_guid: [u8; 16], microcode: Option<&'static [u8]>, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_section: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], handed: Handed, slot_volume_guid: [u8; 16], microcode: Option<&'static [u8]>, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -657,8 +573,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         kernel_stack_addr: kernel.stack_offset as u64,
         kernel_stack_size: kernel.stack_size as u64,
         rsdp_addr,
-        kernel_elf_addr: kernel_elf_bytes.as_ptr() as u64,
-        kernel_elf_size: kernel_elf_bytes.len() as u64,
+        kernel_image_addr: kernel_section.as_ptr() as u64,
+        kernel_image_size: kernel_section.len() as u64,
         gop_framebuffer,
         gop_framebuffer_size,
         gop_width,
@@ -758,8 +674,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     mem::forget(memory_map);
     #[expect(clippy::disallowed_methods, reason = "the kernel runs from these pages")]
     mem::forget(kernel.memory);
-    #[expect(clippy::disallowed_methods, reason = "`kernel_args.kernel_elf_addr` hands it to the kernel")]
-    mem::forget(kernel_elf_bytes);
+    #[expect(clippy::disallowed_methods, reason = "`kernel_args.kernel_image_addr` hands it to the kernel")]
+    mem::forget(kernel_section);
     #[expect(clippy::disallowed_methods, reason = "`kernel_args.cmdline_addr` hands it to the kernel")]
     mem::forget(cmdline);
 
@@ -974,7 +890,7 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
 
     println!("Log partition: signature {:02x?}", log_guid);
 
-    // Every byte the kernel is handed below — its ELF, its parameter, the two
+    // Every byte the kernel is handed below — its image, its parameter, the two
     // programs and ROOT — is one the chosen slot's signed header names. ROOT is read before the
     // kernel is loaded and not after: it is the allocation the image pages come
     // from, and a slot whose ROOT is refused has no use for the kernel's.
@@ -1012,8 +928,8 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
         .unwrap_or_else(|e| panic!("slot {}'s cmdline is not UTF-8: {e}", chosen.which.letter()));
     println!("Boot parameter: {params:?}");
 
-    println!("Loading kernel elf...");
-    let loaded_kernel = load_kernel_elf(&kernel_bytes);
+    println!("Loading kernel image...");
+    let loaded_kernel = load_kernel(&kernel_bytes);
 
     let microcode = microcode::find(system_table.boot_services(), &chosen.root.pages);
 

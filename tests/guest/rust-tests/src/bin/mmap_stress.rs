@@ -142,12 +142,14 @@ fn protection() {
     unsafe { syscall::vm_protect(three.add(PAGE), PAGE, VmProt::None) }.expect("make the page unreachable");
     unsafe { syscall::vm_protect(three.add(PAGE), PAGE, VmProt::ReadWrite) }.expect("make the page writable again");
     assert_eq!(byte(three, 1), 0x31, "None and back lost the page's byte");
+    // And executable, as a loader protects the code it wrote.
+    unsafe { syscall::vm_protect(three.add(PAGE), PAGE, VmProt::ReadExec) }.expect("make the page executable");
+    assert_eq!(byte(three, 1), 0x31, "executable lost the page's byte");
+    unsafe { syscall::vm_protect(three.add(PAGE), PAGE, VmProt::ReadWrite) }.expect("make the page writable again");
 
-    // What protect refuses, all or nothing: a page no range holds, and
-    // executable memory, which no call maps yet.
+    // What protect refuses, all or nothing: a page no range holds.
     unsafe { syscall::vm_release(three.add(2 * PAGE), PAGE) }.expect("release the last page");
     assert_eq!(unsafe { syscall::vm_protect(three, 3 * PAGE, VmProt::Read) }, Err(SyscallError::BadAddress), "protect over a hole");
-    assert_eq!(unsafe { syscall::vm_protect(three, PAGE, VmProt::ReadExec) }, Err(SyscallError::NotSupported), "protect executable");
     set(three, 1, 0x32);
     assert_eq!(byte(three, 1), 0x32, "a refused protect changed the committed page");
     unsafe { syscall::vm_release(three, 2 * PAGE) }.expect("release the rest");

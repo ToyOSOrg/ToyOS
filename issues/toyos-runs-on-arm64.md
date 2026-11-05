@@ -159,9 +159,10 @@ bound). Heaviest: `arch::cpu` (57 references), `arch::percpu` (28),
   63, one root); `mm/paging.rs:1-7` states invalidation is INVPCID/INVLPG.
   ARM splits kernel (TTBR1) from user (TTBR0), carries AttrIndx→MAIR,
   AP[2:1], UXN/PXN, and ASIDs in the TTBR.
-- **TLS.** The kernel builds x86 variant II (`loader/tls.rs:1`); std's
-  `__tls_get_addr` uses `fs:`. AArch64 is variant I; LLVM emits TLSDESC by
-  default.
+- **TLS.** Each program lays its own out (`sdk/toyos/src/tls`), variant II
+  on x86-64 and variant I on AArch64; std's `__tls_get_addr` uses `fs:`.
+  LLVM emits TLSDESC by default on AArch64, which `toyos::dl` refuses, so
+  no AArch64 shared object reaches its thread-locals yet.
 - **Calling conventions.** `extern "sysv64"` at `main.rs:205`,
   `deadline.rs:194`, `sched/driver.rs:892`, `i8042/mod.rs:490`,
   `loader/src/main.rs:785`.
@@ -180,8 +181,8 @@ across `src/` and `tests/`. The harness hardwires q35
 (`tests/common/qemu.rs:4246-4266`). `kvm_usable()` is
 `cfg!(target_arch = "x86_64") && …` (`src/lib.rs:65`). The rust fork has only
 `x86_64_unknown_toyos.rs`; its base `base/toyos.rs` is arch-neutral.
-`toyos-elf`
-refuses anything but `EM_X86_64` (`lib/elf/src/header.rs:24,75`).
+`toyos::elf` reads a machine its caller names (`Machine::RUNNING`), and the
+build lays the kernel out for each (`build/kimage.rs`).
 
 **Already abstracted.** The syscall stub already has both arms
 (`sdk/abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `kernel/pure/sched`
@@ -346,9 +347,9 @@ Each stage names its exit; "measured" means a number from a run.
    declaration; the shootdown stress test and the loom-checked stop both
    pass; `CPU_OFF`/`SYSTEM_RESET`/`SYSTEM_OFF` replace ACPI reset and PM1a.
    The TLS-descriptor resolver lands here, in std with its loader half and a
-   `dlopen` test; until it does the kernel refuses `R_AARCH64_TLSDESC` by name
-   (`toyos_elf::rela::ExeRefusal::TlsDescriptor` for an executable,
-   `toyos_elf::RelocError::TlsDescriptor` for a library).
+   `dlopen` test; until it does a program refuses `R_AARCH64_TLSDESC` by name
+   (`toyos::relocate` for an executable, `toyos::elf::RelocError::TlsDescriptor`
+   for a library).
    **Every CPU starts, ahead of small-kernel stage 6 by the owner's word, as
    stage 4 did:** it ports no device interrupt, so nothing of the relay.
    Owed before the exit holds: the TLS-descriptor resolver;

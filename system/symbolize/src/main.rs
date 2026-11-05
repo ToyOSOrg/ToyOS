@@ -10,8 +10,8 @@
 //! the directory that holds the image's files; a record whose name would leave
 //! that directory is refused.
 //!
-//! **Nothing a line or a file holds makes it fail**: the lookup is
-//! `toyos_symbols::name`, the kernel's own and panic-free on any bytes, and
+//! **Nothing a line or a file holds makes it fail**: the lookup ([`name`]) is
+//! panic-free on any bytes, and
 //! every other outcome is a sentence on the line it is about.
 
 use std::collections::HashMap;
@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use toyos_symbols::frame::{decode, Decoded};
-use toyos_symbols::{name, Unnamed};
+
+mod name;
+use name::{name, Unnamed};
 
 const USAGE: &str = "usage: symbolize [--root DIR] [FILE]";
 

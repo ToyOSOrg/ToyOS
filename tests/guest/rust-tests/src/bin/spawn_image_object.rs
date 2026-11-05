@@ -4,11 +4,13 @@
 //!
 //! - A program read into an object of this process's own runs.
 //! - A handle to the object without `MAP` is no right to its bytes: refused
-//!   `PermissionDenied`. A length the object does not hold: `InvalidArgument`.
+//!   `PermissionDenied`. A range's other refusals are `abuse_spawn_maps`'s.
 //! - The object overwritten with `hlt` the moment the spawn returns: the child
 //!   runs what it had copied and faults on the rest, and the machine goes on —
 //!   the next spawn from a fresh object runs.
 
+use toyos::elf::program::{lay_out, BASE};
+use toyos::elf::Machine;
 use toyos::shm::SharedMemory;
 use toyos::AsHandle;
 use toyos_abi::handle::{RawHandle, Rights};
@@ -18,16 +20,18 @@ use toyos_abi::end::End;
 const SELF: &str = "/system/bin/test_rs_spawn_image_object";
 const CHILD: &str = "spawned-from-an-object";
 
-/// `path` read whole into a memory object of this process's own.
-fn object_of(path: &str) -> (SharedMemory, u64) {
+/// `path` read whole into a memory object of this process's own, and its bytes.
+fn object_of(path: &str) -> (SharedMemory, Vec<u8>) {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let object = SharedMemory::create(bytes.len()).expect("a memory object");
     object.bytes().write(0, &bytes);
-    (object, bytes.len() as u64)
+    (object, bytes)
 }
 
-fn spawn(image: RawHandle, len: u64) -> Result<RawHandle, SyscallError> {
+/// Spawn the program `bytes`, laid out from the object `image` names.
+fn spawn(image: RawHandle, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
     let argv = format!("{SELF}\0{CHILD}\0");
+    let laid = lay_out(bytes, Machine::RUNNING, u64::from(image.0), BASE).expect("this program lays out");
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {
@@ -41,8 +45,12 @@ fn spawn(image: RawHandle, len: u64) -> Result<RawHandle, SyscallError> {
             endow_count: 0,
             labels_ptr: 0,
             labels_len: 0,
-            image: image.0 as u64,
-            image_len: len,
+            maps_ptr: laid.maps().as_ptr() as u64,
+            maps_count: laid.maps().len() as u64,
+            entry: laid.entry,
+            image_base: laid.image_base,
+            build_id_ptr: laid.build_id().as_ptr() as u64,
+            build_id_len: laid.build_id().len() as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
@@ -50,8 +58,8 @@ fn spawn(image: RawHandle, len: u64) -> Result<RawHandle, SyscallError> {
 }
 
 fn runs(what: &str) {
-    let (object, len) = object_of(SELF);
-    let child = spawn(object.as_handle().raw(), len).unwrap_or_else(|e| panic!("{what}: spawn from an object: {e:?}"));
+    let (object, bytes) = object_of(SELF);
+    let child = spawn(object.as_handle().raw(), &bytes).unwrap_or_else(|e| panic!("{what}: spawn from an object: {e:?}"));
     drop(object);
     let end = syscall::process_wait(child).unwrap_or_else(|e| panic!("{what}: wait: {e:?}"));
     assert_eq!(end, End::Exited(0), "{what}: the child spawned from an object ended {end}");
@@ -65,19 +73,16 @@ fn main() {
 
     runs("first");
 
-    let (object, len) = object_of(SELF);
+    let (object, bytes) = object_of(SELF);
     // SAFETY: nothing relies on being the source's only holder.
     let unmappable = unsafe { syscall::dup_narrowed(object.as_handle().raw(), Rights::DUP.union(Rights::TRANSFER)) }
         .expect("a duplicate without MAP");
-    assert_eq!(spawn(unmappable, len).err(), Some(SyscallError::PermissionDenied), "an object without MAP");
+    assert_eq!(spawn(unmappable, &bytes).err(), Some(SyscallError::PermissionDenied), "an object without MAP");
     // SAFETY: no type holds this number.
     unsafe { syscall::close(unmappable) };
-    // Past the whole object, which the kernel rounds up to 2 MiB pages.
-    let past = (len | ((2 << 20) - 1)) + 2;
-    assert_eq!(spawn(object.as_handle().raw(), past).err(), Some(SyscallError::InvalidArgument), "a length past the object");
-    println!("spawn_image_object: an object without MAP and a length past one are refused");
+    println!("spawn_image_object: an object without MAP is refused");
 
-    let child = spawn(object.as_handle().raw(), len).expect("spawn from the object that is then overwritten");
+    let child = spawn(object.as_handle().raw(), &bytes).expect("spawn from the object that is then overwritten");
     // The kernel reads the object only by copying, which is what this races.
     object.bytes().write(0, &vec![0xF4; object.len()]);
     let end = syscall::process_wait(child).expect("the overwritten child is waited for");

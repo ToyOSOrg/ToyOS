@@ -233,7 +233,7 @@ fn launcher_copy() -> OwnedHandle {
 fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
     let argv = format!("{SELF_PATH}\0c");
     let own = image::image_of(SELF_PATH);
-    let (image, image_len) = own.spawn_words();
+    let laid = image::laid(&own);
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,
@@ -245,8 +245,12 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
         endow_count: 0,
         labels_ptr: 0,
         labels_len: 0,
-        image,
-        image_len,
+        maps_ptr: laid.maps().as_ptr() as u64,
+        maps_count: laid.maps().len() as u64,
+        entry: laid.entry,
+        image_base: laid.image_base,
+        build_id_ptr: laid.build_id().as_ptr() as u64,
+        build_id_len: laid.build_id().len() as u64,
         place: u64::from(place.0),
         pager: u64::from(toyos_abi::HANDLE_INVALID.0),
     };

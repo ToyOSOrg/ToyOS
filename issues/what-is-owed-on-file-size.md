@@ -13,7 +13,8 @@ what survives it is a different question.
 **Answered:**
 
 - `elf.rs` → `lib/elf/` (host-tested, crafted-input corpus), `e2c6a06`; the
-  mapping half stayed as `kernel/src/elf/`, `42b29c9`.
+  mapping half stayed as `kernel/src/elf/`, `42b29c9`, until the program's
+  loader took a library's loading out of the kernel.
 - `compositor/main.rs` → `toyos-desktop/` (pure, since moved to
   `system/compositor/desktop/`), `763712b`; the effects shell
   is `system/compositor/` over five files with a 71-line `main.rs`, `72705d9`.

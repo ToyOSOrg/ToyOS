@@ -516,6 +516,22 @@ mod tests {
         assert!(!Prot::ReadExec.within(Prot::ReadWrite) && Prot::None.within(Prot::None));
     }
 
+    /// A program writes its code and then protects it executable, never both at
+    /// once: no protection a range can hold allows a write and an execution, and
+    /// an object's mapping, which another may write through, never becomes
+    /// executable, since a protect is bounded by the mapping's own.
+    #[test]
+    fn no_protection_allows_a_write_and_an_execution() {
+        for prot in [Prot::None, Prot::Read, Prot::ReadWrite, Prot::ReadExec] {
+            // Every protection: one more is a compile error here until it is listed.
+            match prot {
+                Prot::None | Prot::Read | Prot::ReadWrite | Prot::ReadExec => {}
+            }
+            assert!(!(prot.allows(Access::Write) && prot.allows(Access::Exec)), "{prot:?}");
+        }
+        assert!(!Prot::ReadExec.within(Prot::Read) && !Prot::ReadExec.within(Prot::ReadWrite));
+    }
+
     /// The inventory against a page map of the same space, through a
     /// deterministic mix of every change: what is held, what is free and what
     /// the free index can place always agree.

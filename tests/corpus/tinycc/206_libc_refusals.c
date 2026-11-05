@@ -82,7 +82,7 @@ int main(void) {
     said("getrlimit", getrlimit(RLIMIT_STACK, &limit));
     said("setrlimit", setrlimit(RLIMIT_CORE, &limit));
     said("msync", msync(page, 4096, MS_SYNC));
-    said("mprotect executable", mprotect(page, 4096, PROT_READ | PROT_EXEC));
+    said("mprotect writable and executable", mprotect(page, 4096, PROT_READ | PROT_WRITE | PROT_EXEC));
     said("mprotect off a page", mprotect(page + 1, 4096, PROT_READ));
     said("utimes", utimes(FILE_PATH, NULL));
     int status = 0;
@@ -127,12 +127,12 @@ int main(void) {
     printf("getpwuid_r: %s, entry %s\n", errno_name(answer), found ? "set" : "null");
 
     /* mmap: no file, private or shared, at its start or a later page; no
-       executable page; no empty mapping. */
+       page writable and executable at once; no empty mapping. */
     said("mmap a file", mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0) == MAP_FAILED ? -1 : 0);
     said("mmap a file at a page", mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 4096) == MAP_FAILED ? -1 : 0);
     said("mmap a file shared", mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) == MAP_FAILED ? -1 : 0);
     said("mmap a file shared at a page", mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 4096) == MAP_FAILED ? -1 : 0);
-    said("mmap executable", mmap(NULL, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ? -1 : 0);
+    said("mmap writable and executable", mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ? -1 : 0);
     said("mmap nothing", mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ? -1 : 0);
 
     /* munmap: any run of whole pages, as POSIX unmaps them, and a fixed

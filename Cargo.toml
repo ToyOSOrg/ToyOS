@@ -47,7 +47,6 @@ members = [
     "lib/crypto",
     "lib/device-memory",
     "lib/devicepath",
-    "lib/elf",
     "lib/display-output",
     "lib/edid",
     "lib/elide",
@@ -68,6 +67,7 @@ members = [
     "lib/radio",
     "lib/random",
     "lib/rootimage",
+    "lib/kimage",
     "lib/scsi",
     "lib/session",
     "lib/ssh",
@@ -238,9 +238,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bcachefs = { path = "lib/bcachefs" }
 toyos-abi = { path = "sdk/abi" }
-# What `build::syscall_entry_bytes` finds a staged kernel's entry with: its
-# segments, and its symbol table where the kernel's own backtrace finds it.
-toyos-elf = { path = "lib/elf" }
+# The one ELF parser (`toyos::elf`), which the build reads the kernel's and
+# the supervisor's images with.
+toyos = { path = "sdk/toyos" }
+# The kernel section the build writes (`build::kimage`).
+toyos-kimage = { path = "lib/kimage" }
 toyos-symbols = { path = "lib/symbols" }
 # What `build::fpgate` decodes the linked x86-64 kernel with, to refuse an
 # instruction that touches the user FP or vector state outside `arch::fpu`:

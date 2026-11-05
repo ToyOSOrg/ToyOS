@@ -68,12 +68,11 @@ use whole_toolchain::{whole, Whole};
 /// The per-worktree sources that end up inside a sysroot: std links the
 /// `toyos-abi` and `toyos` [`std_patch`] hands it and compiles its ToyOS
 /// backend from `sdk/std`, C's allocator among it from `sdk/libc/src`, and
-/// `libtoyos_c.a` is `sdk/libc` with `toyos-elf` and `toyos-osrelease`.
-pub const SYSROOT_SOURCES: [&str; 7] = [
+/// `libtoyos_c.a` is `sdk/libc` with `toyos-osrelease`.
+pub const SYSROOT_SOURCES: [&str; 6] = [
     "sdk/abi/src",
     "sdk/toyos/src",
     "sdk/std",
-    "lib/elf/src",
     "sdk/osrelease/src",
     "sdk/libc/src",
     "sdk/libc/include",
@@ -81,10 +80,9 @@ pub const SYSROOT_SOURCES: [&str; 7] = [
 
 /// Their manifests, and the lockfile and cargo configuration libc is built
 /// under: the features, versions and flags of the same build.
-pub(crate) const SYSROOT_MANIFESTS: [&str; 7] = [
+pub(crate) const SYSROOT_MANIFESTS: [&str; 6] = [
     "sdk/abi/Cargo.toml",
     "sdk/toyos/Cargo.toml",
-    "lib/elf/Cargo.toml",
     "sdk/osrelease/Cargo.toml",
     "sdk/libc/Cargo.toml",
     "sdk/libc/Cargo.lock",

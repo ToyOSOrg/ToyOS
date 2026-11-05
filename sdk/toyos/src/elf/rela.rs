@@ -1,0 +1,364 @@
+//! `Elf64_Rela` tables, as a view over bytes, and the parse that turns one
+//! entry into a [`Reloc`] a loader may act on.
+//!
+//! A relocation is an instruction to write `width` bytes at a file-chosen
+//! offset with a file-chosen value, so this is the trust boundary's sharpest
+//! edge. A raw [`Rela`] exposes nothing but its kind: every number in it
+//! reaches a loader only through [`parse`], which checks the destination
+//! against the window the loader writes into and the value against the image
+//! or TLS segment it must name, and answers with types that cannot hold
+//! anything else ([`ImageOffset`], [`SymIndex`], [`TlsOffset`]).
+//!
+//! Every type [`Op`] has no variant for, but `NONE`, is refused: a slot left
+//! with its link-time value is a wrong pointer, not a skipped relocation.
+
+use crate::elf::header::Machine;
+use crate::elf::layout::{Extent, ImageOffset, TlsSegment};
+use crate::elf::read;
+use crate::elf::sym::{SymIndex, SymTab};
+use crate::elf::tls::TlsOffset;
+
+/// Bytes in one `Elf64_Rela`.
+pub const ENTRY_SIZE: usize = 24;
+
+/// The dynamic relocations this loader knows about, by what they ask for
+/// rather than by any one machine's number: [`RelocKind::from_raw`] is the
+/// only place a number is read.
+///
+/// `Other` carries the raw type, so its refusal can name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelocKind {
+    /// `R_X86_64_NONE`, `R_AARCH64_NONE`: nothing to write.
+    None,
+    /// `R_X86_64_64`, `R_AARCH64_ABS64`
+    Abs64,
+    /// `R_X86_64_GLOB_DAT`, `R_AARCH64_GLOB_DAT`
+    GlobDat,
+    /// `R_X86_64_JUMP_SLOT`, `R_AARCH64_JUMP_SLOT`
+    JumpSlot,
+    /// `R_X86_64_RELATIVE`, `R_AARCH64_RELATIVE`
+    Relative,
+    /// `R_X86_64_DTPMOD64`, `R_AARCH64_TLS_DTPMOD`
+    DtpMod64,
+    /// `R_X86_64_DTPOFF64`, `R_AARCH64_TLS_DTPREL`
+    DtpOff64,
+    /// `R_X86_64_TPOFF64`, `R_AARCH64_TLS_TPREL`
+    Tpoff64,
+    /// `R_X86_64_TPOFF32`; AArch64 has no 32-bit thread-pointer offset.
+    Tpoff32,
+    /// `R_AARCH64_TLSDESC`: a TLS descriptor, whose resolver this loader does
+    /// not have, so [`parse`] refuses it.
+    TlsDesc,
+    Other(u32),
+}
+
+impl RelocKind {
+    pub const fn from_raw(machine: Machine, r_type: u32) -> RelocKind {
+        match (machine, r_type) {
+            (_, 0) => RelocKind::None,
+            (Machine::X86_64, 1) | (Machine::Aarch64, 257) => RelocKind::Abs64,
+            (Machine::X86_64, 6) | (Machine::Aarch64, 1025) => RelocKind::GlobDat,
+            (Machine::X86_64, 7) | (Machine::Aarch64, 1026) => RelocKind::JumpSlot,
+            (Machine::X86_64, 8) | (Machine::Aarch64, 1027) => RelocKind::Relative,
+            (Machine::X86_64, 16) | (Machine::Aarch64, 1028) => RelocKind::DtpMod64,
+            (Machine::X86_64, 17) | (Machine::Aarch64, 1029) => RelocKind::DtpOff64,
+            (Machine::X86_64, 18) | (Machine::Aarch64, 1030) => RelocKind::Tpoff64,
+            (Machine::X86_64, 23) => RelocKind::Tpoff32,
+            (Machine::Aarch64, 1031) => RelocKind::TlsDesc,
+            (_, other) => RelocKind::Other(other),
+        }
+    }
+}
+
+/// One `Elf64_Rela` as the file wrote it. Only its kind is readable: the
+/// numbers in it are the file's, and they leave this module through [`parse`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rela {
+    offset: u64,
+    sym: u32,
+    kind: RelocKind,
+    addend: i64,
+}
+
+impl Rela {
+    pub const fn kind(&self) -> RelocKind {
+        self.kind
+    }
+}
+
+/// A relocation table, addressed by entry rather than by byte.
+///
+/// Holds no ownership and reserves nothing: `DT_RELASZ` is a length the file
+/// chose, and the only honest bound on it is the bytes the caller already has.
+#[derive(Clone, Copy, Debug)]
+pub struct RelaTable<'a> {
+    data: &'a [u8],
+    machine: Machine,
+}
+
+impl<'a> RelaTable<'a> {
+    /// `machine` decides what each entry's type number means.
+    pub const fn new(data: &'a [u8], machine: Machine) -> RelaTable<'a> {
+        RelaTable { data, machine }
+    }
+
+    /// Whole entries the bytes hold. A trailing partial entry is not an entry.
+    pub const fn len(&self) -> usize {
+        self.data.len() / ENTRY_SIZE
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(&self, i: usize) -> Option<Rela> {
+        let off = i.checked_mul(ENTRY_SIZE)?;
+        let [r_type, r_sym] = read::u32_pair_at(self.data, off.checked_add(8)?)?;
+        Some(Rela {
+            offset: read::u64_at(self.data, off)?,
+            sym: r_sym,
+            kind: RelocKind::from_raw(self.machine, r_type),
+            addend: read::i64_at(self.data, off.checked_add(16)?)?,
+        })
+    }
+
+    /// Takes `self` by value — the table is a `Copy` view, so the iterator
+    /// borrows the bytes rather than the caller's handle on them.
+    pub fn iter(self) -> impl Iterator<Item = Rela> + 'a {
+        (0..self.len()).filter_map(move |i| self.get(i))
+    }
+}
+
+/// What one module's relocations are parsed against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rules {
+    /// The image a `RELATIVE` value must point into.
+    pub extent: Extent,
+    /// Where writes may land, `[lo, hi)` in `r_offset`'s own coordinates.
+    pub window: (u64, u64),
+    /// The module's own `PT_TLS`, which a TLS relocation with `r_sym == 0`
+    /// offsets into; `None` for a module with none.
+    pub tls: Option<TlsSegment>,
+}
+
+/// A relocation whose destination lies in its window and whose value names
+/// what its kind says it names: made only by [`parse`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reloc {
+    offset: u64,
+    op: Op,
+}
+
+impl Reloc {
+    /// `r_offset`: `[offset, offset + width)` lies inside the window it was
+    /// parsed against.
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub const fn op(&self) -> Op {
+        self.op
+    }
+}
+
+impl Op {
+    /// The bytes it writes.
+    pub const fn width(&self) -> u64 {
+        match self {
+            Op::Tpoff32(_) => 4,
+            _ => 8,
+        }
+    }
+}
+
+/// What a [`Reloc`] writes, per psABI, with every file-chosen number already
+/// bounded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Op {
+    /// `B + A`, 8 bytes: the address the image was placed at plus a position
+    /// inside it.
+    Relative(ImageOffset),
+    /// `S`, 8 bytes: `GLOB_DAT`, bound to a symbol by name.
+    Bind(SymIndex),
+    /// `S`, 8 bytes: `JUMP_SLOT`, a call's slot, which a lazy loader binds at
+    /// the first call.
+    Call(SymIndex),
+    /// `S + A`, 8 bytes; `None` is `r_sym == 0`, whose `S` is 0.
+    Absolute(Option<SymIndex>, i64),
+    /// `S + A - tp`, 8 bytes.
+    Tpoff64(TlsRef),
+    /// `S + A - tp`, 4 bytes, sign-extended by the instruction that reads it.
+    Tpoff32(TlsRef),
+    /// The id of the module defining the symbol, 8 bytes; `None` is `r_sym ==
+    /// 0`, the relocating module itself.
+    DtpMod64(Option<SymIndex>),
+    /// `S + A` within its module's TLS block, 8 bytes.
+    DtpOff64(TlsRef),
+}
+
+/// The `S + A` of a TLS relocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TlsRef {
+    /// `r_sym == 0`: an offset into the relocating module's own TLS segment.
+    Own(TlsOffset),
+    /// A symbol the loader resolves by name, and the addend it is offset by.
+    Symbol(TlsSymRef),
+}
+
+/// A TLS relocation's symbol and addend: the sum is bounded only once the
+/// symbol resolves, against the TLS segment of the module defining it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TlsSymRef {
+    sym: SymIndex,
+    addend: i64,
+}
+
+impl TlsSymRef {
+    pub const fn sym(self) -> SymIndex {
+        self.sym
+    }
+
+    /// The addend `A`, resolved against the defining symbol's `S` through
+    /// [`crate::elf::Sym::tls_offset`].
+    pub const fn addend(self) -> i64 {
+        self.addend
+    }
+}
+
+/// Parse one entry against the module's [`Rules`]: `Ok(None)` for `NONE`,
+/// the reason for every type this loader does not write.
+///
+/// A [`SymIndex`] in the answer indexes `symbols` and no other table.
+pub fn parse(rela: Rela, rules: &Rules, symbols: SymTab<'_>) -> Result<Option<Reloc>, RelocError> {
+    let sym = || SymIndex::below(rela.sym, symbols.count()).ok_or(RelocError::SymbolPastTable);
+    let tls = || -> Result<TlsRef, RelocError> {
+        if rela.sym != 0 {
+            return Ok(TlsRef::Symbol(TlsSymRef { sym: sym()?, addend: rela.addend }));
+        }
+        rules
+            .tls
+            .and_then(|segment| TlsOffset::of(0, rela.addend, segment))
+            .map(TlsRef::Own)
+            .ok_or(RelocError::TlsOutsideSegment)
+    };
+    let op = match rela.kind {
+        RelocKind::None => return Ok(None),
+        RelocKind::TlsDesc => return Err(RelocError::TlsDescriptor),
+        RelocKind::Other(raw) => return Err(RelocError::Unsupported(raw)),
+        RelocKind::Relative => Op::Relative(
+            u64::try_from(rela.addend)
+                .ok()
+                .and_then(|a| rules.extent.offset(a))
+                .ok_or(RelocError::RelativeOutsideImage)?,
+        ),
+        RelocKind::Abs64 => Op::Absolute(if rela.sym == 0 { None } else { Some(sym()?) }, rela.addend),
+        RelocKind::GlobDat => Op::Bind(sym()?),
+        RelocKind::JumpSlot => Op::Call(sym()?),
+        RelocKind::Tpoff64 => Op::Tpoff64(tls()?),
+        RelocKind::Tpoff32 => Op::Tpoff32(tls()?),
+        RelocKind::DtpMod64 => Op::DtpMod64(if rela.sym == 0 { None } else { Some(sym()?) }),
+        RelocKind::DtpOff64 => Op::DtpOff64(tls()?),
+    };
+    let (lo, hi) = rules.window;
+    let end = rela.offset.checked_add(op.width()).ok_or(RelocError::OffsetOverflows)?;
+    if rela.offset < lo || end > hi {
+        return Err(RelocError::OutsideWindow);
+    }
+    Ok(Some(Reloc { offset: rela.offset, op }))
+}
+
+/// Why a relocation cannot be applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelocError {
+    /// `r_offset + width` does not fit a `u64`.
+    OffsetOverflows,
+    /// The write would land outside the window the loader owns.
+    OutsideWindow,
+    /// `r_sym` names an entry past the end of `.dynsym`.
+    SymbolPastTable,
+    /// A TLS descriptor, which only a resolver this loader does not have can
+    /// fill.
+    TlsDescriptor,
+    /// A type this loader does not apply, by its number: `COPY` and
+    /// `IRELATIVE` among them.
+    Unsupported(u32),
+    /// A `RELATIVE` addend that is no address inside the image: psABI `B + A`
+    /// with `A` a link-time address, and the image is all this module has.
+    RelativeOutsideImage,
+    /// A TLS offset outside the TLS segment it names, or in a module that has
+    /// none.
+    TlsOutsideSegment,
+    /// A thread-pointer offset no machine word, or for `TPOFF32` no 32-bit
+    /// field, holds.
+    TpoffOverflows,
+}
+
+impl RelocError {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RelocError::OffsetOverflows => "ELF: relocation r_offset + width overflows",
+            RelocError::OutsideWindow => "ELF: relocation r_offset outside the writable image",
+            RelocError::SymbolPastTable => "ELF: relocation r_sym past .dynsym",
+            RelocError::TlsDescriptor => "ELF: R_AARCH64_TLSDESC has no resolver in this loader",
+            RelocError::Unsupported(_) => "ELF: a relocation type this loader does not apply",
+            RelocError::RelativeOutsideImage => "ELF: RELATIVE addend is no address inside the image",
+            RelocError::TlsOutsideSegment => "ELF: TLS relocation names an offset outside its PT_TLS",
+            RelocError::TpoffOverflows => "ELF: TPOFF value does not fit the field it is written to",
+        }
+    }
+}
+
+impl core::fmt::Display for RelocError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            RelocError::Unsupported(raw) => write!(f, "ELF: relocation type {raw}, which this loader does not apply"),
+            _ => f.write_str(self.as_str()),
+        }
+    }
+}
+
+/// The tables a loader reads *while* it is writing relocations, as
+/// image-relative `[start, end)`. An absent table is an empty range.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadTables {
+    pub dynsym: (u64, u64),
+    pub dynstr: (u64, u64),
+    pub rela: (u64, u64),
+    pub jmprel: (u64, u64),
+}
+
+/// Refuse an image that puts a table the loader reads on a `page` of the
+/// window relocations may write into.
+///
+/// A loader resolving symbols holds a `&[u8]` over `.dynsym` and `.dynstr`, and
+/// one over each relocation table it is iterating, across writes into the same
+/// allocation — and it parses those tables again after the image is mapped,
+/// where a page the window touches is one the process may write. Disjointness
+/// from every such page is what makes those borrows sound and the second parse
+/// the first one's answer.
+///
+/// **A conforming image never triggers this.** The ELF gABI gives `.dynsym`,
+/// `.dynstr`, `.rela.dyn` and `.rela.plt` `SHF_ALLOC` without `SHF_WRITE`, so a
+/// linker places them in a non-writable segment, on pages of its own.
+pub fn tables_outside_window(
+    tables: &ReadTables,
+    window: (u64, u64),
+    page: u64,
+) -> Result<(), &'static str> {
+    if window.1 <= window.0 {
+        return Ok(());
+    }
+    let mask = page.wrapping_sub(1);
+    let window = (window.0 & !mask, window.1.checked_add(mask).map_or(u64::MAX, |e| e & !mask));
+    for (range, refusal) in [
+        (tables.dynsym, "ELF: .dynsym lies on a page of the module's writable window"),
+        (tables.dynstr, "ELF: .dynstr lies on a page of the module's writable window"),
+        (tables.rela, "ELF: .rela.dyn lies on a page of the module's writable window"),
+        (tables.jmprel, "ELF: .rela.plt lies on a page of the module's writable window"),
+    ] {
+        if range.1 > range.0 && range.0 < window.1 && window.0 < range.1 {
+            return Err(refusal);
+        }
+    }
+    Ok(())
+}

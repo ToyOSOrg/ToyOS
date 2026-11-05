@@ -5,7 +5,6 @@ use crate::ffi::CStr;
 use crate::io;
 use crate::mem::ManuallyDrop;
 use crate::num::NonZero;
-use crate::ptr;
 use crate::sync::atomic::{AtomicU32, Ordering};
 use crate::thread::ThreadInit;
 use crate::time::Duration;
@@ -24,9 +23,11 @@ unsafe impl Sync for Thread {}
 struct Block {
     tid: AtomicU32,
     state: AtomicU32,
-    /// The stack's reservation: [`GUARD`] reserved, then the stack committed.
+    /// The thread's memory (`toyos::tls::ThreadMemory`): its area, a guard and its stack.
     reservation: *mut u8,
     reserved: usize,
+    /// What the thread names as its thread pointer first.
+    tp: usize,
     /// Taken by the thread as it starts.
     init: UnsafeCell<Option<Box<ThreadInit>>>,
 }
@@ -36,11 +37,6 @@ const DETACHED: u32 = 1;
 const EXITED: u32 = 2;
 
 pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
-
-/// Reserved pages below a thread's stack, so that running off it faults: one
-/// page is enough, since every frame larger than a page probes each page it
-/// spans (the target's inline stack probes).
-const GUARD: usize = syscall::PAGE_SIZE;
 
 /// Wait for `block`'s thread to be gone, then free its stack and `block`. A
 /// join the kernel refuses frees nothing, since the stack may still be in use.
@@ -59,30 +55,21 @@ unsafe fn reap(block: *mut Block) {
 
 impl Thread {
     pub unsafe fn new(stack: usize, init: Box<ThreadInit>) -> io::Result<Thread> {
-        // The size asked for, in whole pages, committed before the thread
-        // starts so that no touch of it can find no memory.
-        let Some(stack_size) = stack.max(1).checked_next_multiple_of(syscall::PAGE_SIZE) else {
-            return Err(io::const_error!(io::ErrorKind::InvalidInput, "thread stack size too large"));
+        // The stack asked for, in whole pages, and the thread's area, committed
+        // before the thread starts so that no touch of either can find no
+        // memory. One guard page is enough below the stack, since every frame
+        // larger than a page probes each page it spans (the target's inline
+        // stack probes).
+        let Some(memory) = toyos::tls::ThreadMemory::reserve(stack) else {
+            return Err(io::const_error!(io::ErrorKind::OutOfMemory, "no memory for a thread"));
         };
-        let reserved = stack_size.checked_add(GUARD).ok_or(io::const_error!(
-            io::ErrorKind::InvalidInput,
-            "thread stack size too large"
-        ))?;
-        // SAFETY: placed anywhere, so it replaces nothing, and the stack is
-        // inside the reservation.
-        let reservation = unsafe { syscall::vm_reserve(reserved, syscall::VmProt::None, syscall::VmAt::ANYWHERE) }
-            .map_err(|_| io::const_error!(io::ErrorKind::OutOfMemory, "no room for a thread stack"))?;
-        let stack_base = reservation.wrapping_add(GUARD);
-        if unsafe { syscall::vm_protect(stack_base, stack_size, syscall::VmProt::ReadWrite) }.is_err() {
-            let _ = unsafe { syscall::vm_release(reservation, reserved) };
-            return Err(io::const_error!(io::ErrorKind::OutOfMemory, "thread stack commit failed"));
-        }
-        let stack_top = stack_base.expose_provenance() as u64 + stack_size as u64;
+        let toyos::tls::ThreadMemory { reservation, reserved, stack_base, stack_top, tp } = memory;
         let block = Box::into_raw(Box::new(Block {
             tid: AtomicU32::new(0),
             state: AtomicU32::new(JOINABLE),
             reservation,
             reserved,
+            tp,
             init: UnsafeCell::new(Some(init)),
         }));
 
@@ -90,7 +77,7 @@ impl Thread {
         let tid = unsafe {
             syscall::thread_spawn(
                 (thread_trampoline as *const ()).expose_provenance() as u64,
-                stack_top,
+                stack_top.expose_provenance() as u64,
                 block.expose_provenance() as u64,
                 stack_base.expose_provenance() as u64,
             )
@@ -130,6 +117,11 @@ impl Drop for Thread {
 
 extern "C" fn thread_trampoline(data: u64) {
     let block = crate::ptr::with_exposed_provenance_mut::<Block>(data as usize);
+    // Before anything reads a thread-local.
+    // SAFETY: the spawner wrote the block, which outlives this thread.
+    if toyos::tls::enter(unsafe { (*block).tp }).is_err() {
+        rtabort!("the kernel refused a thread's thread pointer");
+    }
     // SAFETY: the spawner put the init here and only this thread takes it.
     let init = unsafe { (*(*block).init.get()).take() }.expect("a thread's init is taken once");
     let main = init.init();
@@ -140,10 +132,11 @@ extern "C" fn thread_trampoline(data: u64) {
         crate::sys::thread_local::destructors::run();
     }
     crate::rt::thread_cleanup();
+    toyos::tls::leave();
     // SAFETY: the block is this thread's until its state says otherwise.
     if unsafe { &*block }.state.swap(EXITED, Ordering::AcqRel) == DETACHED {
         // Nobody holds the block but this thread, which frees it and leaves
-        // its stack to the kernel to release.
+        // its memory to the kernel to release.
         let Block { reservation, reserved, .. } = *unsafe { Box::from_raw(block) };
         // SAFETY: the stack is this thread's alone, and ends with it.
         let refused = unsafe { syscall::thread_exit_detached(0, reservation, reserved) };
@@ -154,7 +147,7 @@ extern "C" fn thread_trampoline(data: u64) {
 
 /// The CPUs the calling thread may run on, as Linux's counts its affinity.
 pub fn available_parallelism() -> io::Result<NonZero<usize>> {
-    let mask = syscall::thread_affinity(u64::from(toyos_abi::current_tid().0))
+    let mask = syscall::thread_affinity(u64::from(toyos::tls::current_tid().0))
         .map_err(|_| io::const_error!(io::ErrorKind::NotFound, "the kernel reads no mask for this thread"))?;
     NonZero::new(mask.iter().map(|word| word.count_ones() as usize).sum())
         .ok_or(io::const_error!(io::ErrorKind::NotFound, "the thread's mask names no CPU"))

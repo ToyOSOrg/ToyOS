@@ -213,9 +213,7 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
    `tests/libc-arch` as `sdk/libc/arch/`). The moves landed with stage 4, in
    one pull request, with a clean toolchain build and the guest suite green.
    **Remaining:** `build/sysroot.rs`'s `SYSROOT_SOURCES` and
-   `build/sdkversion.rs`'s `PUBLISHED` are still lists. `SYSROOT_SOURCES`
-   cannot come from `sdk/` alone: libc links `toyos-elf`, which is in
-   `lib/elf` (rule step 5). `PUBLISHED` leaves out `sdk/libc`,
+   `build/sdkversion.rs`'s `PUBLISHED` are still lists. `PUBLISHED` leaves out `sdk/libc`,
    `sdk/libc/arch` and `sdk/std`, which are not published, and
    `sdk/filepicker`, which the filepicker ruling makes public. No release
    dry run was made: `release` and `publish` run only on a push to `main`.

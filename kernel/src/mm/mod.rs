@@ -10,7 +10,6 @@ pub mod charge;
 mod image;
 mod mmio;
 pub mod policy;
-mod region;
 pub mod space;
 
 /// Behind the same feature as its only caller, `sched::driver`'s ladder.
@@ -24,7 +23,6 @@ pub use alloc::sweep as sweep_heap_bands;
 pub use alloc::hold_lock as hold_heap_lock;
 pub use image::Image;
 pub use mmio::Mmio;
-pub use region::{Allocation, KernelSlice};
 
 use crate::MemoryMapEntry;
 pub use pmm::Region;

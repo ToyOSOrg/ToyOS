@@ -221,6 +221,12 @@ static void dl(void) {
     printf("dladdr(tls_get_label + 1): %d, %s, %s at the symbol's address: %s\n", found,
            found ? info.dli_fname : "-", found && info.dli_sname ? info.dli_sname : "none",
            found && info.dli_saddr == code ? "yes" : "no");
+
+    /* The global scope: the first module that exports a name, and none for a
+       name nobody exports. */
+    printf("dlsym(RTLD_DEFAULT, tls_get_label) is the library's: %s; of a name nobody exports: %s\n",
+           dlsym(RTLD_DEFAULT, "tls_get_label") == code ? "yes" : "no",
+           dlsym(RTLD_DEFAULT, "no_module_exports_this") ? "found" : "null");
 }
 
 int main(void) {

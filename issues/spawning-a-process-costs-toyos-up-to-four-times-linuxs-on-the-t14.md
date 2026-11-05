@@ -70,6 +70,5 @@ under deep idle.
 current-state comparison, or each remaining difference measured to its parts
 and justified.
 
-**Owner**: process creation (`kernel/src/process.rs`, `kernel/src/elf/`, the
-SDK's spawn and `sdk/libc/src/spawn.rs`) and, for the parallel build, the
-scheduler (`kernel/src/sched/`).
+**Owner**: process creation (`kernel/src/process.rs`, the SDK's spawn and
+`sdk/libc/src/spawn.rs`) and, for the parallel build, the scheduler (`kernel/src/sched/`).

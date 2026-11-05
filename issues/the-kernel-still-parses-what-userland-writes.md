@@ -25,18 +25,35 @@ parses most of it.
 
 **Stage 1 is built: an executable relocates itself** (`toyos::relocate`,
 called first by std's and libc's `_start`), and the kernel reads no
-executable's dynamic section, symbol tables or relocations, and loads no
-library at spawn. Left in Ring 0: `dlopen` and its four sibling syscalls, the
-TLS block, and the program-header parse. **The interval it opens, owed by the
-stage that brings the userland loader:** an executable with a `DT_NEEDED`
-does not start (its own `_start` refuses it: exit 127 and a line on slot 2,
-or, holding no slot 2, the kernel's handle-fault exit), so `std_tls`, the
-guest test of a startup library's TLS beside the executable's, is deleted at
-the commit that lands stage 1 and comes back with that stage. Nothing shipped
-links a library at load time. The kernel's static TLS block holds the
-executable's module alone, at offset 0, so `TlsModule::base_offset` and
-`Static::tpoff`'s offset are 0 at every caller; that stage places modules in
-userland and deletes them with the kernel's TLS build.
+executable's dynamic section, symbol tables or relocations.
+
+**Stage 2 is built: the loader is the program's.** A program lays out its own
+thread-local storage (`toyos::tls`): its module list, every thread's area and
+DTV, which grows in the process's own memory, and `__tls_get_addr`'s blocks.
+The kernel's only part is the thread pointer a thread names
+(`SYS_SET_THREAD_POINTER`). The SDK's loader (`toyos::dl`) lays a
+library out in private memory with every library it names, relocates them,
+protects their pages, their RELRO read-only, and publishes them in the module
+list together or not at all; libc's `dlopen`, `dlsym`, `dladdr` and
+`dl_iterate_phdr` read that list, and so do libloading, std's unwinder and the
+backtrace crate. `SYS_DLOPEN`, `SYS_DLSYM`, `SYS_DLCLOSE`, `SYS_TLS_ALLOC_BLOCK` and
+`SYS_QUERY_MODULES` are deleted, and a program may protect its own memory read
+and execute, never write and execute at once. An executable's start, std's or libc's, loads the
+libraries it names (`DT_NEEDED`) through the same loader before `main`
+(`toyos::dl::start`), and `std_tls` holds it. AArch64 shared objects reach
+their thread-locals through TLS descriptors, which the loader refuses.
+
+**Stage 3 is built: nothing in the kernel parses an ELF** (owner, 2026-11-05).
+A parent lays out its child's program (`toyos::elf::program`) and hands the
+kernel ranges to map, each checked as an ordinary mapping is
+(`SpawnArgs::maps_ptr`, `abuse_spawn_maps`), the entry, the image base and the
+build-id a crash record names. The build lays out the kernel and the
+supervisor ahead of the boot (`toyos_kimage`): the loader copies the kernel and
+applies its `RELATIVE`s from that table, and the kernel takes its own ranges,
+its symbols and the supervisor's program from it. The ELF decoder is a module
+of `toyos` (`toyos::elf`), the one parser, which the build, `symbolize` and
+the SDK's loader read with; `toyos-elf` is no crate, and the kernel and the
+loader link none of it.
 
 The evidence that it is worth doing: nine dated commits over eleven days fixed
 userland-reachable kernel defects in this code, six of them machine-wide panics;
@@ -44,11 +61,8 @@ seven of the loader's twelve bounds are over quantities a workload sets and two
 have no bound at all; and two of those ceilings are *already* exceeded by
 artifacts this tree builds.
 
-**It has a deadline.** Nothing shipped is dynamically linked today, so the move
-is pure deletion. The day an image ships a hosted rustc, a very large shared object is
-dlopened by the kernel's loader, and every one of those bounds
-becomes load-bearing at once. Do it after the completion architecture lands and
-before that day. Independent of everything else; may run as soon as a slot frees.
+Its deadline, the day an image ships a hosted rustc whose shared objects the
+kernel would have loaded, is met: those bounds are the process's own now.
 
 **Move 2 — filesystem daemons**, sequenced after the completion architecture. A
 crafted image attacks the kernel rather than a sandboxed daemon. The FS daemon
@@ -64,14 +78,13 @@ Frees at least 2 MiB per running program, the kernel stops parsing program
 files' name tables, library frames get names." and wrote "adopt, make sure the
 code can never panic or fail is that possible? i dont want to allow a kernel
 crash because of that and it seems brittle by nature do you agree? can we
-share a lot of code there? should we?". The kernel keeps its own ELF reader,
-`toyos-elf`: the orchestrator's reading of the owner's crate ruling of the same
-day, "if it makes sense we wrote our own elf parser or aml interpreter due to
-security or other important reasons we do it". The kernel names only itself: a
-killed program's frame is recorded as the file it ran, the offset in that file
-and the file's build-id (`lib/symbols/src/frame.rs`), and
-`/system/bin/symbolize` names it with the kernel's own lookup and demangling
-code. What is left: a library's frames print bare, because the kernel records
+share a lot of code there? should we?". The kernel reads no ELF for it: its
+own names are the build's table (`toyos_kimage::Symbols`), which resolves as
+the ELF symbol table does (`build::kimage`'s test). The kernel names only
+itself: a killed program's frame is recorded as the file it ran, the offset in
+that file and the build-id its parent handed the spawn
+(`lib/symbols/src/frame.rs`), and `/system/bin/symbolize` names it out of the
+file with `toyos::elf` and the kernel's demangling code. What is left: a library's frames print bare, because the kernel records
 only the executable's image for a process; and `rustc-demangle`'s standing. It
 is an unforked crates.io dependency, ~2k lines of third-party string parsing in
 Ring 0 on the panic path, now for the kernel's own names alone: fork it into

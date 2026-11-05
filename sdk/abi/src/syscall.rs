@@ -77,9 +77,6 @@ pub const SYS_NANOSLEEP: u64 = 49;
 /// [`dup`] and [`dup_narrowed`].
 pub const SYS_HANDLE_DUP: u64 = 50;
 pub const SYS_GETPID: u64 = 51;
-pub const SYS_DLOPEN: u64 = 55;
-pub const SYS_DLSYM: u64 = 56;
-pub const SYS_DLCLOSE: u64 = 57;
 pub const SYS_FUTEX_WAIT: u64 = 58;
 pub const SYS_FUTEX_WAKE: u64 = 59;
 pub const SYS_STACK_INFO: u64 = 61;
@@ -95,16 +92,11 @@ pub const SYS_CLOCK_EPOCH: u64 = 75;
 ///
 /// [`Acceptor`]: crate::handle::RawHandle
 pub const SYS_ACCEPT: u64 = 86;
-/// Allocate a TLS block for a dlopen'd module on the current thread.
-/// Arg0: module_id (1-based DTV index). Returns the block's virtual address,
-/// or a `SyscallError` word — see [`tls_alloc_block`].
-pub const SYS_TLS_ALLOC_BLOCK: u64 = 88;
 /// Create an [`inbox`](crate::inbox) and map its rings. See [`inbox_setup`].
 pub const SYS_INBOX_SETUP: u64 = 89;
 /// Hand queued submissions to the kernel and/or wait for completions. See
 /// [`inbox_submit`].
 pub const SYS_INBOX_SUBMIT: u64 = 90;
-pub const SYS_QUERY_MODULES: u64 = 91;
 /// Debug syscall. Arg0 selects the action:
 ///   0 = kernel panic (triggers panic!() in syscall context)
 ///   1 = kernel fault (null pointer deref in kernel context)
@@ -371,6 +363,8 @@ pub const SYS_YIELD: u64 = 168;
 pub const SYS_LOG_LAST_WORDS: u64 = 169;
 /// List the names held by a namespace, without opening any connector.
 pub const SYS_NAMESPACE_NAMES: u64 = 170;
+/// Point the calling thread's thread pointer somewhere. See [`set_thread_pointer`].
+pub const SYS_SET_THREAD_POINTER: u64 = 171;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -378,13 +372,13 @@ pub const SYS_NAMESPACE_NAMES: u64 = 170;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 172;
+pub const SYSCALL_PROFILE_BINS: usize = 173;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_NAMESPACE_NAMES < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_SET_THREAD_POINTER < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -404,9 +398,9 @@ crate::user_safe! {
     /// [`Rights::DUP`]: crate::handle::Rights::DUP
     #[derive(Clone, Copy)]
     pub struct SpawnArgs {
-        /// The program: the file the kernel opens and pages the child from, or,
-        /// with an `image`, the path the caller read that from. **Never `argv[0]`**, which is the child's first argument
-        /// and the name it goes by, and which nothing opens.
+        /// The path the caller read the program from, which names it in the
+        /// spawn's record. **Never `argv[0]`**, which is the child's first
+        /// argument and the name it goes by. Nothing opens it.
         pub path_ptr: u64,
         pub path_len: u64,
         pub argv_ptr: u64,
@@ -419,17 +413,22 @@ crate::user_safe! {
         /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
         pub labels_ptr: u64,
         pub labels_len: u64,
-        /// The program's bytes, in a memory object the caller holds — its file
-        /// server's for the file, or one the caller read the program into:
-        /// `image` is a handle to it carrying `MAP`, and `image_len` how many of
-        /// its first bytes the program is — or 0, for a program the kernel opens
-        /// at `path` itself. `PermissionDenied` for a handle without `MAP`;
-        /// `InvalidArgument` for a length the object does not hold, or a device's
-        /// window. The object stays the caller's: what the kernel reads of it,
-        /// and when, is `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is
-        /// then opened by nobody.
-        pub image: u64,
-        pub image_len: u64,
+        /// The child's memory, `[SpawnMap]`, as the caller laid out its program:
+        /// 1 to [`MAX_SPAWN_MAPS`] ranges, none meeting another or the clock
+        /// page, each checked as an ordinary mapping (`SpawnMap`). Everything
+        /// else of the space is empty until the child maps it, but its stack.
+        pub maps_ptr: u64,
+        pub maps_count: u64,
+        /// Where the child's main thread starts: inside a [`VmProt::ReadExec`]
+        /// range of `maps`.
+        pub entry: u64,
+        /// Where the program's address 0 lands, which a crash record names a
+        /// frame's offset from. A label, which the kernel checks nothing of.
+        pub image_base: u64,
+        /// The program's build-id, 0 to [`MAX_BUILD_ID`] bytes, which a crash
+        /// record names the program by: 0 for none.
+        pub build_id_ptr: u64,
+        pub build_id_len: u64,
         /// The process the child is placed under, whose end takes it down: a
         /// handle carrying [`Rights::WRITE`] to it — a copy of that process's
         /// [`SELF_LABEL`] — or [`HANDLE_INVALID`] for the caller itself.
@@ -451,24 +450,38 @@ crate::user_safe! {
 }
 
 crate::user_safe! {
-    /// Arguments for the `SYS_DLOPEN` syscall, passed as a single pointer.
-    #[derive(Clone, Copy)]
-    pub struct DlopenArgs {
-        /// The name the module goes by: what `SYS_QUERY_MODULES` answers for
-        /// it, and what a second load is known by, which answers the module
-        /// already loaded and runs no initialiser again. Nothing opens it.
-        pub name_ptr: u64,
-        pub name_len: u64,
-        /// The library's bytes, in a memory object as [`SpawnArgs::image`] names a
-        /// program's: a handle carrying `MAP`, and how many of its first bytes
-        /// the library is.
-        pub image: u64,
-        pub image_len: u64,
-        /// Where the kernel writes the module's `[.init_array address, count]`,
-        /// or 0 for nowhere.
-        pub init_out: u64,
+    /// One range of a spawned child's memory (`SpawnArgs::maps_ptr`). Each is
+    /// refused `InvalidArgument` unless `addr` and `len` are whole pages of the
+    /// user half, `prot` is a [`VmProt`], `copied <= len`, and `object` holds
+    /// `[offset, offset + copied)` of ordinary memory from a page boundary;
+    /// `PermissionDenied` for an `object` handle without `MAP`. No page is both
+    /// writable and executable, since no `VmProt` is.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct SpawnMap {
+        pub addr: u64,
+        pub len: u64,
+        /// A memory object whose bytes the range's pages start as, each copied at
+        /// its first touch and private to the child from then on; or
+        /// [`HANDLE_INVALID`] for a range of zeros, which `VmProt::None` leaves
+        /// reserved. The object stays the caller's.
+        pub object: u64,
+        pub offset: u64,
+        /// How many of the object's bytes from `offset` the range copies; zeros
+        /// past them.
+        pub copied: u64,
+        /// A [`VmProt`].
+        pub prot: u64,
     }
 }
+
+const _: () = assert!(core::mem::size_of::<SpawnMap>() == 48);
+
+/// The most ranges a spawn lays out: a program's `PT_LOAD`s, at most
+/// sixteen, and the holes between them.
+pub const MAX_SPAWN_MAPS: usize = 64;
+
+/// The most bytes of a build-id a spawn carries.
+pub const MAX_BUILD_ID: usize = 32;
 
 /// One `(label, handle)` pair of a process's endowment table.
 ///
@@ -551,7 +564,7 @@ pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len() - QUIT
 use crate::end::End;
 use crate::handle::Rights;
 use crate::pci::{DmaGrant, DmaMapping};
-use crate::{Pid, RawHandle, HANDLE_INVALID};
+use crate::{Pid, RawHandle, Tid, HANDLE_INVALID};
 
 /// Syscall error with a specific code. Values occupy the top of the u64 range:
 /// error code N is encoded as `u64::MAX - N`. Any return value `>= u64::MAX - 255`
@@ -1185,13 +1198,23 @@ pub const MAX_THREADS: usize = 4096;
 
 /// Spawn a new thread with the given entry point, stack pointer, argument, and stack base.
 /// `stack_base` is the bottom of the user stack (for stack info queries). An
-/// `entry` outside the user half is `InvalidArgument`.
+/// `entry` outside the user half is `InvalidArgument`. The thread starts with
+/// a thread pointer of zero: its first act names its own ([`set_thread_pointer`]).
 ///
 /// # Safety
 /// `entry` must be a valid function pointer and `stack`/`stack_base` must
 /// describe a valid, correctly-sized stack region.
 pub unsafe fn thread_spawn(entry: u64, stack: u64, arg: u64, stack_base: u64) -> u64 {
     syscall(SYS_THREAD_SPAWN, entry, stack, arg, stack_base)
+}
+
+/// Point the calling thread's thread pointer (x86-64's FS base, AArch64's
+/// `TPIDR_EL0`) at `tp`, and answer the caller's own [`Tid`]. The pointer is the
+/// thread's across every switch and the kernel never reads through it: what
+/// lies there is the program's. `InvalidArgument` for a `tp` that is neither
+/// zero nor a user-half address.
+pub fn set_thread_pointer(tp: u64) -> Result<Tid, SyscallError> {
+    check(syscall(SYS_SET_THREAD_POINTER, tp, 0, 0, 0)).map(|tid| Tid::from_raw(tid as u32))
 }
 
 /// Wait for thread `tid` to exit.
@@ -1206,7 +1229,7 @@ pub const CPU_MASK_WORDS: usize = 16;
 
 /// Let thread `tid` of the calling process run only on the CPUs `mask` names.
 /// `tid` names a thread as [`thread_join`]'s does, 0 the main thread; a
-/// thread names itself by [`current_tid`](crate::current_tid). A shorter
+/// thread's own is what [`set_thread_pointer`] answered it. A shorter
 /// mask's missing words are empty.
 ///
 /// The mask is a placement choice, not a right: any non-empty set of online
@@ -2455,63 +2478,6 @@ pub fn getpid() -> Pid {
     Pid(syscall(SYS_GETPID, 0, 0, 0, 0) as u32)
 }
 
-/// Libraries one process holds, `DT_NEEDED` and loaded alike; [`dl_open`] of a
-/// name it does not hold past it is `ResourceExhausted`.
-pub const MAX_LIBRARIES: usize = 1024;
-
-/// Load the shared library `image`'s first `image_len` bytes hold into this
-/// process as `name` ([`DlopenArgs`]), and run its `.init_array`.
-pub fn dl_open(name: &[u8], image: RawHandle, image_len: u64) -> Result<u64, SyscallError> {
-    let mut init_info: [u64; 2] = [0; 2];
-    let args = DlopenArgs {
-        name_ptr: name.as_ptr() as u64,
-        name_len: name.len() as u64,
-        image: u64::from(image.0),
-        image_len,
-        init_out: init_info.as_mut_ptr() as u64,
-    };
-    let handle = dl_open_args(&args)?;
-    // Run .init_array constructors (e.g. EH frame finder registration in cdylib std)
-    let init_array_ptr = init_info[0];
-    let init_count = init_info[1];
-    if init_array_ptr != 0 && init_count > 0 {
-        // SAFETY: `init_array_ptr`/`init_count` are not userland's to make
-        // up — `SYS_DLOPEN` wrote them, naming the `.init_array` table it
-        // just built from the loaded ELF's own section headers, so they name
-        // `init_count` valid `usize`-sized, `usize`-aligned entries.
-        let entries = unsafe { core::slice::from_raw_parts(init_array_ptr as *const usize, init_count as usize) };
-        for &entry in entries {
-            if entry != 0 {
-                // SAFETY: a non-zero `.init_array` entry is the address of a
-                // constructor the loader placed there — by the ELF `DT_INIT_ARRAY`
-                // contract every entry is a valid `extern "C" fn()`, never data.
-                let f: extern "C" fn() = unsafe { core::mem::transmute(entry) };
-                f();
-            }
-        }
-    }
-    Ok(handle)
-}
-
-/// `SYS_DLOPEN` as `args` say, running nothing it loads: [`dl_open`]'s call,
-/// for a caller that names `init_out` itself.
-pub fn dl_open_args(args: &DlopenArgs) -> Result<u64, SyscallError> {
-    check(syscall(SYS_DLOPEN, args as *const DlopenArgs as u64, 0, 0, 0))
-}
-
-/// Look up a symbol in a loaded shared library. Returns the address.
-///
-/// # Safety
-/// The returned address must only be transmuted to the correct function signature.
-pub unsafe fn dl_sym(handle: u64, name: &[u8]) -> Result<u64, SyscallError> {
-    check(syscall(SYS_DLSYM, handle, name.as_ptr() as u64, name.len() as u64, 0))
-}
-
-/// Close a loaded shared library handle.
-pub fn dl_close(handle: u64) -> u64 {
-    syscall(SYS_DLCLOSE, handle, 0, 0, 0)
-}
-
 /// Block if `*addr == expected`. Returns 0 on wake, 1 on timeout.
 /// `None` = wait forever, `Some(nanos)` = timeout.
 ///
@@ -2759,17 +2725,6 @@ pub fn device_dma_unmap(claim: RawHandle, device_addr: u64) -> Result<(), Syscal
     check_unit(syscall(SYS_DEVICE_DMA_UNMAP, claim.0 as u64, device_addr, 0, 0))
 }
 
-/// Allocate a TLS block for a dlopen'd module on the current thread.
-///
-/// The block's *virtual* address, which is what the kernel writes into the DTV.
-/// `InvalidArgument` for a `module_id` of 0 or one outside the process's module
-/// list, `ResourceExhausted` past `DTV_INITIAL_CAPACITY` or when the mapping
-/// fails — and every user address is far below where `SyscallError` encodes, so
-/// no block is ever read as one.
-pub fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
-    check(syscall(SYS_TLS_ALLOC_BLOCK, module_id, 0, 0, 0))
-}
-
 crate::user_safe! {
     /// An inbox and where its page of rings is mapped.
     ///
@@ -2811,73 +2766,6 @@ pub unsafe fn inbox_setup(depth: u32) -> Result<(RawHandle, *mut u8), SyscallErr
 pub fn inbox_submit(handle: RawHandle, to_submit: u32, min_complete: u32, timeout_nanos: u64) -> Result<u32, SyscallError> {
     check(syscall(SYS_INBOX_SUBMIT, handle.0 as u64, to_submit as u64, min_complete as u64, timeout_nanos))
         .map(|n| n as u32)
-}
-
-// Module info (for stack unwinding / backtraces)
-
-crate::user_safe! {
-    /// Information about a loaded module (executable or shared library).
-    ///
-    /// Buffer layout returned by `SYS_QUERY_MODULES`:
-    ///   `[ModuleInfo; count]` followed by packed path strings.
-    ///   Each `ModuleInfo::path_offset` is relative to the start of the buffer.
-    #[derive(Clone, Copy)]
-    pub struct ModuleInfo {
-        /// Load base address (bias) of this module.
-        pub base: u64,
-        /// End of the last mapped segment (base + vaddr_max).
-        pub text_end: u64,
-        /// Absolute virtual address of `.eh_frame_hdr` (0 if none).
-        pub eh_frame_hdr: u64,
-        /// Size of `.eh_frame_hdr` in bytes.
-        pub eh_frame_hdr_size: u64,
-        /// Absolute virtual address of the module's program header table: the
-        /// kernel loads no module whose table a `PT_LOAD` does not map.
-        pub phdr: u64,
-        /// Entries in that table, `e_phnum`: a `u64` so the record has no padding.
-        pub phnum: u64,
-        /// Byte offset of the module's path string within the buffer.
-        pub path_offset: u32,
-        /// Length of the path string in bytes.
-        pub path_len: u32,
-    }
-}
-
-/// Query all loaded modules (exe + dlopen'd libs) in the current process.
-///
-/// Returns the number of **bytes** the description needs, which is a count
-/// only of bytes: the records carry packed path strings, so a module count
-/// cannot size a retry. `n <= buf.len()` means the description is in the
-/// buffer; `n > buf.len()` means nothing was written and `n` is what to
-/// allocate. An empty buffer is therefore a size query.
-///
-/// The records occupy `buf[..records[0].path_offset]` — each module's path is
-/// written after the last record, so the first one's `path_offset` is where
-/// the array ends.
-pub fn query_modules(buf: &mut [u8]) -> Result<usize, SyscallError> {
-    check(syscall(SYS_QUERY_MODULES, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0)).map(|n| n as usize)
-}
-
-/// Every record of one [`query_modules`] answer with its path, executable
-/// first: `answer` is the `n` bytes the call reported.
-///
-/// A record or path outside `answer` is a kernel that broke the layout above,
-/// and panics.
-pub fn modules(answer: &[u8]) -> impl Iterator<Item = (ModuleInfo, &[u8])> {
-    let size = core::mem::size_of::<ModuleInfo>();
-    let record = move |i: usize| {
-        let bytes = &answer[i * size..(i + 1) * size];
-        // SAFETY: `bytes` holds `size_of::<ModuleInfo>()` bytes, read without
-        // an alignment requirement, and every bit pattern of its integer
-        // fields is a `ModuleInfo`.
-        unsafe { (bytes.as_ptr() as *const ModuleInfo).read_unaligned() }
-    };
-    let count = if answer.is_empty() { 0 } else { record(0).path_offset as usize / size };
-    (0..count).map(move |i| {
-        let info = record(i);
-        let path = info.path_offset as usize;
-        (info, &answer[path..path + info.path_len as usize])
-    })
 }
 
 crate::user_safe! {
@@ -2948,84 +2836,6 @@ pub fn process_stats(proc: RawHandle, stats: &mut ProcessStats) -> Result<(), Sy
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// **The encoder is the wire, so the test decodes the wire.**
-    ///
-    /// Not `bytes(&info).len() == size_of::<ModuleInfo>()`, which a padded
-    /// struct passes: every field is read back out of the slice at the offset
-    /// `#[repr(C)]` puts it at.
-    #[test]
-    fn module_info_s_bytes_are_the_fields_and_nothing_between_them() {
-        let info = ModuleInfo {
-            base: 0x1122_3344_5566_7788,
-            text_end: 0x2233_4455_6677_8899,
-            eh_frame_hdr: 0x3344_5566_7788_99aa,
-            eh_frame_hdr_size: 0x44,
-            phdr: 0x5566_7788_99aa_bbcc,
-            phnum: 0x77,
-            path_offset: 0x55,
-            path_len: 0x66,
-        };
-        let b = crate::usersafe::bytes(&info);
-        assert_eq!(b.len(), 56);
-        assert_eq!(u64::from_ne_bytes(b[0..8].try_into().unwrap()), info.base);
-        assert_eq!(u64::from_ne_bytes(b[8..16].try_into().unwrap()), info.text_end);
-        assert_eq!(u64::from_ne_bytes(b[16..24].try_into().unwrap()), info.eh_frame_hdr);
-        assert_eq!(u64::from_ne_bytes(b[24..32].try_into().unwrap()), info.eh_frame_hdr_size);
-        assert_eq!(u64::from_ne_bytes(b[32..40].try_into().unwrap()), info.phdr);
-        assert_eq!(u64::from_ne_bytes(b[40..48].try_into().unwrap()), info.phnum);
-        assert_eq!(u32::from_ne_bytes(b[48..52].try_into().unwrap()), info.path_offset);
-        assert_eq!(u32::from_ne_bytes(b[52..56].try_into().unwrap()), info.path_len);
-    }
-
-    fn record(base: u64, path_offset: u32, path_len: u32) -> ModuleInfo {
-        ModuleInfo {
-            base,
-            text_end: base + 0x1000,
-            eh_frame_hdr: 0,
-            eh_frame_hdr_size: 0,
-            phdr: base + 0x40,
-            phnum: 3,
-            path_offset,
-            path_len,
-        }
-    }
-
-    /// An answer laid out as the kernel writes one — records, then the paths
-    /// packed in module order — decodes to those records and paths, in order,
-    /// at an offset whatever alignment the buffer has.
-    #[test]
-    fn modules_decodes_every_record_and_its_path() {
-        let size = core::mem::size_of::<ModuleInfo>() as u32;
-        let exe = record(0x100_0000_0000, 2 * size, 9);
-        let lib = record(0x200_0000_0000, 2 * size + 9, 13);
-        let mut answer = [0u8; 1 + 2 * 56 + 9 + 13];
-        let wire = &mut answer[1..];
-        wire[..56].copy_from_slice(crate::usersafe::bytes(&exe));
-        wire[56..112].copy_from_slice(crate::usersafe::bytes(&lib));
-        wire[112..121].copy_from_slice(b"/bin/prog");
-        wire[121..].copy_from_slice(b"/lib/libx.so\0");
-        let got: [(u64, u64, &[u8]); 2] = {
-            let mut it = modules(&answer[1..]).map(|(m, path)| (m.base, m.phdr, path));
-            let pair = [it.next().unwrap(), it.next().unwrap()];
-            assert!(it.next().is_none(), "two records, and no third read out of the paths");
-            pair
-        };
-        assert_eq!(got[0], (exe.base, exe.phdr, &b"/bin/prog"[..]));
-        assert_eq!(got[1], (lib.base, lib.phdr, &b"/lib/libx.so\0"[..]));
-        assert_eq!(modules(&[]).count(), 0);
-    }
-
-    /// A path the kernel says runs past its own answer is a broken layout,
-    /// not a shorter name.
-    #[test]
-    #[should_panic]
-    fn modules_refuses_a_path_past_the_answer() {
-        let size = core::mem::size_of::<ModuleInfo>() as u32;
-        let mut answer = [0u8; 56 + 4];
-        answer[..56].copy_from_slice(crate::usersafe::bytes(&record(0, size, 5)));
-        modules(&answer).for_each(drop);
-    }
 
     /// The four readers of a `devices` entry share this parser, so what it
     /// accepts is what a config may say; a PCI function is named by its

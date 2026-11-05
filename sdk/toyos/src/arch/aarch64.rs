@@ -131,3 +131,31 @@ pub(crate) mod timing {
         }
     }
 }
+
+/// The thread control block the thread pointer (`TPIDR_EL0`) addresses, psABI
+/// TLS variant I: the two words at TP, `TP + 0` the DTV and `TP + 8` the word
+/// the psABI leaves to the implementation, this SDK's tid; the executable's
+/// TLS data starts `max(16, p_align)` above TP.
+pub(crate) mod tcb {
+    pub(crate) const VARIANT: crate::tls::Variant = crate::tls::Variant::I;
+    pub(crate) const BYTES: usize = 16;
+    pub(crate) const DTV: usize = 0;
+    pub(crate) const TID: usize = 8;
+
+    /// The calling thread's thread pointer.
+    #[inline]
+    pub(crate) fn thread_pointer() -> usize {
+        let tp: usize;
+        // SAFETY: a read of `TPIDR_EL0` into a register.
+        unsafe { core::arch::asm!("mrs {}, tpidr_el0", out(reg) tp, options(nomem, nostack, preserves_flags)) };
+        tp
+    }
+
+    /// The calling thread's id, read off its TCB.
+    #[inline]
+    pub(crate) fn current_tid() -> u32 {
+        // SAFETY: `TP + TID` lies inside the TCB every thread's startup lays
+        // out before it names its thread pointer.
+        unsafe { core::ptr::read_volatile((thread_pointer() + TID) as *const u32) }
+    }
+}

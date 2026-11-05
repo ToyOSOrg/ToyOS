@@ -253,8 +253,8 @@ dependencies = [
  "toyos-blackbox",
  "toyos-bootmap",
  "toyos-devicepath",
- "toyos-elf",
  "toyos-gpt",
+ "toyos-kimage",
  "toyos-microcode",
  "toyos-random",
  "toyos-rootimage",
@@ -1558,9 +1558,9 @@ dependencies = [
  "toyos-blackbox",
  "toyos-bootmap",
  "toyos-devicepath",
- "toyos-elf",
  "toyos-gicv3",
  "toyos-its",
+ "toyos-kimage",
  "toyos-microcode",
  "toyos-pci",
  "toyos-phys",
@@ -3269,6 +3269,8 @@ dependencies = [
 name = "symbolize"
 version = "0.1.0"
 dependencies = [
+ "object",
+ "toyos",
  "toyos-symbols",
 ]
 
@@ -3536,6 +3538,7 @@ name = "toyos"
 version = "0.18.0"
 dependencies = [
  "loom",
+ "object",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
  "toyos-abi",
@@ -3633,11 +3636,11 @@ dependencies = [
  "serde_json",
  "tar",
  "toml",
+ "toyos",
  "toyos-abi",
  "toyos-blackbox",
  "toyos-blockdev",
  "toyos-crypto",
- "toyos-elf",
  "toyos-fat32",
  "toyos-fat32-check",
  "toyos-font",
@@ -3645,6 +3648,7 @@ dependencies = [
  "toyos-icon",
  "toyos-input",
  "toyos-keymap",
+ "toyos-kimage",
  "toyos-logstream",
  "toyos-manifest",
  "toyos-metal",
@@ -3733,13 +3737,6 @@ version = "0.1.0"
 [[package]]
 name = "toyos-edid"
 version = "0.1.0"
-
-[[package]]
-name = "toyos-elf"
-version = "0.1.0"
-dependencies = [
- "object",
-]
 
 [[package]]
 name = "toyos-elide"
@@ -3834,12 +3831,18 @@ name = "toyos-keymap"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-kimage"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
+
+[[package]]
 name = "toyos-libc-copies"
 version = "0.1.0"
 dependencies = [
  "toyos",
  "toyos-abi",
- "toyos-elf",
 ]
 
 [[package]]
@@ -4106,10 +4109,8 @@ dependencies = [
 name = "toyos-symbols"
 version = "0.1.0"
 dependencies = [
- "object",
  "rustc-demangle",
  "toyos-abi",
- "toyos-elf",
  "toyos-elide",
 ]
 

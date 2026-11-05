@@ -43,10 +43,7 @@ mod power;
 
 mod inventory;
 mod loaded;
-mod rollback;
 mod bootimage;
-mod file_backing;
-mod elf;
 mod symbols;
 mod process;
 mod loader;
@@ -282,8 +279,8 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         kernel_args.kernel_stack_addr, kernel_args.kernel_stack_size
     );
     log!(
-        "boot: kernel elf {:#x}+{:#x}, rsdp {:#x}, boot pml4 {:#x}",
-        kernel_args.kernel_elf_addr, kernel_args.kernel_elf_size,
+        "boot: kernel image {:#x}+{:#x}, rsdp {:#x}, boot pml4 {:#x}",
+        kernel_args.kernel_image_addr, kernel_args.kernel_image_size,
         kernel_args.rsdp_addr, kernel_args.boot_pml4_addr
     );
     log!(
@@ -313,9 +310,17 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         (None, _) => log!("{} none: the loader named no slot", params::SLOT_RECORD),
     }
 
-    let kernel_elf = core::slice::from_raw_parts(
-        DirectMap::from_phys(kernel_args.kernel_elf_addr).as_ptr::<u8>(),
-        kernel_args.kernel_elf_size as usize,
+    // The signed kernel section the loader laid this kernel out of, kept for
+    // the machine's life: its ranges, symbols and the supervisor's program.
+    let kernel_section: &'static [u8] = core::slice::from_raw_parts(
+        DirectMap::from_phys(kernel_args.kernel_image_addr).as_ptr::<u8>(),
+        kernel_args.kernel_image_size as usize,
+    );
+    let kernel_image = toyos_kimage::Kernel::parse(kernel_section).unwrap_or_else(|why| panic!("boot: the loader's {why}"));
+    assert_eq!(kernel_image.machine, arch::E_MACHINE, "boot: the loader's kernel image is another machine's");
+    assert_eq!(
+        kernel_image.supervisor.len, kernel_args.supervisor_image.len,
+        "boot: the supervisor section is not the one the build laid the supervisor's ranges out of"
     );
     // After the boot's own lines, so its refusal reaches a channel that says
     // what machine this is, and while the loader's arguments are still mapped.
@@ -331,7 +336,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     );
     let loader = [
         mm::Region { start: kernel_args.kernel_memory_addr, end: kernel_args.kernel_memory_addr + kernel_args.kernel_memory_size },
-        mm::Region { start: kernel_args.kernel_elf_addr, end: kernel_args.kernel_elf_addr + kernel_args.kernel_elf_size },
+        mm::Region { start: kernel_args.kernel_image_addr, end: kernel_args.kernel_image_addr + kernel_args.kernel_image_size },
         // The loader's black-box page, which is ordinary `LoaderData` and so
         // memory the allocator would otherwise hand out. Empty on a boot whose
         // parameter line names none.
@@ -348,7 +353,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         mm::Region { start: kernel_args.microcode_addr, end: kernel_args.microcode_addr + kernel_args.microcode_len },
     ];
     // A region the loader did not allocate withholds memory nothing uses, so one the firmware map does not hold as `LoaderData` is refused.
-    // Block 1: the ELF region (`kernel_elf_addr`+`kernel_elf_size`) is not page-aligned.
+    // Block 1: the section's region (`kernel_image_addr`+`kernel_image_size`) is not page-aligned.
     for region in loader.iter().filter(|r| r.start < r.end) {
         assert!(
             held(
@@ -379,9 +384,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
             reserved[a].start, reserved[a].end, reserved[b].start, reserved[b].end
         );
     }
-    let layout = toyos_elf::Layout::parse(kernel_elf, arch::ELF_MACHINE)
-        .unwrap_or_else(|e| panic!("boot: the loader's kernel.elf: {e}"));
-    let image = mm::Image::new(&layout, image);
+    let image = mm::Image::new(&kernel_image, image);
 
     // Before the first hash container, `mm::init`'s address space.
     hasher::seed();
@@ -399,7 +402,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     let platform = arch::boot::interrupts(kernel_args.rsdp_addr);
     counters::bring_up();
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
-    symbols::load_kernel(kernel_elf, mm::PHYS_OFFSET + kernel_args.kernel_memory_addr);
+    symbols::load_kernel(kernel_image.symbols, mm::PHYS_OFFSET + kernel_args.kernel_memory_addr);
 
     arch::boot::clock(kernel_args);
     trace::enable();
@@ -447,7 +450,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // Off the loader's images, so nothing from here to the supervisor's
     // spawn asks a disk for anything: every storage driver comes up after it.
     // The supervisor reads /system/etc/system.manifest itself; the boot config never names the program it starts.
-    let pid = process::spawn_supervisor(bootimage::objects(boot_images));
+    let pid = process::spawn_supervisor(bootimage::objects(boot_images), &kernel_image.supervisor);
     log!("spawned the supervisor pid={pid}");
 
     let t_devices = clock::nanos_since_boot();

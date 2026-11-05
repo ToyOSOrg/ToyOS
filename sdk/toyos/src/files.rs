@@ -410,8 +410,8 @@ pub fn read_dir(fd: Fd, cursor: u64) -> Result<(Vec<u8>, Option<u64>), Error> {
 }
 
 /// The whole of the file at `path`, wherever it is served: what a spawn names
-/// as its program (`SpawnArgs::image`) and [`dl_open`] loads, since the kernel
-/// opens neither. The object its server holds it in where there is one
+/// as its program (`SpawnMap::object`) and a library's loader maps, since the
+/// kernel opens neither. The object its server holds it in where there is one
 /// ([`crate::fs::IMAGE`]), and otherwise a copy read into memory of this
 /// process's own.
 pub fn read_image(path: &[u8]) -> Result<Image, ImageRefused<Error>> {
@@ -439,28 +439,6 @@ pub fn read_image_for(path: &[u8], job: Option<crate::BorrowedHandle<'_>>) -> Re
     // SAFETY: the descriptor this function opened, named nowhere else.
     let _ = unsafe { fd::close(fd) };
     image
-}
-
-/// Why [`dl_open`] loaded nothing.
-#[derive(Debug)]
-pub enum DlOpenRefused {
-    /// The library was not read into an image.
-    Image(ImageRefused<Error>),
-    /// The kernel refused to load the image it was handed.
-    Load(SyscallError),
-}
-
-/// Load the shared library at `path` into this process, under its absolute
-/// path as the name it goes by, and run its initialisers: the module's handle.
-/// A second load of one name answers the module the first loaded.
-pub fn dl_open(path: &[u8]) -> Result<u64, DlOpenRefused> {
-    let text = core::str::from_utf8(path).map_err(|_| DlOpenRefused::Image(ImageRefused::Read(Error::NotUtf8)))?;
-    let mut cwd = alloc::vec![0u8; toyos_abi::syscall::MAX_PATH];
-    let n = getcwd(&mut cwd);
-    let name = absolute(&String::from_utf8_lossy(&cwd[..n.min(cwd.len())]), text);
-    let image = read_image(name.as_bytes()).map_err(DlOpenRefused::Image)?;
-    let (handle, len) = image.spawn_words();
-    toyos_abi::syscall::dl_open(name.as_bytes(), toyos_abi::RawHandle(handle as u32), len).map_err(DlOpenRefused::Load)
 }
 
 /// `path` as a path names something: UTF-8, and not empty, which names

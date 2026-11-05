@@ -398,7 +398,6 @@ toyos-acpi = { path = "../lib/acpi" }
 toyos-amdvi = { path = "amdvi" }
 toyos-blackbox = { path = "../lib/blackbox" }
 toyos-bootmap = { path = "../lib/bootmap" }
-toyos-elf = { path = "../lib/elf" }
 toyos-gicv3 = { path = "gicv3" }
 toyos-its = { path = "its" }
 toyos-microcode = { path = "../lib/microcode" }
@@ -409,6 +408,9 @@ toyos-smmu = { path = "smmu" }
 toyos-tco = { path = "../lib/tco" }
 toyos-tsc = { path = "../lib/tsc" }
 toyos-rootimage = { path = "../lib/rootimage" }
+# Its own image's ranges and symbols and the supervisor's program, as the
+# build laid them out: the kernel parses no ELF.
+toyos-kimage = { path = "../lib/kimage" }
 toyos-quiesce = { path = "../lib/quiesce" }
 toyos-random = { path = "../lib/random" }
 toyos-symbols = { path = "../lib/symbols" }

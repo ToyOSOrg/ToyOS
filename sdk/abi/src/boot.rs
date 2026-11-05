@@ -9,8 +9,8 @@ pub struct KernelArgs {
     pub kernel_stack_addr: u64,
     pub kernel_stack_size: u64,
     pub rsdp_addr: u64,
-    pub kernel_elf_addr: u64,
-    pub kernel_elf_size: u64,
+    pub kernel_image_addr: u64,
+    pub kernel_image_size: u64,
     pub gop_framebuffer: u64,
     pub gop_framebuffer_size: u64,
     pub gop_width: u32,
@@ -48,8 +48,8 @@ pub struct KernelArgs {
     /// No presence flag, unlike the boot partition above, and not because the
     /// state cannot arise but because it is not a machine. A machine really can
     /// have no boot partition to be named — PXE, an unpartitioned disk. But
-    /// this GUID comes from a file `create_esp_volume` writes beside
-    /// `kernel.elf`, so a volume carrying that one and not this one was not
+    /// this GUID comes from a file `create_esp_volume` writes beside the
+    /// loader, so a volume carrying that one and not this one was not
     /// built by this project, and the bootloader refuses it by name rather than
     /// starting a kernel that would silently have nowhere to put its log.
     ///
@@ -357,8 +357,8 @@ mod tests {
         kernel_stack_addr: 0,
         kernel_stack_size: 0,
         rsdp_addr: 0,
-        kernel_elf_addr: 0,
-        kernel_elf_size: 0,
+        kernel_image_addr: 0,
+        kernel_image_size: 0,
         gop_framebuffer: 0,
         gop_framebuffer_size: 0,
         gop_width: 0,

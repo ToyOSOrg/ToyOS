@@ -66,17 +66,53 @@ pub(super) fn spawn_place(place: u64) -> Result<process::Parent, u64> {
     .map_err(|refused| refused.refuse())
 }
 
+/// The program `args` lays out: each range checked as an ordinary mapping,
+/// and each object it copies looked up with `MAP` before an endowment could
+/// move the handle naming it.
+pub(super) fn spawn_program(ctx: &crate::user_ptr::SyscallContext<'_>, args: &SpawnArgs) -> Result<crate::loader::Program, u64> {
+    let invalid = || SyscallError::InvalidArgument.to_u64();
+    let count = usize::try_from(args.maps_count).ok().filter(|n| (1..=MAX_SPAWN_MAPS).contains(n)).ok_or_else(invalid)?;
+    if args.build_id_len > MAX_BUILD_ID as u64 {
+        return Err(invalid());
+    }
+    let mut maps = Vec::new();
+    maps.try_reserve_exact(count).map_err(|_| SyscallError::ResourceExhausted.to_u64())?;
+    for i in 0..count {
+        let at = args.maps_ptr.checked_add((i * core::mem::size_of::<SpawnMap>()) as u64).ok_or_else(invalid)?;
+        let raw = ctx.copy_in::<SpawnMap>(UserAddr::new(at)).map_err(SyscallError::to_u64)?;
+        let object = match raw.object {
+            handle if handle == u64::from(toyos_abi::HANDLE_INVALID.0) => None,
+            handle => {
+                let raw_handle = u32::try_from(handle).map_err(|_| invalid())?;
+                let object = process::with_process_data(|data| {
+                    data.handles.get::<crate::object::shm::SharedMemObject>(RawHandle(raw_handle), Rights::MAP)
+                });
+                Some(object.map_err(|refused| refused.refuse())?)
+            }
+        };
+        maps.push(crate::loader::Map::checked(&raw, object).map_err(SyscallError::to_u64)?);
+    }
+    let build_id = match args.build_id_len {
+        0 => None,
+        len => {
+            let bytes = ctx.user_vec(UserAddr::new(args.build_id_ptr), len).map_err(SyscallError::to_u64)?;
+            toyos_symbols::frame::BuildId::new(&bytes)
+        }
+    };
+    Ok(crate::loader::Program { maps, entry: args.entry, image_base: args.image_base, build_id })
+}
+
 /// Start a program under `parent` and return the handle to it the spawn's commit put in the caller's table.
 pub(super) fn sys_spawn(
     path: &str,
     args: &[&str],
     pending: crate::loader::PendingHandles,
     env: Vec<u8>,
-    image: alloc::sync::Arc<crate::file_backing::SharedImage>,
+    program: crate::loader::Program,
     parent: process::Parent,
 ) -> u64 {
     // Nothing to clean up: spawn's frame owns the child's resources on error.
-    match process::spawn(path, args, pending, env, image, parent) {
+    match process::spawn(path, args, pending, env, program, parent) {
         Ok((_, handle)) => u64::from(handle.0),
         Err(e) => e.refuse(),
     }
@@ -220,6 +256,21 @@ pub(super) fn sys_endowments(out: &mut crate::user_ptr::UserBytesMut) -> u64 {
         Ok(()) => needed as u64,
         Err(faulted) => SyscallError::from(faulted).to_u64(),
     }
+}
+
+/// Point the calling thread's thread pointer at `tp` (x86-64's FS base,
+/// AArch64's `TPIDR_EL0`), which the thread keeps across every switch, and
+/// answer its tid. The kernel never reads through it: what lies there is the
+/// program's. Zero or a user-half address; anything else is `InvalidArgument`,
+/// since a non-canonical FS base would fault in the kernel's ring.
+pub(super) fn sys_set_thread_pointer(tp: u64) -> u64 {
+    if tp != 0 && UserAddr::checked(tp).is_none() {
+        return SyscallError::InvalidArgument.to_u64();
+    }
+    // SAFETY: zero or a user-half address, so canonical; the register is this
+    // thread's, saved with it at every switch.
+    unsafe { crate::arch::cpu::write_thread_pointer(tp) };
+    u64::from(process::current_tid().raw())
 }
 
 /// Spawn a thread; refuses a `stack_base` above `stack_ptr` (no stack to clamp to)

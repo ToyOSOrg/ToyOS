@@ -116,7 +116,7 @@ fn partner(busy: u32) -> (JoinHandle<()>, Arc<Seat>) {
     let thread = {
         let seat = seat.clone();
         thread::spawn(move || {
-            let me = toyos_abi::current_tid().0;
+            let me = toyos::tls::current_tid().0;
             pin(u64::from(me), busy);
             assert_eq!(syscall::current_cpu(), busy, "a partner pinned to CPU {busy}");
             seat.tid.store(me, Ordering::Release);
@@ -143,7 +143,7 @@ impl Spinner {
         let thread = {
             let (stop, started) = (stop.clone(), started.clone());
             thread::spawn(move || {
-                pin(u64::from(toyos_abi::current_tid().0), busy);
+                pin(u64::from(toyos::tls::current_tid().0), busy);
                 assert_eq!(syscall::current_cpu(), busy, "a spinner pinned to CPU {busy}");
                 started.store(true, Ordering::Release);
                 let mut x = 1u64;

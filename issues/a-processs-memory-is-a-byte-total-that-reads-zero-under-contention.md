@@ -33,9 +33,9 @@ part of one and another can take several, so exporting the other count
 yields no number that returns to where it was. `peak_memory` is a high-water mark, which means a
 *fix* is invisible in it: a leak that stops leaking leaves the peak where it was.
 
-`tests/guest/rust-tests/src/bin/abuse_tls_alloc.rs` has the harness shape. It
-runs raw `thread_spawn`/`thread_join` over one explicitly `mmap`ed stack, so
-the address space holds still while it measures. What it does not do is read a
+`tests/guest/rust-tests/src/bin/abuse_thread_table.rs` has the harness shape. It
+runs raw `thread_spawn`/`thread_join` over stacks it maps itself, so the
+address space holds still while it measures. What it does not do is read a
 number.
 
 **So what is missing is narrow and worth building.** A test-only per-process

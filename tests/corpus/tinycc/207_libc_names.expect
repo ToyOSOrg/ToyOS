@@ -24,6 +24,7 @@ opendir of nothing: -1, ENOENT
 dladdr(main): 1; names this program: yes; starts where dl_iterate_phdr says: yes; symbol: none
 dladdr(a stack address): 0
 dladdr(tls_get_label + 1): 1, /system/lib/libtls_lib.so, tls_get_label at the symbol's address: yes
+dlsym(RTLD_DEFAULT, tls_get_label) is the library's: yes; of a name nobody exports: null
 strnlen: 3 2 0
 strsignal: Segmentation fault; Unknown signal
 modf(-3.25): -3 and -0.25

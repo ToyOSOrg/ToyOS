@@ -1,5 +1,5 @@
 //! What libc's memory calls refuse before the kernel or the allocator is
-//! asked: `mmap` a file, executable memory, no bytes, a fixed place off a
+//! asked: `mmap` a file, memory writable and executable at once, no bytes, a fixed place off a
 //! page, or no one disposition; `posix_madvise` anything but its five; `madvise` the same, an
 //! address off a page, and `MADV_DONTNEED`'s discard.
 
@@ -24,7 +24,9 @@ fn mmap_refuses_what_the_kernel_cannot_map_and_nothing_else() {
         (0, 4096, PROT_READ, 0, Some(MapRefusal::Invalid)),
         (0, 4096, PROT_READ, MAP_PRIVATE, Some(MapRefusal::File)),
         (0, 4096, rw, MAP_SHARED, Some(MapRefusal::File)),
-        (0, 4096, PROT_READ | PROT_EXEC, anonymous, Some(MapRefusal::Exec)),
+        (0, 4096, PROT_READ | PROT_EXEC, anonymous, None),
+        (0, 4096, PROT_WRITE | PROT_EXEC, anonymous, Some(MapRefusal::WriteExec)),
+        (0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, anonymous, Some(MapRefusal::WriteExec)),
     ] {
         assert_eq!(memreq::mmap_refusal(addr, len, prot, flags), want, "mmap({addr:#x}, {len}, {prot:#x}, {flags:#x})");
     }
@@ -80,7 +82,9 @@ fn a_protection_word_names_one_access_or_is_refused() {
         (PROT_READ, Some(Access::Read)),
         (PROT_WRITE, Some(Access::ReadWrite)),
         (PROT_READ | PROT_WRITE, Some(Access::ReadWrite)),
-        (PROT_READ | PROT_EXEC, Some(Access::Exec)),
+        (PROT_READ | PROT_EXEC, Some(Access::ReadExec)),
+        (PROT_EXEC, Some(Access::ReadExec)),
+        (PROT_WRITE | PROT_EXEC, Some(Access::WriteExec)),
         (0x8, None),
     ] {
         assert_eq!(memreq::access(prot), want, "prot {prot:#x}");
