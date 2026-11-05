@@ -142,7 +142,7 @@ use toyos::AsHandle;
 use toyos_abi::Rights;
 use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
-    Registration, Tag, Unanswered, ALIVE, CONSOLE_INPUT, FLUSH, FLUSHED, MARK, MARKED, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
+    Registration, Tag, Unanswered, ALIVE, CONSOLE_INPUT, FLUSH, MARK, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
 };
 use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
 use toyos_abi::syscall::{
