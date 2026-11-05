@@ -676,10 +676,12 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("pcid::tests::two_live_address_spaces_never_share_a_pcid"),
         Passes("pcid::oracle::tests::the_counting_allocator_produces_a_cross_space_read"),
     ]),
-    // A grant past its holder's limit is issued, truncated, as another grant.
-    red(KERNEL, "iova-ignores-limit", None, &[
-        Fails("iova::tests::a_function_that_drops_its_upper_bits_reaches_only_its_own_grant"),
-        Fails("iova::tests::every_grant_is_the_lowest_allowed_run_below_its_limit"),
+    // An address at or above 4 GiB is handed out, which a function that drops
+    // its upper bits issues as another.
+    red(KERNEL, "iova-past-four-gib", None, &[
+        Fails("iova::tests::nothing_is_handed_out_at_or_above_four_gib"),
+        Fails("iova::tests::every_reservation_is_the_lowest_allowed_run"),
+        Fails("iova::tests::a_reserved_range_is_skipped_by_whole_leaves"),
         Fails("iova::tests::the_amd_benchs_layout"),
     ]),
     red(PROCLIFE, "mutate-spawn-skips-the-insert-recheck", None, &[

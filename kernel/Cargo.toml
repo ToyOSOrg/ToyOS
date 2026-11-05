@@ -118,10 +118,10 @@ protocol-port = []
 # counter that wrapped at 4095 and reissued a live tag, and the isolation tests
 # red under it. Never a default and reached by no kernel build.
 counting-allocator = []
-# `pure/iova.rs`'s negative control: a grant is handed out whatever the
-# holder's address limit, and the truncation test reds under it. Never a
-# default and reached by no kernel build.
-iova-ignores-limit = []
+# `pure/iova.rs`'s negative control: addresses at and above 4 GiB are handed
+# out, and the test that none is reds under it. Never a default and reached by
+# no kernel build.
+iova-past-four-gib = []
 # **Every actuator, and which one is armed comes from the boot parameter.**
 # `kernel/src/actuator.rs` declares every one of them with the claim each rests on; this
 # name is the whole of what a build decides about them. A kernel without it has

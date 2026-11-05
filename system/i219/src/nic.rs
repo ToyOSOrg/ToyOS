@@ -149,8 +149,6 @@ fn granted(dev: &PciDev, label: &str) -> Result<(Bar, Grant, SharedMemory, DmaRe
         bar.read32(toyos_i219::regs::TCTL)
     );
     toyos_i219::quiesce(&bar);
-    // Every buffer address a descriptor carries is 64 bits (82574 §7.1.3, §7.2.10.1).
-    toyos_pci_claim::limit(dev, 64).map_err(Opening::Kernel)?;
     let (grant, region) = Grant::alloc(dev, toyos_i219::GRANT_BYTES).map_err(Opening::Kernel)?;
     toyos_pci_claim::start(dev).map_err(Opening::Kernel)?;
     Ok((bar, grant, mapped, region))

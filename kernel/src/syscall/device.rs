@@ -391,18 +391,6 @@ pub(super) fn sys_device_dma_unmap(handle: RawHandle, device_addr: u64) -> u64 {
     }
 }
 
-/// State the address width the claimed function issues.
-pub(super) fn sys_device_dma_limit(handle: RawHandle, bits: u64) -> u64 {
-    let claim = match pci_claim(handle) {
-        Ok(claim) => claim,
-        Err(e) => return e.refuse(),
-    };
-    match on_function(&claim, |function| crate::pcidev::dma_limit(function, bits)) {
-        Ok(()) => 0,
-        Err(e) => e.to_u64(),
-    }
-}
-
 /// Let the claimed function master the bus.
 pub(super) fn sys_device_dma_start(handle: RawHandle) -> u64 {
     let claim = match pci_claim(handle) {

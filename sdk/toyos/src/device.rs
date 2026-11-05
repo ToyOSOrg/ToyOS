@@ -160,12 +160,6 @@ impl PciDev {
         self.0.into_raw()
     }
 
-    /// State that this function issues `bits`-bit device addresses, before any
-    /// grant or lend: every one is placed below `1 << bits`.
-    pub fn dma_limit(&self, bits: u8) -> Result<(), SyscallError> {
-        syscall::device_dma_limit(self.0.as_handle().raw(), bits)
-    }
-
     /// Let this function master the bus, once its driver has stopped it and
     /// laid out what it may reach. Until then it issues nothing, an interrupt
     /// included.
@@ -173,8 +167,7 @@ impl PciDev {
         syscall::device_dma_start(self.0.as_handle().raw())
     }
 
-    /// `bytes` of memory this function can reach and nothing else can, below
-    /// the width [`Self::dma_limit`] stated.
+    /// `bytes` of memory this function can reach and nothing else can.
     pub fn dma_alloc(&self, bytes: u64) -> Result<DmaRegion, SyscallError> {
         let grant = syscall::device_dma_alloc(self.0.as_handle().raw(), bytes)?;
         let memory = crate::shm::SharedMemory::adopt(crate::OwnedHandle(grant.shm), grant.bytes as usize)?;

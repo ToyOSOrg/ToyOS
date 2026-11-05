@@ -274,9 +274,6 @@ pub const SYS_ACPI: u64 = 128;
 /// A fresh null handle: every read answers end of file and every write takes
 /// all it is given. See [`null`].
 pub const SYS_NULL: u64 = 130;
-/// State the address width a claimed PCI function issues. See
-/// [`device_dma_limit`].
-pub const SYS_DEVICE_DMA_LIMIT: u64 = 131;
 /// Let a claimed PCI function master the bus. See [`device_dma_start`].
 pub const SYS_DEVICE_DMA_START: u64 = 132;
 /// Queue a whole message on a connection, its bytes and the handles it
@@ -2692,9 +2689,8 @@ pub fn device_firmware_window(
 ///
 /// An address the caller invents instead of the one this answers is one the
 /// function's domain does not map, and the unit refuses the access. `bytes` is
-/// rounded up to whole 2 MiB pages, and the grant ends below the claim's
-/// [`device_dma_limit`]: `InvalidArgument` before one is stated, and
-/// `ResourceExhausted` once nothing below it is left.
+/// rounded up to whole 2 MiB pages, below 4 GiB, which every function
+/// reaches; `ResourceExhausted` once the claim holds all it may.
 pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, SyscallError> {
     let mut grant =
         DmaGrant { shm: HANDLE_INVALID, _pad: 0, device_addr: 0, bytes: 0 };
@@ -2706,18 +2702,6 @@ pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, Syscal
         0,
     ))?;
     Ok(grant)
-}
-
-/// State that the function `claim` holds issues device addresses of `bits`
-/// bits, 32 to 64: every grant and lend of the claim is placed below `1 <<
-/// bits`. Once per claim, before any grant: `AlreadyExists` for a second, and
-/// `InvalidArgument` outside that range.
-///
-/// What the device's own capability bits say where they can be trusted, and
-/// the driver's own statement where they cannot: a function that drops its
-/// upper bits issues an address above its width as another grant's.
-pub fn device_dma_limit(claim: RawHandle, bits: u8) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_DEVICE_DMA_LIMIT, claim.0 as u64, bits as u64, 0, 0))
 }
 
 /// Let the function `claim` holds master the bus; nothing on a second call.
@@ -2745,8 +2729,7 @@ pub fn device_dma_start(claim: RawHandle) -> Result<(), SyscallError> {
 /// `InvalidArgument` for a region that is not ordinary memory this kernel
 /// allocated — a BAR window, firmware's framebuffer — and for one already
 /// mapped for this claim; `ResourceExhausted` with no run of the region's
-/// length left in the claim's [`LEND_WINDOW`](crate::pci::LEND_WINDOW), and
-/// `InvalidArgument` before the claim's [`device_dma_limit`] is stated.
+/// length left in the claim's [`LEND_WINDOW`](crate::pci::LEND_WINDOW).
 ///
 /// # Safety
 /// `shm` is live in this process for the call, and nothing that answers for

@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use toyos_abi::acpi::RootBridgeWindow;
 
-use kernel::iova::{Limit, Window};
+use kernel::iova::Window;
 
 use crate::iommu::{DomainId, IommuError, Iova};
 use crate::mm::PAGE_2M;
@@ -55,7 +55,7 @@ impl<S: Copy> Domains<S> {
         let mut addresses = Window::new(translatable, &reserved);
         let first = match room {
             0 => 0,
-            room => addresses.reserve(room, Limit::NARROWEST).ok_or(IommuError::NoRoom { room })?,
+            room => addresses.reserve(room).ok_or(IommuError::NoRoom { room })?,
         };
         Ok(Next { id, addresses, first: Iova::translated(first) })
     }

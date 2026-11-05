@@ -200,7 +200,6 @@ pub fn fault(cap: &SysCap) {
     let regs = unsafe { Window::new(bar.as_ptr(), info.bar_bytes[0] as usize) };
     // One page granted, and the function started: mastering is what its
     // aimed fetch needs.
-    dev.dma_limit(64).expect("usbd_spare: the address limit");
     let grant = dev.dma_alloc(4096).expect("usbd_spare: a grant");
     dev.dma_start().expect("usbd_spare: the start");
     let op = usize::from(regs.read::<u8>(0));

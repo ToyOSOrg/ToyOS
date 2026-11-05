@@ -63,11 +63,6 @@
 //! interrupts this machine does not remap**, because its message would be
 //! compatibility format, which raises any vector on any CPU.
 //!
-//! **Every grant ends below the address limit its holder stated**
-//! ([`dma_limit`]), and no grant or lend is made before one is: a function
-//! that drops its upper address bits would issue a grant above its limit as
-//! another grant's address.
-//!
 //! **A function masters the bus only when its holder starts it**
 //! ([`dma_start`]), never at hand-over: what comes back from a process, or
 //! from firmware, may still hold addresses and run queues. Its holder has the
@@ -141,7 +136,7 @@ use toyos_pci::{af, aperture, bar, express, hotplug, pages, pm};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, mask_claimed_msix, NoCapability, NoEntry, PciDevice};
-use crate::iommu::{IommuError, Limit, OwnSpace, Refused, Remapped};
+use crate::iommu::{IommuError, OwnSpace, Refused, Remapped};
 use kernel::claimspace::{Span, Window};
 use crate::mm::policy::CachePolicy;
 use crate::mm::align_2m;
@@ -358,9 +353,6 @@ struct Bound {
     /// The [`Function::residue`] this claim took over and has placed no grant
     /// over: mapped to nothing and counted against nothing.
     residue: Vec<Span>,
-    /// What the holder stated the function issues ([`dma_limit`]); no grant
-    /// or lend is made before it is.
-    limit: Option<Limit>,
     /// Whether this function may issue a transaction yet: false until its
     /// holder starts it ([`dma_start`]), so a function carrying a previous
     /// holder's or firmware's queue addresses acts on none of them before its
@@ -1121,7 +1113,6 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindo
         bar_bytes,
         grants: Vec::new(),
         residue: Vec::new(),
-        limit: None,
         mastering: false,
         firmware: FirmwareWindows::NONE,
         handed: Vec::new(),
@@ -1823,7 +1814,6 @@ pub fn dma_alloc(
 ) -> Result<(Arc<SharedMemObject>, u64, u64), SyscallError> {
     let function = binding.function();
     with_bound(binding, |bound| {
-        bound.limit.ok_or(SyscallError::InvalidArgument)?;
         if bytes == 0 || bytes > MAX_GRANT_BYTES {
             return Err(SyscallError::InvalidArgument);
         }
@@ -1848,24 +1838,6 @@ pub fn dma_alloc(
         let origin = Origin::Allocated { residual };
         bound.grants.push(Grant { memory: Arc::clone(&memory), at, bytes: span, origin });
         Ok((memory, at, span))
-    })
-}
-
-/// The function issues device addresses of `bits` bits, as its holder states
-/// it: once per claim and before any grant or lend, which are all placed
-/// below it. `InvalidArgument` outside 32 to 64 bits, `AlreadyExists` for a
-/// second statement.
-pub fn dma_limit(binding: &Binding, bits: u64) -> Result<(), SyscallError> {
-    let limit = u8::try_from(bits).ok().and_then(Limit::bits).ok_or(SyscallError::InvalidArgument)?;
-    with_bound(binding, |bound| {
-        if bound.limit.is_some() {
-            return Err(SyscallError::AlreadyExists);
-        }
-        // `OwnSpace::create` hands the window out below 4 GiB, which every
-        // limit reaches.
-        assert!(bound.window.end() <= limit.end(), "pcidev: a window ending at {:#x}, above 4 GiB", bound.window.end());
-        bound.limit = Some(limit);
-        Ok(())
     })
 }
 
@@ -1922,7 +1894,6 @@ pub fn dma_undo(binding: &Binding, memory: &Arc<SharedMemObject>) {
 pub fn dma_map(binding: &Binding, region: &Arc<SharedMemObject>) -> Result<(u64, u64), SyscallError> {
     let function = binding.function();
     with_bound(binding, |bound| {
-        bound.limit.ok_or(SyscallError::InvalidArgument)?;
         let (phys, span) = region.run().ok_or(SyscallError::InvalidArgument)?;
         // One region, one address: a second mapping of it would be two grants
         // naming one set of pages, and taking either back would leave the

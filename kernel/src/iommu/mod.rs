@@ -11,7 +11,6 @@
 
 use crate::arch::iommu_unit as unit;
 use crate::arch::message_unit as messages;
-pub use kernel::iova::Limit;
 
 pub(crate) mod domains;
 pub(crate) mod fault;
