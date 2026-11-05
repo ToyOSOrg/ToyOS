@@ -844,6 +844,7 @@ impl<D: BlockDev> Fat32<D> {
             raw.set_size(len as u32);
             let mark = self.repair.len();
             self.write_entry_at(f.loc.entry_offset, &raw).await?;
+            self.dev.flush().await?;
             // Landed: the free that follows only goes forward.
             self.repair.truncate(mark);
             f.entry_size = len as u32;
@@ -1088,6 +1089,7 @@ impl<D: BlockDev> Fat32<D> {
     /// up to the last erase, carried forward from it by [`Self::atomic`].
     async fn erase_committed(&mut self, loc: Loc, chain: Option<Cluster>) -> Result<(), Error> {
         self.erase_entries(loc).await?;
+        self.dev.flush().await?;
         self.commit();
         if let Some(c) = chain {
             self.queue(Repair::Free { start: c, anchor: None });
@@ -1122,6 +1124,7 @@ impl<D: BlockDev> Fat32<D> {
         }
 
         self.insert_entry(new_dir, &new_name, &node.raw).await?;
+        self.dev.flush().await?;
         self.erase_entries(loc).await?;
         if let Some(c) = moved_dir {
             if new_dir != loc.dir_start {

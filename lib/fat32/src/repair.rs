@@ -30,6 +30,11 @@
 //! — counts when its write lands. Every queued step is driven until it lands,
 //! so no refusal leaves the count a guess.
 //!
+//! **A write-back device orders nothing between two flushes**, so a call
+//! whose writes must land in order flushes between them: a removed name's
+//! erase before its chain's free, a shorter entry before the clusters past
+//! it, and a rename's new name before the old one's erase.
+//!
 //! What stays open, because FAT has no journal:
 //!
 //! - **Between the two copies of one entry.** [`Fat32::set_fat_entry`] is one

@@ -974,6 +974,138 @@ mod tests {
         assert!(grown_before_its_size, "no stop fell between the chain's growth and the size's write");
     }
 
+    /// `op` on a volume `setup` made and synced, stopped with every flush
+    /// epoch before one on the disk and any of that one's writes: each state
+    /// is one a writable mount recovers rather than refuses, which the
+    /// checker then finds nothing in, and `holds` accepts what a read-only
+    /// mount of it reads. Whether any stop needed a repair.
+    fn stopped_anywhere(
+        setup: impl Fn(&mut FatVolume<Traced>),
+        op: impl Fn(&mut FatVolume<Traced>),
+        holds: impl Fn(&mut FatVolume<Bytes<Vec<u8>>>, &str),
+    ) -> bool {
+        use toyos_fat32_check::{check, describe};
+        let clock = || 1_717_245_296 * NANOS_PER_SEC;
+        let spec = spec_volume::fixture();
+        let mut image = spec.bytes.clone();
+        image.resize(spec.bytes.len().div_ceil(BLOCK) * BLOCK, 0);
+        let epochs: Epochs = Rc::new(std::cell::RefCell::new(vec![Vec::new()]));
+        let mut v = FatVolume::mount(Traced { image: Bytes::new(image.clone()), epochs: Rc::clone(&epochs) }, CLEAN_LIMIT, true, clock)
+            .unwrap();
+        setup(&mut v);
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let synced = epochs.borrow().len() - 1;
+        op(&mut v);
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let epochs = epochs.borrow().clone();
+        written(&mut image, epochs[..synced].iter().flatten());
+        let mut repaired = false;
+        for (e, epoch) in epochs.iter().enumerate().skip(synced) {
+            assert!(epoch.len() <= 12, "epoch {e} has {} writes, too many to stop at every subset", epoch.len());
+            for kept in 0..1u32 << epoch.len() {
+                let stop = format!("stopped in flush epoch {e} of {} with writes {kept:#b} of its {}", epochs.len(), epoch.len());
+                let mut bytes = image.clone();
+                written(&mut bytes, epoch.iter().enumerate().filter(|(i, _)| kept >> i & 1 == 1).map(|(_, w)| w));
+                let recovery: Epochs = Rc::new(std::cell::RefCell::new(vec![Vec::new()]));
+                let traced = Traced { image: Bytes::new(bytes.clone()), epochs: Rc::clone(&recovery) };
+                let mounted = FatVolume::mount(traced, CLEAN_LIMIT, true, clock).unwrap_or_else(|e| panic!("{stop}: {e}"));
+                assert!(mounted.writable(), "{stop}: recovery refused a state a stop of ours leaves");
+                drop(mounted);
+                repaired |= recovery.borrow().iter().any(|w| !w.is_empty());
+                written(&mut bytes, recovery.borrow().iter().flatten());
+                let left = check(&bytes);
+                assert!(left.is_empty(), "{stop}, then recovered: {}", describe(&left));
+                let mut after = FatVolume::mount(Bytes::new(bytes), CLEAN_LIMIT, false, clock).unwrap();
+                holds(&mut after, &stop);
+            }
+            written(&mut image, epoch);
+        }
+        repaired
+    }
+
+    const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+    const OPEN: OpenHow = OpenHow { create: false, create_new: false, truncate: false };
+
+    fn pattern(len: usize, seed: u32) -> Vec<u8> {
+        (0..len as u32).map(|i| (i % 251 + seed) as u8).collect()
+    }
+
+    fn put(v: &mut FatVolume<Traced>, path: &str, bytes: &[u8]) {
+        let n = v.open(path, CREATE).unwrap();
+        v.write(n, 0, bytes).unwrap();
+        v.close(n).unwrap();
+    }
+
+    /// `path`'s bytes, or `None` where it is not there.
+    fn read_all(v: &mut FatVolume<Bytes<Vec<u8>>>, path: &str) -> Option<Vec<u8>> {
+        let size = v.lstat(path).ok()?.size as usize;
+        let n = v.open(path, OPEN).unwrap();
+        let mut out = vec![0u8; size];
+        assert_eq!(v.read(n, 0, &mut crate::volume::Buf(&mut out)), Ok(size));
+        Some(out)
+    }
+
+    /// An unlink — logkeeper's sweep of an old part — stopped anywhere: the
+    /// name is there with its bytes or gone, and its neighbour is untouched.
+    #[test]
+    fn an_unlink_stopped_anywhere_is_recovered() {
+        let repaired = stopped_anywhere(
+            |v| {
+                put(v, "old.log", &pattern(3 * BLOCK, 1));
+                put(v, "kept.log", &pattern(2000, 2));
+            },
+            |v| v.unlink("old.log").unwrap(),
+            |v, stop| {
+                let old = read_all(v, "old.log");
+                assert!(old.is_none() || old == Some(pattern(3 * BLOCK, 1)), "{stop}: old.log is neither gone nor whole");
+                assert_eq!(read_all(v, "kept.log"), Some(pattern(2000, 2)), "{stop}: its neighbour");
+            },
+        );
+        assert!(repaired, "no stop left an unlink anything to recover");
+    }
+
+    /// A shrink stopped anywhere: the file is its old length or its new one,
+    /// its kept bytes as they were.
+    #[test]
+    fn a_shrink_stopped_anywhere_is_recovered() {
+        let repaired = stopped_anywhere(
+            |v| put(v, "a.log", &pattern(4 * BLOCK, 3)),
+            |v| {
+                let n = v.open("a.log", OPEN).unwrap();
+                v.truncate(n, 100).unwrap();
+                v.close(n).unwrap();
+            },
+            |v, stop| {
+                let a = read_all(v, "a.log").unwrap_or_else(|| panic!("{stop}: a.log is gone"));
+                let whole = pattern(4 * BLOCK, 3);
+                assert!(a == whole || a == whole[..100], "{stop}: a.log is {} bytes, neither length", a.len());
+            },
+        );
+        assert!(repaired, "no stop left a shrink anything to recover");
+    }
+
+    /// A rename into another directory stopped anywhere: the file is under
+    /// exactly one of its names, whole.
+    #[test]
+    fn a_rename_stopped_anywhere_is_recovered() {
+        let repaired = stopped_anywhere(
+            |v| {
+                v.mkdir("into").unwrap();
+                put(v, "a.log", &pattern(2 * BLOCK, 4));
+            },
+            |v| v.rename("a.log", "into/a moved file.log").unwrap(),
+            |v, stop| {
+                let names = [read_all(v, "a.log"), read_all(v, "into/a moved file.log")];
+                let whole = Some(pattern(2 * BLOCK, 4));
+                assert!(
+                    names == [whole.clone(), None] || names == [None, whole],
+                    "{stop}: the file is not under exactly one name, whole"
+                );
+            },
+        );
+        assert!(repaired, "no stop left a rename anything to recover");
+    }
+
     /// A volume holding what no stop of ours leaves — here a directory whose
     /// chain has a link that is not one — is served read-only and not a byte
     /// of it is written.

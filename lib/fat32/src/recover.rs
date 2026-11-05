@@ -9,11 +9,12 @@
 //! not read whole, a cluster two different entries reach, a chain short of
 //! its size, FAT copies that differ where one does not read whole — refuses
 //! the recovery by name and leaves every byte as it was, since a walk that
-//! did not reach a cluster cannot say it is lost. Then, in this order, each write moving towards
-//! consistency so a stop inside it leaves no worse a volume:
+//! did not reach a cluster cannot say it is lost. Then, in this order, each
+//! write moving towards consistency so a stop inside it leaves no worse a
+//! volume:
 //!
-//! - **A split FAT entry** takes the active copy's value, a state the stopped
-//!   call, its repair or the stopped flush passed through.
+//! - **A split FAT entry** takes the active copy's value, which the walk
+//!   read whole.
 //! - **A rename's second name** — an entry equal in every field but the name
 //!   to one the walk already met, reaching the same chain — is erased, so the
 //!   file keeps its old name or its new one, and each directory's `..` names
@@ -168,12 +169,13 @@ impl<D: BlockDev> Fat32<D> {
     /// Read the volume whole and say what a recovery would write, or what it
     /// found that no stop leaves.
     ///
-    /// **Copies that differ are a stop's only where each reads whole.** The
-    /// file server's cache writes a flush's FAT blocks of both copies in any
-    /// order, so a stop inside one splits every entry of the blocks it had
-    /// not written. Each copy then holds the volume before or after that
-    /// flush, which the walk over it reads whole; a copy torn or written by
-    /// something else does not, and then neither is written over.
+    /// **Copies that differ are a stop's only where each reads whole.** A
+    /// stopped flush of a write-back device may have written any of its FAT
+    /// blocks of either copy; each copy still reads whole because an entry
+    /// reaches the disk a flush after its chain, and an erase a flush before
+    /// its chain's free, so the blocks differ only past a file's size or in
+    /// clusters nothing reaches. A copy torn or written by something else
+    /// does not read whole, and then neither is written over.
     async fn examine(&mut self) -> Result<Result<Findings, Unexplained>, Error> {
         let splits = self.splits().await?;
         let mut found = Findings {
@@ -225,19 +227,20 @@ impl<D: BlockDev> Fat32<D> {
         let bps = self.geom.bytes_per_sector as usize;
         let sectors = self.geom.max_cluster() as u64 * 4 / bps as u64 + 1;
         let mut ours = vec![0u8; bps];
-        let mut theirs = vec![0u8; bps];
+        let mirrors: Vec<u32> = self.geom.fat_mirrors().filter(|&f| f != 0).collect();
+        let mut theirs = vec![vec![0u8; bps]; mirrors.len()];
         for sector in 0..sectors {
             let at = sector * bps as u64;
             self.dev.read_at(self.geom.fat_base_offset(0) + at, &mut ours).await?;
-            for fat in self.geom.fat_mirrors().filter(|&f| f != 0) {
-                self.dev.read_at(self.geom.fat_base_offset(fat) + at, &mut theirs).await?;
-                for e in 0..bps / 4 {
-                    let entry = |b: &[u8]| u32::from_le_bytes(b[e * 4..e * 4 + 4].try_into().expect("4 bytes")) & ENTRY_MASK;
-                    let number = (sector as usize * bps / 4 + e) as u32;
-                    let Some(cluster) = self.geom.cluster(number) else { continue };
-                    if entry(&theirs) != entry(&ours) && splits.last().is_none_or(|&(c, _)| c != cluster) {
-                        splits.push((cluster, entry(&ours)));
-                    }
+            for (fat, buf) in mirrors.iter().zip(theirs.iter_mut()) {
+                self.dev.read_at(self.geom.fat_base_offset(*fat) + at, buf).await?;
+            }
+            for e in 0..bps / 4 {
+                let entry = |b: &[u8]| u32::from_le_bytes(b[e * 4..e * 4 + 4].try_into().expect("4 bytes")) & ENTRY_MASK;
+                let number = (sector as usize * bps / 4 + e) as u32;
+                let Some(cluster) = self.geom.cluster(number) else { continue };
+                if theirs.iter().any(|buf| entry(buf) != entry(&ours)) {
+                    splits.push((cluster, entry(&ours)));
                 }
             }
         }
@@ -253,8 +256,9 @@ impl<D: BlockDev> Fat32<D> {
         if self.reach_chain(root, whole, &mut found.reached).await?.is_err() {
             return Ok(Err("the root directory's chain does not read whole".into()));
         }
-        // Each entry's first cluster, and every field of the entry but its name.
-        let mut named: BTreeMap<u32, [u8; 21]> = BTreeMap::new();
+        // Each entry's first cluster, and every field of the entry but its
+        // name: byte 12, the case of the short name, is the name's.
+        let mut named: BTreeMap<u32, [u8; 20]> = BTreeMap::new();
         let mut dirs = vec![root];
         while let Some(dir) = dirs.pop() {
             let mut scan = DirScan::new(dir);
@@ -282,7 +286,9 @@ impl<D: BlockDev> Fat32<D> {
                     }
                     continue;
                 };
-                let fields: [u8; 21] = raw.0[11..].try_into().expect("21 bytes");
+                let mut fields = [0u8; 20];
+                fields[0] = raw.0[11];
+                fields[1..].copy_from_slice(&raw.0[13..]);
                 if found.reached.has(first.raw()) {
                     if named.get(&first.raw()) != Some(&fields) {
                         return Ok(Err(format!("cluster {} is reached by two different entries", first.raw())));
