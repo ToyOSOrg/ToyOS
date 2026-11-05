@@ -13,12 +13,35 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::time::{Duration, Instant};
 
 use crate::files::{self, Scratch};
 use crate::measure::{each, io, throughput};
-use crate::report::{condition, refuse};
+use crate::report::{condition, refuse, result};
 
 const MIB: usize = 1 << 20;
+
+/// How long the disk is left idle before each [`after_idle`] sample: past the
+/// idle time either system's drive waits before its deepest power state.
+const IDLE: Duration = Duration::from_secs(10);
+/// The samples [`after_idle`] takes, each after [`IDLE`].
+const AFTER_IDLE_SAMPLES: usize = 8;
+
+/// `op` timed alone, [`AFTER_IDLE_SAMPLES`] times, each after [`IDLE`] in which
+/// this program touches nothing: ns per operation.
+fn after_idle(bench: &str, served: &[(&str, String)], mut op: impl FnMut() -> Result<(), String>) {
+    let mut ns = Vec::with_capacity(AFTER_IDLE_SAMPLES);
+    for _ in 0..AFTER_IDLE_SAMPLES {
+        std::thread::sleep(IDLE);
+        let t = Instant::now();
+        if let Err(why) = op() {
+            return refuse(bench, why);
+        }
+        ns.push(u64::try_from(t.elapsed().as_nanos()).expect("an operation under 584 years"));
+    }
+    let fields: Vec<(&str, String)> = std::iter::once(("idle_s", IDLE.as_secs().to_string())).chain(served.iter().cloned()).collect();
+    result(bench, "ns", &mut ns, &fields);
+}
 
 pub fn suite() {
     let Some(disk) = files::disk() else {
@@ -52,6 +75,14 @@ fn durable(disk: &files::Target) {
             });
             // `sync_all` of the same file with nothing new in it: 200 after 10.
             each("persist.fsync_clean", 10, 200, &served, |_| io("fsync", f.sync_all()));
+            // The same write and `sync_all`, each after the disk has been
+            // left idle: what a drive's idle power states cost the first I/O
+            // that wakes it, against `persist.write_4k_fsync`'s back to back.
+            after_idle("persist.write_4k_fsync_after_idle", &served, || {
+                io("seek", f.seek(SeekFrom::Start(0)))?;
+                io("write", f.write_all(&block))?;
+                io("fsync", f.sync_all())
+            });
         }
         Err(e) => refuse("persist.write_4k_fsync", e),
     }

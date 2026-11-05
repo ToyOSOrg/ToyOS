@@ -18,6 +18,12 @@ belongs in the idle states and in device power management: none of this gap
 may be closed by slowing work. The AMD bench's smaller gap is
 `issues/the-amd-benchs-idle-package-draws-15-percent-over-linuxs.md`.
 
+Every Linux figure here had its display on as software holds it: the eDP
+connector's DPMS On, and the backlight at its setting. The one exception is
+the display-off step. The lid's physical state before 2026-11-01 is unknown;
+it has been closed since then. The ToyOS-against-Linux figures therefore hold
+for one lid state, whichever it was (evidence `pr-1131` `lid/`).
+
 Intel's datasheet (631121 Vol. 1 §3.2.5, Table 3-5) holds the package in PC2
 when its cores are in C6 or deeper and its graphics in RC6, but an LTR, a
 near timer or a device memory access refuses any deeper state. Table 3-8
@@ -47,7 +53,31 @@ The two causes, each reproduced on Linux by putting ToyOS's state there:
   - Under ToyOS, stopping the scan-out's plane fetches (Intel's PLANE_CTL Plane Enable) releases PC2 for PC3.
   - Linux's driver reaches PC8 with the panel lit. The fix is ToyOS's own display programming, with the panel lit; turning it off is not the fix. Per Intel's Tiger Lake display reference (Vol. 12), that means watermarks, SAGV, DMC firmware for DC5/DC6, and PSR for PC9/PC10. A driver for it is an owner decision.
 
-APST is the larger share and comes first.
+Under ToyOS, APST did not lower the package (PR #1131, evidence `pr-1131`
+r1-r3). These boots ran the benchmark image, which started no display driver
+until #1149, so the display was as the GOP left it.
+- The drive reaches PS4 between I/Os, yet the package stays in PC2 at 6-7 W
+  either way, so the display holds it.
+- Two things remain unexplained, with or without APST:
+  - **The baseline.** About 6.3 W at the per-second p25, against Linux
+    `nomodeset`'s 2.8 W in the same PC2.
+  - **The excursions.** 2-20 seconds a minute at or above each run's p25 + 4 W,
+    against Linux's 1-2 (4 under `nomodeset`). Every core is in C7 through
+    them, so they are not CPU work.
+- **The excursions follow no software-visible event** (r4).
+  - Each idle second was set against the kernel's diary and the drive's I/O:
+    which tasks woke, timer fires, idle entries, each CPU's C0 and every NVMe
+    command.
+  - No candidate was present in at least 80% of excursion seconds and at most
+    30% of the others. NVMe commands fell in 9% of them.
+  - The drive's states may raise their rate. With the drive reaching PS4
+    400 ms after I/O, five boots gave 12-22. Without APST, seven gave 2-20
+    (median 7).
+  - Linux under `nomodeset` enters PS4 100 ms after I/O and shows 4.
+  - So the trigger is hardware the platform runs as ToyOS leaves it. The one
+    link setting that differs from Linux's is LTR_L1.2_THRESHOLD: 107,520 ns,
+    as firmware left it, against Linux's 101,376 ns. The LTR max, T_PwrOn and
+    T_CommonMode match.
 
 **Exit**: the T14's `energy.idle.package` row is unresolved against Linux's
 in `osbench_energy`, or the remaining gap is a cause named and recorded at its
