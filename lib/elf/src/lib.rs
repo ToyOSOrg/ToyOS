@@ -50,7 +50,7 @@ pub use layout::{
     DynamicSegment, Extent, ImageOffset, ImageRange, Layout, Segment, SegmentFlags,
     ProgramHeaderTable, SectionTableRef, StackedImage, TlsSegment,
 };
-pub use rela::{Op, Rela, RelaCounts, RelaTable, Reloc, RelocError, RelocKind, Rules, TlsRef};
+pub use rela::{Op, Rela, RelaTable, Reloc, RelocError, RelocKind, Rules, TlsRef};
 pub use section::{SectionHeader, SectionTable};
 pub use sym::{Sym, SymIndex, SymTab};
 pub use tls::TlsOffset;

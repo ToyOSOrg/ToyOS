@@ -3539,6 +3539,7 @@ dependencies = [
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
  "toyos-abi",
+ "toyos-elf",
 ]
 
 [[package]]
@@ -3739,6 +3740,7 @@ name = "toyos-elf"
 version = "0.1.0"
 dependencies = [
  "object",
+ "rustc-std-workspace-core",
 ]
 
 [[package]]

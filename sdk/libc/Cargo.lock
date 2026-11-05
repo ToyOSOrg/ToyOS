@@ -30,6 +30,7 @@ name = "toyos"
 version = "0.18.0"
 dependencies = [
  "toyos-abi",
+ "toyos-elf",
 ]
 
 [[package]]

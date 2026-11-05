@@ -1,25 +1,32 @@
-//! A shared object's image, as the loader lays it out and relocates it: every
-//! table it reads, through `toyos-elf`, out of the image's own mapped bytes.
-//! It touches nothing but the memory it is handed, so the host tests it on
-//! images it lays out (`toyos-libc-copies`).
+//! An image, as the loader lays it out and relocates it: every table it
+//! reads, through `toyos-elf`, out of the image's own mapped bytes. It touches
+//! nothing but the memory it is handed, so the host tests it on images it lays
+//! out.
 //!
 //! An image is the process's own input: a crafted one corrupts only the
 //! process that loads it, and is refused by name wherever `toyos-elf` or the
 //! rules here can tell.
 
+#[cfg(test)]
+mod tests;
+
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use toyos_elf::dynamic::ENTRY_SIZE as DYN_SIZE;
+use toyos_elf::sym::{STB_WEAK, STT_TLS};
 use toyos_elf::{
     rela, Dynamic, GnuHash, InitArray, Layout, Machine, Op, RelaTable, RelocError, SegmentFlags, Sym, SymTab, TlsRef,
     TlsSegment,
 };
 
+use super::Refused;
+
 /// The page an image's protections are given in.
 pub(crate) const PAGE: u64 = 4096;
 
-/// The machine this library runs on, whose images it loads.
+/// The machine this program runs on, whose images it loads.
 #[cfg(target_arch = "x86_64")]
 pub(crate) const MACHINE: Machine = Machine::X86_64;
 #[cfg(target_arch = "aarch64")]
@@ -37,18 +44,18 @@ pub(crate) struct Plan {
 /// The image `header` begins, `header` reaching at least past its program
 /// header table: one whose addresses start at zero, whose program header table
 /// a `PT_LOAD` maps and whose segments share no page.
-pub(crate) fn plan(header: &[u8]) -> Result<Plan, &'static str> {
+pub(crate) fn plan(header: &[u8]) -> Result<Plan, Refused> {
     let layout = Layout::parse(header, MACHINE).map_err(|e| e.as_str())?;
     // Every bound below is image-relative and every `r_offset` a vaddr, so a
     // non-zero `vaddr_min` would shift the two against each other.
     if layout.extent().min() != 0 {
-        return Err("ELF: a shared object must begin at vaddr 0");
+        return Err(Refused::Elf("ELF: an image must begin at vaddr 0"));
     }
     if layout.program_headers().is_none() {
-        return Err("ELF: no PT_LOAD maps the program header table");
+        return Err(Refused::Elf("ELF: no PT_LOAD maps the program header table"));
     }
     if layout.overlapping_load_pages(PAGE).is_some() {
-        return Err("ELF: two PT_LOAD segments share a page");
+        return Err(Refused::Elf("ELF: two PT_LOAD segments share a page"));
     }
     let span = layout.span().checked_next_multiple_of(PAGE).and_then(|s| usize::try_from(s).ok());
     let span = span.ok_or("ELF: an image span no address space holds")?;
@@ -56,9 +63,18 @@ pub(crate) fn plan(header: &[u8]) -> Result<Plan, &'static str> {
 }
 
 impl Plan {
+    /// A library's segments, which the loader protects as their flags say:
+    /// one both writable and executable is refused rather than given either.
+    pub(crate) fn library(&self) -> Result<(), Refused> {
+        match self.layout.segments().iter().any(|seg| seg.flags().writable() && seg.flags().executable()) {
+            true => Err(Refused::Elf("ELF: a library's PT_LOAD is both writable and executable")),
+            false => Ok(()),
+        }
+    }
+
     /// Copy every `PT_LOAD`'s file bytes from `file` into `image`, its first
     /// `span` bytes zeroed and writable.
-    pub(crate) fn lay(&self, file: &[u8], image: &mut [u8]) -> Result<(), &'static str> {
+    pub(crate) fn lay(&self, file: &[u8], image: &mut [u8]) -> Result<(), Refused> {
         for seg in self.layout.segments() {
             let at = seg.image().start().get() as usize;
             let len = seg.filesz() as usize;
@@ -141,8 +157,8 @@ impl<'p, 'm> Mapped<'p, 'm> {
     /// image with no `PT_DYNAMIC`. `check`ed, every symbol it defines lies in
     /// it and no table on a page a relocation writes, as [`relocate`] needs: a
     /// module already published was checked as it was loaded.
-    pub(crate) fn tables(&self, check: bool) -> Result<Option<Tables<'m>>, &'static str> {
-        const OUTSIDE: &str = "ELF: a dynamic table outside the image's segments";
+    pub(crate) fn tables(&self, check: bool) -> Result<Option<Tables<'m>>, Refused> {
+        const OUTSIDE: Refused = Refused::Elf("ELF: a dynamic table outside the image's segments");
         let Some(dynamic) = self.plan.layout.dynamic() else { return Ok(None) };
         let range = dynamic.image();
         let dynamic = self.view(range.start().get(), range.len()).ok_or(OUTSIDE)?;
@@ -187,6 +203,7 @@ impl<'p, 'm> Mapped<'p, 'm> {
             rela,
             jmprel,
             rules: rela::Rules { extent, window, tls: self.plan.layout.tls() },
+            bind_now: parsed.bind_now,
             init_array: init_array.map(|a| (a.range().start().get(), a.count() as usize)),
         }))
     }
@@ -203,6 +220,7 @@ impl<'p, 'm> Mapped<'p, 'm> {
 }
 
 /// An image's dynamic tables, each a view of its mapped bytes.
+#[derive(Clone)]
 pub(crate) struct Tables<'a> {
     dynamic: &'a [u8],
     symbols: SymTab<'a>,
@@ -210,6 +228,8 @@ pub(crate) struct Tables<'a> {
     rela: Option<&'a [u8]>,
     jmprel: Option<&'a [u8]>,
     rules: rela::Rules,
+    /// Whether a call's slot is bound as the image is loaded, not at the call.
+    bind_now: bool,
     /// `DT_INIT_ARRAY`'s image offset and entries.
     pub(crate) init_array: Option<(u64, usize)>,
 }
@@ -239,8 +259,9 @@ impl<'a> Tables<'a> {
         sym.is_exported().then_some(sym)
     }
 
-    /// The address this image, mapped at `base`, gives the non-TLS symbol it
-    /// defines as `name`: any defined one, as `dlsym` reads it.
+    /// The address this image, mapped at `base`, gives the symbol it defines
+    /// as `name`: any defined one, as `dlsym` reads it, but a thread-local,
+    /// which has no one address.
     pub(crate) fn defined(&self, name: &str, base: u64) -> Option<u64> {
         let (_, sym) = self.symbols.find(name)?;
         Some(base + sym.address(self.rules.extent)?.get())
@@ -253,7 +274,7 @@ impl<'a> Tables<'a> {
 
     /// `S + A` of the TLS symbol this image exports as `name`, in its block.
     pub(crate) fn tls(&self, name: &str, addend: i64) -> Option<Result<u64, RelocError>> {
-        let sym = self.exported(name).filter(|s| s.kind() == toyos_elf::sym::STT_TLS)?;
+        let sym = self.exported(name).filter(|s| s.kind() == STT_TLS)?;
         let segment = self.rules.tls?;
         Some(sym.tls_offset(addend, segment).map(|at| at.get()).ok_or(RelocError::TlsOutsideSegment))
     }
@@ -276,75 +297,91 @@ pub(crate) trait Scope {
 
 /// Which of an image's relocations this pass writes: a library's, all; an
 /// executable's, all but the `RELATIVE`s it applied to itself.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Pass {
+pub(crate) enum Pass<'b> {
     Library,
-    Executable,
+    /// `block` is the main thread's block of the executable's thread-locals,
+    /// copied from its template before this pass: what the pass writes into
+    /// the template it writes there too. No other thread exists yet.
+    Executable { block: &'b mut [u8] },
 }
 
 /// Apply `tables`' relocations to `mapped`, module `id` of the process,
 /// against `scope` and then the image's own definitions. Every value is
 /// computed before the first write, so a refused image is left as laid.
-/// Answers how many name a symbol nothing defines, each written as zero, or
-/// for a `DTPMOD`, as the image's own id.
-pub(crate) fn relocate(mapped: &Mapped<'_, '_>, tables: &Tables<'_>, id: usize, scope: &dyn Scope, pass: Pass) -> Result<usize, &'static str> {
+///
+/// A symbol nothing defines is refused by name, but one the image names
+/// weakly, whose address is 0, and a call's slot (`JUMP_SLOT`) in an image
+/// not bound now: a lazy loader would bind that at the first call and fail
+/// there, so it is bound to [`super::undefined_function`], which fails there
+/// too. A Rust library's slot for `main` is one, which its std's `_start`
+/// names and only an executable defines.
+pub(crate) fn relocate(mapped: &Mapped<'_, '_>, tables: &Tables<'_>, id: usize, scope: &dyn Scope, pass: Pass<'_>) -> Result<(), Refused> {
     let base = mapped.base();
     let symbol = |i: toyos_elf::SymIndex| -> (Sym, &str) {
-        let sym = tables.symbols.get(i.get()).expect("dlimage: a parse bounded the index by the table");
+        let sym = tables.symbols.get(i.get()).expect("dl: a parse bounded the index by the table");
         (sym, sym.name_in(tables.symbols.strings()))
     };
-    let own_tls = |at: toyos_elf::TlsOffset| at.get();
-    let mut unresolved = 0;
+    let undefined = |name: &str| Refused::Undefined(String::from(name));
+    let address = |i: toyos_elf::SymIndex| -> Result<u64, Refused> {
+        let (sym, name) = symbol(i);
+        let own = sym.address(tables.rules.extent).map(|at| base + at.get());
+        match scope.address(name).or(own) {
+            Some(at) => Ok(at),
+            None if sym.bind() == STB_WEAK => Ok(0),
+            None => Err(undefined(name)),
+        }
+    };
+    let elsewhere = |name: &str, addend: i64| -> Result<(usize, u64), Refused> {
+        scope.tls(name, addend).ok_or_else(|| undefined(name))?.map_err(Refused::Relocation)
+    };
+    let own_block = || tables.rules.tls.ok_or(Refused::Relocation(RelocError::TlsOutsideSegment));
+    let executable = matches!(pass, Pass::Executable { .. });
     let mut writes = Vec::new();
     for raw in tables.relocations() {
-        let Some(r) = rela::parse(raw, &tables.rules, tables.symbols).map_err(|e| e.as_str())? else { continue };
+        let Some(r) = rela::parse(raw, &tables.rules, tables.symbols).map_err(Refused::Relocation)? else { continue };
         let value: u64 = match r.op() {
-            Op::Relative(_) if pass == Pass::Executable => continue,
+            Op::Relative(_) if executable => continue,
             Op::Relative(target) => base + target.get(),
-            Op::Bind(i) => {
-                let (sym, name) = symbol(i);
-                let own = sym.address(tables.rules.extent).map(|at| base + at.get());
-                match scope.address(name).or(own) {
-                    Some(at) => at,
-                    None => {
-                        unresolved += 1;
-                        0
-                    }
-                }
-            }
-            Op::Tpoff64(_) | Op::Tpoff32(_) => return Err("ELF: initial-exec TLS outside the executable's own block"),
-            Op::DtpMod64(i) => match i.map(symbol) {
-                None => id as u64,
-                Some((sym, _)) if sym.is_defined() => id as u64,
-                Some((_, name)) => match scope.tls(name, 0) {
-                    Some(found) => found.map_err(|e| e.as_str())?.0 as u64,
-                    None => {
-                        unresolved += 1;
-                        id as u64
-                    }
-                },
+            Op::Bind(i) => address(i)?,
+            Op::Call(i) => match address(i) {
+                Err(Refused::Undefined(_)) if !tables.bind_now => (super::undefined_function as *const ()).addr() as u64,
+                bound => bound?,
             },
-            Op::DtpOff64(TlsRef::Own(at)) => own_tls(at),
-            Op::DtpOff64(TlsRef::Symbol(s)) => {
-                let (sym, name) = symbol(s.sym());
-                if sym.is_defined() {
-                    let segment = tables.rules.tls.ok_or(RelocError::TlsOutsideSegment.as_str())?;
-                    sym.tls_offset(s.addend(), segment).ok_or(RelocError::TlsOutsideSegment.as_str())?.get()
-                } else {
-                    match scope.tls(name, s.addend()) {
-                        Some(found) => found.map_err(|e| e.as_str())?.1,
-                        None => {
-                            unresolved += 1;
-                            0
-                        }
-                    }
+            Op::Absolute(i, addend) => i.map_or(Ok(0), address)?.wrapping_add_signed(addend),
+            Op::Tpoff64(_) | Op::Tpoff32(_) => return Err(Refused::Elf("ELF: initial-exec TLS outside the executable's own block")),
+            Op::DtpMod64(None) => id as u64,
+            Op::DtpMod64(Some(i)) => match symbol(i) {
+                (sym, _) if sym.is_defined() => id as u64,
+                (_, name) => elsewhere(name, 0)?.0 as u64,
+            },
+            Op::DtpOff64(TlsRef::Own(at)) => at.get(),
+            Op::DtpOff64(TlsRef::Symbol(s)) => match symbol(s.sym()) {
+                (sym, _) if sym.is_defined() => {
+                    let at = sym.tls_offset(s.addend(), own_block()?);
+                    at.ok_or(Refused::Relocation(RelocError::TlsOutsideSegment))?.get()
                 }
-            }
+                (_, name) => elsewhere(name, s.addend())?.1,
+            },
         };
         writes.push((r.offset(), value));
     }
+    let template = mapped.plan.tls().map(|segment| segment.template());
+    let mut block = match pass {
+        Pass::Executable { block } => Some(block),
+        Pass::Library => None,
+    };
     for (at, value) in writes {
-        mapped.write(at, &value.to_le_bytes());
+        let bytes = value.to_le_bytes();
+        mapped.write(at, &bytes);
+        if let (Some(block), Some(template)) = (block.as_deref_mut(), template) {
+            let (lo, hi) = (template.start().get(), template.end().get());
+            for (i, byte) in bytes.iter().enumerate() {
+                let at = at + i as u64;
+                if (lo..hi).contains(&at) {
+                    block[(at - lo) as usize] = *byte;
+                }
+            }
+        }
     }
-    Ok(unresolved)
+    Ok(())
 }

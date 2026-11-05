@@ -15,14 +15,12 @@
 //! A static PIE carries `RELATIVE` relocations and nothing else, so that is
 //! all this applies. An image that names a library (`DT_NEEDED`) leaves every
 //! other relocation in its tables to the loader, which binds them once its
-//! libraries are loaded (libc's `__toyos_load_needed`). Every other form is
-//! refused by name: in an image that names no library, a symbol it would have
-//! to bind (`DT_JMPREL` with entries, any other type); a table form it does not read
+//! libraries are loaded ([`crate::dl::start`]). Every other form is refused by
+//! name: in an image that names no library, a symbol it would have to bind
+//! (`DT_JMPREL` with entries, any other type); a table form it does not read
 //! (`DT_REL`, every `RELR`, Android's packed tables, and every one's size),
-//! and a write into text (`DT_TEXTREL`, `DF_TEXTREL`).
-//! A write lands only inside a writable `PT_LOAD` and never in the `PT_TLS`
-//! template, which every thread's block is copied from as it was mapped and
-//! which a write here would never reach in a block already made.
+//! and a write into text (`DT_TEXTREL`, `DF_TEXTREL`). A write lands only
+//! inside a writable `PT_LOAD`.
 
 #![deny(
     clippy::indexing_slicing,
@@ -82,8 +80,6 @@ enum Refusal {
     Kind(u32),
     /// A write outside every writable `PT_LOAD`.
     OutsideWritable,
-    /// A write into the `PT_TLS` template.
-    InTlsTemplate,
 }
 
 /// What a program whose relocations are refused writes to slot 2.
@@ -195,7 +191,6 @@ const R_AARCH64_RELATIVE: u32 = 1027;
 
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
-const PT_TLS: u32 = 7;
 const PF_W: u32 = 2;
 
 const DT_NULL: u64 = 0;
@@ -432,9 +427,6 @@ impl<'a> Image<'a> {
             }
             if !self.loads().any(|p| p.writable_load() && p.holds(offset, 8, p.memsz)) {
                 return Err(Refusal::OutsideWritable);
-            }
-            if self.headers().any(|p| p.kind == PT_TLS && p.meets(offset, 8, p.filesz)) {
-                return Err(Refusal::InTlsTemplate);
             }
             write(offset, bias.wrapping_add(addend));
         }

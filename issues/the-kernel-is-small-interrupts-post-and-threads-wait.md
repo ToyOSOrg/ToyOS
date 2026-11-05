@@ -122,8 +122,8 @@ Beside that order, each waiting on something outside it:
    5. **Spawn and dlopen from an image handle.** **Exit**: a program in
       `/apps` runs having been read by userland, its faults served from the
       image object and not the VFS; and `SYS_DLOPEN` takes no path.
-      **Done**: spawn (#536, `SpawnArgs::image`), and dlopen: libc's loader
-      reads the library through `toyos::files::read_image` wherever it is
+      **Done**: spawn (#536, `SpawnArgs::image`), and dlopen: the SDK's
+      loader (`toyos::dl`) reads the library through `toyos::files::read_image` wherever it is
       served and loads it itself, each process holding its own library pages
       (orchestrator, under the memory design, whose later stages bring sharing
       back through memory objects); `SYS_DLOPEN` is gone with the kernel's

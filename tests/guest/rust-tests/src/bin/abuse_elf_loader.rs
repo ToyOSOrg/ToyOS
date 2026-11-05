@@ -5,9 +5,9 @@
 //! covers what the kernel *derives* from them: the address a segment lands at
 //! once the image is rebased to `USER_VM_BASE`. Each case is a kernel panic or
 //! a forbidden mapping before the fix; each must be an error return after it,
-//! with the kernel intact. A library is the program's own to load (libc's
-//! `dlopen`), so a crafted one is that program's to refuse, and its loader's
-//! host tests (`toyos-libc-copies`) hold that.
+//! with the kernel intact. A library is the program's own to load
+//! (`toyos::dl`), so a crafted one is that program's to refuse, and its
+//! loader's host tests hold that.
 //!
 //! An executable's dynamic section and thread-local storage are the program's
 //! own (`toyos::relocate`, `toyos::tls`): the spawn cases crafted in them are
@@ -370,7 +370,7 @@ fn main() {
     );
 
     // 5. A PT_TLS p_align that is no power of two, which the program-header
-    //    parse refuses: u64::MAX once wrapped the kernel's TLS block size.
+    //    parse refuses.
     spawn_refused(
         "tls_align_wrap",
         &base_exe(0x4000)
@@ -485,8 +485,8 @@ fn main() {
     spawn_refused("phdrs_unmapped", &unmapped);
 
     // 22. This program's own image, a `RELR` table in one copy, which its
-    //     `_start` refuses before it writes a word, and a library in another,
-    //     which its start refuses before `main`, since it links no loader.
+    //     `_start` refuses before it writes a word, and in another a library
+    //     named by the empty string, which its start refuses before `main`.
     refuses_itself("carries_relr", DT_RELR, REFUSED_LINE);
     refuses_itself("needs_a_library", DT_NEEDED as u64, NO_LIBRARY_LINE);
 
@@ -628,9 +628,9 @@ fn exe_tls_ref_past_segment() -> Vec<u8> {
 
 /// What `toyos::relocate` writes to its stderr, `fd:2`, when it refuses its own program.
 const REFUSED_LINE: &str = "this program's relocations are refused: it cannot start\n";
-/// What std's start writes there for a program that names a library and links
-/// no loader, as this one links none.
-const NO_LIBRARY_LINE: &str = "this program names libraries and links no loader: it cannot start\n";
+/// What std's start writes there for a program whose `DT_NEEDED` names no
+/// library.
+const NO_LIBRARY_LINE: &str = "this program's libraries could not be loaded: ELF: a DT_NEEDED names no library\n";
 /// The status it exits with then.
 const REFUSED_STATUS: i32 = 127;
 /// The argument a refused copy is handed, which its `main` panics on.

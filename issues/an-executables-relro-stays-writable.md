@@ -12,8 +12,8 @@ of function pointers. The kernel maps it as the writable `PT_LOAD` that holds
 it, reads no `PT_GNU_RELRO` (`rg -i relro kernel/src lib/elf/src` matches
 nothing), and gives a program no way to take the write away once
 `toyos::relocate` has run. A stray or hostile write in a running program can
-rewrite a vtable. A library's is read-only once libc's loader has relocated
-it (`sdk/libc/src/dl.rs`, `protect`); an executable's is not, and the same
+rewrite a vtable. A library's is read-only once the SDK's loader has relocated
+it (`sdk/toyos/src/dl/mod.rs`, `protect`); an executable's is not, and the same
 `SYS_VM_PROTECT` is what its start would call.
 
 Owner: the userland loader of

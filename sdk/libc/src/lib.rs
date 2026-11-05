@@ -15,7 +15,6 @@ mod conversion;
 mod ctype;
 mod dgramreq;
 mod dl;
-mod dlimage;
 mod elfsym;
 mod env;
 mod errcode;
@@ -81,8 +80,9 @@ mod runtime {
         // Before the constructors and `main`, either of which may read
         // `environ` before any call that would make it.
         crate::env::init();
-        // SAFETY: the executable's own header, its thread-local storage laid out.
-        unsafe { crate::dl::__toyos_load_needed(&raw const __ehdr_start) };
+        // SAFETY: the executable's own header, its thread-local storage laid
+        // out, and this its main thread.
+        unsafe { toyos::dl::start(&raw const __ehdr_start) };
         // SAFETY: the linker's bounds of the program's constructor array.
         unsafe {
             for hook in hooks(&raw const __init_array_start, &raw const __init_array_end) {

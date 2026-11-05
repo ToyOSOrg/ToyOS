@@ -6,9 +6,9 @@ opened: 2026-09-29
 
 # A dlopen'ed library never binds to the executable's exports
 
-libc's loader (`sdk/libc/src/dl.rs`, `Published`) binds a library's
-`GLOB_DAT`/`JUMP_SLOT` slots against every published module, the executable
-first, as glibc's `dlopen` searches the global scope. Nothing shows it: no
+The SDK's loader (`sdk/toyos/src/dl/mod.rs`, `Global`) binds a library's
+`GLOB_DAT`, `JUMP_SLOT` and `ABS64` slots against every published module, the
+executable first, as glibc's `dlopen` searches the global scope. Nothing shows it: no
 guest case loads a plugin that calls back into a symbol its host exports, and
 no ToyOS executable is linked to export one.
 

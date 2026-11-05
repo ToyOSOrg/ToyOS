@@ -15,7 +15,7 @@ mod common;
 use common::*;
 use toyos_elf::dynamic::{self, Dynamic};
 use toyos_elf::gnu_hash::{self, GnuHash};
-use toyos_elf::rela::{self, Op, Rela, RelaCounts, RelaTable, RelocError, RelocKind, Rules};
+use toyos_elf::rela::{self, Op, Rela, RelaTable, RelocError, RelocKind, Rules};
 use toyos_elf::section::{SectionTable, Unapplied, SHT_DYNSYM, SHT_REL, SHT_RELA, SHT_RELR, SHT_SYMTAB};
 use toyos_elf::sym::SymTab;
 use toyos_elf::Machine;
@@ -60,6 +60,18 @@ fn a_tag_is_absent_or_present_never_zero_meaning_absent() {
 
 /// A table needs both of its tags. `DT_RELA` alone names a table of unknown
 /// length, which nothing can read.
+/// An image binds now if any of the three ways says so, and only the flag
+/// bit that means it counts.
+#[test]
+fn an_image_binds_now_by_any_of_its_three_tags() {
+    assert!(!Dynamic::parse(&dynamic(&[])).bind_now);
+    assert!(Dynamic::parse(&dynamic(&[(dynamic::DT_BIND_NOW, 0)])).bind_now);
+    assert!(Dynamic::parse(&dynamic(&[(dynamic::DT_FLAGS, dynamic::DF_BIND_NOW)])).bind_now);
+    assert!(Dynamic::parse(&dynamic(&[(dynamic::DT_FLAGS_1, dynamic::DF_1_NOW)])).bind_now);
+    // `DF_SYMBOLIC`, which lld writes for a Rust library, and `DF_1_PIE`.
+    assert!(!Dynamic::parse(&dynamic(&[(dynamic::DT_FLAGS, 2), (dynamic::DT_FLAGS_1, 0x0800_0000)])).bind_now);
+}
+
 #[test]
 fn a_table_needs_both_of_its_tags_and_a_non_zero_size() {
     assert_eq!(Dynamic::parse(&dynamic(&[(dynamic::DT_RELA, 0x1000)])).rela, None);
@@ -103,12 +115,13 @@ fn a_trailing_partial_relocation_is_not_a_relocation() {
     assert_eq!(table.iter().count(), 1);
 }
 
+/// `TPOFF32` writes four bytes, so it may end where an eight-byte write may not.
 #[test]
-fn relocation_types_map_to_the_width_the_writers_use() {
-    assert_eq!(RelocKind::from_raw(Machine::X86_64, 8).write_width(), Some(8));
-    assert_eq!(RelocKind::from_raw(Machine::X86_64, 23).write_width(), Some(4));
-    assert_eq!(RelocKind::from_raw(Machine::X86_64, 0).write_width(), None);
-    assert_eq!(RelocKind::from_raw(Machine::X86_64, 42).write_width(), None);
+fn each_type_is_bounded_by_the_bytes_it_writes() {
+    for (raw, fits) in [(1u32, false), (8, false), (23, true)] {
+        let bytes = rela(0x10, 0, raw, 0);
+        assert_eq!(validate(RelaTable::new(&bytes, Machine::X86_64).iter(), (0, 0x14), 4).is_ok(), fits, "type {raw}");
+    }
 }
 
 #[test]
@@ -208,9 +221,9 @@ fn a_read_table_on_a_page_of_the_write_window_is_refused() {
 /// to cover every type the loader writes and not just the ones it applies at
 /// load time.
 #[test]
-fn every_written_type_is_validated_and_no_other_is() {
+fn every_written_type_is_validated() {
     let window = (0u64, 0x100u64);
-    for raw in [6u32, 7, 8, 16, 17, 18, 23] {
+    for raw in [1u32, 6, 7, 8, 16, 17, 18, 23] {
         let bytes = [rela(0x1000, 0, raw, 0)].concat();
         assert_eq!(
             validate(RelaTable::new(&bytes, Machine::X86_64).iter(), window, 4),
@@ -218,9 +231,39 @@ fn every_written_type_is_validated_and_no_other_is() {
             "type {raw} was not validated",
         );
     }
-    // A type nobody patches may name any offset at all.
-    let ignored = [rela(u64::MAX, 0, 42, 0)].concat();
-    assert_eq!(validate(RelaTable::new(&ignored, Machine::X86_64).iter(), window, 0), Ok(()));
+    // `NONE` writes nothing, so it may name any offset at all.
+    for machine in [Machine::X86_64, Machine::Aarch64] {
+        let none = [rela(u64::MAX, 0, 0, 0)].concat();
+        assert_eq!(validate(RelaTable::new(&none, machine).iter(), window, 0), Ok(()));
+    }
+}
+
+/// A slot whose type this loader does not apply would keep its link-time
+/// value, a wrong pointer: `COPY`, `IRELATIVE` and every unknown number are
+/// refused, naming the number.
+#[test]
+fn a_type_this_loader_does_not_apply_is_refused_by_number() {
+    let window = (0u64, 0x100u64);
+    for (machine, raw) in [(Machine::X86_64, 5u32), (Machine::X86_64, 37), (Machine::X86_64, 42), (Machine::Aarch64, 1024), (Machine::Aarch64, 1032)] {
+        let bytes = [rela(0x10, 0, raw, 0)].concat();
+        assert_eq!(validate(RelaTable::new(&bytes, machine).iter(), window, 0), Err(RelocError::Unsupported(raw)));
+    }
+    assert_eq!(RelocError::Unsupported(37).to_string(), "ELF: relocation type 37, which this loader does not apply");
+}
+
+/// `R_X86_64_64` and `R_AARCH64_ABS64` are `S + A`, with `S` 0 for `r_sym == 0`.
+#[test]
+fn an_absolute_relocation_carries_its_symbol_and_addend() {
+    let rules = Rules { extent: extent(0, 0x100), window: (0, 0x100), tls: None };
+    let syms = [0u8; 2 * 24];
+    for (machine, raw) in [(Machine::X86_64, 1u32), (Machine::Aarch64, 257)] {
+        let parse = |r_sym| {
+            let entry = RelaTable::new(&rela(0x10, r_sym, raw, -8), machine).get(0).unwrap();
+            rela::parse(entry, &rules, SymTab::new(&syms, &[])).unwrap().unwrap().op()
+        };
+        assert_eq!(parse(0), Op::Absolute(None, -8));
+        assert!(matches!(parse(1), Op::Absolute(Some(sym), -8) if sym.get() == 1));
+    }
 }
 
 /// A TLS descriptor is filled by a resolver this loader does not have, so an
@@ -236,9 +279,7 @@ fn an_aarch64_tls_descriptor_is_refused_by_name() {
         Err(RelocError::TlsDescriptor),
     );
     assert!(RelocError::TlsDescriptor.as_str().contains("R_AARCH64_TLSDESC"));
-    assert_eq!(validate(RelaTable::new(&desc, Machine::X86_64).iter(), window, 4), Ok(()));
-    let counts = RelaCounts::of(RelaTable::new(&desc, Machine::Aarch64).iter());
-    assert_eq!(counts.count_of(RelocKind::TlsDesc), 1);
+    assert_eq!(validate(RelaTable::new(&desc, Machine::X86_64).iter(), window, 4), Err(RelocError::Unsupported(1031)));
 }
 
 #[test]
@@ -247,7 +288,7 @@ fn a_symbol_index_past_the_table_is_refused_except_for_relative() {
 
     // Every type that resolves a symbol, TLS ones included once `r_sym` is not
     // the null entry.
-    for raw in [6u32, 7, 16, 17, 18, 23] {
+    for raw in [1u32, 6, 7, 16, 17, 18, 23] {
         let bind = [rela(0x10, 4, raw, 0)].concat();
         assert_eq!(
             validate(RelaTable::new(&bind, Machine::X86_64).iter(), window, 4),
@@ -267,7 +308,7 @@ fn a_symbol_index_past_the_table_is_refused_except_for_relative() {
 fn a_symbol_index_is_bounded_by_the_whole_entries_of_its_table() {
     let rules = Rules { extent: extent(0, 0x100), window: (0, 0x100), tls: None };
     let syms = [0u8; 4 * 24 + 8];
-    for raw in [6u32, 7, 16, 17, 18, 23] {
+    for raw in [1u32, 6, 7, 16, 17, 18, 23] {
         let parse = |r_sym| {
             let entry = RelaTable::new(&rela(0x10, r_sym, raw, 0), Machine::X86_64).get(0).unwrap();
             rela::parse(entry, &rules, SymTab::new(&syms, &[]))
@@ -275,23 +316,6 @@ fn a_symbol_index_is_bounded_by_the_whole_entries_of_its_table() {
         assert_eq!(parse(4), Err(RelocError::SymbolPastTable), "type {raw}");
         assert!(parse(3).is_ok(), "type {raw}");
     }
-}
-
-#[test]
-fn counts_are_per_kind_over_every_table() {
-    let a = [rela(0, 0, 8, 0), rela(8, 1, 6, 0), rela(16, 2, 18, 0)].concat();
-    let b = [rela(24, 3, 7, 0), rela(32, 0, 23, 0), rela(40, 0, 99, 0)].concat();
-    let counts = RelaCounts::of(RelaTable::new(&a, Machine::X86_64).iter().chain(RelaTable::new(&b, Machine::X86_64).iter()));
-    assert_eq!(
-        counts,
-        RelaCounts { relative: 1, bind: 2, tpoff64: 1, tpoff32: 1, dtpmod64: 0, dtpoff64: 0, tlsdesc: 0 },
-    );
-    // The ceiling is over the kinds a caller reserves for, never over every
-    // kind: a bound on one nothing stores refuses a file for a collection that
-    // does not exist.
-    assert_eq!(counts.max_of(&[RelocKind::GlobDat, RelocKind::Tpoff32]), 2);
-    assert_eq!(counts.max_of(&[RelocKind::DtpMod64]), 0);
-    assert_eq!(counts.max_of(&[]), 0);
 }
 
 // ── Symbol tables ───────────────────────────────────────────────────────

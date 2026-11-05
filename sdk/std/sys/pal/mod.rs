@@ -224,12 +224,6 @@ extern "C" fn start_rust(argc: usize, argv: *const *const u8) -> ! {
         fn main(argc: i32, argv: *const *const u8) -> i32;
         static __ehdr_start: u8;
     }
-    // The C library's loader (`sdk/libc/src/dl.rs`), where the program links
-    // it: libtoyos_c is built from this std, so std cannot name it itself.
-    unsafe extern "C" {
-        #[linkage = "extern_weak"]
-        static __toyos_load_needed: Option<unsafe extern "C" fn(header: *const u8)>;
-    }
     // The program goes by its `argv[0]`.
     let name = match argc {
         0 => &[][..],
@@ -243,25 +237,14 @@ extern "C" fn start_rust(argc: usize, argv: *const *const u8) -> ! {
     eh_frame::init();
     crate::sys::env::init();
     // Before anything that names a symbol of a library it links.
-    // SAFETY: a weak symbol's value, read once.
-    match unsafe { __toyos_load_needed } {
-        // SAFETY: the executable's own header, its thread-local storage laid out.
-        Some(load) => unsafe { load(&raw const __ehdr_start) },
-        None if toyos::relocate::names_a_library() => {
-            // As `toyos::relocate` refuses its program: a line and 127.
-            let _ = crate::io::Write::write_all(&mut crate::io::stderr(), NO_LOADER);
-            toyos_abi::syscall::exit(127)
-        }
-        None => {}
-    }
+    // SAFETY: the executable's own header, its thread-local storage laid out,
+    // and this its main thread.
+    unsafe { toyos::dl::start(&raw const __ehdr_start) };
 
     let code = unsafe { main(argc as i32, argv) };
     crate::sys::stdio::finish();
     toyos_abi::syscall::exit(code)
 }
-
-/// What a program that names libraries and links no loader says as it ends.
-const NO_LOADER: &[u8] = b"this program names libraries and links no loader: it cannot start\n";
 
 pub fn abort_internal() -> ! {
     toyos_abi::syscall::exit(128 + 6) // SIGABRT-like — kill entire process

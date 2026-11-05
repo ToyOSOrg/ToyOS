@@ -119,12 +119,16 @@ fn the_bias_is_where_the_header_is_found_less_its_link_address() {
     }
 }
 
+/// Every thread's block is copied from the template after this runs
+/// (`toyos::tls::start`), so a pointer in it is relocated like any other.
 #[test]
-fn a_pointer_in_the_tls_template_is_refused() {
+fn a_pointer_in_the_tls_template_is_written() {
     // `readelf -lr x86_64-tls.elf`: `TLS 0x000478 0x2478 … 0x10` and a
     // `R_X86_64_RELATIVE` at `0x2478`; `aarch64-tls.elf` the same at `0x204e0`.
-    assert_eq!(writes(X86_64_TLS, BASE), Err(Refusal::InTlsTemplate));
-    assert_eq!(writes(AARCH64_TLS, BASE), Err(Refusal::InTlsTemplate));
+    for (file, template) in [(X86_64_TLS, 0x2478), (AARCH64_TLS, 0x204e0)] {
+        let writes = writes(file, BASE).expect("lld's own output applies");
+        assert!(writes.iter().any(|&(vaddr, value)| vaddr == template && value > BASE), "{writes:x?}");
+    }
 }
 
 /// `tags`, `DT_NULL`-terminated, as a dynamic section's bytes.
@@ -234,16 +238,6 @@ fn a_write_outside_a_writable_segment_is_refused() {
     for offset in [0x13d0, 0x40, 0x2ffc, 0x2424, u64::MAX - 4] {
         assert_eq!(applied(X86_64, &[rela(offset, 8, 0)]), Err(Refusal::OutsideWritable), "{offset:#x}");
     }
-}
-
-#[test]
-fn a_write_meeting_the_tls_template_is_refused() {
-    // `x86_64-tls.elf`'s template is `[0x2478, 0x2488)`; an 8-byte write
-    // starting 4 bytes before its end meets it.
-    for offset in [0x2478, 0x2480, 0x2484] {
-        assert_eq!(applied(X86_64_TLS, &[rela(offset, 8, 0)]), Err(Refusal::InTlsTemplate), "{offset:#x}");
-    }
-    assert!(applied(X86_64_TLS, &[rela(0x2488, 8, 0)]).is_ok());
 }
 
 #[test]

@@ -117,9 +117,9 @@ struct Case {
 }
 
 fn reloc_number(machine: Machine, which: usize) -> u32 {
-    // RELATIVE, GLOB_DAT, JUMP_SLOT, DTPMOD64, DTPOFF64, TPOFF64, TPOFF32.
-    const X86: [u32; 7] = [8, 6, 7, 16, 17, 18, 23];
-    const A64: [u32; 7] = [1027, 1025, 1026, 1028, 1029, 1030, 1027];
+    // RELATIVE, GLOB_DAT, JUMP_SLOT, DTPMOD64, DTPOFF64, TPOFF64, TPOFF32, ABS64.
+    const X86: [u32; 8] = [8, 6, 7, 16, 17, 18, 23, 1];
+    const A64: [u32; 8] = [1027, 1025, 1026, 1028, 1029, 1030, 1027, 257];
     match machine {
         Machine::X86_64 => X86[which],
         Machine::Aarch64 => A64[which],
@@ -192,14 +192,15 @@ fn generate(rng: &mut Rng) -> Case {
     }
 
     for i in 0..n_relas {
-        let which = rng.below(7) as usize;
-        let r_type = if rng.chance(3) { rng.next() as u32 } else { reloc_number(machine, which) };
+        let which = rng.below(8) as usize;
+        // NONE, COPY, IRELATIVE, TLSDESC and an unknown AArch64 number.
+        let r_type = rng.value(u64::from(reloc_number(machine, which)), &[0, 5, 37, 1031, 1032]) as u32;
         let slot = rng.below((SIZE as u64 - RW) / 8);
         let offset = rng.value(vmin + RW + 8 * slot, &[vmin + span - 4, vmin + span, 0xFF9]);
         let sym = if rng.chance(40) { 0 } else { rng.below(n_syms + 1) as u32 };
         let sym = if rng.chance(5) { rng.next() as u32 } else { sym };
         let honest = match which {
-            0 => vmin + rng.below(span + 1),
+            0 | 7 => vmin + rng.below(span + 1),
             3..=6 if sym == 0 => rng.below(tls_memsz.min(0x400) + 1),
             _ => rng.below(17).wrapping_sub(8),
         };
@@ -233,6 +234,7 @@ struct Reached {
     accepted: u64,
     relative: u64,
     bind: u64,
+    absolute: u64,
     tpoff: u64,
     dtpoff: u64,
     init_arrays: u64,
@@ -245,6 +247,7 @@ impl Reached {
         self.accepted += 1;
         self.relative += image.relative;
         self.bind += image.bind;
+        self.absolute += image.absolute;
         self.tpoff += image.tpoff;
         self.dtpoff += image.dtpoff;
         self.init_arrays += image.init_arrays;
@@ -358,17 +361,13 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
     };
 
     for r in relocs {
-        let width = match r.op() {
-            Op::Tpoff32(_) => 4,
-            _ => 8,
-        };
-        assert!(r.offset() >= window.0 && r.offset() + width <= window.1, "{r:?} outside {window:x?}");
+        assert!(r.offset() >= window.0 && r.offset() + r.op().width() <= window.1, "{r:?} outside {window:x?}");
         match r.op() {
             Op::Relative(off) => {
                 place(off.get());
                 reached.relative += 1;
             }
-            Op::Bind(idx) => {
+            Op::Bind(idx) | Op::Call(idx) => {
                 if let Some(s) = symbols.get(idx.get()) {
                     if let Some(off) = s.address(extent) {
                         place(off.get());
@@ -376,6 +375,7 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
                 }
                 reached.bind += 1;
             }
+            Op::Absolute(..) => reached.absolute += 1,
             Op::Tpoff64(t) | Op::Tpoff32(t) => {
                 if resolve(t)?.is_some() {
                     reached.tpoff += 1;
@@ -426,6 +426,7 @@ fn every_derived_address_lies_inside_the_image_or_the_image_is_refused() {
     for (what, n) in [
         ("RELATIVE", reached.relative),
         ("GLOB_DAT/JUMP_SLOT", reached.bind),
+        ("ABS64", reached.absolute),
         ("TPOFF", reached.tpoff),
         ("DTPOFF", reached.dtpoff),
         ("DT_INIT_ARRAY", reached.init_arrays),

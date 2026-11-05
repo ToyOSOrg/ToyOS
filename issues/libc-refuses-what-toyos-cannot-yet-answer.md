@@ -29,7 +29,7 @@ call replacing a process's image; `setsid` and `getsid`, no POSIX session;
 
 Refused by design, and owed nothing: `mmap` or `mprotect` of memory writable
 and executable at once, `ENOTSUP`. A program writes its code and then
-protects it read and execute, as libc's loader does; no page is both
+protects it read and execute, as the SDK's loader does; no page is both
 (orchestrator, with the userland loader, which made read and execute a
 protection a program may ask for).
 

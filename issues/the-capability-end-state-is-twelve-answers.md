@@ -156,11 +156,11 @@ table** can still reach:
   (`SYS_OPEN`, `SYS_READDIR`, `SYS_DELETE`, `SYS_MKDIR`, `SYS_RMDIR`,
   `SYS_RENAME`, `SYS_SYMLINK`, `SYS_READLINK`), `SYS_SPAWN`, and
   `SYS_SHUTDOWN` — plus `SYS_SYSINFO`'s census. `SYS_DLOPEN` was among them
-  and is gone: a program loads its own libraries (libc's loader), reading
+  and is gone: a program loads its own libraries (`toyos::dl`), reading
   each through its own namespace.
 
-**Smallest decision:** the last group. **Recommendation:** keep the filesystem,
-`SYS_DLOPEN` and `SYS_SPAWN` ambient under question 2's ruling; make
+**Smallest decision:** the last group. **Recommendation:** keep the filesystem
+and `SYS_SPAWN` ambient under question 2's ruling; make
 `SYS_SHUTDOWN` and `SYS_SYSINFO` rights-bearing, because neither is path
 authority and both are machine-wide. Then this list, minus those two, is the
 committed answer. **Both are done** — `Rights::POWER` and `Rights::ROSTER` — so

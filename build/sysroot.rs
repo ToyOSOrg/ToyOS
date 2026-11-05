@@ -23,8 +23,9 @@
 //! moved to the commit its tree pins;
 //! a linked worktree in its own `rust/`, made on first need as a git worktree of
 //! the primary's fork repository at the commit this tree pins and never moved ([`fork_checkout`]).
-//! `library/std` names `toyos-abi` and `toyos` by version, and every bootstrap
-//! run is handed this worktree's by one `[patch]` ([`std_patch`]); each file of
+//! `library/std` names `toyos-abi` and `toyos` by version, `toyos-elf` through
+//! `toyos`, and every bootstrap run is handed this worktree's by one `[patch]`
+//! ([`std_patch`]); each file of
 //! its ToyOS backend, `sdk/std` and the allocator files of `sdk/libc/src` it
 //! includes (`malloc.rs`, `mapped.rs`), it names by a `#[path]` up out of the
 //! fork. So each checkout's std compiles against its own worktree's ABI and
@@ -66,7 +67,7 @@ use crate::toolchain::{self, host_triple, GuestTarget, Owner, Role, GUEST_TARGET
 use whole_toolchain::{whole, Whole};
 
 /// The per-worktree sources that end up inside a sysroot: std links the
-/// `toyos-abi` and `toyos` [`std_patch`] hands it and compiles its ToyOS
+/// `toyos-abi`, `toyos-elf` and `toyos` [`std_patch`] hands it and compiles its ToyOS
 /// backend from `sdk/std`, C's allocator among it from `sdk/libc/src`, and
 /// `libtoyos_c.a` is `sdk/libc` with `toyos-elf` and `toyos-osrelease`.
 pub const SYSROOT_SOURCES: [&str; 7] = [
@@ -94,7 +95,7 @@ pub(crate) const SYSROOT_MANIFESTS: [&str; 7] = [
 /// Of [`SYSROOT_MANIFESTS`], the crates std names by version, which std's
 /// lockfile resolves with the fork's own through [`std_patch`]: what of a
 /// worktree can move a freestanding target's dependency versions.
-const STD_MANIFESTS: [&str; 2] = ["sdk/abi/Cargo.toml", "sdk/toyos/Cargo.toml"];
+const STD_MANIFESTS: [&str; 3] = ["sdk/abi/Cargo.toml", "lib/elf/Cargo.toml", "sdk/toyos/Cargo.toml"];
 
 /// One of the crates std names by version, in a worktree.
 pub(crate) struct StdCrate {
@@ -169,7 +170,7 @@ const RECIPE: &str = "bootstrap stage-0 local rebuild, libraries from the stamp,
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Libraries {
     /// The fork's and [`SYSROOT_SOURCES`]: ToyOS userland's std, which names
-    /// `toyos-abi` and `toyos`.
+    /// `toyos-abi` and `toyos`, and through it `toyos-elf`.
     Worktree,
     /// The fork's alone: the kernel's `core` and `alloc` and the loader's std,
     /// which is what lets them be a key of their own.
@@ -1276,7 +1277,7 @@ pub(crate) mod tests {
     /// The manifests [`std_crates`] reads, in a worktree at `root` that has
     /// no other source: what a bootstrap run is handed std's patch from.
     pub(crate) fn std_manifests(root: &Path) {
-        for (manifest, name) in STD_MANIFESTS.into_iter().zip(["toyos-abi", "toyos"]) {
+        for (manifest, name) in STD_MANIFESTS.into_iter().zip(["toyos-abi", "toyos-elf", "toyos"]) {
             write(&root.join(manifest), &format!("[package]\nname = \"{name}\"\n"));
         }
     }
@@ -1315,6 +1316,8 @@ pub(crate) mod tests {
             [
                 "--config".to_string(),
                 format!("patch.crates-io.toyos-abi.path=\"{at}/sdk/abi\""),
+                "--config".to_string(),
+                format!("patch.crates-io.toyos-elf.path=\"{at}/lib/elf\""),
                 "--config".to_string(),
                 format!("patch.crates-io.toyos.path=\"{at}/sdk/toyos\""),
             ],

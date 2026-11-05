@@ -12,6 +12,11 @@
 //! address space to notice. So the kernel keeps sixteen bytes with a known
 //! value and answers two questions about them (`SYS_DEBUG` actions 10 and 11):
 //! where they are, and whether they still say what it put there.
+//!
+//! `SYS_SET_THREAD_POINTER` writes a userland value into FS base or
+//! `TPIDR_EL0`. A non-canonical FS base faults the `wrmsr` in Ring 0, so the
+//! kernel takes zero or a user-half address and refuses the rest, leaving the
+//! thread's own in place.
 
 use toyos_abi::syscall::{self, VmAt, VmProt, SyscallError};
 
@@ -75,6 +80,23 @@ fn main() {
     assert!(err(ret).is_none(), "futex_wake refused a word of this process's own: {ret:#x}");
 
     unsafe { syscall::vm_release(region, 2 * PAGE as usize) }.expect("release");
+
+    // The first address past the user half, which x86-64 holds non-canonical,
+    // a kernel address and the last address.
+    for tp in [0x0000_8000_0000_0000, canary, u64::MAX] {
+        assert_eq!(
+            syscall::set_thread_pointer(tp).err(),
+            Some(SyscallError::InvalidArgument),
+            "SYS_SET_THREAD_POINTER took {tp:#x}",
+        );
+    }
+    // Read through the thread pointer: still the thread's own.
+    THREAD_OWN.with(|v| assert_eq!(v.get(), 0x7E11, "a refused thread pointer replaced the thread's own"));
+
     assert!(canary_intact(), "the canary changed during the run");
-    println!("futex refuses an address it may not reach, and kernel memory is untouched");
+    println!("futex and the thread pointer refuse an address they may not reach, and kernel memory is untouched");
+}
+
+thread_local! {
+    static THREAD_OWN: std::cell::Cell<u64> = const { std::cell::Cell::new(0x7E11) };
 }

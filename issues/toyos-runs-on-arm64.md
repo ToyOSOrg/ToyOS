@@ -161,7 +161,7 @@ bound). Heaviest: `arch::cpu` (57 references), `arch::percpu` (28),
   AP[2:1], UXN/PXN, and ASIDs in the TTBR.
 - **TLS.** Each program lays its own out (`sdk/toyos/src/tls`), variant II
   on x86-64 and variant I on AArch64; std's `__tls_get_addr` uses `fs:`.
-  LLVM emits TLSDESC by default on AArch64, which libc's loader refuses, so
+  LLVM emits TLSDESC by default on AArch64, which `toyos::dl` refuses, so
   no AArch64 shared object reaches its thread-locals yet.
 - **Calling conventions.** `extern "sysv64"` at `main.rs:205`,
   `deadline.rs:194`, `sched/driver.rs:892`, `i8042/mod.rs:490`,

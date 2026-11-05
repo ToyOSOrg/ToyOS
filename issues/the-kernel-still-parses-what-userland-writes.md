@@ -31,24 +31,18 @@ executable's dynamic section, symbol tables or relocations.
 thread-local storage (`toyos::tls`): its module list, every thread's area and
 DTV, which grows in the process's own memory, and `__tls_get_addr`'s blocks.
 The kernel's only part is the thread pointer a thread names
-(`SYS_SET_THREAD_POINTER`). libc's loader (`sdk/libc/src/dl.rs`) lays a
-library out in private memory, relocates it, protects its pages, its RELRO
-read-only, and publishes it in the module list; `dlopen`, `dlsym`, `dladdr` and
-`dl_iterate_phdr` read that list, and so do std's unwinder and the backtrace
-crate. `SYS_DLOPEN`, `SYS_DLSYM`, `SYS_DLCLOSE`, `SYS_TLS_ALLOC_BLOCK` and
+(`SYS_SET_THREAD_POINTER`). The SDK's loader (`toyos::dl`) lays a
+library out in private memory with every library it names, relocates them,
+protects their pages, their RELRO read-only, and publishes them in the module
+list together or not at all; libc's `dlopen`, `dlsym`, `dladdr` and
+`dl_iterate_phdr` read that list, and so do libloading, std's unwinder and the
+backtrace crate. `SYS_DLOPEN`, `SYS_DLSYM`, `SYS_DLCLOSE`, `SYS_TLS_ALLOC_BLOCK` and
 `SYS_QUERY_MODULES` are deleted, and a program may protect its own memory read
-and execute, never write and execute at once. An executable's start loads the
+and execute, never write and execute at once. An executable's start, std's or libc's, loads the
 libraries it names (`DT_NEEDED`) through the same loader before `main`
-(`__toyos_load_needed`), and `std_tls` holds it. What is left in Ring 0 is the
-program-header parse, which the end state keeps.
-
-**The interval it leaves.** libtoyos_c is built from std, so std cannot link it:
-std reaches the loader through a weak symbol, and a Rust executable that names
-a library links libtoyos_c itself (`std_tls` does), or its start refuses it by
-name and exits 127. A C program always has it. The exit: every Rust executable
-links the loader as a C program does, through the target's link of its C
-runtime. AArch64 shared objects reach their thread-locals through TLS
-descriptors, which the loader refuses.
+(`toyos::dl::start`), and `std_tls` holds it. What is left in Ring 0 is the
+program-header parse, which the end state keeps. AArch64 shared objects reach
+their thread-locals through TLS descriptors, which the loader refuses.
 
 The evidence that it is worth doing: nine dated commits over eleven days fixed
 userland-reachable kernel defects in this code, six of them machine-wide panics;

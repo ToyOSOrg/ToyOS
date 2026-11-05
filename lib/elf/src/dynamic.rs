@@ -30,6 +30,12 @@ pub const DT_STRSZ: i64 = 10;
 pub const DT_INIT_ARRAY: i64 = 25;
 pub const DT_JMPREL: i64 = 23;
 pub const DT_INIT_ARRAYSZ: i64 = 27;
+pub const DT_BIND_NOW: i64 = 24;
+pub const DT_FLAGS: i64 = 30;
+pub const DT_FLAGS_1: i64 = 0x6fff_fffb;
+/// `DT_FLAGS`' and `DT_FLAGS_1`'s bind-now bits.
+pub const DF_BIND_NOW: u64 = 8;
+pub const DF_1_NOW: u64 = 1;
 pub const DT_GNU_HASH: i64 = 0x6fff_fef5u32 as i32 as i64;
 
 /// Bytes in one `Elf64_Dyn`.
@@ -44,6 +50,10 @@ pub struct Dynamic {
     pub strsz: Option<u64>,
     pub symtab: Option<u64>,
     pub gnu_hash: Option<u64>,
+    /// `DT_BIND_NOW`, `DF_BIND_NOW` or `DF_1_NOW`: every symbol is bound as
+    /// the image is loaded, a function's too, so one nothing defines refuses
+    /// the image rather than its first call.
+    pub bind_now: bool,
 }
 
 impl Dynamic {
@@ -70,6 +80,9 @@ impl Dynamic {
                 DT_STRSZ => out.strsz = Some(val),
                 DT_SYMTAB => out.symtab = Some(val),
                 DT_GNU_HASH => out.gnu_hash = Some(val),
+                DT_BIND_NOW => out.bind_now = true,
+                DT_FLAGS if val & DF_BIND_NOW != 0 => out.bind_now = true,
+                DT_FLAGS_1 if val & DF_1_NOW != 0 => out.bind_now = true,
                 _ => {}
             }
         }

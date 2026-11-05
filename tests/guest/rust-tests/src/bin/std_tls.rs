@@ -1,19 +1,10 @@
-//! An executable that links a library at load time (`DT_NEEDED`): its start
-//! loads `libtls_lib.so` and binds its calls to it before `main`
-//! (`__toyos_load_needed`), the executable's own thread-locals sit where its
+//! An executable that links a library at load time (`DT_NEEDED`): std's
+//! start loads `libtls_lib.so` and binds its calls to it before `main`
+//! (`toyos::dl::start`), the executable's own thread-locals sit where its
 //! linker put them, and the library's are a block of their own, reached
 //! through the thread's DTV.
 
 use std::cell::Cell;
-
-// The C library's loader, which this program's start runs: a Rust program
-// that links a library at load time links it (`__toyos_load_needed`).
-#[link(name = "toyos_c", kind = "static")]
-unsafe extern "C" {
-    fn __toyos_load_needed(header: *const u8);
-}
-#[used]
-static LOADER: unsafe extern "C" fn(*const u8) = __toyos_load_needed;
 
 // libtls_lib.so's, which this executable names in a `DT_NEEDED`.
 #[link(name = "tls_lib")]

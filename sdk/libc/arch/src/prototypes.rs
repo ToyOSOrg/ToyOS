@@ -21,7 +21,6 @@ const UNDECLARED: &[(&str, &str)] = &[
     ("_Unwind_Resume", "what the precompiled `alloc`'s landing pads name"),
     ("__cxa_atexit", "the C++ ABI's, which `cxxabi.h` declares"),
     ("__cxa_thread_atexit_impl", "what libc++abi's `__cxa_thread_atexit` calls, which it declares"),
-    ("__toyos_load_needed", "what a program's start calls to load the libraries it names"),
 ];
 
 fn libc() -> PathBuf {

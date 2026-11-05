@@ -1,18 +1,11 @@
-//! The kernel must survive an ELF whose program headers lie about their sizes.
+//! The kernel must survive an ELF whose program headers lie about their sizes
+//! or place a segment outside the loaded image.
 //!
-//! `p_filesz` and `p_memsz` are a (copy length, buffer size) pair to the
-//! loader, so the spec's `p_filesz <= p_memsz` is memory safety here. Inverted,
-//! the copy overruns its destination with file-chosen length *and* content:
-//!
-//! `PT_TLS` on the exe path was `OwnedAlloc::new(tls_memsz)` then
-//! `copy_nonoverlapping(.., tls_filesz)`, a kernel heap overflow, while the
-//! kernel laid out thread-local storage; it is the program's now, and the
-//! header is still refused at the spawn.
-//!
-//! Program-header vaddrs outside the loaded image are the other way in. Every
-//! case must be an error return, with the kernel intact afterwards. A
-//! library's headers are the program's own loader's to refuse (libc's
-//! `dlopen`).
+//! `p_filesz` and `p_memsz` are a (copy length, buffer size) pair to a loader,
+//! so the spec's `p_filesz <= p_memsz` is memory safety: inverted, a copy
+//! overruns its destination with file-chosen length *and* content. Every case
+//! must be an error return, with the kernel intact afterwards. A library's
+//! headers are the program's own loader's to refuse (`toyos::dl`).
 
 use std::fs;
 
@@ -122,9 +115,7 @@ fn spawn_as(path: &str, image: &[u8]) -> SyscallError {
 fn main() {
     fs::create_dir_all(DIR).expect("create /tmp/abuse_elf");
 
-    // 1. PT_TLS filesz > memsz, which the program-header parse refuses: 16 KiB
-    //    copied into a 16-byte kernel heap allocation while the kernel laid
-    //    out thread-local storage.
+    // 1. PT_TLS filesz > memsz, which the program-header parse refuses.
     let err = spawn_err("tls_filesz", &elf(Phdr {
         kind: PT_TLS, flags: 4, offset: 0x2000, vaddr: 0x2000,
         filesz: 0x4000, memsz: 16, align: 8,

@@ -9,9 +9,8 @@
 //! or TLS segment it must name, and answers with types that cannot hold
 //! anything else ([`ImageOffset`], [`SymIndex`], [`TlsOffset`]).
 //!
-//! [`RelocKind::write_width`] is the one table the parse and the writers both
-//! read: a type missing from it is a type nobody patches, and a type in it that
-//! no writer handles would be checked for a write that never happens.
+//! Every type [`Op`] has no variant for, but `NONE`, is refused: a slot left
+//! with its link-time value is a wrong pointer, not a skipped relocation.
 
 use crate::header::Machine;
 use crate::layout::{Extent, ImageOffset, TlsSegment};
@@ -26,10 +25,13 @@ pub const ENTRY_SIZE: usize = 24;
 /// rather than by any one machine's number: [`RelocKind::from_raw`] is the
 /// only place a number is read.
 ///
-/// `Other` carries the raw type rather than dropping it, so a log line can name
-/// what it skipped.
+/// `Other` carries the raw type, so its refusal can name it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelocKind {
+    /// `R_X86_64_NONE`, `R_AARCH64_NONE`: nothing to write.
+    None,
+    /// `R_X86_64_64`, `R_AARCH64_ABS64`
+    Abs64,
     /// `R_X86_64_GLOB_DAT`, `R_AARCH64_GLOB_DAT`
     GlobDat,
     /// `R_X86_64_JUMP_SLOT`, `R_AARCH64_JUMP_SLOT`
@@ -53,6 +55,8 @@ pub enum RelocKind {
 impl RelocKind {
     pub const fn from_raw(machine: Machine, r_type: u32) -> RelocKind {
         match (machine, r_type) {
+            (_, 0) => RelocKind::None,
+            (Machine::X86_64, 1) | (Machine::Aarch64, 257) => RelocKind::Abs64,
             (Machine::X86_64, 6) | (Machine::Aarch64, 1025) => RelocKind::GlobDat,
             (Machine::X86_64, 7) | (Machine::Aarch64, 1026) => RelocKind::JumpSlot,
             (Machine::X86_64, 8) | (Machine::Aarch64, 1027) => RelocKind::Relative,
@@ -62,21 +66,6 @@ impl RelocKind {
             (Machine::X86_64, 23) => RelocKind::Tpoff32,
             (Machine::Aarch64, 1031) => RelocKind::TlsDesc,
             (_, other) => RelocKind::Other(other),
-        }
-    }
-
-    /// How many bytes the loader writes for this type, or `None` for one it
-    /// never writes.
-    pub const fn write_width(self) -> Option<u64> {
-        match self {
-            RelocKind::GlobDat
-            | RelocKind::JumpSlot
-            | RelocKind::Relative
-            | RelocKind::DtpMod64
-            | RelocKind::DtpOff64
-            | RelocKind::Tpoff64 => Some(8),
-            RelocKind::Tpoff32 => Some(4),
-            RelocKind::TlsDesc | RelocKind::Other(_) => None,
         }
     }
 }
@@ -172,6 +161,16 @@ impl Reloc {
     }
 }
 
+impl Op {
+    /// The bytes it writes.
+    pub const fn width(&self) -> u64 {
+        match self {
+            Op::Tpoff32(_) => 4,
+            _ => 8,
+        }
+    }
+}
+
 /// What a [`Reloc`] writes, per psABI, with every file-chosen number already
 /// bounded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,8 +178,13 @@ pub enum Op {
     /// `B + A`, 8 bytes: the address the image was placed at plus a position
     /// inside it.
     Relative(ImageOffset),
-    /// `S`, 8 bytes: `GLOB_DAT` and `JUMP_SLOT`, bound to a symbol by name.
+    /// `S`, 8 bytes: `GLOB_DAT`, bound to a symbol by name.
     Bind(SymIndex),
+    /// `S`, 8 bytes: `JUMP_SLOT`, a call's slot, which a lazy loader binds at
+    /// the first call.
+    Call(SymIndex),
+    /// `S + A`, 8 bytes; `None` is `r_sym == 0`, whose `S` is 0.
+    Absolute(Option<SymIndex>, i64),
     /// `S + A - tp`, 8 bytes.
     Tpoff64(TlsRef),
     /// `S + A - tp`, 4 bytes, sign-extended by the instruction that reads it.
@@ -221,26 +225,11 @@ impl TlsSymRef {
     }
 }
 
-/// Parse one entry against the module's [`Rules`]: `Ok(None)` for a type this
-/// loader does not write, the reason for one it must not.
+/// Parse one entry against the module's [`Rules`]: `Ok(None)` for `NONE`,
+/// the reason for every type this loader does not write.
 ///
 /// A [`SymIndex`] in the answer indexes `symbols` and no other table.
-///
-/// The window is the *writable* one rather than the whole image: once the
-/// module is cached its read-only pages are shared between processes, and the
-/// write lands in a private allocation covering only that window.
 pub fn parse(rela: Rela, rules: &Rules, symbols: SymTab<'_>) -> Result<Option<Reloc>, RelocError> {
-    let Some(width) = rela.kind.write_width() else {
-        return match rela.kind {
-            RelocKind::TlsDesc => Err(RelocError::TlsDescriptor),
-            _ => Ok(None),
-        };
-    };
-    let (lo, hi) = rules.window;
-    let end = rela.offset.checked_add(width).ok_or(RelocError::OffsetOverflows)?;
-    if rela.offset < lo || end > hi {
-        return Err(RelocError::OutsideWindow);
-    }
     let sym = || SymIndex::below(rela.sym, symbols.count()).ok_or(RelocError::SymbolPastTable);
     let tls = || -> Result<TlsRef, RelocError> {
         if rela.sym != 0 {
@@ -253,81 +242,29 @@ pub fn parse(rela: Rela, rules: &Rules, symbols: SymTab<'_>) -> Result<Option<Re
             .ok_or(RelocError::TlsOutsideSegment)
     };
     let op = match rela.kind {
+        RelocKind::None => return Ok(None),
+        RelocKind::TlsDesc => return Err(RelocError::TlsDescriptor),
+        RelocKind::Other(raw) => return Err(RelocError::Unsupported(raw)),
         RelocKind::Relative => Op::Relative(
             u64::try_from(rela.addend)
                 .ok()
                 .and_then(|a| rules.extent.offset(a))
                 .ok_or(RelocError::RelativeOutsideImage)?,
         ),
-        RelocKind::GlobDat | RelocKind::JumpSlot => Op::Bind(sym()?),
+        RelocKind::Abs64 => Op::Absolute(if rela.sym == 0 { None } else { Some(sym()?) }, rela.addend),
+        RelocKind::GlobDat => Op::Bind(sym()?),
+        RelocKind::JumpSlot => Op::Call(sym()?),
         RelocKind::Tpoff64 => Op::Tpoff64(tls()?),
         RelocKind::Tpoff32 => Op::Tpoff32(tls()?),
         RelocKind::DtpMod64 => Op::DtpMod64(if rela.sym == 0 { None } else { Some(sym()?) }),
         RelocKind::DtpOff64 => Op::DtpOff64(tls()?),
-        RelocKind::TlsDesc | RelocKind::Other(_) => return Ok(None),
     };
+    let (lo, hi) = rules.window;
+    let end = rela.offset.checked_add(op.width()).ok_or(RelocError::OffsetOverflows)?;
+    if rela.offset < lo || end > hi {
+        return Err(RelocError::OutsideWindow);
+    }
     Ok(Some(Reloc { offset: rela.offset, op }))
-}
-
-/// How many entries of each kind a set of tables holds.
-///
-/// The loader reserves exactly from these instead of letting a `Vec` double:
-/// `DT_RELASZ` and `DT_PLTRELSZ` are bounded separately, so two individually
-/// acceptable tables sum to a collection no bound on either input can catch,
-/// and growth-by-doubling then overshoots that sum as well.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RelaCounts {
-    pub relative: usize,
-    pub bind: usize,
-    pub tpoff64: usize,
-    pub tpoff32: usize,
-    pub dtpmod64: usize,
-    pub dtpoff64: usize,
-    pub tlsdesc: usize,
-}
-
-impl RelaCounts {
-    pub fn of(entries: impl Iterator<Item = Rela>) -> RelaCounts {
-        let mut counts = RelaCounts::default();
-        for rela in entries {
-            let slot = match rela.kind {
-                RelocKind::Relative => &mut counts.relative,
-                RelocKind::GlobDat | RelocKind::JumpSlot => &mut counts.bind,
-                RelocKind::Tpoff64 => &mut counts.tpoff64,
-                RelocKind::Tpoff32 => &mut counts.tpoff32,
-                RelocKind::DtpMod64 => &mut counts.dtpmod64,
-                RelocKind::DtpOff64 => &mut counts.dtpoff64,
-                RelocKind::TlsDesc => &mut counts.tlsdesc,
-                RelocKind::Other(_) => continue,
-            };
-            *slot += 1;
-        }
-        counts
-    }
-
-    /// The largest of the counts a caller actually reserves for.
-    ///
-    /// Deliberately not "the largest count": a ceiling on a kind nothing
-    /// stores refuses a file over a collection that does not exist, and a
-    /// library is about 99.5 % `RELATIVE` — so a cache that bounded itself on
-    /// `relative`, which it keeps none of, would refuse to cache every real
-    /// library in the tree.
-    pub fn max_of(&self, kinds: &[RelocKind]) -> usize {
-        kinds.iter().map(|&k| self.count_of(k)).max().unwrap_or(0)
-    }
-
-    pub fn count_of(&self, kind: RelocKind) -> usize {
-        match kind {
-            RelocKind::Relative => self.relative,
-            RelocKind::GlobDat | RelocKind::JumpSlot => self.bind,
-            RelocKind::Tpoff64 => self.tpoff64,
-            RelocKind::Tpoff32 => self.tpoff32,
-            RelocKind::DtpMod64 => self.dtpmod64,
-            RelocKind::DtpOff64 => self.dtpoff64,
-            RelocKind::TlsDesc => self.tlsdesc,
-            RelocKind::Other(_) => 0,
-        }
-    }
 }
 
 /// Why a relocation cannot be applied.
@@ -342,6 +279,9 @@ pub enum RelocError {
     /// A TLS descriptor, which only a resolver this loader does not have can
     /// fill.
     TlsDescriptor,
+    /// A type this loader does not apply, by its number: `COPY` and
+    /// `IRELATIVE` among them.
+    Unsupported(u32),
     /// A `RELATIVE` addend that is no address inside the image: psABI `B + A`
     /// with `A` a link-time address, and the image is all this module has.
     RelativeOutsideImage,
@@ -360,6 +300,7 @@ impl RelocError {
             RelocError::OutsideWindow => "ELF: relocation r_offset outside the writable image",
             RelocError::SymbolPastTable => "ELF: relocation r_sym past .dynsym",
             RelocError::TlsDescriptor => "ELF: R_AARCH64_TLSDESC has no resolver in this loader",
+            RelocError::Unsupported(_) => "ELF: a relocation type this loader does not apply",
             RelocError::RelativeOutsideImage => "ELF: RELATIVE addend is no address inside the image",
             RelocError::TlsOutsideSegment => "ELF: TLS relocation names an offset outside its PT_TLS",
             RelocError::TpoffOverflows => "ELF: TPOFF value does not fit the field it is written to",
@@ -369,7 +310,10 @@ impl RelocError {
 
 impl core::fmt::Display for RelocError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.as_str())
+        match self {
+            RelocError::Unsupported(raw) => write!(f, "ELF: relocation type {raw}, which this loader does not apply"),
+            _ => f.write_str(self.as_str()),
+        }
     }
 }
 
