@@ -80,8 +80,9 @@ unsafe fn movsb(dest: *mut u8, src: *const u8, n: usize) {
 /// The distance under which [`copy_long`] copies highest first.
 const SHORT_ALIAS: usize = 512;
 
-/// The shortest copy that asks where its ends sit, the shortest length a
-/// stall has been measured at. Whether a shorter copy stalls is unmeasured.
+/// The shortest copy that asks where its ends sit. Shorter copies stall too
+/// (`issues/a-user-copy-a-short-way-above-its-source-modulo-4-kib-still-costs.md`)
+/// but take one `rep movsb` behind one compare.
 const ROUTED_LEAST: usize = 4096;
 
 /// The longest copy [`copy_long`] copies highest first. A longer one runs

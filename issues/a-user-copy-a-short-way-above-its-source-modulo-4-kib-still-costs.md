@@ -25,7 +25,8 @@ The two benches stall over different windows, and the route covers both:
   and d = 16 it takes 2615 ns against 90 at d = 0.
 - **T14 (i5-1135G7, Tiger Lake).** `copyat`'s copies, whose ends are 1 MiB
   plus the distance apart, read 714–773 ns at d = 16–64 and 206 at 256
-  against 74 at d = 0, and 122 at 512. The 512 window is set by these rows.
+  against 74 at d = 0, then 122 at 512, 108 at 640 and 88 at 1024. The
+  cost tapers rather than ending, and 512 is a choice within the taper.
   Intel documents 4K aliasing on bits 11:0, but the same bench read 124 ns
   for two heap `Vec`s 64 KiB + 16 apart and 136 for #1139's in-process copy
   at d = 16, so what decides the T14's stall is not established.
@@ -46,10 +47,12 @@ destination `d` bytes above the source:
   The descending loop beat it at d = 16 there, 612 µs and 9.8 ms. At 4 MiB and
   d = 256, a distance that does not stall, it lost: 597 µs against 385.
 
-- **Below 4 KiB, unmeasured.** No bench has timed a copy under 4 KiB at a
-  stalling distance, so whether one stalls, and what it costs, is unknown.
-  Round 8 adds unjudged `copyat` rows at 256, 1024 and 2048 bytes, d = 0 and
-  16.
+- **AMD, below 4 KiB.** These copies stall and are not routed. Round 8
+  (base a049276a6, two boots, p50s identical in both) read, at d = 0 and
+  d = 16: 256 B 30 and 90 ns, 1 KiB 31 and 270, 2 KiB 40 and 511 (base's
+  4 KiB: 60 and 992). Nothing below 256 B has been measured. Routing them
+  costs every copy from the new threshold up its out-of-line call: round
+  8's 4 KiB copies at d = 0, which take that call, read 0.97 of main's.
 
 One T14 head boot read `mem.memcpy.64` at 6873 MB/s in all 15 rounds. The
 other three boots read 16649–18226. That copy is page-aligned at d = 0 and
@@ -67,6 +70,11 @@ Evidence: `ToyOSOrg/evidence` branch `pr-1133`, commit
 - C4: `copyat.<size>.libc.s0.d16` and `.d256`, for every size from 64 KiB to
   64 MiB, within 1.1 times base's same row, and on the AMD also within 1.1
   times base's d = 0 row of that size.
+
+- C6: `copyat.<size>.libc.s0.d16` for 256 B, 1 KiB and 2 KiB within 1.5
+  times that size's d = 0 on the AMD, with every `mem.memcpy.*` row within
+  1.1 times main's; or a recorded decision that short copies keep the stall
+  because routing them costs more than it saves.
 
 The `mem.memcpy.64` outlier is reproduced and explained, or shown to be
 independent of this copy.
