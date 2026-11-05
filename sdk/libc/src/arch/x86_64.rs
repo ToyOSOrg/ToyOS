@@ -23,14 +23,15 @@ unsafe extern "C" fn _start() -> ! {
 /// Copy `n` bytes from `src` to `dest` as a forward copy would: correct for
 /// any `dest` not above an overlapping `src`.
 ///
-/// A destination less than [`SHORT_ALIAS`] above its source modulo 4 KiB makes
-/// each load of a forward copy match an older, unrelated store on address bits
-/// 11:0, which the load/store unit takes as a possible dependence: AMD's
-/// Family 17h judges store-to-load forwarding by those bits alone (Software
-/// Optimization Guide for AMD EPYC 7002, 56305 rev. 3.02, §2.12), as Intel's
-/// 4K aliasing does (Intel 64 and IA-32 Architectures Optimization Reference
-/// Manual). Copied highest first, every store such a load could match is
-/// 4 KiB minus the distance behind it and long retired.
+/// A forward copy whose destination is a short way above its source modulo
+/// 4 KiB loads each byte soon after storing to an unrelated address with the
+/// same bits 11:0, and the load waits on that store: AMD's Family 17h judges
+/// store-to-load forwarding eligibility by those bits alone (Software
+/// Optimization Guide for AMD Family 17h Models 30h and Greater Processors,
+/// 56305 rev. 3.02, §2.12), and Intel calls it 4K aliasing (Intel 64 and
+/// IA-32 Architectures Optimization Reference Manual). Copied highest first,
+/// every store such a load could match is 4 KiB minus the distance behind it
+/// and long retired.
 pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
     let distance = (dest as usize).wrapping_sub(src as usize) % 4096;
     // `distance` in 1..SHORT_ALIAS, as one compare.

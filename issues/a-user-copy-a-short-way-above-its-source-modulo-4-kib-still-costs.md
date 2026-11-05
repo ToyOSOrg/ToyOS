@@ -9,11 +9,27 @@ opened: 2026-11-02
 `sdk/libc`'s `copy_forward` (`sdk/libc/src/arch/x86_64.rs`) copies highest
 first when it has at least 64 bytes and at most 1 MiB, its destination is
 1 to 511 bytes above its source modulo 4096, and the two ranges are disjoint.
-Every other copy is one `rep movsb`. Each load of a forward copy at such a
-distance matches an older, unrelated store on address bits 11:0 (AMD
-56305 rev. 3.02, §2.12). Before this route the copy was 10 to 29 times
-slower. Round 5 of `osbench copyat` measured what is left. That was base
-80421e74a against head 0f861df89, four boots per bench, p50s, with the
+Every other copy is one `rep movsb`.
+
+The two benches stall over different windows, and the route covers both:
+- **AMD (Ryzen 7 4800U, Zen 2).** The processor judges store-to-load
+  forwarding eligibility by address bits 11:0 (Software Optimization Guide
+  for AMD Family 17h Models 30h and Greater Processors, 56305 rev. 3.02,
+  §2.12). A forward `rep movsb` from 4 KiB to 64 KiB stalls at d = 8, 16,
+  24 and 31 and at no distance tried from 32 to 2048 (#1139's in-process
+  `kcopyat.movsb` rows, `ToyOSOrg/evidence` commit
+  `776c503ac402da3dc9c419fb2593a0b8ec79eabe`, `kmemcpy/round-3/`). Up to
+  64 MiB it stalls at d = 16 and not at 256 (`copyat`, round 5). At 8 KiB
+  and d = 16 it takes 2615 ns against 90 at d = 0.
+- **T14 (i5-1135G7, Tiger Lake).** `copyat`'s copies, whose ends are 1 MiB
+  plus the distance apart, read 714–773 ns at d = 16–64 and 206 at 256
+  against 74 at d = 0, and 122 at 512. The 512 window is set by these rows.
+  Intel documents 4K aliasing on bits 11:0, but the same bench read 124 ns
+  for two heap `Vec`s 64 KiB + 16 apart and 136 for #1139's in-process copy
+  at d = 16, so what decides the T14's stall is not established.
+
+Round 5 of `osbench copyat` measured what is left after the route. That was
+base 80421e74a against head 0f861df89, four boots per bench, p50s, with the
 destination `d` bytes above the source:
 
 - **T14 (i5-1135G7), up to 1 MiB.** Routed 8 KiB copies take 82–103 ns
