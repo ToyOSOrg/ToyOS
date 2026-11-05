@@ -12,74 +12,13 @@ child's end as a signal (stage 4), sessions (5), a request to quit (6) and job
 control (7). M4 of `issues/toyos-builds-itself.md` and the exit of
 `issues/toyos-runs-on-arm64.md` need the rest.
 
-**Constraints.** libc is built on ToyOS and never ToyOS on libc (owner,
-2026-09-30: "toyos moderness and anti legacy may never be compromised because
-of libc. no legacy"). One mechanism (owner: "i dont want multiple
-mechanisms"): the `Process` handle is the only control, and the kernel grows
-no job-control object, process group, POSIX session, controlling terminal,
-signal, wait-any, pid-addressed call or thread. The scheduler's job (#979,
-`kernel::sched::job`) is the owner CPU time is shared under, and no quit or
-kill reads it. What names a child's image and working directory is
-`issues/every-program-sees-only-the-files-it-was-given.md`'s.
-
-**Ruled** (owner, 2026-09-30):
-
-- A child's end is readiness on its handle: `OP_WATCH` `READABLE` on a
-  `Process` (`WAIT`) completes once the exit is published, closing one handle
-  ends no other's watch, and the ABI gains nothing.
-- Every process has one parent and any number of children, and a parent's end
-  — exit, crash or kill — kills its whole subtree at once; quitting gracefully
-  is the parent's job before it exits, never the kernel's. The kernel starts
-  init and init starts everything else, with no rule for services: a server
-  is init's child and lives as long as init. An app uses a server through
-  handles and is never its child. "Keep running after I close this" asks init,
-  through `launcher`, to be the parent, and nothing else reparents. A kill is
-  cleanup without cooperation, run on the causing path in bounded steps. init
-  never dies and stays tiny.
-
-  Since stage 5, init is the supervisor and, for each login session, its
-  owner: "keep running after I close this" in a login session places the app
-  under that session's owner, and only in the machine's session under the
-  supervisor.
-
-**Ruled** (owner, 2026-10-21): libc's signals are the focused set this track
-plans, over native process events: a child's end (stage 4) and an interrupt,
-hang-up or terminate request (stage 6), and no POSIX signal subsystem up
-front. libc's adaptation stays in userland, and ordinary Rust behaviour is
-kept. Further signal behaviour comes when a required program shows a
-concrete need, with its semantics and cost reviewed then. An unsupported
-signal operation never appears to succeed.
-
-`signal` and `sigaction` keep a handler only for a signal an event raises
-(`SIGCHLD`, `SIGALRM`, `SIGINT`, `SIGHUP`, `SIGTERM`) and refuse one for any
-other, which nothing would call (`sdk/libc/src/sigreq.rs`).
-
-init is `/system/bin/supervisor`.
-
-**Ruled** (owner, 2026-10-22): one userland session-owner process per login
-session, which also provides that session's launcher, with no separate session
-or launcher daemon. The supervisor owns the session owners, and each session
-owner owns its desktop or terminal tree and the apps detached from it. An app
-meant to outlive the shell that started it starts under the session owner, not
-the supervisor: closing the shell leaves it running, and switching users keeps
-the session alive. Ordinary shell commands spawn helpers, which inherit only
-what is passed to them; `launch <app>` is the explicit independent launch, with
-the app's own identity and saved decisions, and independent identity does not
-mean detached lifetime. Sign-out coordinates a graceful shutdown, with cancel
-and force, before it ends the session's subtree. A session owner's failure may end
-that session, never another session or a system service. SSH
-authentication starts the user's session, and its shell inherits no host key
-and no SSH service authority. The kernel's mechanisms stay ordinary processes,
-parent and child, jobs and capabilities; login and session policy is
-userland's.
-
-**No timer ends a process.** A dropped session or a closed terminal sends its
-tree a hang-up quit, says what stays, by name and how long it has been
-outstanding, and keeps waiting. Only an explicit force ends the rest: a
-sign-out's force, through a capability the supervisor mints scoped to the
-user's own sessions, or the controls' stop. The kernel's second quit, which
-kills a process that has not read the first, is such a force when a person or
-an explicit force issues it, and never a timer's.
+Rulings that bound the stages: libc is built on ToyOS and never ToyOS on
+libc, and the `Process` handle is the only control (owner, 2026-09-30); a
+child's end is readiness on its handle and a parent's end takes its subtree
+(2026-09-30); libc's signals are the focused set stages 4 and 6 build (2026-10-21); one
+session-owner process per login session (2026-10-22). init is
+`/system/bin/supervisor`, and `signal` and `sigaction` keep a handler only for
+a signal an event raises (`sdk/libc/src/sigreq.rs`).
 
 ## Stages
 

@@ -6,61 +6,11 @@ opened: 2026-09-26
 
 # Where everything lives, and how a program finds it
 
-The owner ruled this layout on 2026-09-26. This file is where it is recorded:
-`issues/storage-is-layers-and-a-role-is-a-filesystem.md` says what
-backs each name, and
-`issues/a-user-is-a-home-tree-and-a-login-row.md` and
-`issues/every-program-sees-only-the-files-it-was-given.md` say who
-may reach it. Every line below is the owner's ruling.
-
-## The tree
-
-```
-/system                read-only, signed: bin, lib, etc, and
-                       share/{fonts, icons, themes, sounds, backgrounds, licenses, doc}
-/config                machine settings the owner changes; a file here overrides /system/etc
-/state/<program>       a system service's private persistent data
-/apps/<name>           installed packages; no layout is required inside one
-/home/<user>           Desktop Documents Downloads Music Pictures Videos Fonts Apps/<name>/
-/boot                  bootloader, kernel, kernel arguments; the updater's alone
-/log  /media           logs; foreign volumes, one /media/<label> each
-/tmp                   one per session; each service and app its own
-```
-
-`/system` is signed because the image is:
-`issues/the-machine-updates-itself-without-ubuntu.md` signs it, and
-until that lands nothing verifies it.
-
-## The rules
-
-- **No drive letters, no `/usr`, `/var`, `/opt`, `/dev`, `/proc` or `/sys`**:
-  devices and processes are capabilities and syscalls here, not files.
-- **No dotfile and no hidden folder anywhere in the layout.** A third-party
-  program that hard-codes `~/.something` may still create one, but only inside
-  its own app folder: the owner accepted that as the honest limit.
-- **English names, never translated.**
-- **A path means the same file in every view.** `/tmp` is the one exception:
-  a session's programs share one, and each service and each app has its own
-  (amended by the owner, 2026-10-03: "Per session"). A view hides names and
-  never renames one.
-- **A program learns a location from an environment variable init sets**
-  (`HOME` and those like it). A location grants nothing, because the view
-  decides what a program can reach. On ToyOS `std::env::home_dir()` is `$HOME`
-  or `None`, with no fallback, and `temp_dir()` is `/tmp`. A program init did
-  not start carries the `HOME` its caller named or init answered for it, never
-  its parent's own.
-- **`/home/<user>/Apps/<name>` is one app's private data for that user**, and
-  it is that app's `HOME`. Inside it ToyOS answers config, data, cache and
-  state as the visible `Config`, `Data`, `Cache` and `State`.
-- **Fonts**: the system's are in `/system/share/fonts`, a user's in
-  `/home/<user>/Fonts`. sans-serif and system-ui are Open Sans, monospace is
-  JetBrains Mono, and serif is empty until a licence-clean one is chosen.
-- **The time zone is machine-wide in `/config`.** The keyboard layout and the
-  language are machine defaults in `/config`, and per-user overrides come with
-  the users track.
-- **The dev image's user is `toy`.** There is no `root` user and no
-  `/home/root`.
-- An app finds its own files next to its binary (`current_exe()`).
+The file tree's layout and naming rules, ruled by the owner on 2026-09-26 and
+amended for `/tmp` on 2026-10-03, built in the stages below.
+`issues/storage-is-layers-and-a-role-is-a-filesystem.md` builds what backs
+each name, and `issues/a-user-is-a-home-tree-and-a-login-row.md` and
+`issues/every-program-sees-only-the-files-it-was-given.md` who may reach it.
 
 ## Stages
 

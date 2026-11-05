@@ -12,7 +12,8 @@ design is put to him and ruled, "Refuse external, record reflash" (owner,
 port is refused by name (`issues/the-iommu-refuses-nothing-yet.md`,
 `issues/a-driver-that-reflashes-its-device-escapes-its-isolation.md`).
 
-**Constraint**: root `CLAUDE.md`, the trust model under Architecture.
+**Constraint**: a device behind an external port is isolated: its DMA stays
+behind the IOMMU, whoever signed its driver.
 
 Owner: the orchestrator.
 

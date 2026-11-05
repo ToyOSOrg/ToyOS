@@ -7,67 +7,19 @@ opened: 2026-09-24
 # Every program sees only the files it was given
 
 Owner ruling, 2026-09-24: isolation is non-negotiable, and the filesystem is no
-longer the declared exception to the capability model. This reverses question
-2 of `issues/the-capability-end-state-is-twelve-answers.md`. Today any
+longer the declared exception to the capability model. This reverses his
+ruling of 2026-08-20 that kept the filesystem outside it. Today any
 process opens, deletes or spawns any path outside `/state`, so there is no
 boundary between two programs, let alone between two people. Of `/state` each
 row holds only its own directory, so sshd's key list is reachable from sshd
 and what it spawns directly (`issues/sshserver-authorized-keys-unprotected.md`).
 
-## The model
-
-The unit of isolation is the program. A user is the part of the tree a session
-was handed, so isolating people follows from isolating programs.
-
-- **A process has its own view of the tree.** `/` is per process, built by its
-  parent: init builds every program's view from its `system.toml` row, the way
-  it already builds the program's service namespace. Paths keep working, and a
-  path names something only if it lies inside the caller's view.
-- **A child's view is at most its parent's.** Nothing widens a view after
-  spawn, and nothing in it is inherited wider than the parent held it. The
-  swap port leaking to whatever sshd spawns (PR #484's review) is the same
-  shape of defect in the service namespace. **A launch is the exception, and
-  its caller's row is the approval** (owner, 2026-10-03, "Restrict": each
-  program may start only the programs its configuration row lists; swap and
-  update of system programs only from the login session): the launched
-  program holds its own row, the supervisor refuses a row the caller's
-  `starts` does not list, and a direct spawn never inherits a launcher.
-- **Resolution cannot leave the view.** `..` at a view's root, a symlink,
-  a rename racing a lookup, or a held directory handle never resolves outside
-  the view. This is the classic way a restricted root is escaped, so it is
-  built into the resolver by construction and tested adversarially, not
-  checked afterwards.
-- **Sharing is granted, never reached.** A file outside a program's view
-  reaches it only through the file picker, which hands over that one file.
-- **The special cases go.** `/boot` is in the updater's view and nobody else's.
-  With that, the mount guard is deleted. Login data sits in the login
-  authority's view alone.
-
-**Ruled** (owner, 2026-10-03):
-
-- **Who starts programs, "Restrict"**: a program starts only the programs its
-  own `system.toml` row lists, and a system program is swapped or updated only
-  from the login session.
-- **Grants, "Adopt"**: a file grant is an unforgeable badge on a connection,
-  written by whoever minted the connection; the kernel vouches for what was
-  granted, never for who connects. Revocation comes later.
-- **`/tmp`, "Per session"**: a session's programs share one `/tmp`, and each
-  service and each app has its own. This amends the 2026-09-26 ruling of
-  `issues/where-everything-lives.md` that `/tmp` is private per
-  program.
-
-**Ruled** (owner, 2026-10-04), **the local desktop, "Desktop counts"**: the
-local desktop is a login session before a greeter authenticates anybody, so
-`swap` and `update` run from its shell. His words: "You can run swap/update
-from the desktop shell, as today. After #709, untrusted desktop programs no
-longer hold the launch right anyway, so excluding the desktop would mostly
-just block you." That premise holds while only the compositor, terminal,
-shell, toybox and sshserver rows list `starts` and no `/apps` row does. The
-compositor's `login = true` in `system.toml` is the whole of it. Whether the
+Rulings that bound the stages: who starts programs, "Restrict", grants as
+badges on a connection, "Adopt", and `/tmp` per session (owner, 2026-10-03);
+the local desktop counts as a login session, "Desktop counts" (owner,
+2026-10-04), a premise that holds while only the compositor, terminal, shell,
+toybox and sshserver rows list `starts` and no `/apps` row does. Whether the
 desktop stays one once stage 3's local greeter exists is not ruled.
-
-Unix permission bits and numeric user ids are rejected: they leave every path
-nameable by every program and make confused-deputy bugs structural.
 
 ## Stages
 

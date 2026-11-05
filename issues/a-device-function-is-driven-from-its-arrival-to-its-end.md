@@ -14,60 +14,18 @@ when it spawns it, and starts a `drives` row's process on each function it
 reads free in the inventory, at boot and after each end of a process it
 started. Nothing reaches userland when a device arrives or leaves.
 
-**Ruled** (owner, 2026-10-13):
-
-1. The kernel hands out only what the IOMMU can tell apart: PCI functions, ISA
-   rows, platform devices. The supervisor brokers those from `system.toml`, at
-   boot and whenever one arrives later, by moving the claim to a driver. A bus
-   service (usbd, one per xHCI controller) owns everything behind its
-   controller, keeps its device classes (HID, mass storage) inside its process,
-   and speaks the client protocols directly (input, block). The supervisor
-   never sees a USB device; the client port carries a per-device source and
-   `gone`. The client-facing protocol is the unifying boundary, not the bus.
-2. One driver process per kernel-handed function (diskserver per NVMe
-   controller, a NIC driver per function, usbd per controller); one shared
-   service per client-facing function (fileserver, netstack, the input owner,
-   the compositor). The supervisor is the persistent waiter: a function at boot
-   or arriving later is the same event answered by the same spawn; a leaf
-   driver starts with its device and ends when it is `gone`. The 4-claim-slot
-   limit and the process-count issue are defects to remove, not design inputs.
-3. Removal invalidates the claim, which answers `Gone`; a returning device is
-   a fresh arrival with a new handle. Identity (serial, GPT GUID) is the
-   driver's and fileserver's business, never the kernel's. Short USB glitches
-   stay inside usbd's port ladder.
-
-**Ruled** (orchestrator, on #910):
-
-- PCIe hot-plug is stage 2. Stage 1 is the ownership and event model.
-- Physical PCI arrival has no metal witness until a bench has a hot-plug port
-  whose functions the owner lets a driver claim. That comes through
-  `issues/toyos-supports-thunderbolt-and-usb4.md`. USB arrival, the hot-plug
-  both benches have, is usbd's and comes with stage 4.
-- Native PCIe hot-plug only. A machine that offers only ACPI hot-plug is a gap
-  this track records, not one it serves.
-- The device set is a level-triggered snapshot that the supervisor diffs, not
-  an event ring.
-- A driver instance reaches its consumer as a client of the consumer's port,
-  wired as ports are today. It never serves a name for connect-by-name.
-- The claim-slot limit is removed by stage 1 if cheap, otherwise by its own
-  pull request before stage 1's guest smoke
-  (`issues/a-cargo-run-boot-claims-every-pcidev-slot.md`).
-
-**Ruled** (orchestrator, 2026-10-20, on the step-10 brief; it replaces #901's
-`block@<location>` ports, `each`, `pci@` and several block services):
-
-- One shared block service, diskserver, serves `block` to its clients
-  (unchanged: grants are supervisor-minted badges) and `disk` to disk drivers.
-  A disk driver is a `drives` row receiving `disk`: it reads its own GPT,
-  offers each disk's partitions, and says when a disk is gone.
-- On an open the service checks the grant and hands the client's connection
-  and region to the offering driver, which answers `MSG_OPENED` on the
-  client's connection and serves the session itself; data never passes the
-  service (`toyos_blockring::disk`, `lib/blockserve`).
-- The supervisor starts the `drives` processes before the storage rows and
-  tells the block service how many disk drivers it started. An open of a
-  partition no disk offers, and a listing, wait until every boot-started disk
-  driver has settled, each wait bounded and naming the driver that did not.
+Rulings that bound the stages: the ownership and event model (owner,
+2026-10-13); PCIe hot-plug as stage 2, native only, with physical arrival
+witnessed through `issues/toyos-supports-thunderbolt-and-usb4.md`, and the
+claim-slot limit removed by stage 1 if cheap, otherwise by its own pull
+request before stage 1's guest smoke
+(`issues/a-cargo-run-boot-claims-every-pcidev-slot.md`) (orchestrator, on
+#910); and one shared block service to which disk drivers offer their disks
+(orchestrator, 2026-10-20, replacing #901's `block@<location>` ports). The
+supervisor starts the `drives` processes before the storage rows and tells
+the block service how many disk drivers it started; an open of a partition no
+disk offers, and a listing, wait until every boot-started disk driver has
+settled, each wait bounded and naming the driver that did not.
 
 **Measured**:
 

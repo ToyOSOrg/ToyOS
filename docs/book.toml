@@ -1,0 +1,11 @@
+[book]
+title = "The ToyOS Manual"
+description = "How ToyOS works and is meant to work."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../target/manual"
+
+[output.html]
+git-repository-url = "https://github.com/ToyOSOrg/ToyOS"

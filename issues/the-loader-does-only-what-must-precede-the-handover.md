@@ -11,7 +11,7 @@ The owner's bounds:
 - the loader does only what must precede the handover;
 - the hardware clock keeps UTC;
 - the kernel calls no UEFI service, and every UEFI call ToyOS makes is the
-  loader's, before `ExitBootServices` (root `CLAUDE.md`);
+  loader's, before `ExitBootServices`;
 - the anti-rollback floor counts a signed security version, raised only by a
   release that fixes a security hole;
 - the loader calls UEFI through its own bindings, never the `uefi` crate's

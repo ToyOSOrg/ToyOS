@@ -46,7 +46,7 @@ Hardware oracles come from vendor specifications or independent evidence checked
 - Preserve CI security: actions are pinned by full commit hash or valid local path; runners are GitHub-hosted, except the guest runner, which only a `workflow_dispatch`-only workflow may name. No privileged triggers that execute untrusted code as main. Only main publishes caches other refs restore; nightly release alone receives `contents: write`. Do not bypass required checks, hide failures with `continue-on-error`, or introduce a write-capable cache on a PR.
 - For workflow, build or harness changes, read `build/CLAUDE.md` and `tests/CLAUDE.md` for their operational contracts, including CI cache provenance and corpus membership.
 - An actuator-controlled kernel static is accessed only under its guard or in actuator-only code. A `cfg(not(feature = ...))` arm ships and is not an exemption.
-- Changed or removed commands, flags, steps and documents have their instruction references updated in the same change. For deleted documents search both name and path outside `issues/`. Replace contradictory instruction rules rather than appending exceptions.
+- A changed architectural decision or requirement has its manual page updated in the same change, and the manual stays free of code references (root `CLAUDE.md`). Changed or removed commands, flags, steps and documents have their instruction references updated in the same change. For deleted documents search both name and path outside `issues/`. Replace contradictory instruction rules rather than appending exceptions.
 
 ## Findings and verdict
 
