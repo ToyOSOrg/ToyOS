@@ -9,10 +9,10 @@
 //! kernel laid out thread-local storage; it is the program's now, and the
 //! header is still refused at the spawn.
 //!
-//! A `p_memsz` no allocator can satisfy, and program-header vaddrs outside the
-//! loaded image, are the other two ways in. Every case must be an error return,
-//! with the kernel intact afterwards. A library's headers are the program's
-//! own loader's to refuse (libc's `dlopen`).
+//! Program-header vaddrs outside the loaded image are the other way in. Every
+//! case must be an error return, with the kernel intact afterwards. A
+//! library's headers are the program's own loader's to refuse (libc's
+//! `dlopen`).
 
 use std::fs;
 
@@ -122,24 +122,14 @@ fn spawn_as(path: &str, image: &[u8]) -> SyscallError {
 fn main() {
     fs::create_dir_all(DIR).expect("create /tmp/abuse_elf");
 
-    // 1. PT_TLS filesz > memsz: 16 KiB copied into a 16-byte kernel heap
-    //    allocation. The overflow that made this test necessary.
+    // 1. PT_TLS filesz > memsz, which the program-header parse refuses: 16 KiB
+    //    copied into a 16-byte kernel heap allocation while the kernel laid
+    //    out thread-local storage.
     let err = spawn_err("tls_filesz", &elf(Phdr {
         kind: PT_TLS, flags: 4, offset: 0x2000, vaddr: 0x2000,
         filesz: 0x4000, memsz: 16, align: 8,
     }));
     assert_eq!(err, SyscallError::InvalidArgument, "PT_TLS filesz > memsz");
-
-    // 2. PT_TLS memsz no allocator can satisfy — must be an error, not an
-    //    `.expect` panic in syscall context.
-    let err = spawn_err("tls_huge", &elf(Phdr {
-        kind: PT_TLS, flags: 4, offset: 0x2000, vaddr: 0x2000,
-        filesz: 0, memsz: u64::MAX / 2, align: 8,
-    }));
-    assert!(
-        matches!(err, SyscallError::InvalidArgument | SyscallError::ResourceExhausted),
-        "PT_TLS memsz = u64::MAX/2 gave {err:?}",
-    );
 
     // 3. PT_TLS vaddr far outside every PT_LOAD.
     let err = spawn_err("tls_vaddr", &elf(Phdr {

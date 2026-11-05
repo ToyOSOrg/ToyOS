@@ -369,35 +369,12 @@ fn main() {
             .build(),
     );
 
-    // 5. PT_TLS p_align is a file-chosen addend to the TLS block's size.
-    //    u64::MAX wrapped the size computation, and the layout that fell out
-    //    of it tripped the block's own "DTV overlaps TLS data" assert.
+    // 5. A PT_TLS p_align that is no power of two, which the program-header
+    //    parse refuses: u64::MAX once wrapped the kernel's TLS block size.
     spawn_refused(
         "tls_align_wrap",
         &base_exe(0x4000)
             .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x2000, vaddr: 0x2000, filesz: 0, memsz: 8, align: u64::MAX })
-            .build(),
-    );
-
-    // 6. A TLS size that leaves no room for the DTV in front of it. The DTV
-    //    is a fixed 528-byte header the kernel writes at the start of the
-    //    same allocation, and nothing counted it when sizing that allocation.
-    //    Legal to load once it is counted, so the assertion is survival.
-    let _ = spawn_result(
-        "tls_crowds_dtv",
-        &base_exe(0x4000)
-            .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x2000, vaddr: 0x2000, filesz: 0, memsz: 0x1F_FF00, align: 8 })
-            .build(),
-    );
-
-    // 7. A TLS template just under 2 MiB. The kernel heap's page source
-    //    asserts above 2 MiB, and dlmalloc rounds a request up to a whole
-    //    2 MiB granule *plus* its own bookkeeping — so the guard on the
-    //    allocation was short by exactly that bookkeeping.
-    spawn_refused(
-        "tls_template_2m",
-        &base_exe(0x4000)
-            .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x2000, vaddr: 0x2000, filesz: 0, memsz: 0x1F_FFF0, align: 8 })
             .build(),
     );
 
