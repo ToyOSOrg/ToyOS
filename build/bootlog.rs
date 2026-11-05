@@ -9,7 +9,10 @@
 //! panel. **What neither half sees**: a hang between the stop mark and the
 //! reset — the drivers' stop, the kernel's quiesce, the reset itself — that
 //! the boot deadline then ends leaves the same volume as a clean stop, and is
-//! told apart only by coming back late by about that deadline.
+//! told apart only by coming back late. Its `back_secs` is held to twice the
+//! bench's record, so that reds only where the deadline is past twice the
+//! boot's own come-back: true of a short list, not of one that runs near its
+//! bound.
 //!
 //! Neither the T14 driver's nor the QEMU harness's — `tests/metal` reads a log
 //! off a flashed stick and `tests/common/power.rs` reads one off a guest's log

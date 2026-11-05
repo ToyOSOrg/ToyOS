@@ -1086,18 +1086,24 @@ mod tests {
     }
 
     /// **Only the row that keeps the log writes `/log`**: the row holding the
-    /// log's origins, and no row that merely receives its wire or is named
+    /// log's origins, and neither a row that receives its wire nor one named
     /// like it.
     #[test]
     fn only_the_log_keeper_writes_the_log() {
         let m = parse(&format!(
-            "program logkeeper /system/bin/logkeeper\nhold {}\nprogram uart /system/bin/uart\nprogram shell /system/bin/shell\n",
-            toyos_logstream::ORIGINS
+            "program logkeeper /system/bin/logkeeper\nhold {}\nprogram uart /system/bin/uart\nreceive {}\n\
+             program shell /system/bin/shell\n",
+            toyos_logstream::ORIGINS,
+            toyos_logstream::WIRE,
         ));
-        let log = |row: &str| views(m.program(row).unwrap()).into_iter().find(|v| v.1 == LOG).map(|v| v.3);
-        assert_eq!(log("logkeeper"), Some(true));
-        assert_eq!(log("uart"), Some(false));
-        assert_eq!(log("shell"), Some(false));
+        let log = |m: &Manifest, row: &str| views(m.program(row).unwrap()).into_iter().find(|v| v.1 == LOG).map(|v| v.3);
+        assert_eq!(log(&m, "logkeeper"), Some(true));
+        assert!(m.program("uart").unwrap().receives.iter().any(|r| r == toyos_logstream::WIRE));
+        assert_eq!(log(&m, "uart"), Some(false));
+        assert_eq!(log(&m, "shell"), Some(false));
+        // Named like the log keeper and holding nothing.
+        let named = parse("program logkeeper /system/bin/logkeeper\n");
+        assert_eq!(log(&named, "logkeeper"), Some(false));
     }
 
     #[test]

@@ -142,7 +142,7 @@ use toyos::AsHandle;
 use toyos_abi::Rights;
 use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
-    Registration, Tag, ALIVE, CONSOLE_INPUT, FLUSH, FLUSHED, MARK, MARKED, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
+    Registration, Tag, Unanswered, ALIVE, CONSOLE_INPUT, FLUSH, FLUSHED, MARK, MARKED, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
 };
 use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
 use toyos_abi::syscall::{
@@ -308,9 +308,9 @@ struct Log {
     console_input: toyos::Pipe,
     /// What `logkeeper` answers on the connection, kept across flushes.
     rx: RefCell<ipc::FrameRx<8>>,
-    /// Flushes asked for and not answered yet: one waited out past
-    /// [`FLUSH_BOUND`] is answered late, before the next one is.
-    unanswered: Cell<u32>,
+    /// Flushes and stop marks asked for and not answered yet: one waited out
+    /// past [`FLUSH_BOUND`] is answered late, before the next one is.
+    unanswered: Cell<Unanswered>,
 }
 
 /// The rights a program's stdin keeps: it reads it and polls it, and a spawn
@@ -369,7 +369,7 @@ impl Log {
             stdin,
             console_input,
             rx: RefCell::new(ipc::FrameRx::new()),
-            unanswered: Cell::new(0),
+            unanswered: Cell::new(Unanswered::default()),
         };
         // The supervisor's own lines: a ring like every program's, as its
         // stdout and stderr.
@@ -421,8 +421,10 @@ impl Log {
             toyos::warn!("supervisor: logkeeper could not be asked to flush ({e:?}); stopping without it");
             return;
         }
-        self.unanswered.set(self.unanswered.get() + 1);
-        self.answered(None, "flush", "this stop's last lines are on the console only");
+        let mut unanswered = self.unanswered.get();
+        unanswered.flushes += 1;
+        self.unanswered.set(unanswered);
+        self.answered(|u| u.flushes, "flush", "this stop's last lines are on the console only");
     }
 
     /// Have `logkeeper` write the stop mark, the last thing this stop asks of
@@ -432,27 +434,30 @@ impl Log {
             toyos::warn!("supervisor: logkeeper could not be asked to mark the stop ({e:?}); the next boot proves nothing");
             return;
         }
-        self.answered(Some(MARKED), "stop mark", "the next boot may prove nothing");
+        let mut unanswered = self.unanswered.get();
+        unanswered.marks += 1;
+        self.unanswered.set(unanswered);
+        self.answered(|u| u.marks, "stop mark", "the next boot may prove nothing");
     }
 
-    /// Wait for `wanted`, or for every flush still unanswered where `wanted`
-    /// is `None`, within [`FLUSH_BOUND`]. A flush answered late is counted
-    /// whatever is waited for.
-    fn answered(&self, wanted: Option<u32>, what: &str, lost: &str) {
+    /// Wait within [`FLUSH_BOUND`] until `left` of the unanswered counts is
+    /// zero. Every answer that arrives is counted off its own kind, so one
+    /// answered late is drained here and never ends a later wait early.
+    fn answered(&self, left: impl Fn(&Unanswered) -> u32, what: &str, lost: &str) {
         let began = Instant::now();
         loop {
-            if wanted.is_none() && self.unanswered.get() == 0 {
+            if left(&self.unanswered.get()) == 0 {
                 return;
             }
             let step = self.rx.borrow_mut().pump(&self.conn);
             match step {
-                RxStep::Frame { msg_type: FLUSHED, .. } => {
-                    self.unanswered.set(self.unanswered.get().saturating_sub(1));
-                    continue;
-                }
-                RxStep::Frame { msg_type, .. } if Some(msg_type) == wanted => return,
                 RxStep::Frame { msg_type, .. } => {
-                    panic!("supervisor: logkeeper answered a {what} with frame type {msg_type}")
+                    let mut unanswered = self.unanswered.get();
+                    if !unanswered.answer(msg_type) {
+                        panic!("supervisor: logkeeper answered a {what} with frame type {msg_type}, which nothing asked for");
+                    }
+                    self.unanswered.set(unanswered);
+                    continue;
                 }
                 RxStep::Eof => {
                     toyos::warn!("supervisor: logkeeper is gone, so this stop's {what} is not made");

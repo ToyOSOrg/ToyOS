@@ -1070,7 +1070,8 @@ pub fn judge_readbacks(
             findings.push(format!("boot.{label}.complete_ms: this boot recorded none"));
         }
         // The come-back half of `bootlog`'s contract: a stop that hung past its
-        // mark is ended by the deadline, and comes back late by about that bound.
+        // mark is ended by the deadline and comes back late, which reds where
+        // the deadline is past twice this boot's recorded come-back.
         findings.extend(back.measured(&format!("boot.{label}.back_secs"), back.back_secs).err());
         findings.extend(back.one_clock().err());
         findings.extend(back.declaration_not_refused().err());

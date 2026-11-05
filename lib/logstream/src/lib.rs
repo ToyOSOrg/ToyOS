@@ -137,13 +137,40 @@ pub const RESUME: u32 = 7;
 pub const MARK: u32 = 10;
 pub const MARKED: u32 = 11;
 
+/// What the supervisor has asked `logkeeper` of a stop and not heard back on.
+/// An answer waited out past its bound arrives later, and is counted off its
+/// own kind then, so it never ends a later wait early.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Unanswered {
+    pub flushes: u32,
+    pub marks: u32,
+}
+
+impl Unanswered {
+    /// Count `answer` off what it answers; `false` for a frame that answers
+    /// nothing asked.
+    pub fn answer(&mut self, answer: u32) -> bool {
+        let count = match answer {
+            FLUSHED => &mut self.flushes,
+            MARKED => &mut self.marks,
+            _ => return false,
+        };
+        match count.checked_sub(1) {
+            Some(fewer) => {
+                *count = fewer;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 /// The file at the root of the log volume that says the boot which wrote it
 /// reached its stop with the log volume still written: `logkeeper` writes it on
 /// [`MARK`] and deletes it on [`RESUME`], and the loader reads and deletes it
-/// before it hands the machine to the next kernel. Only `logkeeper`'s view
-/// holds `/log` read-write (`toyos_manifest::Program::view`), and a hang in
-/// what the stop does after it — its drivers' stop, the kernel's quiesce and
-/// the reset — still leaves it.
+/// before it hands the machine to the next kernel. Who may write `/log` is
+/// `toyos_manifest::Program::view`'s to say. A hang in what the stop does after
+/// it — its drivers' stop, the kernel's quiesce and the reset — still leaves it.
 pub const STOPPED: &str = "stopped";
 
 /// The supervisor's line before it asks `logkeeper` to flush for a stop: the last line of a
@@ -698,6 +725,29 @@ impl Replay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A late answer drains and never ends a new wait early.** A mark waited
+    /// out past its bound and answered during the next stop's flush is counted
+    /// off the marks, and a stale mark answer counts off the stale ask, not the
+    /// new one; an answer nothing asked is refused.
+    #[test]
+    fn a_late_answer_is_counted_off_its_own_kind() {
+        let mut waited = Unanswered { flushes: 0, marks: 1 };
+        // The next stop asks for a flush; the late MARKED arrives first.
+        waited.flushes += 1;
+        assert!(waited.answer(MARKED));
+        assert_eq!(waited, Unanswered { flushes: 1, marks: 0 });
+        assert!(waited.answer(FLUSHED));
+        assert_eq!(waited, Unanswered::default());
+        // A new mark beside a stale one: the stale answer leaves the new one owed.
+        let mut both = Unanswered { flushes: 0, marks: 2 };
+        assert!(both.answer(MARKED));
+        assert_eq!(both.marks, 1);
+        // Nothing asked: refused.
+        assert!(!Unanswered::default().answer(MARKED));
+        assert!(!Unanswered::default().answer(FLUSHED));
+        assert!(!Unanswered { flushes: 1, marks: 1 }.answer(REGISTER));
+    }
     use std::format;
     use std::string::String;
     use std::vec;

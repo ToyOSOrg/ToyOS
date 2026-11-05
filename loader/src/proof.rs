@@ -4,9 +4,10 @@
 //! has synced its files (`toyos_logstream::STOPPED`).
 //!
 //! **The mark is taken before the next kernel runs, and the record is written
-//! only once it is gone**, so a mark found here is always the boot's that the
-//! record names. Only `logkeeper`'s view holds `/log` read-write; a boot that
-//! hangs after its stop asked for the mark still leaves one.
+//! only once it is gone**, so a mark found here is the boot's that the record
+//! names unless that pass's write of the record failed, which it says. Who may
+//! write `/log` is `toyos_manifest::Program::view`'s to say; a boot that hangs
+//! after its stop asked for the mark still leaves one.
 
 use alloc::string::String;
 use alloc::vec::Vec;
