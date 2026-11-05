@@ -1,10 +1,10 @@
 //! An image, as the loader lays it out and relocates it: every table it
-//! reads, through `toyos-elf`, out of the image's own mapped bytes. It touches
+//! reads, through [`crate::elf`], out of the image's own mapped bytes. It touches
 //! nothing but the memory it is handed, so the host tests it on images it lays
 //! out.
 //!
 //! An image is the process's own input: a crafted one corrupts only the
-//! process that loads it, and is refused by name wherever `toyos-elf` or the
+//! process that loads it, and is refused by name wherever [`crate::elf`] or the
 //! rules here can tell.
 
 #[cfg(test)]

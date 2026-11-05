@@ -44,7 +44,7 @@ const USER_STACK_SIZE: usize = 8 * 1024 * 1024;
 const STACK_GUARD: u64 = 1024 * 1024;
 
 /// One range of a child's memory, its numbers checked where the request was
-/// read (`syscall::proc::spawn_maps`): whole pages, and a copy's bytes inside
+/// read (`syscall::proc::spawn_program`): whole pages, and a copy's bytes inside
 /// an object of ordinary memory.
 pub struct Map {
     pub at: UserAddr,
@@ -173,7 +173,7 @@ pub fn spawn<C: Commit>(
     let t0 = crate::clock::nanos_since_boot();
 
     let Program { maps, entry, image_base, build_id } = program;
-    // Inside a range the child may execute, which `spawn_maps` placed in the user half.
+    // Inside a range the child may execute, which `spawn_program` placed in the user half.
     let executes = |map: &Map| map.prot == kernel::vm::Prot::ReadExec && (map.at.raw()..map.at.raw() + map.len).contains(&entry);
     let Some(entry) = maps.iter().any(executes).then(|| toyos_userbound::Entry::new(entry)).flatten() else {
         log!("spawn: {}: the entry {:#x} is in no executable range", path, entry);
@@ -181,8 +181,6 @@ pub fn spawn<C: Commit>(
     };
     let start = maps.iter().map(|map| map.at.raw()).min().ok_or(SyscallError::InvalidArgument)?;
     let end = maps.iter().map(|map| map.at.raw() + map.len).max().ok_or(SyscallError::InvalidArgument)?;
-
-    let t1 = crate::clock::nanos_since_boot();
 
     let Some(child_pt) = crate::mm::space::Space::new_user(&job) else {
         log!("spawn: {}: no address space: every user PCID is held, or no frame is left for its root", path);
@@ -287,7 +285,7 @@ pub fn spawn<C: Commit>(
     crate::process::debug_hold_marked_spawn(parent, &object);
 
     let t3 = crate::clock::nanos_since_boot();
-    log!("spawn: {} pid={} (layout={}ms total={}ms)", path, pid, (t1 - t0) / 1_000_000, (t3 - t0) / 1_000_000);
+    log!("spawn: {} pid={} (total={}ms)", path, pid, (t3 - t0) / 1_000_000);
 
     Ok((pid, held))
 }

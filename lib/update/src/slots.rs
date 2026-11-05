@@ -31,9 +31,10 @@ const BODY_BYTES: usize = 8 + 4 + 4 + 8 + 2 * SLOT_BYTES;
 /// A copy's bytes, checksum included; the rest of its block is zero.
 pub const TABLE_BYTES: usize = BODY_BYTES + 4;
 
-/// Where each slot's kernel, boot parameter, two programs and signed header
-/// are on its FAT partition, as paths from the volume's root.
-pub const KERNEL_FILE: &str = "toyos/kernel.elf";
+/// Where each slot's kernel section (`toyos_kimage`), boot parameter, two
+/// programs and signed header are on its FAT partition, as paths from the
+/// volume's root.
+pub const KERNEL_FILE: &str = "toyos/kernel.img";
 pub const CMDLINE_FILE: &str = "toyos/cmdline";
 pub const SUPERVISOR_FILE: &str = "toyos/supervisor.elf";
 pub const FILESERVER_FILE: &str = "toyos/fileserver.elf";

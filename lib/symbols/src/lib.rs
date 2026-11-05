@@ -4,9 +4,10 @@
 //! symbols or build-id is `toyos::elf`'s, which the kernel does not link.
 //!
 //! `kernel/src/symbols.rs` keeps the rest of the kernel's own frames — a
-//! `SymbolTable` holding raw pointers into the kernel image, because the
-//! resolve path is reached from the fault handler and the panic handler and
-//! may not allocate, take a lock or do I/O. Nothing here needs any of that:
+//! `SymbolTable` over the build's table in the kernel section
+//! (`toyos_kimage::Symbols`), because the resolve path is reached from the
+//! fault handler and the panic handler and may not allocate, take a lock or do
+//! I/O. Nothing here needs any of that:
 //! every function is of the bytes a caller already has.
 //!
 //! `no_std`, no allocation, no `unsafe`, and no panic on any input: the kernel

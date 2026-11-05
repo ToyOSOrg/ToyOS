@@ -30,6 +30,8 @@ pub struct Input {
     pub supervisor_base: u64,
     pub supervisor_build_id: Vec<u8>,
     pub supervisor_maps: Vec<SpawnMap>,
+    /// Bytes of the supervisor section the maps were laid out of.
+    pub supervisor_len: u64,
     /// The image's bytes from address 0.
     pub image: Vec<u8>,
 }
@@ -78,6 +80,7 @@ impl Input {
         id[..self.supervisor_build_id.len()].copy_from_slice(&self.supervisor_build_id);
         out.extend(id);
         out.extend((self.supervisor_maps.len() as u64).to_le_bytes());
+        out.extend(self.supervisor_len.to_le_bytes());
         for map in &self.supervisor_maps {
             for word in [map.addr, map.len, map.object, map.offset, map.copied, map.prot] {
                 out.extend(word.to_le_bytes());

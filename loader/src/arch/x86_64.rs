@@ -3,7 +3,7 @@
 use toyos_abi::boot::KernelArgs;
 
 /// `e_machine` of the kernel this loader starts (`toyos_kimage::Kernel::machine`).
-pub const E_MACHINE: u16 = 62;
+pub const E_MACHINE: u16 = toyos_kimage::EM_X86_64;
 
 /// How the boot map's entries are encoded.
 pub use toyos_bootmap::x86_64 as encoding;
@@ -133,7 +133,7 @@ pub unsafe fn enter_kernel(image: (u64, u64), entry_offset: u64, args: &KernelAr
     // SAFETY: the caller's contract: the switch keeps this code and stack
     // mapped, and the jump lands in the image it mapped.
     unsafe { core::arch::asm!("mov cr3, {}", in(reg) root, options(nostack)) };
-    // SAFETY: `kernel.elf`'s entry point takes `&KernelArgs` in `rdi` by the boot
+    // SAFETY: the kernel image's entry point takes `&KernelArgs` in `rdi` by the boot
     // protocol `toyos-abi::boot` and the kernel side of it define between them —
     // `sysv64`, because this target's own `"C"` is the Microsoft convention —
     // and this bootloader has no way to check the callee's signature, only to

@@ -38,7 +38,7 @@ fn lld_images_are_laid_out_as_object_reads_them() {
             let lo = segment.address() & !0xfff;
             let hi = (segment.address() + segment.size()).next_multiple_of(0x1000);
             let prot = match p_flags & 3 {
-                1 | 3 => VmProt::ReadExec,
+                1 => VmProt::ReadExec,
                 2 => VmProt::ReadWrite,
                 _ => VmProt::Read,
             };
@@ -75,12 +75,12 @@ fn the_image_moves_with_its_base() {
     );
 }
 
-/// A segment both writable and executable is mapped `ReadExec`: no range a
-/// spawn asks for is both.
+/// A segment both writable and executable is refused by name, as the loader
+/// refuses a library's: no page is both.
 #[test]
-fn a_writable_executable_segment_runs_but_is_not_written() {
+fn a_writable_executable_segment_is_refused() {
     let file = Elf::new(0x2000).ph(Phdr::load(0, 0, 0x2000, 0x2000, PF_R | PF_W | PF_X)).build();
-    assert_eq!(lay_out(&file, Machine::X86_64, OBJECT, BASE).unwrap().maps()[0].prot, VmProt::ReadExec as u64);
+    assert_eq!(lay_out(&file, Machine::X86_64, OBJECT, BASE), Err("ELF: a PT_LOAD is both writable and executable"));
 }
 
 /// A segment's copy stops at the file's end: what the file does not hold is

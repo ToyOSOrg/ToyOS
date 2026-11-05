@@ -1,9 +1,10 @@
 //! A killed program's frame, as the kernel records it and userland reads it
 //! back: `    <pc>  <file>+<offset> id=<build-id>`.
 //!
-//! The kernel names no user frame: it records the file it opened, the offset
+//! The kernel names no user frame: it records the program's file, the offset
 //! of the instruction in flight in that file's own addresses, and the build-id
-//! the file carries, and [`crate::name`] names the function from them. One
+//! the parent handed the spawn (`SpawnArgs::build_id_ptr`), and
+//! `/system/bin/symbolize` names the function from them. One
 //! encoder ([`UserFrame`]'s `Display`) and one decoder ([`decode`]), so the
 //! grammar has no second spelling.
 //!

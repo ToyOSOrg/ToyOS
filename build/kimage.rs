@@ -16,8 +16,8 @@ use crate::arch::Arch;
 
 fn machine(arch: Arch) -> (Machine, u16) {
     match arch {
-        Arch::X86_64 => (Machine::X86_64, 62),
-        Arch::Aarch64 => (Machine::Aarch64, 183),
+        Arch::X86_64 => (Machine::X86_64, toyos_kimage::EM_X86_64),
+        Arch::Aarch64 => (Machine::Aarch64, toyos_kimage::EM_AARCH64),
     }
 }
 
@@ -93,6 +93,7 @@ pub fn section(kernel: &[u8], supervisor: &[u8], arch: Arch) -> Vec<u8> {
         supervisor_base: program.image_base,
         supervisor_build_id: program.build_id().to_vec(),
         supervisor_maps: program.maps().to_vec(),
+        supervisor_len: supervisor.len() as u64,
         image,
     }
     .write()

@@ -4109,7 +4109,6 @@ dependencies = [
 name = "toyos-symbols"
 version = "0.1.0"
 dependencies = [
- "object",
  "rustc-demangle",
  "toyos-abi",
  "toyos-elide",

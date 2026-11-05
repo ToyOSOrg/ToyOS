@@ -55,7 +55,7 @@ pub use irqchip::its as message_unit;
 pub use smmu as iommu_unit;
 
 /// `e_machine` of this kernel's image (`toyos_kimage::Kernel::machine`).
-pub const E_MACHINE: u16 = 183;
+pub const E_MACHINE: u16 = toyos_kimage::EM_AARCH64;
 
 /// Interrupts masked on this CPU for as long as the guard lives, and then put
 /// back as they were — restored, not enabled — so a guard nests inside a region

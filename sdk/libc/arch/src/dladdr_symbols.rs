@@ -1,5 +1,5 @@
 //! `dladdr`'s walk of an image laid out here: the segment holding an address,
-//! the image's first byte, and the tables it hands `toyos-elf`'s choice, as
+//! the image's first byte, and the tables it hands `toyos::elf`'s choice, as
 //! many symbols as `.gnu.hash` describes, or with none as the gap to the
 //! string table holds.
 

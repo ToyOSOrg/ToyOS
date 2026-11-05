@@ -44,10 +44,8 @@ impl Program {
 /// at `at`, each `PT_LOAD` copied from `object`, the memory object holding
 /// `file`. Refused by name where the kernel would refuse a range, or the
 /// program could not start: no `PT_LOAD` maps its program header table, which
-/// it reads to relocate itself.
-///
-/// A segment both writable and executable is mapped `ReadExec`: taking the
-/// execution away would let a hostile file run as data instead.
+/// it reads to relocate itself, or a segment asks to be written and executed,
+/// which no page is, as the loader refuses a library's (`crate::dl`).
 pub fn lay_out(file: &[u8], machine: Machine, object: u64, at: u64) -> Result<Program, &'static str> {
     let layout = Layout::parse(file, machine).map_err(|e| e.as_str())?;
     if layout.program_headers().is_none() {
@@ -80,6 +78,9 @@ pub fn lay_out(file: &[u8], machine: Machine, object: u64, at: u64) -> Result<Pr
         let offset = seg.file_offset() & !(PAGE - 1);
         let bytes = seg.filesz().checked_add(seg.file_offset() % PAGE).ok_or("ELF: a segment past the file")?;
         let copied = bytes.min((file.len() as u64).saturating_sub(offset));
+        if seg.flags().executable() && seg.flags().writable() {
+            return Err("ELF: a PT_LOAD is both writable and executable");
+        }
         let prot = if seg.flags().executable() {
             VmProt::ReadExec
         } else if seg.flags().writable() {

@@ -15,7 +15,8 @@
 //! symbols     [addr u64 | size u64 | name u32 | len u32], ascending by addr
 //! names       the symbols' names
 //! supervisor  entry u64 | image_base u64 | build-id len u64 | build-id [32] | maps u64
-//!             [SpawnMap], `object` 0 for the supervisor section
+//!             | section len u64, then [SpawnMap], `object` 0 for the supervisor
+//!             section, which was `section len` bytes when it was laid out
 //! image       at image_at, a page boundary: the image's bytes from address 0,
 //!             zeros past them to `memory`
 //! ```
@@ -35,12 +36,16 @@ pub use write::{Input, Symbol};
 use toyos_abi::syscall::{SpawnMap, VmProt, MAX_BUILD_ID, MAX_SPAWN_MAPS};
 
 pub const MAGIC: [u8; 8] = *b"TOYOSKRN";
+/// `e_machine` of each machine a kernel image is built for: what the build
+/// writes and the loader and the kernel each check is their own.
+pub const EM_X86_64: u16 = 62;
+pub const EM_AARCH64: u16 = 183;
 pub const FORMAT: u32 = 1;
 const HEADER: usize = 72;
 const RANGE: usize = 24;
 const RELOCATION: usize = 16;
 const SYMBOL: usize = 24;
-const PROGRAM: usize = 64;
+const PROGRAM: usize = 72;
 const MAP: usize = core::mem::size_of::<SpawnMap>();
 pub const PAGE: u64 = 4096;
 
@@ -125,6 +130,7 @@ impl<'a> Kernel<'a> {
                 entry: u64_at(program, 0).ok_or(SHORT)?,
                 image_base: u64_at(program, 8).ok_or(SHORT)?,
                 build_id: &program[24..24 + id_len as usize],
+                len: u64_at(program, 64).ok_or(SHORT)?,
                 maps,
             },
             image,
@@ -239,6 +245,9 @@ pub struct Supervisor<'a> {
     pub entry: u64,
     pub image_base: u64,
     pub build_id: &'a [u8],
+    /// Bytes of the supervisor section the build laid out: a section of
+    /// other bytes is another program, which these ranges do not describe.
+    pub len: u64,
     maps: &'a [u8],
 }
 

@@ -318,6 +318,10 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     );
     let kernel_image = toyos_kimage::Kernel::parse(kernel_section).unwrap_or_else(|why| panic!("boot: the loader's {why}"));
     assert_eq!(kernel_image.machine, arch::E_MACHINE, "boot: the loader's kernel image is another machine's");
+    assert_eq!(
+        kernel_image.supervisor.len, kernel_args.supervisor_image.len,
+        "boot: the supervisor section is not the one the build laid the supervisor's ranges out of"
+    );
     // After the boot's own lines, so its refusal reaches a channel that says
     // what machine this is, and while the loader's arguments are still mapped.
     random::key(loader_args, &mut kernel_args);

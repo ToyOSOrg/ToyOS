@@ -67,7 +67,7 @@ pub use iommu_unit::interrupt as message_unit;
 pub use apic::MSI_DOORBELL;
 
 /// `e_machine` of this kernel's image (`toyos_kimage::Kernel::machine`).
-pub const E_MACHINE: u16 = 62;
+pub const E_MACHINE: u16 = toyos_kimage::EM_X86_64;
 
 /// Interrupts masked on this CPU for as long as the guard lives, and then put
 /// back as they were — restored, not enabled — so a guard nests inside a region

@@ -1,13 +1,13 @@
 //! The positive control: the parser agrees with a real artifact.
 //!
-//! Every other test in this crate hands the parser bytes no linker would emit,
-//! and a parser that refused everything would pass all of them. The fixture is
-//! the first 4 KiB of `/system/bin/shell` as rust-lld linked it with
-//! `--build-id` — which is all [`Layout::parse`] ever reads — so this is the
-//! shape the loader actually meets at every boot.
+//! Every other test of this module hands the parser bytes no linker would
+//! emit, and a parser that refused everything would pass all of them. The
+//! fixture is the first 4 KiB of `/system/bin/shell` as rust-lld linked it
+//! with `--build-id` — which is all [`Layout::parse`] ever reads — so this is
+//! the shape a spawn's layout meets for every program a parent starts.
 //!
 //! Refresh it with `dd if=target/x86_64-unknown-toyos/toyos/shell
-//! of=lib/elf/tests/fixtures/lld-headers.bin bs=4096 count=1`, and expect
+//! of=sdk/toyos/tests/elf/fixtures/lld-headers.bin bs=4096 count=1`, and expect
 //! every number below to move: each is `readelf -hlnW` of the fixture.
 
 use toyos::elf::{Layout, Machine};

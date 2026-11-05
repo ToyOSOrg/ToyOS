@@ -48,8 +48,8 @@ pub struct KernelArgs {
     /// No presence flag, unlike the boot partition above, and not because the
     /// state cannot arise but because it is not a machine. A machine really can
     /// have no boot partition to be named — PXE, an unpartitioned disk. But
-    /// this GUID comes from a file `create_esp_volume` writes beside
-    /// `kernel.elf`, so a volume carrying that one and not this one was not
+    /// this GUID comes from a file `create_esp_volume` writes beside the
+    /// loader, so a volume carrying that one and not this one was not
     /// built by this project, and the bootloader refuses it by name rather than
     /// starting a kernel that would silently have nowhere to put its log.
     ///

@@ -21,6 +21,7 @@ fn input() -> Input {
         supervisor_base: 0x2_0000_0000,
         supervisor_build_id: vec![0x5a; 20],
         supervisor_maps: vec![SpawnMap { addr: 0x2_0000_0000, len: 0x1000, object: 0, offset: 0, copied: 0x800, prot: VmProt::ReadExec as u64 }],
+        supervisor_len: 0x1234,
         image: vec![0xcc; 0x2100],
     }
 }
@@ -33,7 +34,7 @@ fn a_section_reads_back_as_written() {
     assert_eq!(kernel.text().unwrap().lo, 0x1000);
     assert_eq!(kernel.relocations().collect::<Vec<_>>(), [(0x2000, 0x1010), (0x2008, 0)]);
     assert_eq!(kernel.image, &[0xcc; 0x2100][..]);
-    assert_eq!((kernel.supervisor.entry, kernel.supervisor.build_id), (0x2_0000_1000, &[0x5a; 20][..]));
+    assert_eq!((kernel.supervisor.entry, kernel.supervisor.build_id, kernel.supervisor.len), (0x2_0000_1000, &[0x5a; 20][..], 0x1234));
     assert_eq!(kernel.supervisor.maps().collect::<Vec<_>>(), input().supervisor_maps);
 }
 

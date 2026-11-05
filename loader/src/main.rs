@@ -456,7 +456,7 @@ fn report_reach(what: &str, at: u64, len: u64) {
     );
 }
 
-/// What the chosen slot hands the kernel beside its ELF and parameter.
+/// What the chosen slot hands the kernel beside its own image and parameter.
 struct Handed {
     root: rootimage::RootImage,
     supervisor: payload::Payload,
@@ -890,7 +890,7 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
 
     println!("Log partition: signature {:02x?}", log_guid);
 
-    // Every byte the kernel is handed below — its ELF, its parameter, the two
+    // Every byte the kernel is handed below — its image, its parameter, the two
     // programs and ROOT — is one the chosen slot's signed header names. ROOT is read before the
     // kernel is loaded and not after: it is the allocation the image pages come
     // from, and a slot whose ROOT is refused has no use for the kernel's.

@@ -82,6 +82,10 @@ fn main() {
     refused("more bytes copied than the range holds", with(&|m| m[0].copied = m[0].len + 1), laid.entry, invalid);
     refused("a copy past the object's end", with(&|m| m[0].offset = 0x4000_0000), laid.entry, invalid);
     refused("a copy from no object", with(&|m| m[0].object = NONE), laid.entry, invalid);
+    refused("a copy from no page boundary of the object", with(&|m| m[text].offset += 8), laid.entry, invalid);
+    // Unchecked, the sum wraps past the object's size and the first touch
+    // reads past the object's end in the kernel.
+    refused("a copy whose end wraps", with(&|m| (m[text].offset, m[text].copied) = (0xffff_ffff_ffff_f000, 0x1000)), laid.entry, invalid);
     refused("a range on the clock page", with(&|m| m.push(SpawnMap { addr: toyos_abi::clock::CLOCK_PAGE, len: 0x1000, object: NONE, ..SpawnMap::default() })), laid.entry, invalid);
     refused("two ranges that meet", with(&|m| m.push(m[0])), laid.entry, invalid);
     refused("an entry in no executable range", honest.clone(), honest[0].addr + honest[0].len - 8, invalid);

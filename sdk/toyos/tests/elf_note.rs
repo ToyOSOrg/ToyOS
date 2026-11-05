@@ -47,7 +47,7 @@ fn objects(notes: &[u8], align: u64) -> Option<Vec<u8>> {
 /// Ours, and `object`'s on the same bytes, which must agree.
 fn agreed(notes: &[u8], align: u64) -> Option<Vec<u8>> {
     let ours = note::build_id(notes, align).map(<[u8]>::to_vec);
-    assert_eq!(ours, objects(notes, align), "toyos-elf and object disagree on {notes:02x?}");
+    assert_eq!(ours, objects(notes, align), "toyos::elf and object disagree on {notes:02x?}");
     ours
 }
 

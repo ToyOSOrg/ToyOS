@@ -49,7 +49,7 @@ pub enum Refused {
     Read(String, ImageRefused<files::Error>),
     /// No memory to lay a library out in.
     Memory(SyscallError),
-    /// An image `toyos-elf` or the loader's own rules refuse.
+    /// An image [`crate::elf`] or the loader's own rules refuse.
     Elf(&'static str),
     /// A relocation the loader does not apply.
     Relocation(RelocError),
