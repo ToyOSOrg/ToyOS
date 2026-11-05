@@ -1,18 +1,15 @@
-//! `/` is a synthesized read-only directory.
-//!
-//! The listing of `/` is a closed set, so a stray top-level name cannot appear
-//! because some volume happens to carry a directory by that name; `/` is no
-//! filesystem either, so every syscall that would change what is at it is
-//! refused the way a read-only mount refuses one, and the machine survives it.
+//! Synthetic directories expose only ancestors of endowed filesystem capabilities.
 
 use std::fs;
+use std::os::toyos::process::CommandExt;
+use std::process::Command;
 
-use toyos_abi::syscall::{self, OpenFlags, SyscallError};
+use toyos::files::{self, At, Open};
+use toyos::{endow, namespace, port};
+use toyos_abi::syscall::{FileType, SVC_LABEL};
 
-/// `vfs::ROOT_ENTRIES`: the kernel's set and this one are two spellings of the
-/// hierarchy, so a boot that grew another entry reds here.
-const ROOT_ENTRIES: [&str; 9] =
-    ["apps", "boot", "config", "home", "log", "media", "state", "system", "tmp"];
+const SELF: &str = "/system/bin/test_rs_hierarchy_paths";
+const PROBE: &str = "/tmp/hierarchy_paths_probe";
 
 fn names(dir: &str) -> Vec<String> {
     let mut out: Vec<String> = fs::read_dir(dir)
@@ -24,65 +21,56 @@ fn names(dir: &str) -> Vec<String> {
 }
 
 fn main() {
-    let listed = names("/");
-    assert_eq!(listed, ROOT_ENTRIES, "/ lists {listed:?}");
-    println!("  PASS / lists exactly {:?}", ROOT_ENTRIES);
-
-    root_refuses_every_way_of_changing_it();
-    media_is_an_empty_directory();
-
-    println!("all hierarchy tests passed");
+    match std::env::args().nth(1).as_deref() {
+        Some("empty") => {
+            assert!(endow::namespace().expect("namespace").names().unwrap().is_empty());
+            assert!(fs::metadata("/").expect("empty root").is_dir());
+            assert!(names("/").is_empty());
+            std::env::set_current_dir("/").expect("cwd in empty root");
+            assert!(fs::read(PROBE).is_err(), "an empty namespace reached /tmp");
+        }
+        Some("narrow") => narrowed(),
+        Some(other) => panic!("unknown role {other}"),
+        None => {
+            fs::write(PROBE, b"endowed").expect("create probe");
+            // The unserved connector supplies an ancestor, without granting any
+            // global filesystem access or requiring a filesystem implementation.
+            let (_acceptor, connector) = port::create().expect("port");
+            let narrow = namespace::build()
+                .keep(endow::namespace().expect("namespace"), &["fs:/tmp"])
+                .add("fs:/nested/leaf", &connector)
+                .finish().expect("narrow namespace");
+            for (role, names) in [("narrow", narrow), ("empty", namespace::build().finish().unwrap())] {
+                assert!(Command::new(SELF).arg(role).endow(SVC_LABEL, names.into())
+                    .status().expect("spawn namespace probe").success(), "{role} child failed");
+            }
+            fs::remove_file(PROBE).expect("remove probe");
+            println!("all hierarchy tests passed");
+        }
+    }
 }
 
-/// Every syscall that can change what is at a path, aimed at `/`. One each
-/// rather than one representative: they are separate entry points, so a gate on
-/// `open` alone says nothing about `unlink`. None may end the machine.
-fn root_refuses_every_way_of_changing_it() {
-    assert_eq!(
-        syscall::open(b"/intruder", OpenFlags::CREATE | OpenFlags::WRITE),
-        Err(SyscallError::PermissionDenied),
-        "creating a file at / was permitted"
-    );
-    assert_eq!(
-        syscall::delete(b"/system"),
-        Err(SyscallError::PermissionDenied),
-        "unlinking a mount point was permitted"
-    );
-    assert_eq!(
-        syscall::rename(b"/system", b"/elsewhere"),
-        Err(SyscallError::PermissionDenied),
-        "renaming a mount point was permitted"
-    );
-    assert_eq!(
-        syscall::mkdir(b"/intruder"),
-        Err(SyscallError::PermissionDenied),
-        "mkdir at / was permitted"
-    );
-    // `InvalidArgument` and not `PermissionDenied`: a mount point is not a
-    // directory a caller may remove even where the mount itself is writable.
-    assert_eq!(
-        syscall::rmdir(b"/tmp"),
-        Err(SyscallError::InvalidArgument),
-        "rmdir of a mount point was permitted"
-    );
-    assert_eq!(
-        syscall::symlink(b"/system/etc/os-release", b"/intruder"),
-        Err(SyscallError::PermissionDenied),
-        "a symlink at / was permitted"
-    );
+fn narrowed() {
+    assert_eq!(endow::namespace().expect("namespace").names().unwrap(), ["fs:/nested/leaf", "fs:/tmp"]);
+    assert_eq!(names("/"), ["nested", "tmp"]);
+    assert_eq!(names("/nested"), ["leaf"]);
+    assert!(fs::metadata("/nested").expect("synthetic ancestor").is_dir());
+    assert!(fs::metadata("/system").is_err(), "an unendowed root name appeared");
 
-    // The machine is still here, and / still holds what it held.
-    let after = names("/");
-    assert_eq!(after, ROOT_ENTRIES, "a refused operation changed / to {after:?}");
-    assert!(fs::metadata("/system/etc/os-release").is_ok(), "/system is unreadable after the refusals");
-    println!("  PASS create, unlink, rename, mkdir, rmdir and symlink are all refused at /");
-}
+    let root = files::open(At::Cwd, b"/", Open { read: true, directory: true, ..Open::default() }).expect("open root");
+    assert_eq!(files::fstat(root).expect("root fstat").file_type, FileType::Directory);
+    let file = files::open(At::Fd(root), b"tmp/hierarchy_paths_probe", Open { read: true, ..Open::default() }).expect("open from synthetic root");
+    let mut bytes = [0; 7];
+    assert_eq!(files::read(file, &mut bytes).expect("read relative file"), bytes.len());
+    assert_eq!(&bytes, b"endowed");
+    // SAFETY: these descriptors were opened here and are held nowhere else.
+    unsafe { toyos::fd::close(file).unwrap(); toyos::fd::close(root).unwrap(); }
 
-/// A bare mount point is an empty directory, not an error: foreign volumes land
-/// under it at the track's stage 5.
-fn media_is_an_empty_directory() {
-    let listed = names("/media");
-    assert!(listed.is_empty(), "/media holds {listed:?}");
-    assert!(fs::read("/media/anything").is_err(), "/media served a file");
-    println!("  PASS /media is an empty directory");
+    assert!(fs::write("/intruder", b"x").is_err());
+    assert!(fs::remove_file("/nested").is_err());
+    assert!(fs::rename("/nested", "/elsewhere").is_err());
+    assert!(fs::create_dir("/intruder").is_err());
+    assert!(fs::remove_dir("/").is_err());
+    assert!(std::os::toyos::fs::symlink("/tmp", "/intruder").is_err());
+    assert_eq!(names("/"), ["nested", "tmp"], "a refused mutation changed the root");
 }

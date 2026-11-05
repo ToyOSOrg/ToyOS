@@ -1,9 +1,9 @@
-//! fileserver: one role's file server — SYSTEM, DATA, LOG or BOOT — serving the
+//! fileserver: one role's file server — SYSTEM, DATA, LOG, BOOT or MEMORY — serving the
 //! directories of that role as capabilities.
 //!
 //! **What it holds**: the acceptor of its role's one port, endowed by the
 //! supervisor under `serve:fs:<role>`; for its volume, SYSTEM's ROOT image
-//! (`ROOT_IMAGE_LABEL`), which needs no disk, or `block` in its namespace, a
+//! (`ROOT_IMAGE_LABEL`), MEMORY's anonymous objects, or `block` in its namespace, a
 //! connector to the block service minted for its role's partition alone —
 //! every DATA partition, or the one the loader named, read-only for the boot
 //! volume; and nothing else of the machine. Two DATA partitions are refused by
@@ -30,9 +30,9 @@
 //!
 //! **An export is a connection this server makes to itself** through a private
 //! port only it holds a connector to, for its life: connect, then accept, which
-//! answers exactly that connection since this loop is single-threaded. The end
-//! handed out cannot be duplicated, so it has one holder. A restart takes the
-//! port with it, so nothing pending reaches a new instance.
+//! answers exactly that connection since this loop is single-threaded. Each
+//! child gets a fresh exported connection and adopts its aliases together. A
+//! restart takes the port with it, so nothing pending reaches a new instance.
 //!
 //! **A server never blocks on a client.** Accept and the first frame are two
 //! events; a request is buffered until whole; every reply is one `try_send`,
@@ -40,10 +40,11 @@
 //! client lends is read once per request into this process's memory, and
 //! what is acted on is that copy.
 //!
-//! **What is written reaches the disk at a sync**: an fsync, a client's
-//! `SYNC`, or [`fileserver::writeback::WRITEBACK`] after the first unsynced write when nothing asked
-//! sooner. A kill loses what no sync covered, which is POSIX's promise and no
-//! more.
+//! **What is written reaches the disk at a sync**: a client's `SYNC`, or
+//! [`fileserver::writeback::WRITEBACK`] after the first unsynced write when
+//! nothing asked sooner; an fsync makes its own file durable, with what the
+//! volume's commit carries beside it ([`fileserver::pages::Files::fsync`]). A
+//! kill loses what neither covered, which is POSIX's promise and no more.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -57,7 +58,7 @@ use fileserver::descriptions::{self, Description, Held, Ids, Shared};
 use fileserver::listing;
 use diskserver::disk::Served;
 use fileserver::cache::Disk;
-use fileserver::ram::Ram;
+use fileserver::memory::MemoryVolume;
 use fileserver::fat::FatVolume;
 use fileserver::resolve::{self, Found, Refusal as Escape, Resolved};
 use fileserver::rights;
@@ -73,7 +74,6 @@ use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor};
 use toyos::shm::{Bytes, SharedMemory};
 use toyos::Pipe;
-use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{SyscallError, MAX_BADGE, PIPE_CAPACITY, SERVE_PREFIX};
 
 /// What one turn of a stream appends at most.
@@ -87,11 +87,6 @@ const STREAM_PRESENT: usize = PIPE_CAPACITY / STREAM_READ;
 /// The name the private export port has in this server's own namespace.
 const EXPORT_PORT: &str = "export";
 
-/// What the end an export hands out carries: a connection's rights without
-/// `DUP`, so whoever holds it is its one holder, and may pass it on.
-const EXPORTED: Rights =
-    Rights::TRANSFER.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE).union(Rights::MAP);
-
 // One wait watches the acceptor, every connection and every stream at once.
 const _: () = assert!(1 + MAX_SERVED + MAX_HANDSHAKES + MAX_STREAMS <= Poller::MAX_HANDLES as usize);
 
@@ -102,10 +97,6 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Why a client asking for a request number the wire does not have is let go,
 /// whatever its grant.
 const NO_SUCH_OPERATION: &str = "it asked for an operation this protocol does not have";
-
-/// The volume memory stands in for when DATA has no partition: 1 GiB of
-/// blocks, of which only what is written costs anything.
-const RAM_BLOCKS: u64 = 1 << 18;
 
 /// What a volume's cache keeps clean: its tree, or its FAT and directories.
 /// A file's pages are its paged object's ([`pager`]).
@@ -127,6 +118,7 @@ const REPORT: Duration = Duration::from_secs(5);
 enum Role {
     System,
     Data,
+    Memory,
     Log,
     Boot,
 }
@@ -136,6 +128,7 @@ impl Role {
         match text {
             "system" => Some(Self::System),
             "data" => Some(Self::Data),
+            "memory" => Some(Self::Memory),
             "log" => Some(Self::Log),
             "boot" => Some(Self::Boot),
             _ => None,
@@ -146,6 +139,7 @@ impl Role {
         match self {
             Self::System => "system",
             Self::Data => "data",
+            Self::Memory => "memory",
             Self::Log => "log",
             Self::Boot => "boot",
         }
@@ -216,22 +210,19 @@ impl Exports {
         Self { acceptor, names }
     }
 
-    /// A connection to this server: the end to hand away, narrowed to
-    /// [`EXPORTED`], and this server's.
+    /// A connection to this server: the end to hand away and this server's.
+    /// The exported end keeps `DUP` for spawning from a borrowed handle.
     fn connect(&self) -> Result<(Connection, Connection), Error> {
         let theirs = self.names.open(EXPORT_PORT).map_err(|e| Error::kernel("an export's connection", e))?;
         let ours = self.acceptor.accept().unwrap_or_else(|e| panic!("fileserver: the export port refused an accept ({e:?})"));
-        let narrowed = toyos::AsHandle::as_handle(&theirs)
-            .try_clone_narrowed(EXPORTED)
-            .map_err(|e| Error::kernel("an export's narrowed end", e))?;
-        Ok((Connection::received(narrowed), ours))
+        Ok((theirs, ours))
     }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let role = args.get(1).and_then(|r| Role::parse(r)).unwrap_or_else(|| {
-        panic!("fileserver: started with {args:?}; the first argument is a role: system, data, log or boot")
+        panic!("fileserver: started with {args:?}; the first argument is a role: system, data, log, boot or memory")
     });
     let mut guid = None;
     for arg in args.iter().skip(2) {
@@ -254,9 +245,10 @@ fn main() {
         dirs.iter().map(|d| d.dir).collect::<Vec<_>>().join(", "),
         volume.describe()
     );
+    let files = Files::new(pager(role, volume.memory()));
     Server {
         volume,
-        files: Files::new(pager(role)),
+        files,
         pager_armed: false,
         memory,
         acceptor,
@@ -274,7 +266,7 @@ fn main() {
 }
 
 /// The share of physical memory the file servers' pagers together hold in
-/// pages: LOG and BOOT [`SMALL_PAGES`] each, DATA the rest. An interim
+/// pages: LOG and BOOT [`SMALL_PAGES`] each, DATA and MEMORY share the rest. An interim
 /// bound, since nothing reclaims a pager's clean pages for another job
 /// (`issues/a-pager-holds-a-fixed-capacity-until-the-memory-service-reclaims-its-clean-pages.md`).
 const PAGES_SHARE: u64 = 8;
@@ -288,12 +280,12 @@ const DATA_DIRTY: u64 = 8 * 1024;
 /// The role's pager: how many pages its files hold, how many of them may be
 /// dirty and how many files it keeps. None for SYSTEM, whose files are
 /// immutable and are served from ROOT's memory.
-fn pager(role: Role) -> Option<toyos::paged::Pager> {
+fn pager(role: Role, anonymous: bool) -> Option<toyos::paged::Pager> {
     let (capacity, dirty, objects) = match role {
         Role::System => return None,
-        Role::Data => {
+        Role::Data | Role::Memory => {
             let share = toyos::system::memory_total() / PAGES_SHARE / toyos::paged::PAGE;
-            let capacity = share.saturating_sub(2 * SMALL_PAGES).max(SMALL_PAGES);
+            let capacity = (share.saturating_sub(2 * SMALL_PAGES) / 2).max(SMALL_PAGES);
             // A file held for every 16 pages, the table's own cost a small
             // part of the pages': at most 65,536.
             (capacity, DATA_DIRTY.min(capacity / 2), (capacity / 16).clamp(1024, 64 * 1024))
@@ -301,7 +293,7 @@ fn pager(role: Role) -> Option<toyos::paged::Pager> {
         Role::Log => (SMALL_PAGES, 512, 1024),
         Role::Boot => (SMALL_PAGES, 0, 1024),
     };
-    let pager = toyos::paged::Pager::create(capacity, dirty, objects, REPORT)
+    let pager = toyos::paged::Pager::create(capacity, if anonymous { 0 } else { dirty }, objects, REPORT)
         .unwrap_or_else(|e| panic!("fileserver: the {role:?} server makes no pager ({e:?}); its row is no pager row"));
     Some(pager)
 }
@@ -340,8 +332,9 @@ fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> (Box<dyn Volum
             let (volume, memory) = root();
             return (Box::new(volume), Some(memory));
         }
+        Role::Memory => Box::new(MemoryVolume::new(roots, fileserver::volume::now_nanos)) as Box<dyn Volume>,
         Role::Data => match fileserver::data::find(data_partitions().as_deref().map_err(String::clone)) {
-            Located::Nowhere => ram(roots, "this machine has no DATA partition"),
+            Located::Nowhere => memory(roots, "this machine has no DATA partition"),
             Located::Served(guid) => match served(guid) {
                 Some(disk) => data_on(disk, roots),
                 None => absent(roots, "the DATA partition would not open".into()),
@@ -389,7 +382,7 @@ fn absent(roots: &[&str], why: String) -> Box<dyn Volume> {
 
 fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
     match DataVolume::probe(disk, CLEAN_BLOCKS, roots, fileserver::volume::now_nanos) {
-        Probed::Mounted(volume) => Box::new(volume),
+        Probed::Mounted(volume) => volume,
         Probed::Unmountable(why) => {
             println!("fileserver: the DATA volume is ours and does not mount ({why}); it is absent this boot");
             Box::new(Absent::new(roots, why))
@@ -401,12 +394,9 @@ fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
     }
 }
 
-fn ram(roots: &[&str], why: &str) -> Box<dyn Volume> {
+fn memory(roots: &[&str], why: &str) -> Box<dyn Volume> {
     println!("fileserver: {why}; /apps, /config, /home and /state are in memory and will not survive a reboot");
-    match DataVolume::format(Ram::new(RAM_BLOCKS), CLEAN_BLOCKS, roots, fileserver::volume::now_nanos) {
-        Ok(volume) => Box::new(volume),
-        Err(why) => panic!("fileserver: a volume in memory would not format: {why}"),
-    }
+    Box::new(MemoryVolume::new(roots, fileserver::volume::now_nanos))
 }
 
 fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>, String> {
@@ -460,8 +450,8 @@ enum Answer {
 
 /// What `meta` and `identity` say a node is, on `volume`. These volumes keep
 /// one name per file and no access or change time.
-fn stat_reply(meta: Meta, identity: u64, volume: u64) -> Reply {
-    let stat = Stat { kind: meta.kind.wire(), size: meta.size, nlink: 1, atime: 0, mtime: meta.mtime, ctime: 0, volume, node: identity };
+fn stat_reply(meta: Meta, identity: u64, volume: u64, nlink: u64) -> Reply {
+    let stat = Stat { kind: meta.kind.wire(), size: meta.size, nlink, atime: 0, mtime: meta.mtime, ctime: 0, volume, node: identity };
     Reply::stat(&stat)
 }
 
@@ -543,10 +533,8 @@ impl Server {
             for id in late {
                 self.drop_client(id, "it never lent its window");
             }
-            if self.writeback.take_due(now) {
-                if let Err(e) = self.sync(None) {
-                    println!("fileserver: the write-back sync failed: {e:?}");
-                }
+            if self.writeback.take_due(now) && let Err(e) = self.sync() {
+                println!("fileserver: the write-back sync failed: {e:?}");
             }
         }
     }
@@ -718,9 +706,9 @@ impl Server {
         bounds::relative(rel)?;
         let (root, start) = self.start(id, fid)?;
         let volume = &mut self.volume;
-        let mut lookup = |p: &str| match volume.lstat(p) {
-            Ok(meta) if meta.kind == Kind::Symlink => volume.read_link(p).map(Found::Link).map_err(drop),
-            Ok(_) | Err(Error::NotFound) => Ok(Found::Other),
+        let mut lookup = |p: &str| match volume.link_at(p) {
+            Ok(Some(target)) => Ok(Found::Link(target)),
+            Ok(None) | Err(Error::NotFound) => Ok(Found::Other),
             Err(_) => Err(()),
         };
         resolve::resolve(&root, &start, rel, follow_last, &mut lookup).map_err(|e| match e {
@@ -813,9 +801,8 @@ impl Server {
 
     /// What the volume path `path` is.
     fn stat_path(&mut self, path: &str) -> Result<Answer, Error> {
-        let meta = self.volume.lstat(path)?;
-        let identity = self.volume.identity(path)?;
-        Ok(Answer::Reply(stat_reply(meta, identity, self.volume_id)))
+        let (meta, identity) = self.volume.stat(path)?;
+        Ok(Answer::Reply(stat_reply(meta, identity, self.volume_id, 1)))
     }
 
     /// What a description holds open is.
@@ -828,13 +815,12 @@ impl Server {
             };
             (held, f.identity)
         };
-        let meta = match held {
-            Ok(node) => self.volume.node_meta(node)?,
-            // A removed directory is what it was, with nothing in it.
-            Err((_, true)) => Meta { kind: Kind::Dir, size: 0, mtime: 0 },
-            Err((path, false)) => self.volume.lstat(&path)?,
+        let (meta, linked) = match held {
+            Ok(node) => (self.volume.node_meta(node)?, self.volume.linked(node)?),
+            Err((_, true)) => (Meta { kind: Kind::Dir, size: 0, mtime: 0 }, false),
+            Err((path, false)) => (self.volume.lstat(&path)?, true),
         };
-        Ok(Answer::Reply(stat_reply(meta, identity, self.volume_id)))
+        Ok(Answer::Reply(stat_reply(meta, identity, self.volume_id, u64::from(linked))))
     }
 
     /// The open file `fid` names, a directory refused `IsADirectory`, and
@@ -853,7 +839,7 @@ impl Server {
         }
         match op {
             OPEN => self.open(id, &r),
-            // These volumes keep no file without a name.
+            // No volume currently creates an inode without a name.
             CREATE_UNNAMED => Err(Error::Unsupported),
             CLOSE => {
                 // Nobody waits on the answer: an id the client does not hold
@@ -920,7 +906,18 @@ impl Server {
                     let file = self.settled(id, r.fid)?;
                     return self.stat_held(&file);
                 }
-                match self.resolve(id, r.fid, &rel, r.flags & FOLLOW_LAST != 0)? {
+                // The name is stated as it is, and followed only where it is
+                // a link to follow: one lookup of it in the common case.
+                let follow = r.flags & FOLLOW_LAST != 0;
+                let path = match self.resolve(id, r.fid, &rel, false)? {
+                    Resolved::Absolute(p) => return self.follow(id, &r, &p),
+                    Resolved::Path(p) => p,
+                };
+                let (meta, identity) = self.volume.stat(&path)?;
+                if !(follow && meta.kind == Kind::Symlink) {
+                    return Ok(Answer::Reply(stat_reply(meta, identity, self.volume_id, 1)));
+                }
+                match self.resolve(id, r.fid, &rel, true)? {
                     Resolved::Absolute(p) => self.follow(id, &r, &p),
                     Resolved::Path(p) => self.stat_path(&p),
                 }
@@ -928,16 +925,20 @@ impl Server {
             SETATTR => self.set_attr(id, &r),
             FSYNC => {
                 let file = self.settled(id, r.fid)?;
-                let node = match file.borrow().held {
-                    Held::File(node) => Some(node),
-                    // A directory's names are made durable with the volume.
+                let named = match file.borrow().held {
+                    Held::File(node) => Some((file.borrow().identity, node)),
                     Held::Dir { .. } => None,
                 };
-                self.sync(node)
+                self.files.fsync(&mut *self.volume, named)?;
+                // One that left nothing to make durable did the write-back's work.
+                if !self.files.owes(&*self.volume) {
+                    self.writeback.synced(false, Instant::now());
+                }
+                Ok(Answer::Reply(Reply::ok()))
             }
-            SYNC => self.sync(None),
+            SYNC => self.sync(),
             ROOM => {
-                let room = self.volume.room()?;
+                let room = self.files.room(&mut *self.volume)?;
                 Ok(Answer::Reply(Reply { value: room.free, value2: room.unit, ..Reply::ok() }))
             }
             STREAM => {
@@ -1027,7 +1028,7 @@ impl Server {
                         let gone = self.volume.identity(&path).ok();
                         self.volume.unlink(&path)?;
                         if let Some(identity) = gone {
-                            self.files.forget(&mut *self.volume, identity);
+                            self.files.unlinked(&mut *self.volume, identity)?;
                         }
                     }
                 }
@@ -1053,9 +1054,9 @@ impl Server {
                 };
                 self.volume.rename(&from, &to)?;
                 if let Some(identity) = over {
-                    self.files.forget(&mut *self.volume, identity);
+                    self.files.unlinked(&mut *self.volume, identity)?;
                 }
-                self.each_dir(|held, _| descriptions::moved(held, &from, &to));
+                self.each_dir(|held, removed| descriptions::renamed(held, removed, &from, &to));
                 self.dirtied();
                 Ok(Answer::Reply(Reply::ok()))
             }
@@ -1085,10 +1086,14 @@ impl Server {
         }
     }
 
-    /// `f` on every held directory's path and removal, on every connection.
+    /// `f` once per held directory description, including exported aliases.
     fn each_dir(&mut self, mut f: impl FnMut(&mut String, &mut bool)) {
+        let mut seen = std::collections::BTreeSet::new();
         for client in self.clients.values() {
             for shared in client.fids.dirs() {
+                if !seen.insert(Rc::as_ptr(shared)) {
+                    continue;
+                }
                 if let Held::Dir { path, removed } = &mut shared.borrow_mut().held {
                     f(path, removed);
                 }
@@ -1101,7 +1106,9 @@ impl Server {
             return Err(Error::InvalidRequest);
         }
         let rel = self.path(id, r)?;
-        let path = match self.resolve(id, r.fid, &rel, true)? {
+        // The name is looked up as it is, and followed only where it is a
+        // link to follow: one lookup of it in the common case.
+        let mut path = match self.resolve(id, r.fid, &rel, false)? {
             Resolved::Absolute(p) => return self.follow(id, r, &p),
             Resolved::Path(p) => p,
         };
@@ -1109,13 +1116,24 @@ impl Server {
             return Err(Error::TooManyOpen);
         }
         let writes = r.flags & (O_WRITE | O_APPEND | O_TRUNCATE) != 0;
-        let found = match self.volume.lstat(&path) {
+        let mut found = match self.volume.lstat(&path) {
             Ok(meta) => Some(meta.kind),
             Err(Error::NotFound) => None,
             Err(e) => return Err(e),
         };
+        if found == Some(Kind::Symlink) && r.flags & O_CREATE_NEW == 0 {
+            path = match self.resolve(id, r.fid, &rel, true)? {
+                Resolved::Absolute(p) => return self.follow(id, r, &p),
+                Resolved::Path(p) => p,
+            };
+            found = match self.volume.lstat(&path) {
+                Ok(meta) => Some(meta.kind),
+                Err(Error::NotFound) => None,
+                Err(e) => return Err(e),
+            };
+        }
         let (held, meta) = match found {
-            Some(Kind::Dir) if r.flags & O_CREATE_NEW != 0 => return Err(Error::AlreadyExists),
+            Some(_) if r.flags & O_CREATE_NEW != 0 => return Err(Error::AlreadyExists),
             Some(Kind::Dir) if writes => return Err(Error::IsADirectory),
             Some(Kind::Dir) => (Held::Dir { path: path.clone(), removed: false }, self.volume.lstat(&path)?),
             _ if r.flags & O_DIRECTORY != 0 => return Err(if found.is_some() { Error::NotADirectory } else { Error::NotFound }),
@@ -1196,7 +1214,7 @@ impl Server {
                 return Err(e);
             }
         };
-        let reply = Reply { value: fid, ..stat_reply(meta, identity, self.volume_id) };
+        let reply = Reply { value: fid, ..stat_reply(meta, identity, self.volume_id, 1) };
         Ok(match holder {
             Some(handle) => {
                 self.files.held(identity);
@@ -1238,7 +1256,8 @@ impl Server {
             Time::At(nanos) => nanos,
         };
         if held {
-            let node = self.fid(id, r.fid)?.borrow().node().map_err(|_| Error::Unsupported)?;
+            let file = self.fid(id, r.fid)?;
+            let node = file.borrow().node().map_err(|_| Error::Unsupported)?;
             self.volume.set_mtime(node, mtime)?;
         } else {
             let path = match self.resolve(id, r.fid, &rel, r.flags & FOLLOW_LAST != 0)? {
@@ -1257,13 +1276,12 @@ impl Server {
         Ok(Answer::Reply(Reply::ok()))
     }
 
-    /// The volume synced, answered as `node`'s file fared, or with none as
-    /// every file did. A file whose entry was refused keeps the write-back
-    /// due, so the next one tries it again.
-    fn sync(&mut self, node: Option<Node>) -> Result<Answer, Error> {
+    /// The volume synced, answered as every file fared. A file whose entry
+    /// was refused keeps the write-back due, so the next one tries it again.
+    fn sync(&mut self) -> Result<Answer, Error> {
         let unwritten = self.files.sync(&mut *self.volume)?;
         self.writeback.synced(!unwritten.is_empty(), Instant::now());
-        match unwritten.into_iter().find(|&(n, _)| node.is_none_or(|node| n == node)) {
+        match unwritten.into_iter().next() {
             Some((_, e)) => Err(e),
             None => Ok(Answer::Reply(Reply::ok())),
         }
@@ -1317,7 +1335,7 @@ impl Server {
         let mut words = vec![0u8; count * 8];
         self.window(id).read(at, &mut words);
         let fids: Vec<u64> =
-            words.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().expect("eight bytes"))).collect();
+            words.as_chunks::<8>().0.iter().map(|w| u64::from_le_bytes(*w)).collect();
         let parent = &self.clients[&id];
         let (share, writes) = (parent.share, parent.writes);
         let fids = parent.fids.export(&fids)?;
@@ -1366,12 +1384,12 @@ impl Server {
         if let Some(why) = ended {
             println!("fileserver: a stream is ended: {why}");
         }
-        if let Some(stream) = self.streams.remove(&sid) {
-            if let Some((node, identity)) = descriptions::release(stream.file) {
-                // Nobody is left to answer: a refused close is said, and its
-                // node kept for the next sync.
-                let _ = self.files.closed(&mut *self.volume, identity, node);
-            }
+        if let Some(stream) = self.streams.remove(&sid)
+            && let Some((node, identity)) = descriptions::release(stream.file)
+        {
+            // Nobody is left to answer: a refused close is said, and its
+            // node kept for the next sync.
+            let _ = self.files.closed(&mut *self.volume, identity, node);
         }
         false
     }

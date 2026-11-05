@@ -1,8 +1,9 @@
 # The boot `libc_children` runs libc's C programs on: each starts children of
 # its own, `echo` among them, and `system` and `popen` run their commands by
-# `/system/bin/shell -c`.
+# `/system/bin/shell -c`; and `/tmp`'s file server, whose file
+# `spawn_served_stdout` puts at the stdout `system`'s child inherits.
 [boot]
-start = ["acpiserver", "logkeeper", "uart", "test-runner"]
+start = ["acpiserver", "logkeeper", "uart", "fileserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
@@ -36,6 +37,11 @@ syscap = ["dup", "roster"]
 service = true
 devices = ["acpi"]
 receives = ["power"]
+
+[programs.fileserver]
+restart = true
+pager = true
+roles = ["memory"]
 
 # The virtio-serial driver, for the VM's console alone: this image runs no agent.
 [programs.virtio-console]

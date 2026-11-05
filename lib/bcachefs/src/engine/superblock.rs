@@ -13,6 +13,14 @@ pub(crate) const MAGIC: [u8; 16] = [0xc6, 0x85, 0x73, 0xf6, 0x66, 0xce, 0x90, 0x
 /// Where the primary copy and the layout copy start, in sectors.
 pub(crate) const PRIMARY: u64 = 8;
 pub(crate) const LAYOUT: u64 = 7;
+
+/// A format signature, not validation: used to avoid overwriting a volume
+/// even when its primary superblock is damaged.
+pub fn carries_volume(front: &[u8]) -> bool {
+    [LAYOUT as usize * super::SECTOR, PRIMARY as usize * super::SECTOR + 24]
+        .into_iter()
+        .any(|at| front.get(at..at + MAGIC.len()) == Some(&MAGIC))
+}
 /// The fixed header's bytes.
 pub(crate) const HEADER: usize = 752;
 /// The most a copy this reader reads may hold. Upstream's default reserve is
@@ -300,6 +308,13 @@ pub(crate) fn flag(flags: &[u64; 7], word: usize, lo: u32, len: u32) -> u64 {
 }
 
 impl Superblock {
+    /// Whether the copy whose first sector is `head` claims to be one of the
+    /// volume `internal_uuid` names, at `sector`: true of a copy a crash tore,
+    /// whose first sector is whole either way.
+    pub(crate) fn names(head: &[u8], internal_uuid: &[u8; 16], sector: u64) -> bool {
+        head.len() >= 112 && head[24..40] == MAGIC && head[40..56] == *internal_uuid && le64(head, 104) == sector
+    }
+
     /// The copy in `b`, read at `sector`, validated.
     pub(crate) fn decode(b: &[u8], sector: u64) -> Result<Superblock> {
         let header = decode_header(b)?;
@@ -433,7 +448,7 @@ fn decode_header(b: &[u8]) -> Result<Header> {
     }
     let flags: [u64; 7] = core::array::from_fn(|i| le64(b, 144 + 8 * i));
     match field(flags[0], 2, 6) {
-        0 => {}
+        0 => return Err(Error::Unsupported("superblock without a checksum")),
         1 if crc32c(&b[16..total]) == le32(b, 0) => {}
         1 => return Err(Error::Checksum("superblock")),
         _ => return Err(Error::Unsupported("superblock checksum other than crc32c")),

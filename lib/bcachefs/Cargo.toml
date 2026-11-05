@@ -1,6 +1,6 @@
 [package]
 name = "bcachefs"
-description = "bcachefs: the on-disk format's reader, mkfs and check, and the interim ToyOS format they replace."
+description = "bcachefs on-disk storage: read, write, format, recovery and integrity checking."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

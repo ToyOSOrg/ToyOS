@@ -1,126 +1,38 @@
-//! An empty directory and a path that names nothing are different answers.
-//!
-//! `Vfs::list` used to give both of them `NotFound`: a directory was visible
-//! only through the files under it, so `mkdir("/tmp/d")` made something no
-//! later call could see until something was written into it. What that cost is
-//! not `readdir` — it is every tool whose two-argument form means "into this
-//! directory", because `cp x d/` on a `d` that does not stat as a directory
-//! silently writes a *file* named `d`.
-//!
-//! Asked at the syscall boundary and again through `std`, because it took a fix
-//! at each: the kernel tells the two cases apart and `std`'s `is_dir` reads
-//! anything the kernel accepted as a directory. A machine carrying one half and
-//! not the other passes the first block below and reds in the second, which is
-//! how they are kept from drifting apart again.
+//! Empty, missing and occupied directories retain distinct served answers.
 
 use std::fs;
+use std::io::ErrorKind;
 
-use toyos_abi::syscall::{self, SyscallError};
-
-/// `/tmp`, because it is a tmpfs whose directories exist only in the VFS's own
-/// `created_dirs` — nothing on a disk can make one of these look like a
-/// directory by accident, so a pass here is the VFS answering rather than a
-/// filesystem remembering.
 const EMPTY: &str = "/tmp/empty_dir_stat_empty";
 const MISSING: &str = "/tmp/empty_dir_stat_missing";
 const WITH_FILE: &str = "/tmp/empty_dir_stat_full";
 
-fn readdir(path: &str) -> Result<usize, SyscallError> {
-    // One byte on purpose: the kernel reports the size the listing *needs*
-    // whether or not it fits, so the answer is the return value and the bytes
-    // are not wanted.
-    let mut buf = [0u8; 1];
-    syscall::readdir(path.as_bytes(), &mut buf)
+fn listing(path: &str) -> std::io::Result<usize> {
+    fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>().map(|entries| entries.len())
 }
 
 fn main() {
-    fs::create_dir(EMPTY).expect("mkdir the empty directory");
-    fs::create_dir(WITH_FILE).expect("mkdir the directory with a file in it");
-    fs::write(format!("{WITH_FILE}/f"), b"x").expect("write the file");
+    fs::create_dir(EMPTY).expect("mkdir empty");
+    fs::create_dir(WITH_FILE).expect("mkdir occupied");
+    fs::write(format!("{WITH_FILE}/f"), b"x").expect("write file");
+    assert_eq!(listing(EMPTY).expect("empty listing"), 0);
+    assert_eq!(listing(MISSING).expect_err("missing listing").kind(), ErrorKind::NotFound);
+    assert_eq!(listing(WITH_FILE).expect("occupied listing"), 1);
 
-    // The distinction itself, at the one layer that can make it.
-    assert_eq!(
-        readdir(EMPTY),
-        Ok(0),
-        "an empty directory must list as empty, not refuse"
-    );
-    assert_eq!(
-        readdir(MISSING),
-        Err(SyscallError::NotFound),
-        "a path that names nothing must refuse, not list as empty"
-    );
-    // Non-vacuity: a kernel that answered `Ok` for everything would satisfy the
-    // first assertion and be no distinction at all.
-    let full = readdir(WITH_FILE).expect("a directory with a file in it must list");
-    assert!(full > 0, "a directory holding a file listed {full} bytes");
+    let empty = fs::metadata(EMPTY).expect("empty metadata");
+    assert!(empty.is_dir() && !empty.is_file());
+    assert!(fs::metadata(WITH_FILE).expect("occupied metadata").is_dir());
+    assert_eq!(fs::metadata(MISSING).expect_err("missing metadata").kind(), ErrorKind::NotFound);
+    assert_eq!(fs::remove_dir(MISSING).expect_err("missing rmdir").kind(), ErrorKind::NotFound);
+    assert!(fs::remove_dir(WITH_FILE).is_err(), "removed an occupied directory");
 
-    // The same question through `std`, which is how a program asks it.
-    let listed = fs::read_dir(EMPTY)
-        .expect("read_dir on an empty directory must succeed")
-        .count();
-    assert_eq!(listed, 0, "the empty directory yielded {listed} entries");
-
-    let err = fs::read_dir(MISSING).expect_err("read_dir on a missing path must fail");
-    assert_eq!(
-        err.kind(),
-        std::io::ErrorKind::NotFound,
-        "read_dir on a missing path reported {err:?}"
-    );
-
-    // `stat`, which is the question `cp x d/` actually asks and the one
-    // `read_dir` above does not answer: `is_dir` decided it from the *length*
-    // of the listing, so an empty directory came back `NotFound`.
-    let empty = fs::metadata(EMPTY).expect("metadata on an empty directory must succeed");
-    assert!(empty.is_dir(), "an empty directory answered is_dir() == false");
-    assert!(!empty.is_file(), "an empty directory also answered is_file()");
-    assert!(fs::metadata(WITH_FILE).expect("metadata on an occupied directory").is_dir());
-    let err = fs::metadata(MISSING).expect_err("metadata on a missing path must fail");
-    assert_eq!(
-        err.kind(),
-        std::io::ErrorKind::NotFound,
-        "metadata on a missing path reported {err:?}"
-    );
-
-    // A directory that has had a file removed from it is empty, not gone — the
-    // state the `created_dirs` lookup exists for, reached by ordinary use
-    // rather than by never writing anything.
-    fs::remove_file(format!("{WITH_FILE}/f")).expect("remove the file");
-    assert_eq!(
-        readdir(WITH_FILE),
-        Ok(0),
-        "a directory emptied by a delete must still list as a directory"
-    );
-    assert!(
-        fs::metadata(WITH_FILE).expect("metadata on an emptied directory").is_dir(),
-        "a directory emptied by a delete stopped stat-ing as one"
-    );
-
-    // `rmdir` reports the real outcome, not a blanket success (F20): a missing
-    // name, a non-empty directory, and a mount point are each refused.
-    assert_eq!(
-        syscall::rmdir(MISSING.as_bytes()),
-        Err(SyscallError::NotFound),
-        "rmdir of a name that never existed reported success",
-    );
-    fs::write(format!("{WITH_FILE}/g"), b"y").expect("refill the directory");
-    assert_eq!(
-        syscall::rmdir(WITH_FILE.as_bytes()),
-        Err(SyscallError::InvalidArgument),
-        "rmdir of a non-empty directory reported success",
-    );
-    fs::remove_file(format!("{WITH_FILE}/g")).expect("empty it again");
-    syscall::rmdir(WITH_FILE.as_bytes()).expect("rmdir of an empty directory must succeed");
-    assert_eq!(
-        readdir(WITH_FILE),
-        Err(SyscallError::NotFound),
-        "a directory reported as removed still listed",
-    );
-    syscall::rmdir(EMPTY.as_bytes()).expect("rmdir of the empty directory must succeed");
-    assert_eq!(
-        syscall::rmdir("/tmp".as_bytes()),
-        Err(SyscallError::InvalidArgument),
-        "rmdir of a mount point reported success, which erases the mount's directories",
-    );
+    fs::remove_file(format!("{WITH_FILE}/f")).expect("remove file");
+    assert_eq!(listing(WITH_FILE).expect("emptied listing"), 0);
+    assert!(fs::metadata(WITH_FILE).expect("emptied metadata").is_dir());
+    fs::remove_dir(WITH_FILE).expect("remove emptied directory");
+    assert_eq!(listing(WITH_FILE).expect_err("removed listing").kind(), ErrorKind::NotFound);
+    fs::remove_dir(EMPTY).expect("remove empty directory");
+    assert!(fs::remove_dir("/tmp").is_err(), "removed a capability root");
 
     println!("empty dir stat: empty stats as a directory, missing refuses, emptied stays one");
     println!("rmdir outcome: missing refuses, non-empty refuses, mount refuses, empty removed");

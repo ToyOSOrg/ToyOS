@@ -184,8 +184,6 @@ actuators! {
     diag_tick = "diag-tick";
 
 
-    /// Run the revoked-backing controls after mount.
-    revoked_backing_selftest = "revoked-backing-selftest";
 
     /// Shorten the panicked kernel's own reboot bound from a minute to seconds,
     /// so a guest reaches the reset. Judged by `screen_fatal_behind_a_painter`.

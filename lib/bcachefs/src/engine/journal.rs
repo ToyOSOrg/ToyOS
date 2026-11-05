@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use toyos_blockdev::BlockDev;
 
-use super::bkey::{Bpos, Format, Key, Version, KEY_U64S};
+use super::bkey::{Bpos, Format, Key, KEY_U64S};
 use super::crypt::{MasterKey, Nonce};
 use super::node::check_key;
 use super::read::read_bytes;
@@ -157,8 +157,12 @@ pub(crate) struct Found {
     pub offset: u64,
     /// Sectors it occupies, its last block's padding included.
     pub sectors: u64,
-    /// Its records, decrypted; empty when it is not `good`.
+    /// Its records, decrypted; empty when it is not `good`, or when it is
+    /// `past`.
     pub area: Vec<u8>,
+    /// Older than a good flush entry's last sequence: before the window,
+    /// so its records were not kept.
+    pub past: bool,
 }
 
 /// Every entry the ring holds, by sequence.
@@ -167,18 +171,34 @@ pub(crate) struct Scan {
 }
 
 /// Reads every journal bucket in ring order (A2.9), each as
-/// [`scan_bucket`] does.
+/// [`scan_bucket`] does. A ring another writer laid out can hold far more
+/// than any window, so an entry older than the last sequence of a good flush
+/// entry the blacklist leaves keeps no records, and [`Scan::window`] refuses
+/// a window that reaches one.
 pub(crate) async fn scan(dev: &impl BlockDev, sb: &Superblock, key: Option<&MasterKey>) -> Result<Scan> {
     let mut entries: BTreeMap<u64, Found> = BTreeMap::new();
+    let mut floor = 0;
     for index in 0..sb.journal.iter().map(|&(_, count)| count as usize).sum() {
-        for found in scan_bucket(dev, sb, key, index).await? {
+        for mut found in scan_bucket(dev, sb, key, index).await? {
+            if found.seq < floor {
+                found.area = Vec::new();
+                found.past = true;
+            }
             match entries.get(&found.seq) {
-                Some(had) if had.good && found.good && had.area != found.area => {
+                Some(had) if had.good && found.good && !had.past && !found.past && had.area != found.area => {
                     return Err(Error::Corrupt("two journal entries of one sequence"));
                 }
                 Some(had) if had.good || !found.good => {}
                 _ => {
+                    let raised = (found.good && found.flush && found.last_seq <= found.seq && !sb.blacklisted(found.seq)).then_some(found.last_seq).filter(|&l| l > floor);
                     entries.insert(found.seq, found);
+                    if let Some(last_seq) = raised {
+                        for (_, e) in entries.range_mut(floor..last_seq) {
+                            e.area = Vec::new();
+                            e.past = true;
+                        }
+                        floor = last_seq;
+                    }
                 }
             }
         }
@@ -235,7 +255,7 @@ fn entry(sb: &Superblock, key: Option<&MasterKey>, b: &[u8], bucket: usize, at: 
     // An entry that runs past its bucket is cut there and fails its checksum.
     let Some(end) = end.filter(|&end| end <= b.len()) else {
         let sectors = (b.len() / SECTOR) as u64;
-        return Ok(Found { seq, last_seq: 0, flush, good: false, bucket, offset, sectors, area: Vec::new() });
+        return Ok(Found { seq, last_seq: 0, flush, good: false, bucket, offset, sectors, area: Vec::new(), past: false });
     };
     let sectors = (end.next_multiple_of(block) / SECTOR) as u64;
     let mut bytes = b[..end].to_vec();
@@ -254,7 +274,7 @@ fn entry(sb: &Superblock, key: Option<&MasterKey>, b: &[u8], bucket: usize, at: 
     };
     let last_seq = if flush { le64(&bytes, 48) } else { 0 };
     let area = if good { bytes.split_off(HEADER) } else { Vec::new() };
-    Ok(Found { seq, last_seq, flush, good, bucket, offset, sectors, area })
+    Ok(Found { seq, last_seq, flush, good, bucket, offset, sectors, area, past: false })
 }
 
 /// The entries replay takes: from the newest flush entry `F`'s last
@@ -298,6 +318,9 @@ impl Scan {
             }
             if !e.good && !sb.blacklisted(e.seq) {
                 return Err(Error::Checksum("journal entry"));
+            }
+            if e.past {
+                return Err(Error::Corrupt("a journal window reaching behind another flush entry's last sequence"));
             }
             next = e.seq.saturating_add(1);
         }
@@ -374,21 +397,11 @@ fn keys(btree: Btree, level: u8, mut b: &[u8]) -> Result<Vec<(Key, Vec<u8>)>> {
 /// A key replay lays over a node's, or its deletion.
 pub(crate) type Replayed = Option<(Key, Vec<u8>)>;
 
-/// A replayed key and the sequence of the entry it came from.
-pub(crate) struct Logged {
-    pub seq: u64,
-    pub key: Replayed,
-}
-
 /// The window's records laid over the btrees: what a reader of an unclean
 /// volume sees in place of the nodes' keys.
 #[derive(Default)]
 pub(crate) struct Replay {
-    /// Every replayed key but accounting's, by btree, level and position, the
-    /// latest winning; a deletion as `None`.
-    pub keys: BTreeMap<(Btree, u8, Bpos), Logged>,
-    /// Accounting deltas by position, in journal order.
-    pub accounting: BTreeMap<Bpos, Vec<(Version, Vec<u64>)>>,
+    pub pending: super::pending::Pending,
     /// The latest root record of each btree.
     pub roots: Vec<Root>,
     pub key_version: Option<u64>,
@@ -409,17 +422,14 @@ pub(crate) fn replay(scan: &Scan, sb: &Superblock, w: &Window) -> Result<Replay>
             match record {
                 Record::Keys { btree, level, keys } => {
                     r.read += keys.len();
-                    for (key, value) in keys {
-                        if btree == Btree::Accounting {
-                            if key.kind != kind::ACCOUNTING {
-                                return Err(Error::Corrupt("accounting record of another type"));
-                            }
-                            r.accounting.entry(key.pos).or_default().push((key.version, counters(&value)?));
-                            continue;
+                    if btree == Btree::Accounting && level == 0 {
+                        for (key, value) in &keys {
+                            if key.kind != kind::ACCOUNTING { return Err(Error::Corrupt("accounting record of another type")); }
+                            counters(value)?;
                         }
-                        let replayed = (key.kind != kind::DELETED).then_some((key, value));
-                        r.keys.insert((btree, level, key.pos), Logged { seq: found.seq, key: replayed });
                     }
+                    r.pending.reserve(keys.len())?;
+                    r.pending.apply(found.seq, keys.into_iter().map(|(key, value)| (btree, level, key, value)));
                 }
                 Record::Root(root) => {
                     r.roots.retain(|old| old.btree != root.btree);
@@ -450,37 +460,12 @@ impl Replay {
     /// and an accounting key adds every delta newer than its own version
     /// (A7.8), dropped when its counters come to zero.
     pub(crate) fn over(&self, btree: Btree, level: u8, min: Bpos, max: Bpos, keys: Vec<(Key, Vec<u8>)>) -> Result<Vec<(Key, Vec<u8>)>> {
-        let mut merged: BTreeMap<Bpos, (Key, Vec<u8>)> = keys.into_iter().map(|(k, v)| (k.pos, (k, v))).collect();
+        let mut keys = self.pending.over(btree, level, min, max, keys)?;
         if btree == Btree::Accounting && level == 0 {
-            for (&pos, deltas) in self.accounting.range(min..=max) {
-                let stored = merged.remove(&pos);
-                let (mut key, mut sums) = match stored {
-                    Some((key, value)) => (key, counters(&value)?),
-                    None => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
-                };
-                let since = key.version;
-                for (version, delta) in deltas.iter().filter(|(v, _)| *v > since) {
-                    if sums.len() < delta.len() {
-                        sums.resize(delta.len(), 0);
-                    }
-                    for (sum, d) in sums.iter_mut().zip(delta) {
-                        *sum = sum.wrapping_add(*d);
-                    }
-                    key.version = key.version.max(*version);
-                }
-                if sums.iter().any(|&c| c != 0) {
-                    merged.insert(pos, (key, sums.iter().flat_map(|c| c.to_le_bytes()).collect()));
-                }
-            }
-        } else {
-            for ((_, _, pos), logged) in self.keys.range((btree, level, min)..=(btree, level, max)) {
-                match &logged.key {
-                    Some(kv) => merged.insert(*pos, kv.clone()),
-                    None => merged.remove(pos),
-                };
-            }
+            for (_, value) in &keys { counters(value)?; }
+            keys.retain(|(_, value)| value.iter().any(|&b| b != 0));
         }
-        Ok(merged.into_values().collect())
+        Ok(keys)
     }
 }
 
@@ -539,6 +524,9 @@ pub(crate) struct Writer {
     pub newest: Vec<Option<u64>>,
     /// The last sequence of the newest durable flush entry.
     pub durable_last: u64,
+    /// The last sequence of the newest entry closed. No later one names an
+    /// older: the scan refuses a window that does.
+    pub closed_last: u64,
     /// The sequence of the newest flush entry on the medium.
     pub durable: u64,
     pub open: Option<Open>,
@@ -550,13 +538,9 @@ pub(crate) struct Writer {
     pub closing: bool,
     /// The largest reservation any transaction makes, in u64s.
     pub max_tx: u64,
-    /// Entries of the ring reclaim needs to journal the pointer update of
-    /// every node that can pin it. Ordinary reservations leave twice this:
-    /// one share for reclaim as it runs, and one for the reclaim that writes
-    /// out a replayed window after a crash, when the first may be spent.
+    /// Entries left for a reclaim share. Ordinary admission leaves two;
+    /// live reclaim leaves the second for recovery after a crash.
     pub reclaim_entries: u64,
-    /// The mount is writing out a replayed window, and reclaim may take
-    /// both shares.
     pub replaying: bool,
 }
 
@@ -575,6 +559,7 @@ impl Writer {
             head_sectors: 0,
             newest,
             durable_last: 0,
+            closed_last: 0,
             durable: 0,
             open: None,
             closed: VecDeque::new(),
@@ -636,6 +621,9 @@ impl Writer {
             Class::Reclaim if self.replaying => 0,
             Class::Reclaim => self.reclaim_entries,
         };
+        // An entry opened by reclaim must not restart ordinary admission
+        // while the ring is still below its ordinary reserve floor.
+        if class == Class::Ordinary && self.ring_free() < keep { return false; }
         let leaves = total <= self.room() + self.ring_free().saturating_sub(keep) * per_entry;
         let fits = now && leaves;
         if fits {

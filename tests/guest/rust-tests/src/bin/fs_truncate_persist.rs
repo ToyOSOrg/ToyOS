@@ -1,5 +1,5 @@
-//! `set_len` on the kernel's own mount, across a close, and running a binary
-//! out of tmpfs: the loader reads a file whose pages are the file.
+//! `set_len` on `/tmp`, across a close, and running a binary out of it: the
+//! kernel pages the child from the copy its spawn read.
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -56,8 +56,7 @@ fn truncate_round_trip(path: &str) {
     fs::remove_file(path).expect("cleanup");
 }
 
-/// A binary the loader has to demand-page out of tmpfs. Every mount that has
-/// held an executable until now is backed by a device or by the ROOT image.
+/// A binary the loader has to demand-page from a copy read off `/tmp`.
 ///
 /// This binary is its own child: spawning a copy of itself needs no second
 /// program on ROOT, and guarantees the thing being loaded is a real

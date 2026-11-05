@@ -92,10 +92,98 @@ fn writers(dev: &Image, cache_nodes: usize, dirs: &[u64], writers: usize, per: u
     Pressure { limit, room, peak, waits }
 }
 
-/// The least cache a mount takes: room for one transaction's footprint
-/// beside reclaim's, so each writer waits for reclaim to clean what the
-/// last one dirtied.
-const SMALL_CACHE: usize = 54;
+/// The least cache a mount takes: one maximum transaction beside reclaim.
+const SMALL_CACHE: usize = super::super::mount::MIN_CACHE;
+
+#[test]
+fn committed_keys_go_into_the_leaves_they_change_and_replay_stays_pending() {
+    let dev = formatted(64 << 20, None);
+    let options = MountOptions { cache_nodes: SMALL_CACHE };
+    let mount = block_on_ready(Mount::open(&dev, options, random())).unwrap();
+    for i in 0..64 { block_on_ready(mount.create(mount.root(), format!("pending{i}").as_bytes(), New::File, OWNER, NOW)).unwrap(); }
+    let before = mount.pending_pressure();
+    assert_eq!(before.0, 0, "an ordinary transaction's keys go into the leaves it holds");
+    assert!(before.2 > 0);
+    block_on_ready(mount.commit()).unwrap();
+    assert_eq!(mount.pending_pressure(), before, "commit journals the updates without a global materialization pass");
+    drop(mount);
+
+    let mount = block_on_ready(Mount::open(&dev, options, random())).unwrap();
+    assert!(mount.pending_pressure().0 >= 128, "replay keeps journal ownership");
+    assert_eq!(mount.pending_pressure().2, 0);
+    for i in 0..64 {
+        let name = format!("pending{i}");
+        assert!(block_on_ready(mount.lookup(mount.root(), name.as_bytes())).unwrap().is_some());
+        if i % 2 == 0 { block_on_ready(mount.unlink(mount.root(), name.as_bytes(), false, NOW)).unwrap(); }
+    }
+    block_on_ready(mount.check_metadata_budget());
+    block_on_ready(mount.unmount()).unwrap();
+    let volume = block_on_ready(Volume::open(&dev)).unwrap();
+    for i in 0..64 {
+        assert_eq!(block_on_ready(volume.lookup(volume.root(), format!("pending{i}").as_bytes())).unwrap().is_some(), i % 2 != 0);
+    }
+    assert_eq!(block_on_ready(fsck(&volume)).unwrap(), []);
+}
+
+/// An unclean mount replays every transaction's accounting deltas, many at
+/// each accounting position. The first transaction after takes its nodes'
+/// pending keys, each entry looked at a bounded number of times. Red when
+/// each delta's transfer passes over all its position's: quadratic in the
+/// journal, which stalled the first write after a crash on a large volume.
+#[test]
+fn the_first_transaction_after_a_replay_takes_each_delta_once() {
+    let dev = formatted(64 << 20, None);
+    let options = MountOptions { cache_nodes: SMALL_CACHE };
+    let mount = block_on_ready(Mount::open(&dev, options, random())).unwrap();
+    for i in 0..2000 { block_on_ready(mount.create(mount.root(), format!("delta{i}").as_bytes(), New::File, OWNER, NOW)).unwrap(); }
+    drop(mount);
+
+    let mount = block_on_ready(Mount::open(&dev, options, random())).unwrap();
+    let (replayed, _, _) = mount.pending_pressure();
+    assert!(replayed >= 1000, "replay holds a thousand entries and more: {replayed}");
+    let (created, visited) = super::super::pending::visits(|| block_on_ready(mount.create(mount.root(), b"after", New::File, OWNER, NOW)));
+    created.unwrap();
+    // A few passes over each entry, where a delta's transfer passing over
+    // its position's would look at about a thousand per delta.
+    assert!(visited <= 16 * replayed, "{visited} pending entries looked at for {replayed} replayed");
+    block_on_ready(mount.unmount()).unwrap();
+    let volume = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(block_on_ready(fsck(&volume)).unwrap(), []);
+}
+
+/// After a replay left many pending keys in the ranges of the root's leaves:
+/// renames over other files, each changing two neighbouring inodes, and, on
+/// another such replay, creates. What a leaf takes from pending and a
+/// transaction's keys grow it by at most one transaction's bound, as
+/// reclaim's split bound assumes (`MAX_GROUPS`). Red when a node takes from
+/// pending for each key (the renames), or past the room the keys leave (the
+/// creates).
+#[test]
+fn a_transaction_after_a_replay_grows_a_node_by_one_transaction_at_most() {
+    const OPTIONS: MountOptions = MountOptions { cache_nodes: SMALL_CACHE };
+    for what in ["renames", "creates"] {
+        let dev = formatted(64 << 20, None);
+        let mount = block_on_ready(Mount::open(&dev, OPTIONS, random())).unwrap();
+        for i in 0..2000 { block_on_ready(mount.create(mount.root(), format!("file{i}").as_bytes(), New::File, OWNER, NOW)).unwrap(); }
+        block_on_ready(mount.commit()).unwrap();
+        drop(mount);
+        let mount = block_on_ready(Mount::open(&dev, OPTIONS, random())).unwrap();
+        if what == "renames" {
+            for i in (1960..2000).step_by(2) {
+                let (from, to) = (format!("file{i}"), format!("file{}", i + 1));
+                block_on_ready(mount.rename((mount.root(), from.as_bytes()), (mount.root(), to.as_bytes()), Rename::Replace, NOW)).unwrap();
+            }
+        } else {
+            for i in 0..16 { block_on_ready(mount.create(mount.root(), format!("after{i}").as_bytes(), New::File, OWNER, NOW)).unwrap(); }
+        }
+        let grown = mount.grown();
+        assert!(grown > 0, "{what} put keys in place");
+        assert!(grown <= super::super::mount::K_TX as usize * 8, "{what} grew a node by {grown} bytes in one transaction");
+        block_on_ready(mount.unmount()).unwrap();
+        let volume = block_on_ready(Volume::open(&dev)).unwrap();
+        assert_eq!(block_on_ready(fsck(&volume)).unwrap(), [], "{what}");
+    }
+}
 
 /// Creates past what the journal holds, with no commit: entries fill and are
 /// written, the ring fills with entries the dirty nodes pin, and a writer
@@ -107,16 +195,6 @@ fn a_writer_waiting_on_a_full_journal_completes_while_reclaim_runs() {
     let dev = formatted(64 << 20, None);
     let p = writers(&dev, 256, &[mkfs::ROOT_INODE], 1, 600);
     assert!(p.waits[0] > 0, "no writer waited for the journal: {:?}", p.waits);
-}
-
-/// A writer whose every transaction fills the dirty-node limit waits for
-/// cache room until reclaim cleans the last one's nodes. Red when cache room
-/// is taken after the slot, or when reclaim draws on ordinary admission.
-#[test]
-fn a_writer_filling_the_cache_with_dirty_nodes_completes_while_reclaim_runs() {
-    let dev = formatted(64 << 20, None);
-    let p = writers(&dev, SMALL_CACHE, &[mkfs::ROOT_INODE], 1, 60);
-    assert!(p.waits[1] > 0, "no writer waited for cache room: {:?}", p.waits);
 }
 
 /// Thirty-two writers at once, each in a directory whose names live in a

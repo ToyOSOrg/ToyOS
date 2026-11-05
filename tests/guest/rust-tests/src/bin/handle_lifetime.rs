@@ -1,28 +1,9 @@
-//! What a handle holds is released when the *last* handle goes, and no sooner —
-//! on `close` and on being killed alike.
+//! Duplicated descriptors survive the first close. Killing a process releases
+//! its acceptor and ring, while accepted file writes remain readable.
 //!
-//! Duplicating a handle used to copy a `ListenerId` and a `RingId` as bare
-//! numbers while `close` unregistered the service and destroyed the ring
-//! unconditionally, so `dup` and then closing either handle took the object out
-//! from under the survivor. A file was already refcounted; it is here because
-//! the kinds are one property, and a test covering three of them says nothing
-//! about the fourth.
-//!
-//! **The service half is now a port**, and its witness is better for it: there
-//! is no name to ask about, so what says the acceptor is alive is that a client
-//! connecting through the connector is accepted, and what says it is gone is
-//! that the next open answers [`SyscallError::Gone`] — the kernel's own record
-//! of a server that has left, rather than a name nobody re-took.
-//!
-//! The kill half is why this is a guest test and not a host one. This kernel
-//! does not unwind, so a `Drop` reached only by an orderly `close` would be
-//! decoration: `kill` runs on another CPU and drains the victim's handle
-//! table itself, and that is the path each case below re-checks.
-//!
-//! Roles: no argument is the test; `holder <kind>` takes one object, reports
-//! what it can about it, and waits to be killed.
+//! `holder <kind>` acquires the resource, reports readiness and waits to be killed.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::toyos::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
@@ -31,7 +12,7 @@ use toyos::{namespace, port, AsHandle};
 use toyos_abi::end::{End, Fault};
 use toyos_abi::handle::ObjectKind;
 use toyos_abi::inbox::RingLayout;
-use toyos_abi::syscall::{self, OpenFlags, SeekFrom, SyscallError, SERVE_PREFIX};
+use toyos_abi::syscall::{self, SyscallError, SERVE_PREFIX};
 
 #[path = "../census_wait.rs"]
 mod census_wait;
@@ -40,8 +21,8 @@ const SELF_PATH: &str = "/system/bin/test_rs_handle_lifetime";
 /// The name this test's own namespaces map to the port under test. Private to
 /// this process and its children, which is the whole of what a namespace is.
 const SERVICE: &str = "handle-lifetime-service";
-const PATH: &[u8] = b"/tmp/handle-lifetime.txt";
-const KILLED_PATH: &[u8] = b"/tmp/handle-lifetime-killed.txt";
+const PATH: &str = "/tmp/handle-lifetime.txt";
+const KILLED_PATH: &str = "/tmp/handle-lifetime-killed.txt";
 const PAYLOAD: &[u8] = b"a file outlives the handle that was closed first";
 const KILLED_PAYLOAD: &[u8] = b"written by a process that was killed before it could close";
 /// How the kernel ends a process that names a handle it does not hold.
@@ -62,54 +43,28 @@ fn main() {
 }
 
 fn test() {
-    an_undefined_open_flag_bit_is_refused();
     file_survives_one_close();
     acceptor_survives_one_close();
     ring_survives_one_close();
 
     kill_releases_acceptor();
     kill_releases_ring();
-    kill_flushes_file();
+    kill_preserves_file_writes();
 
     println!("file, acceptor and ring each outlive the first close and are released by kill");
 }
 
-/// A bit `OpenFlags` does not define is a caller asking for an openness this
-/// kernel has no name for, so the open is refused before the path is resolved.
-/// The differential is the bit: the same open without it is the handle below.
-fn an_undefined_open_flag_bit_is_refused() {
-    // The lowest bit the ABI does not define.
-    const UNDEFINED: u64 = 1 << OpenFlags::KNOWN.0.trailing_ones();
-
-    let asked = OpenFlags(OpenFlags::WRITE.0 | OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
-    assert_eq!(
-        syscall::open(PATH, OpenFlags(asked.0 | UNDEFINED)).err(),
-        Some(SyscallError::InvalidArgument),
-        "an open carrying a flag bit this ABI does not define was served",
-    );
-    let handle = syscall::open(PATH, asked).expect("the same open without the bit");
-    // SAFETY: no type holds this number.
-    unsafe { syscall::close(handle) };
-    println!("  an undefined OpenFlags bit is InvalidArgument, and without it the same open works");
-}
-
 fn file_survives_one_close() {
-    let a = syscall::open(PATH, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
-        .expect("create the file");
-    // SAFETY: nothing relies on being the source's only holder.
-    let b = unsafe { syscall::dup(a) }.expect("dup a file handle");
-    syscall::write(b, PAYLOAD).expect("write through the dup");
-    // SAFETY: no type holds this number.
-    unsafe { syscall::close(a) };
-
-    // Reading through the survivor is what says the first close did not take
-    // the file's cache entry with it.
-    syscall::seek(b, SeekFrom::Start(0)).expect("seek on the surviving handle");
-    let mut buf = [0u8; 128];
-    let n = syscall::read(b, &mut buf).expect("read through the surviving handle");
-    assert_eq!(&buf[..n], PAYLOAD, "the surviving handle no longer names the file");
-    // SAFETY: no type holds this number.
-    unsafe { syscall::close(b) };
+    let a = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(PATH).expect("create the file");
+    let mut b = a.try_clone().expect("duplicate the open description");
+    b.write_all(PAYLOAD).expect("write through the duplicate");
+    drop(a);
+    b.seek(SeekFrom::Start(0)).expect("seek the surviving description");
+    let mut buf = Vec::new();
+    b.read_to_end(&mut buf).expect("read through the surviving description");
+    assert_eq!(buf, PAYLOAD);
+    drop(b);
+    std::fs::remove_file(PATH).unwrap();
 }
 
 fn acceptor_survives_one_close() {
@@ -223,7 +178,7 @@ fn kill_releases_acceptor() {
 ///
 /// **Every kind and not the one this arm is about**, because the arrival check
 /// is what says the rings were seen and the reclaim check is about everything
-/// the dead process held: a `SharedMem` or a `File` it kept would otherwise be
+/// the dead process held: a `SharedMem` or a connection it kept would otherwise be
 /// a green run. `Census::grown_since` is the comparison the census header asks
 /// for.
 ///
@@ -254,24 +209,13 @@ fn kill_releases_ring() {
     census_wait::released_to(&before);
 }
 
-/// A killed process's dirty file must still reach the filesystem: that flush
-/// used to be a hand-written arm of `close_all`, and is now the handle's
-/// own drop on the same teardown path.
-fn kill_flushes_file() {
+/// Accepted filesystem writes survive the writer's abrupt exit, whose
+/// connection teardown releases its open descriptions.
+fn kill_preserves_file_writes() {
     let (mut child, _) = spawn_holder("file");
     kill_and_reap(&mut child);
-
-    let handle = syscall::open(KILLED_PATH, OpenFlags::READ)
-        .expect("the killed holder's file does not exist");
-    let mut buf = [0u8; 128];
-    let n = syscall::read(handle, &mut buf).expect("read the killed holder's file");
-    // SAFETY: no type holds this number.
-    unsafe { syscall::close(handle) };
-    assert_eq!(
-        &buf[..n],
-        KILLED_PAYLOAD,
-        "a killed process's unclosed file was not written back"
-    );
+    assert_eq!(std::fs::read(KILLED_PATH).unwrap(), KILLED_PAYLOAD);
+    std::fs::remove_file(KILLED_PATH).unwrap();
 }
 
 fn spawn_holder(kind: &str) -> (Child, BufReader<ChildStdout>) {
@@ -339,12 +283,9 @@ fn holder(kind: &str) {
             println!("held");
         }
         "file" => {
-            let handle = syscall::open(
-                KILLED_PATH,
-                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
-            )
-            .expect("holder: open");
-            syscall::write(handle, KILLED_PAYLOAD).expect("holder: write");
+            let mut file = std::fs::File::create(KILLED_PATH).expect("holder: open");
+            file.write_all(KILLED_PAYLOAD).expect("holder: write");
+            core::mem::forget(file);
             println!("held");
         }
         other => panic!("holder: unknown kind {other:?}"),

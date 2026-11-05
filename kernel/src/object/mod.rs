@@ -20,7 +20,6 @@ use crate::sync::Lock;
 pub mod device;
 pub mod devset;
 pub mod event;
-pub mod file;
 pub mod handle;
 pub mod inbox;
 pub mod job;
@@ -274,8 +273,6 @@ kobject! {
     immediate Connector => port::Connector,
     // Immutable once built: its `Arc<Connector>`s go with the last reference and nothing observes it.
     immediate Namespace => namespace::Namespace,
-    // A file's flush and cache reference ride the last `Arc`; `read`/`write` on a file never park.
-    immediate File => file::FileObject,
     // The authority is the rights on the handle; a handle going away *is* the whole event.
     immediate SysCap => syscap::SysCap,
     // The last handle's loss is the loss of the *ability to wait*, not proof the process should stop.

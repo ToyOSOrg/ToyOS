@@ -28,8 +28,7 @@ metal rows.
   dropped reds the test. QEMU's serial runner writes no copy: its console
   already carries the ring.
 - **A leftover reds its test.** After each member the host sends `list`, and
-  the runner prints the processes alive and every root `/` has, whole
-  (`kernel/src/vfs.rs:83-86`). The host holds both to the session's first,
+  the runner prints the processes alive and every root `/` has, whole. The host holds both to the session's first,
   `/log` less `bootlog::split_listing`'s files. Claims join once
   `issues/deferred-release-outlives-its-syscall.md` closes; until then a
   member that mints one runs last in its session, as `endowment_denied` does.

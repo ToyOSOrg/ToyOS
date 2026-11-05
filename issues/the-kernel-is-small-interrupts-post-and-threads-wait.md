@@ -155,14 +155,18 @@ Beside that order, each waiting on something outside it:
       one port, and `fs_escape` is refused a symlink that climbs out, a `..`
       on the wire and a directory it was not given. **Left**: the rest of the
       escape suite, a rename racing a lookup among it, shown red on a
-      global-tree resolver; and the empty view, which names `/tmp` while the
-      kernel serves it (step 9's file half).
+      global-tree resolver; and the empty view, which every view's `/tmp`
+      grant still stands against (`toyos_manifest`'s `temporary`).
    9. **Delete the kernel storage stack.** **Partly done** (#536). Two
       halves are left, and they land apart:
       - **The file half**: the VFS, tmpfs (`tmpfs.rs`, `fs_rename.rs`), the
-        page cache (`file_cache.rs`) and the file syscalls. `/tmp` leaves the
-        kernel per session, as the owner ruled ("Per session", 2026-10-03, in
-        the isolation track). **`/system` is read over the file protocol**,
+        page cache (`file_cache.rs`) and the file syscalls. **Done but for
+        two items** (#1152): `SYS_GETCWD` (21) stays, since the kernel
+        records a spawn's starting directory, which the SDK reads once
+        (`toyos::files`); and the measurement below is owed. `/tmp` is the
+        MEMORY file server's, one for the machine; per session, as the owner
+        ruled ("Per session", 2026-10-03), is the isolation track's stage 3.
+        **`/system` is read over the file protocol**,
         which std and libc both reach through `toyos::files` (owner ruling
         2026-10-21, "Removing the boot filesystem exception"):
         the loader hands the kernel the supervisor's and the file server's

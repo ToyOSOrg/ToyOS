@@ -1,7 +1,6 @@
 //! What a row may do to the machine's disks beyond its own partitions, which
 //! only the signed image grants: `authorize = [...]` in its row. The
-//! supervisor mints each at every start of the row, one action on one target
-//! that the block service resolves each time it is used, and puts it in the
+//! supervisor mints each at every start of the row and puts it in the
 //! row's namespace under [`Authorization::name`]. The build refuses one that
 //! changes a disk to a login authority or a row a login can start, and no
 //! `[apps]` row can spell one.
@@ -14,16 +13,21 @@ pub enum Authorization {
     /// Designations of the machine's one DATA partition, resolved each time
     /// one is asked for, for as long as the row runs.
     DesignateData,
+    /// Raw read/write access to DATA partitions, including existing volumes.
+    /// The trusted formatter selects one; this is not a format-only or
+    /// single-use grant. It grants neither the disk table nor other types.
+    FormatData,
 }
 
 impl Authorization {
-    pub const ALL: [Self; 2] = [Self::Tables, Self::DesignateData];
+    pub const ALL: [Self; 3] = [Self::Tables, Self::DesignateData, Self::FormatData];
 
     /// How a row spells it.
     pub const fn word(self) -> &'static str {
         match self {
             Self::Tables => "tables",
             Self::DesignateData => "designate:data",
+            Self::FormatData => "format:data",
         }
     }
 
@@ -36,11 +40,12 @@ impl Authorization {
         match self {
             Self::Tables => "block-tables",
             Self::DesignateData => "block-designate-data",
+            Self::FormatData => "block-format-data",
         }
     }
 
     /// Whether it changes a disk, rather than reading one.
     pub const fn changes(self) -> bool {
-        matches!(self, Self::DesignateData)
+        matches!(self, Self::DesignateData | Self::FormatData)
     }
 }

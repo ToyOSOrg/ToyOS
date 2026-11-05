@@ -9,8 +9,8 @@ opened: 2026-09-30
 Ninja starts each build edge as `/bin/sh -c <command>` (v1.13.1
 `src/subprocess-posix.cc:132-134`), and the command is the build file's own
 text, written for a POSIX shell; tokio's `tests/process_smoke.rs` runs `sh -c`
-too. ToyOS has no `/bin`: `/` holds exactly the names `kernel/src/vfs.rs`'s
-`ROOT_ENTRIES` lists. Its shell is `/system/bin/shell`, which takes `-c`;
+too. ToyOS has no `/bin`: `/` holds only the directories a process's view
+names (`toyos_manifest::ROLES`). Its shell is `/system/bin/shell`, which takes `-c`;
 nothing establishes that it runs the POSIX shell language build files are
 written in.
 

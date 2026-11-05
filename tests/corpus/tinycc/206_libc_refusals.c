@@ -1,6 +1,6 @@
 /* What libc refuses: each call answers failure in its own POSIX form, errno
    says why, and nothing is done: ENOSYS where ToyOS lacks the function,
-   ENOTSUP where the kernel's /tmp keeps no second name or set time, ECHILD
+   ENOTSUP where /tmp's server keeps no second name or access time, ECHILD
    for a wait with no child to wait for, and the errno POSIX names for a
    lock, a limit or a mapping it cannot take, or memory it cannot give. */
 #include <errno.h>
@@ -74,7 +74,6 @@ int main(void) {
     said("getsid", getsid(0));
     said("gethostname", gethostname(buf, sizeof buf));
     said("link", link(FILE_PATH, FILE_PATH ".link"));
-    said("symlink", symlink(FILE_PATH, FILE_PATH ".symlink"));
     said("fchown", fchown(fd, 0, 0));
     said("chmod", chmod(FILE_PATH, 0600));
     said("fchmod", fchmod(fd, 0600));
@@ -199,7 +198,7 @@ int main(void) {
     int named = stat(FILE_PATH, &by_name) == 0;
     printf("file: %ld bytes; mode %s through fstat, %s through stat; second name: %s\n", size,
            st.st_mode == mode ? "as it was" : "changed", named && by_name.st_mode == mode ? "as it was" : "changed",
-           access(FILE_PATH ".link", F_OK) == 0 || access(FILE_PATH ".symlink", F_OK) == 0 ? "made" : "none");
+           access(FILE_PATH ".link", F_OK) == 0 ? "made" : "none");
     page[0] = 'y';
     printf("page after mprotect: %c\n", page[0]);
     printf("limit after getrlimit: %lu %lu\n", (unsigned long)limit.rlim_cur, (unsigned long)limit.rlim_max);

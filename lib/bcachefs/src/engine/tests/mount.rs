@@ -85,35 +85,21 @@ fn leaves_and_roots_split_and_their_buckets_and_accounting_derive() {
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }
 
-/// The upstream volume left mid-write (BB-A2-1) on 64 MiB, of 32 KiB nodes,
-/// mounted read-write: its window replayed past the unflushed entries after
-/// it, the journal moved on by the post-crash skip with the skipped
-/// sequences blacklisted, every node it writes a fresh one, then unmounted
-/// clean.
+/// The imported ring cannot hold the writer's worst-case reclaim shares;
+/// its committed contents remain available through read-only replay.
 #[test]
-fn the_unclean_fixture_mounts_read_write_past_the_skip_and_unmounts_clean() {
+fn an_imported_journal_too_small_for_reclaim_is_read_and_refused_read_write() {
     let dev = fixture("unclean-32k-nodes.img.gz");
-    mounted(&dev, async |m: &Mount<&Image>| {
-        for i in 0..20 {
-            m.create(m.root(), format!("toyos{i}").as_bytes(), New::File, OWNER, NOW).await.unwrap();
-        }
-        m.commit().await.unwrap();
-    });
+    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Unsupported("journal too small for a transaction and worst-case reclaim")));
     let v = block_on_ready(Volume::open(&dev)).unwrap();
-    let sb = v.superblock();
-    assert!(sb.clean_flag());
-    assert_eq!(sb.blacklist, [(19, 23 + 4096)], "F was 18, the newest entry found 22");
-    assert!(sb.clean.as_ref().unwrap().journal_seq > 23 + 4096);
     // As upstream's own FUSE mount of the fixture reads it: f1 to f139
     // whole, f140 made but empty; the rest were in the unflushed entries.
     let (entries, _) = block_on_ready(v.readdir(v.root(), 0, 1000)).unwrap();
-    assert_eq!(entries.len(), 140 + 20 + 1, "the fixture's 140, these 20 and lost+found");
+    assert_eq!(entries.len(), 140 + 1, "the fixture's 140 and lost+found");
     for i in 1..=139 {
         assert_eq!(read_all(&v, path(&v, &format!("f{i}"))).unwrap(), format!("{i}\n").into_bytes(), "f{i}");
     }
     assert_eq!(read_all(&v, path(&v, "f140")).unwrap(), b"");
-    let found = block_on_ready(fsck(&v)).unwrap();
-    assert_eq!(found, UPSTREAM_ONLY, "only what upstream itself writes otherwise");
 }
 
 /// The same on 32 MiB, of 16 KiB nodes, is read, its window replayed, and
@@ -121,14 +107,30 @@ fn the_unclean_fixture_mounts_read_write_past_the_skip_and_unmounts_clean() {
 #[test]
 fn the_unclean_fixture_of_16_kib_nodes_is_read_and_refused_read_write() {
     let dev = fixture("unclean.img.gz");
-    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Unsupported("writing a volume of btree nodes under 32 KiB")));
+    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Unsupported("journal too small for a transaction and worst-case reclaim")));
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     assert_eq!(read_all(&v, path(&v, "f200")).unwrap(), b"200\n");
 }
 
+/// A journal ring larger than mkfs lays out, as another writer may make
+/// one, is refused read-write by name, since an unclean mount would replay
+/// what it holds; it is still read.
+#[test]
+fn a_volume_whose_journal_is_larger_than_mkfs_lays_out_is_read_but_not_written() {
+    let dev = formatted(64 << 20, None);
+    rewrite_superblock(&dev, |_, fields| {
+        let ring = fields.iter_mut().find(|f| f.kind == super::super::superblock::field_type::JOURNAL_V2).unwrap();
+        let count = u64::from_le_bytes(ring.body[8..16].try_into().unwrap());
+        ring.body[8..16].copy_from_slice(&(count + 1).to_le_bytes());
+    });
+    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Unsupported("writing a volume whose journal is larger than mkfs lays out")));
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert!(block_on_ready(v.readdir(v.root(), 0, 10)).is_ok());
+}
+
 /// What this writer does not handle in full is refused read-write by name
 /// (§3.1): a superblock field of a type v1.39.4 does not define, and a
-/// logged operation it cannot resume.
+/// malformed logged truncate it cannot safely resume.
 #[test]
 fn a_volume_this_writer_cannot_keep_is_refused_read_write() {
     let open = |dev: &Image| block_on_ready(Mount::open(dev, MEMORY, random())).err();
@@ -140,21 +142,19 @@ fn a_volume_this_writer_cannot_keep_is_refused_read_write() {
         let pos = Bpos::new(0, 0, 0);
         keys.push((Key::new(kind::LOGGED_OP_TRUNCATE, pos), vec![0; 24]));
     });
-    assert_eq!(open(&dev), Some(Error::Unsupported("writing a volume with a logged operation to resume")));
+    assert_eq!(open(&dev), Some(Error::Corrupt("logged truncate value")));
     assert!(block_on_ready(Volume::open(&dev)).is_ok(), "still read");
 }
 
-/// A key of a type v1.39.4 does not define, met by a read while mounted, is
-/// refused by name, and the mount stops writing (§3.1).
+/// The mount inventories keys for its capacity ledger before writing. An
+/// unknown type is refused during that walk, before the volume is writable.
 #[test]
-fn a_key_of_an_unknown_type_met_while_mounted_stops_writing() {
+fn a_key_of_an_unknown_type_is_refused_before_writing() {
     let dev = formatted(64 << 20, None);
     rewrite_leaf(&dev, Btree::Dirents, Bpos::MIN, 0, |keys| {
         keys.push((Key::new(kind::UNKNOWN, Bpos::new(mkfs::ROOT_INODE, 77, u32::MAX)), vec![0; 8]));
     });
-    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
-    assert_eq!(block_on_ready(m.readdir(m.root(), 0, 10)).err(), Some(Error::Unsupported("key type v1.39.4 does not define")));
-    assert_eq!(block_on_ready(m.create(m.root(), b"f", New::File, OWNER, NOW)).err(), Some(Error::ReadOnly("key type v1.39.4 does not define")));
+    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Unsupported("key type v1.39.4 does not define")));
 }
 
 /// One crash state of going read-write: it opens, never as a volume marked
@@ -230,10 +230,59 @@ fn a_clean_volume_with_an_empty_journal_survives_a_crash_going_read_write() {
     assert!(judged.get() > 500, "{} crash states judged", judged.get());
 }
 
+/// A device that answers the primary superblock's block from `first` once,
+/// and every read from `then` after it.
+struct Turncoat {
+    first: Image,
+    then: Image,
+    primary_reads: core::cell::Cell<u32>,
+}
+
+impl BlockDev for Turncoat {
+    fn blocks(&self) -> u64 {
+        self.then.blocks()
+    }
+
+    async fn read(&self, lba: u64, out: &mut [toyos_blockdev::Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        if lba <= 1 && lba + out.len() as u64 > 1 {
+            self.primary_reads.set(self.primary_reads.get() + 1);
+        }
+        match self.primary_reads.get() {
+            0 | 1 => self.first.read(lba, out).await,
+            _ => self.then.read(lba, out).await,
+        }
+    }
+
+    async fn write(&self, lba: u64, data: &[toyos_blockdev::Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.then.write(lba, data).await
+    }
+
+    async fn flush(&self) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.then.flush().await
+    }
+}
+
+/// A mount judges the superblock it runs on. An unlock reads one early, so
+/// a volume refused costs no scrypt, and its own after (an open does the
+/// same): a device whose
+/// second answer is a volume of 8 KiB nodes, after a first of mkfs's own,
+/// is refused by name, never mounted on geometry nothing judged.
+#[test]
+fn a_superblock_answered_differently_the_second_time_is_judged_as_answered() {
+    let secret = hex_secret();
+    let encrypted = || formatted(64 << 20, Some(Encryption { passphrase: &secret, kdf: MIN_KDF }));
+    let then = super::geometry::shaped(64 << 20, 8, 16, Some(Encryption { passphrase: &secret, kdf: MIN_KDF }));
+    let turncoat = Turncoat { first: encrypted(), then, primary_reads: core::cell::Cell::new(0) };
+    let limits = toyos_crypto::scrypt::Limits { memory: 1 << 20, work: 1 << 20 };
+    let err = block_on_ready(Mount::unlock(&turncoat, &secret, limits, MEMORY, random())).err();
+    assert!(turncoat.primary_reads.get() >= 2, "the device was asked for its superblock once");
+    assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes too small for reclaim's largest split")));
+}
+
 /// A volume of 512-byte blocks, which upstream formats below 1 GiB (A1.46),
-/// or of nodes under 32 KiB, is refused by name: every write is of whole
-/// 4 KiB device blocks, and a smaller node leaves too little room for the
-/// appends that let reclaim's own writes settle (`MIN_NODE`). A clean volume
+/// is refused by name, as every write is of whole 4 KiB device blocks; so
+/// is one of nodes too small for reclaim's largest split (`splits_fit`),
+/// 8 KiB and under. mkfs's own smallest, 16 KiB, is written. A clean volume
 /// whose member resumes its journal off a block is corrupt.
 #[test]
 fn small_blocks_and_a_journal_position_off_a_block_are_refused() {
@@ -243,12 +292,29 @@ fn small_blocks_and_a_journal_position_off_a_block_are_refused() {
     let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
     assert_eq!(err, Some(Error::Unsupported("writing a volume of blocks under 4 KiB")));
 
-    for sectors in [8, 32] {
+    for sectors in [8, 16] {
         let dev = formatted(64 << 20, None);
         rewrite_superblock(&dev, |h, _| h.flags[0] = h.flags[0] & !(0xffff << 12) | sectors << 12);
         let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
-        assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes under 32 KiB")), "{sectors} sectors");
+        assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes too small for reclaim's largest split")), "{sectors} sectors");
     }
+    // 8 KiB buckets of 8 KiB nodes, as a reader accepts them: refused by
+    // shape before anything sizes a journal writer for them.
+    let dev = formatted(64 << 20, None);
+    rewrite_superblock(&dev, |h, fields| {
+        h.flags[0] = h.flags[0] & !(0xffff << 12) | 16 << 12;
+        let members = fields.iter_mut().find(|f| f.kind == field_type::MEMBERS_V2).unwrap();
+        members.body[8 + 26..8 + 28].copy_from_slice(&16u16.to_le_bytes());
+    });
+    assert_eq!(block_on_ready(Volume::open(&dev)).unwrap().superblock().member.bucket_sectors, 16, "a reader takes 8 KiB buckets");
+    let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
+    assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes too small for reclaim's largest split")), "8 KiB buckets");
+    let dev = formatted(32 << 20, None);
+    assert_eq!(block_on_ready(Volume::open(&dev)).unwrap().superblock().node_sectors(), 32, "mkfs's 16 KiB nodes");
+    mounted(&dev, async |m: &Mount<&Image>| { m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap(); });
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(names(&v, v.root()), ["f"]);
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 
     let dev = formatted(64 << 20, None);
     rewrite_superblock(&dev, |_, fields| {
@@ -284,9 +350,7 @@ fn a_pointer_to_a_cached_node_of_another_btree_is_refused() {
         let inodes = clean.body[from + 8..from + len].to_vec();
         clean.body[to + 8..to + len].copy_from_slice(&inodes);
     });
-    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
-    let made = Executor::new().block_on(async { m.create_unnamed(m.root(), OWNER, NOW).await.map(|i| i.ino) }, || panic!("stalled"));
-    assert_eq!(made, Err(Error::Corrupt("two btree pointers to one node")));
+    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Corrupt("btree node of another btree or level than its pointer's")));
 }
 
 /// Rewrites the accounting root leaf, on an unencrypted volume, as upstream
@@ -297,7 +361,7 @@ fn a_pointer_to_a_cached_node_of_another_btree_is_refused() {
 fn pack_accounting_leaf(dev: &Image) -> u64 {
     use super::super::journal;
     use super::super::superblock::field_type;
-    let sb = block_on_ready(super::super::read::read_superblock(dev)).unwrap();
+    let sb = block_on_ready(super::super::read::read_superblock(dev)).unwrap().0;
     let clean = sb.clean.clone().unwrap();
     let mut roots = clean.roots.clone();
     let root = roots.iter_mut().find(|r| r.btree == Btree::Accounting).unwrap();

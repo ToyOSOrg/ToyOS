@@ -4,7 +4,8 @@
 //!
 //! **A page is present, failed or absent.** A present page holds a frame and
 //! its dirty state; a failed one holds no frame and answers `EIO` until it is
-//! supplied again; an absent one has no slot. Nothing here waits: a caller
+//! supplied again; an absent one has no slot. Unwritten anonymous memory
+//! reads zeros without a slot, and its present pages cannot be withdrawn. Nothing here waits: a caller
 //! that finds a page absent records its request in its own wait record.
 //!
 //! **A dirty page holds a slot until a write-back cleans it.** Slots are
@@ -16,6 +17,12 @@
 //! **The size is the object's.** A supply or write that ends past it extends
 //! it in the same step, so the size never covers bytes not yet in the object;
 //! a shrink removes every page past it, dirty or not.
+//!
+//! **A holder's read is atomic against every write** (POSIX XSH 2.9.7): it
+//! begins only while no write is under way ([`Object::read_begin`]), and its
+//! bytes count only where no write has begun since ([`Object::unchanged`]).
+//! A write is one call, or, where a call does not take all it was given, every
+//! call until [`Object::end_write`]: the pager's whole write.
 //!
 //! What a removed frame owes (the last pin's free, a zeroed tail) is the
 //! caller's: every removal answers its frames.
@@ -163,6 +170,8 @@ pub enum Refused {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lookup<F> {
     Present(F),
+    /// Unwritten anonymous memory, without a resident frame.
+    Zero,
     Absent,
     Failed,
     PastEnd,
@@ -204,14 +213,25 @@ struct Slot<F> {
 }
 
 /// One object's part of the table: its size, whether its pager ended, the
-/// list of its slots.
+/// list of its slots, and its writes under way.
 pub struct Object {
     id: u32,
+    anonymous: bool,
     size: u64,
     gone: bool,
     head: u32,
     pages: usize,
+    /// Moved at every write's begin and end, and at every resize.
+    version: u64,
+    /// Writes under way: each call's, and the held one.
+    writing: u32,
+    /// A call that did not take all it was given left its write under way.
+    held: bool,
 }
+
+/// What a holder's read began at ([`Object::read_begin`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Version(u64);
 
 impl Object {
     pub fn size(&self) -> u64 {
@@ -229,6 +249,43 @@ impl Object {
 
     fn page_end(&self) -> u64 {
         self.size.div_ceil(PAGE)
+    }
+
+    /// Where a holder's read begins: `None` while a write is under way.
+    pub fn read_begin(&self) -> Option<Version> {
+        (self.writing == 0).then_some(Version(self.version))
+    }
+
+    /// Whether no write or resize has begun since the read began at `v`.
+    pub fn unchanged(&self, v: Version) -> bool {
+        self.version == v.0
+    }
+
+    /// A write call begins, before its first byte lands.
+    pub fn write_begin(&mut self) {
+        self.writing = self.writing.checked_add(1).expect("an object's writes overflowed");
+        self.version += 1;
+    }
+
+    /// A write call ends, after its last byte landed. One that did not take
+    /// all it was given leaves the write under way until
+    /// [`end_write`](Self::end_write), unless an earlier call's already is.
+    pub fn write_end(&mut self, whole: bool) {
+        if !whole && !self.held {
+            self.held = true;
+            return;
+        }
+        self.writing = self.writing.checked_sub(1).expect("a write ended that never began");
+        self.version += 1;
+    }
+
+    /// The pager ends the write a short call left under way.
+    pub fn end_write(&mut self) -> Result<(), Refused> {
+        if !core::mem::take(&mut self.held) {
+            return Err(Refused::InvalidArgument);
+        }
+        self.write_end(true);
+        Ok(())
     }
 }
 
@@ -307,7 +364,13 @@ impl<F: Copy> Pages<F> {
     /// [`release`](Self::release) takes every page it held.
     pub fn object(&mut self, id: u32, size: u64) -> Object {
         assert!(size <= LAST_END, "an object of {size} bytes past the last page");
-        Object { id, size, gone: false, head: NONE, pages: 0 }
+        Object { id, anonymous: false, size, gone: false, head: NONE, pages: 0, version: 0, writing: 0, held: false }
+    }
+
+    /// An anonymous object owns its pages: no backing can supply them again,
+    /// so writeback, failure and withdrawal cannot discard present bytes.
+    pub fn anonymous(&mut self, id: u32, size: u64) -> Object {
+        Object { anonymous: true, ..self.object(id, size) }
     }
 
     fn hash(&self, object: u32, page: u64) -> usize {
@@ -421,6 +484,7 @@ impl<F: Copy> Pages<F> {
             return Lookup::PastEnd;
         }
         match self.find(o.id, page) {
+            None if o.anonymous => Lookup::Zero,
             None => Lookup::Absent,
             Some(i) => self.slot(i).frame.map_or(Lookup::Failed, Lookup::Present),
         }
@@ -447,10 +511,11 @@ impl<F: Copy> Pages<F> {
             }
             None => {}
         }
-        if dirty && self.dirty_held >= self.dirty_ceiling {
+        let tracked = dirty && !o.anonymous;
+        if tracked && self.dirty_held >= self.dirty_ceiling {
             return Err(Refused::DirtyFull);
         }
-        let state = State { dirty, ..State::CLEAN };
+        let state = State { dirty: tracked, ..State::CLEAN };
         self.insert(o, page, Some(frame), state)?;
         if dirty {
             o.size = o.size.max(end);
@@ -470,12 +535,12 @@ impl<F: Copy> Pages<F> {
         let i = self.find(o.id, page).ok_or(Refused::InvalidArgument)?;
         let s = self.slot(i);
         let frame = s.frame.ok_or(Refused::InvalidArgument)?;
-        let needs_slot = !s.state.counts_dirty();
+        let needs_slot = !o.anonymous && !s.state.counts_dirty();
         if needs_slot && self.dirty_held >= self.dirty_ceiling {
             return Err(Refused::DirtyFull);
         }
         let s = self.slot_mut(i);
-        s.state.dirty = true;
+        s.state.dirty = !o.anonymous;
         s.state.write_pins = s.state.write_pins.checked_add(1).expect("a page's write pins overflowed");
         if s.state.writeback {
             s.state.pinned_since_begin = true;
@@ -518,7 +583,7 @@ impl<F: Copy> Pages<F> {
     /// cleaned and keeps its slot until the end. The pages begun, as a bitmap.
     pub fn writeback_begin(&mut self, o: &mut Object, first: u64, count: u64) -> Result<[u64; 8], Refused> {
         let overlapping = self.open.iter().flatten().any(|&(id, a, n)| id == o.id && Self::overlaps((a, n), (first, count)));
-        if !Self::range_ok(o, first, count) || overlapping {
+        if o.anonymous || !Self::range_ok(o, first, count) || overlapping {
             return Err(Refused::InvalidArgument);
         }
         let at = self.open.iter().position(Option::is_none).ok_or(Refused::InvalidArgument)?;
@@ -537,11 +602,13 @@ impl<F: Copy> Pages<F> {
         Ok(begun)
     }
 
-    /// End the write-back of exactly a range begun: a bit per page still
-    /// dirty, holding its slot. A page removed meanwhile is clear.
+    /// End a range begun, or its leading part, retaining the unended suffix:
+    /// a bit per page still dirty. A page removed meanwhile is clear.
     pub fn writeback_end(&mut self, o: &mut Object, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused> {
-        let at = self.open.iter().position(|r| *r == Some((o.id, first, count))).ok_or(Refused::InvalidArgument)?;
-        self.open[at] = None;
+        let at = self.open.iter().position(|r| r.is_some_and(|(id, a, n)| id == o.id && a == first && count > 0 && count <= n))
+            .ok_or(Refused::InvalidArgument)?;
+        let (_, _, total) = self.open[at].expect("the range found");
+        self.open[at] = (count < total).then_some((o.id, first + count, total - count));
         let mut kept = [0u64; 8];
         for k in 0..count {
             let Some(i) = self.find(o.id, first + k) else { continue };
@@ -566,6 +633,7 @@ impl<F: Copy> Pages<F> {
     /// holds: their frames, for the caller to free at their last pin.
     /// A range longer than the object holds pages walks its pages, not the range.
     pub fn withdraw(&mut self, o: &mut Object, first: u64, count: u64, out: &mut impl FnMut(F)) -> usize {
+        if o.anonymous { return 0; }
         let end = first.saturating_add(count);
         let mut removed = 0;
         let mut take = |pages: &mut Self, o: &mut Object, i: u32| {
@@ -601,6 +669,7 @@ impl<F: Copy> Pages<F> {
     /// Mark the range failed: present pages give up their frames, and a read
     /// of any page of it answers `Failed` until it is supplied again.
     pub fn fail(&mut self, o: &mut Object, first: u64, count: u64, out: &mut impl FnMut(F)) -> Result<(), Refused> {
+        if o.anonymous { return Err(Refused::InvalidArgument); }
         let end = first.saturating_add(count).min(o.page_end());
         for page in first..end {
             if let Some(i) = self.find(o.id, page) {
@@ -617,6 +686,7 @@ impl<F: Copy> Pages<F> {
     /// answers the frame of a partial last page, whose tail past the size the
     /// caller zeroes.
     pub fn resize(&mut self, o: &mut Object, size: u64, out: &mut impl FnMut(F)) -> Option<F> {
+        o.version += 1;
         let keep = size.div_ceil(PAGE);
         if size < o.size {
             let mut at = o.head;
@@ -675,6 +745,71 @@ mod tests {
 
     fn sink(freed: &mut Vec<u64>) -> impl FnMut(u64) + '_ {
         |f| freed.push(f)
+    }
+
+    /// XSH 2.9.7: a read that began before a write, or while one was under
+    /// way, never counts; one that began after it does.
+    #[test]
+    fn a_read_counts_only_where_no_write_began_or_was_under_way() {
+        let mut p = Pages::<u64>::new(8, 4).unwrap();
+        let mut o = p.object(1, PAGE);
+        let before = o.read_begin().expect("nothing writes yet");
+        o.write_begin();
+        assert_eq!(o.read_begin(), None, "a read meets the write in flight");
+        assert!(!o.unchanged(before), "a read that began before it meets it");
+        o.write_end(true);
+        assert!(!o.unchanged(before), "and still does once it ended");
+        let after = o.read_begin().expect("the write ended");
+        assert!(o.unchanged(after));
+        p.resize(&mut o, 0, &mut none);
+        assert!(!o.unchanged(after), "a shrink is a change a read meets");
+    }
+
+    /// A pager's write that takes several calls is one write: the first short
+    /// call leaves it under way, later ones nest in it, and only its end lets
+    /// a read begin.
+    #[test]
+    fn a_short_call_holds_the_write_until_its_end() {
+        let mut p = Pages::<u64>::new(8, 4).unwrap();
+        let mut o = p.object(2, PAGE);
+        assert_eq!(o.end_write(), Err(Refused::InvalidArgument), "nothing is held");
+        o.write_begin();
+        o.write_end(false);
+        assert_eq!(o.read_begin(), None, "a short call's write is under way");
+        o.write_begin();
+        o.write_end(false);
+        o.write_begin();
+        o.write_end(true);
+        assert_eq!(o.read_begin(), None, "a later call, short or whole, ends no held write");
+        let held = o.version;
+        assert_eq!(o.end_write(), Ok(()));
+        let v = o.read_begin().expect("the end lets a read begin");
+        assert!(o.unchanged(v) && v != Version(held), "the end moved the version");
+        assert_eq!(o.end_write(), Err(Refused::InvalidArgument), "a write ends once");
+    }
+
+    #[test]
+    fn anonymous_bytes_survive_cache_operations_and_release_with_the_object() {
+        let mut pages = Pages::new(2, 0).unwrap();
+        let mut object = pages.anonymous(1, 0);
+        assert_eq!(pages.supply(&mut object, 0, 42, true, PAGE), Ok(Supplied::Installed));
+        assert_eq!(pages.dirty_held(), 0);
+        assert_eq!(pages.write_pin(&mut object, 0), Ok(42));
+        pages.write_unpin(&mut object, 0, 42, PAGE);
+        assert_eq!(pages.withdraw(&mut object, 0, 1, &mut none), 0);
+        assert_eq!(pages.writeback_begin(&mut object, 0, 1), Err(Refused::InvalidArgument));
+        assert_eq!(pages.fail(&mut object, 0, 1, &mut none), Err(Refused::InvalidArgument));
+        assert_eq!(pages.lookup(&object, 0), Lookup::Present(42));
+        assert_eq!(pages.supply(&mut object, 1, 43, true, 2 * PAGE), Ok(Supplied::Installed));
+        assert_eq!(pages.supply(&mut object, 2, 44, true, 3 * PAGE), Err(Refused::NoRoom));
+        pages.resize(&mut object, 4 * PAGE, &mut none);
+        assert_eq!(pages.lookup(&object, 3), Lookup::Zero, "a hole reads without any free slot");
+        let mut freed = Vec::new();
+        pages.resize(&mut object, PAGE, &mut sink(&mut freed));
+        assert_eq!(freed, [43]);
+        pages.release(object, &mut sink(&mut freed));
+        assert_eq!(freed, [43, 42]);
+        assert_eq!(pages.used(), 0);
     }
 
     #[test]
@@ -769,13 +904,25 @@ mod tests {
     }
 
     #[test]
-    fn a_range_must_be_ended_exactly_as_begun_and_once() {
+    fn a_range_ends_once_in_leading_parts_and_keeps_its_unwritten_suffix() {
         let mut p: Pages<u64> = Pages::new(8, 8).unwrap();
         let mut o = p.object(8, PAGE * 1024);
+        for page in 0..4 {
+            p.supply(&mut o, page, page, true, (page + 1) * PAGE).unwrap();
+        }
         p.writeback_begin(&mut o, 0, 4).unwrap();
         assert_eq!(p.writeback_begin(&mut o, 3, 2), Err(Refused::InvalidArgument), "overlapping");
-        assert_eq!(p.writeback_end(&mut o, 0, 3, true), Err(Refused::InvalidArgument), "not the range begun");
-        assert!(p.writeback_end(&mut o, 0, 4, true).is_ok());
+        assert_eq!(p.writeback_end(&mut o, 1, 3, true), Err(Refused::InvalidArgument), "not a leading part");
+        assert_eq!(p.writeback_end(&mut o, 0, 0, true), Err(Refused::InvalidArgument), "empty");
+        assert_eq!(p.writeback_end(&mut o, 0, 5, true), Err(Refused::InvalidArgument), "past the range");
+        assert_eq!(p.writeback_end(&mut o, 0, 2, true), Ok([0; 8]));
+        assert_eq!(p.dirty_held(), 2);
+        assert_eq!(p.writeback_begin(&mut o, 2, 2), Err(Refused::InvalidArgument), "the suffix remains held");
+        assert_eq!(p.writeback_end(&mut o, 0, 2, true), Err(Refused::InvalidArgument), "the prefix already ended");
+        assert_eq!(p.writeback_end(&mut o, 2, 2, false).unwrap()[0], 0b11);
+        assert_eq!(p.writeback_begin(&mut o, 0, 4).unwrap()[0], 0b1100, "only the unwritten suffix is retried");
+        assert_eq!(p.writeback_end(&mut o, 0, 4, true), Ok([0; 8]));
+        assert_eq!(p.dirty_held(), 0);
         assert_eq!(p.writeback_end(&mut o, 0, 4, true), Err(Refused::InvalidArgument), "twice");
         assert_eq!(p.writeback_begin(&mut o, 0, RANGE_PAGES + 1), Err(Refused::InvalidArgument));
         assert_eq!(p.writeback_begin(&mut o, 0, 0), Err(Refused::InvalidArgument));

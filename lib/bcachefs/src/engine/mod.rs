@@ -19,6 +19,7 @@ mod journal;
 mod mkfs;
 mod node;
 mod mount;
+mod pending;
 mod read;
 mod superblock;
 mod sync;
@@ -29,9 +30,9 @@ pub use bkey::{Bpos, Key, Version};
 pub use crypt::MIN_KDF;
 pub use fsck::{fsck, Finding};
 pub use mkfs::{fit, mkfs, Encryption, Options};
-pub use mount::{Link, Mount, MountOptions, New, Owner, Removed, Rename};
+pub use mount::{Link, Mount, MountOptions, New, Owner, Removed, Rename, Reservation};
 pub use read::{read_file, DirEntry, Inode, Volume};
-pub use superblock::{Kdf, Superblock};
+pub use superblock::{carries_volume, Kdf, Superblock};
 pub use tree::{Meta, NodeRef, Tree};
 pub use value::DirentType;
 
@@ -39,6 +40,8 @@ pub use value::DirentType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Device(toyos_blockdev::Error),
+    /// Memory for an operation could not be obtained before it applied.
+    NoMemory,
     /// A checksum or MAC disagreed with the bytes it covers.
     Checksum(&'static str),
     /// Bytes that are not the format, and what was wrong with them.
@@ -70,6 +73,10 @@ pub enum Error {
     NoSpace(&'static str),
     /// The mount stopped writing, and why.
     ReadOnly(&'static str),
+    /// A place the volume's layout gives it, by sector, holds another
+    /// writer's bytes: a superblock copy not naming this volume and its own
+    /// offset, or a layout copy other than the volume's.
+    Overwritten { sector: u64 },
 }
 
 impl From<toyos_blockdev::Error> for Error {

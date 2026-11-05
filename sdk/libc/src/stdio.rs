@@ -1,6 +1,6 @@
 use core::ptr;
 use toyos::files;
-use toyos_abi::syscall::SeekFrom;
+use toyos::files::SeekFrom;
 
 // Platform fd operations
 

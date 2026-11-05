@@ -73,7 +73,7 @@ pub(super) fn sys_spawn(
     pending: crate::loader::PendingHandles,
     cwd: alloc::string::String,
     env: Vec<u8>,
-    image: Option<alloc::sync::Arc<dyn crate::file_backing::FileBacking>>,
+    image: alloc::sync::Arc<crate::file_backing::SharedImage>,
     parent: process::Parent,
 ) -> u64 {
     // Nothing to clean up: spawn's frame owns the child's resources on error.
@@ -362,4 +362,13 @@ pub(super) fn sys_account_info(ctx: &crate::user_ptr::SyscallContext, job: RawHa
         Ok(()) => 0,
         Err(e) => e.to_u64(),
     }
+}
+
+/// The initial working-directory string the parent supplied at spawn.
+pub(super) fn sys_getcwd(out: &mut crate::user_ptr::UserBytesMut) -> u64 {
+    process::with_process_data(|data| {
+        let cwd = data.cwd.as_bytes();
+        if cwd.len() <= out.len() { out.write_at(0, cwd); }
+        cwd.len() as u64
+    })
 }

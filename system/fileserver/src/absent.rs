@@ -74,8 +74,8 @@ impl Volume for Absent {
         Err(Error::NotFound)
     }
 
-    fn write_back(&mut self, _node: Node, _offset: u64, _data: &[u8]) -> Result<(), Error> {
-        Err(Error::NotFound)
+    fn write_back(&mut self, _node: Node, _offset: u64, _data: &[u8]) -> crate::volume::WriteBack {
+        Err((0, Error::NotFound))
     }
 
     fn truncate(&mut self, _node: Node, _size: u64) -> Result<(), Error> {
@@ -108,6 +108,10 @@ impl Volume for Absent {
 
     fn sync(&mut self) -> Result<Vec<(Node, Error)>, Error> {
         Ok(Vec::new())
+    }
+
+    fn commit(&mut self, _node: Option<Node>) -> Result<(), Error> {
+        Ok(())
     }
 
     fn room(&mut self) -> Result<toyos::fs::Room, Error> {

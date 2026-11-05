@@ -83,6 +83,7 @@ const fn kind_word(kind: Kind) -> u32 {
     match kind {
         Kind::Handle => 0,
         Kind::Exported => 1,
+        Kind::File => 2,
     }
 }
 
@@ -91,6 +92,7 @@ const fn kind_of(word: u32) -> Option<Kind> {
     match word {
         0 => Some(Kind::Handle),
         1 => Some(Kind::Exported),
+        2 => Some(Kind::File),
         _ => None,
     }
 }
@@ -316,13 +318,13 @@ impl<'a> Request<'a> {
     }
 }
 
-/// Whether `path` is already the string every path syscall will act on.
+/// Whether `path` is already the string every file request will act on.
 ///
-/// The kernel normalizes before it opens anything (`kernel/src/vfs.rs`'s
-/// `normalize` drops an empty component and `.`, and pops on `..`), so a path
-/// meaning something else after that is one nothing can both classify and
-/// spawn: `/apps/./x` is outside `/apps` to the supervisor's package
-/// classification and inside it to every syscall.
+/// A client reads empty components, `.` and `..` off the text before a
+/// request leaves ([`crate::files::absolute`]), so a path meaning something
+/// else after that is one nothing can both classify and spawn: `/apps/./x` is
+/// outside `/apps` to the supervisor's package classification and inside it
+/// to every file server.
 pub fn is_canonical(path: &str) -> bool {
     path.starts_with('/')
         && !path.split('/').skip(1).any(|part| part.is_empty() || part == "." || part == "..")
@@ -330,7 +332,7 @@ pub fn is_canonical(path: &str) -> bool {
 
 /// What a launch names for a program its caller typed: a bare name left
 /// alone for `PATH`, anything with a `/` made absolute against `cwd` and
-/// normalized the way the kernel does. It lives beside [`is_canonical`]
+/// normalized as every file request is. It lives beside [`is_canonical`]
 /// because a resolver that drifted from the gate would refuse every relative
 /// command.
 pub fn program_path(program: &str, cwd: &str) -> String {
@@ -467,14 +469,14 @@ mod tests {
             env: b"",
             cwd: "/",
             extras: Vec::new(),
-            fds: vec![(0, (), Kind::Handle), (1, (), Kind::Exported)],
+            fds: vec![(0, (), Kind::Handle), (1, (), Kind::Exported), (2, (), Kind::File)],
             parent: Parent::Detached,
             job: (),
         };
         let len = request.encode(&mut buf).expect("encode a launch");
         let decoded = Request::decode(&buf[..len]).expect("decode it");
-        assert_eq!(decoded.fds().collect::<Vec<_>>(), [(0, Some(Kind::Handle)), (1, Some(Kind::Exported))]);
-        assert_eq!(decoded.handle_count(), 3, "two descriptors and the job");
+        assert_eq!(decoded.fds().collect::<Vec<_>>(), [(0, Some(Kind::Handle)), (1, Some(Kind::Exported)), (2, Some(Kind::File))]);
+        assert_eq!(decoded.handle_count(), 4, "three descriptors and the job");
         let second_kind = HEADER + FD_BYTES + 4;
         buf[second_kind..second_kind + 4].copy_from_slice(&7u32.to_le_bytes());
         let decoded = Request::decode(&buf[..len]).expect("decode it");

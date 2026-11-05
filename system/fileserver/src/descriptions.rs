@@ -138,12 +138,17 @@ impl Ids {
     }
 }
 
-/// The directory at `from`, never the volume's root, is at `to` now with
-/// everything beneath it: move `path` with it.
-pub fn moved(path: &mut String, from: &str, to: &str) {
+/// Follow a successful rename once per description. The replaced directory's
+/// old description stays removed instead of naming the source now at its path.
+pub fn renamed(path: &mut String, removed: &mut bool, from: &str, to: &str) {
+    if *removed || from == to { return; }
+    if path == to {
+        *removed = true;
+        return;
+    }
     let beneath = path.len() > from.len() && path.starts_with(from) && path.as_bytes()[from.len()] == b'/';
     if path == from || beneath {
-        *path = crate::volume::join(to, &path[from.len()..].trim_start_matches('/').to_string());
+        *path = crate::volume::join(to, path[from.len()..].trim_start_matches('/'));
     }
 }
 
@@ -207,9 +212,24 @@ mod tests {
         ];
         for (held, from, to, now) in cases {
             let mut path = held.to_string();
-            moved(&mut path, from, to);
+            let mut removed = false;
+            renamed(&mut path, &mut removed, from, to);
             assert_eq!(path, now, "{held} after {from} -> {to}");
+            assert!(!removed);
         }
+    }
+
+    #[test]
+    fn replacement_never_retargets_an_old_directory_description() {
+        let mut path = "target".to_string();
+        let mut removed = false;
+        renamed(&mut path, &mut removed, "source", "target");
+        assert!(removed);
+        renamed(&mut path, &mut removed, "target", "another");
+        assert_eq!(path, "target");
+        let mut removed = false;
+        renamed(&mut path, &mut removed, "target", "target");
+        assert!(!removed);
     }
 
     #[test]

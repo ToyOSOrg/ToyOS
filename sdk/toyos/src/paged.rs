@@ -86,6 +86,18 @@ impl Pager {
         syscall::paged_create(self.0.raw(), size).map_err(|e| Refused::of(e, None))
     }
 
+    /// Anonymous bytes, retained until shrunk or released. No backing can
+    /// refill a present page, so withdrawal and writeback cannot discard it.
+    pub fn anonymous(&self, size: u64) -> Result<u64, Refused> {
+        syscall::paged_anonymous(self.0.raw(), size).map_err(|e| Refused::of(e, None))
+    }
+
+    /// Unused slots in this pager's page quota, without reserving them or
+    /// promising that physical memory will be available for them.
+    pub fn room(&self) -> Result<u64, Refused> {
+        self.op(PagedOp::Room, PagedArgs::default(), None)
+    }
+
     /// A holder handle on object `id`, to send.
     pub fn holder(&self, id: u64) -> Result<OwnedHandle, SyscallError> {
         let raw = syscall::paged_holder(self.0.raw(), id)?;
@@ -101,14 +113,15 @@ impl Pager {
     /// size or the first absent page after the first; never waits. `out` may
     /// be a window another process shares.
     pub fn read(&self, id: u64, out: Bytes<'_>, offset: u64) -> Result<usize, Refused> {
-        let args = PagedArgs { object: id, offset, len: out.len() as u64, buf: out.as_mut_ptr() as u64, flags: 0 };
+        let args = PagedArgs { object: id, offset, len: out.len() as u64, buf: out.as_mut_ptr() as u64, ..PagedArgs::default() };
         self.op(PagedOp::Read, args, Some(SyscallError::WouldBlock)).map(|n| n as usize)
     }
 
     /// `bytes` into fresh pages of object `id` from page-aligned `offset`, at
     /// most [`PAGED_RANGE_PAGES`] of them: clean, as the file holds them, or
-    /// dirty, which grows the size to their end. A page already present is
-    /// kept. The pages installed.
+    /// dirty, which grows the size to their end. Returns the pages installed.
+    /// Clean supply skips present pages; dirty supply stops at the first
+    /// present or refused page, so its count is the copied prefix.
     pub fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused> {
         let flags = if dirty { PAGED_DIRTY } else { 0 };
         let args = PagedArgs { object: id, offset, len: bytes.len() as u64, buf: bytes.as_ptr() as u64, flags };
@@ -116,11 +129,18 @@ impl Pager {
     }
 
     /// `bytes` into the present pages of object `id` from `offset`, dirty,
-    /// the size growing as they land: how many were written before the first
-    /// absent page.
+    /// the size growing as they land: how many were written before the
+    /// first absent page.
     pub fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
         let args = PagedArgs { object: id, offset, len: bytes.len() as u64, buf: bytes.as_ptr() as u64, flags: 0 };
         self.op(PagedOp::Write, args, Some(SyscallError::NotFound)).map(|n| n as usize)
+    }
+
+    /// End the write of object `id` that a [`Self::write`] or dirty
+    /// [`Self::supply`] which did not take all it was given left under way:
+    /// until this, every holder's read of it is asked of this pager instead.
+    pub fn end_write(&self, id: u64) -> Result<(), Refused> {
+        self.op(PagedOp::EndWrite, PagedArgs { object: id, ..PagedArgs::default() }, None).map(drop)
     }
 
     /// Drop the clean pages of `count` from page `first` that nothing holds:
@@ -134,8 +154,8 @@ impl Pager {
         self.op(PagedOp::Fail, PagedArgs { object: id, offset: first, len: count, ..PagedArgs::default() }, None).map(drop)
     }
 
-    /// The size, as `ftruncate` sets it: a shrink drops every page past it,
-    /// dirty or not.
+    /// Set the size: a shrink drops every
+    /// page past it, dirty or not.
     pub fn resize(&self, id: u64, size: u64) -> Result<(), Refused> {
         self.op(PagedOp::Resize, PagedArgs { object: id, offset: size, ..PagedArgs::default() }, None).map(drop)
     }
@@ -143,13 +163,13 @@ impl Pager {
     /// Begin writing back `count` pages from `first`: a bit per page begun.
     pub fn writeback_begin(&self, id: u64, first: u64, count: u64) -> Result<[u64; 8], Refused> {
         let mut bits = [0u64; 8];
-        let args = PagedArgs { object: id, offset: first, len: count, buf: bits.as_mut_ptr() as u64, flags: 0 };
+        let args = PagedArgs { object: id, offset: first, len: count, buf: bits.as_mut_ptr() as u64, ..PagedArgs::default() };
         self.op(PagedOp::WritebackBegin, args, None)?;
         Ok(bits)
     }
 
-    /// End the write-back of exactly a range begun, `written` to the device
-    /// or not: a bit per page still dirty.
+    /// End a range begun or its leading part, `written` to the device or not:
+    /// a bit per page still dirty. Any remaining suffix stays under write-back.
     pub fn writeback_end(&self, id: u64, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused> {
         let mut bits = [0u64; 8];
         let flags = if written { PAGED_WRITTEN } else { 0 };
@@ -200,7 +220,8 @@ impl Paged {
     /// Up to `out.len()` bytes at `offset`, 0 at or past the size, waiting for
     /// every absent page until it is supplied, failed (`Io`, or a short count
     /// after some bytes), cut off by a shrink, or its object or pager ends
-    /// (`Gone`).
+    /// (`Gone`). A read a write of the pager's met is `WouldBlock`: ask the
+    /// pager, whose writes order its own reads.
     pub fn read(&self, out: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
         syscall::paged_read(self.0.raw(), out, offset)
     }

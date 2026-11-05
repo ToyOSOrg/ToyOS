@@ -3,17 +3,10 @@ pub const SYS_WRITE: u64 = 0;
 pub const SYS_READ: u64 = 1;
 pub const SYS_THREAD_EXIT: u64 = 5;
 pub const SYS_RANDOM: u64 = 6;
-pub const SYS_OPEN: u64 = 9;
 pub const SYS_CLOSE: u64 = 10;
-pub const SYS_SEEK: u64 = 13;
 pub const SYS_FSTAT: u64 = 14;
-pub const SYS_FSYNC: u64 = 15;
 /// What a path names, as a [`Stat`]: [`stat`].
-pub const SYS_STAT: u64 = 16;
-pub const SYS_READDIR: u64 = 17;
-pub const SYS_DELETE: u64 = 18;
 pub const SYS_SHUTDOWN: u64 = 19;
-pub const SYS_CHDIR: u64 = 20;
 pub const SYS_GETCWD: u64 = 21;
 pub const SYS_PIPE: u64 = 24;
 /// Start a program, endowing it exactly what the caller names. Answers a
@@ -85,15 +78,11 @@ pub const SYS_NANOSLEEP: u64 = 49;
 /// [`dup`] and [`dup_narrowed`].
 pub const SYS_HANDLE_DUP: u64 = 50;
 pub const SYS_GETPID: u64 = 51;
-pub const SYS_RENAME: u64 = 52;
-pub const SYS_MKDIR: u64 = 53;
-pub const SYS_RMDIR: u64 = 54;
 pub const SYS_DLOPEN: u64 = 55;
 pub const SYS_DLSYM: u64 = 56;
 pub const SYS_DLCLOSE: u64 = 57;
 pub const SYS_FUTEX_WAIT: u64 = 58;
 pub const SYS_FUTEX_WAKE: u64 = 59;
-pub const SYS_FTRUNCATE: u64 = 60;
 pub const SYS_STACK_INFO: u64 = 61;
 pub const SYS_CPU_COUNT: u64 = 62;
 pub const SYS_VM_RESERVE: u64 = 63;
@@ -103,8 +92,6 @@ pub const SYS_WRITE_NONBLOCK: u64 = 67;
 pub const SYS_EXIT: u64 = 72;
 pub const SYS_GET_ENV: u64 = 73;
 pub const SYS_CLOCK_EPOCH: u64 = 75;
-pub const SYS_SYMLINK: u64 = 81;
-pub const SYS_READLINK: u64 = 82;
 /// Accept a queued connection from an [`Acceptor`] handle.
 ///
 /// [`Acceptor`]: crate::handle::RawHandle
@@ -312,12 +299,6 @@ pub const SYS_MACHINE_STOPS: u64 = 136;
 ///
 /// [`Rights::INVENTORY`]: crate::handle::Rights::INVENTORY
 pub const SYS_BOOT_SOURCES: u64 = 137;
-/// Read a kernel file at an offset, leaving its handle's offset where it is.
-/// See [`pread`].
-pub const SYS_PREAD: u64 = 138;
-/// Write a kernel file at an offset, whether or not its handle appends, and
-/// leaving the handle's offset where it is. See [`pwrite`].
-pub const SYS_PWRITE: u64 = 139;
 pub const SYS_VM_PROTECT: u64 = 140;
 pub const SYS_VM_DISCARD: u64 = 141;
 pub const SYS_VM_DECOMMIT: u64 = 142;
@@ -377,7 +358,6 @@ pub const SYS_DEVICE_FIRMWARE_WINDOW: u64 = 164;
 /// Whether the calling thread can set its own data-independent timing. See
 /// [`timing_control`].
 pub const SYS_TIMING_CONTROL: u64 = 165;
-
 /// Mint a handle to the device set ([`crate::devset`]), which carries `READ`
 /// and `WAIT` and neither `DUP` nor `TRANSFER`. Gated by
 /// [`Rights::DEVICE`] on a `SysCap`. See [`device_set`].
@@ -393,6 +373,8 @@ pub const SYS_DEVICE_SET_READ: u64 = 167;
 pub const SYS_YIELD: u64 = 168;
 /// The caller's last words, once per boot. See [`log_last_words`].
 pub const SYS_LOG_LAST_WORDS: u64 = 169;
+/// List the names held by a namespace, without opening any connector.
+pub const SYS_NAMESPACE_NAMES: u64 = 170;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -400,13 +382,13 @@ pub const SYS_LOG_LAST_WORDS: u64 = 169;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 171;
+pub const SYSCALL_PROFILE_BINS: usize = 172;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_LOG_LAST_WORDS < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_NAMESPACE_NAMES < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -441,12 +423,12 @@ crate::user_safe! {
         /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
         pub labels_ptr: u64,
         pub labels_len: u64,
-        /// The child's working directory, absolute, or the spawn is refused
-        /// `InvalidArgument`. Under the name the kernel serves (`/tmp`) it
-        /// must be a directory there or the spawn is `NotFound`; under any other
-        /// name it is a file server's directory, which the caller's client asked
-        /// that server about and the kernel cannot. **Always the caller's
-        /// statement**: the kernel never substitutes the caller's own.
+        /// The child's working directory, kept as text for its
+        /// [`SYS_GETCWD`]: absolute and at most [`MAX_PATH`] bytes, or the
+        /// spawn is refused `InvalidArgument`. It names a file server's
+        /// directory, which the caller's client asked that server about.
+        /// **Always the caller's statement**: the kernel never substitutes the
+        /// caller's own.
         pub cwd_ptr: u64,
         pub cwd_len: u64,
         /// The program's bytes, in a memory object the caller holds — its file
@@ -598,19 +580,7 @@ pub enum SyscallError {
     WouldBlock = 6,
     ResourceExhausted = 7,
     NotSupported = 8,
-    /// The device did not do it.
-    ///
-    /// One word for a transfer that was issued and not completed, and for a
-    /// volume whose own structures do not decode: there is nothing a caller can
-    /// do differently about the two, and both are the opposite of `NotFound`.
-    /// The channel below it — `block::BlockDevice`, `FileBacking::read_page`,
-    /// `bcachefs::BlockIO`, `vfs::FileSystem` — is fallible the whole way so
-    /// that this is what arrives, rather than "no such file".
-    ///
-    /// It carries nothing. Which endpoint stalled, what the sense key was and
-    /// which block was asked for are in the kernel's own log line, where a
-    /// triage reads them; an enum here would be a vocabulary userland has no
-    /// use for and every new driver would have to guess an arm from.
+    /// An object operation failed while performing I/O.
     Io = 9,
     /// The object was there and its other end is not.
     ///
@@ -738,44 +708,6 @@ impl FileType {
     }
 }
 
-/// Seek position for [`seek`].
-pub enum SeekFrom {
-    Start(u64),
-    Current(i64),
-    End(i64),
-}
-
-/// Flags for [`open`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OpenFlags(pub u64);
-
-impl OpenFlags {
-    pub const READ: Self = Self(1);
-    pub const WRITE: Self = Self(2);
-    pub const CREATE: Self = Self(4);
-    pub const TRUNCATE: Self = Self(8);
-    pub const APPEND: Self = Self(16);
-    /// With [`Self::CREATE`] only: refused `AlreadyExists` when the name is
-    /// there, a link or a directory included, decided in the one call that
-    /// creates it.
-    pub const EXCLUSIVE: Self = Self(32);
-    /// Every bit defined above. An open carrying another is refused
-    /// `InvalidArgument` before its path is resolved.
-    pub const KNOWN: Self =
-        Self(Self::READ.0 | Self::WRITE.0 | Self::CREATE.0 | Self::TRUNCATE.0 | Self::APPEND.0 | Self::EXCLUSIVE.0);
-
-    pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
-}
-
-impl core::ops::BitOr for OpenFlags {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
-}
-
-impl core::ops::BitOrAssign for OpenFlags {
-    fn bitor_assign(&mut self, rhs: Self) { self.0 |= rhs.0; }
-}
-
 /// What pages of a process's own memory may be used for. No value is both
 /// writable and executable. `None` pages fault on any access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -839,8 +771,8 @@ pub struct Stat {
     /// ROOT's reproducible image.
     pub mtime: u64,
     /// The volume the file is on; 0 for an object that is no file of any
-    /// volume. A kernel mount's is below 2^63, a file server's has bit 63 set
-    /// (`toyos::fs::SERVED_VOLUME`), so the two minters cannot collide.
+    /// volume, which is every kernel object. A file server's has bit 63 set
+    /// (`toyos::fs::SERVED_VOLUME`), so no server's volume reads as 0.
     pub volume: u64,
     /// The file on that volume: the same through every path and handle that
     /// reaches it, for as long as it exists and its volume stays mounted, and
@@ -909,18 +841,6 @@ pub fn write(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallError> {
 /// Read bytes from a handle. Returns number of bytes read.
 pub fn read(handle: RawHandle, buf: &mut [u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_READ, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
-}
-
-/// Read a file at `offset`: how many bytes, 0 at or past its end. Any handle
-/// but a file's is [`SyscallError::NotSupported`].
-pub fn pread(handle: RawHandle, buf: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
-    check(syscall(SYS_PREAD, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, offset)).map(|n| n as usize)
-}
-
-/// Write a file at `offset`: how many bytes. Any handle but a file's is
-/// [`SyscallError::NotSupported`].
-pub fn pwrite(handle: RawHandle, buf: &[u8], offset: u64) -> Result<usize, SyscallError> {
-    check(syscall(SYS_PWRITE, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, offset)).map(|n| n as usize)
 }
 
 /// Exit the current thread only, leaving its code for [`thread_join`]. Does
@@ -1332,10 +1252,6 @@ pub fn set_thread_name(name: &[u8]) {
     syscall(SYS_SET_THREAD_NAME, name.as_ptr() as u64, name.len() as u64, 0, 0);
 }
 
-/// The most links `SYS_OPEN` follows from the name it is given: the link a
-/// chain reaches past them is refused `InvalidArgument`.
-pub const MAX_LINKS: u32 = 10;
-
 /// The longest path a file server's wire carries (`sdk/toyos/src/fs.rs`), and
 /// libc's `PATH_MAX` (`sdk/libc/include/limits.h`).
 pub const MAX_PATH: usize = 4096;
@@ -1354,11 +1270,6 @@ pub const MAX_WHOLE_PIPE_WRITE: usize = 4096;
 /// for memory.
 pub const PIPE_CAPACITY: usize = 2 << 20;
 
-/// Open a file.
-pub fn open(path: &[u8], flags: OpenFlags) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_OPEN, path.as_ptr() as u64, path.len() as u64, flags.0, 0)).map(|v| RawHandle(v as u32))
-}
-
 /// Close a handle.
 ///
 /// # Safety
@@ -1368,16 +1279,6 @@ pub unsafe fn close(handle: RawHandle) {
     syscall(SYS_CLOSE, handle.0 as u64, 0, 0, 0);
 }
 
-/// Seek within a file handle. Returns new offset.
-pub fn seek(handle: RawHandle, pos: SeekFrom) -> Result<u64, SyscallError> {
-    let (offset, whence) = match pos {
-        SeekFrom::Start(n) => (n as i64, 0u64),
-        SeekFrom::Current(n) => (n, 1u64),
-        SeekFrom::End(n) => (n, 2u64),
-    };
-    check(syscall(SYS_SEEK, handle.0 as u64, offset as u64, whence, 0))
-}
-
 /// Get file metadata for a file handle.
 pub fn fstat(handle: RawHandle) -> Result<Stat, SyscallError> {
     let mut stat = Stat::default();
@@ -1385,81 +1286,8 @@ pub fn fstat(handle: RawHandle) -> Result<Stat, SyscallError> {
     Ok(stat)
 }
 
-/// What the kernel's `path` names: a file, a directory, or, unless `follow`
-/// follows it, a symlink, each with the identity [`fstat`] answers a file.
-pub fn stat(path: &[u8], follow: bool) -> Result<Stat, SyscallError> {
-    let mut stat = Stat::default();
-    let out = &mut stat as *mut Stat as u64;
-    check_unit(syscall(SYS_STAT, path.as_ptr() as u64, path.len() as u64, out, follow as u64))?;
-    Ok(stat)
-}
-
-/// Flush a file handle to disk, or a partition claim's writes out of its
-/// device's cache ([`crate::part`]): `Ok` is the device's own word that every
-/// write the claim returned from before this call is durable.
-pub fn fsync(handle: RawHandle) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_FSYNC, handle.0 as u64, 0, 0, 0))
-}
-
-/// Read directory entries. Returns the number of bytes the listing *needs*.
-///
-/// `Ok(n)` with `n <= buf.len()` means the entries are in `buf`; `n >
-/// buf.len()` means nothing was written and `n` is the size to retry with.
-/// The kernel never writes a partial listing — see `sys_readdir`.
-///
-/// The error is returned rather than folded into `0`: "the directory is too
-/// large to list" and "the directory is empty" are different answers and a
-/// caller has to be able to tell them apart.
-pub fn readdir(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
-    let n = syscall(SYS_READDIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
-    match SyscallError::from_u64(n) {
-        Some(e) => Err(e),
-        None => Ok(n as usize),
-    }
-}
-
-/// The kind byte a [`readdir`] entry opens with: a file.
-pub const DIRENT_FILE: u8 = 1;
-/// The kind byte a [`readdir`] entry opens with: a directory.
-pub const DIRENT_DIR: u8 = 2;
-
-/// One entry of a [`readdir`] listing: its kind byte, its name, a NUL, and its
-/// node as eight bytes, little-endian: the [`Stat::node`] [`stat`] answers it.
-pub struct Dirent<'a> {
-    pub is_dir: bool,
-    pub name: &'a [u8],
-    pub node: u64,
-}
-
-/// The entry at `*at` in a whole [`readdir`] listing, with `*at` moved past
-/// it; `None` once `*at` is at its end. A listing of any other shape is a
-/// kernel that broke this ABI, and panics.
-pub fn dirent<'a>(listing: &'a [u8], at: &mut usize) -> Option<Dirent<'a>> {
-    let rest = listing.get(*at..).filter(|r| !r.is_empty())?;
-    let is_dir = match rest[0] {
-        DIRENT_FILE => false,
-        DIRENT_DIR => true,
-        kind => panic!("SYS_READDIR answered an entry of kind {kind}"),
-    };
-    let len = rest[1..].iter().position(|&b| b == 0).expect("SYS_READDIR answered a name with no NUL");
-    let node = rest
-        .get(len + 2..len + 10)
-        .expect("SYS_READDIR answered an entry with no node");
-    *at += len + 10;
-    Some(Dirent { is_dir, name: &rest[1..1 + len], node: u64::from_le_bytes(node.try_into().unwrap()) })
-}
-
-/// Delete a file or directory.
-pub fn delete(path: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_DELETE, path.as_ptr() as u64, path.len() as u64, 0, 0))
-}
-
-/// Change current working directory.
-pub fn chdir(path: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_CHDIR, path.as_ptr() as u64, path.len() as u64, 0, 0))
-}
-
-/// Get the current working directory.
+/// Get the initial working directory supplied by spawn. Runtime changes
+/// belong to the SDK process state (`toyos::files::getcwd`).
 ///
 /// Returns the length the path *needs*, not the number of bytes written:
 /// `n <= buf.len()` means the path is in `buf[..n]`, and `n > buf.len()` means
@@ -2141,6 +1969,15 @@ pub fn namespace_open(ns: RawHandle, name: &str) -> Result<RawHandle, SyscallErr
     .map(|v| RawHandle(v as u32))
 }
 
+/// The namespace's names, sorted, encoded as a little-endian `u16` length
+/// followed by that many UTF-8 bytes for each name. Requires READ. Returns
+/// the complete required byte length; writes nothing when `out` is smaller.
+/// A namespace is immutable, so a size query and a later read agree.
+pub fn namespace_names(namespace: RawHandle, out: &mut [u8]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_NAMESPACE_NAMES, namespace.0 as u64, out.as_mut_ptr() as u64, out.len() as u64, 0)).map(|n| n as usize)
+}
+
+
 /// Bytes one badge may carry. Policy on the primitive: a badge is kernel
 /// memory no process is charged for, so the bound is what its one reader, the
 /// supervisor's launch authority, needs.
@@ -2646,31 +2483,6 @@ pub fn getpid() -> Pid {
     Pid(syscall(SYS_GETPID, 0, 0, 0, 0) as u32)
 }
 
-/// Rename a file.
-pub fn rename(old: &[u8], new: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_RENAME, old.as_ptr() as u64, old.len() as u64, new.as_ptr() as u64, new.len() as u64))
-}
-
-/// Create a directory.
-pub fn mkdir(path: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0, 0))
-}
-
-/// Remove a directory.
-pub fn rmdir(path: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0, 0))
-}
-
-/// Create a symbolic link at `link` pointing to `target`.
-pub fn symlink(target: &[u8], link: &[u8]) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_SYMLINK, target.as_ptr() as u64, target.len() as u64, link.as_ptr() as u64, link.len() as u64))
-}
-
-/// Read the target of a symbolic link. Returns the number of bytes written to `buf`.
-pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
-    check(syscall(SYS_READLINK, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)).map(|n| n as usize)
-}
-
 /// Libraries one process holds, `DT_NEEDED` and loaded alike; [`dl_open`] of a
 /// name it does not hold past it is `ResourceExhausted`.
 pub const MAX_LIBRARIES: usize = 1024;
@@ -2743,11 +2555,6 @@ pub unsafe fn futex_wait(addr: *const u32, expected: u32, timeout: Option<u64>) 
 /// `addr` must point to a valid, aligned `u32`.
 pub unsafe fn futex_wake(addr: *const u32, count: u32) -> u64 {
     syscall(SYS_FUTEX_WAKE, addr as u64, count as u64, 0, 0)
-}
-
-/// Truncate a file handle to `size` bytes.
-pub fn ftruncate(handle: RawHandle, size: u64) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_FTRUNCATE, handle.0 as u64, size, 0, 0))
 }
 
 /// Get the current thread's stack base address and size.
@@ -3366,56 +3173,7 @@ mod tests {
         assert_eq!(PciId::from_wire(1 << 32), None);
     }
 
-    /// A listing of `entries`, each a name, whether it is a directory and a
-    /// node, encoded as `sys_readdir` (`kernel/src/syscall/fs.rs`) encodes it.
-    fn listing(entries: &[(&str, bool, u64)]) -> std::vec::Vec<u8> {
-        let mut out = std::vec::Vec::new();
-        for (name, is_dir, node) in entries {
-            out.push(if *is_dir { 2 } else { 1 });
-            out.extend_from_slice(name.as_bytes());
-            out.push(0);
-            out.extend_from_slice(&node.to_le_bytes());
-        }
-        out
-    }
 
-    fn read_listing(bytes: &[u8]) -> std::vec::Vec<(std::string::String, bool, u64)> {
-        let mut at = 0;
-        let mut out = std::vec::Vec::new();
-        while let Some(entry) = dirent(bytes, &mut at) {
-            out.push((std::string::String::from_utf8(entry.name.to_vec()).unwrap(), entry.is_dir, entry.node));
-        }
-        assert_eq!(at, bytes.len(), "the reader stopped short of the listing's end");
-        out
-    }
-
-    #[test]
-    fn every_dirent_is_read_back_whatever_its_node_holds() {
-        // Nodes whose bytes are NULs, kind bytes and letters: a reader that
-        // does not step over all eight takes them for names.
-        let entries = [
-            ("a", false, 0),
-            ("dir", true, 0x0201_0000_0000_0000),
-            ("b.txt", false, 0x6162_6300_0102_0304),
-            ("", false, u64::MAX),
-            ("last", true, 17),
-        ];
-        let want: std::vec::Vec<_> = entries.iter().map(|(n, d, s)| ((*n).into(), *d, *s)).collect();
-        assert_eq!(read_listing(&listing(&entries)), want);
-        assert!(read_listing(&[]).is_empty());
-    }
-
-    #[test]
-    #[should_panic(expected = "of kind 3")]
-    fn a_dirent_of_another_kind_is_a_broken_kernel() {
-        read_listing(&[3, b'x', 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    #[should_panic(expected = "no node")]
-    fn a_short_dirent_is_a_broken_kernel() {
-        read_listing(&[1, b'x', 0, 0, 0]);
-    }
 }
 
 
@@ -3433,15 +3191,20 @@ pub const PAGED_RANGE_PAGES: u64 = 512;
 pub enum PagedOp {
     /// Copy `len` bytes from `buf` into fresh pages at `offset`, a whole page
     /// in: clean, or dirty with [`PAGED_DIRTY`], which also grows the size to
-    /// the end of the bytes. A page already present is left as it is.
-    /// Answers the pages installed; `ResourceExhausted` where no page could
-    /// be had, `WouldBlock` at the dirty ceiling, `InvalidArgument` for a
-    /// clean page past the size or a dirty one past its end.
+    /// the end of the bytes and is a write ([`PagedOp::Write`]). A page
+    /// already present is left as it is. Clean supply skips it; dirty supply
+    /// stops there, so its installed count describes a copied prefix.
+    /// Answers the pages installed;
+    /// `ResourceExhausted` where no page could be had, `WouldBlock` at the
+    /// dirty ceiling, `InvalidArgument` for a clean page past the size or a
+    /// dirty one past its end.
     Supply = 0,
     /// Copy `len` bytes from `buf` into the present pages at `offset`, dirty,
     /// growing the size to their end as each page's bytes land. Answers the
     /// bytes written, stopping at the first absent page; `NotFound` when the
-    /// first is absent, `WouldBlock` at the dirty ceiling.
+    /// first is absent, `WouldBlock` at the dirty ceiling. A write that
+    /// does not take all it was given stays under way until
+    /// [`PagedOp::EndWrite`].
     Write = 1,
     /// Remove the clean pages of `len` pages from page `offset` that no
     /// write-back or write holds. Answers how many went.
@@ -3449,17 +3212,17 @@ pub enum PagedOp {
     /// Mark `len` pages from page `offset` failed: each read of one answers
     /// `Io` until it is supplied again.
     Fail = 3,
-    /// Set the size to `offset`. A shrink drops every page past it, dirty or
-    /// not, and zeroes the last page's tail; the new range of a growth reads
-    /// as the pager supplies it.
+    /// Set the size to `offset`. A shrink drops
+    /// every page past it, dirty or not, and zeroes the last page's tail; the
+    /// new range of a growth reads as the pager supplies it.
     Resize = 4,
     /// Begin writing back `len` pages from page `offset`, at most
     /// [`PAGED_RANGE_PAGES`]: each dirty page is cleaned and held until the
     /// end. `buf` receives a 64-byte bitmap of the pages begun.
     WritebackBegin = 5,
-    /// End exactly a range begun, written to the device or not
+    /// End a range begun or its leading part, written to the device or not
     /// ([`PAGED_WRITTEN`]): `buf` receives a 64-byte bitmap of the pages
-    /// still dirty, dirtied again since the begin or not written.
+    /// still dirty. Any remaining suffix stays under write-back.
     WritebackEnd = 6,
     /// Read `len` bytes at `offset` into `buf`, never waiting: `WouldBlock`
     /// where the first page is absent, a short count where a later one is.
@@ -3467,6 +3230,12 @@ pub enum PagedOp {
     /// Let the object go: its pages go, its holders answer `Gone`, and its id
     /// names another object once its last holder has gone.
     Release = 8,
+    /// End the write a short [`PagedOp::Write`] or dirty supply left under
+    /// way; `InvalidArgument` where none is.
+    EndWrite = 9,
+    /// Unused slots in the pager's resident-page quota. This advisory
+    /// snapshot reserves nothing and promises no physical memory.
+    Room = 11,
 }
 
 /// [`PagedOp::Supply`]'s pages are dirty.
@@ -3521,11 +3290,18 @@ pub fn pager_create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> 
     check(syscall(SYS_PAGER_CREATE, capacity, dirty, objects, report_ns)).map(|raw| RawHandle(raw as u32))
 }
 
-/// A paged object of `size` bytes, its pages absent: its id, which `pager`'s
-/// calls and notices name it by. `ResourceExhausted` where the pager serves
-/// as many objects as it was made for.
+/// A paged object of `size` bytes, its pages absent:
+/// its id, which `pager`'s calls and notices name it by.
+/// `ResourceExhausted` where the pager serves as many objects as it was made
+/// for.
 pub fn paged_create(pager: RawHandle, size: u64) -> Result<u64, SyscallError> {
     check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, 0, 0))
+}
+
+/// A resizable anonymous object: its present pages are authoritative, never
+/// withdrawn or discarded by a failure, and writes need no writeback slot.
+pub fn paged_anonymous(pager: RawHandle, size: u64) -> Result<u64, SyscallError> {
+    check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, 1, 0))
 }
 
 /// A holder handle on `pager`'s object `object`, carrying `READ`, which may
@@ -3538,7 +3314,9 @@ pub fn paged_holder(pager: RawHandle, object: u64) -> Result<RawHandle, SyscallE
 /// 0 at or past it. It waits for every absent page until its pager supplies
 /// or fails it, the object shrinks or is released, or the pager ends: `Io`
 /// for a failed page before any byte was read (a short count after some),
-/// `Gone` once the object or the pager ended. A pager's process is refused,
+/// `Gone` once the object or the pager ended. A read a write of the pager's
+/// met, or that began while one was under way, is `WouldBlock`, and the
+/// holder asks the pager instead. A pager's process is refused,
 /// `PermissionDenied`, as is a holder without `READ`; any other kind of
 /// handle, `InvalidArgument`, so a peer's claim that a handle is a holder
 /// can be checked.

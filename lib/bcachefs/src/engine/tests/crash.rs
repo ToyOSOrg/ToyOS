@@ -182,7 +182,7 @@ fn ops_survive_a_crash_anywhere(encryption: Option<Encryption>, ops: &[Op], ever
 
 /// [`ops_survive_a_crash_anywhere`] on `image`, mounted with `options`; how
 /// many buckets the mount took again after an emptying.
-fn ops_survive_a_crash_on(image: Vec<u8>, passphrase: Option<&[u8]>, options: MountOptions, ops: &[Op], every: usize, samples: u64) -> usize {
+pub(super) fn ops_survive_a_crash_on(image: Vec<u8>, passphrase: Option<&[u8]>, options: MountOptions, ops: &[Op], every: usize, samples: u64) -> usize {
     let passphrase = passphrase.map(<[u8]>::to_vec);
     // The names the volume holds already stay through every state.
     let initial: BTreeSet<Vec<u8>> = {
@@ -222,6 +222,10 @@ fn ops_survive_a_crash_on(image: Vec<u8>, passphrase: Option<&[u8]>, options: Mo
             for (i, op) in ops.iter().enumerate() {
                 applied.set(i + 1);
                 apply(&mount, op).await;
+                if matches!(op, Op::Rename(..)) {
+                    let plans = mount.write_batch(super::super::mount::Order::OldestPin).await.unwrap();
+                    mount.point_batch(plans).await.unwrap();
+                }
                 if (i + 1) % every == 0 {
                     mount.commit().await.unwrap();
                     committed.set(i + 1);
@@ -274,7 +278,7 @@ fn encrypted_namespace_operations_survive_a_crash_at_every_request() {
 
 /// A cache whose dirty-node limit is one transaction's footprint: reclaim
 /// writes before every operation, so leaves fill and rewrite.
-pub(super) const PRESSED: MountOptions = MountOptions { cache_nodes: 54 };
+pub(super) const PRESSED: MountOptions = MountOptions { cache_nodes: super::super::mount::MIN_CACHE };
 
 /// `files` files made, then each renamed back and forth `rounds` times:
 /// the same leaves rewritten again and again, each rewrite emptying the
@@ -288,16 +292,16 @@ fn renames(files: usize, rounds: usize) -> Vec<Op> {
     ops
 }
 
-/// Allocation pressure: a volume a file has filled to a few hundred empty
-/// buckets, its leaves rewritten until emptied buckets are taken again, a
+/// Allocation pressure: a file leaves the native rewrite reserve and one
+/// transaction's headroom, then leaves rewrite until emptied buckets are taken again, a
 /// crash at every request. Every crash state replays to a prefix holding
 /// every commit and checks clean: a bucket is written again only once its
 /// emptying is durable. Red when one is reused before.
 #[test]
 fn renames_reusing_buckets_on_a_nearly_full_volume_survive_a_crash_at_every_request() {
     let mut data = Vec::new();
-    let image = super::buckets::nearly_full(&mut data, 400).into_inner();
-    let reused = ops_survive_a_crash_on(image, None, PRESSED, &renames(8, 8), 4, 8);
+    let image = super::buckets::nearly_full(&mut data).into_inner();
+    let reused = ops_survive_a_crash_on(image, None, PRESSED, &renames(8, 32), 4, 8);
     assert!(reused > 4, "{reused} buckets taken again");
 }
 
@@ -306,8 +310,68 @@ fn renames_reusing_buckets_on_a_nearly_full_volume_survive_a_crash_at_every_requ
 fn encrypted_renames_reusing_buckets_survive_a_crash_at_every_request() {
     let secret = hex_secret();
     let image = formatted(64 << 20, Some(Encryption { passphrase: &secret, kdf: MIN_KDF })).into_inner();
-    let reused = ops_survive_a_crash_on(image, Some(&secret), PRESSED, &renames(8, 6), 4, 6);
+    let reused = ops_survive_a_crash_on(image, Some(&secret), PRESSED, &renames(8, 32), 4, 6);
     assert!(reused > 4, "{reused} buckets taken again");
+}
+
+#[test]
+fn journal_pressure_recovers_after_torn_reordered_publication() {
+    let name = |i| format!("p{i:06}-{}", "x".repeat(240)).into_bytes();
+    for passphrase in [None, Some(hex_secret())] {
+        let encryption = passphrase.as_ref().map(|secret| Encryption { passphrase: secret, kdf: MIN_KDF });
+        let model = Model::new(formatted(64 << 20, encryption).into_inner(), 512);
+        let applied = Cell::new(0);
+        let committed = Cell::new(0);
+        let armed = Cell::new(false);
+        let checked = Cell::new(0u64);
+        let dev = Watched {
+            model: &model,
+            after: Box::new(|model| {
+                if !armed.get() || checked.get() == 8 { return; }
+                checked.set(checked.get() + 1);
+                model.check(4, 0xadd1_0000 + checked.get(), |bytes| {
+                    let disk = Overlay::new(bytes);
+                    let m = match &passphrase {
+                        Some(secret) => block_on_ready(Mount::unlock(&disk, secret, MIN_LIMITS, MEMORY, random())),
+                        None => block_on_ready(Mount::open(&disk, MEMORY, random())),
+                    }.map_err(|e| format!("pressure recovery: {e:?}"))?;
+                    let (entries, more) = block_on_ready(m.readdir(m.root(), 0, usize::MAX)).map_err(|e| format!("names: {e:?}"))?;
+                    if more || !(committed.get()..=applied.get()).contains(&entries.len()) {
+                        return Err(format!("{} names outside committed/applied bounds", entries.len()));
+                    }
+                    let seen: BTreeSet<_> = entries.into_iter().map(|e| e.name).collect();
+                    if seen != (0..seen.len()).map(&name).collect() { return Err("names are not a creation prefix".into()); }
+                    block_on_ready(m.unmount()).map_err(|e| format!("pressure drain: {e:?}"))?;
+                    let v = match &passphrase {
+                        Some(secret) => block_on_ready(Volume::unlock(&disk, secret, MIN_LIMITS)),
+                        None => block_on_ready(Volume::open(&disk)),
+                    }.map_err(|e| format!("reopen: {e:?}"))?;
+                    let problems = block_on_ready(fsck(&v)).map_err(|e| format!("fsck: {e:?}"))?;
+                    if !problems.is_empty() { return Err(format!("fsck: {problems:?}")); }
+                    Ok(())
+                }).unwrap_or_else(|e| panic!("{e}"));
+            }),
+        };
+        let m = match &passphrase {
+            Some(secret) => block_on_ready(Mount::unlock(&dev, secret, MIN_LIMITS, MEMORY, random())),
+            None => block_on_ready(Mount::open(&dev, MEMORY, random())),
+        }.unwrap();
+        Executor::new().block_on(async {
+            for i in 0..2000 {
+                let (free, floor) = m.journal_room();
+                armed.set(free <= floor);
+                applied.set(i + 1);
+                m.create(m.root(), &name(i), New::File, OWNER, NOW).await.unwrap();
+                if (i + 1) % 32 == 0 {
+                    m.commit().await.unwrap();
+                    committed.set(i + 1);
+                }
+            }
+        }, || panic!("pressure operation stalled; {}", m.dump()));
+        armed.set(false);
+        block_on_ready(m.unmount()).unwrap();
+        assert_eq!(checked.get(), 8, "cutpoints must reach the ordinary journal reserve floor");
+    }
 }
 
 /// The window upstream's reader takes (A2-torn-newest A2.T1, A2.13): every
@@ -318,7 +382,7 @@ fn encrypted_renames_reusing_buckets_survive_a_crash_at_every_request() {
 /// recover from.
 fn upstream_f(image: &[u8], passphrase: Option<&[u8]>) -> core::result::Result<Option<u64>, String> {
     let dev = ReadOnlyBytes::new(image).unwrap();
-    let sb = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("superblock: {e:?}"))?;
+    let sb = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("superblock: {e:?}"))?.0;
     let key = match passphrase {
         Some(p) => Some(super::super::crypt::MasterKey::unwrap(sb.crypt.as_ref().ok_or("no crypt field")?, &sb.header.internal_uuid, p, MIN_LIMITS).map_err(|e| format!("unlock: {e:?}"))?),
         None => None,
@@ -349,7 +413,7 @@ fn upstream_finds_f_at_every_request(image: Vec<u8>, passphrase: Option<&[u8]>, 
             seed.set(seed.get() + 1);
             m.check(64, seed.get(), |image| {
                 let dev = ReadOnlyBytes::new(image).unwrap();
-                let clean = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("{e:?}"))?.clean_flag();
+                let clean = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("{e:?}"))?.0.clean_flag();
                 if clean {
                     return Ok(());
                 }
@@ -358,7 +422,7 @@ fn upstream_finds_f_at_every_request(image: Vec<u8>, passphrase: Option<&[u8]>, 
                     Some(_) => Ok(()),
                     None => {
                         let dev = ReadOnlyBytes::new(image).unwrap();
-                        let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap();
+                        let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap().0;
                         let scan = block_on_ready(super::super::journal::scan(&dev, &sb, None)).ok();
                         let entries: Vec<_> = scan.iter().flat_map(|s| s.entries.values()).map(|e| (e.seq, e.last_seq, e.flush, e.good)).collect();
                         Err(format!("unclean, and upstream's reader finds no entry to replay: {entries:?}"))

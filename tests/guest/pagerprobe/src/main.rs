@@ -25,6 +25,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos_abi::syscall::SyscallError;
 
 const HOLDER: &str = "pagerprobe-holder";
+const ANONYMOUS: &str = "pagerprobe-anonymous";
 
 /// Pages of the large object: more than 512 MiB.
 const LARGE: u64 = 140_000;
@@ -39,6 +40,7 @@ fn main() {
         return hold();
     }
     let pager = Pager::create(LARGE + 16, 0, 4, Duration::from_secs(1)).expect("pagerprobe: its row starts it as a pager");
+    dirty_supply_prefix(&pager);
     let large = pager.object(LARGE * PAGE).expect("pagerprobe: the large object");
     fill(&pager, large);
     assert_eq!(pager.withdraw(large, 0, u64::MAX), Ok(LARGE), "pagerprobe: the whole object withdrawn at once");
@@ -52,6 +54,17 @@ fn main() {
     let left = pager.object(LARGE * PAGE).expect("pagerprobe: the object the pager's end takes");
     fill(&pager, left);
     println!("pagerprobe: more than 512 MiB in one object withdrawn, released and left for the end");
+    let anonymous = pager.anonymous(32 * PAGE).expect("pagerprobe: anonymous memory");
+    assert_eq!(pager.supply(anonymous, 0, &vec![0x37; 16 * PAGE as usize], true), Ok(16));
+    assert_eq!(pager.room(), Ok(0), "the anonymous pages consumed the remaining quota");
+    assert_eq!(pager.withdraw(anonymous, 0, 32), Ok(0), "anonymous bytes cannot be withdrawn");
+    assert_eq!(pager.fail(anonymous, 0, 32), Err(Refused::Kernel(SyscallError::InvalidArgument)));
+    let mut bytes = vec![0xff; 32 * PAGE as usize];
+    // SAFETY: `bytes` is local and borrowed only by this read until it returns.
+    let out = unsafe { toyos::shm::Bytes::from_raw(bytes.as_mut_ptr(), bytes.len()) };
+    assert_eq!(pager.read(anonymous, out, 0), Ok(bytes.len()));
+    anonymous_contents(&bytes);
+    assert_eq!(pager.room(), Ok(0), "a zero-hole read needs no quota");
     let object = pager.object(4096).expect("pagerprobe: an object");
     let own = pager.holder(object).expect("pagerprobe: a holder for itself");
     // The handle is a holder, and this process a pager: refused by the kernel.
@@ -63,7 +76,13 @@ fn main() {
     println!("pagerprobe: a pager is refused a holder's read");
 
     let theirs = pager.holder(object).expect("pagerprobe: a holder to hand on");
-    let mut helper = Command::new(SELF).arg("--hold").endow(HOLDER, theirs.into()).spawn().expect("pagerprobe: the helper starts");
+    let memory = pager.holder(anonymous).expect("pagerprobe: an anonymous holder");
+    let mut helper = Command::new(SELF)
+        .arg("--hold")
+        .endow(HOLDER, theirs.into())
+        .endow(ANONYMOUS, memory.into())
+        .spawn()
+        .expect("pagerprobe: the helper starts");
 
     // The helper's request is the notice that it waits.
     let poller = Poller::new(1);
@@ -84,6 +103,25 @@ fn main() {
     println!("pagerprobe: ok");
 }
 
+fn dirty_supply_prefix(pager: &Pager) {
+    let object = pager.anonymous(4 * PAGE).unwrap();
+    let old = vec![0x42; PAGE as usize];
+    assert_eq!(pager.supply(object, PAGE, &old, true), Ok(1));
+    assert_eq!(pager.supply(object, 3 * PAGE, &old, true), Ok(1));
+    let new = vec![0x75; 4 * PAGE as usize];
+    assert_eq!(pager.supply(object, 0, &new, true), Ok(1), "dirty supply stops at the first present page");
+    pager.end_write(object).unwrap();
+    let mut bytes = vec![0; new.len()];
+    // SAFETY: the local buffer is borrowed only by this read.
+    let out = unsafe { toyos::shm::Bytes::from_raw(bytes.as_mut_ptr(), bytes.len()) };
+    assert_eq!(pager.read(object, out, 0), Ok(bytes.len()));
+    assert_eq!(&bytes[..PAGE as usize], &new[..PAGE as usize]);
+    assert_eq!(&bytes[PAGE as usize..2 * PAGE as usize], &old);
+    assert!(bytes[2 * PAGE as usize..3 * PAGE as usize].iter().all(|&b| b == 0), "nothing past the returned prefix was installed");
+    assert_eq!(&bytes[3 * PAGE as usize..], &old);
+    pager.release(object).unwrap();
+}
+
 /// Every page of `object`, clean.
 fn fill(pager: &Pager, object: u64) {
     let run = vec![0x5a_u8; (PAGED_RANGE_PAGES * PAGE) as usize];
@@ -97,6 +135,12 @@ fn fill(pager: &Pager, object: u64) {
 }
 
 fn hold() {
+    let memory: toyos::OwnedHandle = Endowments::get().take(ANONYMOUS).expect("pagerprobe --hold: anonymous memory");
+    let memory = Paged::received(memory).expect("pagerprobe --hold: an anonymous holder");
+    let mut bytes = vec![0xff; 32 * PAGE as usize];
+    assert_eq!(memory.read(&mut bytes, 0), Ok(bytes.len()));
+    anonymous_contents(&bytes);
+    println!("pagerprobe --hold: anonymous contents and zero holes read at a full page quota");
     // A peer that says a pipe end is a holder is answered as no holder, and
     // the process asking lives.
     let (read, _write) = toyos::pipe_pair().expect("pagerprobe --hold: a pipe");
@@ -113,4 +157,9 @@ fn hold() {
         Err(SyscallError::Gone) => println!("pagerprobe --hold: the pager's end answered the wait Gone"),
         other => panic!("pagerprobe --hold: a wait on an unsupplied page answered {other:?}"),
     }
+}
+
+fn anonymous_contents(bytes: &[u8]) {
+    assert!(bytes[..16 * PAGE as usize].iter().all(|&b| b == 0x37));
+    assert!(bytes[16 * PAGE as usize..].iter().all(|&b| b == 0));
 }

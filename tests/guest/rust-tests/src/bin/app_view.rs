@@ -230,14 +230,16 @@ fn app() {
             Ok(bytes) => red.push(format!("{file} read {} bytes", bytes.len())),
         }
     }
-    // A directory no capability names is a mount point of the kernel's, and
-    // lists nothing of what the file server holds under it.
-    for dir in ["/apps", "/home", "/home/toy", "/home/toy/Apps", "/config", "/state", "/log"] {
-        if let Ok(listing) = fs::read_dir(dir) {
-            let names: Vec<_> = listing.filter_map(Result::ok).map(|e| e.file_name()).collect();
-            if !names.is_empty() {
-                red.push(format!("{dir} lists {names:?}"));
-            }
+    // Synthetic ancestors expose only paths to the capabilities held here.
+    for (dir, expected) in [("/apps", "appview"), ("/home", "toy"), ("/home/toy", "Apps"), ("/home/toy/Apps", "appview")] {
+        match fs::read_dir(dir).and_then(|listing| listing.map(|entry| entry.map(|e| e.file_name())).collect::<Result<Vec<_>, _>>()) {
+            Ok(names) if names == [std::ffi::OsStr::new(expected)] => {}
+            other => red.push(format!("{dir} did not list only {expected}: {other:?}")),
+        }
+    }
+    for dir in ["/config", "/state", "/log"] {
+        if fs::read_dir(dir).is_ok() {
+            red.push(format!("{dir} is visible without a granted descendant"));
         }
     }
 

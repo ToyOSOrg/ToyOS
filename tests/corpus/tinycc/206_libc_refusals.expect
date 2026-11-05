@@ -4,7 +4,6 @@ setsid: -1, ENOSYS
 getsid: -1, ENOSYS
 gethostname: -1, ENOSYS
 link: -1, ENOTSUP
-symlink: -1, ENOSYS
 fchown: -1, ENOSYS
 chmod: -1, ENOSYS
 fchmod: -1, ENOSYS

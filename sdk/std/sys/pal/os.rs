@@ -10,7 +10,7 @@ pub fn getcwd() -> io::Result<PathBuf> {
     // bytes came back as a shorter, valid-looking path to a *different*
     // directory, and every path derived from it pointed somewhere wrong.
     let mut buf = [0u8; 256];
-    let n = toyos_abi::syscall::getcwd(&mut buf);
+    let n = toyos::files::getcwd(&mut buf);
     if n == 0 {
         return Err(io::Error::new(io::ErrorKind::Other, "getcwd failed"));
     }
@@ -19,10 +19,10 @@ pub fn getcwd() -> io::Result<PathBuf> {
     }
 
     // Too long for the stack buffer: allocate exactly what it asked for. The
-    // kernel bounds cwd, so this retries once rather than looping.
+    // SDK bounds cwd, so this retries once rather than looping.
     let mut heap: crate::vec::Vec<u8> = crate::vec::Vec::new();
     heap.resize(n, 0);
-    let got = toyos_abi::syscall::getcwd(&mut heap);
+    let got = toyos::files::getcwd(&mut heap);
     if got == 0 || got > heap.len() {
         return Err(io::Error::new(io::ErrorKind::Other, "getcwd failed"));
     }

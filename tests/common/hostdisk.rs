@@ -128,16 +128,14 @@ pub fn left_alone(log: &Serial, ours: &[Guid]) -> Result<(usize, Data), String> 
     let said = |line: &str| log.text().lines().any(|l| l.contains(line));
     let fates = [
         (Data::Foreign, said("fileserver: the DATA partition holds no volume of ours and no designation stamp; DATA is absent this boot")),
-        (Data::Formatted, said("designates this partition for ToyOS; formatting it")),
+        (Data::Formatted, said("fileserver: formatting the explicitly designated DATA partition as bcachefs")),
         (Data::Mounted, said("fileserver: mounted the DATA volume")),
     ];
     let fate = match fates.iter().filter(|(_, said)| *said).map(|(fate, _)| *fate).collect::<Vec<_>>()[..] {
         [one] => one,
         ref many => return Err(format!("DATA's file server said {many:?} of foreign, formatted and mounted, and one is its answer")),
     };
-    if fate == Data::Foreign {
-        log.must_say("fileserver: no volume of ours and no designation stamp; nothing will be written to this partition")?;
-    } else {
+    if fate != Data::Foreign {
         let serving = log.must_say("fileserver: Data serving ")?;
         if !serving.contains(" — bcachefs") {
             return Err(format!("DATA is {fate:?} and served by no bcachefs volume: {serving:?}"));

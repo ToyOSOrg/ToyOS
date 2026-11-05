@@ -19,12 +19,13 @@ mount protocol — is superseded, and nothing here builds it.
 
 ## Block
 
-A block device is a service: one program per controller (`blockd` for NVMe;
-the xHCI's own program for USB mass storage, once it has one), serving each
-partition as a session over `toyos-blockring`. A partition has one holder,
-every request is bounded to it before the device sees it, and a flush answers
-for its own writer's writes. GPT is the one partition scheme, read by the
-service that drives the disk. Caching is the file server's, never the block
+A block device is a service: one driver per controller (`nvme`, and `usbd`
+for USB mass storage) offers its disks to the block service (`diskserver`),
+which opens a partition for the client its grant admits and hands the session,
+over `toyos-blockring`, to the driver that serves it. A partition has one
+holder, every request is bounded to it before the device sees it, and a flush
+answers for its own writer's writes. GPT is the one partition scheme, read by
+the driver of the disk. Caching is the file server's, never the block
 service's.
 
 ## Volume
@@ -38,21 +39,21 @@ mounts degraded, or refuses — a member vanishing is never silent. A role on on
 disk is the one-member case. Two filesystems claiming one unique role are
 refused rather than guessed, which `boot_partition_identity` already asserts
 for the boot volume. A blank volume joins the system by the designation stamp
-the bcachefs crate already carries (`DESIGNATION_MAGIC`,
-`lib/bcachefs/src/superblock.rs`): the probe formats a designated volume and
-refuses to reformat a used one (`issues/probe-mounts-on-a-checksum.md`
+the bcachefs crate already carries (`lib/bcachefs/src/designation.rs`): the
+probe formats a designated volume and refuses to reformat a used one
+(`issues/probe-mounts-on-a-checksum.md`
 is what that refusal still owes). Microsoft's basic-data type is a foreign
 volume, handed to whichever server recognises its superblock.
 
 | partition | filesystem | mounts as | writable |
 |---|---|---|---|
-| ESP | FAT32, firmware's rule | `/boot` | kernel only |
+| ESP | FAT32, firmware's rule | `/boot` | no; BOOT's server serves it read-only |
 | ROOT | bcachefs image the build writes | `/system` | no; signed per release |
 | DATA | bcachefs, formatted on first boot | `/apps`, `/config`, `/home`, `/state` | yes |
 | LOG | FAT32 while a Mac has to read the dev stick | `/log` | yes |
 
-`/tmp` has no backing. The dev loop keeps the ESP and ROOT on the stick and
-DATA on the internal NVMe; the installed product carries all four on one disk.
+`/tmp` is the MEMORY server's, in RAM, with no partition. The dev loop keeps
+the ESP and ROOT on the stick and DATA on the internal NVMe; the installed product carries all four on one disk.
 Roles come from partitions, so both shapes are the same code.
 
 ## Filesystem
@@ -67,16 +68,17 @@ and the updater write it offline, checkpoint it and mark the journal clean; a
 server that finds a dirty journal under `/system` refuses by name, because
 replay is a write-path job and a system image needing one is a broken install.
 
-**Every filesystem is a file server per role** — SYSTEM, LOG, DATA, BOOT —
-SYSTEM over ROOT's bytes in memory and every other over its block service's
-sessions, linking the whole crate it serves: a server that crashes loses its
-own role and nothing else, and no filesystem parser runs in the kernel.
+**Every filesystem is a file server per role** — SYSTEM, LOG, DATA, BOOT,
+MEMORY — SYSTEM over ROOT's bytes in memory, MEMORY over paged objects alone
+and every other over its block service's sessions, linking the whole crate it
+serves: a server that crashes loses its own role and nothing else, and no
+filesystem parser runs in the kernel.
 
 **Multi-device is a filesystem property, not a block-layer subsystem.** Pooling
 across disks, replicas per subvolume, tiering with a fast foreground device,
 erasure coding, snapshots, checksums and scrub, compression, encryption,
 subvolume per user and per app: every one is a feature of upstream bcachefs's
-format, which is why `issues/bcachefs-crate-is-not-bcachefs.md`'s
+format, which is why `issues/the-bcachefs-crate-must-implement-bcachefs.md`'s
 ruling — the crate becomes a real implementation — is what makes them
 reachable. The block layer stays dumb. LVM- and md-shaped aggregation is
 refused: it cannot tell metadata from data, place a file's replicas on
@@ -95,12 +97,10 @@ NTFS by the same shape if wanted.
 ## Paths
 
 The tree, its names and how a program finds them are
-`issues/where-everything-lives.md`. What this track owes it is the
-mount structure: a mount point is exactly one top-level name
-(`kernel/src/vfs.rs`, `ROOT_ENTRIES` and the array indexed by it), so
+`issues/where-everything-lives.md`. A client routes a path to the directory
+capability with the longest matching prefix (`toyos::files`), so
 `/media/<label>` for a foreign volume — a Windows disk is `/media/windows` — is
-a nested mount the structure cannot represent. The mount protocol owes that,
-and `/media` is an empty directory until then.
+one more grant; nothing serves a foreign volume to mint it on yet.
 
 Users are a track of their own,
 `issues/a-user-is-a-home-tree-and-a-login-row.md`: a `/home/<user>`
@@ -121,6 +121,7 @@ what is left here is built on them.
 
 1. The users track, `issues/a-user-is-a-home-tree-and-a-login-row.md`.
 2. Real bcachefs under ROOT and DATA — the format swap; nothing above changes.
+   **Built** (#1152).
 3. The installer, written together with the layout it lays down: GPT, ESP,
    ROOT, a designated DATA, one boot entry.
 4. Updates: one ROOT partition per release, a second beside the first, the
@@ -139,6 +140,24 @@ without a request (`system/fileserver/src/pages.rs`). The server's block cache
 keeps the volumes' structures alone. Mapping them is memory stage 7b, the
 process-memory track's
 (`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`).
+
+**A served file's metadata without a request**, in two stages:
+
+- **3a, not built:** a held descriptor's `fstat` asks its file server, whose
+  metadata is the authority. Answering it from the paged object instead
+  (`SYS_PAGED_STAT`, #1144) was superseded in #1152; whether `fstat`'s round
+  trip needs it is unmeasured.
+- **3b, deferred until memory stage 7b's mappings:** a client cache of names,
+  validated by a per-connection page the file server writes. The page carries
+  generations of the directories in the connection's view and of the files
+  it has answered about, so that `stat` of an existing file's path hits the
+  cache; that row is what stands against Linux's 1.5 µs. Its slots carry
+  identity and generation, and a client compares both under acquire. Server
+  death clears the page through the paged object's `Gone`.
+  - Why deferred: building it before mappings means reading slots by
+    syscall, plus a names-only pager for SYSTEM and a dirty allowance for
+    BOOT. That is an interim mechanism the mappings would replace.
+  - Exit: `fsrtt.std.stat` and `open_close`, measured on both benches.
 
 LOG stays its own FAT32 partition through the dev phase, because a Mac has to
 read the stick; folding it into DATA in the installed product is deferred by

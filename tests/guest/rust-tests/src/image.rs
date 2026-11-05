@@ -1,7 +1,4 @@
-//! What a raw `SYS_SPAWN` names as its program and what a raw `SYS_OPEN`
-//! opens, now that the kernel opens no file of `/system`: a program read whole
-//! into a memory object of this process's own, and a file copied to the
-//! kernel's `/tmp`.
+//! Read a served executable into the memory object a raw spawn accepts.
 
 // Each binary takes the half it needs.
 #![allow(dead_code)]
@@ -18,8 +15,7 @@ pub fn image_of(path: &str) -> Image {
     Image::read(len, |buf| file.read(buf)).unwrap_or_else(|why| panic!("read {path} into an image: {why:?}"))
 }
 
-/// `path` copied to `/tmp` under its own name, which the kernel opens: the
-/// path to open.
+/// `path` copied to the memory filesystem under its own name.
 pub fn in_tmp(path: &str) -> String {
     let name = path.rsplit('/').next().expect("a path names a file");
     let copy = format!("/tmp/{name}");

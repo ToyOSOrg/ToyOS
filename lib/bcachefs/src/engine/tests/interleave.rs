@@ -142,10 +142,11 @@ fn bsets(image: &[u8], sector: u64, node_bytes: usize) -> Vec<u64> {
 
 /// A transaction applied but never committed; its nodes are written, each
 /// bset naming its entry, which never becomes durable; the crash; a mount
-/// and a clean unmount. Every bset on the medium naming a sequence past the
-/// newest durable flush entry is then blacklisted, so no reader takes it,
-/// and none is reached anyway. Red with a skip of 0: the sequences the
-/// crashed mount had open would be named again.
+/// and a clean unmount. Every sequence past the newest durable flush entry
+/// that those bsets name is then blacklisted, so no reader takes one that
+/// survives, and none is reached anyway. Red when the mount after the crash
+/// blacklists nothing: the sequences the crashed mount had open would be
+/// named again.
 #[test]
 fn a_bset_naming_an_unflushed_sequence_never_reappears_unblacklisted() {
     let dev = formatted(64 << 20, None);
@@ -157,14 +158,14 @@ fn a_bset_naming_an_unflushed_sequence_never_reappears_unblacklisted() {
     let sectors: Vec<u64> = plans.iter().flat_map(|p| p.sectors(&m)).collect();
     let crashed = Bytes::new(dev.get().clone());
     drop(m);
+    let node_bytes = super::super::read::Source::superblock(&open_ro(&crashed, None).unwrap()).node_sectors() as usize * SECTOR;
+    // Read before the next mount, which may write those slots again.
+    let named: Vec<u64> = sectors.iter().flat_map(|&s| bsets(&crashed.get(), s, node_bytes)).filter(|&s| s > durable).collect();
     let m = open_rw(&crashed, None);
     create(&m, b"after");
     block_on_ready(m.unmount()).unwrap();
     let v = open_ro(&crashed, None).unwrap();
     assert_eq!(names(&v), [b"after".to_vec()]);
-    let node_bytes = v.superblock().node_sectors() as usize * SECTOR;
-    let image = crashed.get();
-    let named: Vec<u64> = sectors.iter().flat_map(|&s| bsets(&image, s, node_bytes)).filter(|&s| s > durable).collect();
     assert!(!named.is_empty(), "the crashed mount's bsets name its open entry");
     for seq in named {
         assert!(v.superblock().blacklisted(seq), "a bset naming {seq}, past the durable {durable}, not blacklisted");
@@ -275,7 +276,7 @@ fn a_failed_write_is_reissued_byte_for_byte(journal: bool) {
     // The journal's blocks, and the nodes' beyond them short of the end
     // superblock copy.
     let (ring, nodes) = {
-        let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap();
+        let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap().0;
         let bucket = u64::from(sb.member.bucket_sectors) / 8;
         let (first, count) = sb.journal[0];
         (first * bucket..(first + count) * bucket, (first + count) * bucket..sb.header.layout.offsets[2] / 8)
@@ -391,13 +392,11 @@ fn a_node_write_failing_past_its_retries_stops_the_mount_and_its_waiters() {
     assert_eq!(unmounted, Err(Error::ReadOnly("btree node write failed")));
 }
 
-/// A plan that fails on the second node of its batch: after a crash every
-/// node's first write is fresh, and on this volume each node takes a bucket
-/// of its own, the second of which freespace lists but whose alloc key holds
-/// data. The mount stops read-only by the failure's name, and the next
-/// transaction and the unmount answer that rather than wait.
+/// After a crash every node's first write is fresh. Reclaim encounters a
+/// second free bucket whose alloc key holds data and stops by that error;
+/// later operations and unmount report it instead of waiting.
 #[test]
-fn a_reclaim_plan_failing_midway_stops_the_mount() {
+fn an_allocation_failure_during_reclaim_stops_the_mount() {
     use super::super::bucket::Bucket;
     use toyos_blockdev::executor::Executor;
     let dev = formatted(64 << 20, None);
@@ -425,8 +424,19 @@ fn a_reclaim_plan_failing_midway_stops_the_mount() {
     let m = open_rw(&dev, None);
     let stalled = || panic!("stalled; {}", m.dump());
     create(&m, b"b");
-    let first = Executor::new().block_on(m.write_batch(Order::OldestPin), stalled);
-    assert_eq!(first.err(), Some(Error::Corrupt("a bucket an index lists as empty whose alloc key holds otherwise")));
+    let failure = Executor::new().block_on(async {
+        for _ in 0..4 {
+            match m.write_batch(Order::OldestPin).await {
+                Err(error) => return error,
+                Ok(plans) => {
+                    assert!(!plans.is_empty(), "the corrupt second bucket must be reached");
+                    if let Err(error) = m.point_batch(plans).await { return error; }
+                }
+            }
+        }
+        panic!("reclaim did not reach the corrupt second bucket");
+    }, stalled);
+    assert_eq!(failure, Error::Corrupt("a bucket an index lists as empty whose alloc key holds otherwise"));
     let late = Executor::new().block_on(async { m.create(m.root(), b"late", New::File, OWNER, NOW).await.map(|i| i.ino) }, stalled);
     assert_eq!(late, Err(Error::ReadOnly("a bucket an index lists as empty whose alloc key holds otherwise")));
     assert_eq!(Executor::new().block_on(m.unmount(), || panic!("unmount stalled")), Err(Error::ReadOnly("a bucket an index lists as empty whose alloc key holds otherwise")));

@@ -1,14 +1,12 @@
 //! A seek past EOF is a position, not an error, and nothing silently moves it.
 //!
-//! POSIX judges the offsets, the hole and the seek pointer; the `MAX_FILE_SIZE`
-//! ceiling is this kernel's own, judged against the page index it protects.
+//! POSIX judges the offsets, the hole and the seek pointer; the
+//! `MAX_FILE_BYTES` ceiling is ToyOS's own (`toyos::fs`).
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
-const PAGE: u64 = 4096;
-/// `file_cache::MAX_FILE_SIZE`: the page index is a `u32`, so `(u32::MAX + 1) * 4096`.
-const MAX_FILE_SIZE: u64 = (u32::MAX as u64 + 1) * PAGE;
+use toyos::fs::MAX_FILE_BYTES;
 
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i * 37 + 11) as u8 | 1).collect()
@@ -90,22 +88,22 @@ fn the_ceiling_refuses(dir: &str) {
         .unwrap_or_else(|e| panic!("create {path}: {e}"));
     f.write_all(&seed).expect("seed page 0");
 
-    f.seek(SeekFrom::Start(MAX_FILE_SIZE + 1))
+    f.seek(SeekFrom::Start(MAX_FILE_BYTES + 1))
         .expect_err("a seek past the ceiling was accepted");
     let here = f.seek(SeekFrom::Current(0)).expect("tell");
     assert_eq!(here, 8, "{dir}: the refused seek moved the pointer to {here}");
 
-    f.set_len(MAX_FILE_SIZE + 1)
+    f.set_len(MAX_FILE_BYTES + 1)
         .expect_err("a truncate past the ceiling was accepted");
 
-    let got = f.seek(SeekFrom::Start(MAX_FILE_SIZE)).expect("seek exactly to the ceiling");
-    assert_eq!(got, MAX_FILE_SIZE, "{dir}: the ceiling itself is a position");
+    let got = f.seek(SeekFrom::Start(MAX_FILE_BYTES)).expect("seek exactly to the ceiling");
+    assert_eq!(got, MAX_FILE_BYTES, "{dir}: the ceiling itself is a position");
     f.write_all(&[0x22])
         .expect_err("a write whose end crosses the ceiling was accepted");
 
     // The straddle a position-only guard passes: two bytes land under the
     // ceiling, two past it where `(abs_pos / 4096) as u32` wraps onto page 0.
-    let at = MAX_FILE_SIZE - 2;
+    let at = MAX_FILE_BYTES - 2;
     let got = f.seek(SeekFrom::Start(at)).expect("seek two bytes under the ceiling");
     assert_eq!(got, at, "{dir}: a seek two bytes under the ceiling answered {got}");
     f.write_all(&[0x33, 0x44, 0x55, 0x66])

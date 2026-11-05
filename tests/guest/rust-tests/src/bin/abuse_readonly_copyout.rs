@@ -15,24 +15,18 @@
 //! clock page asserts in every stamp any process takes, `logkeeper`'s among them, so
 //! the clock arm's verdict may reach no other line.
 
-#[path = "../image.rs"]
-mod image;
-
 use std::os::toyos::io::AsRawHandle;
 use std::process::Command;
 
 use toyos_abi::clock::{ClockPage, CLOCK_PAGE};
-use toyos_abi::syscall::{self, OpenFlags, VmAt, VmProt, ProcessStats, SeekFrom, SyscallError};
+use toyos_abi::syscall::{self, VmAt, VmProt, ProcessStats, SyscallError};
 use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_abuse_readonly_copyout";
 const CHILD_ARG: &str = "reads-the-clock";
 const PAGE_4K: u64 = 4096;
-/// Covers a `ProcessStats`, and ends inside the file this reads.
+/// Covers a complete `ProcessStats` in both copyout probes.
 const LEN: usize = core::mem::size_of::<ProcessStats>();
-/// The bytes the straddling `read` offers, at [`STRADDLE_AT`].
-const PROBE_PATH: &[u8] = b"/tmp/abuse_readonly_copyout.bin";
-const STRADDLE_AT: u64 = 256;
 /// The straddling `read`: half on the last writable page, half on the next.
 const STRADDLE: usize = 16;
 
@@ -50,12 +44,14 @@ fn snapshot(addr: u64) -> [u8; LEN] {
     out
 }
 
-/// A fresh handle on this binary at offset 0, so every `read` has bytes to give:
-/// its copy in the kernel's `/tmp`, made once.
-fn open_self() -> RawHandle {
-    static OWN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let own = OWN.get_or_init(|| image::in_tmp(SELF_PATH));
-    syscall::open(own.as_bytes(), OpenFlags::READ).expect("open self")
+/// A pipe containing a known payload, with its writer closed. The read
+/// exercises the kernel's generic copyout without filesystem policy.
+fn source() -> RawHandle {
+    let pipe = syscall::pipe().expect("a source pipe");
+    syscall::write(pipe.write, &[0x5a; LEN]).expect("fill the source pipe");
+    // SAFETY: this function owns the raw writer.
+    unsafe { syscall::close(pipe.write) };
+    pipe.read
 }
 
 /// `len` bytes at `addr`, as the buffer a `read` is asked to fill.
@@ -71,7 +67,7 @@ unsafe fn target(addr: u64, len: usize) -> &'static mut [u8] {
 /// both refused, and not one byte moved.
 fn refused(what: &str, addr: u64, stats: RawHandle) -> Result<(), String> {
     let before = snapshot(addr);
-    let fd = open_self();
+    let fd = source();
     let ret = syscall::read(fd, unsafe { target(addr, LEN) });
     // SAFETY: no type holds this number.
     unsafe { syscall::close(fd) };
@@ -103,8 +99,7 @@ fn refused_mmap(stats: RawHandle) -> Result<(), String> {
 /// A `read` that starts on a writable page and runs into the read-only page
 /// after it is refused whole.
 fn refused_across_pages() -> Result<(), String> {
-    let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
-    let probe = syscall::open(PROBE_PATH, flags).expect("create the probe file");
+    let probe = syscall::pipe().expect("a source pipe");
     // SAFETY: placed anywhere, so it replaces nothing.
     let pages = unsafe { syscall::vm_reserve(2 * PAGE_4K as usize, VmProt::ReadWrite, VmAt::ANYWHERE) }.expect("reserve two pages");
     let page = pages as u64 + PAGE_4K;
@@ -115,10 +110,8 @@ fn refused_across_pages() -> Result<(), String> {
     // The writable half is offered its own bytes and the read-only half their
     // complement, so a write to the read-only page shows and one below harms nothing.
     let offered: [u8; STRADDLE] = core::array::from_fn(|i| if i < STRADDLE / 2 { before[i] } else { !before[i] });
-    syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
-    syscall::write(probe, &offered).expect("write the straddle's bytes");
-    syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
-    let ret = syscall::read(probe, unsafe { target(at, STRADDLE) });
+    syscall::write(probe.write, &offered).expect("write the straddle's bytes");
+    let ret = syscall::read(probe.read, unsafe { target(at, STRADDLE) });
     let verdict = if before != snapshot(at) {
         Err(format!("read wrote across a writable page into the read-only one at {page:#x}"))
     } else if ret != Err(SyscallError::BadAddress) {
@@ -128,8 +121,7 @@ fn refused_across_pages() -> Result<(), String> {
     };
     unsafe { syscall::vm_release(pages, 2 * PAGE_4K as usize) }.expect("release");
     // SAFETY: no type holds this number.
-    unsafe { syscall::close(probe) };
-    syscall::delete(PROBE_PATH).expect("delete the probe file");
+    unsafe { syscall::close(probe.read); syscall::close(probe.write); };
     verdict
 }
 
@@ -154,9 +146,9 @@ fn main() {
     assert!(first.wait().expect("wait for the first reader").success(), "the first reader failed");
     let stats = RawHandle(first.as_raw_handle());
     let mut ok = [0u8; LEN];
-    let fd = open_self();
+    let fd = source();
     assert_eq!(syscall::read(fd, &mut ok), Ok(LEN), "read into a writable buffer");
-    assert_eq!(&ok[..4], b"\x7fELF", "read put something other than this file in the buffer");
+    assert_eq!(ok, [0x5a; LEN], "read returned the offered pipe bytes");
     // SAFETY: no type holds this number.
     unsafe { syscall::close(fd) };
     syscall::process_stats(stats, &mut ProcessStats::default()).expect("process_stats into a writable value");

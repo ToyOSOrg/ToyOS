@@ -2091,7 +2091,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Us
 /// a real one.
 ///
 /// Designates the result, because every caller here is making a scratch disk
-/// for a guest that expects a working `/apps` and `/home`, and the kernel will
+/// for a guest that expects a working `/apps` and `/home`, and the file server will
 /// not format an undesignated one. Leaving it to the call sites would mean two
 /// places to forget; forgetting is not silent (the boot says so and both paths
 /// are volatile) but it is not worth the chance.
@@ -2104,12 +2104,12 @@ pub fn create_sparse(path: &Path, len: u64) {
 }
 
 /// Partition this image as a DATA disk and stamp the designation on that
-/// partition, so the kernel is allowed to format it.
+/// partition, so the file server is allowed to format it.
 ///
-/// The kernel never formats a volume that does not carry the stamp, which is
+/// The file server never formats a volume that does not carry the stamp, which is
 /// what stops it taking the disk of any machine it is booted on. So a throwaway
 /// image has to say so, and this is the whole of the test harness's opt-in:
-/// **data on a scratch file, not a build flag.** The kernel binary and the
+/// **data on a scratch file, not a build flag.** The file-server binary and the
 /// code path are identical either way — `probe` runs the same match
 /// on metal as it does here — so the configuration under test is the
 /// configuration that ships, which a `#[cfg]` could not have given us.
@@ -3087,12 +3087,14 @@ mod tests {
     #[test]
     fn a_disk_changing_authorization_goes_to_no_row_a_login_can_start() {
         let gate = |text: &str| held_by_their_holders_alone(&toml::from_str(text).unwrap());
-        assert!(gate("[programs.runner]\nauthorize = [\"designate:data\"]\n").is_ok());
+        for word in ["designate:data", "format:data"] {
+            assert!(gate(&format!("[programs.runner]\nauthorize = [\"{word}\"]\n")).is_ok());
+            let launched = gate(&format!("[programs.disks]\nauthorize = [\"{word}\"]\n[programs.shell]\nstarts = [\"disks\"]\n"));
+            assert!(launched.unwrap_err().contains("may start it"));
+            let login = gate(&format!("[boot]\nstart = [\"sshserver\"]\n[programs.sshserver]\nlogin = true\nauthorize = [\"{word}\"]\n"));
+            assert!(login.unwrap_err().contains("is a login authority"));
+        }
         assert!(gate("[programs.disks]\nauthorize = [\"tables\"]\n[programs.shell]\nstarts = [\"disks\"]\n").is_ok());
-        let launched = gate("[programs.disks]\nauthorize = [\"designate:data\"]\n[programs.shell]\nstarts = [\"disks\"]\n");
-        assert!(launched.unwrap_err().contains("may start it"));
-        let login = gate("[boot]\nstart = [\"sshserver\"]\n[programs.sshserver]\nlogin = true\nauthorize = [\"designate:data\"]\n");
-        assert!(login.unwrap_err().contains("is a login authority"));
         assert!(gate("[programs.sshserver]\nlogin = true\nauthorize = [\"tables\"]\n").is_ok(), "reading the tables is no change");
         assert!(gate("[programs.disks]\nauthorize = [\"format:everything\"]\n").unwrap_err().contains("no disk authorization"));
     }
@@ -3403,6 +3405,8 @@ mod tests {
         "tests/images/benchcase.toml",
         "tests/images/clipboardcase.toml",
         "tests/images/designatecase.toml",
+        "tests/images/formatcase.toml",
+        "tests/images/datacase.toml",
         "tests/images/drivescase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/hotplugcase.toml",

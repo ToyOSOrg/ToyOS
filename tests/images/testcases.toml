@@ -136,7 +136,7 @@ receives = ["disk"]
 [programs.fileserver]
 restart = true
 pager = true
-roles = ["data", "log", "boot"]
+roles = ["data", "log", "boot", "memory"]
 receives = ["block"]
 
 # The virtio-serial driver, for the VM's console alone: this image runs no agent.

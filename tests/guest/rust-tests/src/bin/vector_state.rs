@@ -5,7 +5,7 @@
 //!
 //! More threads than CPUs, each spinning with its registers loaded, so every
 //! CPU is time-shared and each switch puts a thread with other values on it.
-//! The spin stops every so often for a `stat`, whose path walk the kernel runs
+//! The spin stops every so often for an object `fstat`, which the kernel runs
 //! on the thread's own kernel stack, below the frame of the switch that
 //! preempts the spin. A CPU whose save skips a component unmodified since its
 //! restore from the same address (SDM Vol. 1 §13.6) keeps it only where
@@ -14,15 +14,11 @@
 #[path = "../arch/vector.rs"]
 mod vector;
 
-/// What each burst `stat`s: a file of the kernel's `/tmp`, so the kernel walks
-/// its path, which it does for no path a file server holds.
-const STAT_PATH: &str = "/tmp/vector_state";
-
 /// Rounds per thread, each with a pattern of its own, so a value left from
 /// the thread's own previous round is caught as surely as another thread's.
 const ROUNDS: u64 = 3;
 
-/// Bursts of the hold loop, each ending in a `stat`: past a quantum on the
+/// Bursts of the hold loop, each ending in an object `fstat`: past a quantum on the
 /// T14 and under TCG alike.
 const BURSTS: u64 = 1_000;
 
@@ -42,8 +38,6 @@ fn pattern(thread: u64, round: u64, len: usize) -> Vec<u8> {
 
 fn main() {
     let width = vector::width();
-    std::fs::write(STAT_PATH, b"x").expect("a file for the kernel to walk to");
-    let path = STAT_PATH.as_bytes();
     let threads = 2 * toyos_abi::syscall::cpu_count() as u64 + 1;
     let workers: Vec<_> = (0..threads)
         .map(|thread| {
@@ -54,7 +48,7 @@ fn main() {
                 }
                 for round in 0..ROUNDS {
                     let want = pattern(thread, round, width.bytes());
-                    let got = vector::hold(width, &want, BURSTS, path);
+                    let got = vector::hold(width, &want, BURSTS);
                     if let Some(register) = width.first_difference(&got, &want) {
                         panic!("thread {thread} round {round}: {register} changed while it was switched out");
                     }
@@ -65,6 +59,5 @@ fn main() {
     for (thread, worker) in workers.into_iter().enumerate() {
         assert!(worker.join().is_ok(), "thread {thread} found a vector register not its own");
     }
-    std::fs::remove_file(STAT_PATH).expect("the walked file removed");
     println!("vector_state: {threads} threads each held {width:?} through {ROUNDS} rounds");
 }

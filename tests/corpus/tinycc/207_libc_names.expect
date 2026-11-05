@@ -17,8 +17,8 @@ setbuf NULL: file 3 bytes
 signal SIGALRM: was SIG_DFL, then SIG_IGN
 sigaction SIGALRM: 0 0, SIG_IGN, flags 0x10000000, mask 0x200
 alarm 5: 0; alarm 0: 1 to 5; again: 0
-entry: a DT_UNKNOWN
-entry: b DT_UNKNOWN
+entry: a DT_REG
+entry: b DT_REG
 entry: sub DT_DIR
 opendir of nothing: -1, ENOENT
 dladdr(main): 1; names this program: yes; starts where dl_iterate_phdr says: yes; symbol: none

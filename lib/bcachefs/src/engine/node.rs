@@ -131,7 +131,7 @@ fn check_bset(sb: &Superblock, flags: u32, version: u16, at: usize) -> Result<()
 /// Verifies a record's checksum or MAC, then decrypts it in place.
 fn open(key: Option<&MasterKey>, seq: u64, journal_seq: u64, csum_type: u8, r: &Record, bytes: &mut [u8]) -> Result<()> {
     match csum_type {
-        csum::NONE => Ok(()),
+        csum::NONE => Err(Error::Unsupported("btree node without a checksum")),
         csum::CRC32C_NONZERO if crc32c(&bytes[r.at + 16..r.end]) == le32(bytes, r.at) => Ok(()),
         csum::CRC32C_NONZERO => Err(Error::Checksum("btree node")),
         csum::CHACHA_POLY_128 => {
@@ -313,6 +313,8 @@ pub(crate) struct Later<'a> {
 pub(crate) fn encode_later(block: usize, key: Option<&MasterKey>, later: &Later) -> Result<Vec<u8>> {
     let Later { btree, level, seq, offset, journal_seq, keys } = *later;
     assert!(offset > 0 && offset.is_multiple_of(block), "a later bset at byte {offset}");
+    // The reader refuses one (`decode`).
+    assert!(!keys.is_empty(), "a later bset with no keys");
     let end = later_record_bytes(keys.iter().map(Vec::len));
     let mut b = alloc::vec![0u8; end.next_multiple_of(block)];
     put64(&mut b, 16, seq);

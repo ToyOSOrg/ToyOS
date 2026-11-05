@@ -110,10 +110,8 @@ pub fn hello<W>(
     of_share: usize,
     window: impl FnOnce() -> Option<Result<W, Lent>>,
 ) -> Hello<W> {
-    if slot == Slot::AtHello {
-        if let Err(why) = served_slot(served, of_share) {
-            return Hello::Refused(why);
-        }
+    if slot == Slot::AtHello && let Err(why) = served_slot(served, of_share) {
+        return Hello::Refused(why);
     }
     match window() {
         None => Hello::Dropped("its hello carried no window"),

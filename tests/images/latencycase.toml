@@ -74,5 +74,5 @@ receives = ["disk"]
 [programs.fileserver]
 restart = true
 pager = true
-roles = ["data", "log", "boot"]
+roles = ["data", "log", "boot", "memory"]
 receives = ["block"]

@@ -176,7 +176,8 @@ static void listing(void) {
     while (count < 16 && (entry = readdir(dir)) != NULL) {
         char line[300];
         snprintf(line, sizeof line, "%s %s", entry->d_name,
-                 entry->d_type == DT_DIR ? "DT_DIR" : entry->d_type == DT_UNKNOWN ? "DT_UNKNOWN" : "another type");
+                 entry->d_type == DT_DIR ? "DT_DIR" : entry->d_type == DT_REG ? "DT_REG"
+                 : entry->d_type == DT_UNKNOWN ? "DT_UNKNOWN" : "another type");
         names[count++] = strdup(line);
     }
     closedir(dir);

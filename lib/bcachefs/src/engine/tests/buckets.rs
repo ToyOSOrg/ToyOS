@@ -58,7 +58,7 @@ impl BlockDev for Sparse {
     }
 }
 
-fn formatted_on<D: BlockDev>(dev: &D) {
+pub(super) fn formatted_on<D: BlockDev>(dev: &D) {
     let options = Options { label: b"toyos", time: 1_761_177_600_000_000_000, encryption: None };
     block_on_ready(mkfs(dev, &options, &Tree::new(), &mut Seeded(0x5eed))).unwrap();
 }
@@ -80,6 +80,8 @@ fn churn<D: BlockDev>(dev: &D, options: MountOptions, files: usize, reuses: usiz
                 let (i, round) = (n % files, n / files);
                 let (from, to) = if round % 2 == 0 { ("a", "b") } else { ("b", "a") };
                 m.rename((r, format!("{from}{i}").as_bytes()), (r, format!("{to}{i}").as_bytes()), Rename::NoReplace, NOW).await.unwrap();
+                let plans = m.write_batch(super::super::mount::Order::OldestPin).await.unwrap();
+                m.point_batch(plans).await.unwrap();
                 n += 1;
                 if n % every == 0 {
                     m.commit().await.unwrap();
@@ -147,9 +149,15 @@ fn empty_buckets<D: BlockDev>(v: &Volume<D>) -> u64 {
         .sum()
 }
 
-/// A 64 MiB volume whose one file leaves about `free` buckets empty.
-pub(super) fn nearly_full(data: &mut Vec<u8>, free: u64) -> Image {
-    let v = block_on_ready(Volume::open(formatted(64 << 20, None))).unwrap();
+/// The native admission reserve, plus one transaction's rewrite footprint.
+/// The populated file needs at most one extent and backpointer per bucket;
+/// count their bytes twice to cover both occupancy and imported-node debt.
+pub(super) fn nearly_full(data: &mut Vec<u8>) -> Image {
+    let blank = formatted(64 << 20, None);
+    let m = block_on_ready(Mount::open(&blank, MEMORY, random())).unwrap();
+    let free = m.test_reserve_buckets(super::read::Source::superblock(&m).member.nbuckets * 2 * 128);
+    block_on_ready(m.unmount()).unwrap();
+    let v = block_on_ready(Volume::open(blank)).unwrap();
     let (empty, bucket) = (empty_buckets(&v), u64::from(v.superblock().member.bucket_sectors) * SECTOR as u64);
     data.resize(((empty - free) * bucket) as usize * 63 / 64, 7);
     let mut tree = Tree::new();
@@ -169,7 +177,7 @@ pub(super) fn nearly_full(data: &mut Vec<u8>, free: u64) -> Image {
 #[test]
 fn a_full_volume_refuses_changes_by_name_and_still_removes_names_and_unmounts_clean() {
     let mut data = Vec::new();
-    let dev = nearly_full(&mut data, 400);
+    let dev = nearly_full(&mut data);
     let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
     let stalled = || panic!("stalled; {}", m.dump());
     let made = Executor::new().block_on(
@@ -189,7 +197,7 @@ fn a_full_volume_refuses_changes_by_name_and_still_removes_names_and_unmounts_cl
             m.commit().await.unwrap();
             assert_eq!(m.create(r, b"again", New::Dir, OWNER, NOW).await.err(), Some(Error::NoSpace("no room left for the btree nodes a change may write")));
             for i in 0..20 {
-                m.unlink(r, format!("f{i}").as_bytes(), false, NOW).await.unwrap();
+                m.unlink(r, format!("f{i}").as_bytes(), false, NOW).await.unwrap_or_else(|error| panic!("remove {i}: {error:?}; {}", m.dump()));
             }
             let orphan = m.lookup(r, b"f20").await.unwrap().unwrap().ino;
             m.unlink(r, b"f20", false, NOW).await.unwrap();
@@ -199,7 +207,7 @@ fn a_full_volume_refuses_changes_by_name_and_still_removes_names_and_unmounts_cl
         },
         stalled,
     );
-    assert!(made > 1_000, "{made} creates filled the volume");
+    assert!(made > 21, "the capacity refusal follows enough creates to exercise removals: {made}");
     block_on_ready(m.unmount()).unwrap();
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     let (entries, more) = block_on_ready(v.readdir(v.root(), 0, usize::MAX)).unwrap();
@@ -240,14 +248,30 @@ pub(super) fn reclaim_all<D: BlockDev>(m: &Mount<D>) -> Vec<u64> {
 #[test]
 fn a_full_volume_crashed_mounts_read_write_and_still_removes_names() {
     let mut data = Vec::new();
-    let dev = nearly_full(&mut data, 400);
+    let dev = full_crash_removal_and_reuse(nearly_full(&mut data), 1);
+    let volume = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(read_all(&volume, path(&volume, "big")).unwrap(), data);
+}
+
+#[test]
+fn metadata_only_capacity_returns_after_reopening_and_removing_all_names() {
+    full_crash_removal_and_reuse(formatted(64 << 20, None), 0);
+}
+
+pub(super) fn full_crash_removal_and_reuse(dev: Image, existing: usize) -> Image {
+    let name = |i| format!("f{i:06}-{}", "x".repeat(240));
     let made = {
         let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
         let made = Executor::new().block_on(
             async {
                 let mut n = 0;
-                while m.create(m.root(), format!("f{n}").as_bytes(), New::File, OWNER, NOW).await.is_ok() {
-                    n += 1;
+                loop {
+                    match m.create(m.root(), name(n).as_bytes(), New::File, OWNER, NOW).await {
+                        Ok(_) => n += 1,
+                        Err(Error::NoSpace(_)) => break,
+                        Err(error) => panic!("fill: {error:?}; {}", m.dump()),
+                    }
+                    assert!(n < 100_000);
                 }
                 m.commit().await.unwrap();
                 n
@@ -263,21 +287,34 @@ fn a_full_volume_crashed_mounts_read_write_and_still_removes_names() {
         async {
             let r = m.root();
             assert_eq!(m.create(r, b"again", New::File, OWNER, NOW).await.err(), Some(Error::NoSpace("no room left for the btree nodes a change may write")));
-            for i in 0..20 {
-                m.unlink(r, format!("f{i}").as_bytes(), false, NOW).await.unwrap();
+            for i in 0..made {
+                let removed = m.unlink(r, name(i).as_bytes(), false, NOW).await.unwrap_or_else(|error| panic!("remove {i}: {error:?}; {}", m.dump()));
+                assert!(removed.last_link);
+                m.release(removed.node).await.unwrap();
+                if i % 32 == 0 { m.commit().await.unwrap(); }
             }
-            let orphan = m.lookup(r, b"f20").await.unwrap().unwrap().ino;
-            m.unlink(r, b"f20", false, NOW).await.unwrap();
-            m.release(orphan).await.unwrap();
             m.commit().await.unwrap();
+            for i in 0..64 {
+                m.create(r, name(i).as_bytes(), New::File, OWNER, NOW).await.unwrap();
+                let removed = m.unlink(r, name(i).as_bytes(), false, NOW).await.unwrap();
+                m.release(removed.node).await.unwrap();
+                m.create(r, name(i).as_bytes(), New::Dir, OWNER, NOW).await.unwrap();
+                m.unlink(r, name(i).as_bytes(), true, NOW).await.unwrap();
+            }
+            let ino = m.create(r, b"reused", New::File, OWNER, NOW).await.unwrap().ino;
+            assert_eq!(m.write(ino, 0, &vec![0x52; 256 << 10], NOW).await.unwrap(), 256 << 10, "removal returns useful capacity");
+            m.check_metadata_budget().await;
         },
         stalled,
     );
     block_on_ready(m.unmount()).unwrap();
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     let (entries, more) = block_on_ready(v.readdir(v.root(), 0, usize::MAX)).unwrap();
-    assert_eq!((entries.len(), more), (made + 1 - 21, false));
+    assert_eq!((entries.len(), more), (existing + 1, false));
+    assert_eq!(read_all(&v, path(&v, "reused")).unwrap(), vec![0x52; 256 << 10]);
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+    drop(v);
+    dev
 }
 
 /// A bucket emptied by an entry not yet durable is not written again: a

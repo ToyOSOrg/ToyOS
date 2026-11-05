@@ -193,6 +193,28 @@ pub(super) fn sys_namespace_open(ns_h: RawHandle, name: &str) -> u64 {
     connect_through(&connector)
 }
 
+/// Inspect only the names this namespace already holds. The Arc keeps the
+/// immutable entries alive after the handle-table lock is released; copying
+/// into user memory therefore holds no object or process lock.
+pub(super) fn sys_namespace_names(ns_h: RawHandle, out: &mut crate::user_ptr::UserBytesMut) -> u64 {
+    let namespace = match process::with_process_data(|data| {
+        data.handles.get::<crate::object::namespace::Namespace>(ns_h, Rights::READ)
+    }) {
+        Ok(namespace) => namespace,
+        Err(e) => return e.refuse(),
+    };
+    let required: usize = namespace.entries().iter().map(|(name, _)| 2 + name.len()).sum();
+    if out.len() >= required {
+        let mut at = 0;
+        for (name, _) in namespace.entries() {
+            out.write_at(at, &(name.len() as u16).to_le_bytes());
+            out.write_at(at + 2, name.as_bytes());
+            at += 2 + name.len();
+        }
+    }
+    required as u64
+}
+
 /// The client half of a connection, and the server half queued on the port.
 fn connect_through(connector: &port::Connector) -> u64 {
     if connector.closed() {

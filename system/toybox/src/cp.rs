@@ -7,17 +7,6 @@ use std::process;
 /// allocates the same 64 KiB whatever the source's length.
 const BUF_BYTES: usize = 64 * 1024;
 
-/// Bytes written between fsyncs.
-///
-/// Not a durability knob. `evict_if_needed` in `kernel/src/file_cache.rs`
-/// declines to take a dirty page, so the kernel's dirty set is bounded only by
-/// what the writer leaves un-flushed — without this the kernel holds the whole
-/// copy however small the buffer above is, and a bounded buffer in front of an
-/// unbounded one is not a bound. 256 pages, against a file cache whose smallest
-/// possible budget is the 2048-page floor in `block::file_cache_pages`. Policy,
-/// not physics; reaching it costs a flush, never a refusal.
-pub const FLUSH_BYTES: u64 = 1024 * 1024;
-
 pub fn main(args: Vec<String>) {
     let [source, dest] = args.as_slice() else {
         eprintln!("Usage: cp <source> <dest>");
@@ -85,7 +74,6 @@ pub fn copy(source: &Path, dest: &Path) -> Result<(), String> {
 fn stream(reader: &mut File, source: &Path, partial: &Path) -> Result<(), String> {
     let mut writer = File::create(partial).map_err(|e| format!("{}: {e}", partial.display()))?;
     let mut buf = vec![0u8; BUF_BYTES];
-    let mut unflushed = 0u64;
 
     loop {
         let n = match reader.read(&mut buf) {
@@ -96,19 +84,12 @@ fn stream(reader: &mut File, source: &Path, partial: &Path) -> Result<(), String
         writer
             .write_all(&buf[..n])
             .map_err(|e| format!("writing {}: {e}", partial.display()))?;
-        unflushed += n as u64;
-        if unflushed >= FLUSH_BYTES {
-            sync(&writer, partial)?;
-            unflushed = 0;
-        }
     }
 
     sync(&writer, partial)
 }
 
-/// Closing a file reports nothing, so a copy that never asks is a copy that
-/// cannot be told the volume was full. `fsync` is the channel that
-/// answers, which is why every write here goes through this function.
+/// Report delayed write errors before replacing the destination's name.
 fn sync(writer: &File, partial: &Path) -> Result<(), String> {
     writer.sync_all().map_err(|e| format!("flushing {}: {e}", partial.display()))
 }

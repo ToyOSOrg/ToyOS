@@ -14,6 +14,9 @@
 //! image whose dynamic section names a form its own `_start` refuses exits
 //! [`REFUSED_STATUS`] with [`REFUSED_LINE`] ([`refuses_itself`]).
 
+#[path = "../image.rs"]
+mod image;
+
 use std::fs;
 use std::process::Command;
 
@@ -24,14 +27,14 @@ use toyos_abi::end::End;
 /// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
 const CWD: &str = "/";
 
-/// Kernel-served, so a path spawn reaches the kernel's own open; every refusal
-/// is asked again with the same bytes handed over as an image.
+/// Where each case's file is written. A spawn reads it back into a memory
+/// object and hands the kernel that, as every spawn of a served program does.
 const DIR: &str = "/tmp/abuse_loader_exe";
 
 /// The two cases about a table larger than one kernel allocation need a file
 /// larger than one kernel allocation, because `read_file_range` clamps a
-/// declared length to what the file actually holds. tmpfs is where that is
-/// cheap: the pages are heap boxes, so a 3 MiB file costs no device I/O, and
+/// declared length to what the file actually holds. `/tmp` is where that is
+/// cheap: its pages are memory, so a 3 MiB file costs no device I/O, and
 /// the case under test is the loader rather than the filesystem.
 ///
 /// Both cases asserted on the *declared* length alone until `/tmp` became
@@ -238,8 +241,11 @@ fn spawn_path(path: &str) -> Result<RawHandle, SyscallError> {
     spawn_argv(path, &format!("{path}\0"))
 }
 
-/// `path` spawned with `argv`, NUL-separated, and no descriptor of this process's.
+/// `path` read into an image and spawned with `argv`, NUL-separated, and no
+/// descriptor of this process's.
 fn spawn_argv(path: &str, argv: &str) -> Result<RawHandle, SyscallError> {
+    let image = image::image_of(path);
+    let (image, image_len) = image.spawn_words();
     unsafe {
         syscall::spawn(&SpawnArgs {
             path_ptr: path.as_ptr() as u64,
@@ -254,8 +260,8 @@ fn spawn_argv(path: &str, argv: &str) -> Result<RawHandle, SyscallError> {
             labels_len: 0,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
-            image: 0,
-            image_len: 0,
+            image,
+            image_len,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
@@ -278,45 +284,8 @@ fn refused(name: &str, outcome: Result<RawHandle, SyscallError>) {
     }
 }
 
-/// `bytes` in a memory object of this process's own, as a spawn from a file
-/// server's volume reads a program into one.
-fn image_object(bytes: &[u8]) -> toyos::shm::SharedMemory {
-    let object = toyos::shm::SharedMemory::create(bytes.len().max(1)).expect("a memory object for the image");
-    object.bytes().write(0, bytes);
-    object
-}
-
-/// The same bytes handed to the kernel by handle, as a spawn from a file
-/// server's volume hands them: the image route to the same loader.
-fn spawn_image(path: &str, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
-    let argv = format!("{path}\0");
-    let object = image_object(bytes);
-    unsafe {
-        syscall::spawn(&SpawnArgs {
-            path_ptr: path.as_ptr() as u64,
-            path_len: path.len() as u64,
-            argv_ptr: argv.as_ptr() as u64,
-            argv_len: argv.len() as u64,
-            env_ptr: 0,
-            env_len: 0,
-            endow_ptr: 0,
-            endow_count: 0,
-            labels_ptr: 0,
-            labels_len: 0,
-            cwd_ptr: CWD.as_ptr() as u64,
-            cwd_len: CWD.len() as u64,
-            image: toyos::AsHandle::as_handle(&object).raw().0 as u64,
-            image_len: bytes.len() as u64,
-            place: u64::from(toyos_abi::HANDLE_INVALID.0),
-            pager: u64::from(toyos_abi::HANDLE_INVALID.0),
-        })
-    }
-}
-
-/// Refused whether the kernel opens the file or is handed its bytes.
 fn spawn_refused(name: &str, bytes: &[u8]) {
     refused(name, spawn_result(name, bytes));
-    refused(&format!("{name} as an image"), spawn_image(&format!("{DIR}/{name}"), bytes));
 }
 
 /// The kernel answers this spawn and lives, and a child it started dies. These
@@ -338,10 +307,8 @@ fn dies(name: &str, outcome: Result<RawHandle, SyscallError>) {
     }
 }
 
-/// [`dies`], whether the kernel opens the file or is handed its bytes.
 fn spawn_dies(name: &str, bytes: &[u8]) {
     dies(name, spawn_result(name, bytes));
-    dies(&format!("{name} as an image"), spawn_image(&format!("{DIR}/{name}"), bytes));
 }
 
 /// Load it and throw it away. These cases are about a *walk* the loader does,

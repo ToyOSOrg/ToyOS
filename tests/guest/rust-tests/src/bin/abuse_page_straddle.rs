@@ -17,7 +17,7 @@ mod image;
 
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{
-    self, VmAt, VmProt, OpenFlags, ProcessStats, SpawnArgs, Stat, SyscallError, SYS_FSTAT,
+    self, VmAt, VmProt, ProcessStats, SpawnArgs, Stat, SyscallError, SYS_FSTAT,
     SYS_PROCESS_STATS,
 };
 
@@ -64,8 +64,7 @@ fn main() {
     let base = region as u64;
     let boundary = base + PAGE;
 
-    let own = image::in_tmp("/system/bin/test_rs_abuse_page_straddle");
-    let handle = syscall::open(own.as_bytes(), OpenFlags::READ).expect("open self");
+    let handle = syscall::null(toyos_abi::Rights::READ).expect("a generic object for fstat");
     let poison = |addr: u64, len: usize| {
         for i in 0..len {
             unsafe { (addr as *mut u8).add(i).write_volatile(CANARY) };

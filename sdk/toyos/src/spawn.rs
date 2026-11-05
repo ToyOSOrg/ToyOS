@@ -101,6 +101,8 @@ pub enum Refused {
     Stream(RawHandle),
     /// netstack made no holder of a stream the child was to be given.
     Export(crate::net::NetError),
+    /// The filesystem refused to export a shared description.
+    File(crate::files::Error),
     /// The launcher did not start a program it permits, or its answer was lost.
     NotStarted,
     /// The kernel refused.
@@ -215,6 +217,7 @@ impl Helper<'_> {
             None => None,
         };
         let mut number = [0u8; 10];
+        let mut group_number = [0u8; 10];
         let mut put = |label: &[&[u8]], handle: RawHandle, count: &mut usize, used: &mut usize| {
             let len: usize = label.iter().map(|part| part.len()).sum();
             let room = labels.get_mut(*used..*used + len).ok_or(Refused::Invalid("endowment labels past what a spawn carries"))?;
@@ -238,8 +241,15 @@ impl Helper<'_> {
         for &(fd, handle, kind) in s.fds {
             let copy = handle.try_clone_to_owned().map_err(Refused::Syscall)?;
             let digits = decimal(fd, &mut number);
-            let label = [FD_PREFIX.as_bytes(), digits, kind.suffix().as_bytes()];
-            put(&label, copy.as_handle().raw(), &mut count, &mut used)?;
+            if kind == FdKind::File {
+                // Duplicated file actions may name one exported connection
+                // several times. The child adopts it once and aliases its fd.
+                let group = s.fds.iter().find(|(_, h, k)| *k == FdKind::File && h.raw() == handle.raw())
+                    .expect("this descriptor is in the spawn").0;
+                put(&[FD_PREFIX.as_bytes(), digits, b":file:", decimal(group, &mut group_number)], copy.as_handle().raw(), &mut count, &mut used)?;
+            } else {
+                put(&[FD_PREFIX.as_bytes(), digits, kind.suffix().as_bytes()], copy.as_handle().raw(), &mut count, &mut used)?;
+            }
             moved.push(copy);
         }
         let (image, image_len) = image.map_or((0, 0), Image::spawn_words);
@@ -292,6 +302,11 @@ impl Independent<'_> {
     /// carries. A job the spawn endowed goes itself, moved as an endowment is.
     pub fn launch(self) -> Result<Process, Refused> {
         let mut s = self.0;
+        for (i, &(_, handle, kind)) in s.fds.iter().enumerate() {
+            if kind == FdKind::File && s.fds[..i].iter().any(|(_, prior, kind)| *kind == FdKind::File && prior.raw() == handle.raw()) {
+                return Err(Refused::Invalid("a launch needs a distinct exported connection for each file descriptor"));
+            }
+        }
         let held = match s.launcher {
             Some(named) => named.raw(),
             None => crate::endow::launcher().ok_or(Refused::Permission("this process holds no launcher"))?.as_handle().raw(),

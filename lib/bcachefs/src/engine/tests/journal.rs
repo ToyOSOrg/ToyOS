@@ -20,8 +20,7 @@ fn the_unclean_fixture_is_read_through_its_journal() {
     let (window, replay) = v.replayed().expect("an unclean volume replays");
     assert_eq!((window.first, window.last, window.next), (61, 62, 63));
     // Accounting deltas add rather than replace, so each is kept.
-    let deltas: usize = replay.accounting.values().map(Vec::len).sum();
-    assert_eq!((replay.read, replay.keys.len() + deltas), (115, 90));
+    assert_eq!((replay.read, replay.pending.iter().count()), (115, 90));
     let mut want: Vec<String> = (1..=200).map(|i| format!("f{i}")).collect();
     want.push("lost+found".into());
     want.sort();
@@ -86,7 +85,7 @@ struct Ring {
 
 impl Ring {
     fn of(dev: &Image, passphrase: Option<&[u8]>) -> Ring {
-        let sb = block_on_ready(super::super::read::read_superblock(dev)).unwrap();
+        let sb = block_on_ready(super::super::read::read_superblock(dev)).unwrap().0;
         let key = passphrase.map(|p| super::super::crypt::MasterKey::unwrap(sb.crypt.as_ref().unwrap(), &sb.header.internal_uuid, p, MIN_LIMITS).unwrap());
         let first = sb.journal[0].0 * u64::from(sb.member.bucket_sectors) / 8;
         Ring { roots: sb.clean.as_ref().unwrap().roots.clone(), uuid: sb.header.internal_uuid, key, first }
@@ -133,7 +132,7 @@ fn a_torn_entry_is_refused(encryption: Option<Encryption>) {
             if window.last != last {
                 return Err(format!("replay ended at {} with the fourth entry {}", window.last, if whole { "whole" } else { "torn or lost" }));
             }
-            let inodes = replay.keys.keys().filter(|(b, _, _)| *b == Btree::Inodes).count() as u64;
+            let inodes = replay.pending.iter().filter(|entry| entry.position().0 == Btree::Inodes).count() as u64;
             if inodes != last {
                 return Err(format!("{inodes} inodes replayed through entry {last}"));
             }
@@ -272,7 +271,7 @@ fn every_entry_of_the_window_carries_its_records_and_none_is_blacklisted() {
 
 fn window_of(dev: &Image) -> Result<Option<journal::Window>> {
     block_on_ready(async {
-        let sb = super::super::read::read_superblock(dev).await?;
+        let sb = super::super::read::read_superblock(dev).await?.0;
         journal::scan(dev, &sb, None).await?.window(&sb)
     })
 }
@@ -298,6 +297,66 @@ fn a_window_with_an_entry_missing_or_failing_its_checksum_is_refused() {
     assert_eq!(window_of(&unclean_with(&[], |_, _| {})).unwrap().map(|w| (w.first, w.last, w.next)), None);
 }
 
+/// The writer goes round the ring of a production geometry, 2 MiB buckets
+/// on an 8 GiB device, and an unclean mount after replays it to a volume
+/// fsck finds clean.
+#[test]
+fn a_writer_that_went_round_a_ring_of_2_mib_buckets_replays_clean() {
+    let dev = super::buckets::Sparse::new(8 << 30);
+    super::buckets::formatted_on(&dev);
+    let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap().0;
+    assert_eq!(sb.member.bucket_sectors, 4096, "2 MiB buckets");
+
+    let mount = block_on_ready(Mount::open(&dev, MountOptions { cache_nodes: 256 }, super::mount::random())).unwrap();
+    let mut last = mount.journal_head();
+    let wrapped = (0..100_000).any(|i| {
+        block_on_ready(mount.create(mount.root(), format!("f{i}").as_bytes(), New::File, super::mount::OWNER, super::mount::NOW)).unwrap();
+        block_on_ready(mount.commit()).unwrap();
+        let head = mount.journal_head();
+        let back = head < last;
+        last = head;
+        back
+    });
+    assert!(wrapped, "the writer went round the ring");
+    drop(mount);
+
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert!(v.replayed().is_some(), "an unclean volume replays");
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+/// A ring can hold far more than a window: an entry older than a good
+/// flush entry's last sequence keeps no records, wherever in the ring it
+/// lies. A window that reaches one has last sequences that went back, and
+/// is refused.
+#[test]
+fn a_scan_keeps_no_records_of_entries_behind_a_flush_entrys_last_sequence() {
+    let roots = Ring::of(&formatted(8 << 20, None), None).roots;
+    let mut area = Vec::new();
+    tail(&mut area, &roots);
+    let scanned = |dev: &Image| -> Vec<(u64, bool, bool)> {
+        block_on_ready(async {
+            let sb = super::super::read::read_superblock(dev).await.unwrap().0;
+            journal::scan(dev, &sb, None).await.unwrap().entries.values().map(|e| (e.seq, e.past, e.area.is_empty())).collect()
+        })
+    };
+    let moving = unclean_with(&[(1, 1, area.clone(), 0), (2, 1, area.clone(), 0), (3, 2, area.clone(), 0), (4, 3, area.clone(), 0)], |_, _| {});
+    assert_eq!(scanned(&moving), [(1, true, true), (2, true, true), (3, false, false), (4, false, false)]);
+    assert_eq!(window_of(&moving).unwrap().map(|w| (w.first, w.last)), Some((3, 4)));
+    // A stale entry in a later bucket than the window, as a wrapped ring
+    // leaves it: read after the floor is known.
+    let dev = formatted(8 << 20, None);
+    let bucket_blocks = u64::from(block_on_ready(super::super::read::read_superblock(&dev)).unwrap().0.member.bucket_sectors) / 8;
+    let ring = Ring::of(&dev, None);
+    let used = (ring.entry(3, 2, &area).len() + ring.entry(4, 3, &area).len()) as u64;
+    let wrapped = unclean_with(&[(3, 2, area.clone(), 0), (4, 3, area.clone(), bucket_blocks - used), (1, 1, area.clone(), 0)], |_, _| {});
+    assert_eq!(scanned(&wrapped), [(1, true, true), (3, false, false), (4, false, false)]);
+    assert_eq!(window_of(&wrapped).unwrap().map(|w| (w.first, w.last)), Some((3, 4)));
+    // Entry 3 said its window starts at 3, the newest that it starts at 2.
+    let back = unclean_with(&[(1, 1, area.clone(), 0), (2, 1, area.clone(), 0), (3, 3, area.clone(), 0), (4, 2, area.clone(), 0)], |_, _| {});
+    assert_eq!(window_of(&back), Err(Error::Corrupt("a journal window reaching behind another flush entry's last sequence")));
+}
+
 /// What the ring holds past a bucket's newest entry is left over from an
 /// earlier pass and is not read; past a damaged entry, the reader steps a
 /// block at a time to the next.
@@ -309,7 +368,7 @@ fn a_bucket_is_read_up_to_an_older_entry_and_past_a_damaged_one() {
     let stale = unclean_with(&[(5, 5, area.clone(), 0), (2, 2, area.clone(), 0)], |_, _| {});
     let seqs = |dev: &Image| -> Vec<(u64, bool)> {
         block_on_ready(async {
-            let sb = super::super::read::read_superblock(dev).await.unwrap();
+            let sb = super::super::read::read_superblock(dev).await.unwrap().0;
             journal::scan(dev, &sb, None).await.unwrap().entries.values().map(|e| (e.seq, e.good)).collect()
         })
     };
@@ -408,15 +467,10 @@ fn a_window_spanning_2_62_sequences_is_checked_entry_by_entry() {
     assert_eq!(window_of(&gap), Err(Error::Corrupt("a journal entry missing from the replay window")));
 }
 
-/// A window whose keys a replay installs into one leaf past seven nodes'
-/// worth: 110 inodes per 16 KiB of the volume's buckets, which are its
-/// nodes, journaled across 13 entries, none yet in a node, as an upstream
-/// volume a crash left can hold them. The reader replays it; the read-write
-/// mount stops by name at its first write, since reclaim cannot split the
-/// leaf in one transaction
-/// (`issues/a-replayed-bcachefs-node-past-seven-nodes-is-refused.md`).
+/// More than seven nodes' worth of replay keys target one physical leaf.
+/// They remain journal-owned until bounded materialization splits the leaf.
 #[test]
-fn a_replayed_leaf_past_seven_nodes_is_read_but_not_mounted_read_write() {
+fn a_replay_larger_than_seven_nodes_materializes_in_bounded_ranges() {
     let dev = formatted(64 << 20, None);
     let bucket_bytes = u64::from(block_on_ready(Volume::open(&dev)).unwrap().superblock().member.bucket_sectors) * SECTOR as u64;
     unclean(&dev);
@@ -440,7 +494,9 @@ fn a_replayed_leaf_past_seven_nodes_is_read_but_not_mounted_read_write() {
     assert!(block_on_ready(v.inode(ino - 1)).is_ok(), "the reader replays the window");
     drop(v);
     let m = block_on_ready(Mount::open(&dev, MountOptions { cache_nodes: 256 }, super::mount::random())).unwrap();
-    let why = "a btree node whose keys fill more than seven nodes";
-    assert_eq!(block_on_ready(m.create(m.root(), b"f", New::File, super::mount::OWNER, super::mount::NOW)).err(), Some(Error::Unsupported(why)));
-    assert_eq!(block_on_ready(m.unmount()).err(), Some(Error::ReadOnly(why)));
+    block_on_ready(m.create(m.root(), b"f", New::File, super::mount::OWNER, super::mount::NOW)).unwrap();
+    block_on_ready(m.unmount()).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert!(block_on_ready(v.inode(ino - 1)).is_ok(), "the final replay key reached a physical leaf");
+    assert!(block_on_ready(v.lookup(v.root(), b"f")).unwrap().is_some());
 }

@@ -4,8 +4,7 @@
 //!
 //! **An open file is a [`Node`]**, one per path while any client holds it
 //! open, so two opens of one file write one set of pages and see one length. A
-//! node whose file was unlinked or renamed over answers `Stale` from then on:
-//! its blocks may be another file's.
+//! node is distinct from the path that was used to open it.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -59,11 +58,16 @@ pub struct OpenHow {
 /// An open file, while any client holds it.
 pub type Node = u64;
 
+/// A write-back is whole, or reports the byte count of the complete-page
+/// prefix written before its refusal. The suffix keeps its capacity for retry.
+pub type WriteBack = Result<(), (usize, Error)>;
+
 /// Where a read's bytes go, `len()` of them at most: the client's window, which
 /// is shared with the client and so is written through a copy and never
 /// through a reference, or a buffer of this process's own.
 pub trait Out {
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool { self.len() == 0 }
     /// `bytes` at `at`, inside `len()`.
     fn put(&mut self, at: usize, bytes: &[u8]);
     /// `len` zeros at `at`, inside `len()`: a hole's bytes.
@@ -105,6 +109,13 @@ impl Out for Window<'_> {
 }
 
 pub trait Volume {
+    /// Its paged objects are the only backing for file contents. Their pages
+    /// cannot be evicted while the inode remains linked or held open.
+    fn memory(&self) -> bool { false }
+
+    /// Whether an open inode still has a name.
+    fn linked(&mut self, _node: Node) -> Result<bool, Error> { Ok(true) }
+
     /// Whether anything here may be changed.
     fn writable(&self) -> bool;
 
@@ -113,6 +124,20 @@ pub trait Volume {
 
     /// What the symlink at `path` holds.
     fn read_link(&mut self, path: &str) -> Result<String, Error>;
+
+    /// What `path` is and its [`Self::identity`], without following it.
+    fn stat(&mut self, path: &str) -> Result<(Meta, u64), Error> {
+        Ok((self.lstat(path)?, self.identity(path)?))
+    }
+
+    /// What the symlink at `path` holds, or `None` for anything else: a
+    /// component of a path being resolved.
+    fn link_at(&mut self, path: &str) -> Result<Option<String>, Error> {
+        match self.lstat(path)?.kind {
+            Kind::Symlink => self.read_link(path).map(Some),
+            _ => Ok(None),
+        }
+    }
 
     /// The entries directly under `dir`.
     fn list(&mut self, dir: &str) -> Result<Vec<Listed>, Error>;
@@ -152,19 +177,21 @@ pub trait Volume {
     /// its reserve gives back its room through [`Self::unreserve`].
     fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<Reserved, Error>;
 
-    /// A write refused after its reserve: the size back to the reserve's old
-    /// one, or to `landed` where the write's bytes reached past it, and every
-    /// block the reserve took past both given back, since it holds what the
-    /// file that last had it left there. `landed` is 0 where none landed.
-    /// Called before any other call on the file, so nothing has recorded the
-    /// reserve's blocks.
+    /// Bytes of this reservation copied into the file's buffer. Called once
+    /// for each touched page, before any write-back can take the new bytes.
+    /// An older dirty version may be written back before this call.
+    fn landed(&mut self, _node: Node, _reserved: Reserved, _offset: u64, _len: usize) {}
+
+    /// Cancel the capacity for bytes this write did not copy, restoring the
+    /// size to the old one or `landed`, whichever is larger. `landed` is 0
+    /// where none landed. Older dirty bytes retain their capacity.
     fn unreserve(&mut self, node: Node, reserved: Reserved, landed: u64) -> Result<(), Error> {
         self.truncate(node, reserved.size.max(landed))
     }
 
     /// `data` at the whole-page `offset`, inside the size, into the room
     /// [`Self::reserve`] made; a last page in part is zeros past the size.
-    fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error>;
+    fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> WriteBack;
 
     fn truncate(&mut self, node: Node, size: u64) -> Result<(), Error>;
 
@@ -190,6 +217,28 @@ pub trait Volume {
     /// volume's own flush refused.
     fn sync(&mut self) -> Result<Vec<(Node, Error)>, Error>;
 
+    /// Whether the volume's next commit carries `node`'s entry whatever it is
+    /// asked to: one written since the last, or one naming blocks taken since,
+    /// which the commit holds as taken. The file's pages reach the volume
+    /// before that commit, so no entry it makes durable names a block that
+    /// does not hold the file's bytes.
+    fn carried(&self, _node: Node) -> bool {
+        false
+    }
+
+    /// Whether an open file's entry is changed past what a commit or sync
+    /// last made durable. Everything else written is durable after either.
+    fn owes(&self) -> bool {
+        false
+    }
+
+    /// `node`'s entry durable, with every entry [`Self::carried`] names and
+    /// no other open file's: an fsync's commit. `None` commits only those, as
+    /// a directory's fsync does, whose names every change writes at once.
+    /// `Err` is `node`'s entry or the commit refused; another's refused entry
+    /// is said, and kept for the next commit.
+    fn commit(&mut self, node: Option<Node>) -> Result<(), Error>;
+
     /// What more can be written to the volume: none, where nothing can be.
     fn room(&mut self) -> Result<toyos::fs::Room, Error>;
 
@@ -201,48 +250,54 @@ pub trait Volume {
 #[derive(Clone, Copy, Debug)]
 pub struct Reserved {
     pub size: u64,
-    /// The pages it held blocks for. Past them a page below `size` is a hole,
-    /// whose block, if the reserve took one, holds what another file left.
-    pub held: u64,
+    /// Old bytes that can be read safely, including holes that read as zero.
+    pub contents: u64,
+    /// Volume-owned identifier for cancelling capacity taken by this write.
+    pub ticket: u64,
 }
 
 impl Reserved {
     /// Where the file's old bytes on the volume end: a page in part reads
     /// what it held below this, and zeros from here.
     pub fn contents(&self) -> u64 {
-        self.size.min(self.held.saturating_mul(toyos_blockdev::BLOCK as u64))
+        self.contents
     }
 }
 
 /// A write straight to the volume, for a file with no paged object — on a
 /// server with no pager, or one whose object went — and for a volume's
-/// tests: the reserve, then each page it touches written back, what the page
-/// held below the old contents' end read first.
+/// tests: the reserve, then the pages it touches written back at once, what
+/// a page it covers in part held below the old contents' end read first.
 pub trait Writes: Volume {
     fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
         const PAGE: u64 = toyos_blockdev::BLOCK as u64;
+        if data.is_empty() { return Ok(()); }
         let reserved = self.reserve(node, offset, data.len() as u64)?;
-        let size = self.node_meta(node)?.size;
         let end = offset + data.len() as u64;
-        let mut landed = 0;
-        for start in (offset / PAGE * PAGE..end).step_by(PAGE as usize) {
-            let mut page = vec![0u8; PAGE as usize];
-            let below = reserved.contents().saturating_sub(start).min(PAGE) as usize;
-            let (from, to) = (offset.max(start), end.min(start + PAGE));
-            let written = self.read(node, start, &mut Buf(&mut page[..below])).and_then(|_| {
-                page[(from - start) as usize..(to - start) as usize]
-                    .copy_from_slice(&data[(from - offset) as usize..(to - offset) as usize]);
-                self.write_back(node, start, &page[..(size - start).min(PAGE) as usize])
-            });
-            if let Err(e) = written {
-                if let Err(again) = self.unreserve(node, reserved, landed) {
-                    println!("fileserver: a refused write was not cut back ({again:?})");
+        let (first, last) = (offset / PAGE * PAGE, end.div_ceil(PAGE) * PAGE);
+        let mut pages = vec![0u8; (last - first) as usize];
+        let mut put = || -> Result<(), (u64, Error)> {
+            let size = self.node_meta(node).map_err(|error| (0, error))?.size;
+            // A page the bytes cover whole needs nothing read.
+            let partial = [first, last - PAGE].into_iter().filter(|&start| offset > start || end < start + PAGE);
+            for start in partial.collect::<std::collections::BTreeSet<_>>() {
+                let below = reserved.contents().saturating_sub(start).min(PAGE) as usize;
+                let at = (start - first) as usize;
+                if below > 0 {
+                    self.read(node, start, &mut Buf(&mut pages[at..at + below])).map_err(|error| (0, error))?;
                 }
-                return Err(e);
             }
-            landed = to;
+            pages[(offset - first) as usize..(end - first) as usize].copy_from_slice(data);
+            self.landed(node, reserved, offset, data.len());
+            self.write_back(node, first, &pages[..(size - first).min(last - first) as usize])
+                .map_err(|(done, error)| ((first + done as u64).min(end).max(offset) - offset, error))
+        };
+        let Err((landed, error)) = put() else { return Ok(()) };
+        let landed = if landed == 0 { 0 } else { offset + landed };
+        if let Err(again) = self.unreserve(node, reserved, landed) {
+            println!("fileserver: a refused write was not cut back ({again:?})");
         }
-        Ok(())
+        Err(error)
     }
 }
 
@@ -341,8 +396,8 @@ pub fn take_anchor() {
 }
 
 /// What a file written now is stamped with (`toyos_abi::syscall::Stat::mtime`):
-/// nanoseconds since the Unix epoch, UTC, as the kernel's `clock::mtime_now`
-/// reckons them, and 0 — undated — on a machine whose RTC never answered.
+/// nanoseconds since the Unix epoch, UTC, and 0 — undated — on a machine whose
+/// RTC never answered.
 pub fn now_nanos() -> u64 {
     let anchor = ANCHOR.get().expect("fileserver takes the anchor at its start");
     anchor.map_or(0, |secs| secs.saturating_mul(NANOS_PER_SEC).saturating_add(nanos_since_boot()))

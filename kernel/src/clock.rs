@@ -275,9 +275,3 @@ pub fn utc_nanos() -> Option<u64> {
         .then(|| BOOT_SECS.load(Relaxed).saturating_mul(NANOS_PER_SEC).saturating_add(nanos_since_boot()))
 }
 
-/// What a file written now is stamped with (`toyos_abi::syscall::Stat::mtime`):
-/// [`utc_nanos`], and 0 — undated — on a machine whose RTC never answered.
-pub fn mtime_now() -> u64 {
-    utc_nanos().unwrap_or(0)
-}
-

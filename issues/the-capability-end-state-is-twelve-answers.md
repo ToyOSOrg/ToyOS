@@ -73,7 +73,7 @@ process holds exactly what its parent moved into it, and there is nothing it can
 name to get more". The dispatch does not: `SYS_OPEN` resolves any absolute path
 against the machine's one VFS (`4a98107f^:kernel/src/arch/syscall.rs:1233`), gated only by
 a per-*mount* `user_may_modify` whose whole subject is protecting `/boot`
-(`kernel/src/vfs.rs:288`); `SYS_SPAWN` starts any binary on that filesystem by
+(`4a98107f^:kernel/src/vfs.rs:288`); `SYS_SPAWN` starts any binary on that filesystem by
 path (`4a98107f^:kernel/src/arch/syscall.rs:359`); `SYS_DLOPEN` loads any `.so` by path
 (`:504`); `SYS_SHUTDOWN` powers the machine off with no handle and no right
 (`:328`). So the answer today is **no**, and the sentence in `CLAUDE.md` is true

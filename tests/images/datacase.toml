@@ -1,0 +1,47 @@
+# Mounted DATA tests on both benches. No formatting or designation authority.
+[boot]
+start = ["logkeeper", "uart", "diskserver", "fileserver", "acpiserver", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread", "console"]
+serves = ["log", "log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
+
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
+
+[programs.test-runner]
+receives = ["power"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"
+
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block", "disk"]
+
+[programs.nvme]
+drives = ["pci:01:08:02"]
+receives = ["disk"]
+
+[programs.usbd]
+drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"]
+receives = ["disk"]
+
+[programs.fileserver]
+restart = true
+pager = true
+roles = ["data", "log", "boot", "memory"]
+receives = ["block"]

@@ -8,7 +8,7 @@
 //! runs for a decode refusal exactly as for a handler. `syscall_total` and
 //! `syscall_total_ns` then count and time the same set of calls.
 
-use crate::object::{ops, KObjectRef};
+use crate::object::ops;
 use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
 use crate::process;
@@ -27,10 +27,7 @@ use super::device::{
     sys_device_reg_read,
 };
 use super::event::{sys_event_create, sys_event_signal, sys_event_take, sys_handle_wait};
-use super::fs::{
-    spawn_cwd, sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink,
-    sys_rename, sys_rmdir, sys_stat, sys_symlink,
-};
+use super::proc::sys_getcwd;
 use super::handles::{sys_close, sys_handle_dup, with_object, with_object_ref};
 use super::io::{
     sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
@@ -38,7 +35,7 @@ use super::io::{
 use super::ipc::{
     Incoming, Outgoing,
     sys_accept, sys_inbox_setup, sys_message_recv, sys_message_send,
-    sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe,
+    sys_inbox_submit, sys_namespace_build, sys_namespace_names, sys_namespace_open, sys_pipe,
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map, sys_shm_sub,
 };
 use super::machine::{
@@ -96,21 +93,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
             sys_random(&mut buf)
         }
-        SYS_OPEN => {
-            let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
-            sys_open(&path, OpenFlags(a3))
-        }
         SYS_CLOSE => sys_close(RawHandle(a1 as u32)),
-        SYS_SEEK => {
-            let pos = match a3 {
-                0 => SeekFrom::Start(a2),
-                1 => SeekFrom::Current(a2 as i64),
-                2 => SeekFrom::End(a2 as i64),
-                _ => return SyscallError::InvalidArgument.to_u64(),
-            };
-            with_object(RawHandle(a1 as u32), Rights::READ, |o| ops::seek(o, pos))
-        }
-        // No right: fstat moves no content, so gating on READ would fail isatty() on write-only handles.
         SYS_FSTAT => {
             let stat = match with_object_ref(RawHandle(a1 as u32), Rights::NONE, ops::fstat) {
                 Ok(stat) => stat,
@@ -121,47 +104,9 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Err(e) => e.to_u64(),
             }
         }
-        // Cloned and run outside the process-data lock: fsync parks between flush
-        // attempts, and a park under that lock is what the baseline tripwire refuses.
-        // The clone outlives a concurrent close, the only other way this object is revoked.
-        SYS_FSYNC => {
-            match with_object_ref(RawHandle(a1 as u32), Rights::WRITE, KObjectRef::clone) {
-                Ok(object) => ops::fsync(&object),
-                Err(e) => e.refuse(),
-            }
-        }
-        SYS_STAT => {
-            let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
-            let follow = match a4 {
-                0 => false,
-                1 => true,
-                _ => return SyscallError::InvalidArgument.to_u64(),
-            };
-            let stat = match sys_stat(&path, follow) {
-                Ok(stat) => stat,
-                Err(e) => return e.to_u64(),
-            };
-            match ctx.copy_out(UserAddr::new(a3), &stat) {
-                Ok(()) => 0,
-                Err(e) => e.to_u64(),
-            }
-        }
-        SYS_READDIR => {
-            let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
-            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a3), a4) else { return bad_addr };
-            sys_readdir(&path, &mut buf)
-        }
-        SYS_DELETE => {
-            let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
-            sys_delete(&path)
-        }
         SYS_SHUTDOWN => sys_shutdown(RawHandle(a1 as u32)),
         SYS_REBOOT => sys_reboot(RawHandle(a1 as u32)),
         SYS_MACHINE_STOPS => sys_machine_stops(RawHandle(a1 as u32), a2),
-        SYS_CHDIR => {
-            let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
-            sys_chdir(&path)
-        }
         SYS_GETCWD => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
             sys_getcwd(&mut buf)
@@ -172,9 +117,9 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // First, and nothing copied: the image is the caller's object, and
             // an endowment below may move the caller's own handle to it.
             let image = match args.image_len {
-                0 => None,
+                0 => return SyscallError::InvalidArgument.to_u64(),
                 len => match shared_image(args.image, len) {
-                    Ok(image) => Some(alloc::sync::Arc::new(image) as alloc::sync::Arc<dyn crate::file_backing::FileBacking>),
+                    Ok(image) => alloc::sync::Arc::new(image) as alloc::sync::Arc<crate::file_backing::SharedImage>,
                     Err(refused) => return refused,
                 },
             };
@@ -202,8 +147,9 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             };
             let path = match ctx.user_str(UserAddr::new(args.path_ptr), args.path_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
-            let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len).and_then(|p| spawn_cwd(&p)) {
-                Ok(cwd) => cwd,
+            let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len) {
+                Ok(cwd) if kernel::cwd::spawnable(&cwd) => cwd,
+                Ok(_) => return SyscallError::InvalidArgument.to_u64(),
                 Err(e) => return e.to_u64(),
             };
             if args.endow_count as usize > toyos_abi::syscall::MAX_SPAWN_ENDOWMENTS
@@ -314,19 +260,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_HANDLE_DUP => sys_handle_dup(RawHandle(a1 as u32), a2),
         SYS_NULL => sys_null(a1),
         SYS_GETPID => process::current_process().raw() as u64,
-        SYS_RENAME => {
-            let old = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
-            let new = match ctx.user_str(UserAddr::new(a3), a4) { Ok(s) => s, Err(e) => return e.to_u64() };
-            sys_rename(&old, &new)
-        }
-        SYS_MKDIR => {
-            let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
-            sys_mkdir(&path)
-        }
-        SYS_RMDIR => {
-            let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
-            sys_rmdir(&path)
-        }
         SYS_DLOPEN => {
             let Ok(args) = ctx.copy_in::<toyos_abi::syscall::DlopenArgs>(UserAddr::new(a1)) else { return bad_addr };
             let name = match ctx.user_str(UserAddr::new(args.name_ptr), args.name_len) { Ok(s) => s, Err(e) => return e.to_u64() };
@@ -353,9 +286,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // A no-op by contract: a dlopen'd module is shared and process-lived, and
         // a reload returns the same handle (`sys_dlopen`), so nothing to reclaim.
         SYS_DLCLOSE => 0,
-        SYS_FTRUNCATE => {
-            with_object(RawHandle(a1 as u32), Rights::WRITE, |o| ops::ftruncate(o, a2))
-        }
         SYS_STACK_INFO => {
             let stack = process::with_current_data(|data| {
                 (data.user_stack_base.raw() > 0)
@@ -386,14 +316,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_VM_DISCARD => sys_vm_discard(a1, a2),
         SYS_VM_DECOMMIT => sys_vm_decommit(a1, a2),
         SYS_VM_REMAP => sys_vm_remap(a1, a2, a3, a4),
-        SYS_PREAD => {
-            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
-            with_object(RawHandle(a1 as u32), Rights::READ, |o| ops::pread(o, a4, &mut buf))
-        }
-        SYS_PWRITE => {
-            let Some(buf) = ctx.user_bytes(UserAddr::new(a2), a3) else { return bad_addr };
-            with_object(RawHandle(a1 as u32), Rights::WRITE, |o| ops::pwrite(o, a4, &buf))
-        }
         SYS_READ_NONBLOCK => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
             sys_read_nonblock(RawHandle(a1 as u32), &mut buf)
@@ -431,16 +353,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_DEVICE_DMA_UNMAP => sys_device_dma_unmap(RawHandle(a1 as u32), a2),
         SYS_DEVICE_DMA_LIMIT => sys_device_dma_limit(RawHandle(a1 as u32), a2),
         SYS_DEVICE_DMA_START => sys_device_dma_start(RawHandle(a1 as u32)),
-        SYS_SYMLINK => {
-            let target = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
-            let link = match ctx.user_str(UserAddr::new(a3), a4) { Ok(s) => s, Err(e) => return e.to_u64() };
-            sys_symlink(&target, &link)
-        }
-        SYS_READLINK => {
-            let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
-            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a3), a4) else { return bad_addr };
-            sys_readlink(&path, &mut buf)
-        }
         SYS_ENDOWMENTS => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
             sys_endowments(&mut buf)
@@ -520,6 +432,11 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             };
             // ctx lets sys_namespace_build bound both counts before it reads either vector.
             sys_namespace_build(&ctx, &args)
+        }
+        SYS_NAMESPACE_NAMES => {
+            let len = a3.min((MAX_NAMESPACE_ENTRIES * (2 + MAX_SERVICE_NAME)) as u64);
+            let Some(mut out) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
+            sys_namespace_names(RawHandle(a1 as u32), &mut out)
         }
         SYS_NAMESPACE_OPEN => {
             let name = match ctx.user_str(UserAddr::new(a2), a3) { Ok(s) => s, Err(e) => return e.to_u64() };
@@ -708,7 +625,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_ACPI => sys_acpi(&ctx, RawHandle(a1 as u32), a2, a3),
         SYS_DEVICE_REG_READ => sys_device_reg_read(RawHandle(a1 as u32), a2, a3),
         SYS_PAGER_CREATE => sys_pager_create(a1, a2, a3, a4),
-        SYS_PAGED_CREATE => sys_paged_create(RawHandle(a1 as u32), a2),
+        SYS_PAGED_CREATE => match a3 {
+            0 | 1 => sys_paged_create(RawHandle(a1 as u32), a2, a3 != 0),
+            _ => SyscallError::InvalidArgument.to_u64(),
+        },
         SYS_PAGED_HOLDER => sys_paged_holder(RawHandle(a1 as u32), a2),
         SYS_PAGED_READ => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };

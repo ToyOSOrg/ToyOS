@@ -72,6 +72,8 @@ const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
+    // The DATA round trip has separate write and read boots, not a no-argument run.
+    "data_roundtrip",
     // It writes the log disk for ever, so that its boot's deadline resets the
     // machine under it: `the_disk_survives_a_reset_under_load` runs it alone.
     "stick_load",
@@ -191,10 +193,6 @@ const RUST_SKIP: &[&str] = &[
     // `tests/images/floorcase.toml`: `memory_floor_holds_the_controls` runs it
     // on QEMU and the `memory_floor` metal row on the T14.
     "memory_floor",
-    // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
-    // shares — every later `read_dir("/tmp")` in it would be refused.
-    // `readdir_bound` gives it one.
-    "readdir_bound",
     // They need an HDA controller, which the shared boot's machine has not:
     // the `hda_tone`, `hda_tone_resampled` and `hda_volume_step` metal rows
     // run them on the T14 and the AMD bench, and
@@ -646,8 +644,8 @@ const MACHINE_TESTS: &[&str] = &[
     // `bent_supervisor_falls_back` metal row runs it on a bench.
     "a_bent_supervisor_is_refused_and_the_other_slot_boots",
     // A spawn and its child's end leave the census as it was, for a program
-    // the root server holds in memory, one on DATA read whole and one in the
-    // kernel's `/tmp`: the image's
+    // the root server holds in memory, and one each on DATA and `/tmp` read
+    // whole: the image's
     // owners and the kernel's object lifetimes together, which no host test
     // holds. One boot of QEMU's x86-64 machine on the actuator kernel, for the
     // census.
@@ -902,13 +900,6 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "memory_floor",
         metal::Metal { arms: FLOORCASE, judge: |b| b[0].job_passed("test_rs_memory_floor") },
-    ),
-    (
-        "readdir_bound",
-        metal::Metal {
-            arms: TESTCASES_READDIR,
-            judge: |b| b[0].job_passed("test_rs_readdir_bound"),
-        },
     ),
     (
         "wake_storm_cost",
@@ -1509,10 +1500,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: SELFTESTS, judge: |b| pci_cap_selftest(b[0].kernel().text()) },
     ),
     (
-        "read_fault_selftests",
-        metal::Metal { arms: SELFTESTS, judge: |b| read_fault_probes(b[0].kernel().text()) },
-    ),
-    (
         "lapic_spurious_vector",
         metal::Metal { arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
     ),
@@ -1648,6 +1635,47 @@ const METAL: &[(&str, metal::Metal)] = &[
         // owner's empty ToyOS DATA.
         "bench_data_designated",
         metal::Metal { arms: DESIGNATE, judge: |b| bench_data_designated(&b[0].log(), &b[1].log()) },
+    ),
+    (
+        // Explicitly destroys the unique DATA partition on either bench.
+        // Never part of an unfiltered suite; no production image holds this grant.
+        "bench_data_formatted",
+        metal::Metal {
+            arms: &[metal::Arm {
+                named_only: true,
+                ..metal::once("data-format", "tests/images/formatcase.toml", &[], &["disks format data --commit"])
+            }],
+            judge: |b| {
+                b[0].job_passed("disks")?;
+                b[0].log().must_say("supervisor: test-runner is authorized for `format:data`")?;
+                b[0].log().must_say("formatted as bcachefs; flushed and mounted for verification")?;
+                Ok(())
+            },
+        },
+    ),
+    (
+        // Both benches: ordinary Rust writes, flushes and namespace changes
+        // survive a real reboot and a fresh native DATA mount.
+        "bench_data_survives_reboot",
+        metal::Metal {
+            arms: &[
+                metal::Arm { named_only: true, ..metal::once("data-roundtrip-1-write", "tests/images/datacase.toml", &[], &["test_rs_data_roundtrip write"]) },
+                metal::Arm { named_only: true, ..metal::once("data-roundtrip-2-read", "tests/images/datacase.toml", &[], &["test_rs_data_roundtrip read"]) },
+            ],
+            judge: |b| {
+                for boot in b {
+                    boot.job_passed("test_rs_data_roundtrip")?;
+                    let (_, fate) = common::hostdisk::left_alone(&boot.log(), &common::hostdisk::loader_named(&boot.loader())?)?;
+                    if fate != common::hostdisk::Data::Mounted {
+                        return Err("the round trip requires an already formatted native DATA volume".into());
+                    }
+                }
+                let written = data_roundtrip_token(b[0].log().text(), "written")?;
+                let read = data_roundtrip_token(b[1].log().text(), "verified")?;
+                if written != read { return Err("the second boot did not verify the first boot's DATA token".into()); }
+                Ok(())
+            },
+        },
     ),
     (
         // The log disk written while the boot deadline resets the machine: the
@@ -2060,11 +2088,6 @@ const TESTCASES_REFUSED: &[metal::Arm] =
 const FLOORCASE: &[metal::Arm] =
     &[metal::once("floorcase", "tests/images/floorcase.toml", &[], &["test_rs_memory_floor"])];
 
-/// Its own boot: `readdir_bound` fills `/tmp` to the VFS listing limit, and
-/// every later `read_dir("/tmp")` in a boot it shared would be refused.
-const TESTCASES_READDIR: &[metal::Arm] =
-    &[metal::once("testcases-readdir", "tests/images/testcases.toml", &[], &["test_rs_readdir_bound"])];
-
 /// The shipping kernel with the windows' instrument and nothing else, so what
 /// it reads is that kernel under the herd. Three exits, a report each:
 /// `idle_span`'s is the boot's first, where the kernel holds; `pwd`'s reads the
@@ -2185,7 +2208,6 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
 /// [`ACTUATOR_TESTS`] ride, which is the same kernel.
 const SELFTEST_PARAMS: &[&str] = &[
     "pci-cap-selftest",
-    "revoked-backing-selftest",
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
     "sysret-ss-probe",
@@ -3242,7 +3264,7 @@ fn a_supervisor_that_fails_early_says_why_on_the_uart() -> Result<(), String> {
 }
 
 /// Eight spawns from each of a file the root server holds in memory, a copy
-/// on DATA that the spawn reads whole, and a copy in the kernel's `/tmp`:
+/// on DATA and a copy on `/tmp`, each of which the spawn reads whole:
 /// each child maps its parent's log ring, and once they have ended the census
 /// is back to its first reading (`spawn_returns_the_census`). A census per kind and not the memory in use:
 /// a served image is a region over pages the server keeps, so one kept past
@@ -5265,7 +5287,7 @@ fn bench_data_designated(first: &serial::Serial, second: &serial::Serial) -> Res
     nvme_wrote_the_designation(first.text())?;
     first.must_say("the DATA partition is designated: the stamp is on the disk and read back")?;
     first.must_not_say("are in memory and will not survive a reboot")?;
-    second.must_say("fileserver: block 0 designates this partition for ToyOS; formatting it")?;
+    second.must_say("fileserver: formatting the explicitly designated DATA partition as bcachefs")?;
     let serving = second.must_say("fileserver: Data serving ")?;
     if !serving.contains(" — bcachefs") {
         return Err(format!("DATA is served by no bcachefs volume: {serving:?}"));
@@ -5273,6 +5295,15 @@ fn bench_data_designated(first: &serial::Serial, second: &serial::Serial) -> Res
     second.must_not_say("are in memory and will not survive a reboot")?;
     second.must_not_say("DATA is absent this boot")?;
     Ok(())
+}
+
+fn data_roundtrip_token(text: &str, phase: &str) -> Result<String, String> {
+    let marker = format!("DATA_ROUNDTRIP {phase} ");
+    let tokens: Vec<_> = text.lines().filter_map(|line| line.split_once(&marker).map(|(_, token)| token.trim())).collect();
+    match tokens[..] {
+        [token] if token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit()) => Ok(token.to_string()),
+        _ => Err(format!("the DATA round trip has no unique valid {phase} token: {tokens:?}")),
+    }
 }
 
 /// A boot of the designation image beside [`common::hostdisk`]'s disk: a
@@ -5347,7 +5378,7 @@ fn a_host_disk_beside_the_stick_is_left_alone(test_config: &Path) -> Result<(), 
 const NVME_ROLES: [&str; 3] = [
     "Log serving /log — FAT32, ",
     "Boot serving /boot — FAT32 read-only, ",
-    "Data serving /apps, /config, /home, /state — bcachefs, ",
+    "Data serving /apps, /config, /home, /state — bcachefs DATA: ",
 ];
 /// Run `command` as a job of the boot, to exit 0: everything said in its
 /// window, the kernel's records with the program lines.
@@ -6731,10 +6762,10 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_process_tree")?;
     let kernel = back.kernel();
     let log = kernel.text();
-    let unloaded = log.lines().filter(|l| l.contains("spawn: /tmp/no_such_program: ")).count();
+    let unloaded = log.lines().filter(|l| l.contains("spawn: /tmp/process_tree_invalid_elf: ")).count();
     if unloaded != 2 {
         return Err(format!(
-            "the loader refused /tmp/no_such_program {unloaded} times, not once per B"
+            "the loader refused the invalid executable {unloaded} times, not once per B"
         ));
     }
     let refused: Vec<&str> = log.lines().filter(|l| l.contains("spawn: refused under pid ")).collect();
@@ -6768,19 +6799,6 @@ fn app_view(back: &metal::Readback) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// A backing read after deletion is refused on both writable mounts, and a page-cache slot whose fill the device refused is unbound.
-fn read_fault_probes(log: &str) -> Result<(), String> {
-        let probe = "revoke-selftest: /tmp/revoke_probe";
-        let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-            return Err(format!("{probe} never ran:\n{log}"));
-        };
-        if !verdict.contains("PASS") {
-            return Err(format!("{}\n{log}", verdict.trim()));
-        }
-        eprintln!("  [read-fault] {}", verdict.trim());
-        Ok(())
 }
 
 /// The spurious vector and an unclaimed one are both gated rather than escalated to #DF.

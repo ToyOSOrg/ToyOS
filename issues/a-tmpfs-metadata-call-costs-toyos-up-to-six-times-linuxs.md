@@ -7,8 +7,8 @@ opened: 2026-10-28
 # A tmpfs metadata call costs ToyOS up to six times Linux's
 
 `osbench files` runs the same operations under each system's memory
-filesystem: ToyOS's `/tmp`, which the kernel serves through syscalls today,
-and Linux's `/dev/shm`, tmpfs through the VFS.
+filesystem: ToyOS's `/tmp`, which the kernel served through syscalls when
+this was measured, and Linux's `/dev/shm`, tmpfs through the VFS.
 
 From the 2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`):
 ToyOS at 069cbbeb8, four boots off the internal NVMe, against five runs of
@@ -31,24 +31,18 @@ On the T14 ToyOS loses all eight, 1.7x to 6.5x, each resolved. On the AMD it
 loses `open_close` (2.1x) and `rename` (1.4x), both resolved, wins
 `tree.100`, `create_write_unlink` and `write_4k_at`, and is unresolved on the
 other three. There the HPET explains Linux's spread: its TSC runs read
-`open_close` at 2.9 µs and its HPET runs at 4.3 µs. The listing
-(`fs.mem.readdir.1000`) is `issues/a-listing-still-scans-the-whole-mount.md`'s,
-and the sequential copies are
+`open_close` at 2.9 µs and its HPET runs at 4.3 µs. The sequential copies are
 `issues/user-memory-hot-paths-are-slower-than-2-mib-pages.md`'s.
 
-**The kernel's tmpfs is not where this is fixed.** Step 9 of
-`issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`, under the
-owner's rulings of 2026-09-25 and 2026-10-03, deletes `tmpfs.rs`,
-`fs_rename.rs`, `file_cache.rs` and `vfs.rs`, and moves `/tmp` to
-userland per session. An `fs.mem` call then becomes a file server request,
-which costs 3 to 12 times a kernel file call today
+`/tmp` is now the MEMORY file server's (`system/fileserver/src/memory.rs`), so
+each `fs.mem` call is a file server request, which cost 3 to 12 times a kernel
+file call when both existed
 (`issues/a-file-server-request-costs-three-to-twelve-times-a-kernel-file-call.md`).
-So the move makes this gap larger, unless the file server's round trip
-shrinks first.
+These rows have not been measured since the move; the gap is expected to have
+grown.
 
-**Exit**: once `/tmp` is served from userland, these eight rows within
-Linux's on both benches in a labelled current-state comparison, or each
-remaining difference measured to its parts and justified.
+**Exit**: these eight rows within Linux's on both benches in a labelled
+current-state comparison, or each remaining difference measured to its parts
+and justified.
 
-**Owner**: whatever serves `/tmp` through step 9's migration. Until then,
-nothing in the kernel's tmpfs is owed this work.
+**Owner**: the file server.

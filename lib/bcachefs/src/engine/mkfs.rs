@@ -61,10 +61,23 @@ const MAX_EXTENT: u64 = 1 << ENCODED_EXTENT_BITS;
 const BACKPOINTER_SHIFT: u32 = 16;
 /// Bucket sizes from 16 KiB to 2 MiB, at least 2 048 buckets where the
 /// device allows.
-const MIN_BUCKET: u64 = 32;
+pub(crate) const MIN_BUCKET: u64 = 32;
 const MAX_BUCKET: u64 = 4096;
 const WANT_BUCKETS: u64 = 2048;
 const MIN_BUCKETS: u64 = 512;
+/// The journal's bytes at most. Its live entries are what an unclean mount
+/// replays, every key of them held in memory until its nodes take them, and
+/// a mount reads the whole ring: so the ring, not the device, bounds a
+/// replay's memory, reading and work.
+pub(crate) const JOURNAL_BYTES: u64 = 32 << 20;
+
+/// The journal buckets mkfs lays out for `nbuckets` buckets of `bucket`
+/// sectors and blocks of `block` bytes: a 128th of the device, at least
+/// eight buckets and at most JOURNAL_BYTES, and never less than reclaim's
+/// shares need.
+pub(crate) fn ring_buckets(nbuckets: u64, bucket: u64, block: usize) -> u64 {
+    (nbuckets / 128).max(8).min(JOURNAL_BYTES / (bucket * SECTOR as u64)).max(super::mount::journal_buckets(bucket, block))
+}
 
 /// Every btree a v1 volume writes, each given a root here: a node count
 /// that only grows with its keys keeps the layout's fixed point monotone.
@@ -90,15 +103,46 @@ const BTREES: [Btree; 15] = [
 /// drawn from `random`, then flushes. A device too small for it is refused
 /// [`Error::Small`].
 pub async fn mkfs(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, random: &mut impl Random) -> Result<()> {
-    let volume = Encoded::lay_out(dev.blocks() * BLOCK_SECTORS, options, tree, random)?;
+    mkfs_shaped(dev, options, tree, random, Shape::NATIVE).await
+}
+
+/// Block and btree node sizes, in sectors: a block at least the device's,
+/// a node of whole blocks, at most a bucket and 256 KiB.
+#[derive(Clone, Copy)]
+pub(crate) struct Shape {
+    pub block: u64,
+    pub node: Option<u64>,
+}
+
+impl Shape {
+    pub(crate) const NATIVE: Shape = Shape { block: BLOCK_SECTORS, node: None };
+}
+
+/// [`mkfs`] at `shape`.
+pub(crate) async fn mkfs_shaped(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, random: &mut impl Random, shape: Shape) -> Result<()> {
+    let volume = Encoded::lay_out(dev.blocks() * BLOCK_SECTORS, options, tree, random, shape)?;
     for (sector, bytes) in volume.population.extents() {
         write(dev, sector, bytes).await?;
     }
     for (sector, bytes) in &volume.nodes {
         write(dev, *sector, bytes).await?;
     }
+    // Each copy fills its whole reserve and the device past the last one is
+    // zeroed: no other format's superblock, a backup at the device's end
+    // among them, outlives the format in a place this volume never writes.
+    let reserve = (1usize << volume.header.layout.max_bits) * SECTOR;
     for &offset in &volume.header.layout.offsets {
-        write(dev, offset, &Superblock::encode(&volume.header, &volume.fields, offset)).await?;
+        let mut copy = Superblock::encode(&volume.header, &volume.fields, offset);
+        copy.resize(reserve, 0);
+        write(dev, offset, &copy).await?;
+    }
+    let tail = volume.header.layout.offsets.last().expect("a layout lists copies") * SECTOR as u64 + reserve as u64;
+    let zeros = alloc::vec![[0u8; BLOCK]; 256];
+    let mut block = tail / BLOCK as u64;
+    while block < dev.blocks() {
+        let n = (dev.blocks() - block).min(zeros.len() as u64);
+        dev.write(block, &zeros[..n as usize]).await?;
+        block += n;
     }
     // Sectors 0–6 are zeros here; the layout copy is sector 7.
     let mut first = alloc::vec![0u8; BLOCK];
@@ -119,7 +163,7 @@ pub async fn mkfs(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, r
 pub fn fit<R: Random + Clone>(options: &Options<'_>, tree: &Tree<'_>, random: &R) -> Result<u64> {
     let mut blocks = MIN_BUCKETS * MIN_BUCKET / BLOCK_SECTORS;
     loop {
-        match Encoded::lay_out(blocks * BLOCK_SECTORS, options, tree, &mut random.clone()) {
+        match Encoded::lay_out(blocks * BLOCK_SECTORS, options, tree, &mut random.clone(), Shape::NATIVE) {
             Ok(_) => return Ok(blocks),
             Err(Error::Small { blocks: needs }) => {
                 assert!(needs > blocks, "a refusal at {blocks} blocks that asks for {needs}");
@@ -140,7 +184,7 @@ struct Encoded<'t, 'a> {
 }
 
 impl<'t, 'a> Encoded<'t, 'a> {
-    fn lay_out(sectors: u64, options: &Options<'_>, tree: &'t Tree<'a>, random: &mut impl Random) -> Result<Self> {
+    fn lay_out(sectors: u64, options: &Options<'_>, tree: &'t Tree<'a>, random: &mut impl Random, shape: Shape) -> Result<Self> {
         if options.label.len() > 31 {
             return Err(Error::Invalid("label longer than 31 bytes"));
         }
@@ -154,7 +198,11 @@ impl<'t, 'a> Encoded<'t, 'a> {
         if options.encryption.is_some() && tree.has_data() {
             return Err(Error::Unsupported("file data or a symlink on an encrypted volume"));
         }
-        let mut geometry = Geometry::new(sectors)?;
+        // File data is laid out in device blocks.
+        if shape.block != BLOCK_SECTORS && tree.has_data() {
+            return Err(Error::Unsupported("file data at a block size other than the device's"));
+        }
+        let mut geometry = Geometry::shaped(sectors, shape)?;
         let mut draw = Draw(random);
         let internal_uuid = draw.uuid()?;
         let user_uuid = draw.uuid()?;
@@ -182,7 +230,7 @@ impl<'t, 'a> Encoded<'t, 'a> {
         let mut nodes = Vec::new();
         for n in &laid.nodes {
             let build = Build { btree: n.btree, level: n.level, seq: n.seq, min: n.min, max: n.max, journal_seq: 0, keys: &n.keys };
-            nodes.push((n.sector, node::encode(magic, BLOCK, key.as_ref(), &build)?));
+            nodes.push((n.sector, node::encode(magic, geometry.block_bytes(), key.as_ref(), &build)?));
         }
 
         let member = Member {
@@ -213,7 +261,7 @@ impl<'t, 'a> Encoded<'t, 'a> {
             label,
             offset: 0,
             seq: 1,
-            block_sectors: BLOCK_SECTORS as u16,
+            block_sectors: geometry.block as u16,
             dev_idx: 0,
             nr_devices: 1,
             time_base: options.time,
@@ -348,6 +396,8 @@ impl<R: Random> Draw<'_, R> {
 
 /// Where everything goes on a device of `sectors`.
 struct Geometry {
+    /// Sectors per block.
+    block: u64,
     /// Sectors per bucket.
     bucket: u64,
     nbuckets: u64,
@@ -361,7 +411,12 @@ struct Geometry {
 }
 
 impl Geometry {
+    #[cfg(test)]
     fn new(sectors: u64) -> Result<Geometry> {
+        Self::shaped(sectors, Shape::NATIVE)
+    }
+
+    fn shaped(sectors: u64, shape: Shape) -> Result<Geometry> {
         let wanted = (sectors / WANT_BUCKETS).max(1);
         let bucket = (1u64 << wanted.ilog2()).clamp(MIN_BUCKET, MAX_BUCKET);
         let nbuckets = sectors / bucket;
@@ -375,8 +430,17 @@ impl Geometry {
         }
         let layout = Layout { max_bits: SB_MAX_BITS, offsets: alloc::vec![PRIMARY, second, end] };
         let front = (second + SB_SECTORS).div_ceil(bucket);
-        let journal = (front, (nbuckets / 128).max(8));
-        Ok(Geometry { bucket, nbuckets, node: bucket.min(MAX_NODE_SECTORS), layout, journal, data_buckets: 0 })
+        let block = shape.block;
+        let node = shape.node.unwrap_or(bucket.min(MAX_NODE_SECTORS));
+        if !block.is_power_of_two() || block < BLOCK_SECTORS || !node.is_power_of_two() || node < block || node > bucket.min(MAX_NODE_SECTORS) {
+            return Err(Error::Invalid("a block or node size mkfs does not lay out"));
+        }
+        let journal = (front, ring_buckets(nbuckets, bucket, (block * SECTOR as u64) as usize));
+        Ok(Geometry { block, bucket, nbuckets, node, layout, journal, data_buckets: 0 })
+    }
+
+    fn block_bytes(&self) -> usize {
+        self.block as usize * SECTOR
     }
 
     /// The first bucket of file data, after the journal.
@@ -521,7 +585,7 @@ impl Plan {
                     .collect()
             };
             let sector = g.slot(p.slot);
-            let bytes = node::record_bytes(keys.iter().map(Vec::len)).next_multiple_of(BLOCK);
+            let bytes = node::record_bytes(keys.iter().map(Vec::len)).next_multiple_of(g.block_bytes());
             assert!(bytes as u64 <= g.node * SECTOR as u64, "a node past its size");
             let ptr = NodePtr { seq: seqs[idx], written: (bytes / SECTOR) as u16, min: p.min, ptr: Ptr { sector, dev: 0, gen: 0, cached: false, unwritten: false } };
             written[idx] = Some((ptr, p.max));
@@ -707,10 +771,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_small_device_lays_out_as_format_does() {
-        // Upstream's own 32 MiB layout: 65 536 sectors in 32-sector buckets, copies at 8,
-        // 2 056 and 63 488; buckets 0–127 hold 32 superblock sectors, 128
-        // holds 8, 1 984–2 047 hold 32.
+    fn a_small_device_keeps_superblock_regions_and_sizes_the_reclaim_journal() {
         let g = Geometry::new(65536).unwrap();
         assert_eq!((g.bucket, g.nbuckets, g.node), (32, 2048, 32));
         assert_eq!(g.layout.offsets, [8, 2056, 63488]);
@@ -720,7 +781,8 @@ mod tests {
         assert_eq!(sb.len(), 129 + 64);
         assert_eq!(sb[128], (128, 8));
         assert!(sb.iter().filter(|&&(b, _)| b != 128).all(|&(_, s)| s == 32));
-        assert_eq!(g.journal, (129, 16));
+        assert_eq!(g.journal, (129, super::super::mount::journal_buckets(g.bucket, BLOCK)));
+        assert!(g.journal.1 > g.nbuckets / 128);
     }
 
     #[test]
@@ -728,7 +790,9 @@ mod tests {
         // 171 GiB, as `format` lays out a partition that size.
         let g = Geometry::new(171 << 21).unwrap();
         assert_eq!((g.bucket, g.node), (4096, 512));
-        assert_eq!(g.journal.1, g.nbuckets / 128);
+        // JOURNAL_BYTES, where a 128th would be 1.3 GiB.
+        assert_eq!(g.journal.1 * g.bucket * SECTOR as u64, JOURNAL_BYTES);
+        assert!(g.nbuckets / 128 > g.journal.1);
     }
 
     #[test]

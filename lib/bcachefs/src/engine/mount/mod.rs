@@ -1,7 +1,8 @@
 //! A volume mounted read-write: one transaction at a time under the writer
-//! slot (§3.3), the btree nodes it changes held in memory, the journal that
-//! makes each transaction durable, and the reclaim that writes the nodes so
-//! the journal can move on.
+//! slot (§3.3). An ordinary transaction's keys go into the nodes it holds;
+//! replayed keys, reclaim's own updates and a change a node cannot take yet
+//! wait in pending, and reclaim materializes them in bounded steps so the
+//! journal can move on.
 //!
 //! **Order of waits.** A transaction takes admission first — journal space
 //! and cache room at its bound — and the slot second. Nothing waits under the
@@ -15,6 +16,7 @@
 //! pointer update that makes it reachable. Until that update is in an entry,
 //! the node's keys keep the journal pinned and the node stays in memory.
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::rc::Rc;
@@ -26,11 +28,12 @@ use toyos_crypto::{scrypt, Random};
 
 use super::bkey::{Bpos, Key, Version, KEY_U64S};
 use super::bucket::Bucket;
-use super::cache::{key_bytes, Cache, Cached, Keys, NodeId};
+use super::cache::{key_bytes, Cache, Cached, NodeId, Unwritten};
 use super::crypt::MasterKey;
 use super::journal::{self, Class, Closed, Jset, Replayed, Writer, SKIP};
 use super::mkfs::{self, COMPAT_CLEAN, ROOT_SNAPSHOT};
 use super::node::{self, Build, FIRST_KEYS};
+use super::pending::{Overlay, Pending};
 use super::read::{self, Inode, Parts, Source, Volume};
 use super::superblock::{field_type, Field, Header, Member, Root, Superblock};
 use super::sync::{Broadcast, Queue};
@@ -38,17 +41,21 @@ use super::value::{self, accounting_pos, class, data_type, inode_field, inode_fl
 use super::{kind, Btree, Error, Result, SECTOR};
 
 mod allocator;
+mod data;
+mod gc;
 mod ops;
+mod publish;
 mod reclaim;
 
 use allocator::{Allocator, Draw, Readers};
+pub use data::Reservation;
 pub use ops::{Link, Removed, Rename};
 pub(crate) use reclaim::Order;
 #[cfg(test)]
 pub(crate) use reclaim::Plan;
-use reclaim::{fresh_cost, node_ptr, MAX_GROUPS, RECLAIM_ROOM, REWRITTEN};
+use reclaim::{fresh_cost, node_ptr, MAX_GROUPS, MAX_REWRITE, RECLAIM_ROOM, REWRITTEN};
 
-/// How much a mount may hold in memory.
+/// The mount's node cache capacity. Pending journal keys are held separately.
 #[derive(Clone, Copy, Debug)]
 pub struct MountOptions {
     /// Btree nodes cached. Dirty and unpointed nodes are bounded well below
@@ -56,38 +63,40 @@ pub struct MountOptions {
     pub cache_nodes: usize,
 }
 
-/// u64s one ordinary transaction journals at most: a namespace operation's
-/// inode, dirent and accounting keys, names of 512 bytes included.
+/// u64s one ordinary transaction journals at most.
 pub(crate) const K_TX: u64 = 512;
-/// Nodes any ordinary transaction dirties at most: the largest grant of
-/// the operations' (`mount/ops.rs`).
-pub(crate) const FOOTPRINT: usize = 10;
+/// Nodes any ordinary transaction dirties at most.
+pub(crate) const FOOTPRINT: usize = 28;
 /// Nodes one reclaim batch writes.
 const BATCH: usize = 2;
-/// u64s a reclaim share holds for each node that can pin the journal:
-/// sized for a rewrite to one node, the common case. A share too short for
-/// the splits a batch needs stops the mount by name ([`Mount::admit`]).
-const PER_NODE: u64 = fresh_cost(1);
+/// A pinning node may require the largest supported split. This also
+/// exceeds a two-source sibling rewrite's cost, even with one clean source.
+const PER_NODE: u64 = fresh_cost(MAX_REWRITE);
 /// Cache room past the limit that only reclaim takes: what its transaction
 /// dirties, and the nodes a batch's rewrites replace its nodes with.
 const RECLAIM: usize = RECLAIM_ROOM + REWRITTEN;
-/// The smallest btree node this writer writes. Past its first bset a
-/// smaller one has room for about two whole-block appends, and reclaim's own
-/// changes to the allocator's leaves then rewrite more nodes than they
-/// settle ([`MAX_GROUPS`] needs less).
-const MIN_NODE: usize = 32 << 10;
+pub(crate) const MIN_CACHE: usize = RECLAIM + 3 * FOOTPRINT;
 /// Retries of a failed node or journal write, each of the same bytes.
 const RETRIES: usize = 2;
 /// Feature bits a volume carries once written read-write (A1.41).
-const RW_FEATURES: u64 = 1 << 9 | 1 << 12 | 1 << 13 | 1 << 17 | 1 << 18;
+const RW_FEATURES: u64 = 1 << 8 | 1 << 9 | 1 << 12 | 1 << 13 | 1 << 17 | 1 << 18;
 /// Feature bit 5: the superblock holds a blacklist.
 const BLACKLIST_FEATURE: u64 = 1 << 5;
+
+/// Ring geometry that leaves two cache-sized reclaim shares and an ordinary
+/// quarter, with room for at least one maximum-size ordinary transaction.
+pub(crate) fn journal_buckets(bucket_sectors: u64, block: usize) -> u64 {
+    let journal = Writer::new(alloc::vec![0], bucket_sectors, block, K_TX);
+    let per_entry = journal.body() - K_TX;
+    let share = ((RECLAIM + FOOTPRINT) as u64 * PER_NODE).div_ceil(per_entry) + 1;
+    (share * 8).div_ceil(3).div_ceil(journal.slots())
+}
 
 /// What a new node is.
 pub enum New {
     File,
     Dir,
-    /// Its target is file data, which B7's data path writes.
+    /// The target, without its on-disk NUL terminator.
     Symlink(Vec<u8>),
 }
 
@@ -107,11 +116,20 @@ struct State {
     member: Member,
     blacklist: Vec<(u64, u64)>,
     cache: Cache,
+    pending: Pending,
     roots: BTreeMap<Btree, Root>,
     /// Btrees given a root in memory, not yet written.
     new_roots: BTreeMap<Btree, NodeId>,
     journal: Writer,
     key_version: u64,
+    next_version: u64,
+    metadata_bytes: u64,
+    metadata_buckets: u64,
+    btree_nodes: u64,
+    sparse_metadata: BTreeSet<u64>,
+    sparse_data: BTreeSet<u64>,
+    baseline_nodes: BTreeSet<u64>,
+    granted_bytes: u64,
     clocks: [u64; 2],
     /// Seconds since the epoch of the newest operation: each entry's
     /// datetime.
@@ -138,10 +156,34 @@ struct State {
     /// The most dirty and unpointed nodes ever held together.
     #[cfg(test)]
     peak: usize,
+    /// The most bytes one ordinary apply grew a node by.
+    #[cfg(test)]
+    grown: usize,
     /// Ordinary admissions that waited for journal space, and for cache
     /// room, as tests construct them.
     #[cfg(test)]
     waits: [usize; 2],
+    #[cfg(test)]
+    journal_bytes: [usize; 3],
+    #[cfg(test)]
+    published: Published,
+    /// Bytes of keys past which a terminal publication splits a new node,
+    /// a node's unless a test lowers it.
+    #[cfg(test)]
+    group_limit: Option<usize>,
+}
+
+/// What the last terminal publication wrote, as tests inspect it.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Published {
+    pub members: usize,
+    /// Bounds added once the publication's own keys overfilled a new node.
+    pub regrouped: usize,
+    /// Members appended to.
+    pub appended: usize,
+    /// Members appended to with no change left once the plan settled.
+    pub idle: usize,
 }
 
 /// A volume mounted read-write.
@@ -164,6 +206,10 @@ pub struct Mount<D> {
     /// waiting on a node and by reclaim waiting on a bucket.
     written: Broadcast,
     readers: RefCell<Readers>,
+    data_held: Cell<bool>,
+    data_queue: Queue,
+    reservations: Rc<RefCell<data::Reservations>>,
+    metadata_gc: Cell<bool>,
     root: u64,
 }
 
@@ -171,10 +217,15 @@ const _: () = assert!(PER_NODE <= K_TX, "a reclaim batch of one node fits one re
 /// The largest key a node holds, as its reader refuses a larger value
 /// (A3.16).
 const MAX_KEY: usize = 8 * (KEY_U64S + super::bkey::MAX_VALUE_U64S);
-// A node read at five times its bytes unpacked, and two transactions more,
-// spread evenly over [`MAX_GROUPS`] nodes: each takes its share and at most
-// a key past it.
-const _: () = assert!((5 * (MIN_NODE - FIRST_KEYS) + 2 * K_TX as usize * 8).div_ceil(MAX_GROUPS) + MAX_KEY <= MIN_NODE - FIRST_KEYS, "seven nodes hold a node read unpacked and two transactions");
+const _: () = assert!(MAX_KEY <= K_TX as usize * 8, "materialization's room takes any one key, so it always takes its first position");
+/// Whether nodes of `node` bytes hold reclaim's largest split: a node read
+/// at five times its bytes unpacked, and two transactions more, spread
+/// evenly over [`MAX_GROUPS`] nodes, each taking its share and at most a key
+/// past it.
+const fn splits_fit(node: usize) -> bool {
+    (5 * (node - FIRST_KEYS) + 2 * K_TX as usize * 8).div_ceil(MAX_GROUPS) + MAX_KEY <= node - FIRST_KEYS
+}
+const _: () = assert!(splits_fit(super::mkfs::MIN_BUCKET as usize * SECTOR), "mkfs's smallest nodes are writable");
 
 /// The writer slot, held until dropped.
 struct Slot<'a, D>(&'a Mount<D>);
@@ -201,6 +252,8 @@ struct Txn {
     emptied: Vec<(u64, Bucket)>,
     /// Buckets taken that it fills.
     filled: Vec<u64>,
+    allocated_data: Vec<u64>,
+    bucket_states: Vec<(u64, Bucket, Bucket)>,
     /// New roots.
     roots: Vec<Root>,
     /// Written nodes made reachable, installed in the cache at apply.
@@ -214,10 +267,10 @@ struct Txn {
 /// A written node, made reachable by the transaction that holds it.
 enum Install {
     /// `id`'s appended bset, now `sectors` long in all.
-    Append { id: NodeId, sectors: u16 },
-    /// `id` replaced by the nodes written for it, and a root above them when
-    /// a root split.
-    Replace { id: NodeId, by: Vec<Planned>, root: Option<Planned> },
+    Append { id: NodeId, sectors: u16, journal_seq: u64 },
+    /// Sources replaced by nodes covering their combined range, with a new
+    /// root when the old root split.
+    Replace { ids: Vec<NodeId>, by: Vec<Planned>, root: Option<Planned> },
 }
 
 /// A new node as planned and written.
@@ -231,6 +284,7 @@ struct Planned {
     sector: u64,
     gen: u8,
     sectors: u16,
+    journal_seq: u64,
     keys: Vec<(Key, Vec<u8>)>,
 }
 
@@ -266,8 +320,8 @@ fn writable(sb: &Superblock) -> Result<()> {
     if sb.journal.is_empty() {
         return Err(Error::Unsupported("writing a volume without journal buckets"));
     }
-    if (sb.node_sectors() as usize) * SECTOR < MIN_NODE {
-        return Err(Error::Unsupported("writing a volume of btree nodes under 32 KiB"));
+    if !splits_fit(sb.node_sectors() as usize * SECTOR) {
+        return Err(Error::Unsupported("writing a volume of btree nodes too small for reclaim's largest split"));
     }
     // Every write is of whole device blocks, so entries, bsets and nodes
     // must fall on them.
@@ -292,6 +346,14 @@ fn writable(sb: &Superblock) -> Result<()> {
     if members.len() < 2 || usize::from(super::le16(members, 0)) < Member::BYTES {
         return Err(Error::Unsupported("writing a volume whose member entry is shorter than 1.39's"));
     }
+    // An unclean mount replays what the ring holds; mkfs's ring is the
+    // bound on that, so a larger one, another writer's, is not written.
+    // Last: sizing mkfs's ring takes a journal writer for these buckets,
+    // which the shapes refused above cannot have.
+    let ring: u64 = sb.journal.iter().map(|&(_, count)| count).sum();
+    if ring > super::mkfs::ring_buckets(sb.member.nbuckets, u64::from(sb.member.bucket_sectors), sb.block_bytes()) {
+        return Err(Error::Unsupported("writing a volume whose journal is larger than mkfs lays out"));
+    }
     Ok(())
 }
 
@@ -301,26 +363,36 @@ impl<D: BlockDev> Mount<D> {
     /// One not cleanly unmounted is replayed first, and its journal resumes
     /// past the post-crash skip.
     pub async fn open(dev: D, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
-        writable(&read::read_superblock(&dev).await?)?;
+        // Early, so a volume refused is refused by name before it is read;
+        // `from` judges again the copy the open read.
+        writable(&read::read_superblock(&dev).await?.0)?;
         let volume = Volume::open(dev).await?;
         no_logged_ops(&volume).await?;
         let empty = allocator::empty_buckets(&volume).await?;
-        Self::from(volume.into_parts(), empty, options, random).await
+        let metadata = allocator::metadata_budget(&volume).await?;
+        Self::from(volume.into_parts(), empty, metadata, options, random).await
     }
 
     /// An encrypted volume, unlocked as [`Volume::unlock`] does, mounted
     /// read-write.
     pub async fn unlock(dev: D, passphrase: &[u8], limits: scrypt::Limits, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
-        writable(&read::read_superblock(&dev).await?)?;
+        // Early, so a volume refused costs no scrypt and is refused by name;
+        // `from` judges again the copy the unlock read.
+        writable(&read::read_superblock(&dev).await?.0)?;
         let volume = Volume::unlock(dev, passphrase, limits).await?;
         no_logged_ops(&volume).await?;
         let empty = allocator::empty_buckets(&volume).await?;
-        Self::from(volume.into_parts(), empty, options, random).await
+        let metadata = allocator::metadata_budget(&volume).await?;
+        Self::from(volume.into_parts(), empty, metadata, options, random).await
     }
 
     /// `empty` is the volume's count of empty buckets.
-    async fn from(parts: Parts<D>, empty: u64, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
-        let Parts { dev, mut sb, key, roots, key_version, replay, root } = parts;
+    async fn from(parts: Parts<D>, empty: u64, metadata: allocator::Metadata, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
+        let Parts { dev, mut sb, key, roots, key_version, replay, root, torn: torn_copies } = parts;
+        // The superblock this mount runs on, which a device may answer
+        // differently from an earlier read.
+        writable(&sb)?;
+        let key_version = key_version.checked_add(if replay.is_some() && key.is_some() { 65_536 } else { 0 }).ok_or(Error::NoSpace("encrypted extent versions"))?;
         let ring: Vec<u64> = sb.journal.iter().flat_map(|&(first, count)| first..first + count).collect();
         let bucket_sectors = u64::from(sb.member.bucket_sectors);
         let mut journal = Writer::new(ring, bucket_sectors, sb.block_bytes(), K_TX);
@@ -381,30 +453,37 @@ impl<D: BlockDev> Mount<D> {
         // every node that can pin it, and leave transactions a quarter.
         let per_entry = journal.body() - journal.max_tx;
         let share = journal.slots() * 3 / 8;
-        let by_journal = ((share - 1) * per_entry / PER_NODE) as usize;
-        let limit = options.cache_nodes.saturating_sub(reclaim_room + 2 * FOOTPRINT).min(by_journal.saturating_sub(reclaim_room));
-        if limit < FOOTPRINT {
-            return Err(Error::Invalid("a cache or journal too small for a transaction and its reclaim"));
+        let by_journal = (share.saturating_sub(1) * per_entry / PER_NODE) as usize;
+        if options.cache_nodes < MIN_CACHE {
+            return Err(Error::Invalid("cache too small for a transaction and worst-case reclaim"));
         }
+        if by_journal < reclaim_room + FOOTPRINT {
+            return Err(Error::Unsupported("journal too small for a transaction and worst-case reclaim"));
+        }
+        let limit = options.cache_nodes.saturating_sub(reclaim_room + 2 * FOOTPRINT).min(by_journal.saturating_sub(reclaim_room));
+        assert!(limit >= FOOTPRINT, "validated cache and journal admit one transaction");
         journal.reclaim_entries = ((limit + reclaim_room) as u64 * PER_NODE).div_ceil(per_entry) + 1;
 
         let journal_next = journal.next_seq;
-        let mut torn_copies = Vec::new();
-        for &offset in &sb.header.layout.offsets {
-            if read::read_copy(&dev, offset).await.is_err() {
-                torn_copies.push(offset);
-            }
-        }
         let state = State {
             header: sb.header.clone(),
             fields: sb.fields.clone(),
             member: sb.member.clone(),
             blacklist,
             cache: Cache::new(options.cache_nodes, sb.node_sectors() as usize * SECTOR - FIRST_KEYS),
+            pending: Pending::default(),
             roots: roots.into_iter().map(|r| (r.btree, r)).collect(),
             new_roots: BTreeMap::new(),
             journal,
             key_version,
+            next_version: key_version,
+            metadata_bytes: metadata.bytes,
+            metadata_buckets: metadata.buckets,
+            btree_nodes: metadata.nodes,
+            sparse_metadata: metadata.sparse,
+            sparse_data: metadata.sparse_data,
+            baseline_nodes: metadata.baseline,
+            granted_bytes: 0,
             clocks,
             now: sb.header.write_time,
             granted: 0,
@@ -418,7 +497,15 @@ impl<D: BlockDev> Mount<D> {
             #[cfg(test)]
             peak: 0,
             #[cfg(test)]
+            grown: 0,
+            #[cfg(test)]
             waits: [0; 2],
+            #[cfg(test)]
+            journal_bytes: [0; 3],
+            #[cfg(test)]
+            published: Published::default(),
+            #[cfg(test)]
+            group_limit: None,
         };
         let mount = Mount {
             dev,
@@ -435,12 +522,17 @@ impl<D: BlockDev> Mount<D> {
             journal_queue: Queue::default(),
             written: Broadcast::default(),
             readers: RefCell::default(),
+            data_held: Cell::new(false),
+            data_queue: Queue::default(),
+            reservations: Rc::default(),
+            metadata_gc: Cell::new(false),
             root,
         };
         mount.go_read_write(restate).await?;
         if let Some((_, replayed)) = replay {
             mount.install_replay(replayed).await?;
         }
+        mount.resume_truncates().await?;
         Ok(mount)
     }
 
@@ -547,18 +639,14 @@ impl<D: BlockDev> Mount<D> {
     }
 }
 
-/// Refuses a volume holding a logged operation, which a mount must resume
-/// before writing (A8.17, A8.18) and this one cannot yet.
+/// Refuses logged operations this writer cannot resume.
 async fn no_logged_ops<D: BlockDev>(volume: &Volume<D>) -> Result<()> {
-    let mut found = false;
-    Source::walk(volume, Btree::LoggedOps, Bpos::MIN, |k, _| {
-        found = k.pos.inode == 0;
-        Ok(false)
+    Source::walk(volume, Btree::LoggedOps, Bpos::MIN, |k, v| {
+        if k.pos.inode != 0 { return Ok(false); }
+        data::truncate_value(k, v)?;
+        Ok(true)
     })
     .await?;
-    if found {
-        return Err(Error::Unsupported("writing a volume with a logged operation to resume"));
-    }
     Ok(())
 }
 
@@ -637,10 +725,12 @@ impl<D: BlockDev> Mount<D> {
             written: ptr.written,
             on_disk: ptr.written,
             bsets: node.bset_seqs.len() as u16,
+            journal_seq: node.bset_seqs.iter().copied().max().unwrap_or(0),
             bytes: node.keys.iter().map(|(_, v)| key_bytes(v)).sum(),
             keys: Rc::new(node.keys),
-            unwritten: BTreeMap::new(),
+            unwritten: Unwritten::default(),
             captured: None,
+            compact: None,
             writing: false,
             fresh,
             held: 0,
@@ -667,10 +757,17 @@ impl<D: BlockDev> Mount<D> {
     /// no root is given an empty one, in memory until it is first written.
     /// Nothing holds it: for a caller that changes it before its next await.
     async fn find(&self, btree: Btree, level: u8, pos: Bpos) -> Result<NodeId> {
-        let mut id = match self.root_node(btree).await? {
+        let root = match self.root_node(btree).await? {
             Some(id) => id,
             None => self.new_root(btree),
         };
+        self.descend(root, level, pos).await
+    }
+
+    /// The node at `level` spanning `pos` below `id`, cached; held as
+    /// [`Mount::find`]'s is.
+    async fn descend(&self, mut id: NodeId, level: u8, pos: Bpos) -> Result<NodeId> {
+        let btree = self.st.borrow().cache.node(id).btree;
         loop {
             let (child, ptr, max) = {
                 let st = self.st.borrow();
@@ -681,8 +778,8 @@ impl<D: BlockDev> Mount<D> {
                 if n.level < level {
                     return Err(Error::Corrupt("a key above its btree's root"));
                 }
-                let (key, value) = n.keys.get(n.at(pos)).ok_or(Error::Corrupt("interior node short of its range"))?;
-                (n.level - 1, NodePtr::decode(value)?, key.pos)
+                let (key, value) = st.logical(id, pos).next().ok_or(Error::Corrupt("interior node short of its range"))??;
+                (n.level - 1, NodePtr::decode(&value)?, key.pos)
             };
             id = self.load(btree, child, &ptr, max).await?;
         }
@@ -705,10 +802,12 @@ impl<D: BlockDev> Mount<D> {
             written: 0,
             on_disk: 0,
             bsets: 0,
+            journal_seq: 0,
             bytes: 0,
             keys: Rc::new(Vec::new()),
-            unwritten: BTreeMap::new(),
+            unwritten: Unwritten::default(),
             captured: None,
+            compact: None,
             writing: false,
             fresh: true,
             held: 0,
@@ -737,8 +836,8 @@ impl<D: BlockDev> Mount<D> {
                 } else if n.level < level {
                     return Err(Error::Corrupt("a key above its btree's root"));
                 } else {
-                    let (key, value) = n.keys.get(n.at(pos)).ok_or(Error::Corrupt("interior node short of its range"))?;
-                    Some((n.level - 1, NodePtr::decode(value)?, key.pos))
+                    let (key, value) = st.logical(id, pos).next().ok_or(Error::Corrupt("interior node short of its range"))??;
+                    Some((n.level - 1, NodePtr::decode(&value)?, key.pos))
                 }
             };
             match next {
@@ -811,14 +910,50 @@ impl<D: BlockDev> Mount<D> {
 }
 
 impl State {
+    /// Node `id`'s keys from `from` on, as the pending keys over them make
+    /// them.
+    fn logical(&self, id: NodeId, from: Bpos) -> Overlay<'_> {
+        let n = self.cache.node(id);
+        self.pending.overlay(n.btree, n.level, from.max(n.min), n.max, &n.keys)
+    }
+
+    /// The logical key at `pos` of node `id`.
+    fn get(&self, id: NodeId, pos: Bpos) -> Result<Option<(Key, Cow<'_, [u8]>)>> {
+        let n = self.cache.node(id);
+        self.pending.overlay(n.btree, n.level, pos, pos, &n.keys).next().transpose()
+    }
+
+    fn oldest_pin(&self) -> Option<u64> {
+        self.cache.oldest_pin().into_iter().chain(self.pending.oldest_pin()).min()
+    }
+
     /// Whether writing the journal now would free a bucket of its ring: the
     /// last sequence an entry closed now carries passes some bucket's newest.
     fn journal_frees(&self) -> bool {
         let j = &self.journal;
         let next = j.open.as_ref().map_or(j.next_seq, |o| o.seq);
-        let last = self.cache.oldest_pin().map_or(next, |p| p.min(next));
+        let last = self.oldest_pin().map_or(next, |p| p.min(next));
         j.newest.iter().enumerate().any(|(i, n)| i != j.head && n.is_some_and(|n| n < last))
     }
+}
+
+/// Puts `key` into `n`, journaled at `seq`: an accounting key adds its
+/// delta to the node's.
+fn put(n: &mut Cached, key: Key, value: Vec<u8>, seq: u64) {
+    let pos = key.pos;
+    if n.btree != Btree::Accounting || n.level != 0 {
+        n.put(pos, (key.kind != kind::DELETED).then_some((key, value)), seq, seq);
+        return;
+    }
+    let (mut sum, mut sums) = match n.keys.get(n.at(pos)) {
+        Some((stored, counters)) if stored.pos == pos => (*stored, journal::counters(counters).expect("cached accounting decodes")),
+        _ => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
+    };
+    let delta = journal::counters(&value).expect("a transaction's accounting decodes");
+    sums.resize(sums.len().max(delta.len()), 0);
+    for (s, d) in sums.iter_mut().zip(delta) { *s = s.wrapping_add(d); }
+    sum.version = sum.version.max(key.version);
+    n.put(pos, Some((sum, value::counters(&sums))), seq, seq);
 }
 
 /// Ends the holds on `ids`.
@@ -840,8 +975,8 @@ fn held(st: &State, btree: Btree, level: u8, pos: Bpos) -> NodeId {
         if n.level == level {
             return id;
         }
-        let (_, value) = &n.keys[n.at(pos)];
-        let ptr = NodePtr::decode(value).expect("a pointer the cache holds decodes");
+        let (_, value) = st.logical(id, pos).next().expect("a held node spans its range").expect("a held logical node decodes");
+        let ptr = NodePtr::decode(&value).expect("a pointer the cache holds decodes");
         id = st.cache.id_at(ptr.ptr.sector).expect("a held node in the cache");
     }
 }
@@ -873,14 +1008,32 @@ impl<D: BlockDev> Source for Mount<D> {
         st.roots.get(&btree).cloned()
     }
 
-    fn rootless(&self, btree: Btree) -> Result<Vec<(Key, Vec<u8>)>> {
-        let st = self.st.borrow();
-        Ok(st.new_roots.get(&btree).map_or_else(Vec::new, |&id| st.cache.node(id).keys.to_vec()))
+    async fn get(&self, btree: Btree, pos: Bpos) -> Result<Option<(Key, Vec<u8>)>> {
+        let _reading = read::Reading(self, self.begin_read());
+        let Some(root) = self.root_node(btree).await? else { return Ok(None) };
+        let leaf = self.descend(root, 0, pos).await?;
+        Ok(self.st.borrow().get(leaf, pos)?.map(|(k, v)| (k, v.into_owned())))
     }
 
-    async fn keys(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Keys> {
-        let id = self.load(btree, level, ptr, max).await?;
-        Ok(Rc::clone(&self.st.borrow().cache.node(id).keys))
+    /// A leaf at a time, each found from the root: pending keys are read
+    /// where they lie, never copied over a whole node.
+    async fn walk(&self, btree: Btree, mut from: Bpos, mut visit: impl FnMut(&Key, &[u8]) -> Result<bool>) -> Result<()> {
+        let _reading = read::Reading(self, self.begin_read());
+        loop {
+            let Some(root) = self.root_node(btree).await? else { return Ok(()) };
+            let leaf = self.descend(root, 0, from).await?;
+            let st = self.st.borrow();
+            for kv in st.logical(leaf, from) {
+                let (key, value) = kv?;
+                if !visit(&key, &value)? {
+                    return Ok(());
+                }
+            }
+            match st.cache.node(leaf).max.successor() {
+                Some(next) => from = next,
+                None => return Ok(()),
+            }
+        }
     }
 
     fn begin_read(&self) -> u64 {
@@ -901,18 +1054,20 @@ impl<D: BlockDev> Mount<D> {
     /// head of the ordinary queue, holding nothing, frees what it lacks
     /// itself: it writes closed entries, reclaims, or writes the journal so
     /// its last sequence moves on, keeping its place; with nothing to free
-    /// it waits for what is granted to apply. Reclaim's own share never waits
+    /// it waits for what is granted to apply. A refusal waits only for what
+    /// was committed before its arrival ([`Mount::grant`]). Reclaim's own share never waits
     /// on reclaim: past its closed entries, a short share is a bug, and the
     /// mount stops.
-    async fn admit(&self, class: Class, draw: Draw, journal: u64, nodes: usize) -> Result<()> {
+    async fn admit(&self, class: Class, draw: Draw, journal: u64, credit: u64, nodes: usize) -> Result<()> {
         let queue = match class {
             Class::Ordinary => &self.admit,
             Class::Reclaim => &self.admit_reclaim,
         };
         let place = queue.enter();
+        let arrived = self.st.borrow().journal.next_seq;
         loop {
             let granted = place
-                .until(|| match self.grant(class, draw, journal, nodes) {
+                .until(|| match self.grant(class, draw, journal, credit, nodes, arrived) {
                     Ok(true) => Some(Ok(true)),
                     Err(e) => Some(Err(e)),
                     Ok(false) if self.can_free() => Some(Ok(false)),
@@ -927,7 +1082,7 @@ impl<D: BlockDev> Mount<D> {
                 Class::Ordinary => Box::pin(self.free()).await?,
                 Class::Reclaim => {
                     self.flush_closed().await?;
-                    if !self.grant(class, draw, journal, nodes)? {
+                    if !self.grant(class, draw, journal, credit, nodes, arrived)? {
                         self.stop("journal reclaim's share exhausted");
                         return Err(Error::ReadOnly("journal reclaim's share exhausted"));
                     }
@@ -937,10 +1092,28 @@ impl<D: BlockDev> Mount<D> {
         }
     }
 
+    /// Whether `credit` bytes more of metadata, past what is promised and
+    /// granted, and `nodes` nodes would find room: what [`Mount::grant`]
+    /// refuses `NoSpace` without, judged now.
+    pub(super) fn room_for(&self, credit: u64, nodes: usize) -> bool {
+        self.cancel_dropped();
+        let pending = self.reservations.borrow().pending(Draw::Ordinary);
+        let st = self.st.borrow();
+        let stable = self.metadata_nodes(&st, pending + st.granted_bytes + credit);
+        st.read_only.is_none() && st.alloc.keeps(st.metadata_buckets, stable, nodes, st.reclaim_room, Draw::Ordinary, false) && st.alloc.fits(nodes, st.reclaim_room, Draw::Ordinary)
+    }
+
     /// Grants `class` its request now if it fits. An ordinary one that the
-    /// room left could not hold even with nothing else dirty is refused
-    /// `NoSpace`, once nothing written or emptied can change that.
-    fn grant(&self, class: Class, draw: Draw, journal: u64, nodes: usize) -> Result<bool> {
+    /// room left could not hold is refused `NoSpace` once nothing written or
+    /// emptied can change that: no other grant outstanding, as the ledgers
+    /// `keeps` judges change when a transaction applies; no emptying
+    /// awaiting durability; and nothing committed before sequence `arrived`
+    /// left unwritten. Writing later changes leaves those ledgers as they
+    /// are, and on a node of one block reclaim's writes never settle, as
+    /// each one's keys dirty another node.
+    fn grant(&self, class: Class, draw: Draw, journal: u64, credit: u64, nodes: usize, arrived: u64) -> Result<bool> {
+        self.cancel_dropped();
+        let pending = self.reservations.borrow().pending(draw);
         let mut st = self.st.borrow_mut();
         if let Some(why) = st.read_only {
             return Err(Error::ReadOnly(why));
@@ -948,20 +1121,26 @@ impl<D: BlockDev> Mount<D> {
         let room = match class {
             Class::Ordinary => {
                 let held = st.cache.dirty + st.cache.unpointed + st.granted;
-                if !st.alloc.fits(nodes, st.reclaim_room, draw) && held == 0 && st.reclaim_granted == 0 && !st.alloc.returning() {
+                let stable = self.metadata_nodes(&st, pending + st.granted_bytes + credit);
+                let keeps = st.alloc.keeps(st.metadata_buckets, stable, nodes, st.reclaim_room, draw, false);
+                let physical = st.alloc.fits(nodes, st.reclaim_room, draw);
+                let can_compact = st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b));
+                let settled = st.granted == 0 && st.reclaim_granted == 0 && !st.alloc.returning() && st.oldest_pin().is_none_or(|pin| pin >= arrived);
+                if (!keeps || (!physical && !can_compact)) && settled {
                     return Err(Error::NoSpace(match draw {
-                        Draw::Ordinary => "no room left for the btree nodes a change may write",
+                        Draw::Ordinary | Draw::Reserved(_) => "no room left for the btree nodes a change may write",
                         Draw::Freeing => "no room left for the btree nodes a removal may write",
                     }));
                 }
                 // Nothing more lands in a node reclaim has yet to split.
                 held + nodes <= st.limit && st.cache.oversized == 0 && st.alloc.fits(held + nodes, st.reclaim_room, draw)
+                    && st.alloc.keeps(st.metadata_buckets, stable, held + nodes, st.reclaim_room, draw, false)
             }
             Class::Reclaim => st.reclaim_granted + nodes <= st.reclaim_room,
         };
         if room && st.journal.reserve(journal, class) {
             match class {
-                Class::Ordinary => st.granted += nodes,
+                Class::Ordinary => { st.granted += nodes; st.granted_bytes += credit; }
                 Class::Reclaim => st.reclaim_granted += nodes,
             }
             return Ok(true);
@@ -973,13 +1152,18 @@ impl<D: BlockDev> Mount<D> {
         Ok(false)
     }
 
-    /// Whether anything can be freed now: entries to write, a dirty node to
-    /// reclaim, or a journal whose last sequence can move on or that holds
-    /// an emptying.
+    /// Whether anything can be freed now: pending runs to materialize,
+    /// entries to write, a dirty node to reclaim, or a journal whose last
+    /// sequence can move on or that holds an emptying.
     fn can_free(&self) -> bool {
         let st = self.st.borrow();
         let flush = st.journal_frees() || st.alloc.returning();
-        !st.journal.closed.is_empty() || (flush && st.journal.may_close()) || st.cache.ids().into_iter().any(|id| {
+        st.pending.oldest_pin().is_some()
+            || !st.journal.closed.is_empty()
+            || (flush && st.journal.open.is_some() && st.journal.may_close())
+            || (st.journal_frees() && st.journal.open.is_none() && st.journal.openable() > 0)
+            || st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b))
+            || st.cache.ids().into_iter().any(|id| {
             let n = st.cache.node(id);
             n.dirty() && !n.writing && n.captured.is_none() && n.held == 0
         })
@@ -995,14 +1179,15 @@ impl<D: BlockDev> Mount<D> {
         if self.reclaim_round(Order::OldestPin).await? {
             return Ok(());
         }
+        if self.compact_metadata().await? { return Ok(()); }
         self.flush_open().await.map(|_| ())
     }
 
     /// Returns what [`Mount::admit`] took.
-    fn ungrant(&self, st: &mut State, class: Class, journal: u64, nodes: usize) {
+    fn ungrant(&self, st: &mut State, class: Class, journal: u64, credit: u64, nodes: usize) {
         st.journal.unreserve(journal);
         match class {
-            Class::Ordinary => st.granted -= nodes,
+            Class::Ordinary => { st.granted -= nodes; st.granted_bytes -= credit; }
             Class::Reclaim => st.reclaim_granted -= nodes,
         }
         self.admit_reclaim.wake();
@@ -1034,27 +1219,46 @@ impl<D: BlockDev> Mount<D> {
     /// a transaction before it left so sends it back to wait for reclaim to
     /// split that node ([`MAX_GROUPS`]).
     async fn transact<T>(&self, bound: u64, nodes: usize, draw: Draw, prepare: impl AsyncFnOnce(&mut Txn) -> Result<T>) -> Result<T> {
+        self.transact_holding(bound, bound * 8, nodes, draw, prepare).await
+    }
+
+    /// [`Mount::transact`], its grant judging and holding `credit` bytes of
+    /// metadata room rather than its journal bound's: what it promises past
+    /// its own records, as a reservation's blocks each owe a transaction.
+    async fn transact_holding<T>(&self, bound: u64, credit: u64, nodes: usize, draw: Draw, prepare: impl AsyncFnOnce(&mut Txn) -> Result<T>) -> Result<T> {
         assert!(nodes <= FOOTPRINT, "a grant of {nodes} nodes, past the largest any operation takes");
+        assert!(credit >= bound * 8, "a grant's credit covers its own records");
         self.check_writable()?;
         let _slot = loop {
-            self.admit(Class::Ordinary, draw, bound, nodes).await?;
+            self.admit(Class::Ordinary, draw, bound, credit, nodes).await?;
             let slot = self.slot(Class::Ordinary).await;
             let mut st = self.st.borrow_mut();
             if st.cache.oversized == 0 {
                 break slot;
             }
-            self.ungrant(&mut st, Class::Ordinary, bound, nodes);
+            self.ungrant(&mut st, Class::Ordinary, bound, credit, nodes);
         };
+        self.prepare_pending(Class::Ordinary, bound, credit, nodes)?;
         let mut txn = Txn::default();
         let out = prepare(&mut txn).await;
-        self.finish(txn, out.is_ok(), Class::Ordinary, bound, nodes)?;
+        self.finish(txn, out.is_ok(), Class::Ordinary, bound, credit, nodes)?;
         out
+    }
+
+    fn prepare_pending(&self, class: Class, bound: u64, credit: u64, nodes: usize) -> Result<()> {
+        let mut st = self.st.borrow_mut();
+        if let Err(error) = st.pending.reserve(bound as usize / KEY_U64S) {
+            self.ungrant(&mut st, class, bound, credit, nodes);
+            self.written.wake();
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Applies `txn` when `apply`, else drops it; either way releases its
     /// holds and its grant. `ReadOnly` when the mount stopped writing while
     /// it was prepared.
-    fn finish(&self, txn: Txn, apply: bool, class: Class, bound: u64, nodes: usize) -> Result<()> {
+    fn finish(&self, mut txn: Txn, apply: bool, class: Class, bound: u64, credit: u64, nodes: usize) -> Result<()> {
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
         // An ordinary grant is each operation's bound; reclaim's is capped
@@ -1065,17 +1269,53 @@ impl<D: BlockDev> Mount<D> {
             st.read_only.get_or_insert("reclaim dirtying more nodes than its cache room");
         }
         let stopped = st.read_only;
+        let allocated = core::mem::take(&mut txn.allocated_data);
         if apply && stopped.is_none() {
-            self.apply(st, txn, bound);
+            for &(b, before, after) in &txn.bucket_states {
+                st.metadata_buckets = st.metadata_buckets + u64::from(after.data_type == data_type::BTREE) - u64::from(before.data_type == data_type::BTREE);
+                if after.data_type == data_type::BTREE && u64::from(after.dirty) <= u64::from(self.sb.member.bucket_sectors) / 2 {
+                    st.sparse_metadata.insert(b);
+                } else {
+                    st.sparse_metadata.remove(&b);
+                }
+                if after.data_type == data_type::USER && u64::from(after.dirty) <= u64::from(self.sb.member.bucket_sectors) / 2 {
+                    st.sparse_data.insert(b);
+                } else {
+                    st.sparse_data.remove(&b);
+                }
+            }
+            for (&(btree, level, pos), update) in &txn.updates {
+                if level != 0 { continue; }
+                let prior = st.get(held(st, btree, level, pos), pos).expect("a prepared logical node decodes");
+                let prior = prior.as_ref().map(|(_, v)| &v[..]);
+                let update = update.as_ref().map(|(_, v)| &v[..]);
+                let charge = |value: Option<&[u8]>| value.map_or(0, |v| allocator::charge(btree, v));
+                let tree_node = |value: Option<&[u8]>| value.is_some_and(|v| v.get(2) == Some(&data_type::BTREE));
+                let (added, removed, before, after) = (charge(update), charge(prior), tree_node(prior), tree_node(update));
+                st.metadata_bytes = st.metadata_bytes + added - removed;
+                if btree == Btree::Backpointers {
+                    st.btree_nodes = st.btree_nodes + u64::from(after) - u64::from(before);
+                    if before && !after { st.baseline_nodes.remove(&(pos.offset >> self.bp_shift())); }
+                }
+            }
+            for (&pos, delta) in &txn.accounting {
+                let prior = st.get(held(st, Btree::Accounting, 0, pos), pos).expect("a prepared accounting node decodes");
+                let before = prior.as_ref().map_or(0, |(_, v)| key_bytes(v) as u64);
+                let counters = prior.as_ref().map_or(0, |(_, v)| v.len() / 8).max(delta.len());
+                st.metadata_bytes = st.metadata_bytes + (KEY_U64S * 8 + counters * 8) as u64 - before;
+            }
+            self.apply(st, txn, bound, class);
+            for sector in allocated { st.alloc.unpin(sector / u64::from(self.sb.member.bucket_sectors)); }
         } else {
             release(st, &txn.held);
+            for sector in allocated { st.alloc.cancel_data(sector, u64::from(self.sb.member.bucket_sectors)); }
         }
         #[cfg(test)]
         {
             st.peak = st.peak.max(st.cache.dirty + st.cache.unpointed);
         }
         assert!(st.cache.dirty + st.cache.unpointed <= st.limit + st.reclaim_room, "dirty and unpointed nodes past the cache's limit and reclaim's room");
-        self.ungrant(st, class, bound, nodes);
+        self.ungrant(st, class, bound, credit, nodes);
         self.written.wake();
         match stopped {
             Some(why) if apply => Err(Error::ReadOnly(why)),
@@ -1083,11 +1323,10 @@ impl<D: BlockDev> Mount<D> {
         }
     }
 
-    /// Installs `txn`: its records appended to the open entry at the sequence
-    /// that entry has, then its keys in their nodes, its roots and its
-    /// written nodes. No await: what the slot's holder prepared, the cache
-    /// holds.
-    fn apply(&self, st: &mut State, mut txn: Txn, bound: u64) {
+    /// Appends the transaction's records, transfers its keys to pending
+    /// ownership, and publishes roots and completed node writes. No await
+    /// separates these logical changes.
+    fn apply(&self, st: &mut State, mut txn: Txn, bound: u64, class: Class) {
         let installs = core::mem::take(&mut txn.installs);
         let holds = core::mem::take(&mut txn.held);
         let filled = core::mem::take(&mut txn.filled);
@@ -1114,32 +1353,37 @@ impl<D: BlockDev> Mount<D> {
             self.readers.borrow_mut().emptied(b);
         }
 
-        // Every change's node is found before any changes: a pointer update
-        // this transaction makes would lead the descent to a node not yet
-        // installed.
-        let updates: Vec<_> = core::mem::take(&mut txn.updates).into_iter().map(|((btree, level, pos), kv)| (held(st, btree, level, pos), pos, kv)).collect();
-        let accounting: Vec<_> = core::mem::take(&mut txn.accounting).into_iter().map(|(pos, delta)| (held(st, Btree::Accounting, 0, pos), pos, delta)).collect();
-        for (id, pos, kv) in updates {
-            st.cache.change(id, |n| n.put(pos, kv, seq));
+        let updates = core::mem::take(&mut txn.updates).into_iter().map(|((btree, level, pos), kv)| {
+            let (key, value) = kv.unwrap_or_else(|| (Key::new(kind::DELETED, pos), Vec::new()));
+            (btree, level, key, value)
+        });
+        let accounting = core::mem::take(&mut txn.accounting).into_iter().map(|(pos, delta)| {
+            let key = Key { version: versions[&pos], ..Key::new(kind::ACCOUNTING, pos) };
+            (Btree::Accounting, 0, key, value::counters(&delta))
+        });
+        // An ordinary transaction's keys go into the nodes it holds, as
+        // reclaim's materialization would put them, where pending holds
+        // nothing older at their position. A node that cannot take them now,
+        // and reclaim's own updates, leave them to pending and reclaim.
+        let room = match class {
+            Class::Ordinary => K_TX.checked_sub(size).expect("an ordinary transaction within K_TX") as usize * 8,
+            Class::Reclaim => 0,
+        };
+        let mut drained = Vec::new();
+        let mut left = Vec::new();
+        for (btree, level, key, value) in updates.chain(accounting) {
+            let id = (class == Class::Ordinary).then(|| held(st, btree, level, key.pos)).filter(|&id| st.cache.node(id).captured.is_none());
+            let Some(id) = id.filter(|&id| self.drained(st, id, key.pos, room, &mut drained)) else {
+                left.push((btree, level, key, value));
+                continue;
+            };
+            st.cache.change(id, |n| put(n, key, value, seq));
         }
-        for (id, pos, delta) in accounting {
-            let version = versions[&pos];
-            st.cache.change(id, |n| {
-                let i = n.at(pos);
-                let mut sums = match n.keys.get(i) {
-                    Some((k, v)) if k.pos == pos => journal::counters(v).expect("a cached accounting key decodes"),
-                    _ => Vec::new(),
-                };
-                sums.resize(sums.len().max(delta.len()), 0);
-                for (sum, d) in sums.iter_mut().zip(&delta) {
-                    *sum = sum.wrapping_add(*d);
-                }
-                let key = Key { version, ..Key::new(kind::ACCOUNTING, pos) };
-                // A total of zero stays, its version with it, so a replay
-                // never adds the delta that made it zero again (A7.23, A7.24).
-                n.put(pos, Some((key, value::counters(&sums))), seq);
-            });
+        #[cfg(test)]
+        for &(id, before) in &drained {
+            st.grown = st.grown.max(st.cache.node(id).bytes.saturating_sub(before));
         }
+        st.pending.apply(seq, left);
         for root in core::mem::take(&mut txn.roots) {
             st.roots.insert(root.btree, root);
         }
@@ -1148,6 +1392,21 @@ impl<D: BlockDev> Mount<D> {
         for install in installs {
             self.install(st, install);
         }
+    }
+
+    /// Whether node `id` takes a key at `pos` in place: pending holds
+    /// nothing at `pos`. A node the transaction has not yet `drained` first
+    /// takes what pending holds of its range within `room`, the transaction
+    /// bound its own keys leave, so together they grow it by at most one
+    /// transaction's.
+    fn drained(&self, st: &mut State, id: NodeId, pos: Bpos, room: usize, drained: &mut Vec<(NodeId, usize)>) -> bool {
+        let n = st.cache.node(id);
+        let (btree, level, min, max) = (n.btree, n.level, n.min, n.max);
+        if !drained.iter().any(|&(d, _)| d == id) {
+            drained.push((id, n.bytes));
+            if st.pending.holds(btree, level, min, max) && self.take_into(st, id, min, room).is_err() { return false; }
+        }
+        !st.pending.holds(btree, level, pos, pos)
     }
 
     /// Closes the open entry: its last sequence the oldest any node pins,
@@ -1164,13 +1423,20 @@ impl<D: BlockDev> Mount<D> {
     /// a clean unmount's last (A1.42).
     fn close(&self, st: &mut State, own: bool) {
         let mut open = st.journal.open.take().expect("an entry open");
-        let pinned = st.cache.oldest_pin().map_or(open.seq, |p| p.min(open.seq));
+        let pinned = st.oldest_pin().map_or(open.seq, |p| p.min(open.seq));
         let last_seq = if own { pinned } else { pinned.min(st.journal.durable) };
-        assert!(last_seq >= st.journal.durable_last, "a journal entry's last sequence moved back");
+        assert!(last_seq >= st.journal.durable_last.max(st.journal.closed_last), "a journal entry's last sequence moved back");
+        st.journal.closed_last = last_seq;
         let roots = encoded_roots(&st.roots);
         journal::tail(&mut open.area, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), Some(st.now), st.key_version, st.clocks);
         let entry = Jset { seq: open.seq, last_seq, area: &open.area };
         let bytes = journal::encode(&st.header.internal_uuid, self.sb.block_bytes(), self.key.as_ref(), &entry).expect("a journal entry encrypts");
+        #[cfg(test)]
+        {
+            st.journal_bytes[0] += 1;
+            st.journal_bytes[1] += open.area.len();
+            st.journal_bytes[2] += bytes.len();
+        }
         st.journal.closed.push_back(Closed { seq: open.seq, last_seq, bytes });
     }
 
@@ -1215,6 +1481,7 @@ impl<D: BlockDev> Mount<D> {
                 let mut st = self.st.borrow_mut();
                 st.journal.closed.pop_front();
                 st.journal.written(seq, last_seq, (bytes.len() / SECTOR) as u64);
+                st.pending.durable(seq);
                 st.alloc.durable_through(seq);
                 drop(st);
                 self.admit_reclaim.wake();
@@ -1279,6 +1546,9 @@ impl<D: BlockDev> Mount<D> {
         let upto = {
             let mut st = self.st.borrow_mut();
             let st = &mut *st;
+            if st.journal.open.is_none() && st.journal_frees() && st.journal.openable() > 0 {
+                st.journal.open_new();
+            }
             if st.journal.open.is_some() && st.journal.may_close() {
                 self.close(st, false);
             }
@@ -1362,20 +1632,38 @@ fn records(txn: &Txn, seq: u64, base: u64) -> (Vec<u8>, BTreeMap<Bpos, Version>)
 /// The clean unmount.
 impl<D: BlockDev> Mount<D> {
     /// Writes everything out and marks the volume clean (A1.42): every
-    /// orphan released; every dirty node written, leaves first, each
-    /// level's pointer updates journaled before the level above is written;
-    /// a final empty entry `S` whose last sequence is its own; then the
+    /// orphan released; everything committed before the unmount written by
+    /// reclaim, oldest first; what reclaim's own updates left, and what
+    /// writing that derives, in one terminal publication
+    /// ([`Mount::publish`]); a final empty entry `S` whose last sequence is
+    /// its own and whose roots reach that publication; then the
     /// superblock, clean, with `clean` naming `S`. Accounting totals that
     /// came to zero stay, as upstream keeps them (A7.23).
     pub async fn unmount(self) -> Result<()> {
+        self.unmount_clean().await
+    }
+
+    async fn unmount_clean(&self) -> Result<()> {
         // A clean volume holds no orphan (A8.14), and nothing holds one now.
         self.release_orphans().await?;
         self.check_writable()?;
-        while self.busy() {
-            // Nothing else runs now, so every dirty node is ready to write.
-            assert!(self.reclaim_round(Order::LeavesFirst).await?, "dirty nodes no reclaim round writes");
-        }
         self.flush_open().await?;
+        // Reclaim keeps the working set within the cache while it writes
+        // what was committed; its own updates pin only later sequences.
+        let start = self.st.borrow().journal.next_seq;
+        while self.st.borrow().oldest_pin().is_some_and(|pin| pin < start) {
+            // Nothing else runs now, so every dirty node is ready to write.
+            assert!(self.reclaim_round(Order::OldestPin).await?, "committed changes no reclaim round writes");
+        }
+        self.publish_clean().await
+    }
+
+    /// Everything left published, then the clean entry and superblock.
+    async fn publish_clean(&self) -> Result<()> {
+        self.flush_open().await?;
+        while self.materialize(Order::LeavesFirst).await? {}
+        let seq = self.st.borrow().journal.next_seq;
+        self.publish(seq).await?;
         let upto = {
             let mut st = self.st.borrow_mut();
             let st = &mut *st;
@@ -1383,6 +1671,7 @@ impl<D: BlockDev> Mount<D> {
             self.close(st, true);
             st.journal.closed.back().expect("just closed").seq
         };
+        assert_eq!(upto, seq, "the clean entry publishes the terminal writes");
         self.write_entries(upto).await?;
         let clean = {
             let mut st = self.st.borrow_mut();
@@ -1397,15 +1686,27 @@ impl<D: BlockDev> Mount<D> {
         self.write_superblock(Some(clean)).await
     }
 
-    /// Whether any node is dirty or unpointed.
+    /// Whether journal-owned keys or unfinished node writes remain.
     fn busy(&self) -> bool {
         let st = self.st.borrow();
-        st.cache.dirty > 0 || st.cache.unpointed > 0
+        st.pending.oldest_pin().is_some() || st.cache.dirty > 0 || st.cache.unpointed > 0
     }
 }
 
 #[cfg(test)]
 impl<D: BlockDev> Mount<D> {
+    /// Drops pending's spare workspace, so its next batch allocates.
+    pub(crate) fn shrink_pending(&self) {
+        self.st.borrow_mut().pending.shrink();
+    }
+
+    /// The most bytes one ordinary transaction grew a node by, its keys and
+    /// what the node took from pending together.
+    #[cfg(test)]
+    pub(crate) fn grown(&self) -> usize {
+        self.st.borrow().grown
+    }
+
     /// The dirty-node limit, reclaim's room, the most dirty and unpointed
     /// nodes held at once, and the ordinary admissions that waited for
     /// journal space and for cache room.
@@ -1419,12 +1720,63 @@ impl<D: BlockDev> Mount<D> {
         self.st.borrow().alloc.reused
     }
 
+    pub(crate) fn pending_pressure(&self) -> (usize, usize, usize) {
+        let st = self.st.borrow();
+        (st.pending.iter().count(), st.pending.allocated_bytes(), st.cache.dirty + st.cache.unpointed)
+    }
+
+    /// Splits a terminal publication's new nodes past `bytes` of keys.
+    pub(crate) fn limit_publication_groups(&self, bytes: usize) {
+        self.st.borrow_mut().group_limit = Some(bytes);
+    }
+
+    /// A clean unmount without reclaim first writing what was committed:
+    /// all of it in the terminal publication, and what that wrote.
+    /// Every cached node of `btree` written to a fresh node next, as one
+    /// read after an unclean mount and not yet rewritten is (§3.5).
+    pub(crate) fn rewrite_next(&self, btree: Btree) {
+        let mut st = self.st.borrow_mut();
+        for id in st.cache.ids() {
+            st.cache.change(id, |n| n.fresh |= n.btree == btree);
+        }
+    }
+
+    /// A clean unmount, and what its terminal publication wrote.
+    pub(crate) async fn unmount_published(self) -> Result<Published> {
+        self.unmount_clean().await?;
+        Ok(self.st.borrow().published)
+    }
+
+    pub(crate) async fn unmount_in_one_publication(self) -> Result<Published> {
+        self.release_orphans().await?;
+        self.publish_clean().await?;
+        Ok(self.st.borrow().published)
+    }
+
+    /// The ring bucket the journal writes into.
+    #[cfg(test)]
+    pub(crate) fn journal_head(&self) -> usize {
+        self.st.borrow().journal.head
+    }
+
+    pub(crate) fn journal_room(&self) -> (u64, u64) {
+        let st = self.st.borrow();
+        (st.journal.ring_free(), 2 * st.journal.reclaim_entries)
+    }
+
     /// What a stalled test reports: the counts admission and reclaim look
     /// at, and every node not clean.
     pub(crate) fn dump(&self) -> alloc::string::String {
         let st = self.st.borrow();
         let j = &st.journal;
         let dirty: Vec<_> = st.cache.ids().into_iter().map(|id| st.cache.node(id)).filter(|n| n.dirty() || n.captured.is_some() || n.writing || n.held > 0).map(|n| (n.btree, n.level, n.dirty(), n.pin(), n.captured, n.writing, n.held, n.bytes)).collect();
-        alloc::format!("dirty={} unp={} over={} granted={} rg={} limit={} room={} open={:?} closed={} ring_free={} openable={} reclaim_entries={} durable_last={} newest={:?} head={} hs={} pins={:?} slot={} admitq_empty={} reclq={} nodes={:?}", st.cache.dirty, st.cache.unpointed, st.cache.oversized, st.granted, st.reclaim_granted, st.limit, st.reclaim_room, j.open.as_ref().map(|o| (o.seq, o.area.len()/8)), j.closed.len(), j.ring_free(), j.openable(), j.reclaim_entries, j.durable_last, j.newest, j.head, j.head_sectors, st.cache.oldest_pin(), self.slot_held.get(), self.admit.is_empty(), self.admit_reclaim.is_empty(), dirty)
+        let mut owners = BTreeMap::new();
+        for entry in st.pending.iter().filter(|e| Some(e.capture().first) == st.pending.oldest_pin()) {
+            let position = entry.position();
+            *owners.entry((position.0, position.1)).or_insert(0) += 1;
+        }
+        let geometry = (st.alloc.capacity(st.metadata_buckets), st.alloc.ready(0), st.btree_nodes, st.alloc.occupied_metadata(st.metadata_buckets), st.metadata_bytes, st.baseline_nodes.len(), self.metadata_nodes(&st, K_TX * 8));
+        alloc::format!("stopped={:?} capacity_free_live_occupied_bytes_baseline_stable={geometry:?} pending={} pending_bytes={} pending_pin={:?} pending_owners={owners:?} journal_entries_payload_encoded={:?} dirty={} unp={} over={} granted={} rg={} limit={} room={} open={:?} closed={} ring_free={} openable={} reclaim_entries={} durable_last={} newest={:?} head={} hs={} pins={:?} slot={} admitq_empty={} reclq={} nodes={:?}", st.read_only, st.pending.iter().count(), st.pending.allocated_bytes(), st.pending.oldest_pin(), st.journal_bytes, st.cache.dirty, st.cache.unpointed, st.cache.oversized, st.granted, st.reclaim_granted, st.limit, st.reclaim_room, j.open.as_ref().map(|o| (o.seq, o.area.len()/8)), j.closed.len(), j.ring_free(), j.openable(), j.reclaim_entries, j.durable_last, j.newest, j.head, j.head_sectors, st.oldest_pin(), self.slot_held.get(), self.admit.is_empty(), self.admit_reclaim.is_empty(), dirty)
     }
 }
+

@@ -9,8 +9,8 @@
 //! waiter left parked is a hang the runner's ceiling reds. A watch made after
 //! the leaving is answered by the submit that makes it.
 //!
-//! **The refusal.** A connection and a file have no other end, and a watch that
-//! asks for one is refused whatever else it asks.
+//! **The refusal.** A connection and an event's wait side have no other end
+//! to leave, and a watch that asks for one is refused whatever else it asks.
 //!
 //! **Its own close.** An end whose holder closes it while the other end lives
 //! answers its watch with `NotFound`: the poll is over, and nothing else would
@@ -20,9 +20,6 @@
 //! held, while the handle sits unreceived in a connection's queue, and after
 //! it moved to a child that still lives: the watch stays armed through each,
 //! and is answered once that holder goes.
-
-#[path = "../image.rs"]
-mod image;
 
 use std::io::Read;
 use std::os::toyos::process::CommandExt;
@@ -35,7 +32,7 @@ use toyos::ipc::Connection;
 use toyos::poller::{Poller, OTHER_END_GONE, READABLE};
 use toyos::syscap::SysCap;
 use toyos::{namespace, pipe_pair, port, AsHandle, BorrowedHandle, OwnedHandle, Pipe};
-use toyos_abi::syscall::{self, OpenFlags, SyscallError};
+use toyos_abi::syscall::SyscallError;
 
 #[path = "../roster.rs"]
 mod roster;
@@ -76,13 +73,11 @@ fn test() {
 
     let (client, server) = connection();
     refused(client.as_handle(), "a connection");
-    let own = image::in_tmp(SELF_PATH);
-    let file = syscall::open(own.as_bytes(), OpenFlags::READ).expect("this binary's own file");
-    // SAFETY: the kernel installed the handle for this call and no other.
-    let file = unsafe { OwnedHandle::from_raw(file) };
-    refused(file.as_handle(), "a file");
-    drop(file);
-    println!("  a connection and a file were refused the question");
+    // A watchable handle with no other end; a memory object lacks WAIT and is
+    // refused for that first.
+    let (_waker, bell) = toyos::wake::pair().expect("an event");
+    refused(bell.as_handle(), "an event's wait side");
+    println!("  a connection and an event's wait side were refused the question");
 
     for own in [End::Read, End::Write] {
         let (reader, writer) = pipe("");

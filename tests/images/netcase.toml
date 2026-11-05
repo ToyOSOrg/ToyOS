@@ -84,7 +84,7 @@ receives = ["disk"]
 [programs.fileserver]
 restart = true
 pager = true
-roles = ["data", "log", "boot"]
+roles = ["data", "log", "boot", "memory"]
 receives = ["block"]
 
 # It declares the memory the root bridges decode: the supervisor starts a PCI

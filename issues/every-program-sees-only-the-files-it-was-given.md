@@ -100,8 +100,8 @@ nameable by every program and make confused-deputy bugs structural.
    what it holds, and a package launched from `/apps` is minted its own
    directory read-only and its own folder of the session's home read-write,
    `/system` read-only, and nothing else a file server serves
-   (`toyos_manifest::Program::view`). It still reaches `/tmp`, which the
-   kernel serves to every program. Every row the image declares still sees
+   (`toyos_manifest::Program::view`). It still reaches `/tmp`, the one tree
+   the MEMORY file server serves every view. Every row the image declares still sees
    the whole tree, `/system` read-only and the rest read-write but `/state`,
    of which each row holds only its own directory where it keeps state
    (`service = true` or `state = true`: the daemons' own state is built).

@@ -29,6 +29,7 @@ fn has(front: &[u8], at: usize, bytes: &[u8]) -> bool {
 
 /// Every format recognised, by name: where its signature is, and what it is.
 const SIGNATURES: &[(&str, usize, &[u8])] = &[
+    ("the retired ToyOS provisional file system", 0, b"BCFS"),
     // The ext4 Disk Layout: the superblock at 1024, `s_magic` 0xEF53 at its byte 0x38.
     ("an ext2/3/4 file system", 1024 + 0x38, &[0x53, 0xEF]),
     // XFS Algorithms & Data Structures, the superblock: `sb_magicnum` "XFSB" at 0.
@@ -105,7 +106,10 @@ mod tests {
         assert_eq!(judge(&stamped, 100), Content::Designated(100));
         assert_eq!(judge(&stamped, 99), Content::Foreign("a stamp for another size"));
         let mut ours = blank.clone();
-        ours[..4].copy_from_slice(b"BCFS");
+        ours[4096 + 24..4096 + 40].copy_from_slice(&[
+            0xc6, 0x85, 0x73, 0xf6, 0x66, 0xce, 0x90, 0xa9,
+            0xd9, 0x6a, 0x60, 0xcf, 0x80, 0x3d, 0xf7, 0xef,
+        ]);
         assert_eq!(judge(&ours, 100), Content::Volume);
         assert_eq!(judge(&blank[..4096], 1), Content::Unrecognised, "a partition shorter than the read");
     }

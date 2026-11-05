@@ -214,8 +214,8 @@ impl Volume for RootVolume {
         Err(Error::ReadOnly)
     }
 
-    fn write_back(&mut self, _: Node, _: u64, _: &[u8]) -> Result<(), Error> {
-        Err(Error::ReadOnly)
+    fn write_back(&mut self, _: Node, _: u64, _: &[u8]) -> crate::volume::WriteBack {
+        Err((0, Error::ReadOnly))
     }
 
     fn truncate(&mut self, _: Node, _: u64) -> Result<(), Error> {
@@ -248,6 +248,10 @@ impl Volume for RootVolume {
 
     fn sync(&mut self) -> Result<Vec<(Node, Error)>, Error> {
         Ok(Vec::new())
+    }
+
+    fn commit(&mut self, _node: Option<Node>) -> Result<(), Error> {
+        Ok(())
     }
 
     /// None: ROOT is read-only.

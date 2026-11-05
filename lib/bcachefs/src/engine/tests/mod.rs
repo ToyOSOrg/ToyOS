@@ -231,13 +231,60 @@ fn mkfs_is_a_function_of_its_random_source_and_time() {
     assert!(a == b);
 }
 
+/// A crash in the primary's write leaves its first sector whole and the
+/// rest unreadable: the volume opens from another copy and names the torn one.
 #[test]
-fn a_lost_primary_superblock_is_read_from_another_copy_and_found() {
+fn a_torn_primary_superblock_is_read_from_another_copy_and_named() {
     let dev = formatted(32 << 20, None);
-    block_on_ready(dev.write(1, &[[0u8; BLOCK]])).unwrap();
+    let mut block = [[0u8; BLOCK]];
+    block_on_ready(dev.read(1, &mut block)).unwrap();
+    block[0][SECTOR..].fill(0xff);
+    block_on_ready(dev.write(1, &block)).unwrap();
     let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(v.torn_copies(), [8]);
     assert_eq!(names(&v, v.root()), Vec::<String>::new());
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), [Finding::Copy(8)]);
+}
+
+/// A copy's place holding what is not this volume's copy there — nothing,
+/// another volume's copy, whole or damaged, a copy of this one at another
+/// offset, or another layout — is another writer's, and the volume is
+/// refused, not opened from the copies left.
+#[test]
+fn a_superblock_place_another_writer_took_refuses_the_volume() {
+    let pristine = formatted(32 << 20, None).into_inner();
+    let image = |edit: &dyn Fn(&mut Vec<u8>)| {
+        let mut raw = pristine.clone();
+        edit(&mut raw);
+        Bytes::new(raw)
+    };
+    let primary = 8 * SECTOR;
+    let second = 2056 * SECTOR;
+    let other = Bytes::new(vec![0u8; 32 << 20]);
+    let options = Options { label: b"toyos", time: 1_761_177_600_000_000_000, encryption: None };
+    block_on_ready(mkfs(&other, &options, &Tree::new(), &mut Seeded(0x07e4))).unwrap();
+    let other = other.into_inner();
+    type Edit<'a> = &'a dyn Fn(&mut Vec<u8>);
+    let cases: [(&str, Edit, u64); 7] = [
+        ("a zeroed primary", &|raw| raw[primary..primary + BLOCK].fill(0), 8),
+        ("another volume's damaged copy", &|raw| raw[second + 40] ^= 1, 2056),
+        ("another volume's whole copy", &|raw| raw[second..second + BLOCK].copy_from_slice(&other[second..second + BLOCK]), 2056),
+        ("the primary's bytes in the second copy's place", &|raw| raw.copy_within(primary..primary + BLOCK, second), 2056),
+        ("a zeroed layout copy", &|raw| raw[7 * SECTOR..8 * SECTOR].fill(0), 7),
+        ("another format's superblock over the front", &|raw| {
+            raw[..BLOCK].fill(0);
+            raw[..4].copy_from_slice(b"BCFS");
+        }, 7),
+        ("another format's superblock over the front and its bitmap over the primary past its header", &|raw| {
+            raw[..BLOCK].fill(0);
+            raw[..4].copy_from_slice(b"BCFS");
+            raw[primary + 216..primary + BLOCK].fill(0xff);
+        }, 7),
+    ];
+    for (what, edit, sector) in cases {
+        assert_eq!(open_err(&image(edit)), Error::Overwritten { sector }, "{what}");
+    }
+    assert!(block_on_ready(Volume::open(&image(&|_| {}))).unwrap().torn_copies().is_empty());
 }
 
 /// The leaf of `btree` whose range holds `at`: its pointer and max key.
@@ -349,7 +396,8 @@ fn a_scrypt_cost_past_any_limit_is_refused_at_mkfs() {
     assert!(matches!(block_on_ready(mkfs(&dev, &options, &Tree::new(), &mut Seeded(1))), Err(Error::Unsupported(_))));
 }
 
-/// The primary copy re-encoded after `edit`, written over every copy.
+/// The primary copy re-encoded after `edit`, written over every copy and
+/// its layout over the layout copy, as an image's author writes both.
 fn rewrite_superblock(dev: &Image, edit: impl FnOnce(&mut super::superblock::Header, &mut Vec<super::superblock::Field>)) {
     let mut block = [[0u8; BLOCK]];
     block_on_ready(dev.read(1, &mut block)).unwrap();
@@ -362,6 +410,11 @@ fn rewrite_superblock(dev: &Image, edit: impl FnOnce(&mut super::superblock::Hea
         blocks.as_flattened_mut()[..bytes.len()].copy_from_slice(&bytes);
         block_on_ready(dev.write(offset / 8, &blocks)).unwrap();
     }
+    let mut first = [[0u8; BLOCK]];
+    block_on_ready(dev.read(0, &mut first)).unwrap();
+    let at = super::superblock::LAYOUT as usize * SECTOR;
+    first[0][at..at + super::superblock::Layout::BYTES].copy_from_slice(&header.layout.encode());
+    block_on_ready(dev.write(0, &first)).unwrap();
 }
 
 fn open_err(dev: &Image) -> Error {
@@ -389,11 +442,10 @@ fn journal_buckets_whose_counts_overflow_are_refused() {
 }
 
 #[test]
-fn a_superblock_copy_past_the_device_is_found_not_read() {
+fn a_superblock_copy_past_the_device_is_refused_not_read() {
     let dev = formatted(8 << 20, None);
     rewrite_superblock(&dev, |header, _| header.layout.offsets[2] = 1 << 60);
-    let v = block_on_ready(Volume::open(&dev)).unwrap();
-    assert!(block_on_ready(fsck(&v)).unwrap().contains(&Finding::Copy(1 << 60)));
+    assert_eq!(open_err(&dev), Error::Corrupt("superblock copy past the device"));
 }
 
 #[test]
@@ -839,10 +891,9 @@ fn a_populated_volume_is_a_function_of_its_tree_random_source_and_time() {
 
 #[test]
 fn a_tree_past_the_device_is_refused() {
-    // 8 MiB: data from bucket 137, the end copy from bucket 448, one node
-    // per bucket. 512 buckets of data put the first node at 649; 310 put
-    // the 15 roots at 447–461. Each needs those and the end copy's 64.
-    for (bytes, blocks) in [(8 << 20, (649 + 1 + 64) * 4), (310 << 14, (461 + 1 + 64) * 4)] {
+    // The enlarged journal puts data at bucket 239. A rejected layout
+    // still reports room for its nodes and the end superblock's 64 buckets.
+    for (bytes, blocks) in [(8 << 20, (751 + 1 + 64) * 4), (310 << 14, (549 + 1 + 64) * 4)] {
         let data = vec![1u8; bytes];
         let mut tree = Tree::new();
         tree.file(Tree::ROOT, b"big", &data, Meta { perm: 0o644, uid: 0, gid: 0 }).unwrap();
@@ -871,10 +922,9 @@ fn an_encrypted_volume_takes_directories_but_no_data() {
 }
 
 /// The superblock rules ToyOS writes by and upstream's volumes do not:
-/// upstream sets inline data, discard and rotational, names the device
+/// upstream sets discard and rotational, names the device
 /// and keeps its counters, errors and recovery-pass fields.
-const UPSTREAM_ONLY: [Finding; 7] = [
-    Finding::Superblock("format's feature set"),
+const UPSTREAM_ONLY: [Finding; 6] = [
     Finding::Superblock("member discard off"),
     Finding::Superblock("member not rotational, and known"),
     Finding::Superblock("member device name, model and serial zero"),
@@ -1259,6 +1309,9 @@ fn read_file_reads_a_file_whole_and_refuses_other_nodes() {
 mod admission;
 mod buckets;
 mod crash;
+mod data;
+mod geometry;
+mod compact;
 mod interleave;
 mod journal;
 mod mount;
@@ -1309,4 +1362,68 @@ fn an_upstream_volumes_file_in_one_run_is_in_place_and_inline_data_is_not() {
     assert_eq!(block_on_ready(v.in_place(path(&v, "Documents/a.txt"))).unwrap(), None, "inline data");
     let (at, len) = block_on_ready(v.in_place(path(&v, "Documents/deep/seq.txt"))).unwrap().expect("one run");
     assert_eq!(dev.get()[at as usize..(at + len) as usize], seq()[..]);
+}
+
+/// What ToyOS writes always carries a checksum, so a superblock, a btree
+/// node or an extent that declares none is refused rather than read
+/// unverified.
+#[test]
+fn metadata_and_data_without_a_checksum_are_refused() {
+    let dev = formatted(8 << 20, None);
+    rewrite_superblock(&dev, |header, _| header.flags[0] &= !(0x3f << 2));
+    assert_eq!(open_err(&dev), Error::Unsupported("superblock without a checksum"));
+
+    let dev = formatted(8 << 20, None);
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    let (ptr, _) = leaf_of(&v, Btree::Inodes, Bpos::MIN);
+    let flags = ptr.ptr.sector * SECTOR as u64 + 152;
+    let mut block = [[0u8; BLOCK]];
+    block_on_ready(dev.read(flags / BLOCK as u64, &mut block)).unwrap();
+    block[0][(flags % BLOCK as u64) as usize] &= !0xf;
+    block_on_ready(dev.write(flags / BLOCK as u64, &block)).unwrap();
+    assert_eq!(block_on_ready(v.inode(4096)), Err(Error::Unsupported("btree node without a checksum")));
+
+    let data = [0x5au8; BLOCK];
+    let mut tree = Tree::new();
+    tree.file(Tree::ROOT, b"f", &data, Meta { perm: 0o644, uid: 0, gid: 0 }).unwrap();
+    let dev = Bytes::new(vec![0u8; 8 << 20]);
+    let options = Options { label: b"toyos", time: 1_761_177_600_000_000_000, encryption: None };
+    block_on_ready(mkfs(&dev, &options, &tree, &mut Seeded(0x5eed))).unwrap();
+    let ino = path(&block_on_ready(Volume::open(&dev)).unwrap(), "f");
+    assert_eq!(read_all(&block_on_ready(Volume::open(&dev)).unwrap(), ino).unwrap(), data, "the file reads before its checksum goes");
+    rewrite_leaf(&dev, Btree::Extents, Bpos::MIN, 0, |keys| {
+        for (key, value) in keys.iter_mut().filter(|(k, _)| k.kind == crate::engine::kind::EXTENT) {
+            let extent = Extent::decode(value).unwrap();
+            *value = Extent::encode(key.size, 0, 0, extent.ptr);
+        }
+    });
+    assert_eq!(read_all(&block_on_ready(Volume::open(&dev)).unwrap(), ino), Err(Error::Unsupported("data without a checksum")));
+}
+
+/// A device another format filled: past each copy within its reserve and
+/// past the last copy to the device's end, mkfs leaves zeros, so no foreign
+/// superblock there — a backup in the last block among them — survives it.
+/// The device is a bucket's fraction past a whole number of buckets, so the
+/// last copy's reserve ends before the device does, as on the benches.
+#[test]
+fn mkfs_leaves_nothing_of_another_format_in_the_places_it_reserves() {
+    let bytes = (8 << 20) + (8 << 10);
+    let mut foreign = vec![0xabu8; bytes];
+    foreign[bytes - BLOCK..bytes - BLOCK + 4].copy_from_slice(b"BCFS");
+    let dev = Bytes::new(foreign);
+    let options = Options { label: b"toyos", time: 1_761_177_600_000_000_000, encryption: None };
+    block_on_ready(mkfs(&dev, &options, &Tree::new(), &mut Seeded(0x5eed))).unwrap();
+    let sb = block_on_ready(Volume::open(&dev)).unwrap().superblock().clone();
+    let layout = sb.header.layout.clone();
+    let raw = dev.into_inner();
+    let reserve = (1usize << layout.max_bits) * SECTOR;
+    for &offset in &layout.offsets {
+        let at = offset as usize * SECTOR;
+        let copy = super::superblock::Superblock::encode(&sb.header, &sb.fields, offset).len();
+        assert!(raw[at + copy..at + reserve].iter().all(|&b| b == 0), "the reserve of the copy at sector {offset} keeps another writer's bytes");
+    }
+    let tail = *layout.offsets.last().unwrap() as usize * SECTOR + reserve;
+    assert!(tail < bytes - BLOCK, "the last copy's reserve reaches the last block: no tail to clear");
+    assert!(raw[tail..].iter().all(|&b| b == 0), "the tail keeps another writer's bytes");
+    assert!(raw[bytes - BLOCK..].iter().all(|&b| b == 0), "the last block keeps the other format's backup");
 }

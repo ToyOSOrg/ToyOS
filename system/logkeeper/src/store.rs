@@ -1,8 +1,7 @@
 //! `/log` as this program's policy: one file per boot, continuations, and
 //! retention.
 //!
-//! Every byte goes through `SYS_WRITE` and `SYS_FSYNC` exactly as any other
-//! program's would.
+//! Writes and syncs use the same served file API as other programs.
 //!
 //! **A part is not preallocated.** Its whole length in zeros is a burst of
 //! writes to the stick at every part's start, and a burst that size starves a
@@ -222,8 +221,7 @@ impl Volume {
         Ok(())
     }
 
-    /// Get everything written so far onto the device, cache flush included —
-    /// which is what `SYS_FSYNC` means on this tree.
+    /// Get everything written so far onto the device, cache flush included.
     pub fn sync(&mut self) -> std::io::Result<()> {
         self.file.sync_all()
     }

@@ -561,7 +561,7 @@ fn main() {
     let no_grants = Grants { roles: Vec::new(), block: None, netstack: None };
     let unread = Manifest::default();
     let started = system_service.spawn(
-        &system_row.source,
+        &Binary::Row(system_row.source.clone()),
         &[],
         Vec::new(),
         &unread,
@@ -821,13 +821,52 @@ struct Instance {
 type Ports = Rc<RefCell<Vec<(String, Acceptor)>>>;
 
 /// One program the supervisor started at boot, and the ports it serves.
+/// What a service runs: its row's binary, or one a swap verified.
+#[derive(Clone)]
+enum Binary {
+    Row(Source),
+    Swapped(Rc<Swapped>),
+}
+
+impl std::fmt::Display for Binary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Row(source) => write!(f, "{source}"),
+            Self::Swapped(swapped) => write!(f, "the swapped binary sha256 {}", toyos_swap::hex(&swapped.digest)),
+        }
+    }
+}
+
+/// A swap's binary, in a region this process created and alone holds, so
+/// nothing else can change what a start of it runs; no file is read for it.
+struct Swapped {
+    region: toyos::shm::SharedMemory,
+    digest: toyos_swap::Digest,
+}
+
+impl Swapped {
+    /// The `request.len` bytes of the region `lent`, copied once into a region
+    /// of this process's own and held against the request's digest.
+    fn copied(lent: toyos::OwnedHandle, request: &SwapRequest) -> Result<Self, Refusal> {
+        let len = usize::try_from(request.len).map_err(|_| Refusal::TooLarge(request.len))?;
+        let lent = toyos::shm::ReadOnly::lent(lent, len).map_err(|why| Refusal::Unreadable(why.to_string()))?;
+        let mut bytes = vec![0; len];
+        lent.bytes().read(0, &mut bytes);
+        drop(lent);
+        toyos_swap::verify(&bytes, &request.digest)?;
+        let region = toyos::shm::SharedMemory::create(len).map_err(|e| Refusal::Install(format!("{e:?}")))?;
+        region.bytes().write(0, &bytes);
+        Ok(Self { region, digest: request.digest })
+    }
+}
+
 struct Service<'a> {
     program: &'a Program,
     /// The file-server role this process serves, for a row with `roles`.
     role: Option<&'a str>,
-    /// What the running process was started from: the row's source, or a
-    /// swap's installed binary.
-    source: Source,
+    /// What the running process was started from: the row's binary, or a
+    /// swap's.
+    source: Binary,
     /// `None` once neither binary would start.
     child: Option<Child>,
     /// The row's devices the running process was endowed: what a process
@@ -858,7 +897,7 @@ impl<'a> Service<'a> {
         Self {
             program,
             role,
-            source: program.source.clone(),
+            source: Binary::Row(program.source.clone()),
             child: None,
             devices: Vec::new(),
             ports: Rc::new(RefCell::new(acceptors)),
@@ -877,7 +916,7 @@ impl<'a> Service<'a> {
     /// of it is no start, so a service never runs on without a device it had.
     fn spawn(
         &mut self,
-        source: &Source,
+        source: &Binary,
         owed: &[String],
         block: Vec<String>,
         system: &Manifest,
@@ -888,17 +927,6 @@ impl<'a> Service<'a> {
         boot: &Boot,
         log: &mut Log,
     ) -> Result<u32, StartError> {
-        // **Checked again at every start, not only on arrival**: the installed
-        // file lives in an ambient directory, so what the supervisor verified when it
-        // wrote it is not a claim about what is there now. This narrows the
-        // window to the spawn itself and does not close it
-        // (`issues/a-swapped-binary-lives-where-any-process-can-rewrite-it.md`).
-        if let Some((path, digest)) = source.path().and_then(|path| Some((path, toyos_swap::installed_digest(path)?))) {
-            let bytes = read_binary(path).map_err(|why| std::io::Error::other(why.to_string()))?;
-            toyos_swap::verify(&bytes, &digest).map_err(|why| {
-                std::io::Error::other(format!("{path} no longer holds what was installed: {why}"))
-            })?;
-        }
         let mut storage = storage_endowment(self.role, syscap, grants, boot)?;
         if is_block(self.program) {
             storage.args.extend(block);
@@ -916,10 +944,15 @@ impl<'a> Service<'a> {
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
         let command = match source {
-            Source::Path(path) => Command::new(path),
-            Source::BootFileServer => {
+            Binary::Row(Source::Path(path)) => Command::new(path),
+            Binary::Row(Source::BootFileServer) => {
                 let mut command = Command::new(&self.program.name);
-                command.boot_image(boot.fileserver.as_handle().into());
+                command.image(boot.fileserver.as_handle().into());
+                command
+            }
+            Binary::Swapped(swapped) => {
+                let mut command = Command::new(&self.program.name);
+                command.image(swapped.region.as_handle().into());
                 command
             }
         };
@@ -1002,8 +1035,8 @@ impl std::fmt::Display for StartError {
 struct Flight {
     /// Index into [`Supervisor::services`].
     service: usize,
-    /// The installed binary it starts.
-    path: String,
+    /// The verified binary it starts.
+    binary: Binary,
     phase: Phase,
 }
 
@@ -1013,7 +1046,7 @@ enum Phase {
     Answered { conn: Connection, rx: LaunchRx, since: Instant },
     /// The new binary runs; it is the service if it is still running at
     /// `until`, and `previous` is started again if it is not.
-    Probation { until: Instant, previous: Source, owed: Vec<String> },
+    Probation { until: Instant, previous: Binary, owed: Vec<String> },
 }
 
 impl Flight {
@@ -1164,7 +1197,7 @@ impl<'a> Supervisor<'a> {
         let service = &mut self.services[at];
         assert!(service.child.is_none(), "supervisor: {} is started twice", service.label());
         let started = service.spawn(
-            &program.source,
+            &Binary::Row(program.source.clone()),
             &[],
             block,
             system,
@@ -1748,8 +1781,9 @@ impl<'a> Supervisor<'a> {
                             }
                             Port::Swap => {
                                 let payload = p.rx.payload(payload_len).to_vec();
+                                let carried = p.rx.take_batch();
                                 if let Some(accepted) =
-                                    self.accept_swap(p.conn, msg_type, &payload, flight.as_ref())
+                                    self.accept_swap(p.conn, msg_type, &payload, carried, flight.as_ref())
                                 {
                                     flight = Some(accepted);
                                 }
@@ -1822,16 +1856,19 @@ impl<'a> Supervisor<'a> {
     }
 
     /// One swap request, answered: refused with the old service untouched, or
-    /// verified, installed and accepted.
+    /// verified, kept and accepted.
     ///
     /// **Everything in the request is sshserver's claim about what its client
-    /// sent**, and the bytes are read here and held against the digest here:
-    /// what the supervisor starts is what the supervisor verified, and nothing else's word for it.
+    /// sent**, and the bytes are copied out of the lent region once, into a
+    /// region only this process holds, and that copy is held against the
+    /// digest: what the supervisor starts is what the supervisor verified,
+    /// and nothing else's word for it.
     fn accept_swap(
         &self,
         conn: Connection,
         msg_type: u32,
         payload: &[u8],
+        carried: toyos::ipc::Batch,
         flight: Option<&Flight>,
     ) -> Option<Flight> {
         let refuse = |service: &str, why: Refusal| {
@@ -1847,10 +1884,9 @@ impl<'a> Supervisor<'a> {
             Err(why) => return refuse("?", why),
         };
         let name = request.service.as_str();
-        // Read and removed before anything else can refuse, so a refused
-        // request leaves nothing staged behind it.
-        let bytes = read_binary(&request.staged);
-        let _ = std::fs::remove_file(&request.staged);
+        let Some([lent]) = carried.exact::<1>() else {
+            return refuse(name, Refusal::Malformed("the request carries no one region".into()));
+        };
         // Not SYSTEM, which no manifest row declares: it runs the signed boot
         // image whatever is installed.
         let Some(index) = self.services.iter().position(|s| s.program.name == name && s.role != Some(toyos_manifest::SYSTEM)) else {
@@ -1869,39 +1905,23 @@ impl<'a> Supervisor<'a> {
         if !running {
             return refuse(name, Refusal::NotRunning(name.to_string()));
         }
-        let bytes = match bytes {
-            Ok(bytes) => bytes,
+        if matches!(&service.source, Binary::Swapped(running) if running.digest == request.digest) {
+            return refuse(name, Refusal::AlreadyRuns(request.digest));
+        }
+        let swapped_in = match Swapped::copied(lent, &request) {
+            Ok(swapped_in) => swapped_in,
             Err(why) => return refuse(name, why),
         };
-        if let Err(why) = toyos_swap::verify(&bytes, &request.digest) {
-            return refuse(name, why);
-        }
-        let installed = toyos_swap::installed_path(name, &request.digest);
-        if service.source.path() == Some(installed.as_str()) {
-            return refuse(name, Refusal::AlreadyRuns(installed));
-        }
-        if let Err(why) = install(&installed, &request.digest, &bytes) {
-            return refuse(name, why);
-        }
+        let binary = Binary::Swapped(Rc::new(swapped_in));
         swapped(
             name,
             Word::Accepted,
-            &format!(
-                "{installed} ({} bytes, sha256 {}) replaces {} (pid {})",
-                bytes.len(),
-                toyos_swap::hex(&request.digest),
-                service.source,
-                service.pid().map_or(0, |p| p)
-            ),
+            &format!("{binary} ({} bytes) replaces {} (pid {})", request.len, service.source, service.pid().map_or(0, |p| p)),
         );
         // A requester that cannot take the answer has hung up, which is the go
         // either way.
-        let _ = conn.try_send_bytes(toyos_swap::MSG_ACCEPTED, installed.as_bytes());
-        Some(Flight {
-            service: index,
-            path: installed,
-            phase: Phase::Answered { conn, rx: LaunchRx::new(), since: Instant::now() },
-        })
+        let _ = conn.try_send_bytes(toyos_swap::MSG_ACCEPTED, toyos_swap::hex(&request.digest).as_bytes());
+        Some(Flight { service: index, binary, phase: Phase::Answered { conn, rx: LaunchRx::new(), since: Instant::now() } })
     }
 
     /// Move a swap on as far as what has happened lets it, and answer what is
@@ -1915,20 +1935,20 @@ impl<'a> Supervisor<'a> {
                     return Some(Flight { phase: Phase::Answered { conn, rx, since }, ..flight });
                 }
                 drop(conn);
-                self.cut_over(flight.service, flight.path)
+                self.cut_over(flight.service, flight.binary)
             }
             Phase::Probation { until, previous, owed } => {
                 if now < until {
                     return Some(Flight { phase: Phase::Probation { until, previous, owed }, ..flight });
                 }
-                self.end_probation(flight.service, &flight.path, &previous, &owed);
+                self.end_probation(flight.service, &flight.binary, &previous, &owed);
                 None
             }
         }
     }
 
-    /// Stop the service and start the installed binary in its place.
-    fn cut_over(&mut self, index: usize, path: String) -> Option<Flight> {
+    /// Stop the service and start the verified binary in its place.
+    fn cut_over(&mut self, index: usize, binary: Binary) -> Option<Flight> {
         let name = self.services[index].program.name.clone();
         let previous = self.services[index].source.clone();
         // What the process being stopped holds, which its replacement and the
@@ -1954,7 +1974,7 @@ impl<'a> Supervisor<'a> {
             let _ = old.wait();
         }
         let started = service.spawn(
-            &Source::Path(path.clone()),
+            &binary,
             &owed,
             block,
             self.system,
@@ -1971,16 +1991,15 @@ impl<'a> Supervisor<'a> {
                     &name,
                     Word::Started,
                     &format!(
-                        "{path} as pid {pid}; in service if it runs {} ms",
+                        "{binary} as pid {pid}; in service if it runs {} ms",
                         toyos_swap::PROBATION_MS
                     ),
                 );
                 let until = Instant::now() + Duration::from_millis(toyos_swap::PROBATION_MS);
-                Some(Flight { service: index, path, phase: Phase::Probation { until, previous, owed } })
+                Some(Flight { service: index, binary, phase: Phase::Probation { until, previous, owed } })
             }
             Err(e) => {
-                swapped(&name, Word::Failed, &format!("{path} did not start: {e}"));
-                forget(&path);
+                swapped(&name, Word::Failed, &format!("{binary} did not start: {e}"));
                 self.restore(index, &previous, &owed);
                 None
             }
@@ -1989,7 +2008,7 @@ impl<'a> Supervisor<'a> {
 
     /// Probation is over: the new binary is the service, or the one it
     /// replaced is started again.
-    fn end_probation(&mut self, index: usize, path: &str, previous: &Source, owed: &[String]) {
+    fn end_probation(&mut self, index: usize, binary: &Binary, previous: &Binary, owed: &[String]) {
         let service = &mut self.services[index];
         let name = service.program.name.clone();
         // The loop watches its end from here, and an end before this answer
@@ -2003,11 +2022,8 @@ impl<'a> Supervisor<'a> {
                 swapped(
                     &name,
                     Word::InService,
-                    &format!("{path} as pid {}", service.pid().map_or(0, |p| p)),
+                    &format!("{binary} as pid {}", service.pid().map_or(0, |p| p)),
                 );
-                if let Some(previous) = previous.path().filter(|&previous| previous != path) {
-                    forget(previous);
-                }
             }
             ended => {
                 let how = match ended {
@@ -2018,10 +2034,9 @@ impl<'a> Supervisor<'a> {
                 swapped(
                     &name,
                     Word::Failed,
-                    &format!("{path} {how} inside {} ms", toyos_swap::PROBATION_MS),
+                    &format!("{binary} {how} inside {} ms", toyos_swap::PROBATION_MS),
                 );
                 service.child = None;
-                forget(path);
                 self.restore(index, previous, owed);
             }
         }
@@ -2268,7 +2283,7 @@ impl<'a> Supervisor<'a> {
 
     /// Start the binary a failed swap replaced, or close the service's ports
     /// when that will not start either.
-    fn restore(&mut self, index: usize, previous: &Source, owed: &[String]) {
+    fn restore(&mut self, index: usize, previous: &Binary, owed: &[String]) {
         let program = self.services[index].program;
         self.make_state_dir(program);
         self.desktop_for(index);
@@ -2315,9 +2330,18 @@ fn is_folder(path: &str) -> Result<(), String> {
     }
 }
 
-/// The SHA-256 of the binary at `path`, which a grant is keyed on.
+/// The SHA-256 of the binary at `path`, which a grant is keyed on, read
+/// through [`toyos_swap::MAX_BINARY_BYTES`]: a file grown while it is read is
+/// refused, never read whole.
 fn binary_digest(path: &str) -> Result<String, String> {
-    let bytes = read_binary(path).map_err(|why| why.to_string())?;
+    use std::io::Read as _;
+    let unreadable = |e: std::io::Error| format!("{path} cannot be read: {e}");
+    let file = std::fs::File::open(path).map_err(unreadable)?;
+    let mut bytes = Vec::new();
+    file.take(toyos_swap::MAX_BINARY_BYTES + 1).read_to_end(&mut bytes).map_err(unreadable)?;
+    if bytes.len() as u64 > toyos_swap::MAX_BINARY_BYTES {
+        return Err(format!("{path} is past the {} bytes a binary may be", toyos_swap::MAX_BINARY_BYTES));
+    }
     Ok(toyos_swap::hex(&toyos_swap::digest(&bytes)))
 }
 
@@ -2329,51 +2353,6 @@ fn write_store(text: &str) -> Result<(), String> {
         .and_then(|()| std::fs::write(&partial, text))
         .and_then(|()| std::fs::rename(&partial, grants::STORE))
         .map_err(|e| format!("{} could not be written: {e}", grants::STORE))
-}
-
-/// A staged or installed binary's bytes, refused past [`toyos_swap::MAX_BINARY_BYTES`]
-/// before any of it is read, and read through that bound: a file grown
-/// between the two is refused, never read whole. Made from the loop: a swap's
-/// files are under [`toyos_swap::STAGING`], which the kernel serves.
-fn read_binary(path: &str) -> Result<Vec<u8>, Refusal> {
-    use std::io::Read as _;
-    let unreadable = |e: std::io::Error| Refusal::Unreadable { path: path.to_string(), why: e.to_string() };
-    let file = std::fs::File::open(path).map_err(unreadable)?;
-    let len = file.metadata().map_err(unreadable)?.len();
-    if len > toyos_swap::MAX_BINARY_BYTES {
-        return Err(Refusal::TooLarge(len));
-    }
-    let mut bytes = Vec::new();
-    file.take(toyos_swap::MAX_BINARY_BYTES + 1).read_to_end(&mut bytes).map_err(unreadable)?;
-    match bytes.len() as u64 > toyos_swap::MAX_BINARY_BYTES {
-        true => Err(Refusal::Unreadable {
-            path: path.to_string(),
-            why: format!("it grew past {} bytes while it was read", toyos_swap::MAX_BINARY_BYTES),
-        }),
-        false => Ok(bytes),
-    }
-}
-
-/// Write verified bytes where a service is started from: a temporary name
-/// beside it and one rename, so the path is never a partial binary.
-fn install(path: &str, digest: &toyos_swap::Digest, bytes: &[u8]) -> Result<(), Refusal> {
-    let failed = |e: std::io::Error| Refusal::Install { path: path.to_string(), why: e.to_string() };
-    std::fs::create_dir_all(toyos_swap::installed_dir(digest)).map_err(failed)?;
-    let partial = format!("{path}.partial");
-    std::fs::write(&partial, bytes).map_err(failed)?;
-    std::fs::rename(&partial, path).map_err(failed)
-}
-
-/// Delete a binary a swap installed once nothing runs it. The image's own
-/// binaries are never touched.
-fn forget(path: &str) {
-    if !toyos_swap::is_installed(path) {
-        return;
-    }
-    let _ = std::fs::remove_file(path);
-    if let Some((dir, _)) = path.rsplit_once('/') {
-        let _ = std::fs::remove_dir(dir);
-    }
 }
 
 impl Supervisor<'_> {
@@ -2894,7 +2873,7 @@ enum Resolved<'a, V> {
 /// before any symlink is followed, never after.** `declared` follows one link,
 /// so asking it first would let `/apps/<anything>/x` — a symlink any process
 /// can plant — resolve to the whole `[programs]` row of the binary it points
-/// at. A path the kernel would normalize is refused before either happens: it
+/// at. A path a client would normalize is refused before either happens: it
 /// classifies as one thing and opens as another, and `start` spawns the string
 /// the client sent, so the two need not even name one file.
 ///
@@ -3299,6 +3278,9 @@ fn start<'a>(
                     LaunchFd::Caller(handle, toyos::fd::Kind::Handle) => {
                         command.inherit_handle(*fd, handle.as_handle().into());
                     }
+                    LaunchFd::Caller(handle, toyos::fd::Kind::File) => {
+                        command.inherit_file(*fd, handle.as_handle().into());
+                    }
                     LaunchFd::Caller(handle, toyos::fd::Kind::Exported) => {
                         command.inherit_exported(*fd, handle.as_handle().into());
                     }
@@ -3480,6 +3462,10 @@ impl Grants<'_> {
             let badge = match authorization {
                 Authorization::Tables => toyos_blockring::wire::Badge::Tables,
                 Authorization::DesignateData => toyos_blockring::wire::Badge::DesignateData,
+                Authorization::FormatData => toyos_blockring::wire::Badge::Partitions(toyos_blockring::wire::Grant {
+                    scope: toyos_blockring::wire::Scope::Kind(toyos_gpt::Guid::TOYOS_DATA.0),
+                    writes: true,
+                }),
             };
             let Some(ports) = &self.block else { return Err(format!("`{word}` is authorized and no block service runs")) };
             let ports = ports.borrow();
@@ -3703,8 +3689,8 @@ fn guid_text(guid: [u8; 16]) -> String {
 
 /// A file server's arguments and the volume it is endowed for one start.
 ///
-/// A file server is told its role. SYSTEM is handed ROOT's image; every other
-/// role `block` minted with its grant (`toyos_supervisor::storage`), and LOG
+/// A file server is told its role. SYSTEM is handed ROOT's image; MEMORY
+/// needs no block grant, and disk roles receive `block` minted with their grant (`toyos_supervisor::storage`), and LOG
 /// and BOOT the GUID of the partition the loader named. A log or boot role the
 /// loader named no partition for, and a block port closed for good, each
 /// refuse the start: the role is then absent, never served from memory.
@@ -3714,6 +3700,7 @@ fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>, b
         return Ok(storage);
     };
     storage.args.push(role.to_string());
+    if role == "memory" { return Ok(storage); }
     if role == toyos_manifest::SYSTEM {
         let root = boot.root.try_clone()
             .map_err(|e| std::io::Error::other(format!("ROOT's image did not duplicate: {e:?}")))?;

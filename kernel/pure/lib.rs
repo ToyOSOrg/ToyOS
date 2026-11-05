@@ -12,7 +12,7 @@ extern crate std;
 pub mod bootwrite;
 pub mod clock;
 pub mod cpu;
-pub mod dirnodes;
+pub mod cwd;
 pub mod dmaguard;
 pub mod event;
 pub mod frames;
