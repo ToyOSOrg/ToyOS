@@ -21,6 +21,11 @@ before it moved to a thread of its own, which is how the console stood silent
 for the supervisor's 30 s declaration bound on `acpi_press_is_one_sci`'s boot.
 
 **Exit**: no console channel waits on a `/log` call; a guest boot whose LOG
-server stops answering mid-boot still carries its later lines.
+server stops answering mid-boot still carries its later lines. The shape: the
+file is a consumer of the replay with its own offset, written on its own
+thread as the readers and carriers are, and the stop asks it to reach the
+replay's end and sync within a bound. #1190's per-file offset and bounded
+stop catch-up (`Volume::through`, `catch_up`, `finish`) are its vehicle, so
+whoever reconciles #1190 with this takes it up.
 
 Owner: `system/logkeeper`; unheld.

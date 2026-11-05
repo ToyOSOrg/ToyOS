@@ -45,13 +45,12 @@
 //! The console's carriers are the third ([`carrier`]): the console UART's
 //! driver, and a VM's console channel, which the UART goes quiet for while it
 //! carries the log. Neither of the two can slow the file: each is a thread
-//! with an offset into what the file already has.
+//! with an offset into the replay, which follows the file once it is open.
 //!
 //! **The volume is opened on a thread of its own, and nothing waits for it**:
-//! /log's file server starts with storage, which can wait for the root
-//! bridges' memory to be declared. Until it opens, the readers and the
-//! console have each round as it is read; once it opens, the file takes the
-//! boot whole from the replay first.
+//! /log's file server may start late. Until it opens, the readers and the
+//! console have each round as it is read; once it opens, the file first takes
+//! the boot so far from the replay.
 //!
 //! # Its whole authority
 //!
@@ -597,9 +596,8 @@ impl Log {
         self.answered(refused);
     }
 
-    /// The volume, once its opener answers and the machine is not stopping:
-    /// the file takes the boot so far from the replay, which holds it whole
-    /// for this, and each round after.
+    /// The volume, once its opener answers outside a stop: the file first
+    /// takes the boot so far from the replay.
     fn adopt(&mut self) {
         if self.stopping.is_some() {
             return;
@@ -685,6 +683,9 @@ impl Log {
     /// The supervisor asked for the log whole before the machine stops: every line is
     /// written by now, so the volume is made durable, and the supervisor is told.
     fn flushed(&mut self) {
+        // An opener that answered during the flush's rounds: the file takes
+        // the boot before the sync below makes it durable.
+        self.adopt();
         if self.opening.is_some() {
             toyos::error!("logkeeper: {DIR} had not opened by the stop - this boot's log is on the console only");
         }

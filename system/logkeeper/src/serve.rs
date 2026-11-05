@@ -3,8 +3,8 @@
 //!
 //! **Every reader gets the boot from its first line**, however late it
 //! connects: the main loop appends each round's lines to one
-//! [`toyos_logstream::Replay`] after the file has them, and a reader is a
-//! thread with an offset into it. So the same text reaches `/log` and every
+//! [`toyos_logstream::Replay`], after the file has them once it is open, and a
+//! reader is a thread with an offset into it. So the same text reaches `/log` and every
 //! reader, in the same order, and nothing a reader does can reach the file.
 //!
 //! A reader that takes none for [`STALLED`] while bytes are owed to it is let
