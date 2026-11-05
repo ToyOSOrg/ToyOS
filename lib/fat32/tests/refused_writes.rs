@@ -395,8 +395,8 @@ fn append_and_sync() -> Scenario {
     }
 }
 
-/// A shrink frees a tail from its first write on; its refusal is carried
-/// forward too, and the entry is recorded once the free has gone through.
+/// A shrink records the shorter entry, then frees the tail: a refused entry
+/// is undone, and a refusal from the free on is carried forward.
 fn truncate() -> Scenario {
     Scenario {
         name: "truncate",
@@ -665,8 +665,8 @@ fn all() -> [Scenario; 11] {
 #[test]
 fn a_stop_at_any_write_leaves_only_the_named_windows() {
     for s in all() {
-        // What these two calls' own write order leaves at a stop, owned by
-        // their issue files and not by this repair.
+        // What rename's own write order leaves at a stop, owned by its issue
+        // file and not by this repair.
         let own: fn(&Complaint) -> bool = match s.name {
             // issues/a-rename-that-stops-between-its-writes-leaves-a-chain-two-entries-reach.md
             "rename" => |c| {
@@ -677,9 +677,6 @@ fn a_stop_at_any_write_leaves_only_the_named_windows() {
                         | Complaint::DotEntry { .. }
                 )
             },
-            // issues/a-shrink-frees-clusters-before-the-entry-stops-naming-them.md
-            "truncate" => |c| matches!(c, Complaint::ChainTooShort { .. }),
-            "truncate to zero" => |c| matches!(c, Complaint::ChainTooShort { .. } | Complaint::ChainOutOfRange { .. }),
             _ => |_| false,
         };
         let (base, handle) = fixture(&s);

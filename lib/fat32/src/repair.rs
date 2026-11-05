@@ -40,8 +40,9 @@
 //! - **Between a claim and its link.** A claimed cluster is end-of-chain before
 //!   anything reaches it, so a stop there orphans it: a leak, never a chain
 //!   into free space.
-//! - **Inside a free.** The name is erased or the kept cluster terminated
-//!   first, so a stop part way through the walk orphans the rest of the chain.
+//! - **Inside a free.** The name is erased, or a truncation's entry
+//!   shortened, before the first cluster is freed, so a stop part way through
+//!   the walk orphans the rest of the chain.
 //! - **Between the entries of one name.** A long name is a run of up to
 //!   twenty-one directory entries written one at a time, so a stop inside a
 //!   create, rename or remove leaves a partial run.
