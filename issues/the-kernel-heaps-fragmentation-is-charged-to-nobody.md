@@ -26,12 +26,32 @@ overcount (a B-tree entry is charged about three times its bytes), which
 absorbs some of it, but nothing bounds it. The host model in `frames.rs` does
 not see it: it holds the heap at exactly what its charges need.
 
-**Exit**, either of:
+## Options
 
-- size-segregated slabs for what processes cause, each class's tail bounded,
-  so a class's footprint is a function of its live count and charged as such;
-- charges taken against the heap's footprint rather than its bytes, so growth
-  the heap needs is charged to the call that caused it.
+Recorded for when kernel memory is next reshaped; none is chosen.
 
-Either with a guest case in `kernel_objects_refused` that churns name sizes
-with every frame taken and is refused, never panics.
+1. **Size-class slabs for what processes cause.** Each class grows by pages
+   and charges its class size per object. A class's footprint then follows
+   its live count only while its pages stay full: a process that frees all
+   but one object per page holds every page at one object's charge. So slabs
+   bound the tail only if each class's pages are charged whole to one job.
+   This also adds a second allocator beside dlmalloc.
+2. **Charge the heap's footprint.** A growth is charged to the call that
+   triggered it. This is unfair across jobs (one job's frees make the holes
+   another job's sizes cannot reuse), and a superframe outlives the charge
+   that grew it.
+3. **A per-job arena.** A job's charged objects come from pages charged to
+   that job alone, so its fragmentation spends only its own quota and nobody
+   else's. That is option 1's whole-page charge made the rule. Kernel objects
+   are `Box`, `Vec` and `BTreeMap` on the global allocator, so this needs
+   allocator-aware containers (`allocator_api` is unstable) or an arena
+   carried by every charged object's type.
+
+**Lean: 3.** It is the only option whose bound holds against a hostile
+holder by construction, by charging pages rather than bytes to the job that
+holds them. 1 converges on it once its tail problem is fixed. The cost is
+threading the job's arena through every charged allocation.
+
+**Exit**: a process's charged kernel objects cannot grow the heap past what
+is charged to it, with a guest case in `kernel_objects_refused` that churns
+name sizes with every frame taken and is refused, never panics.
