@@ -8,15 +8,6 @@ use crate::process;
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::*;
 
-/// Runs `f` on the object `h` names, holding the table's guard.
-pub(super) fn with_object_ref<R>(
-    h: RawHandle,
-    need: Rights,
-    f: impl FnOnce(&KObjectRef) -> R,
-) -> Result<R, crate::object::HandleError> {
-    process::with_process_data(|data| data.handles.get_ref(h, need).map(f))
-}
-
 /// Requires that `syscap` resolves to a `SysCap` holding `need`, and answers
 /// every right it holds, read under the same guard.
 pub(super) fn demand_syscap(syscap: RawHandle, need: Rights) -> Result<Rights, crate::object::HandleError> {
@@ -26,10 +17,17 @@ pub(super) fn demand_syscap(syscap: RawHandle, need: Rights) -> Result<Rights, c
     })
 }
 
-/// The same, for the calls whose answer is already a raw syscall word.
+/// The object `h` names, cloned out of the process's lock: what a call that
+/// copies to or from its caller, or may park, works on (`user_ptr`).
+pub(super) fn object(h: RawHandle, need: Rights) -> Result<KObjectRef, crate::object::HandleError> {
+    process::with_process_data(|data| data.handles.get_ref(h, need).cloned())
+}
+
+/// `f` over the object `h` names, outside the process's lock, for the calls
+/// whose answer is already a raw syscall word.
 pub(super) fn with_object(h: RawHandle, need: Rights, f: impl FnOnce(&KObjectRef) -> u64) -> u64 {
-    match with_object_ref(h, need, f) {
-        Ok(v) => v,
+    match object(h, need) {
+        Ok(object) => f(&object),
         Err(e) => e.refuse(),
     }
 }

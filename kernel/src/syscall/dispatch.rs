@@ -27,7 +27,7 @@ use super::device::{
     sys_device_reg_read,
 };
 use super::event::{sys_event_create, sys_event_signal, sys_event_take, sys_handle_wait};
-use super::handles::{sys_close, sys_handle_dup, with_object, with_object_ref};
+use super::handles::{object, sys_close, sys_handle_dup, with_object};
 use super::io::{
     sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
 };
@@ -94,8 +94,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         }
         SYS_CLOSE => sys_close(RawHandle(a1 as u32)),
         SYS_FSTAT => {
-            let stat = match with_object_ref(RawHandle(a1 as u32), Rights::NONE, ops::fstat) {
-                Ok(stat) => stat,
+            let stat = match object(RawHandle(a1 as u32), Rights::NONE) {
+                Ok(object) => ops::fstat(&object),
                 Err(e) => return e.refuse(),
             };
             match ctx.copy_out(UserAddr::new(a2), &stat) {
@@ -294,8 +294,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             } else {
                 let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
                 let copy_len = env.len().min(buf.len());
-                buf.write_at(0, &env[..copy_len]);
-                copy_len as u64
+                buf.write_at(0, &env[..copy_len]).map_or(bad_addr, |()| copy_len as u64)
             }
         }
         // What a claimed PCI function's driver is built out of. Each is
@@ -379,7 +378,9 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             let Some(bytes) = ctx.user_bytes(UserAddr::new(a2), len) else { return bad_addr };
             let mut badge = [0u8; MAX_BADGE];
-            bytes.read_at(0, &mut badge[..len as usize]);
+            if bytes.read_at(0, &mut badge[..len as usize]).is_err() {
+                return bad_addr;
+            }
             sys_port_mint(RawHandle(a1 as u32), &badge[..len as usize])
         }
         SYS_PORT_BADGE => {
@@ -539,7 +540,9 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 return bad_addr;
             };
             let mut raw = [0u8; CPU_MASK_WORDS * 8];
-            bytes.read_at(0, &mut raw[..a3 as usize * 8]);
+            if bytes.read_at(0, &mut raw[..a3 as usize * 8]).is_err() {
+                return bad_addr;
+            }
             let words: [u64; CPU_MASK_WORDS] =
                 core::array::from_fn(|i| u64::from_le_bytes(raw[i * 8..][..8].try_into().unwrap()));
             sys_thread_set_affinity(a1, &words[..a3 as usize])
@@ -553,10 +556,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             };
             match sys_thread_get_affinity(a1) {
                 Ok(words) => {
-                    for (i, word) in words.iter().enumerate() {
-                        out.write_at(i * 8, &word.to_le_bytes());
-                    }
-                    0
+                    let wrote = words.iter().enumerate().try_for_each(|(i, word)| out.write_at(i * 8, &word.to_le_bytes()));
+                    wrote.map_or(bad_addr, |()| 0)
                 }
                 Err(e) => e.to_u64(),
             }
@@ -573,7 +574,9 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 return bad_addr;
             };
             let mut name = [0u8; process::THREAD_NAME_LEN];
-            bytes.read_at(0, &mut name[..len]);
+            if bytes.read_at(0, &mut name[..len]).is_err() {
+                return bad_addr;
+            }
             process::set_current_thread_name(&name[..len]);
             0
         },

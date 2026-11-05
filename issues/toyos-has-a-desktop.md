@@ -6,37 +6,13 @@ opened: 2026-09-26
 
 # ToyOS has a desktop
 
-Owner rulings, 2026-09-26:
-
-- **The desktop is part of ToyOS.** It ships in the image as a fully fledged
-  desktop distribution; it is never a package the package manager installs.
-- **ToyOS's own desktop software uses iced only.**
-- **The platform supports iced alone, for now** (owner ruling, 2026-09-26):
-  slint and egui are not supported
-  (`issues/slint-and-egui-are-not-supported-by-the-owners-choice.md`).
-- **ToyOS is a first-class platform, never Linux-compatible.** A crate that
-  assumes "any other OS is Linux" gets a forked native toyos branch, carried
-  until it is upstreamed.
-- **Licences:** everything shipped as part of ToyOS is licence-clean, checked
-  by a licence gate being built in parallel. Installable third-party apps are
-  exempt.
-- **Rendering:** CPU rendering is the first-class path; there is no CPU
-  Vulkan. Later, a display-only driver for the T14's Iris Xe (Gen12 Xe-LP),
-  then a Vulkan driver so wgpu apps get the GPU.
-- **Window management:** both floating and tiling.
-- **Look and feel:** the familiar style every desktop shares — a taskbar with
-  pinned and running apps together, one start menu with search, clear window
-  chrome, snapping a window to an edge or half the screen. Minimal and
-  discoverable, not a copy of Windows 7, and no glass or blur, because
-  rendering is on the CPU.
-- **COSMIC:** porting it whole, and `libcosmic` with it, is rejected (owner
-  ruling, 2026-09-26). `libcosmic` carries System76's own forks of iced and
-  winit, is git-only, and pulls about 303 crates at its leanest against plain
-  iced's 97. COSMIC's own apps are GPL-3.0 and built only on Ubuntu, so they
-  are not a realistic installable-package target either. ToyOS writes its own
-  desktop environment on plain upstream iced; its ambition is to be a real
-  competitor to COSMIC, not a port of it. `cosmic-text` (MIT OR Apache-2.0)
-  remains in use.
+The desktop's design was ruled by the owner on 2026-09-26: part of ToyOS and
+never a package, iced alone for ToyOS's own software and for now for the
+platform (`issues/slint-and-egui-are-not-supported-by-the-owners-choice.md`),
+CPU rendering first, floating and tiling, and its own environment on plain
+upstream iced rather than a port of COSMIC, whose `cosmic-text` (MIT OR
+Apache-2.0) remains in use. Everything shipped as part of ToyOS is
+licence-clean; installable third-party apps are exempt.
 
 ## Why CPU rendering, not a CPU Vulkan
 

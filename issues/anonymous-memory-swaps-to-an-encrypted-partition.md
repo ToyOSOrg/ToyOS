@@ -19,35 +19,6 @@ different thing.
 The design is out of the tree with the memory and storage designs. Its plans and
 reviews are in #1088's evidence. Below is what an implementer needs.
 
-## What a program sees
-
-- **Swapped memory may wait on storage**, in a load, a store or a syscall that
-  copies it.
-  - A wait advances on storage progress, ends on established failure or kill,
-    and is reported overdue.
-  - A timeout never turns it into an error. `O_NONBLOCK` does not cover the
-    caller's own buffer.
-- **A page is lost only when a running memory service establishes the loss**: a
-  read failed after the driver's recovery, a failed authentication, or a device
-  that is gone.
-  - With no service running, nothing is established, and waits stay overdue.
-  - **The process's own anonymous memory**, once lost, ends the process at its
-    next touch: a load, a store, or one of its own syscalls copying it. The
-    syscall gets no errno.
-  - **A buffer inside a file mapping** (a paged object, or a served `/tmp`
-    object) answers `EIO`.
-  - **A futex wait** on a swapped or lost word returns as a spurious wake.
-- **Executable and read-only image pages never go to swap.**
-- **A stopped memory service, or one past its restart budget, fails nothing.**
-  Its faults wait, reported as "memory service not running", until an authorized
-  manual restart. The user may stop any waiting program.
-- **Commitment can outlive its backing.** If the swap device leaves, or
-  retirements exhaust the spares, new commitments are refused. A fault past the
-  remaining backing waits, reported with the deficit, and is never ended.
-- **`mlock`/`vm_wire` is refused past the job's wire allowance** (`ENOMEM`).
-- **One program's swapped memory delays only that program.** No service waits on
-  one client's memory in a path that serves others.
-
 ## Ownership
 
 - **Kernel:** mechanics only, with no policy, filesystem or cryptography.
@@ -319,7 +290,7 @@ Each check goes red under the mutation named after "red".
 
 | Stage | After | Builds | Exit |
 |---|---|---|---|
-| S0-a (`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`'s owner) | — | Every user copy faults or swaps in its chunk before any kernel lock, and pins after a re-check, with no pin across a wait. A lost anonymous page ends the caller, and a lost file-mapping page answers `EIO`. The futex re-translation never waits | Closes `issues/a-user-copy-demand-pages-under-whatever-its-caller-holds.md` and `issues/a-pipes-lock-spans-a-user-copy-and-its-first-allocation.md`. **H:** a chunk model in which an anonymous loss ends the caller with no partial result and a file-mapping loss answers `EIO`, red if either takes the other's outcome. **Q:** the pipe and futex sites, red when a copy runs under the pipe lock |
+| S0-a (`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`'s owner) | — | Every user copy faults or swaps in its chunk before any kernel lock, and pins after a re-check, with no pin across a wait. A lost anonymous page ends the caller, and a lost file-mapping page answers `EIO`. The futex re-translation never waits | Closes `issues/a-pipes-lock-spans-a-user-copy-and-its-first-allocation.md`. One half is built: no user copy runs under a spin lock, and one that would is refused by name (`user_ptr`). By the orchestrator's ruling of 2026-11-03, the rest of this row is built as part of the process-memory track's 7b; the kernel has had no sleeping lock for the gate to extend to since #1152. **H:** a chunk model in which an anonymous loss ends the caller with no partial result and a file-mapping loss answers `EIO`, red if either takes the other's outcome. **Q:** the pipe and futex sites, red when a copy runs under the pipe lock |
 | S0-b (`issues/storage-is-layers-and-a-role-is-a-filesystem.md`'s owner) | — | The block-session client and driver side allocate nothing per I/O: tables sized by `DEPTH`, reads opened straight from the arena. A reopen refused `Held` by a closing session waits for its retirement | **H:** `DEPTH` traffic with an allocator that fails after warm-up, red on any per-I/O allocation; a reopen during a dead session's close answered only after its last completion, red if the hold is released early |
 | P1 (`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`'s owner) | prerequisites | Both rules and the frame rule in `kernel/pure/frames.rs`; residency by charged job; `CHARGE`; `vm_wire`, the per-job allowance and additive charges; `resident` and `restart-hold`; the main stack sized by `PT_GNU_STACK` (8 MiB otherwise); resident by kind; unmovable frames in their own superframes; the ledger figures; `S = 0` | **H:** both rules at every `W` and `A` increase, red when a table build skips the backing rule; a resident fault never waits, red when a swappable fault may take a held frame; `SHM_FOR_JOB` to a resident job gives `W` and to an ordinary one `A`; wiring refused past the allowance; a helper shares its job's allowance; an additive wire, red if the charged job pays; two wirers where the first exits, red if any release can be refused or leaves a rule exceeded; superframe invariants under wire and lend; a hold kept whole. **Q:** a `CHARGE`-only handle creates an object `SHM_FOR_JOB` and is refused as a spawn's job and at `SYS_JOB_FLOOR`, red if either refusal accepts it; `mmap_stress`; each resident row's committed and populated totals reported |
 | P2 (`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`'s owner) | P1 | Reverse records and the RAM-object reverse index; `mem_scan`; `mem_reclaim` for clean pages and never-writable copied pages; `mem_read`/`mem_write` and `vm_wire_ticket` on the ticket table; watermarks; the kept fallback; superframe evacuation; the `reclaimer` role; service v0 (plain CLOCK) | **H:** revalidation, floor protection, revoke order, an evacuation case; `Pending` without waiting, every non-resident page requested at once, red if a call waits or requests fewer; an unmap cancels a parked ticket and removes the wirer's charge without waiting, red if the unmap waits or the charge stays; `Lost` removes the wirer's charge, red if it stays; a blocking wire of another job refused, red if accepted; a dropped copied page refilled byte-exact, red if a once-`ReadWrite` or resident range is dropped; a version not purged under a copy range, red if the range is not counted; the fallback with a stuck service; a remap between scan and reclaim. **Q:** a page-cache-heavy run with the controls usable |

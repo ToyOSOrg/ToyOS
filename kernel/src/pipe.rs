@@ -1,13 +1,24 @@
-use crate::frame_bytes::FrameBytes;
+//! A pipe: its two ends' holders and the bytes between them, behind its own
+//! lock, which no copy and no frame allocation runs under
+//! (`crate::frame_bytes`). A small read or write bounces through its stack in
+//! one hold; a larger one claims its bytes. A second of either kind waits for
+//! its turn (`frame_bytes::turn`).
+
+use crate::frame_bytes::{self, Bounce, FrameBytes, BOUNCE};
+
+/// A small read's or write's bytes, on its caller's stack.
+pub type PipeBounce = Bounce<BOUNCE>;
 use crate::mm::charge::{self, Charge, Exhausted};
 
 use kernel::pipe::{End, Holders, Released};
+use kernel::sched::task::WaitClass;
 
 use alloc::sync::Arc;
 
-use crate::watch::Watch;
+use crate::scheduler::Parkable;
 use crate::sync::Lock;
 use crate::user_ptr::{UserBytes, UserBytesMut};
+use crate::watch::{Cancelled, Watch};
 
 /// A reference to a pipe that holds neither end: what an end's object, a
 /// waiter and a poll keep to reach it. The pipe is its own: nothing else
@@ -103,6 +114,17 @@ struct State {
     rt_boost_pending: bool,
 }
 
+impl State {
+    /// What no reader is left to read, to give back with the lock let go;
+    /// kept while a claim's copy may still reach it, whose end asks again.
+    fn unread(&mut self) -> Option<FrameBytes> {
+        (!self.holders.held(End::Read) && !self.held.claimed() && self.held.frames() > 0).then(|| {
+            let job = Arc::clone(self.held.job());
+            core::mem::replace(&mut self.held, FrameBytes::new(&job))
+        })
+    }
+}
+
 impl Pipe {
     /// The heap one takes: itself and its four watches.
     fn heap() -> usize {
@@ -127,6 +149,22 @@ pub fn create() -> Result<(PipeReader, PipeWriter), Exhausted> {
     Ok((PipeReader::acquire(&pipe), PipeWriter::acquire(&pipe)))
 }
 
+/// Bytes [`PipeRef::take_now`] took: the frames they left spare go back,
+/// and a lent real-time window is taken, as it drops with every lock let go.
+pub struct Taken {
+    pub n: usize,
+    _spares: frame_bytes::Spares,
+    boost: bool,
+}
+
+impl Drop for Taken {
+    fn drop(&mut self) {
+        if self.boost {
+            crate::scheduler::boost_current_rt_inherited();
+        }
+    }
+}
+
 pub enum PipeWrite {
     Wrote(usize),
     /// Not the room the write needs now: wait for `kernel::pipe::room`.
@@ -135,6 +173,22 @@ pub enum PipeWrite {
     /// The memory its bytes need could not be taken; no wait for room makes
     /// it appear, so a caller must not park on it.
     NoMemory,
+    /// A byte of the writer's buffer it cannot reach: nothing was written.
+    Faulted,
+}
+
+/// Why a read answered no count.
+pub enum ReadStopped {
+    /// A kill ended the wait for another read's claim.
+    Cancelled,
+    /// A byte of the reader's buffer it cannot reach: the bytes it took are lost.
+    Faulted,
+}
+
+impl From<Cancelled> for ReadStopped {
+    fn from(_: Cancelled) -> Self {
+        Self::Cancelled
+    }
 }
 
 impl PipeRef {
@@ -142,39 +196,177 @@ impl PipeRef {
         self.0.state.lock().holders.hold(end);
     }
 
-    pub fn try_read(&self, buf: &mut UserBytesMut) -> Option<usize> {
-        let (result, boost) = {
-            let mut pipe = self.0.state.lock();
+    /// Read what the pipe holds into `buf`, as much as fits: `None` while it
+    /// holds nothing and a writer is left. Waits only for another read's
+    /// claim to end, never for bytes.
+    pub fn read(&self, p: &Parkable, buf: &mut UserBytesMut) -> Result<Option<usize>, ReadStopped> {
+        let mut bounce = PipeBounce::new();
+        let (n, runs, boost) = {
+            let mut pipe = self.turn(p, End::Read)?;
             let available = pipe.held.len();
-            if available > 0 {
-                let n = buf.len().min(available);
-                pipe.held.read(buf, n);
-                (Some(n), core::mem::take(&mut pipe.rt_boost_pending))
-            } else if !pipe.holders.held(End::Write) && available == 0 {
-                (Some(0), false)
-            } else {
-                (None, false)
+            if available == 0 {
+                return Ok((!pipe.holders.held(End::Write)).then_some(0));
             }
+            let n = buf.len().min(available);
+            if n == 0 {
+                return Ok(Some(0));
+            }
+            let boost = core::mem::take(&mut pipe.rt_boost_pending);
+            if n <= BOUNCE {
+                let spares = pipe.held.take(n, &mut bounce);
+                drop(pipe);
+                frame_bytes::give_back(&self.0.state, |s| &mut s.held, spares);
+                if boost {
+                    crate::scheduler::boost_current_rt_inherited();
+                }
+                buf.write_at(0, bounce.bytes()).map_err(|_| ReadStopped::Faulted)?;
+                return Ok(Some(n));
+            }
+            pipe.held.claim_read(n);
+            (n, pipe.held.first_drain(0, n), boost)
         };
         if boost {
             // Outside the pipe's lock: the scheduler takes its own CPU-queue lock.
             crate::scheduler::boost_current_rt_inherited();
         }
-        result
+        let copied = frame_bytes::drain(&self.0.state, |s| &mut s.held, 0, buf, n, runs);
+        let (spares, ended, unread) = {
+            let mut pipe = self.0.state.lock();
+            let (spares, ended) = pipe.held.consume();
+            (spares, ended, pipe.unread())
+        };
+        frame_bytes::give_back(&self.0.state, |s| &mut s.held, spares);
+        drop(unread);
+        frame_bytes::wake(&self.0.read_watch, ended);
+        copied.map_err(|_| ReadStopped::Faulted)?;
+        Ok(Some(n))
     }
 
-    /// Write `buf` as a pipe write lands (`kernel::pipe::takes`), under the
-    /// one lock hold.
-    pub fn write(&self, buf: &UserBytes) -> PipeWrite {
+    /// Write `buf` as a pipe write lands (`kernel::pipe::takes`). Waits only
+    /// for another write's claim to end, never for room.
+    pub fn write(&self, p: &Parkable, buf: &UserBytes) -> Result<PipeWrite, Cancelled> {
+        if buf.len() <= BOUNCE {
+            let mut bounce = PipeBounce::new();
+            return match bounce.read(buf) {
+                Ok(src) => self.write_bounced(p, src),
+                Err(_) => Ok(PipeWrite::Faulted),
+            };
+        }
+        let (n, first) = {
+            let mut pipe = self.turn(p, End::Write)?;
+            if !pipe.holders.held(End::Read) {
+                return Ok(PipeWrite::BrokenPipe);
+            }
+            match kernel::pipe::takes(pipe.held.space(), buf.len()) {
+                None => return Ok(PipeWrite::NoRoom),
+                Some(0) => return Ok(PipeWrite::Wrote(0)),
+                Some(n) => {
+                    pipe.held.claim_write(n);
+                    (n, pipe.held.first_fill(n))
+                }
+            }
+        };
+        let supplied = match first {
+            frame_bytes::Fill::Runs(runs) => Ok(runs),
+            frame_bytes::Fill::Supply(needs) => frame_bytes::supply(&self.0.state, |s| &mut s.held, needs, n),
+        };
+        let wrote = match supplied {
+            Ok(runs) => match frame_bytes::fill(&self.0.state, |s| &mut s.held, buf, n, runs) {
+                Ok(()) => PipeWrite::Wrote(n),
+                Err(_) => PipeWrite::Faulted,
+            },
+            Err(Exhausted) => PipeWrite::NoMemory,
+        };
+        let (ended, unread) = {
+            let mut pipe = self.0.state.lock();
+            let ended = match wrote {
+                PipeWrite::Wrote(_) => pipe.held.commit(),
+                _ => pipe.held.abandon_write(),
+            };
+            (ended, pipe.unread())
+        };
+        drop(unread);
+        frame_bytes::wake(&self.0.write_watch, ended);
+        Ok(wrote)
+    }
+
+    /// [`Self::write`] of `src`, already copied in: whole in one hold, unless
+    /// it needs frames, which it takes with the lock let go.
+    fn write_bounced(&self, p: &Parkable, src: &PipeBounce) -> Result<PipeWrite, Cancelled> {
+        let (n, needs) = {
+            let mut pipe = self.turn(p, End::Write)?;
+            if !pipe.holders.held(End::Read) {
+                return Ok(PipeWrite::BrokenPipe);
+            }
+            let n = match kernel::pipe::takes(pipe.held.space(), src.bytes().len()) {
+                None => return Ok(PipeWrite::NoRoom),
+                Some(0) => return Ok(PipeWrite::Wrote(0)),
+                Some(n) => n,
+            };
+            if pipe.held.put(&src.bytes()[..n]) {
+                return Ok(PipeWrite::Wrote(n));
+            }
+            pipe.held.claim_write(n);
+            match pipe.held.first_fill(n) {
+                frame_bytes::Fill::Supply(needs) => (n, needs),
+                frame_bytes::Fill::Runs(_) => unreachable!("a put refused wants frames"),
+            }
+        };
+        let supplied = frame_bytes::supply(&self.0.state, |s| &mut s.held, needs, n);
+        let (ended, unread) = {
+            let mut pipe = self.0.state.lock();
+            let ended = match supplied {
+                Ok(_) => pipe.held.place_all(&src.bytes()[..n]),
+                Err(Exhausted) => pipe.held.abandon_write(),
+            };
+            (ended, pipe.unread())
+        };
+        drop(unread);
+        frame_bytes::wake(&self.0.write_watch, ended);
+        Ok(match supplied {
+            Ok(_) => PipeWrite::Wrote(n),
+            Err(Exhausted) => PipeWrite::NoMemory,
+        })
+    }
+
+    /// Write `src`, already copied in, whole in one hold of the pipe's lock,
+    /// for a caller holding its process's lock: `None` where that cannot answer
+    /// it without a wait or frames taken, which [`Self::write`] does.
+    pub fn put_now(&self, src: &[u8]) -> Option<PipeWrite> {
         let mut pipe = self.0.state.lock();
+        if pipe.held.claim_held(End::Write) {
+            return None;
+        }
         if !pipe.holders.held(End::Read) {
-            return PipeWrite::BrokenPipe;
+            return Some(PipeWrite::BrokenPipe);
         }
-        let Some(n) = kernel::pipe::takes(pipe.held.space(), buf.len()) else { return PipeWrite::NoRoom };
-        if pipe.held.write(buf, n).is_err() {
-            return PipeWrite::NoMemory;
+        match kernel::pipe::takes(pipe.held.space(), src.len())? {
+            0 => Some(PipeWrite::Wrote(0)),
+            n => pipe.held.put(&src[..n]).then_some(PipeWrite::Wrote(n)),
         }
-        PipeWrite::Wrote(n)
+    }
+
+    /// Take at most `max` bytes, up to [`BOUNCE`], into `into` whole in one
+    /// hold of the pipe's lock, for a caller holding its process's lock:
+    /// `None` where the pipe holds nothing or more than a bounce would take,
+    /// or another read holds its claim, which [`Self::read`] answers.
+    pub fn take_now(&self, max: usize, into: &mut PipeBounce) -> Option<Taken> {
+        let mut pipe = self.0.state.lock();
+        let n = max.min(pipe.held.len());
+        if n == 0 || n > BOUNCE || pipe.held.claim_held(End::Read) {
+            return None;
+        }
+        let spares = pipe.held.take(n, into);
+        Some(Taken { n, _spares: spares, boost: core::mem::take(&mut pipe.rt_boost_pending) })
+    }
+
+    /// The pipe's lock, held in `end`'s turn to claim.
+    fn turn(&self, p: &Parkable, end: End) -> Result<crate::sync::LockGuard<'_, State>, Cancelled> {
+        let watch = match end {
+            End::Read => &self.0.read_watch,
+            End::Write => &self.0.write_watch,
+        };
+        frame_bytes::turn(p, &self.0.state, |s| &mut s.held, end, watch, WaitClass::Pipe)
     }
 
     pub fn has_data(&self) -> bool {
@@ -200,16 +392,13 @@ impl PipeRef {
 
     /// One reference to `end` lets go; its end's last posts the other end's
     /// watch and its leaving watch, and the read end's last gives back what
-    /// the pipe holds, which nobody can read any more.
+    /// the pipe holds, which nobody can read any more, or leaves it to the
+    /// claim in flight to give back as it ends.
     fn release(&self, end: End) {
         let (released, unread) = {
             let mut pipe = self.0.state.lock();
             let released = pipe.holders.release(end);
-            let unread = (!pipe.holders.held(End::Read) && pipe.held.frames() > 0).then(|| {
-                let job = Arc::clone(pipe.held.job());
-                core::mem::replace(&mut pipe.held, FrameBytes::new(&job))
-            });
-            (released, unread)
+            (released, pipe.unread())
         };
         // Outside the lock: its frames go back to the allocator.
         drop(unread);

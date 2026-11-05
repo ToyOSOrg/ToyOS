@@ -316,9 +316,11 @@ one is not a version of anything.
 
 ## Design
 
-Read `CLAUDE.md` for the principles the codebase is held to, each subsystem's
-own module headers for its design and the decisions behind it, and `issues/`
-for the list of everything currently known to be broken.
+[The ToyOS Manual](https://toyosorg.github.io/ToyOS/), built from `docs/`,
+describes what the system must deliver and how it works. Read `CLAUDE.md` for
+the principles the codebase is held to, each module's header for the contracts
+of its code, and `issues/` for everything currently known to be broken or still
+to build.
 
 The short version: zero legacy, zero technical debt, fail fast, and prefer
 making a mistake unrepresentable over checking for it at runtime.

@@ -33,11 +33,7 @@ takes the published exit as its idle-state input.
 
 ## Realtime exhaustion (owner decision J2, 2026-10-20; stage 4)
 
-Once a CPU's realtime allowance is exhausted, the affected audio workers may
-run only when no ordinary work can use that CPU, until the allowance refills.
-They do not compete for the protected ordinary time through their job's fair
-share. More dropouts during genuine audio overload are accepted. This replaces
-the plan's ordinary-priority fallback, which the stage-1 host model
+J2 replaces the plan's ordinary-priority fallback, which the stage-1 host model
 (`kernel/pure/sched/job_sched.rs`, PR #956) measured giving never-revoked
 spinners 0.8 of the 1.2 CPUs a 70% ceiling leaves on four CPUs, and some
 intervals no ordinary service at all. Model figures are evidence for the
@@ -54,15 +50,6 @@ blocking and stream reopening alike, without calling aggregate overload or a
 legitimate multi-worker client abuse.
 
 ## Job-fair scheduling (owner decision J1, 2026-10-21; stage 3)
-
-Each CPU runs EEVDF over the job groups it holds, and EEVDF again over each
-group's threads. A group's weight is its job's weight times its share of the
-job's runnable threads, so a helper thread buys no entitlement. Placement
-balances summed group weights and steals to idle CPUs. There is no cross-CPU
-service accounting: a job receives, on each CPU running ordinary work, its
-group weight over that CPU's load, and its aggregate share is as close to its
-entitlement as placement makes it. Prompt interaction, bounded realtime (J2),
-ordinary progress and job creation authority are kept.
 
 The host model (`kernel/pure/sched/job_sched.rs`, PR #956) measures the
 approximation as persistent rate gaps decided by placement: m+1 single-thread

@@ -425,7 +425,10 @@ impl PagerObject {
             };
             // SAFETY: a `PagedNotice` is `UserSafe`: every byte of it is a
             // field, and the batch outlives the copy.
-            unsafe { out.write_raw(filled * size, batch.as_ptr().cast::<u8>(), n * size) };
+            if unsafe { out.write_raw(filled * size, batch.as_ptr().cast::<u8>(), n * size) }.is_err() {
+                // The notices taken are lost with the window that could not hold them.
+                return if filled > 0 { filled as u64 } else { SyscallError::BadAddress.to_u64() };
+            }
             filled += n;
             if n < want {
                 break;
@@ -484,14 +487,24 @@ impl PagerObject {
             };
             match step {
                 Step::Copy(count) => {
+                    // A chunk of frames is copied a frame at a time: populated
+                    // first, fresh memory takes one hold rather than a fault
+                    // for each page. A one-frame read, the common small one,
+                    // would pay that hold on every call to save at most two faults.
+                    if count > 1 {
+                        out.fault_in(done, pieces[..count].iter().map(|piece| piece.len).sum());
+                    }
+                    let mut faulted = false;
                     for piece in &pieces[..count] {
-                        match piece.phys {
-                            Some(phys) => {
-                                // SAFETY: `phys` is pinned by `pin_chunk`,
-                                // and `within + len` lies inside its frame.
-                                unsafe { out.write_raw(done, DirectMap::from_phys(phys).as_ptr::<u8>().add(piece.within), piece.len) };
-                            }
+                        let copied = match piece.phys {
+                            // SAFETY: `phys` is pinned by `pin_chunk`, and
+                            // `within + len` lies inside its frame.
+                            Some(phys) => unsafe { out.write_raw(done, DirectMap::from_phys(phys).as_ptr::<u8>().add(piece.within), piece.len) },
                             None => out.fill_zero(done, piece.len),
+                        };
+                        if copied.is_err() {
+                            faulted = true;
+                            break;
                         }
                         done += piece.len;
                     }
@@ -509,6 +522,11 @@ impl PagerObject {
                     }
                     if written {
                         return SyscallError::WouldBlock.to_u64();
+                    }
+                    // After the checks: bytes copied before the fault count only
+                    // as every copied chunk's do.
+                    if faulted {
+                        return if done > 0 { done as u64 } else { SyscallError::BadAddress.to_u64() };
                     }
                 }
                 Step::Written => return SyscallError::WouldBlock.to_u64(),
@@ -686,6 +704,8 @@ impl PagerObject {
             }
             let mut frames = [0u64; CHUNK];
             let mut ends = [0u64; CHUNK];
+            // The frames filled from `src`, in order: a fault stops the fill.
+            let mut filled = 0;
             for k in 0..reserved {
                 let page_at = (first + k as u64) * PAGE;
                 let from = done + k * PAGE as usize;
@@ -703,17 +723,20 @@ impl PagerObject {
                     }
                     None => pmm::alloc_promised().into_raw(),
                 };
-                // SAFETY: a frame just drawn, which nothing else reaches yet.
-                unsafe { src.read_raw(from, DirectMap::from_phys(phys).as_mut_ptr::<u8>(), n) };
                 frames[k] = phys;
                 ends[k] = page_at + (src.len() - from).min(PAGE as usize) as u64;
+                // SAFETY: a frame just drawn, which nothing else reaches yet.
+                if filled == k && unsafe { src.read_raw(from, DirectMap::from_phys(phys).as_mut_ptr::<u8>(), n) }.is_ok() {
+                    filled += 1;
+                }
             }
             let mut refused = None;
             let mut stopped = false;
             {
                 let mut state = self.state.lock();
                 for k in 0..reserved {
-                    if stopped {
+                    // A frame the owner's buffer could not fill goes back as a refused one does.
+                    if stopped || k >= filled {
                         let gone = state.gone;
                         state.held.give_back(self.core.job(), gone, frames[k], false);
                         continue;
@@ -738,15 +761,18 @@ impl PagerObject {
                         Err(why) => {
                             let gone = state.gone;
                             state.held.give_back(self.core.job(), gone, frames[k], false);
-                            refused.get_or_insert(why);
+                            refused.get_or_insert(word(why));
                             stopped = true;
                         }
                     }
                 }
             }
             self.changed.post();
+            if filled < reserved && !stopped {
+                refused.get_or_insert(SyscallError::BadAddress);
+            }
             if let Some(why) = refused {
-                return refusal(installed, word(why));
+                return refusal(installed, why);
             }
             if stopped {
                 return installed;
@@ -775,6 +801,7 @@ impl PagerObject {
             let mut pinned = [(0u64, 0u64, 0usize, 0usize); CHUNK];
             let mut count = 0;
             let mut stopped = None;
+            let mut faulted = false;
             let slot = {
                 let mut state = self.state.lock();
                 let slot = match state.live(id) {
@@ -803,26 +830,39 @@ impl PagerObject {
                 slot
             };
             let mut from = done;
+            // The pages whose bytes all came: a fault in the owner's buffer stops there.
+            let mut copied = 0;
             for &(_, phys, within, n) in &pinned[..count] {
                 // SAFETY: a frame of the object, pinned and write-pinned above.
-                unsafe { src.read_raw(from, DirectMap::from_phys(phys).as_mut_ptr::<u8>().add(within), n) };
+                if unsafe { src.read_raw(from, DirectMap::from_phys(phys).as_mut_ptr::<u8>().add(within), n) }.is_err() {
+                    faulted = true;
+                    break;
+                }
                 from += n;
+                copied += 1;
             }
             {
                 let mut state = self.state.lock();
-                for &(page, phys, within, n) in &pinned[..count] {
+                for (k, &(page, phys, within, n)) in pinned[..count].iter().enumerate() {
                     // A release meanwhile took the object: nothing left to unpin.
                     if state.live(id) != Ok(slot) {
                         break;
                     }
                     let (pages, object) = state.split(slot);
-                    pages.write_unpin(object, page, phys, page * PAGE + (within + n) as u64);
+                    if k < copied {
+                        pages.write_unpin(object, page, phys, page * PAGE + (within + n) as u64);
+                    } else {
+                        pages.write_abandon(object, page, phys);
+                    }
                 }
             }
             for &(_, phys, _, _) in &pinned[..count] {
                 pmm::unpin_range(phys, PAGE as usize);
             }
             done = from;
+            if faulted {
+                return refusal(done as u64, SyscallError::BadAddress);
+            }
             match stopped {
                 None => {}
                 Some(Refused::InvalidArgument) => return refusal(done as u64, SyscallError::NotFound),
@@ -885,8 +925,7 @@ impl PagerObject {
                 for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(bits) {
                     chunk.copy_from_slice(&word.to_le_bytes());
                 }
-                out.write_at(0, &bytes);
-                0
+                out.write_at(0, &bytes).map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| 0)
             }
             Err(why) => word(why).to_u64(),
         }

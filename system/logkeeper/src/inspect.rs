@@ -50,6 +50,8 @@ pub enum State {
     Degraded = 1,
     /// No volume, or one given up on: the log is on the console only.
     ConsoleOnly = 2,
+    /// The volume is not open yet: its file takes the boot whole once it is.
+    Opening = 3,
 }
 
 impl State {
@@ -58,6 +60,7 @@ impl State {
             0 => "writing",
             1 => "degraded",
             2 => "console-only",
+            3 => "opening",
             other => unreachable!("logkeeper: volume state {other} was never published"),
         }
     }

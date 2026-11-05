@@ -12,7 +12,7 @@ speaks any of them: its keyboard and mouse streams went with the small-kernel
 track's step 10. Their readers are the owner of input's wire
 (`lib/input/src/wire.rs`), the surface protocol (`sdk/toyos/src/surface.rs`,
 `sdk/window`) and the compositor's desktop. A userland protocol owns its wire
-types in its own library (root `CLAUDE.md`), so these belong to the surface
+types in its own library, so these belong to the surface
 protocol and `toyos-input`, not to `toyos-abi`.
 
 **Exit**: `sdk/abi` defines no input record, and the surface protocol and

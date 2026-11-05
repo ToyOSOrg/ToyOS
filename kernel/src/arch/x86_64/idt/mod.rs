@@ -344,9 +344,14 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
     // wrote nothing; the registers are what this entry can say without risking
     // that, and the report overwrites them if the machine gets that far. Every
     // vector seals but a Ring 3 page fault, which every first touch of a page
-    // takes: it is served or ends its process through the crash path, which
-    // reports, and a fault inside its handler is a Ring 0 fault and seals.
-    let user_page_fault = Vector::from_raw(frame.vector) == Vector::PageFault && toyos_userbound::Ring::of_cs(frame.cs).is_user();
+    // takes, and a user copy's (`arch::uaccess`): it is served or ends its
+    // process through the crash path, which reports, or the copy answers what
+    // it did not copy; any other fault inside its handler is a Ring 0 fault and
+    // seals.
+    let page_fault = Vector::from_raw(frame.vector) == Vector::PageFault;
+    // A copy's fault on its kernel side is a kernel fault, and seals.
+    let copy_fault = super::uaccess::fixup(frame.rip).is_some() && toyos_userbound::is_user_addr(cpu::read_cr2());
+    let user_page_fault = page_fault && (toyos_userbound::Ring::of_cs(frame.cs).is_user() || copy_fault);
     if !user_page_fault {
         crate::blackbox::record_fault(&fault_of(frame));
     }
@@ -359,8 +364,9 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
             cpu::enable_interrupts();
             exceptions::page_fault_handler(frame);
             cpu::disable_interrupts();
-            // Only a Ring 3 fault comes back: `common_entry` lowers the count
-            // next, and `exit_to_user` opens interrupts.
+            // Only a Ring 3 fault or a user copy's comes back: `common_entry`
+            // lowers the count next, and `exit_to_user` or the `iretq` opens
+            // interrupts.
             #[cfg(feature = "mask-windows")]
             crate::windows::preempt_lowering();
         }
@@ -378,7 +384,7 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
 /// place of the fault's report.
 #[cfg(feature = "mask-windows")]
 fn windows_entered(frame: &TrapFrame) {
-    if !toyos_userbound::Ring::of_cs(frame.cs).is_user() {
+    if !toyos_userbound::Ring::of_cs(frame.cs).is_user() && super::uaccess::fixup(frame.rip).is_none() {
         crate::windows::stop_here();
     }
     crate::windows::irqs_masked();

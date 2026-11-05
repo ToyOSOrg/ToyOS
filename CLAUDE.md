@@ -1,35 +1,26 @@
 # ToyOS
 
-ToyOS is a general-purpose operating system written from scratch in Rust. Its changes are held to a production-grade bar: correct, efficient, minimal. The product is still developing rapidly; a recorded weakness remains a weakness. Self-hosting is the north star: ToyOS must eventually rebuild itself and reproduce the host's bytes.
-
-Modern x86-64 (2020+) and AArch64 are equal targets, UEFI only. Metal is first-class, and QEMU is supported. The machines available for testing determine what we can verify today, not the architecture. Development ergonomics and iteration speed matter throughout.
+ToyOS is a general-purpose operating system written from scratch in Rust. Its changes are held to a production-grade bar: correct, efficient, minimal. The product is still developing rapidly; a recorded weakness remains a weakness. What it must deliver and how it is designed are the manual's (below). The machines available for testing determine what we can verify today, not the architecture. Development ergonomics and iteration speed matter throughout.
 
 ## Principles
 
 - **Simplify the architecture.** Prefer changes in ownership or representation that eliminate responsibilities, states and compensating mechanisms. Preserve useful capabilities. An overarching simplification is worth proposing even when it crosses components; do not substitute an isolated workaround because it fits a smaller assignment. When ToyOS needs a capability anyway, such as managing its own disk partitions, build it into ToyOS rather than doing the job by hand, from a host tool or through another OS on the bench.
 - **Migrate directly.** ToyOS has no users or compatibility obligations. Optimize for the clean final architecture and total implementation effort. Change components together, do the prerequisites and delete superseded paths. Temporary loss of functionality or broken builds are acceptable during a migration; preserving intermediate functionality must not motivate bridges, duplicate paths or extra mechanisms. Preserve it where doing so costs nothing. Report temporary gaps and verify the completed migration.
 - **Code is liability.** Delete dead code and unnecessary machinery. Prefer direct, readable code; an abstraction earns its place through real uses or a boundary it makes clearer and safer. Do not build for imagined callers. A rule visible in review belongs in instructions rather than another custom gate.
-- **Zero legacy.** No backwards compatibility, BIOS or 32-bit support. Do not conceal failures with fallbacks or preserve obsolete paths. Selecting the best supported mechanism for each machine is ordinary hardware support: QEMU must never reduce what metal gets.
+- **Zero legacy.** Do not conceal failures with fallbacks or preserve obsolete paths. Selecting the best supported mechanism for each machine is ordinary hardware support: QEMU must never reduce what metal gets.
 - **Fail clearly.** Internal invariant violations fail loudly. External inputs are validated and refused at their boundary; a userland bug never crashes the kernel. Expected absence and explicitly reported operation failures are not invariant violations. Contain failure at the component that can handle it without hiding it.
 - **Rust is first-class.** Prefer compile-time safety to runtime checks, and runtime checks to tests. Validate external representations once before constructing typed values; validate each later message at its own boundary. Nothing a type makes impossible needs a runtime test. A kernel object type and an application's protocol type are separate contracts.
-- **Userland first.** The kernel owns only what userland cannot. It creates no kernel thread except each CPU's idle loop. Kernel work is bounded, runs on the thread or interrupt that caused it and is charged to it; long-running unowned work belongs in a userland service.
-- **Authority is explicit.** A process receives capabilities through authorized creation or transfer; names and process IDs do not grant authority. Rights can be narrowed, never widened by a holder. Filesystem access belongs inside the same isolation model.
-- **Existing Rust just works.** Programs build and run unchanged through proper platform support in ecosystem forks, not ToyOS-specific replacement crates. Apps use the same source on ToyOS, Linux under Wayland, macOS and Windows. A ToyOS-only program must do a ToyOS-only job; its manifest's `exempt` explains it (`build/userlandhost.rs`). X11 is legacy.
 - **No silent debt.** Remove a discovered compromise or record its evidence, owner and exit in `issues/`. Filing it does not make it acceptable or complete. Never weaken audible or visual quality without the owner's explicit agreement.
 
 Never use a fixed delay where an event can be awaited. A wait has a failure timeout. A hardware-mandated delay with no notification is the exception, with the requirement cited at the operation.
 
 ## Architecture and sources of truth
 
-Read the code for current behavior. `Cargo.toml` accounts for packages; `images/system.toml` declares the system programs; `issues/` holds defects and staged work. Do not duplicate their inventories here.
+The manual, `docs/`, is the design: the requirements and how the system works or is meant to work. Read its page for an area before changing that area. Read the code for current behavior. `Cargo.toml` accounts for packages; `images/system.toml` declares the system programs; `issues/` holds defects, staged work, status and exits. Do not duplicate their inventories here.
 
-`toyos-abi` (`sdk/abi/`) defines only the kernel/program boundary. Its ABI is unstable and may change for a cleaner design. The kernel depends on it; `sdk/toyos/` provides the Rust API for userland. Userland protocols own their wire types and errors in their own libraries. They do not use `SyscallError` or other kernel ABI definitions as the protocol between programs; SDK internals translate kernel failures at the boundary.
+A PR that changes an architectural decision or a requirement updates the manual in the same PR, and review checks that it does. The manual names no code: no source paths, file names, functions, crate paths or snippets, and no code, comment, test or issue record cites it. Progress, status, measurements and investigations stay in `issues/` and the evidence. Each fact has one home: the manual holds the design, these instructions how agents work, `issues/` the work.
 
-The supervisor constructs process namespaces and endowments. The kernel enforces object authority; each userland protocol validates its own inputs and grants. The target is per-program filesystem views; inspect the storage track and code for the remaining shared kernel paths.
-
-ToyOS trusts only what it cannot avoid trusting: the CPU and chipset vendor with its signed microcode, the platform firmware (UEFI, AML, SMM), which already controls the whole machine, and the signed image with its pinned toolchain and crates. Everything else is isolated: programs, users and sessions, the network, file contents, and external or hot-plug devices, whose DMA stays behind the IOMMU. The single exception is a privilege beyond a normal device claim, such as a reset line, DMA without an IOMMU or a firmware register window: it is granted only in the signed image's `system.toml`, to a program that image ships, and a package installed later never gets one, whoever signed it. Inside the trusted base a check is a bug fence, kept where it is cheap and catches our own mistakes, such as a write landing in RAM, the IOMMU, the interrupt controllers or another driver's device; it never withholds a feature for want of a vendor document.
-
-The loader owns every UEFI call, before ExitBootServices. CPU control registers come from one declaration, applied and asserted on every CPU. Input translation belongs in userland, per surface. The kernel's logging responsibility is its record ring and console; logkeeper owns the log file. POSIX compatibility belongs in `sdk/libc`, never in the kernel's native interface.
+The kernel ABI is `toyos-abi` (`sdk/abi/`); `sdk/toyos/` is the Rust API for userland, which translates kernel failures at its boundary, and `sdk/libc` holds POSIX compatibility. A ToyOS-only program's manifest `exempt` names its ToyOS-only job (`build/userlandhost.rs`).
 
 Read the relevant subtree's `CLAUDE.md`: `kernel/`, `system/`, `tests/`, `build/`, `apps/` or `sdk/window/`. Module comments should state only contracts needed to use the code. Issue format lives in `issues/README.md`; agent responsibilities live in `.claude/agents/`.
 
@@ -43,7 +34,7 @@ Use general, widely used crates as published when they are the cleanest solution
 
 Rust and QEMU are the development prerequisites. Other host tools must be buildable from C or C++ for eventual self-hosting, justified where Rust tools do not suffice, and declared in `issues/the-build-runs-host-tools-outside-rust-and-qemu.md`. No dependency on a binary for only one host OS. ToyOS's own maintained code is Rust, not Python, Perl or shell. Bootstrapping all the way from source without a binary seed is out of scope.
 
-`NOTICE` records committed third-party files, hashes, origins and licences. Vendor firmware may ship unmodified, pinned by version and hash, when redistribution permits it: signed CPU microcode, and device firmware whose DMA the IOMMU contains, even when no vendor statement shows the device verifies it; that unverified status is recorded in `issues/`. Device firmware is loaded by its owning driver through its IOMMU domain; CPU microcode loading is privileged kernel work. Loading responsibility does not require embedding firmware payloads in the kernel binary.
+`NOTICE` records committed third-party files, hashes, origins and licences. Vendor firmware may ship unmodified, pinned by version and hash, when redistribution permits it: signed CPU microcode, and device firmware whose DMA the IOMMU contains, even when no vendor statement shows the device verifies it; that unverified status is recorded in `issues/`.
 
 ## Testing and evidence
 
@@ -61,7 +52,7 @@ An agent's guest evidence, aarch64 included, comes only from the guest runner th
 
 ## Working safely
 
-One agent, one worktree, one branch. The primary checkout owns `main` and `rust/`; work in a separate worktree. Never clone ToyOS to make one or run `git submodule` there: the latter can corrupt the shared fork's worktree configuration. Do not disturb another agent's files, branches, locks or processes. Stop only processes you started, by PID, and remove your scratch output when it is no longer needed.
+One agent, one worktree, one branch. The primary checkout owns `main` and `rust/`; work in a separate worktree. Never clone ToyOS to make one or run `git submodule` there: the latter can corrupt the shared fork's worktree configuration. Do not disturb another agent's files, branches, locks or processes. Stop only processes you started, by PID. The disk is shared and finite: remove your build output (`target/`) when you stop working, and your worktrees, check trees, staged images and scratch output once nothing needs them.
 
 `main` moves only through reviewed pull requests and its required merge queue: no direct push, force-push, deletion or bypass. Commit with `git commit -F <file>`. You own your unpushed commits and your own remote ToyOS branch; fork branches are append-only. Keep ABI consumers, fork pins and their implementation coherent in one landing. Account for every changed hunk in a modify/delete conflict.
 

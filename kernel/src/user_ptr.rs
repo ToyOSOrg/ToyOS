@@ -1,17 +1,22 @@
-//! Safe user memory access through the kernel direct map. A copy into user
-//! memory lands only where a ring 3 store from the process itself could.
+//! User memory, copied in and out through the running process's own mapping
+//! (`arch::uaccess`): a copy reaches only what a load or store the process
+//! made itself could reach, and a byte it cannot reach ends the copy as
+//! [`Faulted`], which a syscall answers as `BadAddress`. Values are copied
+//! out, never referenced.
 //!
-//! SMAP stays enabled; access goes through the direct map, never stac/clac.
-//! Values are copied out, never referenced.
+//! **A window is a range of the user half**, checked for its end, overflow
+//! included, when it is made, and by nothing else: whether its pages are
+//! mapped is found by the copy. A page the copy finds absent is served as the
+//! process's own fault would be (`process::handle_page_fault`), and the copy
+//! resumes; one nothing serves, or one the process may not touch so, ends it.
+//! A window over device memory the process mapped is copied through, making
+//! only the accesses the process could make through that mapping itself
+//! (`arch::uaccess`).
 //!
-//! **A window is a range of the caller's own space**, checked against the
-//! space's ranges when it is made. Each copy reaches its pages then, a chunk at
-//! a time: under the space's lock the chunk's pages are reached — populated
-//! where empty — and their frames pinned, and the copy runs with the lock given
-//! back and preemption off. So a frame a sibling's `munmap` frees meanwhile is
-//! not reissued until the copy is done with it, no pin outlives its chunk, and
-//! no CPU holds more than one chunk's pins. A page the process took away since
-//! the window was made reads as zeros and drops what is written to it.
+//! **A copy holds no kernel lock**: its fault takes its space's lock, and in
+//! 7b will wait on a pager. Every spin lock raises the preemption count, so
+//! each copy refuses to run above the depth its syscall's entry runs at
+//! ([`gate`]), whether or not a page faults.
 //!
 //! Every single-word user read is `read_volatile`, including the futex word
 //! and the crash dump's walk, both outside this module.
@@ -25,16 +30,13 @@ use kernel::vm::Access as Asked;
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::UserSafe;
 
-use crate::mm::PAGE_SIZE;
+use crate::arch::uaccess;
 use crate::UserAddr;
 
 /// Longest string, in bytes, the kernel accepts from userspace; one bound for every string syscall, since each copies or tokenizes rather than streaming.
 pub const MAX_USER_STR: u64 = 64 * 1024;
 
 pub(crate) use toyos_userbound::Access;
-
-/// Pages one chunk of a copy reaches and pins at once.
-const CHUNK_PAGES: usize = 16;
 
 fn asked(access: Access) -> Asked {
     match access {
@@ -46,9 +48,47 @@ fn asked(access: Access) -> Asked {
 /// Translate a user virtual address to its direct-map address, populating its
 /// page if needed; `pub(crate)` because the futex word outlives its syscall.
 pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm::DirectMap> {
-    let space = crate::process::current_address_space();
+    let space = unlocked_space();
     let phys = space.lock().reach(addr.raw(), asked(access))?;
     Some(crate::mm::DirectMap::from_phys(phys))
+}
+
+/// The current space, for a reach made holding no lock.
+fn unlocked_space() -> crate::mm::space::PageTables {
+    gate();
+    crate::process::current_address_space()
+}
+
+/// Refuses a user copy made holding a lock or with interrupts masked, whose
+/// fault could not be served: a kernel bug, never a user's doing.
+fn gate() {
+    let depth = crate::preempt::count();
+    if depth > crate::scheduler::BASELINE_TRAP {
+        under_a_lock(depth);
+    }
+    assert!(crate::arch::cpu::interrupts_enabled(), "user_ptr: a user copy with interrupts masked");
+}
+
+/// A copy met a user byte its process could not reach.
+#[derive(Debug)]
+pub struct Faulted;
+
+impl From<Faulted> for SyscallError {
+    fn from(_: Faulted) -> Self {
+        SyscallError::BadAddress
+    }
+}
+
+/// `Ok` where a copy left no byte behind.
+fn whole(left: usize) -> Result<(), Faulted> {
+    if left == 0 { Ok(()) } else { Err(Faulted) }
+}
+
+/// The backtrace names the copy's caller.
+#[cold]
+#[inline(never)]
+fn under_a_lock(depth: u32) -> ! {
+    panic!("user_ptr: a user copy at preemption depth {depth}, past its syscall's: a lock is held, and its fault-in may wait");
 }
 
 /// Context for a single syscall invocation; the lifetime `'a` keeps validated references from escaping it.
@@ -65,12 +105,12 @@ impl<'a> SyscallContext<'a> {
 
     /// A bulk buffer the kernel reads out of and never borrows.
     pub fn user_bytes(&self, ptr: UserAddr, len: u64) -> Option<UserBytes<'a>> {
-        Some(UserBytes(View::window(ptr, len, Access::Read)?, PhantomData))
+        Some(UserBytes(View::window(ptr, len)?, PhantomData))
     }
 
     /// A bulk buffer the kernel writes into and never borrows.
     pub fn user_bytes_mut(&self, ptr: UserAddr, len: u64) -> Option<UserBytesMut<'a>> {
-        Some(UserBytesMut(View::window(ptr, len, Access::Write)?, PhantomData))
+        Some(UserBytesMut(View::window(ptr, len)?, PhantomData))
     }
 
     /// Copy a user string of at most [`MAX_USER_STR`] bytes into kernel memory; an over-long or non-UTF-8 string is `InvalidArgument`, not `BadAddress`.
@@ -84,16 +124,16 @@ impl<'a> SyscallContext<'a> {
 
     /// Read a typed value out of user memory, copied rather than borrowed.
     pub fn copy_in<T: UserSafe>(&self, ptr: UserAddr) -> Result<T, SyscallError> {
-        let view = object::<T>(ptr, Access::Read)?;
+        let view = object::<T>(ptr)?;
         let mut value = toyos_abi::usersafe::zeroed::<T>();
-        view.read_into(0, toyos_abi::usersafe::bytes_mut(&mut value));
+        view.read_into(0, toyos_abi::usersafe::bytes_mut(&mut value))?;
         Ok(value)
     }
 
     /// Write a typed value into user memory.
     pub fn copy_out<T: UserSafe>(&self, ptr: UserAddr, value: &T) -> Result<(), SyscallError> {
-        let view = object::<T>(ptr, Access::Write)?;
-        view.write_from(0, toyos_abi::usersafe::bytes(value));
+        let view = object::<T>(ptr)?;
+        view.write_from(0, toyos_abi::usersafe::bytes(value))?;
         Ok(())
     }
 
@@ -101,103 +141,72 @@ impl<'a> SyscallContext<'a> {
     pub fn user_vec(&self, ptr: UserAddr, len: u64) -> Result<Vec<u8>, SyscallError> {
         let bytes = self.user_bytes(ptr, len).ok_or(SyscallError::BadAddress)?;
         let mut out = vec![0u8; bytes.len()];
-        bytes.read_at(0, &mut out);
+        bytes.read_at(0, &mut out)?;
         Ok(out)
     }
 }
 
 /// A typed value's window: aligned for `T` and inside the user half.
-fn object<T: UserSafe>(ptr: UserAddr, access: Access) -> Result<View, SyscallError> {
+fn object<T: UserSafe>(ptr: UserAddr) -> Result<View, SyscallError> {
     let (size, align) = (core::mem::size_of::<T>() as u64, core::mem::align_of::<T>() as u64);
     if !toyos_userbound::is_user_object(ptr.raw(), size, align) {
         return Err(SyscallError::BadAddress);
     }
-    View::window(ptr, size, access).ok_or(SyscallError::BadAddress)
+    View::window(ptr, size).ok_or(SyscallError::BadAddress)
 }
 
-/// `len` bytes of the caller's space from `start`, which its ranges allowed
-/// `access` to when the view was made.
+/// `len` bytes of the user half from `start`.
 #[derive(Clone, Copy)]
 struct View {
     start: u64,
     len: usize,
-    access: Access,
 }
 
-/// What a page a sibling took away reads as.
-static ZEROS: [u8; PAGE_SIZE as usize] = [0; PAGE_SIZE as usize];
-
 impl View {
-    fn window(ptr: UserAddr, len: u64, access: Access) -> Option<Self> {
-        if !toyos_userbound::in_user_half(ptr.raw(), len) {
-            return None;
-        }
-        let view = Self { start: ptr.raw(), len: usize::try_from(len).ok()?, access };
-        if len == 0 {
-            return Some(view);
-        }
-        let space = crate::process::current_address_space();
-        let allowed = space.lock().allows(ptr.raw(), ptr.raw() + len, asked(access));
-        allowed.then_some(view)
+    fn window(ptr: UserAddr, len: u64) -> Option<Self> {
+        toyos_userbound::in_user_half(ptr.raw(), len).then_some(Self { start: ptr.raw(), len: usize::try_from(len).ok()? })
     }
 
-    /// Hands `copy` each piece of bytes `[off, off + len)` of this view as a
-    /// direct-map pointer, the piece's offset in that range and its length;
-    /// panics if out of bounds — the kernel's own arithmetic, never user input.
-    fn pieces(&self, what: &str, off: usize, len: usize, mut copy: impl FnMut(*mut u8, usize, usize)) {
+    /// The user address of bytes `[off, off + len)` of this view; panics if
+    /// out of bounds — the kernel's own arithmetic, never user input.
+    fn at(&self, what: &str, off: usize, len: usize) -> u64 {
         assert!(off.checked_add(len).is_some_and(|end| end <= self.len), "{what} {off}+{len} past a {}-byte window", self.len);
-        let space = crate::process::current_address_space();
-        let mut done = 0;
-        while done < len {
-            let mut frames = [None::<u64>; CHUNK_PAGES];
-            let mut pieces = [(0u64, 0usize, 0usize); CHUNK_PAGES];
-            let mut count = 0;
-            {
-                let mut guard = space.lock();
-                while count < CHUNK_PAGES && done < len {
-                    let at = self.start + (off + done) as u64;
-                    let n = ((PAGE_SIZE - at % PAGE_SIZE) as usize).min(len - done);
-                    let phys = guard
-                        .reach(at, asked(self.access))
-                        .filter(|&phys| crate::mm::pmm::pin_range(phys & !(PAGE_SIZE - 1), PAGE_SIZE as usize));
-                    frames[count] = phys;
-                    pieces[count] = (phys.unwrap_or(0), done, n);
-                    count += 1;
-                    done += n;
-                }
-            }
-            crate::sched::driver::preempt_off(|_| {
-                for (frame, &(phys, at, n)) in frames[..count].iter().zip(&pieces[..count]) {
-                    match (frame, self.access) {
-                        (Some(_), _) => copy(crate::mm::DirectMap::from_phys(phys).as_mut_ptr(), at, n),
-                        (None, Access::Read) => copy(ZEROS.as_ptr().cast_mut(), at, n),
-                        (None, Access::Write) => {}
-                    }
-                }
-            });
-            for phys in frames[..count].iter().flatten() {
-                crate::mm::pmm::unpin_range(phys & !(PAGE_SIZE - 1), PAGE_SIZE as usize);
-            }
-        }
+        gate();
+        self.start + off as u64
     }
 
-    fn read_into(&self, off: usize, dst: &mut [u8]) {
-        let into = dst.as_mut_ptr();
-        self.pieces("UserBytes::read_at", off, dst.len(), |run, at, n| {
-            // SAFETY: `pieces` bounds `[at, at + n)` inside `dst` and `run..+n`
-            // inside one pinned page or the zero page; `dst` is an owned
-            // `&mut`, so the ranges cannot overlap.
-            unsafe { core::ptr::copy_nonoverlapping(run, into.add(at), n) }
-        });
+    fn read_into(&self, off: usize, dst: &mut [u8]) -> Result<(), Faulted> {
+        // SAFETY: `dst` is an owned `&mut` of that length, and `at` keeps the
+        // user range inside this window, inside the user half.
+        unsafe { self.read_raw(off, dst.as_mut_ptr(), dst.len()) }
     }
 
-    fn write_from(&self, off: usize, src: &[u8]) {
-        let from = src.as_ptr();
-        self.pieces("UserBytesMut::write_at", off, src.len(), |run, at, n| {
-            // SAFETY: `pieces` bounds `[at, at + n)` inside `src` and `run..+n`
-            // inside one pinned page its range let the process write.
-            unsafe { core::ptr::copy_nonoverlapping(from.add(at), run, n) }
-        });
+    fn write_from(&self, off: usize, src: &[u8]) -> Result<(), Faulted> {
+        // SAFETY: as `read_into`, with `src` readable for its length.
+        unsafe { self.write_raw(off, src.as_ptr(), src.len()) }
+    }
+
+    /// # Safety
+    /// `dst` is writable kernel memory for `len` bytes.
+    unsafe fn read_raw(&self, off: usize, dst: *mut u8, len: usize) -> Result<(), Faulted> {
+        let user = self.at("UserBytes::read", off, len);
+        // SAFETY: the caller's `dst`; `at` keeps the user range in the half,
+        // and `gate` holds no lock across the copy.
+        whole(unsafe { uaccess::copy_from_user(dst, user, len) })
+    }
+
+    /// # Safety
+    /// `src` is readable kernel memory for `len` bytes.
+    unsafe fn write_raw(&self, off: usize, src: *const u8, len: usize) -> Result<(), Faulted> {
+        let user = self.at("UserBytesMut::write", off, len);
+        // SAFETY: as `read_raw`.
+        whole(unsafe { uaccess::copy_to_user(user, src, len) })
+    }
+
+    fn fill_zero(&self, off: usize, len: usize) -> Result<(), Faulted> {
+        let user = self.at("UserBytesMut::fill_zero", off, len);
+        // SAFETY: as `read_raw`, with no kernel memory touched.
+        whole(unsafe { uaccess::clear_user(user, len) })
     }
 }
 
@@ -210,19 +219,8 @@ impl UserBytes<'_> {
     }
 
     /// Copy `dst.len()` bytes out of the window at `off`; panics if out of bounds — the kernel's own arithmetic, never user input.
-    pub fn read_at(&self, off: usize, dst: &mut [u8]) {
-        self.0.read_into(off, dst);
-    }
-
-    /// Hand `copy` each piece of the window's `[off, off + len)`, as
-    /// [`read_at`](Self::read_at) reaches them, one chunk of pages pinned at
-    /// a time: a pointer to its bytes, its offset in that range and its
-    /// length. The pointer is valid for that length until `copy` returns,
-    /// with preemption off, and is never made a reference; a page the
-    /// process took away reads as zeros. Panics if out of bounds, as
-    /// [`read_at`](Self::read_at) does.
-    pub fn read_pieces(&self, off: usize, len: usize, mut copy: impl FnMut(*const u8, usize, usize)) {
-        self.0.pieces("UserBytes::read_pieces", off, len, |run, at, n| copy(run.cast_const(), at, n));
+    pub fn read_at(&self, off: usize, dst: &mut [u8]) -> Result<(), Faulted> {
+        self.0.read_into(off, dst)
     }
 
     /// Copy `len` bytes out of the window at `off` to `dst`, never through a
@@ -230,12 +228,9 @@ impl UserBytes<'_> {
     ///
     /// # Safety
     /// `dst` is writable for `len` bytes, kernel memory no window names.
-    pub unsafe fn read_raw(&self, off: usize, dst: *mut u8, len: usize) {
-        self.0.pieces("UserBytes::read_raw", off, len, |run, at, n| {
-            // SAFETY: `pieces` bounds `[at, at + n)` inside `len` and `run..+n`
-            // inside one pinned page or the zero page; `dst` is the caller's.
-            unsafe { core::ptr::copy_nonoverlapping(run, dst.add(at), n) }
-        });
+    pub unsafe fn read_raw(&self, off: usize, dst: *mut u8, len: usize) -> Result<(), Faulted> {
+        // SAFETY: the caller's contract.
+        unsafe { self.0.read_raw(off, dst, len) }
     }
 }
 
@@ -252,15 +247,8 @@ impl UserBytesMut<'_> {
     }
 
     /// Copy `src` into the window at `off`; panics if out of bounds, for the same reason as [`UserBytes::read_at`].
-    pub fn write_at(&mut self, off: usize, src: &[u8]) {
-        self.0.write_from(off, src);
-    }
-
-    /// [`UserBytes::read_pieces`] for a copy into the window: each pointer
-    /// may be written for its length until `copy` returns, and a page the
-    /// process took away drops what is written to it.
-    pub fn write_pieces(&mut self, off: usize, len: usize, copy: impl FnMut(*mut u8, usize, usize)) {
-        self.0.pieces("UserBytesMut::write_pieces", off, len, copy);
+    pub fn write_at(&mut self, off: usize, src: &[u8]) -> Result<(), Faulted> {
+        self.0.write_from(off, src)
     }
 
     /// Copy `len` bytes from `src` into the window at `off`, never through a
@@ -268,19 +256,21 @@ impl UserBytesMut<'_> {
     ///
     /// # Safety
     /// `src` is readable for `len` bytes, kernel memory no window names.
-    pub unsafe fn write_raw(&mut self, off: usize, src: *const u8, len: usize) {
-        self.0.pieces("UserBytesMut::write_raw", off, len, |run, at, n| {
-            // SAFETY: `pieces` bounds `[at, at + n)` inside `len` and `run..+n`
-            // inside one pinned page the process may write; `src` is the caller's.
-            unsafe { core::ptr::copy_nonoverlapping(src.add(at), run, n) }
-        });
+    pub unsafe fn write_raw(&mut self, off: usize, src: *const u8, len: usize) -> Result<(), Faulted> {
+        // SAFETY: the caller's contract.
+        unsafe { self.0.write_raw(off, src, len) }
     }
 
     /// Zero `len` bytes of the window at `off`.
-    pub fn fill_zero(&mut self, off: usize, len: usize) {
-        self.0.pieces("UserBytesMut::fill_zero", off, len, |run, _, n| {
-            // SAFETY: as `write_at`, with a constant zero byte instead of a slice.
-            unsafe { core::ptr::write_bytes(run, 0, n) }
-        });
+    pub fn fill_zero(&mut self, off: usize, len: usize) -> Result<(), Faulted> {
+        self.0.fill_zero(off, len)
+    }
+
+    /// Populate the window's pages under `[off, off + len)` for writing, in
+    /// one hold of the space's lock, up to the first its process may not
+    /// write; the copy faults on any left out. `len` bounds the hold.
+    pub fn fault_in(&mut self, off: usize, len: usize) {
+        let start = self.0.at("UserBytesMut::fault_in", off, len);
+        crate::process::fault_in(start, start + len as u64, kernel::vm::Access::Write);
     }
 }

@@ -45,7 +45,12 @@
 //! The console's carriers are the third ([`carrier`]): the console UART's
 //! driver, and a VM's console channel, which the UART goes quiet for while it
 //! carries the log. Neither of the two can slow the file: each is a thread
-//! with an offset into what the file already has.
+//! with an offset into the replay, which follows the file once it is open.
+//!
+//! **The volume is opened on a thread of its own, and nothing waits for it**:
+//! /log's file server may start late. Until it opens, the readers and the
+//! console have each round as it is read; once it opens, the file first takes
+//! the boot so far from the replay.
 //!
 //! # Its whole authority
 //!
@@ -80,6 +85,7 @@ mod policy;
 mod serve;
 mod store;
 
+use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -92,13 +98,13 @@ use toyos::say;
 use toyos::syscap::SysCap;
 use toyos::wake::Bell;
 use toyos_logstream::{
-    ProgramLine, Registration, Tag, CARRIER, FLUSH, FLUSHED, LOG_OPENED, MAX_TAG, ORIGINS, REGISTER, RESUME,
+    ProgramLine, Registration, Severity, Tag, CARRIER, FLUSH, FLUSHED, LOG_OPENED, MAX_TAG, ORIGINS, REGISTER, RESUME,
     SERVICE, WIRE,
 };
 use toyos_wallclock::Civil;
 
 use carrier::Carriers;
-use serve::Positions;
+use serve::{Owed, Positions};
 use origin::{Origin, Said};
 use policy::{Step, LOG_WRITE_BUDGET};
 use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES};
@@ -143,17 +149,26 @@ fn main() {
     // this program nothing new.
     let (stem, boot_secs, dated) = boot_stamp();
 
-    let volume = Volume::open(stem, MAX_LOG_BYTES, |line| say!("{line}"));
-    match &volume {
-        // This program's half of the startup report, in one line: the kernel
-        // says whether it has a console, this program whether it has a volume
-        // and what the name it chose was decided by.
-        Some(v) => say!("{LOG_OPENED}{} ({dated})", v.path()),
-        None => say!(
-            "logkeeper: no {DIR} on this machine - this boot's kernel log is on the console only \
-             ({dated})"
-        ),
-    }
+    // Opened off the loop: a request on /log waits for its file server, which
+    // the supervisor starts only with storage.
+    let (opened, opening) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("log-volume".into())
+        .spawn(move || {
+            let volume = Volume::open(stem, MAX_LOG_BYTES, |line| say!("{line}"));
+            match &volume {
+                // This program's half of the startup report, in one line: the
+                // kernel says whether it has a console, this program whether it
+                // has a volume and what the name it chose was decided by.
+                Some(v) => say!("{LOG_OPENED}{} ({dated})", v.path()),
+                None => say!(
+                    "logkeeper: no {DIR} on this machine - this boot's kernel log is on the console only \
+                     ({dated})"
+                ),
+            }
+            opened.send(volume).expect("logkeeper: the loop holds the volume's receiver for good");
+        })
+        .expect("logkeeper: the volume's thread could not be started");
 
     let hub = Arc::new(serve::Hub::start(REPLAY_BYTES, boot_secs));
     let published = Arc::new(inspect::Published::new());
@@ -185,7 +200,8 @@ fn main() {
         records: vec![Record::EMPTY; BATCH],
         lost: 0,
         waiting: Vec::new(),
-        volume,
+        volume: None,
+        opening: Some(opening),
         degraded: false,
         boot_secs,
         hub,
@@ -214,6 +230,8 @@ struct Log {
     /// round merges.
     waiting: Vec<Line>,
     volume: Option<Volume>,
+    /// The volume's opener, until it answers.
+    opening: Option<mpsc::Receiver<Option<Volume>>>,
     /// Whether the volume answers, slower than `LOG_WRITE_BUDGET` a round.
     degraded: bool,
     boot_secs: Option<u64>,
@@ -253,7 +271,9 @@ impl Log {
         // Programs whose end a watch reported, until a round has swept them.
         let mut ended: Vec<usize> = Vec::new();
         loop {
+            self.adopt();
             let state = match (&self.volume, self.degraded) {
+                (None, _) if self.opening.is_some() => inspect::State::Opening,
                 (None, _) => inspect::State::ConsoleOnly,
                 (Some(_), true) => inspect::State::Degraded,
                 (Some(_), false) => inspect::State::Writing,
@@ -546,8 +566,8 @@ impl Log {
             }
             return;
         }
-        // The file first: a reader is served only what /log already holds,
-        // whenever the machine stops between the two.
+        // The file first: once it is open, a reader is served only what /log
+        // already holds, whenever the machine stops between the two.
         self.to_volume(file.as_bytes(), !flushing);
         self.hub.append(file.as_bytes(), Some(Arc::clone(&through)));
         if let Some(spoken) = &self.spoken {
@@ -573,6 +593,36 @@ impl Log {
         if refused.is_none() && began.elapsed() > LOG_WRITE_BUDGET {
             refused = Some((Step::TooSlow, format!("it took {:?}", began.elapsed())));
         }
+        self.answered(refused);
+    }
+
+    /// The volume, once its opener answers outside a stop: the file first
+    /// takes the boot so far from the replay.
+    fn adopt(&mut self) {
+        if self.stopping.is_some() {
+            return;
+        }
+        let Some(opening) = &self.opening else { return };
+        let volume = match opening.try_recv() {
+            Ok(volume) => volume,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => panic!("logkeeper: the volume's thread ended without answering"),
+        };
+        self.opening = None;
+        self.volume = volume;
+        let mut at = 0;
+        while self.volume.is_some() {
+            let text = match self.hub.owed(&mut at) {
+                Owed::Text(text) => text,
+                Owed::Gap(lost) => self.hub.own_line(
+                    Severity::Warn,
+                    &format!("logkeeper: the first {lost} bytes of this boot were let go before {DIR} opened"),
+                ),
+                Owed::Nothing => break,
+            };
+            self.to_volume(&text, false);
+        }
+        let refused = self.sync().err();
         self.answered(refused);
     }
 
@@ -633,6 +683,12 @@ impl Log {
     /// The supervisor asked for the log whole before the machine stops: every line is
     /// written by now, so the volume is made durable, and the supervisor is told.
     fn flushed(&mut self) {
+        // An opener that answered during the flush's rounds: the file takes
+        // the boot before the sync below makes it durable.
+        self.adopt();
+        if self.opening.is_some() {
+            toyos::error!("logkeeper: {DIR} had not opened by the stop - this boot's log is on the console only");
+        }
         let refused = self.sync().err();
         self.answered(refused);
         // The console's carriers take the log up to here, and the UART what

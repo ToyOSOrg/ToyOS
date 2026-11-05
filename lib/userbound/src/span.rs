@@ -86,8 +86,7 @@ pub fn rebase_base(vm_base: u64, vaddr_min: u64, span: u64) -> Option<u64> {
 }
 
 /// Whether the kernel may read or write a `size`-byte value of alignment
-/// `align` at `ptr`: aligned, and wholly in the user half. A value across a
-/// page boundary is copied in pieces, one per page.
+/// `align` at `ptr`: aligned, and wholly in the user half.
 pub fn is_user_object(ptr: u64, size: u64, align: u64) -> bool {
     size != 0 && align.is_power_of_two() && ptr.is_multiple_of(align) && in_user_half(ptr, size)
 }

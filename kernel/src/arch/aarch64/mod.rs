@@ -48,6 +48,7 @@ pub mod smp;
 pub mod switch;
 pub mod tlb;
 pub mod trap;
+pub mod uaccess;
 pub mod watchdog;
 
 pub use irqchip::its as message_unit;

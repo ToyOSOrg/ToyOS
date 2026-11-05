@@ -6,16 +6,8 @@ opened: 2026-09-28
 
 # The loader does only what must happen before the handover
 
-The owner's bounds:
-
-- the loader does only what must precede the handover;
-- the hardware clock keeps UTC;
-- the kernel calls no UEFI service, and every UEFI call ToyOS makes is the
-  loader's, before `ExitBootServices` (root `CLAUDE.md`);
-- the anti-rollback floor counts a signed security version, raised only by a
-  release that fixes a security hole;
-- the loader calls UEFI through its own bindings, never the `uefi` crate's
-  (the owner's ruling on the dependency audit).
+The stages keep the owner's bounds on the loader (2026-09-28) and his ruling
+on the dependency audit that it uses its own UEFI bindings.
 
 PR #539 does not land. Its pieces:
 

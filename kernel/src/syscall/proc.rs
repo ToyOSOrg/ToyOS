@@ -252,8 +252,10 @@ pub(super) fn sys_endowments(out: &mut crate::user_ptr::UserBytesMut) -> u64 {
     let mut buf = alloc::vec![0u8; needed];
     data.endowments.encode(&mut buf);
     drop(data);
-    out.write_at(0, &buf);
-    needed as u64
+    match out.write_at(0, &buf) {
+        Ok(()) => needed as u64,
+        Err(faulted) => SyscallError::from(faulted).to_u64(),
+    }
 }
 
 /// Point the calling thread's thread pointer at `tp` (x86-64's FS base,

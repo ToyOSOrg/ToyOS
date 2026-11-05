@@ -445,3 +445,14 @@ Linux guest. The timing is one measurement, taken by hand and not automated
   (`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`):
   2 MiB L2 blocks map identically on both arches, so no change is forced by
   this track.
+
+## Unmeasured until an AArch64 bench
+
+- **User-copy throughput.** Since #1150, every user copy on AArch64 goes
+  through the unprivileged `LDTR`/`STTR` routines of `arch::uaccess`: 8 bytes
+  an access, where it went through the direct map's `memcpy` before. Their
+  correctness is checked under the guest runner (`virt_user_copy_faults`);
+  their cost against the old copy is not measured anywhere, as no AArch64 bench
+  exists and a guest run is no verdict on it. **Exit**: an AArch64 bench's
+  pipe and IPC rows against the commit before #1150, interleaved, with no row
+  worse.

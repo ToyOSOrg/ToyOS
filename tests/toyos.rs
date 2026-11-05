@@ -369,6 +369,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is the T14's verdict, on its served root;
     // `a_spawn_from_an_image_frees_it_when_the_child_ends` runs it under QEMU.
     "spawn_returns_the_census",
+    // Its shared run is each bench's verdict on its own CPU's fault path;
+    // `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` runs it under QEMU.
+    "user_copy_faults",
     // Its shared run is ring's known answers in a guest; the crypto boot runs it
     // first on each bench, and `crypto_instrument_prints_its_table` before the
     // instrument under QEMU.
@@ -422,6 +425,9 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_unmap_touch", qemu::Profile::Virt),
     ("virt_debug_refused", qemu::Profile::Virt),
     ("virt_readonly_copyout", qemu::Profile::Virt),
+    // `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` on AArch64:
+    // the unprivileged copies and their EL1 fixup (`arch::uaccess`).
+    ("virt_user_copy_faults", qemu::Profile::Virt),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt),
     // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and
     // `virt_reboot`: under HVF a woken thread can go undispatched for seconds
@@ -650,6 +656,13 @@ const MACHINE_TESTS: &[&str] = &[
     // holds. One boot of QEMU's x86-64 machine on the actuator kernel, for the
     // census.
     "a_spawn_from_an_image_frees_it_when_the_child_ends",
+    // A user copy through the process's own mapping (`arch::uaccess`): a page
+    // first touched inside the copy is served and the copy resumes, both
+    // directions and past a bounce; a released, unreadable or kernel address
+    // ends it `BadAddress`. The kernel's fault fixup, which no host test
+    // reaches. One boot of QEMU's x86-64 machine; the shared boots run it on
+    // each bench.
+    "a_user_copy_faults_in_mid_copy_or_ends_as_bad_address",
     // The boot's log written through usbd onto the stick it booted from, and
     // still there once the machine has stopped: the path every metal boot's
     // `/log` takes, which no other QEMU row reads, because their console is
@@ -2834,6 +2847,11 @@ const VIRT_RANDOM: &str = "random_draws";
 /// The same for its job `test_rs_wall_clock_now`.
 const VIRT_WALL_CLOCK: &str = "wall_clock_now";
 
+/// The AArch64 guest's user copies through its own mapping (`arch::uaccess`):
+/// the same binary and claims as
+/// `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` on x86-64.
+const VIRT_USER_COPY: &str = "user_copy_faults";
+
 /// The instant `tests/images/virtjobcase.toml`'s RTC starts at, and the same in Unix
 /// seconds: years from any host's own, so a reading on it came from the RTC.
 const VIRT_RTC_BASE: &str = "2033-03-07T09:14:25";
@@ -2853,6 +2871,7 @@ const VIRT_JOBS: &[(&str, &str)] = &[
     ("test_rs_ring0_timer_in_syscall", "the timer interrupted the syscall's body and re-armed a quantum"),
     ("test_rs_random_draws", RANDOM_DRAWS_SAID),
     ("test_rs_wall_clock_now", WALL_CLOCK_SAID),
+    ("test_rs_user_copy_faults", "user copies: all checks passed"),
     ("test_rs_abuse_readonly_copyout", "a syscall writes only where its caller could store"),
 ];
 
@@ -2877,7 +2896,7 @@ fn boot_virt_jobs(profile: qemu::Profile) -> QemuInstance {
             smp: 1,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: [VIRT_COPYOUT, VIRT_RING0_TIMER, VIRT_RANDOM, VIRT_WALL_CLOCK]
+            extra_root_files: [VIRT_COPYOUT, VIRT_RING0_TIMER, VIRT_RANDOM, VIRT_WALL_CLOCK, VIRT_USER_COPY]
                 .map(|name| suite_bin(profile.arch(), name))
                 .to_vec(),
             rtc_base: Some(VIRT_RTC_BASE),
@@ -3287,6 +3306,33 @@ fn a_spawn_from_an_image_frees_it_when_the_child_ends(test_config: &Path) -> Res
     for source in ["the served /system", "a copy in /state", "a copy in /tmp"] {
         let claim = format!("8 spawns from {source}: the census came back to its first reading");
         if !result.stdout.contains(&claim) {
+            return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
+        }
+    }
+    Ok(())
+}
+
+/// `user_copy_faults` alone: its copies that fault mid-copy and are served,
+/// and its refusals, each said by name.
+fn a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "user_copy_faults";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_user_copy_faults", Duration::from_secs(60));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    for claim in [
+        "a fault served mid-copy resumes: 600 bytes",
+        "a fault served mid-copy resumes: 12888 bytes",
+        "a byte nothing serves ends the copy as BadAddress",
+        "user copies: all checks passed",
+    ] {
+        if !result.stdout.contains(claim) {
             return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
         }
     }
@@ -4702,6 +4748,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_unmap_touch" => virt_job(profile, "unmap_touch"),
         "virt_debug_refused" => virt_job(profile, "debug_refused"),
         "virt_readonly_copyout" => virt_job(profile, &format!("test_rs_{VIRT_COPYOUT}")),
+        "virt_user_copy_faults" => virt_job(profile, &format!("test_rs_{VIRT_USER_COPY}")),
         "virt_ring0_timer_in_syscall" => virt_job(profile, &format!("test_rs_{VIRT_RING0_TIMER}")),
         "virt_jobs_at_el2" => virt_jobs_at_el2(profile),
         "virt_random_differs" => virt_random_differs(profile),
@@ -5028,6 +5075,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "the_uart_carries_the_boot_once_across_the_hand_over" => the_uart_carries_the_boot_once_across_the_hand_over(),
         "a_supervisor_that_fails_early_says_why_on_the_uart" => a_supervisor_that_fails_early_says_why_on_the_uart(),
         "a_spawn_from_an_image_frees_it_when_the_child_ends" => a_spawn_from_an_image_frees_it_when_the_child_ends(test_config),
+        "a_user_copy_faults_in_mid_copy_or_ends_as_bad_address" => a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config),
         "a_bent_supervisor_is_refused_and_the_other_slot_boots" => {
             [qemu::Profile::Headless, qemu::Profile::Virt].into_iter().try_for_each(|profile| {
                 let options = BootOptions { profile, bent: Some(toyos_update::slots::SUPERVISOR_FILE), ..Default::default() };

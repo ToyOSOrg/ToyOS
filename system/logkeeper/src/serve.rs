@@ -3,8 +3,8 @@
 //!
 //! **Every reader gets the boot from its first line**, however late it
 //! connects: the main loop appends each round's lines to one
-//! [`toyos_logstream::Replay`] after the file has them, and a reader is a
-//! thread with an offset into it. So the same text reaches `/log` and every
+//! [`toyos_logstream::Replay`], after the file has them once it is open, and a
+//! reader is a thread with an offset into it. So the same text reaches `/log` and every
 //! reader, in the same order, and nothing a reader does can reach the file.
 //!
 //! A reader that takes none for [`STALLED`] while bytes are owed to it is let
@@ -172,6 +172,22 @@ impl Hub {
         self.lock().replay.end()
     }
 
+    /// What a file at the replay's offset `at` is owed next, without waiting,
+    /// and `at` past it.
+    pub fn owed(&self, at: &mut u64) -> Owed {
+        match self.lock().replay.next(*at, CHUNK) {
+            Next::Bytes(bytes) => {
+                *at += bytes.len() as u64;
+                Owed::Text(bytes.to_vec())
+            }
+            Next::Evicted { lost, at: resume } => {
+                *at = resume;
+                Owed::Gap(lost)
+            }
+            Next::CaughtUp => Owed::Nothing,
+        }
+    }
+
     /// The pipe a reader on `conn` is handed, and the boot's length it starts
     /// with: `None` where the reader is already gone.
     pub fn hand_over(&self, conn: &Connection) -> Option<Pipe> {
@@ -207,6 +223,16 @@ impl Hub {
     pub fn own_line(&self, severity: Severity, text: &str) -> Vec<u8> {
         own_line(self.shared.boot_secs, severity, text)
     }
+}
+
+/// What a file is owed of the replay.
+pub enum Owed {
+    /// Whole lines.
+    Text(Vec<u8>),
+    /// Bytes the replay let go of before the file took them.
+    Gap(u64),
+    /// Everything the replay holds.
+    Nothing,
 }
 
 /// What a carrier is fed.
@@ -430,5 +456,21 @@ mod tests {
         assert_eq!(hub.wire_start(21), (21, None), "a channel that took the rounds after resumes after them");
         assert_eq!(hub.wire_start(15), (15, None));
         assert_eq!(hub.wire_start(3).1.as_deref(), Some(&b"program\n"[..]), "one that took less owes them again");
+    }
+
+    /// A volume that opens late is owed the boot from its first line, without
+    /// waiting, and told how much the replay let go of before it opened.
+    #[test]
+    fn a_late_file_is_owed_the_boot_whole_and_what_was_let_go() {
+        let hub = Hub::start(12, None);
+        hub.append(b"one\n", None);
+        let mut at = 0;
+        assert!(matches!(hub.owed(&mut at), Owed::Text(text) if text == b"one\n"));
+        assert!(matches!(hub.owed(&mut at), Owed::Nothing), "caught up is answered, not waited on");
+        hub.append(b"two\nthree\n", None);
+        let mut late = 0;
+        assert!(matches!(hub.owed(&mut late), Owed::Gap(8)), "past its 12 bytes the replay let `one` and `two` go");
+        assert!(matches!(hub.owed(&mut late), Owed::Text(text) if text == b"three\n"));
+        assert!(matches!(hub.owed(&mut late), Owed::Nothing));
     }
 }

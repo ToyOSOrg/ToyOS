@@ -136,24 +136,16 @@ impl DeviceClaim {
         self.info_read.load(Ordering::Relaxed)
     }
 
-    /// Write this claim's description into `buf`, minting handles on first call only.
-    pub fn describe(
-        &self,
-        table: &mut HandleTable,
-        buf: &mut crate::user_ptr::UserBytesMut,
-    ) -> u64 {
+    /// This claim's description, for its reader to copy out, minting handles
+    /// on first call only.
+    pub fn describe(&self, table: &mut HandleTable) -> Result<Box<[u8]>, SyscallError> {
         let mut described = self.described.lock();
         if described.bytes.is_none() {
-            match described.info.mint(table) {
-                Ok(minted) => described.bytes = Some(minted),
-                Err(e) => return e.to_u64(),
-            }
+            described.bytes = Some(described.info.mint(table)?);
         }
-        let bytes = described.bytes.as_deref().expect("just minted");
-        let count = buf.len().min(bytes.len());
-        buf.write_at(0, &bytes[..count]);
+        let bytes = described.bytes.clone().expect("just minted");
         self.info_read.store(true, Ordering::Relaxed);
-        count as u64
+        Ok(bytes)
     }
 }
 
