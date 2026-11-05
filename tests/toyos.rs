@@ -2994,6 +2994,7 @@ fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
         smi_cmd_writer(line)?;
         let byte = field_between(line, "acpi: firmware call ", " written to SMI_CMD ")?;
         let asker = number_between(line, ", asked from cpu", "; the write held cpu")?;
+        // The probe's `CROSSED`.
         if ["0x51", "0x52", "0x53"].contains(&byte) && asker != held {
             return Err(format!("firmware call {byte} was asked from cpu{asker}, where the probe held its asker to cpu{held}: {line}"));
         }
