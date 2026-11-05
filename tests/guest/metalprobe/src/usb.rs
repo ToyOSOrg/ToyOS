@@ -2,11 +2,11 @@
 //! reaches it: the FAT32 driver, the page cache and the xHCI mass-storage
 //! transport.
 //!
-//! **`/boot` is the one place on the boot disk a job may write.** A flashed
-//! image carries an ESP, a read-only ROOT, the boot volume and the `TOYOS-LOG`
-//! volume, and `/log` is the log keeper's alone
-//! (`toyos_manifest::Program::view`), so the durable bytes a job can lay down on
-//! that disk go on the boot volume's FAT32.
+//! **It writes `/log`, which its row's view holds read-only**: `/log` is the
+//! log keeper's alone (`toyos_manifest::Program::view`), and the stick's other
+//! volumes, the ESP and ROOT, are read-only too. So `usbwrite` and `usbread`
+//! fail with `ReadOnly` until the probe is given a writable place on the stick
+//! (`issues/the-device-boot-is-flashed-by-no-metal-row.md`).
 
 use std::fs;
 use std::io::{Read, Write};
@@ -39,17 +39,17 @@ const SHARE_PERCENT: u64 = 8;
 const BYTES: usize =
     (SLOWEST_KIB_S * toyos_tco::JOB_BOUND_MS * SHARE_PERCENT / 100 / 1_000 * 1024) as usize;
 
-/// Both files well inside the boot volume beside the slot's own files — and
-/// each removed as soon as it is measured, so only one is ever on the volume
-/// at once.
+/// Both files, plus a boot's `logkeeper` output, inside the 34 MiB the log volume is
+/// formatted at — and each removed as soon as it is measured, so only one is
+/// ever on the volume at once.
 const _: () = assert!(BYTES * 2 < 16 * 1024 * 1024);
 
 /// The chunk a write is handed down in — a whole number of the 4 KiB pages the
 /// cache is made of, so the measurement is not about a partial-page read/modify.
 const CHUNK: usize = 64 * 1024;
 
-const WRITTEN: &str = "/boot/metal-write.bin";
-const READ: &str = "/boot/metal-read.bin";
+const WRITTEN: &str = "/log/metal-write.bin";
+const READ: &str = "/log/metal-read.bin";
 
 /// The payload, derived from its own offset so a block served from the wrong
 /// place reads as the wrong bytes rather than as plausible ones.

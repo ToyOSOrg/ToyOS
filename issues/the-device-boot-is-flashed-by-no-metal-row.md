@@ -12,9 +12,10 @@ opened: 2026-10-21
 which went with the kernel's xHCI (the small-kernel track's step 10). No row
 names its boot now, so its jobs' timings are taken on no machine; only its
 config's job list is still checked (`the_config_runs_exactly_these_jobs`).
-Its `usbwrite` and `usbread` files moved from `/log`, which only the log
-keeper's view writes since #1196, to `/boot` on the same disk; neither has
-run there.
+Since #1196 its `usbwrite` and `usbread` fail with `ReadOnly`: they write
+`/log`, which only the log keeper's view writes, and the stick's other
+volumes, the ESP and ROOT, are read-only. The probe needs a writable place
+on the stick, which whoever revives this row decides.
 
 **Exit**: a row that rides the device boot and reports its jobs, or the boot
 and its jobs deleted. Owner: `tests/toyos.rs`'s metal profile, held by the

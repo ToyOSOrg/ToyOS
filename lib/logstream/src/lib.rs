@@ -725,6 +725,9 @@ impl Replay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::format;
+    use std::string::String;
+    use std::vec;
 
     /// **A late answer drains and never ends a new wait early.** A mark waited
     /// out past its bound and answered during the next stop's flush is counted
@@ -748,9 +751,6 @@ mod tests {
         assert!(!Unanswered::default().answer(FLUSHED));
         assert!(!Unanswered { flushes: 1, marks: 1 }.answer(REGISTER));
     }
-    use std::format;
-    use std::string::String;
-    use std::vec;
 
     fn line(tag: &str, text: &[u8]) -> String {
         let tag = Tag::new(tag).expect("a tag");
