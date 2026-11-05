@@ -17,7 +17,7 @@ use crate::quit::{self, Notice, Owed, Reason};
 use crate::table::{Lifecycle, Processes};
 use crate::teardown::{self, Leave};
 use crate::tree::{self, Admit, Publish};
-use crate::{End, Node, Pid, Pids, ThreadLocation, Tid, Watch};
+use crate::{End, Node, Pid, Pids, ThreadLocation, Tid, Tids, Watch};
 
 /// One process, as its lifecycle sees it.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -25,7 +25,7 @@ pub struct ModelProc {
     main_tid: Tid,
     teardown_end: Option<End>,
     threads: BTreeMap<Tid, ThreadLocation>,
-    next_tid: Tid,
+    tids: Tids,
     /// How many times a claim was raised on this process. Counted here because
     /// `begin_teardown` has exactly one caller and the count is the law.
     claims: u32,
@@ -61,6 +61,9 @@ impl Lifecycle for ModelProc {
     }
     fn thread_count(&self) -> usize {
         self.threads.len()
+    }
+    fn tids(&self) -> &Tids {
+        &self.tids
     }
     fn node(&self) -> &Node {
         &self.node
@@ -350,31 +353,38 @@ impl World {
             }
         };
         self.notices.insert(pid, notice);
+        let mut tids = Tids::default();
+        let main_tid = tids.take().expect("a new process has every tid");
         let mut threads = BTreeMap::new();
-        threads.insert(Tid(0), ThreadLocation::Scheduled);
+        threads.insert(main_tid, ThreadLocation::Scheduled);
         self.procs.insert(
             pid,
             ModelProc {
-                main_tid: Tid(0),
+                main_tid,
                 teardown_end: None,
                 threads,
-                next_tid: Tid(1),
+                tids,
                 claims: 0,
                 node,
             },
         );
-        self.mapped.insert((pid, Tid(0)));
+        self.mapped.insert((pid, main_tid));
     }
 
     /// Insert a thread the way `spawn_thread`'s phase 3 does — in the table and
     /// enqueued in the scheduler, so it is alive and in the process.
     pub fn spawn_thread(&mut self, pid: Pid) -> Tid {
         let proc = self.procs.get_mut(&pid).expect("spawn_thread on a live process");
-        let tid = proc.next_tid;
-        proc.next_tid = Tid(tid.0 + 1);
+        let tid = proc.tids.take().expect("spawn_thread: admitted, so a tid is left");
         proc.threads.insert(tid, ThreadLocation::Scheduled);
         self.mapped.insert((pid, tid));
         tid
+    }
+
+    /// `pid`'s next new tid is `next`, as a process that started a thread at
+    /// every tid below it.
+    pub fn issue_tids_below(&mut self, pid: Pid, next: Tid) {
+        self.procs.get_mut(&pid).expect("issue_tids_below on a live process").tids = Tids::issued_below(next);
     }
 
     pub fn main_tid(&self, pid: Pid) -> Tid {

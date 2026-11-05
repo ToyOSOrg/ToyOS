@@ -25,6 +25,7 @@
 //! several records because it is a crash and not an end.
 
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -50,7 +51,7 @@ use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_LIBRARIES};
 /// The lifecycle's decisions; this file only performs them.
 pub use toyos_proclife::{ThreadLocation, Watch};
 use toyos_proclife::quit::{self, Notice, Reason};
-use toyos_proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, tree, Lifecycle, Node, Processes};
+use toyos_proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, tree, Lifecycle, Node, Processes, Tids};
 
 /// One `EndowEntry` on the wire; `loader::start` and [`Endowments::encode`] both index by it.
 pub const ENDOW_ENTRY_LEN: usize = core::mem::size_of::<EndowEntry>();
@@ -122,7 +123,7 @@ pub const KERNEL_STACK_SIZE: usize = 128 * 1024;
 /// How much of a process or thread name the table keeps, fixed by the `SYS_SYSINFO` record's name field.
 pub const THREAD_NAME_LEN: usize = 28;
 
-/// Per-thread metadata. Tid is the HashMap key in ProcessEntry.threads.
+/// Per-thread metadata, keyed by its tid in `ProcessEntry::threads`.
 pub struct ThreadEntry {
     state: ThreadLocation,
     name: [u8; THREAD_NAME_LEN],
@@ -159,7 +160,9 @@ pub struct ProcessEntry {
     /// No `Lock`: written once by the loader, then read-only — a crash report reaches it through the task it is reporting on, never through this table. `None` once the process is torn down.
     image: Option<Arc<UserImage>>,
     main_tid: Tid,
-    threads: crate::id_map::IdMap<Tid, ThreadEntry>,
+    /// A `BTreeMap`, whose nodes are fixed-size allocations: no count it holds grows one allocation towards `mm::MAX_HEAP_ALLOC`.
+    threads: BTreeMap<Tid, ThreadEntry>,
+    tids: Tids,
     /// Set once, with the end, by the exit or kill that claims teardown; checked by `spawn_thread` so no thread appears after the retire set.
     teardown_end: Option<End>,
     /// Its parent, children and depth, answered by no syscall; `toyos_proclife::tree` reads and writes it.
@@ -181,8 +184,9 @@ impl ProcessEntry {
         node: Node,
         notice: Arc<crate::object::notice::NoticeObject>,
     ) -> Self {
-        let mut threads = crate::id_map::IdMap::new();
-        let main_tid = threads.insert(main_thread);
+        let mut tids = Tids::default();
+        let main_tid = tids.take().expect("ProcessEntry::new: a new process has every tid");
+        let threads = BTreeMap::from([(main_tid, main_thread)]);
         Self {
             pid: object.pid(),
             object,
@@ -191,6 +195,7 @@ impl ProcessEntry {
             image,
             main_tid,
             threads,
+            tids,
             teardown_end: None,
             node,
             exit: None,
@@ -204,8 +209,8 @@ impl ProcessEntry {
     }
     pub fn process_data(&self) -> &Arc<Lock<ProcessData>> { &self.process_data }
     pub fn main_tid(&self) -> Tid { self.main_tid }
-    pub fn threads(&self) -> &crate::id_map::IdMap<Tid, ThreadEntry> { &self.threads }
-    pub fn threads_mut(&mut self) -> &mut crate::id_map::IdMap<Tid, ThreadEntry> { &mut self.threads }
+    pub fn threads(&self) -> &BTreeMap<Tid, ThreadEntry> { &self.threads }
+    pub fn threads_mut(&mut self) -> &mut BTreeMap<Tid, ThreadEntry> { &mut self.threads }
 }
 
 impl ProcessEntry {
@@ -219,24 +224,25 @@ impl Lifecycle for ProcessEntry {
     fn teardown_end(&self) -> Option<End> { self.teardown_end }
     fn begin_teardown(&mut self, end: End) { self.teardown_end = Some(end); }
     fn location(&self, tid: Tid) -> Option<ThreadLocation> {
-        self.threads.get(tid).map(|t| t.state)
+        self.threads.get(&tid).map(|t| t.state)
     }
     fn set_location(&mut self, tid: Tid, to: ThreadLocation) {
-        if let Some(thread) = self.threads.get_mut(tid) {
+        if let Some(thread) = self.threads.get_mut(&tid) {
             thread.state = to;
         }
     }
     fn forget_thread(&mut self, tid: Tid) {
-        self.threads.remove(tid);
+        self.threads.remove(&tid);
     }
     fn each_thread(&self, f: &mut dyn FnMut(Tid, ThreadLocation)) {
-        for (tid, thread) in self.threads.iter() {
+        for (&tid, thread) in &self.threads {
             f(tid, thread.state);
         }
     }
     fn thread_count(&self) -> usize {
         self.threads.len()
     }
+    fn tids(&self) -> &Tids { &self.tids }
     fn node(&self) -> &Node { &self.node }
     fn node_mut(&mut self) -> &mut Node { &mut self.node }
 }
@@ -475,7 +481,7 @@ pub fn stats_of(
         let guard = PROCESS_TABLE.lock();
         let proc = guard.as_ref()?.get(pid)?;
         let (mut cpu_ns, mut syscall_total, mut syscall_total_ns) = (0, 0, 0);
-        for sched in proc.threads().iter().filter_map(|(_, thread)| thread.sched()) {
+        for sched in proc.threads().values().filter_map(ThreadEntry::sched) {
             cpu_ns += scheduler::task_cpu_ns(sched);
             syscall_total += sched.handle.syscalls().calls();
             syscall_total_ns += sched.handle.syscalls().ns();
@@ -511,7 +517,7 @@ pub fn current_data() -> Arc<Lock<ThreadData>> {
     let guard = PROCESS_TABLE.lock();
     let thread = guard.as_ref().unwrap()
         .get(current_process())
-        .and_then(|p| p.threads.get(current_tid()))
+        .and_then(|p| p.threads.get(&current_tid()))
         .expect("current_data: an entry outlives every thread that has not left it");
     Arc::clone(&thread.thread_data)
 }
@@ -521,7 +527,7 @@ pub fn set_current_thread_name(name: &[u8]) {
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().unwrap();
     if let Some(proc) = table.get_mut(current_process()) {
-        if let Some(thread) = proc.threads.get_mut(current_tid()) {
+        if let Some(thread) = proc.threads.get_mut(&current_tid()) {
             thread.set_name(name);
         }
     }
@@ -636,7 +642,7 @@ pub fn spawn_thread(
         // Not `is_yes()`: a missing entry here means this thread's own process was reaped out from under it, which panics rather than refuses.
         match proclife_spawn::admit_thread_start(table, parent_process) {
             proclife_spawn::Admit::Yes => {}
-            proclife_spawn::Admit::TearingDown | proclife_spawn::Admit::Full => return None,
+            proclife_spawn::Admit::TearingDown | proclife_spawn::Admit::Full | proclife_spawn::Admit::TidsSpent => return None,
             proclife_spawn::Admit::NoSuchProcess => {
                 panic!("spawn_thread: pid {parent_process} is spawning and is not in the table")
             }
@@ -694,9 +700,10 @@ pub fn spawn_thread(
     let image = proc.image.clone().expect("spawn_thread: an admitted thread's process keeps its image until its last thread is out");
     let mask = driver::current_mask();
     // Newest first, as `homes` reads them: the threads a burst has just made.
-    let siblings = proc.threads.iter().rev().filter_map(|(_, thread)| thread.sched().map(|sched| sched.shared.state()));
+    let siblings = proc.threads.values().rev().filter_map(|thread| thread.sched().map(|sched| sched.shared.state()));
     let homes = homes(siblings, mask.within(crate::smp::cpu_count() as usize));
-    let tid = proc.threads.insert(ThreadEntry::new(thread_data));
+    let tid = proc.tids.take().expect("spawn_thread: the insert admission refuses a process whose tids are spent");
+    proc.threads.insert(tid, ThreadEntry::new(thread_data));
     // Before the thread's first instruction, which is the enqueue below: the
     // thread reads its own id here without a syscall (`toyos_abi::TCB_TID`).
     tcb.write((tp_offset + toyos_abi::TCB_TID) as u64, &tid.raw().to_ne_bytes());
@@ -713,7 +720,7 @@ pub fn spawn_thread(
         mask,
         near: Some(Near { spawner: driver::current_cpu(), homes }),
     });
-    proc.threads.get_mut(tid).unwrap().set_sched(sched);
+    proc.threads.get_mut(&tid).unwrap().set_sched(sched);
     drop(guard);
     Some(tid)
 }
@@ -792,7 +799,7 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, end: End, co
     let proc = table.get_mut(process_pid)
         .expect("teardown_bookkeeping: process not found");
     proc.image = None;
-    let cpu_ns: u64 = proc.threads.iter().map(|(_, t)| t.sched().map_or(0, scheduler::task_cpu_ns)).sum();
+    let cpu_ns: u64 = proc.threads.values().map(|t| t.sched().map_or(0, scheduler::task_cpu_ns)).sum();
     let name = proc.name_str();
     // The verdict first: a record past `MAX_RECORD_MESSAGE` loses its end.
     log!("exit: {name} pid={process_pid} {end} cpu={}ms {consumed}", cpu_ns / 1_000_000);
@@ -859,7 +866,7 @@ fn teardown(pid: Pid, tid: Tid, end: End, mark: i32, process_data: &Arc<Lock<Pro
     let (main_thread, supervisor) = {
         let guard = PROCESS_TABLE.lock();
         let proc = guard.as_ref().unwrap().get(pid).expect("teardown: the process its last thread is in");
-        let main = proc.threads.get(proc.main_tid).expect("teardown: a claimed process gives up no thread");
+        let main = proc.threads.get(&proc.main_tid).expect("teardown: a claimed process gives up no thread");
         ((Arc::clone(&main.thread_data), main.sched().cloned()), proc.node.parent().is_none())
     };
     let releases = crate::object::Releases::open();
@@ -940,7 +947,7 @@ fn scheds(table: &ProcessTable, pid: Pid, tids: Vec<Tid>) -> Vec<ThreadSched> {
     let proc = table.get(pid).expect("scheds: a claimed process is in the table");
     tids.into_iter()
         .map(|tid| {
-            proc.threads.get(tid).and_then(ThreadEntry::sched).cloned()
+            proc.threads.get(&tid).and_then(ThreadEntry::sched).cloned()
                 .expect("scheds: a thread in the table has its scheduler record")
         })
         .collect()
@@ -1033,7 +1040,7 @@ fn release_thread(tid: Tid) {
 pub fn thread_sched(pid: Pid, tid: Tid) -> Option<ThreadSched> {
     let guard = PROCESS_TABLE.lock();
     let table = guard.as_ref()?;
-    table.get(pid)?.threads.get(tid)?.sched().cloned()
+    table.get(pid)?.threads.get(&tid)?.sched().cloned()
 }
 
 /// The physical address of a futex word, its page populated like any other user access. Alignment matters: the scheduler dereferences this directly on every wake check, so an unaligned word could straddle into the next physical page.
