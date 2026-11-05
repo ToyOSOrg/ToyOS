@@ -120,7 +120,14 @@ static UNITS: [Masked<Option<Live>>; MAX_UNITS] = [const { Masked::new(None) }; 
 static PUBLISHED: AtomicUsize = AtomicUsize::new(0);
 
 /// Each translating unit's SMI filter, until [`settle`] writes it.
-static SMI: Lock<Vec<(usize, Mmio, Option<Vec<SmiFilter>>)>> = Lock::new(Vec::new());
+static SMI: Lock<Vec<Unfiltered>> = Lock::new(Vec::new());
+
+struct Unfiltered {
+    index: usize,
+    regs: Mmio,
+    /// [`Ready::smi`].
+    filter: Option<Vec<SmiFilter>>,
+}
 
 /// `bytes` at `phys`, through the direct map.
 fn memory(phys: u64, bytes: u64) -> Mmio {
@@ -598,7 +605,7 @@ fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
         *UNITS[at].lock(&closed) = Some(live);
     }
     PUBLISHED.store(at + 1, Ordering::Release);
-    settling.push((index, regs, smi));
+    settling.push(Unfiltered { index, regs, filter: smi });
 }
 
 /// Every unit's SMI filter on, once every function this kernel drives is out
@@ -607,8 +614,8 @@ fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
 pub fn settle() {
     let mut units = SMI.lock();
     let mut everywhere = !units.is_empty();
-    for (index, regs, smi) in units.iter_mut() {
-        let Some(filter) = smi.take() else {
+    for Unfiltered { index, regs, filter } in units.iter_mut() {
+        let Some(filter) = filter.take() else {
             everywhere = false;
             continue;
         };
