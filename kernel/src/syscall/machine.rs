@@ -265,7 +265,7 @@ fn sysinfo_thread_bound() -> usize {
 
 /// Every thread in the process table, zombies included: the roster's entries.
 fn live_threads(table: &process::ProcessTable) -> usize {
-    table.iter().map(|(_, proc)| proc.threads().iter().count()).sum()
+    table.iter().map(|(_, proc)| proc.threads().len()).sum()
 }
 
 /// The machine's header, then the live-thread roster for as much of `out` as fits; the roster requires a `SysCap` carrying `Rights::ROSTER`, demanded only when `out` has room for an entry.
@@ -314,7 +314,7 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
 
     let mut entries: Vec<(process::Tid, &process::ProcessEntry, &process::ThreadEntry)> =
         Vec::with_capacity(entry_count as usize);
-    entries.extend(table.iter().flat_map(|(_, proc)| proc.threads().iter().map(move |(tid, thread)| (tid, proc, thread))));
+    entries.extend(table.iter().flat_map(|(_, proc)| proc.threads().iter().map(move |(&tid, thread)| (tid, proc, thread))));
     entries.sort_by_key(|(tid, proc, _)| (proc.pid(), *tid));
 
     let mut pos = HEADER_SIZE;

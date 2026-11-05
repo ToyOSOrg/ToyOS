@@ -10,7 +10,7 @@
 //! A caller that needs an order sorts what it collected, and the two that do
 //! ([`crate::teardown::retire_set`] and [`crate::reap::finished_pids`]) say so.
 
-use crate::{End, Node, Pid, Pids, ThreadLocation, Tid};
+use crate::{End, Node, Pid, Pids, ThreadLocation, Tid, Tids};
 
 /// One process's lifecycle state: the whole of what a spawn, an exit, a kill, a
 /// join or a reap reads or writes about it.
@@ -51,6 +51,9 @@ pub trait Lifecycle {
     /// How many threads the process holds, zombies a join has not collected
     /// among them.
     fn thread_count(&self) -> usize;
+
+    /// The tids its threads have been issued.
+    fn tids(&self) -> &Tids;
 
     /// Where this process stands in the tree. Read and written by
     /// [`crate::tree`] alone.

@@ -192,7 +192,7 @@ fn sweep(caller: ThreadId) -> Sweep {
     let Some(table) = guard.as_ref() else { return out };
     for (_, proc) in table.iter() {
         let pid = proc.pid();
-        for (tid, thread) in proc.threads().iter() {
+        for (&tid, thread) in proc.threads() {
             if !must_stop(ThreadId { pid: pid.raw(), tid: tid.raw() }, caller) {
                 continue;
             }

@@ -34,6 +34,9 @@ pub enum Admit {
     /// The process holds [`MAX_THREADS`] threads. A thread that exits stays
     /// one until it is joined, so only a join makes room.
     Full,
+    /// Every tid below `Tid::MAX` has been issued in this process
+    /// ([`crate::Tids`]), and nothing makes room.
+    TidsSpent,
 }
 
 impl Admit {
@@ -75,6 +78,7 @@ fn admit<P: Lifecycle>(proc: Option<&P>) -> Admit {
         None => Admit::NoSuchProcess,
         Some(proc) if proc.tearing_down() => Admit::TearingDown,
         Some(proc) if proc.thread_count() >= MAX_THREADS => Admit::Full,
+        Some(proc) if proc.tids().spent() => Admit::TidsSpent,
         Some(_) => Admit::Yes,
     }
 }
@@ -84,7 +88,7 @@ mod tests {
     use super::*;
     use crate::End;
     use crate::model::World;
-    use crate::{join, teardown, ThreadLocation};
+    use crate::{join, teardown, ThreadLocation, Tid};
 
     #[test]
     fn a_live_process_admits_a_thread_at_both_moments() {
@@ -148,6 +152,22 @@ mod tests {
         assert_eq!(admit_thread_start(&world, pid), Admit::Yes);
         world.spawn_thread(pid);
         assert_eq!(admit_thread_insert(&world, pid), Admit::Full);
+    }
+
+    /// A tid is never issued twice and `Tid::MAX` never at all, so a process
+    /// that has started a thread at every tid below it starts no more, however
+    /// few it holds. The insert's answer is the mutation's to change.
+    #[test]
+    fn a_process_whose_tids_are_spent_refuses_at_both_moments() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        world.issue_tids_below(pid, Tid(u32::MAX - 1));
+        assert_eq!(admit_thread_start(&world, pid), Admit::Yes);
+        assert_eq!(world.spawn_thread(pid), Tid(u32::MAX - 1));
+        assert_eq!(admit_thread_start(&world, pid), Admit::TidsSpent);
+        if !cfg!(feature = "mutate-spawn-skips-the-insert-recheck") {
+            assert_eq!(admit_thread_insert(&world, pid), Admit::TidsSpent);
+        }
     }
 
     #[cfg(feature = "mutate-spawn-skips-the-insert-recheck")]
