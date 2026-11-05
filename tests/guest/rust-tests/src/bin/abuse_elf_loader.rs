@@ -77,11 +77,8 @@ const DT_JMPREL: i64 = 23;
 const DT_PLTRELSZ: i64 = 2;
 const DT_GNU_HASH: i64 = 0x6fff_fef5u32 as i32 as i64;
 
-const SHT_DYNSYM: u32 = 11;
-
 const R_X86_64_GLOB_DAT: u64 = 6;
 const R_X86_64_RELATIVE: u64 = 8;
-const R_X86_64_DTPMOD64: u64 = 16;
 const R_X86_64_TPOFF64: u64 = 18;
 
 const STT_TLS: u8 = 6;
@@ -187,14 +184,6 @@ impl Elf {
             .poke(off + 4, &[st_info, 0])
             .poke(off + 6, &st_shndx.to_le_bytes())
             .poke(off + 8, &st_value.to_le_bytes())
-    }
-
-    /// One Elf64_Shdr at file offset `off`.
-    fn shdr(self, off: usize, sh_type: u32, sh_offset: u64, sh_size: u64, sh_entsize: u64) -> Self {
-        self.poke(off + 4, &sh_type.to_le_bytes())
-            .poke(off + 24, &sh_offset.to_le_bytes())
-            .poke(off + 32, &sh_size.to_le_bytes())
-            .poke(off + 56, &sh_entsize.to_le_bytes())
     }
 
     fn build(mut self) -> Vec<u8> {
@@ -579,8 +568,6 @@ fn values_are_bounded_by_the_image() {
 
 const FAR: &str = "far";
 const FAR_VALUE: u64 = 0xFFFF_FFFF_FFFF_F000;
-const DT_INIT_ARRAY: i64 = 25;
-const DT_INIT_ARRAYSZ: i64 = 27;
 const STT_FUNC: u8 = 2;
 
 
