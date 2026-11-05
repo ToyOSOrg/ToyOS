@@ -13,7 +13,7 @@ use toyos_virtio::queue::{Published, UsedRefusal};
 
 use crate::wire::{self, Event, Failed, PcmInfo, Request};
 use crate::{
-    Notified, Played,
+    Played,
     Doorbell, Queues, Refusal, Sound, Stream, CONTROL_PARTS, EVENTS, EVENT_PARTS, PERIODS, PERIOD_BYTES,
     TX_PARTS,
 };
@@ -625,7 +625,7 @@ fn no_period_is_stranded_between_its_used_element_and_its_notification() {
         let mut taken: Option<(u32, u64)> = None;
         let mut back: Vec<(Played, u64)> = Vec::new();
         let read = |sound: &mut Sound<_, _>, record: Option<(u32, u64)>, back: &mut Vec<(Played, u64)>| {
-            let played = sound.played(record.map(|(count, _)| Notified::All(count))).expect("a whole period");
+            let played = sound.played(record.map(|(count, _)| count)).expect("a whole period");
             back.extend(played.zip(record.map(|(_, at)| at)));
         };
         for n in 0..8 {
@@ -665,30 +665,24 @@ fn no_period_is_stranded_between_its_used_element_and_its_notification() {
     assert_eq!(orders, 70);
 }
 
-/// A driver that fell behind is clocked again once it catches up: three
-/// periods complete before a read, the claim's interrupt masks at the second
-/// notification and drops the third (`toyos_abi::pci`), and the record is
-/// [`Notified::AtLeast`]; then the device and the driver alternate, one
-/// period, one notification and one read at a time, and the second steady read after it is clocked again, the first being doubted.
-///
-/// Today's accounting reds this: it keeps the dropped notification owed, and
-/// no record after it ever clocks a period.
+/// A record of one interrupt over two periods anchors nothing, and the
+/// steady reads after it are each clocked again.
 #[test]
-fn a_record_that_dropped_notifications_does_not_stop_the_clock() {
+fn a_record_folded_over_two_periods_does_not_stop_the_clock() {
     let model = Model::new();
     let mut sound = opened(&model);
     for period in 0..PERIODS {
         sound.submit(period).expect("a period goes out");
     }
-    model.play(3);
-    let behind = sound.played(Some(Notified::AtLeast(2))).expect("whole periods").expect("three periods came back");
-    assert_eq!((behind.mask.count_ones(), behind.clocked), (3, 2), "the two notifications that landed clock the first two");
-    let mut clocked = Vec::new();
+    model.play(2);
+    let folded = sound.played(Some(1)).expect("whole periods").expect("two periods came back");
+    assert_eq!(folded.mask.count_ones(), 2);
+    let mut clocked = vec![folded.clocked];
     for _ in 0..3 {
         model.play(1);
-        let played = sound.played(Some(Notified::All(1))).expect("a whole period").expect("one period came back");
+        let played = sound.played(Some(1)).expect("a whole period").expect("one period came back");
         assert_eq!(played.mask.count_ones(), 1);
         clocked.push(played.clocked);
     }
-    assert_eq!(clocked, [0, 1, 1], "how many periods each steady read clocked");
+    assert_eq!(clocked, [0, 1, 1, 1], "how many periods the folded read and each steady read clocked");
 }

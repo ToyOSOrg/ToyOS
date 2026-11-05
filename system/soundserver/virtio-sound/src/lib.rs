@@ -235,23 +235,14 @@ impl<M: DmaBuffers + Clone> Queues<M> {
     }
 }
 
-/// How many notifications a record of the claim's interrupt says landed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Notified {
-    /// Every one since the last record.
-    All(u32),
-    /// At least this many: the claim's interrupt was masked before the read,
-    /// and what landed past the mask was dropped (`toyos_abi::pci`).
-    AtLeast(u32),
-}
-
 /// The periods one record answers for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Played {
     /// The periods the device gave back, one bit each.
     pub mask: u32,
-    /// How many of them, in the order they came back, the record's newest
-    /// notification is the time of; the rest are a later record's.
+    /// 1 where the record's newest notification is the time of the one
+    /// period this read found, and 0 where it may not be: these periods are
+    /// then clocked by the next record that is.
     pub clocked: u32,
 }
 
@@ -270,11 +261,6 @@ pub struct Sound<M: DmaBuffers, D: Doorbell> {
     bell: D,
     queues: Queues<M>,
     running: bool,
-    /// Periods a read counted before their notification landed.
-    unnotified: u32,
-    /// The last record dropped notifications, so the next one's may be for
-    /// a period an earlier read already counted.
-    doubted: bool,
 }
 
 impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
@@ -285,7 +271,7 @@ impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
         if streams == 0 {
             return Err(Refusal::NoStream);
         }
-        let mut sound = Self { mem, bell, queues, running: false, unnotified: 0, doubted: false };
+        let mut sound = Self { mem, bell, queues, running: false };
         for buffer in 0..EVENT_BUFS {
             sound.post_event(buffer);
         }
@@ -346,44 +332,22 @@ impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
         Ok(())
     }
 
-    /// The periods the device has given back since a record of `notified`
-    /// notifications was taken; nothing without a record.
+    /// The periods the device has given back since the last read, for a
+    /// record of `taken` interrupts; nothing without a record.
     ///
-    /// The device writes a used element before the notification that says
-    /// so, and with `avail.flags` zero and no `VIRTIO_F_EVENT_IDX` it owes one
-    /// for every element (§2.7.7), so a ring read after a record was taken
-    /// holds every period that record counts. With no record the ring is not
-    /// read: a period already in it has a notification still to land, which
-    /// makes the record readable again, and it is read then.
+    /// The periods are the used ring's and never the count's: the interrupt
+    /// controller folds messages and the claim's mask drops them, so a count
+    /// says only that the device spoke (`toyos_abi::pci`). With no record the
+    /// ring is not read: a period already in it has a notification still to
+    /// land, which makes the record readable again, and it is read then.
     ///
-    /// **A period read before its notification landed is not clocked by this
-    /// record**: notifications answer periods in the order they came back, the
-    /// ones an earlier read counted first, and [`Played::clocked`] counts the
-    /// periods of this mask the record's notifications reach.
-    ///
-    /// **A record of [`Notified::AtLeast`] dropped the notifications past its
-    /// mask**, so the ones it holds still answer the first periods in order,
-    /// and what it leaves owed is not known: a period this read found may have
-    /// had its notification dropped, or have it still to land.
-    /// It is taken as none, and the next record clocks nothing, since its
-    /// first notification may be one such period's.
-    pub fn played(&mut self, notified: Option<Notified>) -> Result<Option<Played>, Refusal> {
-        let Some(notified) = notified else { return Ok(None) };
+    /// **The record's newest time clocks a period only where it can be no
+    /// other's**: one interrupt taken and one period read. Any other read
+    /// takes no anchor, and its periods carry into the next that does.
+    pub fn played(&mut self, taken: Option<u32>) -> Result<Option<Played>, Refusal> {
+        let Some(count) = taken else { return Ok(None) };
         let mask = self.completed()?;
-        let periods = mask.count_ones();
-        let (count, dropped) = match notified {
-            Notified::All(count) => (count, false),
-            Notified::AtLeast(count) => (count, true),
-        };
-        let fresh = count.saturating_sub(self.unnotified).min(periods);
-        let clocked = if self.doubted { 0 } else { fresh };
-        // No more can be owed than the ring holds periods.
-        self.unnotified = if dropped {
-            0
-        } else {
-            (self.unnotified.saturating_sub(count) + periods - fresh).min(PERIODS as u32)
-        };
-        self.doubted = dropped;
+        let clocked = u32::from(count == 1 && mask.count_ones() == 1);
         Ok((mask != 0).then_some(Played { mask, clocked }))
     }
 

@@ -14,11 +14,12 @@ That bounds it per read and not per unit of time, and three things remain.
 
 **A holder paces cpu0.** A holder that loops on forcing a cause through its
 own registers and reading its record, on any CPU, still raises one cpu0
-interrupt per iteration; one that forces two per read also costs cpu0 an
-invalidation completion wait with interrupts off, at the mask and again at
-its read (VT-d's interrupt-entry-cache invalidation, AMD-Vi's completion
-wait, or the ITS's `SYNC`). All of it is charged to whatever cpu0
-interrupted, not to the holder.
+interrupt per iteration, charged to whatever cpu0 interrupted and not to the
+holder. One that forces two per read also costs cpu0 an invalidation
+completion wait with interrupts off at the mask (VT-d's interrupt-entry-cache
+invalidation, AMD-Vi's completion wait, or the ITS's `SYNC`); the read's own
+wait runs in the holder's call, and reaches cpu0 only as a spin on the unit's
+queue behind it.
 
 **A refused message is recorded nowhere.** While masked, a message is target
 aborted (AMD-Vi) or blocked with fault processing disabled (VT-d), and

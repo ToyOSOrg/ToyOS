@@ -197,18 +197,18 @@ pub struct DmaMapping {
 
 const _: () = assert!(core::mem::size_of::<DmaMapping>() == 8 + 8);
 
-/// The interrupts that landed since the last read of a claim.
+/// The interrupts the kernel took for a claim since its last read.
 ///
 /// One record and not a queue: the kernel accumulates, so a driver that slept
 /// through several is told about all of them at once and there is no ring for a
-/// slow reader to overflow. The count says how many messages arrived, never
-/// what any of them meant: that is in the device's own rings.
+/// slow reader to overflow. The count is of interrupts the kernel took, never
+/// of messages the device sent or what any of them meant: the interrupt
+/// controller folds messages that arrive while one is pending, and what they
+/// meant is in the device's own rings.
 ///
-/// **A claimed PCI function's interrupt is masked from the second message
-/// that lands before a read until that read**: a message sent meanwhile is
-/// refused at the unit on x86-64, and left pending until the read on AArch64.
-/// So a count below [`MASKED_FROM`] is every message, and one at it or above
-/// is a lower bound.
+/// **A claimed PCI function's interrupt is masked from the second interrupt
+/// taken before a read until that read**: a message sent meanwhile is refused
+/// at the unit on x86-64, and left pending until the read on AArch64.
 ///
 /// **The two times are when messages landed, which a driver reading its rings
 /// later cannot recover**: a driver clocked by its device — soundserver's DLL —
@@ -220,11 +220,11 @@ pub struct DeviceIrqRecord {
     /// Never 0 in a record that was answered; an empty count is `WouldBlock`.
     pub count: u32,
     pub _pad: u32,
-    /// When the first message `count` holds landed.
+    /// When the first interrupt `count` holds was taken.
     pub first_nanos: u64,
-    /// When the newest landed: never older than the newest message `count`
-    /// holds, and newer only by one that lands as the read is made, which the
-    /// next read counts.
+    /// When the newest was: never older than the newest interrupt `count`
+    /// holds, and newer only by one taken as the read is made, which the next
+    /// read counts.
     pub last_nanos: u64,
 }
 

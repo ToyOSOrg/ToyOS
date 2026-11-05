@@ -194,7 +194,7 @@ impl PciDev {
     /// The interrupts since the last read, or `Err(WouldBlock)` for none.
     ///
     /// **Take the record before servicing the device.** From a second
-    /// message before a read to that read, the function's interrupt is
+    /// interrupt before a read to that read, the function's interrupt is
     /// masked, and what the device signals meanwhile raises nothing: a driver
     /// that serviced first and read after could miss an event that arrived in
     /// between.

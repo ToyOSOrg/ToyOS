@@ -152,7 +152,7 @@ fn force<R: Registers>(regs: &R, claim: &Claim, forced: u32, unmask: u32) -> (u3
 
 /// `STORM` causes forced with `ITR` off and the record unread, each read off
 /// `ICR` as asserted, then the messages that landed: the claim's interrupt
-/// is masked from the first until this read.
+/// is masked from the second until this read.
 fn storm<R: Registers>(regs: &R, claim: &Claim) -> (u32, u32) {
     regs.write32(regs::IMC, u32::MAX);
     regs.write32(regs::ITR, 0);

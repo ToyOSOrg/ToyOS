@@ -1977,10 +1977,10 @@ pub fn config_read(binding: &Binding, at: Register, width: RegWidth) -> Result<u
     })
 }
 
-/// The interrupts since the last read, or `None` for none, the claim's
-/// message delivered again after a read that took the ones that masked it; `Gone` once the
-/// function has left the device set, and `Io` once the unit has refused it:
-/// the two answers its holder cannot take for a quiet device.
+/// The interrupts since the last read, or `None` for none; a read that takes
+/// some opens a masked claim. `Gone` once the function has left the device
+/// set, and `Io` once the unit has refused it: the two answers its holder
+/// cannot take for a quiet device.
 pub fn take_record(binding: &Binding) -> Result<Option<DeviceIrqRecord>, SyscallError> {
     let function = binding.function();
     if !binding.here() {

@@ -51,7 +51,6 @@ const ORDER: Ordering = Ordering::Relaxed;
 
 /// The count is the word's low half and the reads that took one its high half.
 const COUNT: u64 = 0xFFFF_FFFF;
-
 const READ: u64 = 1 << 32;
 
 /// The negative control: each compare-exchange on the word becomes a load and
