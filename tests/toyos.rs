@@ -624,6 +624,11 @@ const MACHINE_TESTS: &[&str] = &[
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
     "machine_shutdown_short_stop",
+    // A clean stop proves its image: the stop mark `logkeeper` writes at the
+    // stop's flush, and the next loader pass's floor raise. x86-64 q35: it
+    // takes the loader's second pass on the same disk and firmware variables,
+    // which no host test has, and a metal run reflashes before any second pass.
+    "a_clean_stop_proves_its_image",
     // A claimable function with a mappable BAR that no program of the boot
     // holds: QEMU's virtio NIC on `tests/images/testcases.toml`. The T14's one such
     // function is its I219, and a kernel that dies on this takes the bench's
@@ -4865,6 +4870,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
+        "a_clean_stop_proves_its_image" => power::a_clean_stop_proves_its_image(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),

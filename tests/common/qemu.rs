@@ -1701,6 +1701,14 @@ impl QemuInstance {
         qmp.await_event("DEVICE_DELETED", self.budget(budget))
     }
 
+    /// Let the guest's own reset restart it, where a `-no-reboot` QEMU would
+    /// have exited: the next boot runs in this instance, on the same disk and
+    /// firmware variables.
+    pub fn reset_on_reboot(&mut self) {
+        let socket = self.sockets.qmp.clone().expect("reset_on_reboot needs BootOptions { qmp: true }");
+        Qmp::connect(&socket).execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"reset\"}}");
+    }
+
     /// Capture the guest's scanout through QMP and return the decoded PPM.
     ///
     /// After a halt the guest is stopped, so the dump is stable. QEMU writes

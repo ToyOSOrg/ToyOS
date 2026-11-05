@@ -95,6 +95,37 @@ pub fn machine_shutdown_short_stop(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The loader's lines about the proof, in `loader/src/proof.rs`.
+const NO_STOP_MARK: &str = "Proof: the last boot left no stop mark, so it proves no image";
+const STOPPED_CLEANLY: &str = "stopped cleanly";
+const FLOOR_RAISED: &str = "by the boot that proved it";
+
+/// A boot that stops cleanly proves its image: `logkeeper` marks the log
+/// partition at the stop's flush, and the next loader pass takes the mark and
+/// raises the anti-rollback floor to the image's signed version. The first
+/// pass, on a fresh image, has no mark and raises nothing.
+pub fn a_clean_stop_proves_its_image(test_config: &Path) -> Result<(), String> {
+    let options = BootOptions { qmp: true, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    boot.must_say(NO_STOP_MARK)?;
+    says_nothing_of(&boot, FLOOR_RAISED)?;
+    let mut console = boot.text().to_string();
+    qemu.reset_on_reboot();
+    let asked_at = console.len();
+    writeln!(qemu.stdin_mut(), "run reboot").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    qemu::await_marker_new(&mut qemu, &mut console, FLOOR_RAISED, asked_at, "the next loader pass to raise the floor")?;
+    let next = serial::Serial::named("the boot after the reboot", console[asked_at..].to_string());
+    next.must_say_after(bootlog::REBOOTING, bootlog::LOADER_FIRST_LINE)?;
+    let proved = next.must_say(STOPPED_CLEANLY)?.to_string();
+    let raised = next.must_say(FLOOR_RAISED)?;
+    eprintln!("  [power] {}", proved.trim());
+    eprintln!("  [power] {}", raised.trim());
+    Ok(())
+}
+
 /// The kernel's read-back above its own arm, in
 /// `kernel/src/arch/x86_64/watchdog.rs`: whole clauses, one per branch.
 const ARMED_ON_ARRIVAL: &str = "so the bootloader had already armed the timer";
