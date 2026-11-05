@@ -437,17 +437,6 @@ neither bench's dump does AML write a port the kernel refuses.
   kernel's own commands were not; the time a handler takes, and the SMI
   count either side of one, are read on the T14 alone, and there only for
   the enable and the disable.
-- **`acpi_mediated_access` needs one of three calls to be asked off the boot
-  processor**, each from a thread that read itself there first. The job
-  does not pin that thread, though a mask now could, so
-  a thread preempted between that read and the kernel's lock may be taken by
-  the boot processor, the window
-  `issues/no-t14-row-arranges-an-acpi-disable-asked-off-the-boot-processor.md`
-  describes. A boot where all three fall in it reds as `no firmware call was
-  asked from another CPU`, over three kernel lines reading `asked from cpu0`
-  beside the probe's own line naming three non-zero x2APIC ids: that is the
-  window and no defect of the write, and it is answered by the pin, never by
-  a second run. None has been read.
 - **`acpi_mediated_access`'s storm is refused only if nine calls fit in one
   second of the guest's clock.** The probe asks one after another and needs
   the ninth refused `CommandRate`. A guest whose host gives it less than

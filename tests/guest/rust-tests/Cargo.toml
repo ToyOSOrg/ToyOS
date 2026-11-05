@@ -43,8 +43,9 @@ ring = "0.17"
 toyos-crypto = { path = "../../../lib/crypto", features = ["sign"] }
 toyos-parity = { path = "../../../lib/parity" }
 ml-kem = { version = "0.3", features = ["hazmat"] }
-# The ecosystem's way to pin a thread, for `affinity_pins`: its ToyOS arm is
-# what holds that existing Rust pins as it does on Linux.
+# The ecosystem's way to pin a thread, for `affinity_pins`, whose ToyOS arm is
+# what holds that existing Rust pins as it does on Linux, and for the ACPI
+# probes' requests asked off the boot processor.
 core_affinity = "0.8"
 getrandom = "0.2"
 

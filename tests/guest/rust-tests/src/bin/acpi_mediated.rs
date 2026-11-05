@@ -69,6 +69,8 @@ use toyos_abi::RawHandle;
 
 #[path = "../arch/cpu.rs"]
 mod cpu;
+#[path = "../off_the_boot_processor.rs"]
+mod off_the_boot_processor;
 
 const SELF_PATH: &str = "/system/bin/test_rs_acpi_mediated";
 const CLAIM_LABEL: &str = "acpi-claim";
@@ -362,18 +364,14 @@ fn ports(holder: &Holder, info: &AcpiInfo) {
 }
 
 /// Bytes this guest's FADT gives no meaning, which its chipset model keeps
-/// and does nothing on: the calls asked from a thread off the boot processor
-/// where there is one, and the two the storm alternates.
+/// and does nothing on: the calls asked off the boot processor, and the two
+/// the storm alternates.
 const CROSSED: [u64; 3] = [0x51, 0x52, 0x53];
 const STORMED: [u64; 2] = [0x54, 0x55];
 
 /// Calls the storm asks at most: what firmware's AML asks of a handler that
 /// never answers, one a millisecond for ten seconds.
 const STORM: usize = 10_000;
-
-/// Threads started in turn before one must have found itself off the boot
-/// processor.
-const STARTS: usize = 64;
 
 /// What the boot processor counts of the kernel's writes to `SMI_CMD`, in a
 /// round every CPU answered: every answer is taken after its read was called.
@@ -393,44 +391,15 @@ fn firmware_calls(cap: &SysCap) -> u64 {
     }
 }
 
-/// One byte for `SMI_CMD`, asked by a thread that read itself off the boot
-/// processor as its first act where the machine has another CPU — this one if
-/// it is, or one started for it: the x2APIC id it read, 0 on a machine of one.
-///
-/// This thread is asked first because a thread started from a CPU that is
-/// busy goes to an idle one where there is one, and on a machine of two the
-/// idle one is the boot processor whenever this thread is not on it.
+/// One byte for `SMI_CMD`, asked from the last CPU, which is not the boot
+/// processor where the machine has another: the x2APIC id it asked from.
 fn call_off_the_boot_processor(holder: &Holder, smi_cmd: u64, value: u64) -> u32 {
     let claim = holder.handle();
-    let ask = || {
+    off_the_boot_processor::run(|| {
         let mut access = Access::write(Space::SystemIo, smi_cmd, Width::Byte, value);
         assert_eq!(syscall::acpi_access(claim, &mut access), Ok(Ok(value)), "acpi: firmware call {value:#04x}");
-    };
-    if syscall::cpu_count() == 1 {
-        ask();
-        return 0;
-    }
-    let here = cpu::x2apic_id();
-    if here != 0 {
-        ask();
-        return here;
-    }
-    for _ in 0..STARTS {
-        let on = std::thread::scope(|threads| {
-            let asker = threads.spawn(|| {
-                let on = cpu::x2apic_id();
-                (on != 0).then(|| {
-                    ask();
-                    on
-                })
-            });
-            asker.join().expect("acpi: the calling thread")
-        });
-        if let Some(on) = on {
-            return on;
-        }
-    }
-    panic!("acpi: {STARTS} threads in a row started on the boot processor");
+        cpu::x2apic_id()
+    })
 }
 
 fn firmware(holder: &Holder, info: &AcpiInfo, cap: &SysCap) {
