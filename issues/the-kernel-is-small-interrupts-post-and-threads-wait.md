@@ -18,7 +18,8 @@ kernel's part of a restart, and named module tests hold each program's
 
 1. **What step 9's file half left** (stage 4): its windows, by stage 6
    step 2's rule. Its lines are measured: `kernel/src` held 230 files and
-   59,012 lines before #1152 and 223 and 56,800 after #1182.
+   59,012 lines before #1152 and 223 and 56,800 after #1182, and 218 and
+   55,286 once the loader left it (#1189).
 2. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
    where firmware put it, handed over in 4 KiB pages with its MSI-X table's
    page, under the owner's Q2 ruling. The orchestrator ruled on #900 that

@@ -38,6 +38,15 @@ the same stall. Nothing else in that run was red; it did not wait for host
 CPUs; host load was not recorded. Evidence:
 https://github.com/ToyOSOrg/evidence/tree/a95c798b496d939b4bdb3c7fe0a3cfc2e6d9bfb6/pr-1166/r1
 
+Another sighting, 2026-11-05, at #1189 (the guest runner, run 42018194698, and
+local QEMU), with main `15c26bfbc` stalling the same way in 1 of 7 local runs
+beside it. The kernel's exit record of the killed nested shell names its side:
+its main thread made one `SYS_READ` (`1=1`) and spent the 119 s in it, after
+the prompt's one write, while the probe had written `cat` (`0=4`). So the
+nested shell's stdin read sat blocked with the line written: the read or its
+wake lost it, not the surface. Evidence:
+https://github.com/ToyOSOrg/evidence/tree/43e52cb13749d79b5ca967e0688065fb2eefd103/pr-1189/tty
+
 **Exit:** find what the nested shell waits on when it stalls, fix it, and
 show `libc_children` green across repeated runs. `signal_quit`'s stall may be
 the same defect.
