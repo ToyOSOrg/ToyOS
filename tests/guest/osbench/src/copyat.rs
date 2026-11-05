@@ -56,7 +56,7 @@ pub fn suite() {
         }
     }
     // Below 4 KiB, where #1133 does not ask the distance: does d = 16 stall there too?
-    for size in [256usize, 1024, 2048] {
+    for size in [64usize, 128, 256, 1024, 2048] {
         for d in [0usize, 16] {
             // SAFETY: both ranges lie inside the 4 MiB mapping and are 1 MiB apart.
             let (src, dst) = unsafe { (base, base.add(MIB + d)) };
@@ -78,6 +78,7 @@ pub fn suite() {
         measure(&format!("copyat.{size}.heap"), libc, s, d, size);
     }
     drop(map);
+    placements();
     // Past the caches: 1 MiB and 64 MiB, the destination 64 MiB + 4 KiB + `d` above the source.
     let mut big = Mapping::huge(2 * LARGE + 8192);
     big.words().fill(3);
@@ -123,4 +124,37 @@ fn measure_n(bench: &str, copy: CopyFn, src: *const u8, dst: *mut u8, size: usiz
         return refuse(bench, "the copy differs from its source");
     }
     result(bench, "ns", &mut ns, &[]);
+}
+
+/// Measurement only, never lands: `mem.memcpy`'s 256 KiB row, 64 MiB a round
+/// and 15 rounds, between two fresh 256 KiB mappings after a touched ballast
+/// of 17 x k pages, so each k copies between other physical pages.
+fn placements() {
+    const SIZE: usize = 256 * 1024;
+    for k in 0..8usize {
+        let mut ballast = (k > 0).then(|| Mapping::huge(17 * k * 4096));
+        if let Some(b) = ballast.as_mut() {
+            b.words().fill(7);
+        }
+        let mut src = Mapping::huge(SIZE);
+        let mut dst = Mapping::huge(SIZE);
+        for (i, w) in src.words().iter_mut().enumerate() {
+            *w = i as u64;
+        }
+        dst.words().fill(1);
+        let (s, d) = (src.ptr(), dst.ptr());
+        let copies = 64 * MIB / SIZE;
+        let round = || {
+            let t = Instant::now();
+            for _ in 0..copies {
+                // SAFETY: two distinct `SIZE` mappings.
+                unsafe { libc(std::hint::black_box(d), std::hint::black_box(s), SIZE) };
+            }
+            (copies * SIZE) as u64 * 1000 / crate::ns_since(t).max(1)
+        };
+        round();
+        crate::clock::settle();
+        let mut mbps: Vec<u64> = (0..15).map(|_| round()).collect();
+        result(&format!("copyat.place.p{k}"), "MB/s", &mut mbps, &[("ballast_pages", (17 * k).to_string())]);
+    }
 }
