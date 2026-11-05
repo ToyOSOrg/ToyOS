@@ -55,6 +55,14 @@ pub fn suite() {
             }
         }
     }
+    // Below 4 KiB, where #1133 does not ask the distance: does d = 16 stall there too?
+    for size in [256usize, 1024, 2048] {
+        for d in [0usize, 16] {
+            // SAFETY: both ranges lie inside the 4 MiB mapping and are 1 MiB apart.
+            let (src, dst) = unsafe { (base, base.add(MIB + d)) };
+            measure(&format!("copyat.{size}.libc.s0.d{d}"), libc, src, dst, size);
+        }
+    }
     let heap = vec![0u8; 64 * 1024];
     let mut dst = vec![0u8; 64 * 1024];
     let (s, d) = (heap.as_ptr(), dst.as_mut_ptr());
