@@ -16,7 +16,7 @@
 //! The user address is checked against the half's top by the caller; each
 //! routine also replaces an address at or past it with 0 by `csel` and a
 //! `csdb`, so a mispredicted check reads no kernel byte even speculatively
-//! (`issues/user-pointer-checks-have-no-spectre-v1-fence-and-smap-is-optional.md`).
+//! (`issues/user-pointer-checks-have-no-spectre-v1-fence.md`).
 //! A copy through a user mapping of device memory makes only unprivileged
 //! accesses the process could make through that same mapping itself; an
 //! unaligned one faults, and the copy ends there.
