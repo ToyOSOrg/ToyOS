@@ -202,8 +202,9 @@ Each stage lands on its own, in this order.
    Which slot a pass boots is the marked one or none: updates fix forward, and
    the loader's fallback leaves in stage 2 of
    `issues/the-machine-updates-itself-without-ubuntu.md`, which this stage
-   follows. How proving an image depends on the black-box page is before the
-   owner in #1196.
+   follows. The good flag replaces the black-box page's `DONE` record as the
+   proof of an image; #1196 decides whether this stage must land with the
+   page's removal.
    - An install writes its slot with the good flag clear, whatever the slot
      held before.
    - Any failure after `verify` in `start_kernel` that the image causes is a

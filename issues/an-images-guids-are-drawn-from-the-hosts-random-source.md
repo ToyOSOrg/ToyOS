@@ -49,7 +49,7 @@ The floor's need ends at stage 3 of
 `issues/the-loader-does-only-what-must-precede-the-handover.md`, which
 deletes `floor::Scope` and names every floor for its key alone, and the
 attempts record's at its stage 5, which replaces that record with the slot
-table's tries. The black box's does not: stage 9 moves its check into the
+table's good flag. The black box's does not: stage 9 moves its check into the
 kernel, still keyed on the log GUID.
 
 **Owner**: `issues/toyos-builds-itself.md`, whose M4 exits on a guest build

@@ -59,7 +59,7 @@ console's renderer. Exit: as stage A.
   `blackbox_early_panic_sealed_muted`, the T14's own shape), `blackbox_fault_sealed`: the report
   is sealed on the page and the next pass reads it.
 - metal `panic_outlives_the_deadline`: a panic crosses the deadline's reset as a panic report.
-- metal `hang_bounded_by_the_stick`: a hanging image costs one boot and never traps the machine.
+- metal `hang_bounded_by_the_stick`: a hanging `--once` image costs one boot, and the marked slot boots after it.
 - metal `double_fault_stack`, `syscall_panic_halts`, `syscall_fault_halts`,
   `heap_over_ceiling_halts`: each fatal path halts with its own report.
 - metal `reentry_names_the_first_panic`, `double_panic_names_the_fault`,

@@ -49,9 +49,10 @@ line that logs it go with the fallback. A one-shot `update --once` is a
 request, not a fallback, and stays the loader track's stage 5.
 
 With the fallback gone, marking an image dead in the boot record on the
-black-box page has no consumer left. #1196 (the memory-overwrite request) is
-weighing how proving and marking an image depend on that page; this stage
-removes the fallback's use of it.
+black-box page no longer refuses anything, but the next boot still reports the
+last boot's death; #1196 (the memory-overwrite request) decides what carries
+that report if the page goes. This stage removes only the fallback's use of
+the record.
 
 **Exit**: `policy`'s host tests hold that a pass names only the marked slot
 and that a dead image in it is still booted.

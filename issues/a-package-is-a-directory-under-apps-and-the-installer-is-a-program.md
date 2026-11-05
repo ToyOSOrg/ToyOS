@@ -37,11 +37,8 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
   stay for crates, `rust/` and LLVM. Recipes and patches live in this
   repository, where `NOTICE` and the licence gate carry them, not in a ports
   repository.
-- **The installer is the one writer of `/apps`** (owner ruling, 2026-11-05,
-  answering #1191's open decisions): only the installer service writes
-  `/apps`, and every other program sees it read-only. Today `pkg`,
-  `/system/bin/pkg`, is an ordinary program that writes `/apps` because every
-  row holds it read-write; the staged change is stage 2 of
+- **The installer** is `/system/bin/pkg`. Who may write `/apps` (owner
+  ruling, 2026-11-05) is staged in stage 2 of
   `issues/every-program-sees-only-the-files-it-was-given.md`. `pkg`
   fetches, verifies, unpacks and commits, and it asks the user
   before it installs — at install, the moment the user typed the command,
@@ -101,21 +98,13 @@ The storage track's users and mount-protocol stages do not block this one.
    the session user's home, `/home/toy/Apps/<name>`, which is its `HOME` and
    the one part of the home it sees; its own `/apps/<name>` is read-only to
    it (`toyos_manifest::Program::view`).
-6. **An app asks for a right at run time, when it needs it, and the user's
-   grant is bounded by the image's ceiling** (owner ruling, 2026-11-05,
-   superseding the 2026-09-24 ruling that a package's manifest requests its
-   rights up front; the ceiling's shape, 2026-09-26). There is no up-front
-   permission list. The user *grants* per user (from a user action — the
-   file picker hands over one file — or asked when the app first needs a
-   risky right, remembered and revocable; harmless ones such as a window,
-   sound and the app's own data directory are free); the image holds the
-   *ceiling*. **The ceiling names rights, never apps**: it is the set any
-   installed app may be granted at all, so installing an app never edits
-   the image and the image never lists an app by name. The `[apps]` row of
-   stage 1 becomes that ceiling. **Exit**: an app installed by `pkg` from a
-   release starts holding only the free rights, a run-time request beyond
-   the ceiling is refused by name without asking the user, and no file under
-   `/apps` can widen what it gets.
+6. **App rights** (owner ruling, 2026-11-05, superseding the 2026-09-24
+   up-front request; the ceiling's shape, 2026-09-26). Built: the run-time
+   request path from an app to the user's grant, and the `[apps]` row of
+   stage 1 becoming the image's ceiling. **Exit**: an app installed by `pkg`
+   from a release starts holding only the free rights, a run-time request
+   beyond the ceiling is refused by name without asking the user, and no file
+   under `/apps` can widen what it gets.
 7. **The apps leave this repository.** Each app (snake first, as the pilot:
    it builds unchanged for every OS) moves to its own repository, built with
    only the published SDK crates and the released toolchain, and published as

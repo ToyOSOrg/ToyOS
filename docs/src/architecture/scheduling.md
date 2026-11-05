@@ -28,8 +28,7 @@
 - Each CPU has an aggregate real-time allowance, replenished each interval,
   that protects ordinary progress. Once it is exhausted, that CPU's real-time
   workers run only when no ordinary work wants the CPU, until it refills.
-- There is no per-stream reservation and no deadline admission. New streams
-  are accepted best-effort; genuine overload may cause dropouts, and a late
+- New streams are accepted best-effort; genuine overload may cause dropouts, and a late
   client contributes silence without holding back the others.
 
 ## Power

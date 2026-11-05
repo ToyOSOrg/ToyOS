@@ -270,9 +270,8 @@ pub struct CpuSched<X: SchedPayload> {
     /// task", and why "the pick serves `rq` first whenever the RT band is
     /// occupied" is false.
     ///
-    /// The deferral is bounded per *corpse* and not per CPU, so k corpses
-    /// take k consecutive grants, and a real-time band that briefly empties
-    /// throws the accumulated age away on every dispatch.
+    /// The deferral is bounded per corpse, not per CPU
+    /// (`issues/k-dying-corpses-take-k-deferral-grants-on-one-cpu.md`).
     ///
     /// **A queue and not a stack.** Two concurrent process teardowns put two
     /// corpses on one CPU; popping the end `keep_dying` pushes to would
