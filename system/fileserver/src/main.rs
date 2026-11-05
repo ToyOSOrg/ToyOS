@@ -928,7 +928,7 @@ impl Server {
                 self.files.fsync(&mut *self.volume, named)?;
                 // One that left nothing to make durable did the write-back's work.
                 if !self.files.owes(&*self.volume) {
-                    self.writeback.synced(false, Instant::now());
+                    self.writeback.synced();
                 }
                 Ok(Answer::Reply(Reply::ok()))
             }
@@ -1272,14 +1272,23 @@ impl Server {
         Ok(Answer::Reply(Reply::ok()))
     }
 
-    /// The volume synced, answered as every file fared. A file whose entry
-    /// was refused keeps the write-back due, so the next one tries it again.
+    /// The volume synced, answered as every file fared. A sync refused,
+    /// whole or for one file, keeps the write-back due, so a later one tries
+    /// it again.
     fn sync(&mut self) -> Result<Answer, Error> {
-        let unwritten = self.files.sync(&mut *self.volume)?;
-        self.writeback.synced(!unwritten.is_empty(), Instant::now());
-        match unwritten.into_iter().next() {
-            Some((_, e)) => Err(e),
-            None => Ok(Answer::Reply(Reply::ok())),
+        let refused = match self.files.sync(&mut *self.volume) {
+            Ok(unwritten) => unwritten.into_iter().next().map(|(_, e)| e),
+            Err(e) => Some(e),
+        };
+        match refused {
+            Some(e) => {
+                self.writeback.refused(Instant::now());
+                Err(e)
+            }
+            None => {
+                self.writeback.synced();
+                Ok(Answer::Reply(Reply::ok()))
+            }
         }
     }
 
