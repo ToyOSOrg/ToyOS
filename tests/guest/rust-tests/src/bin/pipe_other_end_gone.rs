@@ -9,8 +9,8 @@
 //! waiter left parked is a hang the runner's ceiling reds. A watch made after
 //! the leaving is answered by the submit that makes it.
 //!
-//! **The refusal.** A connection and a memory object have no other end, and a watch that
-//! asks for one is refused whatever else it asks.
+//! **The refusal.** A connection and an event's wait side have no other end
+//! to leave, and a watch that asks for one is refused whatever else it asks.
 //!
 //! **Its own close.** An end whose holder closes it while the other end lives
 //! answers its watch with `NotFound`: the poll is over, and nothing else would
@@ -32,7 +32,7 @@ use toyos::ipc::Connection;
 use toyos::poller::{Poller, OTHER_END_GONE, READABLE};
 use toyos::syscap::SysCap;
 use toyos::{namespace, pipe_pair, port, AsHandle, BorrowedHandle, OwnedHandle, Pipe};
-use toyos_abi::syscall::SyscallError;
+use toyos_abi::syscall::{self, SyscallError};
 
 #[path = "../roster.rs"]
 mod roster;
@@ -73,10 +73,14 @@ fn test() {
 
     let (client, server) = connection();
     refused(client.as_handle(), "a connection");
-    let memory = toyos::shm::SharedMemory::create(4096).expect("a memory object");
-    refused(memory.as_handle(), "a memory object");
-    drop(memory);
-    println!("  a connection and a memory object were refused the question");
+    // A handle the poller may watch, which answers being readable: a memory
+    // object has no wait right, and would be refused for that instead.
+    let event = syscall::event_create().expect("an event");
+    // SAFETY: the kernel installed both handles for this call and no other.
+    let (signal, wait) = unsafe { (OwnedHandle::from_raw(event.signal), OwnedHandle::from_raw(event.wait)) };
+    refused(wait.as_handle(), "an event's wait side");
+    drop((signal, wait));
+    println!("  a connection and an event's wait side were refused the question");
 
     for own in [End::Read, End::Write] {
         let (reader, writer) = pipe("");
