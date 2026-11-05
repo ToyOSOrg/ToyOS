@@ -586,9 +586,10 @@ impl Claim {
 }
 
 /// No period is stranded: every one comes back exactly once, and none while
-/// the claim is left unreadable. **And none is stamped earlier than its own
-/// notification**: a period a record clocks is one whose notification that
-/// record, or an earlier one, carried.
+/// the claim is left unreadable. **And within two periods none is stamped
+/// earlier than its own notification**: a period a record clocks is one whose
+/// notification that record, or an earlier one, carried. A third period can
+/// be (`Sound::played`).
 ///
 /// Two periods, each a used element and then its notification (§2.7.7),
 /// against two wakes of a driver that takes the record and then reads the

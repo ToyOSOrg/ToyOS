@@ -240,9 +240,8 @@ impl<M: DmaBuffers + Clone> Queues<M> {
 pub struct Played {
     /// The periods the device gave back, one bit each.
     pub mask: u32,
-    /// 1 where the record's newest notification is the time of the one
-    /// period this read found, and 0 where it may not be: these periods are
-    /// then clocked by the next record that is.
+    /// 1 where this read anchors the clock at the record's newest time, else
+    /// 0: these periods are then clocked by the next read that anchors.
     pub clocked: u32,
 }
 
@@ -341,9 +340,11 @@ impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
     /// ring is not read: a period already in it has a notification still to
     /// land, which makes the record readable again, and it is read then.
     ///
-    /// **The record's newest time clocks a period only where it can be no
-    /// other's**: one interrupt taken and one period read. Any other read
-    /// takes no anchor, and its periods carry into the next that does.
+    /// **The record's newest time anchors the clock where one interrupt was
+    /// taken and one period read**, and any other read anchors nothing, its
+    /// periods carrying into the next that does. A period read ahead of its
+    /// notification can make the next such read anchor early, by at most that
+    /// read's wake latency.
     pub fn played(&mut self, taken: Option<u32>) -> Result<Option<Played>, Refusal> {
         let Some(count) = taken else { return Ok(None) };
         let mask = self.completed()?;

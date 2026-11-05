@@ -222,9 +222,9 @@ pub struct DeviceIrqRecord {
     pub _pad: u32,
     /// When the first interrupt `count` holds was taken.
     pub first_nanos: u64,
-    /// When the newest was: never older than the newest interrupt `count`
-    /// holds, and newer only by one taken as the read is made, which the next
-    /// read counts.
+    /// When the newest was taken: never older than the newest interrupt
+    /// `count` holds, and newer only by one taken as the read is made, which
+    /// the next read counts.
     pub last_nanos: u64,
 }
 
