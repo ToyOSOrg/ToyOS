@@ -298,6 +298,17 @@ fn small_blocks_and_a_journal_position_off_a_block_are_refused() {
         let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
         assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes too small for reclaim's largest split")), "{sectors} sectors");
     }
+    // 8 KiB buckets of 8 KiB nodes, as a reader accepts them: refused by
+    // shape before anything sizes a journal writer for them.
+    let dev = formatted(64 << 20, None);
+    rewrite_superblock(&dev, |h, fields| {
+        h.flags[0] = h.flags[0] & !(0xffff << 12) | 16 << 12;
+        let members = fields.iter_mut().find(|f| f.kind == field_type::MEMBERS_V2).unwrap();
+        members.body[8 + 26..8 + 28].copy_from_slice(&16u16.to_le_bytes());
+    });
+    assert_eq!(block_on_ready(Volume::open(&dev)).unwrap().superblock().member.bucket_sectors, 16, "a reader takes 8 KiB buckets");
+    let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
+    assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes too small for reclaim's largest split")), "8 KiB buckets");
     let dev = formatted(32 << 20, None);
     assert_eq!(block_on_ready(Volume::open(&dev)).unwrap().superblock().node_sectors(), 32, "mkfs's 16 KiB nodes");
     mounted(&dev, async |m: &Mount<&Image>| { m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap(); });

@@ -320,12 +320,6 @@ fn writable(sb: &Superblock) -> Result<()> {
     if sb.journal.is_empty() {
         return Err(Error::Unsupported("writing a volume without journal buckets"));
     }
-    // An unclean mount replays what the ring holds; mkfs's ring is the
-    // bound on that, so a larger one, another writer's, is not written.
-    let ring: u64 = sb.journal.iter().map(|&(_, count)| count).sum();
-    if ring > super::mkfs::ring_buckets(sb.member.nbuckets, u64::from(sb.member.bucket_sectors), sb.block_bytes()) {
-        return Err(Error::Unsupported("writing a volume whose journal is larger than mkfs lays out"));
-    }
     if !splits_fit(sb.node_sectors() as usize * SECTOR) {
         return Err(Error::Unsupported("writing a volume of btree nodes too small for reclaim's largest split"));
     }
@@ -351,6 +345,14 @@ fn writable(sb: &Superblock) -> Result<()> {
     let members = sb.field(field_type::MEMBERS_V2).unwrap_or(&[]);
     if members.len() < 2 || usize::from(super::le16(members, 0)) < Member::BYTES {
         return Err(Error::Unsupported("writing a volume whose member entry is shorter than 1.39's"));
+    }
+    // An unclean mount replays what the ring holds; mkfs's ring is the
+    // bound on that, so a larger one, another writer's, is not written.
+    // Last: sizing mkfs's ring takes a journal writer for these buckets,
+    // which the shapes refused above cannot have.
+    let ring: u64 = sb.journal.iter().map(|&(_, count)| count).sum();
+    if ring > super::mkfs::ring_buckets(sb.member.nbuckets, u64::from(sb.member.bucket_sectors), sb.block_bytes()) {
+        return Err(Error::Unsupported("writing a volume whose journal is larger than mkfs lays out"));
     }
     Ok(())
 }
@@ -1090,6 +1092,17 @@ impl<D: BlockDev> Mount<D> {
         }
     }
 
+    /// Whether `credit` bytes more of metadata, past what is promised and
+    /// granted, and `nodes` nodes would find room: what [`Mount::grant`]
+    /// refuses `NoSpace` without, judged now.
+    pub(super) fn room_for(&self, credit: u64, nodes: usize) -> bool {
+        self.cancel_dropped();
+        let pending = self.reservations.borrow().pending(Draw::Ordinary);
+        let st = self.st.borrow();
+        let stable = self.metadata_nodes(&st, pending + st.granted_bytes + credit);
+        st.read_only.is_none() && st.alloc.keeps(st.metadata_buckets, stable, nodes, st.reclaim_room, Draw::Ordinary, false) && st.alloc.fits(nodes, st.reclaim_room, Draw::Ordinary)
+    }
+
     /// Grants `class` its request now if it fits. An ordinary one that the
     /// room left could not hold is refused `NoSpace` once nothing written or
     /// emptied can change that: no other grant outstanding, as the ledgers
@@ -1098,17 +1111,6 @@ impl<D: BlockDev> Mount<D> {
     /// left unwritten. Writing later changes leaves those ledgers as they
     /// are, and on a node of one block reclaim's writes never settle, as
     /// each one's keys dirty another node.
-    /// Whether an ordinary transaction of `journal` u64s and `nodes` nodes
-    /// would find room for what it may write: what [`Mount::grant`] refuses
-    /// `NoSpace` without, judged now.
-    pub(super) fn room_for(&self, journal: u64, nodes: usize) -> bool {
-        self.cancel_dropped();
-        let pending = self.reservations.borrow().pending(Draw::Ordinary);
-        let st = self.st.borrow();
-        let stable = self.metadata_nodes(&st, pending + st.granted_bytes + journal * 8);
-        st.read_only.is_none() && st.alloc.keeps(st.metadata_buckets, stable, nodes, st.reclaim_room, Draw::Ordinary, false) && st.alloc.fits(nodes, st.reclaim_room, Draw::Ordinary)
-    }
-
     fn grant(&self, class: Class, draw: Draw, journal: u64, nodes: usize, arrived: u64) -> Result<bool> {
         self.cancel_dropped();
         let pending = self.reservations.borrow().pending(draw);

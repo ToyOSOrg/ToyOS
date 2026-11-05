@@ -41,9 +41,10 @@ struct Open {
     /// Pages the current write reserved and has not copied yet.
     incoming: BTreeMap<u64, u64>,
     /// The last write's ticket, which a write starting where its
-    /// reservation ends extends, so a write-back of both is one extent; and
-    /// where that reservation ended before the current write extended it.
+    /// reservation ends extends, so a write-back of both is one extent.
     tail: Option<u64>,
+    /// Where the tail's reservation ended before this write extended it,
+    /// until the write lands or is cut.
     extended_from: Option<u64>,
 }
 impl Open {

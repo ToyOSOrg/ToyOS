@@ -141,26 +141,44 @@ impl<D: BlockDev> Mount<D> {
             return Err(Error::Invalid("reservation belongs to another mount"));
         }
         let block = self.sb.block_bytes() as u64;
-        let (from, at_end) = reservation.range();
+        let at_end = reservation.range().1;
         let end = at_end.checked_add(len as u64).filter(|&end| len > 0 && i64::try_from(end).is_ok()).ok_or(Error::Invalid("reservation of nothing or past 2^63-1"))?.div_ceil(block) * block;
+        let _data = self.data_slot().await;
+        // Whole or refused: what a refused extension took goes back.
+        let taken = self.take_reserved(reservation, end).await;
+        if taken.is_err() {
+            self.cut(reservation, at_end);
+        }
+        taken
+    }
+
+    /// Takes runs into `reservation` up to `end`. Each take is judged for
+    /// the metadata credit it adds, a transaction's for each of its blocks,
+    /// as each may be written back alone.
+    async fn take_reserved(&self, reservation: &mut Reservation, end: u64) -> Result<()> {
+        let block = self.sb.block_bytes() as u64;
         let bucket = u64::from(self.sb.member.bucket_sectors);
         let longest = EXTENT_MAX.min(bucket * SECTOR as u64) / block * block;
-        let _data = self.data_slot().await;
         let ino = self.reservations.borrow().active.get(&reservation.id).ok_or(Error::Invalid("reservation already written"))?.ino;
         regular_mode(self.inode(ino).await?.mode)?;
-        let mut at = at_end;
+        let (from, mut at) = reservation.range();
         while at < end {
             let wanted = (end - at).min(longest) / SECTOR as u64;
             let single = wanted * SECTOR as u64 == block;
+            let credit = K_TX * 8 * (wanted * SECTOR as u64 / block);
             // Sectors of the open bucket are taken in memory where room for
-            // their write is plain; a new bucket, or a judgement that may
+            // their writes is plain; a new bucket, or a judgement that may
             // wait or refuse, is a transaction's.
-            let taken = if self.room_for(K_TX, FOOTPRINT) { self.st.borrow_mut().alloc.next_data(bucket, wanted, single, !single).map(|(sector, _, got)| (sector, got)) } else { None };
+            let taken = if self.room_for(credit, FOOTPRINT) { self.st.borrow_mut().alloc.next_data(bucket, wanted, single, !single).map(|(sector, _, got)| (sector, got)) } else { None };
             let (sector, got) = match taken {
                 Some(taken) => taken,
                 None => loop {
                     let out = self
                         .transact(K_TX, FOOTPRINT, Draw::Ordinary, async |_: &mut Txn| {
+                            // The grant judged one transaction's credit.
+                            if !self.room_for(credit - K_TX * 8, FOOTPRINT) {
+                                return Err(Error::NoSpace("no room left for the btree nodes reserved blocks' writes may write"));
+                            }
                             if single { self.data_sector(wanted, Draw::Ordinary, true).await.map(|(sector, _)| (sector, wanted)) } else { self.data_run(wanted, Draw::Ordinary).await }
                         })
                         .await;
@@ -171,6 +189,7 @@ impl<D: BlockDev> Mount<D> {
                 },
             };
             let blocks = (got * SECTOR as u64 / block) as u32;
+            assert!(u64::from(blocks) * K_TX * 8 <= credit, "a take promises more credit than was judged");
             {
                 let mut st = self.st.borrow_mut();
                 for _ in 0..blocks { st.alloc.pin(sector / bucket); }

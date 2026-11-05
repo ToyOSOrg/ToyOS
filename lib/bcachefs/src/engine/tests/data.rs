@@ -637,6 +637,24 @@ fn an_extended_reservation_keeps_each_run_in_one_bucket() {
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }
 
+/// Near full, an extension refused for space takes nothing: the
+/// reservation keeps its range and the volume its room.
+#[test]
+fn a_refused_extension_gives_back_what_it_took() {
+    let dev = formatted(64 << 20, None);
+    mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap().ino;
+        let mut tokens = Vec::new();
+        while let Ok(token) = m.reserve(ino, tokens.len() as u64 * 4096, 4096).await { tokens.push(token); }
+        // Room for some blocks again, fewer than the extension asks.
+        tokens.truncate(tokens.len() - 24);
+        let mut token = tokens.pop().unwrap();
+        let (range, room) = (token.range(), m.space().1);
+        assert!(matches!(m.extend(&mut token, 256 << 10).await, Err(Error::NoSpace(_))));
+        assert_eq!((token.range(), m.space().1), (range, room));
+    });
+}
+
 /// A write over more old extents than one transaction may remove goes in
 /// parts, each removing at most two, and the file reads as written.
 #[test]
