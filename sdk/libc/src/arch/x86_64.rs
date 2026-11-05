@@ -21,16 +21,17 @@ unsafe extern "C" fn _start() -> ! {
 }
 
 /// Copy `n` bytes from `src` to `dest` as a forward copy would: correct for
-/// any `dest` not above an overlapping `src`. A copy shorter than
-/// [`ROUTED_LEAST`] is one `rep movsb` behind one compare; only a longer one
-/// asks where its ends sit.
+/// any `dest` not above an overlapping `src`. Returns `dest`, so `memcpy`
+/// can end in a jump to [`copy_long`] and a shorter copy runs one `rep movsb`
+/// behind one compare, with nothing held across a call.
 #[inline(always)]
-pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
+pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     if n >= ROUTED_LEAST {
         // SAFETY: as this function's caller promises.
         return unsafe { copy_long(dest, src, n) };
     }
     unsafe { movsb(dest, src, n) };
+    dest
 }
 
 /// [`copy_forward`] from [`ROUTED_LEAST`] up, out of line.
@@ -45,7 +46,7 @@ pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
 /// every store such a load could match is 4 KiB minus the distance behind it
 /// and long retired. Only disjoint ranges go down.
 #[inline(never)]
-unsafe fn copy_long(dest: *mut u8, src: *const u8, n: usize) {
+unsafe fn copy_long(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     let distance = (dest as usize).wrapping_sub(src as usize) % 4096;
     // `distance` in 1..SHORT_ALIAS, as one compare.
     let short = distance.wrapping_sub(1) < SHORT_ALIAS - 1;
@@ -60,6 +61,7 @@ unsafe fn copy_long(dest: *mut u8, src: *const u8, n: usize) {
             copy_down_sse2(dest, src, n);
         }
     }
+    dest
 }
 
 #[inline(always)]

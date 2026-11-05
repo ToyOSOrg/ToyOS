@@ -243,7 +243,8 @@ mod tests {
         for distance in (0..1024).chain([2048, 4032, 4095]) {
             for at in [0, 1, 17, 63] {
                 for n in [0, 1, 63, 64, 65, 127, 128, 200, 1000, 4095, 4096, 4097, 5000, 8192] {
-                    agrees_at("copy_forward", arch::copy_forward, distance, at, n);
+                    // SAFETY: as `agrees_at` promises its copy.
+                    agrees_at("copy_forward", |d, s, n| unsafe { _ = arch::copy_forward(d, s, n) }, distance, at, n);
                 }
             }
         }
