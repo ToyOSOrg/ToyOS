@@ -13,12 +13,5 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
-[features]
-# The build's writer, which allocates.
-write = []
-
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
-
-[dev-dependencies]
-toyos-kimage = { path = ".", features = ["write"] }

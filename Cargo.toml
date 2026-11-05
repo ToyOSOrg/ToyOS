@@ -242,7 +242,7 @@ toyos-abi = { path = "sdk/abi" }
 # the supervisor's images with.
 toyos = { path = "sdk/toyos" }
 # The kernel section the build writes (`build::kimage`).
-toyos-kimage = { path = "lib/kimage", features = ["write"] }
+toyos-kimage = { path = "lib/kimage" }
 toyos-symbols = { path = "lib/symbols" }
 # What `build::fpgate` decodes the linked x86-64 kernel with, to refuse an
 # instruction that touches the user FP or vector state outside `arch::fpu`:

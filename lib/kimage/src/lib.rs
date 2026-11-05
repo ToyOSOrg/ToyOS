@@ -27,12 +27,9 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-#[cfg(feature = "write")]
 extern crate alloc;
 
-#[cfg(feature = "write")]
 mod write;
-#[cfg(feature = "write")]
 pub use write::{Input, Symbol};
 
 use toyos_abi::syscall::{SpawnMap, VmProt, MAX_BUILD_ID, MAX_SPAWN_MAPS};
@@ -115,7 +112,7 @@ impl<'a> Kernel<'a> {
         let maps = take(bytes, &mut at, maps, MAP).ok_or(SHORT)?;
         let id_len = u64_at(program, 16).filter(|&n| n <= MAX_BUILD_ID as u64).ok_or("kernel image: a build-id past its bound")?;
         let image_at = usize::try_from(field(64)?).map_err(|_| SHORT)?;
-        let image = bytes.get(image_at..).filter(|_| image_at >= at && image_at as u64 % PAGE == 0).ok_or(SHORT)?;
+        let image = bytes.get(image_at..).filter(|_| image_at >= at && (image_at as u64).is_multiple_of(PAGE)).ok_or(SHORT)?;
         let kernel = Kernel {
             machine,
             entry,
@@ -142,7 +139,7 @@ impl<'a> Kernel<'a> {
         let mut covered = 0;
         for range in self.ranges() {
             let range = range.ok_or("kernel image: a range with no protection")?;
-            if range.lo < covered || range.hi <= range.lo || range.hi > self.memory || range.lo % PAGE != 0 || range.hi % PAGE != 0 {
+            if range.lo < covered || range.hi <= range.lo || range.hi > self.memory || !range.lo.is_multiple_of(PAGE) || !range.hi.is_multiple_of(PAGE) {
                 return Err("kernel image: ranges that are not ascending whole pages of its memory");
             }
             covered = range.hi;
@@ -152,7 +149,7 @@ impl<'a> Kernel<'a> {
             return Err("kernel image: an entry past its memory");
         }
         let (lo, hi) = self.relro;
-        if lo > hi || hi > self.memory || lo % PAGE != 0 || hi % PAGE != 0 {
+        if lo > hi || hi > self.memory || !lo.is_multiple_of(PAGE) || !hi.is_multiple_of(PAGE) {
             return Err("kernel image: RELRO that is not whole pages of its memory");
         }
         if self.relocations().any(|(offset, addend)| offset.checked_add(8).is_none_or(|end| end > self.memory) || addend > self.memory) {
@@ -164,7 +161,7 @@ impl<'a> Kernel<'a> {
 
     /// Every range and its protection; `None` for a word that names none.
     pub fn ranges(&self) -> impl Iterator<Item = Option<Range>> + 'a {
-        self.ranges.chunks_exact(RANGE).map(|r| {
+        self.ranges.as_chunks::<RANGE>().0.iter().map(|r| {
             let (lo, hi) = (u64_at(r, 0)?, u64_at(r, 8)?);
             Some(Range { lo, hi, prot: VmProt::from_u64(u64_at(r, 16)?)? })
         })
@@ -181,7 +178,7 @@ impl<'a> Kernel<'a> {
 
     /// `(offset, addend)`: the loader writes its base plus `addend` at `offset`.
     pub fn relocations(&self) -> impl Iterator<Item = (u64, u64)> + 'a {
-        self.relocations.chunks_exact(RELOCATION).filter_map(|r| Some((u64_at(r, 0)?, u64_at(r, 8)?)))
+        self.relocations.as_chunks::<RELOCATION>().0.iter().filter_map(|r| Some((u64_at(r, 0)?, u64_at(r, 8)?)))
     }
 }
 
@@ -251,7 +248,7 @@ pub const SUPERVISOR_OBJECT: u64 = 0;
 impl Supervisor<'_> {
     /// Its ranges, `object` [`SUPERVISOR_OBJECT`] or `HANDLE_INVALID` for zeros.
     pub fn maps(&self) -> impl Iterator<Item = SpawnMap> + '_ {
-        self.maps.chunks_exact(MAP).filter_map(|m| {
+        self.maps.as_chunks::<MAP>().0.iter().filter_map(|m| {
             Some(SpawnMap {
                 addr: u64_at(m, 0)?,
                 len: u64_at(m, 8)?,

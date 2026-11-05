@@ -3835,7 +3835,6 @@ name = "toyos-kimage"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
- "toyos-kimage",
 ]
 
 [[package]]

@@ -141,7 +141,6 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/object/paged.rs", 1),
     ("kernel/src/process.rs", 1),
     ("kernel/src/sched/driver.rs", 2),
-    ("kernel/src/symbols.rs", 2),
 ];
 
 /// Directories whose Rust is compiled for the guest, by repository-relative
