@@ -207,8 +207,8 @@ const _: () = assert!(core::mem::size_of::<DmaMapping>() == 8 + 8);
 /// **A claimed PCI function's interrupt is masked from the second message
 /// that lands before a read until that read**: a message sent meanwhile is
 /// refused at the unit on x86-64, and left pending until the read on AArch64.
-/// So a count of one is every message, and a count of two or more is a
-/// lower bound.
+/// So a count below [`MASKED_FROM`] is every message, and one at it or above
+/// is a lower bound.
 ///
 /// **The two times are when messages landed, which a driver reading its rings
 /// later cannot recover**: a driver clocked by its device — soundserver's DLL —
@@ -227,6 +227,10 @@ pub struct DeviceIrqRecord {
     /// next read counts.
     pub last_nanos: u64,
 }
+
+/// The count from which a claimed PCI function's interrupt is masked until
+/// the read that takes it.
+pub const MASKED_FROM: u32 = 2;
 
 impl DeviceIrqRecord {
     pub const SIZE: usize = core::mem::size_of::<Self>();

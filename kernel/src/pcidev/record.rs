@@ -43,7 +43,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use toyos_abi::pci::DeviceIrqRecord;
+use toyos_abi::pci::{DeviceIrqRecord, MASKED_FROM};
 
 /// The words that say only what they hold: the latch, the fault and the
 /// newest stamp, whose reader takes it after the exchange that orders it.
@@ -52,9 +52,6 @@ const ORDER: Ordering = Ordering::Relaxed;
 /// The count is the word's low half and the reads that took one its high half.
 const COUNT: u64 = 0xFFFF_FFFF;
 
-/// The count from which a claim's interrupt is masked until its holder reads:
-/// a message landing while one already waits unread.
-pub const MASKED_FROM: u64 = 2;
 const READ: u64 = 1 << 32;
 
 /// The negative control: each compare-exchange on the word becomes a load and
@@ -222,7 +219,7 @@ impl Interrupt {
 
     /// Whether the record owes its claim's interrupt masked.
     pub fn owes_mask(&self) -> bool {
-        self.word.load(ORDER) & COUNT >= MASKED_FROM
+        self.word.load(ORDER) & COUNT >= u64::from(MASKED_FROM)
     }
 
     /// Whether this is the first message this claim has taken. Answers `true`
