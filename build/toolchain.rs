@@ -483,6 +483,10 @@ pub(crate) fn x_build_compiler(root: &Path, rust_dir: &Path, args: &[&str], what
 /// process's, less GitHub Actions' `GITHUB_ACTIONS` and `CI`: bootstrap takes
 /// `HEAD^1` as the upstream commit whose artifacts to fetch when it sees them,
 /// and in this fork that is our own merge, which rust-lang's CI never built.
+///
+/// Bootstrap's `$TMPDIR` is a directory of its own, removed when it returns:
+/// the crates it builds have build scripts that write to `temp_dir()` and
+/// leave what they wrote there.
 pub(crate) fn x_build_with(
     root: &Path,
     rust_dir: &Path,
@@ -498,9 +502,10 @@ pub(crate) fn x_build_with(
         Restore::holding(&rust_dir.join("library/Cargo.lock")),
     ];
     let x = if rust_dir.join("x").exists() { "./x" } else { "./x.py" };
+    let scratch = toyos_tmpdir::TempDir::new("bootstrap");
     let mut command = Command::new(x);
     environment(&mut command);
-    command.env_remove("GITHUB_ACTIONS").env_remove("CI");
+    command.env_remove("GITHUB_ACTIONS").env_remove("CI").env("TMPDIR", scratch.path());
     command.env(sysroot::STD_PATCH_FLAGS, sysroot::std_patch(root).join(" "));
     let mut child = command
         .args(args)
@@ -778,6 +783,51 @@ mod tests {
         assert!(Path::new(FAKE).is_file(), "a_fake_bootstrap_that_reads_ci ran outside a fake fork checkout; it is not a test");
         let read = |name| std::env::var(name).unwrap_or_else(|_| "none".to_string());
         println!("GITHUB_ACTIONS {}, CI {}", read("GITHUB_ACTIONS"), read("CI"));
+    }
+
+    /// **What a bootstrap's build scripts leave in `$TMPDIR` goes with it**,
+    /// rather than into the `$TMPDIR` its caller had. `./x` here is this test
+    /// binary, running [`a_fake_bootstrap_that_leaves_scratch`], which does
+    /// what rustix 1.1.2's build script does: writes a probe to `$TMPDIR` and
+    /// leaves it.
+    #[test]
+    fn a_bootstrap_run_leaves_nothing_in_its_caller_s_tmpdir() {
+        let fork = TempDir::new("x-build-scratch");
+        fs::create_dir_all(fork.join("library")).unwrap();
+        for lock in ["Cargo.lock", "library/Cargo.lock"] {
+            fs::write(fork.join(lock), "# as committed\n").unwrap();
+        }
+        fs::write(fork.join(FAKE), "").unwrap();
+        crate::sysroot::tests::std_manifests(&fork);
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), fork.join("x")).unwrap();
+        let caller = TempDir::new("x-build-caller-tmpdir");
+        let args = ["--exact", "toolchain::tests::a_fake_bootstrap_that_leaves_scratch", "--include-ignored", "--nocapture"];
+        let (ok, log) = x_build_with(&fork, &fork, &args, "a fake bootstrap", |command| {
+            command.env("TMPDIR", caller.path());
+        });
+        assert!(ok, "the fake bootstrap did not run: {log:?}");
+        let probe = log
+            .iter()
+            .find_map(|l| l.strip_prefix(LEFT_AT))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| panic!("the fake bootstrap said nothing of its probe: {log:?}"));
+        let left: Vec<_> = fs::read_dir(&caller).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert!(left.is_empty(), "a bootstrap left {left:?} in its caller's $TMPDIR");
+        assert!(!probe.exists(), "{} outlived the bootstrap run", probe.display());
+    }
+
+    /// The line [`a_fake_bootstrap_that_leaves_scratch`] says where it left its
+    /// probe with.
+    const LEFT_AT: &str = "left a probe at ";
+
+    #[test]
+    #[ignore = "the bootstrap `a_bootstrap_run_leaves_nothing_in_its_caller_s_tmpdir` runs; never runs on its own"]
+    fn a_fake_bootstrap_that_leaves_scratch() {
+        assert!(Path::new(FAKE).is_file(), "a_fake_bootstrap_that_leaves_scratch ran outside a fake fork checkout; it is not a test");
+        let tmpdir = std::env::var_os("TMPDIR").expect("a bootstrap is given a $TMPDIR");
+        let probe = Path::new(&tmpdir).join("rustix_test_can_compile");
+        fs::write(&probe, "metadata").unwrap();
+        println!("{LEFT_AT}{}", probe.display());
     }
 
     /// The negative control is the defect itself: what cargo wrote for a
