@@ -4,17 +4,12 @@
 //! The slot table marks one slot; that one is tried first and the other only
 //! when the marked one is refused (`toyos_update::policy::order`). A slot is
 //! booted only once, in this order: its signed header is on its FAT
-//! partition, the signature is [`KEY`]'s, its image did not die on its last
-//! boot, its version is at or above the floor a boot has proven, and its
+//! partition, the signature is [`KEY`]'s, its version is at or above the floor
+//! a boot has proven, and its
 //! kernel, boot parameter, supervisor, file server and ROOT each hash to what
 //! the header names. Each
 //! refusal is said by name, and the boot that falls back tells the kernel
 //! which slot it refused and why, so the next boot's log carries it.
-//!
-//! **A death is the one refusal a slot comes back from**: where no slot
-//! verifies but one whose image died, that one boots, and says so — a machine
-//! with one slot, or with two that both died, boots what it has rather than
-//! nothing, which is what it did before it had slots.
 //!
 //! **The loader is the part signing does not cover**: it reads the key it
 //! checks against out of its own binary, and only UEFI Secure Boot over the
@@ -25,7 +20,7 @@ use alloc::vec::Vec;
 
 use toyos_update::image::{Header, Section, SIGNATURE_BYTES, SIGNED_BYTES};
 use toyos_update::policy::{self, Refusal};
-use toyos_update::record::{self, Booted, Record};
+use toyos_update::record::Booted;
 use toyos_update::slots::{self, Slot, Which};
 use toyos_update::{sig, Digest};
 use crate::efi::{BootServices, CString16, Handle, Mode, SimpleFileSystem, Status, SystemTable};
@@ -43,7 +38,6 @@ const HEAD: &str = "Slot";
 /// A slot every byte of which its signature vouches for.
 pub struct Chosen {
     pub which: Which,
-    pub version: u64,
     /// The SHA-256 of its signed header, which names the image exactly.
     pub digest: Digest,
     pub kernel: Vec<u8>,
@@ -62,7 +56,6 @@ pub fn choose(
     handle: Handle,
     system_table: &SystemTable,
     floor: u64,
-    record: &Record,
 ) -> Result<Chosen, String> {
     let bs = system_table.boot_services();
     let disk = crate::rootimage::boot_disk(handle, bs)?;
@@ -76,36 +69,19 @@ pub fn choose(
         if table.slots[1].is_some() { "present" } else { "absent" },
     );
     let mut refused: Option<(Which, Refusal)> = None;
-    let mut dead: alloc::vec::Vec<Which> = alloc::vec::Vec::new();
     for which in policy::order(&table).into_iter().flatten() {
         let slot = table.slot(which).expect("`order` names only slots the table carries");
-        match verify(bs, &mut disk, which, slot, floor, Some(record)) {
+        match verify(bs, &mut disk, which, slot, floor) {
             Ok(mut chosen) => {
                 chosen.refused = refused;
                 return Ok(chosen);
             }
             Err(why) => {
                 println!("{HEAD} {}: REFUSED, {why}", which.letter());
-                if why == Refusal::Died {
-                    dead.push(which);
-                }
                 // The marked slot's refusal is the one the kernel is told: it
                 // is why this boot is not the one the table asked for.
                 refused.get_or_insert((which, why));
             }
-        }
-    }
-    for which in dead {
-        let slot = table.slot(which).expect("a slot `order` named");
-        println!("{HEAD} {}: no slot verifies but this one, whose image died on its last boot; it boots again", which.letter());
-        match verify(bs, &mut disk, which, slot, floor, None) {
-            Ok(mut chosen) => {
-                if which != table.marked {
-                    chosen.refused = refused;
-                }
-                return Ok(chosen);
-            }
-            Err(why) => println!("{HEAD} {}: REFUSED, {why}", which.letter()),
         }
     }
     Err(alloc::format!(
@@ -115,15 +91,13 @@ pub fn choose(
     ))
 }
 
-/// `slot`, held to [`KEY`] and the floor, and to the record's deaths where
-/// there is a record to hold it to.
+/// `slot`, held to [`KEY`] and the floor.
 fn verify(
     bs: &BootServices,
     disk: &mut Disk<'_>,
     which: Which,
     slot: Slot,
     floor: u64,
-    record: Option<&Record>,
 ) -> Result<Chosen, Refusal> {
     let letter = which.letter();
     // First, because it costs one read of the table and refuses by name a
@@ -139,9 +113,6 @@ fn verify(
         return Err(Refusal::Type("root"));
     }
     let (header, digest) = signed_header(bs, which, &slot)?;
-    if record.is_some_and(|record| record::died(record, which, &digest)) {
-        return Err(Refusal::Died);
-    }
     policy::admits(floor, header.version)?;
 
     let kernel = read_section(bs, &slot.boot, slots::KERNEL_FILE, header.kernel().len, "kernel")?;
@@ -178,7 +149,6 @@ fn verify(
     println!("{HEAD} {letter}: kernel, cmdline, supervisor, fileserver and ROOT are the bytes the signed header names");
     Ok(Chosen {
         which,
-        version: header.version,
         digest,
         kernel,
         cmdline,

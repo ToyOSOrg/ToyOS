@@ -20,6 +20,7 @@ The cause is unknown. The arm has been removed from the tree rather than left
 armed: the reading it was after is asked through the PHY probe's exit code
 instead.
 
-This closes when a boot records what happened — a black box, a log that reaches
-past 0.6 s, or a firmware event log naming the shutdown — or when nothing needs
-that experiment again.
+This closes when a boot records what happened — a record that survives the
+reset (`issues/a-crash-record-survives-a-reset-outside-ram.md`), a log that
+reaches past 0.6 s, or a firmware event log naming the shutdown — or when
+nothing needs that experiment again.

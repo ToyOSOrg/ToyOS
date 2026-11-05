@@ -76,36 +76,19 @@ and takes no VFS lock. So it is not this.
 
 ## What now exists to answer it
 
-`kernel/src/deadline.rs`: a bound armed off the parameter line and polled from
-the timer interrupt entry in both rings on every CPU, which on expiry seals a
-`WEDGED` record carrying **the tail of the log ring** into the black box and
-writes the reset register itself. Every metal image carries one: twice its
-list's bound (`toyos_tco::wedge_bound_ms`), which is 120 s where no shared
-member rides the boot, or `toyos_tco::STAGED_BOUND_MS` where the boot stages
-its own wedge. The next occurrence therefore ends itself
-without a hand and leaves the records `logd` never wrote, which is the one
-channel that crosses a reset without `logd`.
+`kernel/src/deadline.rs` ends such a boot without a hand: a bound armed off
+the parameter line and polled from the timer interrupt entry on every CPU,
+which writes the reset register itself. What it no longer leaves is a record:
+the black-box page that carried the log ring's tail across the reset went with
+the memory-overwrite request, and a record surviving a reset is
+`issues/a-crash-record-survives-a-reset-outside-ram.md`.
 
 **The two records these boots stopped at are no longer written.** A spawn
 writes one record, the `spawn: <path> pid=…` that only the boots that came
 back carry, so the next occurrence's landmark is that record's absence after
 the job's `exit:`: the window opens at the job's exit and takes in the whole
-spawn, the VFS-lock sites this file eliminated for run 19 among them. Nothing
-the spawn writes on its way places a wedge inside it any more.
+spawn, the VFS-lock sites this file eliminated for run 19 among them.
 
-The `WEDGED` record this file waits for carries the machine's census, sealed
-by the deadline itself above the ring's tail (`kernel/src/census.rs`): every
-CPU's interrupt counts and the shootdowns' at the moment the bound fired.
-
-**Exit condition**: a `WEDGED` record off the stick naming what the machine was
-doing between a job's `exit:` record and the next `spawn:` record, and then
-whatever that names.
-
-**The mechanism works and the instrument is not yet sharp enough.** T14 run 21
-proved the deadline: a boot wedged on purpose ended itself at 120153 ms against
-its 120000 ms bound, sealed a `WEDGED` record, and the machine was back in 231 s
-with no hand. But the sealed tail carried 190 of that boot's 295 records and
-**dropped the newest ten** —
-`issues/a-wedged-reports-newest-records-were-cut-by-the-loaders-own-log-file.md`
-— and the newest ten are what this file is waiting for. That is the next thing
-to fix, before the next hung boot spends its one seal on the wrong window.
+**Exit condition**: what the machine was doing between a job's `exit:` record
+and the next `spawn:` record, named with evidence — a record that crossed the
+reset, or a reproduction with a console — and then whatever that names.

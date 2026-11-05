@@ -66,7 +66,7 @@ host load alone.
 The budget cannot simply be widened to the bound that would cover a thread
 inside a run of block work: `block::DEADMAN` is 120 s and the boot deadline is
 armed straight through `quiesce` — `kernel/src/deadline.rs` stands down only for
-a panic — so a park that long is sealed as a wedge rather than expiring with the
+a panic — so a park that long is ended as a wedge rather than expiring with the
 record this issue is about.
 
 ## Why it is not free to answer

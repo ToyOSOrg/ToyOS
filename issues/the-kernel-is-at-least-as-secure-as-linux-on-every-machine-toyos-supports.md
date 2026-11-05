@@ -15,10 +15,6 @@ security feature such a CPU offers. The proving machines are the T14 and
 AMD EPYC KVM guests; the PR gate's TCG model proves wiring only. A
 probe is a `boot-actuators` arm or a `test-actuators` `SYS_DEBUG` action.
 
-One line of Linux's is declined, and ToyOS stays below it there: the
-firmware's memory-overwrite request, by the owner's "Keep crash records"
-(`issues/the-loader-never-sets-the-firmwares-memory-overwrite-request.md`).
-
 **Exit**: every issue below is closed, in the order listed. The T14's Linux
 readings issue is not among them: since #915 it owes no reading this track's
 work needs.

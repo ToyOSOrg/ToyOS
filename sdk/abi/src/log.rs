@@ -225,8 +225,8 @@ impl core::fmt::Display for Dated<'_> {
     }
 }
 
-/// A kernel record's line, so the kernel's console, the panel, the black box
-/// and `logkeeper` produce byte-identical text: [`Head`]'s, with no wall clock.
+/// A kernel record's line, so the kernel's console, the panel and `logkeeper`
+/// produce byte-identical text: [`Head`]'s, with no wall clock.
 impl core::fmt::Display for LogRecord {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.fmt_dated(f, "")

@@ -201,8 +201,7 @@ pub fn settle(stopping: crate::quiesce::Stopping) -> Settled {
 ///
 /// **A write the platform does not act on is a panic past [`S5_TAKES`]**,
 /// naming what the registers and this CPU's SMI count read either side of it:
-/// the panel shows it, and the black box carries it through the panic's reset,
-/// where a halt would leave a machine that is on, silent, and indistinguishable
+/// the panel shows it, where a halt would leave a machine that is on, silent, and indistinguishable
 /// from one the power left.
 pub fn off(Settled(taken): Settled) -> ! {
     // Past the settle no holder's call is in flight: the one a supply logged last.

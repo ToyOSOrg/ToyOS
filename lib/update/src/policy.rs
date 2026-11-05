@@ -1,11 +1,13 @@
 //! Which slot a boot may take, which image an update may install, and every
 //! reason one is refused, by the word the loader hands the kernel for it.
 //!
-//! **The anti-rollback floor** is the highest version a boot has proven
-//! ([`crate::record::Ended::Proven`]). The loader refuses an image below it,
-//! and raises it only for an image that handed the machine back on purpose —
-//! never for one merely booted, because a new image that dies must leave the
-//! old one bootable. The loader keeps the floor in a UEFI variable it creates
+//! **The anti-rollback floor** is the highest version a boot has proven by
+//! stopping cleanly. The loader refuses an image below it, and raises it only
+//! for an image whose boot left `logkeeper`'s stop mark on the log partition —
+//! never for one merely booted. The mark and the loader's record are writable
+//! only by `logkeeper`'s view and the supervisor's (`toyos_manifest::Program::view`),
+//! and the mark is written before the stop's drivers stop, so a boot that hangs
+//! after it still proves its image. The loader keeps the floor in a UEFI variable it creates
 //! without runtime access, so no kernel it hands the machine to, however
 //! compromised, can lower it ([`crate::floor`]).
 //!
@@ -29,8 +31,6 @@ use crate::slots::{Table, Which};
 pub enum Refusal {
     /// The table carries no such slot.
     Absent,
-    /// Its image died on its last boot.
-    Died,
     /// It carries no signed header.
     Unsigned,
     /// Its signed header is not one.
@@ -55,7 +55,6 @@ impl Refusal {
     pub fn word(&self) -> &'static str {
         match self {
             Self::Absent => "absent",
-            Self::Died => "died",
             Self::Unsigned => "unsigned",
             Self::Malformed => "malformed",
             Self::Signature => "signature",
@@ -71,7 +70,6 @@ impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match *self {
             Self::Absent => write!(f, "the slot table carries no such slot"),
-            Self::Died => write!(f, "its image died on its last boot"),
             Self::Unsigned => write!(f, "it carries no signed header, so it is unsigned"),
             Self::Malformed => write!(f, "its signed header is not one"),
             Self::Signature => write!(f, "its signature is not this machine's key's"),
@@ -160,7 +158,6 @@ mod tests {
     fn every_word_is_one_parameter_token() {
         for r in [
             Refusal::Absent,
-            Refusal::Died,
             Refusal::Unsigned,
             Refusal::Malformed,
             Refusal::Signature,

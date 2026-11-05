@@ -9,7 +9,6 @@ use toyos_metal::{
 };
 use toyos_metal::timings::{Machine, Record};
 
-const PANEL: &str = "| panel: paints=10 px=8741248 us=21751 max_us=3851\n";
 const BOOTED: &str = "[2026-09-29 18:22:39  1.165 cpu0 kernel] Boot: complete (1165ms)\n";
 
 fn t14() -> Machine {
@@ -33,7 +32,7 @@ fn recorded() -> toyos_tmpdir::TempDir {
 pub fn readbacks_of_a_machine_with_no_record_are_red_and_record_nothing() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let root = toyos_tmpdir::TempDir::new("metal-records");
-    plant(&dir, "passing", PANEL, BOOTED, None);
+    plant(&dir, "passing", BOOTED, None);
     let tests = [("passes", &PASSING)];
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
     assert!(
@@ -63,33 +62,9 @@ pub fn the_bench_reaches_the_loop_as_its_host() {
     assert!(!t14.iter().any(|w| w == "--host"), "{t14:?}");
 }
 
-/// A `loader.log` whose pass after the reset reads `page`.
-fn loader(page: &str) -> String {
-    format!(
-        "{}\n{}\n{}\n{}\n{}\n{page}",
-        bootlog::LOADER_FIRST_LINE,
-        bootlog::LOADER_CLOCK_NONE,
-        bootlog::LOADER_LAST_LINE,
-        bootlog::SEPARATOR,
-        bootlog::LOADER_FIRST_LINE
-    )
-}
-
-/// The record of arming the deadline, at the 60 ms the T14 arms it.
-fn armed() -> String {
-    format!(
-        "[2026-09-29 18:22:39  0.060 cpu0 kernel] {}120000 ms, after which this kernel seals a WEDGED \
-         record and writes the reset register itself\n{BOOTED}",
-        bootlog::DEADLINE_ARMED
-    )
-}
-
-fn expired_at(reached: i64) -> String {
-    format!(
-        "{PANEL}| {}: a bound of 120000 ms, reached at {reached} ms, with this machine in \
-         `complete`.\n",
-        bootlog::DEADLINE_EXPIRED
-    )
+/// A `loader.log` that handed its boot a kernel.
+fn loader() -> String {
+    format!("{}\n{}\n{}\n", bootlog::LOADER_FIRST_LINE, bootlog::LOADER_CLOCK_NONE, bootlog::LOADER_LAST_LINE)
 }
 
 /// What every boot that reaches `Boot: complete` owes `one_clock`.
@@ -111,17 +86,11 @@ pub(super) fn boot_file() -> String {
 }
 
 /// One boot's readback as the loop writes it.
-pub(super) fn plant(
-    dir: &Path,
-    label: &str,
-    page: &str,
-    kernel: &str,
-    verdict: Option<&Refusal>,
-) {
+pub(super) fn plant(dir: &Path, label: &str, kernel: &str, verdict: Option<&Refusal>) {
     let home = metal::at(dir, label);
     fs::create_dir_all(&home).expect("a readback directory");
     for (name, text) in [
-        (READBACK_LOADER, loader(page)),
+        (READBACK_LOADER, loader()),
         (READBACK_KERNEL, format!("{STARTED}{kernel}")),
         (READBACK_BOOT, boot_file()),
         (READBACK_VERDICT, verdict_file(verdict)),
@@ -131,9 +100,9 @@ pub(super) fn plant(
 }
 
 /// One boot the loop passed, read back.
-fn planted(page: &str, kernel: &str) -> Readback {
+fn planted(kernel: &str) -> Readback {
     let dir = toyos_tmpdir::TempDir::new("metal-readback");
-    plant(&dir, "planted", page, kernel, None);
+    plant(&dir, "planted", kernel, None);
     metal::read_readback(&dir, "planted").expect("a planted readback")
 }
 
@@ -141,59 +110,8 @@ fn read(dir: &Path, labels: &[&str]) -> BTreeMap<String, Result<Readback, String
     labels.iter().map(|label| (label.to_string(), metal::read_readback(dir, label))).collect()
 }
 
-/// **A boot that handed the machine back owes the stop's record**, drawn on
-/// the page that has to carry it.
-pub fn the_stop_owes_its_record() {
-    let whole = toyos_quiesce::Record {
-        sweep: toyos_quiesce::Sweep { stopped: 6, running: 0 },
-        elapsed_ms: 11,
-        budget_ms: 2010,
-        sweeps: 3,
-        cpus: 8,
-    };
-    let handed_back = |stop: &str| format!("Black box: {}\n{PANEL}{stop}", bootlog::HANDED_BACK);
-    assert_eq!(planted(&handed_back(&format!("| {whole}\n")), BOOTED).stop_completed(), Ok(()));
-    let why = planted(&handed_back(""), BOOTED)
-        .stop_completed()
-        .expect_err("a boot that handed the machine back with no record of its stop");
-    assert!(why.contains("carries no record of the stop"), "{why}");
-    let ended = format!("Previous boot's panic: the last boot read WEDGED\n{PANEL}");
-    assert_eq!(planted(&ended, BOOTED).stop_completed(), Ok(()));
-}
-
-/// Each bound's lateness against the period of what polls it, a millisecond
-/// either way and no further.
-pub fn a_bound_fires_within_one_period_of_itself() {
-    let quantum = i64::try_from(kernel::sched::task::QUANTUM_NS / 1_000_000).expect("ms");
-    let deadline = |late: i64| planted(&expired_at(120_060 + late), &armed()).deadline_on_time();
-    assert_eq!(deadline(4), Ok(()));
-    assert_eq!(deadline(quantum + 1), Ok(()));
-    assert!(deadline(quantum + 2).is_err());
-    assert_eq!(deadline(-1), Ok(()));
-    assert!(deadline(-2).is_err());
-    let unarmed = planted(&expired_at(120_064), BOOTED).deadline_on_time();
-    assert!(unarmed.is_err(), "an expiry with no arm to count from passed");
-
-    let sample = i64::try_from(toyos_tco::HARD_LOCKUP_SAMPLE_NS / 1_000_000).expect("ms");
-    let lockup = |late: i64| {
-        let page = format!(
-            "{PANEL}| {}: cpu7 has taken no interrupt for {} ms, with `IF` clear at every \
-             sample in that span. Its bound is 60000 ms.\n",
-            bootlog::LOCKED_UP,
-            60_000 + late
-        );
-        planted(&page, BOOTED).lockup_on_time()
-    };
-    assert_eq!(lockup(4), Ok(()));
-    assert_eq!(lockup(sample + 1), Ok(()));
-    assert!(lockup(sample + 2).is_err());
-
-    let neither = planted(PANEL, BOOTED);
-    assert_eq!((neither.deadline_on_time(), neither.lockup_on_time()), (Ok(()), Ok(())));
-}
-
 pub fn a_name_measured_twice_is_refused() {
-    let back = planted(PANEL, BOOTED);
+    let back = planted(BOOTED);
     assert_eq!(back.measured("span.planted.us", 1), Ok(()));
     let why = back.measured("span.planted.us", 2).expect_err("a second value");
     assert!(why.contains("twice"), "{why}");
@@ -229,8 +147,6 @@ static BESIDE: Metal = Metal {
 };
 static REFUSED: Metal =
     Metal { arms: &[metal::once("refused", "tests/images/jobcase.toml", &[], &[])], judge: span };
-static LATE: Metal =
-    Metal { arms: &[metal::once("late", "tests/images/jobcase.toml", &[], &[])], judge: span };
 static SKEWED: Metal =
     Metal { arms: &[metal::once("skewed", "tests/images/jobcase.toml", &[], &[])], judge: span };
 static ONE: Metal =
@@ -251,26 +167,24 @@ static TWO: Metal =
 pub fn a_number_fails_with_its_owner_alone() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let root = recorded();
-    plant(&dir, "passing", PANEL, BOOTED, None);
-    plant(&dir, "failing", PANEL, BOOTED, None);
-    plant(&dir, "refused", PANEL, BOOTED, Some(&Refusal::HungWithoutARecord));
-    plant(&dir, "late", &expired_at(120_160), &armed(), None);
+    plant(&dir, "passing", BOOTED, None);
+    plant(&dir, "failing", BOOTED, None);
+    plant(&dir, "refused", BOOTED, Some(&Refusal::Log(toyos_build::bootlog::Unfit::NoStopMark)));
     // The supervisor's line 10 ms before the spawn it reports.
-    plant(&dir, "skewed", PANEL, BOOTED, None);
+    plant(&dir, "skewed", BOOTED, None);
     let at = metal::at(&dir, "skewed").join(READBACK_KERNEL);
     let kernel = fs::read_to_string(&at).expect("a planted log");
     fs::write(&at, kernel.replacen("0.050 supervisor]", "0.040 supervisor]", 1)).expect("a planted log");
-    let readbacks = read(&dir, &["passing", "failing", "refused", "late", "skewed"]);
+    let readbacks = read(&dir, &["passing", "failing", "refused", "skewed"]);
     assert!(readbacks["skewed"].as_ref().expect("a readback").one_clock().is_err());
     let why = readbacks["refused"].as_ref().err().expect("the loop's refusal, read back");
-    assert!(why.contains("never reported: no panic"), "{why}");
+    assert!(why.contains("never made the log durable at a stop"), "{why}");
 
     let tests = [
         ("passes", &PASSING),
         ("fails", &FAILING),
         ("beside", &BESIDE),
         ("refused", &REFUSED),
-        ("late", &LATE),
         ("skewed", &SKEWED),
     ];
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
@@ -281,13 +195,10 @@ pub fn a_number_fails_with_its_owner_alone() {
         names,
         [
             "beside.failing.us",
+            "boot.failing.back_secs",
             "boot.failing.complete_ms",
-            "boot.failing.panel_max_us",
-            "boot.failing.panel_us",
+            "boot.passing.back_secs",
             "boot.passing.complete_ms",
-            "boot.passing.panel_max_us",
-            "boot.passing.panel_us",
-            "span.late.us",
             "span.passing.us"
         ]
     );
@@ -322,8 +233,8 @@ pub fn a_boot_that_lost_parts_of_its_log_judges_no_row() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let root = recorded();
     // Parts 1, 4 and 5 came back, and no line says where 2 and 3 went.
-    plant(&dir, "holed", PANEL, &format!("{BOOTED}{opened}{}{}", continued(4), continued(5)), None);
-    plant(&dir, "passing", PANEL, &format!("{BOOTED}{opened}{}{}", continued(2), continued(3)), None);
+    plant(&dir, "holed", &format!("{BOOTED}{opened}{}{}", continued(4), continued(5)), None);
+    plant(&dir, "passing", &format!("{BOOTED}{opened}{}{}", continued(2), continued(3)), None);
     let readbacks = read(&dir, &["holed", "passing"]);
     assert_eq!(
         readbacks["holed"].as_ref().err().map(String::as_str),
@@ -342,8 +253,8 @@ pub fn a_boot_that_lost_parts_of_its_log_judges_no_row() {
 /// neither, whether the first of them passed or failed.
 pub fn a_name_two_owners_measured_is_refused() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
-    plant(&dir, "one", PANEL, BOOTED, None);
-    plant(&dir, "two", PANEL, BOOTED, None);
+    plant(&dir, "one", BOOTED, None);
+    plant(&dir, "two", BOOTED, None);
     let readbacks = read(&dir, &["one", "two"]);
     for first in [&ONE, &ONE_FAILS] {
         let root = recorded();
@@ -352,22 +263,21 @@ pub fn a_name_two_owners_measured_is_refused() {
         assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "one name twice judged green");
         let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
         assert!(!record.measured.contains_key("latency.p99_us"), "{:?}", record.measured);
-        assert_eq!(record.measured.len(), 6, "{:?}", record.measured);
+        assert_eq!(record.measured.len(), 4, "{:?}", record.measured);
     }
 }
 
-/// `passing`'s four rows under `bios`: its planted readings, with `complete_ms`
-/// as given.
-fn kept(bios: &str, complete_ms: u64) -> Record {
+/// `passing`'s three rows under `bios`: its planted readings, with
+/// `complete_ms` and `back_secs` as given.
+fn kept_back(bios: &str, complete_ms: u64, back_secs: u64) -> Record {
     let machine = t14();
     Record {
         vendor: machine.vendor,
         product: machine.product,
         bios: bios.to_string(),
         measured: [
+            ("boot.passing.back_secs", back_secs),
             ("boot.passing.complete_ms", complete_ms),
-            ("boot.passing.panel_max_us", 3851),
-            ("boot.passing.panel_us", 21751),
             ("span.passing.us", 7),
         ]
         .into_iter()
@@ -376,12 +286,17 @@ fn kept(bios: &str, complete_ms: u64) -> Record {
     }
 }
 
+/// [`kept_back`] at the 40 s the planted boot file came back in.
+fn kept(bios: &str, complete_ms: u64) -> Record {
+    kept_back(bios, complete_ms, 40)
+}
+
 /// `passing`'s readback judged against `record`, saved first: whether the
 /// run was red, and the record it left.
 fn judged_against(record: &Record) -> (bool, Record) {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let root = toyos_tmpdir::TempDir::new("metal-records");
-    plant(&dir, "passing", PANEL, BOOTED, None);
+    plant(&dir, "passing", BOOTED, None);
     record.save(&root).expect("a saved record");
     let tests = [("passes", &PASSING)];
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
@@ -398,6 +313,10 @@ pub fn a_reading_past_its_record_fails_and_moves_nothing() {
     // 1165 ms against a ceiling of 1164.
     let past = kept(&bios, 582);
     assert_eq!(judged_against(&past), (true, past));
+    // **The come-back half of the contract**: back in 40 s against a ceiling
+    // of 38, which is a stop the deadline ended rather than a clean one.
+    let late = kept_back(&bios, 1165, 19);
+    assert_eq!(judged_against(&late), (true, late));
 }
 
 /// **A run under another BIOS reds and records nothing**, though every reading
@@ -433,8 +352,8 @@ pub fn a_failing_shared_member_fails_itself_alone() {
             jobs[0], jobs[1]
         )
     };
-    plant(&dir, "passing", PANEL, &exits(0), None);
-    plant(&dir, "failing", PANEL, &exits(101), None);
+    plant(&dir, "passing", &exits(0), None);
+    plant(&dir, "failing", &exits(101), None);
     let shared = |boot: &str| metal::SharedBoot {
         boot: boot.to_string(),
         config: "tests/images/testcases.toml",
@@ -453,14 +372,7 @@ pub fn a_failing_shared_member_fails_itself_alone() {
     let names: Vec<&str> = record.measured.keys().map(String::as_str).collect();
     assert_eq!(
         names,
-        [
-            "boot.failing.complete_ms",
-            "boot.failing.panel_max_us",
-            "boot.failing.panel_us",
-            "boot.passing.complete_ms",
-            "boot.passing.panel_max_us",
-            "boot.passing.panel_us"
-        ]
+        ["boot.failing.back_secs", "boot.failing.complete_ms", "boot.passing.back_secs", "boot.passing.complete_ms"]
     );
 }
 
@@ -501,10 +413,6 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
         ],
         judge: |_| Ok(()),
     };
-    static WEDGES: Metal = Metal {
-        arms: &[metal::once("wedge", "tests/images/jobcase.toml", &[toyos_metal::WEDGE_ARM], &[])],
-        judge: |_| Ok(()),
-    };
     let members = |boot: &str, members: &[(&str, u64)]| metal::SharedBoot {
         boot: boot.to_string(),
         config: "tests/images/testcases.toml",
@@ -514,7 +422,7 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
         files: vec![(format!("expect/{}", members[0].0), Vec::new())],
         links: Vec::new(),
     };
-    let rows = [("early", &EARLY), ("held", &HELD), ("wedges", &WEDGES)];
+    let rows = [("early", &EARLY), ("held", &HELD)];
     let shared = [
         members("shared", &[("m1", 860), ("c1", 260), ("m2", 860)]),
         members("corpus", &[("c2", 260), ("c3", 260)]),
@@ -527,8 +435,6 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
     assert_eq!(bounds("corpus"), (60_520, 121_040));
     // No member: the bounds every row's boot had before a list could widen.
     assert_eq!(bounds("own"), (60_000, 120_000));
-    // A staged wedge keeps its short deadline, whatever its list's bound.
-    assert_eq!(bounds("wedge"), (60_000, toyos_tco::STAGED_BOUND_MS));
 
     let debug = metal::SharedBoot { features: toyos_build::build::TEST_KERNEL, ..shared[0].clone() };
     let Err(refused) = metal::batches(&rows, &[debug]) else {
@@ -621,45 +527,6 @@ pub fn words_take_rows_members_and_whole_boots() {
     }
 }
 
-/// **A page the pass after the reset cleared owes no panel**: `foreignrecord`'s
-/// census went with its record, so the boot is green and records its
-/// `complete_ms` alone. The same record cleared by the pass before the handoff
-/// leaves this boot's own page owing the census, and without it the boot is red
-/// and records nothing.
-pub fn a_cleared_page_owes_no_panel() {
-    let cleared = format!(
-        "Black box: 0x8000000 {} ([3e, d4, 0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, \
-         81], and this stick is [c1, d4, 0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, 81]), \
-         armed at 2026-09-29-131341. It has been cleared and this pass boots its kernel\n",
-        bootlog::FOREIGN_DONE
-    );
-    let hung = format!(
-        "Boot attempts: this image has had the machine 1 time(s) without reporting; now 0\n{}\n{}\n",
-        bootlog::HUNG_WITHOUT_A_RECORD,
-        bootlog::CHAIN_ENDS_LINE
-    );
-    // `before` goes in the pass before the handoff, `page` in the pass after
-    // the reset.
-    let judged = |before: &str, page: &str| {
-        let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
-        let root = recorded();
-        plant(&dir, "foreignrecord", page, BOOTED, None);
-        let at = metal::at(&dir, "foreignrecord").join(READBACK_LOADER);
-        let handoff = bootlog::LOADER_LAST_LINE;
-        let loader = fs::read_to_string(&at).expect("a planted loader.log");
-        fs::write(&at, loader.replacen(handoff, &format!("{before}{handoff}"), 1))
-            .expect("a planted loader.log");
-        let red = metal::judge_readbacks(&root, &read(&dir, &["foreignrecord"]), &[], &[]);
-        let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
-        (red, record.measured.into_keys().collect::<Vec<_>>())
-    };
-    assert_eq!(
-        judged("", &format!("{cleared}{hung}")),
-        (false, vec!["boot.foreignrecord.complete_ms".to_string()])
-    );
-    assert_eq!(judged(&cleared, &hung), (true, Vec::new()));
-}
-
 /// **The loader's lines, the kernel's records and a program's lines count
 /// from one zero**: a kernel record stamped before the loader's handoff, or the
 /// supervisor's line after a spawn before that spawn's record, is a clock that kept another
@@ -675,13 +542,11 @@ pub fn the_loader_the_kernel_and_a_program_count_from_one_zero() {
              {said}\
              [2026-10-04 09:30:00 15.000 cpu0 kernel] Boot: complete (3335ms)\n"
         );
-        plant(&dir, "planted", PANEL, &kernel, None);
+        plant(&dir, "planted", &kernel, None);
         let loader = format!(
-            "[{loader_ms} cpu0 loader] {}\n[{loader_ms} cpu0 loader] {clock}\n[{loader_ms} cpu0 loader] {}\n{}\n{}\n{PANEL}",
+            "[{loader_ms} cpu0 loader] {}\n[{loader_ms} cpu0 loader] {clock}\n[{loader_ms} cpu0 loader] {}\n",
             bootlog::LOADER_FIRST_LINE,
             bootlog::LOADER_LAST_LINE,
-            bootlog::SEPARATOR,
-            bootlog::LOADER_FIRST_LINE
         );
         let home = metal::at(&dir, "planted");
         fs::write(home.join(READBACK_LOADER), loader).expect("a planted loader.log");
@@ -716,9 +581,9 @@ pub fn an_exit_record_without_a_code_answers_no_code() {
              [2026-09-29 18:22:42  3.120 cpu5 kernel] exit: {job} pid=13 code=0 cpu=9ms\n"
         )
     };
-    assert_eq!(planted(PANEL, &kernel("code=3")).exit_code(job), Ok(3));
+    assert_eq!(planted(&kernel("code=3")).exit_code(job), Ok(3));
     for end in ["killed", "fault=memory"] {
-        let answer = planted(PANEL, &kernel(end)).exit_code(job);
+        let answer = planted(&kernel(end)).exit_code(job);
         assert!(answer.as_ref().is_err_and(|why| why.contains(end)), "{end}: {answer:?}");
     }
 }

@@ -50,15 +50,13 @@ name is a `#[test]` in the named crate or a `METAL` row, and reverting the behav
 
 ## Stage B: the panic path and the end of a machine
 
-Metal: the blackbox page and `loader.log` the next boot reads off the T14. Host: the panel
+Metal: what the boot left on its log partition, and that the machine came back; no report
+crosses the reset (`issues/a-crash-record-survives-a-reset-outside-ram.md`). Host: the panel
 console's renderer. Exit: as stage A.
 
 - metal `panic_reboots`, `panic_before_peripherals_reboots`: a panic ends the boot inside its
   bound, from `percpu::init_bsp` on.
-- metal `blackbox_panic_chain`, `blackbox_early_panic_sealed` (and
-  `blackbox_early_panic_sealed_muted`, the T14's own shape), `blackbox_fault_sealed`: the report
-  is sealed on the page and the next pass reads it.
-- metal `panic_outlives_the_deadline`: a panic crosses the deadline's reset as a panic report.
+- metal `panic_outlives_the_deadline`: a panic holds its panel past the deadline's bound.
 - metal `hang_bounded_by_the_stick`: a hanging `--once` image costs one boot, and the marked slot boots after it.
 - metal `double_fault_stack`, `syscall_panic_halts`, `syscall_fault_halts`,
   `heap_over_ceiling_halts`: each fatal path halts with its own report.

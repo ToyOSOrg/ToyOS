@@ -140,9 +140,8 @@ pub enum Refusal {
     /// **The image carries no bound on its own boot.** Every metal image is
     /// built with `boot-deadline=<ms>`; one without it is not a metal-staged
     /// image, and flashing it puts the machine somewhere only a hand gets it out
-    /// of. `staged_a_wedge` is the sharpest form: an image that stops every CPU
-    /// on purpose and has nothing to end the boot it stopped.
-    NoBound { staged_a_wedge: bool },
+    /// of.
+    NoBound,
     /// **The outside judge's verdict on the volume the boot left.** What
     /// `toyos-fat32-check` said about the log partition read straight off the
     /// disk — the bytes, not a driver's opinion of them, and not the FAT32
@@ -168,24 +167,10 @@ pub enum Refusal {
     FellThrough(String),
     /// The log the boot left is not a passing boot's.
     Log(bootlog::Unfit),
-    /// **The loader reported a record and booted no kernel.** Not the same thing
-    /// as an absent boot record, and the difference is the whole diagnosis: the
-    /// pass that reads the black box ends the chain by design, so a machine that
-    /// came back with `loader.log` carrying a reporting pass and `logkeeper` carrying
-    /// nothing did exactly what it was told — the question is why it had a
-    /// record to report at all.
-    ReportedAndBootedNothing { said: String },
-    /// **The last boot of this image was handed the machine and hung.** The
-    /// loader counts attempts on the log partition, and this pass is the second of an
-    /// image whose first never reported — so it booted no kernel and handed the
-    /// machine back rather than starting the same hang again. What is owed is a
-    /// look at why that kernel stopped, and the boot before this one is where.
-    HungWithoutARecord,
-    /// **An image armed to stop itself did not, or was not ended by its own
-    /// bound.** Said only of an image carrying [`WEDGE_ARM`], for which
-    /// `Rebooting.` is the failure and a sealed `WEDGED` record is the pass —
-    /// the one boot in this loop whose verdict is not `bootlog::verdict`'s.
-    Wedge { why: &'static str },
+    /// **An image its own deadline ends did not end that way.** Said only of
+    /// an image [`ended_by_its_deadline`], which owes its boot record and no
+    /// clean stop.
+    Deadline { why: &'static str },
     /// The machine did not name itself: its SMBIOS answer is not
     /// [`Machine::QUERY`]'s three lines.
     Machine(String),
@@ -215,9 +200,7 @@ impl Refusal {
                 | Self::FellThrough(_)
                 | Self::Log(_)
                 | Self::Fat32(_)
-                | Self::ReportedAndBootedNothing { .. }
-                | Self::HungWithoutARecord
-                | Self::Wedge { .. }
+                | Self::Deadline { .. }
         )
     }
 }
@@ -231,19 +214,14 @@ impl fmt::Display for Refusal {
             }
             Self::Adopt(why) => write!(f, "nothing was erased: {why}"),
             Self::File { path, why } => write!(f, "{path}: {why}"),
-            Self::NoBound { staged_a_wedge } => write!(
+            Self::NoBound => write!(
                 f,
-                "the image carries no `{}<ms>` on its parameter line{}. Every image the \
+                "the image carries no `{}<ms>` on its parameter line. Every image the \
                  metal profile builds carries one, so this is not one of them — and a \
                  flashed boot with no bound on itself is what this loop exists to prevent: \
                  a kernel that stops making progress without panicking is bounded by \
                  nothing else, and the machine has no power switch",
                 toyos_tco::DEADLINE_PARAM,
-                if *staged_a_wedge {
-                    ", and it stages a wedge that stops every CPU on purpose"
-                } else {
-                    ""
-                }
             ),
             Self::Fat32(said) => write!(
                 f,
@@ -292,25 +270,10 @@ impl fmt::Display for Refusal {
             ),
             Self::FellThrough(why) => write!(f, "the firmware did not fall through past an unbootable entry: {why}"),
             Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
-            Self::Wedge { why } => write!(
+            Self::Deadline { why } => write!(
                 f,
-                "this image is armed to stop itself, so it is judged by the record its own \
-                 deadline sealed and not by the word a shutdown writes — and {why}"
-            ),
-            Self::HungWithoutARecord => write!(
-                f,
-                "the last boot of this image was handed the machine and never reported: no panic, \
-                 no fault and no deliberate handover, which is a hang. This pass refused to \
-                 boot the same kernel again and gave the machine back, so the machine is free \
-                 and nothing needs a hand — but this boot measured no test, and why that kernel \
-                 stopped is the boot before it"
-            ),
-            Self::ReportedAndBootedNothing { said } => write!(
-                f,
-                "the loader reported a record and booted no kernel: `loader.log` carries a \
-                 pass that read the black box and ended the chain, and `logkeeper` wrote nothing \
-                 because nothing ran. This boot measured no test. What the pass said was: \
-                 {said}"
+                "this image's own deadline is what ends its boot, so it is judged by its boot \
+                 record and the machine coming back, and not by a clean stop — and {why}"
             ),
             Self::Machine(why) => write!(f, "the machine did not say what it is: {why}"),
             Self::Home(got) => write!(
@@ -761,100 +724,28 @@ pub const FLASHABLE: &[&str] = &[
     // way an unarmed one does. Nothing it writes outlives a reset: the patch
     // level resets at warm and cold reset (55922 §1.4.4.11).
     "microcode-amd-flip",
-    // It seals this boot's own record under an identity one bit from this
-    // image's, so the pass that finds it clears it and boots a kernel. The page
-    // is memory the loader allocated and the machine is what it was after.
-    FOREIGN_RECORD_ARM,
-    // **The one arm that deliberately stops this machine.** At the shutdown
-    // syscall, after the job list, every CPU stops taking scheduler passes.
-    // Admissible only because `kernel/src/deadline.rs` is what ends it, which
-    // [`arms_are_admissible`] refuses an image without: it reaches no device
-    // register, writes no firmware state, and the boot after it is ordinary.
-    WEDGE_ARM,
-    // **The other arm that deliberately stops this machine, and it stops one
-    // CPU harder.** It takes a lock of its own, clears `IF` on the last CPU and
-    // never gives either back, which is the state this machine hung in for
-    // 420 s. Admissible for the same reason as the row above and one more:
-    // `kernel/src/hardlockup` ends it at half the bound the image carries, and
-    // the boot deadline is still armed behind that. It reaches no device
-    // register and writes no firmware state; the kernel implies `WEDGE_ARM`
-    // behind it, so the boot cannot end itself before its own bound.
-    LOCKUP_ARM,
 ];
 
-/// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and
-/// [`arms_are_admissible`] refuses an image carrying it with no bound to end it.
-pub const WEDGE_ARM: &str = "wedge-before-reset";
-
-/// The arm that stops one CPU harder — interrupts off, inside a lock — which
-/// only `kernel/src/hardlockup`'s NMI sample reaches. A second name rather than
-/// a second judge: what it owes a readback is exactly what [`WEDGE_ARM`] owes,
-/// and which bound sealed the page is the page's own first line to say.
-pub const LOCKUP_ARM: &str = "hard-lockup-probe";
-
-/// Every arm that deliberately leaves this machine to be ended by a bound.
-///
-/// **One list and not a condition spelled out at each reader.** A further such
-/// arm added to [`FLASHABLE`] and not here is an image whose boot is judged by
-/// the word a shutdown writes — which it never reaches — so the reader that
-/// forgot it reds every boot it was staged for.
-pub const WEDGE_ARMS: &[&str] = &[WEDGE_ARM, LOCKUP_ARM];
-
-/// The arm whose boot the pass after it reads as a hang on purpose: its record
-/// is sealed under another image's identity, so that pass clears it and finds
-/// an attempt nothing reported, and hands the machine back.
-pub const FOREIGN_RECORD_ARM: &str = "blackbox-foreign-identity";
-
-/// Whether this image is armed to stop itself, and so owes a sealed record
-/// rather than `Rebooting.`.
-pub fn stages_a_wedge(armed: &[impl AsRef<str>]) -> bool {
-    armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_ref()))
-}
-
-/// Whether this image is ended by its own boot deadline on purpose: armed to
-/// wedge, or carrying a deadline below the least bound a runner gives its list
+/// Whether this image is ended by its own boot deadline on purpose: it carries
+/// a deadline below the least bound a runner gives its list
 /// ([`toyos_tco::JOB_BOUND_MS`]). The harness gives such a deadline only to a
-/// boot whose load runs until the reset, such as `the_disk_survives_a_reset_under_load`'s,
-/// so the boot is judged by the record that bound sealed, as a wedge is.
+/// boot whose load runs until the reset, such as
+/// `the_disk_survives_a_reset_under_load`'s.
 pub fn ended_by_its_deadline(armed: &[impl AsRef<str>]) -> bool {
-    stages_a_wedge(armed)
-        || armed.iter().any(|name| {
-            name.as_ref()
-                .strip_prefix(toyos_tco::DEADLINE_PARAM)
-                .and_then(|ms| ms.parse::<u64>().ok())
-                .is_some_and(|ms| ms < toyos_tco::JOB_BOUND_MS)
-        })
-}
-
-/// The `boot-deadline=` bound an image armed with `armed` carries, whose
-/// runner bounds its list at `list_ms`. A wedge staged under the chipset
-/// watchdog is the watchdog's to end, so its deadline stands behind it.
-pub fn bound_for(armed: &[impl AsRef<str>], list_ms: u64) -> u64 {
-    match (stages_a_wedge(armed), watched(armed)) {
-        (true, true) => toyos_tco::WATCHED_WEDGE_BOUND_MS,
-        (true, false) => toyos_tco::STAGED_BOUND_MS,
-        (false, _) => toyos_tco::wedge_bound_ms(list_ms),
-    }
-}
-
-/// Whether this image is armed with the chipset watchdog.
-fn watched(armed: &[impl AsRef<str>]) -> bool {
-    armed.iter().any(|name| name.as_ref() == toyos_tco::PARAM)
-}
-
-/// Whether this image is armed so the pass after its reset clears its record
-/// as another image's: nothing crosses on the page but the record's state, and
-/// that pass hands the machine back as a hang.
-pub fn clears_its_own_page(armed: &[impl AsRef<str>]) -> bool {
-    armed.iter().any(|name| name.as_ref() == FOREIGN_RECORD_ARM)
+    armed.iter().any(|name| {
+        name.as_ref()
+            .strip_prefix(toyos_tco::DEADLINE_PARAM)
+            .and_then(|ms| ms.parse::<u64>().ok())
+            .is_some_and(|ms| ms < toyos_tco::JOB_BOUND_MS)
+    })
 }
 
 /// Whether [`FLASHABLE`] clears `name`.
 pub fn flashable(name: &str) -> bool {
-    // The two parameters that carry a value are not names: the black-box page's
-    // address, which every image the harness builds has, and the boot
-    // deadline's bound. Neither arms an instrument, and the second is what ends
-    // a boot this loop would otherwise wait 360 s for and then need a hand on.
+    // The parameters that carry a value are not names: the boot deadline's
+    // bound and the loader's slot words. None arms an instrument, and the
+    // deadline is what ends a boot this loop would otherwise wait 360 s for and
+    // then need a hand on.
     toyos_build::build::is_valued_param(name) || FLASHABLE.contains(&name)
 }
 
@@ -883,7 +774,7 @@ pub fn judge_arms(armed: &[String]) -> Result<u64, Refusal> {
     // `target/bootable.img`, which has no job list and no deadline at all.
     // A bound nothing can read is no bound: the kernel panics on it.
     let Some(Ok(deadline_ms)) = toyos_tco::deadline_in(&armed.join(",")) else {
-        return Err(Refusal::NoBound { staged_a_wedge: stages_a_wedge(armed) });
+        return Err(Refusal::NoBound);
     };
     match armed.iter().find(|name| !flashable(name)) {
         Some(name) => Err(Refusal::Armed { name: name.clone() }),
@@ -1194,7 +1085,7 @@ impl Driver {
     ///
     /// Two strings and not one, because only the second is the boot's log and
     /// [`bootlog::verdict`] is about that.
-    fn read_log(&self) -> Result<(String, String), Refusal> {
+    fn read_log(&self) -> Result<(String, String, bool), Refusal> {
         self.mounted(Owned::Log, Self::read_mounted)
     }
 
@@ -1219,9 +1110,10 @@ impl Driver {
         }
     }
 
-    fn read_mounted(&self) -> Result<(String, String), Refusal> {
+    fn read_mounted(&self) -> Result<(String, String, bool), Refusal> {
         let at = shell_word(&self.home.mount());
         let listing = self.ssh("listing the log", &format!("ls -1 {at}"))?;
+        let stopped = bootlog::stop_marked(&listing).is_ok();
         let (loader, logkeeper) = bootlog::split_listing(&listing);
         // Absence is an answer and not a failure: the boot is judged on what
         // `logkeeper` wrote either way.
@@ -1233,7 +1125,7 @@ impl Driver {
         for name in logkeeper {
             text.push_str(&self.cat(name)?);
         }
-        Ok((loader, text))
+        Ok((loader, text, stopped))
     }
 
     /// The log volume the image wrote, `bytes` long, read whole as bytes.
@@ -1800,7 +1692,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let (down, back) = driver.ride_the_reboot(wait_secs)?;
     println!("the machine answered ssh again after {back} s");
     let began = std::time::Instant::now();
-    let (loader, log_text) = driver.read_log()?;
+    let (loader, log_text, stopped) = driver.read_log()?;
     let read_log = began.elapsed().as_secs_f64();
     print!("{loader}{log_text}");
     // The outside judge, and it runs before the verdict: a volume this
@@ -1825,7 +1717,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let phases = Phases { preamble, flash, dd_secs: installed.dd, entry, down, read_log, raw_log };
     println!("phases: {phases}");
     let boot = BootFile { back, machine, phases }.text();
-    let verdict = judge_and_write_readback(&armed, &loader, &log_text, args.readback.as_deref(), &boot);
+    let verdict = judge_and_write_readback(&armed, &loader, &log_text, stopped, args.readback.as_deref(), &boot);
     // After the readback, so a boot that moved the order is still judged; the
     // order's refusal is the louder answer, since the next failure loops.
     order_kept(&before, &driver.ssh("listing boot entries", EFIBOOTMGR)?)?;
@@ -1978,10 +1870,11 @@ fn judge_and_write_readback(
     armed: &[String],
     loader: &str,
     log: &str,
+    stopped: bool,
     readback: Option<&Path>,
     boot: &str,
 ) -> Result<u64, Refusal> {
-    let verdict = boot_verdict(armed, loader, log);
+    let verdict = boot_verdict(armed, log, stopped);
     if let Some(dir) = readback {
         write_readback(dir, loader, log, boot, &verdict_file(verdict.as_ref().err()))?;
         println!("readback written to {}", dir.display());
@@ -1989,158 +1882,27 @@ fn judge_and_write_readback(
     verdict
 }
 
-/// The log's own verdict on one boot, off what its image is armed with, the
-/// loader's file and the log.
-fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusal> {
-    let staged_hang = clears_its_own_page(armed);
-    // **Named by evidence, before the boot record is missed.** A boot that
-    // never happened and a boot that failed both leave no `Boot: complete`,
-    // and `Unfit::NoBootRecord` says the second where it is often the first.
-    // The loader's own file is what tells them apart: a pass that read the
-    // black box says so and ends the chain, and this is the only way a
-    // machine can come back with a whole `loader.log` and an empty kernel one.
-    // **First, because it is the one refusal that is not a machine needing a
-    // hand.** The loader bounded a hang and gave the machine back; every
-    // other reading of an empty kernel log would send a reader to the wrong
-    // place, and `NoBootRecord` would send them to a kernel that never ran.
-    if loader.contains(bootlog::HUNG_WITHOUT_A_RECORD) && !staged_hang {
-        return Err(Refusal::HungWithoutARecord);
-    }
-    if let Some(said) = reported_and_booted_nothing(loader, log) {
-        return Err(Refusal::ReportedAndBootedNothing { said });
-    }
-    // **An image armed to stop itself is judged by the record its own bound
-    // sealed, not by the word a shutdown writes.** Read off what the image
-    // is armed with rather than off its label or its readback directory: the
-    // arm comes out of the artifact, so no boot can be judged as something
-    // it was not flashed as. *Which* bound sealed it is the page's to say
-    // and not this list's — the arm says a bound was staged, and two of them
-    // can reach a staged boot.
+/// One boot's verdict under `toyos_build::bootlog`'s contract, off what the log
+/// volume carries; that the machine came back is [`Refusal::Silent`]'s, answered
+/// before this runs.
+fn boot_verdict(armed: &[String], log: &str, stopped: bool) -> Result<u64, Refusal> {
+    // An image armed to be ended by its own deadline owes its boot record, and
+    // a clean stop is the one thing it may not have.
     if ended_by_its_deadline(armed) {
-        return wedged_boot(watched(armed), loader, log);
+        let ms = bootlog::boot_millis(log).ok_or(Refusal::Deadline {
+            why: "the kernel wrote no `Boot: complete`, so this boot stopped before the phase \
+                  its deadline is armed for",
+        })?;
+        if stopped {
+            return Err(Refusal::Deadline { why: "it stopped cleanly, so its deadline never ended it" });
+        }
+        return Ok(ms);
     }
     let ms = bootlog::verdict(log).map_err(Refusal::Log)?;
-    if staged_hang {
-        bootlog::foreign_done(loader).map_err(Refusal::Log)?;
-    } else {
-        bootlog::handed_back(loader).map_err(Refusal::Log)?;
+    if !stopped {
+        return Err(Refusal::Log(bootlog::Unfit::NoStopMark));
     }
     Ok(ms)
-}
-
-/// What an image armed to stop itself owes instead of `Rebooting.`, and the
-/// `Boot: complete` it still owes as well.
-///
-/// **Both halves, because either alone passes for the wrong reason.** A boot
-/// that reached `Rebooting.` was never wedged, and a boot with no sealed record
-/// is one somebody's hand ended — which is the whole thing these arms exist to
-/// prove cannot happen any more.
-///
-/// **The record's own first line is what says which bound ended the machine**,
-/// and nothing else may: an arm staged for one of them is still a machine the
-/// other can reach first, and the T14 read back a `hard-lockup-probe` boot as a
-/// failure for exactly that reason — this judge knew one line and the page
-/// carried the other. Under the chipset watchdog, its reset is the third
-/// ending: the pass after it finds a page no kernel sealed, and the chipset
-/// says its watchdog reset the machine. The wedge stops every feed, and the
-/// deadline stands past the watchdog's bound.
-fn wedged_boot(watched: bool, loader: &str, log: &str) -> Result<u64, Refusal> {
-    if bootlog::handed_back(loader).is_ok() {
-        return Err(Refusal::Wedge {
-            why: "it reached the shutdown's own last word, so nothing about it was wedged",
-        });
-    }
-    let Some(said) = sealed_by(loader).or_else(|| watched.then(|| reset_by_the_chipset(loader)).flatten()) else {
-        return Err(Refusal::Wedge {
-            why: "the pass after the reset reports neither of this kernel's bounds, nor a reset \
-                  by the chipset watchdog it may be armed with, so what ended this boot was not \
-                  one of them",
-        });
-    };
-    let ms = bootlog::boot_millis(log).ok_or(Refusal::Wedge {
-        why: "the kernel wrote no `Boot: complete`, so this boot stopped before the phase these \
-              bounds are armed for",
-    })?;
-    println!("{}", said.trim_start_matches("| ").trim());
-    Ok(ms)
-}
-
-/// The line the pass after the reset printed about whichever bound sealed the
-/// page, or `None` where it printed neither.
-fn sealed_by(loader: &str) -> Option<&str> {
-    loader
-        .lines()
-        .find(|l| l.contains(bootlog::DEADLINE_EXPIRED) || l.contains(bootlog::LOCKED_UP))
-}
-
-/// The line the pass after the reset printed where the chipset says its
-/// watchdog caused that reset, above a page no kernel sealed: a panicked
-/// kernel the watchdog then reset is a panic. Only an FCH says so.
-fn reset_by_the_chipset(loader: &str) -> Option<&str> {
-    if !bootlog::sealed_nothing(loader) {
-        return None;
-    }
-    let after = bootlog::after_the_reset(loader)?;
-    after.lines().find(|l| l.contains(toyos_tco::fch::RESET_SAID))
-}
-
-/// The lateness of a deadline that expired, in milliseconds past the bound it
-/// was armed with, out of the line the pass after the reset printed; `None` on
-/// a boot whose deadline did not expire.
-///
-/// **Counted from the kernel's own record of arming it** (`log`): the bound
-/// runs from the arm and the expiry is quoted since boot, so the difference
-/// alone is the boot's first tens of milliseconds and not the poll's lateness.
-/// Signed, because both instants are floored milliseconds: an expiry at its
-/// bound can read one early, and one before it is a reading, not an absence.
-pub fn deadline_lateness_ms(loader: &str, log: &str) -> Option<Result<i64, String>> {
-    let said = loader.lines().find(|l| l.contains(bootlog::DEADLINE_EXPIRED))?;
-    let fields = || {
-        let (_, rest) = said.split_once("a bound of ")?;
-        let (bound, rest) = rest.split_once(" ms, reached at ")?;
-        let (reached, _) = rest.split_once(" ms,")?;
-        Some((bound.parse::<i64>().ok()?, reached.parse::<i64>().ok()?))
-    };
-    let armed = || {
-        let line = log.lines().find(|line| line.contains(bootlog::DEADLINE_ARMED))?;
-        i64::try_from(bootlog::record_millis(line)?).ok()
-    };
-    Some(match (fields(), armed()) {
-        (Some((bound, reached)), Some(armed)) => Ok(reached - armed - bound),
-        (None, _) => Err(format!("{said:?} is not the expiry the kernel writes")),
-        (_, None) => Err(format!(
-            "the deadline expired and this boot's log carries no {:?} record to count its bound \
-             from",
-            bootlog::DEADLINE_ARMED
-        )),
-    })
-}
-
-/// What the kernel's stop wrote about itself in `text`: the loader's pass after
-/// the reset, which prints the tail the stop sealed.
-///
-/// `None` on a boot that wrote none, which is every boot that reset without
-/// going through `quiesce`.
-pub fn park(text: &str) -> Option<toyos_quiesce::Record> {
-    text.lines().find_map(toyos_quiesce::Record::parse)
-}
-
-/// The same for the other bound: how far past its own bound the hard-lockup
-/// sample was when it found the CPU stuck.
-///
-/// **A number of its own and not [`deadline_lateness_ms`]'s**, because what
-/// bounds it is a different thing: this one lands within one of that detector's
-/// sample periods rather than within one timer period.
-pub fn lockup_lateness_ms(loader: &str) -> Option<Result<i64, String>> {
-    let said = loader.lines().find(|l| l.contains(bootlog::LOCKED_UP))?;
-    let fields = || {
-        let (_, rest) = said.split_once("has taken no interrupt for ")?;
-        let (reached, rest) = rest.split_once(" ms,")?;
-        let (_, rest) = rest.split_once("Its bound is ")?;
-        let (bound, _) = rest.split_once(" ms")?;
-        Some(reached.parse::<i64>().ok()? - bound.parse::<i64>().ok()?)
-    };
-    Some(fields().ok_or_else(|| format!("{said:?} is not the lockup record the kernel writes")))
 }
 
 /// What the two files and this boot's own facts are called under `--readback`.
@@ -2352,38 +2114,6 @@ fn write_readback(
     wrote(&dir.join(READBACK_VERDICT), verdict)
 }
 
-/// Whether this boot was a loader pass that reported a record and booted no
-/// kernel, and what that pass said if so.
-///
-/// **Three things together, and no one of them alone.** `loader.log` carries a
-/// pass that ended the chain; the loader never reached its handoff line, which
-/// is what a pass that *did* boot a kernel writes; and the kernel log carries no
-/// boot record. A boot whose kernel died early has the handoff line and no
-/// chain-end; a boot that panicked has both, and a `logkeeper` file besides.
-///
-/// It exists because `Unfit::NoBootRecord` says "this boot failed" where the
-/// answer is "this boot never happened", and the two send a reader to different
-/// places. On the T14 the first flash of a run read a record another image had
-/// left in the same DRAM, took itself for that record's reporting pass, and
-/// handed the machine back in 24 s having run nothing.
-///
-/// Pure, so the reading can be staged: text in, a name out.
-pub fn reported_and_booted_nothing(loader: &str, log: &str) -> Option<String> {
-    let ended = loader.lines().find(|line| line.contains(bootlog::CHAIN_ENDS_LINE))?;
-    if loader.contains(bootlog::LOADER_LAST_LINE) || bootlog::boot_millis(log).is_some() {
-        return None;
-    }
-    // The report rather than the line that ends the chain, and the *last* of it:
-    // the pass writes the record's date first and what it found second, and what
-    // it found is the half that identifies the record.
-    let said = loader
-        .lines()
-        .rfind(|line| {
-            line.contains(bootlog::PREVIOUS_PANIC) || line.contains(bootlog::BLACKBOX_HEAD)
-        })
-        .unwrap_or(ended);
-    Some(said.trim().to_string())
-}
 /// What the host measured about a boot, out of [`READBACK_BOOT`].
 pub fn back_secs(text: &str) -> Option<u64> {
     key(text, BACK_SECS)
@@ -2489,24 +2219,16 @@ mod tests {
 
         // The shape a stray `target/bootable.img` has: nothing armed at all.
         let refusal = judge_arms(&armed(&[])).unwrap_err();
-        assert_eq!(refusal, Refusal::NoBound { staged_a_wedge: false });
+        assert_eq!(refusal, Refusal::NoBound);
         let said = refusal.to_string();
         assert!(said.contains(toyos_tco::DEADLINE_PARAM), "{said}");
         assert!(said.contains("no power switch"), "{said}");
         // A build fault and not the machine's, so exit 2 rather than 1.
         assert!(!refusal.about_the_boot());
 
-        // The sharpest form, and it says so: an image that stops every CPU on
-        // purpose with nothing to end the boot it stopped.
-        let refusal = judge_arms(&armed(&[WEDGE_ARM])).unwrap_err();
-        assert_eq!(refusal, Refusal::NoBound { staged_a_wedge: true });
-        assert!(refusal.to_string().contains("stops every CPU on purpose"), "{refusal}");
-
-        // And with the bound, both go through — the wedge because it is paired.
-        // The gate answers with the bound the image carries, which is what the
-        // loop waits it out by.
+        // With the bound it goes through, and the gate answers with the bound
+        // the image carries, which is what the loop waits it out by.
         assert_eq!(judge_arms(&armed(&[&bound])), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)));
-        assert_eq!(judge_arms(&armed(&[WEDGE_ARM, &bound])), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)));
         let longer = format!("{}271360", toyos_tco::DEADLINE_PARAM);
         assert_eq!(judge_arms(&armed(&["watchdog", &longer])), Ok(271_360));
         // A bound nothing can read is no bound.
@@ -2514,7 +2236,7 @@ mod tests {
             let unread = format!("{}{unread}", toyos_tco::DEADLINE_PARAM);
             assert_eq!(
                 judge_arms(&armed(&[&unread])),
-                Err(Refusal::NoBound { staged_a_wedge: false }),
+                Err(Refusal::NoBound),
                 "{unread}"
             );
         }
@@ -2588,7 +2310,7 @@ mod tests {
     #[test]
     fn an_arm_with_no_ruling_never_reaches_the_bench() {
         assert!(flashable("watchdog"));
-        assert!(flashable("blackbox=0x8000000"));
+        assert!(flashable("boot-deadline=120000"));
         assert!(!flashable("nvme-write-selftest"));
         let refusal = Refusal::Armed { name: "nvme-write-selftest".to_string() };
         let said = refusal.to_string();
@@ -2596,44 +2318,6 @@ mod tests {
         assert!(said.contains("FLASHABLE"), "{said}");
         // A refusal about the image is the loop's, never the machine's: exit 2.
         assert!(!refusal.about_the_boot());
-    }
-
-    /// **An arm that stops the machine and is judged as an ordinary boot reds
-    /// every run it is staged for**, because `Rebooting.` is the word it never
-    /// reaches. The two halves are `WEDGE_ARMS` and `FLASHABLE`, and this is
-    /// what holds them together — a name in either that the other does not know
-    /// about is the hole.
-    #[test]
-    fn every_arm_that_stops_this_machine_is_cleared_and_judged_as_one() {
-        let bound = alloc_deadline();
-        for arm in WEDGE_ARMS {
-            assert!(flashable(arm), "{arm} reaches no bench");
-            assert_eq!(judge_arms(&[arm.to_string(), bound.clone()]), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)), "{arm}");
-            assert!(stages_a_wedge(&[arm.to_string()]), "{arm}");
-            assert_eq!(bound_for(&[arm], 135_680), toyos_tco::STAGED_BOUND_MS, "{arm}");
-            // And with no bound behind it, the sharpest refusal names it as the
-            // wedge it is rather than as a plain image.
-            assert_eq!(
-                judge_arms(&[arm.to_string()]),
-                Err(Refusal::NoBound { staged_a_wedge: true }),
-                "{arm}"
-            );
-        }
-        // The negative half: an arm that stops nothing is not judged as one,
-        // and keeps the bound a wedge nobody staged is ended by, which is
-        // twice its list's.
-        assert!(!stages_a_wedge(&["watchdog".to_string(), bound]));
-        assert_eq!(bound_for(&["watchdog"], 60_000), 120_000);
-        assert_eq!(bound_for(&["watchdog"], 135_680), 271_360);
-    }
-
-    /// Under the chipset watchdog a staged wedge's deadline is past the
-    /// watchdog's reset, which lands within one bound of the last feed.
-    #[test]
-    fn a_wedge_under_the_watchdog_is_the_watchdogs_to_end() {
-        assert_eq!(bound_for(&[WEDGE_ARM, toyos_tco::PARAM], 60_000), 29_200);
-        const { assert!(toyos_tco::WATCHED_WEDGE_BOUND_MS > toyos_tco::STAGED_BOUND_MS + toyos_tco::BOUND_MS) };
-        assert_eq!(bound_for(&[WEDGE_ARM], 60_000), toyos_tco::STAGED_BOUND_MS);
     }
 
     /// A row for a name the kernel no longer declares is a ruling about
@@ -2653,41 +2337,6 @@ mod tests {
         }
     }
 
-    /// **The case, off the machine that produced it.** A `DONE` record another
-    /// image had left in the same DRAM is read as this boot's predecessor, and
-    /// the driver's only word for it was "the log carries no `Boot: complete`
-    /// record" — which sends a reader after a kernel that never ran.
-    #[test]
-    fn a_pass_that_reported_and_booted_nothing_is_named_as_that() {
-        let stale = "ToyOS Bootloader 1.0\n\
-             Black box: the record below is from the boot armed at 2026-09-07-045553\n\
-             Black box: the last boot read DONE, so it handed the machine back on purpose \
-             and this chain ends here\n\
-             Loader log: the last boot is accounted for, so this pass resets the machine\n";
-        let said = reported_and_booted_nothing(stale, "").expect("the case, named");
-        assert!(said.contains("the last boot read DONE"), "{said}");
-        let refusal = Refusal::ReportedAndBootedNothing { said };
-        let words = refusal.to_string();
-        assert!(words.contains("booted no kernel"), "{words}");
-        assert!(words.contains("This boot measured no test."), "{words}");
-        // The machine failed, not the loop: exit 1.
-        assert!(refusal.about_the_boot());
-
-        // **The three controls, and each is a boot this must not name.** A pass
-        // that booted a kernel says so at its handoff line; a boot that got as
-        // far as its own record is a boot that ran; and a machine with no
-        // finding at all has no chain-end line to find.
-        let booted = format!("{stale}{}\n", bootlog::LOADER_LAST_LINE);
-        assert_eq!(reported_and_booted_nothing(&booted, ""), None);
-        assert_eq!(
-            reported_and_booted_nothing(stale, "[ 1.200 cpu0 kernel] Boot: complete (1220ms)\n"),
-            None
-        );
-        assert_eq!(
-            reported_and_booted_nothing("ToyOS Bootloader 1.0\nLoading kernel...\n", ""),
-            None
-        );
-    }
     #[test]
     fn the_host_clock_crosses_in_the_boot_file() {
         assert_eq!(back_secs("back_secs 47\n"), Some(47));
@@ -2747,7 +2396,7 @@ mod tests {
     #[test]
     fn the_loops_verdict_crosses_in_the_readback() {
         assert_eq!(loop_verdict(&verdict_file(None)), Ok(()));
-        let refused = Refusal::HungWithoutARecord;
+        let refused = Refusal::Log(bootlog::Unfit::NoStopMark);
         assert_eq!(
             loop_verdict(&verdict_file(Some(&refused))),
             Err(refused.to_string().trim_end().to_string())
@@ -2769,34 +2418,16 @@ mod tests {
             loop_verdict(&std::fs::read_to_string(&at).expect("the verdict is written"))
         };
 
-        let hung = format!("{}\n{}\n", bootlog::LOADER_FIRST_LINE, bootlog::HUNG_WITHOUT_A_RECORD);
-        assert_eq!(
-            judge_and_write_readback(&armed, &hung, "", Some(dir.path()), boot),
-            Err(Refusal::HungWithoutARecord)
-        );
-        assert_eq!(written(), Err(Refusal::HungWithoutARecord.to_string().trim_end().to_string()));
-
-        let loader = format!(
-            "{}\n{}\n{}\n{}\nBlack box: {}, so it handed the machine back on purpose and this \
-             chain ends here\n| {} (16)\n| {}[ 1.516 cpu0 kernel] {}\n{}\n",
-            bootlog::LOADER_FIRST_LINE,
-            bootlog::LOADER_LAST_LINE,
-            bootlog::SEPARATOR,
-            bootlog::LOADER_FIRST_LINE,
-            bootlog::HANDED_BACK,
-            bootlog::LOG_TAIL_HEAD,
-            bootlog::LOG_TAIL,
-            bootlog::REBOOTING,
-            bootlog::CHAIN_ENDS_LINE,
-        );
         let log = format!(
             "[ 1.151 cpu0 kernel] Boot: complete (1151ms)\n[ 1.203 supervisor] {} (Reboot)\n",
             bootlog::STOPPING
         );
-        assert_eq!(
-            judge_and_write_readback(&armed, &loader, &log, Some(dir.path()), boot),
-            Ok(1151)
-        );
+        let loader = format!("{}\n{}\n", bootlog::LOADER_FIRST_LINE, bootlog::LOADER_LAST_LINE);
+        let unstopped = Refusal::Log(bootlog::Unfit::NoStopMark);
+        assert_eq!(judge_and_write_readback(&armed, &loader, &log, false, Some(dir.path()), boot), Err(unstopped.clone()));
+        assert_eq!(written(), Err(unstopped.to_string().trim_end().to_string()));
+
+        assert_eq!(judge_and_write_readback(&armed, &loader, &log, true, Some(dir.path()), boot), Ok(1151));
         assert_eq!(written(), Ok(()));
     }
 
@@ -3201,7 +2832,7 @@ mod tests {
         assert_eq!(return_secs(120_000), 420);
         assert_eq!(return_secs(271_360), 572);
         assert_eq!(return_secs(271_001), 572);
-        assert_eq!(return_secs(toyos_tco::STAGED_BOUND_MS), 360);
+        assert_eq!(return_secs(10_000), 360);
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::FIRMWARE_BOUND_MS));
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::BOUND_MS));
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::PANIC_BOUND_MS));
@@ -3228,7 +2859,7 @@ mod tests {
 
     #[test]
     fn a_failed_boot_and_a_loop_that_could_not_run_are_different_answers() {
-        assert!(Refusal::Wedge { why: "x" }.about_the_boot());
+        assert!(Refusal::Deadline { why: "x" }.about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
         assert!(Refusal::Silent { what: "come back", secs: 420 }.about_the_boot());
@@ -3292,118 +2923,6 @@ mod tests {
         assert!(matches!(Args::parse(&["--flash".to_string()]), Err(Refusal::Usage(_))));
     }
 
-    /// The lateness comes off the line the kernel writes, counted from the
-    /// record of arming the bound, and a boot that wrote none measures nothing
-    /// rather than zero.
-    #[test]
-    fn the_deadlines_lateness_is_counted_from_its_arm() {
-        let said = format!(
-            "| {}: a bound of 120000 ms, reached at 120064 ms, with this machine in `complete`. \
-             The tail of the log ring follows.\n",
-            bootlog::DEADLINE_EXPIRED
-        );
-        let log = format!(
-            "[2026-09-29 18:22:39  0.060 cpu0 kernel] {}120000 ms, after which this kernel seals a \
-             WEDGED record and writes the reset register itself\n",
-            bootlog::DEADLINE_ARMED
-        );
-        assert_eq!(deadline_lateness_ms(&said, &log), Some(Ok(4)));
-        assert_eq!(deadline_lateness_ms("Previous boot's panic: nothing of the kind\n", &log), None);
-        // An expiry before its bound is a reading, not an absence.
-        let early = said.replace("reached at 120064", "reached at 119000");
-        assert_eq!(deadline_lateness_ms(&early, &log), Some(Ok(-1060)));
-        // An expiry with no arm to count from, or one not in the kernel's shape.
-        assert!(matches!(deadline_lateness_ms(&said, "nothing armed\n"), Some(Err(_))));
-        let unread = said.replace("reached at", "reached by");
-        assert!(matches!(deadline_lateness_ms(&unread, &log), Some(Err(_))));
-    }
-
-    /// The one boot judged by its sealed record and not by the shutdown's word:
-    /// both halves refuse, and the pass needs both.
-    #[test]
-    fn an_image_armed_to_stop_itself_owes_a_record_and_no_reboot() {
-        let sealed = format!(
-            "Previous boot's panic: the last boot read WEDGED\n| {}: a bound of 120000 ms, \
-             reached at 120153 ms, with this machine in `complete`.\n",
-            bootlog::DEADLINE_EXPIRED
-        );
-        let booted = "[ 1.198 cpu0 kernel] Boot: complete (1198ms)\n";
-        assert_eq!(wedged_boot(false, &sealed, booted), Ok(1198));
-
-        let done = format!(
-            "Black box: {}\n| {}[ 1.300 cpu0 kernel] {}\n",
-            bootlog::HANDED_BACK,
-            bootlog::LOG_TAIL,
-            bootlog::REBOOTING
-        );
-        let why = wedged_boot(false, &done, booted).unwrap_err().to_string();
-        assert!(why.contains("nothing about it was wedged"), "{why}");
-
-        let why = wedged_boot(false, "no record here\n", booted).unwrap_err().to_string();
-        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
-
-        let why = wedged_boot(false, &sealed, "nothing at all\n").unwrap_err().to_string();
-        assert!(why.contains("no `Boot: complete`"), "{why}");
-    }
-
-    /// A wedge under the chipset watchdog ends in the chipset's reset, which
-    /// only the pass after it reports, and only an image armed with the
-    /// watchdog may end that way.
-    #[test]
-    fn a_watched_wedge_is_ended_by_the_chipsets_reset() {
-        let booted = "[ 1.300 cpu0 kernel] Boot: complete (1300ms)\n";
-        let said = format!("watchdog: watchdog_issue_reset=1 fired=0, so {}\n", toyos_tco::fch::RESET_SAID);
-        let after = format!(
-            "{}\n{said}Previous boot's panic: the page still reads ARMED, so that kernel died \
-             without reaching either its panic path or its shutdown\n",
-            bootlog::SEPARATOR
-        );
-        assert_eq!(wedged_boot(true, &after, booted), Ok(1300));
-        let why = wedged_boot(false, &after, booted).unwrap_err().to_string();
-        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
-        // The first pass's survey speaks of the boot before this one.
-        let before = format!("{said}{}\nPrevious boot's panic: the page still reads ARMED\n", bootlog::SEPARATOR);
-        let why = wedged_boot(true, &before, booted).unwrap_err().to_string();
-        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
-        // A kernel that panicked and then went unfed: the chipset's reset
-        // ends it, and the page says it was a panic.
-        let panicked = format!(
-            "{}\n{said}Previous boot's panic: 812 bytes off 0x8000000\n",
-            bootlog::SEPARATOR
-        );
-        let why = wedged_boot(true, &panicked, booted).unwrap_err().to_string();
-        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
-    }
-
-    /// **The record's own first line is what says which bound ended the boot.**
-    /// Both of them seal `WEDGED` and either can reach a staged machine first,
-    /// so a judge that knew only one read the T14's `hard-lockup-probe` boot —
-    /// which the detector ended exactly as designed — as a failure.
-    #[test]
-    fn either_bounds_record_is_a_wedged_boots_pass() {
-        let booted = "[ 1.200 cpu0 kernel] Boot: complete (1200ms)\n";
-        let locked = format!(
-            "Previous boot's panic: the last boot read WEDGED\n| {}: cpu7 has taken no interrupt \
-             for 60004 ms, with `IF` clear at every sample in that span. Its bound is 60000 ms.\n\
-             |   pc=0xffff800060a5903f  <kernel::sync::Lock<..>>::lock+0x12f\n",
-            bootlog::LOCKED_UP
-        );
-        assert_eq!(wedged_boot(false, &locked, booted), Ok(1200));
-        assert_eq!(lockup_lateness_ms(&locked), Some(Ok(4)));
-        // Each bound's lateness is read off its own record and off no other.
-        assert_eq!(deadline_lateness_ms(&locked, booted), None);
-        let expired = format!(
-            "| {}: a bound of 120000 ms, reached at 120153 ms, with this machine in `complete`.\n",
-            bootlog::DEADLINE_EXPIRED
-        );
-        assert_eq!(lockup_lateness_ms(&expired), None);
-        // A sample that landed before the bound is a reading, not an absence.
-        let early = locked.replace("for 60004 ms", "for 59000 ms");
-        assert_eq!(lockup_lateness_ms(&early), Some(Ok(-1000)));
-        let unread = locked.replace("Its bound is", "Its bound was");
-        assert!(matches!(lockup_lateness_ms(&unread), Some(Err(_))));
-    }
-
     /// The outside judge on what the T14's first unclean reset mid-append left
     /// (r5 at d36af3872): accepted for a boot its deadline ends, refused for
     /// one that handed back, and a short chain refused for both.
@@ -3423,100 +2942,22 @@ mod tests {
     }
 
     /// A boot given a deadline below its runner's least bound is ended by it on
-    /// purpose, as `the_disk_survives_a_reset_under_load`'s is: judged by the
-    /// record the deadline sealed, never by a supervisor's stop it was never
-    /// going to reach. The same boot under the ordinary deadline is the
-    /// unfinished boot it would be, and one that handed back was not ended
-    /// by its bound.
+    /// purpose, as `the_disk_survives_a_reset_under_load`'s is: it owes its boot
+    /// record and no clean stop. The same boot under the ordinary deadline is
+    /// the unfinished boot it would be.
     #[test]
-    fn a_boot_its_deadline_ends_on_purpose_is_judged_by_the_record_it_sealed() {
-        let loader = format!(
-            "Loader log: the kernel handoff begins, so this file ends here\n{}\n\
-             ToyOS Bootloader 1.0\n\
-             Previous boot's panic: the last boot read WEDGED, so a bound of its own ended it and this chain ends here\n\
-             | {}: a bound of 40000 ms, reached at 52397 ms, with this machine in `complete`.\n\
-             Loader log: the last boot is accounted for, so this pass resets the machine\n",
-            bootlog::SEPARATOR,
-            bootlog::DEADLINE_EXPIRED
-        );
+    fn a_boot_its_deadline_ends_on_purpose_owes_its_record_and_no_stop() {
         let log = "[2026-10-21 09:02:08 12.400 cpu0 kernel] Boot: complete (12400ms)\n\
                    [2026-10-21 09:02:48 52.332 test-runner pid=12] stick_load: 32204 lines said\n";
         let armed = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_string()).collect() };
         assert!(ended_by_its_deadline(&armed(&["boot-deadline=40000"])));
         assert!(!ended_by_its_deadline(&armed(&["boot-deadline=120000"])));
-        assert_eq!(boot_verdict(&armed(&["boot-deadline=40000"]), &loader, log), Ok(12400));
+        assert_eq!(boot_verdict(&armed(&["boot-deadline=40000"]), log, false), Ok(12400));
+        assert!(matches!(boot_verdict(&armed(&["boot-deadline=40000"]), log, true), Err(Refusal::Deadline { .. })));
+        assert!(matches!(boot_verdict(&armed(&["boot-deadline=40000"]), "", false), Err(Refusal::Deadline { .. })));
         assert!(matches!(
-            boot_verdict(&armed(&["boot-deadline=120000"]), &loader, log),
+            boot_verdict(&armed(&["boot-deadline=120000"]), log, false),
             Err(Refusal::Log(bootlog::Unfit::Unfinished(_)))
         ));
-        let handed_back = format!(
-            "{}Black box: {} at 2026-10-21-090207\n| {}[52.400 cpu0 kernel] {}\n",
-            loader,
-            bootlog::HANDED_BACK,
-            bootlog::LOG_TAIL,
-            bootlog::REBOOTING
-        );
-        assert!(matches!(
-            boot_verdict(&armed(&["boot-deadline=40000"]), &handed_back, log),
-            Err(Refusal::Wedge { .. })
-        ));
-    }
-
-    /// The foreign-record arm's pass after the reset: the hang it stages is its
-    /// verdict's premise, the record it cleared says the stop finished, and the
-    /// same pass under any other arm is the hang refusal.
-    #[test]
-    fn the_foreign_record_arm_reaches_its_judge_through_the_hang_it_stages() {
-        let loader = format!(
-            "Loader log: the kernel handoff begins, so this file ends here\n{}\n\
-             ToyOS Bootloader 1.0\n\
-             Black box: 0x8000000 held a DONE record another image left in this memory ([63, 12, \
-             b3, 41, e8, dd, 26, 4a, b9, d6, e7, 17, 3a, 83, d6, 18], and this stick is [9c, 12, \
-             b3, 41, e8, dd, 26, 4a, b9, d6, e7, 17, 3a, 83, d6, 18]), armed at \
-             2026-09-29-103651. It has been cleared and this pass boots its kernel\n\
-             Boot attempts: this image has had the machine 1 time(s) without reporting; now 0\n\
-             Boot attempts: the previous boot of this image never reported; the machine is \
-             handed back\n\
-             Loader log: the last boot is accounted for, so this pass resets the machine\n",
-            bootlog::SEPARATOR
-        );
-        let log = "[2026-09-29 10:36:53  1.171 cpu0 kernel] Boot: complete (1171ms)\n\
-                   [2026-09-29 10:36:53  1.186 supervisor] supervisor: power: the machine stops, and logkeeper makes \
-                   the log whole first (Reboot)\n";
-        let armed = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_string()).collect() };
-        assert_eq!(
-            boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &loader, log),
-            Ok(1171)
-        );
-        assert_eq!(
-            boot_verdict(&armed(&["boot-deadline=120000"]), &loader, log),
-            Err(Refusal::HungWithoutARecord)
-        );
-        // A stop that panicked or that a bound ended seals under the foreign
-        // identity too, and hands the machine back the same way.
-        for state in ["PANIC", "WEDGED"] {
-            let ended = loader.replace("held a DONE record", &format!("held a {state} record"));
-            assert_eq!(
-                boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &ended, log),
-                Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
-            );
-            // The pass before the handoff cleared a stale foreign `DONE`.
-            let stale = format!(
-                "Black box: 0x8000000 held a DONE record another image left in this memory\n{ended}"
-            );
-            assert_eq!(
-                boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &stale, log),
-                Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
-            );
-        }
-        // A chain that never went round has no pass after the reset to read.
-        let unreturned = format!(
-            "Black box: 0x8000000 held a DONE record another image left in this memory\n{}\n",
-            bootlog::LOADER_LAST_LINE
-        );
-        assert_eq!(
-            boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &unreturned, log),
-            Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
-        );
     }
 }

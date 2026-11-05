@@ -40,8 +40,7 @@ reached the device before the shutdown's own.
   (`answered`, `system/logkeeper/src/main.rs`).
 - **What it says reaches nothing on this machine.** `logkeeper: cannot create …`
   is logkeeper's own record, which with no volume reaches only its console; a
-  laptop with no serial port has no channel there, and it is not a kernel
-  record, so the black box's tail does not carry it either.
+  laptop with no serial port has no channel there.
 - Under QEMU the same boot's recovery takes in about a millisecond, the create
   succeeds and `/log` is complete, so no QEMU boot shows any of this.
 
@@ -53,8 +52,8 @@ re-issued WRITE(10) answered with CSW status 1 (`Scsi::Refused`, a device error
 to every caller — a device that has just taken a class reset may owe a UNIT
 ATTENTION), or the call ran out of `block::OPERATION` or of the driver's budget
 after a break (`Scsi::Budget`, `WouldBlock`). Either leaves a `usb-storage:`
-record, and the black box's recovery section now carries those across the reset
-whether or not the volume got anything.
+record, which reaches no file when the volume got nothing and, since the
+black-box page went, crosses no reset either.
 
 ## Exit condition
 

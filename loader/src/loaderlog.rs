@@ -27,19 +27,6 @@ pub const GOP_AT: &str = "GOP: mode";
 /// write after that could grow the map the kernel is about to be handed.
 const ENDS_AT: &str = "Loader log: the kernel handoff begins, so this file ends here";
 
-/// The last line of a pass that reads the black box and boots no kernel.
-pub const ENDS_AT_CHAIN: &str =
-    "Loader log: the last boot is accounted for, so this pass resets the machine";
-
-/// Close the file on a pass that boots no kernel. Separate from [`close`]
-/// because that one's last line is about a handoff this pass does not make.
-pub fn close_without_a_kernel() {
-    // SAFETY: [`Sink`]'s contract. Dropping the handle closes it.
-    unsafe { *SINK.0.get() = None };
-    // SAFETY: [`Volume`]'s contract.
-    unsafe { *VOLUME.0.get() = None };
-}
-
 const NAME: &CStr16 = cstr16!("loader.log");
 
 /// The open file, from [`open`] until [`close`].
@@ -63,10 +50,6 @@ struct Volume(UnsafeCell<Option<File>>);
 unsafe impl Sync for Volume {}
 
 static VOLUME: Volume = Volume(UnsafeCell::new(None));
-
-/// What a pass that appends writes before its own first line, so the boot being
-/// reported on and the pass reporting on it are never read as one.
-pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot above left";
 
 /// The handle of the filesystem on the partition `guid` names, or why this
 /// machine has none.
@@ -128,7 +111,7 @@ pub fn with_open_volume<T>(visit: impl FnOnce(&mut File) -> T) -> Result<T, allo
     }
 }
 
-pub fn open(system_table: &SystemTable, guid: &[u8; 16], truncate: bool) {
+pub fn open(system_table: &SystemTable, guid: &[u8; 16]) {
     let bs = system_table.boot_services();
     let handle = match volume_handle(bs, guid) {
         Ok(handle) => handle,
@@ -145,16 +128,14 @@ pub fn open(system_table: &SystemTable, guid: &[u8; 16], truncate: bool) {
     // Deleted and not rewound: `CreateReadWrite` opens what is already there at
     // offset zero without truncating it, so a shorter boot than the last would
     // end in the last one's tail.
-    if truncate {
-        match root.open(NAME, Mode::ReadWrite) {
-            Ok(stale) => {
-                if let Err(e) = stale.delete() {
-                    return refused(format_args!("the last boot's {NAME} would not delete ({e})"));
-                }
+    match root.open(NAME, Mode::ReadWrite) {
+        Ok(stale) => {
+            if let Err(e) = stale.delete() {
+                return refused(format_args!("the last boot's {NAME} would not delete ({e})"));
             }
-            Err(Status::NOT_FOUND) => {}
-            Err(e) => return refused(format_args!("the last boot's {NAME} would not open ({e})")),
         }
+        Err(Status::NOT_FOUND) => {}
+        Err(e) => return refused(format_args!("the last boot's {NAME} would not open ({e})")),
     }
     let file = match root.open(NAME, Mode::CreateReadWrite) {
         Ok(file) => file,
@@ -165,21 +146,10 @@ pub fn open(system_table: &SystemTable, guid: &[u8; 16], truncate: bool) {
     };
     #[expect(clippy::disallowed_methods, reason = "the exclusive open outlives this function, until `close`")]
     core::mem::forget(fs);
-    let mut file = file;
-    if !truncate {
-        // `EFI_FILE_POSITION_END_OF_FILE` (UEFI 2.10 §13.5.13): the one seek
-        // that does not need the length read first.
-        if let Err(e) = file.set_position(u64::MAX) {
-            return refused(format_args!("{NAME} would not seek to its end ({e})"));
-        }
-    }
     // SAFETY: [`Sink`]'s contract.
     unsafe { *SINK.0.get() = Some(file) };
     // SAFETY: [`Volume`]'s contract.
     unsafe { *VOLUME.0.get() = Some(root) };
-    if !truncate {
-        println!("{SEPARATOR}");
-    }
 }
 
 pub fn line(args: fmt::Arguments) {

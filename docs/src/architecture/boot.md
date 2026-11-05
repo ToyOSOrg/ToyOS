@@ -19,6 +19,10 @@
   through the firmware's block I/O, so no storage driver is needed to boot.
 - It hands the kernel a typed description of what it loaded and which slot it
   chose.
+- On every boot it asks the firmware to overwrite memory before the next one
+  (the TCG memory-overwrite request), so on firmware that defines and honours
+  the request a reset leaves nothing of this boot in RAM for whoever boots
+  next.
 - The hardware clock keeps UTC.
 
 ## Signed images
@@ -53,4 +57,8 @@
   every part of the slot it boots, and a failing link is refused by name.
 - An anti-rollback floor per signing key counts the signed security version,
   raised only by a release that fixes a security hole, and holds even against
-  someone with the machine in hand.
+  someone with the machine in hand. A boot proves its image by stopping
+  cleanly: once the stop has synced its files, and before its drivers stop,
+  the log keeper marks the log partition, which only the log keeper and the
+  supervisor may write, and only the next loader pass that finds that mark
+  raises the floor to the image's version.

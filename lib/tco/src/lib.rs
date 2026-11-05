@@ -158,21 +158,6 @@ pub const fn wedge_bound_ms(list_ms: u64) -> u64 {
 /// test is a reset where it should have been a verdict.
 const _: () = assert!(wedge_bound_ms(JOB_BOUND_MS) > JOB_BOUND_MS);
 
-/// The bound a boot that stages its own wedge carries instead of
-/// [`wedge_bound_ms`] of its list, in milliseconds: it ends the machine seconds
-/// after the wedge rather than at the bound every other boot keeps for a wedge
-/// nobody staged. Its half is the lockup detector's bound, which still outlasts
-/// the lockup probe's own reach to its lock.
-pub const STAGED_BOUND_MS: u64 = 10_000;
-
-/// The bound a boot that stages its wedge under the chipset watchdog carries,
-/// in milliseconds, so that the watchdog ends it and not the deadline: the wedge
-/// has begun by [`STAGED_BOUND_MS`], and [`BOUND_MS`] after the last feed the
-/// watchdog resets the machine. A second [`BOUND_MS`] covers a tick whose
-/// accuracy no vendor states; past it the deadline ends a machine whose
-/// watchdog did not.
-pub const WATCHED_WEDGE_BOUND_MS: u64 = STAGED_BOUND_MS + 2 * BOUND_MS;
-
 /// The bound one *CPU* gets to take no interrupt at all while it is burning
 /// cycles, in milliseconds, before that CPU ends the machine from its own NMI.
 ///
@@ -181,8 +166,7 @@ pub const WATCHED_WEDGE_BOUND_MS: u64 = STAGED_BOUND_MS + 2 * BOUND_MS;
 /// still inside is not a wedge; that argument does not apply here, since a CPU
 /// that takes no interrupt runs no job — no scheduler pass reaches it. So the
 /// stronger evidence gets the earlier bound: a machine that has hard-locked one
-/// core is named as that, with the core's own instruction pointer in the record,
-/// rather than reported half a bound later as a boot that merely stopped.
+/// core is reset at once rather than half a bound later.
 ///
 /// Nothing in this kernel legitimately holds `IF` clear for this long. The one
 /// path that comes close is the panicked kernel's panel, whose own bound is
@@ -330,7 +314,7 @@ mod tests {
     /// not one.
     #[test]
     fn a_bound_is_read_a_malformed_one_is_not_silence() {
-        assert_eq!(deadline_in("root=abc,blackbox=0x8000000"), None);
+        assert_eq!(deadline_in("root=abc,boot-slot=A"), None);
         assert_eq!(deadline_in("boot-deadline=120000"), Some(Ok(120_000)));
         assert_eq!(deadline_in("watchdog,boot-deadline=1,early-panel"), Some(Ok(1)));
         assert_eq!(deadline_in("boot-deadline=soon"), Some(Err("soon")));

@@ -14,14 +14,14 @@ clock is a page (`sdk/abi/src/clock.rs`). Between the kernel's boot and its
 stop the console UART is its userland driver's, which `logd` feeds the log it
 writes, so a program's line reaches the console only through `logd`, under
 its name. The kernel waits on `logd` neither at a
-panic, which halts the other CPUs first and seals its tail in the black box,
+panic, which halts the other CPUs first and paints its report,
 nor at a stop, which init sequences through `logd`'s flush. `logd` syncs on an
 alert or an interval, keeps every boot's first part, and holds each program
 to an allowance. Severity is an ordered ladder.
 
 The log is a pillar of `issues/toyos-explains-itself.md`. The
-orchestrator's plan, not ruled: step 1's ring is the reset-surviving region's,
-and step 2's keys are how a program writes an event.
+orchestrator's plan, not ruled: step 2's keys are how a program writes an
+event.
 
 What is left, in order:
 
@@ -32,15 +32,11 @@ the firmware names today, `toyos_abi::log::CursorHead`); the k-way merge and
 the shard registry go, and with them the merge's per-record cost: a stamp read
 and a position store per CPU the firmware names, recomputed each record so no
 fatal path holds a per-CPU array; the loom models are
-rewritten. The ring lives in persistent RAM, so a triple fault or a firmware
-reset — which seal nothing today — leaves the last boot's tail, and the next
-boot's `logd` reads it through `SYS_LOG_READ` under a flag and writes it to
-`/log` rather than the loader copying a rendering of it. That is also what puts
-a stopped boot's own last records — its stop record, its census, `Rebooting.` —
-into `/log` rather than only the next loader pass's page. High-risk: a
+rewritten. No RAM survives a reset (the loader's memory-overwrite request),
+so a record crossing one is
+`issues/a-crash-record-survives-a-reset-outside-ram.md`'s. High-risk: a
 loom-checked primitive and the ABI.
-*Exit:* one ring, one sequence, a `u64` cursor, and a guest test that resets a
-machine mid-boot finding the tail in the next boot's `/log`.
+*Exit:* one ring, one sequence, a `u64` cursor, and the loom models green.
 
 **2. Verdicts that match on fields instead of English.** A record carries its
 severity and origin; the tests and metal verdicts this change touched match on

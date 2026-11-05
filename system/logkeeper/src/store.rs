@@ -11,10 +11,10 @@
 //! **Every boot keeps its first part** ([`retire`]): a boot that floods the
 //! volume deletes older parts of its own and never another boot's start.
 //!
-//! **`toyos_wallclock::classify` is the whole of what this program may delete.**
-//! `/log` is userland-writable, `toybox` writes there and the bootloader writes
-//! its own file there, and the only thing standing between somebody else's file
-//! and `delete_file` is that the function does not recognise it.
+//! **`toyos_wallclock::classify` and the stop mark are the whole of what this
+//! program may delete.** Only this program's view and the supervisor's write
+//! `/log`, but the bootloader writes its own files there, and the only thing
+//! standing between those and `delete_file` is that neither names them.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -53,6 +53,24 @@ pub const MAX_LOG_PARTS: u32 = 9999;
 /// fits, and sixteen of them fit the volume with room to spare. It also bounds
 /// what `/system/bin/console` reads off USB before it paints anything.
 pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
+
+/// Say on the volume that this boot stopped cleanly
+/// ([`toyos_logstream::STOPPED`]), durably.
+pub fn mark_stopped() -> std::io::Result<()> {
+    File::create(stopped_path())?.sync_all()
+}
+
+/// Take back [`mark_stopped`]: the stop it was written for was refused.
+pub fn unmark_stopped() -> std::io::Result<()> {
+    match fs::remove_file(stopped_path()) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        done => done,
+    }
+}
+
+fn stopped_path() -> String {
+    format!("{DIR}/{}", toyos_logstream::STOPPED)
+}
 
 /// Where one file of this boot's sequence is: `toyos_wallclock::Part` is its
 /// name.

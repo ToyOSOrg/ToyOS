@@ -20,9 +20,10 @@ counters and sizes pillars, which no other track does.
 - On the diary's reader: "its obvious that we want to be able to understand
   kernel metrics from within toyos ... thats an important and productive tool
   that should be shipped with toyos."
-- **"Keep crash records"**: ToyOS does not ask the firmware to wipe memory at
-  reset, and crash records survive a reset in RAM
-  (`issues/the-loader-never-sets-the-firmwares-memory-overwrite-request.md`).
+- **"Keep crash records"** was reversed on 2026-11-05: "just wipe it … if
+  that means we remove the blackbox then so be it". The loader requests the
+  firmware's memory overwrite on every boot, and no crash record survives a
+  reset in RAM (`issues/a-crash-record-survives-a-reset-outside-ram.md`).
 - **"Only with permission"**, the option he chose: "A program needs a
   permission to read counters; the revealing ones (power, per-device
   interrupts) need the strict diary permission. Admin tools get them; ordinary
@@ -60,7 +61,7 @@ rest were not put to him.
 | Profile | behind the diary's judgement; `issues/a-frozen-toyos-waits-for-a-hand-on-the-power-button.md` |
 | Accounting | `issues/a-processs-memory-is-a-byte-total-that-reads-zero-under-contention.md`, `issues/blocked-time-is-invisible-while-the-park-lasts.md` |
 | Inspect | `issues/the-kernel-keeps-nothing-it-enumerates.md` |
-| Post-mortem | step 1 of `issues/logging-records-from-every-producer-and-a-kernel-that-waits-on-nobody.md` |
+| Post-mortem | `issues/a-crash-record-survives-a-reset-outside-ram.md` |
 | Symbols | `issues/the-kernel-still-parses-what-userland-writes.md` Move 3 |
 
 ## What is to be built, in order (the orchestrator's)

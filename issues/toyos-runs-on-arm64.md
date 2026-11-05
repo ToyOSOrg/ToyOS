@@ -194,7 +194,7 @@ ECAM/MMIO-only (`drivers/pci.rs:134-154`), no `0xCF8`. NVMe, xHCI and virtio
 have no ISA dependence beyond TSC-based waits. The bootloader calls UEFI
 through its own bindings, which boot both targets.
 The pure decision crates carry no arch at all: `toyos-acpi`, `-gpt`,
-`-fat32`, `-dma`, `-userbound`, `-proclife`, `-blackbox`, `-elide` and
+`-fat32`, `-dma`, `-userbound`, `-proclife`, `-elide` and
 others.
 
 **The biggest porting costs, in order:** interrupt delivery (IDT, APIC,

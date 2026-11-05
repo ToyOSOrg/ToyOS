@@ -1,10 +1,8 @@
 //! Vector 2: where `crate::hardlockup` samples the CPU it landed on, which is
-//! the one bound a CPU with `IF` clear is under: the frame's `rip`, `rsp` and
-//! `rflags` are what a machine whose every CPU stopped taking interrupts has
-//! left to say. That path may seal a record and reset from here and never
-//! return. Never logs, since the interrupted context may hold the log ring's
-//! lock, and never reschedules, so no preempt-count or exit-to-user check
-//! either.
+//! the one bound a CPU with `IF` clear is under: the frame's `rflags` says
+//! whether it was. That path may reset from here and never return. Never
+//! logs, since the interrupted context may hold the log ring's lock, and never
+//! reschedules, so no preempt-count or exit-to-user check either.
 //! Runs on IST2 for the `#DF` `arch::syscall`'s CPL-0/user-`rsp` window would
 //! otherwise take; `PerCpu::nmi_active` guards IST2's non-reentrancy by
 //! routing a second NMI to [`nested_nmi`] instead of corrupting the stack.
@@ -13,11 +11,10 @@ use core::arch::naked_asm;
 
 use crate::arch::percpu::OFF_NMI_ACTIVE;
 
-/// Ten pushes of eight bytes place the interrupt frame's `rip` here.
-const RIP_OFFSET: usize = 80;
-const RSP_OFFSET: usize = RIP_OFFSET + 24;
-/// `rflags`' `IF` is what separates a cpu that has stopped taking interrupts from one that is merely slow.
-const RFLAGS_OFFSET: usize = RIP_OFFSET + 16;
+/// Ten pushes of eight bytes place the interrupt frame's `rip` at 80, and its
+/// `rflags` two words above. `IF` is what separates a cpu that has stopped
+/// taking interrupts from one that is merely slow.
+const RFLAGS_OFFSET: usize = 80 + 16;
 
 /// Before any push, the CPU's own five words start at `rsp`.
 const NESTED_RIP_OFFSET: usize = 0;
@@ -44,9 +41,7 @@ pub(super) extern "sysv64" fn nmi_entry() {
         "push r10",
         "push r11",
         "push rbp",
-        "mov rdi, [rsp + {rip_offset}]",
-        "mov rsi, [rsp + {rsp_offset}]",
-        "mov rdx, [rsp + {rflags_offset}]",
+        "mov rdi, [rsp + {rflags_offset}]",
         "mov rbp, rsp",
         "and rsp, -16",
         "call {note}",
@@ -73,8 +68,6 @@ pub(super) extern "sysv64" fn nmi_entry() {
         "call {nested}",
         "ud2",
         active = const OFF_NMI_ACTIVE,
-        rip_offset = const RIP_OFFSET,
-        rsp_offset = const RSP_OFFSET,
         rflags_offset = const RFLAGS_OFFSET,
         nested_rip = const NESTED_RIP_OFFSET,
         nested_rsp = const NESTED_RSP_OFFSET,
@@ -83,11 +76,10 @@ pub(super) extern "sysv64" fn nmi_entry() {
     );
 }
 
-extern "sysv64" fn note(rip: u64, rsp: u64, rflags: u64) {
+extern "sysv64" fn note(rflags: u64) {
     crate::arch::percpu::irq_took!(Nmi);
-    // Before the nested-NMI staging: a hard lockup ends the machine from here,
-    // and nothing stages a second NMI onto a frame that is sealing a record.
-    crate::hardlockup::sample(rip, rsp, rflags);
+    // Before the nested-NMI staging: a hard lockup ends the machine from here.
+    crate::hardlockup::sample(rflags);
     #[cfg(feature = "boot-actuators")]
     stage_nested_if_armed();
 }

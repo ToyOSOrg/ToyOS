@@ -38,7 +38,6 @@ members = [
     "lib/acpi",
     "lib/acpiserver-api",
     "lib/bcachefs",
-    "lib/blackbox",
     "lib/blockdev",
     "lib/blockhold",
     "lib/blockring",
@@ -289,7 +288,6 @@ toyos-tco = { path = "lib/tco" }
 # The one scratch directory, under `$TMPDIR` or, for a socket, `/tmp`: the harness's run takes one, and so does
 # every test here; `--ci host` holds the host tests to leaving nothing behind.
 toyos-tmpdir = { path = "lib/tmpdir" }
-toyos-blackbox = { path = "lib/blackbox" }
 # The signed image, the slot table and the signer: `build/signing.rs` signs with
 # the same crate the loader and `/system/bin/update` verify with.
 toyos-update = { path = "lib/update", features = ["sign"] }

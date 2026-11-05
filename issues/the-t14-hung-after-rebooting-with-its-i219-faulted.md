@@ -21,10 +21,11 @@ writes to the stick. The kernel xHCI's storm on run 20, closed with that
 driver, was a different shape — ten timer interrupts in thirty-four seconds; here cpu0
 took 43 in the same 430 ms.
 
-**What a clean reboot has and this one lacks** is everything after
-`Rebooting.`: the loader's next pass reads the black box and reports the
+**What a clean reboot had then and this one lacked** is everything after
+`Rebooting.`: the loader's next pass read the black box and reported the
 kernel's quiesce (ports reset, controllers halted, bus mastering off) under `|`
-lines. Run 122 has none of that because the page is gone, so the hang is
+lines. That page is now gone on every boot, with the memory-overwrite request.
+Run 122 had none of it, so the hang is
 somewhere between the kernel's last record and the firmware's next pass, and
 which side is not known.
 

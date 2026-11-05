@@ -26,7 +26,6 @@ pub mod amdvi;
 pub mod apic;
 pub mod barrier;
 pub mod boot;
-pub mod cache;
 pub mod clocksource;
 pub mod control_regs;
 pub mod copy;

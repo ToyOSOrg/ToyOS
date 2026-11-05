@@ -253,7 +253,7 @@ unsafe impl Sync for RenderedCell {}
 static FB: crate::seqlock::Published<FB_WORDS> = crate::seqlock::Published::new();
 
 /// Exactly one painter at a time, taken by every painter without exception.
-/// [`render`] and [`seal_wedge`] never release it; every other painter does,
+/// [`render`] never releases it; every other painter does,
 /// and takes it only while [`FATAL`] is unclaimed.
 static PAINTING: AtomicBool = AtomicBool::new(false);
 
@@ -656,30 +656,8 @@ pub fn render() -> bool {
         return false;
     }
     forget_the_glass();
-    let text = fatal_text();
-    // Before the paint, from the same view the panel gets: a fault inside the
-    // painter then costs the screen and not the copy the next boot reads.
-    crate::blackbox::record_panic(text.text);
-    paint(Fill::Fatal, text, || false);
+    paint(Fill::Fatal, fatal_text(), || false);
     true
-}
-
-/// Seal the tail of the live log into the black box, for the boot deadline.
-///
-/// Takes [`PAINTING`] and never gives it back — the caller's next statement
-/// writes the reset register, so there is no later painter to give it to — and
-/// **gives up the records rather than waiting** where another CPU holds it: a
-/// wedge is not a state to spin in, and why the machine ended is worth more
-/// than the tail it ended with.
-///
-/// The live shards and not the capture: what this record is for is the records
-/// that never reached the log file, which are the newest ones.
-pub fn seal_wedge(said: core::fmt::Arguments) {
-    if PAINTING.swap(true, Ordering::SeqCst) {
-        crate::blackbox::record_wedge(format_args!("{said}{}", crate::census::Sealed), &[]);
-        return;
-    }
-    crate::blackbox::record_wedge(format_args!("{said}{}", crate::census::Sealed), live_tail().text);
 }
 
 /// Keep the panel as it is until `bound` resets the machine: the panic path's

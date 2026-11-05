@@ -24,29 +24,13 @@
 //!   sampled by an NMI off a performance counter. The two are armed off this one
 //!   parameter and compose **by scope and not by machine state**: this bound is
 //!   the whole machine's and that one is any *single CPU*'s, so a machine with
-//!   one deaf core is ended by that one, at the earlier bound, with a record
-//!   that can name where the core is standing. Whichever fires takes the
-//!   machine's one seal through [`claim_the_reset`].
+//!   one deaf core is ended by that one, at the earlier bound. Whichever fires
+//!   takes the machine's one reset through [`claim_the_reset`].
 //! - **A panic in progress**, which is not a gap but a stand-down:
 //!   `panic::halt_all_cpus` calls [`stand_down`] before it holds the panel, so a
-//!   panic report is never replaced by an expiry.
+//!   panic report is never cut short by an expiry.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
-
-
-/// Every phase [`boot_phase!`](crate::boot_phase) publishes, in the order a
-/// boot reaches them, so a sealed record can name where the machine stopped.
-/// Index 0 is a machine that has published none; the rest are the literals
-/// `boot_phase!` is called with, and [`index_of`] refuses at compile time one
-/// that is not here.
-pub const PHASES: &[&str] = &[
-    "before the first boot phase",
-    "CPU ready",
-    "peripherals ready",
-    "subsystems ready",
-    "devices ready",
-    "complete",
-];
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 /// The bound this boot was armed with, in milliseconds, or 0 for a boot that
 /// named none. Written on the BSP before any AP exists.
@@ -59,13 +43,11 @@ static BOUND_MS: AtomicU64 = AtomicU64::new(0);
 /// every CPU.
 static AT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Whether a CPU has taken the expiry. One machine, one seal, one reset.
+/// Whether a CPU has taken the expiry. One machine, one reset.
 static FIRED: AtomicBool = AtomicBool::new(false);
 
-/// Take this machine's one seal-and-reset, or `false` where another CPU already
-/// holds it — in which case the caller adds nothing to the page and goes no
-/// further, because the page is being written. Shared with
-/// [`crate::hardlockup`]: two bounds compose, one seal.
+/// Take this machine's one reset, or `false` where another CPU already holds
+/// it. Shared with [`crate::hardlockup`]: two bounds compose, one reset.
 pub fn claim_the_reset() -> bool {
     !FIRED.swap(true, Relaxed)
 }
@@ -74,7 +56,7 @@ pub fn claim_the_reset() -> bool {
 ///
 /// Called from `panic::halt_all_cpus` beside [`crate::hardlockup::stand_down`]:
 /// from there this machine holds a panic report under a bound of its own, and an
-/// expiry would seal a `WEDGED` record over it. Disarms rather than latching a
+/// expiry would reset it out from under its reader. Disarms rather than latching a
 /// second flag, so [`poll`] stays one relaxed load.
 pub fn stand_down() {
     AT_COUNTER.store(0, Relaxed);
@@ -89,56 +71,6 @@ pub fn stand_down() {
 /// register traffic on every wake that buys nothing.
 pub fn armed() -> bool {
     AT_COUNTER.load(Relaxed) != 0
-}
-
-/// The last phase [`reached`] was told about, as an index into [`PHASES`].
-static PHASE: AtomicU8 = AtomicU8::new(0);
-
-/// The index `boot_phase!` publishes for its literal.
-///
-/// `const`, and it panics on a name [`PHASES`] does not carry — so adding a
-/// boot phase without naming it here does not compile.
-pub const fn index_of(name: &str) -> u8 {
-    let mut i = 0;
-    while i < PHASES.len() {
-        if same(PHASES[i], name) {
-            return i as u8;
-        }
-        i += 1;
-    }
-    panic!("boot_phase!: this phase is not one of `deadline::PHASES`")
-}
-
-const fn same(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
-/// Publish the phase this machine has reached; `boot_phase!`'s, and nothing
-/// else's.
-pub fn reached(phase: u8) {
-    PHASE.store(phase, Relaxed);
-}
-
-fn phase() -> &'static str {
-    let at = PHASE.load(Relaxed) as usize;
-    // Not indexed: this is read from inside the expiry, where a bounds check
-    // that panicked would take the machine down inside the report about why it
-    // is going down.
-    match PHASES.get(at) {
-        Some(name) => name,
-        None => "an unpublished phase",
-    }
 }
 
 /// Read the bound off the parameter line.
@@ -171,10 +103,7 @@ pub fn start() {
         return;
     }
     AT_COUNTER.store(crate::clock::counter_deadline(ms.saturating_mul(1_000_000)), Relaxed);
-    log!(
-        "boot deadline: {ms} ms, after which this kernel seals a WEDGED record and writes the \
-         reset register itself"
-    );
+    log!("boot deadline: {ms} ms, after which this kernel writes the reset register itself");
     // The other half of the same parameter: what one CPU gets to take no
     // interrupt at all, which this poll cannot see because it is not running.
     // Written from here because everything that module does is reached from an
@@ -183,164 +112,24 @@ pub fn start() {
 }
 
 pub fn poll() {
-    past(AT_COUNTER.load(Relaxed))
-}
-
-fn past(at: u64) {
+    let at = AT_COUNTER.load(Relaxed);
     if at == 0 || crate::arch::cpu::counter() < at {
         return;
     }
     expire()
 }
 
-/// Where a CPU's timer last interrupted the kernel, kept only on a boot with
-/// a bound: the seal's account of a CPU stuck with interrupts open, which no
-/// hard-lockup sample reports.
-pub struct Local {
-    kernel_pc: AtomicU64,
-}
-
-impl Local {
-    pub fn new() -> Self {
-        Self { kernel_pc: AtomicU64::new(0) }
-    }
-}
-
-/// [`poll`], for a timer interrupt that found the kernel at `pc`.
+/// Stop what is doing DMA, and hand the machine back.
 ///
-/// `extern "C"` because the Ring 0 half of the x86 timer entry calls it from
-/// naked assembly, where the ABI is written out rather than inferred.
-pub extern "C" fn poll_in_kernel(pc: u64) {
-    let at = AT_COUNTER.load(Relaxed);
-    if at != 0 {
-        crate::cpu_local::here().deadline.kernel_pc.store(pc, Relaxed);
-    }
-    past(at)
-}
-
-/// A line `  cpuN pc=<pc>  <symbol>+<offset>` for each online CPU, out of
-/// [`Local`]; the harness reads the symbol (`build/bootlog.rs`).
-struct KernelPcs;
-
-impl core::fmt::Display for KernelPcs {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        for cpu in 0..crate::smp::cpu_count() {
-            let pc = crate::cpu_local::get(cpu).map_or(0, |local| local.deadline.kernel_pc.load(Relaxed));
-            writeln!(f, "  cpu{cpu} pc={}", crate::symbols::At(pc))?;
-        }
-        Ok(())
-    }
-}
-
-/// Seal why, stop what is doing DMA, and hand the machine back.
-///
-/// Runs inside an interrupt entry on whichever CPU noticed, so it is the same
-/// no-lock, no-allocation, nothing-may-block region the panic path's seal runs
-/// in — and for the stronger reason: every lock in this kernel is a thing the
-/// wedge may be holding.
+/// Runs inside an interrupt entry on whichever CPU noticed: no lock, no
+/// allocation, nothing that can block, since every lock in this kernel is a
+/// thing the wedge may be holding.
 fn expire() -> ! {
     if !claim_the_reset() {
-        // Another CPU is already sealing and resetting. This one has nothing to
-        // add and must not race it into the page.
+        // Another CPU is already resetting.
         crate::arch::cpu::halt();
     }
     #[cfg(feature = "mask-windows")]
     crate::windows::stand_down();
-    crate::drivers::panic_console::seal_wedge(format_args!(
-        "{EXPIRED}: a bound of {} ms, reached at {} ms, with this machine in `{}`. Where each \
-         CPU's timer last found the kernel:\n{KernelPcs}The tail of the log ring follows — which \
-         is what nothing was draining.\n",
-        BOUND_MS.load(Relaxed),
-        crate::clock::stamp().expect("the deadline polls only once the clock runs").nanos() / 1_000_000,
-        phase(),
-    ));
-    // The seal first, because the USB stop `reset_now` makes before it writes
-    // the register is bounded but not instant, and this record is the
-    // diagnostic the whole mechanism exists for.
     crate::power::reset_now()
 }
-
-/// What a sealed record opens with, and so what the next boot's loader prints
-/// under `Previous boot's panic:`. A constant because the harness judges the
-/// line and nothing links the two crates (`build/bootlog.rs`).
-pub const EXPIRED: &str = "the boot deadline expired";
-
-/// Wedge this machine on purpose, the way a defect does: the negative control
-/// on everything above.
-///
-/// **Every CPU, and not just this one.** A wedge one core survives is a boot
-/// that finishes, and a control the boot finishes is no control. From here every
-/// CPU that reaches a scheduler pass stops taking them, with preemption disabled
-/// and `IF` set — nothing panics, nothing halts, the LAPIC timers go on firing,
-/// and no userland instruction runs again; [`this_cpu`] establishes that state
-/// rather than inheriting it.
-#[cfg(feature = "boot-actuators")]
-pub fn stage_a_wedge() -> ! {
-    log!("{WEDGE_STAGED}: every CPU stops taking scheduler passes from here");
-    STAGED.store(true, Relaxed);
-    // A core still asleep is not a core this control has wedged.
-    crate::sched::driver::ring_all_but_self();
-    this_cpu()
-}
-
-/// What a staged wedge says before it stops: a `WEDGED` page whose text does not
-/// hold this line is a machine the deadline ended for some other reason. Judged
-/// by the harness, so it is a constant (`build/bootlog.rs`).
-#[cfg(feature = "boot-actuators")]
-pub const WEDGE_STAGED: &str = "wedge: staged, and only a bound this machine runs under ends it";
-
-/// A scheduler pass's first statement, where a staged wedge takes the CPU.
-#[cfg(feature = "boot-actuators")]
-pub fn wedge_if_staged() {
-    if STAGED.load(Relaxed) {
-        this_cpu()
-    }
-}
-
-#[cfg(feature = "boot-actuators")]
-static STAGED: AtomicBool = AtomicBool::new(false);
-
-// Never inlined: the seal names the spin by this symbol (`build/bootlog.rs`).
-#[cfg(feature = "boot-actuators")]
-#[inline(never)]
-fn this_cpu() -> ! {
-    // Preemption off, `IF` on and a one-shot armed: the shape a device
-    // operation on this machine already runs in, so what the deadline has to
-    // reach is the Ring 0 half of the timer entry and not the Rust half.
-    //
-    // **All three set, not assumed**, and not an `IrqGuard`: nothing here ever
-    // puts them back. One woken out of the idle halt has its one-shot stopped
-    // however set `IF` is, which leaves a CPU taking no interrupt at all: a
-    // hard lockup and not the state this control claims.
-    crate::preempt::disable();
-    let arrived_awake = crate::arch::cpu::interrupts_enabled();
-    crate::arch::irqchip::arm_within(kernel::sched::task::QUANTUM_NS);
-    crate::arch::cpu::enable_interrupts();
-    log!(
-        "wedge: cpu{} {}",
-        crate::arch::percpu::cpu_id(),
-        if arrived_awake { WEDGE_AWAKE } else { WEDGE_ARRIVED_DEAF },
-    );
-    // The hard-lockup control is this wedge and one CPU more, staged here —
-    // where every CPU has already left the scheduler — because the idle loop it
-    // would otherwise be staged from is one of the things this wedge stops.
-    if crate::actuator::hard_lockup_probe() {
-        crate::hardlockup::probe::stage();
-    }
-    loop {
-        core::hint::spin_loop();
-    }
-}
-
-/// What a CPU says that arrived with interrupts masked: the staging CPU, if the
-/// syscall gate left them masked, which the harness refuses
-/// (`build/bootlog.rs`).
-#[cfg(feature = "boot-actuators")]
-pub const WEDGE_ARRIVED_DEAF: &str =
-    "arrived with interrupts off, through the syscall gate, and takes them again here";
-
-/// What every CPU says that arrived with them open, the staging CPU among them:
-/// the harness requires it of that CPU (`build/bootlog.rs`).
-#[cfg(feature = "boot-actuators")]
-pub const WEDGE_AWAKE: &str = "arrived with interrupts on";
-

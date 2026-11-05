@@ -43,7 +43,7 @@ macro_rules! sources {
         }
 
         impl Source {
-            /// Order `tests/toyos.rs`'s `irq_census_conservation` parses back; must match variant order.
+            /// Order `tests/common/irqcensus.rs` parses back; must match variant order.
             pub const NAMES: &'static [&'static str] =
                 &["timer", "kick", "userdev", "dmafault", $($name,)* "tlb", "nmi", "spurious", "unclaimed"];
             pub const COUNT: usize = Self::NAMES.len();
@@ -115,15 +115,9 @@ pub fn deliveries(cpu: u32, source: Source) -> Option<u64> {
 /// itself by the time it reads this, so a total including it moves on every
 /// sample and no CPU is ever stuck.
 ///
-/// One published pointer and relaxed loads: no lock, so the CPU sealing a
-/// record about a sibling can read this about it.
-pub fn taken_by(cpu: u32) -> Option<u64> {
-    read(cpu).map(|counts| sum_bar_nmi(&counts))
-}
-
-/// [`taken_by`] for the CPU asking, read straight off its own block — the one
-/// form a CPU inside an NMI may use, since it needs neither the published
-/// pointer array nor a bounds check on a `cpu_id` it is standing on.
+/// Read straight off the asking CPU's own block, which a CPU inside an NMI
+/// may do: it needs neither the published pointer array nor a bounds check on
+/// a `cpu_id` it is standing on.
 pub fn taken_here() -> u64 {
     sum_bar_nmi(&percpu::irq_counts_here())
 }

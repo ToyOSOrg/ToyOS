@@ -31,7 +31,6 @@ mod drivers;
 mod log;
 mod actuator;
 mod params;
-mod blackbox;
 mod deadline;
 mod quiesce;
 mod random;
@@ -223,19 +222,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
             toyos_abi::boot::LAYOUT
         );
     }
-    // Beside it, and out of the raw buffer: a panic between here and
-    // `params::init` — inside `serial::init`, or on the parameter line's own
-    // UTF-8 check — is one the page has to carry past the reset, and neither
-    // the console nor that line has been decided yet.
-    blackbox::arm(if kernel_args.cmdline_len == 0 {
-        &[]
-    } else {
-        core::slice::from_raw_parts(
-            DirectMap::from_phys(kernel_args.cmdline_addr).as_ptr::<u8>(),
-            kernel_args.cmdline_len as usize,
-        )
-    });
-
     serial::init(kernel_args.rsdp_addr);
 
     // After both channels exist, before the first actuator site.
@@ -337,11 +323,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     let loader = [
         mm::Region { start: kernel_args.kernel_memory_addr, end: kernel_args.kernel_memory_addr + kernel_args.kernel_memory_size },
         mm::Region { start: kernel_args.kernel_image_addr, end: kernel_args.kernel_image_addr + kernel_args.kernel_image_size },
-        // The loader's black-box page, which is ordinary `LoaderData` and so
-        // memory the allocator would otherwise hand out. Empty on a boot whose
-        // parameter line names none.
-        blackbox::reserved_region(),
-        // The boot images (`bootimage`), `LoaderData` like the black box's page.
+        // The boot images (`bootimage`), `LoaderData`.
         supervisor_image,
         fileserver_image,
         root_image,
@@ -373,8 +355,8 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // name, rather than indexing it, means a region added to `loader` fails
     // to compile here instead of compiling and being silently dropped from
     // what `mm::init` withholds.
-    let [image, elf, black_box, supervisor, fileserver, root, map, microcode] = loader;
-    let reserved = [image, elf, black_box, supervisor, fileserver, root, map, microcode, arch::boot::reserved()];
+    let [image, elf, supervisor, fileserver, root, map, microcode] = loader;
+    let reserved = [image, elf, supervisor, fileserver, root, map, microcode, arch::boot::reserved()];
     // A region another one shares is two allocations the loader made of one
     // byte, and whichever writes it second corrupts the first.
     let extents = reserved.map(|r| r.start..r.end);

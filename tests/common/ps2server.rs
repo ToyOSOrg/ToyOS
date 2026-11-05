@@ -1,7 +1,7 @@
 //! What `/system/bin/ps2server` says of the i8042 it armed, read the same way
 //! off a QEMU boot's console and a metal boot's log.
 
-use super::irqcensus::Census;
+use super::irqcensus::census_sources;
 use super::serial::Serial;
 
 /// The probe's line where the keyboard and a pointer were armed.
@@ -16,7 +16,7 @@ const AUX_ABSENT: &str = "ps2server: aux absent — its reset went unanswered in
 /// `log` says ps2server reset the keyboard and armed it set 2 translated, and
 /// armed the aux device or found it absent, each by its line; nothing it said
 /// is a refusal; and the kernel's interrupt census has no source of its own
-/// for the i8042, which [`Census::parse`] refuses a line carrying.
+/// for the i8042, which [`census_sources`] refuses a line carrying.
 pub fn armed(log: &Serial, kernel: &Serial) -> Result<(), String> {
     let reset = log.must_say(KEYBOARD_RESET)?;
     if !reset.ends_with("— set 2, translated") {
@@ -34,7 +34,7 @@ pub fn armed(log: &Serial, kernel: &Serial) -> Result<(), String> {
         log.must_not_say(refusal)?;
     }
     for line in kernel.text().lines() {
-        if let Some(Err(why)) = Census::parse(line) {
+        if let Some(Err(why)) = census_sources(line) {
             return Err(format!("the census line {line:?} is not this kernel's sources: {why}"));
         }
     }

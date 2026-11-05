@@ -2,10 +2,11 @@
 //! reaches it: the FAT32 driver, the page cache and the xHCI mass-storage
 //! transport.
 //!
-//! **`/log` is the one writable place on a metal boot.** A flashed image carries
-//! an ESP, a read-only ROOT and the `TOYOS-LOG` volume, so the only durable
-//! bytes a job can lay down are on the FAT32 partition `logkeeper` also writes —
-//! which is the partition the driver reads back and the host's FAT check judges.
+//! **It writes `/log`, which its row's view holds read-only**: `/log` is the
+//! log keeper's alone (`toyos_manifest::Program::view`), and the stick's other
+//! volumes, the ESP and ROOT, are read-only too. So `usbwrite` and `usbread`
+//! fail with `ReadOnly` until the probe is given a writable place on the stick
+//! (`issues/the-device-boot-is-flashed-by-no-metal-row.md`).
 
 use std::fs;
 use std::io::{Read, Write};

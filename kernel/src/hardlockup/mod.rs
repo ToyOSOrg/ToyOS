@@ -25,10 +25,7 @@
 //! that has not moved is a CPU that has taken nothing at all. A CPU whose count
 //! is stale for [`toyos_tco::hard_lockup_bound_ms`] of
 //! the bound this boot named, *and* whose sampled frame has `IF` clear, is
-//! stuck: it seals a `WEDGED` record naming itself, its `pc` and `sp` from the
-//! NMI frame, the lock it is spinning on if `Lock::lock` recorded one, a line
-//! for every other CPU, and the tail of the log ring — then writes the reset
-//! register through `power::reset_now`.
+//! stuck: it writes the reset register through `power::reset_now`.
 //!
 //! # The discipline this file is written under
 //!
@@ -36,8 +33,7 @@
 //! `log!` — the interrupted context may hold the log ring's own shard, and
 //! `build/sourcegate.rs`'s `nmi_does_not_log` is the gate. The sampling path is
 //! also on every CPU every second of every boot, so it is atomics and one
-//! `cpu::counter` read and no division at all. The report divides, and only after the
-//! machine is already being ended.
+//! `cpu::counter` read and no division at all.
 //!
 //! # What it does not cover, stated rather than implied
 //!
@@ -56,37 +52,15 @@
 //!   timer's.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 use crate::arch::{cpu, percpu, pmu, trap};
-use crate::smp;
-use crate::symbols::At;
 
-/// The negative control, in a file of its own because it says what it staged
-/// and nothing here may say anything.
-#[cfg(feature = "boot-actuators")]
-pub mod probe;
-
-/// What a sealed record opens with, and so what the next boot's loader prints
-/// under `Previous boot's panic:`. A constant because the harness judges the
-/// line and nothing links the two crates (`build/bootlog.rs`).
-pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
-
-/// Declared beside the bound it samples, so the host judging a lockup's
-/// lateness reads the same period.
 const SAMPLE_NS: u64 = toyos_tco::HARD_LOCKUP_SAMPLE_NS;
 
 /// The bound in counter ticks, or 0 for a boot that armed none. Written on the BSP
 /// before any AP exists.
 static BOUND_TICKS: AtomicU64 = AtomicU64::new(0);
-
-/// The same bound in milliseconds, for the record to quote and the probe to
-/// stage against.
-static BOUND_MS: AtomicU64 = AtomicU64::new(0);
-
-/// Counter ticks per millisecond, so the report can turn a span into a number
-/// without reaching for the nanosecond clock's out-of-line divide.
-static TICKS_PER_MS: AtomicU64 = AtomicU64::new(0);
 
 /// The performance counter's reload period, in `cpu::counter` ticks, the unit
 /// `pmu::arm` takes.
@@ -98,38 +72,17 @@ static PERIOD: AtomicU64 = AtomicU64::new(0);
 /// machine out from under its own report.
 static STOOD_DOWN: AtomicBool = AtomicBool::new(false);
 
-/// A CPU's words, all of them written by that CPU — from its own NMI, or from
-/// `sync::Lock::lock`'s spin — and read by whichever CPU seals.
+/// A CPU's words, all of them written by that CPU from its own NMI.
 pub struct Local {
-    /// The progress count at its last sample, when that count last moved, and
-    /// where the last sample found it.
+    /// The progress count at its last sample, and when that count last moved.
     progress: AtomicU64,
     still_since: AtomicU64,
-    at_counter: AtomicU64,
-    at_pc: AtomicU64,
-    at_sp: AtomicU64,
-    at_flags: AtomicU64,
     armed_pmu: AtomicBool,
-    /// The lock it is spinning on and the `#[track_caller]` site that asked for
-    /// it, written at the top of the spin and cleared when it acquires. Zero is
-    /// a CPU inside no contended acquisition.
-    spin_lock: AtomicU64,
-    spin_at: AtomicU64,
 }
 
 impl Local {
     pub fn new() -> Self {
-        Self {
-            progress: AtomicU64::new(0),
-            still_since: AtomicU64::new(0),
-            at_counter: AtomicU64::new(0),
-            at_pc: AtomicU64::new(0),
-            at_sp: AtomicU64::new(0),
-            at_flags: AtomicU64::new(0),
-            armed_pmu: AtomicBool::new(false),
-            spin_lock: AtomicU64::new(0),
-            spin_at: AtomicU64::new(0),
-        }
+        Self { progress: AtomicU64::new(0), still_since: AtomicU64::new(0), armed_pmu: AtomicBool::new(false) }
     }
 }
 
@@ -152,13 +105,10 @@ fn of(cpu: usize) -> &'static Local {
 pub fn start(deadline_ms: u64) -> Armed {
     let ms = toyos_tco::hard_lockup_bound_ms(deadline_ms);
     let ticks = crate::clock::counter_ticks(ms.saturating_mul(1_000_000));
-    let per_ms = crate::clock::counter_ticks(1_000_000);
-    if ms == 0 || ticks == 0 || per_ms == 0 {
+    if ms == 0 || ticks == 0 {
         return Armed { ms: 0, sampled: false };
     }
-    BOUND_MS.store(ms, Relaxed);
     BOUND_TICKS.store(ticks, Relaxed);
-    TICKS_PER_MS.store(per_ms, Relaxed);
     PERIOD.store(crate::clock::counter_ticks(SAMPLE_NS), Relaxed);
     arm_this_cpu();
     Armed { ms, sampled: has_a_counter(percpu::cpu_id() as usize) }
@@ -184,8 +134,7 @@ impl fmt::Display for Armed {
             (ms, true) => write!(
                 f,
                 "hard lockup: {ms} ms, sampled every {} ms by each cpu's own performance counter, \
-                 after which a cpu that has taken no interrupt seals a WEDGED record and resets \
-                 the machine",
+                 after which a cpu that has taken no interrupt resets the machine",
                 SAMPLE_NS / 1_000_000,
             ),
             (ms, false) => write!(
@@ -228,36 +177,21 @@ pub fn stand_down() {
     STOOD_DOWN.store(true, Relaxed);
 }
 
-/// The bound in milliseconds, or 0 where this boot armed none. The control's
-/// question: it stages against the bound rather than a number of its own.
-#[cfg(feature = "boot-actuators")]
-pub fn bound_ms() -> u64 {
-    BOUND_MS.load(Relaxed)
-}
-
-/// One sample of the CPU this NMI landed on: where it is, whether it has taken
-/// anything since the last one, and whether that has gone on too long.
+/// One sample of the CPU this NMI landed on: whether it has taken anything
+/// since the last one, and whether that has gone on too long.
 ///
 /// Called from `arch::trap::nmi`'s `note` and nowhere else. Returns on every NMI
 /// that is not this CPU's own overflow, so the diagnostic senders — the blocked
 /// task dump's probe — cost one load and one compare.
-pub fn sample(pc: u64, sp: u64, flags: u64) {
+pub fn sample(flags: u64) {
     if BOUND_TICKS.load(Relaxed) == 0 || STOOD_DOWN.load(Relaxed) {
         return;
     }
     let me = percpu::cpu_id() as usize;
-    let mine = of(me).armed_pmu.load(Relaxed) && pmu::overflowed();
-    // A machine with no PMU has this bound only under the actuator that sends
-    // the NMI the counter would have, which is how QEMU's guest reaches this
-    // decision at all.
-    if !mine && !crate::actuator::hard_lockup_probe() {
+    if !(of(me).armed_pmu.load(Relaxed) && pmu::overflowed()) {
         return;
     }
     let now = cpu::counter();
-    of(me).at_pc.store(pc, Relaxed);
-    of(me).at_sp.store(sp, Relaxed);
-    of(me).at_flags.store(flags, Relaxed);
-    of(me).at_counter.store(now, Relaxed);
 
     let taken = crate::irq_census::taken_here();
     let moved = of(me).progress.swap(taken, Relaxed) != taken;
@@ -267,173 +201,28 @@ pub fn sample(pc: u64, sp: u64, flags: u64) {
     if moved || trap::frame_interrupts_enabled(flags) {
         of(me).still_since.store(now, Relaxed);
     } else if now.wrapping_sub(of(me).still_since.load(Relaxed)) >= BOUND_TICKS.load(Relaxed) {
-        locked_up(me, pc, sp, now)
+        locked_up()
     }
     // **After the decision and never before it.** Re-arming clears the mask
     // hardware set on delivery; leaving it set is what stops a second NMI
-    // landing on the stack this one is still standing on while it seals, which
+    // landing on the stack this one is still standing on while it resets, which
     // `arch::trap::nmi`'s `nested_nmi` would answer by stopping the machine
     // without resetting it.
-    if mine {
-        pmu::rearm(PERIOD.load(Relaxed));
-    }
+    pmu::rearm(PERIOD.load(Relaxed));
 }
 
-/// Seal where every CPU is and hand the machine back.
-///
-/// Runs on the stuck CPU itself, from its own NMI frame, which is the only
-/// context that has its `pc`. No CPU is asked anything from here: an NMI sent
-/// to a sibling already inside its own would enter `nested_nmi` and stop the
-/// machine instead of resetting it, so the record is built out of what each CPU
-/// last wrote about itself.
-fn locked_up(me: usize, pc: u64, sp: u64, now: u64) -> ! {
+/// Hand the machine back, from the stuck CPU's own NMI. No CPU is asked
+/// anything from here: an NMI sent to a sibling already inside its own would
+/// enter `nested_nmi` and stop the machine instead of resetting it.
+fn locked_up() -> ! {
     if !crate::deadline::claim_the_reset() {
-        // Another CPU is already sealing and resetting. This one has nothing to
-        // add and must not race it into the page.
+        // Another CPU is already resetting.
         cpu::halt();
     }
-    crate::drivers::panic_console::seal_wedge(format_args!(
-        "{}",
-        Report { me, pc, sp, now, cpus: smp::cpu_count() as usize }
-    ));
-    // The seal first, because the USB stop `reset_now` makes before it writes
-    // the register is bounded but not instant, and this record is the
-    // diagnostic the whole mechanism exists for.
     crate::power::reset_now()
 }
 
-/// What this CPU was waiting for before a nested acquisition took the slot, so
-/// [`spinning_on_nothing`] puts it back rather than clearing it.
-///
-/// **A contended spin is not the innermost thing this CPU does.**
-/// `sync::Lock::lock` polls TLB shootdowns from inside its own spin, and that
-/// poll takes locks of its own; a nested acquisition that succeeded used to zero
-/// the slot while the outer spin was still waiting, and the record a lockup then
-/// sealed named no lock for the one CPU that was holding one.
-#[derive(Clone, Copy)]
-pub struct Spinning {
-    lock: u64,
-    at: u64,
-}
-
-/// Note that this CPU is inside a contended acquisition, so a record sealed
-/// while it is there can name what it is waiting for.
-///
-/// Called from `sync::Lock::lock`'s spin — the contended path only, so an
-/// uncontended acquisition costs nothing — and by nothing else.
-#[must_use]
-pub fn spinning_on(lock: u64, at: &'static core::panic::Location<'static>) -> Spinning {
-    let me = percpu::cpu_id() as usize;
-    let was = Spinning { lock: of(me).spin_lock.load(Relaxed), at: of(me).spin_at.load(Relaxed) };
-    of(me).spin_at.store(at as *const _ as u64, Relaxed);
-    // Last, and what the reader tests: a non-zero lock means the site beside it
-    // was already stored — `Release`, so that holds on another CPU's record.
-    of(me).spin_lock.store(lock, Release);
-    was
-}
-
-/// The acquisition succeeded; this CPU is waiting for whatever it was waiting
-/// for before, which is nothing at the outermost spin.
-pub fn spinning_on_nothing(was: Spinning) {
-    let me = percpu::cpu_id() as usize;
-    of(me).spin_at.store(was.at, Relaxed);
-    of(me).spin_lock.store(was.lock, Release);
-}
-
-/// Milliseconds, from a `cpu::counter` span. One `div`, and only on the path that has
-/// already decided to end the machine.
-struct Ms(u64);
-
-impl fmt::Display for Ms {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match TICKS_PER_MS.load(Relaxed) {
-            0 => f.write_str("an unmeasured span"),
-            per_ms => write!(f, "{} ms", self.0 / per_ms),
-        }
-    }
-}
-
-/// The lock one CPU is inside a contended acquisition of, as the record says it.
-struct Waiting(usize);
-
-impl fmt::Display for Waiting {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // `Acquire`: pairs with the store that set it, so the site read below is
-        // at least the one stored before it.
-        let lock = of(self.0).spin_lock.load(Acquire);
-        if lock == 0 {
-            return Ok(());
-        }
-        write!(f, " spinning on the lock at {lock:#x}")?;
-        let at = of(self.0).spin_at.load(Relaxed);
-        if at != 0 {
-            // SAFETY: written by `spinning_on` from a `&'static Location`, which
-            // `#[track_caller]` places in this image's read-only data and which
-            // outlives every reader; the store of `lock` above is what publishes
-            // that this one is set.
-            let at: &'static core::panic::Location<'static> = unsafe { &*(at as *const _) };
-            write!(f, ", taken at {at}")?;
-        }
-        Ok(())
-    }
-}
-
-/// What the machine looked like from the CPU that ended it.
-struct Report {
-    me: usize,
-    pc: u64,
-    sp: u64,
-    now: u64,
-    cpus: usize,
-}
-
-impl fmt::Display for Report {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { me, pc, sp, now, cpus } = *self;
-        writeln!(
-            f,
-            "{LOCKED_UP}: cpu{me} has taken no interrupt for {}, with `IF` clear at every sample \
-             in that span. Its bound is {} ms.",
-            Ms(now.wrapping_sub(of(me).still_since.load(Relaxed))),
-            BOUND_MS.load(Relaxed),
-        )?;
-        writeln!(f, "  pc={}", At(pc))?;
-        writeln!(f, "  sp={sp:#018x}{}", Waiting(me))?;
-        // Every CPU, and each line is what that CPU last wrote about itself:
-        // the holder of whatever the stuck one is waiting for is somewhere in
-        // this list, and nothing else in a wedged machine can point at it.
-        for cpu in 0..cpus {
-            // The live count, not the sampled one: a CPU whose total has moved
-            // since its own last sample is a CPU that is still running, which
-            // is the first thing a reader of a wedged machine wants to know.
-            let irqs = crate::irq_census::taken_by(cpu as u32).unwrap_or(0);
-            let at = of(cpu).at_counter.load(Relaxed);
-            if at == 0 {
-                writeln!(
-                    f,
-                    "  cpu{cpu} irqs={irqs}, never sampled: halted through every period, or no \
-                     counter of its own{}",
-                    Waiting(cpu),
-                )?;
-                continue;
-            }
-            writeln!(
-                f,
-                "  cpu{cpu} irqs={irqs} (={} when sampled {} ago) if={} at {}{}",
-                of(cpu).progress.load(Relaxed),
-                Ms(now.wrapping_sub(at)),
-                u8::from(trap::frame_interrupts_enabled(of(cpu).at_flags.load(Relaxed))),
-                At(of(cpu).at_pc.load(Relaxed)),
-                Waiting(cpu),
-            )?;
-        }
-        f.write_str("The tail of the log ring follows — which is what nothing was draining.\n")
-    }
-}
-
-
-/// Whether `cpu` armed a counter of its own — what separates a boot the counter
-/// samples from one only the control's sender reaches.
+/// Whether `cpu` armed a counter of its own.
 fn has_a_counter(cpu: usize) -> bool {
     of(cpu).armed_pmu.load(Relaxed)
 }

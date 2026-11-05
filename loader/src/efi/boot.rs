@@ -118,7 +118,6 @@ pub enum AllocateType {
     AnyPages,
     /// Pages whose last byte is at or below this address.
     MaxAddress(u64),
-    Address(u64),
 }
 
 /// `OpenProtocol`'s two attributes this loader passes (§7.3.9).
@@ -275,7 +274,6 @@ impl BootServices {
         let (kind, mut at) = match kind {
             AllocateType::AnyPages => (0, 0),
             AllocateType::MaxAddress(last) => (1, last),
-            AllocateType::Address(at) => (2, at),
         };
         // SAFETY: the out parameter is a live `u64`.
         unsafe { (self.allocate_pages)(kind, LOADER_DATA, pages, &mut at) }.ok().map(|()| at)

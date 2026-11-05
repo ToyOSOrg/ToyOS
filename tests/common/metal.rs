@@ -260,8 +260,8 @@ impl Readback {
 
     /// Every `logkeeper` file this boot wrote, as one text, less every program's
     /// line ([`bootlog::kernel_records`]): no program's line is read as the kernel's.
-    /// It ends where the supervisor had `logkeeper` make it whole, so what the kernel writes
-    /// inside the stop or a wedge is only on the page ([`Self::after_the_reset`]).
+    /// It ends where the supervisor had `logkeeper` make it whole: what the kernel
+    /// writes inside the stop or a wedge reaches no file.
     pub fn kernel(&self) -> Serial {
         Serial::named(&format!("{}'s kernel log", self.label), self.kernel.as_str())
     }
@@ -271,8 +271,7 @@ impl Readback {
         Serial::named(&format!("{}'s log", self.label), self.log.as_str())
     }
 
-    /// `loader.log`, both passes: the one before the kernel handoff and, under
-    /// `loaderlog::SEPARATOR`, the one that read the black box afterwards.
+    /// `loader.log`: the pass that handed this boot its kernel.
     pub fn loader(&self) -> Serial {
         Serial::named(&format!("{}'s loader.log", self.label), self.loader.as_str())
     }
@@ -301,120 +300,6 @@ impl Readback {
     /// When `Boot: complete` was written, on the same clock.
     pub fn complete_record_ms(&self) -> Option<u64> {
         self.kernel.lines().find(|line| line.contains(bootlog::COMPLETE)).and_then(bootlog::record_millis)
-    }
-
-    /// Whether this boot's log is whole to its stop, and the stop's own tail
-    /// is on the page.
-    ///
-    /// **The file ends where the supervisor had `logkeeper` make it whole.** The stop stops
-    /// `logkeeper` with every other thread, so what the kernel says from there on
-    /// goes on the black-box page under the boot's `DONE` seal and comes back
-    /// in the next loader pass, and this reads it there — for every boot,
-    /// because the suite's whole verdict is read out of those two files.
-    pub fn log_is_whole_to_its_stop(&self) -> Result<(), String> {
-        let after = self.after_the_reset()?;
-        let text = after.text();
-        // A boot its own deadline or the lockup detector ended never finished
-        // `quiesce`, so it seals no tail. Owed by the boots that handed the
-        // machine back, and only by them.
-        if !text.contains(bootlog::HANDED_BACK) {
-            return Ok(());
-        }
-        if bootlog::stopping_line(&self.log).is_none() {
-            return Err(format!(
-                "{}'s pass after the reset read DONE, and its log carries no {:?} from the supervisor: \
-                 nothing made the file whole before the stop",
-                self.label,
-                bootlog::STOPPING,
-            ));
-        }
-        if !text.contains(bootlog::LOG_TAIL_HEAD) || bootlog::handed_back(text).is_err() {
-            return Err(format!(
-                "{}'s pass after the reset carries no {:?} ending in {:?}: this boot's kernel \
-                 sealed no tail of its stop, so nothing says what it did after the file",
-                self.label,
-                bootlog::LOG_TAIL_HEAD,
-                bootlog::REBOOTING,
-            ));
-        }
-        Ok(())
-    }
-
-    /// Whether this boot's deadline, where it expired, fired within one timer
-    /// period of its bound: every CPU a staged wedge holds re-arms a one-shot of
-    /// one scheduler quantum, and the timer entry is what polls. Read out of the
-    /// record the pass after the reset printed, because that is the only
-    /// channel a wedged boot has.
-    pub fn deadline_on_time(&self) -> Result<(), String> {
-        let Some(late) = toyos_metal::deadline_lateness_ms(&self.loader, &self.kernel)
-        else {
-            return Ok(());
-        };
-        within_one_period(late?, kernel::sched::task::QUANTUM_NS)
-            .map_err(|why| format!("{}'s boot deadline {why}", self.label))
-    }
-
-    /// What the on-screen panel cost this boot, off the kernel's own census.
-    ///
-    /// **Off the page, because no file carries it.** A boot that hands the
-    /// machine back writes the census inside its stop, after `logkeeper` has
-    /// stopped, and seals it among its tail; a boot a bound ended seals it with
-    /// its record. The page from *this* boot is the one after the separator:
-    /// an earlier chain's report can sit in the pass before it.
-    pub fn panel(&self) -> Option<bootlog::Panel> {
-        let after = self.after_the_reset().ok()?;
-        bootlog::panel_census(after.text())
-    }
-
-    /// The same for the other bound: a hard-lockup sample finds a stuck cpu
-    /// within one of its sample periods past its bound. Read out of the same
-    /// channel and for the same reason.
-    pub fn lockup_on_time(&self) -> Result<(), String> {
-        let Some(late) = toyos_metal::lockup_lateness_ms(&self.loader) else {
-            return Ok(());
-        };
-        within_one_period(late?, toyos_tco::HARD_LOCKUP_SAMPLE_NS)
-            .map_err(|why| format!("{}'s hard-lockup detector {why}", self.label))
-    }
-
-    /// The stop's own record, off the page its tail is sealed on: the stop
-    /// writes it after `logkeeper` has stopped, so no file carries it.
-    fn stop_record(&self) -> Option<toyos_quiesce::Record> {
-        toyos_metal::park(self.after_the_reset().ok()?.text())
-    }
-
-    pub fn stop_completed(&self) -> Result<(), String> {
-        let handed_back =
-            self.after_the_reset().is_ok_and(|after| after.text().contains(bootlog::HANDED_BACK));
-        match self.stop_record() {
-            None if handed_back => Err(format!(
-                "{} handed the machine back and its page carries no record of the stop",
-                self.label
-            )),
-            None => Ok(()),
-            Some(park) if !park.stopped_the_machine() => Err(format!(
-                "{}'s stop gave up on {} userland thread(s) that never reached a safe point, so \
-                 this boot's sync and its last word are claims about a machine that was still \
-                 running:\n    {park}",
-                self.label,
-                park.sweep.running,
-            )),
-            Some(_) => Ok(()),
-        }
-    }
-
-    /// The loader pass **after** the kernel's reset, which is where a chain
-    /// report is. `None` where the chain did not go round — which for a boot
-    /// that ended itself is a finding, not an absence.
-    pub fn after_the_reset(&self) -> Result<Serial, String> {
-        let after = bootlog::after_the_reset(&self.loader).ok_or_else(|| {
-            format!(
-                "{}'s loader.log carries no pass after the reset: the loader did not point \
-                 `BootNext` at itself, or the machine went back to the boot manager\n{}",
-                self.label, self.loader
-            )
-        })?;
-        Ok(Serial::named(&format!("{}'s loader pass after the reset", self.label), after))
     }
 
     /// What the kernel recorded about the process the *runner* spawned as
@@ -548,17 +433,6 @@ impl Readback {
     }
 }
 
-/// A bound's lateness against the period of what polls it, and a millisecond
-/// either way for the two floored readings the lateness is the difference of.
-fn within_one_period(late_ms: i64, period_ns: u64) -> Result<(), String> {
-    let period_ms = i64::try_from(period_ns / 1_000_000).expect("a period in milliseconds");
-    if (-1..=period_ms + 1).contains(&late_ms) {
-        Ok(())
-    } else {
-        Err(format!("fired {late_ms} ms past its bound, and what polls it runs every {period_ms} ms"))
-    }
-}
-
 /// One image, and every test that rides it.
 /// The bytes of every line of `text` that carries `marker`, newline included:
 /// what of a load's lines a file read back off the log volume holds.
@@ -614,7 +488,7 @@ impl Batch {
             assert!(STICK_LOAD_DEADLINE_MS < self.bound_ms(), "the load's deadline is past its runner's bound");
             return STICK_LOAD_DEADLINE_MS;
         }
-        toyos_metal::bound_for(&self.params, self.bound_ms())
+        toyos_tco::wedge_bound_ms(self.bound_ms())
     }
 }
 
@@ -1189,38 +1063,16 @@ pub fn judge_readbacks(
             back.back_secs
         );
         eprintln!("    phases: {}", back.phases);
-        let panel = back.panel();
-        if let Some(panel) = panel {
-            eprintln!(
-                "    the panel painted {} time(s) and put {} px on the glass",
-                panel.paints, panel.pixels
-            );
-        }
         let mut findings: Vec<String> = Vec::new();
-        // The census crosses only on the page, and neither a page the pass
-        // after the reset cleared as another image's nor one no kernel sealed
-        // carries one.
-        let owes_a_panel = bootlog::foreign_done(&back.loader).is_err() && !bootlog::sealed_nothing(&back.loader);
-        for (field, value, owed) in [
-            ("complete_ms", back.boot_ms, true),
-            ("panel_max_us", panel.map(|panel| panel.max_micros), owes_a_panel),
-            ("panel_us", panel.map(|panel| panel.micros), owes_a_panel),
-        ] {
-            let name = format!("boot.{label}.{field}");
-            match value {
-                Some(value) => findings.extend(back.measured(&name, value).err()),
-                None if owed => findings.push(format!("{name}: this boot recorded none")),
-                None => {}
-            }
+        if let Some(ms) = back.boot_ms {
+            findings.extend(back.measured(&format!("boot.{label}.complete_ms"), ms).err());
+        } else {
+            findings.push(format!("boot.{label}.complete_ms: this boot recorded none"));
         }
-        // **Every boot, and before any verdict is read out of its log.** A
-        // test's judge reads the file the boot left on the disk, so a file that
-        // stops before the boot does turns a machine fact into a missing line —
-        // and the missing line is what a reader would have to guess about.
-        findings.extend(back.log_is_whole_to_its_stop().err());
-        findings.extend(back.stop_completed().err());
-        findings.extend(back.deadline_on_time().err());
-        findings.extend(back.lockup_on_time().err());
+        // The come-back half of `bootlog`'s contract: a stop that hung past its
+        // mark is ended by the deadline and comes back late, which reds where
+        // the deadline is past twice this boot's recorded come-back.
+        findings.extend(back.measured(&format!("boot.{label}.back_secs"), back.back_secs).err());
         findings.extend(back.one_clock().err());
         findings.extend(back.declaration_not_refused().err());
         for why in &findings {

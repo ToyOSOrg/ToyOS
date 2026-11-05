@@ -26,5 +26,6 @@ a home.
 black-box page, and that page is gone: the loader's claim was removed whole
 after the T14's firmware stopped returning from `ExitBootServices` with a
 custom UEFI memory type in its map. A truncated map is now memory the kernel
-silently never sees. The channel comes back when the page does, under an
-ordinary memory type with its address on the kernel parameter line.
+silently never sees, and the page will not come back: the loader now asks the
+firmware to overwrite memory before every next boot, so the channel is
+whatever `issues/a-crash-record-survives-a-reset-outside-ram.md` builds.

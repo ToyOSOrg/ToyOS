@@ -13,7 +13,7 @@ Its whole requirement is that some CPU still takes an interrupt".
 bound on a *machine*, and its whole requirement is that some CPU still takes
 an interrupt: it is polled from the timer entry."
 
-The calls say the narrower thing. `poll` and `poll_in_kernel` are reached from
+The calls say the narrower thing. `poll` is reached from
 the timer entries alone: x86-64's Ring 0 naked entry and `timer_handler`
 (`kernel/src/arch/x86_64/idt/timer.rs`), and AArch64's timer arm
 (`kernel/src/arch/aarch64/trap.rs`); `rg -n 'deadline::poll' kernel/src` finds

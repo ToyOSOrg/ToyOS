@@ -491,8 +491,6 @@ pub fn pass(dispose: Dispose) {
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("a scheduler pass");
     crate::preempt::disable();
-    #[cfg(feature = "boot-actuators")]
-    crate::deadline::wedge_if_staged();
     // Cleared before the pass, so a wake landing during it survives into the next poll.
     crate::preempt::clear_need_resched();
     // Before the pass picks, so a wake this posts is in the run queue by the

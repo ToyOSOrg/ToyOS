@@ -10,9 +10,9 @@ opened: 2026-09-16
 `kernel/src/deadline.rs` reads the bound off the parameter line (`claim`),
 turns it into a counter deadline once there is a clock (`start`), and `poll`
 compares one relaxed load of `AT_COUNTER` against `arch::cpu::counter` from the
-timer interrupt entry — `kernel/src/arch/x86_64/idt/timer.rs`, through
-`poll_in_kernel` in Ring 0 and `poll` in Ring 3 — and calls `expire`, which
-seals the record and writes the reset register through `power::reset_now`.
+timer interrupt entry in both rings (`kernel/src/arch/x86_64/idt/timer.rs`)
+and calls `expire`, which writes the reset register through
+`power::reset_now`.
 `start` arms the other half of the same parameter,
 `crate::hardlockup::start(ms)`: a bound of `toyos_tco::hard_lockup_bound_ms`,
 `deadline_ms / 2` (`lib/tco/src/lib.rs`), sampled by an NMI every
@@ -102,20 +102,13 @@ could not be loaded, and the disk went offline at 5.556 s. A boot with no
 runner asks for no reboot; the deadline was the only bound left, and it fired
 133 s late.
 
-**That tail's census was two processes' ends, and a process's end takes none
-now.** The next occurrence carries one census, the deadline's own: `expire`
-seals the machine's census into the `WEDGED` record above the ring's tail
-(`kernel/src/census.rs`), read at the moment the bound fired rather than at
-whichever process last died before it, and names where each CPU's timer last
-found the kernel (`deadline::KernelPcs`).
+## The instrument is gone
 
-## The instrument that measures this already exists
-
-`tests/metal/src/lib.rs`'s `deadline_lateness_ms` computes exactly
-`reached − bound` out of the `DEADLINE_EXPIRED` line (`build/bootlog.rs`).
-The arithmetic above is the instrument's own, done by hand because the run
-was `toyos-metal` invoked directly and not the harness. No second instrument
-is owed; a cause is.
+The `WEDGED` record this was read from crossed the reset in the black-box
+page, which the memory-overwrite request deleted: a deadline's expiry now
+reaches no channel on a machine with no serial port, and the next occurrence
+on the T14 shows only as a boot that came back late. Restoring a record
+across the reset is `issues/a-crash-record-survives-a-reset-outside-ram.md`.
 
 ## What is known and what is not
 

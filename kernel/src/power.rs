@@ -16,9 +16,7 @@
 //! past it reaches no wire. What an end says
 //! through the ring it says above the drain (`arch::power::settle`);
 //! `arch::power::off` and `arch::power::reset` log nothing, and a panic in
-//! either drains for itself. The black box's page is another reader and an
-//! earlier one: its tail is sealed before either end is entered
-//! (`log::seal_tail`), so what `settle` says is on the console and in no page.
+//! either drains for itself.
 
 use crate::log::console::StopWire;
 
@@ -48,8 +46,8 @@ pub fn reboot(mut wire: StopWire) -> ! {
 /// life — so a CPU stuck inside one holds what the stop would wait for, on
 /// exactly the boots `crate::deadline` exists for. This takes no lock.
 ///
-/// A machine with no reset halts here rather than returning: the caller has
-/// already sealed why, and holding is what such a machine has always done.
+/// A machine with no reset halts here rather than returning: holding is what
+/// such a machine has always done.
 pub fn reset_now() -> ! {
     // **Here and not at either caller**: the stop is registers and nothing
     // else, written for the panic path, so it takes no lock and allocates

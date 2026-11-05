@@ -311,12 +311,6 @@ impl File {
         self.call(|f, this| unsafe { (f.write)(this, &mut size, buffer.as_ptr()) }).ok().map_err(|status| (status, size))
     }
 
-    /// `SetPosition` (§13.5.8); `u64::MAX` is the end of the file.
-    pub fn set_position(&mut self, position: u64) -> Result<(), Status> {
-        // SAFETY: a plain call on the handle.
-        self.call(|f, this| unsafe { (f.set_position)(this, position) }).ok()
-    }
-
     /// `Flush` (§13.5.11).
     pub fn flush(&mut self) -> Result<(), Status> {
         // SAFETY: a plain call on the handle.

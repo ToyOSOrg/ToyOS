@@ -61,23 +61,23 @@ fails to build. `Armed`'s `(0, _)` arm, which nothing reaches, is gone.
 
 **Then, once loader stage 7 has taken Ubuntu**, whose `iTCO_wdt_probe` clears
 `SECOND_TO_STS` (Linux 6.12, `drivers/watchdog/iTCO_wdt.c:545-560`), out of the
-loop: **the reading**, `watchdog_resets`' metal row in
-`issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`, which
-judges the AMD bench's FCH and has no TCO judge yet. The
+loop: **the reading**. Its metal row, `watchdog_resets`, judged the AMD
+bench's FCH off the loader pass after the reset, and went with that pass and
+the `wedge-before-reset` arm when the black-box page did; this reading brings
+both back as a row of its own, judged off the next ToyOS boot. The
 owner's ruling (2026-10-03): one T14 boot may stop feeding the chipset's
 watchdog on purpose, "only if its quick i dont want tests doing nothing for a
 long time". So the row's wait is bounded by the watchdog's own bound and fails
 loudly past it, with no long idle wait. One T14 boot is armed with `watchdog`
 and `wedge-before-reset`, under a deadline past its job list and
-`toyos_tco::BOUND_MS`, which `toyos_tco::STAGED_BOUND_MS` is not. The fed
+`toyos_tco::BOUND_MS`. The fed
 control is `watchdog_fed`, once
 `issues/watchdog-fed-ends-its-boot-before-the-bound-it-judges.md`
 closes.
 
 **Exit**: the next armed kernel's `TCO2_STS` read, in `arch::watchdog`'s
-`arm`, says the last boot ended in a TCO reset, and the page still reads
-`ARMED` where the deadline would have sealed a record; the armed boot after
-that says no TCO reset. That closes
+`arm`, says the last boot ended in a TCO reset; the armed boot after that
+says no TCO reset. That closes
 `issues/tco2-sts-clearing-is-verified-on-qemu-only.md`. Otherwise the
 T14 exit below waits on the TCO defect.
 

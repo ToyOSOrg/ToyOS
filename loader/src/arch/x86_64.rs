@@ -62,28 +62,6 @@ pub fn microcode_cpu() -> Option<Result<toyos_microcode::Cpu, &'static str>> {
     })
 }
 
-/// `CLFLUSH`'s line on every x86-64 part.
-const LINE: u64 = 64;
-
-/// Every line of `[at, at + len)` written back out of this CPU's caches and
-/// every other CPU's, before this returns.
-pub fn write_back(at: u64, len: usize) {
-    let mut line = at & !(LINE - 1);
-    while line < at + len as u64 {
-        // SAFETY: `CLFLUSH` writes back and invalidates the line containing the
-        // address and touches nothing else; the caller names memory it
-        // allocated, and the instruction faults on nothing a canonical address
-        // can be.
-        unsafe {
-            core::arch::asm!("clflush [{addr}]", addr = in(reg) line as *const u8, options(nostack, preserves_flags));
-        }
-        line += LINE;
-    }
-    // SAFETY: `SFENCE` orders those writebacks ahead of whatever ends this
-    // machine; it touches no memory or register.
-    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
-}
-
 /// What the loader says about the CPU as firmware handed it over, or why the
 /// kernel cannot run on it. A UEFI x86-64 loader runs in long mode at CPL 0,
 /// the state the kernel's entry takes, so there is nothing to say or refuse.

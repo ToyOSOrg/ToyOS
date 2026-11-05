@@ -1529,10 +1529,8 @@ fn check_params(root: &Path, params: &[String]) {
 /// `starts_with`. The path is here so the two lists can be checked against each
 /// other — a prefix only one of them knows is an image the other refuses.
 const VALUED_PARAMS: &[(&str, &str)] = &[
-    ("toyos_blackbox::PARAM", toyos_blackbox::PARAM),
     ("toyos_tco::DEADLINE_PARAM", toyos_tco::DEADLINE_PARAM),
-    // The loader's words about the slot it booted, appended as it appends the
-    // black box's.
+    // The loader's words about the slot it booted.
     ("toyos_abi::boot::SLOT_PARAM", toyos_abi::boot::SLOT_PARAM),
     ("toyos_abi::boot::SLOT_REFUSED_PARAM", toyos_abi::boot::SLOT_REFUSED_PARAM),
 ];
@@ -2747,8 +2745,8 @@ mod tests {
     #[test]
     fn the_pre_flash_gate_clears_a_valued_parameter_and_refuses_an_actuator() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert_eq!(flashable_params(root, &[format!("{}0x1000", toyos_blackbox::PARAM)]), Ok(()));
-        assert!(flashable_params(root, &["wedge-before-reset".to_string()]).is_err());
+        assert_eq!(flashable_params(root, &[format!("{}40000", toyos_tco::DEADLINE_PARAM)]), Ok(()));
+        assert!(flashable_params(root, &["test-late-panic".to_string()]).is_err());
     }
 
     #[test]

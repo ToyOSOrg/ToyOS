@@ -1,8 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use toyos_blackbox::{PHYS, State};
-use toyos_build::bootlog::{self, REBOOTING};
+use toyos_build::bootlog;
 
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
@@ -93,6 +92,49 @@ pub fn machine_shutdown_short_stop(test_config: &Path) -> Result<(), String> {
         return Err(format!("the stop left no thread running, so this boot staged no short stop: {record}"));
     }
     eprintln!("  [power] a short stop, then the power-off: {record}");
+    Ok(())
+}
+
+/// The loader's lines about the proof, in `loader/src/proof.rs`.
+const NO_STOP_MARK: &str = "Proof: the last boot left no stop mark, so it proves no image";
+const STOPPED_CLEANLY: &str = "stopped cleanly";
+const FLOOR_RAISED: &str = "by the boot that proved it";
+
+/// A boot that stops cleanly proves its image: `logkeeper` marks the log
+/// partition at the stop's flush, and the next loader pass takes the mark and
+/// raises the anti-rollback floor to the image's signed version. The first
+/// pass, on a fresh image, has no mark and raises nothing.
+pub fn a_clean_stop_proves_its_image(test_config: &Path) -> Result<(), String> {
+    let options = BootOptions { profile: qemu::Profile::Headless, qmp: true, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let first = serial::Serial::named("the first loader pass", qemu.loader_log());
+    first.must_say(NO_STOP_MARK)?;
+    says_nothing_of(&first, FLOOR_RAISED)?;
+    let mut console = qemu.boot_log().to_string();
+    qemu.reset_on_reboot();
+    let asked_at = console.len();
+    writeln!(qemu.stdin_mut(), "run reboot").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    qemu::await_marker_new(&mut qemu, &mut console, bootlog::REBOOTING, asked_at, "the clean stop")?;
+    let rebooted_at = console.len();
+    qemu::await_marker_new(&mut qemu, &mut console, bootlog::COMPLETE, rebooted_at, "the next boot")?;
+    // The second pass is on the console where the loader writes the console,
+    // and otherwise the 16550's file's second.
+    let after = &console[asked_at..];
+    let uart = qemu.loader_log();
+    let first_in_uart = uart.find(bootlog::LOADER_FIRST_LINE);
+    let next = match after.find(bootlog::LOADER_FIRST_LINE) {
+        Some(at) => after[at..].to_string(),
+        None => match uart.rfind(bootlog::LOADER_FIRST_LINE).filter(|at| Some(*at) != first_in_uart) {
+            Some(at) => uart[at..].to_string(),
+            None => return Err(format!("no loader pass after the reboot:\n{uart}\n{after}")),
+        },
+    };
+    let next = serial::Serial::named("the loader pass after the reboot", next);
+    let proved = next.must_say(STOPPED_CLEANLY)?.to_string();
+    let raised = next.must_say(FLOOR_RAISED)?;
+    eprintln!("  [power] {}", proved.trim());
+    eprintln!("  [power] {}", raised.trim());
     Ok(())
 }
 
@@ -223,31 +265,6 @@ fn fch_armed(loader: &serial::Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// A wedge under the chipset watchdog, read off the boot and the loader pass
-/// after its reset: the kernel took the loader's arm over and fed it to the
-/// stop where the wedge is staged; then the machine reset with nothing in the
-/// kernel ending it, and the FCH says its watchdog did.
-pub fn watchdog_reset_chain(
-    kernel: &serial::Serial,
-    log: &serial::Serial,
-    after: &serial::Serial,
-) -> Result<(), String> {
-    kernel.must_say(ARMED_ON_ARRIVAL)?;
-    kernel.must_say(&kernel_feeds())?;
-    bootlog::stopping_line(log.text()).ok_or_else(|| {
-        format!("the armed boot's log carries no {:?}: it never reached the stop the wedge is staged at", bootlog::STOPPING)
-    })?;
-    // An ARMED page is a kernel that neither its deadline nor its lockup
-    // detector ended; one lost with the reset is a black box the FCH's reset
-    // does not keep, and fails here.
-    after.must_say(&armed_and_nothing_else())?;
-    let said = after.must_say(toyos_tco::fch::RESET_SAID)?.to_string();
-    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
-    says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
-    eprintln!("  [power] {}", said.trim());
-    Ok(())
-}
-
 /// The control: a boot that did not name the parameter arms nothing, and the
 /// kernel says nothing about a timer either way.
 pub fn watchdog_quiet(
@@ -278,205 +295,6 @@ pub fn says_nothing_of(channel: &serial::Serial, needle: &str) -> Result<(), Str
     }
 }
 
-/// A line of the first boot's own report, which has to come back out of DRAM on
-/// the boot after it: the panic's message, so what is recovered is the crash
-/// and not merely a page that checksummed.
-const BLACKBOX_WITNESS: &str = "test-late-panic: on-screen console check";
-
-/// The first record `serial::init` writes, which is the first thing the kernel
-/// does after taking the page.
-const SERIAL_IS_UP: &str = "serial: 16550 loopback read";
-
-/// The page armed and its address handed to the kernel, as the two sides say it.
-fn armed_line() -> String {
-    format!("{} {PHYS:#x} armed", bootlog::BLACKBOX_HEAD)
-}
-
-fn kernel_took_it() -> String {
-    format!("black box: {PHYS:#x} is this boot's")
-}
-
-/// What the loader writes about a page that still read ARMED, which is a kernel
-/// that reached neither of the two paths that write one.
-fn armed_and_nothing_else() -> String {
-    format!("{} the page still reads {}", bootlog::PREVIOUS_PANIC, State::Armed.named())
-}
-
-/// The loader pass after a deliberate reboot: it read DONE, said so, and ended
-/// the chain rather than booting another kernel.
-///
-/// On the T14 this pass is already what every metal boot does — the loader
-/// points `BootNext` at itself before each handoff and a pass with a finding
-/// appends to the same `loader.log` — so the argument is that file's tail.
-pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
-    after.must_say(bootlog::HANDED_BACK)?;
-    the_tail_is_the_stops(after)?;
-    // The distinction the whole state machine exists for: a deliberate stop is
-    // not a panic and not a kernel that vanished.
-    says_nothing_of(after, &armed_and_nothing_else())?;
-    says_nothing_of(after, BLACKBOX_WITNESS)?;
-    // The chain ends rather than going round: a pass that booted a kernel would
-    // have said so, and this one must not have.
-    says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
-    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
-    eprintln!("  [power] a deliberate reboot sealed DONE and the chain ended in a reset");
-    Ok(())
-}
-
-/// The tail the stop sealed under the seal: the one channel for what the
-/// kernel said after `logkeeper` stopped — its stop record, the panel's census, and
-/// the last word. Read after the seal,
-/// because the same lines are in the capture on the first boot's console.
-fn the_tail_is_the_stops(after: &serial::Serial) -> Result<(), String> {
-    let head = after.must_say_after(bootlog::HANDED_BACK, bootlog::LOG_TAIL_HEAD)?.to_string();
-    let tail: Vec<&str> = after
-        .text()
-        .lines()
-        .skip_while(|line| !line.contains(&head))
-        .filter(|line| line.contains(bootlog::LOG_TAIL))
-        .collect();
-    if !tail.iter().any(|line| toyos_quiesce::Record::parse(line).is_some()) {
-        return Err(format!("the page's tail carries no stop record:\n{}", tail.join("\n")));
-    }
-    for owed in [bootlog::PANEL_CENSUS, REBOOTING] {
-        if !tail.iter().any(|line| line.contains(owed)) {
-            return Err(format!("the page's tail carries no {owed:?}:\n{}", tail.join("\n")));
-        }
-    }
-    Ok(())
-}
-
-/// A machine that died took its census as one that stops does: the record its
-/// death sealed carries every line of `kernel/src/census.rs`, written by the
-/// seal itself, since no process's end leaves one in the ring for a tail to
-/// carry.
-fn death_took_the_census(after: &serial::Serial) -> Result<(), String> {
-    for line in ["irq: cpu0 ", "tlb: shootdowns=", "irq: unclaimed vectors", bootlog::PANEL_CENSUS] {
-        after.must_say_after(bootlog::PREVIOUS_PANIC, line)?;
-    }
-    Ok(())
-}
-
-/// The `cpuN` the bracket of `line`'s record names, before `needle`.
-fn record_cpu<'a>(line: &'a str, needle: &str) -> Option<&'a str> {
-    line.split(needle)
-        .next()?
-        .split(|c: char| c.is_whitespace() || c == '[' || c == ']')
-        .rfind(|word| word.strip_prefix("cpu").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
-}
-
-/// The metal half of [`boot_deadline_ends_a_wedge`]: a T14 boot that wedged on
-/// purpose ended itself, and the pass after the reset read why off the page.
-///
-/// **The only evidence a wedge can leave on this machine.** `logkeeper` writes the
-/// kernel log to the log volume, and a wedged boot's `logkeeper` never runs again — so
-/// everything after the wedge exists only in the record ring, and the black box
-/// is the one channel that carries a copy of it across the reset.
-pub fn deadline_wedge_chain(after: &serial::Serial) -> Result<(), String> {
-    after.must_say(bootlog::PREVIOUS_PANIC)?;
-    death_took_the_census(after)?;
-    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?.to_string();
-    // The control: the machine reached the staged wedge, and then never reached
-    // the reset it was one statement away from.
-    let staged = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
-    // And the CPU that asked for it arrived through the syscall gate with
-    // interrupts open: one that arrived deaf is the gate masking a syscall's
-    // body. Keyed to that CPU, because every other one arrives awake from a
-    // pass whatever the gate does.
-    let cpu = record_cpu(staged, bootlog::WEDGE_STAGED)
-        .ok_or_else(|| format!("no cpu in the record that staged the wedge: {staged:?}"))?;
-    after.must_say_after(bootlog::PREVIOUS_PANIC, &format!("wedge: {cpu} {}", bootlog::WEDGE_AWAKE))?;
-    says_nothing_of(after, bootlog::WEDGE_ARRIVED_DEAF)?;
-    // And the seal names where that CPU stood: its timer's last kernel frame is
-    // inside the spin, resolved by the kernel against its own symbols.
-    let pc = after.must_say_after(bootlog::PREVIOUS_PANIC, &format!("{cpu}{}", bootlog::SEAL_PC))?;
-    if !pc.contains(bootlog::WEDGE_SPIN) {
-        return Err(format!("the seal puts {cpu} outside the wedge's spin `{}`: {pc:?}", bootlog::WEDGE_SPIN));
-    }
-    says_nothing_of(after, bootlog::REBOOTING)?;
-    // **The two bounds composing, on the one machine that has both.** This
-    // wedge spins with `IF` set, so every CPU still takes its timer interrupt
-    // and every CPU's performance counter still samples it — and the
-    // hard-lockup detector, whose bound is the earlier of the two, must find
-    // nothing. A page reading it here would mean this machine resets a boot
-    // that was merely stopped, which on the T14 is a reset loop.
-    says_nothing_of(after, bootlog::LOCKED_UP)?;
-    says_nothing_of(after, &armed_and_nothing_else())?;
-    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
-    says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
-    eprintln!("  [power] {}", said.trim());
-    Ok(())
-}
-
-/// The metal half of [`hard_lockup_ends_a_deaf_cpu`], and **the arm that proves
-/// the counter**: on this machine CPUID states an architectural PMU, so the
-/// staged CPU's own performance-counter NMI is what samples it and nothing is
-/// sent to it. QEMU's TCG guest can prove the handler and the record; only
-/// hardware can prove the thing that delivers them.
-///
-/// The state under it is the one measured on this machine and on no other: run
-/// 22's boot hung after its job list with a 120 s deadline armed, sat past
-/// 420 s, and left the log volume with no kernel log at all — the deadline never
-/// fired, because nothing was taking the interrupt that polls it.
-pub fn hard_lockup_chain(
-    kernel: &serial::Serial,
-    after: &serial::Serial,
-) -> Result<(), String> {
-    // **Nothing this judge reads was written after the wedge.** `logkeeper` stops
-    // where the scheduler does, so the log volume's kernel log ends at the last
-    // spawn, and the sealed page can fill with a boot's *older* records before
-    // it reaches the lines the control writes about itself. What crosses is the
-    // arm line and the record itself.
-    kernel.must_say("by each cpu's own performance counter")?;
-    says_nothing_of(kernel, "CPUID states no architectural performance counter")?;
-
-    after.must_say(bootlog::PREVIOUS_PANIC)?;
-    death_took_the_census(after)?;
-    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?.to_string();
-    let stuck = after.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
-    sp_is_a_kernel_stack(stuck)?;
-    // And the NMI frame's `rip` is where that CPU stood: inside the lock's
-    // spin, resolved by the kernel against its own symbols. A `pc` read off
-    // any other word of the frame resolves to nothing, or to somewhere else.
-    let pc = after.must_say_after(bootlog::LOCKED_UP, bootlog::LOCKUP_PC)?;
-    if !bootlog::LOCK_SPIN.iter().all(|part| pc.contains(part)) {
-        return Err(format!("the record puts the stuck cpu outside the lock's spin {:?}: {pc:?}", bootlog::LOCK_SPIN));
-    }
-    // The staged control's own witness, carried by the mechanism rather than by
-    // a log line that may not survive: the lock the stuck cpu is inside was
-    // taken at the control's own source line, which no other boot can say.
-    after.must_say_after(bootlog::PREVIOUS_PANIC, "taken at kernel/src/hardlockup/probe.rs")?;
-    // **cpu0's line is what proves the counter rather than a sender.** Nothing
-    // sends cpu0 an NMI on this boot — the control's sender is skipped where the
-    // cpus have counters — so a sample recorded against cpu0 came from cpu0's
-    // own overflow, and a sample against every cpu is the arm working on all of
-    // them.
-    after.must_say_after(bootlog::PREVIOUS_PANIC, "cpu0 irqs=")?;
-    after.must_say_after(bootlog::PREVIOUS_PANIC, "cpu7 irqs=")?;
-    // The deadline was armed on this boot too, at twice this bound, and is not
-    // what ended the machine.
-    says_nothing_of(after, bootlog::DEADLINE_EXPIRED)?;
-    says_nothing_of(after, &armed_and_nothing_else())?;
-    // **Not [`bootlog::CHAIN_ENDS_LINE`], which the deadline's arm demands.**
-    // That pass's own last line is written after the record, and a `loader.log`
-    // that stopped inside the record never reaches it — so demanding it here
-    // would judge the loader's file capacity and call it a lockup. The pass
-    // having booted no kernel is what this asserts instead.
-    says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
-    eprintln!("  [power] {}", said.trim());
-    Ok(())
-}
-
-/// The NMI entry routed the frame's `rsp` to the sample: a kernel stack is above
-/// `mm::PHYS_OFFSET`, and the `rflags` a swapped load would put there is below
-/// `0x400000`.
-fn sp_is_a_kernel_stack(stuck: &str) -> Result<(), String> {
-    if !stuck.contains("sp=0xffff") {
-        return Err(format!("the stuck cpu's sp is no kernel stack: {stuck}"));
-    }
-    Ok(())
-}
-
 /// The kernel decoded a reset register out of this machine's FADT and wrote it.
 ///
 /// **The port is the machine's, not q35's.** What a boot on real hardware can
@@ -490,28 +308,14 @@ pub fn reset_register_decoded(kernel: &serial::Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// The loader named a page, the kernel took *that* page, and it took it before
-/// the console existed.
-pub fn blackbox_unclaimed(
-    loader: &serial::Serial,
-    kernel: &serial::Serial,
-) -> Result<(), String> {
-    // The loader claimed one on this machine, so what is judged here is the
-    // *kernel's* reading of its own parameter line: the address it was given is
-    // the address the loader printed, and nothing else in the line is a page.
-    let claimed = loader.must_say(&armed_line())?.to_string();
-    loader.must_say(&format!("blackbox={PHYS:#x}"))?;
-    kernel.must_say(&kernel_took_it())?;
-    // **Before `serial::init`, and that ordering is the assertion.** The page
-    // used to be taken after the console, the parameter line's UTF-8 check and
-    // `params::init`, and the owner's laptop panicked before all three: it
-    // rendered a panel and reset itself with the page still holding the loader's
-    // `ARMED`. No staged panic can land in that window — arming one needs the
-    // line parsed first — so what is judged is where the kernel says it took
-    // the page, which moves the moment the reading moves.
-    kernel.must_say_after(&kernel_took_it(), SERIAL_IS_UP)?;
-
-    eprintln!("  [power] the loader named the page and the kernel took it: {}", claimed.trim());
+/// The loader found the firmware's memory-overwrite request and set it, so the
+/// firmware overwrites memory before the boot after this one.
+pub fn memory_overwrite_requested(loader: &serial::Serial) -> Result<(), String> {
+    let line = loader.must_say("Memory overwrite: MemoryOverwriteRequestControl read ")?;
+    if !line.contains("and is now [01]") {
+        return Err(format!("the loader did not set the request: {}", line.trim()));
+    }
+    eprintln!("  [power] {}", line.trim());
     Ok(())
 }
 
@@ -520,14 +324,15 @@ pub fn blackbox_unclaimed(
 const ACPI_ARMED: &str = "acpiserver: armed: power button served";
 
 /// [`STICK_LOAD_JOB`](super::metal::STICK_LOAD_JOB)'s boot: the job wrote the
-/// log disk, the boot deadline ended the machine while it did, and the pass
-/// after the reset read the deadline's record. The host booting again off that
-/// disk is the loop's own half, and a readback is only there once it did.
+/// log disk, and the boot's own deadline reset the machine while it did — the
+/// driver held the volume to a boot record, no stop mark and the outside
+/// judge's reading (`toyos_metal::ended_by_its_deadline`). The host booting
+/// again off that disk is the loop's own half, and a readback is only there
+/// once it did.
 pub fn the_disk_survives_a_reset_under_load(back: &super::metal::Readback) -> Result<(), String> {
-    let after = back.after_the_reset()?;
-    after.must_say(bootlog::PREVIOUS_PANIC)?;
-    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
-    says_nothing_of(&after, REBOOTING)?;
+    if let Some(line) = bootlog::stopping_line(back.log().text()) {
+        return Err(format!("the boot stopped, so no reset landed under the load: {line}"));
+    }
     // What reached the medium: the load's lines in the file read back off the
     // log volume.
     let reached = super::metal::bytes_of_lines(back.log().text(), "stick_load: line ");

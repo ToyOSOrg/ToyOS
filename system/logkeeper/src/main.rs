@@ -69,8 +69,10 @@
 //!
 //! **A round's lines are written and the volume made durable before the next
 //! round**, and again when the supervisor asks before the machine stops
-//! ([`toyos_logstream::FLUSH`]). The kernel waits on none of it: a panicking kernel's report is in its black box, and so are the stop's
-//! own last records.
+//! ([`toyos_logstream::FLUSH`]); once the stop has synced its files it asks
+//! for the stop mark ([`toyos_logstream::MARK`]). The kernel waits on none of it, so
+//! what it says after the flush, at a panic or in the stop, reaches only its
+//! console and panel.
 //! **A program's line after that flush reaches the UART and is held back from
 //! the file**, to a bound ([`STOPPING_BYTES`]): the stop syncs no file still open,
 //! so the file ends where the flush made it durable, and a reader of the
@@ -98,7 +100,7 @@ use toyos::say;
 use toyos::syscap::SysCap;
 use toyos::wake::Bell;
 use toyos_logstream::{
-    ProgramLine, Registration, Severity, Tag, CARRIER, FLUSH, FLUSHED, LOG_OPENED, MAX_TAG, ORIGINS, REGISTER, RESUME,
+    ProgramLine, Registration, Severity, Tag, CARRIER, FLUSH, FLUSHED, LOG_OPENED, MARK, MARKED, MAX_TAG, ORIGINS, REGISTER, RESUME,
     SERVICE, WIRE,
 };
 use toyos_wallclock::Civil;
@@ -241,10 +243,12 @@ struct Log {
     stopping: Option<Stopping>,
 }
 
-/// The file's text held back after a flush, and the lines past the bound.
+/// The file's text held back after a flush, the lines past the bound, and
+/// whether the flush wrote the stop mark.
 struct Stopping {
     text: String,
     unwritten: u64,
+    marked: bool,
 }
 
 /// Text a stop may hold back from the file: a refused stop writes it, and
@@ -353,6 +357,7 @@ impl Log {
                 // RESUME when the stop it flushed for was refused, which can be
                 // before this program got to the flush, and RESUME answers it.
                 RxStep::Frame { msg_type: FLUSH, .. } => return true,
+                RxStep::Frame { msg_type: MARK, .. } => self.mark(),
                 RxStep::Frame { msg_type: RESUME, .. } => self.resume(),
                 RxStep::Frame { msg_type, .. } => {
                     panic!("logkeeper: the supervisor sent frame type {msg_type} on the origins connection")
@@ -696,9 +701,27 @@ impl Log {
         if let Some(carriers) = &self.carriers {
             carriers.stop(self.hub.end());
         }
-        self.stopping = Some(Stopping { text: String::new(), unwritten: 0 });
+        self.stopping = Some(Stopping { text: String::new(), unwritten: 0, marked: false });
         if let Err(e) = self.from_supervisor.signal(FLUSHED) {
             panic!("logkeeper: the supervisor could not be told the log is whole: {e:?}");
+        }
+    }
+
+    /// The supervisor's stop has synced its files and is about to stop its
+    /// drivers: write the stop mark over a durable log, and say so. No volume,
+    /// no call: `/log`'s server may never have answered.
+    fn mark(&mut self) {
+        let Some(stopping) = self.stopping.as_mut() else {
+            panic!("logkeeper: the supervisor asked for the stop mark, and no stop was flushed for");
+        };
+        stopping.marked = self.volume.is_some()
+            && store::mark_stopped()
+                .inspect_err(|e| {
+                    toyos::error!("logkeeper: {DIR} would not take the stop mark ({e}) - the next boot will not count this one as clean")
+                })
+                .is_ok();
+        if let Err(e) = self.from_supervisor.signal(MARKED) {
+            panic!("logkeeper: the supervisor could not be told the stop is marked: {e:?}");
         }
     }
 
@@ -709,6 +732,11 @@ impl Log {
             panic!("logkeeper: the supervisor said the machine runs on, and no stop was flushed for");
         };
         toyos::warn!("logkeeper: the stop was refused, so {DIR} takes this boot's lines again");
+        if held.marked
+            && let Err(e) = store::unmark_stopped()
+        {
+            toyos::error!("logkeeper: {DIR} would not give back the stop mark ({e}) - a later death of this boot will read as clean");
+        }
         if held.unwritten > 0 {
             toyos::warn!(
                 "logkeeper: {} line(s) said while the machine stopped were past {STOPPING_BYTES} bytes \

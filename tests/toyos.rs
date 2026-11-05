@@ -406,9 +406,6 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in.
     ("screen_fatal_halt_composited", qemu::Profile::Metal),
-    // What the loader leaves on the panel: its own lines, and none of the
-    // firmware's.
-    ("screen_loader_clears", qemu::Profile::Metal),
     ("virt_early_panic", qemu::Profile::Virt),
     ("virt_early_fault", qemu::Profile::Virt),
     // `kernel_wx_leaf_is_refused` on `virt`: no metal bench is AArch64.
@@ -627,6 +624,11 @@ const MACHINE_TESTS: &[&str] = &[
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
     "machine_shutdown_short_stop",
+    // A clean stop proves its image: the stop mark `logkeeper` writes at the
+    // stop's flush, and the next loader pass's floor raise. x86-64 q35: it
+    // takes the loader's second pass on the same disk and firmware variables,
+    // which no host test has, and a metal run reflashes before any second pass.
+    "a_clean_stop_proves_its_image",
     // A claimable function with a mappable BAR that no program of the boot
     // holds: QEMU's virtio NIC on `tests/images/testcases.toml`. The T14's one such
     // function is its I219, and a kernel that dies on this takes the bench's
@@ -868,10 +870,6 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     // ---- one image: tests/images/testcases.toml, no parameters, one job list ----
     (
-        "blackbox_unclaimed_page",
-        metal::Metal { arms: TESTCASES, judge: |b| power::blackbox_unclaimed(&b[0].loader(), &b[0].kernel()) },
-    ),
-    (
         // The machine's own CPU count, off the SMP bring-up records — a source
         // independent of the `control_regs:` lines it is then held to.
         "control_regs",
@@ -881,21 +879,18 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The firmware defines the TCG memory-overwrite request and took the
+        // loader's write. The T14 and the AMD bench.
+        "memory_overwrite_requested",
+        metal::Metal { arms: TESTCASES, judge: |b| power::memory_overwrite_requested(&b[0].loader()) },
+    ),
+    (
         "ioapic_topology",
         metal::Metal { arms: TESTCASES, judge: |b| ioapic_topology(b[0].kernel().text()) },
     ),
     (
         "console_uart_driven",
         metal::Metal { arms: TESTCASES, judge: |b| console_uart_driven(&b[0].log()) },
-    ),
-    (
-        "irq_census_conservation",
-        // Off the page: the stop takes the boot's one census after
-        // `logkeeper` has stopped, so no file carries it.
-        metal::Metal {
-            arms: TESTCASES,
-            judge: |b| irq_census(b[0].after_the_reset()?.text()),
-        },
     ),
     (
         // The windows on the machine that owes them: every CPU in every
@@ -1158,7 +1153,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         "watchdog_fed",
         metal::Metal {
             arms: &[metal::once("testcases-watchdog", "tests/images/testcases.toml", &["watchdog"], &[])],
-            judge: |b| b[0].log_is_whole_to_its_stop(),
+            // The driver's verdict is the claim: the volume carries the
+            // supervisor's stop and the stop mark.
+            judge: |_| Ok(()),
         },
     ),
     // ---- the boot facts, riding the same tests/images/testcases.toml image ----
@@ -1331,69 +1328,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         "i219_carries_netstacks_link",
         metal::Metal { arms: BENCHCASE_ALONE, judge: |b| i219_carries_netstacks_link(b[0]) },
     ),
-    // ---- tests/images/jobcase.toml, each image armed to end its boot its own way ----
-    (
-        // Its own boot, and it must not share one: it is the only arm in this
-        // profile that deliberately leaves the machine unable to end its own
-        // boot, and what it judges is that the machine ended it anyway.
-        "boot_deadline_ends_a_wedge",
-        metal::Metal {
-            arms: &[metal::once("deadlinewedge", "tests/images/jobcase.toml", &["wedge-before-reset"], &[])],
-            judge: |b| power::deadline_wedge_chain(&b[0].after_the_reset()?),
-        },
-    ),
-    (
-        // The same wedge under the chipset watchdog, with the deadline past
-        // its bound: the watchdog's reset and not the kernel's ends the boot.
-        // The AMD bench, whose FCH says which reset it was. Named only: no
-        // TCO has reset the T14 (`issues/an-armed-tco-has-never-reset-the-t14.md`),
-        // where this boot would wait out its deadline instead.
-        "watchdog_resets",
-        metal::Metal {
-            arms: &[metal::Arm {
-                named_only: true,
-                ..metal::once("watchdogwedge", "tests/images/jobcase.toml", &["watchdog", "wedge-before-reset"], &[])
-            }],
-            judge: |b| power::watchdog_reset_chain(&b[0].kernel(), &b[0].log(), &b[0].after_the_reset()?),
-        },
-    ),
-    (
-        // Its own boot, and the one arm in this profile the machine itself is
-        // the instrument for: QEMU's TCG guest has no performance counter, so
-        // only here is the NMI that samples a deaf CPU the counter's own. It
-        // ends the machine at half the metal bound, with the whole second half
-        // of the deadline still to run, so which record the page carries says
-        // which of the two bounds ended it.
-        "hard_lockup_ends_a_deaf_cpu",
-        metal::Metal {
-            arms: &[metal::once("hardlockup", "tests/images/jobcase.toml", &["hard-lockup-probe"], &[])],
-            judge: |b| power::hard_lockup_chain(&b[0].kernel(), &b[0].after_the_reset()?),
-        },
-    ),
-    (
-        // Its own boot, and it must not share one: it deliberately leaves the
-        // page holding a record no image owns, and a boot that then read it as
-        // a predecessor's is exactly what the arm above judges.
-        "blackbox_foreign_record",
-        metal::Metal {
-            arms: &[metal::once(
-                "foreignrecord",
-                "tests/images/jobcase.toml",
-                &[toyos_metal::FOREIGN_RECORD_ARM],
-                &[],
-            )],
-            judge: |b| {
-                let after = b[0].after_the_reset()?;
-                let said = after.must_say(bootlog::FOREIGN_DONE)?.to_string();
-                power::says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
-                power::says_nothing_of(&after, "the last boot read")?;
-                // The hang `toyos-metal` admits for this arm, and only this one.
-                after.must_say(bootlog::HUNG_WITHOUT_A_RECORD)?;
-                eprintln!("  [power] {}", said.trim());
-                Ok(())
-            },
-        },
-    ),
     // ---- one image: tests/images/proctreecase.toml ----
     (
         // A parent's end takes its children down. The guest carries every
@@ -1462,26 +1396,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // On the T14 the chain is what every metal boot does — the loader
-        // points `BootNext` at itself before each handoff, so the pass that
-        // reads the page appends its report to the same `loader.log` the
-        // driver hands back.
-        "blackbox_done_chain",
-        metal::Metal { arms: METALCASE, judge: |b| power::done_chain(&b[0].after_the_reset()?) },
-    ),
-    (
         // The machine came back to Ubuntu's ssh server, which is what tells a reset from the
         // S5 power-off the QEMU stop reason exists to catch — the driver
         // established it before this judge ran. What is left is the kernel's own
         // decode, and `0xcf9 <- 0x0f` is q35's register rather than this one's.
         "machine_reboot",
-        metal::Metal {
-            arms: METALCASE,
-            judge: |b| {
-                power::reset_register_decoded(&b[0].kernel())?;
-                bootlog::handed_back(b[0].after_the_reset()?.text()).map_err(|why| why.to_string())
-            },
-        },
+        metal::Metal { arms: METALCASE, judge: |b| power::reset_register_decoded(&b[0].kernel()) },
     ),
     (
         // The T14's display driver offers the compositor the firmware's
@@ -1602,7 +1522,7 @@ const METAL: &[(&str, metal::Metal)] = &[
                 for job in ["test_rs_usbd_spare", "test_rs_usbd_spare_fault", "test_rs_end_returns_claims", "test_rs_usbd_spare_vector"] {
                     b[0].job_passed(job)?;
                 }
-                amdvi_usbd(&b[0].kernel(), &b[0].log(), &b[0].after_the_reset()?)
+                amdvi_usbd(&b[0].kernel(), &b[0].log())
             },
         },
     ),
@@ -4511,79 +4431,6 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             )?;
             Ok(())
         }
-        "screen_loader_clears" => {
-            // A loader's screen lasts until the kernel's first paint, which no
-            // poll is sure to catch, so the machine is held where a loader pass
-            // ends in a reset of its own: the pass after a reset that kept
-            // memory reads the black box the first pass armed, and hands the
-            // machine back.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                &[],
-                &[],
-                BootOptions { profile, qmp: true, ready_marker: bootlog::LOADER_LAST_LINE, ..Default::default() },
-            );
-            qemu.reset_and_hold_the_next(Duration::from_secs(30))?;
-            let serial = qemu.drain_until(Duration::from_secs(5), |l| l.contains(bootlog::CHAIN_ENDS_LINE));
-            if !serial.contains(bootlog::CHAIN_ENDS_LINE) {
-                return Err(format!("the held boot is not a loader pass that ended its chain:\n{serial}"));
-            }
-            let dump = qemu.screendump();
-            const BLACK: [u8; 3] = [0, 0, 0];
-            // The firmware's logo is in colours its console's text is not.
-            let colours: BTreeSet<[u8; 3]> = dump.pixels.iter().copied().collect();
-            if colours.len() != 2 || !colours.contains(&BLACK) {
-                return Err(format!(
-                    "the loader's screen carries {} colours, not black and the console's text alone: \
-                     something the firmware drew is still on it",
-                    colours.len()
-                ));
-            }
-            // The top line of ink is the loader's first, as wide as its
-            // characters at the 8-pixel glyphs of EDK2's console: the firmware's
-            // boot manager announces the option it starts on a line of its own.
-            // A pass that reads a finding appends to its log, so its first line
-            // is the separator; what precedes it on the 16550 is the terminal's
-            // escapes for the clear.
-            let Some(first) = serial.lines().find(|l| l.contains(bootlog::SEPARATOR)) else {
-                return Err(format!("the held pass never wrote {:?}:\n{serial}", bootlog::SEPARATOR));
-            };
-            // An escape runs from ESC to its final letter.
-            let shown = match first.rfind('\x1b') {
-                Some(at) => {
-                    let escape = &first[at..];
-                    &escape[escape.find(|c: char| c.is_ascii_alphabetic()).map_or(escape.len(), |end| end + 1)..]
-                }
-                None => first,
-            };
-            let chars = shown.trim().len();
-            let (width, pixels) = (dump.width, &dump.pixels);
-            let inked = |y: usize| (0..width).filter(move |&x| pixels[y * width + x] != BLACK);
-            // The first band of ink from `from` down: where it ends, and how wide it is.
-            let band = |from: usize| -> Option<(usize, usize)> {
-                let top = (from..dump.height).find(|&y| inked(y).next().is_some())?;
-                let bottom = (top..dump.height).find(|&y| inked(y).next().is_none()).unwrap_or(dump.height);
-                let xs: Vec<usize> = (top..bottom).flat_map(inked).collect();
-                Some((bottom, xs.iter().max()? - xs.iter().min()? + 1))
-            };
-            let fits = |wide: usize, n: usize| n > 0 && wide > 8 * (n - 1) && wide <= 8 * n;
-            let Some((bottom, wide)) = band(0) else {
-                return Err("the loader's screen is blank".to_string());
-            };
-            // A line wider than the console wraps: its top row is the console's
-            // width, and the row under it holds the rest of the line.
-            let columns = if fits(wide, chars) { chars } else { wide.div_ceil(8) };
-            let rest = chars.saturating_sub(columns);
-            let under = band(bottom).map(|(_, wide)| wide);
-            if !fits(wide, columns.min(chars)) || (rest > 0 && !under.is_some_and(|w| fits(w, rest.min(columns)))) {
-                return Err(format!(
-                    "the screen's top line is {wide} px wide and the one under it {under:?}, and the \
-                     loader's first, {shown:?}, is {chars} characters: something else is above the \
-                     loader's lines\n{serial}"
-                ));
-            }
-            Ok(())
-        }
         "virt_early_panic" => {
             // The AArch64 port's stage 3, whole: the loader on AAVMF, the entry's
             // drop and declaration, the PL011 SPCR names, the boot's survey of
@@ -4842,9 +4689,9 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 profile,
                 smp: 8,
                 qmp: true,
-                // The T14's literal shape: no console, so the panel and the
-                // black box are the report's only channels. The probe is
-                // time-based, so it needs no console to drive it.
+                // The T14's literal shape: no console, so the panel is the
+                // report's only channel. The probe is time-based, so it needs
+                // no console to drive it.
                 mute: true,
                 kernel_params: &["metal-panic-probe"],
                 ..Default::default()
@@ -4887,53 +4734,8 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 ));
             }
 
-            // **And the report is sealed where the next boot reads it, not
-            // only on the panel.** A panicking kernel stops every other CPU
-            // first and runs no userland again, so `/log` gets the report from
-            // the next boot's loader, out of the black box: that page, read
-            // here out of the halted guest's memory, is the whole of the
-            // promise. Before this, the panic path kept userland running for
-            // half a second to let `logkeeper` write it, and the stick either had it
-            // or the panel said it did not.
-            let page = qemu.guest_memory(toyos_blackbox::PHYS, toyos_blackbox::BYTES)?;
-            let page: &[u8; toyos_blackbox::BYTES] = page
-                .as_slice()
-                .try_into()
-                .map_err(|_| "pmemsave returned the wrong length".to_string())?;
-            let Some((state, _, _, sealed)) = toyos_blackbox::recover(page) else {
-                return Err(format!(
-                    "the black box carries nothing after a fatal panic\ndecoded screen:\n{text}"
-                ));
-            };
-            let sealed = String::from_utf8_lossy(sealed).into_owned();
-            if state != toyos_blackbox::State::Panic
-                || !sealed.contains("PANIC:")
-                || !sealed.contains(MARKER)
-            {
-                return Err(format!(
-                    "the black box reads {} and {} the banner and {} the marker after a fatal \
-                     panic: the report is on the panel only\n{sealed}",
-                    state.named(),
-                    if sealed.contains("PANIC:") { "carries" } else { "lacks" },
-                    if sealed.contains(MARKER) { "carries" } else { "lacks" },
-                ));
-            }
-            // The death's own census, which the seal writes as lines of its
-            // own. Anchored at the line's start: the ring's tail under it can
-            // carry an `irq: cpu0` record, behind its stamp.
-            for owed in ["irq: cpu0 ", "tlb: shootdowns="] {
-                if !sealed.lines().any(|line| line.starts_with(owed)) {
-                    return Err(format!(
-                        "the panic's sealed record has no line that begins {owed:?}, so this \
-                         death took no census of the machine\n{sealed}"
-                    ));
-                }
-            }
             drop(qemu);
-            eprintln!(
-                "  [panic] the fatal report is on the panel and sealed in the black box ({} bytes)",
-                sealed.len()
-            );
+            eprintln!("  [panic] the fatal report is on the panel");
             if dump.fill() != FILL_FATAL {
                 return Err(format!(
                     "the panel still carries {:?} rather than the fatal fill, so the compositor's \
@@ -5068,6 +4870,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
+        "a_clean_stop_proves_its_image" => power::a_clean_stop_proves_its_image(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
@@ -5709,7 +5512,7 @@ fn a_function_arrives_and_leaves() -> Result<(), String> {
 /// its holder's rewrite of its own table entry to a vector not its own
 /// refused and recorded against the claim, which usbd ends on, never told of
 /// its No-Op.
-fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
+fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
     let (at, id) = spare_xhci(kernel, log)?;
     let at = at.as_str();
     let handed = format!("pcidev: PCI {at} [{id}] handed over, vector ");
@@ -5739,20 +5542,9 @@ fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Ser
         .ok_or_else(|| format!("no record of {at} names the aimed {aimed}: {records:?}"))?;
     log.must_say("usbd_spare: the claim refuses its interrupt read: Io")?;
 
-    let rewritten = log.must_say("usbd_spare: MSI-X entry 0's data ")?;
+    log.must_say("usbd_spare: MSI-X entry 0's data ")?;
     log.must_say(&format!("usbd {at}: ENDED — the claim refused its interrupt record (Io)"))?;
     log.must_say("usbd_spare: usbd ended on the claim's refusal")?;
-    // Refused by the unit, not delivered to a vector nobody holds: the stop's
-    // census names every vector the unclaimed gate took.
-    let foreign_vector = rewritten
-        .split_once(" rewritten to ")
-        .and_then(|(_, rest)| rest.split(',').next())
-        .ok_or_else(|| format!("{rewritten:?} names no vector"))?;
-    // Logged inside the stop, past where the log file ends.
-    let census = after.must_say("irq: unclaimed vectors")?;
-    if census.split_whitespace().any(|word| word == foreign_vector) {
-        return Err(format!("{foreign_vector} reached a CPU: {census}"));
-    }
     // An interrupt's record states no read or write (48882 Table 57, `I`).
     let foreign = records
         .iter()
@@ -6620,130 +6412,6 @@ fn lent_device_memory_refused(test_config: &Path) -> Result<(), String> {
         return Err(format!("the job never said `{SAID}`:\n{}", result.stdout));
     };
     eprintln!("  [claims] {}", line.trim());
-    Ok(())
-}
-
-/// Every device delivery is still cpu0's, and no CPU took a shootdown IPI the
-/// issuer did not count.
-///
-/// **The capture is in stamp order, not read order** (`Census::raise`), of a
-/// CPU's census and of the issuer's total alike, and no line says when it was
-/// read. No two lines are compared by their place in the capture: a CPU's
-/// census is the largest count each of its sources reached on any line, and the
-/// issuer's is the largest `shootdowns=`.
-fn irq_census(capture: &str) -> Result<(), String> {
-    use common::irqcensus::{Census, DEVICE_SOURCES};
-    let mut newest: BTreeMap<u32, Census> = BTreeMap::new();
-    for line in capture.lines() {
-        let census = match Census::parse(line) {
-            None => continue,
-            Some(Ok(census)) => census,
-            Some(Err(why)) => return Err(format!("{why}\nline: {line}")),
-        };
-        newest.entry(census.cpu).or_insert_with(|| census.clone()).raise(&census);
-    }
-    if newest.is_empty() {
-        return Err(format!(
-            "no `irq: cpu` census in the capture — the machine stopped and the kernel \
-             said nothing:\n{capture}"
-        ));
-    }
-
-    // 1. The machine is real: the boot CPU took interrupts, and so did
-    //    at least one AP — otherwise (2) says nothing.
-    let cpu0 = newest
-        .get(&0)
-        .ok_or_else(|| format!("no cpu0 in the census: {newest:?}"))?;
-    if cpu0.total() == 0 {
-        return Err(format!("cpu0 took no interrupts at all: {cpu0:?}"));
-    }
-    let aps: Vec<&Census> = newest.values().filter(|c| c.cpu != 0).collect();
-    if aps.len() < 3 {
-        return Err(format!(
-            "a 4-CPU machine reported {} AP(s); the census cannot see them all: {newest:?}",
-            aps.len()
-        ));
-    }
-    if !aps.iter().any(|c| c.total() > 0) {
-        return Err(format!("no AP took a single interrupt: {newest:?}"));
-    }
-
-    // 2. **The present-state fact this whole track is about.** Every
-    //    message-signalled interrupt is addressed to physical
-    //    destination 0 (`drivers::pci`'s `MSG_ADDR`) and the one I/O
-    //    APIC pin goes to the BSP, so no AP may have a device count at
-    //    all. This is what reds the day a placement policy lands, and
-    //    that red is the improvement.
-    let mut delivered = 0;
-    for name in DEVICE_SOURCES {
-        delivered += cpu0.source(name);
-        for ap in &aps {
-            if ap.source(name) != 0 {
-                return Err(format!(
-                    "cpu{} took {} `{name}` interrupt(s); every device vector is \
-                     addressed to physical destination 0, so this machine's delivery \
-                     policy has changed: {ap:?}",
-                    ap.cpu,
-                    ap.source(name),
-                ));
-            }
-        }
-    }
-    if delivered == 0 {
-        return Err(format!(
-            "not one device interrupt on the whole machine, so \"they are all on \
-             cpu0\" is vacuous: {newest:?}"
-        ));
-    }
-
-    let share = cpu0.total() as f64
-        / newest.values().map(Census::total).sum::<u64>() as f64
-        * 100.0;
-    eprintln!(
-        "  [irq] {} cpu(s), {} interrupt(s), {delivered} of them device deliveries — \
-         all on cpu0, which took {share:.1}% of everything",
-        newest.len(),
-        newest.values().map(Census::total).sum::<u64>(),
-    );
-
-    // 3. The issuer side: every `tlb` delivery a CPU's census carries
-    //    must be within the issues a `tlb:` line counted — an excess
-    //    is a path shooting down uncounted. The lower bound is not
-    //    asserted: an issued IPI can be pending on an IF-clear target.
-    //    The bound is the largest count: the stop reads the deliveries
-    //    before the issuer's total.
-    let mut issued: Option<u64> = None;
-    for line in capture.lines() {
-        let Some(rest) = line.split("tlb: shootdowns=").nth(1) else { continue };
-        let n: u64 = rest
-            .split_whitespace()
-            .next()
-            .and_then(|v| v.parse().ok())
-            .ok_or_else(|| format!("unreadable issuer census: {line}"))?;
-        issued = issued.max(Some(n));
-        eprintln!("  [tlb] {}", line.trim());
-    }
-    let Some(issued) = issued else {
-        return Err(format!(
-            "no `tlb: shootdowns=` census in the capture — the machine stopped and \
-             the issuer side said nothing:\n{capture}"
-        ));
-    };
-    for census in newest.values() {
-        if census.source("tlb") > issued {
-            return Err(format!(
-                "cpu{} took {} tlb IPI(s) against {issued} counted issue(s) — \
-                 some path shoots down without being counted: {census:?}",
-                census.cpu,
-                census.source("tlb"),
-            ));
-        }
-    }
-    eprintln!(
-        "  [tlb] {issued} shootdown(s) issued, deliveries per CPU {:?} — every \
-         delivery accounted for",
-        newest.values().map(|c| c.source("tlb")).collect::<Vec<_>>(),
-    );
     Ok(())
 }
 
