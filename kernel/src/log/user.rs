@@ -52,7 +52,10 @@ impl<R: UserSafe> RecordSink<R> for UserRecords<'_, '_> {
             return false;
         }
         let bytes = toyos_abi::usersafe::bytes(record);
-        self.out.write_at(self.written * bytes.len(), bytes);
+        // A record the reader cannot take ends the reading as a full window does.
+        if self.out.write_at(self.written * bytes.len(), bytes).is_err() {
+            return false;
+        }
         self.written += 1;
         true
     }

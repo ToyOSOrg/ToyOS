@@ -50,7 +50,9 @@ pub(super) fn sys_log_last_words(syscap: RawHandle, text: &UserBytes) -> u64 {
     }
     let mut copy = [0u8; toyos_abi::log::MAX_LAST_WORDS];
     let copy = &mut copy[..text.len()];
-    text.read_at(0, copy);
+    if let Err(faulted) = text.read_at(0, copy) {
+        return SyscallError::from(faulted).to_u64();
+    }
     let Some(words) = toyos_abi::log::last_words(copy) else {
         return SyscallError::InvalidArgument.to_u64();
     };
@@ -102,7 +104,7 @@ fn read_on_cursor(
     let put = |head: CursorHead, positions: &[u64]| -> Result<(), SyscallError> {
         let mut window = ctx.user_bytes_mut(at, (HEAD + 8 * positions.len()) as u64).ok_or(SyscallError::BadAddress)?;
         for (i, word) in head.to_words().iter().chain(positions).enumerate() {
-            window.write_at(8 * i, &word.to_le_bytes());
+            window.write_at(8 * i, &word.to_le_bytes())?;
         }
         Ok(())
     };
@@ -282,7 +284,17 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
             return e.refuse();
         }
     }
+    match sysinfo_laid(max_entries) {
+        Ok(laid) => out.write_at(0, &laid).map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| laid.len() as u64),
+        Err(e) => e.to_u64(),
+    }
+}
 
+/// [`sys_sysinfo`]'s answer, its header and at most `max_entries` entries,
+/// laid out under the process table's lock for the caller to copy out after.
+fn sysinfo_laid(max_entries: usize) -> Result<Vec<u8>, SyscallError> {
+    const HEADER_SIZE: usize = toyos_abi::syscall::SYSINFO_HEADER_SIZE;
+    const ENTRY_SIZE: usize = toyos_abi::syscall::SYSINFO_ENTRY_SIZE;
     let (total_mem, used_mem) = crate::mm::pmm::stats();
     let cpu_count = crate::smp::cpu_count();
     let uptime = crate::clock::nanos_since_boot();
@@ -294,7 +306,7 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
 
     let entry_count = live_threads(table) as u32;
     if entry_count as usize > sysinfo_thread_bound() {
-        return SyscallError::ResourceExhausted.to_u64();
+        return Err(SyscallError::ResourceExhausted);
     }
 
     let mut header = [0u8; HEADER_SIZE];
@@ -305,19 +317,20 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     header[24..32].copy_from_slice(&uptime.to_le_bytes());
     header[32..40].copy_from_slice(&total_cpu_ns.to_le_bytes());
     header[40..48].copy_from_slice(&total_available_ns.to_le_bytes());
-    out.write_at(0, &header);
+    let mut laid = Vec::new();
+    laid.extend_from_slice(&header);
 
-    // Header-only callers pay for no allocation and no sort of the roster below.
+    // Header-only callers pay for no sort of the roster below.
     if max_entries == 0 {
-        return HEADER_SIZE as u64;
+        return Ok(laid);
     }
+    laid.reserve_exact(max_entries.min(entry_count as usize) * ENTRY_SIZE);
 
     let mut entries: Vec<(process::Tid, &process::ProcessEntry, &process::ThreadEntry)> =
         Vec::with_capacity(entry_count as usize);
     entries.extend(table.iter().flat_map(|(_, proc)| proc.threads().iter().map(move |(&tid, thread)| (tid, proc, thread))));
     entries.sort_by_key(|(tid, proc, _)| (proc.pid(), *tid));
 
-    let mut pos = HEADER_SIZE;
     for (i, &(tid, proc, thread)) in entries.iter().enumerate() {
         if i >= max_entries {
             break;
@@ -346,12 +359,9 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
         entry[16..24].copy_from_slice(&memory.to_le_bytes());
         entry[24..32].copy_from_slice(&cpu_ns.to_le_bytes());
         entry[32..60].copy_from_slice(name);
-        out.write_at(pos, &entry);
-
-        pos += ENTRY_SIZE;
+        laid.extend_from_slice(&entry);
     }
-
-    pos as u64
+    Ok(laid)
 }
 
 /// Every online CPU's counters into `out`, or the CPU count when `out` is
@@ -375,8 +385,8 @@ pub(super) fn sys_boot_sources(syscap: RawHandle, out: &mut UserBytesMut) -> u64
     if let Err(e) = demand_syscap(syscap, Rights::INVENTORY) {
         return e.refuse();
     }
-    out.write_at(0, toyos_abi::usersafe::bytes(&crate::loaded::sources()));
-    0
+    out.write_at(0, toyos_abi::usersafe::bytes(&crate::loaded::sources()))
+        .map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| 0)
 }
 
 /// The most records one `SYS_DEVICE_INVENTORY` buffer may be declared to hold,
@@ -428,9 +438,12 @@ pub(super) fn sys_device_set_read(set: RawHandle, out: &mut UserBytesMut) -> u64
         functions: u32::try_from(functions.len()).expect("pcidev: fewer functions than a u32 counts"),
         declaration,
     };
-    out.write_at(0, &header.encode().0);
-    for (at, pci) in functions.into_iter().enumerate() {
-        out.write_at((at + 1) * RECORD_BYTES, &devset::function(pci).0);
+    let wrote = out.write_at(0, &header.encode().0).and_then(|()| {
+        functions.into_iter().enumerate().try_for_each(|(at, pci)| out.write_at((at + 1) * RECORD_BYTES, &devset::function(pci).0))
+    });
+    // A reader that was not told this generation has not seen it.
+    if let Err(faulted) = wrote {
+        return SyscallError::from(faulted).to_u64();
     }
     set.saw(generation);
     count as u64
@@ -453,8 +466,6 @@ pub(super) fn sys_device_inventory(syscap: RawHandle, out: &mut UserBytesMut) ->
     if out.len() < records.len() * RECORD_BYTES {
         return SyscallError::ResourceExhausted.to_u64();
     }
-    for (i, record) in records.iter().enumerate() {
-        out.write_at(i * RECORD_BYTES, &record.encode().0);
-    }
-    records.len() as u64
+    let wrote = records.iter().enumerate().try_for_each(|(i, record)| out.write_at(i * RECORD_BYTES, &record.encode().0));
+    wrote.map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| records.len() as u64)
 }

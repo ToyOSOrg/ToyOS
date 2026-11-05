@@ -571,6 +571,21 @@ impl<F: Copy> Pages<F> {
         o.size = o.size.max(end);
     }
 
+    /// The end of a [`write_pin`](Self::write_pin) whose bytes did not all
+    /// come: released as [`write_unpin`](Self::write_unpin) releases it, the
+    /// size left as it was.
+    pub fn write_abandon(&mut self, o: &Object, page: u64, frame: F)
+    where
+        F: PartialEq,
+    {
+        let Some(i) = self.find(o.id, page) else { return };
+        let s = self.slot_mut(i);
+        if s.frame != Some(frame) {
+            return;
+        }
+        s.state.write_pins = s.state.write_pins.checked_sub(1).expect("a write pin released twice");
+    }
+
     fn range_ok(o: &Object, first: u64, count: u64) -> bool {
         (1..=RANGE_PAGES).contains(&count) && first.checked_add(count).is_some() && !o.gone
     }
@@ -849,6 +864,19 @@ mod tests {
         p.write_unpin(&mut o, 0, 7, 300);
         assert_eq!(o.size(), 300, "the bytes are in, and the size covers them");
         assert_eq!(p.write_pin(&mut o, 1), Err(Refused::InvalidArgument), "an absent page is supplied, not pinned");
+    }
+
+    /// A write pin whose copy faulted is released with the size as it was.
+    #[test]
+    fn an_abandoned_write_pin_grows_nothing_and_holds_nothing() {
+        let mut p = Pages::new(8, 4).unwrap();
+        let mut o = p.object(6, 100);
+        p.supply(&mut o, 0, 7, false, 100).unwrap();
+        assert_eq!(p.write_pin(&mut o, 0), Ok(7));
+        p.write_abandon(&o, 0, 7);
+        assert_eq!(o.size(), 100, "an abandoned write grows nothing");
+        let slot = p.find(o.id, 0).expect("the page stays");
+        assert_eq!(p.slot(slot).state.write_pins, 0, "an abandoned write holds no pin");
     }
 
     #[test]

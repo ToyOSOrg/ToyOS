@@ -817,15 +817,6 @@ impl AddressSpace {
         Some(phys + va % PAGE_SIZE)
     }
 
-    /// Whether every page of `[start, end)` is in a range that allows
-    /// `access` and is memory the kernel can copy through the direct map:
-    /// what a copy the kernel makes for a thread asks first. A device's
-    /// registers or firmware's framebuffer, an aperture, are no buffer.
-    pub fn allows(&self, start: u64, end: u64, access: Access) -> bool {
-        self.inventory
-            .covered_where(start & !(PAGE_SIZE - 1), end, |entry| entry.prot.allows(access) && entry.backed() && copyable(entry))
-    }
-
     /// The frame and protection a present leaf maps `va` with, populating
     /// nothing: for a check made where no fault may be taken.
     pub fn get(&self, va: u64) -> Option<(u64, policy::Prot)> {

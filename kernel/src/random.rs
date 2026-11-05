@@ -108,15 +108,20 @@ pub fn word() -> u64 {
 }
 
 /// Fill a caller's window with one draw.
-pub fn fill_user(out: &mut UserBytesMut) {
+pub fn fill_user(out: &mut UserBytesMut) -> Result<(), crate::user_ptr::Faulted> {
     let mut stream = stream();
     let mut chunk = [0u8; 256];
     let mut at = 0;
     while at < out.len() {
         let n = (out.len() - at).min(chunk.len());
         stream.fill(&mut chunk[..n]);
-        out.write_at(at, &chunk[..n]);
+        let wrote = out.write_at(at, &chunk[..n]);
+        if wrote.is_err() {
+            wipe(&mut chunk);
+            return wrote;
+        }
         at += n;
     }
     wipe(&mut chunk);
+    Ok(())
 }

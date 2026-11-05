@@ -19,7 +19,6 @@
 //! declaration declared it; that bring-up's sample reads each once, so a wrong
 //! verdict is `#GP` at boot, never inside a read.
 
-use alloc::vec::Vec;
 
 use kernel::sched::task::WaitClass;
 use toyos_abi::counters::{Counter, Record, RECORD_BYTES};
@@ -253,10 +252,9 @@ pub fn read(rights: Rights, out: &mut UserBytesMut) -> Result<usize, SyscallErro
     if watch::wait_until(&parkable, &ANSWERED, 0, WaitClass::Other, deadline, answered).is_err() {
         return Err(SyscallError::Gone);
     }
-    // One copy: each copy takes the caller's space lock, which its other
-    // readers of the round want at the same moment.
-    let records: Vec<u8> = (0..cpus).flat_map(|cpu| record(cpu, generation, rights).encode().0).collect();
-    out.write_at(0, &records);
+    for cpu in 0..cpus {
+        out.write_at(cpu * RECORD_BYTES, &record(cpu, generation, rights).encode().0)?;
+    }
     Ok(cpus)
 }
 

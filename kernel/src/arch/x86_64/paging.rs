@@ -29,7 +29,7 @@ const PAGE_WRITE: u64 = 1 << 1;
 const PAGE_USER: u64 = 1 << 2;
 const PAGE_WRITE_THROUGH: u64 = 1 << 3;
 const PAGE_CACHE_DISABLE: u64 = 1 << 4;
-/// Set by hardware on access or write; masked out when comparing entries.
+/// Masked out when comparing entries; nothing reads either.
 const PAGE_ACCESSED: u64 = 1 << 5;
 const PAGE_DIRTY: u64 = 1 << 6;
 const PAGE_SIZE_BIT: u64 = 1 << 7;
@@ -52,11 +52,15 @@ const TABLE_FLAGS: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
 
 impl Prot {
     /// The permission bits a user leaf carries; address and cache policy stay the caller's.
+    ///
+    /// Accessed, and dirty where writable, from the start (SDM Vol. 3A §4.8;
+    /// AMD APM Vol. 2 §5.4.2): otherwise the walker writes them on a fresh
+    /// page's first access. A clean-page tracker would have to stop setting `DIRTY`.
     fn leaf_bits(self) -> u64 {
-        let common = PAGE_PRESENT | PAGE_USER;
+        let common = PAGE_PRESENT | PAGE_USER | PAGE_ACCESSED;
         match self {
             Self::Read => common | PAGE_NX,
-            Self::ReadWrite => common | PAGE_WRITE | PAGE_NX,
+            Self::ReadWrite => common | PAGE_WRITE | PAGE_DIRTY | PAGE_NX,
             Self::ReadExec => common,
         }
     }

@@ -394,9 +394,8 @@ pub fn enable_interrupts() {
 ///
 /// **A measurement and not a guard.** The answer is stale the instant any `sti`
 /// or `cli` runs, so nothing may branch on it to decide whether to mask; what it
-/// is for is a site that has to *say* which state it inherited, which is a fact
-/// about its caller rather than about the instruction after it.
-#[cfg(any(feature = "boot-actuators", feature = "mask-windows"))]
+/// is for is a site that has to *say* or assert which state it inherited,
+/// which is a fact about its caller rather than about the instruction after it.
 pub fn interrupts_enabled() -> bool {
     let rflags: u64;
     // SAFETY: balanced push/pop leaves rsp unchanged; the pair uses the stack, so no nomem.

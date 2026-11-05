@@ -270,7 +270,7 @@ pub fn build_child_handles(endow: &UserBytes, labels: &[u8], pager: bool) -> Res
         return Err(SyscallError::InvalidArgument.into());
     }
     let mut raw = alloc::vec![0u8; endow.len()];
-    endow.read_at(0, &mut raw);
+    endow.read_at(0, &mut raw).map_err(SyscallError::from)?;
     let job = child_job(&raw, labels)?;
     Ok(PendingHandles { table: HandleTable::new(&job), endow: raw, labels: labels.to_vec(), job, pager })
 }

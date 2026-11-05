@@ -4,55 +4,33 @@ kind: defect
 opened: 2026-08-28
 ---
 
-# A pipe's lock spans a 2 MiB user copy and the frames it takes for it
+# A pipe's or queue's lock hold is unmeasured, and a queue still grows under it
 
-Each pipe owns its state behind its own `sync::Lock` (`kernel/src/pipe.rs`),
-which disables preemption before it spins (`kernel/src/sync.rs`). The bulk copy
-runs inside that lock, through the frame store pipes and connections share
-(`kernel/src/frame_bytes.rs`):
+A pipe (`kernel/src/pipe.rs`) and a connection direction
+(`kernel/src/message.rs`) each keep their state behind a `sync::Lock`, which
+disables preemption before it spins (`kernel/src/sync.rs`). No user copy and no
+frame allocation runs under either any more: a read or a write claims its bytes
+under the lock, copies them and takes or gives back frames with it let go, and
+ends its claim under it (`kernel/src/frame_bytes.rs`, `kernel::pipe::Bytes`).
+A hold is a claim's arithmetic, one chunk's runs (at most 17), a list moved
+into a longer one (at most 513 words), or a batch of 32 spare frames listed.
 
-* `FrameBytes::read` makes one walk of the caller's window,
-  `buf.write_pieces`, and copies each pinned piece out of the frames it
-  covers with `bytes.peek`, under it;
-* `FrameBytes::write` makes one walk, `buf.read_pieces`, and copies each piece
-  into its frames with `bytes.place`, in the same acquisition.
+What is left:
 
-Each 16 pages of either copy take the caller's space lock and populate any
-untouched page, a frame from the allocator and a 4 KiB zeroing.
+* **The hold time has not been read**, before or after. Before, a pipe's lock
+  spanned up to a 2 MiB copy and 513 frames from the allocator; the scheduler's
+  bar for an uninterruptible stretch is `MAX_PASS_NS = 200_000` ns
+  (`kernel/pure/sched/cpu.rs`). The bound above is by inspection. QEMU's clock
+  cannot read it; a bench can.
+* **A connection's queue grows its two lists under the lock.**
+  `kernel::message::Queue` keeps its heads and its handles in `VecDeque`s that
+  start empty and double as `push` fills them, a heap allocation under the
+  queue's lock, up to `MAX_QUEUED_MESSAGES` and `MAX_QUEUED_HANDLES` entries.
+  Their bound is charged when the connection is made, so reserving it then is
+  the direct fix, at that memory per direction whether or not it is used.
+* **`audio_tone`'s worst wake** has not been read against the change.
 
-A pipe's copy is bounded only by the pipe: `PIPE_CAPACITY` is 2 MiB, the
-largest single copy under the lock, and nothing above caps it
-(`SYS_READ`/`SYS_WRITE` pass the caller's length through).
-
-A connection direction (`kernel/src/message.rs`) copies one whole message under
-its queue's lock, so its copy is bounded at `MAX_MESSAGE_LEN`, 16 KiB, and its
-frames are taken the same way. Both its send and its receive run that copy
-inside `process::with_process_data`, nesting the queue's lock in the process
-lock: the receive installs the message's handles in the caller's table and
-copies its bytes in one hold, so a refusal takes nothing.
-
-A write that grows the pipe also takes its frames under the same lock,
-nesting the frame allocator's lock: up to 513 frames, unzeroed, under one
-hold, and the heap the list of them grows into. A read that empties frames
-past the spares kept gives them back under the same nesting.
-
-What queues behind it is that one pipe's traffic: its other end's reads and
-writes, `has_data`/`has_space` from its blocking wrappers and polls, and its
-handles' clones and closes. The scheduler's own bar for an uninterruptible
-stretch is `MAX_PASS_NS = 200_000` ns (`kernel/pure/sched/cpu.rs`); a 2 MiB copy
-is past it at any plausible bandwidth. The hold time is not measured, and that
-is owed first. The length is the caller's.
-
-## Fix direction
-
-The lock is also the serialization `kernel::pipe::Bytes` relies on, so the
-copy cannot simply be lifted out: a claimed-range token per end, or a copy
-bounded per acquisition, has to carry the data-race argument. The frames can
-be taken before the lock and given back after it, as the read end's last
-holder already gives back what the pipe held.
-
-**Exit**: no pipe or queue lock is held across more than a bounded copy or any
-allocation, the connection's nesting in the process lock included, the hold
-time is read before and after, and `audio_tone`'s worst wake does not move.
+**Exit**: the hold time read on a bench before and after, the queue's lists
+grown outside its lock or reserved, and `audio_tone`'s worst wake unmoved.
 
 This is stage S0-a of `issues/anonymous-memory-swaps-to-an-encrypted-partition.md`.

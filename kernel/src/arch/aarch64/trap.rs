@@ -6,7 +6,8 @@
 //! it, the top of the running thread's kernel stack — and [`dispatch`] routes
 //! it: an interrupt to [`irq`], an `SVC` to the syscall dispatcher, a
 //! translation fault to the demand pager, anything else from EL0 to the end
-//! of its process, and anything else from EL1 to a panic. Every return to EL0
+//! of its process, a user copy's abort to the demand pager or the copy's
+//! fixup (`super::uaccess`), and anything else from EL1 to a panic. Every return to EL0
 //! runs `scheduler::exit_to_user` last. The entry saves no FP/SIMD register:
 //! the kernel never touches one, and a switch saves the thread's
 //! (`super::switch`).
@@ -129,8 +130,46 @@ extern "C" fn dispatch(frame: &mut Frame, entry: u64) {
             }
             crate::scheduler::exit_to_user();
         }
+        EL1_SYNC if user_copy_abort(frame) => {}
         _ => exception(frame, entry),
     }
+}
+
+/// `ESR_EL1.EC` of a data abort taken from EL1 itself.
+const EC_DABT_SAME: u64 = 0x25;
+
+/// An EL1 data abort inside a user copy (`super::uaccess`) on a user address:
+/// served as the process's own fault would be, after which the access is
+/// taken again, or else resumed at the copy's fixup, which answers the bytes
+/// not copied. The copy holds no lock at its syscall's depth (`user_ptr`), so
+/// the service runs at that depth too.
+/// `false` for any other EL1 exception.
+fn user_copy_abort(frame: &mut Frame) -> bool {
+    let Some(fixup) = super::uaccess::fixup(frame.elr) else { return false };
+    // `FnV`: a syndrome whose `FAR_EL1` is not valid names no address.
+    let far_valid = frame.esr & (1 << 10) == 0;
+    if frame.esr >> 26 != EC_DABT_SAME || !far_valid || !toyos_userbound::is_user_addr(frame.far) {
+        return false;
+    }
+    if is_translation_fault(frame.esr) {
+        let prev = percpu::swap_fault_state(CpuFaultState::PageFault);
+        if prev != CpuFaultState::Normal {
+            // Put back: the panic classifies a recursive fault by what it finds.
+            percpu::set_fault_state(prev);
+            return false;
+        }
+        cpu::enable_interrupts();
+        // `WnR`, bit 6: the access was a write.
+        let access = if frame.esr & (1 << 6) != 0 { kernel::vm::Access::Write } else { kernel::vm::Access::Read };
+        let served = crate::process::handle_page_fault(frame.far, access);
+        cpu::disable_interrupts();
+        percpu::set_fault_state(CpuFaultState::Normal);
+        if served {
+            return true;
+        }
+    }
+    frame.elr = fixup;
+    true
 }
 
 /// The report of an exception this kernel does not return from: its own, at

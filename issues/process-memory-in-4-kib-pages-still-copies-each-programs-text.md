@@ -108,4 +108,19 @@ are split in two. **7a**, delivered by the storage track's file-server work:
 a pager's objects, read through `SYS_PAGED_READ` and never mapped
 (`kernel/src/object/paged.rs`). **7b** stays this track's: mappings of them,
 faults that park, their page tables and reverse records, holders' kernel
-writes and their admission, after stage 4's seal.
+writes and their admission. **7b comes before stage 4**, by the
+orchestrator's ruling of 2026-11-01 on the owner's delegation: file mappings
+are on the critical path for file parity with Linux and for the storage
+track's name cache, and stage 4's seal layers onto mappings rather than the
+reverse. By the orchestrator's ruling of 2026-11-03, 7b needs two things:
+the swap track's S0-a half that is met, every user copy outside every spin
+lock (a fault that parks on a pager can hold none, and `user_ptr` refuses a
+copy made under one); and, after the storage consolidation (#1152) lands, the
+same gate extended to sleeping locks, so a user copy under any kernel lock is
+refused. #1152 deleted the kernel's sleeping lock (`kernel/src/sleeplock.rs`),
+so the spin-lock gate is that gate and both are met. The rest of S0-a's row
+(a chunk faulted in before any lock and pinned after a re-check, the lost-page
+outcomes, its H model) is built as part of 7b. One outcome 7b must place: a pipe read or message receive of at most
+`frame_bytes::BOUNCE` bytes lets its bytes go, and a receive installs its
+handles, before copying out to the caller. A lost page met in that copy must
+not lose them. Faulting the destination in before the take is one way.
