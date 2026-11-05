@@ -21,7 +21,7 @@ use toyos_smmu::Asid;
 
 use super::{window, Live, UNIT};
 use crate::iommu::domains;
-use crate::iommu::{DomainId, IommuError, Iova, Limit, StreamId};
+use crate::iommu::{DomainId, IommuError, Iova, StreamId};
 use crate::log;
 use crate::mm::PAGE_SIZE;
 
@@ -159,26 +159,7 @@ pub fn create(room: u64, windows: &[toyos_abi::acpi::RootBridgeWindow]) -> Resul
     Ok(live.domains.add(next, Space { asid, root, context }, what))
 }
 
-pub fn map(id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<Iova, IommuError> {
-    let mut held = UNIT.lock();
-    let live = held.as_mut().expect("a domain exists only on an armed unit");
-    let (space, at) = live.domains.map(id, phys, bytes, limit)?;
-    for (at, phys) in domains::leaves(at, phys, bytes) {
-        live.put(space.root, at, block(phys));
-    }
-    Ok(at)
-}
-
-/// Put `bytes` at `phys` at `at` again, room this domain handed out before
-/// and whose mapping was taken back.
-pub fn map_at(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
-    place(id, at, phys, bytes)?;
-    domains::placed_again(id, at, phys, bytes);
-    Ok(())
-}
-
-/// [`map_at`] without its record line, for a mapping a holder makes and takes
-/// back as often as it likes.
+/// Put `bytes` at `phys` at `at`, inside room this domain handed out.
 pub fn place(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
     let mut held = UNIT.lock();
     let live = held.as_mut().expect("a domain exists only on an armed unit");

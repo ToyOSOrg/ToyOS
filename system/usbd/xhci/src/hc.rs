@@ -37,8 +37,7 @@ const CAP_HCSPARAMS2: usize = 0x08;
 const CAP_HCCPARAMS1: usize = 0x10;
 const CAP_DBOFF: usize = 0x14;
 const CAP_RTSOFF: usize = 0x18;
-/// HCCPARAMS1's 64-bit Addressing Capability and Context Size (§5.3.6).
-const HCCPARAMS1_AC64: u32 = 1 << 0;
+/// HCCPARAMS1's Context Size (§5.3.6).
 const HCCPARAMS1_CSZ: u32 = 1 << 2;
 
 const OP_USBCMD: usize = 0x00;
@@ -367,9 +366,6 @@ pub struct Counts {
 /// HCRST has run, and nothing of the machine is reachable to it.
 pub struct Reset<R> {
     regs: R,
-    /// The device addresses the controller issues: 64 bits, or 32 where
-    /// HCCPARAMS1.AC64 is clear (§5.3.6).
-    pub address_bits: u8,
     op: usize,
     rt: usize,
     db: usize,
@@ -496,8 +492,7 @@ impl<R: Registers> Reset<R> {
         settle(host, "it held HCRST", || regs.read32(op + OP_USBCMD) & USBCMD_HCRST == 0)?;
         settle(host, "it stayed Controller Not Ready", || regs.read32(op + OP_USBSTS) & USBSTS_CNR == 0)?;
         let slots = max_slots.min(MAX_DEVICES);
-        let address_bits = if hccparams1 & HCCPARAMS1_AC64 != 0 { 64 } else { 32 };
-        Ok(Self { regs, address_bits, op, rt, db, max_ports, slots, context_bytes, scratch, protocols })
+        Ok(Self { regs, op, rt, db, max_ports, slots, context_bytes, scratch, protocols })
     }
 
     /// The grant the layout needs: the fixed head, the scratchpad, and every

@@ -171,11 +171,7 @@ fn main() {
         Ok(reset) => reset,
         Err(why) => not_serving(&name, &format!("the controller cannot be driven: {why}"), link, stop),
     };
-    // After the reset, so a controller refused above never had a grant, and
-    // the addresses every grant and lend is placed below stated first.
-    if let Err(why) = dev.dma_limit(reset.address_bits) {
-        not_serving(&name, &format!("the kernel refused its {}-bit address limit: {why:?}", reset.address_bits), link, stop)
-    }
+    // After the reset, so a controller refused above never had a grant.
     let bytes = reset.grant_bytes();
     let (grant, _region) = match Grant::alloc(&dev, bytes as u64) {
         Ok(granted) => granted,

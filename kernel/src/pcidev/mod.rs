@@ -13,16 +13,17 @@
 //! an address outside them is refused at the unit and recorded against that
 //! claim.
 //!
-//! **What a holder lends is placed in a window of its function's domain
-//! reserved for lending, [`LEND_WINDOW`] long, and nowhere else**, so
-//! lending and taking back as often as a holder likes spends no address and no
-//! remapping table past that window's, and a window with no room left is a
-//! refusal ([`SyscallError::ResourceExhausted`]). An address in it is lent
-//! again once it is taken back. Within a claim, what the function still had in
-//! flight there lands in memory the same holder lent, which is authority it
-//! already had over both regions; across claims, only once the function was
-//! reset and is quiet ([`Retired`]), and never while the address is the
-//! function's [`Function::residue`].
+//! **Every device address a claim is given is in one window of its
+//! function's domain, reserved with the domain** (`kernel::claimspace`):
+//! [`MAX_GRANT_TOTAL`] for grants, then [`LEND_WINDOW`] for what a holder
+//! lends. So claiming, granting, lending and ending as often as holders like
+//! spends no address and no remapping table past that window's, and a window
+//! with no room left is a refusal ([`SyscallError::ResourceExhausted`]). An
+//! address in it is given again once it is taken back. Within a claim, what
+//! the function still had in flight there lands in memory the same holder was
+//! given, which is authority it already had over both regions; across claims,
+//! only once the function was reset and is quiet ([`Retired`]), or in a
+//! grant's fresh pages where it is the function's [`Function::residue`].
 //!
 //! **A BAR is handed over where firmware put it, in the 4 KiB pages it
 //! covers**, and only where no other function decodes inside them
@@ -62,11 +63,6 @@
 //! interrupts this machine does not remap**, because its message would be
 //! compatibility format, which raises any vector on any CPU.
 //!
-//! **Every grant ends below the address limit its holder stated**
-//! ([`dma_limit`]), and no grant or lend is made before one is: a function
-//! that drops its upper address bits would issue a grant above its limit as
-//! another grant's address.
-//!
 //! **A function masters the bus only when its holder starts it**
 //! ([`dma_start`]), never at hand-over: what comes back from a process, or
 //! from firmware, may still hold addresses and run queues. Its holder has the
@@ -83,11 +79,10 @@
 //! the function reaches nothing until its next holder starts it — and keeps
 //! only their device addresses, as the function's [`Function::residue`], for
 //! the rest of the boot if it is never claimed again. A residue address is
-//! never lent ([`Bound::lend_room`]) and never a fresh grant's, so the next
-//! claim's grant of a range's size is fresh pages placed at that range; a range
-//! it places nothing at stays unmapped, so a transfer aimed there faults, and
-//! stays residue across its release until a release resets the function. No
-//! page is ever two holders'.
+//! never lent, and a grant placed over it is fresh pages, which is where a
+//! stale transfer aimed there lands; what no grant covers stays unmapped, so a
+//! transfer aimed there faults, and stays residue across its release until a
+//! release resets the function. No page is ever two holders'.
 //!
 //! **That rests on the next holder laying its grants out as the last one did.**
 //! The stale transfer — data and descriptor write-back — lands in whatever the
@@ -141,9 +136,10 @@ use toyos_pci::{af, aperture, bar, express, hotplug, pages, pm};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, mask_claimed_msix, NoCapability, NoEntry, PciDevice};
-use crate::iommu::{IommuError, Limit, OwnSpace, Refused, Remapped};
+use crate::iommu::{IommuError, OwnSpace, Refused, Remapped};
+use kernel::claimspace::{Span, Window};
 use crate::mm::policy::CachePolicy;
-use crate::mm::{align_2m, PAGE_2M};
+use crate::mm::align_2m;
 use crate::object::shm::SharedMemObject;
 use crate::sync::Lock;
 use crate::inbox::PollEntry;
@@ -155,8 +151,8 @@ use crate::watch::IrqWatch;
 /// memory.
 const MAX_GRANT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// And the most one claim may hold across every grant. What it lends is
-/// bounded apart, by the window it is placed in ([`Space::lend`]).
+/// And the most one claim may hold across every grant, the grant part of its
+/// function's window ([`Space::window`]); what it lends is bounded by the rest.
 const MAX_GRANT_TOTAL: u64 = 32 * 1024 * 1024;
 
 /// A function's own configuration space, which is all a claim may read of it
@@ -188,6 +184,10 @@ struct Function {
     /// names several devices, and the manifest's refusal of two matchers on
     /// one function is a host-side gate, not the capability boundary.
     held: AtomicBool,
+    /// Whether a claim has ever held it, set by [`claim`] and never cleared:
+    /// what it issues after a release is still its last holder's doing, so
+    /// its fault is never this kernel's ([`note_fault`]).
+    claimed: AtomicBool,
     irq: Interrupt,
     /// What its holder's poll waits on: two processes each driving a function
     /// must not learn when the other's device is busy.
@@ -200,7 +200,7 @@ struct Function {
     retired: Lock<Option<Retired>>,
     /// Where [`release`] could not reset it was left aimed: its last holder's
     /// grants, by address alone, until it is claimed again.
-    residue: Lock<Vec<Aimed>>,
+    residue: Lock<Vec<Span>>,
 }
 
 impl core::fmt::Display for Function {
@@ -247,6 +247,7 @@ fn new_record(pci: PciDevice, arrival: Arrival) -> Function {
         slot: AtomicPtr::new(core::ptr::null_mut()),
         left: AtomicU32::new(0),
         held: AtomicBool::new(false),
+        claimed: AtomicBool::new(false),
         irq: Interrupt::new(),
         watch: IrqWatch::new(),
         space: Lock::new(None),
@@ -278,13 +279,14 @@ fn function(number: usize) -> &'static Function {
     unsafe { &*RECORDS[number].load(Ordering::Acquire) }
 }
 
-/// A function's address space, and the room in it every holder's lent regions go.
+/// A function's address space, and the room in it every holder's grants and
+/// lent regions go.
 #[derive(Clone, Copy)]
 struct Space {
     space: OwnSpace,
-    /// [`LEND_WINDOW`] of addresses handed out with the domain and never
-    /// mapped by anything but [`dma_map`].
-    lend: u64,
+    /// Addresses handed out with the domain and mapped by nothing but
+    /// [`dma_alloc`] and [`dma_map`].
+    window: Window,
 }
 
 /// One granted buffer: the memory, and where the device reaches it.
@@ -298,27 +300,24 @@ struct Grant {
     origin: Origin,
 }
 
+impl Grant {
+    fn span(&self) -> Span {
+        Span { at: self.at, bytes: self.bytes }
+    }
+}
+
 /// Where a grant's memory came from, which decides who may take it back.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Origin {
     /// [`dma_alloc`]'s fresh pages, the claim's for its whole life. `residual`
-    /// is a grant placed at a range of [`Bound::residue`]: taken back, the
-    /// range returns there.
+    /// is a grant placed over [`Bound::residue`]: taken back, its range
+    /// returns there.
     Allocated { residual: bool },
-    /// A region the holder already had, put in [`Space::lend`] by
-    /// [`dma_map`]: never at a residue range, because what a stale transfer
-    /// lands in there must be this holder's own fresh memory and not a region
-    /// some other process still reads. Its address can itself become residue,
-    /// and a [`dma_alloc`] grant of its size is then placed there like at any
-    /// other — fresh pages, which is what residue is for.
+    /// A region the holder already had, put in its window's lend part by
+    /// [`dma_map`]: never over residue, because what a stale transfer lands in
+    /// there must be this holder's own fresh memory and not a region some
+    /// other process still reads.
     Mapped,
-}
-
-/// Device addresses a function's domain handed out and no longer maps.
-#[derive(Clone, Copy)]
-struct Aimed {
-    at: u64,
-    bytes: u64,
 }
 
 /// How a claimed function was made to speak, and the message it speaks with.
@@ -342,8 +341,8 @@ impl Armed {
 struct Bound {
     pci: PciDevice,
     space: OwnSpace,
-    /// [`Space::lend`].
-    lend: u64,
+    /// [`Space::window`].
+    window: Window,
     armed: Armed,
     id: PciId,
     /// Where firmware put each BAR its holder may map, and how much of it the
@@ -351,13 +350,9 @@ struct Bound {
     bar_at: [u64; BARS],
     bar_bytes: [u64; BARS],
     grants: Vec<Grant>,
-    /// The [`Function::residue`] this claim took over and has placed no grant at: mapped
-    /// to nothing and counted against nothing, and where a grant of a range's
-    /// size is placed.
-    residue: Vec<Aimed>,
-    /// What the holder stated the function issues ([`dma_limit`]); no grant
-    /// or lend is made before it is.
-    limit: Option<Limit>,
+    /// The [`Function::residue`] this claim took over and has placed no grant
+    /// over: mapped to nothing and counted against nothing.
+    residue: Vec<Span>,
     /// Whether this function may issue a transaction yet: false until its
     /// holder starts it ([`dma_start`]), so a function carrying a previous
     /// holder's or firmware's queue addresses acts on none of them before its
@@ -371,21 +366,6 @@ struct Bound {
 }
 
 impl Bound {
-    /// The first run of `span` in [`Space::lend`] that no grant and no residue
-    /// range touches.
-    fn lend_room(&self, span: u64) -> Option<u64> {
-        let taken = |at: u64| {
-            let end = at + span;
-            let grants = self.grants.iter().map(|grant| (grant.at, grant.bytes));
-            let residue = self.residue.iter().map(|aimed| (aimed.at, aimed.bytes));
-            grants.chain(residue).any(|(from, bytes)| from < end && at < from + bytes)
-        };
-        (0..LEND_WINDOW / PAGE_2M)
-            .map(|leaf| self.lend + leaf * PAGE_2M)
-            .take_while(|at| at + span <= self.lend + LEND_WINDOW)
-            .find(|at| !taken(*at))
-    }
-
     /// Let the function master the bus, once.
     fn start_mastering(&mut self) {
         if !self.mastering {
@@ -1024,6 +1004,7 @@ pub fn claim(arrival: Arrival, firmware: FirmwareWindows) -> Result<(PciFunction
     if held.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
         return Err(ClaimError::Owned);
     }
+    function(number).claimed.store(true, Ordering::Release);
     // Dropped by every refusal below, which is what gives the function back.
     let binding = Binding { number, arrival };
     // It may have left between the look above and the take: nothing of a
@@ -1102,7 +1083,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindo
     // else — and a refusal where this machine has none to give, because the
     // alternative is handing a process physical addresses to write into
     // descriptors.
-    let Space { space, lend } = function_space(number, windows).map_err(Refusal::Untranslated)?;
+    let Space { space, window } = function_space(number, windows).map_err(Refusal::Untranslated)?;
     let (bar_at, bar_bytes) = bars(&pci, windows)?;
 
     // Decode must be on for the table's BAR to take the entry, and for the
@@ -1125,14 +1106,13 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindo
     Ok(Bound {
         pci,
         space,
-        lend,
+        window,
         armed,
         id,
         bar_at,
         bar_bytes,
         grants: Vec::new(),
         residue: Vec::new(),
-        limit: None,
         mastering: false,
         firmware: FirmwareWindows::NONE,
         handed: Vec::new(),
@@ -1185,10 +1165,10 @@ fn bars(pci: &PciDevice, windows: &[RootBridgeWindow]) -> Result<([u64; BARS], [
     Ok((bar_at, bar_bytes))
 }
 
-/// Function `number`'s address space, made on its first claim clear of the
-/// declared `windows`, with what firmware reserved for the function already
-/// mapped, so a function firmware left running against that memory, a
-/// scan-out among them, keeps reaching it across the attach.
+/// Function `number`'s address space and its window, made on its first claim
+/// clear of the declared `windows`, with what firmware reserved for the
+/// function already mapped, so a function firmware left running against that
+/// memory, a scan-out among them, keeps reaching it across the attach.
 fn function_space(number: usize, windows: &[RootBridgeWindow]) -> Result<Space, IommuError> {
     let function = function(number);
     let mut held = function.space.lock();
@@ -1196,10 +1176,16 @@ fn function_space(number: usize, windows: &[RootBridgeWindow]) -> Result<Space, 
         Some(space) => Ok(space),
         None => {
             let who = function.who;
-            let (space, lend) =
-                OwnSpace::create(LEND_WINDOW, windows, (who >> 8) as u8, ((who >> 3) & 0x1f) as u8, (who & 7) as u8)?;
-            *held = Some(Space { space, lend });
-            Ok(Space { space, lend })
+            let (space, at) = OwnSpace::create(
+                MAX_GRANT_TOTAL + LEND_WINDOW,
+                windows,
+                (who >> 8) as u8,
+                ((who >> 3) & 0x1f) as u8,
+                (who & 7) as u8,
+            )?;
+            let made = Space { space, window: Window::new(at, MAX_GRANT_TOTAL, LEND_WINDOW) };
+            *held = Some(made);
+            Ok(made)
         }
     }
 }
@@ -1477,14 +1463,14 @@ fn finish_retired(number: usize) {
 }
 
 /// The function's [`Function::residue`], for the claim that now holds it.
-fn take_residue(number: usize) -> Vec<Aimed> {
+fn take_residue(number: usize) -> Vec<Span> {
     let function = function(number);
     let residue = core::mem::take(&mut *function.residue.lock());
     if !residue.is_empty() {
         let bytes: u64 = residue.iter().map(|aimed| aimed.bytes).sum();
         log!(
-            "pcidev: {function} was left aimed at {} range(s), {bytes} bytes: a grant of a \
-             range's size is placed there, on fresh pages",
+            "pcidev: {function} was left aimed at {} range(s), {bytes} bytes: a grant placed \
+             over them is fresh pages",
             residue.len()
         );
     }
@@ -1639,7 +1625,7 @@ fn tear_down(function: &Function, mut bound: Bound) {
             // still be aimed there too, until something resets it.
             *residue = grants
                 .iter()
-                .map(|grant| Aimed { at: grant.at, bytes: grant.bytes })
+                .map(Grant::span)
                 .chain(bound.residue.iter().copied())
                 .collect();
         }
@@ -1828,62 +1814,31 @@ pub fn dma_alloc(
 ) -> Result<(Arc<SharedMemObject>, u64, u64), SyscallError> {
     let function = binding.function();
     with_bound(binding, |bound| {
-        let limit = bound.limit.ok_or(SyscallError::InvalidArgument)?;
         if bytes == 0 || bytes > MAX_GRANT_BYTES {
             return Err(SyscallError::InvalidArgument);
         }
-        let held: u64 = bound
-            .grants
-            .iter()
-            .filter(|grant| grant.origin != Origin::Mapped)
-            .map(|grant| grant.bytes)
-            .sum();
         let span = align_2m(bytes as usize) as u64;
-        if held + span > MAX_GRANT_TOTAL {
-            return Err(SyscallError::ResourceExhausted);
-        }
+        // First fit in the grant part, `MAX_GRANT_TOTAL` long: refused where no
+        // run of `span` is free there, which a claim whose grants were taken
+        // back out of order can meet below that total.
         let memory = SharedMemObject::create_run(&crate::mm::charge::current(), span)?;
         let (phys, _) = memory.run().expect("pcidev: a grant is one run");
-        // The pages are the allocator's own and 2 MiB, so a domain that cannot
-        // take them is a kernel bug rather than the device's answer.
-        let refused = |why| -> ! { panic!("pcidev: {function} could not map a grant: {why}") };
-        let (at, residual) = match bound.residue.iter().position(|aimed| aimed.bytes == span && aimed.at + span <= limit.end()) {
-            // The function may still be aimed here, so this holder is the one
-            // whatever it had in flight lands on.
-            Some(index) => {
-                let aimed = bound.residue.remove(index);
-                bound.space.map_at(aimed.at, phys, span).unwrap_or_else(|why| refused(why));
-                (aimed.at, true)
-            }
-            // A domain its claims have spent is the machine's limit and not
-            // a kernel bug: the holder is refused, and the pages go back.
-            None => match bound.space.map(phys, span, limit) {
-                Ok(at) => (at, false),
-                Err(IommuError::AddressesExhausted(_)) => return Err(SyscallError::ResourceExhausted),
-                Err(why) => refused(why),
-            },
-        };
+        // The function may still be aimed at what this covers of the residue,
+        // so these fresh pages are where whatever it had in flight lands.
+        let (room, residual) = bound
+            .window
+            .grant(span, bound.grants.iter().map(Grant::span), &mut bound.residue)
+            .ok_or(SyscallError::ResourceExhausted)?;
+        let at = room.at;
+        let placed = if residual { bound.space.map_again(at, phys, span) } else { bound.space.map_at(at, phys, span) };
+        // Inside room the domain handed out with the function, and the pages
+        // are the allocator's own whole 2 MiB ones: a refusal is a kernel bug.
+        if let Err(why) = placed {
+            panic!("pcidev: {function} could not map a grant at {at:#x}: {why}");
+        }
         let origin = Origin::Allocated { residual };
         bound.grants.push(Grant { memory: Arc::clone(&memory), at, bytes: span, origin });
         Ok((memory, at, span))
-    })
-}
-
-/// The function issues device addresses of `bits` bits, as its holder states
-/// it: once per claim and before any grant or lend, which are all placed
-/// below it. `InvalidArgument` outside 32 to 64 bits, `AlreadyExists` for a
-/// second statement.
-pub fn dma_limit(binding: &Binding, bits: u64) -> Result<(), SyscallError> {
-    let limit = u8::try_from(bits).ok().and_then(Limit::bits).ok_or(SyscallError::InvalidArgument)?;
-    with_bound(binding, |bound| {
-        if bound.limit.is_some() {
-            return Err(SyscallError::AlreadyExists);
-        }
-        // `OwnSpace::create` hands the lend window out below 4 GiB, which
-        // every limit reaches.
-        assert!(bound.lend + LEND_WINDOW <= limit.end(), "pcidev: a lend window at {:#x} above 4 GiB", bound.lend);
-        bound.limit = Some(limit);
-        Ok(())
     })
 }
 
@@ -1899,7 +1854,7 @@ pub fn dma_start(binding: &Binding) -> Result<(), SyscallError> {
 /// Take a grant back, for a caller that could not be given a handle to it.
 ///
 /// **A partial success is not left behind.** Without this the grant would stay
-/// mapped in the function's domain and counted against [`MAX_GRANT_TOTAL`] with
+/// mapped in the function's domain, holding room in its grant part with
 /// nothing naming it, so a caller that hit a full handle table once would be
 /// refused every later grant with no way back but dying.
 ///
@@ -1918,7 +1873,7 @@ pub fn dma_undo(binding: &Binding, memory: &Arc<SharedMemObject>) {
             panic!("pcidev: {function} could not take {:#x} back: {why}", grant.at);
         }
         if grant.origin == (Origin::Allocated { residual: true }) {
-            bound.residue.push(Aimed { at: grant.at, bytes: grant.bytes });
+            bound.residue.push(grant.span());
         }
         Ok(())
     });
@@ -1928,19 +1883,18 @@ pub fn dma_undo(binding: &Binding, memory: &Arc<SharedMemObject>) {
 /// where the function reaches it and how much of it there is.
 ///
 /// **The domain is still the whole gate.** What is added is exactly the
-/// region's pages, in [`Space::lend`] where no grant and no residue is, so the
+/// region's pages, in its window's lend part where no grant and no residue is, so the
 /// function reaches this memory, the claim's own grants and what this holder
 /// lent it before, and nothing else. Only ordinary memory this kernel
 /// allocated in one run qualifies ([`SharedMemObject::run`]): a BAR window mapped here
 /// would be one device aimed at another's registers, and firmware's
 /// framebuffer is not the kernel's to lend.
 ///
-/// Bounded by [`LEND_WINDOW`] alone: a window with no run of the region's
+/// Bounded by [`LEND_WINDOW`] alone: a lend part with no run of the region's
 /// length left free is a refusal.
 pub fn dma_map(binding: &Binding, region: &Arc<SharedMemObject>) -> Result<(u64, u64), SyscallError> {
     let function = binding.function();
     with_bound(binding, |bound| {
-        bound.limit.ok_or(SyscallError::InvalidArgument)?;
         let (phys, span) = region.run().ok_or(SyscallError::InvalidArgument)?;
         // One region, one address: a second mapping of it would be two grants
         // naming one set of pages, and taking either back would leave the
@@ -1948,7 +1902,11 @@ pub fn dma_map(binding: &Binding, region: &Arc<SharedMemObject>) -> Result<(u64,
         if bound.grants.iter().any(|grant| Arc::ptr_eq(&grant.memory, region)) {
             return Err(SyscallError::InvalidArgument);
         }
-        let at = bound.lend_room(span).ok_or(SyscallError::ResourceExhausted)?;
+        let at = bound
+            .window
+            .lend_room(span, bound.grants.iter().map(Grant::span), &bound.residue)
+            .ok_or(SyscallError::ResourceExhausted)?
+            .at;
         // Inside room the domain handed out with the function, and the pages are
         // the allocator's own whole 2 MiB ones: a refusal here is a kernel bug.
         if let Err(why) = bound.space.place(at, phys, span) {
@@ -2057,9 +2015,9 @@ pub fn isr(number: usize) {
     function.watch.post_in_place();
 }
 
-/// The unit refused requester `who` an access: `true` where a claim holds it
-/// or it has left the device set, so that no driver of this kernel's is to
-/// blame, and its bus mastering is then cleared.
+/// The unit refused requester `who` an access: `true` where a claim holds it,
+/// a claim held it, or it has left the device set, so that no driver of this
+/// kernel's is to blame, and its bus mastering is then cleared.
 ///
 /// Called from the fault handler, so it takes no lock: every call the claim
 /// answers refuses from here on, its interrupt read included, and the post
@@ -2069,13 +2027,15 @@ pub fn note_fault(who: u16) -> bool {
         return false;
     };
     let gone = function.arrival.load(Ordering::Acquire) == 0;
-    if !gone && !function.held.load(Ordering::Acquire) {
+    let held = function.held.load(Ordering::Acquire);
+    if !gone && !held && !function.claimed.load(Ordering::Acquire) {
         return false;
     }
     // A function that arrived after the fault handler's table was published
     // is not in it, so this is the one place its mastering is stopped.
     crate::drivers::pci::stop_bus_mastering(function.pci.config_window());
-    if gone {
+    // No claim is left to refuse: the fault's line is its whole record.
+    if gone || !held {
         return true;
     }
     function.irq.fault();

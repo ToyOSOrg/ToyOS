@@ -58,8 +58,6 @@ enum Refusal {
     Kernel(KernelRefused),
     NoRegisters,
     Controller(controller::Refusal),
-    /// No width this function reaches is known.
-    Width(controller::Contradicted),
     Link(LinkFault),
     NoOutput(PathError),
     /// The converter behind the chosen pin offers none of soundserver's rates
@@ -110,7 +108,6 @@ impl core::fmt::Display for Refusal {
             Self::Kernel(why) => write!(f, "{why}"),
             Self::NoRegisters => write!(f, "the claim gives its register BAR no window"),
             Self::Controller(why) => write!(f, "the controller refused: {why}"),
-            Self::Width(why) => write!(f, "{why}"),
             Self::Link(why) => write!(f, "the codec link refused: {why}"),
             Self::NoOutput(why) => {
                 write!(f, "its codecs reach no output: ")?;
@@ -216,9 +213,6 @@ impl Driver {
         // running reaches the grants laid out below.
         let reset = controller::reset(&bar, || std::thread::sleep(Duration::from_micros(CODEC_DETECT_MICROS)))?;
         say!("{at}: gcap={:#06x} statests={:#06x}", reset.gcap.0, reset.statests);
-        let (vendor, device) = toyos_pci_claim::id(&dev)?;
-        let bits = controller::address_bits(vendor, device, reset.gcap).map_err(Refusal::Width)?;
-        toyos_pci_claim::limit(&dev, bits)?;
 
         let (grant, region) = Grant::alloc(&dev, GRANT_BYTES as u64)?;
         grant.window().zero();

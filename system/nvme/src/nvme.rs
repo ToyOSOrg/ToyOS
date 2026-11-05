@@ -245,8 +245,6 @@ impl Controller {
         if mqes < IO_DEPTH as u32 {
             return Err(Refusal::Geometry(format!("the controller's queues hold {mqes} entries")));
         }
-        // Every address NVMe carries — queue bases and PRP entries — is 64 bits.
-        dev.dma_limit(64).map_err(|e| Refusal::Kernel("the address limit", e))?;
         let grant = dev.dma_alloc(GRANT_BYTES).map_err(|e| Refusal::Kernel("a DMA grant", e))?;
         // SAFETY: the grant is at least `GRANT_BYTES` and lives as long as
         // `grant`, which this struct holds.

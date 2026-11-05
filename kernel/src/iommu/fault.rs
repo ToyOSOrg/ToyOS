@@ -12,12 +12,13 @@
 //! **What differs is who the fault is handed to.** An enumerated function
 //! every driver of which is in this kernel has nobody, and its fault is a
 //! defect of this kernel, so the terminal action is a halt — the last thing
-//! that happens rather than the first. A function a process drives has an
-//! owner: `pcidev` is told, that claim refuses every later call, and the
-//! machine goes on, because one process's bug taking the machine down is the
-//! thing moving a driver out of the kernel was for. A record that names no
-//! enumerated function is a device's input this kernel never took on: the
-//! unit has already refused it, so it is counted and the machine goes on.
+//! that happens rather than the first. A function a process drives, or
+//! drove, has an owner: `pcidev` is told, a claim that holds it refuses every
+//! later call, and the machine goes on, because one process's bug taking the
+//! machine down is the thing moving a driver out of the kernel was for. A
+//! record that names no enumerated function is a device's input this kernel
+//! never took on: the unit has already refused it, so it is counted and the
+//! machine goes on.
 //! Nothing here can clear such a requester's `BME`, so a backend bounds what
 //! it reads per interrupt by itself, never by the device, and only a stray's
 //! records whose count is a power of two are written, so the device cannot
@@ -267,7 +268,7 @@ fn config_window(phys: u64) -> Mmio {
 enum Owner {
     /// An enumerated function only this kernel drives: the halt.
     Kernel,
-    /// An enumerated function a process holds a claim on.
+    /// An enumerated function a process holds or held a claim on.
     Process,
     /// No enumerated function: a requester this kernel never took on.
     Nobody,

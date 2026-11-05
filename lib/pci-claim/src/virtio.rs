@@ -1,7 +1,7 @@
 //! A virtio function's claim, brought to the features its driver and device
 //! agreed: the capability walk, the register window, and §3.1.1 up to
-//! `FEATURES_OK`, in the order `toyos-virtio`'s types fix; then its 64-bit
-//! address width stated and the function started.
+//! `FEATURES_OK`, in the order `toyos-virtio`'s types fix; then the function
+//! started.
 //!
 //! What is the device type's own — its queues, their vectors, its
 //! configuration — begins at the [`Setup`] this answers.
@@ -126,9 +126,7 @@ pub fn negotiate(dev: &PciDev, wanted: u64) -> Result<Negotiated, Refusal> {
     let offer = Offer::acknowledge(window, &layout)?;
     let offered = offer.features();
     let setup = offer.accept(wanted)?;
-    // Every address a virtqueue carries is 64 bits (virtio 1.2 §2.7.5), and
-    // the device just reset (§3.1.1) uses none before `DRIVER_OK`.
-    crate::limit(dev, 64)?;
+    // The device just reset (§3.1.1) uses no address before `DRIVER_OK`.
     crate::start(dev)?;
     let features = Features { at: (info.bus, info.dev, info.func), offered, negotiated: setup.features() };
     Ok(Negotiated { setup, mapping, features })

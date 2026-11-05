@@ -19,7 +19,7 @@ use crate::log;
 use alloc::vec::Vec;
 
 use crate::iommu::domains::{self, Domains};
-use crate::iommu::{AddressWidth, DomainId, IommuError, Iova, Limit, StreamId};
+use crate::iommu::{AddressWidth, DomainId, IommuError, Iova, StreamId};
 use crate::sync::Lock;
 use kernel::rmrr::Verdict as Reserved;
 
@@ -146,24 +146,7 @@ pub fn keep_reserved(id: DomainId, stream: StreamId) {
     }
 }
 
-pub fn map(id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<Iova, IommuError> {
-    let mut held = DOMAINS.lock();
-    let (space, at) = held.domains.map(id, phys, bytes, limit)?;
-    put(id, space, at, phys, bytes);
-    Ok(at)
-}
-
-/// Put `bytes` at `phys` at `at`, room this domain handed out before and whose
-/// mapping was taken back: a device still aimed there reaches these pages.
-pub fn map_at(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
-    place(id, at, phys, bytes)?;
-    domains::placed_again(id, at, phys, bytes);
-    Ok(())
-}
-
-/// [`map_at`] without its record line, for a mapping a holder makes and
-/// takes back as often as it likes: a line each would let one process flood
-/// the record ring.
+/// Put `bytes` at `phys` at `at`, inside room this domain handed out.
 pub fn place(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
     let held = DOMAINS.lock();
     let space = held.domains.place(id, at, phys, bytes)?;

@@ -453,18 +453,6 @@ fn a_controller_firmware_keeps_is_refused_and_left_as_found() {
     assert!(!host.1.borrow().iter().any(|l| l.contains("SMI generation off")), "{:#?}", host.1.borrow());
 }
 
-/// A controller that issues only 32-bit addresses (HCCPARAMS1.AC64 clear) is
-/// driven, and states that width for every grant and lend (§5.3.6).
-#[test]
-fn a_controller_without_ac64_is_driven_at_32_bits() {
-    let w = World::new(vec![(FakePort::empty(QUICK), None)], 1);
-    w.xhc().ac64 = false;
-    let reset = Reset::new(w.regs.clone(), &w.host).unwrap_or_else(|why| panic!("refused: {why}"));
-    assert_eq!(reset.address_bits, 32);
-    let w = World::new(vec![(FakePort::empty(QUICK), None)], 1);
-    assert_eq!(Reset::new(w.regs.clone(), &w.host).expect("the stub resets").address_bits, 64);
-}
-
 /// The stick present at bring-up is read and offered: its table through the
 /// reader the caller gives, and the bus is settled only once it has been.
 #[test]

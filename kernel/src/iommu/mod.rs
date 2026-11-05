@@ -11,7 +11,6 @@
 
 use crate::arch::iommu_unit as unit;
 use crate::arch::message_unit as messages;
-pub use kernel::iova::Limit;
 
 pub(crate) mod domains;
 pub(crate) mod fault;
@@ -116,8 +115,6 @@ pub enum IommuError {
     /// The units disagree on the depth a domain's tables would be built at.
     WidthsDisagree,
     DomainsExhausted(u32),
-    /// Every allowed address below this limit is handed out.
-    AddressesExhausted(Limit),
     /// Less than a new domain was asked to hand out is allowed below 4 GiB.
     NoRoom { room: u64 },
     /// Not a whole number of the 2 MiB leaves this kernel writes.
@@ -134,9 +131,6 @@ impl core::fmt::Display for IommuError {
             }
             Self::DomainsExhausted(ceiling) => {
                 write!(f, "every one of this machine's {ceiling} domains is taken")
-            }
-            Self::AddressesExhausted(limit) => {
-                write!(f, "a domain's device addresses below {:#x} are all handed out", limit.end())
             }
             Self::NoRoom { room } => {
                 write!(f, "less than the {room:#x} bytes a new domain hands out first is allowed below 4 GiB")
@@ -173,26 +167,30 @@ impl OwnSpace {
         Ok((Self(id), at.raw()))
     }
 
-    /// Put `bytes` at `phys` in this space, ending at or below `limit`, the
-    /// device's own address width; returns what to program the device with.
+    /// Put `bytes` at `phys` at `at`, inside room [`Self::create`] handed
+    /// out, with a record of it.
     ///
     /// Read and write both, always: nothing here can give a permission set a
     /// second value. The only leaf is 2 MiB, and QEMU drops an access its
     /// cached translation denies rather than recording a fault —
     /// unexpressible and unobservable both.
-    pub fn map(self, phys: u64, bytes: u64, limit: Limit) -> Result<u64, IommuError> {
-        unit::domain::map(self.0, phys, bytes, limit).map(Iova::raw)
-    }
-
-    /// Put `bytes` at `phys` at `at` again, where a device may still be aimed
-    /// from a mapping this space took back.
     pub fn map_at(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
-        unit::domain::map_at(self.0, Iova::translated(at), phys, bytes)
+        self.place(at, phys, bytes)?;
+        domains::placed(self.0, Iova::translated(at), phys, bytes, false);
+        Ok(())
     }
 
-    /// Put `bytes` at `phys` at `at`, inside room [`Self::create`] handed out,
-    /// and write no record of it: for a mapping its holder makes and takes back
-    /// as often as it likes.
+    /// [`Self::map_at`], where a device may still be aimed from a mapping
+    /// this space took back.
+    pub fn map_again(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
+        self.place(at, phys, bytes)?;
+        domains::placed(self.0, Iova::translated(at), phys, bytes, true);
+        Ok(())
+    }
+
+    /// [`Self::map_at`] with no record: for a mapping its holder makes and
+    /// takes back as often as it likes, a line each of which would let one
+    /// process flood the record ring.
     pub fn place(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
         unit::domain::place(self.0, Iova::translated(at), phys, bytes)
     }

@@ -136,7 +136,7 @@ pub const INTERRUPT_RANGE: (u64, u64) = (0xFEE0_0000, 0xFEF0_0000);
 pub mod domain {
     use super::{backend, Backend};
     use crate::arch::x86_64::{amdvi, vtd};
-    use crate::iommu::{DomainId, IommuError, Iova, Limit, StreamId};
+    use crate::iommu::{DomainId, IommuError, Iova, StreamId};
 
     pub fn create(room: u64, windows: &[toyos_abi::acpi::RootBridgeWindow]) -> Result<(DomainId, Iova), IommuError> {
         match backend() {
@@ -182,20 +182,6 @@ pub mod domain {
         let found = backend();
         assert!(found != Backend::None, "iommu: a domain used on a machine where no unit translates");
         found
-    }
-
-    pub fn map(id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<Iova, IommuError> {
-        match minted() {
-            Backend::AmdVi => amdvi::domain::map(id, phys, bytes, limit),
-            _ => vtd::domain::map(id, phys, bytes, limit),
-        }
-    }
-
-    pub fn map_at(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
-        match minted() {
-            Backend::AmdVi => amdvi::domain::map_at(id, at, phys, bytes),
-            _ => vtd::domain::map_at(id, at, phys, bytes),
-        }
     }
 
     pub fn place(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {

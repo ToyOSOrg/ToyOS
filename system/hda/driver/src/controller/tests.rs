@@ -438,21 +438,6 @@ fn a_read_pointer_reset_that_never_reads_back_is_refused() {
     );
 }
 
-#[test]
-fn a_grant_above_four_gib_is_refused_only_where_the_controller_is_narrow() {
-    let high = 0x1_2000_0000;
-    let narrow = Model::new(LAPTOP_GCAP & !1, 0b1).with(|s| s.device_base = high);
-    let reset = brought_up(&narrow);
-    assert_eq!(
-        Link::open(narrow.regs(), narrow.mem(), &reset).err(),
-        Some(Refusal::Beyond32Bits { device_addr: high + CORB as u64 })
-    );
-    let wide = Model::laptop().with(|s| s.device_base = high);
-    linked(&wide);
-    assert_eq!(wide.reg32(CORBUBASE), 1);
-    assert_eq!(wide.reg32(RIRBLBASE), 0x2000_0000 + RIRB as u32);
-}
-
 /// Every malformed answer is refused by name, and the link answers nothing
 /// after it: the CORB is not touched again.
 fn refused_for_good(model: Model, want: LinkFault) {
@@ -607,12 +592,6 @@ fn a_ring_the_engine_cannot_be_pointed_at_is_refused() {
         Stream::open(model.regs(), &model.mem(), RING_AT + 64, &reset, 0x4011),
         Err(Refusal::RingUnaligned { device_addr }) if device_addr == RING_AT + 64
     ));
-    let narrow = Model::new(LAPTOP_GCAP & !1, 0b1);
-    let reset = brought_up(&narrow);
-    assert!(matches!(
-        Stream::open(narrow.regs(), &narrow.mem(), 0xFFFF_FF80, &reset, 0x4011),
-        Err(Refusal::Beyond32Bits { .. })
-    ));
 }
 
 #[test]
@@ -683,15 +662,4 @@ fn a_stream_that_never_stops_is_refused() {
     let mut stream = streaming(&model);
     stream.start().unwrap();
     assert_eq!(stream.stop(), Err(StreamFault::NeverStopped));
-}
-
-/// 64OK decides the width, except for a function a measurement contradicts,
-/// which is driven at none.
-#[test]
-fn the_address_width_is_64ok_unless_it_is_contradicted() {
-    assert_eq!(address_bits(0x8086, 0xa0c8, Gcap(LAPTOP_GCAP)), Ok(64));
-    assert_eq!(address_bits(0x8086, 0xa0c8, Gcap(LAPTOP_GCAP & !1)), Ok(32));
-    assert_eq!(address_bits(0x1022, 0x15e3, Gcap(0x4401)), Ok(64));
-    let refused = address_bits(0x1002, 0x1637, Gcap(0x4001)).unwrap_err();
-    assert_eq!((refused.vendor, refused.device), (0x1002, 0x1637));
 }
