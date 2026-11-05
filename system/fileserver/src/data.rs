@@ -762,6 +762,32 @@ mod tests {
         assert_eq!(tail.pop(), Some(b'x'));
         assert!(tail.iter().all(|&b| b == 0));
     }
+    /// A file a delete made room for holds its own bytes on the device. The
+    /// first file takes most of the volume, so the second cannot be written
+    /// without the blocks the delete freed.
+    #[test]
+    fn a_file_in_a_deleted_files_blocks_holds_its_own_bytes_on_the_device() {
+        const CHUNK: usize = 64 * BLOCK;
+        let mut v = volume();
+        let free = v.room().unwrap().free as usize;
+        let len = (free * 6 / 10) & !(CHUNK - 1);
+        let fill = |v: &mut DataVolume<Ram>, path: &str, bytes: &[u8]| {
+            let node = v.open(path, CREATE).unwrap();
+            for (i, chunk) in bytes.chunks(CHUNK).enumerate() {
+                v.write(node, (i * CHUNK) as u64, chunk).unwrap_or_else(|e| panic!("{path} at {}: {e:?}", i * CHUNK));
+            }
+            v.close(node).unwrap();
+            v.sync().unwrap();
+        };
+        fill(&mut v, "home/old", &vec![0x5c; len]);
+        v.unlink("home/old").unwrap();
+        v.sync().unwrap();
+        let bytes: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        fill(&mut v, "home/new", &bytes);
+        let mut v = reopen(v);
+        let new = v.open("home/new", EXISTING).unwrap();
+        assert!(read(&mut v, new) == bytes, "the device holds other bytes than the file written");
+    }
     #[test]
     fn unlink_and_replacement_keep_live_inode_identity() {
         let mut v = volume();
