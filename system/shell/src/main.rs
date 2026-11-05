@@ -650,8 +650,15 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
             command.stdin(stdout);
         } else if is_first {
             if let Some(ref path) = cmd.input_file {
-                if let Ok(file) = File::open(path) {
-                    command.stdin(file);
+                match File::open(path) {
+                    Ok(file) => {
+                        command.stdin(file);
+                    }
+                    Err(e) => {
+                        eprintln!("shell: {path}: {e}");
+                        set_status_code(1);
+                        return false;
+                    }
                 }
             } else if cmd.heredoc.is_some() {
                 command.stdin(Stdio::piped());
@@ -660,8 +667,13 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
 
         if !is_last {
             command.stdout(Stdio::piped());
-        } else {
-            apply_redirect(&mut command, cmd);
+        } else if !apply_redirect(&mut command, cmd) {
+            // The commands before it end on the pipe this one would have read.
+            drop(command);
+            for mut child in children {
+                let _ = child.wait();
+            }
+            return false;
         }
 
         match command.spawn() {
@@ -754,7 +766,9 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
     } else if cmd.heredoc.is_some() {
         command.stdin(Stdio::piped());
     }
-    apply_redirect(&mut command, cmd);
+    if !apply_redirect(&mut command, cmd) {
+        return false;
+    }
 
     if let Some(ref data) = cmd.heredoc {
         // Spawn, write heredoc to stdin, then wait
@@ -837,7 +851,9 @@ fn detach(cmd: &SimpleCommand) -> bool {
     }
     let mut command = Command::new(program);
     command.args(&cmd.args[2..]).independent().detached();
-    apply_redirect(&mut command, cmd);
+    if !apply_redirect(&mut command, cmd) {
+        return false;
+    }
     match command.spawn() {
         Ok(_) => {
             set_status_code(0);
@@ -894,55 +910,53 @@ fn unstarted(cmd: &SimpleCommand, e: &std::io::Error) {
     }
 }
 
-fn apply_redirect(command: &mut Command, cmd: &SimpleCommand) {
-    match &cmd.redirect {
-        Some(Redirect::Truncate(path)) => {
-            if let Ok(file) = File::create(path) {
-                command.stdout(file);
-            } else {
-                eprintln!("cannot open: {}", path);
-            }
-        }
-        Some(Redirect::Append(path)) => {
-            if let Ok(file) = OpenOptions::new().create(true).append(true).open(path) {
-                command.stdout(file);
-            } else {
-                eprintln!("cannot open: {}", path);
-            }
-        }
-        None => {}
-    }
-    match &cmd.stderr {
-        Some(StderrRedirect::ToStdout) => {
-            // 2>&1: stderr goes where stdout goes
-            match &cmd.redirect {
-                Some(Redirect::Truncate(path)) => {
-                    if let Ok(file) = OpenOptions::new().write(true).open(path) {
-                        command.stderr(file);
-                    }
+/// Open `cmd`'s redirections onto `command`. One that does not open is said
+/// with what its open answered, the status is 1 and false is answered: the
+/// command is not run, since its output would go where the line did not send
+/// it. `2>&1` onto a file shares stdout's open file and its offset.
+fn apply_redirect(command: &mut Command, cmd: &SimpleCommand) -> bool {
+    let opened = (|| -> Result<(), (&str, io::Error)> {
+        let open = |path: &str, append: bool| {
+            let mut how = OpenOptions::new();
+            how.create(true);
+            if append { how.append(true) } else { how.write(true).truncate(true) };
+            how.open(path)
+        };
+        let stdout = match &cmd.redirect {
+            Some(Redirect::Truncate(path)) => Some((path, open(path, false).map_err(|e| (path.as_str(), e))?)),
+            Some(Redirect::Append(path)) => Some((path, open(path, true).map_err(|e| (path.as_str(), e))?)),
+            None => None,
+        };
+        match &cmd.stderr {
+            Some(StderrRedirect::ToStdout) => match &stdout {
+                Some((path, file)) => {
+                    command.stderr(file.try_clone().map_err(|e| (path.as_str(), e))?);
                 }
-                Some(Redirect::Append(path)) => {
-                    if let Ok(file) = OpenOptions::new().append(true).open(path) {
-                        command.stderr(file);
-                    }
-                }
+                // stdout is inherited or piped — stderr follows
                 None => {
-                    // stdout is inherited or piped — stderr follows
                     command.stderr(Stdio::inherit());
                 }
+            },
+            Some(StderrRedirect::ToFile(path)) => {
+                command.stderr(open(path, false).map_err(|e| (path.as_str(), e))?);
             }
-        }
-        Some(StderrRedirect::ToFile(path)) => {
-            if let Ok(file) = File::create(path) {
-                command.stderr(file);
+            Some(StderrRedirect::AppendFile(path)) => {
+                command.stderr(open(path, true).map_err(|e| (path.as_str(), e))?);
             }
+            None => {}
         }
-        Some(StderrRedirect::AppendFile(path)) => {
-            if let Ok(file) = OpenOptions::new().create(true).append(true).open(path) {
-                command.stderr(file);
-            }
+        if let Some((_, file)) = stdout {
+            command.stdout(file);
         }
-        None => {}
+        Ok(())
+    })();
+    match opened {
+        Ok(()) => true,
+        Err((path, e)) => {
+            eprintln!("shell: {path}: {e}");
+            set_status_code(1);
+            false
+        }
     }
 }
 
