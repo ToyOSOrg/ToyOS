@@ -20,4 +20,7 @@ QEMU, while `guest.yml`'s container still installs 11.1.1 from its snapshot
 archive, so its instrument step reds until the container moves to an image
 carrying 11.1.3.
 
-**Exit**: the nightly resumes, its guest container on 11.1.3. Held by the owner.
+**Exit**: the nightly resumes with its guest lanes on the guest runner rather
+than GitHub's machines. Only a `workflow_dispatch`-only workflow may name that
+runner, so resumption owes a design for a scheduled job under that guard. Held
+by the owner.
