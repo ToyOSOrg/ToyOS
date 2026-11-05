@@ -70,6 +70,10 @@ pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
 #[allow(suspicious_runtime_symbol_definitions)]
 #[no_mangle]
 pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    // MEASUREMENT ONLY, never lands: padding jumped over, which moves the
+    // functions after this one (memcpy among them) without changing them.
+    #[cfg(target_arch = "x86_64")]
+    unsafe { core::arch::asm!("jmp 2f", ".skip 0x184, 0xcc", "2:", options(nomem, nostack, preserves_flags)) };
     for i in 0..n {
         let a = *s1.add(i);
         let b = *s2.add(i);
