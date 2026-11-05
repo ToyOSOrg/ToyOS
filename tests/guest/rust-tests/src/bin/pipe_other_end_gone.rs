@@ -32,7 +32,7 @@ use toyos::ipc::Connection;
 use toyos::poller::{Poller, OTHER_END_GONE, READABLE};
 use toyos::syscap::SysCap;
 use toyos::{namespace, pipe_pair, port, AsHandle, BorrowedHandle, OwnedHandle, Pipe};
-use toyos_abi::syscall::{self, SyscallError};
+use toyos_abi::syscall::SyscallError;
 
 #[path = "../roster.rs"]
 mod roster;
@@ -73,13 +73,10 @@ fn test() {
 
     let (client, server) = connection();
     refused(client.as_handle(), "a connection");
-    // A handle the poller may watch, which answers being readable: a memory
-    // object has no wait right, and would be refused for that instead.
-    let event = syscall::event_create().expect("an event");
-    // SAFETY: the kernel installed both handles for this call and no other.
-    let (signal, wait) = unsafe { (OwnedHandle::from_raw(event.signal), OwnedHandle::from_raw(event.wait)) };
-    refused(wait.as_handle(), "an event's wait side");
-    drop((signal, wait));
+    // A watchable handle with no other end; a memory object lacks WAIT and is
+    // refused for that first.
+    let (_waker, bell) = toyos::wake::pair().expect("an event");
+    refused(bell.as_handle(), "an event's wait side");
     println!("  a connection and an event's wait side were refused the question");
 
     for own in [End::Read, End::Write] {
