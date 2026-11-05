@@ -44,20 +44,19 @@ pub unsafe extern "C" fn posix_memalign(out: *mut *mut u8, align: usize, size: u
 #[allow(suspicious_runtime_symbol_definitions)]
 #[no_mangle]
 pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    crate::arch::copy_forward(dest, src, n);
-    dest
+    crate::arch::copy_forward(dest, src, n)
 }
 
 #[allow(suspicious_runtime_symbol_definitions)]
 #[no_mangle]
 pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     if (dest as usize) <= (src as usize) || (dest as usize) >= (src as usize) + n {
-        crate::arch::copy_forward(dest, src, n);
+        crate::arch::copy_forward(dest, src, n)
     } else {
         // Overlap with dest after src: copy backwards.
         crate::arch::copy_backward(dest, src, n);
+        dest
     }
-    dest
 }
 
 #[allow(suspicious_runtime_symbol_definitions)]
