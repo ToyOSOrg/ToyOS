@@ -74,8 +74,6 @@ const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 const RUST_SKIP: &[&str] = &[
     // The DATA round trip has separate write and read boots, not a no-argument run.
     "data_roundtrip",
-    // Its explicit metal registration owns the directory listing workload.
-    "readdir_bound",
     // It writes the log disk for ever, so that its boot's deadline resets the
     // machine under it: `the_disk_survives_a_reset_under_load` runs it alone.
     "stick_load",
@@ -902,13 +900,6 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "memory_floor",
         metal::Metal { arms: FLOORCASE, judge: |b| b[0].job_passed("test_rs_memory_floor") },
-    ),
-    (
-        "readdir_bound",
-        metal::Metal {
-            arms: TESTCASES,
-            judge: |b| b[0].job_passed("test_rs_readdir_bound"),
-        },
     ),
     (
         "wake_storm_cost",
