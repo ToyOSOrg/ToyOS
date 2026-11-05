@@ -1510,8 +1510,7 @@ impl<'a> Supervisor<'a> {
         let temporary = toyos_manifest::app_temporary(package);
         let made = self.files("an app's directories", move || {
             let folders = toyos_manifest::APP_FOLDERS.iter().map(|folder| format!("{asked}/{folder}"));
-            let apps = temporary.rsplit_once('/').expect("an app's /tmp is beneath /tmp").0.to_string();
-            let temporary = [apps, temporary];
+            let temporary = [toyos_manifest::APP_TEMPORARIES.to_string(), temporary];
             std::iter::once(asked.clone()).chain(folders).chain(temporary).try_for_each(|dir| {
                 make_dir(&dir)?;
                 match std::fs::symlink_metadata(&dir)?.is_dir() {
