@@ -172,9 +172,9 @@ impl<D: BlockDev> Fat32<D> {
     /// **Copies that differ are a stop's only where each reads whole.** A
     /// stopped flush of a write-back device may have written any of its FAT
     /// blocks of either copy; each copy still reads whole because an entry
-    /// reaches the disk a flush after its chain, and an erase a flush before
-    /// its chain's free, so the blocks differ only past a file's size or in
-    /// clusters nothing reaches. A copy torn or written by something else
+    /// reaches the disk a flush after its chain, and every write that must
+    /// precede another a flush before it ([`crate::repair`]), so the blocks
+    /// differ only past a file's size or in clusters nothing reaches. A copy torn or written by something else
     /// does not read whole, and then neither is written over.
     async fn examine(&mut self) -> Result<Result<Findings, Unexplained>, Error> {
         let splits = self.splits().await?;

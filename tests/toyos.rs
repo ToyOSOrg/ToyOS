@@ -5267,7 +5267,7 @@ fn nvme_disk_boots(test_config: &Path) -> Result<(), String> {
     for role in NVME_ROLES {
         qemu::await_marker(&mut qemu, &mut console, &format!("fileserver: {role}"), "the role to be served")?;
     }
-    Ok(())
+    serial::Serial::named("the nvme boot", console).must_be_clean()
 }
 
 /// The NVMe driver's own account of the designation, which must be that it
