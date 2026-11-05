@@ -243,10 +243,12 @@ struct Log {
     stopping: Option<Stopping>,
 }
 
-/// The file's text held back after a flush, and the lines past the bound.
+/// The file's text held back after a flush, the lines past the bound, and
+/// whether the flush wrote the stop mark.
 struct Stopping {
     text: String,
     unwritten: u64,
+    marked: bool,
 }
 
 /// Text a stop may hold back from the file: a refused stop writes it, and
@@ -694,18 +696,20 @@ impl Log {
         let refused = self.sync().err();
         self.answered(refused);
         // Only over a durable log: the mark is what lets the next boot's loader
-        // treat this image as proven.
-        if self.volume.is_some()
-            && let Err(e) = store::mark_stopped()
-        {
-            toyos::error!("logkeeper: {DIR} would not take the stop mark ({e}) - the next boot will not count this one as clean");
-        }
+        // treat this image as proven. No volume, no call: `/log`'s server may
+        // never have answered.
+        let marked = self.volume.is_some()
+            && store::mark_stopped()
+                .inspect_err(|e| {
+                    toyos::error!("logkeeper: {DIR} would not take the stop mark ({e}) - the next boot will not count this one as clean")
+                })
+                .is_ok();
         // The console's carriers take the log up to here, and the UART what
         // the machine says from here as it stops.
         if let Some(carriers) = &self.carriers {
             carriers.stop(self.hub.end());
         }
-        self.stopping = Some(Stopping { text: String::new(), unwritten: 0 });
+        self.stopping = Some(Stopping { text: String::new(), unwritten: 0, marked });
         if let Err(e) = self.from_supervisor.signal(FLUSHED) {
             panic!("logkeeper: the supervisor could not be told the log is whole: {e:?}");
         }
@@ -718,7 +722,9 @@ impl Log {
             panic!("logkeeper: the supervisor said the machine runs on, and no stop was flushed for");
         };
         toyos::warn!("logkeeper: the stop was refused, so {DIR} takes this boot's lines again");
-        if let Err(e) = store::unmark_stopped() {
+        if held.marked
+            && let Err(e) = store::unmark_stopped()
+        {
             toyos::error!("logkeeper: {DIR} would not give back the stop mark ({e}) - a later death of this boot will read as clean");
         }
         if held.unwritten > 0 {
