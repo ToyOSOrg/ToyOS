@@ -148,7 +148,7 @@ Beside that order, each waiting on something outside it:
       **Exit**: that stage's, run against fileserver: an escape suite red on
       a resolver that walks the global tree and green on fileserver's, and a
       process given an empty view naming nothing. **Done** (#729, #742,
-      STEP8_PR): a connection is the grant the supervisor minted on its
+      #1181): a connection is the grant the supervisor minted on its
       role's one port. fileserver's `resolve` refuses every `..` and link
       that climbs out of the grant's root, and a held directory a rename left
       outside it (`a_held_directory_renamed_out_of_the_root_names_nothing`
@@ -165,7 +165,7 @@ Beside that order, each waiting on something outside it:
         records a spawn's starting directory, which the SDK reads once
         (`toyos::files`); and the measurement below is owed. `/tmp` is the
         MEMORY file server's, one for the machine, of which each installed
-        package's `/tmp` is its own directory (STEP8_PR); per session, as the owner
+        package's `/tmp` is its own directory (#1181); per session, as the owner
         ruled ("Per session", 2026-10-03), is the isolation track's stage 3.
         **`/system` is read over the file protocol**,
         which std and libc both reach through `toyos::files` (owner ruling

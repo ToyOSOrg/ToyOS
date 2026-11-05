@@ -90,7 +90,7 @@ nameable by every program and make confused-deputy bugs structural.
    **Exit**: an escape suite (every `..`, symlink and rename race the
    literature names) is red on a resolver that walks the global tree and green
    on the file server's. A process given an empty view names nothing.
-   **Done** (STEP8_PR; the track's step 8): fileserver's `resolve` suite, red
+   **Done** (#1181; the track's step 8): fileserver's `resolve` suite, red
    with the grant's root ignored, and `toyos::files`'
    `an_empty_view_names_nothing_but_an_empty_root`. Left of the design above:
    a spawn still states its child's working directory as text the kernel
