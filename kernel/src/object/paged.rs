@@ -504,9 +504,6 @@ impl PagerObject {
                     for piece in &pieces[..count] {
                         if let Some(phys) = piece.phys { pmm::unpin_range(phys, PAGE as usize); }
                     }
-                    if faulted {
-                        return if done > 0 { done as u64 } else { SyscallError::BadAddress.to_u64() };
-                    }
                     let (gone, written) = {
                         let state = self.state.lock();
                         let object = &state.entry(slot).object;
@@ -518,6 +515,11 @@ impl PagerObject {
                     }
                     if written {
                         return SyscallError::WouldBlock.to_u64();
+                    }
+                    // After the checks: bytes copied before the fault count only
+                    // as every copied chunk's do.
+                    if faulted {
+                        return if done > 0 { done as u64 } else { SyscallError::BadAddress.to_u64() };
                     }
                 }
                 Step::Written => return SyscallError::WouldBlock.to_u64(),

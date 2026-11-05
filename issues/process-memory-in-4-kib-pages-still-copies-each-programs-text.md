@@ -118,9 +118,9 @@ lock (a fault that parks on a pager can hold none, and `user_ptr` refuses a
 copy made under one); and, after the storage consolidation (#1152) lands, the
 same gate extended to sleeping locks, so a user copy under any kernel lock is
 refused. #1152 deleted the kernel's sleeping lock (`kernel/src/sleeplock.rs`),
-so the spin-lock gate is that gate and both are met. The rest of S0-a's row (a chunk faulted in before any lock and pinned
-after a re-check, the lost-page outcomes, its H model) is built as part of 7b. One
-outcome 7b must place: a pipe read or message receive of at most
+so the spin-lock gate is that gate and both are met. The rest of S0-a's row
+(a chunk faulted in before any lock and pinned after a re-check, the lost-page
+outcomes, its H model) is built as part of 7b. One outcome 7b must place: a pipe read or message receive of at most
 `frame_bytes::BOUNCE` bytes lets its bytes go, and a receive installs its
 handles, before copying out to the caller. A lost page met in that copy must
 not lose them. Faulting the destination in before the take is one way.
