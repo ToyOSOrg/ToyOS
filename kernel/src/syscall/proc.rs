@@ -216,8 +216,10 @@ pub(super) fn sys_endowments(out: &mut crate::user_ptr::UserBytesMut) -> u64 {
     let mut buf = alloc::vec![0u8; needed];
     data.endowments.encode(&mut buf);
     drop(data);
-    out.write_at(0, &buf);
-    needed as u64
+    match out.write_at(0, &buf) {
+        Ok(()) => needed as u64,
+        Err(faulted) => SyscallError::from(faulted).to_u64(),
+    }
 }
 
 /// Spawn a thread; refuses a `stack_base` above `stack_ptr` (no stack to clamp to)

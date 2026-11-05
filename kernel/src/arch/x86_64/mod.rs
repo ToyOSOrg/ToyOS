@@ -33,6 +33,7 @@ pub mod copy;
 pub mod counters;
 pub mod console_uart;
 pub mod cpu;
+pub mod uaccess;
 pub mod entropy;
 pub mod entry;
 pub mod fpu;

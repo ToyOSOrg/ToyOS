@@ -11,7 +11,8 @@ use alloc::vec::Vec;
 
 use crate::watch;
 use crate::object::{ops, port, KObjectRef};
-use crate::message::{SendRefused, Taken};
+use crate::message::{MessageBounce, QueueRef, SendRefused, Unclaimed, Unsent};
+use crate::object::handle::HandleEntry;
 use crate::object::service::ConnectionEnd;
 use crate::time::Deadline;
 use crate::user_ptr::SyscallContext;
@@ -122,7 +123,9 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
         };
         for i in 0..args.keep_n as usize {
             let mut raw = [0u8; 8];
-            keep.read_at(i * 8, &mut raw);
+            if keep.read_at(i * 8, &mut raw).is_err() {
+                return SyscallError::BadAddress.to_u64();
+            }
             let off = u32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
             let len = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
             let Some(name) = name_at(off, len) else {
@@ -144,7 +147,9 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
         };
         for i in 0..args.add_n as usize {
             let mut raw = [0u8; 16];
-            add.read_at(i * 16, &mut raw);
+            if add.read_at(i * 16, &mut raw).is_err() {
+                return SyscallError::BadAddress.to_u64();
+            }
             let off = u32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
             let len = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
             let handle = RawHandle(u32::from_ne_bytes([raw[8], raw[9], raw[10], raw[11]]));
@@ -207,8 +212,10 @@ pub(super) fn sys_namespace_names(ns_h: RawHandle, out: &mut crate::user_ptr::Us
     if out.len() >= required {
         let mut at = 0;
         for (name, _) in namespace.entries() {
-            out.write_at(at, &(name.len() as u16).to_le_bytes());
-            out.write_at(at + 2, name.as_bytes());
+            let wrote = out.write_at(at, &(name.len() as u16).to_le_bytes()).and_then(|()| out.write_at(at + 2, name.as_bytes()));
+            if let Err(faulted) = wrote {
+                return SyscallError::from(faulted).to_u64();
+            }
             at += 2 + name.len();
         }
     }
@@ -342,8 +349,7 @@ pub(super) fn sys_port_badge(
         return SyscallError::PermissionDenied.to_u64();
     }
     let Some(badge) = stamp.badge else { return SyscallError::NotFound.to_u64() };
-    out.write_at(0, &badge);
-    badge.len() as u64
+    out.write_at(0, &badge).map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| badge.len() as u64)
 }
 
 /// Make a shared region and hand back the one handle to it, carrying MAP, WRITE, DUP and TRANSFER — naming it is what authorizes mapping it.
@@ -457,109 +463,195 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
     let mut wanted = [RawHandle(0); MAX_TRANSFER_HANDLES];
     for (i, slot) in wanted.iter_mut().enumerate().take(out.count) {
         let mut raw = [0u8; HANDLE_LEN];
-        out.handles.read_at(i * HANDLE_LEN, &mut raw);
+        out.handles.read_at(i * HANDLE_LEN, &mut raw).map_err(|faulted| SyscallError::from(faulted).to_u64())?;
         *slot = RawHandle(u32::from_ne_bytes(raw));
     }
     let wanted = &wanted[..out.count];
     // `TRANSFER` on the connection only when it carries handles: bytes alone
     // are a write, which `WRITE` already allows.
     let need = if out.count == 0 { Rights::WRITE } else { Rights::WRITE.union(Rights::TRANSFER) };
-
-    loop {
-        let sent = process::with_process_data(|data| {
-            let conn = data.handles.get::<ConnectionEnd>(conn_h, need)?;
-            // Every handle is checked before anything is queued or moved.
-            for (i, h) in wanted.iter().enumerate() {
-                if *h == conn_h || wanted[..i].contains(h) {
-                    return Err(SyscallError::InvalidArgument.into());
-                }
-                let rights = data.handles.rights_of(*h)?;
-                if !rights.contains(Rights::TRANSFER) {
-                    return Err(SyscallError::PermissionDenied.into());
-                }
+    // Every handle is checked before anything is queued or moved, and again
+    // under the hold that moves them.
+    let checked = |data: &process::ProcessData| {
+        let conn = data.handles.get::<ConnectionEnd>(conn_h, need)?;
+        for (i, h) in wanted.iter().enumerate() {
+            if *h == conn_h || wanted[..i].contains(h) {
+                return Err(SyscallError::InvalidArgument.into());
             }
-            // A device claim that moves takes back every mapping made through
-            // it: what it handed out is taken off it here, before the send
-            // shows it to a receiver that may hand out its own, and revoked
-            // once this lock is let go.
-            let claims: Vec<_> = wanted
-                .iter()
-                .filter_map(|h| data.handles.get::<crate::object::device::DeviceClaim>(*h, Rights::TRANSFER).ok())
-                .filter_map(|claim| claim.take_mappings().map(|handed| (claim, handed)))
-                .collect();
-            // A refusal restores every handle at its own number, so it is invisible.
-            let tx = conn.tx().clone();
-            let moved = data.handles.transfer(wanted, |batch| tx.send(&out.bytes, batch));
-            let handed: Vec<_> = match moved {
-                Ok(()) => claims.into_iter().map(|(_, handed)| handed).collect(),
-                Err(_) => {
-                    for (claim, handed) in claims {
-                        claim.restore_mappings(handed);
-                    }
-                    Vec::new()
-                }
-            };
+            let rights = data.handles.rights_of(*h)?;
+            if !rights.contains(Rights::TRANSFER) {
+                return Err(SyscallError::PermissionDenied.into());
+            }
+        }
+        Ok::<_, crate::object::Refusal>(conn.tx().clone())
+    };
+
+    // The message's bytes, copied in once before any lock.
+    let mut bounce = MessageBounce::new();
+    let src = bounce.read(&out.bytes).map_err(|faulted| SyscallError::from(faulted).to_u64())?.bytes();
+    let parkable = crate::scheduler::Parkable::at_entry();
+    loop {
+        let moved = process::with_process_data(|data| {
+            let tx = checked(data)?;
+            let (moved, handed) = move_handles(data, wanted, |batch| tx.send_now(src, batch));
             Ok::<_, crate::object::Refusal>((tx, moved, handed))
         });
-        let tx = match sent {
+        let (tx, refused) = match moved {
             Ok((tx, Ok(()), handed)) => {
-                for handed in handed {
-                    handed.revoke();
-                }
-                crate::scheduler::post_lending(tx.read_watch(), || tx.set_rt_boost_pending());
+                sent(&tx, handed);
                 return Ok(());
             }
-            Ok((tx, Err(SendRefused::NoRoom), _)) if !nonblock => tx,
-            Ok((_, Err(SendRefused::NoRoom), _)) => return Err(SyscallError::WouldBlock.to_u64()),
-            Ok((_, Err(SendRefused::Gone), _)) => return Err(SyscallError::Gone.to_u64()),
-            Ok((_, Err(SendRefused::NoMemory), _)) => return Err(SyscallError::ResourceExhausted.to_u64()),
+            Ok((tx, Err(Unsent::Refused(refused)), _)) => (tx, Some(refused)),
+            // Its bytes want frames, or another send's claim is taking them.
+            Ok((tx, Err(Unsent::Claim), _)) => {
+                let refused = match tx.claim_send(&parkable, src, out.count) {
+                    Ok(mut claim) => {
+                        let moved = process::with_process_data(|data| {
+                            checked(data)?;
+                            Ok::<_, crate::object::Refusal>(move_handles(data, wanted, |batch| claim.commit(batch)))
+                        });
+                        drop(claim);
+                        match moved {
+                            Ok((Ok(()), handed)) => {
+                                sent(&tx, handed);
+                                None
+                            }
+                            Ok((Err(refused), _)) => Some(refused),
+                            Err(e) => return Err(e.refuse()),
+                        }
+                    }
+                    Err(refused) => Some(refused),
+                };
+                (tx, refused)
+            }
             Err(e) => return Err(e.refuse()),
         };
+        let Some(refused) = refused else { return Ok(()) };
+        match refused {
+            SendRefused::NoRoom if !nonblock => {}
+            SendRefused::NoRoom => return Err(SyscallError::WouldBlock.to_u64()),
+            SendRefused::Gone => return Err(SyscallError::Gone.to_u64()),
+            SendRefused::NoMemory => return Err(SyscallError::ResourceExhausted.to_u64()),
+            SendRefused::Cancelled => return Err(cancelled()),
+        }
         // Outside every lock: room appears as the receiver takes messages, and each receive posts this watch.
         let (len, count) = (out.bytes.len(), out.count);
-        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), tx.write_watch(), 0, WaitClass::Ipc, Deadline::never(), || {
-            tx.fits(len, count)
-        })
-        .is_err()
-        {
+        if watch::wait_until(&parkable, tx.write_watch(), 0, WaitClass::Ipc, Deadline::never(), || tx.fits(len, count)).is_err() {
             return Err(cancelled());
         }
     }
 }
 
-fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
-    loop {
-        let taken = process::with_process_data(|data| {
-            let conn = data.handles.get::<ConnectionEnd>(conn_h, Rights::READ)?;
-            let rx = conn.rx().clone();
-            let taken = rx.recv(&mut into.head, &mut into.bytes, into.cap, &mut data.handles);
-            Ok::<_, crate::object::Refusal>((rx, taken))
-        });
-        let rx = match taken {
-            Ok((rx, Taken::Message(head, installed))) => {
-                for (i, h) in installed[..head.handles].iter().enumerate() {
-                    into.handles.write_at(i * HANDLE_LEN, &h.0.to_ne_bytes());
-                }
-                // Room for the sender.
-                rx.write_watch().post();
-                return toyos_abi::syscall::Received::encode(head.len, head.handles);
+/// Move `wanted`'s handles, checked under this same hold, through `sink`,
+/// which queues them with their message or refuses and hands them back. A
+/// device claim that moves takes back every mapping made through it: what it
+/// handed out is taken off it here, before the send shows it to a receiver
+/// that may hand out its own, and is answered to revoke once the lock is let
+/// go. A refusal restores every handle at its own number, and every mapping,
+/// so it is invisible.
+fn move_handles<E>(
+    data: &mut process::ProcessData,
+    wanted: &[RawHandle],
+    sink: impl FnOnce(Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, E)>,
+) -> (Result<(), E>, Vec<crate::pcidev::Handed>) {
+    let claims: Vec<_> = wanted
+        .iter()
+        .filter_map(|h| data.handles.get::<crate::object::device::DeviceClaim>(*h, Rights::TRANSFER).ok())
+        .filter_map(|claim| claim.take_mappings().map(|handed| (claim, handed)))
+        .collect();
+    let moved = data.handles.transfer(wanted, sink);
+    let handed = match moved {
+        Ok(()) => claims.into_iter().map(|(_, handed)| handed).collect(),
+        Err(_) => {
+            for (claim, handed) in claims {
+                claim.restore_mappings(handed);
             }
-            Ok((_, Taken::Gone)) => return SyscallError::Gone.to_u64(),
-            Ok((_, Taken::Untaken(kernel::message::Untaken::TooSmall))) => return SyscallError::InvalidArgument.to_u64(),
-            Ok((_, Taken::Untaken(kernel::message::Untaken::NoRoom))) => return SyscallError::ResourceExhausted.to_u64(),
-            Ok((_, Taken::Empty)) if nonblock => return SyscallError::WouldBlock.to_u64(),
-            Ok((rx, Taken::Empty)) => rx,
+            Vec::new()
+        }
+    };
+    (moved, handed)
+}
+
+/// A message is queued: with every lock let go, revoke what its device
+/// claims handed out and wake the receiver.
+fn sent(tx: &QueueRef, handed: Vec<crate::pcidev::Handed>) {
+    for handed in handed {
+        handed.revoke();
+    }
+    crate::scheduler::post_lending(tx.read_watch(), || tx.set_rt_boost_pending());
+}
+
+fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
+    let parkable = crate::scheduler::Parkable::at_entry();
+    let (buf, cap) = (into.head.len() + into.bytes.len(), into.cap);
+    let mut bounce = MessageBounce::new();
+    loop {
+        // Taken, and its handles installed, in the hold that looks the
+        // connection up; its bytes are copied out after.
+        let looked = process::with_process_data(|data| {
+            let rx = data.handles.get::<ConnectionEnd>(conn_h, Rights::READ)?.rx().clone();
+            let taken = loop {
+                match rx.recv_now(&mut data.handles, buf, cap, &mut bounce) {
+                    // Grown with the queue's lock let go, then asked again.
+                    Err(Unclaimed::Room(n)) if data.handles.make_room(n) => {}
+                    Err(Unclaimed::Room(_)) => break Err(Unclaimed::Untaken(kernel::message::Untaken::NoRoom)),
+                    taken => break taken,
+                }
+            };
+            Ok::<_, crate::object::HandleError>((rx, taken))
+        });
+        let rx = match looked {
             // Refused outside this hold: ending the caller takes the same non-reentrant lock.
             Err(e) => return e.refuse(),
+            Ok((rx, Ok(received))) => {
+                let bytes = bounce.bytes();
+                let first = bytes.len().min(into.head.len());
+                let copied = into.head.write_at(0, &bytes[..first]).and_then(|()| into.bytes.write_at(0, &bytes[first..]));
+                let (head, installed) = (received.head, received.installed);
+                drop(received);
+                return match copied {
+                    Ok(()) => delivered(&rx, into, head, &installed),
+                    Err(faulted) => undelivered(&rx, &installed[..head.handles], faulted),
+                };
+            }
+            Ok((_, Err(Unclaimed::Gone))) => return SyscallError::Gone.to_u64(),
+            Ok((_, Err(Unclaimed::Untaken(kernel::message::Untaken::TooSmall)))) => return SyscallError::InvalidArgument.to_u64(),
+            Ok((_, Err(Unclaimed::Untaken(kernel::message::Untaken::NoRoom)))) => return SyscallError::ResourceExhausted.to_u64(),
+            Ok((_, Err(Unclaimed::Room(_)))) => unreachable!("a table that would not grow answers NoRoom"),
+            Ok((_, Err(Unclaimed::Empty))) if nonblock => return SyscallError::WouldBlock.to_u64(),
+            Ok((rx, Err(Unclaimed::Empty))) => rx,
         };
-        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), rx.read_watch(), 0, WaitClass::Ipc, Deadline::never(), || {
-            rx.readable()
-        })
-        .is_err()
-        {
+        if watch::wait_until(&parkable, rx.read_watch(), 0, WaitClass::Ipc, Deadline::never(), || rx.readable()).is_err() {
             return cancelled();
         }
     }
+}
+
+/// A message is taken, its bytes in the reader's buffers: answer its
+/// handles' numbers and wake the sender, for its room.
+fn delivered(rx: &QueueRef, into: &mut Incoming<'_>, head: kernel::message::Head, installed: &[RawHandle]) -> u64 {
+    let installed = &installed[..head.handles];
+    let told = installed.iter().enumerate().try_for_each(|(i, h)| into.handles.write_at(i * HANDLE_LEN, &h.0.to_ne_bytes()));
+    if let Err(faulted) = told {
+        return undelivered(rx, installed, faulted);
+    }
+    rx.write_watch().post();
+    toyos_abi::syscall::Received::encode(head.len, head.handles)
+}
+
+/// A message taken whose reader's buffers faulted: its bytes are lost, and
+/// its handles, installed at numbers the reader was never told, are closed.
+fn undelivered(rx: &QueueRef, installed: &[RawHandle], faulted: crate::user_ptr::Faulted) -> u64 {
+    process::with_process_data(|data| {
+        for &h in installed {
+            // A sibling may have closed the number since, or reused it for a
+            // handle of its own, which this then closes: the race is the
+            // misbehaving process's own, and stays inside it.
+            let _ = ops::close(&mut data.handles, h);
+        }
+    });
+    rx.write_watch().post();
+    SyscallError::from(faulted).to_u64()
 }
 
 /// Make an inbox and tell the caller where it is; the inbox owns its page and only this mapping may name it. `out` is the window the dispatch took for the answer.
@@ -578,7 +670,11 @@ pub(super) fn sys_inbox_setup(depth: u32, out: &mut crate::user_ptr::UserBytesMu
         Ok(h) => h,
         Err(e) => return e.to_u64(),
     };
-    out.write_at(0, toyos_abi::usersafe::bytes(&InboxSetup { handle, _pad: 0, vaddr }));
+    // A caller that cannot be told its handle does not keep it.
+    if let Err(faulted) = out.write_at(0, toyos_abi::usersafe::bytes(&InboxSetup { handle, _pad: 0, vaddr })) {
+        let _ = process::with_process_data(|data| ops::close(&mut data.handles, handle));
+        return SyscallError::from(faulted).to_u64();
+    }
     0
 }
 

@@ -455,7 +455,7 @@ pub(super) fn machine_check_handler(frame: &TrapFrame) -> ! {
 }
 
 /// Returns if the fault was resolved (page mapped in); diverges if fatal.
-pub(super) fn page_fault_handler(frame: &TrapFrame) {
+pub(super) fn page_fault_handler(frame: &mut TrapFrame) {
     let prev = percpu::swap_fault_state(percpu::CpuFaultState::PageFault);
     if prev != percpu::CpuFaultState::Normal {
         // Restores the prior fault state: `fatal_exception` classifies a
@@ -468,6 +468,13 @@ pub(super) fn page_fault_handler(frame: &TrapFrame) {
     }
 
     let fault_addr = cpu::read_cr2();
+    let copy_fixup = if Ring::of_cs(frame.cs).is_user() { None } else { crate::arch::uaccess::fixup(frame.rip) };
+    if let Some(fixup) = copy_fixup.filter(|_| toyos_userbound::is_user_addr(fault_addr)) {
+        user_copy_fault(frame, fault_addr, fixup);
+        percpu::set_fault_state(percpu::CpuFaultState::Normal);
+        return;
+    }
+
     if frame.error_code & PF_PRESENT != 0 && !Ring::of_cs(frame.cs).is_user()
         && mm::is_kernel_addr(fault_addr)
     {
@@ -505,6 +512,28 @@ pub(super) fn page_fault_handler(frame: &TrapFrame) {
     fatal_exception(&ctx);
 }
 
+
+/// A user copy's fault on `addr` (`arch::uaccess`): served as the process's
+/// own fault would be, after which the copy resumes where it stopped, or else
+/// resumed at `fixup`, which answers the bytes not copied. The copy was made
+/// holding no lock at its syscall's depth (`user_ptr`), so the service runs at
+/// that depth too.
+fn user_copy_fault(frame: &mut TrapFrame, addr: u64, fixup: u64) {
+    // Every copy instruction runs between its routine's `stac` and `clac`: a
+    // fault there with `AC` clear is a kernel bug, never a bad user address.
+    const AC: u64 = 1 << 18;
+    assert!(frame.rflags & AC != 0, "uaccess: a copy faulted at {:#x} with RFLAGS.AC clear", frame.rip);
+    let access = if frame.error_code & PF_WRITE != 0 { kernel::vm::Access::Write } else { kernel::vm::Access::Read };
+    if frame.error_code & PF_PRESENT == 0 {
+        percpu::preempt_count_down();
+        let served = process::handle_page_fault(addr, access);
+        percpu::preempt_count_up();
+        if served {
+            return;
+        }
+    }
+    frame.rip = fixup;
+}
 
 /// Fatal exception handler for #UD and #GP. Never returns.
 pub(super) fn exception_handler(frame: &TrapFrame) -> ! {

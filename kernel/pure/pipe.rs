@@ -136,17 +136,50 @@ pub fn takes(space: usize, len: usize) -> Option<usize> {
 /// largest, never more than [`MOST_FRAMES`], and a stream of writes of one
 /// size takes no frame from the allocator whether its reader keeps up or
 /// lags.
+///
+/// **A copy runs with no lock held, inside a claim.** A write claims the room
+/// past the last byte held and a read the oldest bytes held, one of each at
+/// a time; the kernel's lock is held only to claim, to hand out a claim's
+/// frames and to end it. Nothing but the claim's holder reaches its bytes: a
+/// claimed write's are past every reader's, its frames are kept as used, and
+/// only the read's own [`Self::consume`] lets claimed bytes go. A claim's
+/// frames keep their contents across another's calls, but not their place in
+/// the list, which a read's consume rotates; so a copier takes each frame
+/// it needs under the lock, as [`Self::place`] and [`Self::peek`] hand them
+/// out, and uses it once the lock is let go.
+///
+/// A copy that finds its end's claim held waits for [`Self::turn`] to answer
+/// `true`, and each claim's end answers whether to wake such copies
+/// ([`Ended`]).
 pub struct Bytes<F> {
     frames: VecDeque<F>,
     head: usize,
     len: usize,
     /// The frames the last write spanned: the working set its next one wants.
     last: usize,
+    /// The bytes past the last held a write has claimed.
+    writing: Option<usize>,
+    /// The oldest bytes held a read has claimed.
+    reading: Option<usize>,
+    /// By [`End`]: a copy found that end's claim held since it was last ended.
+    waiting: [bool; 2],
+}
+
+/// What a claim's end owes the copies it may have kept waiting, done once the
+/// lock is let go.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[must_use = "a copy that found this claim held sleeps until its end wakes it"]
+pub struct Ended {
+    /// A copy of its kind found it held: wake each to look again.
+    pub turn: bool,
+    /// Room it claimed comes back unused, which a wait for room or a writable
+    /// poll found taken while it was held: wake every waiter.
+    pub room: bool,
 }
 
 impl<F> Bytes<F> {
     pub const fn new() -> Self {
-        Self { frames: VecDeque::new(), head: 0, len: 0, last: 0 }
+        Self { frames: VecDeque::new(), head: 0, len: 0, last: 0, writing: None, reading: None, waiting: [false; 2] }
     }
 
     pub fn len(&self) -> usize {
@@ -157,8 +190,9 @@ impl<F> Bytes<F> {
         self.len == 0
     }
 
+    /// Room for a write to claim: none of it claimed.
     pub fn space(&self) -> usize {
-        PIPE_CAPACITY - self.len
+        PIPE_CAPACITY - self.len - self.writing.unwrap_or(0)
     }
 
     /// The frames it holds, spares among them.
@@ -171,39 +205,83 @@ impl<F> Bytes<F> {
         self.frames.capacity()
     }
 
-    /// Grow its list to `frames`, at most [`MOST_FRAMES`].
-    pub fn list(&mut self, frames: usize) {
-        assert!(frames <= MOST_FRAMES, "pipe: a list of {frames} frames");
-        self.frames.reserve_exact(frames.saturating_sub(self.frames.len()));
+    /// Move the frames into `list`, empty and with room for [`Self::wants`]
+    /// more, so that adding them grows nothing; answers the old list, empty,
+    /// for the caller to drop.
+    pub fn relist(&mut self, mut list: VecDeque<F>) -> VecDeque<F> {
+        assert!(list.is_empty(), "pipe: a new list that holds frames");
+        assert!(list.capacity() >= self.frames.len() + self.wants(), "pipe: a new list with no room for its claim");
+        list.extend(self.frames.drain(..));
+        core::mem::replace(&mut self.frames, list)
     }
 
-    /// The frames holding bytes.
+    /// The frames holding bytes or claimed for them.
     fn used(&self) -> usize {
-        (self.head + self.len).div_ceil(FRAME)
+        (self.head + self.len + self.writing.unwrap_or(0)).div_ceil(FRAME)
     }
 
-    /// How many frames more a write of `n` bytes, at most [`Self::space`],
-    /// needs than it holds.
-    pub fn wants(&self, n: usize) -> usize {
+    /// Whether a copy at `end` may claim now. While another holds `end`'s
+    /// claim, `false`, and that claim's end answers [`Ended::turn`]: a waiter
+    /// asks under every hold of the lock it re-checks in, so a claim made
+    /// between a wake and its re-check still wakes it as it ends.
+    pub fn turn(&mut self, end: End) -> bool {
+        let held = match end {
+            End::Read => self.reading.is_some(),
+            End::Write => self.writing.is_some(),
+        };
+        if held {
+            self.waiting[end as usize] = true;
+        }
+        !held
+    }
+
+    /// Whether `end`'s claim is held, asking nothing of its end: for a copy
+    /// that will not wait for it.
+    pub fn claim_held(&self, end: End) -> bool {
+        match end {
+            End::Read => self.reading.is_some(),
+            End::Write => self.writing.is_some(),
+        }
+    }
+
+    fn ended(&mut self, end: End, room: bool) -> Ended {
+        Ended { turn: core::mem::take(&mut self.waiting[end as usize]), room }
+    }
+
+    /// Claim `n` bytes of room, at most [`Self::space`], for one write, its
+    /// [`Self::turn`] answered.
+    pub fn claim_write(&mut self, n: usize) {
+        assert!(self.writing.is_none(), "pipe: a write claimed beside another");
         assert!(n <= self.space(), "pipe: a {n}-byte write with room for {}", self.space());
-        (self.head + self.len + n).div_ceil(FRAME).saturating_sub(self.frames.len())
+        self.writing = Some(n);
     }
 
-    /// One frame more for the next write.
+    /// Whether a write holds its claim.
+    pub fn writing(&self) -> bool {
+        self.writing.is_some()
+    }
+
+    /// How many frames more the claimed write needs than it holds.
+    pub fn wants(&self) -> usize {
+        self.used().saturating_sub(self.frames.len())
+    }
+
+    /// One frame more for the claimed write, into the room its list has.
     pub fn add(&mut self, frame: F) {
         assert!(self.frames.len() < MOST_FRAMES, "pipe: a frame past the most it holds");
+        assert!(self.frames.len() < self.frames.capacity(), "pipe: a frame past its list");
         self.frames.push_back(frame);
     }
 
-    /// Place the `len` bytes `at` past the last byte held, inside the room a
-    /// write that [`Self::wants`] no more frames for may fill: `copy` is
-    /// handed each run of them as its frame, where they go in it, and where
-    /// they start among the `len`. They are held once [`Self::commit`] counts
-    /// them.
+    /// Place the `len` claimed bytes `at` into the claim, once it
+    /// [`Self::wants`] no more frames: `copy` is handed each run of them as
+    /// its frame, where they go in it, and where they start among the `len`.
+    /// They are held once [`Self::commit`] counts them.
     #[inline(always)]
     pub fn place(&mut self, at: usize, len: usize, mut copy: impl FnMut(&mut F, Range<usize>, usize)) {
-        let end = self.head + self.len + at + len;
-        assert!(end <= self.frames.len() * FRAME, "pipe: bytes placed past the frames it was given");
+        let claim = self.writing.expect("pipe: bytes placed with no write claimed");
+        assert!(at + len <= claim, "pipe: {len} bytes placed at {at} of a {claim}-byte claim");
+        assert_eq!(self.wants(), 0, "pipe: bytes placed past the frames it was given");
         let (mut done, mut pos) = (0, self.head + self.len + at);
         while done < len {
             let (frame, off) = (pos / FRAME, pos % FRAME);
@@ -213,18 +291,45 @@ impl<F> Bytes<F> {
         }
     }
 
-    /// Count `n` more bytes held: what [`Self::place`] put at the end.
-    pub fn commit(&mut self, n: usize) {
-        assert_eq!(self.wants(n), 0, "pipe: bytes held past the frames it was given");
+    /// Count the claimed write's bytes held, ending its claim.
+    pub fn commit(&mut self) -> Ended {
+        let n = self.writing.expect("pipe: a commit with no write claimed");
+        assert_eq!(self.wants(), 0, "pipe: bytes held past the frames it was given");
         self.last = (self.head + self.len + n).div_ceil(FRAME) - (self.head + self.len) / FRAME;
-        self.len += n;
+        (self.len, self.writing) = (self.len + n, None);
+        self.ended(End::Write, false)
     }
 
-    /// The `len` held bytes `at` past the oldest, handed to `copy` as
+    /// End the claimed write holding none of it.
+    pub fn abandon_write(&mut self) -> Ended {
+        let n = self.writing.take().expect("pipe: an abandon with no write claimed");
+        self.ended(End::Write, n > 0)
+    }
+
+    /// Claim the `n` oldest bytes, at most [`Self::len`], for one read, its
+    /// [`Self::turn`] answered.
+    pub fn claim_read(&mut self, n: usize) {
+        assert!(self.reading.is_none(), "pipe: a read claimed beside another");
+        assert!(n <= self.len, "pipe: {n} bytes claimed of {} held", self.len);
+        self.reading = Some(n);
+    }
+
+    /// Whether a read holds its claim.
+    pub fn reading(&self) -> bool {
+        self.reading.is_some()
+    }
+
+    /// Whether either claim is held.
+    pub fn claimed(&self) -> bool {
+        self.writing.is_some() || self.reading.is_some()
+    }
+
+    /// The `len` claimed bytes `at` past the oldest, handed to `copy` as
     /// [`Self::place`] hands them out; [`Self::consume`] lets them go.
     #[inline(always)]
     pub fn peek(&self, at: usize, len: usize, mut copy: impl FnMut(&F, Range<usize>, usize)) {
-        assert!(at + len <= self.len, "pipe: {len} bytes at {at} of {} held", self.len);
+        let claim = self.reading.expect("pipe: bytes peeked with no read claimed");
+        assert!(at + len <= claim, "pipe: {len} bytes peeked at {at} of a {claim}-byte claim");
         let (mut done, mut pos) = (0, self.head + at);
         while done < len {
             let (frame, off) = (pos / FRAME, pos % FRAME);
@@ -234,26 +339,57 @@ impl<F> Bytes<F> {
         }
     }
 
-    /// Let the `n` oldest bytes go; a frame it empties becomes a spare.
-    pub fn consume(&mut self, n: usize) {
-        assert!(n <= self.len, "pipe: {n} bytes let go of {} held", self.len);
+    /// Let the claimed bytes go, ending the read's claim; a frame it empties
+    /// becomes a spare. The room it frees is its caller's to announce.
+    pub fn consume(&mut self) -> Ended {
+        let n = self.reading.take().expect("pipe: a consume with no read claimed");
         let emptied = (self.head + n) / FRAME;
         self.frames.rotate_left(emptied);
         (self.head, self.len) = ((self.head + n) % FRAME, self.len - n);
-        if self.len == 0 {
+        if self.len == 0 && self.writing.is_none() {
             self.head = 0;
         }
+        self.ended(End::Read, false)
     }
 
-    /// The spares past those it keeps, for the caller to give back.
-    pub fn surplus(&mut self) -> Drain<'_, F> {
-        let used = self.used();
+    /// A write of `n` bytes, at most [`Self::space`], whole in one hold of
+    /// the lock, in its [`Self::turn`]: claimed, handed to `copy` as
+    /// [`Self::place`] hands them out, and committed. `false`, claiming
+    /// nothing, where it would want a frame, which a claim takes with the
+    /// lock let go. No copy waits on it: one asks only while a claim is held.
+    pub fn put(&mut self, n: usize, copy: impl FnMut(&mut F, Range<usize>, usize)) -> bool {
+        self.claim_write(n);
+        if self.wants() > 0 {
+            self.writing = None;
+            return false;
+        }
+        self.place(0, n, copy);
+        assert_eq!(self.commit(), Ended { turn: false, room: false }, "pipe: a copy waited on a put");
+        true
+    }
+
+    /// A read of the `n` oldest bytes, at most [`Self::len`], whole in one
+    /// hold of the lock, in its [`Self::turn`]: claimed, handed to `copy` as
+    /// [`Self::peek`] hands them out, and let go.
+    pub fn take(&mut self, n: usize, copy: impl FnMut(&F, Range<usize>, usize)) {
+        self.claim_read(n);
+        self.peek(0, n, copy);
+        assert_eq!(self.consume(), Ended { turn: false, room: false }, "pipe: a copy waited on a take");
+    }
+
+    /// At most `most` of the spares past those it keeps, for the caller to
+    /// give back; fewer than `most` once none is left past them.
+    pub fn surplus(&mut self, most: usize) -> Drain<'_, F> {
+        // A claim may want frames its writer is still taking: every one held is used.
+        let used = self.used().min(self.frames.len());
         let keep = used + (self.frames.len() - used).min(used.max(self.last).max(1));
-        self.frames.drain(keep..)
+        self.frames.drain(keep.max(self.frames.len().saturating_sub(most))..)
     }
 
-    /// Every frame, for the caller to give back, and with them every byte.
+    /// Every frame, for the caller to give back, and with them every byte;
+    /// never while a claim is held, whose copy may still reach its frames.
     pub fn clear(&mut self) -> Drain<'_, F> {
+        assert!(!self.claimed(), "pipe: bytes cleared under a claim");
         (self.head, self.len, self.last) = (0, 0, 0);
         self.frames.drain(..)
     }
@@ -635,29 +771,42 @@ mod tests {
             Self { bytes: Bytes::new(), taken: 0, returned: Vec::new() }
         }
 
-        /// Write `src` as `kernel::pipe` does: the frames it wants, then
-        /// the copy placed and committed.
-        fn write(&mut self, src: &[u8]) {
-            for _ in 0..self.bytes.wants(src.len()) {
+        /// Claim `n` bytes of room and supply the frames the claim wants, as
+        /// `kernel::frame_bytes` does: a list grown first, then the frames.
+        fn claim(&mut self, n: usize) {
+            self.bytes.claim_write(n);
+            let wants = self.bytes.wants();
+            if self.bytes.frames() + wants > self.bytes.listed() {
+                let old = self.bytes.relist(VecDeque::with_capacity((self.bytes.frames() + wants).next_power_of_two()));
+                assert!(old.is_empty());
+            }
+            for _ in 0..wants {
                 self.bytes.add(Frame { id: self.taken, bytes: vec![0xEE; FRAME] });
                 self.taken += 1;
             }
+        }
+
+        /// Write `src` as `kernel::pipe` does: claimed, then the copy placed
+        /// and committed.
+        fn write(&mut self, src: &[u8]) {
+            self.claim(src.len());
             self.bytes.place(0, src.len(), |frame, within, at| {
                 frame.bytes[within.clone()].copy_from_slice(&src[at..at + within.len()]);
             });
-            self.bytes.commit(src.len());
+            let _ = self.bytes.commit();
         }
 
-        /// Read up to `want` bytes as `kernel::pipe` does: peeked, consumed,
-        /// and the surplus given back.
+        /// Read up to `want` bytes as `kernel::pipe` does: claimed, peeked,
+        /// consumed, and the surplus given back.
         fn read(&mut self, want: usize) -> Vec<u8> {
             let n = want.min(self.bytes.len());
             let mut out = vec![0; n];
+            self.bytes.claim_read(n);
             self.bytes.peek(0, n, |frame, within, at| {
                 out[at..at + within.len()].copy_from_slice(&frame.bytes[within]);
             });
-            self.bytes.consume(n);
-            self.returned.extend(self.bytes.surplus().map(|frame| frame.id));
+            let _ = self.bytes.consume();
+            self.returned.extend(self.bytes.surplus(usize::MAX).map(|frame| frame.id));
             out
         }
 
@@ -726,10 +875,7 @@ mod tests {
         let (mut written, mut read) = (0, 0);
         for _ in 0..300 {
             let n = random(3 * FRAME + 1).min(pipe.bytes.space());
-            for _ in 0..pipe.bytes.wants(n) {
-                pipe.bytes.add(Frame { id: pipe.taken, bytes: vec![0xEE; FRAME] });
-                pipe.taken += 1;
-            }
+            pipe.claim(n);
             let src = pattern(written, n);
             let mut cuts: Vec<usize> = (0..random(6)).map(|_| random(n + 1)).chain([0, n]).collect();
             cuts.sort_unstable();
@@ -740,11 +886,12 @@ mod tests {
                     frame.bytes[within.clone()].copy_from_slice(&src[at + from..at + from + within.len()]);
                 });
             }
-            pipe.bytes.commit(n);
+            let _ = pipe.bytes.commit();
             written += n;
 
             let m = random(pipe.bytes.len() + 1);
             let mut out = vec![0; m];
+            pipe.bytes.claim_read(m);
             let mut at = 0;
             while at < m {
                 let len = (1 + random(2 * FRAME)).min(m - at);
@@ -753,8 +900,8 @@ mod tests {
                 });
                 at += len;
             }
-            pipe.bytes.consume(m);
-            pipe.returned.extend(pipe.bytes.surplus().map(|frame| frame.id));
+            let _ = pipe.bytes.consume();
+            pipe.returned.extend(pipe.bytes.surplus(usize::MAX).map(|frame| frame.id));
             assert_eq!(out, pattern(read, m), "bytes {read}.. came back wrong");
             read += m;
             pipe.accounted();
@@ -809,5 +956,284 @@ mod tests {
         assert_eq!(pipe.taken, PIPE_CAPACITY / FRAME, "the kept frame did not carry the next whole write");
         assert_eq!(pipe.bytes.clear().count(), 1);
         assert_eq!((pipe.bytes.len(), pipe.bytes.frames()), (0, 0));
+    }
+
+    /// **The claims carry the data-race argument.** A write placed a run at a
+    /// time with reads claimed, peeked and consumed between its runs, as
+    /// another CPU's read runs while a write copies with no lock held: every
+    /// frame a run is handed is the one an earlier run of the claim was
+    /// handed for those bytes, no read is handed a claimed byte, and none of
+    /// the claim's frames is given back as surplus.
+    #[test]
+    fn a_write_claim_keeps_its_frames_while_reads_drain_beside_it() {
+        let mut seed = 0x2545_f491_u64;
+        let mut random = move |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        let mut pipe = Held::new();
+        let (mut written, mut read) = (0, 0);
+        for _ in 0..300 {
+            let n = random(4 * FRAME + 1).min(pipe.bytes.space());
+            pipe.claim(n);
+            let src = pattern(written, n);
+            // Where each claimed byte's run was first handed out, by frame id and offset.
+            let mut handed: Vec<Option<(usize, usize)>> = vec![None; n];
+            let mut at = 0;
+            while at < n {
+                let len = (1 + random(FRAME)).min(n - at);
+                pipe.bytes.place(at, len, |frame, within, from| {
+                    frame.bytes[within.clone()].copy_from_slice(&src[at + from..at + from + within.len()]);
+                    for (i, off) in within.enumerate() {
+                        handed[at + from + i] = Some((frame.id, off));
+                    }
+                });
+                at += len;
+                let m = random(pipe.bytes.len() + 1);
+                let mut out = vec![0; m];
+                pipe.bytes.claim_read(m);
+                pipe.bytes.peek(0, m, |frame, within, from| {
+                    out[from..from + within.len()].copy_from_slice(&frame.bytes[within]);
+                });
+                let _ = pipe.bytes.consume();
+                pipe.returned.extend(pipe.bytes.surplus(usize::MAX).map(|frame| frame.id));
+                assert_eq!(out, pattern(read, m), "a read beside a claim came back wrong");
+                read += m;
+                pipe.accounted();
+                for (byte, place) in handed.iter().enumerate().take(at) {
+                    let (id, _) = place.expect("placed");
+                    assert!(!pipe.returned.contains(&id), "claimed byte {byte}'s frame {id} was given back");
+                }
+            }
+            // Placed again over what was placed: each byte lands where it did.
+            pipe.bytes.place(0, n, |frame, within, from| {
+                for (i, off) in within.enumerate() {
+                    assert_eq!(handed[from + i], Some((frame.id, off)), "claimed byte {} moved", from + i);
+                }
+            });
+            let _ = pipe.bytes.commit();
+            written += n;
+        }
+        let rest = pipe.read(PIPE_CAPACITY);
+        assert_eq!(rest, pattern(read, written - read));
+    }
+
+    /// One claim of each kind at a time: a second waits for its turn and
+    /// claims nothing, and a claim's bytes are not another's.
+    #[test]
+    fn a_second_claim_waits_until_the_first_ends() {
+        let mut pipe = Held::new();
+        pipe.claim(10);
+        assert!(!pipe.bytes.turn(End::Write), "a second write's turn beside the first");
+        assert!(pipe.bytes.turn(End::Read), "a write's claim held up a read");
+        assert_eq!(pipe.bytes.len(), 0, "a claimed write was held before its commit");
+        assert_eq!(pipe.bytes.space(), PIPE_CAPACITY - 10, "the claimed room was offered again");
+        pipe.bytes.place(0, 10, |frame, within, at| {
+            frame.bytes[within.clone()].copy_from_slice(&pattern(at, within.len()));
+        });
+        assert_eq!(pipe.bytes.commit(), Ended { turn: true, room: false });
+        pipe.bytes.claim_read(4);
+        assert!(!pipe.bytes.turn(End::Read), "a second read's turn beside the first");
+        assert_eq!(pipe.bytes.consume(), Ended { turn: true, room: false });
+        assert!(!pipe.bytes.claimed());
+        assert_eq!(pipe.read(10), pattern(4, 6));
+    }
+
+    /// A claim ended with nobody waiting for it wakes nobody.
+    #[test]
+    fn an_unwaited_claim_wakes_nobody() {
+        let mut pipe = Held::new();
+        pipe.claim(10);
+        assert!(pipe.bytes.turn(End::Read));
+        pipe.bytes.place(0, 10, |frame, within, _| frame.bytes[within].fill(1));
+        assert_eq!(pipe.bytes.commit(), Ended { turn: false, room: false });
+        pipe.bytes.claim_read(10);
+        assert_eq!(pipe.bytes.consume(), Ended { turn: false, room: false });
+    }
+
+    /// A waiter woken by one claim's end that finds another's claim made
+    /// before its re-check is woken by that one's end too: the re-check
+    /// counts as waiting again.
+    #[test]
+    fn a_claim_made_before_a_woken_waiter_looks_again_still_wakes_it() {
+        for end in [End::Read, End::Write] {
+            let mut pipe = Held::new();
+            pipe.write(&pattern(0, 100));
+            let claim = |pipe: &mut Held| match end {
+                End::Read => pipe.bytes.claim_read(10),
+                End::Write => pipe.claim(10),
+            };
+            let end_claim = |pipe: &mut Held| match end {
+                End::Read => pipe.bytes.consume(),
+                End::Write => {
+                    pipe.bytes.place(0, 10, |frame, within, _| frame.bytes[within].fill(1));
+                    pipe.bytes.commit()
+                }
+            };
+            // A holds the claim; B finds it held.
+            claim(&mut pipe);
+            assert!(!pipe.bytes.turn(end));
+            // A ends it and wakes B; C claims before B looks again.
+            assert!(end_claim(&mut pipe).turn, "{end:?}: A's end woke nobody");
+            assert!(pipe.bytes.turn(end));
+            claim(&mut pipe);
+            // B looks again and parks.
+            assert!(!pipe.bytes.turn(end));
+            assert!(end_claim(&mut pipe).turn, "{end:?}: C's end left B parked");
+        }
+    }
+
+    /// Writes and reads made whole in one hold, beside a large write's claim
+    /// in flight and a read's: a stream comes back exact, `put` takes no
+    /// frame (a claim supplies them), and the claim keeps its place.
+    #[test]
+    fn whole_transfers_in_one_hold_keep_the_stream_and_the_claims() {
+        let mut pipe = Held::new();
+        let (mut written, mut read) = (0, 0);
+        for round in 0..200 {
+            let n = [1, 64, 300, FRAME, FRAME + 7][round % 5];
+            let src = pattern(written, n);
+            if !pipe.bytes.put(n, |frame, within, at| frame.bytes[within.clone()].copy_from_slice(&src[at..at + within.len()])) {
+                assert!(!pipe.bytes.writing() && pipe.bytes.turn(End::Write), "a refused put claimed");
+                pipe.write(&src);
+            }
+            written += n;
+            if round % 3 == 0 {
+                // A large write claims its room and places part of it; small
+                // reads drain what was there before it.
+                let big = 3 * FRAME;
+                pipe.claim(big);
+                let src = pattern(written, big);
+                pipe.bytes.place(0, FRAME, |frame, within, at| frame.bytes[within.clone()].copy_from_slice(&src[at..at + within.len()]));
+                assert!(!pipe.bytes.turn(End::Write), "a put's turn beside a write's claim");
+                while !pipe.bytes.is_empty() {
+                    let m = pipe.bytes.len().min(100);
+                    let mut out = vec![0; m];
+                    pipe.bytes.take(m, |frame, within, at| out[at..at + within.len()].copy_from_slice(&frame.bytes[within]));
+                    assert_eq!(out, pattern(read, m), "round {round}: a take beside a claim");
+                    read += m;
+                    pipe.returned.extend(pipe.bytes.surplus(usize::MAX).map(|frame| frame.id));
+                }
+                pipe.bytes.place(FRAME, big - FRAME, |frame, within, at| {
+                    frame.bytes[within.clone()].copy_from_slice(&src[FRAME + at..FRAME + at + within.len()]);
+                });
+                let _ = pipe.bytes.commit();
+                written += big;
+            }
+            let m = pipe.bytes.len().min(500);
+            let mut out = vec![0; m];
+            pipe.bytes.take(m, |frame, within, at| out[at..at + within.len()].copy_from_slice(&frame.bytes[within]));
+            assert_eq!(out, pattern(read, m), "round {round}");
+            read += m;
+            pipe.returned.extend(pipe.bytes.surplus(usize::MAX).map(|frame| frame.id));
+            assert!(pipe.bytes.frames() <= MOST_FRAMES);
+        }
+        assert_eq!(pipe.read(PIPE_CAPACITY), pattern(read, written - read));
+        pipe.accounted();
+    }
+
+    /// An abandoned write gives back the room it claimed, which a wait for
+    /// room found taken: its end says so, and an empty one does not.
+    #[test]
+    fn an_abandoned_write_gives_its_room_back() {
+        let mut pipe = Held::new();
+        pipe.claim(FRAME);
+        assert_eq!(pipe.bytes.abandon_write(), Ended { turn: false, room: true });
+        pipe.bytes.claim_write(0);
+        assert_eq!(pipe.bytes.abandon_write(), Ended { turn: false, room: false });
+    }
+
+    /// An abandoned write holds nothing.
+    #[test]
+    fn an_abandoned_claim_changes_nothing() {
+        let mut pipe = Held::new();
+        pipe.write(&pattern(0, 8));
+        pipe.claim(FRAME);
+        let _ = pipe.bytes.abandon_write();
+        assert_eq!((pipe.bytes.len(), pipe.bytes.space()), (8, PIPE_CAPACITY - 8));
+        assert_eq!(pipe.read(8), pattern(0, 8));
+    }
+
+    /// A read that empties the pipe while a write holds its claim does not
+    /// move the claim's bytes back to the start of the frame they began in.
+    #[test]
+    fn a_drained_pipe_beside_a_claim_keeps_the_claims_place() {
+        let mut pipe = Held::new();
+        pipe.write(&pattern(0, 100));
+        pipe.claim(50);
+        pipe.bytes.place(0, 20, |frame, within, at| {
+            frame.bytes[within.clone()].copy_from_slice(&pattern(100 + at, within.len()));
+        });
+        assert_eq!(pipe.read(100), pattern(0, 100));
+        pipe.bytes.place(20, 30, |frame, within, at| {
+            frame.bytes[within.clone()].copy_from_slice(&pattern(120 + at, within.len()));
+        });
+        let _ = pipe.bytes.commit();
+        assert_eq!(pipe.read(50), pattern(100, 50));
+    }
+
+    #[test]
+    #[should_panic(expected = "cleared under a claim")]
+    fn bytes_are_never_cleared_under_a_claim() {
+        let mut pipe = Held::new();
+        pipe.claim(1);
+        let _ = pipe.bytes.clear();
+    }
+
+    /// The surplus given back a batch at a time is the surplus given back
+    /// at once.
+    #[test]
+    fn the_surplus_comes_back_in_batches() {
+        let (mut whole, mut batched) = (Held::new(), Held::new());
+        for pipe in [&mut whole, &mut batched] {
+            pipe.write(&vec![1; PIPE_CAPACITY - 1]);
+            pipe.write(&[1]);
+            pipe.bytes.claim_read(PIPE_CAPACITY);
+            let _ = pipe.bytes.consume();
+        }
+        let all: Vec<usize> = whole.bytes.surplus(usize::MAX).map(|f| f.id).collect();
+        let mut got: Vec<usize> = Vec::new();
+        loop {
+            let batch: Vec<usize> = batched.bytes.surplus(7).map(|f| f.id).collect();
+            got.extend(&batch);
+            if batch.len() < 7 {
+                break;
+            }
+        }
+        got.sort_unstable();
+        let mut all = all;
+        all.sort_unstable();
+        assert_eq!(got, all);
+        assert_eq!(whole.bytes.frames(), batched.bytes.frames());
+    }
+
+    /// A read that ends while a write's claim still wants its frames, as one
+    /// does while the writer takes them with no lock held: the surplus keeps
+    /// every frame held, and the claim is supplied and lands after it.
+    #[test]
+    fn a_read_beside_an_unsupplied_claim_gives_back_nothing() {
+        let mut pipe = Held::new();
+        pipe.write(&pattern(0, 100));
+        pipe.bytes.claim_write(3 * FRAME);
+        assert!(pipe.bytes.wants() > 0, "the claim's frames are not here yet");
+        assert_eq!(pipe.read(100), pattern(0, 100));
+        assert_eq!(pipe.returned, Vec::<usize>::new(), "a frame was given back from under a claim");
+        let wants = pipe.bytes.wants();
+        if pipe.bytes.frames() + wants > pipe.bytes.listed() {
+            let _ = pipe.bytes.relist(VecDeque::with_capacity((pipe.bytes.frames() + wants).next_power_of_two()));
+        }
+        for _ in 0..wants {
+            pipe.bytes.add(Frame { id: pipe.taken, bytes: vec![0xEE; FRAME] });
+            pipe.taken += 1;
+        }
+        let src = pattern(100, 3 * FRAME);
+        pipe.bytes.place(0, src.len(), |frame, within, at| {
+            frame.bytes[within.clone()].copy_from_slice(&src[at..at + within.len()]);
+        });
+        let _ = pipe.bytes.commit();
+        assert_eq!(pipe.read(3 * FRAME), src);
+        pipe.accounted();
     }
 }

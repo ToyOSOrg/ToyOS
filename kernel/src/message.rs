@@ -5,21 +5,36 @@
 //! of it queued, and taken whole or left queued (`kernel::message`). Its
 //! bytes are kept in frames counted to the job that made the connection
 //! (`crate::frame_bytes`), its handles beside them in the same order.
+//!
+//! **No user copy runs under the queue's lock.** A message, at most
+//! [`MAX_MESSAGE_LEN`] bytes, bounces through its caller's stack
+//! ([`MessageBounce`]): a send copies it in with no lock held and queues it
+//! whole in one hold ([`QueueRef::send_now`]), and a receive takes it whole
+//! and installs its handles in one hold ([`QueueRef::recv_now`]), copying it
+//! out after. A refusal takes nothing and queues nothing. A send whose bytes
+//! want frames claims its room and takes them with the lock let go
+//! ([`QueueRef::claim_send`]); one such claim at a time, and a send that meets
+//! it waits for its turn (`frame_bytes::turn`).
 
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use kernel::message::{Head, Queue, Untaken};
 use kernel::pipe::{End, Holders, Released};
+use kernel::sched::task::WaitClass;
 use toyos_abi::handle::RawHandle;
-use toyos_abi::syscall::{MAX_QUEUED_HANDLES, MAX_QUEUED_MESSAGES, MAX_TRANSFER_HANDLES};
+use toyos_abi::syscall::{MAX_MESSAGE_LEN, MAX_QUEUED_HANDLES, MAX_QUEUED_MESSAGES, MAX_TRANSFER_HANDLES};
 
-use crate::frame_bytes::FrameBytes;
+use crate::frame_bytes::{self, Bounce, Fill, FrameBytes, Spares};
 use crate::mm::charge::{self, Charge, Exhausted};
 use crate::object::handle::{HandleEntry, HandleTable};
-use crate::sync::Lock;
-use crate::user_ptr::{UserBytes, UserBytesMut};
-use crate::watch::Watch;
+use crate::scheduler::Parkable;
+use crate::sync::{Lock, LockGuard};
+use crate::watch::{Cancelled, Watch};
+
+/// A whole message's bytes, on its sender's or receiver's stack.
+pub type MessageBounce = Bounce<MAX_MESSAGE_LEN>;
 
 /// A reference to a queue that holds neither end, as [`crate::pipe::PipeRef`]
 /// is a pipe's.
@@ -94,6 +109,34 @@ struct State {
     rt_boost_pending: bool,
 }
 
+impl State {
+    /// Every message nobody can take any more, to give back with the lock
+    /// let go; kept while a claim's copy may still reach its bytes, whose end
+    /// asks again.
+    fn untaken(&mut self) -> Option<(FrameBytes, VecDeque<HandleEntry>)> {
+        let owed = !self.holders.held(End::Read) && !self.bytes.claimed() && (self.bytes.frames() > 0 || !self.queue.is_empty());
+        owed.then(|| {
+            let job = Arc::clone(self.bytes.job());
+            (core::mem::replace(&mut self.bytes, FrameBytes::new(&job)), self.queue.clear())
+        })
+    }
+
+    /// What a claim's end, already made, leaves to do once the lock is let
+    /// go: `spares` given back, what nobody can take, and its wake.
+    fn ended(&mut self, ended: kernel::pipe::Ended, spares: Spares) -> Ended {
+        Ended { spares, untaken: self.untaken(), ended, boost: false }
+    }
+}
+
+/// [`State::ended`]'s answer.
+struct Ended {
+    spares: Spares,
+    untaken: Option<(FrameBytes, VecDeque<HandleEntry>)>,
+    ended: kernel::pipe::Ended,
+    /// The real-time window a sender lent, taken with the message.
+    boost: bool,
+}
+
 /// Why a message was not sent; nothing of it was.
 pub enum SendRefused {
     /// No room for the whole message now: wait for [`QueueRef::fits`].
@@ -102,19 +145,86 @@ pub enum SendRefused {
     Gone,
     /// Its bytes' frames could not be taken; no wait makes them appear.
     NoMemory,
+    /// A kill ended the wait for another send's claim.
+    Cancelled,
 }
 
-/// What a receive answered.
-pub enum Taken {
-    /// A whole message, its bytes copied out and its handles installed at
-    /// these numbers, the first `Head::handles` of them.
-    Message(Head, [RawHandle; MAX_TRANSFER_HANDLES]),
+/// Why [`QueueRef::send_now`] queued nothing.
+pub enum Unsent {
+    Refused(SendRefused),
+    /// It cannot be made whole in this hold: another send's claim is held,
+    /// or its bytes want frames. A claim sends it.
+    Claim,
+}
+
+/// A message taken whole by [`QueueRef::recv_now`], its bytes in the
+/// caller's bounce: what is left of the hold is done as it drops, with every
+/// lock let go. Spares past its batch stay listed for the next take.
+pub struct Received {
+    pub head: Head,
+    pub installed: [RawHandle; MAX_TRANSFER_HANDLES],
+    _spares: Spares,
+    boost: bool,
+}
+
+impl Drop for Received {
+    fn drop(&mut self) {
+        if self.boost {
+            crate::scheduler::boost_current_rt_inherited();
+        }
+    }
+}
+
+/// Why a receive claimed no message.
+pub enum Unclaimed {
     /// Nothing queued, and a sender is left to send.
     Empty,
     /// Nothing queued, and no sender is left.
     Gone,
     /// The front message stays queued.
     Untaken(Untaken),
+    /// The front message stays queued until the table grows by this many
+    /// slots, which it may not under the queue's lock.
+    Room(usize),
+}
+
+/// A send's room, claimed, with its frames taken: its bytes placed and the
+/// message queued whole by [`Self::commit`], or dropped first, nothing of it.
+pub struct SendClaim<'q> {
+    queue: &'q QueueRef,
+    src: &'q [u8],
+    /// Set by the commit, which ends the claim.
+    ended: Option<Ended>,
+}
+
+impl SendClaim<'_> {
+    /// Queue the message with `batch`, its handles; a refusal hands the batch
+    /// back and queues nothing.
+    pub fn commit(&mut self, mut batch: Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, SendRefused)> {
+        let mut state = self.queue.0.state.lock();
+        if !state.holders.held(End::Read) {
+            return Err((batch, SendRefused::Gone));
+        }
+        // It fits: the claim was made where it did, and only this claim adds.
+        let ended = state.bytes.place_all(self.src);
+        state.queue.push(self.src.len(), batch.drain(..));
+        self.ended = Some(state.ended(ended, Spares::NONE));
+        drop(state);
+        // The empty batch's storage goes back with the lock let go.
+        drop(batch);
+        Ok(())
+    }
+}
+
+impl Drop for SendClaim<'_> {
+    fn drop(&mut self) {
+        let ended = self.ended.take().unwrap_or_else(|| {
+            let mut state = self.queue.0.state.lock();
+            let ended = state.bytes.abandon_write();
+            state.ended(ended, Spares::NONE)
+        });
+        self.queue.finish(End::Write, ended);
+    }
 }
 
 /// Make a queue, answering its two ends.
@@ -144,54 +254,105 @@ impl QueueRef {
         self.0.state.lock().holders.hold(end);
     }
 
-    /// Queue `bytes` and `batch` as one message, or nothing of it. A refusal
-    /// hands the batch back: dropped here, it would be capabilities destroyed
-    /// silently.
-    pub fn send(&self, bytes: &UserBytes, batch: Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, SendRefused)> {
+    /// Queue `src`, already copied in, and `batch`, its handles, whole in
+    /// this hold, called under the sender's process lock as its handles move;
+    /// a refusal hands the batch back and queues nothing. No copy waits on it.
+    pub fn send_now(&self, src: &[u8], mut batch: Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, Unsent)> {
         let mut state = self.0.state.lock();
+        if !state.bytes.turn(End::Write) {
+            return Err((batch, Unsent::Claim));
+        }
         if !state.holders.held(End::Read) {
-            return Err((batch, SendRefused::Gone));
+            return Err((batch, Unsent::Refused(SendRefused::Gone)));
         }
-        if !state.queue.fits(state.bytes.space(), bytes.len(), batch.len()) {
-            return Err((batch, SendRefused::NoRoom));
+        if !state.queue.fits(state.bytes.space(), src.len(), batch.len()) {
+            return Err((batch, Unsent::Refused(SendRefused::NoRoom)));
         }
-        if state.bytes.write(bytes, bytes.len()).is_err() {
-            return Err((batch, SendRefused::NoMemory));
+        if !state.bytes.put(src) {
+            return Err((batch, Unsent::Claim));
         }
-        state.queue.push(bytes.len(), batch.into_iter());
+        state.queue.push(src.len(), batch.drain(..));
+        drop(state);
+        // The empty batch's storage goes back with the queue's lock let go.
+        drop(batch);
         Ok(())
     }
 
-    /// Take the front message into `head` and then `body`, its first bytes
-    /// filling `head`, and at most `cap` handles, each installed in `table`
-    /// under this queue's lock.
-    pub fn recv(&self, head: &mut UserBytesMut, body: &mut UserBytesMut, cap: usize, table: &mut HandleTable) -> Taken {
-        let (taken, boost) = {
-            let mut guard = self.0.state.lock();
-            let State { bytes, queue, holders, rt_boost_pending } = &mut *guard;
-            // Bound, not the block's tail: a tail match's temporaries outlive `guard`.
-            let taken = match queue.pop(head.len() + body.len(), cap, |width| table.make_room(width)) {
-                Some(Ok((message, handles))) => {
-                    let mut installed = [RawHandle(0); MAX_TRANSFER_HANDLES];
-                    for (slot, entry) in installed.iter_mut().zip(handles) {
-                        *slot = table.install(entry).expect("room was made first");
-                    }
-                    let first = message.len.min(head.len());
-                    bytes.read(head, first);
-                    bytes.read(body, message.len - first);
-                    (Taken::Message(message, installed), core::mem::take(rt_boost_pending))
-                }
-                Some(Err(untaken)) => (Taken::Untaken(untaken), false),
-                None if holders.held(End::Write) => (Taken::Empty, false),
-                None => (Taken::Gone, false),
-            };
-            taken
+    /// Take the front message whole into `into` and install its handles in
+    /// `table`, in this hold, where a reader holding `buf` bytes and `cap`
+    /// handles can take it, called under the receiver's process lock. A table
+    /// that must grow first answers [`Unclaimed::Room`], taking nothing.
+    pub fn recv_now(&self, table: &mut HandleTable, buf: usize, cap: usize, into: &mut MessageBounce) -> Result<Received, Unclaimed> {
+        let mut state = self.0.state.lock();
+        let head = match state.queue.front(buf, cap) {
+            Some(Ok(head)) => head,
+            Some(Err(untaken)) => return Err(Unclaimed::Untaken(untaken)),
+            None if state.holders.held(End::Write) => return Err(Unclaimed::Empty),
+            None => return Err(Unclaimed::Gone),
         };
+        if !table.has_room(head.handles) {
+            return Err(Unclaimed::Room(head.handles));
+        }
+        let mut installed = [RawHandle(0); MAX_TRANSFER_HANDLES];
+        let Some(Ok((message, handles))) = state.queue.pop(head.len, head.handles, |_| true) else {
+            unreachable!("message: a front its reader holds left the queue or was refused");
+        };
+        assert_eq!(message, head, "message: the front moved under its lock");
+        for (slot, entry) in installed.iter_mut().zip(handles) {
+            *slot = table.install(entry).expect("the table had room");
+        }
+        let spares = state.bytes.take(head.len, into);
+        let boost = core::mem::take(&mut state.rt_boost_pending);
+        Ok(Received { head, installed, _spares: spares, boost })
+    }
+
+    /// Claim room for `src`, a message's bytes, and its `handles`, and take
+    /// the frames its bytes want with the lock let go: for a send
+    /// [`Self::send_now`] could not make whole. Waits only for another send's
+    /// claim to end, never for room.
+    pub fn claim_send<'q>(&'q self, p: &Parkable, src: &'q [u8], handles: usize) -> Result<SendClaim<'q>, SendRefused> {
+        let len = src.len();
+        let first = {
+            let mut state = self.turn(p, End::Write).map_err(|_| SendRefused::Cancelled)?;
+            if !state.holders.held(End::Read) {
+                return Err(SendRefused::Gone);
+            }
+            if !state.queue.fits(state.bytes.space(), len, handles) {
+                return Err(SendRefused::NoRoom);
+            }
+            state.bytes.claim_write(len);
+            state.bytes.first_fill(len)
+        };
+        let claim = SendClaim { queue: self, src, ended: None };
+        if let Fill::Supply(needs) = first {
+            frame_bytes::supply(&self.0.state, |s| &mut s.bytes, needs, len).map_err(|Exhausted| SendRefused::NoMemory)?;
+        }
+        Ok(claim)
+    }
+
+    /// The queue's lock, held in `end`'s turn to claim.
+    fn turn(&self, p: &Parkable, end: End) -> Result<LockGuard<'_, State>, Cancelled> {
+        frame_bytes::turn(p, &self.0.state, |s| &mut s.bytes, end, self.watch(end), WaitClass::Ipc)
+    }
+
+    fn watch(&self, end: End) -> &Watch {
+        match end {
+            End::Read => &self.0.read_watch,
+            End::Write => &self.0.write_watch,
+        }
+    }
+
+    /// What a claim's end left, done with the lock let go: frames go back to
+    /// the allocator, a handle's release can run another object's hook, and
+    /// the scheduler takes its own CPU-queue lock for a lent window.
+    fn finish(&self, end: End, ended: Ended) {
+        let Ended { spares, untaken, ended, boost } = ended;
+        frame_bytes::give_back(&self.0.state, |s| &mut s.bytes, spares);
+        drop(untaken);
         if boost {
-            // Outside the queue's lock: the scheduler takes its own CPU-queue lock.
             crate::scheduler::boost_current_rt_inherited();
         }
-        taken
+        frame_bytes::wake(self.watch(end), ended);
     }
 
     /// A message to take, or no sender left: what a receive or a readable
@@ -236,11 +397,7 @@ impl QueueRef {
         let (released, untaken) = {
             let mut state = self.0.state.lock();
             let released = state.holders.release(end);
-            let untaken = (!state.holders.held(End::Read) && (state.bytes.frames() > 0 || !state.queue.is_empty())).then(|| {
-                let job = Arc::clone(state.bytes.job());
-                (core::mem::replace(&mut state.bytes, FrameBytes::new(&job)), state.queue.clear())
-            });
-            (released, untaken)
+            (released, state.untaken())
         };
         // Outside the lock: frames go back to the allocator, and a handle's
         // release can run another object's hook.

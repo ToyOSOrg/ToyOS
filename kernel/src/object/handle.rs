@@ -198,6 +198,12 @@ impl HandleTable {
         self.grow_for(self.slots.len() + n.saturating_sub(self.free.len()))
     }
 
+    /// Whether `n` more `install`s all succeed without growing the table: an
+    /// install under another object's lock, where nothing may allocate.
+    pub fn has_room(&self, n: usize) -> bool {
+        self.slots.len() + n.saturating_sub(self.free.len()) <= self.slots.capacity().min(MAX_HANDLES)
+    }
+
     /// Storage for `len` slots, doubling: `false` where it cannot be charged.
     fn grow_for(&mut self, len: usize) -> bool {
         if len <= self.slots.capacity() {
