@@ -55,8 +55,6 @@ unsafe fn copy_short_alias(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     unsafe {
         if n > ROUTED_MOST || (dest as usize).abs_diff(src as usize) < n {
             movsb(dest, src, n);
-        } else if has_avx() {
-            copy_down_avx(dest, src, n);
         } else {
             copy_down_sse2(dest, src, n);
         }
@@ -90,36 +88,13 @@ const ROUTED_LEAST: usize = 256;
 /// stall.
 const ROUTED_MOST: usize = 1 << 20;
 
-/// Whether this CPU runs AVX and its system saves the YMM state: CPUID.1:ECX
-/// AVX (bit 28) and OSXSAVE (bit 27), and XCR0's SSE and AVX bits (1 and 2).
-/// Asked once; a racing first call asks twice and stores the same answer.
-pub(crate) fn has_avx() -> bool {
-    use core::sync::atomic::{AtomicU8, Ordering};
-    static AVX: AtomicU8 = AtomicU8::new(0);
-    match AVX.load(Ordering::Relaxed) {
-        1 => false,
-        2 => true,
-        _ => {
-            let ecx = core::arch::x86_64::__cpuid(1).ecx;
-            let avx = ecx & (1 << 28) != 0 && ecx & (1 << 27) != 0 && {
-                let (lo, _hi): (u32, u32);
-                // SAFETY: OSXSAVE says XGETBV exists; XCR0 is readable at every privilege level.
-                unsafe { core::arch::asm!("xgetbv", in("ecx") 0, out("eax") lo, out("edx") _hi, options(nomem, nostack, preserves_flags)) };
-                lo & 0b110 == 0b110
-            };
-            AVX.store(if avx { 2 } else { 1 }, Ordering::Relaxed);
-            avx
-        }
-    }
-}
-
-/// Where a descending loop of `width`-byte stores starts: the offset of the
-/// last `width` boundary of the destination at or below its end. The bytes
-/// above it go in one unaligned 64-byte store; every store below it is
-/// aligned, since a store split across two lines costs both benches' cores
-/// as much as the stall this loop avoids.
-fn aligned_end(dest: *mut u8, n: usize, width: usize) -> usize {
-    ((dest as usize + n) & !(width - 1)) - dest as usize
+/// Where [`copy_down_sse2`] starts: the offset of the last 16-byte boundary
+/// of the destination at or below its end. The bytes above it go in one
+/// unaligned 64-byte store; every store below it is aligned, since a store
+/// split across two lines costs both benches' cores as much as the stall the
+/// loop avoids.
+fn aligned_end(dest: *mut u8, n: usize) -> usize {
+    ((dest as usize + n) & !15) - dest as usize
 }
 
 /// Copy `n` bytes, at least 64, between disjoint ranges by SSE2 from the
@@ -147,47 +122,10 @@ pub(crate) unsafe fn copy_down_sse2(dest: *mut u8, src: *const u8, n: usize) {
             s = in(reg) src,
             d = in(reg) dest,
             n = in(reg) n,
-            p = inout(reg) aligned_end(dest, n, 16) => _,
+            p = inout(reg) aligned_end(dest, n) => _,
             out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
             out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
             out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm11") _,
-            options(nostack),
-        );
-    }
-}
-
-/// [`copy_down_sse2`] 32 bytes a load and store, half the stores: a CPU
-/// retiring one store a cycle copies at twice the rate. `vzeroupper` ends it,
-/// so SSE code after it pays no transition (56305 rev. 3.02, §2.11.6).
-///
-/// # Safety
-/// As [`copy_down_sse2`], on a CPU [`has_avx`] answers for.
-#[target_feature(enable = "avx")]
-pub(crate) unsafe fn copy_down_avx(dest: *mut u8, src: *const u8, n: usize) {
-    unsafe {
-        core::arch::asm!(
-            "vmovdqu ymm2, [{s}]", "vmovdqu ymm3, [{s} + 32]",
-            "vmovdqu ymm4, [{s} + {n} - 64]", "vmovdqu ymm5, [{s} + {n} - 32]",
-            "2:",
-            "cmp {p}, 64",
-            "jbe 3f",
-            "sub {p}, 64",
-            "vmovdqu ymm0, [{s} + {p}]", "vmovdqu ymm1, [{s} + {p} + 32]",
-            "vmovdqa [{d} + {p}], ymm0", "vmovdqa [{d} + {p} + 32], ymm1",
-            "jmp 2b",
-            "3:",
-            "vmovdqu [{d} + {n} - 64], ymm4", "vmovdqu [{d} + {n} - 32], ymm5",
-            "vmovdqu [{d}], ymm2", "vmovdqu [{d} + 32], ymm3",
-            "vzeroupper",
-            s = in(reg) src,
-            d = in(reg) dest,
-            n = in(reg) n,
-            p = inout(reg) aligned_end(dest, n, 32) => _,
-            // `vzeroupper` clears every YMM register's upper half.
-            out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
-            out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
-            out("ymm8") _, out("ymm9") _, out("ymm10") _, out("ymm11") _,
-            out("ymm12") _, out("ymm13") _, out("ymm14") _, out("ymm15") _,
             options(nostack),
         );
     }

@@ -250,24 +250,15 @@ mod tests {
         }
     }
 
-    /// x86-64's two descending loops, each called directly so the one this
-    /// host's `copy_forward` does not take is checked too, at every
-    /// destination offset in a store; AVX's only where the host has it.
+    /// x86-64's descending loop, called directly, at every destination offset
+    /// in a 16-byte store from two source offsets.
     #[cfg(target_arch = "x86_64")]
     #[test]
-    fn both_descending_loops_agree() {
-        let mut loops: Vec<(&str, unsafe fn(*mut u8, *const u8, usize))> = vec![("sse2", arch::copy_down_sse2)];
-        if arch::has_avx() {
-            // SAFETY: `has_avx` answered for this CPU.
-            loops.push(("avx", |d, s, n| unsafe { arch::copy_down_avx(d, s, n) }));
-        }
-        for (name, copy) in loops {
-            for n in (64..300).chain([511, 512, 513, 4095, 4096]) {
-                // Every destination offset in a 32-byte store, from two source offsets.
-                for distance in 1..=32 {
-                    for at in [0, 17] {
-                        agrees_at(name, copy, distance, at, n);
-                    }
+    fn the_descending_loop_agrees() {
+        for n in (64..300).chain([511, 512, 513, 4095, 4096]) {
+            for distance in 1..=32 {
+                for at in [0, 17] {
+                    agrees_at("sse2", arch::copy_down_sse2, distance, at, n);
                 }
             }
         }
