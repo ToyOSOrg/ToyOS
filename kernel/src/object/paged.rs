@@ -489,7 +489,8 @@ impl PagerObject {
                 Step::Copy(count) => {
                     // A chunk of frames is copied a frame at a time: populated
                     // first, fresh memory takes one hold rather than a fault
-                    // for each page. One frame's copy faults at most once anyway.
+                    // for each page. A one-frame read, the common small one,
+                    // would pay that hold on every call to save at most two faults.
                     if count > 1 {
                         out.fault_in(done, pieces[..count].iter().map(|piece| piece.len).sum());
                     }
