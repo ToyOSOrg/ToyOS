@@ -37,8 +37,10 @@
   to ask for a session. The session's view is the user's home, the system
   read-only and the session's own temporary directory.
 - A program in one user's session cannot name another user's files.
-- The local desktop is a login session. SSH authentication starts the user's
-  session, whose shell inherits no host key and no SSH service authority.
+- The local desktop is a login session like any other: the local greeter asks
+  for it, and it has the same per-session view and isolation. SSH
+  authentication starts the user's session, whose shell inherits no host key
+  and no SSH service authority.
 
 ## Ending a session
 

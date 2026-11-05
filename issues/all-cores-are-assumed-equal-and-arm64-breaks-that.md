@@ -19,8 +19,4 @@ task character (bursty/latency-sensitive work on big cores, throughput work on
 efficient ones); and eventually an energy model deciding when saving power beats
 finishing sooner (the EAS school on ARM).
 
-What is already done so this does not have to be retrofitted: reservation
-admission sums against **each CPU's own capacity** — a reservation is a fraction
-of a specific CPU, and "all cores equal" is never baked into the arithmetic.
-That one decision is the cheap half; this issue is the expensive half, and it
-waits for ARM64.
+It waits for ARM64.

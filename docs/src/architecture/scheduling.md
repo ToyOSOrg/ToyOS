@@ -10,6 +10,8 @@
 - CPU time is shared by jobs, not threads. A process's and its helpers'
   threads share one job, so helpers buy no extra share; authorised launchers
   create independent jobs.
+- Nothing reserves CPU time: no program is promised a budget, and nothing is
+  admitted against one.
 - Every job has equal weight, across users too. Window focus changes
   responsiveness, not sustained entitlement.
 - Each CPU runs EEVDF over the job groups it holds, and again among each
@@ -26,8 +28,7 @@
 - Each CPU has an aggregate real-time allowance, replenished each interval,
   that protects ordinary progress. Once it is exhausted, that CPU's real-time
   workers run only when no ordinary work wants the CPU, until it refills.
-- There is no per-stream reservation and no deadline admission. New streams
-  are accepted best-effort; genuine overload may cause dropouts, and a late
+- New streams are accepted best-effort; genuine overload may cause dropouts, and a late
   client contributes silence without holding back the others.
 
 ## Power

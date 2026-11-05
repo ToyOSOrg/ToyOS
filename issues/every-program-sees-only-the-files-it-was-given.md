@@ -18,8 +18,9 @@ Rulings that bound the stages: who starts programs, "Restrict", grants as
 badges on a connection, "Adopt", and `/tmp` per session (owner, 2026-10-03);
 the local desktop counts as a login session, "Desktop counts" (owner,
 2026-10-04), a premise that holds while only the compositor, terminal, shell,
-toybox and sshserver rows list `starts` and no `/apps` row does. Whether the
-desktop stays one once stage 3's local greeter exists is not ruled.
+toybox and sshserver rows list `starts` and no `/apps` row does. Once stage
+3's local greeter exists, the local desktop is a login session like any
+other, with the same per-session isolation (owner, 2026-11-05).
 
 ## Stages
 
@@ -66,14 +67,20 @@ desktop stays one once stage 3's local greeter exists is not ruled.
    of which each row holds only its own directory where it keeps state
    (`service = true` or `state = true`: the daemons' own state is built).
    `/apps` is included, so a shell and everything it starts can
-   rewrite an installed package; whether the installer alone writes `/apps`
-   is `issues/whether-pkg-alone-writes-apps.md`.
+   rewrite an installed package. Only the installer service writes `/apps`
+   (owner ruling, 2026-11-05): this stage gives that one row `/apps`
+   read-write and every other row, the shell included,
+   `/apps` read-only. Whether `pkg` becomes that service or its client is
+   this stage's brief. **Its exit**: a shell's write under `/apps` is refused
+   by the file server, and an install through the installer service still
+   commits; granting the shell's row `/apps` read-write reds the first.
    `/dev/null` is a name only libc's `open` knows, answered with a kernel
    null handle (`SYS_NULL`): no view holds it, so `stat` of it and a program
    that does not open through libc find nothing. Whether views name it is
    this stage's.
 3. **Sessions and users.** `issues/a-user-is-a-home-tree-and-a-login-row.md`
-   on top of views: a login authority (sshd, and later a local greeter) holds
+   on top of views: a login authority (sshd, and later a local greeter, which
+   asks for the desktop's session the same way) holds
    a `login` right and asks init's `launcher` for a session, and init builds
    the session's view from the user's row: the user's home, `/system`
    read-only, and the session's own `/tmp`. The machine's SSH identity is sshd's own

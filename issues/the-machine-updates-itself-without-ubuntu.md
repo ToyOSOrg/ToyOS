@@ -17,8 +17,7 @@ stdin — and the machine installs nothing the owner did not sign.
 Done: the signed image (`toyos-update`), the two slots and their table, and
 the loader's verification. The loader boots the marked slot and today the
 other where the marked one is refused or died on its last boot; the kernel
-logs which and why. Whether that fallback stays, against the fix-forward
-update policy, is before the owner.
+logs which and why. That fallback leaves in stage 2.
 
 - **`update`** holds the slot table and the idle slot's two partitions, which
   init claims against the ROOT the kernel holds, writes the image and moves the
@@ -29,7 +28,40 @@ update policy, is before the owner.
   (`--owner-key`, `--update-image`, minted by `--signing-key-new`) for an image
   installed on the owner's machine, whose loader keeps the machine's floor.
 
-## Stage 2 — the T14 installs ToyOS on its NVMe
+## Stage 2 — fix forward: the loader boots the marked slot or nothing
+
+Owner ruling, 2026-11-05, answering #1191's open decisions: updates fix
+forward, with no automatic fallback to the previous slot.
+
+The loader falls back today in three ways, all of which go:
+
+- `policy::order` names the other slot after the marked one, and
+  `slot::choose` boots it when the marked one is refused;
+- `Refusal::Died` refuses an image whose last boot the record says died or
+  hung, so the other slot boots instead;
+- where no slot verifies but a dead one, `slot::choose` boots that one,
+  which may be the other slot.
+
+A pass verifies the marked slot alone and boots it whether or not its last
+boot died. Where it is refused, the loader names the refusal on the panel and
+in `loader.log` and powers the machine off. `slot-refused=` and the kernel's
+line that logs it go with the fallback. A one-shot `update --once` is a
+request, not a fallback, and stays the loader track's stage 5.
+
+With the fallback gone, marking an image dead in the boot record on the
+black-box page no longer refuses anything, but the next boot still reports the
+last boot's death; #1196 (the memory-overwrite request) decides what carries
+that report if the page goes. This stage removes only the fallback's use of
+the record.
+
+**Exit**: `policy`'s host tests hold that a pass names only the marked slot
+and that a dead image in it is still booted.
+`a_bent_supervisor_is_refused_and_the_other_slot_boots` and its metal row
+`bent_supervisor_falls_back` become a bent marked supervisor refused by name,
+nothing booted and the machine powered off; putting the other slot back into
+`policy::order` reds them.
+
+## Stage 3 — the T14 installs ToyOS on its NVMe
 
 The machine boots the stick and installs onto its own NVMe, then takes
 `ssh t14 update < image` for every change after. It waits on stage 5 of

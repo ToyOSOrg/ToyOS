@@ -44,7 +44,6 @@ lacks:
   with the CPU count. Derived from the code, not measured; both benches have
   at most 16 CPUs.
 
-Composes with the reservation model (placement decides *where*, reservations
-decide *how much*) and with the scheduler simulator (`kernel/sim`), which runs
+Composes with the scheduler simulator (`kernel/sim`), which runs
 every scenario at the benches' scouted shapes and two permuted synthetic trees
 (`kernel/sim/src/topology.rs`).

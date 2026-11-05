@@ -24,7 +24,7 @@ name is a `#[test]` in the named crate or a `METAL` row, and reverting the behav
 - host `root_chunk_refused`: an unreadable ROOT chunk is refused by name, never retried forever.
 - host `root_candidate_overlaps`: an overlapping ROOT partition is refused.
 - host `root_named_twice_on_the_boot_disk`, `root_named_twice`: a twin ROOT is never read.
-- host `update_refusals_boot_the_other_slot`: every refused slot is refused by name and the other boots.
+- host `update_refusals_are_named`: every refused slot is refused by name and no other slot boots.
 - host `update_grant_refuses_a_stray_partition`: init grants only the idle slot's partition.
 - host `update_floor_is_the_images_own`: the anti-rollback floor is the key's and the image's.
 - host `update_refused_pass_credits_no_image`: a refused pass credits nothing.
@@ -45,8 +45,6 @@ name is a `#[test]` in the named crate or a `METAL` row, and reverting the behav
 - metal `shipped_config_boots`: `images/system.toml` boots to ready.
 - metal `diskless_boot`, `internal_disk_boot`: a boot with no NVMe, and one off the internal disk.
 - metal `update_boots_the_new_kernel`: an update over ssh is the kernel the next boot runs.
-- metal `update_falls_back_from_a_dying_kernel`, `update_hang_kills_an_unproven_image`: a slot
-  that dies or hangs falls back, its death in the next boot's `/log`.
 - metal `foreign_disk_untouched`: a disk the system was not given comes back byte for byte;
   brings back `src/fingerprint.rs`.
 
@@ -61,7 +59,7 @@ console's renderer. Exit: as stage A.
   `blackbox_early_panic_sealed_muted`, the T14's own shape), `blackbox_fault_sealed`: the report
   is sealed on the page and the next pass reads it.
 - metal `panic_outlives_the_deadline`: a panic crosses the deadline's reset as a panic report.
-- metal `hang_bounded_by_the_stick`: a hanging image costs one boot and never traps the machine.
+- metal `hang_bounded_by_the_stick`: a hanging `--once` image costs one boot, and the marked slot boots after it.
 - metal `double_fault_stack`, `syscall_panic_halts`, `syscall_fault_halts`,
   `heap_over_ceiling_halts`: each fatal path halts with its own report.
 - metal `reentry_names_the_first_panic`, `double_panic_names_the_fault`,
