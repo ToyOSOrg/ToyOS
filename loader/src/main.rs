@@ -35,6 +35,7 @@ mod efi;
 mod floor;
 mod loaderlog;
 mod microcode;
+mod overwrite;
 mod payload;
 mod rootimage;
 mod seed;
@@ -800,6 +801,9 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     if let Some(line) = stale {
         println!("{line}");
     }
+    // On every pass, including one that boots no kernel: its reset hands this
+    // memory to whatever boots next.
+    overwrite::request(&system_table);
     // Said either way, because the bound is only as good as what a reader can
     // see of it: a stick this could not count on is a machine with no bound.
     match (&previous, &wrote) {

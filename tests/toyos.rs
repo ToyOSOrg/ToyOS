@@ -881,6 +881,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The firmware defines the TCG memory-overwrite request and took the
+        // loader's write. The T14 and the AMD bench.
+        "memory_overwrite_requested",
+        metal::Metal { arms: TESTCASES, judge: |b| power::memory_overwrite_requested(&b[0].loader()) },
+    ),
+    (
         "ioapic_topology",
         metal::Metal { arms: TESTCASES, judge: |b| ioapic_topology(b[0].kernel().text()) },
     ),

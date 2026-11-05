@@ -515,6 +515,17 @@ pub fn blackbox_unclaimed(
     Ok(())
 }
 
+/// The loader found the firmware's memory-overwrite request and set it, so the
+/// firmware overwrites memory before the boot after this one.
+pub fn memory_overwrite_requested(loader: &serial::Serial) -> Result<(), String> {
+    let line = loader.must_say("Memory overwrite: MemoryOverwriteRequestControl read ")?;
+    if !line.contains("and is now [01]") {
+        return Err(format!("the loader did not set the request: {}", line.trim()));
+    }
+    eprintln!("  [power] {}", line.trim());
+    Ok(())
+}
+
 /// What `/system/bin/acpiserver` says once it serves q35's power button,
 /// whole, before it loads the tables.
 const ACPI_ARMED: &str = "acpiserver: armed: power button served";
