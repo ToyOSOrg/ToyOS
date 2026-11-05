@@ -24,21 +24,21 @@ fn machine(arch: Arch) -> (Machine, u16) {
 /// The section of `kernel` and the supervisor `supervisor`, both for `arch`.
 pub fn section(kernel: &[u8], supervisor: &[u8], arch: Arch) -> Vec<u8> {
     let (machine, e_machine) = machine(arch);
-    let layout = Layout::parse(kernel, machine).unwrap_or_else(|e| panic!("kernel.elf: {e}"));
+    let layout = Layout::parse(kernel, machine).unwrap_or_else(|e| panic!("the kernel's ELF: {e}"));
     let extent = layout.extent();
     // The image sits at its own addresses: an image offset is moved by the
     // extent's start, which the kernel links at a page boundary.
     let min = extent.min();
-    assert!(min.is_multiple_of(PAGE), "kernel.elf: its lowest address {min:#x} is no page boundary");
+    assert!(min.is_multiple_of(PAGE), "the kernel's ELF: its lowest address {min:#x} is no page boundary");
     if let Some((a, b)) = layout.overlapping_load_pages(PAGE) {
-        panic!("kernel.elf: PT_LOAD segments {a} and {b} share a page, which cannot have both their protections");
+        panic!("the kernel's ELF: PT_LOAD segments {a} and {b} share a page, which cannot have both their protections");
     }
     let memory = extent.max().next_multiple_of(PAGE);
     let mut image = Vec::new();
     let mut ranges = Vec::new();
     for segment in layout.segments() {
         let bytes = file_range(kernel, segment.file_offset(), segment.filesz())
-            .expect("kernel.elf: a PT_LOAD's file bytes are past the file's end");
+            .expect("the kernel's ELF: a PT_LOAD's file bytes are past the file's end");
         let at = (min + segment.image().start().get()) as usize;
         if image.len() < at + bytes.len() {
             image.resize(at + bytes.len(), 0);
@@ -46,7 +46,7 @@ pub fn section(kernel: &[u8], supervisor: &[u8], arch: Arch) -> Vec<u8> {
         image[at..at + bytes.len()].copy_from_slice(bytes);
         let (lo, hi) = segment.page_range(PAGE);
         let flags = segment.flags();
-        assert!(!(flags.executable() && flags.writable()), "kernel.elf: a segment both writable and executable");
+        assert!(!(flags.executable() && flags.writable()), "the kernel's ELF: a segment both writable and executable");
         let prot = if flags.executable() {
             VmProt::ReadExec
         } else if flags.writable() {
@@ -65,17 +65,17 @@ pub fn section(kernel: &[u8], supervisor: &[u8], arch: Arch) -> Vec<u8> {
         .section_headers()
         .and_then(|table| file_range(kernel, table.file_offset, table.byte_len() as u64))
         .map(SectionTable::new)
-        .expect("kernel.elf: no section header table inside the file");
-    let rela_sections = sections.rela_sections().unwrap_or_else(|form| panic!("kernel.elf: {form} is not supported"));
+        .expect("the kernel's ELF: no section header table inside the file");
+    let rela_sections = sections.rela_sections().unwrap_or_else(|form| panic!("the kernel's ELF: {form} is not supported"));
     let rules = Rules { extent, window: (0, memory), tls: None };
     let mut relocations = Vec::new();
     for section in rela_sections {
-        let table = file_range(kernel, section.offset, section.size).expect("kernel.elf: SHT_RELA section is past the file's end");
+        let table = file_range(kernel, section.offset, section.size).expect("the kernel's ELF: SHT_RELA section is past the file's end");
         for raw in RelaTable::new(table, machine).iter() {
-            match rela::parse(raw, &rules, SymTab::empty()).unwrap_or_else(|e| panic!("kernel.elf: {e}")).map(|r| (r.offset(), r.op())) {
+            match rela::parse(raw, &rules, SymTab::empty()).unwrap_or_else(|e| panic!("the kernel's ELF: {e}")).map(|r| (r.offset(), r.op())) {
                 Some((offset, Op::Relative(target))) => relocations.push((offset, min + target.get())),
                 None => {}
-                Some(other) => panic!("kernel.elf: a relocation the loader does not apply: {other:?}"),
+                Some(other) => panic!("the kernel's ELF: a relocation the loader does not apply: {other:?}"),
             }
         }
     }

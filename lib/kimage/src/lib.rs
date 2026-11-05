@@ -37,7 +37,7 @@ use toyos_abi::syscall::{SpawnMap, VmProt, MAX_BUILD_ID, MAX_SPAWN_MAPS};
 
 pub const MAGIC: [u8; 8] = *b"TOYOSKRN";
 /// `e_machine` of each machine a kernel image is built for: what the build
-/// writes and the loader and the kernel each check is their own.
+/// writes, and what the loader and the kernel each check against their own.
 pub const EM_X86_64: u16 = 62;
 pub const EM_AARCH64: u16 = 183;
 pub const FORMAT: u32 = 1;
