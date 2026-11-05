@@ -5307,15 +5307,17 @@ fn nvme_disk_boots(test_config: &Path) -> Result<(), String> {
     if let Some(usb) = qemu::profile_argv(&options).iter().find(|arg| arg.contains("usb") || arg.contains("xhci")) {
         return Err(format!("this machine was to have no USB controller, and QEMU is given {usb}"));
     }
-    let qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-    let log = serial::Serial::boot(&qemu);
-    log.must_be_clean()?;
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    serial::Serial::boot(&qemu).must_be_clean()?;
     // Every role is on this disk, so each is served off the nvme driver's
-    // sessions through the block service, or the boot left it absent.
+    // sessions through the block service, or the boot left it absent. LOG's
+    // server says so once its recovery has read the volume whole, which may
+    // be after the runner is ready.
+    let mut console = qemu.boot_log().to_string();
     for role in NVME_ROLES {
-        log.must_say(&format!("fileserver: {role}"))?;
+        qemu::await_marker(&mut qemu, &mut console, &format!("fileserver: {role}"), "the role to be served")?;
     }
-    Ok(())
+    serial::Serial::named("the nvme boot", console).must_be_clean()
 }
 
 /// The NVMe driver's own account of the designation, which must be that it

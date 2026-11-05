@@ -13,8 +13,7 @@ among them, so the commit makes durable an entry whose new extents name
 blocks that never received its pages. In the same boot the file still reads
 right: its pages stay dirty in its object and the next sync tries them
 again. After a stop before that, it reads what those blocks last held,
-which may be a deleted file's bytes
-(`issues/a-reallocated-extent-on-data-keeps-the-deleted-files-bytes.md`).
+which may be a deleted file's bytes.
 
 An fsync does not: a carried file whose pages are refused refuses the
 commit (`Files::fsync`).

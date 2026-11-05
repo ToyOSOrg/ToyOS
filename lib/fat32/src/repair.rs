@@ -30,6 +30,11 @@
 //! — counts when its write lands. Every queued step is driven until it lands,
 //! so no refusal leaves the count a guess.
 //!
+//! **A write-back device orders nothing between two flushes**, so a call
+//! whose writes must land in order flushes between them: a removed name's
+//! erase before its chain's free, a shorter entry before the clusters past
+//! it, and a rename's new name before the old one's erase.
+//!
 //! What stays open, because FAT has no journal:
 //!
 //! - **Between the two copies of one entry.** [`Fat32::set_fat_entry`] is one
@@ -40,16 +45,18 @@
 //! - **Between a claim and its link.** A claimed cluster is end-of-chain before
 //!   anything reaches it, so a stop there orphans it: a leak, never a chain
 //!   into free space.
-//! - **Inside a free.** The name is erased or the kept cluster terminated
-//!   first, so a stop part way through the walk orphans the rest of the chain.
+//! - **Inside a free.** The name is erased, or a truncation's entry
+//!   shortened, before the first cluster is freed, so a stop part way through
+//!   the walk orphans the rest of the chain.
 //! - **Between the entries of one name.** A long name is a run of up to
 //!   twenty-one directory entries written one at a time, so a stop inside a
 //!   create, rename or remove leaves a partial run.
 //! - **The repair lives in memory.** A reset, panic or power loss while it is
 //!   non-empty leaves the state the refused write reached: orphaned clusters
 //!   bounded by what one call claims and frees, at most one split entry, and
-//!   at most one partial run, each of which `toyos-fat32-check` names. Nothing
-//!   on the mount path repairs them.
+//!   at most one partial run, each of which `toyos-fat32-check` names.
+//!
+//! [`Fat32::recover`] takes back every state these windows leave.
 
 use crate::boot::Cluster;
 use toyos_blockdev::BlockDev;

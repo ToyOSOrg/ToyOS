@@ -819,6 +819,10 @@ impl<D: BlockDev> Fat32<D> {
     /// the handle once the repair carries the shrink: a refusal before that
     /// has written nothing, and the handle's old size is what makes the retry
     /// shrink again.
+    ///
+    /// **The entry stops naming the clusters before they are freed**, so a
+    /// stop between the two leaks them and never leaves an entry naming free
+    /// space.
     async fn shrink_chain(&mut self, f: &mut File, len: u64) -> Result<(), Error> {
         let bpc = self.geom.bytes_per_cluster() as u64;
         let keep = len.div_ceil(bpc);
@@ -831,6 +835,23 @@ impl<D: BlockDev> Fat32<D> {
         // part of a chain and frees the rest, and a loop between the two
         // halves is how live clusters reach the allocator.
         self.verify_acyclic(first).await?;
+        let unnamed = keep == 0 && f.entry_cluster.is_some();
+        if f.entry_size as u64 > len || unnamed {
+            let mut raw = self.live_entry(f).await?;
+            if keep == 0 {
+                raw.set_first_cluster(0);
+            }
+            raw.set_size(len as u32);
+            let mark = self.repair.len();
+            self.write_entry_at(f.loc.entry_offset, &raw).await?;
+            self.dev.flush().await?;
+            // Landed: the free that follows only goes forward.
+            self.repair.truncate(mark);
+            f.entry_size = len as u32;
+            if keep == 0 {
+                f.entry_cluster = None;
+            }
+        }
         if keep == 0 {
             f.first_cluster = None;
             f.size = len as u32;
@@ -1068,6 +1089,7 @@ impl<D: BlockDev> Fat32<D> {
     /// up to the last erase, carried forward from it by [`Self::atomic`].
     async fn erase_committed(&mut self, loc: Loc, chain: Option<Cluster>) -> Result<(), Error> {
         self.erase_entries(loc).await?;
+        self.dev.flush().await?;
         self.commit();
         if let Some(c) = chain {
             self.queue(Repair::Free { start: c, anchor: None });
@@ -1102,6 +1124,7 @@ impl<D: BlockDev> Fat32<D> {
         }
 
         self.insert_entry(new_dir, &new_name, &node.raw).await?;
+        self.dev.flush().await?;
         self.erase_entries(loc).await?;
         if let Some(c) = moved_dir {
             if new_dir != loc.dir_start {
