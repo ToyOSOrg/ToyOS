@@ -94,7 +94,10 @@ nameable by every program and make confused-deputy bugs structural.
    with the grant's root ignored, and `toyos::files`'
    `an_empty_view_names_nothing_but_an_empty_root`. Left of the design above:
    a spawn still states its child's working directory as text the kernel
-   keeps for `SYS_GETCWD`, step 9's file half's remainder.
+   keeps for `SYS_GETCWD`, a later step of
+   `issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`; and a
+   row the image declares is still minted the whole tree but `/state`,
+   which stage 2 narrows to the files its row declares.
 2. **Every row declares its files.** `system.toml` states each program's view;
    the build refuses a row that names a path no role provides. The shell and
    terminal get the session's view, doom its `/apps` directory, and daemons

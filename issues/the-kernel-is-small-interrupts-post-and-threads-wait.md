@@ -156,7 +156,10 @@ Beside that order, each waiting on something outside it:
       view holds only the grants its row gives, a package's `/tmp` its own
       (`toyos_manifest::app_temporary`), and an empty view names nothing but
       an empty `/` (`toyos::files`'
-      `an_empty_view_names_nothing_but_an_empty_root`).
+      `an_empty_view_names_nothing_but_an_empty_root`). Not this step's: a
+      declared row's own view, which still holds the whole tree but
+      `/state` (the isolation track's stage 2), and `SYS_GETCWD` (step 9's
+      file half, item 1 above).
    9. **Delete the kernel storage stack.** **Partly done** (#536). Two
       halves are left, and they land apart:
       - **The file half**: the VFS, tmpfs (`tmpfs.rs`, `fs_rename.rs`), the
