@@ -1,0 +1,12 @@
+MEASUREMENT ONLY, never lands: a memcpy by where its two ends sit
+
+osbench copyat times one copy between two ends of one anonymous mapping
+at a source offset (0 or 16 past a page) and a destination distance
+modulo 4096 (0 to 4080): the library memcpy, and beside it rep movsb
+from the destination or source 64-byte boundary and SSE2 loops lowest
+or highest first (osbench arch::copies, checked against copy_within
+under Rosetta over 64 to 699 bytes). Also libc between two heap Vecs,
+their offsets noted. Metal row copyat (with osbench mem); QEMU test
+copyat_runs that it exits 0.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
