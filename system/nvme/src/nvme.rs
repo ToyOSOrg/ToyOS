@@ -136,6 +136,44 @@ impl std::fmt::Display for Refusal {
     }
 }
 
+/// Refuse a controller whose smallest memory page is not 4 KiB: `CC.MPS` is
+/// written 0 and `MDTS` is read in 4 KiB units, both of which `CAP.MPSMIN`
+/// (bits 51:48, a page of `2^(12 + MPSMIN)` bytes; Base 2.0 §3.1.4.1) must
+/// allow.
+fn page_size(cap: u64) -> Result<(), String> {
+    match (cap >> 48) & 0xF {
+        0 => Ok(()),
+        min => Err(format!("the controller's smallest memory page is {} KiB, and this driver's is 4 KiB", 4 << min)),
+    }
+}
+
+/// Namespace 1's sector size as a shift, from Identify Namespace's `NLBAF`
+/// (byte 25, a zero-based count), `FLBAS` (byte 26) and the LBA format at
+/// each byte offset `format_at` reads (NVM Command Set 1.0 §4.1.5.1). The
+/// format index is `FLBAS` bits 3:0 with bits 6:5 above them, which a
+/// namespace of 16 formats or fewer clears. A format carrying metadata is
+/// refused: its sectors move more than `2^LBADS` bytes, or need a metadata
+/// pointer this driver never sets.
+fn sector_shift(nlbaf: u8, flbas: u8, format_at: impl Fn(usize) -> u32) -> Result<u32, String> {
+    let formats = nlbaf as usize + 1;
+    let index = (flbas & 0x0F) as usize | (((flbas >> 5) & 0b11) as usize) << 4;
+    if index >= formats {
+        return Err(format!("namespace 1 is in LBA format {index}, and it reports {formats}"));
+    }
+    let format = format_at(128 + 4 * index);
+    let metadata = format & 0xFFFF;
+    if metadata != 0 {
+        return Err(format!("namespace 1's format carries {metadata} bytes of metadata per sector"));
+    }
+    let lbads = (format >> 16) & 0xFF;
+    if !(9..=12).contains(&lbads) {
+        return Err(format!(
+            "namespace 1 has 2^{lbads}-byte sectors, and a 4 KiB block is whole sectors only for 512..=4096"
+        ));
+    }
+    Ok(lbads)
+}
+
 /// One submission entry's fields (§4.2); the identifier is the slot's.
 #[derive(Clone, Copy, Default)]
 struct Command {
@@ -237,6 +275,7 @@ impl Controller {
         // which this struct holds.
         let regs = unsafe { Window::new(bar.as_ptr(), bar_bytes as usize) };
         let cap: u64 = regs.read(REG_CAP);
+        page_size(cap).map_err(Refusal::Geometry)?;
         let stride = 4usize << ((cap >> 32) & 0xF);
         if DOORBELLS + (2 * MAX_IO_QUEUES as usize + 2) * stride > bar_bytes as usize {
             return Err(Refusal::NoRegisters);
@@ -351,8 +390,8 @@ impl Controller {
         let mdts: u8 = id.read(77);
         let vwc: u8 = id.read(525);
         self.vwc = vwc & 1 != 0;
-        // A power of two in units of the minimum page, 4 KiB here; zero is no
-        // limit.
+        // A power of two in units of the minimum page, which `page_size`
+        // holds at 4 KiB; zero is no limit.
         self.max_blocks = match mdts {
             0 => u32::MAX,
             n if n >= 20 => u32::MAX,
@@ -372,15 +411,7 @@ impl Controller {
             Command { opcode: ADMIN_IDENTIFY, nsid: 1, prp1: buf, cdw10: 0, ..Command::default() },
         )?;
         let nsze: u64 = id.read(0);
-        let flbas: u8 = id.read(26);
-        let format: u32 = id.read(128 + 4 * (flbas & 0x0F) as usize);
-        let lbads = (format >> 16) & 0xFF;
-        if !(9..=12).contains(&lbads) {
-            return Err(Refusal::Geometry(format!(
-                "namespace 1 has 2^{lbads}-byte sectors, and a 4 KiB block is whole sectors only \
-                 for 512..=4096"
-            )));
-        }
+        let lbads = sector_shift(id.read(25), id.read(26), |at| id.read(at)).map_err(Refusal::Geometry)?;
         self.lba_bytes = 1 << lbads;
         self.sectors = nsze;
         Ok(())
@@ -668,5 +699,58 @@ impl Controller {
     /// The queues each command was issued down, as a line.
     pub fn spread(&self) -> String {
         self.issued.iter().map(u64::to_string).collect::<Vec<_>>().join("/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{page_size, sector_shift};
+
+    /// An Identify Namespace page: `formats` LBA formats, each `(MS, LBADS)`.
+    fn namespace(formats: &[(u16, u8)]) -> impl Fn(usize) -> u32 {
+        let formats = formats.to_vec();
+        move |at| {
+            let (ms, lbads) = formats[(at - 128) / 4];
+            ms as u32 | (lbads as u32) << 16
+        }
+    }
+
+    #[test]
+    fn a_namespace_past_sixteen_formats_takes_the_index_high_bits() {
+        let mut formats = vec![(0, 9); 64];
+        formats[0x23] = (0, 12);
+        assert_eq!(sector_shift(63, 0b0100_0011, namespace(&formats)), Ok(12));
+        assert_eq!(sector_shift(63, 0b0000_0011, namespace(&formats)), Ok(9));
+        // Bit 4 between the two halves is not the index's.
+        assert_eq!(sector_shift(63, 0b0101_0011, namespace(&formats)), Ok(12));
+    }
+
+    #[test]
+    fn a_format_index_past_the_count_is_refused() {
+        let formats = vec![(0, 9); 16];
+        assert!(sector_shift(1, 2, namespace(&formats)).unwrap_err().contains("LBA format 2"));
+        assert!(sector_shift(15, 0b0010_0011, namespace(&formats)).unwrap_err().contains("LBA format 19"));
+    }
+
+    #[test]
+    fn a_format_with_metadata_is_refused_extended_or_separate() {
+        let formats = [(8, 9), (64, 12)];
+        // FLBAS bit 4 set: metadata interleaved with the data.
+        assert!(sector_shift(1, 0b1_0000, namespace(&formats)).unwrap_err().contains("8 bytes of metadata"));
+        // Clear: a separate buffer.
+        assert!(sector_shift(1, 1, namespace(&formats)).unwrap_err().contains("64 bytes of metadata"));
+    }
+
+    #[test]
+    fn a_sector_outside_512_to_4096_bytes_is_refused() {
+        assert!(sector_shift(0, 0, namespace(&[(0, 13)])).is_err());
+        assert_eq!(sector_shift(0, 0, namespace(&[(0, 9)])), Ok(9));
+    }
+
+    #[test]
+    fn a_controller_whose_smallest_page_is_not_4_kib_is_refused() {
+        assert_eq!(page_size(0x0000_0020_FF01_003F), Ok(()));
+        let cap = 0x0001_0020_FF01_003F | (0xF << 52);
+        assert!(page_size(cap).unwrap_err().contains("8 KiB"));
     }
 }
