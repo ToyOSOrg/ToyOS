@@ -61,7 +61,7 @@ An agent's guest evidence, aarch64 included, comes only from the guest runner th
 
 ## Working safely
 
-One agent, one worktree, one branch. The primary checkout owns `main` and `rust/`; work in a separate worktree. Never clone ToyOS to make one or run `git submodule` there: the latter can corrupt the shared fork's worktree configuration. Do not disturb another agent's files, branches, locks or processes. Stop only processes you started, by PID, and remove your scratch output when it is no longer needed.
+One agent, one worktree, one branch. The primary checkout owns `main` and `rust/`; work in a separate worktree. Never clone ToyOS to make one or run `git submodule` there: the latter can corrupt the shared fork's worktree configuration. Do not disturb another agent's files, branches, locks or processes. Stop only processes you started, by PID. The disk is shared and finite: remove your build output (`target/`) when you stop working, and your worktrees, check trees, staged images and scratch output once nothing needs them.
 
 `main` moves only through reviewed pull requests and its required merge queue: no direct push, force-push, deletion or bypass. Commit with `git commit -F <file>`. You own your unpushed commits and your own remote ToyOS branch; fork branches are append-only. Keep ABI consumers, fork pins and their implementation coherent in one landing. Account for every changed hunk in a modify/delete conflict.
 
