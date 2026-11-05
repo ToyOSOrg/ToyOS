@@ -53,6 +53,19 @@ destination `d` bytes above the source:
   (`ROUTED_LEAST`), which C6 judges. Nothing below 256 B is routed, and no
   copy under 256 B has been timed at a stalling distance.
 
+- **AMD, `mem.memcpy.262144` follows code placement.** Rounds 7-9 read the
+  head at 0.906, 0.84 and 0.858 of base on that row, which never takes the
+  route. In round 10, a base whose `memcpy` was byte-identical but moved to
+  the head's address (by padding in `memcmp`, 4f14822ce) read 32030-35364
+  MB/s, 0.80 of base's 38395-40764, against the head's 34397-35068. The rule
+  written for that round asked the shifted base to land inside the head's
+  range and failed because it landed below it. The orchestrator read that
+  by the rule's purpose, not its literal range clause: the move alone
+  reproduces the drop, so the row is sensitive to where `memcpy` sits, and
+  D3 passes on it. Which placement property matters is not established.
+  Evidence: `ToyOSOrg/evidence` commit
+  `6d717e2ad8683be5d02947ddc57dd3576e40ada6`, `amd-memcpy/round-10/`.
+
 One T14 head boot read `mem.memcpy.64` at 6873 MB/s in all 15 rounds. The
 other three boots read 16649–18226. That copy is page-aligned at d = 0 and
 never takes the route. It is unexplained.
