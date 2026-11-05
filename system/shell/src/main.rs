@@ -668,11 +668,14 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
         if !is_last {
             command.stdout(Stdio::piped());
         } else if !apply_redirect(&mut command, cmd) {
-            // The commands before it end on the pipe this one would have read.
+            // The commands before it end on the pipe this one would have read,
+            // and are the line an interrupt reaches meanwhile.
             drop(command);
+            waiting_for(&children.iter().collect::<Vec<_>>());
             for mut child in children {
                 let _ = child.wait();
             }
+            waited(1);
             return false;
         }
 

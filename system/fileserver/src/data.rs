@@ -762,6 +762,7 @@ mod tests {
         assert_eq!(tail.pop(), Some(b'x'));
         assert!(tail.iter().all(|&b| b == 0));
     }
+
     /// A file a delete made room for holds its own bytes on the device. The
     /// first file takes most of the volume, so the second cannot be written
     /// without the blocks the delete freed.
