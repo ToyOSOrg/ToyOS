@@ -1,7 +1,44 @@
-//! Read-only directory ancestors of the filesystem capabilities actually held.
+//! A view's routing: which held capability an absolute path lies on, and the
+//! read-only directory ancestors of the capabilities actually held. A path
+//! beneath no capability and no such ancestor is `NotHeld`, so a process
+//! given an empty view names nothing but an empty `/`.
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use super::{Error, MAX_CAPABILITY_DEPTH};
+use crate::fs;
+
+/// Where an absolute, lexically clean path lies in a view.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Routed<C> {
+    /// On the capability of the longest held prefix, at this path beneath it.
+    Served(C, String),
+    /// A directory [`Directories`] makes of the held capabilities' ancestors.
+    Directory,
+}
+
+/// Route `abs` through `held`, which answers the capability a prefix names:
+/// the longest prefix first, at most [`MAX_CAPABILITY_DEPTH`] components,
+/// then `/`.
+pub(super) fn route<'a, C>(
+    abs: &str,
+    dirs: impl FnOnce() -> Result<&'a Directories, Error>,
+    mut held: impl FnMut(&str) -> Result<Option<C>, Error>,
+) -> Result<Routed<C>, Error> {
+    let parts: Vec<&str> = abs.split('/').filter(|p| !p.is_empty()).collect();
+    for depth in (1..=parts.len().min(MAX_CAPABILITY_DEPTH)).rev() {
+        let prefix = alloc::format!("/{}", parts[..depth].join("/"));
+        if let Some(cap) = held(&prefix)? {
+            return Ok(Routed::Served(cap, parts[depth..].join("/")));
+        }
+    }
+    match held("/")? {
+        Some(cap) => Ok(Routed::Served(cap, parts.join("/"))),
+        None if dirs()?.node(abs).is_some() => Ok(Routed::Directory),
+        None => Err(Error::Served(fs::Error::NotHeld)),
+    }
+}
 
 pub(super) struct Directories(Vec<String>);
 
@@ -14,7 +51,7 @@ impl Directories {
                 continue;
             }
             let parts: Vec<_> = path.split('/').filter(|p| !p.is_empty()).collect();
-            if parts.len() > super::MAX_CAPABILITY_DEPTH { continue; }
+            if parts.len() > MAX_CAPABILITY_DEPTH { continue; }
             for end in 1..=parts.len() {
                 paths.insert(alloc::format!("/{}", parts[..end].join("/")));
             }
@@ -54,5 +91,45 @@ mod tests {
         let dirs = Directories::new([]);
         assert_eq!(dirs.node("/"), Some(1));
         assert_eq!(dirs.children("/").count(), 0);
+    }
+
+    /// `abs` routed in a view holding exactly `names`, each capability
+    /// answered by its own prefix.
+    fn routed(names: &[&str], abs: &str) -> Result<Routed<String>, Error> {
+        let dirs = Directories::new(names.iter().map(|n| String::from(*n)));
+        route(abs, || Ok(&dirs), |prefix| {
+            let name = alloc::format!("{}{prefix}", fs::CAPABILITY_PREFIX);
+            Ok(names.contains(&name.as_str()).then(|| String::from(prefix)))
+        })
+    }
+
+    /// **A process given an empty view names nothing**: every directory any
+    /// role serves, and the files a program would reach for first, are not
+    /// held, and `/` is a directory listing nothing (above).
+    #[test]
+    fn an_empty_view_names_nothing_but_an_empty_root() {
+        let not_held = Err(Error::Served(fs::Error::NotHeld));
+        for abs in [
+            "/system", "/system/bin/shell", "/system/etc/system.manifest", "/tmp", "/tmp/x", "/apps", "/apps/doom",
+            "/home", "/home/toy", "/home/toy/Apps/doom", "/config", "/state", "/state/sshserver/authorized_keys",
+            "/log", "/boot", "/dev/null",
+        ] {
+            assert_eq!(routed(&[], abs), not_held, "{abs}");
+        }
+        assert_eq!(routed(&[], "/"), Ok(Routed::Directory));
+    }
+
+    /// A view holding `/tmp` and a package's folder names what is beneath
+    /// them on their own capabilities, their ancestors as directories, and
+    /// nothing beside them.
+    #[test]
+    fn a_view_names_only_what_lies_beneath_what_it_holds() {
+        let view = ["fs:/tmp", "fs:/home/toy/Apps/doom"];
+        assert_eq!(routed(&view, "/tmp/a/b"), Ok(Routed::Served("/tmp".into(), "a/b".into())));
+        assert_eq!(routed(&view, "/home/toy/Apps/doom/Data/x"), Ok(Routed::Served("/home/toy/Apps/doom".into(), "Data/x".into())));
+        assert_eq!(routed(&view, "/home/toy/Apps"), Ok(Routed::Directory));
+        for abs in ["/system/bin/shell", "/home/toy/Apps/other", "/home/toy/Documents", "/tmpx", "/state"] {
+            assert_eq!(routed(&view, abs), Err(Error::Served(fs::Error::NotHeld)), "{abs}");
+        }
     }
 }

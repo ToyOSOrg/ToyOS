@@ -1499,16 +1499,19 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    /// An installed package's `HOME`, its folder of the session's home, and
-    /// its [`toyos_manifest::APP_FOLDERS`], made before it runs. `Err` is why
+    /// An installed package's `HOME`, its folder of the session's home, its
+    /// [`toyos_manifest::APP_FOLDERS`] and its own `/tmp`
+    /// ([`toyos_manifest::app_temporary`]), made before it runs. `Err` is why
     /// one is not a directory, and the launch is refused: its grant would
     /// name nothing, or something else than a folder.
-    fn make_app_home(&mut self, program: &Program) -> Result<(), String> {
+    fn make_app_dirs(&mut self, program: &Program, package: &str) -> Result<(), String> {
         let home = program.home();
         let asked = home.clone();
-        let made = self.files("an app's home", move || {
+        let temporary = toyos_manifest::app_temporary(package);
+        let made = self.files("an app's directories", move || {
             let folders = toyos_manifest::APP_FOLDERS.iter().map(|folder| format!("{asked}/{folder}"));
-            std::iter::once(asked.clone()).chain(folders).try_for_each(|dir| {
+            let temporary = [toyos_manifest::APP_TEMPORARIES.to_string(), temporary];
+            std::iter::once(asked.clone()).chain(folders).chain(temporary).try_for_each(|dir| {
                 make_dir(&dir)?;
                 match std::fs::symlink_metadata(&dir)?.is_dir() {
                     true => Ok(()),
@@ -2718,8 +2721,8 @@ impl Supervisor<'_> {
         // `inherit_handle` duplicates into the child, so the supervisor's own copies go with
         // `fds` when this returns.
         self.make_state_dir(program);
-        if program.package().is_some() {
-            if let Err(why) = self.make_app_home(program) {
+        if let Some(package) = program.package() {
+            if let Err(why) = self.make_app_dirs(program, package) {
                 say!("supervisor: launcher: {} was not started: {why}", program.name);
                 let _ = conn.try_signal(launch::MSG_REFUSED);
                 return;

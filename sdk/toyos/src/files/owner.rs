@@ -8,7 +8,8 @@ use alloc::vec::Vec;
 
 use toyos_abi::syscall::{self, FileType, SyscallError};
 
-use super::{encode, At, Error, Open, Stat, MAX_CAPABILITY_DEPTH, MAX_LINKS, SEEK_CURRENT, SEEK_END, SEEK_START};
+use super::namespace::Routed;
+use super::{encode, At, Error, Open, Stat, MAX_LINKS, SEEK_CURRENT, SEEK_END, SEEK_START};
 use crate::fd::{self, Fd, Object, SERVED_FILE};
 use crate::fs::{self, Base, Change, Dir, Fid, Refused};
 use crate::sync::{Lock, Turnstile};
@@ -241,18 +242,10 @@ fn capability(prefix: &str) -> Result<Option<Arc<Capability>>, Error> {
 
 /// Which server the absolute, lexically clean `abs` is on, and the path there.
 fn route(abs: &str) -> Result<Place, Error> {
-    let parts: Vec<&str> = abs.split('/').filter(|p| !p.is_empty()).collect();
-    for depth in (1..=parts.len().min(MAX_CAPABILITY_DEPTH)).rev() {
-        let prefix = alloc::format!("/{}", parts[..depth].join("/"));
-        if let Some(cap) = capability(&prefix)? {
-            return Ok(Place::Served(cap, Base::Root, parts[depth..].join("/")));
-        }
-    }
-    match capability("/")? {
-        Some(cap) => Ok(Place::Served(cap, Base::Root, parts.join("/"))),
-        None if directories()?.node(abs).is_some() => Ok(Place::Directory(String::from(abs))),
-        None => Err(Error::Served(fs::Error::NotHeld)),
-    }
+    Ok(match super::namespace::route(abs, directories, capability)? {
+        Routed::Served(cap, rel) => Place::Served(cap, Base::Root, rel),
+        Routed::Directory => Place::Directory(String::from(abs)),
+    })
 }
 
 /// Where `path` from `at` is resolved: the empty path names nothing

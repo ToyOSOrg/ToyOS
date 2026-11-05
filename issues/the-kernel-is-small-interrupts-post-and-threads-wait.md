@@ -16,20 +16,17 @@ kernel's part of a restart, and named module tests hold each program's
 
 ## What is left, in order
 
-1. **Step 9's file half** (stage 4). libc is a file server's client
-   through `toyos::files`, as std is.
-2. **Step 8's exit** (stage 4). Its empty view needs step 9's file half:
-   until then the kernel serves `/tmp` to every process, and every view holds
-   `/system` read-only.
-3. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
+1. **What step 9's file half left** (stage 4): `SYS_GETCWD`, and the
+   measurement that half owes.
+2. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
    where firmware put it, handed over in 4 KiB pages with its MSI-X table's
    page, under the owner's Q2 ruling. The orchestrator ruled on #900 that
    this route serves usbd's claim (step 10).
-4. **Step 10's metal rows still owed** (step 10, below): a reset, a tone and
+3. **Step 10's metal rows still owed** (step 10, below): a reset, a tone and
    `mask_windows` under a write to a stick through usbd, which no bench row
    makes since the benches boot off their NVMe
    (`issues/no-bench-row-drives-usb-storage-since-the-benches-boot-off-nvme.md`).
-5. **Stage 6 step 5, then stage 5's windows.**
+4. **Stage 6 step 5, then stage 5's windows.**
 
 Beside that order, each waiting on something outside it:
 - stage 1's NVMe boot-time measurement, on a ROOT on the T14's NVMe, which
@@ -105,7 +102,7 @@ Beside that order, each waiting on something outside it:
    refused by name, red on a supervisor that starts the role again while its
    claim is held or that drops the name from the `AlreadyExists` refusal
    (`refused` in `system/supervisor/src/main.rs`).
-   **Partly done**: steps 1, 2, 3, 4, 6 and 7 are done, and 5, 8, 9 and 10
+   **Partly done**: steps 1, 2, 3, 4, 6, 7 and 8 are done, and 5, 9 and 10
    partly.
 
    Stages 3 and 4 are built as these steps:
@@ -150,13 +147,19 @@ Beside that order, each waiting on something outside it:
       (`issues/every-program-sees-only-the-files-it-was-given.md`).
       **Exit**: that stage's, run against fileserver: an escape suite red on
       a resolver that walks the global tree and green on fileserver's, and a
-      process given an empty view naming nothing. **Partly done** (#729,
-      #742): a connection is the grant the supervisor minted on its role's
-      one port, and `fs_escape` is refused a symlink that climbs out, a `..`
-      on the wire and a directory it was not given. **Left**: the rest of the
-      escape suite, a rename racing a lookup among it, shown red on a
-      global-tree resolver; and the empty view, which every view's `/tmp`
-      grant still stands against (`toyos_manifest`'s `temporary`).
+      process given an empty view naming nothing. **Done** (#729, #742,
+      #1181): a connection is the grant the supervisor minted on its
+      role's one port. fileserver's `resolve` refuses every `..` and link
+      that climbs out of the grant's root, and a held directory a rename left
+      outside it (`a_held_directory_renamed_out_of_the_root_names_nothing`
+      and its neighbours), each red on a resolver that ignores the root. A
+      view holds only the grants its row gives, a package's `/tmp` its own
+      (`toyos_manifest::app_temporary`), and an empty view names nothing but
+      an empty `/` (`toyos::files`'
+      `an_empty_view_names_nothing_but_an_empty_root`). Not this step's: a
+      declared row's own view, which still holds the whole tree but
+      `/state` (the isolation track's stage 2), and `SYS_GETCWD` (step 9's
+      file half, item 1 above).
    9. **Delete the kernel storage stack.** **Partly done** (#536). Two
       halves are left, and they land apart:
       - **The file half**: the VFS, tmpfs (`tmpfs.rs`, `fs_rename.rs`), the
@@ -164,7 +167,8 @@ Beside that order, each waiting on something outside it:
         two items** (#1152): `SYS_GETCWD` (21) stays, since the kernel
         records a spawn's starting directory, which the SDK reads once
         (`toyos::files`); and the measurement below is owed. `/tmp` is the
-        MEMORY file server's, one for the machine; per session, as the owner
+        MEMORY file server's, one for the machine, of which each installed
+        package's `/tmp` is its own directory (#1181); per session, as the owner
         ruled ("Per session", 2026-10-03), is the isolation track's stage 3.
         **`/system` is read over the file protocol**,
         which std and libc both reach through `toyos::files` (owner ruling

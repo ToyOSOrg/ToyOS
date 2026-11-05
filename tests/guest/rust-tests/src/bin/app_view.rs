@@ -1,5 +1,5 @@
-//! An installed app sees its own package read-only and its own folder as
-//! `HOME`, and nothing else of `/apps` or `/home`.
+//! An installed app sees its own package read-only, its own folder as `HOME`
+//! and its own `/tmp`, and nothing else of `/apps`, `/home` or `/tmp`.
 //!
 //! The job installs this binary as the package `appview` beside another
 //! package and another app's folder, and launches it through test-runner's
@@ -10,6 +10,9 @@
 //!
 //! - its `HOME` is `/home/toy/Apps/appview`, holding `Config Data Cache State`,
 //!   and a file it writes there lands in that folder of `/home`;
+//! - its `/tmp` is its own: a file it writes there lands in `/tmp/apps/appview`
+//!   of the machine's, and neither the machine's `/tmp` nor another app's is
+//!   there by path;
 //! - its own package reads, and every request that would change it — an open
 //!   to write, append, truncate, create or create anew, a `mkdir`, `rmdir`,
 //!   `unlink`, `rename` and `symlink` — is refused `ReadOnly` by the server,
@@ -55,6 +58,11 @@ const ROW_MANIFEST: &[u8] = b"name = \"shell\"\nversion = \"1\"\n\
 const OTHER_PACKAGE_FILE: &str = "/apps/other/kept";
 const OTHER_FOLDER_FILE: &str = "/home/toy/Apps/other/Data/kept";
 const KEPT: &[u8] = b"what the app wrote in its own folder";
+/// The app's own `/tmp`, in the machine's: `toyos_manifest::app_temporary`.
+const TEMPORARY: &str = "/tmp/apps/appview";
+const MACHINE_TMP_FILE: &str = "/tmp/app_view_machine";
+const OTHER_TMP_FILE: &str = "/tmp/apps/other/kept";
+const TEMPORARY_KEPT: &[u8] = b"what the app wrote in its own /tmp";
 const APP: &str = "app";
 const GAME: &str = "game";
 const GAMES: &str = "/home/toy/Games";
@@ -78,13 +86,14 @@ fn job() {
     }
     let _ = fs::remove_dir_all(HOME);
     let _ = fs::remove_file(HOME);
+    let _ = fs::remove_dir_all(TEMPORARY);
     fs::create_dir_all(format!("{PACKAGE}/sub")).expect("make the package's directories");
     fs::copy(SELF, PROGRAM).expect("install this binary as the package's program");
     fs::write(format!("{PACKAGE}/manifest.toml"), MANIFEST).expect("write the package's manifest");
     fs::create_dir_all(ROW_PACKAGE).expect("make the row-named package's directory");
     fs::copy(SELF, ROW_PROGRAM).expect("install this binary as the row-named package's program");
     fs::write(format!("{ROW_PACKAGE}/manifest.toml"), ROW_MANIFEST).expect("write the row-named package's manifest");
-    for file in [OTHER_PACKAGE_FILE, OTHER_FOLDER_FILE] {
+    for file in [OTHER_PACKAGE_FILE, OTHER_FOLDER_FILE, MACHINE_TMP_FILE, OTHER_TMP_FILE] {
         let dir = file.rsplit_once('/').expect("a file in a directory").0;
         fs::create_dir_all(dir).unwrap_or_else(|e| panic!("make {dir}: {e}"));
         fs::write(file, b"not the app's").unwrap_or_else(|e| panic!("write {file}: {e}"));
@@ -130,10 +139,15 @@ fn job() {
         Ok(bytes) if bytes == KEPT => println!("  the app's write is in {HOME}/Data"),
         other => red.push(format!("what the app wrote is not in {HOME}/Data/kept: {other:?}")),
     }
+    match fs::read(format!("{TEMPORARY}/kept")) {
+        Ok(bytes) if bytes == TEMPORARY_KEPT => println!("  the app's /tmp write is in {TEMPORARY}"),
+        other => red.push(format!("what the app wrote in its /tmp is not in {TEMPORARY}/kept: {other:?}")),
+    }
     granted(&mut red);
-    for dir in [PACKAGE, ROW_PACKAGE, "/apps/other", "/home/toy/Apps/other", HOME, GAMES] {
+    for dir in [PACKAGE, ROW_PACKAGE, "/apps/other", "/home/toy/Apps/other", HOME, GAMES, TEMPORARY, "/tmp/apps/other"] {
         let _ = fs::remove_dir_all(dir);
     }
+    let _ = fs::remove_file(MACHINE_TMP_FILE);
     if !red.is_empty() {
         panic!("app_view: {red:#?}");
     }
@@ -155,6 +169,9 @@ fn app() {
     }
     if let Err(e) = fs::write(format!("{HOME}/Data/kept"), KEPT) {
         red.push(format!("a write in its own folder was refused: {e}"));
+    }
+    if let Err(e) = fs::write("/tmp/kept", TEMPORARY_KEPT) {
+        red.push(format!("a write in its own /tmp was refused: {e}"));
     }
 
     match fs::read(format!("{PACKAGE}/manifest.toml")) {
@@ -224,7 +241,9 @@ fn app() {
             Ok(_) => red.push(format!("it holds {held}")),
         }
     }
-    for file in [OTHER_PACKAGE_FILE, OTHER_FOLDER_FILE] {
+    // The machine's `/tmp/app_view_machine` and another app's file, by the
+    // paths the machine names them and by the paths its own `/tmp` would.
+    for file in [OTHER_PACKAGE_FILE, OTHER_FOLDER_FILE, MACHINE_TMP_FILE, OTHER_TMP_FILE, "/tmp/other/kept"] {
         match fs::read(file) {
             Err(_) => {}
             Ok(bytes) => red.push(format!("{file} read {} bytes", bytes.len())),
@@ -236,6 +255,10 @@ fn app() {
             Ok(names) if names == [std::ffi::OsStr::new(expected)] => {}
             other => red.push(format!("{dir} did not list only {expected}: {other:?}")),
         }
+    }
+    match fs::read_dir("/tmp").and_then(|listing| listing.map(|entry| entry.map(|e| e.file_name())).collect::<Result<Vec<_>, _>>()) {
+        Ok(names) if names == [std::ffi::OsStr::new("kept")] => println!("  its /tmp lists only what it wrote"),
+        other => red.push(format!("/tmp did not list only kept: {other:?}")),
     }
     for dir in ["/config", "/state", "/log"] {
         if fs::read_dir(dir).is_ok() {

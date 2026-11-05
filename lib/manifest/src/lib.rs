@@ -94,6 +94,15 @@ pub fn row_named(name: &str) -> String {
     format!("the package {name} is named after a row the image declares, and {} is that row's folder", app_home(name))
 }
 
+/// Where each installed package's own `/tmp` is, in the machine's.
+pub const APP_TEMPORARIES: &str = "/tmp/apps";
+
+/// An installed package's own `/tmp`: a directory of the machine's, which its
+/// view names `/tmp` and no other package's view names.
+pub fn app_temporary(name: &str) -> String {
+    format!("{APP_TEMPORARIES}/{name}")
+}
+
 /// What an app's own folder holds, made with it: where it keeps its config,
 /// data, cache and state. English on disk, as every home folder is.
 pub const APP_FOLDERS: [&str; 4] = ["Config", "Data", "Cache", "State"];
@@ -162,27 +171,30 @@ pub fn whole_tree() -> Vec<View> {
         .collect()
 }
 
-/// `/tmp`, read-write: an explicit capability in every view.
-fn temporary() -> View {
-    View { role: "memory", dir: "/tmp".into(), root: String::new(), write: true }
-}
-
-/// `/system`, read-only: in every view.
+/// `/system`, read-only: in every package's view.
 fn system() -> View {
     let [only] = role_dirs(SYSTEM).expect("SYSTEM is a role") else { panic!("SYSTEM serves one directory") };
     View { role: SYSTEM, dir: only.dir.to_string(), root: only.root.to_string(), write: false }
 }
 
-/// The DATA directory `dir`, beneath one DATA serves.
-fn data_dir(dir: String, write: bool) -> View {
-    let role = "data";
+/// The directory `path`, beneath one `role` serves, granted as `dir`.
+fn beneath(role: &'static str, path: &str, dir: &str, write: bool) -> View {
     let parent = role_dirs(role)
-        .expect("DATA is a role")
+        .unwrap_or_else(|| panic!("manifest: {role} is no role"))
         .iter()
-        .find(|d| dir.strip_prefix(d.dir).is_some_and(|rest| rest.starts_with('/')))
-        .unwrap_or_else(|| panic!("manifest: {dir} is beneath no directory DATA serves"));
-    let root = format!("{}{}", parent.root, &dir[parent.dir.len()..]);
-    View { role, dir, root, write }
+        .find(|d| path.strip_prefix(d.dir).is_some_and(|rest| rest.starts_with('/')))
+        .unwrap_or_else(|| panic!("manifest: {path} is beneath no directory {role} serves"));
+    let rest = path[parent.dir.len()..].trim_start_matches('/');
+    let root = match parent.root {
+        "" => rest.to_string(),
+        root => format!("{root}/{rest}"),
+    };
+    View { role, dir: dir.to_string(), root, write }
+}
+
+/// The DATA directory `dir`, beneath one DATA serves.
+fn data_dir(dir: &str, write: bool) -> View {
+    beneath("data", dir, dir, write)
 }
 
 pub use toyos_abi::handle::Rights;
@@ -409,11 +421,12 @@ impl Program {
         }
     }
 
-    /// The directories this row's program is endowed. **An installed package
-    /// sees `/system` and its own directory read-only, its own folder of the
-    /// home read-write, `/tmp`, and the folder its launch was granted, and nothing else
-    /// any role serves**: no other package, no other part of the home, no
-    /// `/config`, `/state`, `/log` or `/boot`.
+    /// The directories this row's program is endowed, and nothing else.
+    /// **An installed package sees `/system` and its own directory read-only,
+    /// its own folder of the home and its own `/tmp` ([`app_temporary`])
+    /// read-write, and the folder its launch was granted**: no other package
+    /// or its `/tmp`, no other part of the home, no `/config`, `/state`,
+    /// `/log` or `/boot`, and not the machine's `/tmp`.
     /// **Every other row sees the whole tree but [`STATE`], and of that only its
     /// own [`Self::state_dir`]**: no row's view holds another row's, the
     /// supervisor's included. The rest stays whole until each row
@@ -421,8 +434,9 @@ impl Program {
     pub fn view(&self) -> Vec<View> {
         match self.package() {
             Some(name) => {
-                let granted = self.folder.iter().map(|f| data_dir(f.path.clone(), f.access == grants::Access::ReadWrite));
-                [system(), temporary(), data_dir(package::Package::dir(name), false), data_dir(app_home(name), true)]
+                let granted = self.folder.iter().map(|f| data_dir(&f.path, f.access == grants::Access::ReadWrite));
+                let temporary = beneath("memory", &app_temporary(name), "/tmp", true);
+                [system(), temporary, data_dir(&package::Package::dir(name), false), data_dir(&app_home(name), true)]
                     .into_iter()
                     .chain(granted)
                     .collect()
@@ -430,7 +444,7 @@ impl Program {
             None => whole_tree()
                 .into_iter()
                 .filter(|view| view.dir != STATE)
-                .chain(self.state_dir().map(|dir| data_dir(dir, true)))
+                .chain(self.state_dir().map(|dir| data_dir(&dir, true)))
                 .collect(),
         }
     }
@@ -975,9 +989,10 @@ mod tests {
     }
 
     /// **An installed package sees `/system` and its own directory read-only
-    /// and its own folder and `/tmp` read-write, and nothing else any role serves.**
-    /// Spelled out whole, so an extra directory, a wider root or a writable
-    /// package is red.
+    /// and its own folder and its own `/tmp` read-write, and nothing else any
+    /// role serves**: its `/tmp` is a directory of the machine's, not the
+    /// machine's whole. Spelled out whole, so an extra directory, a wider root
+    /// or a writable package is red.
     #[test]
     fn a_package_s_view_is_its_own_directory_read_only_and_its_own_folder() {
         let row = sample().app_row("gbae", "/apps/gbae/gbae").unwrap();
@@ -985,7 +1000,7 @@ mod tests {
             views(&row),
             [
                 system(),
-                ("memory", "/tmp".into(), String::new(), true),
+                ("memory", "/tmp".into(), "apps/gbae".into(), true),
                 ("data", "/apps/gbae".into(), "apps/gbae".into(), false),
                 ("data", "/home/toy/Apps/gbae".into(), "home/toy/Apps/gbae".into(), true),
             ]
@@ -994,8 +1009,8 @@ mod tests {
         let longest = "n".repeat(MAX_PROGRAM_NAME);
         let row = sample().app_row(&longest, &format!("/apps/{longest}/{longest}")).unwrap();
         assert_eq!(
-            views(&row).into_iter().skip(2).map(|(_, _, root, write)| (root, write)).collect::<Vec<_>>(),
-            [(format!("apps/{longest}"), false), (format!("home/toy/Apps/{longest}"), true)]
+            views(&row).into_iter().skip(1).map(|(_, _, root, write)| (root, write)).collect::<Vec<_>>(),
+            [(format!("apps/{longest}"), true), (format!("apps/{longest}"), false), (format!("home/toy/Apps/{longest}"), true)]
         );
     }
 
@@ -1010,7 +1025,7 @@ mod tests {
                 views(&row),
                 [
                     system(),
-                    ("memory", "/tmp".into(), String::new(), true),
+                    ("memory", "/tmp".into(), "apps/gbae".into(), true),
                     ("data", "/apps/gbae".into(), "apps/gbae".into(), false),
                     ("data", "/home/toy/Apps/gbae".into(), "home/toy/Apps/gbae".into(), true),
                     ("data", "/home/toy/Games".into(), "home/toy/Games".into(), write),
