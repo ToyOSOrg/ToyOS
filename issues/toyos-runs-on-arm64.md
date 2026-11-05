@@ -159,9 +159,10 @@ bound). Heaviest: `arch::cpu` (57 references), `arch::percpu` (28),
   63, one root); `mm/paging.rs:1-7` states invalidation is INVPCID/INVLPG.
   ARM splits kernel (TTBR1) from user (TTBR0), carries AttrIndx→MAIR,
   AP[2:1], UXN/PXN, and ASIDs in the TTBR.
-- **TLS.** The kernel builds x86 variant II (`loader/tls.rs:1`); std's
-  `__tls_get_addr` uses `fs:`. AArch64 is variant I; LLVM emits TLSDESC by
-  default.
+- **TLS.** Each program lays its own out (`sdk/toyos/src/tls`), variant II
+  on x86-64 and variant I on AArch64; std's `__tls_get_addr` uses `fs:`.
+  LLVM emits TLSDESC by default on AArch64, which libc's loader refuses, so
+  no AArch64 shared object reaches its thread-locals yet.
 - **Calling conventions.** `extern "sysv64"` at `main.rs:205`,
   `deadline.rs:194`, `sched/driver.rs:892`, `i8042/mod.rs:490`,
   `loader/src/main.rs:785`.

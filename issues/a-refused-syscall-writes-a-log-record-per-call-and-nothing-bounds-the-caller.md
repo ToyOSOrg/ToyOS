@@ -8,17 +8,12 @@ opened: 2026-10-08
 # A refused syscall writes a log record per call, and nothing bounds the caller
 
 A refusal the kernel answers with an error is also a kernel log record, once
-per call, at every one of these sites, and the caller chooses how often:
+per call, and the caller chooses how often: a refused spawn
+(`kernel/src/loader/mod.rs`) writes a `spawn: <path>: …` record, one for each
+reason a file can be refused.
 
-- `sys_dlopen` (`kernel/src/syscall/vm.rs`): an image
-  `elf::load_shared_lib` refuses (`dlopen: <name>: <why>`), no virtual
-  address space left, and a TLS reference that leaves its module's segment;
-- a refused spawn (`kernel/src/loader/mod.rs`): every `spawn: <path>: …`
-  record, one for each reason a file can be refused.
-
-`dlopen` of a refused image in a loop, or a spawn of a file that is not an
-executable, is a record per syscall from any program, into a log every
-program shares: `logkeeper` keeps sixteen megabytes of a boot
+A spawn of a file that is not an executable, in a loop, is a record per
+syscall from any program, into a log every program shares: `logkeeper` keeps sixteen megabytes of a boot
 (`issues/a-t14-boot-that-outlogs-its-retention-loses-its-middle-and-the-rows-whose-lines-sat-there.md`),
 and what a storm of these pushes out is the middle of everybody else's.
 

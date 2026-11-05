@@ -4,16 +4,13 @@ kind: defect
 opened: 2026-09-29
 ---
 
-# libc's `dl_iterate_phdr` allocates on every walk
+# Nothing holds that libc's `dl_iterate_phdr` walks without allocating
 
-`sdk/libc/src/link.rs` sizes and reads a whole `SYS_QUERY_MODULES`
-answer into a heap `Vec`, and builds each module's NUL-terminated name in a
-second one: every walk allocates twice and makes at least two syscalls.
-libunwind calls `dl_iterate_phdr` to find a frame's unwind tables, so a C++
-`throw std::bad_alloc` with the heap exhausted dies in libc's allocator
-instead of reaching its handler. The answer's size grows with every library
-and path, so no fixed buffer holds it: an allocation-free walk needs a query whose
-answer a bounded buffer holds, which is an ABI change.
+libunwind calls `dl_iterate_phdr` to find a frame's unwind tables, so a walk
+that allocates lets a C++ `throw std::bad_alloc` with the heap exhausted die
+in libc's allocator instead of reaching its handler. `sdk/libc/src/link.rs`
+walks the process's own module list (`toyos::tls`), whose names are kept
+NUL-terminated, and allocates nothing, but no case shows it.
 
-**Exit**: `dl_iterate_phdr` makes no heap allocation, and a guest C case walks
-every module with `malloc` exhausted and visits each.
+**Exit**: a guest C case walks every module with `malloc` exhausted and
+visits each.

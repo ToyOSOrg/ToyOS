@@ -1,5 +1,5 @@
 //! A memory object: bytes more than one address space can map — a region
-//! `SYS_SHM_CREATE` makes, a device's grant, a program's TLS block, an inbox's
+//! `SYS_SHM_CREATE` makes, a device's grant, an inbox's
 //! ring, the clock page, a boot image the loader handed over, part of another
 //! object's pages — or an aperture over memory the kernel does not own: a
 //! device's registers, firmware's framebuffer.

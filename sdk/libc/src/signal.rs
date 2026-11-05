@@ -139,7 +139,7 @@ impl State {
 }
 
 fn tid() -> u32 {
-    toyos_abi::current_tid().raw()
+    toyos::tls::current_tid().raw()
 }
 
 /// `sigaction`'s work: `sig`'s action made `new`, if any, and the old one

@@ -1,19 +1,18 @@
 //! Seeded random images over the ELF *value* path: `r_addend`, `st_value`,
-//! `DT_INIT_ARRAY`, the TLS segment's size and alignment, and every `TPOFF`
-//! derived from them.
+//! `DT_INIT_ARRAY` and the TLS segment's size and alignment.
 //!
 //! Every other test here varies where a table is, never what it says. Each
 //! image is a structurally valid
 //! module — text, data, `PT_DYNAMIC`, `PT_TLS`, a relocation table, a symbol
 //! table, an init array — whose numbers are drawn honest most of the time and
-//! hostile the rest, and then run through the calls the kernel's loader makes,
-//! in the order it makes them. The property:
+//! hostile the rest, and then run through the calls libc's loader makes, in
+//! the order it makes them. The property:
 //!
-//! - nothing panics — the test binary runs with overflow checks on, as the
-//!   kernel does, so an unchecked sum here is the kernel panic it stands for;
+//! - nothing panics — the test binary runs with overflow checks on, so an
+//!   unchecked sum here is the panic it stands for;
 //! - an image is refused, or every address derived from it lies inside the
-//!   image placed at the highest address its span fits at, and every
-//!   thread-pointer offset inside the thread's TLS block.
+//!   image placed at the highest address its span fits at, and every TLS
+//!   offset inside its module's `PT_TLS`.
 //!
 //! The generator also counts what it got past the parse, so a regression that
 //! refuses everything cannot pass as one that accepts nothing wrong.
@@ -25,7 +24,7 @@ use common::*;
 use toyos_elf::dynamic::{Dynamic, InitArray};
 use toyos_elf::rela::{self, Op, ReadTables, RelaTable, Rules, TlsRef};
 use toyos_elf::sym::{self, SymTab};
-use toyos_elf::tls::{self, Static, TlsOffset, Variant};
+use toyos_elf::tls::TlsOffset;
 use toyos_elf::{ImageRange, Layout, Machine, TlsSegment};
 
 /// Images per run: every one of them reaches the relocation parse unless its
@@ -50,12 +49,6 @@ const DT_STRTAB: i64 = 5;
 const DT_STRSZ: i64 = 10;
 const DT_INIT_ARRAY: i64 = 25;
 const DT_INIT_ARRAYSZ: i64 = 27;
-
-/// The kernel's TLS constants: a 64-byte TCB, a 64-entry DTV behind a
-/// two-word header, 2 MiB allocations.
-const TCB: usize = 64;
-const DTV: usize = 16 + 64 * 8;
-const GRANULE: usize = 2 * 1024 * 1024;
 
 /// Where the kernel places an executable: `USER_VM_BASE`.
 const USER_VM_BASE: u64 = 0x100_0000_0000;
@@ -138,7 +131,7 @@ fn generate(rng: &mut Rng) -> Case {
     // rate per number would refuse nearly every image over its first one.
     rng.hostile = rng.pick(&[0, 1, 2, 5, 15]);
     let machine = if rng.chance(50) { Machine::X86_64 } else { Machine::Aarch64 };
-    // Where the kernel loads a library: at vaddr 0.
+    // Where a library is loaded: at vaddr 0.
     let vmin = 0u64;
     let bss = rng.pick(&[0u64, 0x800, 0x3000]);
     let span = SIZE as u64 + bss;
@@ -275,7 +268,7 @@ enum Placement {
     Highest,
 }
 
-/// Everything the kernel's loader decides about one image, in its order,
+/// Everything the loader decides about one image, in its order,
 /// through the calls it makes. `Err` is a refusal; every address derived from
 /// an accepted image is checked against the image as `placement` places it.
 fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), ()> {
@@ -350,42 +343,12 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
         }
     }
 
-    // The thread's static block: this module alone, placed as the kernel's
-    // `build_tls_layout` places an executable's.
-    let variant = Variant::of(case.machine);
-    let (block, base_offset, memsz) = match tls.and_then(TlsSegment::occupied) {
-        Some(t) => {
-            let memsz = usize::try_from(t.memsz()).map_err(|_| ())?;
-            let align = usize::try_from(t.align()).map_err(|_| ())?;
-            let placed = match variant {
-                Variant::II => tls::exe_extent(memsz, align).ok_or(())?,
-                Variant::I => memsz,
-            };
-            (Static::new(variant, placed, align).ok_or(())?, 0, t.memsz())
-        }
-        None => (Static::empty(variant), 0, 0),
-    };
-    let plan = block.plan(TCB, DTV, GRANULE).ok_or(())?;
-    let thread_offset = |at: TlsOffset, width_i32: bool| -> Result<i64, ()> {
-        let tpoff = block.tpoff(base_offset, at).ok_or(())?;
-        if width_i32 {
-            i32::try_from(tpoff).map_err(|_| ())?;
-        }
-        // `tp + tpoff` is the datum, and it lies in the block's TLS data.
-        let datum = i128::from(plan.tp_offset as u64) + i128::from(tpoff);
-        let data = i128::from(plan.tls_start as u64);
-        assert!(
-            (data..=data + i128::from(block.total_memsz() as u64)).contains(&datum),
-            "TPOFF {tpoff:#x} names {datum:#x}, outside the TLS data at {data:#x}+{:#x}",
-            block.total_memsz(),
-        );
-        Ok(tpoff)
-    };
+    let memsz = tls.and_then(TlsSegment::occupied).map_or(0, |t| t.memsz());
     let resolve = |r: TlsRef| -> Result<Option<TlsOffset>, ()> {
         match r {
             TlsRef::Own(off) => Ok(Some(off)),
             // Defined here: bounded against this module's segment. Undefined:
-            // another module's, which the kernel resolves by name and this
+            // another module's, which the loader resolves by name and this
             // image has no other module to find it in.
             TlsRef::Symbol(s) => match symbols.get(s.sym().get()).filter(|d| d.is_defined()) {
                 Some(d) => tls.and_then(|t| d.tls_offset(s.addend(), t)).map(Some).ok_or(()),
@@ -414,8 +377,7 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
                 reached.bind += 1;
             }
             Op::Tpoff64(t) | Op::Tpoff32(t) => {
-                if let Some(off) = resolve(t)? {
-                    thread_offset(off, matches!(r.op(), Op::Tpoff32(_)))?;
+                if resolve(t)?.is_some() {
                     reached.tpoff += 1;
                 }
             }

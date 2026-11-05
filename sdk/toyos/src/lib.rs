@@ -45,6 +45,7 @@ pub mod syscap;
 pub mod sync;
 pub mod system;
 pub mod timing;
+pub mod tls;
 pub mod transport;
 pub mod volatile;
 

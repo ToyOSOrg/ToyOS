@@ -209,10 +209,8 @@ unsafe extern "C" fn _start() -> ! {
     );
 }
 
-/// .init_array constructor: registers the EH frame finder for DWARF unwinding.
-/// For executables, this runs before `_start`. For cdylib .so files loaded via
-/// dlopen, the kernel returns the .init_array to userspace which calls it.
-/// This ensures panic unwinding works from code inside shared libraries.
+/// .init_array constructor: registers the EH frame finder for DWARF unwinding
+/// in a library, whose loader runs it; an executable's start registers its own.
 extern "C" fn init_eh_frame() {
     eh_frame::init();
 }
@@ -224,112 +222,68 @@ static INIT_EH_FRAME: extern "C" fn() = init_eh_frame;
 extern "C" fn start_rust(argc: usize, argv: *const *const u8) -> ! {
     unsafe extern "C" {
         fn main(argc: i32, argv: *const *const u8) -> i32;
+        static __ehdr_start: u8;
     }
+    // The C library's loader (`sdk/libc/src/dl.rs`), where the program links
+    // it: libtoyos_c is built from this std, so std cannot name it itself.
+    unsafe extern "C" {
+        #[linkage = "extern_weak"]
+        static __toyos_load_needed: Option<unsafe extern "C" fn(header: *const u8)>;
+    }
+    // The program goes by its `argv[0]`.
+    let name = match argc {
+        0 => &[][..],
+        _ => unsafe { crate::ffi::CStr::from_ptr((*argv).cast()) }.to_bytes(),
+    };
+    // SAFETY: the executable's own header, and this is its main thread.
+    unsafe { toyos::tls::start(&raw const __ehdr_start, name) };
     ARGC.store(argc, Ordering::Relaxed);
     ARGV.store(argv.expose_provenance(), Ordering::Relaxed);
 
-    // Register EH frame finder (also in .init_array for cdylib, but exes don't run .init_array)
     eh_frame::init();
-
-    // Initialize environment variables
     crate::sys::env::init();
+    // Before anything that names a symbol of a library it links.
+    // SAFETY: a weak symbol's value, read once.
+    match unsafe { __toyos_load_needed } {
+        // SAFETY: the executable's own header, its thread-local storage laid out.
+        Some(load) => unsafe { load(&raw const __ehdr_start) },
+        None if toyos::relocate::names_a_library() => {
+            // As `toyos::relocate` refuses its program: a line and 127.
+            let _ = crate::io::Write::write_all(&mut crate::io::stderr(), NO_LOADER);
+            toyos_abi::syscall::exit(127)
+        }
+        None => {}
+    }
 
     let code = unsafe { main(argc as i32, argv) };
     crate::sys::stdio::finish();
     toyos_abi::syscall::exit(code)
 }
 
+/// What a program that names libraries and links no loader says as it ends.
+const NO_LOADER: &[u8] = b"this program names libraries and links no loader: it cannot start\n";
+
 pub fn abort_internal() -> ! {
     toyos_abi::syscall::exit(128 + 6) // SIGABRT-like — kill entire process
 }
 
-/// DWARF EH frame finder for the `unwinding` crate.
-/// Locates `.eh_frame_hdr` for a given PC via `SYS_QUERY_MODULES`.
+/// DWARF EH frame finder for the `unwinding` crate: the `.eh_frame_hdr` of the
+/// module that holds a PC, off the process's module list (`toyos::tls`).
 mod eh_frame {
-    use toyos_abi::syscall::ModuleInfo;
-
-    use crate::sync::Mutex;
-
-    struct Module {
-        base: usize,
-        end: usize,
-        eh_frame_hdr: usize,
-        eh_frame_hdr_size: usize,
-    }
-
-    static CACHE: Mutex<Vec<Module>> = Mutex::new(Vec::new());
-
-    fn load_modules() -> Vec<Module> {
-        let mut buf = vec![0u8; 4096];
-        loop {
-            match toyos_abi::syscall::query_modules(&mut buf) {
-                Ok(count) => {
-                    let info_size = core::mem::size_of::<ModuleInfo>();
-                    let mut modules = Vec::with_capacity(count);
-                    for i in 0..count {
-                        let off = i * info_size;
-                        if off + info_size > buf.len() {
-                            break;
-                        }
-                        let info = unsafe { &*(buf.as_ptr().add(off) as *const ModuleInfo) };
-                        modules.push(Module {
-                            base: info.base as usize,
-                            end: info.text_end as usize,
-                            eh_frame_hdr: info.eh_frame_hdr as usize,
-                            eh_frame_hdr_size: info.eh_frame_hdr_size as usize,
-                        });
-                    }
-                    return modules;
-                }
-                Err(_) => {
-                    buf.resize(buf.len() * 2, 0);
-                    if buf.len() > 1024 * 1024 {
-                        return Vec::new();
-                    }
-                }
-            }
-        }
-    }
-
     struct ToyOsEhFrameFinder;
     static FINDER: ToyOsEhFrameFinder = ToyOsEhFrameFinder;
 
     unsafe impl unwind::EhFrameFinder for ToyOsEhFrameFinder {
         fn find(&self, pc: usize) -> Option<unwind::FrameInfo> {
-            // Fast path: check cached modules
-            {
-                let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(m) = cache.iter().find(|m| pc >= m.base && pc < m.end) {
-                    if m.eh_frame_hdr != 0 {
-                        return Some(unwind::FrameInfo {
-                            text_base: Some(m.base),
-                            kind: unwind::FrameInfoKind::EhFrameHdr(m.eh_frame_hdr),
-                        });
-                    }
-                    return None;
-                }
-            }
-
-            // Cache miss — reload module list (handles dlopen)
-            let modules = load_modules();
-            let result = modules.iter().find(|m| pc >= m.base && pc < m.end).and_then(|m| {
-                if m.eh_frame_hdr != 0 {
-                    Some(unwind::FrameInfo {
-                        text_base: Some(m.base),
-                        kind: unwind::FrameInfoKind::EhFrameHdr(m.eh_frame_hdr),
-                    })
-                } else {
-                    None
-                }
-            });
-            *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = modules;
-            result
+            let module = toyos::tls::modules().find(|m| m.holds(pc))?;
+            (module.image.eh_frame_hdr != 0).then(|| unwind::FrameInfo {
+                text_base: Some(module.image.base),
+                kind: unwind::FrameInfoKind::EhFrameHdr(module.image.eh_frame_hdr),
+            })
         }
     }
 
     pub(super) fn init() {
-        let modules = load_modules();
-        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = modules;
         unwind::set_custom_eh_frame_finder(&FINDER).ok();
     }
 }

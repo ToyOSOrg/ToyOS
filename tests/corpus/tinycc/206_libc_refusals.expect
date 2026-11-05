@@ -12,7 +12,7 @@ fstatvfs: -1, ENOSYS
 getrlimit: -1, ENOSYS
 setrlimit: -1, ENOSYS
 msync: -1, ENOSYS
-mprotect executable: -1, ENOTSUP
+mprotect writable and executable: -1, ENOTSUP
 mprotect off a page: -1, EINVAL
 utimes: -1, ENOTSUP
 wait: -1, ECHILD
@@ -39,7 +39,7 @@ mmap a file: -1, ENODEV
 mmap a file at a page: -1, ENODEV
 mmap a file shared: -1, ENODEV
 mmap a file shared at a page: -1, ENODEV
-mmap executable: -1, ENOTSUP
+mmap writable and executable: -1, ENOTSUP
 mmap nothing: -1, EINVAL
 mmap the first of two pages fixed: 0, no errno
 pages after it: 0 s

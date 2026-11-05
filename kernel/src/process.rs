@@ -37,15 +37,15 @@ use crate::sched::driver;
 use crate::sched::payload::ThreadSched;
 use kernel::sched::cpu::{homes, Near};
 use crate::time::{Deadline, Duration};
-use crate::{elf, pipe, scheduler};
+use crate::{pipe, scheduler};
 use crate::object::shm::SharedMemObject;
 use crate::UserAddr;
-use crate::loader::{alloc_kernel_stack, Start, TlsBlock};
+use crate::loader::{alloc_kernel_stack, Start};
 
 pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
 use toyos_abi::end::{End, Fault};
-use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_LIBRARIES};
+use toyos_abi::syscall::{EndowEntry, SyscallError};
 
 /// The lifecycle's decisions; this file only performs them.
 pub use toyos_proclife::{ThreadLocation, Watch};
@@ -67,7 +67,7 @@ pub struct OwnedAlloc {
 }
 
 impl OwnedAlloc {
-    /// `None` above `mm::MAX_HEAP_ALLOC` — not `PAGE_2M`, which dlmalloc's own overhead can still overrun for a `PT_TLS` block near that size.
+    /// `None` above `mm::MAX_HEAP_ALLOC`.
     pub fn new(size: usize, align: usize) -> Option<Self> {
         if size > crate::mm::MAX_HEAP_ALLOC { return None; }
         let layout = Layout::from_size_align(size, align).ok()?;
@@ -77,18 +77,6 @@ impl OwnedAlloc {
     }
 
     pub fn ptr(&self) -> *mut u8 { self.ptr.as_ptr() }
-    pub fn size(&self) -> usize { self.layout.size() }
-
-    /// A bounds-checked view of the first `len` bytes; `len` is checked against the allocation, not trusted.
-    pub fn slice(&self, len: usize) -> crate::mm::KernelSlice {
-        crate::mm::KernelSlice::whole(self).subslice(0, len)
-    }
-}
-
-// SAFETY: `ptr()`/`size()` read the same `Layout` `alloc_zeroed` used; the type is move-only and frees once in `Drop`.
-unsafe impl crate::mm::Allocation for OwnedAlloc {
-    fn ptr(&self) -> *mut u8 { OwnedAlloc::ptr(self) }
-    fn size(&self) -> usize { OwnedAlloc::size(self) }
 }
 
 impl Drop for OwnedAlloc {
@@ -102,9 +90,8 @@ impl Drop for OwnedAlloc {
 unsafe impl Send for OwnedAlloc {}
 
 
-/// An object the kernel mapped into a process for it and takes back itself: a
-/// thread's TLS block, a `dlopen`ed module's block for one thread, an inbox's
-/// rings. The kernel writes what it owes the process into the object.
+/// An object the kernel mapped into a process for it and takes back itself: an
+/// inbox's rings. The kernel writes what it owes the process into the object.
 pub struct KernelMapping {
     pub object: Arc<SharedMemObject>,
     pub at: UserAddr,
@@ -265,33 +252,6 @@ impl Processes for ProcessTable {
 }
 
 
-/// ELF loading artifacts and TLS state.
-pub struct ElfInfo {
-    pub elf_alloc: Option<OwnedAlloc>,
-    pub tls_modules: Vec<crate::elf::TlsModule>,
-    /// Every static module's TLS, as a thread's block is laid out from it.
-    pub tls: toyos_elf::tls::Static,
-    /// Next module ID to assign on dlopen (1-based, exe=1).
-    pub next_tls_module_id: u64,
-    /// Dynamically allocated TLS blocks for dlopen'd modules, keyed by
-    /// (Tid, module_id), each with the charge of its place here.
-    pub dynamic_tls_blocks: alloc::collections::BTreeMap<(Tid, u64), (KernelMapping, Charge)>,
-    /// Dynamically loaded shared libraries (indexed by dlopen handle).
-    pub loaded_libs: Vec<elf::LoadedLib>,
-    pub elf_base: UserAddr,
-    /// The executable's `.eh_frame_hdr` as (address, size), `(0, 0)` without one.
-    pub exe_eh_frame_hdr: (u64, u64),
-    /// One past the executable's last byte.
-    pub exe_vaddr_max: u64,
-    /// The executable's program header table as (address, count), `(0, 0)` with no executable.
-    pub exe_phdrs: (u64, u16),
-    /// Paths of dlopen'd libraries (parallel to loaded_libs).
-    pub lib_paths: Vec<String>,
-}
-
-// The ledger stops at `MAX_LIBRARIES`, and a doubling from below it stays inside one heap allocation.
-const _: () = assert!(2 * MAX_LIBRARIES * core::mem::size_of::<elf::LoadedLib>() <= crate::mm::MAX_HEAP_ALLOC);
-
 /// Process-level data shared across all threads via `Arc<Lock<ProcessData>>`.
 pub struct ProcessData {
     /// Every kernel object this process can name; stdio is handles `0`, `1`, `2`.
@@ -299,12 +259,8 @@ pub struct ProcessData {
     /// Inherited environment variables (KEY=VALUE\0KEY2=VALUE2\0...)
     pub env: Vec<u8>,
 
-    pub elf: ElfInfo,
-
     /// The space every thread of it runs in.
     pub space: PageTables,
-    /// Executable path (for SYS_QUERY_MODULES).
-    pub exe_path: String,
 
     pub spawn_ns: u64,
     pub accounting: ProcessAccounting,
@@ -313,8 +269,8 @@ pub struct ProcessData {
     /// The job its threads, and its children unless a spawn names another,
     /// run in.
     pub job: Arc<kernel::sched::job::Job>,
-    /// What [`ProcessData::charge`] charged, and its executable's TLS beside.
-    pub charge: Charge,
+    /// What [`ProcessData::charge`] charged.
+    pub _charge: Charge,
     /// Whether it was started as a pager, which no call changes, and whether
     /// it made its one pager object.
     pub pager: PagerRole,
@@ -353,7 +309,7 @@ impl ProcessData {
             + entry
             + threads
             + 2 * core::mem::size_of::<Pid>();
-        let strings = 2 * charge::array::<u8>(path.len())
+        let strings = charge::array::<u8>(path.len())
             + charge::array::<u8>(toyos_abi::syscall::MAX_PATH)
             + charge::array::<u8>(env.len());
         let endowments = charge::array::<EndowEntry>(toyos_abi::syscall::MAX_ENDOWMENTS)
@@ -406,7 +362,6 @@ pub struct ProcessAccounting {
 
 /// Per-thread data, unique to each thread via `Arc<Lock<ThreadData>>`.
 pub struct ThreadData {
-    pub tls: Option<KernelMapping>,
     pub user_stack_base: UserAddr,
     pub user_stack_size: u64,
 }
@@ -647,44 +602,19 @@ pub fn spawn_thread(
             .expect("spawn_thread: the spawning thread runs in an address space");
         (addr_space, Arc::clone(&proc.process_data))
     };
-    let (tls_modules, tls, job) = {
-        let data = process_data_arc.lock();
-        (data.elf.tls_modules.clone(), data.elf.tls, data.job.clone())
-    };
+    let job = process_data_arc.lock().job.clone();
 
-    // Phase 2: build the TLS block outside any lock, then publish it into the
-    // running parent — whose other threads may already be touching memory the
-    // block's address is chosen from, so every pointer in it is final before
-    // the mapping exists.
-    let block = TlsBlock::build(&tls_modules, tls)?;
-    // Placement or memory refused is a resource failure the process caused,
-    // not a kernel bug.
-    let (tls_alloc, thread_pointer, tp_offset) = block.publish(&parent_addr_space)?;
-
-    let (ks_alloc, ks_sp) = match alloc_kernel_stack(&job, Start::Thread { entry, sp: stack_ptr, arg }) {
-        Some(ks) => ks,
-        None => {
-            tls_alloc.release(&parent_addr_space);
-            return None;
-        }
-    };
+    // Phase 2: the kernel stack, outside any lock.
+    let (ks_alloc, ks_sp) = alloc_kernel_stack(&job, Start::Thread { entry, sp: stack_ptr, arg })?;
 
     // Phase 3: insert into table (brief table lock); threads share the parent's ProcessData Arc.
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().unwrap();
     // Re-checked under the insert lock: a thread refused here would otherwise be invisible to a retire sweep already under way.
     if !proclife_spawn::admit_thread_insert(table, parent_process).is_yes() {
-        // The unmap cannot run under the table lock (its shootdown is a wait a
-        // sibling can be spinning against), so the mapping is
-        // still solely this scope's here — built into a ThreadData only past
-        // the admission, where the table owns its release.
-        drop(guard);
-        tls_alloc.release(&parent_addr_space);
         return None;
     }
-    let tcb = Arc::clone(&tls_alloc.object);
     let thread_data = Arc::new(Lock::new(ThreadData {
-        tls: Some(tls_alloc),
         user_stack_base: UserAddr::new(stack_base),
         user_stack_size: if stack_base > 0 { stack_ptr - stack_base } else { 0 },
     }));
@@ -697,9 +627,6 @@ pub fn spawn_thread(
     let siblings = proc.threads.iter().rev().filter_map(|(_, thread)| thread.sched().map(|sched| sched.shared.state()));
     let homes = homes(siblings, mask.within(crate::smp::cpu_count() as usize));
     let tid = proc.threads.insert(ThreadEntry::new(thread_data));
-    // Before the thread's first instruction, which is the enqueue below: the
-    // thread reads its own id here without a syscall (`toyos_abi::TCB_TID`).
-    tcb.write((tp_offset + toyos_abi::TCB_TID) as u64, &tid.raw().to_ne_bytes());
 
     // Enqueue while still holding the table lock: this thread is fully visible to the scheduler before any retire sweep can start.
     let (sched, _dst) = scheduler::enqueue_new(scheduler::NewTask {
@@ -707,7 +634,8 @@ pub fn spawn_thread(
         kernel_stack: ks_alloc,
         entry_sp: ks_sp,
         address_space: parent_addr_space,
-        thread_pointer,
+        // The thread names its own (`SYS_SET_THREAD_POINTER`).
+        thread_pointer: 0,
         job,
         image,
         mask,
@@ -749,21 +677,18 @@ impl core::fmt::Display for Consumed {
     }
 }
 
-/// Frees an exiting process's resources (mappings, handles, ELF state), and answers what it consumed.
+/// Frees an exiting process's resources (mappings, handles), and answers what it consumed.
 /// Says nothing of the machine: a reading of every CPU is `crate::census`'s, never one process's end.
 fn teardown_resources(
     process_data_arc: &Arc<Lock<ProcessData>>,
     main_thread: &(Arc<Lock<ThreadData>>, Option<ThreadSched>),
     pid: Pid,
 ) -> Consumed {
-    let (thread_data_arc, sched) = main_thread;
+    let (_, sched) = main_thread;
     let syscalls = sched.as_ref().map(|sched| sched.handle.syscalls());
     let syscall_total = syscalls.map_or(0, |s| s.calls());
     let syscall_total_ns = syscalls.map_or(0, |s| s.ns());
     let syscall_counts = syscalls.map_or([0; toyos_abi::syscall::SYSCALL_PROFILE_BINS], |s| s.by_number());
-    // Never hold ThreadData + ProcessData at once.
-    thread_data_arc.lock().tls.take();
-
     // Before the teardown below: a report spans its process up to here, and the next one this teardown.
     #[cfg(feature = "mask-windows")]
     crate::windows::report();
@@ -772,8 +697,6 @@ fn teardown_resources(
     ops::close_all(&mut data.handles);
     // Every thread has left, and none returns to Ring 3 to use them.
     crate::isa::process_ends(pid);
-    data.elf.elf_alloc.take();
-    data.elf.loaded_libs.clear();
 
     let usage = data.space.usage();
     Consumed {
@@ -978,7 +901,7 @@ pub enum Joined {
     Detached,
 }
 
-/// Exit the current thread. If this is the main thread, it is the process's exit. For a child thread, frees its own mappings and leaves.
+/// Exit the current thread. If this is the main thread, it is the process's exit; a child thread leaves.
 pub fn thread_exit(code: i32, joined: Joined) -> ! {
     let process_pid = current_process();
     let tid = current_tid();
@@ -992,7 +915,6 @@ pub fn thread_exit(code: i32, joined: Joined) -> ! {
         proclife::ThreadExit::Sibling { post } => post,
     };
 
-    release_thread(tid);
     match joined {
         Joined::Joinable => leave_as(Leaving::Joinable(code)),
         Joined::Detached => leave_as(Leaving::Detached(code)),
@@ -1009,24 +931,6 @@ pub fn thread_exit(code: i32, joined: Joined) -> ! {
         handle.watch().post();
     }
     scheduler::exit_current();
-}
-
-/// A child thread's own mappings, released before it leaves; returns rather than diverging for [`leave`]'s reason.
-fn release_thread(tid: Tid) {
-    let addr_space = current_address_space();
-    crate::mm::paging::activate_kernel();
-
-    let tls = current_data().lock().tls.take();
-    let blocks: Vec<KernelMapping> = {
-        let owner_arc = process_data();
-        let mut owner = owner_arc.lock();
-        let keys: Vec<(Tid, u64)> = owner.elf.dynamic_tls_blocks.keys().filter(|&&(t, _)| t == tid).copied().collect();
-        keys.iter().filter_map(|key| owner.elf.dynamic_tls_blocks.remove(key)).map(|(block, _charge)| block).collect()
-    };
-    // With no process lock held: a release takes the space's.
-    for block in tls.iter().chain(&blocks) {
-        block.release(&addr_space);
-    }
 }
 
 /// A thread's scheduler record, cloned out of the table so wake/retire never hold the table lock while they post.
@@ -1145,24 +1049,7 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
     let tp = crate::arch::cpu::thread_pointer();
     if tp != 0 {
         log!("  Thread pointer: {:#x}", tp);
-        if let Some(first) = read_user(tp) {
-            if matches!(crate::loader::TLS_VARIANT, toyos_elf::tls::Variant::II) {
-                log!("  [TP] = {:#x} (expected {:#x}, variant II's self-pointer)", first, tp);
-            }
-            for i in 0..8u64 {
-                let addr = tp + i * 8;
-                let Some(val) = read_user(addr) else { break };
-                log!("    TP+{:#x} = {:#018x}", i * 8, val);
-            }
-            log!("  TLS data before TP:");
-            for i in 1..=4u64 {
-                let addr = tp - i * 8;
-                let Some(val) = read_user(addr) else { break };
-                log!("    TP-{:#x} = {:#018x}", i * 8, val);
-            }
-        } else {
-            log!("  Thread pointer {:#x} NOT MAPPED!", tp);
-        }
+        dump_region("the thread pointer", tp);
     }
 }
 

@@ -63,9 +63,9 @@ fn writes(file: &[u8], bias: u64) -> Result<Vec<(u64, u64)>, Refusal> {
     let at = |span: Span| (span.vaddr - image.header_vaddr) as usize;
     let slice = |span: Span| &memory[at(span)..at(span) + span.len];
     let dynamic = image.dynamic()?.expect("a PT_DYNAMIC");
-    let rela = image.rela(slice(dynamic))?.expect("a DT_RELA");
+    let rela = image.rela(slice(dynamic))?.rela.expect("a DT_RELA");
     let mut out = Vec::new();
-    image.apply(slice(rela), bias, |vaddr, value| out.push((vaddr, value)))?;
+    image.apply(slice(rela), bias, false, |vaddr, value| out.push((vaddr, value)))?;
     Ok(out)
 }
 
@@ -143,7 +143,7 @@ fn rela(offset: u64, kind: u64, addend: u64) -> Vec<u8> {
 }
 
 /// The x86-64 fixture's own table, with `tags` beside it.
-fn x86_tables(tags: &[(u64, u64)]) -> Result<Option<Span>, Refusal> {
+fn x86_tables(tags: &[(u64, u64)]) -> Result<Tables, Refusal> {
     // `readelf -d x86_64.elf`: `RELA 0x210`, `RELASZ 216`.
     let own = [(DT_RELA, 0x210), (DT_RELASZ, 216), (DT_RELAENT, 24)];
     image_of(X86_64).rela(&dynamic(&[&own[..], tags].concat()))
@@ -151,8 +151,8 @@ fn x86_tables(tags: &[(u64, u64)]) -> Result<Option<Span>, Refusal> {
 
 #[test]
 fn every_dynamic_form_it_does_not_apply_is_refused_by_name() {
-    assert_eq!(x86_tables(&[]), Ok(Some(Span { vaddr: 0x210, len: 216 })));
-    assert_eq!(x86_tables(&[(DT_NEEDED, 1)]), Err(Refusal::Needed));
+    let own = Some(Span { vaddr: 0x210, len: 216 });
+    assert_eq!(x86_tables(&[]), Ok(Tables { rela: own, needed: false }));
     assert_eq!(x86_tables(&[(DT_JMPREL, 0x210), (DT_PLTRELSZ, 24)]), Err(Refusal::JmpRel));
     assert_eq!(x86_tables(&[(DT_PLTRELSZ, 24)]), Err(Refusal::JmpRel));
     // A `DT_JMPREL` whose size is missing is no table of known length.
@@ -172,7 +172,7 @@ fn every_dynamic_form_it_does_not_apply_is_refused_by_name() {
     // in an AArch64 image.
     for tag in [DT_AARCH64_AUTH_RELRSZ, DT_AARCH64_AUTH_RELR, DT_AARCH64_AUTH_RELRENT] {
         assert_eq!(image_of(AARCH64).rela(&dynamic(&[(tag, 0)])), Err(Refusal::Relr), "{tag:#x}");
-        assert_eq!(image_of(X86_64).rela(&dynamic(&[(tag, 0)])), Ok(None), "{tag:#x}");
+        assert_eq!(image_of(X86_64).rela(&dynamic(&[(tag, 0)])), Ok(Tables { rela: None, needed: false }), "{tag:#x}");
     }
     assert_eq!(x86_tables(&[(DT_TEXTREL, 0)]), Err(Refusal::TextRel));
     assert_eq!(x86_tables(&[(DT_FLAGS, DF_TEXTREL)]), Err(Refusal::TextRel));
@@ -180,10 +180,28 @@ fn every_dynamic_form_it_does_not_apply_is_refused_by_name() {
     assert!(x86_tables(&[(DT_FLAGS, 8)]).is_ok());
 }
 
+/// An image that names a library leaves its symbols to the loader: its
+/// `DT_JMPREL` is no refusal, and only its `RELATIVE` entries are written.
+#[test]
+fn an_image_that_names_a_library_leaves_every_symbol_to_the_loader() {
+    let own = Some(Span { vaddr: 0x210, len: 216 });
+    let needed = [(DT_NEEDED, 1), (DT_JMPREL, 0x210), (DT_PLTRELSZ, 24)];
+    assert_eq!(x86_tables(&needed), Ok(Tables { rela: own, needed: true }));
+    // Still no table of known length.
+    assert_eq!(x86_tables(&[(DT_NEEDED, 1), (DT_JMPREL, 0x210)]), Err(Refusal::JmpRel));
+    let mut out = Vec::new();
+    let entries = [rela(0x2428, 6, 0), rela(0x2430, 8, 0x13d0), rela(0x2438, 7, 0)].concat();
+    assert_eq!(image_of(X86_64).apply(&entries, BASE, true, |v, w| out.push((v, w))), Ok(()));
+    assert_eq!(out, vec![(0x2430, BASE + 0x13d0)]);
+    // A `RELATIVE` outside its place is refused all the same.
+    let outside = rela(0x13d0, 8, 0);
+    assert_eq!(image_of(X86_64).apply(&outside, BASE, true, |_, _| ()), Err(Refusal::OutsideWritable));
+}
+
 #[test]
 fn a_rela_table_of_the_wrong_shape_or_place_is_refused() {
     let image = image_of(X86_64);
-    assert_eq!(image.rela(&dynamic(&[])), Ok(None));
+    assert_eq!(image.rela(&dynamic(&[])), Ok(Tables { rela: None, needed: false }));
     assert_eq!(image.rela(&dynamic(&[(DT_RELA, 0x210)])), Err(Refusal::RelaShape));
     assert_eq!(image.rela(&dynamic(&[(DT_RELASZ, 24)])), Err(Refusal::RelaShape));
     assert_eq!(image.rela(&dynamic(&[(DT_RELA, 0x210), (DT_RELASZ, 25)])), Err(Refusal::RelaShape));
@@ -197,7 +215,7 @@ fn a_rela_table_of_the_wrong_shape_or_place_is_refused() {
 
 fn applied(file: &[u8], entries: &[Vec<u8>]) -> Result<Vec<(u64, u64)>, Refusal> {
     let mut out = Vec::new();
-    image_of(file).apply(&entries.concat(), BASE, |vaddr, value| out.push((vaddr, value)))?;
+    image_of(file).apply(&entries.concat(), BASE, false, |vaddr, value| out.push((vaddr, value)))?;
     Ok(out)
 }
 
@@ -240,7 +258,7 @@ fn every_type_but_the_machines_relative_is_refused() {
     }
     // The first refusal stops it: nothing after it is written.
     let mut out = Vec::new();
-    let refused = image_of(X86_64).apply(&[rela(0x2428, 7, 0), rela(0x2430, 8, 0)].concat(), BASE, |v, w| out.push((v, w)));
+    let refused = image_of(X86_64).apply(&[rela(0x2428, 7, 0), rela(0x2430, 8, 0)].concat(), BASE, false, |v, w| out.push((v, w)));
     assert_eq!((refused, out), (Err(Refusal::Kind(7)), vec![]));
 }
 

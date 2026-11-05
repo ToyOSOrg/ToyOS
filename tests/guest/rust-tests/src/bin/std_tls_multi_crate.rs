@@ -1,15 +1,21 @@
+use std::ffi::{c_char, c_void, CStr};
 use std::sync::{Arc, Barrier};
 
-use toyos_abi::syscall;
+// The C library's loader.
+#[link(name = "toyos_c", kind = "static")]
+unsafe extern "C" {
+    fn dlopen(path: *const c_char, flags: i32) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+}
 
 /// Three TLS-bearing names no earlier line of this binary holds, so every racer
 /// runs the whole load rather than returning the dedup lookup's answer. The
 /// third is the one the rest of this binary exercises: the checks below read
 /// the first two, and every test after them reads that one.
-const RACED: [&[u8]; 3] = [
-    b"/system/lib/libtls_lib.so",
-    b"/system/lib/libtls_dlopen_lib.so",
-    b"/system/lib/libtls_multi_crate.so",
+const RACED: [&CStr; 3] = [
+    c"/system/lib/libtls_lib.so",
+    c"/system/lib/libtls_dlopen_lib.so",
+    c"/system/lib/libtls_multi_crate.so",
 ];
 
 fn main() {
@@ -87,10 +93,11 @@ fn main() {
     println!("all multi-crate TLS tests passed");
 }
 
-fn sym(handle: u64, name: &[u8]) -> usize {
-    let addr = unsafe { syscall::dl_sym(handle, name) }
-        .unwrap_or_else(|e| panic!("dl_sym {}: {e:?}", String::from_utf8_lossy(name)));
-    addr as usize
+fn sym(handle: usize, name: &CStr) -> usize {
+    // SAFETY: a handle `dlopen` answered, and a NUL-terminated name.
+    let at = unsafe { dlsym(handle as *mut c_void, name.as_ptr()) };
+    assert!(!at.is_null(), "dlsym {name:?}");
+    at as usize
 }
 
 /// Two threads loading two *different* TLS-bearing names at once hold two
@@ -101,34 +108,37 @@ fn two_names_at_once_are_two_modules() {
     let racers: Vec<_> = RACED
         .iter()
         .map(|name| {
-            let name: &'static [u8] = name;
+            let name: &'static CStr = name;
             let line = Arc::clone(&line);
             std::thread::spawn(move || {
                 // A first load is a disk read, so the barrier alone would race
                 // the block queue rather than the two loads.
-                let path = core::str::from_utf8(name).expect("a library path");
+                let path = name.to_str().expect("a library path");
                 std::fs::read(path).unwrap_or_else(|e| panic!("warm {path}: {e}"));
                 line.wait();
-                toyos::files::dl_open(name).unwrap_or_else(|e| panic!("dlopen {path}: {e:?}"))
+                // SAFETY: a NUL-terminated path.
+                let handle = unsafe { dlopen(name.as_ptr(), 2) };
+                assert!(!handle.is_null(), "dlopen {path}");
+                handle as usize
             })
         })
         .collect();
-    let handles: Vec<u64> = racers.into_iter().map(|t| t.join().expect("a racer")).collect();
+    let handles: Vec<usize> = racers.into_iter().map(|t| t.join().expect("a racer")).collect();
 
     let a_label: extern "C" fn() -> u64 =
-        unsafe { core::mem::transmute(sym(handles[0], b"tls_get_label")) };
+        unsafe { core::mem::transmute(sym(handles[0], c"tls_get_label")) };
     let a_set_label: extern "C" fn(u64) =
-        unsafe { core::mem::transmute(sym(handles[0], b"tls_set_label")) };
+        unsafe { core::mem::transmute(sym(handles[0], c"tls_set_label")) };
     let a_inc: extern "C" fn() -> u64 =
-        unsafe { core::mem::transmute(sym(handles[0], b"tls_increment")) };
+        unsafe { core::mem::transmute(sym(handles[0], c"tls_increment")) };
     let b_label: extern "C" fn() -> u64 =
-        unsafe { core::mem::transmute(sym(handles[1], b"dl_tls_get_label")) };
+        unsafe { core::mem::transmute(sym(handles[1], c"dl_tls_get_label")) };
     let b_set_label: extern "C" fn(u64) =
-        unsafe { core::mem::transmute(sym(handles[1], b"dl_tls_set_label")) };
+        unsafe { core::mem::transmute(sym(handles[1], c"dl_tls_set_label")) };
     let b_counter: extern "C" fn() -> u64 =
-        unsafe { core::mem::transmute(sym(handles[1], b"dl_tls_get_a")) };
+        unsafe { core::mem::transmute(sym(handles[1], c"dl_tls_get_a")) };
     let b_buffer: extern "C" fn() -> u64 =
-        unsafe { core::mem::transmute(sym(handles[1], b"dl_tls_check_buffer")) };
+        unsafe { core::mem::transmute(sym(handles[1], c"dl_tls_check_buffer")) };
 
     // Read before anything writes: a block sized and templated from the other
     // module answers with the other module's initialisers.

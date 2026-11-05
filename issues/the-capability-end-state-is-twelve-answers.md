@@ -141,11 +141,9 @@ table** can still reach:
 
 - **its own execution** — `SYS_EXIT`, `SYS_THREAD_EXIT`, `SYS_THREAD_SPAWN`,
   `SYS_THREAD_JOIN`, `SYS_FUTEX_WAIT`/`WAKE`, `SYS_NANOSLEEP`,
-  `SYS_SET_THREAD_NAME`;
-- **its own address space** — `SYS_VM_*`, `SYS_TLS_ALLOC_BLOCK`,
-  `SYS_STACK_INFO`;
-- **its own record** — `SYS_GETPID`, `SYS_GET_ENV`, `SYS_ENDOWMENTS`,
-  `SYS_QUERY_MODULES`, `SYS_GETCWD`, `SYS_CHDIR`;
+  `SYS_SET_THREAD_NAME`, `SYS_SET_THREAD_POINTER`;
+- **its own address space** — `SYS_VM_*`, `SYS_STACK_INFO`;
+- **its own record** — `SYS_GETPID`, `SYS_GET_ENV`, `SYS_ENDOWMENTS`;
 - **machine facts** — `SYS_CLOCK_EPOCH`, `SYS_CPU_COUNT`, `SYS_RANDOM`, and
   `SYS_SYSINFO`'s header (total and used memory, the CPU count, the live-thread
   count, the uptime and the two CPU-time accumulators) but not the roster after
@@ -158,8 +156,8 @@ table** can still reach:
   (`SYS_OPEN`, `SYS_READDIR`, `SYS_DELETE`, `SYS_MKDIR`, `SYS_RMDIR`,
   `SYS_RENAME`, `SYS_SYMLINK`, `SYS_READLINK`), `SYS_SPAWN`, and
   `SYS_SHUTDOWN` — plus `SYS_SYSINFO`'s census. `SYS_DLOPEN` was among them
-  and is not now: it loads an image the caller read through its own
-  namespace, and opens nothing by path.
+  and is gone: a program loads its own libraries (libc's loader), reading
+  each through its own namespace.
 
 **Smallest decision:** the last group. **Recommendation:** keep the filesystem,
 `SYS_DLOPEN` and `SYS_SPAWN` ambient under question 2's ruling; make

@@ -26,9 +26,8 @@ const EM_AARCH64: u16 = 183;
 
 /// The instruction set an image is built for.
 ///
-/// Each machine names its own relocation numbers ([`crate::rela`]) and its own
-/// TLS variant ([`crate::tls`]); nothing else in this crate is
-/// per-architecture.
+/// Each machine names its own relocation numbers ([`crate::rela`]); nothing
+/// else in this crate is per-architecture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Machine {
     X86_64,

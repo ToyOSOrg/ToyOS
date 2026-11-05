@@ -47,6 +47,11 @@ mod errcode;
 #[path = "../../src/dgramreq.rs"]
 mod dgramreq;
 #[cfg(test)]
+#[path = "../../src/dlimage.rs"]
+// The loader's effects (`dl.rs`) use what the tests here do not.
+#[allow(dead_code)]
+mod dlimage;
+#[cfg(test)]
 #[path = "../../src/elfsym.rs"]
 mod elfsym;
 #[cfg(test)]
@@ -112,6 +117,8 @@ mod at_requests;
 mod descriptor_requests;
 #[cfg(test)]
 mod dladdr_symbols;
+#[cfg(test)]
+mod dlimage_relocations;
 #[cfg(test)]
 mod errno_codes;
 #[cfg(test)]

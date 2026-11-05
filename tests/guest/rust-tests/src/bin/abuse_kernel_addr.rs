@@ -1,43 +1,23 @@
-//! Two syscalls take an address from userland and hand it to
+//! `SYS_FUTEX_WAIT` takes an address from userland and hands it to
 //! `AddressSpace::translate`, which walked any PML4 index. A user address space
 //! shallow-copies the kernel's PML4 half, so a kernel address resolved to a
-//! present, writable 2 MiB leaf of the direct map.
+//! present, writable 2 MiB leaf of the direct map. The word was guarded, but by
+//! an expression at the dispatch arm whose value was thrown away, in a
+//! different file from the `pub fn` it protected. The bound now lives where it
+//! cannot be forgotten — in `translate` itself, and in `futex_wait`'s
+//! signature.
 //!
-//! `SYS_DLOPEN`'s `init_out` was the one the syscall layer never validated
-//! at all — sixteen bytes of arbitrary kernel memory, written by any process
-//! that can call `dlopen`. `SYS_FUTEX_WAIT`'s word is the other: it was
-//! guarded, but by an expression at the dispatch arm whose value was thrown
-//! away, in a different file from the `pub fn` it protected. Both bounds now
-//! live where they cannot be forgotten — in `translate` itself, and in
-//! `futex_wait`'s signature.
-//!
-//! **The verdict is not the assertion.** A kernel that still made that write
-//! would return the same error to a userland that cannot read a byte of the
-//! kernel's address space to notice. So the kernel keeps sixteen bytes with a
-//! known value and answers two questions about them
-//! (`SYS_DEBUG` actions 10 and 11): where they are, and whether they still say
-//! what it put there.
+//! **The verdict is not the assertion.** A kernel that still read there would
+//! return the same error to a userland that cannot read a byte of the kernel's
+//! address space to notice. So the kernel keeps sixteen bytes with a known
+//! value and answers two questions about them (`SYS_DEBUG` actions 10 and 11):
+//! where they are, and whether they still say what it put there.
 
-use toyos_abi::syscall::{self, DlopenArgs, VmAt, VmProt, SyscallError};
+use toyos_abi::syscall::{self, VmAt, VmProt, SyscallError};
 
 use toyos_abi::syscall::debug_action::{CANARY_ADDR, CANARY_CHANGED};
 
-/// The one the TLS tests load, chosen because it exists in this image and has
-/// an `init_array` — so a successful call has something to report.
-const LIB: &[u8] = b"/system/lib/libtls_dlopen_lib.so";
-
 const PAGE: u64 = syscall::PAGE_SIZE as u64;
-
-/// `dl_open` builds its own `init_info` on the stack, so the typed wrapper
-/// cannot express the argument under test: `SYS_DLOPEN` of [`LIB`], read once
-/// into an image, with `init_out` as given.
-fn dlopen_raw(path: &[u8], init_out: u64) -> u64 {
-    static IMAGE: std::sync::OnceLock<toyos::process::Image> = std::sync::OnceLock::new();
-    let image = IMAGE.get_or_init(|| toyos::files::read_image(path).unwrap_or_else(|e| panic!("read the library: {e:?}")));
-    let (handle, image_len) = image.spawn_words();
-    let args = DlopenArgs { name_ptr: path.as_ptr() as u64, name_len: path.len() as u64, image: handle, image_len, init_out };
-    syscall::dl_open_args(&args).unwrap_or_else(SyscallError::to_u64)
-}
 
 fn err(ret: u64) -> Option<SyscallError> {
     SyscallError::from_u64(ret)
@@ -56,67 +36,16 @@ fn main() {
     );
     assert!(canary_intact(), "the canary was already changed before the test ran");
 
-    // 1. The defect itself: a kernel address as `init_out`.
-    let ret = dlopen_raw(LIB, canary);
-    assert_eq!(err(ret), Some(SyscallError::BadAddress), "dlopen took a kernel address");
-    assert!(canary_intact(), "dlopen wrote {canary:#x} — sixteen bytes of kernel memory");
-
-    // 2. The rest of the kernel half, and the non-canonical hole above the user
-    //    half, which `translate` reaches by the same walk.
-    for &addr in &[0xFFFF_8000_0000_0000u64, 0x0000_8000_0000_0000, u64::MAX & !7] {
-        let ret = dlopen_raw(LIB, addr);
-        assert_eq!(err(ret), Some(SyscallError::BadAddress), "dlopen took {addr:#x}");
-    }
-    assert!(canary_intact(), "the canary changed while other kernel addresses were tried");
-
-    // 3. A user address off the value's alignment is still refused.
     // SAFETY: placed anywhere, so it replaces nothing.
     let region = unsafe { syscall::vm_reserve(2 * PAGE as usize, VmProt::ReadWrite, VmAt::ANYWHERE) }.expect("reserve two pages");
     let base = region as u64;
-    let boundary = base + PAGE;
-    let ret = dlopen_raw(LIB, base + 4);
-    assert_eq!(err(ret), Some(SyscallError::BadAddress), "dlopen took {:#x}", base + 4);
 
-    // 3b. A refused dlopen must register nothing: the library loads and maps
-    //     before the copy-out, so a `BadAddress` used to leave a module in the
-    //     process's list. `query_modules`' size is the census and climbs per leak.
-    let before = syscall::query_modules(&mut []).expect("query_modules size query");
-    for _ in 0..8 {
-        let ret = dlopen_raw(LIB, base + 4);
-        assert_eq!(err(ret), Some(SyscallError::BadAddress), "a misaligned init_out was not refused");
-    }
-    let after = syscall::query_modules(&mut []).expect("query_modules size query");
-    assert_eq!(
-        after, before,
-        "refused dlopens grew the module census {before} -> {after}: a BadAddress left modules registered",
-    );
-
-    // 4. And the syscall still does its job, which is what none of the above
-    //    may cost, at an `init_out` whose two words lie on two pages. Poisoned
-    //    first, because a library with an empty init_array is written two
-    //    zeros and that is not distinguishable from a write that never
-    //    happened.
-    const POISON: u64 = 0x_DEAD_BEEF_DEAD_BEEF;
-    let out = boundary - 8;
-    let words = out as *mut u64;
-    unsafe {
-        words.write_volatile(POISON);
-        words.add(1).write_volatile(POISON);
-    }
-    let ret = dlopen_raw(LIB, out);
-    assert!(err(ret).is_none(), "dlopen refused an init_out across two pages: {ret:#x}");
-    let info = unsafe { [words.read_volatile(), words.add(1).read_volatile()] };
-    assert!(
-        info[0] != POISON && info[1] != POISON,
-        "dlopen returned a handle and wrote nothing to init_out: {info:#x?}",
-    );
-
-    // 5. The futex word, which the *scheduler* dereferences on every wake check
-    //    long after the syscall returned. A kernel address here is a read
-    //    oracle: `futex_wait` blocks when the word equals `expected` and returns
-    //    at once when it does not, so a caller that may name kernel memory can
-    //    ask whether a kernel word holds a value — one bit per call, from
-    //    timing alone. Neither answer is what an address it may not name gets.
+    // The futex word, which the *scheduler* dereferences on every wake check
+    // long after the syscall returned. A kernel address here is a read
+    // oracle: `futex_wait` blocks when the word equals `expected` and returns
+    // at once when it does not, so a caller that may name kernel memory can
+    // ask whether a kernel word holds a value — one bit per call, from
+    // timing alone. Neither answer is what an address it may not name gets.
     for &expected in &[0u32, 0x0F17_1E55, 0x1A55] {
         let ret = unsafe {
             syscall::futex_wait(canary as *const u32, expected, Some(50_000_000))
@@ -147,5 +76,5 @@ fn main() {
 
     unsafe { syscall::vm_release(region, 2 * PAGE as usize) }.expect("release");
     assert!(canary_intact(), "the canary changed during the run");
-    println!("dlopen and futex refuse an address they may not reach, and kernel memory is untouched");
+    println!("futex refuses an address it may not reach, and kernel memory is untouched");
 }

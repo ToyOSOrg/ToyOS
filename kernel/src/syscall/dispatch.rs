@@ -48,10 +48,10 @@ use super::machine::lower_sysinfo_bound;
 use super::paged::{sys_paged_create, sys_paged_holder, sys_paged_notices, sys_paged_op, sys_paged_read, sys_pager_create};
 use super::proc::{
     spawn_pager, spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
-    sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_get_affinity, sys_thread_join, sys_thread_set_affinity, sys_thread_spawn, sys_wake_latency_hold, sys_yield,
+    sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_get_affinity, sys_thread_join, sys_thread_set_affinity, sys_set_thread_pointer, sys_thread_spawn, sys_wake_latency_hold, sys_yield,
 };
 use super::vm::{
-    shared_image, sys_dlopen, sys_dlsym, sys_query_modules, sys_tls_alloc_block, sys_vm_decommit, sys_vm_discard, sys_vm_remap,
+    shared_image, sys_vm_decommit, sys_vm_discard, sys_vm_remap,
     sys_vm_protect, sys_vm_release, sys_vm_reserve,
 };
 
@@ -193,6 +193,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // No right: the one caller marks both ends of a pair, so requiring one would refuse the other.
         SYS_MARK_TTY => with_object(RawHandle(a1 as u32), Rights::NONE, ops::mark_tty),
         SYS_THREAD_SPAWN => sys_thread_spawn(a1, a2, a3, a4),
+        SYS_SET_THREAD_POINTER => sys_set_thread_pointer(a1),
         SYS_THREAD_JOIN => sys_thread_join(a1),
         SYS_YIELD => sys_yield(),
         // Answers from the boot-time anchor, never the CMOS: NotSupported beats a
@@ -250,32 +251,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_HANDLE_DUP => sys_handle_dup(RawHandle(a1 as u32), a2),
         SYS_NULL => sys_null(a1),
         SYS_GETPID => process::current_process().raw() as u64,
-        SYS_DLOPEN => {
-            let Ok(args) = ctx.copy_in::<toyos_abi::syscall::DlopenArgs>(UserAddr::new(a1)) else { return bad_addr };
-            let name = match ctx.user_str(UserAddr::new(args.name_ptr), args.name_len) { Ok(s) => s, Err(e) => return e.to_u64() };
-            // Refused here rather than at the write, so a bad address never leaves a
-            // library the caller was never told about.
-            let init_out = match args.init_out {
-                0 => None,
-                raw => match UserAddr::checked(raw) {
-                    Some(addr) => Some(addr),
-                    None => return bad_addr,
-                },
-            };
-            let image = match shared_image(args.image, args.image_len) {
-                Ok(image) => image,
-                Err(refused) => return refused,
-            };
-            // ctx carries the copy-out: sys_dlopen writes init_out only once the load succeeds.
-            sys_dlopen(&ctx, name, &image, init_out)
-        }
-        SYS_DLSYM => {
-            let name = match ctx.user_str(UserAddr::new(a2), a3) { Ok(s) => s, Err(e) => return e.to_u64() };
-            sys_dlsym(a1, &name)
-        }
-        // A no-op by contract: a dlopen'd module is shared and process-lived, and
-        // a reload returns the same handle (`sys_dlopen`), so nothing to reclaim.
-        SYS_DLCLOSE => 0,
         SYS_STACK_INFO => {
             let stack = process::with_current_data(|data| {
                 (data.user_stack_base.raw() > 0)
@@ -432,7 +407,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let name = match ctx.user_str(UserAddr::new(a2), a3) { Ok(s) => s, Err(e) => return e.to_u64() };
             sys_namespace_open(RawHandle(a1 as u32), &name)
         }
-        SYS_TLS_ALLOC_BLOCK => sys_tls_alloc_block(a1),
         SYS_INBOX_SETUP => {
             // Taken before the inbox exists: a bad address must not leave a handle the caller was never told.
             let len = core::mem::size_of::<InboxSetup>() as u64;
@@ -441,10 +415,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         }
         SYS_INBOX_SUBMIT => {
             sys_inbox_submit(RawHandle(a1 as u32), a2 as u32, a3 as u32, a4)
-        }
-        SYS_QUERY_MODULES => {
-            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
-            sys_query_modules(&mut buf)
         }
         // Feature-gated, not capability-checked: a shipping kernel has no SYS_DEBUG
         // arm, so the number falls to the same default InvalidArgument as any unassigned one.

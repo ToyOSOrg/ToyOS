@@ -143,7 +143,7 @@ fn each_threads_own(supported: bool) -> (usize, usize) {
             let protected = Arc::clone(&protected);
             std::thread::spawn(move || {
                 let wants = i % 2 == 0;
-                protected.lock().unwrap().insert(toyos_abi::current_tid().raw(), wants);
+                protected.lock().unwrap().insert(toyos::tls::current_tid().raw(), wants);
                 let protection = wants.then(toyos::timing::protect);
                 for round in 0..ROUNDS {
                     let begun = Instant::now();

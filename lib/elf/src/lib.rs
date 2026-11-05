@@ -1,10 +1,10 @@
 //! ELF64 decoding, for the questions ToyOS asks a program image: **what does
 //! this file want mapped, where does everything it names live inside it, and
-//! which of the numbers in it may the kernel act on?**
+//! which of the numbers in it may a loader act on?**
 //!
-//! An ELF is untrusted input — `spawn` opens whatever path a process names and
-//! `dlopen` opens whatever path a process names — so the kernel's fail-fast
-//! rule does not apply to anything decoded here. Every length, count, offset
+//! An ELF is untrusted input — the kernel maps whatever image a spawn names,
+//! and libc's loader whatever library a process names — so the kernel's
+//! fail-fast rule does not apply to anything decoded here. Every length, count, offset
 //! and vaddr is checked before it is used, nothing is indexed without a bound,
 //! and no path panics. What cannot be satisfied is refused by name through
 //! [`Error`]; nothing is silently truncated to fit.
@@ -19,7 +19,7 @@
 //!
 //! It maps nothing, allocates nothing and writes nothing. Turning a
 //! [`Layout`] into an address space, applying a relocation and copying a TLS
-//! template are the kernel's, and the split is the point: everything in here
+//! template are its callers', and the split is the point: everything in here
 //! is a pure function of bytes and is tested on the host in milliseconds.
 //!
 //! # Scope

@@ -69,7 +69,7 @@ pub fn thread_pointer() -> u64 {
 
 /// Install the thread pointer the next return to EL0 runs with.
 /// # Safety
-/// `tp` is the thread's own, which the kernel computed for it.
+/// `tp` is the running thread's.
 pub unsafe fn write_thread_pointer(tp: u64) {
     // SAFETY: `TPIDR_EL0` is EL0's register; the kernel never reads through it.
     unsafe { asm!("msr tpidr_el0, {}", in(reg) tp, options(nomem, nostack, preserves_flags)) };

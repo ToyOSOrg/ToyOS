@@ -44,10 +44,8 @@ mod power;
 
 mod inventory;
 mod loaded;
-mod rollback;
 mod bootimage;
 mod file_backing;
-mod elf;
 mod symbols;
 mod process;
 mod loader;

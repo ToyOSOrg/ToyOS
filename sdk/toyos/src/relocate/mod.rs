@@ -13,14 +13,16 @@
 //! memory.
 //!
 //! A static PIE carries `RELATIVE` relocations and nothing else, so that is
-//! all this applies. Every other form is refused by name: a library this
-//! process would have to load (`DT_NEEDED`), a symbol it would have to bind
-//! (`DT_JMPREL` with entries, any other type), a table form it does not read
+//! all this applies. An image that names a library (`DT_NEEDED`) leaves every
+//! other relocation in its tables to the loader, which binds them once its
+//! libraries are loaded (libc's `__toyos_load_needed`). Every other form is
+//! refused by name: in an image that names no library, a symbol it would have
+//! to bind (`DT_JMPREL` with entries, any other type); a table form it does not read
 //! (`DT_REL`, every `RELR`, Android's packed tables, and every one's size),
 //! and a write into text (`DT_TEXTREL`, `DF_TEXTREL`).
 //! A write lands only inside a writable `PT_LOAD` and never in the `PT_TLS`
-//! template, which the kernel copies from the file into every thread's block
-//! and which a write here would never reach.
+//! template, which every thread's block is copied from as it was mapped and
+//! which a write here would never reach in a block already made.
 
 #![deny(
     clippy::indexing_slicing,
@@ -33,7 +35,18 @@
 #[cfg(test)]
 mod tests;
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use toyos_abi::RawHandle;
+
+/// Whether the image [`relocate_self`] relocated names a library (`DT_NEEDED`).
+static NAMES_A_LIBRARY: AtomicBool = AtomicBool::new(false);
+
+/// Whether this program names a library its start must load before anything
+/// binds to it: what [`relocate_self`] found.
+pub fn names_a_library() -> bool {
+    NAMES_A_LIBRARY.load(Ordering::Relaxed)
+}
 
 /// Why a program's relocations are refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,8 +59,6 @@ enum Refusal {
     HeaderSegment,
     /// `PT_DYNAMIC` lies in no `PT_LOAD`'s file bytes.
     Dynamic,
-    /// `DT_NEEDED`: a library this process would have to load.
-    Needed,
     /// `DT_JMPREL` with entries, or with no `DT_PLTRELSZ` to say it has none:
     /// slots this process would have to bind.
     JmpRel,
@@ -103,7 +114,7 @@ pub unsafe extern "C" fn relocate_self(header: *const u8) {
 /// kernel's endowment table with nothing but the stack and the code's own
 /// addresses: no word of the image is relocated yet, so no table, `str`
 /// pointer or formatting is reached.
-fn stderr() -> Option<RawHandle> {
+pub(crate) fn stderr() -> Option<RawHandle> {
     use toyos_abi::syscall::{endowments, MAX_ENDOWMENTS, MAX_LABELS_LEN};
     const ENTRY: usize = 16;
     let word = |b: &[u8], at: usize| -> Option<usize> {
@@ -155,13 +166,15 @@ unsafe fn apply_to_self(header: *const u8) -> Result<(), Refusal> {
         };
         image.rela(dynamic)?
     };
+    let Tables { rela, needed } = rela;
+    NAMES_A_LIBRARY.store(needed, Ordering::Relaxed);
     let Some(rela) = rela else { return Ok(()) };
     // SAFETY: inside a `PT_LOAD`'s file bytes that no writable segment
     // overlaps, so no write below reaches it.
     let rela = unsafe {
         core::slice::from_raw_parts(core::ptr::with_exposed_provenance::<u8>(at(rela.vaddr, bias)), rela.len)
     };
-    image.apply(rela, bias, |vaddr, value| {
+    image.apply(rela, bias, needed, |vaddr, value| {
         let slot = core::ptr::with_exposed_provenance_mut::<u64>(at(vaddr, bias));
         // SAFETY: `apply` names only a vaddr whose 8 bytes lie in a writable
         // `PT_LOAD`, which the kernel mapped writable at `bias + vaddr`, and
@@ -212,6 +225,13 @@ const DT_AARCH64_AUTH_RELRSZ: u64 = 0x7000_0011;
 const DT_AARCH64_AUTH_RELR: u64 = 0x7000_0012;
 const DT_AARCH64_AUTH_RELRENT: u64 = 0x7000_0013;
 const DF_TEXTREL: u64 = 4;
+
+/// The `DT_RELA` table a dynamic section names, and whether it names a library.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Tables {
+    rela: Option<Span>,
+    needed: bool,
+}
 
 /// A run of the image's bytes, at its link-time address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -346,15 +366,15 @@ impl<'a> Image<'a> {
         Ok(Some(Span { vaddr: dynamic.vaddr, len }))
     }
 
-    /// The `DT_RELA` table `dynamic` names, or `None` when it names none.
-    fn rela(&self, dynamic: &[u8]) -> Result<Option<Span>, Refusal> {
-        let (mut rela, mut size, mut jmprel, mut plt) = (None, None, false, None);
+    /// The `DT_RELA` table `dynamic` names, if any, and whether it names a library.
+    fn rela(&self, dynamic: &[u8]) -> Result<Tables, Refusal> {
+        let (mut rela, mut size, mut jmprel, mut plt, mut needed) = (None, None, false, None, false);
         let aarch64 = self.relative == R_AARCH64_RELATIVE;
         for entry in dynamic.as_chunks::<DYN_SIZE>().0 {
             let (Some(tag), Some(value)) = (u64_at(entry, 0), u64_at(entry, 8)) else { break };
             match tag {
                 DT_NULL => break,
-                DT_NEEDED => return Err(Refusal::Needed),
+                DT_NEEDED => needed = true,
                 DT_PLTRELSZ => plt = Some(value),
                 DT_JMPREL => jmprel = true,
                 DT_RELA => rela = Some(value),
@@ -375,12 +395,13 @@ impl<'a> Image<'a> {
                 _ => {}
             }
         }
-        // A `DT_JMPREL` whose size is missing is no table of known length.
-        if plt.is_some_and(|plt| plt != 0) || (jmprel && plt.is_none()) {
+        // A `DT_JMPREL` whose size is missing is no table of known length; one
+        // with entries is the loader's to bind, in an image that names a library.
+        if (!needed && plt.is_some_and(|plt| plt != 0)) || (jmprel && plt.is_none()) {
             return Err(Refusal::JmpRel);
         }
         let (vaddr, size) = match (rela, size) {
-            (None, None) => return Ok(None),
+            (None, None) => return Ok(Tables { rela: None, needed }),
             (Some(vaddr), Some(size)) if size.is_multiple_of(RELA_SIZE as u64) => (vaddr, size),
             _ => return Err(Refusal::RelaShape),
         };
@@ -388,12 +409,14 @@ impl<'a> Image<'a> {
             return Err(Refusal::RelaPlacement);
         }
         let len = usize::try_from(size).map_err(|_| Refusal::RelaPlacement)?;
-        Ok(Some(Span { vaddr, len }))
+        Ok(Tables { rela: Some(Span { vaddr, len }), needed })
     }
 
-    /// Write `bias + addend` at every entry of `rela` through `write`, which
-    /// is handed the entry's link-time address; the first refusal stops it.
-    fn apply(&self, rela: &[u8], bias: u64, mut write: impl FnMut(u64, u64)) -> Result<(), Refusal> {
+    /// Write `bias + addend` at every `RELATIVE` entry of `rela` through
+    /// `write`, which is handed the entry's link-time address; the first
+    /// refusal stops it. Any other type is the loader's in an image that names
+    /// a library (`needed`), and refused in one that does not.
+    fn apply(&self, rela: &[u8], bias: u64, needed: bool, mut write: impl FnMut(u64, u64)) -> Result<(), Refusal> {
         for entry in rela.as_chunks::<RELA_SIZE>().0 {
             let (Some(offset), Some(info), Some(addend)) = (u64_at(entry, 0), u64_at(entry, 8), u64_at(entry, 16))
             else {
@@ -402,6 +425,9 @@ impl<'a> Image<'a> {
             // `r_info`'s low half is the type: the mask keeps it.
             let kind = (info & 0xffff_ffff) as u32;
             if kind != self.relative {
+                if needed {
+                    continue;
+                }
                 return Err(Refusal::Kind(kind));
             }
             if !self.loads().any(|p| p.writable_load() && p.holds(offset, 8, p.memsz)) {

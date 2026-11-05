@@ -220,6 +220,21 @@ pub(super) fn sys_endowments(out: &mut crate::user_ptr::UserBytesMut) -> u64 {
     needed as u64
 }
 
+/// Point the calling thread's thread pointer at `tp` (x86-64's FS base,
+/// AArch64's `TPIDR_EL0`), which the thread keeps across every switch, and
+/// answer its tid. The kernel never reads through it: what lies there is the
+/// program's. Zero or a user-half address; anything else is `InvalidArgument`,
+/// since a non-canonical FS base would fault in the kernel's ring.
+pub(super) fn sys_set_thread_pointer(tp: u64) -> u64 {
+    if tp != 0 && UserAddr::checked(tp).is_none() {
+        return SyscallError::InvalidArgument.to_u64();
+    }
+    // SAFETY: zero or a user-half address, so canonical; the register is this
+    // thread's, saved with it at every switch.
+    unsafe { crate::arch::cpu::write_thread_pointer(tp) };
+    u64::from(process::current_tid().raw())
+}
+
 /// Spawn a thread; refuses a `stack_base` above `stack_ptr` (no stack to clamp to)
 /// and an `entry` outside the user half, which the return to it would fault on
 /// in the kernel's ring. The stack pointer is the thread's own to fault on.

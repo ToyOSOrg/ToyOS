@@ -319,13 +319,13 @@ const RUST_SKIP: &[&str] = &[
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
-/// own process — thousands of threads, a thousand library images — and its
+/// own process — thousands of threads — and its
 /// exit gives all of it back. Behind every
 /// discovered member and every corpus case, so nothing but the reboot runs
 /// after one of these. **This is their one declaration**:
 /// [`discover_rust_tests`] leaves them to it, so a name taken off this list is
 /// a discovered member again.
-const LAST_MEMBERS: &[&str] = &["abuse_thread_table", "abuse_dlopen_ledger"];
+const LAST_MEMBERS: &[&str] = &["abuse_thread_table"];
 
 /// Binaries a metal row or a guest test drives that the shared boot also runs
 /// on purpose.

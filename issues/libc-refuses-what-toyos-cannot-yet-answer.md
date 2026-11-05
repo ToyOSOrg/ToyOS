@@ -18,8 +18,7 @@ These answer failure in their POSIX form and do nothing
   the failure and reads the `rlimit` it did not get.
 - `gethostname`, `ENOSYS`: no host name is published to a process.
 - `msync`, `ENOSYS`: no mapping is of a file, so there is nothing to write back.
-- `mmap` of a file, `ENODEV`, and `mmap` or `mprotect` of executable memory,
-  `ENOTSUP`: the kernel maps neither.
+- `mmap` of a file, `ENODEV`: the kernel maps no file.
 - `fcntl` (`sdk/libc/src/fdreq.rs`): a record lock, `EINVAL`, POSIX's answer
   for a file that supports no locking; `F_GETFL`, `F_SETFL`, `F_GETOWN` and
   `F_SETOWN`, `ENOSYS`.
@@ -27,6 +26,12 @@ These answer failure in their POSIX form and do nothing
 Ruled out, and owed nothing while the ruling stands: `execv` and `execve`, no
 call replacing a process's image; `setsid` and `getsid`, no POSIX session;
 `fchown`, no owner; `getpwnam_r` and `getpwuid_r`, no user database.
+
+Refused by design, and owed nothing: `mmap` or `mprotect` of memory writable
+and executable at once, `ENOTSUP`. A program writes its code and then
+protects it read and execute, as libc's loader does; no page is both
+(orchestrator, with the userland loader, which made read and execute a
+protection a program may ask for).
 
 **Exit**: each above either does what POSIX says, asserted by a guest C case
 that reads its effect back, or is ruled out by the owner and moved to the list

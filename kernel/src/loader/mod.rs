@@ -1,46 +1,42 @@
 //! Building a process out of an ELF file.
 //!
-//! The kernel reads an executable's program headers, its `PT_TLS` template
-//! and its build-id note, copies its `PT_LOAD`s into memory of the new
-//! process's own and jumps to its entry;
-//! it reads no dynamic section, applies no relocation and loads no library at
-//! spawn. The program relocates itself (`toyos::relocate`).
+//! The kernel reads an executable's program headers and its build-id note,
+//! copies its `PT_LOAD`s into memory of the new process's own and jumps to its
+//! entry. Everything else is the program's: it relocates itself
+//! (`toyos::relocate`), lays out its own thread-local storage (`toyos::tls`)
+//! and loads its own libraries.
 //!
 //! Every number the file names is untrusted: a refusal is
 //! `SyscallError::{InvalidArgument, ResourceExhausted}`, never a panic.
 //!
 //! A spawn that lands writes one record, `spawn: <path> pid=N (…ms)`, once
 //! the process is in the table and placed; a spawn that is refused writes
-//! one, naming why. Nothing is said on the way, by this file or by
-//! `crate::elf` under it (`crate::process`'s header).
+//! one, naming why. Nothing is said on the way (`crate::process`'s header).
 
 // `warn`, not `deny`: the rest of the kernel is not yet swept for undocumented unsafe blocks.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 mod start;
-mod tls;
 
 pub use start::{build_child_handles, Commit, PendingHandles};
 pub(crate) use start::{alloc_kernel_stack, KernelStack, Start};
-pub use tls::{TlsBlock, DTV_INITIAL_CAPACITY, VARIANT as TLS_VARIANT};
 
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::elf;
 use crate::object::{ops, HandleTable, KObjectRef};
 use crate::mm::space::CopySource;
 use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::process::{
-    Admission, ElfInfo, Endowments, OwnedAlloc, Parent, Pid, ProcessAccounting, ProcessData,
+    Admission, Endowments, Parent, Pid, ProcessAccounting, ProcessData,
     ProcessEntry, ThreadData, ThreadEntry, UserImage, PROCESS_TABLE,
 };
 use crate::sync::Lock;
 use crate::{scheduler, UserAddr};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::SyscallError;
-use toyos_elf::{Layout, TlsSegment};
+use toyos_elf::Layout;
 use toyos_symbols::frame::BuildId;
 
 /// The main thread's stack: committed whole, populated as it is touched.
@@ -190,25 +186,25 @@ pub fn spawn<C: Commit>(
     };
     // Before anything is built; dropped on every way out below but the insert.
     let admission = Admission::ask(parent)?;
-    let mut charge = ProcessData::charge(&job, path, &env).map_err(SyscallError::from)?;
+    let charge = ProcessData::charge(&job, path, &env).map_err(SyscallError::from)?;
     let t0 = crate::clock::nanos_since_boot();
 
     let header_size = 4096.min(backing.file_size() as usize);
     let header_data = read_file_range(backing.as_ref(), 0, header_size);
-    let layout = match elf::parse_layout(&header_data) {
+    let layout = match Layout::parse(&header_data, crate::arch::ELF_MACHINE) {
         Ok(l) => l,
-        Err(msg) => {
-            log!("spawn: {}: {}", path, msg);
+        Err(e) => {
+            log!("spawn: {}: {}", path, e.as_str());
             return Err(SyscallError::InvalidArgument.into());
         }
     };
 
-    // The program reads the mapped table to relocate itself, and
-    // `SYS_QUERY_MODULES` answers with it: an image without one has neither.
-    let Some(phdrs) = layout.program_headers() else {
+    // The program reads the mapped table to relocate itself and lay out its
+    // thread-local storage.
+    if layout.program_headers().is_none() {
         log!("spawn: {}: no PT_LOAD maps the program header table", path);
         return Err(SyscallError::InvalidArgument.into());
-    };
+    }
 
     let source = backing.source();
 
@@ -253,44 +249,6 @@ pub fn spawn<C: Commit>(
         (image_start, base, stack_base, sp)
     };
 
-    let exe_tls_template = match layout.tls().and_then(TlsSegment::occupied) {
-        Some(tls) => {
-            let Some(tls_file_off) = layout.file_offset_of(tls.template()) else {
-                log!("spawn: {}: PT_TLS's template is in no PT_LOAD's file bytes", path);
-                return Err(SyscallError::InvalidArgument.into());
-            };
-            // Read directly into the `memsz`-sized buffer: `OwnedAlloc` zeroes
-            // (no second pass for `.tbss`) and refuses a size past one heap
-            // allocation itself.
-            let template = core::alloc::Layout::from_size_align(tls.memsz() as usize, 16).map_err(|_| SyscallError::InvalidArgument)?;
-            charge.grow(crate::mm::charge::heap(template)).map_err(SyscallError::from)?;
-            let Some(tls_buf) = OwnedAlloc::new(tls.memsz() as usize, 16) else {
-                log!("spawn: {}: cannot allocate a {}-byte TLS template", path, tls.memsz());
-                return Err(SyscallError::ResourceExhausted.into());
-            };
-            // `slice` bounds `filesz` against the `memsz` allocation, re-checking what `Layout::parse` already refused.
-            elf::read_backing_into(
-                backing.as_ref(),
-                tls_file_off,
-                tls_buf.slice(tls.template().len() as usize),
-            );
-            Some(tls_buf)
-        }
-        None => None,
-    };
-
-    let Some((tls_modules, tls)) = tls::build_tls_layout(&layout, exe_tls_template.as_ref()) else {
-        log!("spawn: {}: the TLS module does not fit one block", path);
-        return Err(SyscallError::ResourceExhausted.into());
-    };
-
-    let Some((tls_pages, thread_pointer, _)) =
-        tls::TlsBlock::build(&tls_modules, tls).and_then(|b| b.publish(&child_pt))
-    else {
-        log!("spawn: {}: failed to allocate TLS ({} bytes)", path, tls.total_memsz());
-        return Err(SyscallError::ResourceExhausted.into());
-    };
-
     // Inside the image, which `rebase_base` placed inside the user half.
     let Some(entry) = toyos_userbound::Entry::new((image_start + layout.entry().get()).raw())
     else {
@@ -298,7 +256,6 @@ pub fn spawn<C: Commit>(
         return Err(SyscallError::InvalidArgument.into());
     };
     let image_end = (image_start + layout.span()).raw();
-    let t_tls = crate::clock::nanos_since_boot();
 
     // What a crash record names a frame by. The build-id is read at each
     // `PT_NOTE`'s own offset, a page of it at most.
@@ -329,33 +286,16 @@ pub fn spawn<C: Commit>(
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         env,
-        elf: ElfInfo {
-            elf_alloc: exe_tls_template,
-            tls_modules,
-            tls,
-            next_tls_module_id: tls::FIRST_DLOPEN_MODULE,
-            dynamic_tls_blocks: alloc::collections::BTreeMap::new(),
-            loaded_libs: Vec::new(),
-            elf_base: UserAddr::new(base),
-            exe_eh_frame_hdr: layout
-                .eh_frame_hdr()
-                .map_or((0, 0), |r| ((image_start + r.start().get()).raw(), r.len())),
-            exe_vaddr_max: image_end,
-            exe_phdrs: ((image_start + phdrs.image().start().get()).raw(), phdrs.count()),
-            lib_paths: Vec::new(),
-        },
         space: Arc::clone(&child_pt),
-        exe_path: String::from(path),
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
         endowments,
         job: job.clone(),
-        charge,
+        _charge: charge,
         pager,
     }));
 
     let thread_data = Arc::new(Lock::new(ThreadData {
-        tls: Some(tls_pages),
         user_stack_base: stack_base,
         user_stack_size: USER_STACK_SIZE as u64,
     }));
@@ -383,7 +323,7 @@ pub fn spawn<C: Commit>(
             kernel_stack: ks_alloc,
             entry_sp: ks_sp,
             address_space: child_pt.clone(),
-            thread_pointer,
+            thread_pointer: 0,
             job,
             image,
             // The spawning thread's, as a new thread's is.
@@ -403,8 +343,7 @@ pub fn spawn<C: Commit>(
     crate::process::debug_hold_marked_spawn(parent, &object);
 
     let t3 = crate::clock::nanos_since_boot();
-    log!("spawn: {} pid={} (layout={}ms tls={}ms total={}ms)",
-        path, pid, (t1 - t0) / 1_000_000, (t_tls - t1) / 1_000_000, (t3 - t0) / 1_000_000);
+    log!("spawn: {} pid={} (layout={}ms total={}ms)", path, pid, (t1 - t0) / 1_000_000, (t3 - t0) / 1_000_000);
 
     Ok((pid, held))
 }

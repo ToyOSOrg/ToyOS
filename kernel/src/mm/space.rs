@@ -237,11 +237,6 @@ impl AddressSpace {
         self.tables.root()
     }
 
-    /// The job its memory is counted to.
-    pub fn job(&self) -> &Arc<Job> {
-        &self.job
-    }
-
     /// Where a range of `len` bytes goes, changing nothing: a `Fixed` one is
     /// put in place of what is there by [`put`](Self::put). `len` is whole
     /// pages.

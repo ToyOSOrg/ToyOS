@@ -23,8 +23,8 @@ holds is spawned from a copy in one memory object, which `SYS_SHM_CREATE` now
 makes of 4 KiB frames in any order (`kernel/src/object/shm.rs`), so the hosted
 clang's 148 MB image no longer needs one physical run; `hosted_clang_hello`,
 which was refused `ENOMEM` linking, is the check. What is still one physical
-run is a device-lendable object (`SHM_DEVICE`, `SharedMemObject::create_run`)
-and each `dlopen` image (`issues/a-dlopen-image-is-one-contiguous-run.md`).
+run is a device-lendable object (`SHM_DEVICE`, `SharedMemObject::create_run`);
+a library is laid out in the process's own private memory by libc's loader.
 
 **The constraint that makes this a track, measured on the T14** (run 29
 readback, `PMM: 100/16038MB used` at 11 s with four user processes and three

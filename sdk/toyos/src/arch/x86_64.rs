@@ -57,3 +57,40 @@ pub(crate) mod timing {
         }
     }
 }
+
+/// The thread control block the thread pointer (`FS.base`) addresses, psABI
+/// TLS variant II: `TP + 0` the self-pointer, `TP + 8` the DTV, then this
+/// SDK's words; the executable's TLS data lies below TP.
+pub(crate) mod tcb {
+    pub(crate) const VARIANT: crate::tls::Variant = crate::tls::Variant::II;
+    pub(crate) const BYTES: usize = 64;
+    pub(crate) const DTV: usize = 8;
+    pub(crate) const TID: usize = 16;
+
+    /// The calling thread's thread pointer, read off its self-pointer.
+    #[inline]
+    pub(crate) fn thread_pointer() -> usize {
+        let tp: usize;
+        // SAFETY: `fs:0` is the TCB's self-pointer, which every thread's
+        // startup writes before it names its thread pointer.
+        unsafe { core::arch::asm!("mov {}, fs:[0]", out(reg) tp, options(nostack, readonly, preserves_flags)) };
+        tp
+    }
+
+    /// The calling thread's id, read off its TCB in one load.
+    #[inline]
+    pub(crate) fn current_tid() -> u32 {
+        let tid: u32;
+        // SAFETY: `TP + TID` lies inside the TCB every thread's startup lays
+        // out before it names its thread pointer.
+        unsafe {
+            core::arch::asm!(
+                "mov {tid:e}, dword ptr fs:[{at}]",
+                tid = out(reg) tid,
+                at = const TID,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        tid
+    }
+}

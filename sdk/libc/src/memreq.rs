@@ -28,8 +28,8 @@ pub(crate) enum MapRefusal {
     Invalid,
     /// A file's bytes, which the kernel maps for no process: `ENODEV`.
     File,
-    /// Executable memory, which the kernel does not map: `ENOTSUP`.
-    Exec,
+    /// Memory writable and executable at once, which no page is: `ENOTSUP`.
+    WriteExec,
 }
 
 /// Why `mmap` of `len` bytes at `addr` with `prot` and `flags` is refused, if
@@ -46,8 +46,8 @@ pub(crate) fn mmap_refusal(addr: usize, len: usize, prot: i32, flags: i32) -> Op
     if flags & MAP_ANONYMOUS == 0 {
         return Some(MapRefusal::File);
     }
-    if prot & PROT_EXEC != 0 {
-        return Some(MapRefusal::Exec);
+    if prot & PROT_EXEC != 0 && prot & PROT_WRITE != 0 {
+        return Some(MapRefusal::WriteExec);
     }
     None
 }
@@ -88,8 +88,11 @@ pub(crate) enum Access {
     Read,
     /// Writing, which on every machine ToyOS runs on brings reading with it.
     ReadWrite,
-    /// Executing, which no call maps yet: `ENOTSUP`.
-    Exec,
+    /// Executing, which brings reading with it.
+    ReadExec,
+    /// Writing and executing at once, which no page allows: `ENOTSUP`. A
+    /// program writes its code, then protects it executable.
+    WriteExec,
 }
 
 /// What `prot` asks; `None` (`EINVAL`) for a bit `PROT_*` does not define.
@@ -97,8 +100,10 @@ pub(crate) fn access(prot: i32) -> Option<Access> {
     if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
         return None;
     }
-    Some(if prot & PROT_EXEC != 0 {
-        Access::Exec
+    Some(if prot & PROT_EXEC != 0 && prot & PROT_WRITE != 0 {
+        Access::WriteExec
+    } else if prot & PROT_EXEC != 0 {
+        Access::ReadExec
     } else if prot & PROT_WRITE != 0 {
         Access::ReadWrite
     } else if prot & PROT_READ != 0 {

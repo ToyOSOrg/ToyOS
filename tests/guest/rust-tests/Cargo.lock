@@ -117,10 +117,11 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 [[package]]
 name = "core_affinity"
 version = "0.8.3"
-source = "git+https://github.com/ToyOSOrg/core_affinity?branch=toyos-0.8.3#9b2f9bdfef0d77e000496d48689ae3048f7e2283"
+source = "git+https://github.com/ToyOSOrg/core_affinity?branch=toyos-0.8.3#61cf0afe562c2757bec723424484baf3cc4a714e"
 dependencies = [
  "libc",
  "num_cpus",
+ "toyos",
  "toyos-abi",
  "winapi",
 ]
@@ -420,11 +421,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libloading"
 version = "0.8.9"
-source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12#da187608c2662c6e251386192ee1297c83d3ebd8"
+source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12#d38a45d2cb833ef562304723801f4e4aeb21361c"
 dependencies = [
  "cfg-if",
- "toyos",
- "toyos-abi",
  "windows-link",
 ]
 

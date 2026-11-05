@@ -2,17 +2,19 @@
 //! kernel's own address-space rules forbid.
 //!
 //! `abuse_elf_segments` covers the sizes a program header declares.  This one
-//! covers what the loader *derives* from them: the address a segment lands at
-//! once the image is rebased to `USER_VM_BASE`, the TLS block's layout, and
-//! what `dlopen` reads of a library's tables.  Each case is a kernel panic or
+//! covers what the kernel *derives* from them: the address a segment lands at
+//! once the image is rebased to `USER_VM_BASE`. Each case is a kernel panic or
 //! a forbidden mapping before the fix; each must be an error return after it,
-//! with the kernel intact.
+//! with the kernel intact. A library is the program's own to load (libc's
+//! `dlopen`), so a crafted one is that program's to refuse, and its loader's
+//! host tests (`toyos-libc-copies`) hold that.
 //!
-//! An executable's dynamic section is the program's own
-//! (`toyos::relocate`): the spawn cases crafted in one are answered either way,
-//! the kernel lives, and a child the kernel starts dies ([`dies`]). A real std
-//! image whose dynamic section names a form its own `_start` refuses exits
-//! [`REFUSED_STATUS`] with [`REFUSED_LINE`] ([`refuses_itself`]).
+//! An executable's dynamic section and thread-local storage are the program's
+//! own (`toyos::relocate`, `toyos::tls`): the spawn cases crafted in them are
+//! answered either way, the kernel lives, and a child the kernel starts dies
+//! ([`dies`]). A real std image whose dynamic section names what its own
+//! `_start` refuses exits [`REFUSED_STATUS`] with the line it says
+//! ([`refuses_itself`]).
 
 #[path = "../image.rs"]
 mod image;
@@ -307,29 +309,6 @@ fn spawn_dies(name: &str, bytes: &[u8]) {
     dies(name, spawn_result(name, bytes));
 }
 
-/// Load it and throw it away. These cases are about a *walk* the loader does,
-/// not about a header it can reject: a library whose `.gnu.hash` never
-/// terminates or whose TLS symbol resolves nowhere is still a library, and it
-/// may legitimately load with nothing in it. The assertion is that the kernel
-/// comes back — which the checks at the end of `main` make, and which the
-/// panic each of these used to raise made impossible.
-fn dlopen_survives(name: &str, bytes: &[u8]) {
-    let path = write_file(name, bytes);
-    drop(unsafe { libloading::Library::new(&path) });
-}
-
-/// `dlopen` must refuse this file. A success is the defect.
-fn dlopen_refused(name: &str, bytes: &[u8]) {
-    let path = write_file(name, bytes);
-    match unsafe { libloading::Library::new(&path) } {
-        Ok(lib) => {
-            drop(lib);
-            panic!("{name}: dlopen loaded an image the loader must refuse");
-        }
-        Err(e) => assert!(!format!("{e}").is_empty(), "{name}: dlopen error message"),
-    }
-}
-
 /// A minimal, honest exe: one PT_LOAD covering the whole file at vaddr 0.
 fn base_exe(size: usize) -> Elf {
     Elf::new(size).ph(Phdr::load(0, 0, size as u64, size as u64, PF_R | PF_X)).entry(0)
@@ -461,23 +440,6 @@ fn main() {
         )),
     );
 
-    // 10. A .gnu.hash whose chain array never terminates. The symbol-count
-    //     walk followed `chain[i] & 1` with no bound but the slice's own
-    //     assert, and a zeroed image never sets that bit.
-    dlopen_survives(
-        "gnu_hash_runaway.so",
-        &Elf::new(0x4000)
-            .ph(Phdr::load(0, 0, 0x4000, 0x4000, PF_R | PF_W))
-            .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
-            .dynamic(0x1000, &[(DT_GNU_HASH, 0x2000), (DT_STRTAB, 0x3000), (DT_STRSZ, 16)])
-            // nbuckets=1, symoffset=0, bloom_size=1, bloom_shift=0, bloom[0],
-            // buckets[0]=1 — then chains, all zero to the end of the image.
-            .poke(0x2000, &1u32.to_le_bytes())
-            .poke(0x2008, &1u32.to_le_bytes())
-            .poke(0x2018, &1u32.to_le_bytes())
-            .build(),
-    );
-
     // 12. Two relocation tables the ceiling accepted, whose derived index did
     //     not fit: `DT_RELASZ` and `DT_PLTRELSZ` were bounded apart and both
     //     fed one index the kernel built at spawn, 2.7 MiB in a single `Vec`.
@@ -526,11 +488,6 @@ fn main() {
         spawn_dies("too_many_needed_libs", &elf.dynamic(0x1000, &tags).build());
     }
 
-    // 11. A DTPMOD64 relocation naming a TLS symbol no loaded module defines.
-    //     Its two resolvers panicked where every other unresolved-symbol path
-    //     in the loader logs and carries on.
-    dlopen_survives("dtpmod_unresolved.so", &so_with_dtpmod());
-
     // 13. A RELATIVE write beginning in a page's last seven bytes: r_offset
     //     0x1FFE + 8 crosses 0x2000, which the kernel's per-page applier dropped.
     spawn_dies(
@@ -544,50 +501,28 @@ fn main() {
             .build(),
     );
 
-    // 15. `.dynsym`, `.dynstr` and `.rela.dyn` placed inside the module's own
-    //     writable window. The loader holds a `&[u8]` over each across the
-    //     writes, and the window relocations were bounded to began 2 MiB-rounded
-    //     *down* from the first writable byte — so this image loaded, and the
-    //     borrow and the write covered the same bytes.
-    dlopen_refused("tables_in_write_window.so", &so_with_tables_in_write_window());
-
-    // 16. The other half of that rounding: a RELATIVE write below the first
-    //     writable byte, which `page_prot` maps `ReadExec` in every process.
-    dlopen_refused("reloc_below_writable.so", &so_with_reloc_below_writable());
-
-    // 17. An image whose lowest vaddr is not 0. Every window the loader
-    //     computes is image-relative and every `r_offset` is a vaddr, so the
-    //     two sit `vaddr_min` apart: a relocation validated inside the writable
-    //     window lands that many bytes lower in the image — here inside
-    //     `.dynsym`, inside the borrow, inside a `ReadExec` page.
-    dlopen_refused("vaddr_min_shift.so", &so_with_non_zero_vaddr_min());
-
     // 18. The values a file writes, not the places: each of these was an
     //     overflow panic in the kernel, reached by writing the file to /tmp.
     values_are_bounded_by_the_image();
-
-    // 14. A cross-module initial-exec TLS reference resolves to `S + A - tp`.
-    f13_cross_module_addend_is_kept();
 
     // 19. A relocation naming a symbol the executable's short-read `.dynsym` does
     //     not hold, which the kernel refused by name while it read one.
     globdat_past_short_dynsym();
 
-    // 20. The apply-time TLS refusals, each named by its reason in the log.
-    tls_apply_time_refusals_are_reached();
+    // 20. Thread-local references an executable's own start refuses.
+    executable_tls_refs_die();
 
     // 21. A program header table no `PT_LOAD` maps: the one segment's file
     //     bytes start at 0x1000, past the table at 0x40. Its vaddr is 0, so
-    //     `rebase_base` and `load_shared_lib`'s vaddr-0 check pass it and only
-    //     the table refuses it, in `spawn` and in `load_shared_lib` alike.
+    //     `rebase_base` passes it and only the table refuses it.
     let unmapped = Elf::new(0x2000).ph(Phdr::load(0x1000, 0, 0x1000, 0x1000, PF_R | PF_X)).entry(0).build();
     spawn_refused("phdrs_unmapped", &unmapped);
-    dlopen_refused("phdrs_unmapped.so", &unmapped);
 
-    // 22. This program's own image, a library to load in one copy and a `RELR`
-    //     table in another: its `_start` refuses both before it writes a word.
-    refuses_itself("needs_a_library", DT_NEEDED as u64);
-    refuses_itself("carries_relr", DT_RELR);
+    // 22. This program's own image, a `RELR` table in one copy, which its
+    //     `_start` refuses before it writes a word, and a library in another,
+    //     which its start refuses before `main`, since it links no loader.
+    refuses_itself("carries_relr", DT_RELR, REFUSED_LINE);
+    refuses_itself("needs_a_library", DT_NEEDED as u64, NO_LIBRARY_LINE);
 
     // The kernel heap is intact: allocate and touch enough to walk it, then
     // prove the real loader still works.
@@ -610,116 +545,10 @@ fn main() {
     println!("crafted ELF derivations rejected, kernel intact");
 }
 
-/// A library that loads far enough to reach `apply_dtpmod_relocs`, carrying
-/// one DTPMOD64 whose symbol is undefined here and defined nowhere else.
-///
-/// Everything in it exists to get past a check: PT_TLS so the module is given
-/// a DTV id at all, a writable PT_LOAD so the relocation's `r_offset` is
-/// inside the private window the loader validates against, and an SHT_DYNSYM
-/// section header so `r_sym` is inside a symbol table.
-fn so_with_dtpmod() -> Vec<u8> {
-    Elf::new(0x5000)
-        .ph(Phdr::load(0, 0, 0x4000, 0x20_0000, PF_R | PF_X))
-        .ph(Phdr::load(0x4000, 0x20_0000, 0x1000, 0x20_0000, PF_R | PF_W))
-        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x100, vaddr: 0x100, filesz: 0, memsz: 8, align: 8 })
-        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
-        .sections(0x3800, 1, 64)
-        .dynamic(
-            0x1000,
-            &[
-                (DT_SYMTAB, 0x2000),
-                (DT_STRTAB, 0x3000),
-                (DT_STRSZ, 0x100),
-                (DT_RELA, 0x2800),
-                (DT_RELASZ, 24),
-            ],
-        )
-        // sym[1]: undefined (st_shndx == 0), so resolution goes cross-module.
-        .sym(0x2018, 1, 6 /* STT_TLS */, 0, 0)
-        .poke(0x3001, b"tls_nowhere\0")
-        .rela(0x2800, 0x20_0000, (1u64 << 32) | R_X86_64_DTPMOD64, 0)
-        .shdr(0x3800, SHT_DYNSYM, 0x2000, 48, 24)
-        .build()
-}
-
-/// Text at `[0, 0x1000)`, writable data at `[0x1000, 0x5000)`, and every table
-/// the loader reads inside that writable range. `rw_lo & !(2 MiB - 1)` is 0, so
-/// the window the old bound permitted was the whole image.
-fn so_with_tables_in_write_window() -> Vec<u8> {
-    Elf::new(0x5000)
-        .ph(Phdr::load(0, 0, 0x1000, 0x1000, PF_R | PF_X))
-        .ph(Phdr::load(0x1000, 0x1000, 0x4000, 0x4000, PF_R | PF_W))
-        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
-        .sections(0x3800, 1, 64)
-        .dynamic(0x1000, &[
-            (DT_SYMTAB, 0x2000),
-            (DT_STRTAB, 0x3000),
-            (DT_STRSZ, 0x100),
-            (DT_RELA, 0x2800),
-            (DT_RELASZ, 24),
-        ])
-        .sym(0x2018, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
-        .poke(0x3001, b"in_the_window\0")
-        // Inside the writable range either way, so the refusal is the tables'.
-        .rela(0x2800, 0x1400, R_X86_64_RELATIVE, 0)
-        .shdr(0x3800, SHT_DYNSYM, 0x2000, 48, 24)
-        .build()
-}
-
-/// The same shape with its tables in the text segment, and one RELATIVE write
-/// at `0x100` — below `rw_lo`, inside what the rounded-down window permitted.
-fn so_with_reloc_below_writable() -> Vec<u8> {
-    Elf::new(0x5000)
-        .ph(Phdr::load(0, 0, 0x1000, 0x1000, PF_R | PF_X))
-        .ph(Phdr::load(0x1000, 0x1000, 0x4000, 0x4000, PF_R | PF_W))
-        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x600, vaddr: 0x600, filesz: 0x200, memsz: 0x200, align: 8 })
-        .sections(0x900, 1, 64)
-        .dynamic(0x600, &[
-            (DT_SYMTAB, 0x200),
-            (DT_STRTAB, 0x300),
-            (DT_STRSZ, 0x100),
-            (DT_RELA, 0x800),
-            (DT_RELASZ, 24),
-        ])
-        .sym(0x218, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
-        .poke(0x301, b"below_the_window\0")
-        .rela(0x800, 0x100, R_X86_64_RELATIVE, 0)
-        .shdr(0x900, SHT_DYNSYM, 0x200, 48, 24)
-        .build()
-}
-
-/// Text at vaddr `[0x4000, 0x8000)`, data at `[0x8000, 0xa000)`, so the image
-/// begins at `vaddr_min = 0x4000` and the image-relative writable window is
-/// `[0x4000, 0x6000)`. `.dynsym` is at image `[0x100, 0x130)` — outside that
-/// window — and the one RELATIVE entry names vaddr `0x4100`, which is inside
-/// it. `ModuleImage::slice` subtracts `vaddr_min`, so the write lands at image
-/// `0x100`: inside `.dynsym`, and inside a page mapped `ReadExec`.
-fn so_with_non_zero_vaddr_min() -> Vec<u8> {
-    Elf::new(0x6000)
-        .ph(Phdr::load(0, 0x4000, 0x4000, 0x4000, PF_R | PF_X))
-        .ph(Phdr::load(0x4000, 0x8000, 0x2000, 0x2000, PF_R | PF_W))
-        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x600, vaddr: 0x4600, filesz: 0x200, memsz: 0x200, align: 8 })
-        .entry(0x4000)
-        .sections(0x900, 1, 64)
-        .dynamic(0x600, &[
-            (DT_SYMTAB, 0x4100),
-            (DT_STRTAB, 0x4300),
-            (DT_STRSZ, 0x100),
-            (DT_RELA, 0x4800),
-            (DT_RELASZ, 24),
-        ])
-        .sym(0x118, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
-        .poke(0x301, b"shifted\0")
-        .rela(0x800, 0x4100, R_X86_64_RELATIVE, 0)
-        .shdr(0x900, SHT_DYNSYM, 0x100, 48, 24)
-        .build()
-}
-
-/// Every file-chosen value the loader turns into an address or a thread-pointer
-/// offset, set to one no image holds: a `RELATIVE` addend, a TPOFF addend, a
-/// symbol's `st_value`, `DT_INIT_ARRAY`. Each is refused where the kernel reads
-/// it, a library's, and dies where it no longer does, an executable's; the
-/// kernel living through them is what the checks at the end of `main` assert.
+/// Every file-chosen value an executable's start turns into an address or a
+/// thread-pointer offset, set to one no image holds: a `RELATIVE` addend, a
+/// TPOFF addend, a symbol's `st_value`. Each child dies; the kernel living
+/// through them is what the checks at the end of `main` assert.
 fn values_are_bounded_by_the_image() {
     // RELATIVE `B + A` with `A = i64::MAX`: `USER_VM_BASE + A` overflowed.
     spawn_dies(
@@ -746,19 +575,6 @@ fn values_are_bounded_by_the_image() {
         spawn_dies("export_past_image", &exe.build());
     }
 
-    dlopen_refused("so_relative_addend_past_image.so", &so_with(&[], &[(0x1400, 0, R_X86_64_RELATIVE, i64::MAX)], None));
-    dlopen_refused("so_tpoff_addend_past_tls.so", &so_with(&[], &[(0x1400, 0, R_X86_64_TPOFF64, i64::MIN)], Some(16)));
-    dlopen_refused(
-        "so_init_array_past_image.so",
-        &so_with(&[(DT_INIT_ARRAY, u64::MAX), (DT_INIT_ARRAYSZ, 8)], &[], None),
-    );
-    let far = so_with(&[], &[], None);
-    let far = patch_sym(far, 0x218, 1, (STB_GLOBAL << 4) | STT_FUNC, 1, FAR_VALUE);
-    let path = write_file("so_export_past_image.so", &far);
-    if let Ok(lib) = unsafe { libloading::Library::new(&path) } {
-        let found = unsafe { lib.get::<*const u8>(FAR.as_bytes()) }.is_ok();
-        panic!("so_export_past_image.so: dlopen loaded it (dlsym found {FAR}: {found})");
-    }
 }
 
 const FAR: &str = "far";
@@ -791,117 +607,12 @@ fn exe_with(tags: &[(i64, u64)], relas: &[(u64, u64, i64)], tls: Option<u64>) ->
     elf
 }
 
-/// A library laid out as [`so_with_reloc_below_writable`] is — text and every
-/// table in `[0, 0x1000)`, writable data at `[0x1000, 0x5000)` — with these
-/// extra dynamic tags, relocations `(r_offset, r_sym, type, addend)`, and a
-/// `PT_TLS` of `tls` bytes when asked.
-fn so_with(tags: &[(i64, u64)], relas: &[(u64, u32, u64, i64)], tls: Option<u64>) -> Vec<u8> {
-    let mut all = vec![(DT_SYMTAB, 0x200), (DT_STRTAB, 0x300), (DT_STRSZ, 0x100)];
-    if !relas.is_empty() {
-        all.extend([(DT_RELA, 0x800), (DT_RELASZ, 24 * relas.len() as u64)]);
-    }
-    all.extend_from_slice(tags);
-    let mut elf = Elf::new(0x5000)
-        .ph(Phdr::load(0, 0, 0x1000, 0x1000, PF_R | PF_X))
-        .ph(Phdr::load(0x1000, 0x1000, 0x4000, 0x4000, PF_R | PF_W))
-        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x600, vaddr: 0x600, filesz: 0x200, memsz: 0x200, align: 8 })
-        .sections(0x900, 1, 64)
-        .dynamic(0x600, &all)
-        .poke(0x301, FAR.as_bytes())
-        .shdr(0x900, SHT_DYNSYM, 0x200, 48, 24);
-    if let Some(memsz) = tls {
-        elf = elf.ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x1800, vaddr: 0x1800, filesz: 0, memsz, align: 16 });
-    }
-    for (i, &(offset, sym, r_type, addend)) in relas.iter().enumerate() {
-        elf = elf.rela(0x800 + 24 * i, offset, ((sym as u64) << 32) | r_type, addend);
-    }
-    elf.build()
-}
-
-/// One `Elf64_Sym` written into built bytes.
-fn patch_sym(mut bytes: Vec<u8>, off: usize, st_name: u32, st_info: u8, st_shndx: u16, st_value: u64) -> Vec<u8> {
-    bytes[off..off + 4].copy_from_slice(&st_name.to_le_bytes());
-    bytes[off + 4] = st_info;
-    bytes[off + 6..off + 8].copy_from_slice(&st_shndx.to_le_bytes());
-    bytes[off + 8..off + 16].copy_from_slice(&st_value.to_le_bytes());
-    bytes
-}
-
-thread_local! {
-    // A non-empty static TLS block, so `dlopen` runs the TPOFF pass at all.
-    static F13_KEEP_TLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// psABI `R_X86_64_TPOFF64` is `S + A - tp`. Two references to one cross-module
-/// symbol, addends 0 and `ADDEND`, are differenced so the kernel-side absolute
-/// parts cancel and the gap is the addend alone — `ADDEND` kept, 0 dropped.
-fn f13_cross_module_addend_is_kept() {
-    const ADDEND: i64 = 0x140;
-    F13_KEEP_TLS.with(|c| c.set(c.get()));
-
-    // `defs` loads first so it resolves `refs`'s TPOFF; both held to the read.
-    let defs = write_file("f13_defs.so", &tls_defs_so(b"xtls", 0x200));
-    let refs = write_file("f13_refs.so", &tls_refs_so(b"xtls", ADDEND));
-    let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen f13_defs.so");
-    let lib_refs = unsafe { libloading::Library::new(&refs) }.expect("dlopen f13_refs.so");
-
-    let read = |name: &[u8]| -> u64 {
-        let sym = unsafe { lib_refs.get::<*const u64>(name) }
-            .unwrap_or_else(|e| panic!("dlsym {}: {e}", String::from_utf8_lossy(name)));
-        let addr: *const u64 = *sym;
-        unsafe { addr.read() }
-    };
-    let v0 = read(b"probe0");
-    let vn = read(b"probeN");
-    assert_eq!(
-        vn.wrapping_sub(v0) as i64,
-        ADDEND,
-        "cross-module TPOFF dropped the addend: probe0={v0:#x} probeN={vn:#x}",
-    );
-    drop(lib_refs);
-    drop(lib_defs);
-}
-
-/// Defines `name` (`STT_TLS`, offset 8) for a cross-module `TPOFF64`, in a
-/// `memsz`-byte `PT_TLS`.
-fn tls_defs_so(name: &[u8; 4], memsz: u64) -> Vec<u8> {
-    Elf::new(0x2000)
-        .ph(Phdr::load(0, 0, 0x2000, 0x2000, PF_R | PF_X))
-        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x1800, vaddr: 0x1800, filesz: 0, memsz, align: 8 })
-        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
-        .sections(0x1C00, 1, 64)
-        .dynamic(0x1000, &[(DT_SYMTAB, 0x1200), (DT_STRTAB, 0x1400), (DT_STRSZ, 0x40)])
-        // sym[1] `name`: defined (st_shndx == 1), STT_TLS, offset 8 in the block.
-        .sym(0x1218, 1, (STB_GLOBAL << 4) | STT_TLS, 1, 8)
-        .poke(0x1401, name)
-        .shdr(0x1C00, SHT_DYNSYM, 0x1200, 48, 24)
-        .build()
-}
-
-/// The apply-time TLS refusals, which no `r_sym == 0` case reaches because
-/// `rela::parse` refuses those before either apply pass runs. Each refuses a
-/// *resolved* `S + A` outside the defining module's `PT_TLS`, named
-/// `TLS_OUTSIDE_SEGMENT` beside the file in the kernel log; the executable's
-/// spawn dies instead, its tables its own.
-fn tls_apply_time_refusals_are_reached() {
-    // dlopen, the module's own symbol: `apply_tpoff_relocs` refuses, and the
-    // mapping guard takes the library back down.
-    dlopen_refused("tls_apply_refs.so", &so_tls_ref_past_segment());
-
-    // spawn, the executable's own symbol, which `apply_tls_relocs` refused.
+/// Thread-local references an executable's own start refuses: one to its own
+/// symbol whose `S + A` leaves its `PT_TLS`, and one to a library's symbol,
+/// which no executable may reach with the initial-exec model.
+fn executable_tls_refs_die() {
     spawn_dies("tls_apply_spawn", &exe_tls_ref_past_segment());
 
-    // dlopen, another module's symbol: `S + A` (8 + 0x140) leaves the defining
-    // module's 0x20-byte `PT_TLS`. Named apart from f13's `xtls`, which stays
-    // loaded (`dlclose` unloads nothing) and would be the module resolved.
-    let defs = write_file("f13_defs_small.so", &tls_defs_so(b"ytls", 0x20));
-    let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen f13_defs_small.so");
-    dlopen_refused("f13_refs_past.so", &tls_refs_so(b"ytls", 0x140));
-    drop(lib_defs);
-
-    // `S + A` (8 + `i64::MAX`) inside a `PT_TLS` declared past 2^63 bytes: only
-    // `S + A - tp` leaves an `i64`.
-    const PAST_I64: u64 = 0x8000_0000_0000_0010;
     let dep = "tpoff_overflow_dep.so";
     // `.dynstr` at 0x1800 holds "wtls\0<dep>\0".
     let exe = exe_with(&[(DT_NEEDED, 6)], &[(0x2000, (1u64 << 32) | R_X86_64_TPOFF64, i64::MAX)], None)
@@ -909,11 +620,6 @@ fn tls_apply_time_refusals_are_reached() {
         .poke(0x1801, b"wtls\0")
         .poke(0x1806, dep.as_bytes());
     spawn_dies("tpoff_overflow_spawn", &exe.build());
-
-    let defs = write_file("tpoff_overflow_defs.so", &tls_defs_so(b"vtls", PAST_I64));
-    let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen tpoff_overflow_defs.so");
-    dlopen_refused("tpoff_overflow.so", &tls_refs_so(b"vtls", i64::MAX));
-    drop(lib_defs);
 }
 
 /// An executable needing a library, whose `.gnu.hash` counts 1000 symbols
@@ -937,27 +643,6 @@ fn globdat_past_short_dynsym() {
     spawn_dies("globdat_past_dynsym", &exe.build());
 }
 
-/// A shared object defining its own `xtls` (`STT_TLS`, offset 8) in a 0x20-byte
-/// `PT_TLS`, with a `TPOFF64` against it whose `S + A` (0x148) leaves it.
-fn so_tls_ref_past_segment() -> Vec<u8> {
-    Elf::new(0x5000)
-        .ph(Phdr::load(0, 0, 0x1000, 0x1000, PF_R | PF_X))
-        .ph(Phdr::load(0x1000, 0x1000, 0x4000, 0x4000, PF_R | PF_W))
-        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x600, vaddr: 0x600, filesz: 0x200, memsz: 0x200, align: 8 })
-        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x1800, vaddr: 0x1800, filesz: 0, memsz: 0x20, align: 16 })
-        .sections(0x900, 1, 64)
-        .dynamic(0x600, &[
-            (DT_SYMTAB, 0x200), (DT_STRTAB, 0x300), (DT_STRSZ, 0x100),
-            (DT_RELA, 0x800), (DT_RELASZ, 24),
-        ])
-        // sym[1] xtls: defined STT_TLS, offset 8 in the block.
-        .sym(0x218, 1, (STB_GLOBAL << 4) | STT_TLS, 1, 8)
-        .poke(0x301, b"xtls\0")
-        .rela(0x800, 0x1000, (1u64 << 32) | R_X86_64_TPOFF64, 0x140)
-        .shdr(0x900, SHT_DYNSYM, 0x200, 48, 24)
-        .build()
-}
-
 /// An executable defining `xtls` (`STT_TLS`, offset 8) in a 0x20-byte `PT_TLS`,
 /// with a `TPOFF64` against it whose `S + A` (0x148) leaves the segment.
 fn exe_tls_ref_past_segment() -> Vec<u8> {
@@ -977,32 +662,11 @@ fn exe_tls_ref_past_segment() -> Vec<u8> {
         .build()
 }
 
-/// Two `TPOFF64` relocations against the undefined `name`, addends 0 and
-/// `addend`, patching exported data `probe0`/`probeN` a reader can difference.
-fn tls_refs_so(name: &[u8; 4], addend: i64) -> Vec<u8> {
-    Elf::new(0x4000)
-        .ph(Phdr::load(0, 0, 0x2000, 0x2000, PF_R | PF_X))
-        .ph(Phdr::load(0x2000, 0x2000, 0x2000, 0x2000, PF_R | PF_W))
-        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
-        .sections(0x1C00, 1, 64)
-        .dynamic(0x1000, &[
-            (DT_SYMTAB, 0x1200), (DT_STRTAB, 0x1400), (DT_STRSZ, 0x40),
-            (DT_RELA, 0x1600), (DT_RELASZ, 48),
-        ])
-        // sym[1] `name` undefined (shndx 0) → cross-module; sym[2]/[3] the probes.
-        .sym(0x1218, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
-        .sym(0x1230, 6, STB_GLOBAL << 4, 2, 0x2000)
-        .sym(0x1248, 13, STB_GLOBAL << 4, 2, 0x2008)
-        .poke(0x1401, name)
-        .poke(0x1406, b"probe0\0probeN\0")
-        .rela(0x1600, 0x2000, (1u64 << 32) | R_X86_64_TPOFF64, 0)
-        .rela(0x1618, 0x2008, (1u64 << 32) | R_X86_64_TPOFF64, addend)
-        .shdr(0x1C00, SHT_DYNSYM, 0x1200, 96, 24)
-        .build()
-}
-
 /// What `toyos::relocate` writes to its stderr, `fd:2`, when it refuses its own program.
 const REFUSED_LINE: &str = "this program's relocations are refused: it cannot start\n";
+/// What std's start writes there for a program that names a library and links
+/// no loader, as this one links none.
+const NO_LIBRARY_LINE: &str = "this program names libraries and links no loader: it cannot start\n";
 /// The status it exits with then.
 const REFUSED_STATUS: i32 = 127;
 /// The argument a refused copy is handed, which its `main` panics on.
@@ -1031,9 +695,9 @@ fn own_image_tagged(tag: u64) -> Vec<u8> {
 }
 
 /// A copy of this program tagged `tag` exits [`REFUSED_STATUS`] and says
-/// [`REFUSED_LINE`] on the stderr it is endowed. Endowed none, it says
-/// nothing and exits the same.
-fn refuses_itself(name: &str, tag: u64) {
+/// `line` on the stderr it is endowed. Endowed none, it says nothing and
+/// exits the same.
+fn refuses_itself(name: &str, tag: u64, line: &str) {
     let path = write_file(name, &own_image_tagged(tag));
     let out = Command::new(&path)
         .arg(REFUSED_COPY)
@@ -1041,7 +705,7 @@ fn refuses_itself(name: &str, tag: u64) {
         .unwrap_or_else(|e| panic!("{name}: spawn: {e}"));
     let said = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(REFUSED_STATUS), "{name}: exited {:?}, said {said:?}", out.status);
-    assert_eq!(said, REFUSED_LINE, "{name}");
+    assert_eq!(said, line, "{name}");
 
     let child = spawn_argv(&path, &format!("{path}\0{REFUSED_COPY}\0"))
         .unwrap_or_else(|e| panic!("{name} without a stderr: spawn gave {e:?}"));

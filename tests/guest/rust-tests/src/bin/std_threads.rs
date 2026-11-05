@@ -153,5 +153,5 @@ fn main() {
 
 /// The calling thread's id, as the affinity calls name it.
 fn own() -> u64 {
-    u64::from(toyos_abi::current_tid().0)
+    u64::from(toyos::tls::current_tid().0)
 }
