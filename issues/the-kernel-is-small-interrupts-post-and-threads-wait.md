@@ -16,8 +16,9 @@ kernel's part of a restart, and named module tests hold each program's
 
 ## What is left, in order
 
-1. **What step 9's file half left** (stage 4): `SYS_GETCWD`, and the
-   measurement that half owes.
+1. **What step 9's file half left** (stage 4): its windows, by stage 6
+   step 2's rule. Its lines are measured: `kernel/src` held 230 files and
+   59,012 lines before #1152 and 223 and 56,800 after #1182.
 2. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
    where firmware put it, handed over in 4 KiB pages with its MSI-X table's
    page, under the owner's Q2 ruling. The orchestrator ruled on #900 that
@@ -158,15 +159,15 @@ Beside that order, each waiting on something outside it:
       an empty `/` (`toyos::files`'
       `an_empty_view_names_nothing_but_an_empty_root`). Not this step's: a
       declared row's own view, which still holds the whole tree but
-      `/state` (the isolation track's stage 2), and `SYS_GETCWD` (step 9's
-      file half, item 1 above).
+      `/state` (the isolation track's stage 2).
    9. **Delete the kernel storage stack.** **Partly done** (#536). Two
       halves are left, and they land apart:
       - **The file half**: the VFS, tmpfs (`tmpfs.rs`, `fs_rename.rs`), the
         page cache (`file_cache.rs`) and the file syscalls. **Done but for
-        two items** (#1152): `SYS_GETCWD` (21) stays, since the kernel
-        records a spawn's starting directory, which the SDK reads once
-        (`toyos::files`); and the measurement below is owed. `/tmp` is the
+        its windows** (#1152, #1182; item 1 above). The kernel keeps no
+        working directory: a spawn states its child's in the child's `PWD`,
+        which the SDK writes and the child's SDK starts from
+        (`toyos::files::starting_in`). `/tmp` is the
         MEMORY file server's, one for the machine, of which each installed
         package's `/tmp` is its own directory (#1181); per session, as the owner
         ruled ("Per session", 2026-10-03), is the isolation track's stage 3.
