@@ -163,19 +163,25 @@ impl Loading {
     }
 
     /// Publish `module` under [`next_id`](Self::next_id).
-    pub fn add(&mut self, mut module: Module) -> &'static Module {
-        module.id = self.next_id();
-        let module: &'static Module = alloc::boxed::Box::leak(alloc::boxed::Box::new(module));
-        let at = (module as *const Module).cast_mut();
-        // SAFETY: the last module published, never freed; the list is held.
-        match unsafe { self.0.last.load(Ordering::Relaxed).as_ref() } {
-            Some(last) => last.next.store(at, Ordering::Release),
-            None => self.0.first.store(at, Ordering::Release),
-        }
-        self.0.last.store(at, Ordering::Relaxed);
-        self.0.count.store(module.id, Ordering::Release);
-        module
+    pub fn add(&mut self, module: Module) -> &'static Module {
+        publish(self.0, module)
     }
+}
+
+/// Publish `module` in `list` under the next id: the list's one writer, which
+/// holds it or is the program's start, before any other thread exists.
+fn publish(list: &'static Modules, mut module: Module) -> &'static Module {
+    module.id = list.count.load(Ordering::Relaxed) + 1;
+    let module: &'static Module = alloc::boxed::Box::leak(alloc::boxed::Box::new(module));
+    let at = (module as *const Module).cast_mut();
+    // SAFETY: the last module published, never freed.
+    match unsafe { list.last.load(Ordering::Relaxed).as_ref() } {
+        Some(last) => last.next.store(at, Ordering::Release),
+        None => list.first.store(at, Ordering::Release),
+    }
+    list.last.store(at, Ordering::Relaxed);
+    list.count.store(module.id, Ordering::Release);
+    module
 }
 
 impl Drop for Loading {
@@ -260,9 +266,7 @@ pub unsafe fn start(header: *const u8, name: &[u8]) {
     // No panic here, which reads a thread-local: an `argv[0]` holds no NUL.
     let name = alloc::ffi::CString::new(name).unwrap_or_default();
     let name: &'static CStr = alloc::boxed::Box::leak(name.into_boxed_c_str());
-    let mut first = Loading(list);
-    first.add(Module::new(name, image, tls));
-    core::mem::forget(first);
+    publish(list, Module::new(name, image, tls));
     let Ok(at) = reserve(area.size, area.align) else {
         refuse(b"no memory for this program's thread-local storage: it cannot start\n");
     };

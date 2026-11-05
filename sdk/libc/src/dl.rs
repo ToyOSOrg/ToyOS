@@ -115,7 +115,7 @@ fn open(loading: &mut Loading, published: &mut Published, name: &str, inits: &mu
     // its own protection once nothing more is written.
     // SAFETY: placed anywhere, so it replaces nothing.
     let base = unsafe { syscall::vm_reserve(plan.span, VmProt::ReadWrite, VmAt::ANYWHERE) }.map_err(Refused::Memory)?;
-    let reservation = Reservation { at: base, len: plan.span };
+    let mut reservation = Reservation { at: base, len: plan.span, published: false };
     // SAFETY: the fresh, zeroed reservation, this function's alone.
     plan.lay(bytes, unsafe { core::slice::from_raw_parts_mut(base, plan.span) })?;
     // SAFETY: laid out whole and writable, and reached by nothing else until published.
@@ -146,7 +146,7 @@ fn open(loading: &mut Loading, published: &mut Published, name: &str, inits: &mu
     };
     let name = alloc::ffi::CString::new(name).map_err(|_| "dlopen: a library path holds a NUL")?;
     let name: &'static core::ffi::CStr = alloc::boxed::Box::leak(name.into_boxed_c_str());
-    core::mem::forget(reservation);
+    reservation.published = true;
     let module = loading.add(Module::new(name, image, tls));
     if let Some((at, count)) = tables.init_array {
         inits.push((start + at as usize, count));
@@ -155,16 +155,19 @@ fn open(loading: &mut Loading, published: &mut Published, name: &str, inits: &mu
     Ok(module)
 }
 
-/// A reservation released unless it is published.
+/// A library's memory, released unless it was published.
 struct Reservation {
     at: *mut u8,
     len: usize,
+    published: bool,
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        // SAFETY: a reservation nothing was published over.
-        let _ = unsafe { syscall::vm_release(self.at, self.len) };
+        if !self.published {
+            // SAFETY: a reservation nothing was published over.
+            let _ = unsafe { syscall::vm_release(self.at, self.len) };
+        }
     }
 }
 

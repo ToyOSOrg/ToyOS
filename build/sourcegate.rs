@@ -138,7 +138,6 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/drivers/panic_console/mod.rs", 3),
     ("kernel/src/arch/x86_64/hw.rs", 1),
     ("kernel/src/mm/mmio.rs", 2),
-    ("kernel/src/mm/region.rs", 2),
     ("kernel/src/object/paged.rs", 1),
     ("kernel/src/process.rs", 1),
     ("kernel/src/sched/driver.rs", 2),

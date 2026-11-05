@@ -84,11 +84,11 @@ mod tests {
                 for p_align in [0, 1, 2, 4, 8, 16, 32, 64, 4096, 1 << 21] {
                     let a = area(variant, memsz, p_align, DTV, tcb).unwrap();
                     let p = p_align.max(1);
-                    assert_eq!(a.data % p, 0, "{variant:?} memsz {memsz} align {p_align}: data off its alignment");
-                    assert!(a.align.is_power_of_two() && a.align >= 16 && a.align % p == 0);
+                    assert!(a.data.is_multiple_of(p), "{variant:?} memsz {memsz} align {p_align}: data off its alignment");
+                    assert!(a.align.is_power_of_two() && a.align >= 16 && a.align.is_multiple_of(p));
                     assert!(a.data >= DTV, "the data meets the DTV");
                     assert!(a.data + memsz <= a.size && a.tp + tcb <= a.size, "past the area's end");
-                    assert_eq!(a.tp % 16, 0, "a thread pointer off 16");
+                    assert!(a.tp.is_multiple_of(16), "a thread pointer off 16");
                     match variant {
                         Variant::II => {
                             assert_eq!(a.data + memsz.next_multiple_of(p), a.tp, "variant II's data ends at TP");
