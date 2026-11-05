@@ -7,11 +7,11 @@ opened: 2026-11-02
 # A user copy a short way above its source modulo 4 KiB still costs
 
 `sdk/libc`'s `copy_forward` (`sdk/libc/src/arch/x86_64.rs`) copies highest
-first when it has at least 4 KiB and at most 1 MiB, its destination is
+first when it has at least 256 bytes and at most 1 MiB, its destination is
 1 to 511 bytes above its source modulo 4096, and the two ranges are disjoint.
-Every other copy is one `rep movsb`, and a copy under 4 KiB never asks the
-distance: round 7 measured every 64 B to 1 KiB copy 5-7% slower on the AMD
-when every copy asked.
+Every other copy is one `rep movsb`. A copy under 256 bytes never asks the
+distance, and the check is inline for the rest: round 7 measured every 64 B
+to 1 KiB copy 5-7% slower on the AMD when every copy made a call to ask.
 
 The two benches stall over different windows, and the route covers both:
 - **AMD (Ryzen 7 4800U, Zen 2).** The processor judges store-to-load
@@ -47,12 +47,11 @@ destination `d` bytes above the source:
   The descending loop beat it at d = 16 there, 612 µs and 9.8 ms. At 4 MiB and
   d = 256, a distance that does not stall, it lost: 597 µs against 385.
 
-- **AMD, below 4 KiB.** These copies stall and are not routed. Round 8
-  (base a049276a6, two boots, p50s identical in both) read, at d = 0 and
-  d = 16: 256 B 30 and 90 ns, 1 KiB 31 and 270, 2 KiB 40 and 511 (base's
-  4 KiB: 60 and 992). Nothing below 256 B has been measured. Routing them
-  costs every copy from the new threshold up its out-of-line call: round
-  8's 4 KiB copies at d = 0, which take that call, read 0.97 of main's.
+- **AMD, below 4 KiB.** Round 8 (base a049276a6, two boots, p50s within
+  10%) read, at d = 0 and d = 16: 256 B 30 and 90 ns, 1 KiB 31 and 270,
+  2 KiB 40 and 511 (4 KiB: 60 and 992). Those copies are routed from 256 B
+  since round 9, which C6 judges. Nothing below 256 B is routed; round 9
+  measures 64 and 128 B.
 
 One T14 head boot read `mem.memcpy.64` at 6873 MB/s in all 15 rounds. The
 other three boots read 16649–18226. That copy is page-aligned at d = 0 and

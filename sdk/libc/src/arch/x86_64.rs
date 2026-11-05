@@ -21,20 +21,7 @@ unsafe extern "C" fn _start() -> ! {
 }
 
 /// Copy `n` bytes from `src` to `dest` as a forward copy would: correct for
-/// any `dest` not above an overlapping `src`. Returns `dest`, so `memcpy`
-/// can end in a jump to [`copy_long`] and a shorter copy runs one `rep movsb`
-/// behind one compare, with nothing held across a call.
-#[inline(always)]
-pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    if n >= ROUTED_LEAST {
-        // SAFETY: as this function's caller promises.
-        return unsafe { copy_long(dest, src, n) };
-    }
-    unsafe { movsb(dest, src, n) };
-    dest
-}
-
-/// [`copy_forward`] from [`ROUTED_LEAST`] up, out of line.
+/// any `dest` not above an overlapping `src`; returns `dest`.
 ///
 /// A forward copy whose destination is a short way above its source modulo
 /// 4 KiB loads each byte soon after storing to an unrelated address with the
@@ -42,18 +29,31 @@ pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) -> *m
 /// store-to-load forwarding eligibility by those bits alone (Software
 /// Optimization Guide for AMD Family 17h Models 30h and Greater Processors,
 /// 56305 rev. 3.02, §2.12), and Intel calls it 4K aliasing (Intel 64 and
-/// IA-32 Architectures Optimization Reference Manual). Copied highest first,
-/// every store such a load could match is 4 KiB minus the distance behind it
-/// and long retired. Only disjoint ranges go down.
+/// IA-32 Architectures Optimization Reference Manual). Such a copy of at
+/// least [`ROUTED_LEAST`] bytes jumps to [`copy_short_alias`]; every other copy
+/// is one `rep movsb`, behind the length compare and, from `ROUTED_LEAST`,
+/// the distance compare, both inline so no call is made.
+#[inline(always)]
+pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    // The distance modulo 4 KiB in 1..SHORT_ALIAS, as one compare.
+    if n >= ROUTED_LEAST && ((dest as usize).wrapping_sub(src as usize) % 4096).wrapping_sub(1) < SHORT_ALIAS - 1 {
+        // SAFETY: as this function's caller promises.
+        return unsafe { copy_short_alias(dest, src, n) };
+    }
+    unsafe { movsb(dest, src, n) };
+    dest
+}
+
+/// [`copy_forward`] at a short distance, out of line: highest first, so every
+/// store a load could match is 4 KiB minus the distance behind it and long
+/// retired, where the ranges are disjoint and the copy at most
+/// [`ROUTED_MOST`]; otherwise one `rep movsb`.
 #[inline(never)]
-unsafe fn copy_long(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    let distance = (dest as usize).wrapping_sub(src as usize) % 4096;
-    // `distance` in 1..SHORT_ALIAS, as one compare.
-    let short = distance.wrapping_sub(1) < SHORT_ALIAS - 1;
+unsafe fn copy_short_alias(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     // SAFETY: `n` is at least `ROUTED_LEAST`, above the loops' 64; down only
     // between disjoint ranges.
     unsafe {
-        if !short || n > ROUTED_MOST || (dest as usize).abs_diff(src as usize) < n {
+        if n > ROUTED_MOST || (dest as usize).abs_diff(src as usize) < n {
             movsb(dest, src, n);
         } else if has_avx() {
             copy_down_avx(dest, src, n);
@@ -77,15 +77,14 @@ unsafe fn movsb(dest: *mut u8, src: *const u8, n: usize) {
     }
 }
 
-/// The distance under which [`copy_long`] copies highest first.
+/// The distance under which [`copy_forward`] copies highest first.
 const SHORT_ALIAS: usize = 512;
 
-/// The shortest copy that asks where its ends sit. Shorter copies stall too
-/// (`issues/a-user-copy-a-short-way-above-its-source-modulo-4-kib-still-costs.md`)
-/// but take one `rep movsb` behind one compare.
-const ROUTED_LEAST: usize = 4096;
+/// The shortest copy that asks where its ends sit; a shorter one pays one
+/// compare over a bare `rep movsb`.
+const ROUTED_LEAST: usize = 256;
 
-/// The longest copy [`copy_long`] copies highest first. A longer one runs
+/// The longest copy [`copy_short_alias`] copies highest first. A longer one runs
 /// from beyond the caches, where the loop's stores read each line before
 /// writing it and measured slower than `rep movsb` at distances that do not
 /// stall.

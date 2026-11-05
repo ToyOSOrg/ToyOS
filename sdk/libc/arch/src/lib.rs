@@ -242,7 +242,7 @@ mod tests {
     fn a_forward_copy_agrees_at_every_page_distance() {
         for distance in (0..1024).chain([2048, 4032, 4095]) {
             for at in [0, 1, 17, 63] {
-                for n in [0, 1, 63, 64, 65, 127, 128, 200, 1000, 4095, 4096, 4097, 5000, 8192] {
+                for n in [0, 1, 63, 64, 65, 127, 128, 200, 255, 256, 257, 1000, 4096, 5000, 8192] {
                     // SAFETY: as `agrees_at` promises its copy.
                     agrees_at("copy_forward", |d, s, n| unsafe { _ = arch::copy_forward(d, s, n) }, distance, at, n);
                 }
@@ -279,8 +279,7 @@ mod tests {
     #[test]
     fn an_overlapping_forward_copy_a_page_apart_agrees() {
         for gap in [3584, 3600, 4000, 4080, 4095] {
-            // Every `n` at least 4096, the shortest copy that asks for the distance.
-            for over in [512, 600, 4096] {
+            for over in [1, 64, 500, 4096] {
                 let n = gap + over;
                 let base = pattern(n + gap);
                 let mut want = base.clone();
