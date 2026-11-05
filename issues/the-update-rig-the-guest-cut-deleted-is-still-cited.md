@@ -20,7 +20,7 @@ six lines in one file, each planning or describing a test on them:
 
 What it should name is the tier its test has now, and stage A of
 `issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md` gives
-it: `update_floor_is_the_images_own`, `update_refusals_boot_the_other_slot`
+it: `update_floor_is_the_images_own`, `update_refusals_are_named`
 and `update_grant_refuses_a_stray_partition` are host tests there and guest
 tests in the loader track, and the tree holds no `update_*` test today.
 

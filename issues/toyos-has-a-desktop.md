@@ -78,8 +78,9 @@ until the Rust target is upstream.
    waits on the users track
    (`issues/a-user-is-a-home-tree-and-a-login-row.md`).
 4. **Compositor services**: clipboard, drag and drop, notifications and
-   screenshots. Clipboard reads and screenshots are privileges granted under
-   the package track's request ∩ grant ∩ ceiling rule
+   screenshots. Clipboard reads and screenshots are privileges an app asks for
+   at run time, granted within the image's ceiling under the package track's
+   stage 6
    (`issues/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`).
 5. **Fractional scaling**: `issues/the-desktop-draws-at-the-panels-scale.md`.
 6. **Accessibility**: accesskit, keyboard-only navigation, high contrast.

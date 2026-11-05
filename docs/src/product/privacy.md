@@ -6,8 +6,9 @@ These are the user-visible rules. The mechanisms behind them are
 
 ## Permissions
 
-- Programs request resources at run time, and the answer, approval or denial,
-  can be remembered.
+- Programs ask for a right at run time, when they need it, and the answer,
+  approval or denial, can be remembered. There is no up-front permission
+  list.
 - Choosing a file grants that file, not its folder. Remembered access does not
   follow renames. Writable access to a document includes replacing it safely,
   scoped to that file.

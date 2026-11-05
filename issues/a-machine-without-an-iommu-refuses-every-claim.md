@@ -7,7 +7,11 @@ opened: 2026-09-29
 # A machine without an IOMMU refuses every claim; signed in-image drivers should claim there
 
 Owner ruling, 2026-09-29: on a machine with no IOMMU unit a driver signed and
-shipped in the ToyOS image may claim a device, and no other may.
+shipped in the ToyOS image may claim a device, and no other may. On
+2026-11-05, answering #1191's open decisions, the owner confirmed it is
+image-wide: any driver the signed image ships claims its device there with its
+ordinary claim, and no `system.toml` row grants DMA without an IOMMU per
+program.
 It is the same driver code as on a machine with a unit, never a second
 driver: the kernel's DMA layer hands it a physical address where there is no
 unit and a domain address where there is. A claim's space is an

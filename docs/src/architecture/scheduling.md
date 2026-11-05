@@ -10,6 +10,8 @@
 - CPU time is shared by jobs, not threads. A process's and its helpers'
   threads share one job, so helpers buy no extra share; authorised launchers
   create independent jobs.
+- Nothing reserves CPU time: no program is promised a budget, and nothing is
+  admitted against one.
 - Every job has equal weight, across users too. Window focus changes
   responsiveness, not sustained entitlement.
 - Each CPU runs EEVDF over the job groups it holds, and again among each

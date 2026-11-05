@@ -12,7 +12,7 @@ ToyOS is a general-purpose operating system written from scratch in Rust. Its ch
 - **Rust is first-class.** Prefer compile-time safety to runtime checks, and runtime checks to tests. Validate external representations once before constructing typed values; validate each later message at its own boundary. Nothing a type makes impossible needs a runtime test. A kernel object type and an application's protocol type are separate contracts.
 - **No silent debt.** Remove a discovered compromise or record its evidence, owner and exit in `issues/`. Filing it does not make it acceptable or complete. Never weaken audible or visual quality without the owner's explicit agreement.
 
-Never use a fixed delay where an event can be awaited. A wait has a failure timeout. A hardware-mandated delay with no notification is the exception, with the requirement cited at the operation.
+Never use a fixed delay where an event can be awaited. A wait has a failure timeout; on expiry it returns an error where its interface can carry one and otherwise reports the expiry. A hardware-mandated delay with no notification is the exception, with the requirement cited at the operation.
 
 ## Architecture and sources of truth
 

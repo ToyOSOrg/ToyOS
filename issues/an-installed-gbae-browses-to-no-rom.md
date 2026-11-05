@@ -32,7 +32,7 @@ Evidence, in a QEMU guest on `tests/images/proctreecase.toml`, a package launche
 **Exit**: an installed gbae, started from the desktop, loads a ROM the user
 picked from outside its own folder. The designed answer is the file picker,
 which hands an app the one file the user chose: the package track's stage 6
-(an app's rights are its request, the user's grant and the image's ceiling),
+(an app asks for a right at run time, within the image's ceiling),
 and the isolation track's "Sharing is granted, never reached"
 (`issues/every-program-sees-only-the-files-it-was-given.md`). Until then gbae
 plays only a ROM placed in its own folder and given on its command line.

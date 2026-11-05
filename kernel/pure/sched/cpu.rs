@@ -270,15 +270,9 @@ pub struct CpuSched<X: SchedPayload> {
     /// task", and why "the pick serves `rq` first whenever the RT band is
     /// occupied" is false.
     ///
-    /// **Superseded in design by the reservation model**
-    /// (`issues/cpu-time-is-a-band-and-not-a-reservation.md`), which
-    /// deletes the age, the chunk and the grant together: the deferral
-    /// above is bounded per *corpse* and not per CPU, so k corpses take k
-    /// consecutive grants, and a real-time band that briefly empties throws the
-    /// accumulated age away on every dispatch. What replaces it is a per-CPU
-    /// dying server holding an ordinary reservation, whose guarantee does not
-    /// depend on how many corpses are behind it or on how the other band's
-    /// occupancy happens to fall.
+    /// The deferral is bounded per *corpse* and not per CPU, so k corpses
+    /// take k consecutive grants, and a real-time band that briefly empties
+    /// throws the accumulated age away on every dispatch.
     ///
     /// **A queue and not a stack.** Two concurrent process teardowns put two
     /// corpses on one CPU; popping the end `keep_dying` pushes to would
