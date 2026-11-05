@@ -63,7 +63,8 @@ preallocated on internal storage, with keys that live for one boot.
   or growth. Swap adds capacity, not responsiveness.
 - Swapped memory may make a load, a store or a copying system call wait on
   storage. The wait advances with storage progress and is reported when
-  overdue; a timeout never turns it into an error.
+  overdue; a timeout never turns it into an error, and a non-blocking
+  descriptor does not cover the caller's own buffer.
 - A page is lost only when a running memory service establishes the loss: a
   failed read after the driver's recovery, a failed authentication or a device
   that is gone.

@@ -45,8 +45,8 @@ one is not a grant of device authority.
 
 Verified updates are prepared automatically. An OS update activates at a
 voluntary reboot, which the user may postpone; an app update activates while the
-app is stopped, with a per-app pause. There is one stable OS release, and no
-downgrade. A failed download or staging leaves the existing installation
+app is stopped, with a per-app pause. There is one stable OS
+release. A failed download or staging leaves the existing installation
 intact. Snapshots of app updates and a built-in backup
 product are not provided; backups belong to separately installed applications.
 

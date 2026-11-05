@@ -46,4 +46,6 @@ Each a stage: an image-based read-only system, a verified boot chain,
 anti-rollback against the machine in hand
 (`issues/the-anti-rollback-floor-is-a-firmware-variable.md`), pull-based
 updates from a release server over HTTPS with The Update Framework's roles and
-metadata, and content-addressed chunked delta updates.
+metadata, and content-addressed chunked delta updates. Until the verified
+boot chain, the loader is the one binary no signature covers, and a writable
+ESP is the gap.

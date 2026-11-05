@@ -37,9 +37,8 @@ DMA stays behind the IOMMU.
   errors, not evidence that isolation is absent. There is no machine-specific
   exception image.
 
-## External ports and firmware
+## Device firmware
 
-- A device behind an external port is never claimed by a userland driver.
 - The IOMMU does not stop a driver reflashing its own device's firmware.
 - Device firmware is loaded by its owning driver through its IOMMU domain. CPU
   microcode loading is privileged kernel work. Neither payload need be embedded

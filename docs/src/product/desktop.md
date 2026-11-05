@@ -39,7 +39,7 @@
   Minimal and discoverable; no glass or blur, since rendering is on the CPU.
 - **Window management**: floating and tiling.
 - **Toolkit**: ToyOS's own desktop software uses iced, on plain upstream iced,
-  and for now iced is the one toolkit the platform supports. ToyOS writes its
+  and in release one iced is the one toolkit the platform supports. ToyOS writes its
   own desktop environment rather than porting another.
 - **Language**: English and keyboard navigation at first. Language, keyboard
   layout, regional formats and time zone are independent choices; compact data
