@@ -13,6 +13,12 @@ toyos-logstream = { path = "../../lib/logstream" }
 toyos-elide = { path = "../../lib/elide" }
 toyos-inspect = { path = "../../lib/inspect" }
 toyos-wallclock = { path = "../../lib/wallclock" }
+# The supervisor's bound on the stop's flush, which the stop's catch-up keeps inside.
+toyos-quiesce = { path = "../../lib/quiesce" }
+
+[dev-dependencies]
+# A scratch `/log` for the volume's own tests.
+toyos-tmpdir = { path = "../../lib/tmpdir" }
 
 [package.metadata.toyos.host]
 exempt.owns = "the kernel's record ring, read under the `logread` SysCap"
