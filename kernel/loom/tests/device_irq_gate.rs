@@ -1,6 +1,7 @@
 //! Loom: a claimed function's interrupt ends masked exactly while its record
-//! holds a count, however the handler and a read interleave
-//! (`pcidev/record.rs`); the `device-irq-gate-intent` control must red it.
+//! owes a mask, from the second unread message, however the handler and a
+//! read interleave (`pcidev/record.rs`); the `device-irq-gate-intent` control
+//! must red the two-message model.
 
 use kernel_loom::device_irq::{Gate, Interrupt};
 use loom::sync::{Arc, Mutex};
@@ -17,7 +18,7 @@ impl Gate for Line {
 
 /// Messages against one read that may run at any point among them, and a
 /// last read once they have all landed: after each, hardware is masked
-/// exactly while the record holds a count.
+/// exactly while the record owes it.
 fn model(messages: u64) {
     loom::model(move || {
         let irq = Arc::new(Interrupt::new());
@@ -37,10 +38,10 @@ fn model(messages: u64) {
         let masked = *line.0.lock().unwrap();
         assert_eq!(
             masked,
-            irq.pending(),
-            "the read took {taken} of {messages} message(s) and hardware is {} with {} waiting",
+            irq.owes_mask(),
+            "the read took {taken} of {messages} message(s) and hardware is {} where the record owes it {}",
             if masked { "masked" } else { "open" },
-            if irq.pending() { "a count" } else { "nothing" },
+            if irq.owes_mask() { "masked" } else { "open" },
         );
 
         let left = irq.take_opening(&*line).map_or(0, |record| u64::from(record.count));
@@ -49,12 +50,14 @@ fn model(messages: u64) {
     });
 }
 
+/// One message per read never masks.
 #[test]
-fn hardware_ends_as_the_record_owes() {
+fn one_message_per_read_never_masks() {
     model(1);
 }
 
-/// A second message landing while the first is masked or being read.
+/// A second message before a read masks, and the read that takes them opens
+/// it, wherever the read lands among them.
 #[test]
 fn hardware_ends_as_the_record_owes_after_two_messages() {
     model(2);

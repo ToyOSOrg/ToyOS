@@ -39,13 +39,13 @@ const WINDOW_NANOS: u64 = toyos_i219::DELIVERY_DEADLINE_NANOS;
 /// Causes forced back to back with the claim's record left unread: a holder
 /// making its function speak as fast as its own register writes go.
 const STORM: u32 = 10_000;
-/// The most of them that may land: the first masks the claim's entry and
-/// drains what the unit already remapped before its end of interrupt, and a
-/// local APIC holds one request per vector beside the one in service, so
-/// whatever was drained is one more delivery (Intel SDM Vol. 3A §11.8.4,
+/// The most of them that may land: the first never masks the claim's entry
+/// and the second does, draining what the unit already remapped before its
+/// end of interrupt, which a local APIC holds as one more request for the
+/// vector beside the one in service (Intel SDM Vol. 3A, 325384-093, §13.8.4,
 /// "Interrupt Acceptance for Fixed Interrupts"). Unmasked, every one lands:
 /// the `ICR` read between forces outlasts the handler.
-const STORM_BOUND: u32 = 2;
+const STORM_BOUND: u32 = 3;
 /// How long the link is given to come up after the driver's reset.
 const LINK_NANOS: u64 = 15_000_000_000;
 /// How long frames are listened for after the DHCP discover.

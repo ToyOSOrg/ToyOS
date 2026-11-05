@@ -28,13 +28,14 @@
 //! the slot the first is loading; that costs the racing holder its own time,
 //! never a count.
 //!
-//! **A claim's interrupt is masked while a count waits** ([`Gate`]): the ISR
-//! masks it after it counts, and the holder's read opens it after it takes, so
-//! a function interrupts at most once per read. Each side changes the count
-//! first and then, under the gate's lock, puts hardware in the state the
-//! record then owes, read from the word and not from its own change: the side
-//! that takes the lock last sees both changes, so a mask that lands after the
-//! read that opened the gate cannot leave a claim masked with nothing to read.
+//! **A claim's interrupt is masked from the second message before a read**
+//! ([`Gate`], [`MASKED_FROM`]): a driver that reads between messages never
+//! pays for a mask, and one that falls behind is held to what lands before
+//! the mask takes. Each side changes the count first and then, under the
+//! gate's lock, puts hardware in the state the record then owes, read from
+//! the word and not from its own change: the side that takes the lock last
+//! sees both changes, so a mask that lands after the read that opened the
+//! gate cannot leave a claim masked with nothing to read.
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -50,6 +51,10 @@ const ORDER: Ordering = Ordering::Relaxed;
 
 /// The count is the word's low half and the reads that took one its high half.
 const COUNT: u64 = 0xFFFF_FFFF;
+
+/// The count from which a claim's interrupt is masked until its holder reads:
+/// a message landing while one already waits unread.
+pub const MASKED_FROM: u64 = 2;
 const READ: u64 = 1 << 32;
 
 /// The negative control: each compare-exchange on the word becomes a load and
@@ -189,13 +194,17 @@ impl Interrupt {
         self.word.load(ORDER) & COUNT != 0
     }
 
-    /// [`Self::took`], then the claim's interrupt masked behind `gate`.
+    /// [`Self::took`], then the claim's interrupt masked behind `gate` where
+    /// this message found one waiting unread.
     pub fn took_masking(&self, now: u64, gate: &impl Gate) {
         self.took(now);
         #[cfg(feature = "device-irq-gate-intent")]
-        gate.hold(|| true);
+        {
+            let seen = self.owes_mask();
+            gate.hold(|| seen);
+        }
         #[cfg(not(feature = "device-irq-gate-intent"))]
-        gate.hold(|| self.pending());
+        gate.hold(|| self.owes_mask());
     }
 
     /// [`Self::take`], then the claim's interrupt opened behind `gate` where
@@ -206,9 +215,14 @@ impl Interrupt {
             #[cfg(feature = "device-irq-gate-intent")]
             gate.hold(|| false);
             #[cfg(not(feature = "device-irq-gate-intent"))]
-            gate.hold(|| self.pending());
+            gate.hold(|| self.owes_mask());
         }
         taken
+    }
+
+    /// Whether the record owes its claim's interrupt masked.
+    pub fn owes_mask(&self) -> bool {
+        self.word.load(ORDER) & COUNT >= MASKED_FROM
     }
 
     /// Whether this is the first message this claim has taken. Answers `true`

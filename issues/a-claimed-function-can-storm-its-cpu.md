@@ -7,17 +7,18 @@ opened: 2026-10-04
 
 # A claimed function can storm its CPU
 
-A claim's message is masked from the message its handler takes until its
-holder reads the record (`kernel/src/pcidev/record.rs`), so a function
-interrupts at most once per read. That bounds it per read and not per unit of
-time, and three things remain.
+A claim's message is masked from the second message that lands before its
+holder reads the record until that read (`kernel/src/pcidev/record.rs`), so
+what lands between two reads stops at what arrives before the mask takes.
+That bounds it per read and not per unit of time, and three things remain.
 
 **A holder paces cpu0.** A holder that loops on forcing a cause through its
 own registers and reading its record, on any CPU, still raises one cpu0
-interrupt per iteration. Each one now also costs cpu0 an invalidation
-completion wait with interrupts off: VT-d's interrupt-entry-cache
-invalidation, AMD-Vi's completion wait, or the ITS's `SYNC`. Both are charged
-to whatever cpu0 interrupted, not to the holder.
+interrupt per iteration; one that forces two per read also costs cpu0 an
+invalidation completion wait with interrupts off, at the mask and again at
+its read (VT-d's interrupt-entry-cache invalidation, AMD-Vi's completion
+wait, or the ITS's `SYNC`). All of it is charged to whatever cpu0
+interrupted, not to the holder.
 
 **A refused message is recorded nowhere.** While masked, a message is target
 aborted (AMD-Vi) or blocked with fault processing disabled (VT-d), and
