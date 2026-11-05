@@ -70,11 +70,6 @@ impl core::fmt::Display for Tid {
     }
 }
 
-impl core::ops::Add for Tid {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self { Tid(self.0 + rhs.0) }
-}
-
 crate::user_safe! {
     /// The firmware's framebuffer, as its claim describes it.
     ///

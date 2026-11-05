@@ -22,7 +22,6 @@ mod smp;
 mod smp_roster;
 mod sync;
 mod hasher;
-mod id_map;
 
 // No `mod` line below carries an `#[allow(clippy::undocumented_unsafe_blocks)]`.
 mod arch;

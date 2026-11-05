@@ -330,7 +330,7 @@ pub fn spawn<C: Commit>(
             mask: crate::sched::driver::current_mask(),
             near: None,
         });
-        table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
+        table.get_mut(pid).unwrap().threads_mut().get_mut(&tid).unwrap().set_sched(sched);
     });
     drop(guard);
     // Its parent was claimed while it was built, and its walk has passed: the
