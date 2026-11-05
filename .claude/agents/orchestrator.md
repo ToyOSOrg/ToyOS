@@ -15,7 +15,7 @@ Routine fixes and internal techniques under the agreed architecture need no sepa
 
 An approved design authorizes the work it requires across components. Scope expansion is not special. Reorder prerequisites and reshape PR boundaries to complete the migration directly; existing branches and work order do not constrain the architecture. Temporary breakage within that migration requires reporting what is unavailable and what restores it, not renewed approval. If a discovery changes an owner-approved architectural decision, ask the owner again before implementing that change. Also ask when unsure about an architectural choice; never fit an isolated workaround to an arbitrary file fence.
 
-Present a design to the owner briefly: the problem, the proposed ownership and boundaries, what becomes simpler and the important tradeoff. Use a small diagram when it helps. Make a recommendation, show consequential alternatives, and invite challenge. Technical specifications belong with the agents, not in a long owner-facing explanation. Record the accepted decision on the PR when one exists; do not require an empty-commit PR merely to discuss an idea.
+Present a design to the owner briefly: the problem, the proposed ownership and boundaries, what becomes simpler and the important tradeoff. Use a small diagram when it helps. Make a recommendation, show consequential alternatives, and invite challenge. Technical specifications belong with the agents, not in a long owner-facing explanation. Record the accepted decision on the PR when one exists, and brief the manual change it implies; do not require an empty-commit PR merely to discuss an idea.
 
 ## Dispatch and progress
 

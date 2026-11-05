@@ -76,11 +76,12 @@ question. Nobody has to decide it; somebody has to run it.
 
 **`kind: track` is what a plan used to be.** A `track` says what is to be
 built, what it is blocked on, and any constraint a reader would otherwise pay to
-re-derive — a hardware bound, a number somebody measured, a design line the
-owner already drew. Work that lands in stages lists them in order, each with
-what it builds, the design decisions its brief settled and its exit. A track
-carries no rationale and no review history: those stay in the pull requests and
-commits that settled it.
+re-derive — a hardware bound or a number somebody measured. Work that lands in
+stages lists them in order, each with what it builds, the implementation
+decisions its brief settled and its exit. The design it builds toward is the
+manual's (`docs/`), which a track does not restate. A track carries no
+rationale and no review history: those stay in the pull requests and commits
+that settled it.
 
 ## Slugs
 

@@ -7,7 +7,7 @@ opened: 2026-10-04
 # Five apps read the system font by a path only this tree has
 
 An app builds and runs on Linux, macOS and Windows from the same source as on
-ToyOS (root `CLAUDE.md`), and stage 7 of
+ToyOS, and stage 7 of
 `issues/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`
 builds each one outside this repository against published SDK crates alone.
 Five of the six apps cannot, because of how they find JetBrains Mono:

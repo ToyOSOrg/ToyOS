@@ -25,22 +25,12 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
 - **A package is the release's built archive.** Binary only, for now:
   fetching a source tree and building it on the machine waits for a hosted
   compiler and is no part of this track.
-- **A package is a directory.** `/apps/<name>/` holds the binaries, data and
-  licence the archive carried, unpacked as-is, plus one file the installer
-  writes: `manifest.toml` naming the package, version, the archive's digest,
-  and the program to launch. Nothing is registered anywhere else: the
-  desktop's launcher lists `/apps` and reads each manifest; init grants an
-  app its namespace from that row the same way `system.toml` grants a system
-  program's. Removal is deleting the directory.
-- **A package is a program, whole** (owner, 2026-10-02): self-contained and
-  fixed at build time. No library packages, no dependency solver, no install
-  scripts; a fix in what a package carries is a rebuild of the package.
-- Not his ruling, a refinement put to him with it that he did not object to: a
-  library can be a build input named exactly by hash, never an installed
-  thing; shared objects stay, only library packages go.
-- **`/apps/<name>` is immutable by stage-then-commit** (owner, 2026-10-02).
-  `pkg` unpacks into a private staging directory and commits it in one step,
-  one operation the file server gains; nothing writes a committed package.
+- The package's shape was ruled by the owner on 2026-10-02: a directory
+  holding a whole program, with no library packages, solver or scripts,
+  committed whole from a private staging directory, one operation the file
+  server gains. Not his ruling, a refinement put to him with it that he did
+  not object to: a library can be a build input named exactly by hash, never
+  an installed thing; shared objects stay, only library packages go.
 - **A standalone C program's ToyOS changes are patch files in a recipe**
   (owner, 2026-10-02), against an upstream archive pinned by hash; a delta too
   large to read as patches moves to a fork repository pinned by commit. Forks

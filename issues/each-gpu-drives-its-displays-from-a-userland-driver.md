@@ -6,13 +6,10 @@ opened: 2026-10-31
 
 # Each GPU drives its displays from a userland driver
 
-Held by the display task. Owner rulings, 2026-10-31:
-
-- The display engine is release-1 scope on both benches: the internal panel and external outputs, modesetting, hotplug, EDID, refresh rates including high refresh and VRR where the sink offers them, and power (watermarks, SAGV, DMC and DC states, PSR). Video and render acceleration are out.
-- **Several outputs, extended or mirrored**, each with its own mode and refresh rate, with hotplug.
-- **Intel is a Rust driver from Intel's published PRMs** (IHD-OS-TGL-Vol 2c and Vol 12, 12.21), cited at each register.
-- **AMD adapts AMD's Display Core**, under root `CLAUDE.md`'s vendor-component rule (#1124).
-- **The driver registers a panic surface with the kernel.**
+Held by the display task. The display scope and the per-vendor driver
+rulings are the owner's of 2026-10-31: Intel's driver cites Intel's PRMs
+(IHD-OS-TGL-Vol 2c and Vol 12, 12.21) at each register, and AMD's falls under
+root `CLAUDE.md`'s vendor-component rule (#1124).
 
 Earlier owner decisions this track builds on:
 

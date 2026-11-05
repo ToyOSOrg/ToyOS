@@ -2031,7 +2031,7 @@ mod tests {
             }
         }
         assert_eq!(self_hosted, ["guest-rows.yml"], "the workflows that reach a self-hosted runner");
-        assert_eq!(seen, 6, "ci.yml, nightly.yml, publish.yml and guest-rows.yml, and guest.yml and toolchain.yml");
+        assert_eq!(seen, 7, "ci.yml, nightly.yml, publish.yml, manual.yml and guest-rows.yml, and guest.yml and toolchain.yml");
     }
 
     /// A self-hosted workflow's job never runs on main's ref, whose token

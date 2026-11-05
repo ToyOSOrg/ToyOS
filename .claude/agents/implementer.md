@@ -20,7 +20,7 @@ Use vendor documentation, specifications and research under root's source policy
 
 Use one worktree and branch for the assignment. Reuse the worktree named in the brief, or create it from `origin/main` with `git worktree add -b <branch> <path> origin/main` after fetching. Never clone ToyOS or run `git submodule` in its worktree. Shared fork sources require particular care below.
 
-Keep the branch coherent: change all consumers and declarations affected by an interface change, including fork consumers. Record unrelated defects with evidence rather than fixing them on the way. Remove obsolete paths and stale comments from what you change. Inspect the final diff and affected module contracts before reporting.
+Keep the branch coherent: change all consumers and declarations affected by an interface change, including fork consumers, and the manual page of a design decision or requirement the branch changes. Record unrelated defects with evidence rather than fixing them on the way. Remove obsolete paths and stale comments from what you change. Inspect the final diff and affected module contracts before reporting.
 
 ## Verify the behavior
 
