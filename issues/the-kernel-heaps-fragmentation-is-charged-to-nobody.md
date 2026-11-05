@@ -47,11 +47,17 @@ Recorded for when kernel memory is next reshaped; none is chosen.
    allocator-aware containers (`allocator_api` is unstable) or an arena
    carried by every charged object's type.
 
-**Lean: 3.** It is the only option whose bound holds against a hostile
-holder by construction, by charging pages rather than bytes to the job that
-holds them. 1 converges on it once its tail problem is fixed. The cost is
-threading the job's arena through every charged allocation.
+**The implementer's lean (kfu, unruled): 3.** It is the only option whose
+bound holds against a hostile holder by construction, by charging pages
+rather than bytes to the job that holds them. 1 converges on it once its
+tail problem is fixed. Its costs:
 
-**Exit**: a process's charged kernel objects cannot grow the heap past what
+- every charged allocation has to carry the job's arena;
+- one allocator per job;
+- page granularity: a job's arena grows by the frame allocator's 2 MiB
+  superframes, so even a small job holds at least one, unless the arena is
+  given a 4 KiB page source, which the frame allocator avoids today.
+
+**Exit**: a job's charged kernel objects cannot grow the heap past what
 is charged to it, with a guest case in `kernel_objects_refused` that churns
 name sizes with every frame taken and is refused, never panics.
