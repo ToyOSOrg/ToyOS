@@ -636,7 +636,7 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
         return execute_simple(&pipeline[0], None);
     }
 
-    let mut children = Vec::new();
+    let mut children: Vec<Child> = Vec::new();
     let mut prev_stdout: Option<std::process::ChildStdout> = None;
 
     for (i, cmd) in pipeline.iter().enumerate() {
