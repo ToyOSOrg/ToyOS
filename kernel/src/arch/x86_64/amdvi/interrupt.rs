@@ -13,6 +13,11 @@
 //! `GuestMode` 0 (Table 21, Figure 17); its destination is 32 bits wide under
 //! `XTEn` (§2.2.5.3, Figure 19), which an x2APIC machine needs.
 //!
+//! **A claim's entry is masked with `RemapEn` clear and `SupIOPF` set**
+//! ([`irte::masked`]): its messages are target aborted, which the host bridge
+//! completes with no error reported (§2.1.3.1), and none is logged. Each
+//! change is published with `INVALIDATE_INTERRUPT_TABLE` (§2.4.5).
+//!
 //! This module's lock is taken before `DOMAINS`, `UNITS` and `TABLES`, never
 //! after any of them.
 
@@ -123,21 +128,44 @@ fn report(source: StreamId, vector: u8, read: [u64; 2]) {
     );
 }
 
+/// A claim's entry, held until [`release`]: whose table it is in, where,
+/// and what it holds while it delivers.
+#[derive(Clone, Copy)]
+pub struct Line {
+    requester: u16,
+    vector: u8,
+    slot: crate::mm::Mmio,
+    delivers: [u64; 2],
+}
+
 /// `source`'s entry at `vector`, delivering it to this kernel's CPU.
-fn arm(source: StreamId, vector: u8) {
+fn arm(source: StreamId, vector: u8) -> Line {
     let mut remap = REMAP.lock();
     let destination = match remap.extended {
         Some(true) => Destination::Extended(MSG_DEST),
         _ => Destination::Narrow(MSG_DEST_NARROW),
     };
-    let read = remap.write(source.requester(), vector, irte::entry(vector, destination));
+    let requester = source.requester();
+    let delivers = remap.write(requester, vector, irte::entry(vector, destination));
+    let table = remap.tables[&requester];
     drop(remap);
-    report(source, vector, read);
+    report(source, vector, delivers);
+    Line { requester, vector, slot: memory(table.get() + u64::from(vector) * 16, 16), delivers }
+}
+
+/// A claim's entry masked or delivering again, gone from every unit's cache
+/// before this returns. One 64-bit write: `RemapEn` and `SupIOPF` are both
+/// in the low half. Takes only the units' buffers, so a claim's interrupt
+/// handler may call it.
+pub(in crate::arch::x86_64) fn set_masked(line: Line, masked: bool) {
+    let entry = if masked { irte::masked(line.delivers) } else { line.delivers };
+    line.slot.write_u64(0, entry[0]);
+    submit(&[Command::InvalidateInterrupts(line.requester)]);
 }
 
 /// A claim's entry at `vector` for `source`, whose entry from now on passes
 /// nothing firmware declared for it and gives it no `SysMgt`.
-pub(in crate::arch::x86_64) fn claim(vector: u8, source: StreamId) -> Result<Msi, Refused> {
+pub(in crate::arch::x86_64) fn claim(vector: u8, source: StreamId) -> Result<(Msi, Line), Refused> {
     // A requester the platform speaks as is refused before here
     // (`iommu::isolates`), and one a kernel driver holds by `pcidev::claim`.
     // A table already written is a re-claim's, whose setting is `CLAIMED`;
@@ -147,15 +175,14 @@ pub(in crate::arch::x86_64) fn claim(vector: u8, source: StreamId) -> Result<Msi
         "amdvi: a claim on {source}, whose remapping table another source already wrote"
     );
     domain::claimed(source.requester());
-    if is_armed() {
-        arm(source, vector);
-    }
+    let line = arm(source, vector);
     let (address, data) = msi_message(vector);
-    Ok(Msi { address, data })
+    Ok((Msi { address, data }, line))
 }
 
 /// A claim's entry absent again and gone from every unit's cache.
-pub(in crate::arch::x86_64) fn release(vector: u8, source: StreamId) {
+pub(in crate::arch::x86_64) fn release(line: Line, source: StreamId) {
+    let vector = line.vector;
     let read = REMAP.lock().write(source.requester(), vector, irte::ABSENT);
     log!("iommu: amdvi irte source={source} vector={vector:#04x} p={} released", u8::from(irte::present(read)));
 }

@@ -28,6 +28,11 @@
 //! does not consume within [`TIMEOUT_PER_SECOND`]'s bound, is a kernel
 //! defect, and panics.
 //!
+//! **A claim's LPI is masked by its configuration byte's enable** (Table 5-1),
+//! reread at the redistributor on an `INV` (§5.3.6): a disabled LPI's message
+//! stays pending and is taken once it is enabled again. Every LPI is enabled
+//! whenever no claim has masked it.
+//!
 //! **A claim's DeviceID is the one the SMMUv3's own routes carry**
 //! (`super::super::smmu::its_device`): a function the unit would not put on a
 //! domain is refused before its claim reaches the unit.
@@ -44,7 +49,7 @@ use crate::log;
 use crate::mm::pmm::{self, PhysPage};
 use crate::mm::policy::MmioPolicy;
 use crate::mm::{DirectMap, Mmio, PAGE_2M};
-use crate::sync::Lock;
+use crate::sync::{Lock, Masked};
 
 /// A command is consumed within a second, and a register settles in one:
 /// `settles` takes the bound as a rate.
@@ -89,19 +94,29 @@ const ITT_ALIGN: u64 = 256;
 
 static ITS: Lock<Option<Live>> = Lock::new(None);
 
-/// The ITS this kernel drives, armed.
-struct Live {
+/// The armed ITS's command queue: a leaf, taken with interrupts masked and
+/// holding nothing else, because a claim's interrupt handler masks its LPI
+/// through it ([`set_masked`]) while any other context may hold it.
+static QUEUE: Masked<Option<Queue>> = Masked::new(None);
+
+struct Queue {
     regs: Mmio,
-    /// The MADT's id for it, which the IORT names it by.
-    id: u32,
-    /// `GITS_TRANSLATER`'s physical address: every claim's message address.
-    doorbell: u32,
     queue: Mmio,
     commands: CommandQueue,
     /// `GITS_CWRITER` as last written.
     cwriter: u64,
     /// The boot CPU's redistributor, as this ITS names it.
     target: Target,
+}
+
+/// The ITS this kernel drives, armed.
+struct Live {
+    /// The MADT's id for it, which the IORT names it by.
+    id: u32,
+    /// `GITS_TRANSLATER`'s physical address: every claim's message address.
+    doorbell: u32,
+    /// The redistributor's LPI configuration table.
+    configuration: Mmio,
     collection: Collection,
     events: EventBits,
     space: lpi::Space,
@@ -127,9 +142,17 @@ impl Live {
         self.itts.push((device, table));
         Some(table)
     }
+}
 
-    /// `commands`, then a `SYNC` to the boot CPU's redistributor, consumed:
-    /// every one has taken effect when this returns (§5.3.15).
+/// `commands`, then a `SYNC` to the boot CPU's redistributor, consumed:
+/// every one has taken effect when this returns (§5.3.15).
+fn issue(commands: &[Command]) {
+    let closed = crate::arch::IrqGuard::close();
+    let mut held = QUEUE.lock(&closed);
+    held.as_mut().expect("ITS: a command issued with no ITS armed").issue(commands);
+}
+
+impl Queue {
     fn issue(&mut self, commands: &[Command]) {
         let (regs, queue) = (self.regs, self.commands);
         for command in commands.iter().copied().chain([Command::Sync(self.target)]) {
@@ -346,14 +369,15 @@ fn bring_up(id: u32, base: u64, frame: u64) -> Result<Live, alloc::string::Strin
     );
 
     let target = its.target(lpi::processor_number(rd_typer), Phys::new(frame).expect("a redistributor frame is 64 KiB aligned"));
-    let mut live = Live {
-        regs,
+    {
+        let closed = crate::arch::IrqGuard::close();
+        *QUEUE.lock(&closed) = Some(Queue { regs, queue: window(queue_at, 4096), commands, cwriter: 0, target });
+    }
+    issue(&[Command::MapCollection { collection, target }]);
+    Ok(Live {
         id,
         doorbell,
-        queue: window(queue_at, 4096),
-        commands,
-        cwriter: 0,
-        target,
+        configuration: config,
         collection,
         events,
         space,
@@ -361,9 +385,7 @@ fn bring_up(id: u32, base: u64, frame: u64) -> Result<Live, alloc::string::Strin
         itt_bytes: its.itt_bytes(events).next_multiple_of(ITT_ALIGN),
         held: Vec::new(),
         memory,
-    };
-    live.issue(&[Command::MapCollection { collection, target }]);
-    Ok(live)
+    })
 }
 
 /// The 4 KiB page `GITS_TRANSLATER` is in, where an ITS is armed: what every
@@ -456,7 +478,7 @@ fn device_of(live: &Live, routed: Option<toyos_acpi::ItsDevice>) -> Result<u32, 
 /// [`release`].
 pub struct Claimed {
     pub msi: Msi,
-    device: u32,
+    line: Line,
     lpi: Lpi,
 }
 
@@ -465,6 +487,27 @@ impl Claimed {
     pub fn interrupt(&self) -> impl core::fmt::Display {
         alloc::format!("LPI {}", self.lpi.intid())
     }
+
+    pub fn line(&self) -> Line {
+        self.line
+    }
+}
+
+/// A claim's LPI, which [`set_masked`] masks; named only while its
+/// [`Claimed`] is held.
+#[derive(Clone, Copy)]
+pub struct Line {
+    /// The LPI's configuration byte.
+    configuration: Mmio,
+    device: u32,
+    event: toyos_its::Event,
+}
+
+/// `line`'s LPI disabled, or enabled again, at the redistributor before this
+/// returns. Takes only the command queue.
+pub fn set_masked(line: Line, masked: bool) {
+    line.configuration.write_u8(0, lpi::configuration(PRIORITY, !masked));
+    issue(&[Command::Reconfigure { device: line.device, event: line.event }]);
 }
 
 /// Map `source`'s DeviceID to its translation table, its one event to `pcidev`
@@ -486,24 +529,28 @@ pub fn claim(function: usize, source: StreamId) -> Result<Claimed, Refused> {
     let table = live.table_of(device).ok_or(Refused::NoMemory)?;
     let event = live.events.event(EVENT).expect("event 0 is in every table");
     let (collection, events) = (live.collection, live.events);
-    live.issue(&[
+    issue(&[
         Command::MapDevice { device, table, events },
         Command::MapEvent { device, event, lpi, collection },
     ]);
     live.held.push(device);
     log!("ITS: {source}, DeviceID {device:#x}, event {EVENT} is LPI {}", lpi.intid());
-    Ok(Claimed { msi: Msi { address: live.doorbell, data: EVENT }, device, lpi })
+    let configuration = live.configuration.subregion(lpi.configuration_index() as u64, 1);
+    Ok(Claimed { msi: Msi { address: live.doorbell, data: EVENT }, line: Line { configuration, device, event }, lpi })
 }
 
 /// A claim's DeviceID unmapped, and anything it left pending dropped, before
 /// this returns.
+///
+/// Its LPI is enabled again first, where its claim left it masked, so the
+/// next claim on the function finds it as every unclaimed LPI is.
 pub fn release(claimed: &Claimed, source: StreamId) {
-    let device = claimed.device;
+    let Line { device, event, configuration } = claimed.line;
     let mut held = ITS.lock();
     let live = held.as_mut().unwrap_or_else(|| panic!("ITS: {source} released with no ITS armed"));
     let at = live.held.iter().position(|held| *held == device);
     live.held.swap_remove(at.unwrap_or_else(|| panic!("ITS: DeviceID {device:#x} released unmapped")));
-    let event = live.events.event(EVENT).expect("event 0 is in every table");
-    live.issue(&[Command::Discard { device, event }, Command::UnmapDevice { device }]);
+    configuration.write_u8(0, lpi::configuration(PRIORITY, true));
+    issue(&[Command::Reconfigure { device, event }, Command::Discard { device, event }, Command::UnmapDevice { device }]);
     log!("ITS: {source}, DeviceID {device:#x}, unmapped from LPI {}", claimed.lpi.intid());
 }

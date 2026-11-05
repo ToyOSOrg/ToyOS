@@ -29,6 +29,12 @@
 //! the boot, one per arming, and by a claim until its release, when it goes
 //! not present and is free again.
 //!
+//! **A claim's entry is masked not present with `FPD` set** (§9.9 Figure 9-9,
+//! `FPD` bit 1, evaluated whatever `P` says): a message through it is blocked
+//! (§5.1.4), and its fault, `22h`, is a qualified one (§5.1.4.1 Table 13),
+//! recorded only where `FPD` is clear. Each change is followed by the entry's
+//! interrupt-entry-cache invalidation (§6.4, §6.5.2.7).
+//!
 //! This module's lock is taken before `UNITS` and before `TABLES`, never after
 //! either.
 
@@ -57,6 +63,7 @@ const ENTRIES: usize = 256;
 const EXTENDED_INTERRUPT_MODE: u64 = 1 << 11;
 
 const PRESENT: u64 = 1;
+const FAULT_PROCESSING_DISABLE: u64 = 1 << 1;
 const TRIGGER_LEVEL: u64 = 1 << 4;
 const VECTOR_SHIFT: u64 = 16;
 const DESTINATION_SHIFT: u64 = 32;
@@ -212,15 +219,43 @@ pub(in crate::arch::x86_64) fn message(index: usize) -> Msi {
     }
 }
 
+/// A claim's entry, held until [`release`]: where it is and what its low
+/// half holds while it delivers.
+#[derive(Clone, Copy)]
+pub struct Line {
+    table: Table,
+    index: usize,
+    delivers: u64,
+}
+
+impl Line {
+    pub(in crate::arch::x86_64) fn index(self) -> usize {
+        self.index
+    }
+}
+
 /// An entry delivering a claim's `vector`, written for `source` and published
-/// to every unit before this returns; its index, held until [`release`].
-pub(in crate::arch::x86_64) fn claim(vector: u8, source: StreamId) -> Result<usize, Refused> {
-    allocate(source, vector, MSG_DEST, false)
+/// to every unit before this returns.
+pub(in crate::arch::x86_64) fn claim(vector: u8, source: StreamId) -> Result<Line, Refused> {
+    let index = allocate(source, vector, MSG_DEST, false)?;
+    let table = REMAP.lock().table.expect("iommu: a claim's entry was written with a table armed");
+    Ok(Line { table, index, delivers: table.read_pair(index).0 })
+}
+
+/// A claim's entry masked or delivering again, gone from every remapping
+/// unit's cache before this returns. One 64-bit write: `P` and `FPD` are both
+/// in the low half, so the unit reads the old entry or the new one. Takes
+/// only the units' queues, so a claim's interrupt handler may call it.
+pub(in crate::arch::x86_64) fn set_masked(line: Line, masked: bool) {
+    let low = if masked { line.delivers & !PRESENT | FAULT_PROCESSING_DISABLE } else { line.delivers };
+    line.table.write_low(line.index, low);
+    super::remapping_queues(|queue| queue.invalidate_interrupt(line.index));
 }
 
 /// A claim's entry not present again and gone from every unit's cache, and
 /// then free.
-pub(in crate::arch::x86_64) fn release(entry: usize, source: StreamId) {
+pub(in crate::arch::x86_64) fn release(line: Line, source: StreamId) {
+    let entry = line.index;
     let lo = {
         let remap = REMAP.lock();
         let Some(table) = remap.table else {

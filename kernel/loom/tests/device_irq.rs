@@ -117,12 +117,12 @@ fn an_idle_record_answers_nothing() {
     loom::model(|| {
         let irq = Interrupt::new();
         assert!(irq.take().is_none(), "an untouched record answered a reader");
-        assert!(!irq.armed(), "an untouched record read ready");
+        assert!(!irq.pending(), "an untouched record read ready");
         irq.took(7);
-        assert!(irq.armed(), "a record with a message in it read empty");
+        assert!(irq.pending(), "a record with a message in it read empty");
         let record = irq.take().expect("a record with a message in it answered nothing");
         assert_eq!((record.count, record.first_nanos, record.last_nanos), (1, 7, 7));
         assert!(irq.take().is_none(), "the same message was answered twice");
-        assert!(!irq.armed(), "a drained record still reads ready");
+        assert!(!irq.pending(), "a drained record still reads ready");
     });
 }

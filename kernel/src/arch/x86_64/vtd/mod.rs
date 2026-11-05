@@ -26,8 +26,9 @@ use crate::drivers::acpi::TableError;
 use crate::drivers::pci::PciDevice;
 use crate::iommu::{AddressWidth, StreamId};
 use crate::mm::Mmio;
-use crate::sync::Lock;
+use crate::sync::{Lock, Masked};
 use crate::time::{Duration, Tripwire};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::iommu_unit::{yn, MAX_UNITS};
 use dmar::{Dmar, Malformed, Scope, Scopes, Structure};
@@ -88,19 +89,47 @@ const COMMAND_TIMEOUT: Tripwire = Tripwire::absurd(
 /// Remapping tables outlive `init`: the unit keeps reading them while it is on.
 static TABLES: Lock<Tables> = Lock::new(Tables::new());
 
-/// Every translating unit, and the single owner of each one's invalidation
-/// queue: a queue has one tail, so a second holder would submit behind its back.
+/// Every translating unit.
 static UNITS: Lock<Vec<Live>> = Lock::new(Vec::new());
 
-/// A unit past its hand-over: its window, its queue, and the root table its
-/// context entries live in.
-pub(super) struct Live {
-    regs: Mmio,
+/// Each translating unit's invalidation queue, [`PUBLISHED`] of them, in the
+/// order [`UNITS`] holds them: a queue has one tail, so its slot is the one
+/// owner. A leaf, taken with interrupts masked and holding nothing else,
+/// because a claim's interrupt handler masks its entry through it
+/// ([`interrupt::set_masked`]) while any other context may hold it.
+static QUEUES: [Masked<Option<Published>>; MAX_UNITS] = [const { Masked::new(None) }; MAX_UNITS];
+static PUBLISHED: AtomicUsize = AtomicUsize::new(0);
+
+struct Published {
     queue: Queue,
-    root: Table,
     /// A descriptor type a unit does not implement stalls its queue, so the
     /// interrupt-entry-cache type goes only to a unit that remaps.
     remaps: bool,
+}
+
+/// `f` on the queue of the unit at `index` in [`QUEUES`].
+fn with_queue<R>(index: usize, f: impl FnOnce(&mut Published) -> R) -> R {
+    let closed = crate::arch::IrqGuard::close();
+    let mut held = QUEUES[index].lock(&closed);
+    f(held.as_mut().expect("vtd: a published unit has its queue"))
+}
+
+/// `f` on every remapping unit's queue.
+fn remapping_queues(mut f: impl FnMut(&mut Queue)) {
+    for index in 0..PUBLISHED.load(Ordering::Acquire) {
+        with_queue(index, |unit| {
+            if unit.remaps {
+                f(&mut unit.queue);
+            }
+        });
+    }
+}
+
+/// A unit past its hand-over: its queue's place in [`QUEUES`], and the root
+/// table its context entries live in.
+pub(super) struct Live {
+    queue: usize,
+    root: Table,
     /// [`Unit::pci_all`].
     pci_all: bool,
     /// [`Unit::hierarchies`].
@@ -109,22 +138,20 @@ pub(super) struct Live {
 
 impl Live {
     pub(super) fn invalidate_domain(&mut self, domain: u16) {
-        self.queue.invalidate_domain(self.regs, domain);
+        with_queue(self.queue, |unit| unit.queue.invalidate_domain(domain));
     }
 
     /// Moves `stream` onto `domain` in this unit's tables, and out of
     /// whatever this unit still holds for it under its old one.
     pub(super) fn attach(&mut self, stream: StreamId, id: u16, space: table::Space) {
         let displaced = table::bind(&mut TABLES.lock(), self.root, stream, id, space);
-        self.queue.invalidate_context(self.regs, displaced);
+        with_queue(self.queue, |unit| unit.queue.invalidate_context(displaced));
     }
 }
 
 /// Every remapping unit's interrupt-entry cache, gone.
 pub(super) fn invalidate_interrupt_entries() {
-    for unit in UNITS.lock().iter_mut().filter(|u| u.remaps) {
-        unit.queue.invalidate_interrupts(unit.regs);
-    }
+    remapping_queues(Queue::invalidate_interrupts);
 }
 
 /// Every region firmware reserved and the interrupt range are what no domain's
@@ -464,12 +491,12 @@ impl Unit {
         self.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
         self.regs.write_u64(RTADDR_REG, root.phys());
         self.command(SET_ROOT_TABLE_POINTER, true, "the root table pointer");
-        queue.invalidate_all(self.regs);
+        queue.invalidate_all();
         self.command(TRANSLATION_ENABLE, true, "translation");
         if self.caps.interrupt_remapping() {
             self.regs.write_u64(interrupt::IRTA_REG, remap.phys());
             self.command(interrupt::SET_TABLE_POINTER, true, "the interrupt remap table pointer");
-            queue.invalidate_interrupts(self.regs);
+            queue.invalidate_interrupts();
             self.command(interrupt::INTERRUPT_REMAPPING_ENABLE, true, "interrupt remapping");
             let status = self.regs.read_u32(GSTS_REG) & PERSISTENT;
             self.regs.write_u32(GCMD_REG, status | interrupt::COMPATIBILITY_FORMAT);
@@ -676,7 +703,7 @@ fn translate(unit: Unit, plan: Plan, root: Table, via: Invalidation) -> Translat
     unit.regs.write_u64(RTADDR_REG, root.phys());
     unit.command(SET_ROOT_TABLE_POINTER, true, "the root table pointer");
     match queue.as_mut() {
-        Some(queue) => queue.invalidate_all(unit.regs),
+        Some(queue) => queue.invalidate_all(),
         None => unit.invalidate_through_registers(),
     }
     unit.command(TRANSLATION_ENABLE, true, "translation");
@@ -701,12 +728,21 @@ fn finish(translating: Translating, devices: &[PciDevice], remap: Option<bool>) 
     if let Some(irta) = irta {
         unit.regs.write_u64(interrupt::IRTA_REG, irta);
         unit.command(interrupt::SET_TABLE_POINTER, true, "the interrupt remap table pointer");
-        queue.invalidate_interrupts(unit.regs);
+        queue.invalidate_interrupts();
         unit.command(interrupt::INTERRUPT_REMAPPING_ENABLE, true, "interrupt remapping");
     }
     // After `IRE`, so nothing is invalidated on a unit that is not yet reading
     // the table, and after `TE`, so nothing reaches a unit that is not on.
-    UNITS.lock().push(Live { regs: unit.regs, queue, root, remaps: remap.is_some(), pci_all: unit.pci_all, hierarchies: unit.hierarchies.clone() });
+    {
+        let mut units = UNITS.lock();
+        let at = PUBLISHED.load(Ordering::Relaxed);
+        {
+            let closed = crate::arch::IrqGuard::close();
+            *QUEUES[at].lock(&closed) = Some(Published { queue, remaps: remap.is_some() });
+        }
+        PUBLISHED.store(at + 1, Ordering::Release);
+        units.push(Live { queue: at, root, pci_all: unit.pci_all, hierarchies: unit.hierarchies.clone() });
+    }
 
     let gsts = unit.regs.read_u32(GSTS_REG);
     log!(

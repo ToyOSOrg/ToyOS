@@ -204,6 +204,11 @@ const _: () = assert!(core::mem::size_of::<DmaMapping>() == 8 + 8);
 /// slow reader to overflow. The count says how many messages arrived, never
 /// what any of them meant: that is in the device's own rings.
 ///
+/// **A claimed PCI function's interrupt is masked from a message until the
+/// read that takes it**, so it interrupts at most once per read: a message
+/// sent meanwhile is refused at the unit on x86-64, and left pending until
+/// the read on AArch64. A count above one is only what was in flight.
+///
 /// **The two times are when messages landed, which a driver reading its rings
 /// later cannot recover**: a driver clocked by its device — soundserver's DLL —
 /// is clocked by these and not by when it woke. Both are nanoseconds since

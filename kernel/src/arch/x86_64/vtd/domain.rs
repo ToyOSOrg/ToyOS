@@ -13,7 +13,8 @@
 //! 6.1: with caching mode reported, software invalidates after *every* change,
 //! a mapping becoming present included.
 //!
-//! Lock order here is `DOMAINS`, `REMAP`, `UNITS`, `TABLES`, never the reverse.
+//! Lock order here is `DOMAINS`, `REMAP`, `UNITS`, `TABLES`, never the reverse,
+//! and a unit's invalidation queue last of all.
 
 use crate::log;
 use alloc::vec::Vec;

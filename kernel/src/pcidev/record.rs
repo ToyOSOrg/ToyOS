@@ -27,6 +27,14 @@
 //! the first can take read `n + 1` and let read `n + 2`'s first message into
 //! the slot the first is loading; that costs the racing holder its own time,
 //! never a count.
+//!
+//! **A claim's interrupt is masked while a count waits** ([`Gate`]): the ISR
+//! masks it after it counts, and the holder's read opens it after it takes, so
+//! a function interrupts at most once per read. Each side changes the count
+//! first and then, under the gate's lock, puts hardware in the state the
+//! record then owes, read from the word and not from its own change: the side
+//! that takes the lock last sees both changes, so a mask that lands after the
+//! read that opened the gate cannot leave a claim masked with nothing to read.
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -177,8 +185,30 @@ impl Interrupt {
 
     /// Whether a message is waiting, for a readiness check that consumes
     /// nothing.
-    pub fn armed(&self) -> bool {
+    pub fn pending(&self) -> bool {
         self.word.load(ORDER) & COUNT != 0
+    }
+
+    /// [`Self::took`], then the claim's interrupt masked behind `gate`.
+    pub fn took_masking(&self, now: u64, gate: &impl Gate) {
+        self.took(now);
+        #[cfg(feature = "device-irq-gate-intent")]
+        gate.hold(|| true);
+        #[cfg(not(feature = "device-irq-gate-intent"))]
+        gate.hold(|| self.pending());
+    }
+
+    /// [`Self::take`], then the claim's interrupt opened behind `gate` where
+    /// the read took something.
+    pub fn take_opening(&self, gate: &impl Gate) -> Option<DeviceIrqRecord> {
+        let taken = self.take();
+        if taken.is_some() {
+            #[cfg(feature = "device-irq-gate-intent")]
+            gate.hold(|| false);
+            #[cfg(not(feature = "device-irq-gate-intent"))]
+            gate.hold(|| self.pending());
+        }
+        taken
     }
 
     /// Whether this is the first message this claim has taken. Answers `true`
@@ -207,4 +237,12 @@ impl Interrupt {
         self.faulted.store(false, ORDER);
         self.unannounced.store(true, ORDER);
     }
+}
+
+/// What masks a claim's interrupt in hardware, behind a lock both sides of
+/// its record take.
+pub trait Gate {
+    /// Under the lock, put hardware in the state `masked` answers, where it
+    /// is not already in it.
+    fn hold(&self, masked: impl FnOnce() -> bool);
 }

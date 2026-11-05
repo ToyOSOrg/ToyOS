@@ -250,7 +250,7 @@ pub fn take_record(row: &Row) -> Option<DeviceIrqRecord> {
 }
 
 pub fn has_irq(row: &Row) -> bool {
-    IRQ[row.0].armed()
+    IRQ[row.0].pending()
 }
 
 /// Records one interrupt, masks the row's level lines and posts the claim's
