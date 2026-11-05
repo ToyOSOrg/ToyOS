@@ -53,7 +53,7 @@ each name, and `issues/a-user-is-a-home-tree-and-a-login-row.md` and
    under `/system/share/licenses`, and none under `/system/share/fonts`.
 7. **The upstream arms**, none opened until the owner opens it:
    - fontdb and fontique scan `/system/share/fonts` and `$HOME/Fonts` from the
-     start, and fontique maps the families above. **Exit**: both prepared
+     start, and fontique maps the families the 2026-09-26 ruling assigns. **Exit**: both prepared
      branches carry both folders and the family table.
    - dirs-sys answers `home_dir` from std, and the six user folders and the
      four `Config Data Cache State` directories under `$HOME` by their names

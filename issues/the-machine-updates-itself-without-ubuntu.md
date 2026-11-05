@@ -14,21 +14,12 @@ stdin — and the machine installs nothing the owner did not sign.
 
 ## Stage 1 — slots, signatures and `update`, proven in QEMU (done)
 
-- **A signed image** (`toyos-update`): a header naming a monotonic version and
-  the SHA-256 of the kernel, its boot parameter, the supervisor, the file server
-  and ROOT, each by role and length, signed with Ed25519
-  over OpenSSH's SSHSIG message in the `toyos-image` namespace — so
-  `ssh-keygen -Y sign` signs one and `ssh-keygen -Y verify` checks ours. The
-  signature covers hashes, never bytes.
-- **Two slots**, each a FAT volume (kernel, parameter, the two boot programs,
-  signed header) and a
-  ROOT, named by a slot table (two copies, a sequence, the writer writes the
-  copy that is not current). Every image carries slot A; an image built for a
-  machine carries an empty slot B.
-- **The loader** boots the marked slot and falls back to the other where the
-  marked one is refused — unsigned, another key's, a flipped byte, a version
-  under the floor — or died on its last boot; the kernel logs which and why, and
-  `logd` carries it to `/log`.
+Done: the signed image (`toyos-update`), the two slots and their table, and
+the loader's verification. The loader boots the marked slot and today the
+other where the marked one is refused or died on its last boot; the kernel
+logs which and why. Whether that fallback stays, against the fix-forward
+update policy, is before the owner.
+
 - **`update`** holds the slot table and the idle slot's two partitions, which
   init claims against the ROOT the kernel holds, writes the image and moves the
   mark last, after an fsync of its own writes. **`swap`** replaced sshd's
@@ -51,19 +42,8 @@ kernel change sent with `ssh t14 update < image` boots at the next reset.
 
 ## Later stages — the end state, which no earlier stage may block
 
-- **An image-based, read-only system**: `/system` is the signed ROOT and
-  nothing else, and nothing the machine runs is outside an image or a package.
-- **A verified boot chain**: UEFI Secure Boot with the owner's key over the
-  loader. Until then the loader is the one binary no signature covers, and a
-  writable ESP is the gap.
-- **Anti-rollback that holds against the machine in hand**:
-  `issues/the-anti-rollback-floor-is-a-firmware-variable.md`.
-- **Pull-based updates** from a release server over HTTPS, with The Update
-  Framework's roles and metadata over the same signed header — `update` takes
-  the bytes on stdin and does not care how they came.
-- **Content-addressed, chunked delta updates**: the header already names each
-  section by hash, so a chunked form is the same signature over the same
-  hashes, and only chunks the idle slot lacks cross the wire.
-- **User data never touched by an update**: `/home` and `/apps` are on DATA,
-  which no slot includes.
-- **Apps updated separately** through `pkg`.
+Each a stage: an image-based read-only system, a verified boot chain,
+anti-rollback against the machine in hand
+(`issues/the-anti-rollback-floor-is-a-firmware-variable.md`), pull-based
+updates from a release server over HTTPS with The Update Framework's roles and
+metadata, and content-addressed chunked delta updates.

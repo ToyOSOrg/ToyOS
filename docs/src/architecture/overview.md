@@ -27,7 +27,7 @@
 | Permission service | Saved decisions, runtime consent and authorising fresh grants |
 | Authentication | Verifying users, unlocking storage, protected credentials and passkeys |
 | Package management | Verifying and installing immutable versions; app identity |
-| Resource services | Files, disks, network and audio, and enforcing access to them |
+| Resource services | Files, disks, network, audio, input, logs and the firmware's ACPI events, and enforcing access to them |
 | Memory service | Reclaim policy, pressure reports and encrypted swap |
 | Diagnostics | Local inspection, failure evidence and authorised recovery |
 | Drivers | Operating a device, its firmware, queues and device-specific recovery |
@@ -60,7 +60,3 @@ stay out of the kernel.
   for novel algorithms.
 - **Recovery has a bounded path.** Reclaim, writeback, device I/O and service
   recovery never depend on the memory or the service being recovered.
-- **Waits are honest.** When a wait's failure timeout expires, the operation
-  returns an error where its meaning allows one; otherwise the stall is
-  reported and state is kept. Elapsed time alone never terminates or restarts
-  anything.

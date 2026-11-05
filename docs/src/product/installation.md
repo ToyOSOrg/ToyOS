@@ -5,8 +5,9 @@
 Installation media boot to the desktop, and a desktop entry starts a graphical
 installer. Installation and first-account setup work offline. A dedicated drive
 is enough; nothing erases unrelated storage without authorisation. The
-installer leaves every partition it did not create untouched, so another OS on
-the same disk keeps booting through the firmware's menu.
+installer leaves every partition it did not create untouched and adds one boot
+entry; on a shared EFI system partition it writes only its own directory, never
+another OS's, so that OS keeps booting through the firmware's menu.
 
 Documented firmware key enrolment is acceptable; after it, boot is verified.
 Recovery from a broken installation may initially be manual.
@@ -44,9 +45,9 @@ one is not a grant of device authority.
 
 Verified updates are prepared automatically. An OS update activates at a
 voluntary reboot, which the user may postpone; an app update activates while the
-app is stopped, with a per-app pause. There is one stable OS release and no
-downgrade or rollback: fixes ship forward. A failed download or staging leaves
-the existing installation intact. Snapshots of app updates and a built-in backup
+app is stopped, with a per-app pause. There is one stable OS release, and no
+downgrade. A failed download or staging leaves the existing installation
+intact. Snapshots of app updates and a built-in backup
 product are not provided; backups belong to separately installed applications.
 
 How the machine boots an update and refuses an image it should not run is

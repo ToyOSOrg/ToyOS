@@ -19,35 +19,6 @@ different thing.
 The design is out of the tree with the memory and storage designs. Its plans and
 reviews are in #1088's evidence. Below is what an implementer needs.
 
-## What a program sees
-
-- **Swapped memory may wait on storage**, in a load, a store or a syscall that
-  copies it.
-  - A wait advances on storage progress, ends on established failure or kill,
-    and is reported overdue.
-  - A timeout never turns it into an error. `O_NONBLOCK` does not cover the
-    caller's own buffer.
-- **A page is lost only when a running memory service establishes the loss**: a
-  read failed after the driver's recovery, a failed authentication, or a device
-  that is gone.
-  - With no service running, nothing is established, and waits stay overdue.
-  - **The process's own anonymous memory**, once lost, ends the process at its
-    next touch: a load, a store, or one of its own syscalls copying it. The
-    syscall gets no errno.
-  - **A buffer inside a file mapping** (a paged object, or a served `/tmp`
-    object) answers `EIO`.
-  - **A futex wait** on a swapped or lost word returns as a spurious wake.
-- **Executable and read-only image pages never go to swap.**
-- **A stopped memory service, or one past its restart budget, fails nothing.**
-  Its faults wait, reported as "memory service not running", until an authorized
-  manual restart. The user may stop any waiting program.
-- **Commitment can outlive its backing.** If the swap device leaves, or
-  retirements exhaust the spares, new commitments are refused. A fault past the
-  remaining backing waits, reported with the deficit, and is never ended.
-- **`mlock`/`vm_wire` is refused past the job's wire allowance** (`ENOMEM`).
-- **One program's swapped memory delays only that program.** No service waits on
-  one client's memory in a path that serves others.
-
 ## Ownership
 
 - **Kernel:** mechanics only, with no policy, filesystem or cryptography.

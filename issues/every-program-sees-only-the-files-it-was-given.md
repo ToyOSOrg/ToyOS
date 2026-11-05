@@ -47,7 +47,7 @@ desktop stays one once stage 3's local greeter exists is not ruled.
    `an_empty_view_names_nothing_but_an_empty_root`. The kernel keeps no
    working directory (#1182): a spawn states its child's in the child's
    `PWD`, a name the child resolves in its own view, so it reaches nothing
-   that view does not hold. Left of the design above: a row the image
+   that view does not hold. Left of this stage: a row the image
    declares is still minted the whole tree but `/state`, which stage 2
    narrows to the files its row declares.
 2. **Every row declares its files.** `system.toml` states each program's view;

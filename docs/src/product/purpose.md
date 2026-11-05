@@ -48,7 +48,7 @@ restarts suffice; a session restart or reboot is acceptable when needed.
 Hibernation, snapshots, compression, multi-drive pooling and mirroring,
 independent per-user encryption, Linux binaries, hosted virtual machines,
 native containers, additional package catalogues, browser calls, DRM, VPNs,
-captive portals, multiple monitors, GPU rendering, translations, screen
+captive portals, GPU rendering and video acceleration, translations, screen
 readers, adjustable text size, built-in file search, general desktop automation
 and transparent app recovery after a desktop failure. Pooling, mirroring and
 containers remain architecturally possible without being built now.

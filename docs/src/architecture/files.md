@@ -57,8 +57,10 @@ directory, which the child resolves in its own view.
   `Cache` and `State`.
 - An app finds its own files next to its executable.
 - Fonts: the system's under `/system`, a user's in their `Fonts` folder.
-- Time zone, keyboard layout and language are machine settings in `/config`;
-  per-user overrides come with users.
+  sans-serif and system-ui are Open Sans, monospace is JetBrains Mono, and
+  serif stays empty until a licence-clean face is chosen.
+- The time zone is a machine setting in `/config`. Keyboard layout and
+  language are machine defaults there, which a user may override.
 
 ## Files
 

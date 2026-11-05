@@ -12,9 +12,6 @@ design is put to him and ruled, "Refuse external, record reflash" (owner,
 port is refused by name (`issues/the-iommu-refuses-nothing-yet.md`,
 `issues/a-driver-that-reflashes-its-device-escapes-its-isolation.md`).
 
-**Constraint**: a device behind an external port is isolated: its DMA stays
-behind the IOMMU, whoever signed its driver.
-
 Owner: the orchestrator.
 
 **Exit**: a metal row on a bench machine with a Thunderbolt or USB4 port reads,

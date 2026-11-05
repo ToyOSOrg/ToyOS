@@ -2,39 +2,38 @@
 
 ## Existing Rust just works
 
-Rust programs build and run on ToyOS unchanged. ToyOS is a real Rust target with
-a real standard library, and the ecosystem crates that need platform support,
-such as windowing, presentation, audio and asynchronous I/O, get a proper ToyOS
-backend in their own upstream projects. ToyOS never asks a program to use a
-replacement crate written only for it. ToyOS is a first-class platform and never
-pretends to be Linux: a crate that assumes every other OS is Linux gets a native
-ToyOS branch.
-
-ToyOS is a normal target for third-party software. Its SDK crates are published
-on crates.io, and its toolchain is a release a developer can install and link
-with. Its system-call ABI is unstable: a program built against an old SDK may
-break, and is rebuilt.
+- Rust programs build and run on ToyOS unchanged: ToyOS is a real Rust target
+  with a real standard library.
+- Ecosystem crates that need platform support, such as windowing,
+  presentation, audio and asynchronous I/O, get a proper ToyOS backend in their
+  own upstream projects. No program is asked to use a replacement crate written
+  only for ToyOS.
+- ToyOS is a first-class platform and never pretends to be Linux: a crate that
+  assumes every other OS is Linux gets a native ToyOS branch.
+- ToyOS is a normal target for third-party software: its SDK crates are on
+  crates.io, and its toolchain is a release a developer can install.
 
 ## The same app everywhere
 
-Apps use the same source on ToyOS, Linux under Wayland, macOS and Windows. A
-program that runs only on ToyOS must be doing a job only ToyOS has, such as
-driving a ToyOS device or serving a ToyOS protocol. X11 is legacy.
+- Apps use the same source on ToyOS, Linux under Wayland, macOS and Windows.
+- A program that runs only on ToyOS does a job only ToyOS has, such as driving
+  a ToyOS device or serving a ToyOS protocol.
+- X11 is legacy.
 
 ## C and C++
 
-C and C++ programs build with the toolchain's clang against ToyOS's libc. libc is
-built on ToyOS's native interface, never the other way round, and POSIX
-compatibility lives there and nowhere in the kernel. Where POSIX conflicts with
+C and C++ programs build with the toolchain's clang against ToyOS's libc. libc
+is built on ToyOS's native interface, never the other way round, and POSIX
+compatibility lives there, never in the kernel. Where POSIX conflicts with
 ToyOS's model, libc implements the focused part programs need and refuses the
 rest visibly:
 
-- children start by spawn; there is no fork or exec;
+- children start by spawn, as every process does; there is no fork or exec;
 - a child receives its standard streams and exactly the descriptors its spawn
   names;
-- signals are limited to native events: a child's end, an alarm, and interrupt,
-  hang-up and terminate requests. A signal nothing raises is refused, and no
-  unsupported operation appears to succeed.
+- signals come only from native events: a child's end, an alarm, and
+  interrupt, hang-up and terminate requests. Any other signal is refused, and
+  no unsupported operation appears to succeed.
 
 ## Loading programs
 
@@ -45,11 +44,8 @@ kernel as memory, never named by a path the kernel resolves.
 
 ## Desktop apps
 
-ToyOS's own desktop software uses iced, and for now iced is the one toolkit the
-platform supports. Drawing is on the CPU, through the toolkits' own 2D
-renderers; a window's pixels reach the compositor through shared memory. GPU
-rendering comes later through display and Vulkan drivers, not through a CPU
-implementation of Vulkan.
+A window's pixels reach the compositor through shared memory. The toolkit and
+rendering are in [The desktop and its hardware](../product/desktop.md).
 
 ## Packages
 
