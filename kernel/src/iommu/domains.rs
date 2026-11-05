@@ -78,20 +78,8 @@ impl<S: Copy> Domains<S> {
         self.live[usize::from(id.raw() - self.first)].0
     }
 
-    /// Room for `bytes` at `phys`, never handed out before and ending at or
-    /// below `limit`: the domain's tables, and where the leaves go.
-    pub fn map(&mut self, id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<(S, Iova), IommuError> {
-        aligned(phys)?;
-        // A `DomainId` only `add` mints, so the index is always in range.
-        let (space, window) = &mut self.live[usize::from(id.raw() - self.first)];
-        let at = window.reserve(bytes, limit).ok_or(IommuError::AddressesExhausted(limit))?;
-        log!("iommu: domain{} maps {phys:#x}..{:#x} at {at:#x}", id.raw(), phys + bytes.next_multiple_of(PAGE_2M));
-        Ok((*space, Iova::translated(at)))
-    }
-
     /// The domain's tables, for `bytes` at `phys` placed at `at`, room this
-    /// domain already handed out. Room it never handed out is a kernel bug,
-    /// since [`Self::map`] may yet hand it out.
+    /// domain already handed out. Room it never handed out is a kernel bug.
     pub fn place(&self, id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<S, IommuError> {
         aligned(phys)?;
         let (space, window) = &self.live[usize::from(id.raw() - self.first)];
@@ -127,12 +115,14 @@ pub fn leaves(at: Iova, phys: u64, bytes: u64) -> impl Iterator<Item = (u64, u64
     (0..bytes).step_by(PAGE_2M as usize).map(move |offset| (at.raw() + offset, phys + offset))
 }
 
-/// The record a mapping put back where a device may still be aimed leaves.
-pub fn placed_again(id: DomainId, at: Iova, phys: u64, bytes: u64) {
+/// A mapping's record, `again` where a device may still be aimed there from
+/// a mapping the domain took back.
+pub fn placed(id: DomainId, at: Iova, phys: u64, bytes: u64, again: bool) {
     log!(
-        "iommu: domain{} maps {phys:#x}..{:#x} at {:#x} again",
+        "iommu: domain{} maps {phys:#x}..{:#x} at {:#x}{}",
         id.raw(),
         phys + bytes.next_multiple_of(PAGE_2M),
-        at.raw()
+        at.raw(),
+        if again { " again" } else { "" },
     );
 }

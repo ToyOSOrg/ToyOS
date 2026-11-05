@@ -16,7 +16,7 @@
 use alloc::vec::Vec;
 
 use crate::iommu::domains::{self, Domains};
-use crate::iommu::{DomainId, IommuError, Iova, Limit, StreamId};
+use crate::iommu::{DomainId, IommuError, Iova, StreamId};
 use crate::log;
 use crate::sync::Lock;
 use toyos_acpi::Requesters;
@@ -141,24 +141,7 @@ pub fn create(room: u64, windows: &[toyos_abi::acpi::RootBridgeWindow]) -> Resul
     Ok(amd.domains.add(next, space, alloc::format!("root={:#x} mode={ROOT_LEVEL}", space.root.get())))
 }
 
-pub fn map(id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<Iova, IommuError> {
-    let mut held = DOMAINS.lock();
-    let amd = held.as_mut().expect("amdvi: a domain exists only once a unit translates");
-    let (space, at) = amd.domains.map(id, phys, bytes, limit)?;
-    place_leaves(id, space, at, phys, bytes);
-    Ok(at)
-}
-
-/// Put `bytes` at `phys` at `at`, room this domain handed out before and whose
-/// mapping was taken back: a device still aimed there reaches these pages.
-pub fn map_at(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
-    place(id, at, phys, bytes)?;
-    domains::placed_again(id, at, phys, bytes);
-    Ok(())
-}
-
-/// [`map_at`] without its record line, for a mapping a holder makes and
-/// takes back as often as it likes.
+/// Put `bytes` at `phys` at `at`, inside room this domain handed out.
 pub fn place(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
     let held = DOMAINS.lock();
     let amd = held.as_ref().expect("amdvi: a domain exists only once a unit translates");
