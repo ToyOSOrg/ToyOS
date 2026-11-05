@@ -1,21 +1,6 @@
-//! Loom: a claimed function's interrupt, masked while its record holds a
-//! count and opened by the read that takes it (`pcidev/record.rs`'s [`Gate`]).
-//!
-//! **The invariant is that hardware ends in the state the record owes it:
-//! masked exactly while a count waits.** A claim left masked with nothing to
-//! read never interrupts again, and its driver waits for a device that has
-//! spoken; one left open with a count waiting is the storm the mask exists to
-//! stop. What makes it hold is that each side reads the record under the
-//! gate's lock after its own change to the count, so the negative control is
-//! each side applying its own intent instead (the ISR masks, the read opens),
-//! where a mask that lands after the read opened the gate strands the claim:
-//!
-//! ```text
-//! cargo test --manifest-path kernel/loom/Cargo.toml --features device-irq-gate-intent \
-//!   --test device_irq_gate
-//! ```
-//!
-//! and [`hardware_ends_as_the_record_owes`] must red.
+//! Loom: a claimed function's interrupt ends masked exactly while its record
+//! holds a count, however the handler and a read interleave
+//! (`pcidev/record.rs`); the `device-irq-gate-intent` control must red it.
 
 use kernel_loom::device_irq::{Gate, Interrupt};
 use loom::sync::{Arc, Mutex};

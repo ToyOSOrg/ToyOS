@@ -1049,8 +1049,8 @@ pub fn claim(arrival: Arrival, firmware: FirmwareWindows) -> Result<(PciFunction
             let function = binding.function();
             let line = bound.armed.message().line();
             *function.bound.lock() = Some(bound);
-            function.gate.arm(line);
             function.irq.clear();
+            function.gate.arm(line);
             changed();
             Ok((info, Claim::pci(binding)))
         }
