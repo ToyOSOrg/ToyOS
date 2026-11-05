@@ -524,9 +524,10 @@ fn an_overwrite_keeps_incoming_capacity_while_its_older_dirty_page_is_flushed() 
 }
 
 #[test]
-/// Two pages each under its own write's capacity, written back in one run:
-/// the second, the file's last page in part, reads the old block it keeps
-/// the rest of, and that read is refused.
+/// Two pages each under its own write's capacity, the tail written first so
+/// the second write does not continue it, written back in one run: the
+/// second page, the file's last in part, reads the old block it keeps the
+/// rest of, and that read is refused.
 fn a_partial_writeback_cleans_only_its_prefix_and_retries_the_same_reserved_suffix() {
     let refusing = Rc::new(Cell::new(false));
     let disk = RefusingRead { ram: Ram::new(16384), refusing: Rc::clone(&refusing) };
@@ -542,8 +543,8 @@ fn a_partial_writeback_cleans_only_its_prefix_and_retries_the_same_reserved_suff
     let mut files = Files::new(Some(fake.clone()));
     let (node, id) = open(&mut files, &mut v, "home/f");
     let new = pattern(PAGE as usize + TAIL, 8);
-    files.write(&mut v, id, node, 0, &new[..PAGE as usize]).unwrap();
     files.write(&mut v, id, node, PAGE, &new[PAGE as usize..]).unwrap();
+    files.write(&mut v, id, node, 0, &new[..PAGE as usize]).unwrap();
     refusing.set(true);
     assert_eq!(files.fsync(&mut v, Some((id, node))), Err(Error::Io));
     let object = files.object(id).unwrap();

@@ -40,6 +40,11 @@ struct Open {
     pages: BTreeMap<u64, u64>,
     /// Pages the current write reserved and has not copied yet.
     incoming: BTreeMap<u64, u64>,
+    /// The last write's ticket, which a write starting where its
+    /// reservation ends extends, so a write-back of both is one extent; and
+    /// where that reservation ended before the current write extended it.
+    tail: Option<u64>,
+    extended_from: Option<u64>,
 }
 impl Open {
     /// A page no longer needs `ticket`'s capacity.
@@ -418,6 +423,8 @@ impl<D: Disk> Volume for DataVolume<D> {
                 capacity: BTreeMap::new(),
                 pages: BTreeMap::new(),
                 incoming: BTreeMap::new(),
+                tail: None,
+                extended_from: None,
             })
             .holders += 1;
         if how.truncate
@@ -483,14 +490,30 @@ impl<D: Disk> Volume for DataVolume<D> {
         }
         let pages = offset / BLOCK as u64..end.div_ceil(BLOCK as u64);
         let bytes = ((pages.end - pages.start) as usize).checked_mul(BLOCK).ok_or(Error::FileTooLarge)?;
-        let reservation = self.cache.block_on(self.fs.reserve(node, pages.start * BLOCK as u64, bytes)).map_err(word)?;
         let open = self.open.get_mut(&node).unwrap();
-        open.capacity.insert(ticket, Capacity { reservation, pages: (pages.end - pages.start) as usize });
+        let continued = open.tail.filter(|tail| open.capacity.get(tail).is_some_and(|c| c.reservation.range().1 == offset));
+        open.extended_from = continued.map(|_| offset);
+        let ticket = match continued {
+            Some(tail) => {
+                let capacity = open.capacity.get_mut(&tail).unwrap();
+                self.cache.block_on(self.fs.extend(&mut capacity.reservation, bytes)).map_err(word)?;
+                capacity.pages += (pages.end - pages.start) as usize;
+                tail
+            }
+            None => {
+                let reservation = self.cache.block_on(self.fs.reserve(node, pages.start * BLOCK as u64, bytes)).map_err(word)?;
+                let open = self.open.get_mut(&node).unwrap();
+                open.capacity.insert(ticket, Capacity { reservation, pages: (pages.end - pages.start) as usize });
+                ticket
+            }
+        };
+        let open = self.open.get_mut(&node).unwrap();
+        open.tail = Some(ticket);
         open.incoming.extend(pages.map(|page| (page, ticket)));
         open.size = open.size.max(end);
         open.mtime = (self.clock)();
         open.changed = true;
-        Ok(reserved)
+        Ok(Reserved { ticket, ..reserved })
     }
     fn landed(&mut self, node: Node, reserved: Reserved, offset: u64, len: usize) {
         if len == 0 { return; }
@@ -507,8 +530,16 @@ impl<D: Disk> Volume for DataVolume<D> {
         let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
         let ticket = reserved.ticket;
         let cut = |page: u64, held: u64, from: u64| held == ticket && page * BLOCK as u64 >= from;
+        // Copied pages of this ticket below `landed` are this write's or an
+        // earlier one's it continued; none landed leaves them all.
+        let from = if landed == 0 { u64::MAX } else { landed };
         let gone: Vec<u64> = open.incoming.iter().filter(|&(&p, &t)| cut(p, t, 0)).map(|(&p, _)| p)
-            .chain(open.pages.iter().filter(|&(&p, &t)| cut(p, t, landed)).map(|(&p, _)| p)).collect();
+            .chain(open.pages.iter().filter(|&(&p, &t)| cut(p, t, from)).map(|(&p, _)| p)).collect();
+        // An extension gives its blocks back now; a reservation of its own
+        // goes with its last page.
+        if let (Some(from), Some(capacity)) = (open.extended_from.take(), open.capacity.get_mut(&ticket)) {
+            self.fs.cut(&mut capacity.reservation, from.max(landed));
+        }
         for page in gone {
             if open.incoming.remove(&page).or_else(|| open.pages.remove(&page)).is_some() {
                 open.release(ticket);

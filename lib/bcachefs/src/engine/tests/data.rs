@@ -589,6 +589,54 @@ fn a_write_is_one_extent_for_each_run_of_contiguous_blocks() {
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }
 
+/// Writes of a block each, every one extending the reservation the last
+/// made, are written back as one extent for each run of contiguous sectors
+/// in one bucket, as one write of them all is; a cut gives back what the
+/// last extension took. On 16 KiB buckets the runs cross buckets often.
+#[test]
+fn an_extended_reservation_writes_back_as_one_write_would() {
+    let dev = formatted(64 << 20, None);
+    let data: Vec<u8> = (0..64 * 4096).map(|i| (i * 7) as u8).collect();
+    let ino = mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap().ino;
+        let mut token = m.reserve(ino, 0, 4096).await.unwrap();
+        for _ in 1..64 { m.extend(&mut token, 4096).await.unwrap(); }
+        m.extend(&mut token, 4096).await.unwrap();
+        m.cut(&mut token, 64 * 4096);
+        assert_eq!(token.range(), (0, 64 * 4096));
+        assert_eq!(m.write_reserved(&mut token, 0, &data, NOW).await.unwrap(), data.len());
+        ino
+    });
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(read_all(&v, ino).unwrap(), data);
+    let runs = extents(&v, ino);
+    assert!(runs.len() <= 64 / 4 + 1, "{} extents for 64 blocks on buckets of four", runs.len());
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+/// The same across the end of a bucket of 2 MiB, where the next bucket
+/// taken can lie right after it: a run does not cross into it.
+#[test]
+fn an_extended_reservation_keeps_each_run_in_one_bucket() {
+    use super::buckets::Sparse;
+    let dev = Sparse::new(4 << 30);
+    block_on_ready(mkfs(&dev, &Options { label: b"data", time: NOW as u64, encryption: None }, &Tree::new(), &mut Seeded(7))).unwrap();
+    let blocks = 2 * 512 + 64;
+    let data: Vec<u8> = (0..blocks * 4096).map(|i| (i * 7) as u8).collect();
+    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+    // Three blocks first, so runs of sixteen do not end where buckets do.
+    let pad = block_on_ready(m.create(m.root(), b"pad", New::File, OWNER, NOW)).unwrap().ino;
+    block_on_ready(m.write(pad, 0, &[1; 3 * 4096], NOW)).unwrap();
+    let ino = block_on_ready(m.create(m.root(), b"f", New::File, OWNER, NOW)).unwrap().ino;
+    let mut token = block_on_ready(m.reserve(ino, 0, 4096)).unwrap();
+    for _ in 1..blocks { block_on_ready(m.extend(&mut token, 4096)).unwrap(); }
+    assert_eq!(block_on_ready(m.write_reserved(&mut token, 0, &data, NOW)).unwrap(), data.len());
+    block_on_ready(m.unmount()).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(read_all(&v, ino).unwrap(), data);
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
 /// A write over more old extents than one transaction may remove goes in
 /// parts, each removing at most two, and the file reads as written.
 #[test]

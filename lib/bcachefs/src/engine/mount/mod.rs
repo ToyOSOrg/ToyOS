@@ -1098,6 +1098,17 @@ impl<D: BlockDev> Mount<D> {
     /// left unwritten. Writing later changes leaves those ledgers as they
     /// are, and on a node of one block reclaim's writes never settle, as
     /// each one's keys dirty another node.
+    /// Whether an ordinary transaction of `journal` u64s and `nodes` nodes
+    /// would find room for what it may write: what [`Mount::grant`] refuses
+    /// `NoSpace` without, judged now.
+    pub(super) fn room_for(&self, journal: u64, nodes: usize) -> bool {
+        self.cancel_dropped();
+        let pending = self.reservations.borrow().pending(Draw::Ordinary);
+        let st = self.st.borrow();
+        let stable = self.metadata_nodes(&st, pending + st.granted_bytes + journal * 8);
+        st.read_only.is_none() && st.alloc.keeps(st.metadata_buckets, stable, nodes, st.reclaim_room, Draw::Ordinary, false) && st.alloc.fits(nodes, st.reclaim_room, Draw::Ordinary)
+    }
+
     fn grant(&self, class: Class, draw: Draw, journal: u64, nodes: usize, arrived: u64) -> Result<bool> {
         self.cancel_dropped();
         let pending = self.reservations.borrow().pending(draw);
