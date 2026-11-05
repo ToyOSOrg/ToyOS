@@ -1,0 +1,24 @@
+# A member of the host workspace (root `Cargo.toml`), like toyos-rootimage: the
+# loader and the kernel depend on it by path, the build writes it, and its
+# tests run on the host. What lives here is the kernel section of a signed
+# image: the kernel already laid out, its relocations, its ranges and symbols,
+# and the supervisor's program, so neither the loader nor the kernel parses an
+# ELF.
+
+[package]
+name = "toyos-kimage"
+description = "The kernel's boot image: laid out by the build, read by the loader and the kernel without an ELF parse."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+# The build's writer, which allocates.
+write = []
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+
+[dev-dependencies]
+toyos-kimage = { path = ".", features = ["write"] }

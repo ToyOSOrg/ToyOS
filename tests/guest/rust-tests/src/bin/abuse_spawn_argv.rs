@@ -39,7 +39,7 @@ fn main() {
     }
 
     let program = image::image_of(PROGRAM);
-    let (image, image_len) = program.spawn_words();
+    let laid = image::laid(&program);
     let base = SpawnArgs {
         path_ptr: region as u64,
         path_len: 1,
@@ -51,8 +51,12 @@ fn main() {
         endow_count: 0,
         labels_ptr: 0,
         labels_len: 0,
-        image,
-        image_len,
+        maps_ptr: laid.maps().as_ptr() as u64,
+        maps_count: laid.maps().len() as u64,
+        entry: laid.entry,
+        image_base: laid.image_base,
+        build_id_ptr: laid.build_id().as_ptr() as u64,
+        build_id_len: laid.build_id().len() as u64,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
         pager: u64::from(toyos_abi::HANDLE_INVALID.0),
     };

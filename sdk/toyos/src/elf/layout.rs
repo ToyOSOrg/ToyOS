@@ -9,11 +9,11 @@
 //! a position inside the image's own [`Extent`], which a loader adds to the
 //! address it placed the image at. A raw `p_vaddr` never leaves this module.
 
-use crate::header::{
+use crate::elf::header::{
     FileHeader, Machine, ProgramHeader, PROGRAM_HEADER_SIZE, PT_DYNAMIC, PT_GNU_EH_FRAME, PT_GNU_RELRO, PT_LOAD,
     PT_TLS, SECTION_HEADER_SIZE,
 };
-use crate::{Error, MAX_LOAD_SEGMENTS, MAX_TLS_ALIGN};
+use crate::elf::{Error, MAX_LOAD_SEGMENTS, MAX_TLS_ALIGN};
 
 /// An image's loadable extent, `[min, max]` with `min <= max`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

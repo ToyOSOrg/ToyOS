@@ -181,8 +181,8 @@ across `src/` and `tests/`. The harness hardwires q35
 (`tests/common/qemu.rs:4246-4266`). `kvm_usable()` is
 `cfg!(target_arch = "x86_64") && …` (`src/lib.rs:65`). The rust fork has only
 `x86_64_unknown_toyos.rs`; its base `base/toyos.rs` is arch-neutral.
-`toyos-elf`
-refuses anything but `EM_X86_64` (`lib/elf/src/header.rs:24,75`).
+`toyos::elf` reads a machine its caller names (`Machine::RUNNING`), and the
+build lays the kernel out for each (`build/kimage.rs`).
 
 **Already abstracted.** The syscall stub already has both arms
 (`sdk/abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `kernel/pure/sched`
@@ -347,9 +347,9 @@ Each stage names its exit; "measured" means a number from a run.
    declaration; the shootdown stress test and the loom-checked stop both
    pass; `CPU_OFF`/`SYSTEM_RESET`/`SYSTEM_OFF` replace ACPI reset and PM1a.
    The TLS-descriptor resolver lands here, in std with its loader half and a
-   `dlopen` test; until it does the kernel refuses `R_AARCH64_TLSDESC` by name
-   (`toyos_elf::rela::ExeRefusal::TlsDescriptor` for an executable,
-   `toyos_elf::RelocError::TlsDescriptor` for a library).
+   `dlopen` test; until it does a program refuses `R_AARCH64_TLSDESC` by name
+   (`toyos::relocate` for an executable, `toyos::elf::RelocError::TlsDescriptor`
+   for a library).
    **Every CPU starts, ahead of small-kernel stage 6 by the owner's word, as
    stage 4 did:** it ports no device interrupt, so nothing of the relay.
    Owed before the exit holds: the TLS-descriptor resolver;

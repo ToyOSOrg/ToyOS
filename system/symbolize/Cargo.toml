@@ -7,3 +7,10 @@ description = "Names the frames of a killed program's crash record: the file and
 
 [dependencies]
 toyos-symbols = { path = "../../lib/symbols" }
+# The one ELF parser.
+toyos = { path = "../../sdk/toyos" }
+
+[dev-dependencies]
+# The namer's outside judge: unaligned, since an include_bytes! fixture is
+# aligned to 1 and object reads a header in place.
+object = { version = "0.38", default-features = false, features = ["read_core", "elf", "std", "unaligned"] }

@@ -11,11 +11,12 @@
 // tables inside them. Every item is used by one of the two, so the unused half
 // is dead only from here.
 #[allow(dead_code)]
+#[path = "elf/common/mod.rs"]
 mod common;
 
 use common::*;
-use toyos_elf::header::PROGRAM_HEADER_SIZE;
-use toyos_elf::{Error, ImageRange, Layout, Machine, StackedImage, MAX_LOAD_SEGMENTS};
+use toyos::elf::header::PROGRAM_HEADER_SIZE;
+use toyos::elf::{Error, ImageRange, Layout, Machine, StackedImage, MAX_LOAD_SEGMENTS};
 
 fn refused(bytes: Vec<u8>) -> Error {
     match Layout::parse(&bytes, Machine::X86_64) {
@@ -403,7 +404,7 @@ fn a_table_no_segment_holds_whole_is_absent() {
     let after = Elf::new(0x2000).entry(0x1000).ph(Phdr::load(PH_OFF as u64 + 8, 0x1000, 0x1000, 0x1000, PF_R));
     assert_eq!(table_of(&accepted(after.build())), None);
     // And one at vaddr 0, so a loader's vaddr-0 checks pass and only the table
-    // refuses it: `abuse_elf_loader`'s `phdrs_unmapped`.
+    // refuses it (`program::lay_out`).
     let unmapped = accepted(Elf::new(0x2000).ph(Phdr::load(0x1000, 0, 0x1000, 0x1000, PF_R | PF_X)).build());
     assert_eq!((unmapped.extent().min(), table_of(&unmapped)), (0, None));
 }

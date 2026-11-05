@@ -12,11 +12,11 @@
 //! Every type [`Op`] has no variant for, but `NONE`, is refused: a slot left
 //! with its link-time value is a wrong pointer, not a skipped relocation.
 
-use crate::header::Machine;
-use crate::layout::{Extent, ImageOffset, TlsSegment};
-use crate::read;
-use crate::sym::{SymIndex, SymTab};
-use crate::tls::TlsOffset;
+use crate::elf::header::Machine;
+use crate::elf::layout::{Extent, ImageOffset, TlsSegment};
+use crate::elf::read;
+use crate::elf::sym::{SymIndex, SymTab};
+use crate::elf::tls::TlsOffset;
 
 /// Bytes in one `Elf64_Rela`.
 pub const ENTRY_SIZE: usize = 24;
@@ -219,7 +219,7 @@ impl TlsSymRef {
     }
 
     /// The addend `A`, resolved against the defining symbol's `S` through
-    /// [`crate::Sym::tls_offset`].
+    /// [`crate::elf::Sym::tls_offset`].
     pub const fn addend(self) -> i64 {
         self.addend
     }

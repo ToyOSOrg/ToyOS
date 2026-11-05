@@ -1,11 +1,11 @@
 //! A thread-local datum's place inside its module's `PT_TLS`.
 
-use crate::layout::TlsSegment;
+use crate::elf::layout::TlsSegment;
 
 /// `S + A` inside one module's TLS segment, `0..=p_memsz`: made only by
 /// [`TlsOffset::of`] against a [`TlsSegment`] a parse derived.
 ///
-/// The end is inclusive for the reason [`crate::Extent::offset`]'s is.
+/// The end is inclusive for the reason [`crate::elf::Extent::offset`]'s is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TlsOffset(u64);
 

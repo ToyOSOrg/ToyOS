@@ -1,9 +1,9 @@
-//! The payloads the loader hands the kernel beside its own ELF: the
+//! The payloads the loader hands the kernel beside its own image: the
 //! supervisor's executable, the file server's and ROOT's bytes
-//! (`toyos_abi::boot::BootImage`). The kernel parses none of them but the
-//! supervisor's program headers, which it spawns the supervisor from; the
-//! other two it hands the supervisor, whose file server serves `/system` out
-//! of ROOT.
+//! (`toyos_abi::boot::BootImage`). The kernel parses none of them: it spawns
+//! the supervisor from the ranges the build laid out of its executable
+//! (`toyos_kimage::Supervisor`), and hands the other two to the supervisor,
+//! whose file server serves `/system` out of ROOT.
 //!
 //! [`init`] runs before `mm::init` and refuses the boot by name unless each
 //! image is non-empty, page-aligned and whole pages inside one `LoaderData`

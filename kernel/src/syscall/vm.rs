@@ -21,7 +21,7 @@ fn whole_pages(size: u64) -> Option<u64> {
 /// The protection a `VmProt` word names. No word names write and execute at
 /// once: a program's loader writes its code `ReadWrite` and then protects it
 /// `ReadExec`, so no page of private memory is ever both.
-fn vm_prot(word: u64) -> Result<Prot, SyscallError> {
+pub(crate) fn vm_prot(word: u64) -> Result<Prot, SyscallError> {
     Ok(match VmProt::from_u64(word).ok_or(SyscallError::InvalidArgument)? {
         VmProt::None => Prot::None,
         VmProt::Read => Prot::Read,
@@ -106,17 +106,4 @@ pub(super) fn sys_vm_remap(addr: u64, old: u64, new: u64, may_move: u64) -> u64 
     remapped.map_or_else(SyscallError::to_u64, UserAddr::raw)
 }
 
-/// The first `len` bytes of the shared memory object `handle` names, as a
-/// program image; `Err` is the syscall's answer.
-pub(super) fn shared_image(handle: u64, len: u64) -> Result<crate::file_backing::SharedImage, u64> {
-    let Ok(raw) = u32::try_from(handle) else { return Err(SyscallError::InvalidArgument.to_u64()) };
-    let object = process::with_process_data(|data| {
-        data.handles.get::<crate::object::shm::SharedMemObject>(
-            toyos_abi::handle::RawHandle(raw),
-            toyos_abi::handle::Rights::MAP,
-        )
-    })
-    .map_err(|e| e.refuse())?;
-    crate::file_backing::SharedImage::over(object, len).map_err(|e| e.to_u64())
-}
 

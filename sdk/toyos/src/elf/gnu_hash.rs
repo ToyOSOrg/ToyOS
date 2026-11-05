@@ -7,8 +7,8 @@
 //! off the end answers `None` — a symbol count derived from a walk that ran off
 //! the end is not a count.
 
-use crate::read;
-use crate::sym::SymTab;
+use crate::elf::read;
+use crate::elf::sym::SymTab;
 
 /// A `.gnu.hash` table whose header is readable and internally usable.
 ///

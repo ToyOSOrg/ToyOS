@@ -939,7 +939,6 @@ name = "toyos"
 version = "0.18.0"
 dependencies = [
  "toyos-abi",
- "toyos-elf",
 ]
 
 [[package]]
@@ -955,10 +954,6 @@ dependencies = [
 
 [[package]]
 name = "toyos-device-memory"
-version = "0.1.0"
-
-[[package]]
-name = "toyos-elf"
 version = "0.1.0"
 
 [[package]]

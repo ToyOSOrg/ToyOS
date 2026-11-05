@@ -18,14 +18,15 @@
 //! refuses everything cannot pass as one that accepts nothing wrong.
 
 #[allow(dead_code)]
+#[path = "elf/common/mod.rs"]
 mod common;
 
 use common::*;
-use toyos_elf::dynamic::{Dynamic, InitArray};
-use toyos_elf::rela::{self, Op, ReadTables, RelaTable, Rules, TlsRef};
-use toyos_elf::sym::{self, SymTab};
-use toyos_elf::tls::TlsOffset;
-use toyos_elf::{ImageRange, Layout, Machine, TlsSegment};
+use toyos::elf::dynamic::{Dynamic, InitArray};
+use toyos::elf::rela::{self, Op, ReadTables, RelaTable, Rules, TlsRef};
+use toyos::elf::sym::{self, SymTab};
+use toyos::elf::tls::TlsOffset;
+use toyos::elf::{ImageRange, Layout, Machine, TlsSegment};
 
 /// Images per run: every one of them reaches the relocation parse unless its
 /// own headers are what the mutation broke.
@@ -441,7 +442,7 @@ fn every_derived_address_lies_inside_the_image_or_the_image_is_refused() {
 /// answers is a `GNU` build-id note's whole descriptor out of the bytes given.
 #[test]
 fn no_note_segment_panics_the_build_id_read() {
-    use toyos_elf::note::{self, MAX_BUILD_ID, NT_GNU_BUILD_ID};
+    use toyos::elf::note::{self, MAX_BUILD_ID, NT_GNU_BUILD_ID};
     let mut rng = Rng { state: 0xA076_1D64_78BD_642F, hostile: 20 };
     let mut found = 0u64;
     const ITERATIONS: u64 = 200_000;

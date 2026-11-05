@@ -154,9 +154,8 @@ fn toyos_sources_in_dep_info(crates: &[StdCrate], text: &str) -> Vec<String> {
     paths_in_dep_info(text).filter(|path| std_crate_of(crates, path).is_some()).map(str::to_string).collect()
 }
 
-/// Refuse a std whose dep-info under `dep_info` names a `toyos-abi`,
-/// `toyos-elf` or `toyos` that is not this worktree's: a registry's, or
-/// another checkout's.
+/// Refuse a std whose dep-info under `dep_info` names a `toyos-abi` or `toyos`
+/// that is not this worktree's: a registry's, or another checkout's.
 ///
 /// What the builder believed is not evidence; this reads what the compiler was
 /// handed. A std built against another `toyos-abi` still builds, links and
@@ -181,8 +180,8 @@ pub(crate) fn assert_std_built_from(root: &Path, dep_info: &Path) {
         sources.iter().filter(|p| !Path::new(p).starts_with(&root)).collect();
     assert!(
         foreign.is_empty(),
-        "std was compiled against {} toyos-abi, toyos-elf or toyos sources that are not this worktree's {}:\n  {}\n\
-         std names them by version and takes this worktree's only through the [patch] bootstrap is \
+        "std was compiled against {} toyos-abi or toyos sources that are not this worktree's {}:\n  {}\n\
+         std names both by version and takes this worktree's only through the [patch] bootstrap is \
          handed (`sysroot::std_patch`): a registry's copy is a resolve that patch did not reach, and \
          another checkout's a patch that named another tree.",
         foreign.len(),
@@ -862,36 +861,36 @@ mod tests {
         );
     }
 
-    /// **A std that took any of its crates from a registry is refused, naming
-    /// the registry's source**: what a std build the patch did not reach
-    /// compiles, as its dep-info spells it. Only this worktree's copies pass.
+    /// **A std that took either crate from a registry is refused, naming the
+    /// registry's source**: what a std build the patch did not reach compiles,
+    /// as its dep-info spells it. Only this worktree's copies of both pass.
     #[test]
-    fn a_std_built_from_a_registry_s_copy_of_any_crate_is_refused() {
+    fn a_std_built_from_a_registry_s_copy_of_either_crate_is_refused() {
         let temp = TempDir::new("std-registry");
         let root = fs::canonicalize(&*temp).unwrap();
         let built = root.join("rust/build/toyos-std/host/stage0-std/x86_64-unknown-toyos");
         fs::create_dir_all(built.join("dist")).unwrap();
         crate::sysroot::tests::std_manifests(&root);
-        let ours = ["sdk/abi", "lib/elf", "sdk/toyos"].map(|dir| format!("{}/{dir}/src/lib.rs", root.display()));
-        let registry = [("toyos-abi", "0.63.0+267ff3ef79dccdcb"), ("toyos-elf", "0.2.0+0a1b2c3d4e5f6a7b"), ("toyos", "0.75.0+0ea8e9e321a9f71c")]
-            .map(|(name, version)| format!("/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/{name}-{version}/src/lib.rs"));
-        let built_from = |sources: &[String; 3]| {
-            fs::write(built.join("dist/libstd.d"), format!("{}/dist/libstd.rlib: {}\n", built.display(), sources.join(" ")))
+        let ours = |dir: &str| format!("{}/{dir}/src/lib.rs", root.display());
+        let registry = |name: &str, version: &str| {
+            format!("/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/{name}-{version}/src/lib.rs")
+        };
+        let built_from = |abi: &str, toyos: &str| {
+            fs::write(built.join("dist/libstd.d"), format!("{}/dist/libstd.rlib: {abi} {toyos}\n", built.display()))
                 .unwrap();
             std::panic::catch_unwind(|| assert_std_built_from(&root, &built))
                 .err()
                 .map(|refused| *refused.downcast::<String>().expect("a formatted refusal"))
         };
-        assert_eq!(built_from(&ours), None);
+        assert_eq!(built_from(&ours("sdk/abi"), &ours("sdk/toyos")), None);
 
-        for (i, taken) in registry.iter().enumerate() {
-            let mut sources = ours.clone();
-            sources[i] = taken.clone();
-            let said = built_from(&sources).unwrap_or_else(|| panic!("a std built from {taken} was taken"));
+        let (abi, toyos) = (registry("toyos-abi", "0.63.0+267ff3ef79dccdcb"), registry("toyos", "0.75.0+0ea8e9e321a9f71c"));
+        for (taken, from) in [(&abi, built_from(&abi, &ours("sdk/toyos"))), (&toyos, built_from(&ours("sdk/abi"), &toyos))] {
+            let said = from.unwrap_or_else(|| panic!("a std built from {taken} was taken"));
             assert!(said.contains(taken.as_str()) && said.contains("a registry's copy"), "{said}");
         }
-        let said = built_from(&registry).expect("a std built from the registry's copies of all was taken");
-        assert!(registry.iter().all(|taken| said.contains(taken.as_str())), "{said}");
+        let said = built_from(&abi, &toyos).expect("a std built from the registry's copies of both was taken");
+        assert!(said.contains(&abi) && said.contains(&toyos), "{said}");
     }
 
     /// **Freestanding libraries whose dep-info names the worktree outside its

@@ -401,9 +401,9 @@ crate::user_safe! {
     /// [`Rights::DUP`]: crate::handle::Rights::DUP
     #[derive(Clone, Copy)]
     pub struct SpawnArgs {
-        /// The program: the file the kernel opens and pages the child from, or,
-        /// with an `image`, the path the caller read that from. **Never `argv[0]`**, which is the child's first argument
-        /// and the name it goes by, and which nothing opens.
+        /// The path the caller read the program from, which names it in the
+        /// spawn's record. **Never `argv[0]`**, which is the child's first
+        /// argument and the name it goes by. Nothing opens it.
         pub path_ptr: u64,
         pub path_len: u64,
         pub argv_ptr: u64,
@@ -416,17 +416,22 @@ crate::user_safe! {
         /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
         pub labels_ptr: u64,
         pub labels_len: u64,
-        /// The program's bytes, in a memory object the caller holds — its file
-        /// server's for the file, or one the caller read the program into:
-        /// `image` is a handle to it carrying `MAP`, and `image_len` how many of
-        /// its first bytes the program is — or 0, for a program the kernel opens
-        /// at `path` itself. `PermissionDenied` for a handle without `MAP`;
-        /// `InvalidArgument` for a length the object does not hold, or a device's
-        /// window. The object stays the caller's: what the kernel reads of it,
-        /// and when, is `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is
-        /// then opened by nobody.
-        pub image: u64,
-        pub image_len: u64,
+        /// The child's memory, `[SpawnMap]`, as the caller laid out its program:
+        /// 1 to [`MAX_SPAWN_MAPS`] ranges, none meeting another or the clock
+        /// page, each checked as an ordinary mapping (`SpawnMap`). Everything
+        /// else of the space is empty until the child maps it, but its stack.
+        pub maps_ptr: u64,
+        pub maps_count: u64,
+        /// Where the child's main thread starts: inside a [`VmProt::ReadExec`]
+        /// range of `maps`.
+        pub entry: u64,
+        /// Where the program's address 0 lands, which a crash record names a
+        /// frame's offset from. A label, which the kernel checks nothing of.
+        pub image_base: u64,
+        /// The program's build-id, 0 to [`MAX_BUILD_ID`] bytes, which a crash
+        /// record names the program by: 0 for none.
+        pub build_id_ptr: u64,
+        pub build_id_len: u64,
         /// The process the child is placed under, whose end takes it down: a
         /// handle carrying [`Rights::WRITE`] to it — a copy of that process's
         /// [`SELF_LABEL`] — or [`HANDLE_INVALID`] for the caller itself.
@@ -446,6 +451,40 @@ crate::user_safe! {
         pub pager: u64,
     }
 }
+
+crate::user_safe! {
+    /// One range of a spawned child's memory (`SpawnArgs::maps_ptr`). Each is
+    /// refused `InvalidArgument` unless `addr` and `len` are whole pages of the
+    /// user half, `prot` is a [`VmProt`], `copied <= len`, and `object` holds
+    /// `[offset, offset + copied)` of ordinary memory from a page boundary;
+    /// `PermissionDenied` for an `object` handle without `MAP`. No page is both
+    /// writable and executable, since no `VmProt` is.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct SpawnMap {
+        pub addr: u64,
+        pub len: u64,
+        /// A memory object whose bytes the range's pages start as, each copied at
+        /// its first touch and private to the child from then on; or
+        /// [`HANDLE_INVALID`] for a range of zeros, which `VmProt::None` leaves
+        /// reserved. The object stays the caller's.
+        pub object: u64,
+        pub offset: u64,
+        /// How many of the object's bytes from `offset` the range copies; zeros
+        /// past them.
+        pub copied: u64,
+        /// A [`VmProt`].
+        pub prot: u64,
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<SpawnMap>() == 48);
+
+/// The most ranges a spawn lays out: a program's `PT_LOAD`s, at most
+/// sixteen, and the holes between them.
+pub const MAX_SPAWN_MAPS: usize = 64;
+
+/// The most bytes of a build-id a spawn carries.
+pub const MAX_BUILD_ID: usize = 32;
 
 /// One `(label, handle)` pair of a process's endowment table.
 ///

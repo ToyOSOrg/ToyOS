@@ -21,6 +21,7 @@ pub mod census;
 pub mod device;
 pub mod devset;
 pub mod dl;
+pub mod elf;
 pub mod endow;
 pub mod fd;
 pub mod files;

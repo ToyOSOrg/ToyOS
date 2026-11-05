@@ -7,10 +7,10 @@
 
 use core::ffi::CStr;
 
-use crate::layout::{Extent, ImageOffset, TlsSegment};
-use crate::read;
-use crate::tls::TlsOffset;
-use crate::Error;
+use crate::elf::layout::{Extent, ImageOffset, TlsSegment};
+use crate::elf::read;
+use crate::elf::tls::TlsOffset;
+use crate::elf::Error;
 
 /// Bytes in one `Elf64_Sym`.
 pub const ENTRY_SIZE: usize = 24;
@@ -59,6 +59,16 @@ impl Sym {
         self.shndx != 0
     }
 
+    /// `st_value`: an image offset, or a TLS offset for `STT_TLS`.
+    pub const fn value(&self) -> u64 {
+        self.value
+    }
+
+    /// `st_size`, 0 for a symbol that bounds nothing.
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
     pub const fn bind(&self) -> u8 {
         self.info >> 4
     }
@@ -77,7 +87,7 @@ impl Sym {
 
     /// This symbol's name in `strings`, `""` when it names nothing readable.
     pub fn name_in<'a>(&self, strings: &'a [u8]) -> &'a str {
-        crate::cstr(strings, u64::from(self.name))
+        crate::elf::cstr(strings, u64::from(self.name))
     }
 
     /// Where a defined, non-TLS symbol lies in the image `extent` describes,

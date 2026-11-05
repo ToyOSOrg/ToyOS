@@ -5,8 +5,8 @@
 //! thing and the loader does another, which is the class of defect the whole
 //! crate exists to remove.
 
-use crate::read;
-use crate::Error;
+use crate::elf::read;
+use crate::elf::Error;
 
 /// Bytes in `e_ident`.
 pub const EI_NIDENT: usize = 16;
@@ -26,7 +26,7 @@ const EM_AARCH64: u16 = 183;
 
 /// The instruction set an image is built for.
 ///
-/// Each machine names its own relocation numbers ([`crate::rela`]); nothing
+/// Each machine names its own relocation numbers ([`crate::elf::rela`]); nothing
 /// else in this crate is per-architecture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Machine {
@@ -35,6 +35,12 @@ pub enum Machine {
 }
 
 impl Machine {
+    /// The machine this code runs on, whose images it loads and spawns.
+    #[cfg(target_arch = "x86_64")]
+    pub const RUNNING: Machine = Machine::X86_64;
+    #[cfg(target_arch = "aarch64")]
+    pub const RUNNING: Machine = Machine::Aarch64;
+
     /// The machine an `e_machine` names, or `None` for one ToyOS does not run.
     pub const fn from_raw(e_machine: u16) -> Option<Machine> {
         match e_machine {

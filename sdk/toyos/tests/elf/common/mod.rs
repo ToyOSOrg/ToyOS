@@ -186,24 +186,24 @@ impl Elf {
 }
 
 /// The extent `Layout::parse` derives for a single `PT_LOAD` spanning
-/// `[min, max]`: the only way a test names an [`toyos_elf::Extent`], since its
+/// `[min, max]`: the only way a test names an [`toyos::elf::Extent`], since its
 /// constructor is the parse's alone.
-pub fn extent(min: u64, max: u64) -> toyos_elf::Extent {
+pub fn extent(min: u64, max: u64) -> toyos::elf::Extent {
     let bytes = Elf::new(0x200)
         .entry(min)
         .ph(Phdr::load(0x100, min, 0, max - min, PF_R | PF_X))
         .build();
-    toyos_elf::Layout::parse(&bytes, toyos_elf::Machine::X86_64)
+    toyos::elf::Layout::parse(&bytes, toyos::elf::Machine::X86_64)
         .unwrap()
         .extent()
 }
 
 /// The `PT_TLS` `Layout::parse` derives for a `memsz`-byte segment: the only
-/// way a test names a [`toyos_elf::TlsSegment`], and so the only bound a
-/// [`toyos_elf::TlsOffset`] is had against.
-pub fn tls_segment(memsz: u64) -> toyos_elf::TlsSegment {
+/// way a test names a [`toyos::elf::TlsSegment`], and so the only bound a
+/// [`toyos::elf::TlsOffset`] is had against.
+pub fn tls_segment(memsz: u64) -> toyos::elf::TlsSegment {
     let bytes = Elf::honest(0x200).ph(Phdr::tls(0x100, 0, memsz, 8)).build();
-    toyos_elf::Layout::parse(&bytes, toyos_elf::Machine::X86_64)
+    toyos::elf::Layout::parse(&bytes, toyos::elf::Machine::X86_64)
         .unwrap()
         .tls()
         .unwrap()

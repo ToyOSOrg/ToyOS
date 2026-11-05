@@ -8,9 +8,9 @@ opened: 2026-10-10
 
 `PT_GNU_RELRO` names what a program's relocations write once and nothing
 writes after: `.data.rel.ro`, `.dynamic`, `.got`, every vtable and every table
-of function pointers. The kernel maps it as the writable `PT_LOAD` that holds
-it, reads no `PT_GNU_RELRO` (`rg -i relro kernel/src lib/elf/src` matches
-nothing), and gives a program no way to take the write away once
+of function pointers. A parent lays it out as part of the writable range that
+holds it (`toyos::elf::program`), which the kernel maps as asked; nothing reads
+an executable's `PT_GNU_RELRO`, and nothing takes the write away once
 `toyos::relocate` has run. A stray or hostile write in a running program can
 rewrite a vtable. A library's is read-only once the SDK's loader has relocated
 it (`sdk/toyos/src/dl/mod.rs`, `protect`); an executable's is not, and the same

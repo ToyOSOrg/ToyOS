@@ -40,9 +40,20 @@ backtrace crate. `SYS_DLOPEN`, `SYS_DLSYM`, `SYS_DLCLOSE`, `SYS_TLS_ALLOC_BLOCK`
 `SYS_QUERY_MODULES` are deleted, and a program may protect its own memory read
 and execute, never write and execute at once. An executable's start, std's or libc's, loads the
 libraries it names (`DT_NEEDED`) through the same loader before `main`
-(`toyos::dl::start`), and `std_tls` holds it. What is left in Ring 0 is the
-program-header parse, which the end state keeps. AArch64 shared objects reach
+(`toyos::dl::start`), and `std_tls` holds it. AArch64 shared objects reach
 their thread-locals through TLS descriptors, which the loader refuses.
+
+**Stage 3 is built: nothing in the kernel parses an ELF** (owner, 2026-11-05).
+A parent lays out its child's program (`toyos::elf::program`) and hands the
+kernel ranges to map, each checked as an ordinary mapping is
+(`SpawnArgs::maps_ptr`, `abuse_spawn_maps`), the entry, the image base and the
+build-id a crash record names. The build lays out the kernel and the
+supervisor ahead of the boot (`toyos_kimage`): the loader copies the kernel and
+applies its `RELATIVE`s from that table, and the kernel takes its own ranges,
+its symbols and the supervisor's program from it. The ELF decoder is a module
+of `toyos` (`toyos::elf`), the one parser, which the build, `symbolize` and
+the SDK's loader read with; `toyos-elf` is no crate, and the kernel and the
+loader link none of it.
 
 The evidence that it is worth doing: nine dated commits over eleven days fixed
 userland-reachable kernel defects in this code, six of them machine-wide panics;
@@ -67,14 +78,13 @@ Frees at least 2 MiB per running program, the kernel stops parsing program
 files' name tables, library frames get names." and wrote "adopt, make sure the
 code can never panic or fail is that possible? i dont want to allow a kernel
 crash because of that and it seems brittle by nature do you agree? can we
-share a lot of code there? should we?". The kernel keeps its own ELF reader,
-`toyos-elf`: the orchestrator's reading of the owner's crate ruling of the same
-day, "if it makes sense we wrote our own elf parser or aml interpreter due to
-security or other important reasons we do it". The kernel names only itself: a
-killed program's frame is recorded as the file it ran, the offset in that file
-and the file's build-id (`lib/symbols/src/frame.rs`), and
-`/system/bin/symbolize` names it with the kernel's own lookup and demangling
-code. What is left: a library's frames print bare, because the kernel records
+share a lot of code there? should we?". The kernel reads no ELF for it: its
+own names are the build's table (`toyos_kimage::Symbols`), which resolves as
+the ELF symbol table does (`build::kimage`'s test). The kernel names only
+itself: a killed program's frame is recorded as the file it ran, the offset in
+that file and the build-id its parent handed the spawn
+(`lib/symbols/src/frame.rs`), and `/system/bin/symbolize` names it out of the
+file with `toyos::elf` and the kernel's demangling code. What is left: a library's frames print bare, because the kernel records
 only the executable's image for a process; and `rustc-demangle`'s standing. It
 is an unforked crates.io dependency, ~2k lines of third-party string parsing in
 Ring 0 on the panic path, now for the kernel's own names alone: fork it into

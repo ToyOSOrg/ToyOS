@@ -18,7 +18,8 @@ toyos-acpi = { path = "../lib/acpi" }
 toyos-bootmap = { path = "../lib/bootmap" }
 toyos-blackbox = { path = "../lib/blackbox" }
 toyos-wallclock = { path = "../lib/wallclock" }
-toyos-elf = { path = "../lib/elf" }
+# The kernel section, laid out by the build: no ELF is parsed here.
+toyos-kimage = { path = "../lib/kimage" }
 # ROOT is picked off the boot disk by the GPT.
 toyos-gpt = { path = "../lib/gpt" }
 # Which ROOT, how it is read in bounded chunks, and the handoff the kernel

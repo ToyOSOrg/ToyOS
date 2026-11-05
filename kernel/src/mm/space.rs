@@ -321,6 +321,12 @@ impl AddressSpace {
         }
     }
 
+    /// Whether `[start, start + len)` is whole pages of the user half that
+    /// nothing in the space holds.
+    pub fn vacant(&self, start: u64, len: u64) -> bool {
+        pages(start, len).is_some_and(|end| self.inventory.holds(start, end) && self.inventory.is_free(start, end))
+    }
+
     /// `len` bytes of private memory, committed unless `prot` is `None`, which
     /// reserves the range and nothing more. A commitment is promised its
     /// frames here, so it is refused here, `ResourceExhausted`, and never at a

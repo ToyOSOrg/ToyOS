@@ -101,9 +101,8 @@ impl FromHandle for Process {
     }
 }
 
-/// A program's bytes in a memory object this process holds, which the kernel
-/// pages a child from: how a program the kernel does not serve is spawned
-/// (`SpawnArgs::image`).
+/// A program's bytes in a memory object this process holds, which a spawn
+/// lays out and the kernel pages the child from (`SpawnMap::object`).
 pub struct Image {
     object: Object,
     len: u64,
@@ -226,14 +225,15 @@ impl Image {
         &bytes[..self.len as usize]
     }
 
-    /// What `SpawnArgs::image` and `SpawnArgs::image_len` carry. The object is
-    /// this process's until the spawn returns; the child keeps its own.
-    pub fn spawn_words(&self) -> (u64, u64) {
+    /// The handle a spawn's ranges name the object by (`SpawnMap::object`).
+    /// The object is this process's until the spawn returns; the child's pages
+    /// are copied out of it.
+    pub fn handle(&self) -> u64 {
         let handle = match &self.object {
             Object::Read(object) => object.as_handle(),
             Object::Immutable(image) => image.as_handle(),
         };
-        (u64::from(handle.raw().0), self.len)
+        u64::from(handle.raw().0)
     }
 }
 

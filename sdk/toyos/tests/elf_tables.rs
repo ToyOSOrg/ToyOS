@@ -10,15 +10,16 @@
 // whole files that point at them. Every item is used by one of the two, so the
 // unused half is dead only from here.
 #[allow(dead_code)]
+#[path = "elf/common/mod.rs"]
 mod common;
 
 use common::*;
-use toyos_elf::dynamic::{self, Dynamic};
-use toyos_elf::gnu_hash::{self, GnuHash};
-use toyos_elf::rela::{self, Op, Rela, RelaTable, RelocError, RelocKind, Rules};
-use toyos_elf::section::{SectionTable, Unapplied, SHT_DYNSYM, SHT_REL, SHT_RELA, SHT_RELR, SHT_SYMTAB};
-use toyos_elf::sym::SymTab;
-use toyos_elf::Machine;
+use toyos::elf::dynamic::{self, Dynamic};
+use toyos::elf::gnu_hash::{self, GnuHash};
+use toyos::elf::rela::{self, Op, Rela, RelaTable, RelocError, RelocKind, Rules};
+use toyos::elf::section::{SectionTable, Unapplied, SHT_DYNSYM, SHT_REL, SHT_RELA, SHT_RELR, SHT_SYMTAB};
+use toyos::elf::sym::SymTab;
+use toyos::elf::Machine;
 
 /// Every entry through [`rela::parse`], in an image spanning all of memory with
 /// a TLS segment no offset leaves: the window and the symbol count are the
@@ -33,7 +34,7 @@ fn validate(
         window,
         tls: Some(tls_segment(u64::MAX)),
     };
-    let syms = vec![0; sym_count * toyos_elf::sym::ENTRY_SIZE];
+    let syms = vec![0; sym_count * toyos::elf::sym::ENTRY_SIZE];
     entries.try_for_each(|r| rela::parse(r, &rules, SymTab::new(&syms, &[])).map(|_| ()))
 }
 

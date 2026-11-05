@@ -10,9 +10,9 @@
 //! of=lib/elf/tests/fixtures/lld-headers.bin bs=4096 count=1`, and expect
 //! every number below to move: each is `readelf -hlnW` of the fixture.
 
-use toyos_elf::{Layout, Machine};
+use toyos::elf::{Layout, Machine};
 
-const LLD_HEADERS: &[u8] = include_bytes!("fixtures/lld-headers.bin");
+const LLD_HEADERS: &[u8] = include_bytes!("elf/fixtures/lld-headers.bin");
 
 #[test]
 fn a_linked_binary_parses_to_what_readelf_says() {
@@ -76,18 +76,18 @@ fn objects_build_id(file: &[u8]) -> Option<Vec<u8>> {
 
 /// Ours, read as the kernel reads it: each `PT_NOTE` at its own offset.
 fn our_build_id(file: &[u8]) -> Option<Vec<u8>> {
-    toyos_elf::note::segments(file).find_map(|s| {
+    toyos::elf::note::segments(file).find_map(|s| {
         let notes = file.get(s.offset as usize..(s.offset + s.filesz) as usize)?;
-        toyos_elf::note::build_id(notes, s.align).map(<[u8]>::to_vec)
+        toyos::elf::note::build_id(notes, s.align).map(<[u8]>::to_vec)
     })
 }
 
 #[test]
 fn an_lld_binarys_build_id_is_what_object_and_readelf_read() {
     Layout::parse(LLD_HEADERS, Machine::X86_64).expect("rust-lld's own output");
-    let segments: Vec<_> = toyos_elf::note::segments(LLD_HEADERS).collect();
+    let segments: Vec<_> = toyos::elf::note::segments(LLD_HEADERS).collect();
     // `readelf -l`: `NOTE 0x0002a8 0x00000000000002a8 0x00000000000002a8 0x000024 0x000024 R 0x4`.
-    assert_eq!(segments, [toyos_elf::note::NoteSegment { offset: 0x2a8, filesz: 0x24, align: 4 }]);
+    assert_eq!(segments, [toyos::elf::note::NoteSegment { offset: 0x2a8, filesz: 0x24, align: 4 }]);
     let ours = our_build_id(LLD_HEADERS);
     assert_eq!(ours, objects_build_id(LLD_HEADERS));
     // `readelf -n`: `Build ID: 97082d0f339a81a4dadc05e2f47960b079ab178c`.

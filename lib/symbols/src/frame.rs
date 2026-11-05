@@ -20,7 +20,7 @@
 use core::fmt::{self, Display, Write};
 
 use toyos_abi::log::MAX_RECORD_MESSAGE;
-use toyos_elf::note::{self, NoteSegment, MAX_BUILD_ID};
+use toyos_abi::syscall::MAX_BUILD_ID;
 use toyos_elide::{widest, Elided, MARKER_MAX};
 
 /// A user frame's own text, every number at its widest: indent, `0x` and
@@ -47,16 +47,6 @@ impl BuildId {
 
     pub fn as_bytes(&self) -> &[u8] {
         self.bytes.get(..usize::from(self.len)).unwrap_or(&[])
-    }
-
-    /// The build-id of the image whose program header table `headers` holds:
-    /// the first `PT_NOTE` that `read` hands back bytes for and that carries
-    /// one. `read` answers a segment's bytes, as many of them as it will read.
-    pub fn find<B: AsRef<[u8]>>(headers: &[u8], mut read: impl FnMut(NoteSegment) -> Option<B>) -> Option<BuildId> {
-        note::segments(headers).find_map(|segment| {
-            let bytes = read(segment)?;
-            note::build_id(bytes.as_ref(), segment.align).and_then(BuildId::new)
-        })
     }
 }
 

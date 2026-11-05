@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use super::{plan, relocate, Mapped, Pass, Scope};
 use crate::dl::Refused;
-use toyos_elf::RelocError;
+use crate::elf::RelocError;
 
 const SIZE: usize = 0x2000;
 const PHDRS: usize = 0x40;

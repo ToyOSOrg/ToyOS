@@ -1,66 +1,31 @@
 //! The kernel's own symbols: [`SymbolTable`] is read from the fault handler,
 //! panic handler and double fault, so it never allocates, locks or does I/O.
-//! `toyos-symbols` holds the pure byte-level decisions; this module holds only
-//! what must run in that context, plus the boot-time global and `log!`
-//! integration. The kernel names no program's frame: a user frame is recorded
-//! as file and offset (`process::record_user_frame`).
+//! The table is the build's (`toyos_kimage::Symbols`), read out of the kernel
+//! section the loader handed over; `toyos-symbols` holds how a name is
+//! printed. The kernel names no program's frame: a user frame is recorded as
+//! file and offset (`process::record_user_frame`).
 
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use alloc::boxed::Box;
-use toyos_elf::sym::SymTab;
 use toyos_symbols::demangled;
 
-/// Zero-allocation symbol table: raw pointers into the kernel image's ELF sections, safe to call from any context including panic/double-fault.
+/// The kernel's functions, in the section the loader handed over and keeps
+/// mapped for the machine's life, and where the kernel's address 0 is.
 pub struct SymbolTable {
-    symtab: *const u8,
-    symtab_len: usize,
-    strtab: *const u8,
-    strtab_len: usize,
+    table: toyos_kimage::Symbols<'static>,
     base: u64,
 }
 
-// SAFETY: the pointers name only the kernel image in the direct map, mapped
-// for the life of the machine; `SymbolTable` is `!Send` only because
-// `*const u8` is.
-unsafe impl Send for SymbolTable {}
-// SAFETY: no method writes through either pointer, so concurrent reads from
-// multiple CPUs alias only immutable bytes.
-unsafe impl Sync for SymbolTable {}
-
 impl SymbolTable {
-    // A failed `locate` returns an empty table rather than an error: a kernel that cannot find its symbols still boots.
-    fn from_elf(data: &[u8], base: u64) -> Self {
-        let (symtab, strtab) = toyos_symbols::locate(data).unwrap_or((&[], &[]));
-        Self {
-            symtab: symtab.as_ptr(),
-            symtab_len: symtab.len(),
-            strtab: strtab.as_ptr(),
-            strtab_len: strtab.len(),
-            base,
-        }
-    }
-
-    fn tables(&self) -> SymTab<'_> {
-        // SAFETY: both ranges are slices `locate` borrowed out of the kernel
-        // image in the direct map, mapped for the life of the machine, or the
-        // dangling-but-aligned pointer of an empty slice with length 0.
-        unsafe {
-            SymTab::new(
-                core::slice::from_raw_parts(self.symtab, self.symtab_len),
-                core::slice::from_raw_parts(self.strtab, self.strtab_len),
-            )
-        }
-    }
-
     /// Resolve an address to (mangled name, offset); no allocation, lock or panic.
-    pub fn resolve(&self, addr: u64) -> Option<(&str, u64)> {
-        self.tables().resolve(addr.checked_sub(self.base)?)
+    pub fn resolve(&self, addr: u64) -> Option<(&'static str, u64)> {
+        self.table.resolve(addr.checked_sub(self.base)?)
     }
 
     /// [`resolve`](Self::resolve) for a return address: steps back one byte
     /// first, since a return address can land one past the callee's last byte.
-    pub fn resolve_return(&self, return_addr: u64) -> Option<(&str, u64)> {
+    pub fn resolve_return(&self, return_addr: u64) -> Option<(&'static str, u64)> {
         let (name, offset) = self.resolve(return_addr.saturating_sub(1))?;
         Some((name, offset + 1))
     }
@@ -75,10 +40,10 @@ pub fn set_kernel_base(base: u64) {
     KERNEL_BASE.store(base, Ordering::Release);
 }
 
-/// Load kernel symbols from raw ELF bytes in the direct map; called once at boot.
-pub fn load_kernel(data: &[u8], base: u64) {
-    let table = SymbolTable::from_elf(data, base);
-    let count = table.tables().count();
+/// Take the kernel's symbols, its address 0 at `base`; called once at boot.
+pub fn load_kernel(table: toyos_kimage::Symbols<'static>, base: u64) {
+    let count = table.count();
+    let table = SymbolTable { table, base };
     KERNEL_SYMS.store(Box::into_raw(Box::new(table)), Ordering::Release);
     log!("symbols: loaded {} kernel symbols", count);
 }

@@ -410,7 +410,7 @@ pub fn read_dir(fd: Fd, cursor: u64) -> Result<(Vec<u8>, Option<u64>), Error> {
 }
 
 /// The whole of the file at `path`, wherever it is served: what a spawn names
-/// as its program (`SpawnArgs::image`) and a library's loader maps, since the
+/// as its program (`SpawnMap::object`) and a library's loader maps, since the
 /// kernel opens neither. The object its server holds it in where there is one
 /// ([`crate::fs::IMAGE`]), and otherwise a copy read into memory of this
 /// process's own.

@@ -2,13 +2,14 @@
 //! `object`'s note reader, which is not ToyOS code.
 
 #[allow(dead_code)]
+#[path = "elf/common/mod.rs"]
 mod common;
 
 use common::*;
 use object::elf::{FileHeader64, NT_GNU_BUILD_ID as OBJECT_NT_GNU_BUILD_ID};
 use object::read::elf::NoteIterator;
 use object::LittleEndian;
-use toyos_elf::note::{self, NoteSegment, MAX_BUILD_ID, NT_GNU_BUILD_ID};
+use toyos::elf::note::{self, NoteSegment, MAX_BUILD_ID, NT_GNU_BUILD_ID};
 
 const PT_NOTE: u32 = 4;
 const OTHER: u32 = 1;

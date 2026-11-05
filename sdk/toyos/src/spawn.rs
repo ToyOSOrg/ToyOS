@@ -197,9 +197,16 @@ impl<'a> Spawn<'a> {
 
 impl Helper<'_> {
     /// Spawn the child here, carrying the spawn's environment and running
-    /// `image` when one is given, which the kernel pages the child from.
+    /// `image`, which this process lays out ([`crate::elf::program`]) and the
+    /// kernel pages the child from. Refused [`Refused::Invalid`] without one,
+    /// or for one that names a layout the child could not start from.
     pub fn spawn(self, image: Option<&Image>) -> Result<Process, Refused> {
         let s = self.0;
+        let image = image.ok_or(Refused::Invalid("a spawn names the program it runs"))?;
+        let program = crate::elf::program::lay_out(image.bytes(), crate::elf::Machine::RUNNING, image.handle(), crate::elf::program::BASE)
+            .map_err(Refused::Invalid)?;
+        let maps = program.maps();
+        let build_id = program.build_id();
         let path = image_and_name(s.program, s.image).0;
         let env = crate::files::starting_in(s.env, s.cwd)
             .ok_or(Refused::Invalid("a working directory that is not absolute, is too long or holds a NUL"))?;
@@ -255,7 +262,6 @@ impl Helper<'_> {
             }
             moved.push(copy);
         }
-        let (image, image_len) = image.map_or((0, 0), Image::spawn_words);
         let args = SpawnArgs {
             path_ptr: path.as_ptr() as u64,
             path_len: path.len() as u64,
@@ -267,8 +273,12 @@ impl Helper<'_> {
             endow_count: count as u64,
             labels_ptr: labels.as_ptr() as u64,
             labels_len: used as u64,
-            image,
-            image_len,
+            maps_ptr: maps.as_ptr() as u64,
+            maps_count: maps.len() as u64,
+            entry: program.entry,
+            image_base: program.image_base,
+            build_id_ptr: build_id.as_ptr() as u64,
+            build_id_len: build_id.len() as u64,
             place: match s.parent {
                 Parent::Caller => u64::from(toyos_abi::HANDLE_INVALID.0),
                 Parent::Place(place) => u64::from(place.raw().0),

@@ -5,9 +5,9 @@
 //! and the loader has to tell "the file did not say" from "the file said
 //! zero", because those two get different treatment at every use site.
 
-use crate::gnu_hash::GnuHash;
-use crate::layout::{Extent, ImageRange};
-use crate::{read, sym, Error};
+use crate::elf::gnu_hash::GnuHash;
+use crate::elf::layout::{Extent, ImageRange};
+use crate::elf::{read, sym, Error};
 
 /// A table named by a (location, size) pair of tags.
 ///

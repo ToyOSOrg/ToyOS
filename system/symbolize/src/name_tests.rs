@@ -4,9 +4,10 @@
 
 use object::{Object, ObjectSymbol, SymbolKind};
 use toyos_symbols::frame::BuildId;
-use toyos_symbols::{name, Check, Named, Unnamed};
 
-const BINARY: &[u8] = include_bytes!("fixtures/input-test.bin");
+use super::{name, Check, Named, Unnamed};
+
+const BINARY: &[u8] = include_bytes!("../../../sdk/toyos/tests/elf/fixtures/input-test.bin");
 
 /// `input-test` with its `PT_GNU_EH_FRAME` turned into a `PT_NOTE` over a
 /// build-id note appended past its end, far past its header page.
@@ -73,7 +74,7 @@ fn the_build_the_record_names_is_the_one_named() {
     let id = [0x5a; 20];
     let file = with_build_id(&id);
     let id = BuildId::new(&id).unwrap();
-    assert_eq!(BuildId::find(&file, |s| file.get(s.offset as usize..(s.offset + s.filesz) as usize)), Some(id));
+    assert_eq!(toyos::elf::note::build_id_in(&file).and_then(BuildId::new), Some(id));
     assert_eq!(name(&file, 0x13a0, Some(&id)), Ok(Named { function: "main", within: 0, check: Check::BuildId }));
 }
 
@@ -107,7 +108,7 @@ fn no_corrupted_file_panics_the_namer() {
         state ^= state << 17;
         state
     };
-    let (_, strtab) = toyos_symbols::locate(BINARY).unwrap();
+    let (_, strtab) = toyos::elf::section::symbol_tables(BINARY).unwrap();
     let shoff = u64::from_le_bytes(BINARY[40..48].try_into().unwrap()) as usize;
     let strtab_at = BINARY.windows(strtab.len().min(64)).position(|w| w == &strtab[..w.len()]).unwrap();
     // The file header, the program headers, the section headers and the first

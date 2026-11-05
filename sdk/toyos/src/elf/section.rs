@@ -7,8 +7,8 @@
 
 use core::fmt;
 
-use crate::header::SECTION_HEADER_SIZE;
-use crate::read;
+use crate::elf::header::SECTION_HEADER_SIZE;
+use crate::elf::read;
 
 pub const SHT_SYMTAB: u32 = 2;
 pub const SHT_RELA: u32 = 4;
@@ -108,6 +108,14 @@ impl<'a> SectionTable<'a> {
         Some((syms, strs))
     }
 
+    /// `SHT_SYMTAB` and its `.strtab` in the whole image `file` this table
+    /// belongs to, as byte slices of it; `None` when it has none, or a
+    /// declared extent leaves the file.
+    pub fn symbol_tables(self, file: &'a [u8]) -> Option<(&'a [u8], &'a [u8])> {
+        let (syms, strs) = self.symbols(SHT_SYMTAB)?;
+        Some((crate::elf::file_range(file, syms.offset, syms.size)?, crate::elf::file_range(file, strs.offset, strs.size)?))
+    }
+
     /// Every `SHT_RELA` section, for a loader that applies those and nothing
     /// else: the only way to them, so no such loader can start an image whose
     /// other relocations it never read. Refused when the table also names one
@@ -122,4 +130,13 @@ impl<'a> SectionTable<'a> {
         }
         Ok(self.iter().filter(|sh| sh.kind == SHT_RELA))
     }
+}
+
+/// `.symtab` and its `.strtab` in the whole image `file`, as byte slices of
+/// it, bounded against it and never copied; `None` when it has none or a
+/// declared extent leaves it, which is "no symbols" to every reader.
+pub fn symbol_tables(file: &[u8]) -> Option<(&[u8], &[u8])> {
+    let header = crate::elf::FileHeader::parse(file).ok()?;
+    let len = u64::from(header.shnum) * u64::from(header.shentsize);
+    SectionTable::new(crate::elf::file_range(file, header.shoff, len)?).symbol_tables(file)
 }

@@ -7,7 +7,7 @@ description = "The ToyOS userland SDK: typed handles, IPC, ports, namespaces, su
 repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [features]
-rustc-dep-of-std = ["core", "alloc", "toyos-abi/rustc-dep-of-std", "toyos-elf/rustc-dep-of-std", "fd-table"]
+rustc-dep-of-std = ["core", "alloc", "toyos-abi/rustc-dep-of-std", "fd-table"]
 # This copy owns the process's descriptor table (`src/fd.rs`): on in std's
 # build and in libc's C-only build, and in no other.
 fd-table = []
@@ -104,8 +104,9 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("toyos")
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
 alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-alloc" }
 toyos-abi = { path = "../abi", default-features = false }
-# The loader's ELF decoding (`dl`).
-toyos-elf = { path = "../../lib/elf" }
 
 [dev-dependencies]
 loom = "0.7"
+# The ELF module's oracle: unaligned, since an include_bytes! fixture is aligned
+# to 1 and object reads a header in place.
+object = { version = "0.38", default-features = false, features = ["read_core", "elf", "std", "unaligned"] }

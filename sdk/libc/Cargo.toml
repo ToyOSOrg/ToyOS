@@ -15,7 +15,6 @@ fd-owner = ["toyos/fd-table"]
 [dependencies]
 toyos-abi = { path = "../abi" }
 toyos = { path = "../toyos" }
-toyos-elf = { path = "../../lib/elf" }
 toyos-osrelease = { path = "../osrelease" }
 dlmalloc = "0.2.7"
 

@@ -1,19 +1,20 @@
-//! The positive control: `locate` agrees with an outside judge on a real
+//! The positive control: `section::symbol_tables` agrees with an outside judge on a real
 //! binary's symbol table.
 //!
 //! Every other property this crate could assert is a property of hostile or
 //! synthetic bytes, and a parser that refused everything would pass those
 //! trivially.
 
-use toyos_elf::sym::SymTab;
+use toyos::elf::section::symbol_tables;
+use toyos::elf::sym::SymTab;
 
-const BINARY: &[u8] = include_bytes!("fixtures/input-test.bin");
+const BINARY: &[u8] = include_bytes!("elf/fixtures/input-test.bin");
 
 #[test]
 fn locate_finds_the_same_tables_readelf_reports() {
-    let (symtab, strtab) = toyos_symbols::locate(BINARY).expect("input-test has a symtab");
+    let (symtab, strtab) = symbol_tables(BINARY).expect("input-test has a symtab");
 
-    // `readelf -S lib/symbols/tests/fixtures/input-test.bin`:
+    // `readelf -S sdk/toyos/tests/elf/fixtures/input-test.bin`:
     //   [ 6] .symtab  SYMTAB  ...  00016ea8  ...
     //   [ 7] .strtab  STRTAB  ...  0004b65f  ...
     assert_eq!(symtab.len(), 0x16ea8);
@@ -22,7 +23,7 @@ fn locate_finds_the_same_tables_readelf_reports() {
 
 #[test]
 fn a_real_binarys_own_functions_resolve_to_their_own_names() {
-    let (symtab, strtab) = toyos_symbols::locate(BINARY).expect("input-test has a symtab");
+    let (symtab, strtab) = symbol_tables(BINARY).expect("input-test has a symtab");
     let table = SymTab::new(symtab, strtab);
 
     // `readelf --syms`: `3888: 0000000000005a0c  16 FUNC GLOBAL DEFAULT 1 _start`
@@ -42,7 +43,7 @@ fn a_real_binarys_own_functions_resolve_to_their_own_names() {
 }
 
 #[test]
-fn a_file_header_locate_cannot_read_answers_none() {
-    assert_eq!(toyos_symbols::locate(&BINARY[..32]), None);
-    assert_eq!(toyos_symbols::locate(&[]), None);
+fn a_file_header_it_cannot_read_answers_none() {
+    assert_eq!(symbol_tables(&BINARY[..32]), None);
+    assert_eq!(symbol_tables(&[]), None);
 }

@@ -27,7 +27,6 @@ pub const PUBLISHED: &[Crate] = &[
     Crate { name: "toyos-abi", dir: "sdk/abi" },
     Crate { name: "toyos-keymap", dir: "sdk/keymap" },
     Crate { name: "toyos-font", dir: "sdk/font" },
-    Crate { name: "toyos-elf", dir: "lib/elf" },
     Crate { name: "toyos", dir: "sdk/toyos" },
     Crate { name: "toyos-window", dir: "sdk/window" },
     Crate { name: "toyos-osrelease", dir: "sdk/osrelease" },

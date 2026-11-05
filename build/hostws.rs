@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn the_gate_refuses_a_crate_that_joined_neither_list() {
         let members: BTreeSet<String> =
-            [".", "lib/elf", "system/usbd", "system/usbd/xhci"].iter().map(|s| s.to_string()).collect();
+            [".", "lib/kimage", "system/usbd", "system/usbd/xhci"].iter().map(|s| s.to_string()).collect();
 
         let all_declared: BTreeSet<String> = members.clone();
         assert!(unclaimed(&members, &all_declared).is_empty());
@@ -336,7 +336,7 @@ mod tests {
         let root = repo_root();
         let found = crate_dirs(&root);
         assert!(found.contains("."), "the walk did not find the root package");
-        assert!(found.contains("lib/elf"), "the walk did not find lib/elf: {found:?}");
+        assert!(found.contains("lib/kimage"), "the walk did not find lib/kimage: {found:?}");
         assert!(
             found.contains("system/usbd/xhci"),
             "the walk did not descend past the first level, so a nested member could \
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn the_dead_path_scan_names_the_member_and_ignores_an_excluded_crate() {
         let members: BTreeSet<String> =
-            [".", "toyos-abi", "toyos-elf"].iter().map(|s| s.to_string()).collect();
+            [".", "toyos-abi", "toyos-kimage"].iter().map(|s| s.to_string()).collect();
         assert_eq!(
             dead_member_target_paths(&members, "let abi = root.join(\"../../toyos-abi/target/x\");"),
             ["toyos-abi/target"],

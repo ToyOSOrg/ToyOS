@@ -675,15 +675,15 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Font("OFL-1.1"),
     ),
     (
-        "lib/elf/tests/fixtures/lld-headers.bin",
+        "sdk/toyos/tests/elf/fixtures/lld-headers.bin",
         "ba65b2a85776a973ad4fd49a224598391fde212e06b10aa51e2c8bcacfae0c79",
-        "ours: the first 4096 bytes of a rust-lld output (lib/elf/tests/real.rs)",
+        "ours: the first 4096 bytes of a rust-lld output (sdk/toyos/tests/elf_real.rs)",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "lib/symbols/tests/fixtures/input-test.bin",
+        "sdk/toyos/tests/elf/fixtures/input-test.bin",
         "6a08f75ee01bdbd1e77c9b3affd6185e981d86995da432c90ed107676f08eb83",
-        "ours: a ToyOS binary this build produced (lib/symbols/tests/real.rs)",
+        "ours: a ToyOS binary this build produced (sdk/toyos/tests/elf_symbols.rs)",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (

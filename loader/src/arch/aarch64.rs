@@ -3,8 +3,8 @@
 use toyos_abi::boot::KernelArgs;
 use toyos_bootmap::Typing;
 
-/// The machine the kernel image must be built for: the loader's own.
-pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::Aarch64;
+/// `e_machine` of the kernel this loader starts (`toyos_kimage::Kernel::machine`).
+pub const E_MACHINE: u16 = 183;
 
 /// How the boot map's descriptors are encoded.
 pub use toyos_bootmap::aarch64 as encoding;

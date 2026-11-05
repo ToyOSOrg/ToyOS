@@ -7,16 +7,22 @@
 //! 4, or 8 for a segment that declares it. Nothing here refuses a file: a note
 //! that cannot be read names no build-id.
 
-use crate::header::{FileHeader, ProgramHeader, PROGRAM_HEADER_SIZE, PT_NOTE};
-use crate::read;
+use crate::elf::header::{FileHeader, ProgramHeader, PROGRAM_HEADER_SIZE, PT_NOTE};
+use crate::elf::read;
 
 /// `n_type` of a GNU build-id note.
 pub const NT_GNU_BUILD_ID: u32 = 3;
 
-/// The longest build-id this crate answers. lld's is 20
+/// The longest build-id this module answers. lld's is 20
 /// bytes, a `uuid` or `md5` one 16; past this a descriptor is no build-id any
 /// linker writes.
-pub const MAX_BUILD_ID: usize = 32;
+pub const MAX_BUILD_ID: usize = toyos_abi::syscall::MAX_BUILD_ID;
+
+/// The build-id of the whole image `file`: the first `PT_NOTE` inside it that
+/// carries one.
+pub fn build_id_in(file: &[u8]) -> Option<&[u8]> {
+    segments(file).find_map(|segment| build_id(crate::elf::file_range(file, segment.offset, segment.filesz)?, segment.align))
+}
 
 /// One `PT_NOTE`: where its bytes are in the file, and the alignment its notes
 /// are padded to.

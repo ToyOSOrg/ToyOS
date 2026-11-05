@@ -14,9 +14,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use toyos_elf::dynamic::ENTRY_SIZE as DYN_SIZE;
-use toyos_elf::sym::{STB_WEAK, STT_TLS};
-use toyos_elf::{
+use crate::elf::dynamic::ENTRY_SIZE as DYN_SIZE;
+use crate::elf::sym::{STB_WEAK, STT_TLS};
+use crate::elf::{
     rela, Dynamic, GnuHash, InitArray, Layout, Machine, Op, RelaTable, RelocError, SegmentFlags, Sym, SymTab, TlsRef,
     TlsSegment,
 };
@@ -27,10 +27,7 @@ use super::Refused;
 pub(crate) const PAGE: u64 = 4096;
 
 /// The machine this program runs on, whose images it loads.
-#[cfg(target_arch = "x86_64")]
-pub(crate) const MACHINE: Machine = Machine::X86_64;
-#[cfg(target_arch = "aarch64")]
-pub(crate) const MACHINE: Machine = Machine::Aarch64;
+const MACHINE: Machine = Machine::RUNNING;
 
 const DT_NEEDED: u64 = 1;
 
@@ -168,7 +165,7 @@ impl<'p, 'm> Mapped<'p, 'm> {
         let syms = match parsed.symtab {
             Some(at) => {
                 let whole = self.view_to_end(at).ok_or(OUTSIDE)?;
-                &whole[..whole.len().min(count.saturating_mul(toyos_elf::sym::ENTRY_SIZE))]
+                &whole[..whole.len().min(count.saturating_mul(crate::elf::sym::ENTRY_SIZE))]
             }
             None => &[][..],
         };
@@ -176,7 +173,7 @@ impl<'p, 'm> Mapped<'p, 'm> {
             Some(at) => self.view(at, parsed.strsz.unwrap_or(0)).ok_or(OUTSIDE)?,
             None => &[][..],
         };
-        let table = |t: Option<toyos_elf::Table>| t.map(|t| self.view(t.vaddr, t.size).ok_or(OUTSIDE)).transpose();
+        let table = |t: Option<crate::elf::Table>| t.map(|t| self.view(t.vaddr, t.size).ok_or(OUTSIDE)).transpose();
         let (rela, jmprel) = (table(parsed.rela)?, table(parsed.jmprel)?);
         let symbols = SymTab::new(syms, strs);
         let extent = self.plan.layout.extent();
@@ -246,7 +243,7 @@ impl<'a> Tables<'a> {
             .map(|entry| (u64::from_le_bytes(entry[..8].try_into().unwrap()), u64::from_le_bytes(entry[8..].try_into().unwrap())))
             .take_while(|&(tag, _)| tag != 0)
             .filter(|&(tag, _)| tag == DT_NEEDED)
-            .map(move |(_, at)| toyos_elf::cstr(strs, at))
+            .map(move |(_, at)| crate::elf::cstr(strs, at))
     }
 
     /// The symbol this image exports as `name`, through its `.gnu.hash`
@@ -317,12 +314,12 @@ pub(crate) enum Pass<'b> {
 /// names and only an executable defines.
 pub(crate) fn relocate(mapped: &Mapped<'_, '_>, tables: &Tables<'_>, id: usize, scope: &dyn Scope, pass: Pass<'_>) -> Result<(), Refused> {
     let base = mapped.base();
-    let symbol = |i: toyos_elf::SymIndex| -> (Sym, &str) {
+    let symbol = |i: crate::elf::SymIndex| -> (Sym, &str) {
         let sym = tables.symbols.get(i.get()).expect("dl: a parse bounded the index by the table");
         (sym, sym.name_in(tables.symbols.strings()))
     };
     let undefined = |name: &str| Refused::Undefined(String::from(name));
-    let address = |i: toyos_elf::SymIndex| -> Result<u64, Refused> {
+    let address = |i: crate::elf::SymIndex| -> Result<u64, Refused> {
         let (sym, name) = symbol(i);
         let own = sym.address(tables.rules.extent).map(|at| base + at.get());
         match scope.address(name).or(own) {

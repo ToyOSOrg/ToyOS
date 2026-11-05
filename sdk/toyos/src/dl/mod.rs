@@ -28,7 +28,7 @@ use core::ffi::CStr;
 use core::fmt;
 
 use toyos_abi::syscall::{self, SyscallError, VmAt, VmProt};
-use toyos_elf::RelocError;
+use crate::elf::RelocError;
 
 use crate::files;
 use crate::process::ImageRefused;
