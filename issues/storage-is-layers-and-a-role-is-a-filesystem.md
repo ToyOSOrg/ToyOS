@@ -34,6 +34,15 @@ what is left here is built on them.
    and ROOT), and a link that fails is refused by name.
 7. NTFS read-only, postponed here by the owner.
 
+**A DATA commit's durability costs two Flushes per journal entry**, three for
+an entry naming itself (`write_entries`, `lib/bcachefs/src/engine/mount/mod.rs`):
+a flush, the entry, a flush. A write with Force Unit Access is durable when
+it completes, with no Flush after it (NVM Express NVM Command Set, Write's
+FUA bit; SCSI SBC, WRITE(10)'s FUA bit). FUA is missing end to end: `toyos-blockring`'s
+Write carries no flag, the nvme driver never sets Write's FUA bit, usbd
+never sets WRITE(10)'s, and bcachefs asks for none. Assigned with #1131,
+whose APST wake cost the second Flush is part of.
+
 **A file's pages are the kernel's paged objects'** (memory stage 7a, built by
 this track): one per file, supplied by its file server, read by its holders
 without a request (`system/fileserver/src/pages.rs`). The server's block cache
