@@ -1275,7 +1275,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     // Measurement only, never lands: a memcpy by where its two ends sit.
     (
         "copyat",
-        metal::Metal { arms: COPYAT, judge: |b| osbench_ran(b[0], &["osbench_copyat", "osbench_ipc", "osbench_mem"]) },
+        metal::Metal { arms: COPYAT, judge: |b| osbench_ran(b[0], &["osbench_copyat", "osbench_mem"]) },
     ),
     (
         // `osbench energy`: the package's power, idle and under defined loads,
@@ -1934,7 +1934,7 @@ const BENCHCASE: &[metal::Arm] = &[metal::Arm {
 const COPYAT: &[metal::Arm] = &[metal::Arm {
     adds_ms: 360_000,
     named_only: true,
-    ..metal::once("copyat", "tests/images/benchcase.toml", &[], &["osbench_copyat", "osbench_ipc", "osbench_mem"])
+    ..metal::once("copyat", "tests/images/benchcase.toml", &[], &["osbench_copyat", "osbench_mem"])
 }];
 
 /// `energy` waits up to 120 s for the machine to go quiet, then measures 60 s

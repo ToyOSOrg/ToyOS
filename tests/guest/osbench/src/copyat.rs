@@ -27,6 +27,7 @@ const MIB: usize = 1 << 20;
 const DISTANCES: [usize; 16] = [0, 16, 32, 64, 256, 384, 512, 640, 768, 1024, 1536, 2048, 2560, 3072, 4032, 4080];
 
 pub fn suite() {
+    code_note();
     let mut map = Mapping::huge(4 * MIB);
     let base = map.ptr();
     let hows: [(&str, CopyFn); 7] = [
@@ -143,6 +144,10 @@ fn placements() {
         }
         dst.words().fill(1);
         let (s, d) = (src.ptr(), dst.ptr());
+        note(
+            &format!("copyat.place.p{k}.at"),
+            &[("src", format!("{:#x}", s as usize)), ("dst", format!("{:#x}", d as usize))],
+        );
         let copies = 64 * MIB / SIZE;
         let round = || {
             let t = Instant::now();
@@ -157,4 +162,23 @@ fn placements() {
         let mut mbps: Vec<u64> = (0..15).map(|_| round()).collect();
         result(&format!("copyat.place.p{k}"), "MB/s", &mut mbps, &[("ballast_pages", (17 * k).to_string())]);
     }
+}
+
+/// Measurement only, never lands: where this boot's `memcpy` and its first
+/// `rep movsb` sit, so a drop can be tied to code placement.
+fn code_note() {
+    let at: usize;
+    // SAFETY: takes the address of the linked `memcpy`, nothing more.
+    unsafe { std::arch::asm!("lea {}, [rip + memcpy]", out(reg) at, options(nomem, nostack, preserves_flags)) };
+    // SAFETY: the first 64 bytes of `memcpy`'s mapped, readable code.
+    let code = unsafe { std::slice::from_raw_parts(at as *const u8, 64) };
+    let movsb = code.windows(2).position(|w| w == [0xf3, 0xa4]);
+    note(
+        "copyat.code",
+        &[
+            ("memcpy", format!("{at:#x}")),
+            ("memcpy_page_offset", format!("{:#x}", at % 4096)),
+            ("rep_movsb", movsb.map_or_else(|| "none".to_string(), |o| format!("{:#x}", at + o))),
+        ],
+    );
 }
