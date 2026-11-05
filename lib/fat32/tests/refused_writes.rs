@@ -27,7 +27,7 @@ use std::cell::{Cell, Ref, RefCell};
 use common::now;
 use spec_volume::{fat_offset, Volume, BYTES_PER_SECTOR, CLUSTERS, FAT_SECTORS, NUM_FATS};
 use toyos_blockdev::{within, Block, BlockDev, Error as DevError, BLOCK};
-use toyos_fat32::{Error, Fat32, FatTime, File, MAX_LFN_CHARS, MAX_REPAIR_STEPS};
+use toyos_fat32::{Error, Fat32, FatTime, File, Recovered, MAX_LFN_CHARS, MAX_REPAIR_STEPS};
 use toyos_fat32_check::Complaint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -724,6 +724,51 @@ fn a_stop_at_any_write_leaves_only_the_named_windows() {
             }
         }
     }
+}
+
+/// **What a stop leaves, a writable mount takes back.** Every state the test
+/// above admits, mounted again and recovered, is one the checker finds
+/// nothing in — but rename's own, which recovery leaves and counts — and a
+/// second recovery finds nothing to do.
+#[test]
+fn a_recovery_after_a_stop_at_any_write_leaves_a_consistent_volume() {
+    let mut seen = Recovered::default();
+    for s in all() {
+        let (base, handle) = fixture(&s);
+        for outcome in [Outcome::Refused, Outcome::Landed] {
+            for from in 0u64.. {
+                let mut fs = now(Fat32::mount(Faulty::new(base.clone()))).expect("mount");
+                let mut h = handle;
+                fs.device().arm(burst(from, u64::MAX, outcome));
+                let _ = (s.call)(&mut fs, &mut h, 0);
+                if fs.device().refused() == 0 {
+                    break;
+                }
+                let context = format!("{}: stopped at write {from}, {outcome:?}", s.name);
+                let stopped = fs.into_device().into_medium();
+                let mut fs = now(Fat32::mount(Faulty::new(stopped))).expect("mount the stopped volume");
+                let recovered = now(fs.recover()).unwrap_or_else(|e| panic!("{context}: recover: {e}"));
+                seen.mirrors += recovered.mirrors;
+                seen.cut += recovered.cut;
+                seen.long_names += recovered.long_names;
+                seen.lost += recovered.lost;
+                let said = complaints(&fs.device().medium(), true);
+                let rename_own = |c: &Complaint| {
+                    matches!(c, Complaint::CrossLinked { .. } | Complaint::DotDotCluster { .. } | Complaint::DotEntry { .. })
+                };
+                let left: Vec<Complaint> = said.into_iter().filter(|c| !(s.name == "rename" && rename_own(c))).collect();
+                assert!(left.is_empty(), "{context}: {recovered:?}, and still\n{}", toyos_fat32_check::describe(&left));
+                common::assert_fats_agree(&fs.geometry().clone(), &fs.device().medium());
+                if s.name != "rename" {
+                    assert_eq!(recovered.unrepaired, 0, "{context}");
+                }
+                let again = now(fs.recover()).expect("recover again");
+                assert!(again.nothing() || s.name == "rename", "{context}: a second recovery did {again:?}");
+            }
+        }
+    }
+    // Each repair met at least one stop that needed it, or this shows nothing of it.
+    assert!(seen.mirrors > 0 && seen.cut > 0 && seen.long_names > 0 && seen.lost > 0, "{seen:?}");
 }
 
 // ----------------------------------------------- the shape a stop produces

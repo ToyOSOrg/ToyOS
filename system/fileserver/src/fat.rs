@@ -17,6 +17,9 @@
 //! FAT32 has no symlink representation, so a symlink is refused rather than
 //! written as a file its reader would take for one.
 //!
+//! **A writable mount first takes back what a stop left** (`Fat32::recover`):
+//! leaks, a split FAT entry, a partial long name and a chain past its size.
+//!
 //! A volume that is not FAT32 is left untouched: `toyos-fat32` has no format
 //! path and its probe writes nothing.
 
@@ -25,7 +28,7 @@ use std::rc::Rc;
 
 use toyos::fs;
 use toyos_blockdev::BlockDev;
-use toyos_fat32::{Error, Fat32, FatTime};
+use toyos_fat32::{Error, Fat32, FatTime, Recovered};
 
 use crate::cache::{Cache, Disk};
 use crate::volume::{parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume, WriteBack, NANOS_PER_SEC};
@@ -100,7 +103,7 @@ impl<D: Disk> FatVolume<D> {
     /// before the volume is known to be FAT32.
     pub fn mount(disk: D, clean_limit: usize, writable: bool, clock: fn() -> u64) -> Result<Self, String> {
         let cache = Rc::new(Cache::new(disk, clean_limit));
-        let fs = cache.block_on(Fat32::mount(Rc::clone(&cache))).map_err(|e| format!("no FAT32 here: {e}"))?;
+        let mut fs = cache.block_on(Fat32::mount(Rc::clone(&cache))).map_err(|e| format!("no FAT32 here: {e}"))?;
         let geom = fs.geometry();
         println!(
             "fileserver: FAT32 mounted, {} bytes, {}-byte sectors, {}-byte clusters",
@@ -108,6 +111,19 @@ impl<D: Disk> FatVolume<D> {
             geom.bytes_per_sector,
             geom.bytes_per_cluster()
         );
+        // Before the first write: a stop leaves leaks and splits nothing else
+        // takes back. One that fails leaves the volume no worse than it was.
+        if writable {
+            match cache.block_on(fs.recover()) {
+                Ok(done) if done.nothing() => {}
+                Ok(Recovered { mirrors, cut, long_names, lost, unrepaired }) => println!(
+                    "fileserver: the FAT volume was not left whole: {mirrors} split FAT entries mended, {cut} \
+                     clusters past a file's size and {lost} no entry reached freed, {long_names} partial long \
+                     names erased; {unrepaired} inconsistencies left as they are"
+                ),
+                Err(e) => println!("fileserver: recovering the FAT volume failed ({e}); it is mounted as it is"),
+            }
+        }
         Ok(Self {
             fs,
             cache,
@@ -912,7 +928,7 @@ mod tests {
                     })
                     .collect();
                 assert!(refused.is_empty(), "{stop}: {}", describe(&refused));
-                let mut after = FatVolume::mount(Bytes::new(bytes), CLEAN_LIMIT, false, clock).unwrap_or_else(|e| panic!("{stop}: {e}"));
+                let mut after = FatVolume::mount(Bytes::new(bytes.clone()), CLEAN_LIMIT, false, clock).unwrap_or_else(|e| panic!("{stop}: {e}"));
                 let n = after.open("a.txt", OPEN).unwrap();
                 let size = after.lstat("a.txt").unwrap().size as usize;
                 let mut out = vec![0u8; size];
@@ -924,6 +940,21 @@ mod tests {
                     held.len(),
                     whole.len()
                 );
+
+                // A writable mount takes back what the stop left, and keeps
+                // the file as the read-only mount found it.
+                let recovery: Epochs = Rc::new(std::cell::RefCell::new(vec![Vec::new()]));
+                let traced = Traced { image: Bytes::new(bytes.clone()), epochs: Rc::clone(&recovery) };
+                drop(FatVolume::mount(traced, CLEAN_LIMIT, true, clock).unwrap_or_else(|e| panic!("{stop}: {e}")));
+                let mut recovered = bytes.clone();
+                written(&mut recovered, recovery.borrow().iter().flatten());
+                let left = check(&recovered);
+                assert!(left.is_empty(), "{stop}, then recovered: {}", describe(&left));
+                let mut again = FatVolume::mount(Bytes::new(recovered), CLEAN_LIMIT, false, clock).unwrap();
+                let n = again.open("a.txt", OPEN).unwrap();
+                let mut kept = vec![0u8; again.lstat("a.txt").unwrap().size as usize];
+                assert_eq!(again.read(n, 0, &mut crate::volume::Buf(&mut kept)), Ok(size));
+                assert!(kept == out, "{stop}: recovery changed the file a read-only mount read");
             }
             written(&mut image, epoch);
         }

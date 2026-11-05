@@ -49,8 +49,9 @@
 //! - **The repair lives in memory.** A reset, panic or power loss while it is
 //!   non-empty leaves the state the refused write reached: orphaned clusters
 //!   bounded by what one call claims and frees, at most one split entry, and
-//!   at most one partial run, each of which `toyos-fat32-check` names. Nothing
-//!   on the mount path repairs them.
+//!   at most one partial run, each of which `toyos-fat32-check` names.
+//!
+//! [`Fat32::recover`] takes back every state these windows leave.
 
 use crate::boot::Cluster;
 use toyos_blockdev::BlockDev;

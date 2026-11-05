@@ -82,6 +82,7 @@ mod error;
 mod fat;
 mod fs;
 mod name;
+mod recover;
 mod repair;
 mod time;
 
@@ -90,5 +91,6 @@ pub use dir::MAX_DIR_ENTRIES;
 pub use error::Error;
 pub use fs::{DirEntry, Extent, Fat32, File, Metadata, ReplaceFailed, Replaced};
 pub use name::MAX_LFN_CHARS;
+pub use recover::Recovered;
 pub use repair::MAX_REPAIR_STEPS;
 pub use time::FatTime;

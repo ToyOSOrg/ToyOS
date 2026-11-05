@@ -241,6 +241,12 @@ impl DirScan {
         }
     }
 
+    /// Entries read so far: the end marker or the chain's end, once
+    /// [`Self::next`] has answered `None`.
+    pub(crate) fn scanned(&self) -> u32 {
+        self.index
+    }
+
     fn drop_run(&mut self) {
         self.run_valid = false;
         self.run_units = 0;

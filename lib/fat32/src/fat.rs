@@ -13,7 +13,7 @@ pub(crate) const END_OF_CHAIN: u32 = 0x0FFF_FFFF;
 /// A FAT32 entry is 28 bits. The top four belong to whoever formatted the
 /// volume and are preserved across every write, which is why `set_fat_entry`
 /// reads before it writes.
-const ENTRY_MASK: u32 = 0x0FFF_FFFF;
+pub(crate) const ENTRY_MASK: u32 = 0x0FFF_FFFF;
 
 impl<D: BlockDev> Fat32<D> {
     /// One FAT entry, masked to its 28 significant bits.
@@ -49,7 +49,7 @@ impl<D: BlockDev> Fat32<D> {
 
     /// One FAT copy's entry, preserving the four reserved high bits the format
     /// leaves to whoever made the volume.
-    async fn write_fat_entry(&mut self, fat: u32, cluster: Cluster, value: u32) -> Result<(), Error> {
+    pub(crate) async fn write_fat_entry(&mut self, fat: u32, cluster: Cluster, value: u32) -> Result<(), Error> {
         let offset = self.geom.fat_entry_offset(fat, cluster);
         let mut raw = [0u8; 4];
         self.dev.read_at(offset, &mut raw).await?;
