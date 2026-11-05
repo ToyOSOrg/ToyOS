@@ -105,20 +105,32 @@ const FLOOR_RAISED: &str = "by the boot that proved it";
 /// raises the anti-rollback floor to the image's signed version. The first
 /// pass, on a fresh image, has no mark and raises nothing.
 pub fn a_clean_stop_proves_its_image(test_config: &Path) -> Result<(), String> {
-    let options = BootOptions { qmp: true, ..Default::default() };
+    let options = BootOptions { profile: qemu::Profile::Headless, qmp: true, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-    let boot = serial::Serial::boot(&qemu);
-    boot.must_be_clean()?;
-    boot.must_say(NO_STOP_MARK)?;
-    says_nothing_of(&boot, FLOOR_RAISED)?;
-    let mut console = boot.text().to_string();
+    let first = serial::Serial::named("the first loader pass", qemu.loader_log());
+    first.must_say(NO_STOP_MARK)?;
+    says_nothing_of(&first, FLOOR_RAISED)?;
+    let mut console = qemu.boot_log().to_string();
     qemu.reset_on_reboot();
     let asked_at = console.len();
     writeln!(qemu.stdin_mut(), "run reboot").expect("write to QEMU stdin");
     qemu.flush_stdin();
-    qemu::await_marker_new(&mut qemu, &mut console, FLOOR_RAISED, asked_at, "the next loader pass to raise the floor")?;
-    let next = serial::Serial::named("the boot after the reboot", console[asked_at..].to_string());
-    next.must_say_after(bootlog::REBOOTING, bootlog::LOADER_FIRST_LINE)?;
+    qemu::await_marker_new(&mut qemu, &mut console, bootlog::REBOOTING, asked_at, "the clean stop")?;
+    let rebooted_at = console.len();
+    qemu::await_marker_new(&mut qemu, &mut console, bootlog::COMPLETE, rebooted_at, "the next boot")?;
+    // The second pass is on the console where the loader writes the console,
+    // and otherwise the 16550's file's second.
+    let after = &console[asked_at..];
+    let uart = qemu.loader_log();
+    let first_in_uart = uart.find(bootlog::LOADER_FIRST_LINE);
+    let next = match after.find(bootlog::LOADER_FIRST_LINE) {
+        Some(at) => after[at..].to_string(),
+        None => match uart.rfind(bootlog::LOADER_FIRST_LINE).filter(|at| Some(*at) != first_in_uart) {
+            Some(at) => uart[at..].to_string(),
+            None => return Err(format!("no loader pass after the reboot:\n{uart}\n{after}")),
+        },
+    };
+    let next = serial::Serial::named("the loader pass after the reboot", next);
     let proved = next.must_say(STOPPED_CLEANLY)?.to_string();
     let raised = next.must_say(FLOOR_RAISED)?;
     eprintln!("  [power] {}", proved.trim());
