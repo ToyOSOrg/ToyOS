@@ -17,7 +17,8 @@ cargo is one such program. Every file lock it takes is one of these calls
 (its `src/util/flock.rs` at `7c83d4cc0953`, the cargo the fork pins), so two
 cargo processes in one ToyOS are kept apart by nothing.
 
-Owner: `issues/toyos-builds-itself.md`, whose M4 runs cargo in the guest;
+Owner: `issues/toyos-builds-itself.md`, whose M4 runs cargo in the guest
+(where it stays, by the coordinator's ruling of 2026-11-05);
 the locks libc owes for the same milestone are
 `issues/libc-refuses-what-toyos-cannot-yet-answer.md`'s.
 
