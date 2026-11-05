@@ -235,6 +235,16 @@ impl<M: DmaBuffers + Clone> Queues<M> {
     }
 }
 
+/// How many notifications a record of the claim's interrupt says landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notified {
+    /// Every one since the last record.
+    All(u32),
+    /// At least this many: the claim's interrupt was masked before the read,
+    /// and what landed past the mask was dropped (`toyos_abi::pci`).
+    AtLeast(u32),
+}
+
 /// The periods one record answers for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Played {
@@ -262,6 +272,9 @@ pub struct Sound<M: DmaBuffers, D: Doorbell> {
     running: bool,
     /// Periods a read counted before their notification landed.
     unnotified: u32,
+    /// The last record dropped notifications, so the next one's may be for
+    /// a period an earlier read already counted.
+    doubted: bool,
 }
 
 impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
@@ -272,7 +285,7 @@ impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
         if streams == 0 {
             return Err(Refusal::NoStream);
         }
-        let mut sound = Self { mem, bell, queues, running: false, unnotified: 0 };
+        let mut sound = Self { mem, bell, queues, running: false, unnotified: 0, doubted: false };
         for buffer in 0..EVENT_BUFS {
             sound.post_event(buffer);
         }
@@ -347,15 +360,30 @@ impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
     /// record**: notifications answer periods in the order they came back, the
     /// ones an earlier read counted first, and [`Played::clocked`] counts the
     /// periods of this mask the record's notifications reach.
-    pub fn played(&mut self, notified: Option<u32>) -> Result<Option<Played>, Refusal> {
+    ///
+    /// **A record of [`Notified::AtLeast`] dropped the notifications past its
+    /// mask**, so the ones it holds still answer the first periods in order,
+    /// and what it leaves owed is not known: a period this read found may have
+    /// had its notification dropped, or have it still to land.
+    /// It is taken as none, and the next record clocks nothing, since its
+    /// first notification may be one such period's.
+    pub fn played(&mut self, notified: Option<Notified>) -> Result<Option<Played>, Refusal> {
         let Some(notified) = notified else { return Ok(None) };
         let mask = self.completed()?;
         let periods = mask.count_ones();
-        let fresh = notified.saturating_sub(self.unnotified);
-        let clocked = fresh.min(periods);
+        let (count, dropped) = match notified {
+            Notified::All(count) => (count, false),
+            Notified::AtLeast(count) => (count, true),
+        };
+        let fresh = count.saturating_sub(self.unnotified).min(periods);
+        let clocked = if self.doubted { 0 } else { fresh };
         // No more can be owed than the ring holds periods.
-        self.unnotified =
-            (self.unnotified.saturating_sub(notified) + periods - clocked).min(PERIODS as u32);
+        self.unnotified = if dropped {
+            0
+        } else {
+            (self.unnotified.saturating_sub(count) + periods - fresh).min(PERIODS as u32)
+        };
+        self.doubted = dropped;
         Ok((mask != 0).then_some(Played { mask, clocked }))
     }
 

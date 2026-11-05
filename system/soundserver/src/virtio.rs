@@ -26,7 +26,7 @@ use toyos_abi::syscall::SyscallError;
 use toyos_pci_claim::virtio::{negotiate, Negotiated};
 use toyos_pci_claim::{Bar, Grant, KernelRefused};
 use toyos_virtio::pci::{Live, NO_VECTOR};
-use toyos_virtio_sound::{Queues, Sound, PERIOD_BYTES, STREAM_ID};
+use toyos_virtio_sound::{Notified, Queues, Sound, PERIOD_BYTES, STREAM_ID};
 
 use crate::backend::Completion;
 
@@ -153,7 +153,11 @@ impl Virtio {
         let record = record?;
         let played = self
             .sound
-            .played(Some(record.count))
+            .played(Some(if record.count >= toyos_abi::pci::MASKED_FROM {
+                Notified::AtLeast(record.count)
+            } else {
+                Notified::All(record.count)
+            }))
             .unwrap_or_else(|why| panic!("soundserver: virtio-sound cannot be driven on — {why}"))?;
         Some(Completion {
             mask: played.mask,
