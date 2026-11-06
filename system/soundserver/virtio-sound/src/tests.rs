@@ -586,9 +586,10 @@ impl Claim {
 }
 
 /// No period is stranded: every one comes back exactly once, and none while
-/// the claim is left unreadable. **And none is stamped earlier than its own
-/// notification**: a period a record clocks is one whose notification that
-/// record, or an earlier one, carried.
+/// the claim is left unreadable. **And within two periods none is stamped
+/// earlier than its own notification**: a period a record clocks is one whose
+/// notification that record, or an earlier one, carried. A third period can
+/// be (`Sound::played`).
 ///
 /// Two periods, each a used element and then its notification (§2.7.7),
 /// against two wakes of a driver that takes the record and then reads the
@@ -663,4 +664,26 @@ fn no_period_is_stranded_between_its_used_element_and_its_notification() {
         assert_eq!(seen, 0b11, "order {pick:#010b}: the periods that came back are {masks:?}");
     }
     assert_eq!(orders, 70);
+}
+
+/// A record of one interrupt over two periods anchors nothing, and the
+/// steady reads after it are each clocked again.
+#[test]
+fn a_record_folded_over_two_periods_does_not_stop_the_clock() {
+    let model = Model::new();
+    let mut sound = opened(&model);
+    for period in 0..PERIODS {
+        sound.submit(period).expect("a period goes out");
+    }
+    model.play(2);
+    let folded = sound.played(Some(1)).expect("whole periods").expect("two periods came back");
+    assert_eq!(folded.mask.count_ones(), 2);
+    let mut clocked = vec![folded.clocked];
+    for _ in 0..3 {
+        model.play(1);
+        let played = sound.played(Some(1)).expect("a whole period").expect("one period came back");
+        assert_eq!(played.mask.count_ones(), 1);
+        clocked.push(played.clocked);
+    }
+    assert_eq!(clocked, [0, 1, 1, 1], "how many periods the folded read and each steady read clocked");
 }

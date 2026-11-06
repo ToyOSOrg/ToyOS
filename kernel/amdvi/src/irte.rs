@@ -5,6 +5,9 @@
 //! entry is the message's own vector.
 
 const REMAP_EN: u64 = 1 << 0;
+/// `SupIOPF`: no `IO_PAGE_FAULT` is logged for a message through the entry,
+/// whatever `RemapEn` says (Table 22).
+const SUP_IOPF: u64 = 1 << 1;
 const DESTINATION_SHIFT: u32 = 8;
 /// `Vector`, bits 71:64: bits 7:0 of the second doubleword.
 const VECTOR_SHIFT: u32 = 0;
@@ -29,6 +32,13 @@ pub const fn entry(vector: u8, destination: Destination) -> [u64; 2] {
 }
 
 pub const ABSENT: [u64; 2] = [0, 0];
+
+/// `entry` refusing its messages silently: `RemapEn` clear, so each is target
+/// aborted (Table 22, §2.1.3.1), and `SupIOPF` set, so none is logged. The
+/// rest of the entry is kept for the [`entry`] it was to deliver again.
+pub const fn masked(entry: [u64; 2]) -> [u64; 2] {
+    [entry[0] & !REMAP_EN | SUP_IOPF, entry[1]]
+}
 
 /// Whether an entry read back delivers anything.
 pub const fn present(words: [u64; 2]) -> bool {

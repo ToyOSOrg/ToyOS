@@ -244,6 +244,17 @@ fn a_remapping_entry_delivers_its_vector_to_its_destination() {
     assert!(!irte::present(irte::ABSENT));
 }
 
+/// Table 22: a masked entry has `RemapEn` [0] clear and `SupIOPF` [1] set,
+/// and every other bit of the entry it masks.
+#[test]
+fn a_masked_entry_aborts_silently_and_keeps_its_fields() {
+    let delivering = irte::entry(0xFB, Destination::Extended(0x1234_5678));
+    let masked = irte::masked(delivering);
+    assert_eq!(masked, [delivering[0] & !1 | 1 << 1, delivering[1]]);
+    assert!(!irte::present(masked));
+    assert_eq!((irte::vector(masked), irte::destination(masked)), (0xFB, 0x1234_5678));
+}
+
 /// Figure 48: `INVALIDATE_INTERRUPT_TABLE`, code 05h, the id at [15:0].
 #[test]
 fn invalidating_an_interrupt_table_names_its_requester() {

@@ -112,6 +112,11 @@ impl Table {
         self.write(index * 2, lo);
     }
 
+    /// Rewrites only the low half of the 16-byte entry at `index`.
+    pub fn write_low(self, index: usize, lo: u64) {
+        self.write(index * 2, lo);
+    }
+
     /// Zeroes a 16-byte entry low half first: the low half holds `P`, and an
     /// entry whose high half went first would for a moment be present over a
     /// field it no longer means.

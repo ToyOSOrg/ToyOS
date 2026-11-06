@@ -282,14 +282,34 @@ pub mod interrupt {
     pub struct Claimed {
         pub msi: Msi,
         vector: ClaimVector,
-        /// VT-d's entry index; AMD-Vi's entry is the vector's own.
-        entry: Option<usize>,
+        line: Line,
     }
 
     impl Claimed {
         /// What the message raises, for the record.
         pub fn interrupt(&self) -> impl core::fmt::Display {
             self.vector
+        }
+
+        pub fn line(&self) -> Line {
+            self.line
+        }
+    }
+
+    /// A claim's remapping entry, which [`set_masked`] masks; named only
+    /// while its [`Claimed`] is held.
+    #[derive(Clone, Copy)]
+    pub enum Line {
+        Vtd(vtd::interrupt::Line),
+        AmdVi(amdvi::interrupt::Line),
+    }
+
+    /// `line`'s messages refused silently at the unit, or delivered again,
+    /// before this returns. Takes only the units' invalidation queues.
+    pub fn set_masked(line: Line, masked: bool) {
+        match line {
+            Line::Vtd(line) => vtd::interrupt::set_masked(line, masked),
+            Line::AmdVi(line) => amdvi::interrupt::set_masked(line, masked),
         }
     }
 
@@ -321,13 +341,13 @@ pub mod interrupt {
     pub fn claim(function: usize, source: StreamId) -> Result<Claimed, Refused> {
         let vector = user_dev::take(function).ok_or(Refused::NoVector)?;
         let made = match backend() {
-            Backend::AmdVi => amdvi::interrupt::claim(vector.vector(), source).map(|msi| (msi, None)),
+            Backend::AmdVi => amdvi::interrupt::claim(vector.vector(), source).map(|(msi, line)| (msi, Line::AmdVi(line))),
             Backend::Vtd => vtd::interrupt::claim(vector.vector(), source)
-                .map(|entry| (vtd::interrupt::message(entry), Some(entry))),
+                .map(|line| (vtd::interrupt::message(line.index()), Line::Vtd(line))),
             Backend::None => unreachable!("iommu: a claim's message made where nothing remaps"),
         };
         match made {
-            Ok((msi, entry)) => Ok(Claimed { msi, vector, entry }),
+            Ok((msi, line)) => Ok(Claimed { msi, vector, line }),
             Err(why) => {
                 user_dev::give_back(vector);
                 Err(why)
@@ -337,9 +357,9 @@ pub mod interrupt {
 
     /// A claim's entry gone from every unit, and then its vector free.
     pub fn release(claimed: &Claimed, source: StreamId) {
-        match claimed.entry {
-            Some(entry) => vtd::interrupt::release(entry, source),
-            None => amdvi::interrupt::release(claimed.vector.vector(), source),
+        match claimed.line {
+            Line::Vtd(line) => vtd::interrupt::release(line, source),
+            Line::AmdVi(line) => amdvi::interrupt::release(line, source),
         }
         user_dev::give_back(claimed.vector);
     }

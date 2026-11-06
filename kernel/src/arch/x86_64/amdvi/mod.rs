@@ -22,14 +22,14 @@ pub(super) mod selftest;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::drivers::pci::PciDevice;
 use crate::iommu::StreamId;
 use crate::log;
 use crate::mm::pmm::{self, PhysPage};
 use crate::mm::{DirectMap, Mmio, PAGE_2M, PAGE_SIZE};
-use crate::sync::Lock;
+use crate::sync::{Lock, Masked};
 use crate::time::{Duration, Tripwire};
 use toyos_amdvi::dte::{interrupts_blocked, Dte, Setting, DEVICE_IDS, ENTRY_BYTES};
 use toyos_amdvi::queue::{Command, ENTRIES};
@@ -111,9 +111,23 @@ impl Tables {
 
 static TABLES: Lock<Tables> = Lock::new(Tables::new());
 
-/// Every translating unit, and the single owner of each one's command buffer:
-/// a buffer has one tail, so a second holder would write behind its back.
-static UNITS: Lock<Vec<Live>> = Lock::new(Vec::new());
+/// Each translating unit's command buffer, [`PUBLISHED`] of them: a buffer
+/// has one tail, so its slot is the one owner. A leaf, taken with interrupts
+/// masked and holding nothing else, because a claim's interrupt handler
+/// masks its entry through it ([`interrupt::set_masked`]) while any other
+/// context may hold it.
+static UNITS: [Masked<Option<Live>>; MAX_UNITS] = [const { Masked::new(None) }; MAX_UNITS];
+static PUBLISHED: AtomicUsize = AtomicUsize::new(0);
+
+/// Each translating unit's SMI filter, until [`settle`] writes it.
+static SMI: Lock<Vec<Unfiltered>> = Lock::new(Vec::new());
+
+struct Unfiltered {
+    index: usize,
+    regs: Mmio,
+    /// [`Ready::smi`].
+    filter: Option<Vec<SmiFilter>>,
+}
 
 /// `bytes` at `phys`, through the direct map.
 fn memory(phys: u64, bytes: u64) -> Mmio {
@@ -476,8 +490,6 @@ struct Live {
     tail: usize,
     done: Address<12>,
     waited: u64,
-    /// [`Ready::smi`], until [`settle`] writes it.
-    smi: Option<Vec<SmiFilter>>,
 }
 
 impl Live {
@@ -518,8 +530,9 @@ impl Live {
 
 /// `commands` on every translating unit, finished on each before this returns.
 fn submit(commands: &[Command]) {
-    for unit in UNITS.lock().iter_mut() {
-        unit.submit(commands);
+    for slot in &UNITS[..PUBLISHED.load(Ordering::Acquire)] {
+        let closed = crate::arch::IrqGuard::close();
+        slot.lock(&closed).as_mut().expect("amdvi: a published unit has its buffer").submit(commands);
     }
 }
 
@@ -568,7 +581,7 @@ fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
         || regs.read_u32(reg::STATUS) & running == running,
         || format!("iommu: amdvi unit{index} never ran its command buffer and event log: STATUS={:#010x}", regs.read_u32(reg::STATUS)),
     );
-    let mut live = Live { index, regs, commands: memory(commands.get(), PAGE_SIZE), tail: 0, done, waited: 0, smi };
+    let mut live = Live { index, regs, commands: memory(commands.get(), PAGE_SIZE), tail: 0, done, waited: 0 };
     // §2.4.8 needs `INVALIDATE_IOMMU_ALL` alone. QEMU 11.1.1 moves a function
     // off pass-through only on an `INVALIDATE_DEVTAB_ENTRY` that names it
     // (`issues/qemus-invalidate-iommu-all-leaves-every-function-untranslated.md`),
@@ -585,34 +598,40 @@ fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
         events.get(),
         devices.len(),
     );
-    UNITS.lock().push(live);
+    let mut settling = SMI.lock();
+    let at = PUBLISHED.load(Ordering::Relaxed);
+    {
+        let closed = crate::arch::IrqGuard::close();
+        *UNITS[at].lock(&closed) = Some(live);
+    }
+    PUBLISHED.store(at + 1, Ordering::Release);
+    settling.push(Unfiltered { index, regs, filter: smi });
 }
 
 /// Every unit's SMI filter on, once every function this kernel drives is out
 /// of firmware's hands. A refused SMI is logged as an `IO_PAGE_FAULT`
 /// (§2.1.5.1) for [`fault`].
 pub fn settle() {
-    let mut units = UNITS.lock();
+    let mut units = SMI.lock();
     let mut everywhere = !units.is_empty();
-    for unit in units.iter_mut() {
-        let Some(filter) = unit.smi.take() else {
+    for Unfiltered { index, regs, filter } in units.iter_mut() {
+        let Some(filter) = filter.take() else {
             everywhere = false;
             continue;
         };
         for (i, register) in (0u64..).zip(&filter) {
-            if !SmiFilter(unit.regs.read_u64(reg::SMI_FILTER + 8 * i)).locked() {
-                unit.regs.write_u64(reg::SMI_FILTER + 8 * i, register.0);
+            if !SmiFilter(regs.read_u64(reg::SMI_FILTER + 8 * i)).locked() {
+                regs.write_u64(reg::SMI_FILTER + 8 * i, register.0);
             }
         }
-        unit.regs.write_u64(reg::CONTROL, unit.regs.read_u64(reg::CONTROL) | control::SMIF_EN | control::SMIF_LOG_EN);
+        regs.write_u64(reg::CONTROL, regs.read_u64(reg::CONTROL) | control::SMIF_EN | control::SMIF_LOG_EN);
         let passes: Vec<String> = (0..filter.len() as u64)
-            .filter_map(|i| SmiFilter(unit.regs.read_u64(reg::SMI_FILTER + 8 * i)).passes())
+            .filter_map(|i| SmiFilter(regs.read_u64(reg::SMI_FILTER + 8 * i)).passes())
             .map(|id| format!("{}", requester(id)))
             .collect();
         log!(
-            "iommu: amdvi unit{} SMI filter on control={:#018x}, passing {}",
-            unit.index,
-            unit.regs.read_u64(reg::CONTROL),
+            "iommu: amdvi unit{index} SMI filter on control={:#018x}, passing {}",
+            regs.read_u64(reg::CONTROL),
             passes.join(" ")
         );
     }

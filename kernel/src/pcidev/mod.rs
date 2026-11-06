@@ -136,12 +136,12 @@ use toyos_pci::{af, aperture, bar, express, hotplug, pages, pm};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, mask_claimed_msix, NoCapability, NoEntry, PciDevice};
-use crate::iommu::{IommuError, OwnSpace, Refused, Remapped};
+use crate::iommu::{IommuError, MessageLine, OwnSpace, Refused, Remapped};
 use kernel::claimspace::{Span, Window};
 use crate::mm::policy::CachePolicy;
 use crate::mm::align_2m;
 use crate::object::shm::SharedMemObject;
-use crate::sync::Lock;
+use crate::sync::{Lock, Masked};
 use crate::inbox::PollEntry;
 use crate::watch::IrqWatch;
 
@@ -189,6 +189,8 @@ struct Function {
     /// its fault is never this kernel's ([`note_fault`]).
     claimed: AtomicBool,
     irq: Interrupt,
+    /// What masks its claim's message while [`Self::irq`] holds a count.
+    gate: Gate,
     /// What its holder's poll waits on: two processes each driving a function
     /// must not learn when the other's device is busy.
     watch: IrqWatch,
@@ -249,6 +251,7 @@ fn new_record(pci: PciDevice, arrival: Arrival) -> Function {
         held: AtomicBool::new(false),
         claimed: AtomicBool::new(false),
         irq: Interrupt::new(),
+        gate: Gate(Masked::new(None)),
         watch: IrqWatch::new(),
         space: Lock::new(None),
         bound: Lock::new(None),
@@ -1044,8 +1047,10 @@ pub fn claim(arrival: Arrival, firmware: FirmwareWindows) -> Result<(PciFunction
                 bound.armed.message().interrupt(),
             );
             let function = binding.function();
+            let line = bound.armed.message().line();
             *function.bound.lock() = Some(bound);
             function.irq.clear();
+            function.gate.arm(line);
             changed();
             Ok((info, Claim::pci(binding)))
         }
@@ -1522,6 +1527,7 @@ fn release(number: usize, arrival: Arrival) {
 /// that maps nothing and a message that is not present.
 fn tear_down_departed(function: &Function, bound: Bound) {
     let Bound { space, armed, grants, id, .. } = bound;
+    function.gate.disarm();
     drop(armed);
     for grant in grants.iter() {
         if let Err(why) = space.unmap(grant.at, grant.bytes) {
@@ -1586,6 +1592,7 @@ fn tear_down(function: &Function, mut bound: Bound) {
     // Once the function no longer speaks, and before it can be claimed again:
     // its translation goes, and its interrupt is free.
     bound.pci.drain_messages();
+    function.gate.disarm();
     drop(message);
     // **The reset before the domain gives anything back.** With mastering off
     // the function starts nothing new; its grants stay mapped until it is
@@ -1970,9 +1977,10 @@ pub fn config_read(binding: &Binding, at: Register, width: RegWidth) -> Result<u
     })
 }
 
-/// The interrupts since the last read, or `None` for none; `Gone` once the
-/// function has left the device set, and `Io` once the unit has refused it:
-/// the two answers its holder cannot take for a quiet device.
+/// The interrupts since the last read, or `None` for none; a read that takes
+/// some opens a masked claim. `Gone` once the function has left the device
+/// set, and `Io` once the unit has refused it: the two answers its holder
+/// cannot take for a quiet device.
 pub fn take_record(binding: &Binding) -> Result<Option<DeviceIrqRecord>, SyscallError> {
     let function = binding.function();
     if !binding.here() {
@@ -1981,7 +1989,7 @@ pub fn take_record(binding: &Binding) -> Result<Option<DeviceIrqRecord>, Syscall
     if function.irq.faulted() {
         return Err(SyscallError::Io);
     }
-    let taken = function.irq.take();
+    let taken = function.irq.take_opening(&function.gate);
     if taken.is_some() && function.irq.take_unannounced() {
         let bound = function.bound.lock();
         let bound = bound.as_ref().expect("pcidev: a claim's binding has its function bound");
@@ -1994,13 +2002,16 @@ pub fn take_record(binding: &Binding) -> Result<Option<DeviceIrqRecord>, Syscall
 /// refusal is.
 pub fn has_irq(binding: &Binding) -> bool {
     let function = binding.function();
-    !binding.here() || function.irq.armed() || function.irq.faulted()
+    !binding.here() || function.irq.pending() || function.irq.faulted()
 }
 
-/// Records one message and posts the claim's watch. Called from the
+/// Records one message, masks the claim's message until its holder reads
+/// the record where this is the second unread one, and posts the claim's
+/// watch: a function's interrupts between two reads stop at what lands
+/// before the mask, whatever its holder makes it send. Called from the
 /// interrupt's handler for function `number`, so it allocates nothing;
-/// `record.rs` owns the counting, and `kernel-loom` models it against a
-/// concurrent reader.
+/// `record.rs` owns the counting and the mask's rule, and `kernel-loom`
+/// models both against a concurrent reader.
 ///
 /// **The handler holds the preempt count raised across it**: the post lets go
 /// of a count of its own, and at depth zero that would run a scheduler pass
@@ -2011,8 +2022,47 @@ pub fn isr(number: usize) {
     if let Some(slot) = slot::of(function) {
         return slot.isr();
     }
-    function.irq.took(crate::clock::nanos_since_boot());
+    function.irq.took_masking(crate::clock::nanos_since_boot(), &function.gate);
     function.watch.post_in_place();
+}
+
+/// A claim's message line and whether it is masked, while the claim holds
+/// it. A leaf but for the units' invalidation queues, taken with interrupts
+/// masked: the handler takes it too.
+struct Gate(Masked<Option<Gated>>);
+
+struct Gated {
+    line: MessageLine,
+    masked: bool,
+}
+
+impl Gate {
+    /// A claim's line, which its arming left delivering.
+    fn arm(&self, line: MessageLine) {
+        let closed = crate::arch::IrqGuard::close();
+        let previous = self.0.lock(&closed).replace(Gated { line, masked: false });
+        assert!(previous.is_none(), "pcidev: a claim's line was armed over another's");
+    }
+
+    /// Before the claim's message is given back, so nothing masks an entry
+    /// another claim may be given.
+    fn disarm(&self) {
+        let closed = crate::arch::IrqGuard::close();
+        self.0.lock(&closed).take();
+    }
+}
+
+impl record::Gate for Gate {
+    fn hold(&self, masked: impl FnOnce() -> bool) {
+        let closed = crate::arch::IrqGuard::close();
+        let mut held = self.0.lock(&closed);
+        let Some(gated) = held.as_mut() else { return };
+        let masked = masked();
+        if masked != gated.masked {
+            gated.line.set_masked(masked);
+            gated.masked = masked;
+        }
+    }
 }
 
 /// The unit refused requester `who` an access: `true` where a claim holds it,

@@ -35,6 +35,18 @@ write-back policy this path's.
 What either part does with its ring across a link change is not in this
 exit: `issues/no-machine-has-read-an-intel-nic-across-a-link-change.md`.
 
+**Sighting, 2026-11-05: `i219_msi`'s burst does not fill the T14's ring
+either.** Its traffic phase queues `4 * TX_RING` frames back to back and
+then requires `tx_full` and a taken wake, and on the bench's link the wire
+sends them faster than the driver queues them: "the ring full 0 time(s), 0
+wake(s) asked and 0 taken, 0 stranded; the MAC counted 65 sent", both on
+#1188's T14 run, where the job failed first on its receive check
+(https://github.com/ToyOSOrg/evidence/blob/72d7fa82557c6680fb33008665e717ddc83cb849/pr-1188/r3/t14-kernel-excerpt.log,
+line 43), and on #1193's B arm, where it is the job's failure
+(https://github.com/ToyOSOrg/evidence/tree/3bfbd7de150de5686df1edc749efc33b07722354/pr-1193/r1).
+That phase's `tx_full` requirement is this exit's premise and the burst does
+not establish it.
+
 ## Owner
 
 The T14's outbound rows of `issues/toyos-has-its-own-network-stack.md`: the

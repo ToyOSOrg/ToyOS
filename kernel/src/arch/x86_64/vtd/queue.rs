@@ -18,6 +18,10 @@ const CONTEXT_CACHE: u64 = 0x1;
 const IOTLB: u64 = 0x2;
 /// Type 4h, Section 6.5.2.7 — granularity inverted against the two above: clear is global.
 const INTERRUPT_ENTRY_CACHE: u64 = 0x4;
+/// `G`, bit 4 of an interrupt-entry-cache descriptor: set, one index (§6.5.2.7).
+const INDEX_SELECTIVE: u64 = 1 << 4;
+/// `IIDX`, bits 47:32; `IM` 31:27 left 0 names that index alone.
+const INDEX_SHIFT: u64 = 32;
 const WAIT: u64 = 0x5;
 
 /// Granularity field, bits 5:4: `01` is global — every domain, every entry.
@@ -48,6 +52,7 @@ const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
 );
 
 pub struct Queue {
+    regs: Mmio,
     descriptors: Table,
     /// Own page: the ring uses its full 4 KiB, so an inline status word would collide with a descriptor slot.
     status: Table,
@@ -57,7 +62,7 @@ pub struct Queue {
 impl Queue {
     /// The caller enables `GCMD.QIE` only after this returns, since a queue the unit has not been pointed at is a queue it never reads.
     pub fn new(tables: &mut Tables, regs: Mmio) -> Self {
-        let queue = Self { descriptors: tables.alloc(), status: tables.alloc(), tail: 0 };
+        let queue = Self { regs, descriptors: tables.alloc(), status: tables.alloc(), tail: 0 };
         // Descriptor width 0, queue size 0: the register is the base address alone.
         regs.write_u64(IQA_REG, queue.descriptors.phys());
         regs.write_u64(IQT_REG, 0);
@@ -66,58 +71,43 @@ impl Queue {
 
     /// Every cached translation and context entry, gone, acknowledged by the
     /// unit before this returns.
-    pub fn invalidate_all(&mut self, regs: Mmio) {
-        self.submit(
-            regs,
-            &[
-                (CONTEXT_CACHE | GLOBAL, 0),
-                (IOTLB | GLOBAL | DRAIN_WRITES | DRAIN_READS, 0),
-            ],
-        );
+    pub fn invalidate_all(&mut self) {
+        self.submit(&[(CONTEXT_CACHE | GLOBAL, 0), (IOTLB | GLOBAL | DRAIN_WRITES | DRAIN_READS, 0)]);
     }
 
     /// Every translation cached for one domain, gone. Owed after any change to
     /// its second-level tables, a mapping becoming present included, because
     /// `CAP.CM` says the unit may have cached the absence.
-    pub fn invalidate_domain(&mut self, regs: Mmio, domain: u16) {
-        self.submit(
-            regs,
-            &[(
-                IOTLB | DOMAIN | DRAIN_WRITES | DRAIN_READS
-                    | ((domain as u64) << DOMAIN_SHIFT),
-                0,
-            )],
-        );
+    pub fn invalidate_domain(&mut self, domain: u16) {
+        self.submit(&[(IOTLB | DOMAIN | DRAIN_WRITES | DRAIN_READS | ((domain as u64) << DOMAIN_SHIFT), 0)]);
     }
 
     /// A replaced context entry, then everything cached under the domain it
     /// named, in Section 6.5.2.1's order: the unit looks a translation up by
     /// requester and keeps it under that id (Section 6.2.1).
-    pub fn invalidate_context(&mut self, regs: Mmio, displaced: Displaced) {
+    pub fn invalidate_context(&mut self, displaced: Displaced) {
         let domain = (displaced.domain() as u64) << DOMAIN_SHIFT;
-        self.submit(
-            regs,
-            &[
-                (
-                    CONTEXT_CACHE
-                        | DEVICE
-                        | domain
-                        | ((displaced.requester() as u64) << SOURCE_SHIFT),
-                    0,
-                ),
-                (IOTLB | DOMAIN | DRAIN_WRITES | DRAIN_READS | domain, 0),
-            ],
-        );
+        self.submit(&[
+            (CONTEXT_CACHE | DEVICE | domain | ((displaced.requester() as u64) << SOURCE_SHIFT), 0),
+            (IOTLB | DOMAIN | DRAIN_WRITES | DRAIN_READS | domain, 0),
+        ]);
     }
 
     /// Every cached interrupt remapping entry, gone. Owed after `SIRTP` where
     /// `CAP.ESIRTPS` is clear (Section 6.7); sent only to a unit that remaps,
     /// since a type it does not implement stalls its queue.
-    pub fn invalidate_interrupts(&mut self, regs: Mmio) {
-        self.submit(regs, &[(INTERRUPT_ENTRY_CACHE, 0)]);
+    pub fn invalidate_interrupts(&mut self) {
+        self.submit(&[(INTERRUPT_ENTRY_CACHE, 0)]);
     }
 
-    fn submit(&mut self, regs: Mmio, descriptors: &[(u64, u64)]) {
+    /// Interrupt remapping entry `index`, gone from the cache, and every
+    /// message the unit already remapped through it delivered (§6.5.2.7).
+    pub fn invalidate_interrupt(&mut self, index: usize) {
+        self.submit(&[(INTERRUPT_ENTRY_CACHE | INDEX_SELECTIVE | (index as u64) << INDEX_SHIFT, 0)]);
+    }
+
+    fn submit(&mut self, descriptors: &[(u64, u64)]) {
+        let regs = self.regs;
         assert!(
             descriptors.len() + 1 < QUEUE_ENTRIES,
             "iommu: {} descriptors do not fit a {QUEUE_ENTRIES}-entry queue",

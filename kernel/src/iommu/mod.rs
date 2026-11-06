@@ -306,6 +306,11 @@ impl Remapped {
         self.claimed.interrupt()
     }
 
+    /// What masks the message, for as long as this is held.
+    pub fn line(&self) -> MessageLine {
+        MessageLine(self.claimed.line())
+    }
+
     fn stream(&self) -> StreamId {
         StreamId::pci(self.function.bus, self.function.dev, self.function.func)
     }
@@ -314,6 +319,21 @@ impl Remapped {
 impl Drop for Remapped {
     fn drop(&mut self) {
         messages::release(&self.claimed, self.stream());
+    }
+}
+
+/// What masks a claimed function's message at the unit that translates it:
+/// its remapping entry, or its LPI. Valid while its [`Remapped`] is held.
+#[derive(Clone, Copy)]
+pub struct MessageLine(messages::Line);
+
+impl MessageLine {
+    /// The function's messages refused, or delivered again, before this
+    /// returns: a refused one on x86-64 is dropped at the unit and recorded
+    /// nowhere, and on AArch64 left pending until it is delivered. Takes only
+    /// the units' invalidation queues, so an interrupt handler may call it.
+    pub fn set_masked(self, masked: bool) {
+        messages::set_masked(self.0, masked);
     }
 }
 

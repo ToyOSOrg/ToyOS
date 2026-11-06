@@ -11,7 +11,8 @@
 //! A requester an IVMD names stays on the identity domain: firmware declares
 //! memory it must keep reaching, which a domain of its own would not map.
 //!
-//! `DOMAINS` is taken before `UNITS` or `TABLES`, and those two are never held together.
+//! `DOMAINS` is taken before `UNITS` or `TABLES`, and those two are never held together;
+//! a unit's slot in `UNITS` is a leaf.
 
 use alloc::vec::Vec;
 

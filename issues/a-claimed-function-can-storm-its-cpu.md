@@ -7,28 +7,31 @@ opened: 2026-10-04
 
 # A claimed function can storm its CPU
 
-A function a process drives raises its claim's interrupt on cpu0 for
-every message it sends — on x86-64 the claim's vector
-(`kernel/src/arch/x86_64/idt/user_dev.rs`), on AArch64 the function's LPI through
-the ITS (`kernel/src/arch/aarch64/irqchip/its.rs`) — and `pcidev::isr`
-(`kernel/src/pcidev/mod.rs`) takes each one; nothing bounds how often. Its
-holder programs the device through the BARs it maps, so a hostile or broken
-holder can make the device send messages as fast as the bus carries
-them, and each one is an interrupt cpu0 takes before anything else it runs.
-The kernel's own xHCI measured what that does to a CPU for a kernel
-driver's source, ten timer interrupts in thirty-four seconds on T14 run 20,
-before that driver left the kernel; a claim is the same source with its
-holder outside the kernel, which every xHCI controller now is.
+A claim's message is masked from the second message that lands before its
+holder reads the record until that read (`kernel/src/pcidev/record.rs`), so
+what lands between two reads stops at what arrives before the mask takes.
+That bounds it per read and not per unit of time, and three things remain.
 
-The lever is the claim's own translation: on x86-64 its remapping entry, which
-made not present stops the function's messages at the unit; on AArch64 its
-LPI's configuration byte, which cleared and followed by an `INV` disables
-the LPI at the redistributor. Masking through the device would need the
-holder's cooperation. What rate is a storm is not decided, and a number
-chosen without a measurement behind it is the silent decision this file
-exists to refuse.
+**A holder paces cpu0.** A holder that loops on forcing a cause through its
+own registers and reading its record, on any CPU, still raises one cpu0
+interrupt per iteration, charged to whatever cpu0 interrupted and not to the
+holder. One that forces two per read also costs cpu0 an invalidation
+completion wait with interrupts off at the mask (VT-d's interrupt-entry-cache
+invalidation, AMD-Vi's completion wait, or the ITS's `SYNC`); the read's own
+wait runs in the holder's call, and reaches cpu0 only as a spin on the unit's
+queue behind it.
 
-Owner: the IOMMU track. Exit: a claimed function's messages past a bound the
-kernel derives and states are stopped at its entry and recorded against its
-claim, and a T14 row with a holder that provokes them shows cpu0's timer and
-other sources still served.
+**A refused message is recorded nowhere.** While masked, a message is target
+aborted (AMD-Vi) or blocked with fault processing disabled (VT-d), and
+neither the unit nor the claim's record counts it. On AArch64 a disabled LPI
+stays pending and folds into one.
+
+**No T14 row shows cpu0's other sources served under a holder that
+provokes its function.** `i219_msi`'s storm phase shows a forced storm on
+an unread claim stopped at the entry, and not the timer.
+
+Owner: the IOMMU track. Exit: cpu0's interrupts from a claim are bounded in
+time, and the work they cost is charged to their holder, by a bound the
+kernel derives and states; a message refused past it is counted against
+the claim; and a T14 row with a holder that loops force-and-read shows
+cpu0's timer and other sources still served.

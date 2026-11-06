@@ -62,6 +62,10 @@ shard-publish-relaxed = []
 # `device_irq` reds. They *are* the record's design, so turning them off reverts
 # the whole of what the model claims.
 device-irq-lossy = []
+# `src/pcidev/record.rs`'s gate follows each side's intent instead of the
+# record, so a mask landing after the read that opened it strands the claim, and
+# `device_irq_gate` reds.
+device-irq-gate-intent = []
 # The same arrangement for the CPU roster's publication edge: `src/smp_roster.rs`'s
 # `commit` publishes the count with a `Relaxed` store instead of the release the
 # slot store needs, so a reader can see a count over an unfilled slot, and

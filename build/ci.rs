@@ -606,6 +606,9 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "device-irq-lossy", Some("device_irq"), &[
         Fails("every_message_is_counted_once"),
     ]),
+    red(KERNEL_LOOM, "device-irq-gate-intent", Some("device_irq_gate"), &[
+        Fails("hardware_ends_as_the_record_owes_after_two_messages"),
+    ]),
     Control {
         krate: KERNEL_LOOM,
         feature: "no-preempt-guard",
