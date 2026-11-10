@@ -40,7 +40,9 @@
   table. An update is written to the slot the machine is not running.
 - Updates fix forward. The loader boots the slot marked to boot next and no
   other; a slot that is refused or fails is reported, never replaced by the
-  previous one automatically. The remedy is a newer image.
+  previous one automatically. After a refusal the machine reports it and
+  powers off; it does not reset into anything else. The remedy is a newer
+  image.
 - Updating is an ordinary program: a signed image on standard input, written to
   the idle slot and marked to boot next. The signature is its whole authority,
   and how the bytes arrived does not matter.

@@ -651,7 +651,8 @@ const MACHINE_TESTS: &[&str] = &[
     // refused before boot services end, and the machine stops with the whole
     // slot beside it unread. On both architectures' QEMU machines, each with
     // the loader's serial port as its console; no metal row, since the metal
-    // loop judges only a boot that stopped cleanly.
+    // loop judges a boot by the kernel's own record, which this one never
+    // writes.
     "a_bent_supervisor_is_refused_and_nothing_boots",
     // A spawn and its child's end leave the census as it was, for a program
     // the root server holds in memory, and one each on DATA and `/tmp` read
@@ -3276,7 +3277,7 @@ fn a_bent_supervisor_is_refused_and_nothing_boots(profile: qemu::Profile, test_c
     let refused = toyos_update::policy::Refusal::Hash(toyos_update::image::SUPERVISOR);
     said.must_say(&format!("Slot A: REFUSED, {refused}"))?;
     said.must_say(&format!("Slots: the marked slot A {}", bootlog::LOADER_BOOTS_NOTHING))?;
-    // Every line the loader says of a slot it reads opens `Slot <letter>:`.
+    // A slot the loader verifies says `Slot <letter>: signed header` first.
     if let Some(line) = said.text().lines().find(|l| l.contains("Slot B:")) {
         return Err(format!("the loader read slot B after refusing the marked slot: {line:?}\n{}", said.text()));
     }

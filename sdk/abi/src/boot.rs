@@ -62,8 +62,8 @@ pub struct KernelArgs {
     /// layout.
     pub layout: u32,
     /// The boot parameter, as ASCII with no terminator: comma-separated tokens
-    /// read out of `\toyos\cmdline` on the slot's volume, with the words the
-    /// loader appends ([`SLOT_PARAM`] among them), read by [`tokens`].
+    /// read out of `\toyos\cmdline` on the slot's volume, with the word the
+    /// loader appends ([`SLOT_PARAM`]), read by [`tokens`].
     ///
     /// Every token is a parameter the kernel claims (`kernel/src/params.rs`)
     /// or an actuator its table declares, and a kernel that carries no

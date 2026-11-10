@@ -163,8 +163,7 @@ impl<'a> Disk<'a> {
     /// timeout and says nothing while it runs, so a firmware driver that stalls
     /// holds this loader until the firmware watchdog `main` armed at entry
     /// resets the machine, if the firmware honours it. What shows where it
-    /// stopped is the slot's line before the read and the attempt count the
-    /// next pass reads.
+    /// stopped is the slot's line before the read.
     pub fn read_root(&mut self, bs: &BootServices, part: &Located, len: u64) -> Result<RootImage, String> {
         let part = part.partition();
         let capacity = part.lba_count().get().saturating_mul(u64::from(self.lba_bytes));
@@ -183,15 +182,13 @@ impl<'a> Disk<'a> {
         let read = chunk::read(&mut device, part.first_lba(), self.lba_bytes, chunk, pages.bytes_mut());
         let image = RootImage { pages, partition: part.unique_guid().0, ticks: crate::arch::counter().wrapping_sub(began) };
         if let Err(failed) = read {
-            let why = alloc::format!(
+            return Err(alloc::format!(
                 "the read of {} blocks at LBA {} failed: {:?}, after {} of {len} bytes read",
                 failed.blocks,
                 failed.lba,
                 failed.error,
                 failed.read
-            );
-            image.pages.free(bs);
-            return Err(why);
+            ));
         }
         println!(
             "{READ_AT} {at:#x}+{len:#x} from LBA {}+{}, {chunk} bytes a request (optimal granularity: {}), in {} counter ticks",

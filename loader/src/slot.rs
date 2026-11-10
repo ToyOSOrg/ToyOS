@@ -103,30 +103,16 @@ fn verify(
     let cmdline = read_section(bs, &slot.boot, slots::CMDLINE_FILE, header.cmdline().len, "cmdline")?;
     held(&cmdline, header.cmdline().sha256, "cmdline")?;
     let supervisor = program(bs, &slot.boot, slots::SUPERVISOR_FILE, header.supervisor(), "supervisor")?;
-    let fileserver = match program(bs, &slot.boot, slots::FILESERVER_FILE, header.fileserver(), "fileserver") {
-        Ok(fileserver) => fileserver,
-        Err(why) => {
-            supervisor.free(bs);
-            return Err(why);
-        }
-    };
+    let fileserver = program(bs, &slot.boot, slots::FILESERVER_FILE, header.fileserver(), "fileserver")?;
 
-    let root = match disk.read_root(bs, &part, header.root().len) {
-        Ok(root) => root,
-        Err(why) => {
-            println!("{HEAD} {letter}: ROOT: {why}");
-            supervisor.free(bs);
-            fileserver.free(bs);
-            return Err(Refusal::Unreadable("root"));
-        }
-    };
+    let root = disk.read_root(bs, &part, header.root().len).map_err(|why| {
+        println!("{HEAD} {letter}: ROOT: {why}");
+        Refusal::Unreadable("root")
+    })?;
     let began = crate::arch::counter();
     let root_hash = toyos_update::sha256(root.pages.bytes());
     println!("{HEAD} {letter}: ROOT hashed in {} counter ticks", crate::arch::counter().wrapping_sub(began));
     if root_hash != header.root().sha256 {
-        root.pages.free(bs);
-        supervisor.free(bs);
-        fileserver.free(bs);
         return Err(Refusal::Hash("root"));
     }
     println!("{HEAD} {letter}: kernel, cmdline, supervisor, fileserver and ROOT are the bytes the signed header names");
@@ -153,10 +139,7 @@ fn program(bs: &BootServices, guid: &[u8; 16], path: &str, section: Section, nam
     pages.bytes_mut().copy_from_slice(&bytes);
     drop(bytes);
     // Over the pages the kernel is handed, not over the buffer they came from.
-    if let Err(why) = held(pages.bytes(), section.sha256, name) {
-        pages.free(bs);
-        return Err(why);
-    }
+    held(pages.bytes(), section.sha256, name)?;
     Ok(pages)
 }
 

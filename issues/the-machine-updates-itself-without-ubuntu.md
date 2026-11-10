@@ -31,17 +31,23 @@ the loader's verification.
 Owner ruling, 2026-11-05, answering #1191's open decisions: updates fix
 forward, with no automatic fallback to the previous slot.
 
-Done: a pass verifies the marked slot alone. Where it is refused, the loader
-names the refusal on the console and in `loader.log`, reads nothing of the
-other slot and ends as its panic does: the machine powers off, or resets
-where a `BootNext` bought this boot and the default entry is another. The
-kernel is told only the slot it was booted from. #1196 took the death-driven
-fallback out with the black-box page.
+Done: a pass tries and boots the marked slot and no other. Where it is
+refused, the loader names the refusal on the console and in `loader.log` and
+ends as its panic does. The other slot is read only where the proof record
+names it: its signed header is verified to raise the floor, and nothing of it
+boots. The kernel is told only the slot it was booted from. #1196 took the
+death-driven fallback out with the black-box page.
+
+Not yet the design: the machine is to power off after a refusal and reset
+into nothing else. Today's handler powers off, but resets where a `BootNext`
+bought this boot and the firmware's default entry is another. The exit is
+stage 4 of `issues/the-loader-does-only-what-must-precede-the-handover.md`,
+whose handler never resets.
 
 `a_bent_supervisor_is_refused_and_nothing_boots` holds it on both
-architectures' QEMU machines. It has no metal row: the metal loop judges only
-a boot that stopped cleanly, so a refused slot on the T14 is stage 6's exit in
-`issues/the-loader-does-only-what-must-precede-the-handover.md`. A one-shot
+architectures' QEMU machines. It has no metal row: the metal loop judges a
+boot by the kernel's own record, which a refused pass never writes, so a
+refused slot on the T14 is stage 6's exit in that track. A one-shot
 `update --once` is a request, not a fallback, and stays that track's stage 5.
 
 ## Stage 3 — the T14 installs ToyOS on its NVMe

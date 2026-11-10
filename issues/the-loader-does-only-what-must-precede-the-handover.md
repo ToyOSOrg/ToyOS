@@ -149,8 +149,9 @@ Each stage lands on its own, in this order.
      From `EXITING` on (the first `ExitBootServices` call) it skips `loaderlog`
      and goes straight to `ResetSystem`'s shutdown, since UEFI 2.10 §7.4.6
      forbids the File protocol from that call on as it forbids the console.
-     The refused-floor site stops writing its reason to `loader.log` before
-     its `panic!`: the handler writes it.
+     The refused-floor site and the refused-slot site (`slot::marked`'s
+     caller) stop writing their reason to `loader.log` before their `panic!`:
+     the handler writes it.
    - `alloc_kernel_memory` stops building a `Vec<u8>` over a 2 MiB-aligned
      allocation. Both relocation unsafes go.
    - The layout word and every field before it keep their offsets, each
