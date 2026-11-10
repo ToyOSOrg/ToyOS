@@ -53,8 +53,9 @@ pub use toyos_proclife::{ThreadLocation, Watch};
 use toyos_proclife::quit::{self, Notice, Reason};
 use toyos_proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, tree, Lifecycle, Node, Processes, Tids};
 
-/// One `EndowEntry` on the wire; `loader::start` and [`Endowments::encode`] both index by it.
+/// One endowment on the wire, a spawn's `SpawnEndow` and the `EndowEntry` read back; `loader::start` and [`Endowments::encode`] both index by it.
 pub const ENDOW_ENTRY_LEN: usize = core::mem::size_of::<EndowEntry>();
+const _: () = assert!(core::mem::size_of::<toyos_abi::syscall::SpawnEndow>() == ENDOW_ENTRY_LEN);
 
 pub use crate::loader::{build_child_handles, spawn, spawn_supervisor};
 

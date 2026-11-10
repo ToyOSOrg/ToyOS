@@ -401,10 +401,10 @@ crate::user_safe! {
         /// authority. `InvalidArgument` unless [`process_name`] takes it.
         pub name_ptr: u64,
         pub name_len: u64,
-        /// `[EndowEntry]`, moved out of the parent's table.
+        /// `[SpawnEndow]`, moved out of the parent's table.
         pub endow_ptr: u64,
         pub endow_count: u64,
-        /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
+        /// The label blob every [`SpawnEndow`]'s `label_off`/`label_len` indexes.
         pub labels_ptr: u64,
         pub labels_len: u64,
         /// The child's memory, `[SpawnMap]`, as the caller laid out its program:
@@ -495,12 +495,25 @@ pub const MAX_SPAWN_MAPS: usize = 64;
 /// The most bytes of a build-id a spawn carries.
 pub const MAX_BUILD_ID: usize = 32;
 
-/// One `(label, handle)` pair of a process's endowment table.
+/// One handle a spawn moves out of its caller's table into the child's, and
+/// the label the child finds it under ([`EndowEntry`]): `label_off` and
+/// `label_len` index [`SpawnArgs`]'s label blob.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SpawnEndow {
+    pub label_off: u32,
+    pub label_len: u32,
+    pub moved: TransferEntry,
+}
+
+const _: () = assert!(core::mem::size_of::<SpawnEndow>() == 16);
+
+/// One `(label, handle)` pair of a process's endowment table, as
+/// [`endowments`] answers it.
 ///
 /// `label_off`/`label_len` index the label blob that travels beside the
-/// entries — in [`SpawnArgs`] going in, in [`endowments`]'s answer coming back.
-/// The label is a *local name* in one process's own table and buys nothing to
-/// guess: a name not in your table resolves to nothing.
+/// entries. The label is a *local name* in one process's own table and buys
+/// nothing to guess: a name not in your table resolves to nothing.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct EndowEntry {
@@ -576,7 +589,7 @@ pub const MAX_LABELS_LEN: usize = 4096;
 pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len() - QUIT_LABEL.len();
 
 use crate::end::End;
-use crate::handle::Rights;
+use crate::handle::{Rights, TransferEntry};
 use crate::pci::{DmaGrant, DmaMapping};
 use crate::{Pid, RawHandle, Tid, HANDLE_INVALID};
 
@@ -2059,6 +2072,7 @@ crate::user_safe! {
     pub struct MessageSend {
         pub bytes: u64,
         pub len: u64,
+        /// `[TransferEntry]`.
         pub handles: u64,
         pub count: u64,
         /// [`MESSAGE_NONBLOCK`] or none; any other bit is `InvalidArgument`.
@@ -2067,7 +2081,7 @@ crate::user_safe! {
 }
 
 impl MessageSend {
-    fn new(bytes: &[u8], handles: &[RawHandle], nonblock: bool) -> Self {
+    fn new(bytes: &[u8], handles: &[TransferEntry], nonblock: bool) -> Self {
         Self {
             bytes: bytes.as_ptr() as u64,
             len: bytes.len() as u64,
@@ -2084,7 +2098,9 @@ impl MessageSend {
 /// bytes and exactly its handles, in the order they were sent
 /// ([`message_recv`]). Nothing is queued and no handle moves on a refusal:
 /// - every handle must carry [`Rights::TRANSFER`], and so must `conn` when
-///   there are any; `conn` itself and a handle named twice are refused;
+///   there are any; `conn` itself and a handle named twice are refused, and
+///   so is a handle asked to arrive with rights it does not carry
+///   ([`TransferEntry`]);
 /// - past [`MAX_MESSAGE_LEN`] bytes or [`MAX_TRANSFER_HANDLES`] handles is
 ///   `InvalidArgument`;
 /// - a peer that is gone is `Gone`, and memory for the bytes the machine
@@ -2099,7 +2115,7 @@ impl MessageSend {
 /// # Safety
 /// Each of `handles` is the caller's to give away: a sent handle leaves this
 /// process, so nothing may answer for it afterwards ([`crate::handle`]).
-pub unsafe fn message_send(conn: RawHandle, bytes: &[u8], handles: &[RawHandle], nonblock: bool) -> Result<(), SyscallError> {
+pub unsafe fn message_send(conn: RawHandle, bytes: &[u8], handles: &[TransferEntry], nonblock: bool) -> Result<(), SyscallError> {
     let args = MessageSend::new(bytes, handles, nonblock);
     check_unit(syscall(SYS_MESSAGE_SEND, conn.0 as u64, &args as *const MessageSend as u64, 0, 0))
 }

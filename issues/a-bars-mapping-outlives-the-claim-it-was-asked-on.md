@@ -35,9 +35,8 @@ release or a move is refused `Gone`.
   live mapping faulting on its next access after a release or a move, a
   spawn's endowment, and the races the install check closes.
 
-The tracker's ruling on taking a mapping back from a running process
-(`issues/a-moved-handle-is-always-re-movable.md`, "Revocation is the other
-answer") is that forced reclaim is killing the holder. A revoked mapping is
+The ruling on taking a mapping back from a running process is that forced
+reclaim is killing the holder. A revoked mapping is
 that: the old holder's next access to it faults.
 
 **Exit condition**: after a claim ends, moves, or its function departs, no

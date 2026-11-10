@@ -146,6 +146,20 @@ pub fn null(rights: toyos_abi::handle::Rights) -> Result<OwnedHandle, toyos_abi:
 /// travels, the currency of [`Connection::send_with`].
 pub struct OwnedHandle(pub(crate) RawHandle);
 
+/// A handle [`Connection::send_moved`] moves, and what it carries where it
+/// arrives: its own rights, as any [`OwnedHandle`] converts, or fewer
+/// ([`OwnedHandle::arriving_with`]).
+pub struct Moved {
+    pub(crate) handle: OwnedHandle,
+    pub(crate) rights: Option<toyos_abi::handle::Rights>,
+}
+
+impl From<OwnedHandle> for Moved {
+    fn from(handle: OwnedHandle) -> Self {
+        Self { handle, rights: None }
+    }
+}
+
 impl OwnedHandle {
     /// Take ownership of a handle this process holds.
     ///
@@ -160,6 +174,13 @@ impl OwnedHandle {
     }
 
     pub(crate) fn raw(&self) -> RawHandle { self.0 }
+
+    /// This handle as a send moves it, carrying only `rights` where it
+    /// arrives: the send is refused `PermissionDenied` for any this one does
+    /// not carry. Without `TRANSFER`, its receiver cannot pass it on.
+    pub fn arriving_with(self, rights: toyos_abi::handle::Rights) -> Moved {
+        Moved { handle: self, rights: Some(rights) }
+    }
 
     /// [`BorrowedHandle::try_clone_to_owned`].
     pub fn try_clone(&self) -> Result<OwnedHandle, toyos_abi::syscall::SyscallError> {

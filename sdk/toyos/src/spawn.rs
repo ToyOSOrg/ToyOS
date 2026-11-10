@@ -18,8 +18,9 @@
 //! **The job the child joins is no endowment of that kind**: a launch carries
 //! it too. The one endowed under [`JOB_LABEL`], or else this process's own.
 
+use toyos_abi::handle::TransferEntry;
 use toyos_abi::syscall::{
-    self, EndowEntry, SpawnArgs, SyscallError, FD_PREFIX, JOB_LABEL, MAX_PROCESS_NAME, MAX_SPAWN_ENDOWMENTS,
+    self, SpawnArgs, SpawnEndow, SyscallError, FD_PREFIX, JOB_LABEL, MAX_PROCESS_NAME, MAX_SPAWN_ENDOWMENTS,
     MAX_SPAWN_LABELS_LEN, SVC_LABEL,
 };
 
@@ -224,7 +225,7 @@ impl Helper<'_> {
         if s.endow.len() + s.fds.len() + usize::from(!names_svc) > MAX_SPAWN_ENDOWMENTS {
             return Err(Refused::Invalid("more endowments and descriptors than a spawn carries"));
         }
-        let mut entries = [EndowEntry { label_off: 0, label_len: 0, handle: RawHandle(0), _pad: 0 }; MAX_SPAWN_ENDOWMENTS];
+        let mut entries = [SpawnEndow { label_off: 0, label_len: 0, moved: TransferEntry::unchanged(RawHandle(0)) }; MAX_SPAWN_ENDOWMENTS];
         let mut labels = [0u8; MAX_SPAWN_LABELS_LEN];
         let (mut count, mut used) = (0, 0);
         // Duplicates rather than the handles themselves: an endowment is a
@@ -246,7 +247,7 @@ impl Helper<'_> {
                 room[at..at + part.len()].copy_from_slice(part);
                 at += part.len();
             }
-            entries[*count] = EndowEntry { label_off: *used as u32, label_len: len as u32, handle, _pad: 0 };
+            entries[*count] = SpawnEndow { label_off: *used as u32, label_len: len as u32, moved: TransferEntry::unchanged(handle) };
             (*count, *used) = (*count + 1, *used + len);
             Ok(())
         };

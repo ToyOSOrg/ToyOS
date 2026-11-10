@@ -177,7 +177,8 @@ pub(crate) fn open_stream(
             return None;
         }
     };
-    let client_shm = match shm.share() {
+    // The client's alone: it maps the ring and cannot hand it to anyone.
+    let client_shm = match shm.lend() {
         Ok(h) => h,
         Err(e) => {
             say!("soundserver: cannot share the ring with client {client_id} ({e:?})");
@@ -213,7 +214,7 @@ pub(crate) fn open_stream(
         slot_count: slot_count as u16,
         fade_frames: ramp_frames,
     };
-    if control.send_with(MSG_STREAM_OPENED, &opened, [client_shm, signal_bell.into()]).is_err() {
+    if control.send_moved(MSG_STREAM_OPENED, &opened, [client_shm, toyos::OwnedHandle::from(signal_bell).into()]).is_err() {
         // Client died mid-open; the dropped control connection removes it.
         say!("soundserver: client {client_id} vanished during stream open");
     }

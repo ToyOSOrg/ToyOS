@@ -145,12 +145,15 @@ impl Commit for PendingHandles {
         let mut data = data_arc.lock();
 
         let count = endow.len() / ENDOW_ENTRY_LEN;
-        let mut moving: Vec<(EndowEntry, RawHandle)> = Vec::with_capacity(count);
+        let mut moving: Vec<(EndowEntry, RawHandle, Rights)> = Vec::with_capacity(count);
         let mut endowed_job: Option<Arc<Job>> = None;
         for raw in endow.as_chunks::<ENDOW_ENTRY_LEN>().0 {
             let label_off = u32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
             let label_len = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
             let handle = RawHandle(u32::from_ne_bytes([raw[8], raw[9], raw[10], raw[11]]));
+            let want = toyos_abi::handle::TransferEntry { handle, rights: u32::from_ne_bytes([raw[12], raw[13], raw[14], raw[15]]) }
+                .rights()
+                .map_err(|_| SyscallError::InvalidArgument)?;
             let end = (label_off as usize)
                 .checked_add(label_len as usize)
                 .ok_or(SyscallError::InvalidArgument)?;
@@ -170,16 +173,13 @@ impl Commit for PendingHandles {
                 endowed_job = Some(data.handles.get_sent::<JobObject>(handle, Rights::WRITE)?.job().clone());
             }
             // Checked before any removal, so a missing `TRANSFER` refuses the spawn instead of leaving a hole.
-            let rights = data.handles.rights_of(handle)?;
-            if !rights.contains(Rights::TRANSFER) {
-                return Err(SyscallError::PermissionDenied.into());
-            }
+            let rights = data.handles.rights_to_move(handle, want)?;
             // A duplicate is refused here: unremoved handles let it pass twice, then the second removal's
             // `expect` below panics.
-            if moving.iter().any(|(_, seen)| *seen == handle) {
+            if moving.iter().any(|(_, seen, _)| *seen == handle) {
                 return Err(SyscallError::InvalidArgument.into());
             }
-            moving.push((EndowEntry { label_off, label_len, handle, _pad: 0 }, handle));
+            moving.push((EndowEntry { label_off, label_len, handle, _pad: 0 }, handle, rights));
         }
         // Before any removal: the table changed under the spawn if the job
         // everything was built for is no longer the one it names.
@@ -194,11 +194,12 @@ impl Commit for PendingHandles {
         // What each device claim moving into the child handed out, taken off
         // it under the caller's lock and revoked once that lock is let go.
         let mut handed = Vec::new();
-        for (mut entry, parent_handle) in moving {
+        for (mut entry, parent_handle, rights) in moving {
             let moved = data
                 .handles
                 .remove(parent_handle)
-                .expect("an endowed handle verified under this lock stopped resolving");
+                .expect("an endowed handle verified under this lock stopped resolving")
+                .arriving_with(rights);
             if let KObjectRef::Device(claim) = moved.object() {
                 handed.extend(claim.take_mappings());
             }

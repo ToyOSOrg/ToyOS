@@ -322,6 +322,60 @@ impl Rights {
     }
 }
 
+crate::user_safe! {
+    /// One handle a move takes out of its holder's table, by a message
+    /// ([`message_send`]) or a spawn's endowment ([`SpawnEndow`]), and what it
+    /// carries where it arrives.
+    ///
+    /// The mover needs [`Rights::TRANSFER`] on it and names its own set or
+    /// less: a set it does not hold is `PermissionDenied`, and a word that is
+    /// no set `InvalidArgument`. A set without `TRANSFER` is how a holder is
+    /// given a handle it cannot pass on.
+    ///
+    /// [`message_send`]: crate::syscall::message_send
+    /// [`SpawnEndow`]: crate::syscall::SpawnEndow
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct TransferEntry {
+        pub handle: RawHandle,
+        /// A [`Rights`] set's bits, or [`Self::UNCHANGED`].
+        pub rights: u32,
+    }
+}
+
+impl TransferEntry {
+    /// The rights word of a move that carries what the mover holds: no
+    /// [`Rights`] set has these bits.
+    pub const UNCHANGED: u32 = u32::MAX;
+
+    /// `handle`, arriving with the rights it has.
+    pub const fn unchanged(handle: RawHandle) -> Self {
+        Self { handle, rights: Self::UNCHANGED }
+    }
+
+    /// `handle`, arriving with `rights` alone.
+    pub const fn narrowed(handle: RawHandle, rights: Rights) -> Self {
+        Self { handle, rights: rights.bits() }
+    }
+
+    /// The set the move asks for, `None` for the mover's own; `Err` for a
+    /// word that is neither.
+    pub const fn rights(self) -> Result<Option<Rights>, NotRights> {
+        if self.rights == Self::UNCHANGED {
+            return Ok(None);
+        }
+        match Rights::from_bits(self.rights) {
+            Some(rights) => Ok(Some(rights)),
+            None => Err(NotRights),
+        }
+    }
+}
+
+const _: () = assert!(Rights::from_bits(TransferEntry::UNCHANGED).is_none());
+
+/// A rights word with a bit no right uses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NotRights;
+
 /// Named bits rather than a number, because the one place this is read is a
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
@@ -423,6 +477,15 @@ mod tests {
         assert!(!Rights::MAP.subset_of(full));
         assert!(full.contains(Rights::READ.union(Rights::WRITE)));
         assert_eq!(full.without(Rights::DUP), Rights::READ.union(Rights::WRITE));
+    }
+
+    #[test]
+    fn a_moves_rights_word_is_a_set_or_the_movers_own() {
+        let h = RawHandle::new(3, 1);
+        assert_eq!(TransferEntry::unchanged(h).rights(), Ok(None));
+        assert_eq!(TransferEntry::narrowed(h, Rights::NONE).rights(), Ok(Some(Rights::NONE)));
+        assert_eq!(TransferEntry::narrowed(h, Rights::MAP).rights(), Ok(Some(Rights::MAP)));
+        assert_eq!(TransferEntry { handle: h, rights: Rights::ALL.bits() + 1 }.rights(), Err(NotRights));
     }
 
     #[test]

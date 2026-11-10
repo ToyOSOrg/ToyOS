@@ -23,6 +23,9 @@ use crate::process;
 /// Byte width of one [`RawHandle`] on the wire.
 const HANDLE_LEN: usize = core::mem::size_of::<RawHandle>();
 
+/// Byte width of one handle a send moves.
+const TRANSFER_ENTRY_LEN: usize = core::mem::size_of::<toyos_abi::handle::TransferEntry>();
+
 // Never read: `kernel_exit_to_user_check` sees the kill bit and exits before Ring 3.
 fn cancelled() -> u64 {
     SyscallError::Gone.to_u64()

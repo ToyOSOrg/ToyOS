@@ -12,8 +12,9 @@ From the external capability review of 2026-08-20, which the owner adopted:
   reduction and duplication, cross-process transfer, table exhaustion,
   teardown with references in flight, and every path where a numeric
   identifier might become authority. Measure it against what
-  `abuse_handle_table`, `handle_lifetime` and the census arm already cover,
-  and make the gaps tests. `handle_kill_policy` is deleted;
+  `abuse_handle_table`, `handle_lifetime`, `moved_rights` (a move's rights
+  narrow and never widen, by a message and by an endowment, and a ring is
+  never moved) and the census arm already cover, and make the gaps tests. `handle_kill_policy` is deleted;
   `issues/handle-kill-policy-census-grew-one-sharedmem-on-two-nightlies.md`
   records the commit that restores it.
 - **Zero-handle hooks stay mechanically constrained**: the drain sites' "no

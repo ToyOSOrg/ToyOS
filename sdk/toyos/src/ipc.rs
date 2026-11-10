@@ -5,9 +5,10 @@
 //! (`SYS_MESSAGE_RECV`): a receiver never sees part of a frame, and a
 //! frame's handles arrive with it and with no other.
 
+use toyos_abi::handle::TransferEntry;
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, Received, SyscallError};
-use crate::{AsHandle, BorrowedHandle, OwnedHandle};
+use crate::{AsHandle, BorrowedHandle, Moved, OwnedHandle};
 
 /// A type that may cross an IPC boundary as a payload.
 ///
@@ -177,7 +178,8 @@ impl Connection {
     /// A frame and the handles it carries, as one message.
     ///
     /// **Every handle is consumed, sent or not**: a refused send closes them
-    /// all, so no caller holds a handle it believes it gave away. More than
+    /// all, so no caller holds a handle it believes it gave away. Each
+    /// arrives with the rights it has. More than
     /// [`MAX_TRANSFER_HANDLES`](syscall::MAX_TRANSFER_HANDLES) is refused
     /// `InvalidArgument`, as the kernel refuses it.
     pub fn send_with<T: IpcPayload>(
@@ -185,6 +187,17 @@ impl Connection {
         msg_type: u32,
         payload: &T,
         handles: impl IntoIterator<Item = OwnedHandle>,
+    ) -> Result<(), IpcError> {
+        message(self.as_handle(), msg_type, as_bytes(payload), moved(handles), false).map_err(blocking)
+    }
+
+    /// [`send_with`](Self::send_with), each handle arriving with the rights
+    /// its [`Moved`] names.
+    pub fn send_moved<T: IpcPayload>(
+        &self,
+        msg_type: u32,
+        payload: &T,
+        handles: impl IntoIterator<Item = Moved>,
     ) -> Result<(), IpcError> {
         message(self.as_handle(), msg_type, as_bytes(payload), handles, false).map_err(blocking)
     }
@@ -196,12 +209,12 @@ impl Connection {
         data: &[u8],
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), IpcError> {
-        message(self.as_handle(), msg_type, data, handles, false).map_err(blocking)
+        message(self.as_handle(), msg_type, data, moved(handles), false).map_err(blocking)
     }
 
     /// [`send_with`](Self::send_with) for a bare message type.
     pub fn signal_with(&self, msg_type: u32, handles: impl IntoIterator<Item = OwnedHandle>) -> Result<(), IpcError> {
-        message(self.as_handle(), msg_type, &[], handles, false).map_err(blocking)
+        message(self.as_handle(), msg_type, &[], moved(handles), false).map_err(blocking)
     }
 
     /// [`send_with`](Self::send_with) without blocking: nothing is sent and
@@ -212,7 +225,7 @@ impl Connection {
         payload: &T,
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), TrySendError> {
-        message(self.as_handle(), msg_type, as_bytes(payload), handles, true).map_err(nonblocking)
+        message(self.as_handle(), msg_type, as_bytes(payload), moved(handles), true).map_err(nonblocking)
     }
 
     /// [`try_send_with`](Self::try_send_with) for a byte payload.
@@ -222,7 +235,7 @@ impl Connection {
         data: &[u8],
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), TrySendError> {
-        message(self.as_handle(), msg_type, data, handles, true).map_err(nonblocking)
+        message(self.as_handle(), msg_type, data, moved(handles), true).map_err(nonblocking)
     }
 
     /// [`try_send_with`](Self::try_send_with) for a bare message type.
@@ -231,7 +244,7 @@ impl Connection {
         msg_type: u32,
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), TrySendError> {
-        message(self.as_handle(), msg_type, &[], handles, true).map_err(nonblocking)
+        message(self.as_handle(), msg_type, &[], moved(handles), true).map_err(nonblocking)
     }
 
     /// Wait for the next frame and take its payload straight into
@@ -262,7 +275,7 @@ pub fn send_bytes(conn: BorrowedHandle<'_>, msg_type: u32, data: &[u8]) -> Resul
 
 /// [`Connection::signal_with`] on a raw handle.
 pub(crate) fn signal_with(conn: BorrowedHandle<'_>, msg_type: u32, handles: impl IntoIterator<Item = OwnedHandle>) -> Result<(), IpcError> {
-    message(conn, msg_type, &[], handles, false).map_err(blocking)
+    message(conn, msg_type, &[], moved(handles), false).map_err(blocking)
 }
 
 /// Send a framed payload without ever blocking, or refuse the whole frame.
@@ -285,8 +298,25 @@ pub fn try_send_bytes(conn: BorrowedHandle<'_>, msg_type: u32, data: &[u8]) -> R
     message(conn, msg_type, data, none(), true).map_err(nonblocking)
 }
 
-fn none() -> core::iter::Empty<OwnedHandle> {
+fn none() -> core::iter::Empty<Moved> {
     core::iter::empty()
+}
+
+/// Each handle as a move that carries its own rights.
+fn moved(handles: impl IntoIterator<Item = OwnedHandle>) -> impl Iterator<Item = Moved> {
+    handles.into_iter().map(Moved::from)
+}
+
+/// What [`move_batch`] moves: the entry the kernel is asked to move it by.
+trait Move {
+    fn entry(&self) -> TransferEntry;
+}
+
+impl Move for Moved {
+    fn entry(&self) -> TransferEntry {
+        let handle = self.handle.raw();
+        self.rights.map_or(TransferEntry::unchanged(handle), |rights| TransferEntry::narrowed(handle, rights))
+    }
 }
 
 /// Why [`message`] sent nothing.
@@ -334,7 +364,7 @@ fn framed<'a>(
 /// The one way a frame leaves this endpoint: its type and `payload` in one
 /// buffer, and `handles`, handed to the kernel as one message. Every handle is
 /// consumed whatever the answer.
-fn message<H: AsHandle>(
+fn message<H: Move>(
     conn: BorrowedHandle<'_>,
     msg_type: u32,
     payload: &[u8],
@@ -357,9 +387,9 @@ fn message<H: AsHandle>(
 
 /// Hand `handles` to `send` as one batch, consuming every one: what `send`
 /// takes is the peer's, and what it refuses is closed here as it drops.
-fn move_batch<H: AsHandle>(
+fn move_batch<H: Move>(
     handles: impl IntoIterator<Item = H>,
-    send: impl FnOnce(&[RawHandle]) -> Result<(), SyscallError>,
+    send: impl FnOnce(&[TransferEntry]) -> Result<(), SyscallError>,
 ) -> Result<(), SyscallError> {
     let mut batch: [Option<H>; syscall::MAX_TRANSFER_HANDLES] = core::array::from_fn(|_| None);
     let mut count = 0;
@@ -367,9 +397,9 @@ fn move_batch<H: AsHandle>(
         *batch.get_mut(count).ok_or(SyscallError::InvalidArgument)? = Some(handle);
         count += 1;
     }
-    let mut raw = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+    let mut raw = [TransferEntry::unchanged(toyos_abi::HANDLE_INVALID); syscall::MAX_TRANSFER_HANDLES];
     for (out, handle) in raw.iter_mut().zip(batch.iter().flatten()) {
-        *out = handle.as_handle().raw();
+        *out = handle.entry();
     }
     send(&raw[..count])?;
     #[expect(clippy::disallowed_methods, reason = "taken: the numbers are no longer this process's to close")]
@@ -619,9 +649,8 @@ mod tests {
         closed: Rc<RefCell<Vec<u32>>>,
     }
 
-    impl AsHandle for Probe {
-        // SAFETY: a number no syscall is made on: these tests' sends are closures.
-        fn as_handle(&self) -> BorrowedHandle<'_> { unsafe { BorrowedHandle::borrow_raw(self.raw) } }
+    impl Move for Probe {
+        fn entry(&self) -> TransferEntry { TransferEntry::unchanged(self.raw) }
     }
 
     impl Drop for Probe {
@@ -734,7 +763,7 @@ mod tests {
         let closed = Rc::default();
         let mut seen = Vec::new();
         let sent = move_batch(probes(3, &closed), |batch| {
-            seen.extend(batch.iter().map(|h| h.0));
+            seen.extend(batch.iter().map(|h| h.handle.0));
             Err(SyscallError::Gone)
         });
         assert_eq!(sent, Err(SyscallError::Gone));
