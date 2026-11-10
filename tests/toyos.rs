@@ -3818,9 +3818,9 @@ const BAR_MARKS: [u64; 2] = [0xbad0_c0de_0000_5eed, 0xbad1_c0de_0000_5eed];
 /// to, its LPI raised; and at the claim's end the DeviceID
 /// unmapped again. The second is refused the `e1000e` the IORT routes past
 /// the SMMUv3, by the kernel's name for it, and claims edu after it. The
-/// third faults twice in edu's BAR, and names it as a syscall's buffer; no
-/// crash report reads through it. And no access of a function's is refused
-/// at the SMMUv3.
+/// third faults twice in edu's BAR, where no crash report reads through it,
+/// and names it as a syscall's buffer, which is copied as its holder could.
+/// And no access of a function's is refused at the SMMUv3.
 fn virt_claim_lpi(profile: qemu::Profile) -> Result<(), String> {
     const JOB: &str = "test_rs_claim_lpi";
     const SAID: &str = "claim_lpi: 16 messages edu sent were read as 16 interrupts of its claim, one each";
@@ -3919,7 +3919,7 @@ serial:
         &mut qemu,
         &mut serial,
         "test_rs_claim_bar_fault",
-        "claim_bar_fault: two faults in the BAR ended their processes, and a syscall naming it was refused",
+        "claim_bar_fault: two faults in the BAR ended their processes, and a syscall naming it copied as its holder could",
     )?;
     await_kernel_exit(&mut qemu, &mut serial, "test_rs_claim_bar_fault")?;
     let faults: Vec<&str> = serial.lines().filter(|l| l.contains("FAULT pc=")).collect();
@@ -6298,7 +6298,8 @@ fn stream_holders(test_config: &Path) -> Result<(), String> {
 /// once its handle is gone, closed or never installed for want of room: each
 /// time the kernel answers a handle whose mapping reads the function's own
 /// register, two held at once map apart, and the job that asked ends on its
-/// own.
+/// own. And a syscall whose buffer is the mapping copies through it, which is
+/// x86-64's `rep movsb` on a function's registers and no host build's.
 fn bar_map_again(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "bar_map_again";
     let tests = compile::repo_root().join("tests/guest/rust-tests");
@@ -6321,6 +6322,7 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
     for answered in [
         "bar_map_again: two answers held at once map apart, and the later outlives the earlier",
         "bar_map_again: answered with a handle that maps",
+        "bar_map_again: a syscall's copies through the BAR were its holder's own accesses",
         "bar_map_again: answered after the refusal with a handle that maps",
         "bar_map_again: a BAR's handle kept past its claim's move maps nothing, and the new holder's maps",
         "bar_map_again: a BAR's handle kept past its claim's end maps nothing",

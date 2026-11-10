@@ -23,6 +23,8 @@ devices, and confines each to the memory granted to it.
 - A driver reaches only the memory its grants map: the IOMMU domain is the
   gate, not the descriptor the driver writes. A device address outside a grant
   is a recorded DMA fault and the device is stopped.
+- The kernel copies through a device mapping its process holds, making only
+  the accesses the process itself could.
 - A device is reused only once the old holder's DMA is contained and cleaned
   up. A contained device that failed may stay unavailable until reboot.
 
