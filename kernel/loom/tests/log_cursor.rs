@@ -16,7 +16,7 @@
 use std::alloc::{alloc_zeroed, Layout};
 
 use kernel_loom::arch::IrqGuard;
-use kernel_loom::log_read::{drain_ordered, Cursor, RecordSink};
+use kernel_loom::log_read::{drain_ordered, Cursor, Published, RecordSink};
 use kernel_loom::log_shard::{Shard, FIRST_SEQ, SHARD_RECORDS};
 use toyos_abi::log::LogRecord;
 
@@ -117,7 +117,26 @@ fn an_offline_cpus_shard_is_read_beside_the_online_ones() {
     let mut out = Room { room: usize::MAX, took: Vec::new() };
     assert_eq!(drain_ordered(&shards[..], &mut walk, &mut out), 5);
     assert_eq!(out.took, [10, 20, 30, 40, 50]);
-    assert_eq!(walk.next(), [FIRST_SEQ + 3, 0, FIRST_SEQ + 2, 0], "the holes were never opened");
+    assert_eq!(walk.next(), [FIRST_SEQ + 3, FIRST_SEQ, FIRST_SEQ + 2, FIRST_SEQ], "a hole is read at its first number");
+}
+
+/// **A reader catches up with the console on a machine with a CPU that never
+/// started.** What the console has spoken is asked with positions of zero, as
+/// `logkeeper` asks it, and a zeroed cursor's read reaches the answer in the
+/// unpublished ring too.
+#[test]
+fn a_read_reaches_the_consoles_position_in_an_unpublished_ring() {
+    let boot = shard();
+    emit(boot, [10, 20]);
+    let shards = [Some(boot), None];
+    let spoken = Published::new();
+    spoken.size(shards.len());
+    spoken.advance(&[FIRST_SEQ + 2, 0]);
+    let console = spoken.advance(&[0, 0]);
+    let mut walk = Cursor::from_reader(&[0, 0], &shards[..]).expect("a fresh cursor is taken");
+    let mut out = Room { room: usize::MAX, took: Vec::new() };
+    drain_ordered(&shards[..], &mut walk, &mut out);
+    assert!(walk.next().iter().zip(&console).all(|(read, spoken)| read >= spoken), "{:?} is behind {console:?}", walk.next());
 }
 
 /// **A buffer of one record reads every shard, oldest first, a read at a
