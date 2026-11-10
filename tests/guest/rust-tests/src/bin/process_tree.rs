@@ -368,7 +368,8 @@ fn a_detached_program_outlives_its_shell() {
     let input = shell.stdin.take().expect("the input the shell and cat read");
     let status = shell.wait().expect("wait the shell");
     assert!(status.success(), "the shell's detach failed: {status:?}");
-    let live = live_named(&["cat"]);
+    // A launched process goes by its row's file, which `cat` is a link to.
+    let live = live_named(&["toybox"]);
     assert_eq!(live.len(), 1, "the cat the shell detached ended with the shell: {live:?}");
     drop(input);
     println!("  a detached cat outlived its shell");

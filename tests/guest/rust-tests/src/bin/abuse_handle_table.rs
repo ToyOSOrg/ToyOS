@@ -53,11 +53,18 @@ const REGION: usize = 4 * 1024 * 1024;
 /// be in range or the refusal would be the label check rather than the repeat.
 const LABELS: &[u8] = b"twice";
 
-/// This binary as an image, read before the table is filled: a full table has
-/// no slot for the object a read makes.
-fn own() -> &'static toyos::process::Image {
-    static OWN: std::sync::OnceLock<toyos::process::Image> = std::sync::OnceLock::new();
-    OWN.get_or_init(|| image::image_of(SELF))
+/// This binary laid out to start as [`CHILD`], read before the table is
+/// filled: a full table has no slot for the objects a read and a startup
+/// block make.
+fn own() -> &'static image::Laid {
+    // The image is kept: the ranges name its object.
+    static OWN: std::sync::OnceLock<(toyos::process::Image, image::Laid)> = std::sync::OnceLock::new();
+    let (_, laid) = OWN.get_or_init(|| {
+        let image = image::image_of(SELF);
+        let laid = image::laid(&image, &format!("{SELF}\0{CHILD}"));
+        (image, laid)
+    });
+    laid
 }
 
 fn main() {
@@ -191,8 +198,7 @@ fn a_pair_is_refused_whole(filled: &mut Vec<RawHandle>) {
 /// `SYS_SPAWN` of this binary as a child that exits at once, carrying
 /// `entries` into the blob `labels`.
 fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, SyscallError> {
-    let argv = format!("{SELF}\0{CHILD}");
-    let laid = image::laid(&own(), &argv);
+    let laid = own();
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {
