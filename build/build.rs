@@ -208,6 +208,9 @@ struct ProgramConfig {
     /// and puts it in its view beside the session's `HOME`. A service's is
     /// implied. No row's view holds another's (`toyos_manifest::Program::view`).
     state: bool,
+    /// The installer: `/apps` is read-write in its view and read-only in
+    /// every other row's (`toyos_manifest::Program::installs`).
+    installs: bool,
     /// The file-server roles this binary serves, one process each
     /// (`toyos_manifest::Program::roles`).
     roles: Vec<String>,
@@ -918,6 +921,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     authorize: cfg.authorize.clone(),
                     service: cfg.service,
                     state: cfg.state,
+                    installs: cfg.installs,
                     roles: cfg.roles.clone(),
                     restart: cfg.restart,
                     pager: cfg.pager,
@@ -3337,6 +3341,30 @@ mod tests {
             let parsed = parse_config(&root.join(config));
             let rendered = std::panic::catch_unwind(|| render_manifest(&parsed));
             assert!(rendered.is_ok(), "{config} does not render; the panic above says why");
+        }
+    }
+
+    /// **Only the installer's view holds `/apps` read-write**: `pkg` in the
+    /// shipped image, and in no config a shell or a row a shell spawns. A
+    /// test image's writer is the row its job installs through.
+    #[test]
+    fn only_the_installer_s_view_writes_apps() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for config in ALL_CONFIGS {
+            let rendered = render_manifest(&parse_config(&root.join(config)));
+            let manifest = toyos_manifest::parse(std::str::from_utf8(&rendered).unwrap());
+            let writers: Vec<&str> = manifest
+                .programs
+                .iter()
+                .filter(|row| row.view().iter().any(|v| v.dir == toyos_manifest::package::DIR && v.write))
+                .map(|row| row.name.as_str())
+                .collect();
+            let installers: &[&str] = match *config {
+                "images/system.toml" | "tests/images/hostedclangcase.toml" => &["pkg"],
+                "tests/images/proctreecase.toml" => &["test-runner"],
+                _ => &[],
+            };
+            assert_eq!(writers, installers, "{config}");
         }
     }
 

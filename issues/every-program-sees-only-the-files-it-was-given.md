@@ -66,14 +66,23 @@ other, with the same per-session isolation (owner, 2026-11-05).
    the whole tree, `/system` read-only and the rest read-write but `/state`,
    of which each row holds only its own directory where it keeps state
    (`service = true` or `state = true`: the daemons' own state is built).
-   `/apps` is included, so a shell and everything it starts can
-   rewrite an installed package. Only the installer service writes `/apps`
-   (owner ruling, 2026-11-05): this stage gives that one row `/apps`
-   read-write and every other row, the shell included,
-   `/apps` read-only. Whether `pkg` becomes that service or its client is
-   this stage's brief. **Its exit**: a shell's write under `/apps` is refused
+   Only the installer service writes `/apps` (owner ruling, 2026-11-05).
+   Built: `/apps` is read-only in every declared row's view but the row
+   that declares `installs = true` (`toyos_manifest::Program::installs`),
+   which in the image is `pkg`'s. `pkg` is that service and not a client of
+   one: a launch already gives a row its own view, and who may launch it is
+   the `starts` that list it, so the authority is `images/system.toml`'s
+   alone and no port, protocol or daemon was added. `launch pkg install
+   <file>` installs; a `pkg` a shell spawns as a helper holds the shell's
+   view and refuses by name. Judged on the host, red with the shell's row
+   granted `installs`: `toyos_manifest`'s `only_the_installer_writes_apps`
+   and the build's `only_the_installer_s_view_writes_apps`, over every
+   committed config. **Its exit**: a shell's write under `/apps` is refused
    by the file server, and an install through the installer service still
-   commits; granting the shell's row `/apps` read-write reds the first.
+   commits. Owed on a machine: the first is the metal `app_view` row's
+   shell arm; the second is `pkg_install_gbae`'s
+   (`issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`,
+   stage D), whose client launches `pkg`.
    `/dev/null` is a name only libc's `open` knows, answered with a kernel
    null handle (`SYS_NULL`): no view holds it, so `stat` of it and a program
    that does not open through libc find nothing. Whether views name it is

@@ -24,6 +24,11 @@
 //! Every arm runs, so one run names each one that is red. The job then holds
 //! the package to what it installed.
 //!
+//! The job writes `/apps` because test-runner's row is this image's installer
+//! (`installs = true`). The shell's row is not: a shell launched in the login
+//! session redirects the same line into `/tmp`, which writes, and into the
+//! package, which the file server refuses.
+//!
 //! Then it grants the package a folder of the home, `/home/toy/Games` holding
 //! a ROM, through `/system/bin/grants`: refused `Apps/appview` by name, from
 //! the login session test-runner, its login authority, opened for its jobs. Granted it there, the package run as `game` browses
@@ -63,6 +68,10 @@ const TEMPORARY: &str = "/tmp/apps/appview";
 const MACHINE_TMP_FILE: &str = "/tmp/app_view_machine";
 const OTHER_TMP_FILE: &str = "/tmp/apps/other/kept";
 const TEMPORARY_KEPT: &[u8] = b"what the app wrote in its own /tmp";
+/// What the shell's line copies, and where its redirects go.
+const SHELL_SOURCE: &str = "/system/etc/system.manifest";
+const SHELL_TMP_FILE: &str = "/tmp/app_view_shell";
+const SHELL_PACKAGE_FILE: &str = "/apps/appview/planted";
 const APP: &str = "app";
 const GAME: &str = "game";
 const GAMES: &str = "/home/toy/Games";
@@ -143,11 +152,14 @@ fn job() {
         Ok(bytes) if bytes == TEMPORARY_KEPT => println!("  the app's /tmp write is in {TEMPORARY}"),
         other => red.push(format!("what the app wrote in its /tmp is not in {TEMPORARY}/kept: {other:?}")),
     }
+    shell_writes(&mut red);
     granted(&mut red);
     for dir in [PACKAGE, ROW_PACKAGE, "/apps/other", "/home/toy/Apps/other", HOME, GAMES, TEMPORARY, "/tmp/apps/other"] {
         let _ = fs::remove_dir_all(dir);
     }
-    let _ = fs::remove_file(MACHINE_TMP_FILE);
+    for file in [MACHINE_TMP_FILE, SHELL_TMP_FILE] {
+        let _ = fs::remove_file(file);
+    }
     if !red.is_empty() {
         panic!("app_view: {red:#?}");
     }
@@ -279,6 +291,23 @@ fn app() {
 /// the session `grants` is answered in.
 fn in_login(line: &str) -> std::process::Output {
     Command::new("/system/bin/shell").independent().args(["-c", line]).current_dir("/").output().expect("launch a shell")
+}
+
+/// A shell's redirect writes `/tmp` and is refused in a package.
+fn shell_writes(red: &mut Vec<String>) {
+    let _ = fs::remove_file(SHELL_TMP_FILE);
+    let wrote = in_login(&format!("/system/bin/cat {SHELL_SOURCE} > {SHELL_TMP_FILE}"));
+    match fs::metadata(SHELL_TMP_FILE) {
+        Ok(file) if file.len() > 0 && wrote.status.success() => println!("  a shell's redirect into /tmp: written"),
+        other => red.push(format!("a shell's redirect into /tmp wrote {other:?}: {wrote:?}")),
+    }
+    let refused = in_login(&format!("/system/bin/cat {SHELL_SOURCE} > {SHELL_PACKAGE_FILE}"));
+    match fs::symlink_metadata(SHELL_PACKAGE_FILE) {
+        Err(e) if e.kind() == ErrorKind::NotFound && !refused.status.success() => {
+            println!("  a shell's redirect into a package: refused ({})", String::from_utf8_lossy(&refused.stderr).trim())
+        }
+        other => red.push(format!("a shell's redirect into a package left {other:?}: {refused:?}")),
+    }
 }
 
 /// What the package saw as `game`: its working directory, the ROMs gbae's

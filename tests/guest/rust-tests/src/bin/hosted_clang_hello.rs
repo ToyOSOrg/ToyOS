@@ -1,4 +1,4 @@
-//! clang built for ToyOS, installed by `pkg`, compiles a C program here, and
+//! clang built for ToyOS, installed by a launched `pkg`, compiles a C program here, and
 //! its driver links one, starting `ld.lld` as a child; the program runs, and
 //! what each wrote is the host's clang's bytes.
 //!
@@ -7,6 +7,7 @@
 //! `src/hello.c`, and what the host's clang made of it at `host/hello.o` and
 //! `host/a.out`.
 
+use std::os::toyos::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -21,8 +22,10 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let staged = PathBuf::from(args.next().expect("the staged directory, as the first argument"));
     let package = staged.join(args.next().expect("the package's file name, as the second argument"));
+    // Launched, and no helper: `/apps` is read-write in the installer's own
+    // view and read-only in this job's.
     let mut install = Command::new("/system/bin/pkg");
-    install.arg("install").arg(&package).arg("--yes");
+    install.independent().arg("install").arg(&package).arg("--yes");
     run(install, "pkg install");
 
     let out = Path::new(OUT);

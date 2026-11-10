@@ -1,8 +1,9 @@
-//! `/system/bin/pkg` — the installer, and an ordinary program.
+//! `/system/bin/pkg` — the installer.
 //!
-//! **It holds no authority a shell does not.** It claims no device, receives no
-//! service and is endowed nothing; it writes under `/apps` because `/apps` is
-//! writable to it. What it does is verify an archive against the release's own
+//! **Its one authority is `/apps` read-write**, which its row's view holds and
+//! no other row's does (`toyos_manifest::Program::installs`): launched, it
+//! installs and removes; spawned as a helper it holds its parent's view, and
+//! lists. What it does is verify an archive against the release's own
 //! `SHA256SUMS`, ask, unpack, and write the `manifest.toml` that records which
 //! binary the directory launches.
 //!
@@ -71,7 +72,7 @@ fn install(file: &Path, assume_yes: bool) -> Result<(), String> {
         .map_err(|e| format!("pkg: cannot read {}: {e}", beside.display()))?;
     let want = sums::digest_for(&sums_text, &name)?;
 
-    let mut apps = apps()?;
+    let mut apps = writable_apps()?;
     let room = apps.room().map_err(|e| format!("pkg: {} answers no room: {e:?}", package::DIR))?;
     let (planner, got) = survey(file, Planner::new(&name, room.free, room.unit))?;
     if got != want {
@@ -101,11 +102,17 @@ fn install(file: &Path, assume_yes: bool) -> Result<(), String> {
 
 /// `/apps`'s own capability, for what std has no word for: the room on its
 /// volume, and a sync of the whole volume that answers for every file in it.
-fn apps() -> Result<toyos::fs::Dir, String> {
+/// Refused where it is read-only, which it is to every row but the
+/// installer's.
+fn writable_apps() -> Result<toyos::fs::Dir, String> {
     let names = toyos::endow::namespace()
         .ok_or_else(|| String::from("pkg: this process holds no directory capabilities"))?;
     let name = format!("{}{}", toyos::fs::CAPABILITY_PREFIX, package::DIR);
-    toyos::fs::Dir::connect(names, &name).map_err(|e| format!("pkg: cannot reach {}: {e:?}", package::DIR))
+    let apps = toyos::fs::Dir::connect(names, &name).map_err(|e| format!("pkg: cannot reach {}: {e:?}", package::DIR))?;
+    match apps.writable() {
+        true => Ok(apps),
+        false => Err(format!("pkg: {} is read-only to this process; run it with `launch pkg`", package::DIR)),
+    }
 }
 
 /// The first read: every header through `planner`, and the whole file's
@@ -259,6 +266,7 @@ fn remove(name: &str) -> Result<(), String> {
     if package::package_of(&format!("{}/x", Package::dir(name))) != Some(name) {
         return Err(format!("pkg: {name:?} is not a package name"));
     }
+    writable_apps()?;
     let dir = Package::dir(name);
     let manifest = Package::path(name);
     let installed = fs::read_to_string(&manifest).ok().and_then(|t| Package::parse(&t).ok());

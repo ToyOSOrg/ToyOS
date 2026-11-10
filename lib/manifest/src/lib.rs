@@ -27,6 +27,7 @@
 //! authorize <word>          a disk authorization the supervisor mints at its start ([`authorize`])
 //! service                   a system service: its `HOME` is `/state/<name>`, not the session's
 //! state                     it keeps machine state of its own in `/state/<name>`
+//! installs                  the installer: `/apps` is read-write in its view
 //! role <role>               a file server for `<role>`: one process of it per role
 //! restart                   the supervisor starts it again when it ends
 //! pager                     started as a pager: it may make the paged objects its files are read through
@@ -365,6 +366,9 @@ pub struct Program {
     /// It keeps machine state of its own in [`STATE`]`/<name>` beside the
     /// session's `HOME`: pkg's accepted repository metadata, say.
     pub state: bool,
+    /// The installer: [`package::DIR`] is read-write in its view and
+    /// read-only in every other row's ([`Self::view`]).
+    pub installs: bool,
     /// The file-server roles this row serves, one process each: the supervisor starts
     /// the binary once per role, with the role as its argument and the
     /// acceptor of the role's port ([`role_dirs`] are the grants on it).
@@ -443,6 +447,8 @@ impl Program {
     /// **`/log` is read-only but to the row that keeps the log**
     /// ([`Self::keeps_the_log`]): what is there proves a boot to the next
     /// loader pass (`toyos_logstream::STOPPED`).
+    /// **`/apps` is read-only but to the installer** ([`Self::installs`]): a
+    /// shell and what it spawns cannot rewrite an installed package.
     pub fn view(&self) -> Vec<View> {
         match self.package() {
             Some(name) => {
@@ -456,9 +462,10 @@ impl Program {
             None => whole_tree()
                 .into_iter()
                 .filter(|view| view.dir != STATE)
-                .map(|view| match view.dir == LOG {
-                    true => View { write: self.keeps_the_log(), ..view },
-                    false => view,
+                .map(|view| match view.dir.as_str() {
+                    LOG => View { write: self.keeps_the_log(), ..view },
+                    package::DIR => View { write: self.installs, ..view },
+                    _ => view,
                 })
                 .chain(self.state_dir().map(|dir| data_dir(&dir, true)))
                 .collect(),
@@ -475,8 +482,8 @@ pub struct Manifest {
     /// key, so these have no declaration to come from.
     pub supervisor_serves: Vec<String>,
     /// The connectors every program launched from `/apps` is given beside its
-    /// view ([`Program::view`]), and nothing else. `/apps` is writable to
-    /// the installer, so this row is the image's rather than the package's —
+    /// view ([`Program::view`]), and nothing else. A package is what an
+    /// archive carried, so this row is the image's rather than the package's —
     /// which is why a device class and a `syscap` right have no spelling on
     /// the package side at all.
     pub apps: Vec<String>,
@@ -652,6 +659,9 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         }
         if program.state {
             out.push_str("state\n");
+        }
+        if program.installs {
+            out.push_str("installs\n");
         }
         for role in &program.roles {
             if role_dirs(role).is_none() {
@@ -836,6 +846,7 @@ pub fn parse(text: &str) -> Manifest {
                     "authorize" if authorize::Authorization::parse(rest).is_some() => program.authorize.push(rest.to_string()),
                     "service" => program.service = true,
                     "state" if rest.is_empty() => program.state = true,
+                    "installs" if rest.is_empty() => program.installs = true,
                     "role" => program.roles.push(rest.to_string()),
                     "restart" if rest.is_empty() => program.restart = true,
                     "pager" if rest.is_empty() => program.pager = true,
@@ -883,6 +894,7 @@ mod tests {
                     slots: true,
                     holds: vec![toyos_logstream::CONSOLE_INPUT.into()],
                     state: true,
+                    installs: true,
                     authorize: vec!["tables".into(), "designate:data".into(), "format:data".into()],
                     ..Program::default()
                 },
@@ -1050,15 +1062,15 @@ mod tests {
         }
     }
 
-    /// **Every row the image declares sees the whole tree read-write but
-    /// `/system` and `/state`, and of `/state` only its own directory**: a
-    /// service's and a row's that declares state, none for any other. The
-    /// installer and the shell are alike: neither has authority over `/apps`
-    /// the other lacks, nobody writes the signed image, and nobody reads or
-    /// rewrites another program's machine state, the supervisor's included.
+    /// **Every row the image declares sees the whole tree but `/state`, and of
+    /// `/state` only its own directory**: a service's and a row's that
+    /// declares state, none for any other. `/system`, `/log` and `/apps` are
+    /// read-only and the rest read-write: nobody writes the signed image, and
+    /// nobody reads or rewrites another program's machine state, the
+    /// supervisor's included.
     #[test]
     fn a_declared_row_sees_the_whole_tree_but_state_and_of_state_its_own() {
-        let m = parse("program pkg /system/bin/pkg\nstate\nprogram shell /system/bin/shell\n");
+        let m = parse("program files /system/bin/files\nstate\nprogram shell /system/bin/shell\n");
         let whole_but_state = |own: Option<&str>| -> Vec<_> {
             std::iter::once(system())
                 .chain(
@@ -1066,7 +1078,7 @@ mod tests {
                         .iter()
                         .zip(["apps", "config", "home", "", "", ""])
                         .zip(["data", "data", "data", "log", "boot", "memory"])
-                        .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), *dir != "/log")),
+                        .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), !["/log", "/apps"].contains(dir))),
                 )
                 .chain(own.map(|name| ("data", format!("/state/{name}"), format!("state/{name}"), true)))
                 .collect()
@@ -1074,13 +1086,13 @@ mod tests {
         let s = sample();
         for (row, own) in [
             (m.program("shell").unwrap(), None),
-            (m.program("pkg").unwrap(), Some("pkg")),
+            (m.program("files").unwrap(), Some("files")),
             (s.program("compositor").unwrap(), Some("compositor")),
         ] {
             assert_eq!(views(row), whole_but_state(own), "{}", row.name);
         }
         // A row that keeps state keeps its session `HOME`; a service's is its state.
-        assert_eq!(m.program("pkg").unwrap().home(), session_home());
+        assert_eq!(m.program("files").unwrap().home(), session_home());
         assert_eq!(s.program("compositor").unwrap().home(), "/state/compositor");
         assert_eq!(m.program("shell").unwrap().state_dir(), None);
     }
@@ -1104,6 +1116,31 @@ mod tests {
         // Named like the log keeper and holding nothing.
         let named = parse("program logkeeper /system/bin/logkeeper\n");
         assert_eq!(log(&named, "logkeeper"), Some(false));
+    }
+
+    /// **Only the installer writes `/apps`**: the row that declares it, and
+    /// neither the shell that starts it nor a row named like it. Every other
+    /// directory of its view is what an undeclared row's is.
+    #[test]
+    fn only_the_installer_writes_apps() {
+        let m = parse(
+            "program pkg /system/bin/pkg\ninstalls\nprogram shell /system/bin/shell\nstarts pkg\n\
+             program compositor /system/bin/compositor\nservice\n",
+        );
+        let apps = |m: &Manifest, row: &str| {
+            views(m.program(row).unwrap()).into_iter().find(|v| v.1 == package::DIR).map(|v| (v.2, v.3))
+        };
+        assert_eq!(apps(&m, "pkg"), Some(("apps".into(), true)));
+        assert_eq!(apps(&m, "shell"), Some(("apps".into(), false)));
+        assert_eq!(apps(&m, "compositor"), Some(("apps".into(), false)));
+        let but_apps = |row: &str| views(m.program(row).unwrap()).into_iter().filter(|v| v.1 != package::DIR).collect::<Vec<_>>();
+        assert_eq!(but_apps("pkg"), but_apps("shell"));
+        // Named like the installer and declaring nothing.
+        let named = parse("program pkg /system/bin/pkg\n");
+        assert_eq!(apps(&named, "pkg"), Some(("apps".into(), false)));
+        // A package's own directory stays read-only whatever the image's rows say.
+        let package = m.app_row("gbae", "/apps/gbae/gbae").unwrap();
+        assert!(views(&package).iter().all(|v| !v.1.starts_with(package::DIR) || !v.3));
     }
 
     #[test]

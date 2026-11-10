@@ -120,7 +120,7 @@ and NVMe. Exit: as stage A.
   `Gone` and reconnect, and the supervisor's restart, its bound and its refusal by name of a
   restart whose claim is held, as module tests.
 - metal `layout_fresh_boot`: `/home`'s layout on the disk.
-- metal `pkg_install_gbae`: `pkg install` lands a package that runs.
+- metal `pkg_install_gbae`: a launched `pkg install` lands a package that runs.
 - metal `kernel_log_file`, `log_partition_layout`, `log_partition_identity`: `/log` on the stick
   and its layout.
 - metal `file_mtime_survives_a_reboot`: a file's mtime survives a reboot.
