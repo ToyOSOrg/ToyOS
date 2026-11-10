@@ -1119,8 +1119,8 @@ mod tests {
     }
 
     /// **Only the installer writes `/apps`**: the row that declares it, and
-    /// neither the shell that starts it nor a row named like it. Every other
-    /// directory of its view is what an undeclared row's is.
+    /// neither the shell that starts it nor a row named like it. The rest of
+    /// its view is the shell's.
     #[test]
     fn only_the_installer_writes_apps() {
         let m = parse(
