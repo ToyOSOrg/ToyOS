@@ -1,15 +1,18 @@
-//! A claimed function's BAR, mapped into its holder, is no memory the kernel
-//! reads or writes for that holder: a fault whose frame pointer is in it, and
-//! a fault at an address in it, each end their process with the kernel's
-//! crash report reading nothing there, and a syscall naming it as a buffer is
-//! refused `BadAddress` with nothing read or written.
+//! A claimed function's BAR, mapped into its holder, is reached by the kernel
+//! only as that holder could reach it. A fault whose frame pointer is in it,
+//! and a fault at an address in it, each end their process with the kernel's
+//! crash report reading nothing there. A syscall naming it as a buffer is
+//! copied through the holder's mapping: aligned, the registers take and give
+//! the bytes; unaligned, the access faults as the holder's own would on
+//! AArch64's Device memory, and the call answers `BadAddress` with the
+//! registers untouched. A futex word there is refused.
 //!
 //! The function is QEMU's `edu`, whose DMA source and destination registers
 //! (`docs/specs/edu.rst`) are eight bytes each that keep what is written to
-//! them across claims, since nothing resets it. This job writes one marker in
-//! each and never reads them into a register a fault could report: the
-//! harness reds on either marker anywhere on the console, which is where a
-//! report that read through the BAR would put it.
+//! them across claims, since nothing resets it. For the faults this job
+//! writes one marker in each and never reads them into a register a fault
+//! could report: the harness reds on either marker anywhere on the console,
+//! which is where a report that read through the BAR would put it.
 
 #[path = "../function.rs"]
 mod function;
@@ -45,6 +48,11 @@ const DMA_DESTINATION: usize = 0x88;
 /// aligned, so a report that read one as a frame pointer stops there.
 const MARK_SOURCE: u64 = 0xbad0_c0de_0000_5eed;
 const MARK_DESTINATION: u64 = 0xbad1_c0de_0000_5eed;
+
+/// What a pipe's bytes, read into the two registers by the kernel, leave in
+/// them.
+const COPIED_SOURCE: u64 = 0x0706_0504_0302_0100;
+const COPIED_DESTINATION: u64 = 0x0f0e_0d0c_0b0a_0908;
 
 fn main() {
     let role = std::env::args().nth(1);
@@ -89,32 +97,50 @@ fn holder() {
         let dev = claim(&cap);
         let (bar, regs) = mapped_registers(&dev);
         let at = bar.as_ptr() as u64 + DMA_SOURCE as u64;
-        regs.write::<u64>(DMA_SOURCE, MARK_SOURCE);
-        regs.write::<u64>(DMA_DESTINATION, MARK_DESTINATION);
+        let copied = |what: &str| {
+            assert!(
+                regs.read::<u64>(DMA_SOURCE) == COPIED_SOURCE && regs.read::<u64>(DMA_DESTINATION) == COPIED_DESTINATION,
+                "claim_bar_fault: the registers do not hold the copied bytes after {what}"
+            );
+        };
+        let mut sent = [0u8; 16];
+        sent[..8].copy_from_slice(&COPIED_SOURCE.to_le_bytes());
+        sent[8..].copy_from_slice(&COPIED_DESTINATION.to_le_bytes());
 
         let pipe = syscall::pipe().expect("claim_bar_fault: a pipe");
-        assert_eq!(syscall::write(pipe.write, &[0x5a; 16]), Ok(16), "claim_bar_fault: the pipe took no bytes");
+        assert_eq!(syscall::write(pipe.write, &sent), Ok(16), "claim_bar_fault: the pipe took no bytes");
         // SAFETY: the sixteen bytes are the two registers, inside the live
         // mapping; the slice only carries their address into the syscall.
         let registers = unsafe { core::slice::from_raw_parts_mut(at as *mut u8, 16) };
+        assert_eq!(syscall::read(pipe.read, registers), Ok(16), "claim_bar_fault: an aligned read into the BAR");
+        copied("the read into them");
+        assert_eq!(syscall::write(pipe.write, registers), Ok(16), "claim_bar_fault: an aligned write from the BAR");
+        let mut back = [0u8; 16];
+        assert_eq!(syscall::read(pipe.read, &mut back), Ok(16), "claim_bar_fault: the pipe gave no bytes back");
+        assert_eq!(back, sent, "claim_bar_fault: the write from the BAR carried other bytes than the registers hold");
+
+        // SAFETY: eight bytes from one past the source register, inside the
+        // live mapping; the slice only carries their address into the syscall.
+        let unaligned = unsafe { core::slice::from_raw_parts_mut((at + 1) as *mut u8, 8) };
         assert_eq!(
-            syscall::read(pipe.read, registers),
+            syscall::write(pipe.write, unaligned),
             Err(SyscallError::BadAddress),
-            "claim_bar_fault: a read into the BAR was not refused BadAddress"
+            "claim_bar_fault: an unaligned write from the BAR was not refused BadAddress"
         );
+        assert_eq!(syscall::write(pipe.write, &[0xa5; 8]), Ok(8), "claim_bar_fault: the pipe took no bytes");
         assert_eq!(
-            syscall::write(pipe.write, registers),
+            syscall::read(pipe.read, unaligned),
             Err(SyscallError::BadAddress),
-            "claim_bar_fault: a write from the BAR was not refused BadAddress"
+            "claim_bar_fault: an unaligned read into the BAR was not refused BadAddress"
         );
-        assert!(
-            regs.read::<u64>(DMA_SOURCE) == MARK_SOURCE && regs.read::<u64>(DMA_DESTINATION) == MARK_DESTINATION,
-            "claim_bar_fault: the refused read wrote into the BAR"
-        );
+        copied("the refused unaligned copies");
         // SAFETY: no type holds this number.
         unsafe { syscall::close(pipe.read) };
         // SAFETY: no type holds this number.
         unsafe { syscall::close(pipe.write) };
+
+        regs.write::<u64>(DMA_SOURCE, MARK_SOURCE);
+        regs.write::<u64>(DMA_DESTINATION, MARK_DESTINATION);
         // A futex word the kernel would read through the direct map, which
         // reaches no BAR. The expected value is the marker's low word, so a
         // wait that read the register would park for ever.
@@ -126,7 +152,7 @@ fn holder() {
         // SAFETY: as above.
         let woken = unsafe { syscall::futex_wake(word, 1) };
         assert_eq!(SyscallError::from_u64(woken), Some(SyscallError::BadAddress), "claim_bar_fault: a futex wake on the BAR answered {woken:#x}");
-        println!("claim_bar_fault: a read into the BAR, a write from it and a futex on it were refused BadAddress, the registers untouched");
+        println!("claim_bar_fault: aligned copies went through the BAR, unaligned ones and a futex on it were refused BadAddress");
     }
 
     // `frame` runs an undefined instruction with its stack in the BAR; `jump`
@@ -152,5 +178,5 @@ fn holder() {
         regs.read::<u64>(DMA_SOURCE) == MARK_SOURCE && regs.read::<u64>(DMA_DESTINATION) == MARK_DESTINATION,
         "claim_bar_fault: the registers lost their markers while the children faulted"
     );
-    println!("claim_bar_fault: two faults in the BAR ended their processes, and a syscall naming it was refused");
+    println!("claim_bar_fault: two faults in the BAR ended their processes, and a syscall naming it copied as its holder could");
 }
