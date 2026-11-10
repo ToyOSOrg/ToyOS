@@ -100,14 +100,10 @@ fn spawn(own: &Image, role: &str, stdout: Option<RawHandle>) -> Result<RawHandle
     const LABEL: &str = "fd:1";
     let endow: Vec<EndowEntry> =
         stdout.into_iter().map(|handle| EndowEntry { label_off: 0, label_len: LABEL.len() as u32, handle, _pad: 0 }).collect();
-    let laid = image::laid(&own);
+    let laid = image::laid(&own, &argv);
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,
-        argv_ptr: argv.as_ptr() as u64,
-        argv_len: argv.len() as u64,
-        env_ptr: 0,
-        env_len: 0,
         endow_ptr: endow.as_ptr() as u64,
         endow_count: endow.len() as u64,
         labels_ptr: LABEL.as_ptr() as u64,

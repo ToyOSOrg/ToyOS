@@ -202,10 +202,7 @@ static CWD: Lock<Option<String>> = Lock::new(None);
 fn cwd() -> String {
     let mut cwd = CWD.lock();
     cwd.get_or_insert_with(|| {
-        let mut env = alloc::vec![0; syscall::get_env(&mut [])];
-        let n = syscall::get_env(&mut env);
-        assert_eq!(n, env.len(), "the spawn's environment changed size");
-        super::starting_directory(&env).expect("the spawn stated a starting directory that is not absolute UTF-8")
+        super::starting_directory(crate::startup::env()).expect("the spawn stated a starting directory that is not absolute UTF-8")
     }).clone()
 }
 

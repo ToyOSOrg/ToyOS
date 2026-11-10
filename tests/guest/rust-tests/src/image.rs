@@ -6,9 +6,10 @@
 
 use std::io::Read as _;
 
-use toyos::elf::program::{lay_out, Program, BASE};
+use toyos::elf::program::{lay_out, Program};
 use toyos::elf::Machine;
 use toyos::process::Image;
+use toyos::startup::{self, Block};
 
 /// `path`, read whole into a memory object of this process's own, which a
 /// spawn's ranges name ([`laid`]).
@@ -26,9 +27,26 @@ pub fn in_tmp(path: &str) -> String {
     copy
 }
 
-/// `image` laid out as the SDK lays out a spawn's program: a raw `SpawnArgs`
-/// names its ranges (`maps_ptr`, `maps_count`), `entry`, `image_base` and
-/// build-id.
-pub fn laid(image: &Image) -> Program {
-    lay_out(image.bytes(), Machine::RUNNING, image.handle(), BASE).unwrap_or_else(|why| panic!("lay out an image: {why}"))
+/// A program laid out, and the startup block its ranges name.
+pub struct Laid {
+    program: Program,
+    _block: Block,
+}
+
+impl std::ops::Deref for Laid {
+    type Target = Program;
+
+    fn deref(&self) -> &Program {
+        &self.program
+    }
+}
+
+/// `image` laid out as the SDK lays out a spawn's program, its child starting
+/// with `argv`, NUL-separated, and no environment: a raw `SpawnArgs` names
+/// its ranges (`maps_ptr`, `maps_count`), `entry`, `image_base` and build-id.
+pub fn laid(image: &Image, argv: &str) -> Laid {
+    let said = startup::block(argv.as_bytes(), b"").expect("arguments a child starts with");
+    let block = Block::new(&said, None).unwrap_or_else(|e| panic!("a startup block: {e:?}"));
+    let program = lay_out(image.bytes(), Machine::RUNNING, image.handle()).unwrap_or_else(|why| panic!("lay out an image: {why}"));
+    Laid { program: program.starting_with(&block), _block: block }
 }

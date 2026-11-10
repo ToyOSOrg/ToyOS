@@ -70,20 +70,16 @@ fn main() {
     };
     assert!(!region.is_null(), "mmap failed");
 
-    let argv = unsafe { region.add(REGION / 2) };
-    const ARGV0: &[u8] = b"/system/bin/echo\0";
-    unsafe { core::ptr::copy_nonoverlapping(ARGV0.as_ptr(), argv, ARGV0.len()) };
+    let path = unsafe { region.add(REGION / 2) };
+    const PATH: &str = "/system/bin/echo";
+    unsafe { core::ptr::copy_nonoverlapping(PATH.as_ptr(), path, PATH.len()) };
 
     let echo = image::image_of("/system/bin/echo");
-    let laid = image::laid(&echo);
+    let laid = image::laid(&echo, PATH);
     let spawn_with = |endow_count: u64| {
         let args = SpawnArgs {
-            path_ptr: argv as u64,
-            path_len: (ARGV0.len() - 1) as u64,
-            argv_ptr: argv as u64,
-            argv_len: ARGV0.len() as u64,
-            env_ptr: 0,
-            env_len: 0,
+            path_ptr: path as u64,
+            path_len: PATH.len() as u64,
             endow_ptr: (region as u64) + (REGION / 4) as u64,
             endow_count,
             labels_ptr: (region as u64) + (REGION / 8) as u64,
@@ -196,16 +192,12 @@ fn a_pair_is_refused_whole(filled: &mut Vec<RawHandle>) {
 /// `entries` into the blob `labels`.
 fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, SyscallError> {
     let argv = format!("{SELF}\0{CHILD}");
-    let laid = image::laid(&own());
+    let laid = image::laid(&own(), &argv);
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {
             path_ptr: SELF.as_ptr() as u64,
             path_len: SELF.len() as u64,
-            argv_ptr: argv.as_ptr() as u64,
-            argv_len: argv.len() as u64,
-            env_ptr: 0,
-            env_len: 0,
             endow_ptr: entries.as_ptr() as u64,
             endow_count: entries.len() as u64,
             labels_ptr: labels.as_ptr() as u64,

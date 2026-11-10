@@ -9,6 +9,7 @@ use common::*;
 use object::{Object, ObjectSegment, SegmentFlags};
 use toyos::elf::program::{lay_out, BASE};
 use toyos::elf::Machine;
+use toyos::startup::AT;
 use toyos_abi::syscall::{SpawnMap, VmProt};
 use toyos_abi::HANDLE_INVALID;
 
@@ -25,7 +26,7 @@ fn lld_images_are_laid_out_as_object_reads_them() {
         (&include_bytes!("relocate/x86_64.elf")[..], Machine::X86_64),
         (&include_bytes!("relocate/aarch64.elf")[..], Machine::Aarch64),
     ] {
-        let program = lay_out(file, machine, OBJECT, BASE).expect("lld's image lays out");
+        let program = lay_out(file, machine, OBJECT).expect("lld's image lays out");
         let elf = object::File::parse(file).expect("object reads lld's image");
         assert_eq!(program.entry, BASE + elf.entry());
         assert_eq!(program.image_base, BASE);
@@ -49,26 +50,29 @@ fn lld_images_are_laid_out_as_object_reads_them() {
         for pair in program.maps().windows(2) {
             assert_eq!(pair[0].addr + pair[0].len, pair[1].addr, "{machine:?}: a gap no range reserves");
         }
-        for hole in program.maps().iter().filter(|m| m.object == NONE) {
+        for hole in program.maps()[1..].iter().filter(|m| m.object == NONE) {
             assert_eq!((hole.prot, hole.copied), (VmProt::None as u64, 0));
         }
     }
 }
 
-/// A spawn's base is where the lowest page goes, and the image base is that
-/// less the image's own lowest address.
+/// The lowest page goes at the base, the image base is that less the image's
+/// own lowest address, and below the program lies a startup block that says
+/// nothing: a page of zeros at its address, and reserved pages up to the base.
 #[test]
-fn the_image_moves_with_its_base() {
+fn the_image_lies_at_the_base_above_an_empty_startup_block() {
     let file = Elf::new(0x3000)
         .ph(Phdr::load(0, 0x10_0000, 0x1000, 0x1000, PF_R | PF_X))
         .ph(Phdr::load(0x1000, 0x10_1000, 0x800, 0x2000, PF_R | PF_W))
         .entry(0x10_0040)
         .build();
-    let program = lay_out(&file, Machine::X86_64, OBJECT, BASE).unwrap();
+    let program = lay_out(&file, Machine::X86_64, OBJECT).unwrap();
     assert_eq!((program.image_base, program.entry), (BASE - 0x10_0000, BASE + 0x40));
     assert_eq!(
         program.maps(),
         [
+            SpawnMap { addr: AT, len: 0x1000, object: NONE, offset: 0, copied: 0, prot: VmProt::ReadWrite as u64 },
+            SpawnMap { addr: AT + 0x1000, len: BASE - AT - 0x1000, object: NONE, offset: 0, copied: 0, prot: VmProt::None as u64 },
             SpawnMap { addr: BASE, len: 0x1000, object: OBJECT, offset: 0, copied: 0x1000, prot: VmProt::ReadExec as u64 },
             SpawnMap { addr: BASE + 0x1000, len: 0x2000, object: OBJECT, offset: 0x1000, copied: 0x800, prot: VmProt::ReadWrite as u64 },
         ]
@@ -80,7 +84,7 @@ fn the_image_moves_with_its_base() {
 #[test]
 fn a_writable_executable_segment_is_refused() {
     let file = Elf::new(0x2000).ph(Phdr::load(0, 0, 0x2000, 0x2000, PF_R | PF_W | PF_X)).build();
-    assert_eq!(lay_out(&file, Machine::X86_64, OBJECT, BASE), Err("ELF: a PT_LOAD is both writable and executable"));
+    assert_eq!(lay_out(&file, Machine::X86_64, OBJECT), Err("ELF: a PT_LOAD is both writable and executable"));
 }
 
 /// A segment's copy stops at the file's end: what the file does not hold is
@@ -88,31 +92,29 @@ fn a_writable_executable_segment_is_refused() {
 #[test]
 fn a_copy_stops_at_the_files_end() {
     let file = Elf::new(0x1800).ph(Phdr::load(0, 0, 0x1800, 0x1800, PF_R | PF_X)).build();
-    let map = lay_out(&file[..0x1200], Machine::X86_64, OBJECT, BASE);
+    let map = lay_out(&file[..0x1200], Machine::X86_64, OBJECT);
     // The header page alone is held; the parse needs only it.
-    assert_eq!(map.map(|p| p.maps()[0].copied), Ok(0x1200));
+    assert_eq!(map.map(|p| p.maps()[2].copied), Ok(0x1200));
 }
 
 #[test]
 fn what_a_spawn_cannot_start_is_refused_by_name() {
     // No `PT_LOAD` maps the program header table, which the program reads.
     let unmapped = Elf::new(0x2000).ph(Phdr::load(0x1000, 0x1000, 0x1000, 0x1000, PF_R | PF_X)).entry(0x1000).build();
-    assert_eq!(lay_out(&unmapped, Machine::X86_64, OBJECT, BASE), Err("ELF: no PT_LOAD maps the program header table"));
+    assert_eq!(lay_out(&unmapped, Machine::X86_64, OBJECT), Err("ELF: no PT_LOAD maps the program header table"));
     // Two segments on one page could not each have their protection.
     let shared = Elf::new(0x2000)
         .ph(Phdr::load(0, 0, 0x800, 0x800, PF_R | PF_X))
         .ph(Phdr::load(0x800, 0x800, 0x800, 0x800, PF_R | PF_W))
         .build();
-    assert_eq!(lay_out(&shared, Machine::X86_64, OBJECT, BASE), Err("ELF: two PT_LOAD segments share a page"));
+    assert_eq!(lay_out(&shared, Machine::X86_64, OBJECT), Err("ELF: two PT_LOAD segments share a page"));
     // Another machine's image.
-    assert!(lay_out(&Elf::honest(0x1000).build(), Machine::Aarch64, OBJECT, BASE).is_err());
-    // A base that is no page boundary.
-    assert!(lay_out(&Elf::honest(0x1000).build(), Machine::X86_64, OBJECT, BASE + 8).is_err());
+    assert!(lay_out(&Elf::honest(0x1000).build(), Machine::Aarch64, OBJECT).is_err());
 }
 
 /// A build-id note is carried, as the crash record names the program by it.
 #[test]
 fn the_build_id_is_carried() {
     let file = include_bytes!("elf/fixtures/input-test.bin");
-    assert_eq!(lay_out(file, Machine::X86_64, OBJECT, BASE).unwrap().build_id(), toyos::elf::note::build_id_in(file).unwrap_or(&[]));
+    assert_eq!(lay_out(file, Machine::X86_64, OBJECT).unwrap().build_id(), toyos::elf::note::build_id_in(file).unwrap_or(&[]));
 }

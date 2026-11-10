@@ -1,5 +1,5 @@
 //! The environment: `environ`, `getenv`, `setenv` and `unsetenv`, read from
-//! the block the kernel started this process with.
+//! the block this process started with (`toyos::startup`).
 //!
 //! **A string `setenv` replaces or `unsetenv` removes is never freed**: a
 //! program that keeps what `getenv` answered across a later call, which POSIX
@@ -50,16 +50,7 @@ fn is(entry: &[u8], name: &[u8]) -> bool {
 
 impl Env {
     fn read() -> Env {
-        let mut block = Vec::new();
-        loop {
-            let need = toyos_abi::syscall::get_env(&mut block);
-            if need <= block.len() {
-                block.truncate(need);
-                break;
-            }
-            block.resize(need, 0);
-        }
-        let strings: Vec<*mut u8> = block.split(|&b| b == 0).filter(|e| !e.is_empty()).map(leak).collect();
+        let strings: Vec<*mut u8> = toyos::startup::env().map(leak).collect();
         let mut env = Env { strings, array: Vec::new() };
         env.publish();
         env
@@ -151,7 +142,7 @@ pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
     0
 }
 
-/// The environment as `SYS_SPAWN` takes one: each `KEY=VALUE`, ended by `NUL`.
+/// The environment as a spawn takes one: each `KEY=VALUE`, ended by `NUL`.
 pub(crate) fn blob() -> Vec<u8> {
     with(|env| {
         let mut out = Vec::new();

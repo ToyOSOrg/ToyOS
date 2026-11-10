@@ -170,10 +170,14 @@ Beside that order, each waiting on something outside it:
         its windows** (#1152, #1182; item 1 above). The kernel keeps no
         working directory: a spawn states its child's in the child's `PWD`,
         which the SDK writes and the child's SDK starts from
-        (`toyos::files::starting_in`). The kernel still holds userland data
-        it never reads, path text among it: the environment
-        (`ProcessData::env`, answered by `SYS_GET_ENV`), whose likely exit
-        is a startup memory object the parent fills for the child. `/tmp` is the
+        (`toyos::files::starting_in`). A child's arguments and environment,
+        that `PWD` among it, are a startup block its parent lays out below
+        its program (`toyos::startup`), which the kernel neither stores nor
+        answers (#PRNUM): `SYS_GET_ENV` (73) and `ProcessData::env` are
+        gone. The kernel still keeps one userland text of each process, the
+        path its parent read the program from (`SpawnArgs::path_ptr`), which
+        the spawn's record and a crash's frames name the file by and
+        `symbolize` opens; its last component is the process's name. `/tmp` is the
         MEMORY file server's, one for the machine, of which each installed
         package's `/tmp` is its own directory (#1181); per session, as the owner
         ruled ("Per session", 2026-10-03), is the isolation track's stage 3.

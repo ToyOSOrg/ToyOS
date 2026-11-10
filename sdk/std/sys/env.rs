@@ -6,25 +6,17 @@ use crate::sync::{Mutex, MutexGuard};
 
 static ENV: Mutex<Option<HashMap<OsString, OsString>>> = Mutex::new(None);
 
-/// Lock ENV and lazily initialize from the kernel if needed.
+/// Lock ENV and lazily initialize from the startup block if needed.
 /// This ensures env works from cdylib .so files whose std was never explicitly initialized.
 fn lock_env() -> MutexGuard<'static, Option<HashMap<OsString, OsString>>> {
     let mut guard = ENV.lock().unwrap();
     if guard.is_none() {
         let mut map = HashMap::new();
-        let size = toyos_abi::syscall::get_env(&mut []);
-        if size > 0 {
-            let mut buf = vec![0u8; size];
-            toyos_abi::syscall::get_env(&mut buf);
-            for entry in buf.split(|&b| b == 0) {
-                if entry.is_empty() {
-                    continue;
-                }
-                if let Some(eq) = entry.iter().position(|&b| b == b'=') {
-                    let key = OsString::from(crate::str::from_utf8(&entry[..eq]).unwrap_or(""));
-                    let val = OsString::from(crate::str::from_utf8(&entry[eq + 1..]).unwrap_or(""));
-                    map.insert(key, val);
-                }
+        for entry in toyos::startup::env() {
+            if let Some(eq) = entry.iter().position(|&b| b == b'=') {
+                let key = OsString::from(crate::str::from_utf8(&entry[..eq]).unwrap_or(""));
+                let val = OsString::from(crate::str::from_utf8(&entry[eq + 1..]).unwrap_or(""));
+                map.insert(key, val);
             }
         }
         *guard = Some(map);

@@ -401,13 +401,6 @@ pub fn direct_map_policy(phys: u64) -> Option<CachePolicy> {
     high().as_ref()?.leaf(DirectMap::from_phys(phys).as_ptr::<u8>() as u64).map(|(leaf, _)| policy_of(leaf))
 }
 
-/// The kernel wrote instructions into the frame at `phys` that a user leaf
-/// executes: the data it wrote is cleaned to the point of unification and the
-/// stale instructions invalidated, as the Arm ARM requires before they run.
-pub fn wrote_code(phys: u64) {
-    super::cache::make_executable(DirectMap::from_phys(phys).as_ptr::<u8>() as u64, PAGE_4K as usize);
-}
-
 /// Marks a user leaf whose frame the space owns: one of the bits [58:55] a
 /// descriptor leaves to software (Arm ARM K.a, D8.3.2). Kept on a leaf that is
 /// not valid, so a frame no access may reach is still recorded.

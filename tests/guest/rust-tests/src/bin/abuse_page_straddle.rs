@@ -6,7 +6,7 @@
 //! value its own process may store.
 //!
 //! Two are reachable from userland: `fstat`'s `Stat`, a kernel write, and
-//! `spawn`'s `SpawnArgs`, a kernel read whose `argv_ptr` and `argv_len` the
+//! `spawn`'s `SpawnArgs`, a kernel read whose `path_ptr` and ranges the
 //! kernel then acts on.
 //!
 //! **The verdict is the bytes**: each straddling value is read back field by
@@ -84,19 +84,15 @@ fn main() {
     unsafe { syscall::close(handle) };
 
     // 2. `SpawnArgs` straddling, read whole: the child it names starts.
-    let argv = b"/system/bin/echo\0straddle\0";
+    const PATH: &str = "/system/bin/echo";
     let echo = image::image_of("/system/bin/echo");
-    let laid = image::laid(&echo);
+    let laid = image::laid(&echo, "/system/bin/echo\0straddle");
     unsafe {
-        core::ptr::copy_nonoverlapping(argv.as_ptr(), base as *mut u8, argv.len());
+        core::ptr::copy_nonoverlapping(PATH.as_ptr(), base as *mut u8, PATH.len());
     }
     let args = SpawnArgs {
         path_ptr: base,
-        path_len: "/system/bin/echo".len() as u64,
-        argv_ptr: base,
-        argv_len: argv.len() as u64,
-        env_ptr: 0,
-        env_len: 0,
+        path_len: PATH.len() as u64,
         endow_ptr: 0,
         endow_count: 0,
         labels_ptr: 0,

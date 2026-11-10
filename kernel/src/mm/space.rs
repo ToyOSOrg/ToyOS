@@ -826,52 +826,6 @@ impl AddressSpace {
             Leaf::Held(_) | Leaf::Empty => None,
         }
     }
-
-    /// Write `bytes` at `va`, into private memory this space committed:
-    /// what the kernel lays out in a space before any thread runs in it, or
-    /// in a range no thread has been told of.
-    pub fn fill(&mut self, va: u64, bytes: &[u8]) {
-        let mut done = 0;
-        while done < bytes.len() {
-            let at = va + done as u64;
-            let n = ((PAGE_SIZE - at % PAGE_SIZE) as usize).min(bytes.len() - done);
-            let phys = self.populate_private(at).unwrap_or_else(|| panic!("space: {at:#x} is no committed private memory"));
-            // SAFETY: `populate_private` answered a frame this space owns and
-            // maps at `at`, and `n` bytes from there stay inside its page; the
-            // kernel's own buffer cannot overlap it.
-            unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr().add(done), super::DirectMap::from_phys(phys).as_mut_ptr(), n);
-            }
-            if self.inventory.find(at).is_some_and(|(_, entry)| entry.prot == Prot::ReadExec) {
-                super::paging::wrote_code(phys & !(PAGE_SIZE - 1));
-            }
-            done += n;
-        }
-    }
-
-    /// `va`'s frame, populated if empty, where `va` is committed private memory.
-    fn populate_private(&mut self, va: u64) -> Option<u64> {
-        let (_, entry) = self.inventory.find(va)?;
-        if !matches!(entry.kind, Kind::Private { committed: true }) {
-            return None;
-        }
-        let page = va & !(PAGE_SIZE - 1);
-        let phys = match self.tables.get(page) {
-            Leaf::Mapped(m) => m.phys,
-            Leaf::Held(phys) => phys,
-            Leaf::Empty => {
-                let phys = pmm::alloc_promised().into_raw();
-                let leaf = match leaf_prot(entry.prot) {
-                    Some(prot) => Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal }),
-                    None => Leaf::Held(phys),
-                };
-                self.tables.set(page, leaf);
-                self.usage.populated(1);
-                phys
-            }
-        };
-        Some(phys + va % PAGE_SIZE)
-    }
 }
 
 /// Whether a range's pages are memory the direct map reaches.

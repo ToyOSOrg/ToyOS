@@ -262,9 +262,6 @@ impl Processes for ProcessTable {
 pub struct ProcessData {
     /// Every kernel object this process can name; stdio is handles `0`, `1`, `2`.
     pub handles: HandleTable,
-    /// Inherited environment variables (KEY=VALUE\0KEY2=VALUE2\0...)
-    pub env: Vec<u8>,
-
     /// The space every thread of it runs in.
     pub space: PageTables,
 
@@ -302,8 +299,8 @@ impl ProcessData {
     /// The heap a process of the program at `path` takes beside what is
     /// charged on its own — its handles, threads, ranges and objects: its
     /// records, its place in the process table and among its parent's
-    /// children, its strings at their bound, and its endowments at theirs.
-    pub fn charge(job: &Arc<kernel::sched::job::Job>, path: &str, env: &[u8]) -> Result<Charge, Exhausted> {
+    /// children, its label, and its endowments at their bound.
+    pub fn charge(job: &Arc<kernel::sched::job::Job>, path: &str) -> Result<Charge, Exhausted> {
         // The process table doubles, and its control byte beside each.
         let entry = 2 * (core::mem::size_of::<(Pid, ProcessEntry)>() + 1);
         // A thread table of one thread is a whole leaf.
@@ -315,12 +312,10 @@ impl ProcessData {
             + entry
             + threads
             + 2 * core::mem::size_of::<Pid>();
-        let strings = charge::array::<u8>(path.len())
-            + charge::array::<u8>(toyos_abi::syscall::MAX_PATH)
-            + charge::array::<u8>(env.len());
+        let label = charge::array::<u8>(path.len());
         let endowments = charge::array::<EndowEntry>(toyos_abi::syscall::MAX_ENDOWMENTS)
             + charge::array::<u8>(toyos_abi::syscall::MAX_LABELS_LEN);
-        Charge::new(job, records + strings + endowments)
+        Charge::new(job, records + label + endowments)
     }
 }
 

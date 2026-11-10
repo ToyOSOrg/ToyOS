@@ -7,7 +7,6 @@ pub mod tls;
 #[path = "../../../../rust/library/std/src/sys/pal/unsupported/common.rs"]
 mod unsupported_common;
 
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub use unsupported_common::{cleanup, init};
 
@@ -165,14 +164,8 @@ pub fn fd_error(e: toyos::fd::Error) -> crate::io::Error {
     }
 }
 
-// argc/argv stored by _start for std::env::args()
-pub(crate) static ARGC: AtomicUsize = AtomicUsize::new(0);
-pub(crate) static ARGV: AtomicUsize = AtomicUsize::new(0); // *const *const u8 as usize
-
-// Stack layout at entry (set up by kernel), with the stack pointer 16-byte aligned:
-//   [sp]   = argc
-//   [sp+8] = argv[0], argv[1], ..., NULL
-// The image relocates itself first, from its own header's address.
+// The entry, on an empty stack. The image relocates itself first, from its
+// own header's address.
 #[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
@@ -180,8 +173,6 @@ unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
         "lea rdi, [rip + __ehdr_start]",
         "call {relocate}",
-        "mov rdi, [rsp]",
-        "lea rsi, [rsp + 8]",
         "call {start_rust}",
         "ud2",
         relocate = sym toyos::relocate::relocate_self,
@@ -197,8 +188,6 @@ unsafe extern "C" fn _start() -> ! {
         "adrp x0, __ehdr_start",
         "add x0, x0, :lo12:__ehdr_start",
         "bl {relocate}",
-        "ldr x0, [sp]",
-        "add x1, sp, #8",
         // The outermost frame record: a backtrace ends here.
         "mov x29, xzr",
         "mov x30, xzr",
@@ -219,11 +208,12 @@ extern "C" fn init_eh_frame() {
 #[unsafe(link_section = ".init_array")]
 static INIT_EH_FRAME: extern "C" fn() = init_eh_frame;
 
-extern "C" fn start_rust(argc: usize, argv: *const *const u8) -> ! {
+extern "C" fn start_rust() -> ! {
     unsafe extern "C" {
         fn main(argc: i32, argv: *const *const u8) -> i32;
         static __ehdr_start: u8;
     }
+    let (argc, argv) = toyos::startup::args();
     // The program goes by its `argv[0]`.
     let name = match argc {
         0 => &[][..],
@@ -231,8 +221,6 @@ extern "C" fn start_rust(argc: usize, argv: *const *const u8) -> ! {
     };
     // SAFETY: the executable's own header, and this is its main thread.
     unsafe { toyos::tls::start(&raw const __ehdr_start, name) };
-    ARGC.store(argc, Ordering::Relaxed);
-    ARGV.store(argv.expose_provenance(), Ordering::Relaxed);
 
     eh_frame::init();
     crate::sys::env::init();

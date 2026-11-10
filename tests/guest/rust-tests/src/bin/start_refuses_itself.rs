@@ -54,16 +54,12 @@ fn own_image_tagged(tag: u64) -> Vec<u8> {
 /// `path` read into an image and spawned with `argv`, NUL-separated, endowed nothing.
 fn spawn_endowed_nothing(path: &str, argv: &str) -> Result<RawHandle, SyscallError> {
     let image = image::image_of(path);
-    let laid = image::laid(&image);
+    let laid = image::laid(&image, argv);
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {
             path_ptr: path.as_ptr() as u64,
             path_len: path.len() as u64,
-            argv_ptr: argv.as_ptr() as u64,
-            argv_len: argv.len() as u64,
-            env_ptr: 0,
-            env_len: 0,
             endow_ptr: 0,
             endow_count: 0,
             labels_ptr: 0,

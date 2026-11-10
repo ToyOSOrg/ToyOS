@@ -19,16 +19,11 @@ const NONE: u64 = toyos_abi::HANDLE_INVALID.0 as u64;
 
 /// Spawn this program with `maps` and `entry`, its image laid out otherwise.
 fn spawn(maps: &[SpawnMap], entry: u64, image_base: u64) -> Result<RawHandle, SyscallError> {
-    let argv = format!("{SELF}\0{CHILD}\0");
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {
             path_ptr: SELF.as_ptr() as u64,
             path_len: SELF.len() as u64,
-            argv_ptr: argv.as_ptr() as u64,
-            argv_len: argv.len() as u64,
-            env_ptr: 0,
-            env_len: 0,
             endow_ptr: 0,
             endow_count: 0,
             labels_ptr: 0,
@@ -46,7 +41,7 @@ fn spawn(maps: &[SpawnMap], entry: u64, image_base: u64) -> Result<RawHandle, Sy
 }
 
 fn runs(what: &str, image: &Image) {
-    let laid = image::laid(image);
+    let laid = image::laid(image, &format!("{SELF}\0{CHILD}"));
     let child = spawn(laid.maps(), laid.entry, laid.image_base).unwrap_or_else(|e| panic!("{what}: an honest spawn: {e:?}"));
     let end = syscall::process_wait(child).unwrap_or_else(|e| panic!("{what}: wait: {e:?}"));
     assert_eq!(end, End::Exited(0), "{what}: the child ended {end}");
@@ -57,7 +52,7 @@ fn main() {
         return;
     }
     let image = image::image_of(SELF);
-    let laid = image::laid(&image);
+    let laid = image::laid(&image, &format!("{SELF}\0{CHILD}"));
     runs("first", &image);
     let honest = laid.maps().to_vec();
     let text = honest.iter().position(|m| m.prot == VmProt::ReadExec as u64).expect("an executable range");
@@ -79,9 +74,9 @@ fn main() {
     refused("a range past the user half", with(&|m| m[0].addr = 0x7fff_ffff_f000), laid.entry, invalid);
     refused("a range in the kernel half", with(&|m| m[0].addr = 0xffff_8000_0000_0000), laid.entry, invalid);
     refused("a protection no VmProt names", with(&|m| m[text].prot = 4), laid.entry, invalid);
-    refused("more bytes copied than the range holds", with(&|m| m[0].copied = m[0].len + 1), laid.entry, invalid);
-    refused("a copy past the object's end", with(&|m| m[0].offset = 0x4000_0000), laid.entry, invalid);
-    refused("a copy from no object", with(&|m| m[0].object = NONE), laid.entry, invalid);
+    refused("more bytes copied than the range holds", with(&|m| m[text].copied = m[text].len + 1), laid.entry, invalid);
+    refused("a copy past the object's end", with(&|m| m[text].offset = 0x4000_0000), laid.entry, invalid);
+    refused("a copy from no object", with(&|m| m[text].object = NONE), laid.entry, invalid);
     refused("a copy from no page boundary of the object", with(&|m| m[text].offset += 8), laid.entry, invalid);
     // Unchecked, the sum wraps past the object's size and the first touch
     // panics the kernel (`SharedMemObject`'s bound on every read).

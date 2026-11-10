@@ -195,8 +195,8 @@ pub unsafe extern "C" fn posix_spawnattr_getsigdefault(attr: *const SpawnAttr, s
     0
 }
 
-/// `strs`, a null-terminated array of C strings, as `SYS_SPAWN`'s blob of
-/// them, each ended by `NUL`.
+/// `strs`, a null-terminated array of C strings, as a spawn's blob of them
+/// (`toyos::spawn::Spawn`), each ended by `NUL`.
 ///
 /// # Safety
 /// `strs` is null or a null-terminated array of C strings.

@@ -2,11 +2,8 @@
 //! byte tail, and the FP square roots. An unaligned `ldp`/`stp` is legal on the
 //! Normal memory every user buffer is.
 
-/// Entry point for C programs. Stack layout at entry (set up by kernel), with
-/// the stack pointer 16-byte aligned:
-///   [sp]   = argc
-///   [sp+8] = argv[0], argv[1], ..., NULL
-/// The image relocates itself first, from its own header's address.
+/// Entry point for C programs, on an empty stack. The image relocates itself
+/// first, from its own header's address.
 #[cfg(not(feature = "std-runtime"))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
@@ -15,8 +12,6 @@ unsafe extern "C" fn _start() -> ! {
         "adrp x0, __ehdr_start",
         "add x0, x0, :lo12:__ehdr_start",
         "bl {relocate}",
-        "ldr x0, [sp]",        // argc
-        "add x1, sp, #8",      // argv
         // The outermost frame record: a backtrace ends here.
         "mov x29, xzr",
         "mov x30, xzr",

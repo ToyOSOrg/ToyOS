@@ -86,7 +86,6 @@ pub const SYS_VM_RELEASE: u64 = 64;
 pub const SYS_READ_NONBLOCK: u64 = 66;
 pub const SYS_WRITE_NONBLOCK: u64 = 67;
 pub const SYS_EXIT: u64 = 72;
-pub const SYS_GET_ENV: u64 = 73;
 pub const SYS_CLOCK_EPOCH: u64 = 75;
 /// Accept a queued connection from an [`Acceptor`] handle.
 ///
@@ -394,14 +393,10 @@ crate::user_safe! {
     #[derive(Clone, Copy)]
     pub struct SpawnArgs {
         /// The path the caller read the program from, which names it in the
-        /// spawn's record. **Never `argv[0]`**, which is the child's first
-        /// argument and the name it goes by. Nothing opens it.
+        /// spawn's record and a crash's, and whose last component is the name
+        /// the child goes by. Nothing opens it.
         pub path_ptr: u64,
         pub path_len: u64,
-        pub argv_ptr: u64,
-        pub argv_len: u64,
-        pub env_ptr: u64,
-        pub env_len: u64,
         /// `[EndowEntry]`, moved out of the parent's table.
         pub endow_ptr: u64,
         pub endow_count: u64,
@@ -411,7 +406,9 @@ crate::user_safe! {
         /// The child's memory, `[SpawnMap]`, as the caller laid out its program:
         /// 1 to [`MAX_SPAWN_MAPS`] ranges, none meeting another or the clock
         /// page, each checked as an ordinary mapping (`SpawnMap`). Everything
-        /// else of the space is empty until the child maps it, but its stack.
+        /// else of the space is empty until the child maps it, but its stack,
+        /// which starts empty: what a parent tells its child, its arguments
+        /// and environment among it, is bytes of a range.
         pub maps_ptr: u64,
         pub maps_count: u64,
         /// Where the child's main thread starts: inside a [`VmProt::ReadExec`]
@@ -1080,12 +1077,6 @@ pub fn event_take(wait: RawHandle) -> Result<(), SyscallError> {
 /// such condition, or a device claim, is `NotSupported`.
 pub fn handle_wait(handle: RawHandle, interest: u32, timeout_nanos: u64) -> Result<u32, SyscallError> {
     check(syscall(SYS_HANDLE_WAIT, handle.0 as u64, interest as u64, timeout_nanos, 0)).map(|bit| bit as u32)
-}
-
-/// Read the inherited environment variables into `buf`.
-/// Returns the number of bytes written, or the required size if buf is too small.
-pub fn get_env(buf: &mut [u8]) -> usize {
-    syscall(SYS_GET_ENV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) as usize
 }
 
 /// Spawn a new process.

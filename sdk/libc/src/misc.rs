@@ -257,9 +257,9 @@ pub unsafe extern "C" fn sysconf(name: i32) -> i64 {
         _SC_PAGESIZE => crate::memreq::PAGE as i64,
         _SC_NPROCESSORS_ONLN => syscall::cpu_count() as i64,
         _SC_CLK_TCK => 100,
-        // What `SYS_SPAWN` takes of each of `argv` and the environment
-        // (`kernel/src/user_ptr.rs`'s `MAX_USER_STR`), so both together fit.
-        _SC_ARG_MAX => 64 * 1024,
+        // What a child's startup block holds: its arguments, its
+        // environment and a pointer to each.
+        _SC_ARG_MAX => toyos::startup::MAX_BLOCK as i64,
         // POSIX's -1 with `errno` untouched: the `getpw*_r` lookups it bounds
         // are ones ToyOS does not have.
         _SC_GETPW_R_SIZE_MAX => -1,

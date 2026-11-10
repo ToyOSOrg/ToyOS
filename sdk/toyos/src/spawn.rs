@@ -196,20 +196,27 @@ impl<'a> Spawn<'a> {
 }
 
 impl Helper<'_> {
-    /// Spawn the child here, carrying the spawn's environment and running
-    /// `image`, which this process lays out ([`crate::elf::program`]) and the
-    /// kernel pages the child from. Refused [`Refused::Invalid`] without one,
+    /// Spawn the child here, running `image`, which this process lays out
+    /// ([`crate::elf::program`]) and the kernel pages the child from, and
+    /// starting with the spawn's arguments and environment
+    /// ([`crate::startup`]). Refused [`Refused::Invalid`] without one,
     /// or for one that names a layout the child could not start from.
     pub fn spawn(self, image: Option<&Image>) -> Result<Process, Refused> {
         let s = self.0;
         let image = image.ok_or(Refused::Invalid("a spawn names the program it runs"))?;
-        let program = crate::elf::program::lay_out(image.bytes(), crate::elf::Machine::RUNNING, image.handle(), crate::elf::program::BASE)
-            .map_err(Refused::Invalid)?;
-        let maps = program.maps();
-        let build_id = program.build_id();
         let path = image_and_name(s.program, s.image).0;
         let env = crate::files::starting_in(s.env, s.cwd)
             .ok_or(Refused::Invalid("a working directory that is not absolute, is too long or holds a NUL"))?;
+        let said = crate::startup::block(s.argv, &env)
+            .ok_or(Refused::Invalid("arguments and an environment past what a child starts with"))?;
+        // Held until the spawn answers: the child copies its pages from it.
+        let job = s.endow.iter().find(|(label, _)| *label == JOB_LABEL).map(|(_, job)| job.as_handle());
+        let block = crate::startup::Block::new(&said, job).map_err(Refused::Syscall)?;
+        let program = crate::elf::program::lay_out(image.bytes(), crate::elf::Machine::RUNNING, image.handle())
+            .map_err(Refused::Invalid)?
+            .starting_with(&block);
+        let maps = program.maps();
+        let build_id = program.build_id();
         let names_svc = s.endow.iter().any(|(label, _)| *label == SVC_LABEL);
         if s.endow.len() + s.fds.len() + usize::from(!names_svc) > MAX_SPAWN_ENDOWMENTS {
             return Err(Refused::Invalid("more endowments and descriptors than a spawn carries"));
@@ -265,10 +272,6 @@ impl Helper<'_> {
         let args = SpawnArgs {
             path_ptr: path.as_ptr() as u64,
             path_len: path.len() as u64,
-            argv_ptr: s.argv.as_ptr() as u64,
-            argv_len: s.argv.len() as u64,
-            env_ptr: env.as_ptr() as u64,
-            env_len: env.len() as u64,
             endow_ptr: entries.as_ptr() as u64,
             endow_count: count as u64,
             labels_ptr: labels.as_ptr() as u64,

@@ -488,11 +488,12 @@ pub fn starting_in(env: &[u8], dir: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The directory a process starts in, read from the environment its spawn
-/// gave it: its [`START`], lexically clean, or `/`, its view's root, where it
-/// states none. `None` for one [`starting_in`] would not have written.
-pub fn starting_directory(env: &[u8]) -> Option<String> {
-    let Some(dir) = env.split(|&b| b == 0).find_map(stated) else { return Some(String::from("/")) };
+/// The directory a process starts in, read from `env`, the entries of the
+/// environment its spawn gave it: its [`START`], lexically clean, or `/`, its
+/// view's root, where it states none. `None` for one [`starting_in`] would
+/// not have written.
+pub fn starting_directory<'a>(mut env: impl Iterator<Item = &'a [u8]>) -> Option<String> {
+    let Some(dir) = env.find_map(stated) else { return Some(String::from("/")) };
     let dir = core::str::from_utf8(dir).ok().filter(|d| d.starts_with('/') && d.len() <= fs::MAX_PATH)?;
     Some(absolute("/", dir))
 }
@@ -530,6 +531,11 @@ mod owner;
 mod tests {
     use super::*;
 
+    /// Where a child given `env` starts.
+    fn starts(env: &[u8]) -> Option<String> {
+        starting_directory(env.split(|&b| b == 0))
+    }
+
     #[test]
     fn a_path_is_made_absolute_and_lexically_clean() {
         assert_eq!(absolute("/home/a", "b/./c"), "/home/a/b/c");
@@ -544,16 +550,16 @@ mod tests {
     fn a_child_starts_where_its_spawn_says_and_nowhere_its_environment_said() {
         let given = b"HOME=/home/toy\0PWD=/elsewhere\0PWDX=/x\0TERM=toyos\0";
         let env = starting_in(given, "/home/toy/Games").expect("an absolute directory");
-        assert_eq!(starting_directory(&env).as_deref(), Some("/home/toy/Games"));
+        assert_eq!(starts(&env).as_deref(), Some("/home/toy/Games"));
         assert_eq!(env, b"HOME=/home/toy\0PWDX=/x\0TERM=toyos\0PWD=/home/toy/Games\0");
-        assert_eq!(starting_directory(&starting_in(b"", "/").unwrap()).as_deref(), Some("/"));
-        assert_eq!(starting_directory(b"PWD=/a/./b/../c\0").as_deref(), Some("/a/c"));
+        assert_eq!(starts(&starting_in(b"", "/").unwrap()).as_deref(), Some("/"));
+        assert_eq!(starts(b"PWD=/a/./b/../c\0").as_deref(), Some("/a/c"));
     }
 
     #[test]
     fn a_spawn_stating_no_directory_starts_its_child_at_the_root() {
-        assert_eq!(starting_directory(b"").as_deref(), Some("/"));
-        assert_eq!(starting_directory(b"PWDX=/x\0HOME=/home\0").as_deref(), Some("/"));
+        assert_eq!(starts(b"").as_deref(), Some("/"));
+        assert_eq!(starts(b"PWDX=/x\0HOME=/home\0").as_deref(), Some("/"));
     }
 
     #[test]
@@ -564,7 +570,7 @@ mod tests {
             assert_eq!(starting_in(b"", dir), None, "{dir:?}");
         }
         for env in [&b"PWD=home\0"[..], b"PWD=\0", b"PWD=/\xff\0"] {
-            assert_eq!(starting_directory(env), None, "{env:?}");
+            assert_eq!(starts(env), None, "{env:?}");
         }
     }
 
