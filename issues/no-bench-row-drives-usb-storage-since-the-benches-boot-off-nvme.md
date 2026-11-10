@@ -31,11 +31,6 @@ the boot stick lost it:
 - `amdvi_translates_the_boot_controller` and `amdvi_remaps_the_boot_controller`
   judge the NVMe controller where they judged the stick's xHCI.
 
-- Whether a stick's mode parameters set DPOFUA, and whether it then takes a
-  WRITE(10) with FUA, is read on no bench: usbd asks MODE SENSE as a disk
-  first comes up and forces a durable write only where the stick says so
-  (`system/usbd/xhci/src/msc.rs`), judged against a host model alone.
-
 QEMU's machines still boot off a stick (`the_log_lands_on_the_boot_stick`).
 
 No row that writes the scratch disk is built. The owner declined the
@@ -43,9 +38,35 @@ comparison of ToyOS's resets with Linux's restart
 (`issues/a-reset-can-leave-a-usb-stick-hung-until-its-power-is-removed.md`),
 and that does not discharge this exit.
 
+**A stick's forced writes have never met a real stick.** This is not a
+judgement the boot stick lost: it is new with the forced write. usbd asks
+MODE SENSE(6) as a disk first comes up, reads DPOFUA from its header, and
+sends a durable write as WRITE(10) with FUA only where the stick set it
+(`system/usbd/xhci/src/msc.rs`, `lib/scsi`). A host model and QEMU's stick
+are all that have answered either command. What a real stick can do that
+they do not:
+
+- **Break on the MODE SENSE.** The command climbs the recovery ladder like
+  any broken command, and since it runs at every first bring-up, a stick
+  that hangs on it is never served.
+- **Set DPOFUA and refuse a write with FUA.** The write is answered not
+  done; the journal issues its entry again twice more and then the mount stops
+  writing. Nothing acknowledged is lost, and the volume takes no more
+  writes until it is mounted again.
+- **Set DPOFUA and ignore FUA.** The write is answered done from the
+  stick's cache. The commit is acknowledged without being on the medium, a
+  power cut loses it, and usbd counts no flush owed for it, so a stick that
+  leaves then is counted as having lost nothing. Nothing on the host can
+  see this.
+
 **Exit**: a metal row drives a USB stick that is not the boot disk — the
 scratch disk (`issues/the-scratch-disk-adopt-scratch-makes-is-not-served.md`)
 — and judges usbd serving it, a reset under a write to it, and a tone beside
-that write.
+that write. And for forced writes: on a real stick, usbd's bring-up line
+shows the MODE SENSE answered with no Bulk-Only break before it; and on a
+real device that sets DPOFUA, carrying a bcachefs volume, a commit's
+WRITE(10) with FUA is answered done. Whether such a device honours FUA is
+shown only by cutting its power after an acknowledged commit; that is
+evidence to record if it is ever taken, and no part of this exit.
 
 **Owner**: the orchestrator, which runs metal.

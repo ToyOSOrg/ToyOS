@@ -189,8 +189,7 @@ impl Session {
     }
 
     /// Whether the session's device forces a write asked with `fua` onto its
-    /// medium, as this session's open was answered: a reconnect may answer
-    /// otherwise.
+    /// medium, as the open or the last reconnect was answered.
     pub fn fua(&self) -> bool {
         self.opened.fua()
     }
@@ -372,6 +371,9 @@ impl Session {
 
     /// Open the same partition over the same region through the same name,
     /// after the service ended; writes the client holds go out again first.
+    /// The partition must answer as it did; whether its device forces writes
+    /// is taken as the new server says it, since a driver asks its device
+    /// again each time it comes up.
     ///
     /// Blocks until the service answers, within [`wire::ANSWER_BOUND_NS`]: a
     /// name whose server is being restarted queues the connection until the
@@ -382,14 +384,21 @@ impl Session {
         // two indices at zero, as it will set its own.
         self.rings = layout::client(self.region.words());
         let (bells, opened) = handshake(&self.names, &self.service, self.guid, &self.region)?;
-        if opened != self.opened {
+        if !same_partition(&opened, &self.opened) {
             return Err(Error::Protocol);
         }
+        self.opened = opened;
         self.bells = Some(bells);
         self.client.session_started();
         self.pump();
         Ok(())
     }
+}
+
+/// Whether two opens answered for one partition: its length and its GUID,
+/// and not what its device does with a forced write.
+fn same_partition(a: &Opened, b: &Opened) -> bool {
+    (a.blocks(), a.unique()) == (b.blocks(), b.unique())
 }
 
 fn transfer_blocks(blocks: usize) -> u32 {
@@ -460,5 +469,28 @@ pub fn list(names: &Namespace, service: &str) -> Result<Vec<wire::Listed>, Error
         wire::MSG_LISTED => wire::Listed::decode_all(payload).map(Iterator::collect).ok_or(Error::Protocol),
         wire::MSG_REFUSED => Err(Refusal::decode(payload).map_or(Error::Protocol, Error::Refused)),
         _ => Err(Error::Protocol),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opened(blocks: u64, unique: u8, fua: bool) -> Opened {
+        let mut bytes = Vec::from(blocks.to_le_bytes());
+        bytes.extend([unique; wire::GUID_BYTES]);
+        bytes.push(u8::from(fua));
+        Opened::decode(&bytes).expect("an open's answer")
+    }
+
+    /// A reconnect is refused for another partition and for another length,
+    /// and never for what the device does with a forced write.
+    #[test]
+    fn a_reconnect_is_held_to_the_partition_and_not_to_forced_writes() {
+        let first = opened(100, 7, false);
+        assert!(same_partition(&opened(100, 7, true), &first));
+        assert!(same_partition(&first, &opened(100, 7, true)));
+        assert!(!same_partition(&opened(101, 7, false), &first));
+        assert!(!same_partition(&opened(100, 8, false), &first));
     }
 }

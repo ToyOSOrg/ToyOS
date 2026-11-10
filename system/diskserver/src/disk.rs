@@ -194,8 +194,8 @@ impl<L: Link> Served<L> {
     /// `fua` where the session offers it, and otherwise written and then
     /// flushed. Not over a write no flush has covered.
     pub async fn write_shared_durable(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
-        // Asked of the session each time: a reconnect may have found the
-        // disk behind another driver.
+        // Asked of the session each time: a reconnect adopts what its server
+        // says of the device.
         if self.link.borrow().fua() {
             return self.write_requests(lba, blocks, true).await;
         }

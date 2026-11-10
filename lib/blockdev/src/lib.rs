@@ -72,10 +72,10 @@ pub trait BlockDev {
     /// Every write that completed before this was asked, on the medium.
     async fn flush(&self) -> Result<(), Error>;
 
-    /// `data` at `lba`, on the medium once complete, and nothing else made
-    /// durable by it. It must not overlap a write of this device's no flush
-    /// has covered. A device that cannot force one write to its medium
-    /// writes it and then flushes, which is this.
+    /// `data` at `lba`, on the medium once complete; nothing else is promised
+    /// durable. It must not overlap a write of this device's no flush has
+    /// covered. A device that cannot force one write to its medium writes it
+    /// and then flushes, which is this.
     async fn write_durable(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
         self.write(lba, data).await?;
         self.flush().await

@@ -37,8 +37,10 @@ struct Script {
     reconnects: VecDeque<Result<(), SessionError>>,
     reconnected: u32,
     read_only: bool,
-    /// What each session's open says of its device.
+    /// What the session's open says of its device, and what each
+    /// reconnect's says in turn; as before once they run out.
     fua: bool,
+    fua_after: VecDeque<bool>,
 }
 
 impl Script {
@@ -55,6 +57,7 @@ impl Script {
             reconnected: 0,
             read_only: false,
             fua: false,
+            fua_after: VecDeque::new(),
         }
     }
 
@@ -131,6 +134,9 @@ impl Link for Script {
         self.reconnected += 1;
         let answer = self.reconnects.pop_front().unwrap_or(Ok(()));
         self.up = answer.is_ok();
+        if self.up {
+            self.fua = self.fua_after.pop_front().unwrap_or(self.fua);
+        }
         answer
     }
 }
@@ -198,6 +204,34 @@ fn a_forced_write_on_the_wire_at_a_session_end_is_asked_again_forced() {
     now(&disk, disk.write_durable(1, &blocks(9, 1))).unwrap();
     let forced = Asked::Write { lba: 1, data: vec![9; BLOCK], fua: true };
     assert_eq!(disk.link.borrow().log, [forced.clone(), forced]);
+}
+
+/// A reconnect's answer for the device is the one that holds from then on,
+/// either way. A forced write on the wire when its session ended is asked
+/// again as it was; the server that no longer offers one refuses it, and the
+/// durable write after that is a write and a flush. The other way, the
+/// durable write after the reconnect is forced.
+#[test]
+fn a_reconnect_s_answer_for_forced_writes_is_adopted_both_ways() {
+    let mut script = Script::new(4);
+    script.fua = true;
+    script.ends.push_back(0);
+    script.fua_after.push_back(false);
+    let disk = Served::new(script);
+    assert_eq!(now(&disk, disk.write_durable(1, &blocks(9, 1))), Err(Error::Device));
+    now(&disk, disk.write_durable(1, &blocks(9, 1))).unwrap();
+    let write = |fua| Asked::Write { lba: 1, data: vec![9; BLOCK], fua };
+    assert_eq!(disk.link.borrow().log, [write(true), write(true), write(false), Asked::Flush]);
+    assert!(disk.link.borrow().disk[BLOCK..2 * BLOCK].iter().all(|&b| b == 9));
+
+    let mut script = Script::new(4);
+    script.ends.push_back(0);
+    script.fua_after.push_back(true);
+    let disk = Served::new(script);
+    now(&disk, disk.write(2, &blocks(7, 1))).unwrap();
+    now(&disk, disk.write_durable(1, &blocks(9, 1))).unwrap();
+    let plain = Asked::Write { lba: 2, data: vec![7; BLOCK], fua: false };
+    assert_eq!(disk.link.borrow().log, [plain.clone(), plain, write(true)]);
 }
 
 /// A request refused at every session end is asked once more than

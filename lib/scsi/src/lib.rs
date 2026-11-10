@@ -65,8 +65,10 @@ impl Cdb {
     pub const SYNCHRONIZE_CACHE: Self = Self::of([0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0], false);
 
     /// Every mode page (SPC-4, MODE SENSE(6): page code 3Fh), of which only
-    /// the mode parameter header is read. [`MODE_BYTES`] allocated, so a
-    /// device with pages to send has room to send them.
+    /// the mode parameter header is read. The standard lets the allocation
+    /// be the header's four bytes; all pages with [`MODE_BYTES`] allocated is
+    /// asked instead as the form a device is likeliest to have been sent
+    /// before, which is a choice and no requirement.
     pub const MODE_SENSE: Self = Self::of([0x1A, 0, 0x3F, 0, MODE_BYTES as u8, 0], true);
 
     /// READ(10) or WRITE(10) of `sectors` at `lba`.
@@ -104,9 +106,11 @@ pub const MODE_BYTES: usize = 192;
 /// PARAMETER field for direct access block devices"), which is byte 2 of
 /// MODE SENSE(6)'s mode parameter header (SPC-4, mode parameter header
 /// formats). `header` is the first bytes of what `reply` delivered. A device
-/// that refuses MODE SENSE, or answers less than the header, takes none.
+/// that refuses MODE SENSE, answers less than the header, or states a MODE
+/// DATA LENGTH (byte 0, the bytes after itself) that ends before the
+/// header does, takes none.
 pub fn dpofua(reply: Reply, header: &[u8; 4]) -> bool {
-    matches!(reply, Reply::Ok { delivered } if delivered >= 4) && header[2] & (1 << 4) != 0
+    matches!(reply, Reply::Ok { delivered } if delivered >= 4) && header[0] >= 3 && header[2] & (1 << 4) != 0
 }
 
 /// Bytes a REQUEST SENSE asks for.
@@ -654,6 +658,8 @@ mod tests {
         assert!(!dpofua(whole, &[3, 0, 0x80, 0]), "write protect is not DPOFUA");
         assert!(!dpofua(whole, &[3, 0, 0, 0]));
         assert!(!dpofua(Reply::Ok { delivered: 3 }, &[3, 0, 0x10, 0]), "a header that did not arrive");
+        assert!(!dpofua(whole, &[2, 0, 0x10, 0]), "mode data that ends inside the header");
+        assert!(!dpofua(whole, &[0, 0, 0x10, 0]), "no mode data");
         let illegal = Sense { key: 0x05, asc: 0x20, ..Sense::NONE };
         assert!(!dpofua(Reply::Refused(illegal), &[3, 0, 0x10, 0]));
         assert!(!dpofua(Reply::Broken, &[3, 0, 0x10, 0]));

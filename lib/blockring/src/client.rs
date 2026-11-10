@@ -29,7 +29,9 @@
 //! kept and never issued again: [`Outcome::Done`] for it is durable. The
 //! caller asks one only of a session that offers it
 //! ([`crate::wire::Opened::fua`]), and never over a write of its own that is
-//! kept: issued again after a loss, the kept write would replace it.
+//! kept: issued again after a loss, the kept write would replace it, and a
+//! later flush would call the older bytes durable. One that is, is the
+//! caller's bug, and [`Client::next_request`] panics rather than send it.
 //!
 //! **What it keeps is bounded.** Once the acknowledged writes it keeps reach
 //! the limit it was made with, the caller's next write waits while the client
@@ -263,6 +265,9 @@ impl<P: Clone, const D: usize> Client<P, D> {
     /// `D` on the wire, what is next must wait for writes being issued again
     /// or for the client's own flush, or `place` has no room for it, which a
     /// request on the wire answered makes.
+    ///
+    /// # Panics
+    /// When a write with `fua` is next and a kept write overlaps it.
     pub fn next_request(&mut self, mut place: impl FnMut(Placing<'_, P>) -> Option<Run>) -> Option<Request> {
         if !self.up || self.wire.values().count() == D {
             return None;
@@ -312,6 +317,16 @@ impl<P: Clone, const D: usize> Client<P, D> {
                 Op::Read { run: place(Placing::Read { ticket, blocks })?, lba }
             }
             Ask::Write { lba, blocks, payload, fua } => {
+                // Nothing is being issued again here, so every kept write is
+                // in `acked`.
+                let over = self.acked.iter().find(|a| a.lba < lba + u64::from(*blocks) && *lba < a.lba + u64::from(a.blocks));
+                if let (true, Some(kept)) = (*fua, over) {
+                    panic!(
+                        "blockring: a forced write of {blocks} blocks at {lba} over the kept write of {} at {}, \
+                         which no flush has covered",
+                        kept.blocks, kept.lba
+                    );
+                }
                 let fua = *fua && cfg!(not(feature = "mutate-fua-goes-out-unforced"));
                 Op::Write { run: place(Placing::Write { payload, blocks: *blocks })?, lba: *lba, fua }
             }
@@ -679,6 +694,32 @@ mod tests {
         client.session_started();
         assert_eq!(next(&mut client), None);
         assert_eq!(client.reissued(), 0);
+    }
+
+    /// A forced write over a kept write is refused before it goes out, and
+    /// goes once a flush has covered the kept one.
+    #[test]
+    fn a_forced_write_goes_over_a_write_only_once_a_flush_covered_it() {
+        let kept = |client: &mut C| {
+            client.submit(1, write(1, 4, 2));
+            let w = next(client).unwrap();
+            answer(client, w, Status::Ok);
+        };
+        let mut client = up(ROOMY);
+        kept(&mut client);
+        client.submit(2, Ask::Flush);
+        let f = next(&mut client).unwrap();
+        answer(&mut client, f, Status::Ok);
+        client.submit(3, Ask::Write { lba: 5, blocks: 2, payload: 3, fua: true });
+        assert!(matches!(next(&mut client).unwrap().op, Op::Write { fua: true, .. }));
+
+        let mut client = up(ROOMY);
+        kept(&mut client);
+        client.submit(3, Ask::Write { lba: 5, blocks: 2, payload: 3, fua: true });
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| next(&mut client)));
+        let why = refused.expect_err("a forced write went out over a kept write");
+        let why = why.downcast_ref::<String>().expect("a message");
+        assert!(why.contains("a forced write of 2 blocks at 5 over the kept write of 2 at 4"), "{why}");
     }
 
     /// A write acknowledged, then a flush answered `Lost`: the write goes out

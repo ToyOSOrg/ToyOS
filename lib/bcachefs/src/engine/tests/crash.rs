@@ -259,10 +259,12 @@ enum Asked {
 }
 
 /// A device that records what it is asked, and takes a durable write
-/// forced, or, with `forces` off, as a write it leaves in its cache.
+/// forced, or, with `forces` off, as a write it leaves in its cache. It
+/// refuses its next `refusing` durable writes, each left in its cache.
 struct Recorded<'a> {
     model: &'a Model,
     forces: bool,
+    refusing: Cell<u32>,
     asked: core::cell::RefCell<Vec<Asked>>,
 }
 
@@ -287,6 +289,11 @@ impl BlockDev for Recorded<'_> {
 
     async fn write_durable(&self, lba: u64, data: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
         self.asked.borrow_mut().push(Asked::Durable(lba));
+        if self.refusing.get() > 0 {
+            self.refusing.set(self.refusing.get() - 1);
+            self.model.write(lba, data).await?;
+            return Err(toyos_blockdev::Error::Device);
+        }
         match self.forces {
             true => self.model.write_durable(lba, data).await,
             false => self.model.write(lba, data).await,
@@ -303,7 +310,7 @@ impl BlockDev for Recorded<'_> {
 fn a_commit_is_one_flush_and_its_entry_forced_and_is_lost_where_the_entry_is_not() {
     for forces in [true, false] {
         let model = Model::new(formatted(64 << 20, None).into_inner(), 512);
-        let dev = Recorded { model: &model, forces, asked: core::cell::RefCell::default() };
+        let dev = Recorded { model: &model, forces, refusing: Cell::new(0), asked: core::cell::RefCell::default() };
         let mount = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
         let root = mount.root();
         block_on_ready(async {
@@ -343,6 +350,31 @@ fn a_commit_is_one_flush_and_its_entry_forced_and_is_lost_where_the_entry_is_not
         assert!(next > entry, "the second entry at block {next} is not after the first at {entry}");
         block_on_ready(mount.unmount()).unwrap();
     }
+}
+
+/// A durable write the device refused may be in its cache, so the attempt
+/// after it flushes before it writes the entry again: the model refuses a
+/// forced write over what no flush has covered, and the commit is asked as
+/// flush, entry, flush, entry.
+#[test]
+fn an_entry_written_again_after_a_refusal_follows_a_flush_of_its_own() {
+    let model = Model::new(formatted(64 << 20, None).into_inner(), 512);
+    let dev = Recorded { model: &model, forces: true, refusing: Cell::new(0), asked: core::cell::RefCell::default() };
+    let mount = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+    block_on_ready(async {
+        mount.create(mount.root(), b"first", New::File, OWNER, NOW).await.unwrap();
+        mount.commit().await.unwrap();
+        dev.asked.borrow_mut().clear();
+        dev.refusing.set(1);
+        mount.create(mount.root(), b"second", New::File, OWNER, NOW).await.unwrap();
+        mount.commit().await.unwrap();
+    });
+    let asked = dev.asked.take();
+    let [Asked::Flush, Asked::Durable(first), Asked::Flush, Asked::Durable(again)] = asked[..] else {
+        panic!("a commit whose entry was refused once asked {asked:?}")
+    };
+    assert_eq!(first, again);
+    block_on_ready(mount.unmount()).unwrap();
 }
 
 fn creates(n: usize) -> Vec<Op> {

@@ -1444,10 +1444,11 @@ impl<D: BlockDev> Mount<D> {
     /// flush and itself durable as it is written (A2.12), so each is durable
     /// once written and so is every node write that completed before it. An
     /// entry naming itself has its header sector written last, once the rest
-    /// is durable. The journal's blocks are written no other way, so a
-    /// durable write of one is never over a write no flush has covered. A
-    /// failed write is reissued with the same bytes, or the mount stops
-    /// writing.
+    /// is durable. A durable write is never over a write no flush has
+    /// covered: an attempt that failed may have left the entry's blocks
+    /// written and unflushed, and each attempt's own flush covers them
+    /// before it writes again. A failed write is reissued with the same
+    /// bytes, or the mount stops writing.
     async fn write_entries(&self, upto: u64) -> Result<()> {
         self.journal_queue.wait(|| (!self.journal_held.get()).then(|| self.journal_held.set(true))).await;
         let out = async {

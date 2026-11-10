@@ -3321,6 +3321,9 @@ fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
     let mut console = qemu.boot_log().to_string();
     qemu::await_marker(&mut qemu, &mut console, ": serving it as disk 0", "usbd to serve the boot stick")?;
+    // Which way the stick takes a forced write, as its MODE SENSE answered.
+    let served = console.lines().find(|l| l.contains(": serving it as disk 0")).unwrap_or_default();
+    eprintln!("  [usbd] {}", served.trim());
     qemu::await_marker(&mut qemu, &mut console, toyos_logstream::LOG_OPENED, "logkeeper to open the log")?;
     // The stop is asked for under load: the stick is being written when the
     // power button is pressed, as the metal row's deadline finds it.
