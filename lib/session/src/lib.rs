@@ -273,22 +273,29 @@ impl Listed {
 /// A session opened on [`LOGIN_PORT`] through `login`, the namespace a
 /// login authority is endowed under that name: its launcher, as a namespace
 /// holding `toyos::launch::LAUNCHER`, and its control connection.
+///
+/// **A session whose controls are gone is asked for again.** Its owner ended
+/// before the supervisor read that end, which it reads next; a failing
+/// owner's opens are refused past their budget, so the asking ends.
 pub fn open(
     login: &toyos::namespace::Namespace,
 ) -> Result<(toyos::namespace::Namespace, toyos::ipc::Connection), String> {
-    let conn = login.open(LOGIN_PORT).map_err(|e| format!("the supervisor's login port refused: {e:?}"))?;
-    conn.signal(MSG_OPEN).map_err(|e| format!("the open was not sent: {e:?}"))?;
     let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
-    let frame = rx.recv(&conn).map_err(|e| format!("the open was not answered: {e:?}"))?;
-    if frame.msg_type != MSG_OPENED {
-        let why = String::from_utf8_lossy(rx.payload(frame.payload_len));
-        return Err(format!("the supervisor refused a session: {why}"));
+    loop {
+        let conn = login.open(LOGIN_PORT).map_err(|e| format!("the supervisor's login port refused: {e:?}"))?;
+        conn.signal(MSG_OPEN).map_err(|e| format!("the open was not sent: {e:?}"))?;
+        let frame = rx.recv(&conn).map_err(|e| format!("the open was not answered: {e:?}"))?;
+        if frame.msg_type != MSG_OPENED {
+            let why = String::from_utf8_lossy(rx.payload(frame.payload_len));
+            return Err(format!("the supervisor refused a session: {why}"));
+        }
+        let [launcher, controls] = rx.take_handles::<2>().ok_or("the session came without its handles")?;
+        match toyos::namespace::Namespace::received(controls).open(CONTROL) {
+            Ok(control) => return Ok((toyos::namespace::Namespace::received(launcher), control)),
+            Err(toyos_abi::syscall::SyscallError::Gone) => {}
+            Err(e) => return Err(format!("the session's controls refused its control connection: {e:?}")),
+        }
     }
-    let [launcher, controls] = rx.take_handles::<2>().ok_or("the session came without its handles")?;
-    let control = toyos::namespace::Namespace::received(controls)
-        .open(CONTROL)
-        .map_err(|e| format!("the session's controls refused its control connection: {e:?}"))?;
-    Ok((toyos::namespace::Namespace::received(launcher), control))
 }
 
 #[cfg(test)]

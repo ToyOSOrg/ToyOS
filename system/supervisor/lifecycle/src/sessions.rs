@@ -58,20 +58,24 @@ pub fn holds_machine_launcher(program: &Program) -> bool {
 }
 
 /// One open session, as [`desktop_session`] judges it: whether it is a
-/// desktop, the login authority that opened it, and whether its owner still
-/// runs, which it may not while its end waits to be read.
+/// desktop, the login authority that opened it, and the two signs that its
+/// owner has ended.
 #[derive(Clone, Copy, Debug)]
 pub struct Open<'a> {
     pub desktop: bool,
     pub opener: &'a str,
-    pub running: bool,
+    /// The owner's link has hung up. The kernel closes an ending process's
+    /// handles before it publishes its exit, so this comes first.
+    pub hung_up: bool,
+    /// The owner's exit is published.
+    pub exited: bool,
 }
 
 /// The desktop session `opener` may be handed again, by its index: one it
-/// opened whose owner still runs. **Never one whose owner has ended** though
-/// its end is not read yet: its launcher's port is about to close.
+/// opened whose owner shows no sign of its end. **Never one whose owner has
+/// ended** though the session is still open: its controls are gone.
 pub fn desktop_session(open: &[Open<'_>], opener: &str) -> Option<usize> {
-    open.iter().position(|s| s.desktop && s.opener == opener && s.running)
+    open.iter().position(|s| s.desktop && s.opener == opener && !s.hung_up && !s.exited)
 }
 
 /// The session a launch an owner handed over runs in: its link's, never what
@@ -153,15 +157,19 @@ mod tests {
         assert!(holds_machine_launcher(&Program { starts: vec!["toybox".into()], ..Program::default() }));
     }
 
-    /// A desktop whose owner ended, its end not read yet, is not handed
-    /// again: the next running one is, or none and one is opened.
+    /// A desktop whose owner ended is not handed again, whether its link
+    /// hung up with its exit not published yet or its exit is published and
+    /// the session not closed yet: the next running one is, or none and one
+    /// is opened.
     #[test]
     fn a_desktop_whose_owner_ended_is_not_handed_again() {
-        let ended = Open { desktop: true, opener: "compositor", running: false };
-        let running = Open { desktop: true, opener: "compositor", running: true };
-        let remote = Open { desktop: false, opener: "sshserver", running: true };
-        assert_eq!(desktop_session(&[ended], "compositor"), None);
-        assert_eq!(desktop_session(&[remote, ended, running], "compositor"), Some(2));
+        let running = Open { desktop: true, opener: "compositor", hung_up: false, exited: false };
+        let hung_up = Open { hung_up: true, ..running };
+        let exited = Open { exited: true, ..running };
+        let remote = Open { desktop: false, opener: "sshserver", ..running };
+        assert_eq!(desktop_session(&[hung_up], "compositor"), None);
+        assert_eq!(desktop_session(&[exited], "compositor"), None);
+        assert_eq!(desktop_session(&[remote, hung_up, exited, running], "compositor"), Some(3));
         assert_eq!(desktop_session(&[running], "sshserver"), None);
     }
 
