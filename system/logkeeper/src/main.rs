@@ -45,12 +45,14 @@
 //! The console's carriers are the third ([`carrier`]): the console UART's
 //! driver, and a VM's console channel, which the UART goes quiet for while it
 //! carries the log. Neither of the two can slow the file: each is a thread
-//! with an offset into the replay, which follows the file once it is open.
+//! with an offset into the replay. The replay follows the file while the file
+//! has all of it, and leads it while the part is refused or catching up.
 //!
-//! **The volume is opened on a thread of its own, and nothing waits for it**:
-//! /log's file server may start late. Until it opens, the readers and the
-//! console have each round as it is read; once it opens, the file first takes
-//! the boot so far from the replay.
+//! **The volume is opened on a thread of its own**: /log's file server may
+//! start late. Only the stop's flush waits for it, within [`STOP_CATCH_UP`].
+//! Until it opens, the readers and the console have each round as it is read;
+//! once it opens, the file takes the boot so far from the replay, a part's
+//! worth a round.
 //!
 //! # Its whole authority
 //!
@@ -91,7 +93,7 @@ mod policy;
 mod serve;
 mod store;
 
-use std::sync::mpsc::{self, TryRecvError};
+use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -171,10 +173,8 @@ fn main() {
                     "logkeeper: {} is asked again - this boot's lines are kept until {DIR} takes them ({dated})",
                     v.path()
                 ),
-                None => say!(
-                    "logkeeper: no {DIR} on this machine - this boot's kernel log is on the console only \
-                     ({dated})"
-                ),
+                // `Volume::open` has said why.
+                None => say!("logkeeper: this boot's kernel log is on the console only ({dated})"),
             }
             opened.send(volume).expect("logkeeper: the loop holds the volume's receiver for good");
         })
@@ -267,6 +267,8 @@ struct Stopping {
 /// leaving the rest to drain the rings, the final sync and the answer. What
 /// it does not reach is said, in the file and on the console.
 const STOP_CATCH_UP: Duration = Duration::from_millis(toyos_quiesce::FLUSH_MS / 2);
+
+const OPENER_ENDED: &str = "logkeeper: the volume's thread ended without answering";
 
 /// Text a stop may hold back from the file: a refused stop writes it, and
 /// what is past it is counted and said then.
@@ -589,8 +591,9 @@ impl Log {
             }
             return;
         }
-        // The file first: once it is open, a reader is served only what /log
-        // already holds, whenever the machine stops between the two.
+        // The file first: while it has all of the replay, a reader is served
+        // only what /log already holds, whenever the machine stops between the
+        // two. A part refused or catching up takes this text from the replay.
         self.to_volume(file.as_bytes(), !flushing);
         self.hub.append(file.as_bytes(), Some(Arc::clone(&through)));
         if let Some(spoken) = &self.spoken {
@@ -623,17 +626,20 @@ impl Log {
     }
 
     /// The volume, once its opener answers outside a stop. Its file stands
-    /// at the replay's start, so the next round's catch-up gives it the boot
-    /// so far, a part at a time.
+    /// at the replay's start and is given the boot so far, a part's worth
+    /// here and a part's worth each round after.
     fn adopt(&mut self) {
         if self.stopping.is_some() {
             return;
         }
         let Some(opening) = &self.opening else { return };
         match opening.try_recv() {
-            Ok(volume) => self.took(volume),
+            Ok(volume) => {
+                self.took(volume);
+                self.caught_up();
+            }
             Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => panic!("logkeeper: the volume's thread ended without answering"),
+            Err(TryRecvError::Disconnected) => panic!("{OPENER_ENDED}"),
         }
     }
 
@@ -769,13 +775,16 @@ impl Log {
     /// written by now, so the volume is made durable, and the supervisor is told.
     fn flushed(&mut self) {
         let deadline = Instant::now() + STOP_CATCH_UP;
-        // An opener that answers during the flush's rounds or the stop's own
-        // time: the file takes the boot in the catch-up below.
-        self.adopt();
+        // An opener that has answered since the loop last asked, or answers
+        // in the stop's own time: the file takes the boot in `finish` below,
+        // inside the deadline.
         if let Some(opening) = &self.opening {
             match opening.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok(volume) => self.took(volume),
-                Err(_) => toyos::error!("logkeeper: {DIR} had not opened by the stop - this boot's log is on the console only"),
+                Err(RecvTimeoutError::Timeout) => {
+                    toyos::error!("logkeeper: {DIR} had not opened by the stop - this boot's log is on the console only")
+                }
+                Err(RecvTimeoutError::Disconnected) => panic!("{OPENER_ENDED}"),
             }
         }
         if let Some(v) = self.volume.as_mut() {
@@ -814,13 +823,20 @@ impl Log {
     }
 
     /// The supervisor's stop has synced its files and is about to stop its
-    /// drivers: write the stop mark over a durable log, and say so. No volume,
-    /// no call: `/log`'s server may never have answered.
+    /// drivers: write the stop mark over a durable log, and say so. The mark
+    /// is withheld, and no call made, unless the part is open: `/log`'s
+    /// server may never have answered, and a part the volume refused is not
+    /// this boot's log, so the mark would call a stop clean whose log is not
+    /// on the volume.
     fn mark(&mut self) {
         let Some(stopping) = self.stopping.as_mut() else {
             panic!("logkeeper: the supervisor asked for the stop mark, and no stop was flushed for");
         };
-        stopping.marked = self.volume.as_ref().is_some_and(Volume::is_open)
+        let open = self.volume.as_ref().is_some_and(Volume::is_open);
+        if !open {
+            toyos::warn!("logkeeper: {DIR} does not hold this boot's log, so the stop is not marked - the next boot will not count this one as clean");
+        }
+        stopping.marked = open
             && store::mark_stopped()
                 .inspect_err(|e| {
                     toyos::error!("logkeeper: {DIR} would not take the stop mark ({e}) - the next boot will not count this one as clean")
