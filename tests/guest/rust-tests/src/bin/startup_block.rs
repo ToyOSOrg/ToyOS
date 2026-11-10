@@ -18,6 +18,9 @@ use toyos_abi::syscall::{self, SpawnArgs};
 
 const SELF: &str = "/system/bin/test_rs_startup_block";
 const SAID: &str = "said";
+/// What each child exits with once its checks hold, so neither can pass as the other.
+const SAID_HELD: i32 = 41;
+const UNSAID_HELD: i32 = 42;
 /// Past the 64 KiB the kernel once copied of each, and past a page many times over.
 const LONG: usize = 300 * 1024;
 
@@ -26,12 +29,13 @@ fn long(byte: u8) -> String {
 }
 
 /// The child given no block: no argument, not even its name, and no variable.
-fn unsaid() {
+fn unsaid() -> ! {
     assert_eq!(std::env::vars_os().count(), 0, "a child given no block has an environment");
+    std::process::exit(UNSAID_HELD);
 }
 
 /// The child given the parent's block: each argument and variable whole.
-fn said() {
+fn said() -> ! {
     let args: Vec<String> = std::env::args().collect();
     assert_eq!(args.len(), 4, "arguments: {}", args.len());
     assert_eq!((args[0].as_str(), args[1].as_str(), args[3].as_str()), (SELF, SAID, "last"));
@@ -39,6 +43,7 @@ fn said() {
     assert!(std::env::var("LONG").is_ok_and(|v| v == long(b'e')), "the long variable is not the parent's");
     assert_eq!(std::env::var("AFTER").as_deref(), Ok("the variable after it"));
     assert_eq!(std::env::current_dir().expect("a working directory").to_str(), Some("/tmp"));
+    std::process::exit(SAID_HELD);
 }
 
 /// This program started from its ranges alone, as `lay_out` leaves them.
@@ -69,8 +74,8 @@ fn spawn_unsaid() -> End {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        _ if args.is_empty() => return unsaid(),
-        Some(SAID) => return said(),
+        _ if args.is_empty() => unsaid(),
+        Some(SAID) => said(),
         _ => {}
     }
     let status = Command::new(SELF)
@@ -80,7 +85,7 @@ fn main() {
         .current_dir("/tmp")
         .status()
         .expect("spawn the child given a block");
-    assert!(status.success(), "the child given a block: {status:?}");
-    assert_eq!(spawn_unsaid(), End::Exited(0), "the child given no block");
+    assert_eq!(status.code(), Some(SAID_HELD), "the child given a block: {status:?}");
+    assert_eq!(spawn_unsaid(), End::Exited(UNSAID_HELD), "the child given no block");
     println!("startup_block: PASS");
 }

@@ -39,9 +39,8 @@ fn strings(run: &[u8]) -> impl Iterator<Item = &[u8]> {
     run.split(|&b| b == 0).filter(|s| !s.is_empty())
 }
 
-/// The block that says `args` and `env`, each a run of strings a NUL
-/// separates, an empty one skipped. `None` past [`MAX_BLOCK`].
-pub fn block(args: &[u8], env: &[u8]) -> Option<Vec<u8>> {
+/// The bytes of the block that says `args` and `env`. `None` past [`MAX_BLOCK`].
+fn bytes(args: &[u8], env: &[u8]) -> Option<Vec<u8>> {
     let argc = strings(args).count();
     let words = argc + strings(env).count() + 3;
     let text: usize = strings(args).chain(strings(env)).map(|s| s.len() + 1).sum();
@@ -66,6 +65,15 @@ pub fn block(args: &[u8], env: &[u8]) -> Option<Vec<u8>> {
     Some(block)
 }
 
+/// Why no block was made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// The arguments and environment are past [`MAX_BLOCK`].
+    TooLarge,
+    /// The kernel made no memory for it.
+    Memory(SyscallError),
+}
+
 /// A block in a memory object, which a spawn names as the pages its child
 /// starts with at [`AT`] (`Program::starting_with`) and may drop once the
 /// spawn has answered.
@@ -75,15 +83,18 @@ pub struct Block {
 }
 
 impl Block {
-    /// `bytes`, which [`block`] made, in memory counted to the job `job` is a
-    /// handle to carrying `WRITE`, the one the child runs in, or else to this
-    /// process's own.
-    pub fn new(bytes: &[u8], job: Option<BorrowedHandle<'_>>) -> Result<Block, SyscallError> {
+    /// The block that says `args` and `env`, each a run of strings a NUL
+    /// separates, an empty one skipped, in memory counted to the job `job` is
+    /// a handle to carrying `WRITE`, the one the child runs in, or else to
+    /// this process's own.
+    pub fn new(args: &[u8], env: &[u8], job: Option<BorrowedHandle<'_>>) -> Result<Block, Refused> {
+        let bytes = bytes(args, env).ok_or(Refused::TooLarge)?;
         let memory = match job {
-            Some(job) => SharedMemory::create_for(job, bytes.len())?,
-            None => SharedMemory::create(bytes.len())?,
-        };
-        memory.bytes().write(0, bytes);
+            Some(job) => SharedMemory::create_for(job, bytes.len()),
+            None => SharedMemory::create(bytes.len()),
+        }
+        .map_err(Refused::Memory)?;
+        memory.bytes().write(0, &bytes);
         Ok(Block { memory, len: bytes.len() })
     }
 
@@ -105,8 +116,9 @@ impl Block {
 /// A program may write them, as C lets `main` write its `argv`.
 pub fn args() -> (usize, *const *const u8) {
     let at = AT as *const u64;
-    // SAFETY: every process starts with the block's first page mapped at
-    // `AT`, and a block's pointers follow its count.
+    // SAFETY: a program `crate::elf::program::lay_out` laid out starts with
+    // the block's first page mapped at `AT`, and a block's pointers follow
+    // its count.
     unsafe { (at.read() as usize, at.add(1).cast()) }
 }
 
@@ -141,7 +153,7 @@ mod tests {
     /// every pointer the address its string lies at once the block is at `AT`.
     #[test]
     fn a_block_s_pointers_name_its_strings_in_order() {
-        let block = block(b"/bin/echo\0-n\0hello world", b"HOME=/home/toy\0PWD=/\0").unwrap();
+        let block = bytes(b"/bin/echo\0-n\0hello world", b"HOME=/home/toy\0PWD=/\0").unwrap();
         assert_eq!(u64::from_ne_bytes(block[..8].try_into().unwrap()), 3);
         let words: Vec<_> = (1..8).map(|word| string(&block, word)).collect();
         assert_eq!(
@@ -154,16 +166,16 @@ mod tests {
     /// Nothing said is a count of zero and two nulls: what a page of zeros reads as.
     #[test]
     fn a_block_that_says_nothing_is_zeros() {
-        assert_eq!(block(b"", b"\0\0").unwrap(), [0u8; 24]);
+        assert_eq!(bytes(b"", b"\0\0").unwrap(), [0u8; 24]);
     }
 
     /// A block ends below the program with a page to spare, and one byte more is refused.
     #[test]
     fn a_block_past_its_reservation_is_refused() {
         let fits = alloc::vec![b'a'; MAX_BLOCK - 4 * 8 - 1];
-        assert_eq!(block(&fits, b"").map(|block| block.len()), Some(MAX_BLOCK));
+        assert_eq!(bytes(&fits, b"").map(|block| block.len()), Some(MAX_BLOCK));
         let mut past = fits;
         past.push(b'a');
-        assert_eq!(block(&past, b""), None);
+        assert_eq!(bytes(&past, b""), None);
     }
 }

@@ -60,10 +60,11 @@ fn reserved(lo: u64, hi: u64) -> SpawnMap {
 
 /// The program `file`, an image for `machine`, laid out with its lowest page
 /// at [`BASE`], each `PT_LOAD` copied from `object`, the memory object holding
-/// `file`, below it a startup block that says nothing. Refused by name where the kernel would refuse a range, or the
-/// program could not start: no `PT_LOAD` maps its program header table, which
-/// it reads to relocate itself, or a segment asks to be written and executed,
-/// which no page is, as the loader refuses a library's (`crate::dl`).
+/// `file`, below it a startup block that says nothing. Refused by name where
+/// the kernel would refuse a range, or the program could not start: no
+/// `PT_LOAD` maps its program header table, which it reads to relocate itself,
+/// or a segment asks to be written and executed, which no page is, as the
+/// loader refuses a library's (`crate::dl`).
 pub fn lay_out(file: &[u8], machine: Machine, object: u64) -> Result<Program, &'static str> {
     let layout = Layout::parse(file, machine).map_err(|e| e.as_str())?;
     if layout.program_headers().is_none() {

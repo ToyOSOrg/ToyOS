@@ -175,10 +175,13 @@ Beside that order, each waiting on something outside it:
         that `PWD` among it, are a startup block its parent lays out below
         its program (`toyos::startup`), which the kernel neither stores nor
         answers (#1200): `SYS_GET_ENV` (73) and `ProcessData::env` are
-        gone. The kernel still keeps one userland text of each process, the
+        gone. The kernel still keeps two userland texts of each process: the
         path its parent read the program from (`SpawnArgs::path_ptr`), which
         the spawn's record and a crash's frames name the file by and
-        `symbolize` opens; its last component is the process's name. `/tmp` is the
+        `symbolize` opens, its last component the process's name; and its
+        endowment labels, kept for its life and answered through
+        `SYS_ENDOWMENTS` as the environment was, the next candidate for the
+        block. `/tmp` is the
         MEMORY file server's, one for the machine, of which each installed
         package's `/tmp` is its own directory (#1181); per session, as the owner
         ruled ("Per session", 2026-10-03), is the isolation track's stage 3.

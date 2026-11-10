@@ -71,7 +71,7 @@ fn main() {
     refused("more ranges than a spawn carries", vec![honest[0]; MAX_SPAWN_MAPS + 1], laid.entry, invalid);
     refused("an address that is no page boundary", with(&|m| m[0].addr += 8), laid.entry, invalid);
     refused("a length that is no whole pages", with(&|m| m[0].len += 8), laid.entry, invalid);
-    refused("a range past the user half", with(&|m| m[0].addr = 0x7fff_ffff_f000), laid.entry, invalid);
+    refused("a range past the user half", with(&|m| m[text].addr = 0x7fff_ffff_f000), laid.entry, invalid);
     refused("a range in the kernel half", with(&|m| m[0].addr = 0xffff_8000_0000_0000), laid.entry, invalid);
     refused("a protection no VmProt names", with(&|m| m[text].prot = 4), laid.entry, invalid);
     refused("more bytes copied than the range holds", with(&|m| m[text].copied = m[text].len + 1), laid.entry, invalid);

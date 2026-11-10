@@ -12,7 +12,7 @@
 use toyos::elf::program::lay_out;
 use toyos::elf::Machine;
 use toyos::shm::SharedMemory;
-use toyos::startup::{self, Block};
+use toyos::startup::Block;
 use toyos::AsHandle;
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
@@ -31,8 +31,7 @@ fn object_of(path: &str) -> (SharedMemory, Vec<u8>) {
 
 /// Spawn the program `bytes`, laid out from the object `image` names.
 fn spawn(image: RawHandle, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
-    let said = startup::block(format!("{SELF}\0{CHILD}").as_bytes(), b"").expect("arguments a child starts with");
-    let block = Block::new(&said, None).expect("a startup block");
+    let block = Block::new(format!("{SELF}\0{CHILD}").as_bytes(), b"", None).expect("a startup block");
     let laid = lay_out(bytes, Machine::RUNNING, u64::from(image.0)).expect("this program lays out").starting_with(&block);
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {

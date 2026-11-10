@@ -8,7 +8,7 @@ opened: 2026-10-20
 
 A spawn's `argv` is one `NUL`-separated run of bytes (`toyos::spawn::Spawn`),
 which the startup block's writer splits skipping every empty string
-(`toyos::startup::block`), as the kernel did while it copied `argv`. So a
+(`toyos::startup::Block::new`), as the kernel did while it copied `argv`. So a
 child is never handed an empty argument, and a program asked to run
 `cmd "" x` sees `cmd x`. An argument that is not UTF-8 reaches the block and a
 C child as given, and a Rust child's `std::env::args_os` as an empty one

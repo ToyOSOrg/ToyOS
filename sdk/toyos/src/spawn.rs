@@ -207,11 +207,12 @@ impl Helper<'_> {
         let path = image_and_name(s.program, s.image).0;
         let env = crate::files::starting_in(s.env, s.cwd)
             .ok_or(Refused::Invalid("a working directory that is not absolute, is too long or holds a NUL"))?;
-        let said = crate::startup::block(s.argv, &env)
-            .ok_or(Refused::Invalid("arguments and an environment past what a child starts with"))?;
         // Held until the spawn answers: the child copies its pages from it.
         let job = s.endow.iter().find(|(label, _)| *label == JOB_LABEL).map(|(_, job)| job.as_handle());
-        let block = crate::startup::Block::new(&said, job).map_err(Refused::Syscall)?;
+        let block = crate::startup::Block::new(s.argv, &env, job).map_err(|why| match why {
+            crate::startup::Refused::TooLarge => Refused::Invalid("arguments and an environment past what a child starts with"),
+            crate::startup::Refused::Memory(e) => Refused::Syscall(e),
+        })?;
         let program = crate::elf::program::lay_out(image.bytes(), crate::elf::Machine::RUNNING, image.handle())
             .map_err(Refused::Invalid)?
             .starting_with(&block);

@@ -17,3 +17,11 @@ draws 32 bits for the image and the mmap base (`CONFIG_ARCH_MMAP_RND_BITS`,
 three bases is set 88 to 168 times, and each base claims Linux's bits or its
 shortfall is filed as a defect. **Mutation**: `BASE + n * 2 MiB`; a constant
 seed. **Oracle**: Linux's bits.
+
+A fourth address is constant since #1200: the startup block
+(`toyos::startup::AT`), below the image. It is the only one of the four whose
+bytes another party chooses: writable, up to 2 MiB, written by the parent,
+and in a launched program holding strings of a caller with less authority than
+the row. **Exit**: the block has no address of its own. It moves with the
+image, found by every SDK copy through the process's module list
+(`toyos::tls`), and the exit above counts its base with the other three.

@@ -7,7 +7,6 @@ pub mod tls;
 #[path = "../../../../rust/library/std/src/sys/pal/unsupported/common.rs"]
 mod unsupported_common;
 
-
 pub use unsupported_common::{cleanup, init};
 
 /// The kernel's word as the `ErrorKind` a caller can act on.
