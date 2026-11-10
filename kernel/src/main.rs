@@ -285,15 +285,10 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         "boot: cmdline {:#x}+{}",
         kernel_args.cmdline_addr, kernel_args.cmdline_len
     );
-    // Before `mm::init`, which may hand the parameter's memory out. This record
-    // is how a slot that died or was refused reaches the next boot's `/log`.
+    // Before `mm::init`, which may hand the parameter's memory out.
     match params::slot(cmdline) {
-        (Some(slot), None) => log!("{} {slot}, the one the slot table marks", params::SLOT_RECORD),
-        (Some(slot), Some(refused)) => match refused.split_once(':') {
-            Some((marked, why)) => log!("{} {slot}, because the marked slot {marked} was refused: {why}", params::SLOT_RECORD),
-            None => log!("{} {slot}, because the marked slot was refused: {refused}", params::SLOT_RECORD),
-        },
-        (None, _) => log!("{} none: the loader named no slot", params::SLOT_RECORD),
+        Some(slot) => log!("{} {slot}, the one the slot table marks", params::SLOT_RECORD),
+        None => log!("{} none: the loader named no slot", params::SLOT_RECORD),
     }
 
     // The signed kernel section the loader laid this kernel out of, kept for

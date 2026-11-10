@@ -1530,9 +1530,8 @@ fn check_params(root: &Path, params: &[String]) {
 /// other — a prefix only one of them knows is an image the other refuses.
 const VALUED_PARAMS: &[(&str, &str)] = &[
     ("toyos_tco::DEADLINE_PARAM", toyos_tco::DEADLINE_PARAM),
-    // The loader's words about the slot it booted.
+    // The loader's word naming the slot it booted.
     ("toyos_abi::boot::SLOT_PARAM", toyos_abi::boot::SLOT_PARAM),
-    ("toyos_abi::boot::SLOT_REFUSED_PARAM", toyos_abi::boot::SLOT_REFUSED_PARAM),
 ];
 
 /// The names in [`VALUED_PARAMS`], for a refusal that says what it would have

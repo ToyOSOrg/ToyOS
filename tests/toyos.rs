@@ -646,11 +646,14 @@ const MACHINE_TESTS: &[&str] = &[
     // `images/console.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
-    // The UEFI loader's check of a boot program, which no host test reaches:
-    // a slot whose supervisor is bent is refused before boot services end,
-    // and the other slot boots. On both architectures' QEMU machines; the
-    // `bent_supervisor_falls_back` metal row runs it on a bench.
-    "a_bent_supervisor_is_refused_and_the_other_slot_boots",
+    // The UEFI loader's check of a boot program and what follows its refusal,
+    // which no host test reaches: a marked slot whose supervisor is bent is
+    // refused before boot services end, and the machine stops with the whole
+    // slot beside it unread. On both architectures' QEMU machines, each with
+    // the loader's serial port as its console; no metal row, since the metal
+    // loop judges a boot by the kernel's own record, which this one never
+    // writes.
+    "a_bent_supervisor_is_refused_and_nothing_boots",
     // A spawn and its child's end leave the census as it was, for a program
     // the root server holds in memory, and one each on DATA and `/tmp` read
     // whole: the image's
@@ -864,10 +867,6 @@ const MACHINE_TESTS: &[&str] = &[
 /// than derived from its config and parameters, because sharing is not always
 /// safe and only the author knows.
 const METAL: &[(&str, metal::Metal)] = &[
-    (
-        "bent_supervisor_falls_back",
-        metal::Metal { arms: BENT_SUPERVISOR, judge: |b| bent_supervisor_fell_back(&b[0].loader(), &b[0].kernel()) },
-    ),
     // ---- one image: tests/images/testcases.toml, no parameters, one job list ----
     (
         // The machine's own CPU count, off the SMP bring-up records — a source
@@ -3261,21 +3260,32 @@ fn a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config: &Path) -> 
     Ok(())
 }
 
-/// What a boot whose marked slot's supervisor is bent says: the loader refused
-/// that slot by the section, and the kernel was booted from the other.
-fn bent_supervisor_fell_back(loader: &serial::Serial, kernel: &serial::Serial) -> Result<(), String> {
+/// A boot whose marked slot's supervisor is bent, beside a slot that
+/// verifies: the loader refuses the marked slot by the section, reads nothing
+/// of the other, hands no kernel the machine, and the machine stops.
+fn a_bent_supervisor_is_refused_and_nothing_boots(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    let options = BootOptions {
+        profile,
+        bent: Some(toyos_update::slots::SUPERVISOR_FILE),
+        ready_marker: bootlog::LOADER_BOOTS_NOTHING,
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let by = qemu.budget(qemu::GUEST_QUIET);
+    let after = qemu.await_exit(by)?;
+    let said = serial::Serial::named("the refused boot's serial", format!("{}{after}", qemu.boot_log()));
     let refused = toyos_update::policy::Refusal::Hash(toyos_update::image::SUPERVISOR);
-    loader.must_say(&format!("Slot A: REFUSED, {refused}"))?;
-    // `kernel/src/params.rs`'s `SLOT_RECORD`, which the kernel's binary keeps.
-    kernel.must_say(&format!("boot: slot B, because the marked slot A was refused: {}", refused.word()))?;
-    Ok(())
+    said.must_say(&format!("Slot A: REFUSED, {refused}"))?;
+    said.must_say(&format!("Slots: the marked slot A {}", bootlog::LOADER_BOOTS_NOTHING))?;
+    // A slot the loader verifies says `Slot <letter>: signed header` first.
+    if let Some(line) = said.text().lines().find(|l| l.contains("Slot B:")) {
+        return Err(format!("the loader read slot B after refusing the marked slot: {line:?}\n{}", said.text()));
+    }
+    match said.kernel_lines() {
+        0 => Ok(()),
+        n => Err(format!("a kernel said {n} lines on a machine whose marked slot was refused:\n{}", said.text())),
+    }
 }
-
-/// [`bent_supervisor_fell_back`] on a bench, whose loader keeps its own log.
-const BENT_SUPERVISOR: &[metal::Arm] = &[metal::Arm {
-    bent: Some(toyos_update::slots::SUPERVISOR_FILE),
-    ..metal::once("bentsupervisor", "tests/images/testcases.toml", &[], &[])
-}];
 
 /// Boot `tests/images/testcases.toml` from a USB stick, as a metal boot does,
 /// write the stick through usbd ([`metal::STICK_LOAD_JOB`]), press the power
@@ -4881,15 +4891,9 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "a_supervisor_that_fails_early_says_why_on_the_uart" => a_supervisor_that_fails_early_says_why_on_the_uart(),
         "a_spawn_from_an_image_frees_it_when_the_child_ends" => a_spawn_from_an_image_frees_it_when_the_child_ends(test_config),
         "a_user_copy_faults_in_mid_copy_or_ends_as_bad_address" => a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config),
-        "a_bent_supervisor_is_refused_and_the_other_slot_boots" => {
-            [qemu::Profile::Headless, qemu::Profile::Virt].into_iter().try_for_each(|profile| {
-                let options = BootOptions { profile, bent: Some(toyos_update::slots::SUPERVISOR_FILE), ..Default::default() };
-                let qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-                let loader = serial::Serial::named("loader's serial", qemu.loader_log());
-                let kernel = serial::Serial::named("boot's console", qemu.boot_log().to_string());
-                bent_supervisor_fell_back(&loader, &kernel)
-            })
-        }
+        "a_bent_supervisor_is_refused_and_nothing_boots" => [qemu::Profile::HeadlessNoConsolePort, qemu::Profile::Virt]
+            .into_iter()
+            .try_for_each(|profile| a_bent_supervisor_is_refused_and_nothing_boots(profile, test_config)),
         "the_log_lands_on_the_boot_stick" => the_log_lands_on_the_boot_stick(test_config),
         "a_usb_key_reaches_the_console" => a_usb_key_reaches_the_console(),
         "desktop_without_x2apic" => desktop_without_x2apic(),

@@ -16,9 +16,8 @@
 //! A machine carries two [`slots`], each a FAT partition holding the kernel,
 //! its boot parameter, the two programs and the signed header, and a ROOT partition holding
 //! ROOT; the slot table names both slots and marks one. The loader boots the
-//! marked slot, and falls back to the other where the marked one is refused;
-//! the updater writes only the slot the machine is not running, and moves the
-//! mark last.
+//! marked slot or nothing; the updater writes only the slot the machine is not
+//! running, and moves the mark last.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]

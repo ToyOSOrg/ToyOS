@@ -675,7 +675,7 @@ Not consumers:
      2.4192 GHz, about 105 µs, and 122,724 on the AMD bench, whose CPU states
      no counter rate.
    - An AArch64 QEMU loader boot verifies a signed image. Done:
-     `a_bent_supervisor_is_refused_and_the_other_slot_boots` boots QEMU's
+     `a_bent_supervisor_is_refused_and_nothing_boots` boots QEMU's
      AArch64 machine too.
    - `ed25519-dalek` and the loader's `sha2` leave `Cargo.lock`'s non-dev
      packages. Done (#1019).

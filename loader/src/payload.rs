@@ -36,24 +36,13 @@ impl Payload {
 
     pub fn bytes(&self) -> &[u8] {
         // SAFETY: `at` and `len` are the pages `allocate` took, identity-mapped
-        // while boot services live, and released only by `free`, which takes
-        // `self`.
+        // while boot services live, and never released.
         unsafe { core::slice::from_raw_parts(self.at as *const u8, self.len as usize) }
     }
 
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         // SAFETY: as `bytes`, and `&mut self` is the one borrow of them.
         unsafe { core::slice::from_raw_parts_mut(self.at as *mut u8, self.len as usize) }
-    }
-
-    /// Give the pages back: a payload whose slot was refused is not the kernel's.
-    pub fn free(self, bs: &BootServices) {
-        let pages = self.len.div_ceil(PAGE_SIZE as u64) as usize;
-        // SAFETY: the pages are this payload's own allocation, and `self` is
-        // consumed, so nothing reads them after this.
-        if let Err(e) = unsafe { bs.free_pages(self.at, pages) } {
-            println!("Payload: firmware would not take back the {} bytes at {:#x} ({e:?})", self.len, self.at);
-        }
     }
 
     /// Where the kernel is told the payload is.

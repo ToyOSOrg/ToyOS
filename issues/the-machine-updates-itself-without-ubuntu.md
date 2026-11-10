@@ -15,9 +15,7 @@ stdin — and the machine installs nothing the owner did not sign.
 ## Stage 1 — slots, signatures and `update`, proven in QEMU (done)
 
 Done: the signed image (`toyos-update`), the two slots and their table, and
-the loader's verification. The loader boots the marked slot and today the
-other where the marked one is refused; the kernel logs which and why. That
-fallback leaves in stage 2.
+the loader's verification.
 
 - **`update`** holds the slot table and the idle slot's two partitions, which
   init claims against the ROOT the kernel holds, writes the image and moves the
@@ -28,38 +26,29 @@ fallback leaves in stage 2.
   (`--owner-key`, `--update-image`, minted by `--signing-key-new`) for an image
   installed on the owner's machine, whose loader keeps the machine's floor.
 
-## Stage 2 — fix forward: the loader boots the marked slot or nothing
+## Stage 2 — fix forward: the loader boots the marked slot or nothing (done)
 
 Owner ruling, 2026-11-05, answering #1191's open decisions: updates fix
 forward, with no automatic fallback to the previous slot.
 
-The loader falls back today in three ways, all of which go:
+Done: a pass tries and boots the marked slot and no other. Where it is
+refused, the loader names the refusal on the console and in `loader.log` and
+ends as its panic does. The other slot is read only where the proof record
+names it: its signed header is verified to raise the floor, and nothing of it
+boots. The kernel is told only the slot it was booted from. #1196 took the
+death-driven fallback out with the black-box page.
 
-- `policy::order` names the other slot after the marked one, and
-  `slot::choose` boots it when the marked one is refused;
-- `Refusal::Died` refuses an image whose last boot the record says died or
-  hung, so the other slot boots instead;
-- where no slot verifies but a dead one, `slot::choose` boots that one,
-  which may be the other slot.
+Not yet the design: the machine is to power off after a refusal and reset
+into nothing else. Today's handler powers off, but resets where a `BootNext`
+bought this boot and the firmware's default entry is another. The exit is
+stage 4 of `issues/the-loader-does-only-what-must-precede-the-handover.md`,
+whose handler never resets.
 
-A pass verifies the marked slot alone and boots it whether or not its last
-boot died. Where it is refused, the loader names the refusal on the panel and
-in `loader.log` and powers the machine off. `slot-refused=` and the kernel's
-line that logs it go with the fallback. A one-shot `update --once` is a
-request, not a fallback, and stays the loader track's stage 5.
-
-With the fallback gone, marking an image dead in the boot record on the
-black-box page no longer refuses anything, but the next boot still reports the
-last boot's death; #1196 (the memory-overwrite request) decides what carries
-that report if the page goes. This stage removes only the fallback's use of
-the record.
-
-**Exit**: `policy`'s host tests hold that a pass names only the marked slot
-and that a dead image in it is still booted.
-`a_bent_supervisor_is_refused_and_the_other_slot_boots` and its metal row
-`bent_supervisor_falls_back` become a bent marked supervisor refused by name,
-nothing booted and the machine powered off; putting the other slot back into
-`policy::order` reds them.
+`a_bent_supervisor_is_refused_and_nothing_boots` holds it on both
+architectures' QEMU machines. It has no metal row: the metal loop judges a
+boot by the kernel's own record, which a refused pass never writes, so a
+refused slot on the T14 is stage 6's exit in that track. A one-shot
+`update --once` is a request, not a fallback, and stays that track's stage 5.
 
 ## Stage 3 — the T14 installs ToyOS on its NVMe
 

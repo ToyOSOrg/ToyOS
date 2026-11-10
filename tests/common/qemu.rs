@@ -1507,7 +1507,7 @@ fn build_boot_image_with(
         Some(file) => {
             let parts = toyos_build::build::build_test_parts(&root, &plan, quiet, &extra_files);
             let signing = toyos_build::image::Signing { key: toyos_build::signing::key(), version: plan.version };
-            super::slots::bent_fallback(arch, &parts, &plan.params.join(","), signing, file)
+            super::slots::bent_marked(arch, &parts, &plan.params.join(","), signing, file)
         }
     }
 }

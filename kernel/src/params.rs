@@ -35,18 +35,15 @@ pub fn claims(token: &str) -> bool {
     PARAMS.iter().any(|(name, _)| *name == token)
         || token.starts_with(toyos_tco::DEADLINE_PARAM)
         || token.starts_with(toyos_abi::boot::SLOT_PARAM)
-        || token.starts_with(toyos_abi::boot::SLOT_REFUSED_PARAM)
 }
 
 /// The head of the record naming the slot this boot came from.
 pub const SLOT_RECORD: &str = "boot: slot";
 
-/// The slot the loader booted, and the marked slot it refused and why, as the
-/// loader wrote them: the last of each, because the loader appends its words
-/// after the slot's own parameter and so has the last one.
-pub fn slot(cmdline: &str) -> (Option<&str>, Option<&str>) {
-    let word = |prefix: &str| toyos_abi::boot::tokens(cmdline).filter_map(|t| t.strip_prefix(prefix)).last();
-    (word(toyos_abi::boot::SLOT_PARAM), word(toyos_abi::boot::SLOT_REFUSED_PARAM))
+/// The slot the loader booted, as the loader wrote it: the last one, because
+/// the loader appends its word after the slot's own parameter.
+pub fn slot(cmdline: &str) -> Option<&str> {
+    toyos_abi::boot::tokens(cmdline).filter_map(|t| t.strip_prefix(toyos_abi::boot::SLOT_PARAM)).last()
 }
 
 pub fn watchdog() -> bool {

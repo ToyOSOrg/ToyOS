@@ -1,9 +1,7 @@
 //! An image whose marked slot's `file` carries one bent byte and whose other
 //! slot carries the same image whole: the loader refuses the marked slot by
-//! the section that file is, before it exits boot services, and boots the
-//! other. A boot that falls back, rather than one with nothing to boot, is the
-//! only refusal a metal bench comes back from, since a loader with no slot
-//! powers the machine off.
+//! the section that file is, before it exits boot services, and boots
+//! nothing, though a slot that verifies is beside it.
 
 use std::io::{Seek, SeekFrom, Write};
 
@@ -12,7 +10,7 @@ use toyos_build::image::{self, SecondSlot, Signing};
 
 /// The bytes of `parts` as such an image, its slot A's `file` (a
 /// `toyos_update::slots::*_FILE`) bent.
-pub fn bent_fallback(
+pub fn bent_marked(
     arch: toyos_build::arch::Arch,
     parts: &Parts,
     params: &str,

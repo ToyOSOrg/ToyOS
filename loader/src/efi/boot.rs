@@ -31,7 +31,7 @@ pub struct BootServices {
     raise_tpl: Unused,
     restore_tpl: Unused,
     allocate_pages: unsafe extern "efiapi" fn(kind: u32, memory: u32, pages: usize, at: *mut u64) -> Status,
-    free_pages: unsafe extern "efiapi" fn(at: u64, pages: usize) -> Status,
+    free_pages: Unused,
     get_memory_map: unsafe extern "efiapi" fn(
         size: *mut usize,
         map: *mut u64,
@@ -277,16 +277,6 @@ impl BootServices {
         };
         // SAFETY: the out parameter is a live `u64`.
         unsafe { (self.allocate_pages)(kind, LOADER_DATA, pages, &mut at) }.ok().map(|()| at)
-    }
-
-    /// `FreePages` (§7.2.2).
-    ///
-    /// # Safety
-    /// `at` and `pages` are an allocation `allocate_pages` made, and nothing
-    /// reads or writes it after.
-    pub unsafe fn free_pages(&self, at: u64, pages: usize) -> Result<(), Status> {
-        // SAFETY: the caller's contract.
-        unsafe { (self.free_pages)(at, pages) }.ok()
     }
 
     /// `AllocatePool` (§7.2.4), as `EfiLoaderData`: 8-byte aligned.
