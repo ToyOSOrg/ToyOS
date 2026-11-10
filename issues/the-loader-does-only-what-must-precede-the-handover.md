@@ -159,7 +159,7 @@ Each stage lands on its own, in this order.
      `repr(C)` sub-structs, and `#[repr(C, u32)]` enums for the optional parts
      in place of `u32` presence flags and zero sentinels; a field the typing
      changes moves after the word. The slot booted is a field, not
-     `boot-slot=` text; `slot-refused=` leaves with the fallback.
+     `boot-slot=` text.
      `params.rs`' last-one-wins and kernel `main.rs`' branch for a format
      never emitted go. `kernel_stack_addr` is renamed for the offset it
      holds. x86's `_start` reads by `const offset_of!`.
@@ -196,10 +196,9 @@ Each stage lands on its own, in this order.
    rises. It replaces the proof record (`loader/src/proof.rs`,
    `lib/update/src/record.rs`), logkeeper's stop mark and `slot::proven` as
    how an image is proven.
-   Which slot a pass boots is the marked one or none: updates fix forward, and
-   the loader's fallback leaves in stage 2 of
-   `issues/the-machine-updates-itself-without-ubuntu.md`, which this stage
-   follows. #1196 moved that proof from the black-box page to the stop mark.
+   Which slot a pass boots is the marked one or none: updates fix forward
+   (stage 2 of `issues/the-machine-updates-itself-without-ubuntu.md`, done).
+   #1196 moved that proof from the black-box page to the stop mark.
    - An install writes its slot with the good flag clear, whatever the slot
      held before.
    - Any failure after `verify` in `start_kernel` that the image causes is a

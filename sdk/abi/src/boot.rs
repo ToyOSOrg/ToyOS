@@ -280,12 +280,6 @@ pub const WRITE_NO_LAYOUT_PARAM: &str = "loader-writes-no-layout";
 /// fact only the loader has.
 pub const SLOT_PARAM: &str = "boot-slot=";
 
-/// The word the loader appends when it booted the other slot than the one the
-/// slot table marks: the marked slot and why it was refused, `B:died`. The
-/// kernel logs it, which is how a dead or refused boot reaches the next boot's
-/// log.
-pub const SLOT_REFUSED_PARAM: &str = "slot-refused=";
-
 /// Every token of the boot parameter: each one a parameter of the kernel's (`params`) or an actuator its table declares.
 pub fn tokens(cmdline: &str) -> impl Iterator<Item = &str> {
     cmdline.split(',').filter(|t| !t.is_empty())

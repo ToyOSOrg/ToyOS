@@ -1,15 +1,12 @@
-//! Which slot this boot hands the machine to, and every byte of it held to the
+//! The slot this boot hands the machine to, and every byte of it held to the
 //! owner's signature before it is.
 //!
-//! The slot table marks one slot; that one is tried first and the other only
-//! when the marked one is refused (`toyos_update::policy::order`). A slot is
-//! booted only once, in this order: its signed header is on its FAT
-//! partition, the signature is [`KEY`]'s, its version is at or above the floor
-//! a boot has proven, and its
-//! kernel, boot parameter, supervisor, file server and ROOT each hash to what
-//! the header names. Each
-//! refusal is said by name, and the boot that falls back tells the kernel
-//! which slot it refused and why, so the next boot's log carries it.
+//! The slot table marks one slot, and that one is booted or nothing is: a
+//! refusal is said by name and no other slot is tried. The slot is booted
+//! only once, in this order: its signed header is on its FAT partition, the
+//! signature is [`KEY`]'s, its version is at or above the floor a boot has
+//! proven, and its kernel, boot parameter, supervisor, file server and ROOT
+//! each hash to what the header names.
 //!
 //! **The loader is the part signing does not cover**: it reads the key it
 //! checks against out of its own binary, and only UEFI Secure Boot over the
@@ -35,6 +32,9 @@ pub const KEY: [u8; 32] = sig::key_from_hex(env!("TOYOS_IMAGE_KEY"));
 /// The head of every line this module writes.
 const HEAD: &str = "Slot";
 
+/// How the line ends that says the marked slot was refused.
+const BOOTS_NOTHING: &str = "is refused, and no other slot is booted; the remedy is a newer image";
+
 /// A slot every byte of which its signature vouches for.
 pub struct Chosen {
     pub which: Which,
@@ -47,12 +47,10 @@ pub struct Chosen {
     pub root: RootImage,
     /// The unique GUID of its volume, which the kernel and its parameter were read from.
     pub volume: [u8; 16],
-    /// The slot tried before this one, and why it was refused.
-    pub refused: Option<(Which, Refusal)>,
 }
 
-/// The slot to boot, or every refusal and why there is nothing to boot.
-pub fn choose(
+/// The slot the table marks, verified, or why this pass boots nothing.
+pub fn marked(
     handle: Handle,
     system_table: &SystemTable,
     floor: u64,
@@ -68,27 +66,12 @@ pub fn choose(
         if table.slots[0].is_some() { "present" } else { "absent" },
         if table.slots[1].is_some() { "present" } else { "absent" },
     );
-    let mut refused: Option<(Which, Refusal)> = None;
-    for which in policy::order(&table).into_iter().flatten() {
-        let slot = table.slot(which).expect("`order` names only slots the table carries");
-        match verify(bs, &mut disk, which, slot, floor) {
-            Ok(mut chosen) => {
-                chosen.refused = refused;
-                return Ok(chosen);
-            }
-            Err(why) => {
-                println!("{HEAD} {}: REFUSED, {why}", which.letter());
-                // The marked slot's refusal is the one the kernel is told: it
-                // is why this boot is not the one the table asked for.
-                refused.get_or_insert((which, why));
-            }
-        }
-    }
-    Err(alloc::format!(
-        "no slot verifies: the marked slot {} was refused ({})",
-        table.marked.letter(),
-        refused.map_or(String::new(), |(_, why)| alloc::format!("{why}"))
-    ))
+    let which = table.marked;
+    let slot = table.slot(which).expect("a slot table that reads carries the slot it marks");
+    verify(bs, &mut disk, which, slot, floor).map_err(|why| {
+        println!("{HEAD} {}: REFUSED, {why}", which.letter());
+        alloc::format!("the marked slot {} {BOOTS_NOTHING}", which.letter())
+    })
 }
 
 /// `slot`, held to [`KEY`] and the floor.
@@ -156,7 +139,6 @@ fn verify(
         fileserver,
         root,
         volume: slot.boot,
-        refused: None,
     })
 }
 

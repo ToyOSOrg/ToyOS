@@ -49,6 +49,10 @@ pub const LOADER_LOG: &str = "loader.log";
 pub const LOADER_FIRST_LINE: &str = "ToyOS Bootloader 1.0";
 pub const LOADER_LAST_LINE: &str = "Loader log: the kernel handoff begins, so this file ends here";
 
+/// How the loader's line ends that says the marked slot was refused, in
+/// `loader/src/slot.rs`: the last it says before the pass ends.
+pub const LOADER_BOOTS_NOTHING: &str = "is refused, and no other slot is booted; the remedy is a newer image";
+
 /// The kernel's record for a process that ended, in `kernel/src/process.rs`.
 ///
 /// **The one channel a guest binary's verdict crosses on a machine with no
@@ -445,6 +449,7 @@ mod tests {
             ("loader/src/loaderlog.rs", format!("cstr16!(\"{LOADER_LOG}\")")),
             ("loader/src/loaderlog.rs", format!("\"{LOADER_FIRST_LINE}\"")),
             ("loader/src/loaderlog.rs", format!("\"{LOADER_LAST_LINE}\"")),
+            ("loader/src/slot.rs", format!("\"{LOADER_BOOTS_NOTHING}\"")),
         ];
         for (file, rhs) in wanted {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);

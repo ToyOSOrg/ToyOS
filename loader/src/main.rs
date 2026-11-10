@@ -791,8 +791,14 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     // programs and ROOT — is one the chosen slot's signed header names. ROOT is read before the
     // kernel is loaded and not after: it is the allocation the image pages come
     // from, and a slot whose ROOT is refused has no use for the kernel's.
-    let chosen = slot::choose(handle, &system_table, image_floor.value)
-        .unwrap_or_else(|why| panic!("Slots: {why}"));
+    //
+    // Updates fix forward: a refused slot boots nothing, and the pass ends as
+    // the `Panic:` line above says a panic does. Said first, so the stick
+    // holds it.
+    let chosen = slot::marked(handle, &system_table, image_floor.value).unwrap_or_else(|why| {
+        println!("Slots: {why}");
+        panic!("Slots: {why}")
+    });
     // Only once the mark is gone: otherwise the next pass could credit this
     // boot with a stop mark an earlier boot left.
     if last.unmarked {
@@ -809,20 +815,14 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     let kernel_bytes = chosen.kernel;
     println!("Kernel: {} bytes", kernel_bytes.len());
 
-    // The words naming the slot are appended to what the slot
-    // carried, because each is a fact only this loader has: the kernel is
-    // handed one line and reads its own parameters out of it.
+    // The word naming the slot is appended to what the slot carried, because
+    // it is a fact only this loader has: the kernel is handed one line and
+    // reads its own parameters out of it.
     let mut cmdline = chosen.cmdline;
-    let mut append = |word: &str| {
-        if !cmdline.is_empty() {
-            cmdline.push(b',');
-        }
-        cmdline.extend_from_slice(word.as_bytes());
-    };
-    append(&alloc::format!("{}{}", toyos_abi::boot::SLOT_PARAM, chosen.which.letter()));
-    if let Some((refused, why)) = chosen.refused {
-        append(&alloc::format!("{}{}:{}", toyos_abi::boot::SLOT_REFUSED_PARAM, refused.letter(), why.word()));
+    if !cmdline.is_empty() {
+        cmdline.push(b',');
     }
+    cmdline.extend_from_slice(alloc::format!("{}{}", toyos_abi::boot::SLOT_PARAM, chosen.which.letter()).as_bytes());
     let params = core::str::from_utf8(&cmdline)
         .unwrap_or_else(|e| panic!("slot {}'s cmdline is not UTF-8: {e}", chosen.which.letter()));
     println!("Boot parameter: {params:?}");

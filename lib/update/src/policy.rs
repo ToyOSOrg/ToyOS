@@ -1,5 +1,5 @@
-//! Which slot a boot may take, which image an update may install, and every
-//! reason one is refused, by the word the loader hands the kernel for it.
+//! Whether a boot may take the marked slot's image, which image an update may
+//! install, and every reason one is refused.
 //!
 //! **The anti-rollback floor** is the highest version a boot has proven by
 //! stopping cleanly. The loader refuses an image below it, and raises it only
@@ -24,13 +24,9 @@
 //! hand clearing its NVRAM, lowers the floor to nothing. Only a monotonic
 //! counter the platform refuses to lower — a TPM's NV counter — closes that.
 
-use crate::slots::{Table, Which};
-
 /// Why a slot was not booted, or an image not installed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The table carries no such slot.
-    Absent,
     /// It carries no signed header.
     Unsigned,
     /// Its signed header is not one.
@@ -49,27 +45,9 @@ pub enum Refusal {
     Type(&'static str),
 }
 
-impl Refusal {
-    /// The word the loader hands the kernel for this refusal: one token of the
-    /// boot parameter, so no comma and no space.
-    pub fn word(&self) -> &'static str {
-        match self {
-            Self::Absent => "absent",
-            Self::Unsigned => "unsigned",
-            Self::Malformed => "malformed",
-            Self::Signature => "signature",
-            Self::BelowFloor { .. } | Self::Older { .. } => "version",
-            Self::Hash(_) => "hash",
-            Self::Unreadable(_) => "unreadable",
-            Self::Type(_) => "type",
-        }
-    }
-}
-
 impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match *self {
-            Self::Absent => write!(f, "the slot table carries no such slot"),
             Self::Unsigned => write!(f, "it carries no signed header, so it is unsigned"),
             Self::Malformed => write!(f, "its signed header is not one"),
             Self::Signature => write!(f, "its signature is not this machine's key's"),
@@ -90,13 +68,6 @@ pub fn admits(floor: u64, version: u64) -> Result<(), Refusal> {
         return Err(Refusal::BelowFloor { version, floor });
     }
     Ok(())
-}
-
-/// The slots a boot tries, in order: the marked one, then the other where the
-/// table carries it.
-pub fn order(table: &Table) -> [Option<Which>; 2] {
-    let other = table.marked.other();
-    [Some(table.marked), table.slot(other).map(|_| other)]
 }
 
 /// The floor after a boot proved `proven`: it only rises.
@@ -124,7 +95,6 @@ pub fn installable(version: u64, running: u64, idle: Option<u64>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slots::Slot;
 
     #[test]
     fn the_floor_admits_its_own_version_and_above_and_only_rises() {
@@ -142,31 +112,5 @@ mod tests {
         assert_eq!(installable(9, 10, None), Err(Refusal::Older { version: 9, than: 10 }));
         assert_eq!(installable(11, 10, Some(12)), Err(Refusal::Older { version: 11, than: 12 }));
         assert_eq!(installable(12, 10, Some(12)), Ok(()));
-    }
-
-    #[test]
-    fn a_boot_tries_the_marked_slot_first_and_the_other_only_if_there_is_one() {
-        let slot = Some(Slot { boot: [1; 16], root: [2; 16], version: 1 });
-        let both = Table { sequence: 1, marked: Which::B, slots: [slot, slot] };
-        assert_eq!(order(&both), [Some(Which::B), Some(Which::A)]);
-        let one = Table { sequence: 1, marked: Which::A, slots: [slot, None] };
-        assert_eq!(order(&one), [Some(Which::A), None]);
-    }
-
-    /// Each word is one token of a comma-separated boot parameter.
-    #[test]
-    fn every_word_is_one_parameter_token() {
-        for r in [
-            Refusal::Absent,
-            Refusal::Unsigned,
-            Refusal::Malformed,
-            Refusal::Signature,
-            Refusal::BelowFloor { version: 1, floor: 2 },
-            Refusal::Hash("kernel"),
-            Refusal::Unreadable("root"),
-            Refusal::Type("root"),
-        ] {
-            assert!(!r.word().is_empty() && !r.word().contains([',', ' ', ':', '=']), "{r:?}");
-        }
     }
 }
