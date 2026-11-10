@@ -15,6 +15,11 @@
 //! [`Error::Gone`], and so is every request once a reconnect fails: what was
 //! waiting for the next session would otherwise go out under requests asked
 //! since.
+//!
+//! **A durable write is one write with `fua` where the session's device
+//! forces it, and a write and a flush where it does not**
+//! ([`Served::write_shared_durable`]); the disk's driver says which at its
+//! bring-up.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,7 +38,8 @@ use crate::{Outcome, Ticket};
 pub trait Link {
     fn blocks(&self) -> u64;
     fn submit_read(&mut self, lba: u64, blocks: u32) -> Result<Ticket, Unsent>;
-    fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock]) -> Result<Ticket, Unsent>;
+    fn fua(&self) -> bool;
+    fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock], fua: bool) -> Result<Ticket, Unsent>;
     fn submit_flush(&mut self) -> Result<Ticket, Unsent>;
     fn wait(&mut self, block: bool) -> Waited;
     fn reconnect(&mut self) -> Result<(), SessionError>;
@@ -46,8 +52,11 @@ impl Link for Session {
     fn submit_read(&mut self, lba: u64, blocks: u32) -> Result<Ticket, Unsent> {
         Session::submit_read(self, lba, blocks)
     }
-    fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock]) -> Result<Ticket, Unsent> {
-        Session::submit_write(self, lba, blocks)
+    fn fua(&self) -> bool {
+        Session::fua(self)
+    }
+    fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock], fua: bool) -> Result<Ticket, Unsent> {
+        Session::submit_write(self, lba, blocks, fua)
     }
     fn submit_flush(&mut self) -> Result<Ticket, Unsent> {
         Session::submit_flush(self)
@@ -178,11 +187,28 @@ impl<L: Link> Served<L> {
     /// `blocks` written at `lba`, shared: the session keeps them until a
     /// flush covers the write, rather than a copy of them.
     pub async fn write_shared(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
+        self.write_requests(lba, blocks, false).await
+    }
+
+    /// `blocks` written at `lba` and on the medium once this returns: with
+    /// `fua` where the session offers it, and otherwise written and then
+    /// flushed. Not over a write no flush has covered.
+    pub async fn write_shared_durable(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
+        // Asked of the session each time: a reconnect may have found the
+        // disk behind another driver.
+        if self.link.borrow().fua() {
+            return self.write_requests(lba, blocks, true).await;
+        }
+        self.write_requests(lba, blocks, false).await?;
+        self.flush().await
+    }
+
+    async fn write_requests(&self, lba: u64, blocks: &[SharedBlock], fua: bool) -> Result<(), Error> {
         within(lba, blocks.len(), self.blocks)?;
         let per = MAX_REQUEST_BLOCKS as usize;
         for (i, chunk) in blocks.chunks(per).enumerate() {
             let at = lba + (i * per) as u64;
-            match self.ask(|link| link.submit_write(at, chunk)).await.map_err(|Gone| Error::Gone)?.outcome {
+            match self.ask(|link| link.submit_write(at, chunk, fua)).await.map_err(|Gone| Error::Gone)?.outcome {
                 Outcome::Done => {}
                 Outcome::ReadOnly => return Err(Error::ReadOnly),
                 _ => return Err(Error::Device),
@@ -190,6 +216,10 @@ impl<L: Link> Served<L> {
         }
         Ok(())
     }
+}
+
+fn shared(data: &[Block]) -> Vec<SharedBlock> {
+    data.iter().map(|block| std::rc::Rc::new(Box::new(*block))).collect()
 }
 
 impl<L: Link> BlockDev for Served<L> {
@@ -214,8 +244,11 @@ impl<L: Link> BlockDev for Served<L> {
 
     /// A copy of `data`, which the session keeps until a flush covers it.
     async fn write(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
-        let shared: Vec<SharedBlock> = data.iter().map(|block| std::rc::Rc::new(Box::new(*block))).collect();
-        self.write_shared(lba, &shared).await
+        self.write_shared(lba, &shared(data)).await
+    }
+
+    async fn write_durable(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        self.write_shared_durable(lba, &shared(data)).await
     }
 
     async fn flush(&self) -> Result<(), Error> {

@@ -16,7 +16,8 @@ use super::mount::{random, MEMORY, NOW, OWNER};
 use super::*;
 
 /// A device that, after each write and flush it passes on, hands the model
-/// to `after`.
+/// to `after`: a durable write both while it is still torn and once it is on
+/// the medium.
 pub(super) struct Watched<'a> {
     pub model: &'a Model,
     pub after: Box<dyn Fn(&Model) + 'a>,
@@ -39,6 +40,14 @@ impl BlockDev for Watched<'_> {
 
     async fn flush(&self) -> core::result::Result<(), toyos_blockdev::Error> {
         self.model.flush().await?;
+        (self.after)(self.model);
+        Ok(())
+    }
+
+    async fn write_durable(&self, lba: u64, data: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.model.write(lba, data).await?;
+        (self.after)(self.model);
+        self.model.forced();
         (self.after)(self.model);
         Ok(())
     }
@@ -238,6 +247,102 @@ pub(super) fn ops_survive_a_crash_on(image: Vec<u8>, passphrase: Option<&[u8]>, 
     block_on_ready(mount.unmount()).unwrap();
     assert!(judged.get() > 500, "{} crash states judged", judged.get());
     reused
+}
+
+/// What a mount asked of its device, in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    Write,
+    Flush,
+    /// A durable write at this block.
+    Durable(u64),
+}
+
+/// A device that records what it is asked, and takes a durable write
+/// forced, or, with `forces` off, as a write it leaves in its cache.
+struct Recorded<'a> {
+    model: &'a Model,
+    forces: bool,
+    asked: core::cell::RefCell<Vec<Asked>>,
+}
+
+impl BlockDev for Recorded<'_> {
+    fn blocks(&self) -> u64 {
+        self.model.blocks()
+    }
+
+    async fn read(&self, lba: u64, out: &mut [Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.model.read(lba, out).await
+    }
+
+    async fn write(&self, lba: u64, data: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.asked.borrow_mut().push(Asked::Write);
+        self.model.write(lba, data).await
+    }
+
+    async fn flush(&self) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.asked.borrow_mut().push(Asked::Flush);
+        self.model.flush().await
+    }
+
+    async fn write_durable(&self, lba: u64, data: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.asked.borrow_mut().push(Asked::Durable(lba));
+        match self.forces {
+            true => self.model.write_durable(lba, data).await,
+            false => self.model.write(lba, data).await,
+        }
+    }
+}
+
+/// A commit of one create asks the device for a flush and then its journal
+/// entry, durable as written, and nothing after: with a file's data written
+/// before it, the same two after the data. Every crash once the commit has
+/// returned holds the create. The control: on a device that takes the entry
+/// without forcing it, some crash after the commit returned has lost it.
+#[test]
+fn a_commit_is_one_flush_and_its_entry_forced_and_is_lost_where_the_entry_is_not() {
+    for forces in [true, false] {
+        let model = Model::new(formatted(64 << 20, None).into_inner(), 512);
+        let dev = Recorded { model: &model, forces, asked: core::cell::RefCell::default() };
+        let mount = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+        let root = mount.root();
+        block_on_ready(async {
+            // The first entry after a clean state names itself, and goes
+            // header last.
+            mount.create(root, b"first", New::File, OWNER, NOW).await.unwrap();
+            mount.commit().await.unwrap();
+            dev.asked.borrow_mut().clear();
+            mount.create(root, b"second", New::File, OWNER, NOW).await.unwrap();
+            mount.commit().await.unwrap();
+        });
+        let asked = dev.asked.take();
+        let [Asked::Flush, Asked::Durable(entry)] = asked[..] else { panic!("a commit asked {asked:?}") };
+
+        let held = model.check(1 << 12, 0xf0a_0001, |image| {
+            let dev = Overlay::new(image);
+            let mount = block_on_ready(Mount::open(&dev, MEMORY, random())).map_err(|e| format!("mount: {e:?}"))?;
+            match block_on_ready(mount.lookup(mount.root(), b"second")) {
+                Ok(Some(_)) => Ok(()),
+                other => Err(format!("the committed create is {other:?}")),
+            }
+        });
+        match (forces, held) {
+            (true, Ok(_)) => {}
+            (true, Err(lost)) => panic!("{lost}"),
+            (false, Err(_)) => continue,
+            (false, Ok(search)) => panic!("an entry left in the cache was held through {search:?}"),
+        }
+
+        block_on_ready(async {
+            let file = mount.lookup(root, b"second").await.unwrap().unwrap().ino;
+            assert_eq!(mount.write(file, 0, &[7; BLOCK], NOW).await.unwrap(), BLOCK);
+            mount.commit().await.unwrap();
+        });
+        let asked = dev.asked.take();
+        let [Asked::Write, Asked::Flush, Asked::Durable(next)] = asked[..] else { panic!("a commit after data asked {asked:?}") };
+        assert!(next > entry, "the second entry at block {next} is not after the first at {entry}");
+        block_on_ready(mount.unmount()).unwrap();
+    }
 }
 
 fn creates(n: usize) -> Vec<Op> {

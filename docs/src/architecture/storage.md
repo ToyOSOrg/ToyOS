@@ -23,6 +23,10 @@ All four layers run in userland.
   block service.
 - A partition has one holder at a time, every request is bounded to it before
   the device sees it, and a flush answers for its own writer's writes.
+- A write may be asked onto the medium by itself, without a flush of the
+  whole device; a filesystem's journal commits with one. A device that cannot
+  force a single write is written and then flushed instead, and its driver
+  says so when it brings the disk up.
 - Caching belongs to file servers, never to the block layer.
 - Partition editing and storage initialisation are userland operations shared
   by disk tools and the installer. Editing the table, reading payloads and

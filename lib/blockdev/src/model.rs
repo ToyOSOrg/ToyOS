@@ -8,6 +8,9 @@
 //! covers holds, after the crash, either what was durable or what any one of
 //! those writes carried; a write kept in part is a torn write.
 //!
+//! **A forced write is on the medium once it completes** ([`Model::forced`]),
+//! and until then is torn like any other.
+//!
 //! **The unit is the device's**, never the format's block: one logical block
 //! (512 bytes on a 512-byte-LBA device) unless the device reports a larger
 //! unit it writes whole across a power loss.
@@ -94,6 +97,20 @@ impl Model {
     /// Writes no flush has covered.
     pub fn unflushed(&self) -> usize {
         self.state.borrow().unflushed.len()
+    }
+
+    /// The newest write completes forced: it is durable, and every other
+    /// unflushed write stays as it was.
+    ///
+    /// # Panics
+    /// With no unflushed write, or where the newest overlaps another: the
+    /// cache would hold an older copy of blocks the medium has newer.
+    pub fn forced(&self) {
+        let mut state = self.state.borrow_mut();
+        let w = state.unflushed.pop().expect("a forced write completes after it was written");
+        let overlapped = state.unflushed.iter().any(|o| o.at < w.at + w.data.len() && w.at < o.at + o.data.len());
+        assert!(!overlapped, "a forced write at byte {} over a write no flush has covered", w.at);
+        state.durable[w.at..w.at + w.data.len()].copy_from_slice(&w.data);
     }
 
     /// `judge` asked of every medium a crash now could leave, or of `budget`
@@ -212,6 +229,12 @@ impl BlockDev for Model {
         }
         Ok(())
     }
+
+    async fn write_durable(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        self.write(lba, data).await?;
+        self.forced();
+        Ok(())
+    }
 }
 
 /// A device over a medium [`Model::check`] judges, which leaves it as it is:
@@ -321,6 +344,39 @@ mod tests {
         block_on_ready(commit(&dev, true));
         let search = dev.check(1 << 20, SEED, committed_is_whole).unwrap_or_else(|v| panic!("{v}"));
         assert_eq!(search, Search::Every(1 << 8), "the marker's eight units, each kept or not");
+    }
+
+    /// A record written forced is durable with no flush, so no crash keeps
+    /// the marker without it; and it made nothing else durable: a write
+    /// before it is still torn.
+    #[test]
+    fn a_forced_record_is_whole_under_its_marker_and_covers_no_other_write() {
+        let dev = Model::new(vec![0; 4 * BLOCK], 512);
+        block_on_ready(async {
+            dev.write(3, &[[0x33; BLOCK]]).await.unwrap();
+            dev.write_durable(RECORD, &[[0xAA; BLOCK]]).await.unwrap();
+            dev.write(MARKER, &[[0x11; BLOCK]]).await.unwrap();
+        });
+        assert_eq!(dev.unflushed(), 2);
+        let mut earlier_lost = false;
+        let search = dev
+            .check(1 << 20, SEED, |image| {
+                earlier_lost |= image[3 * BLOCK] == 0;
+                committed_is_whole(image)
+            })
+            .unwrap_or_else(|v| panic!("{v}"));
+        assert_eq!(search, Search::Every(1 << 16), "the marker's and the earlier write's units");
+        assert!(earlier_lost, "a forced write made an earlier write durable");
+    }
+
+    #[test]
+    #[should_panic(expected = "over a write no flush has covered")]
+    fn a_forced_write_over_an_unflushed_one_is_refused() {
+        let dev = Model::new(vec![0; BLOCK], BLOCK);
+        block_on_ready(async {
+            dev.write(0, &[[1; BLOCK]]).await.unwrap();
+            dev.write_durable(0, &[[2; BLOCK]]).await.unwrap();
+        });
     }
 
     /// One block written at one LBA on a device with 512-byte units: a crash

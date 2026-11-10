@@ -10,7 +10,7 @@ use toyos_input::wire::Record;
 use crate::exec::{Dead, Host, Nanos, Tasks};
 use crate::hc::{self, Reset};
 use crate::input::{Opened, Owner, Sent};
-use crate::msc::{Event, Work};
+use crate::msc::{Event, Io, Work};
 use crate::stub::devices::{gpt_disk, Keyboard, Pipes, Stick};
 use crate::stub::port::{FakePort, ResetBehaviour};
 use crate::stub::{Answers, Dma, Function, Regs, Xhc, LENT_BASE};
@@ -355,7 +355,7 @@ fn the_stop_resets_every_connected_port_then_halts_resets_and_unpowers_the_contr
     assert!(w.said("collection 0: a Keyboard"), "{:#?}", w.host.lines.borrow());
     // The stick's next command goes unanswered, so the stop finds it open.
     pipes.set(Pipes::SilentIn);
-    usb.disks.submit(0, Work::Io { write: false, block: 0, blocks: 1, at: LENT_BASE, token: (0, 1) });
+    usb.disks.submit(0, Work::Io { io: Io::Read, block: 0, blocks: 1, at: LENT_BASE, token: (0, 1) });
     let now = w.host.now.get();
     w.run(&usb, &mut tasks, &mut owner, now + 50 * MS).unwrap();
 
@@ -524,9 +524,9 @@ fn a_disks_work_moves_between_the_stick_and_the_lent_region() {
     let pattern: Vec<u8> = (0..8192u32).map(|i| (i * 7) as u8).collect();
     w.xhc().mem.borrow_mut().write(LENT_BASE + 0xF000, &pattern);
     // Two blocks from 60 KiB into the region: the data crosses 64 KiB.
-    usb.disks.submit(0, Work::Io { write: true, block: 300, blocks: 2, at: LENT_BASE + 0xF000, token: (1, 1) });
+    usb.disks.submit(0, Work::Io { io: Io::Write { fua: false }, block: 300, blocks: 2, at: LENT_BASE + 0xF000, token: (1, 1) });
     usb.disks.submit(0, Work::Flush { token: (1, 2) });
-    usb.disks.submit(0, Work::Io { write: false, block: 300, blocks: 2, at: LENT_BASE + 0x1_8000, token: (1, 3) });
+    usb.disks.submit(0, Work::Io { io: Io::Read, block: 300, blocks: 2, at: LENT_BASE + 0x1_8000, token: (1, 3) });
     w.run(&usb, &mut tasks, &mut owner, 700 * MS).unwrap();
     let answered: Vec<((u64, u32), bool)> = usb
         .disks
@@ -544,6 +544,49 @@ fn a_disks_work_moves_between_the_stick_and_the_lent_region() {
     assert_eq!(back, pattern);
     assert!(commands.borrow().contains(&0x35));
     assert_eq!(w.xhc().mem.borrow().faults, 0);
+}
+
+/// A stick whose mode parameters set DPOFUA is offered as forcing writes, and
+/// a write asked with FUA reaches it as a WRITE(10) carrying the bit. One
+/// whose do not is offered without.
+#[test]
+fn a_stick_that_says_dpofua_is_sent_fua_and_one_that_does_not_is_offered_without() {
+    for dpofua in [true, false] {
+        let (mut stick, disk, _) = stick("SERIAL1");
+        stick.dpofua = dpofua;
+        let (commands, forced) = (stick.commands.clone(), stick.forced.clone());
+        let w = World::new(vec![(FakePort::occupied(QUICK), Some(Box::new(stick)))], 1);
+        w.xhc().mem.borrow_mut().lend(LENT_BASE, 128 * 1024);
+        let usb = w.start(BOTH);
+        let mut tasks = usb.tasks();
+        let _end = End(&usb);
+        let mut owner = Mock::default();
+        w.run(&usb, &mut tasks, &mut owner, 600 * MS).unwrap();
+        assert!(matches!(usb.disks.take_events()[..], [Event::Arrived { disk: 0, .. }]));
+        assert!(commands.borrow().contains(&0x1A), "MODE SENSE was never asked");
+        assert_eq!(usb.disks.fua(0), dpofua);
+        if !dpofua {
+            assert!(w.said("no DPOFUA, so a forced write is a write and a flush"), "{:#?}", w.host.lines.borrow());
+            continue;
+        }
+        let pattern = [0x5Au8; 4096];
+        w.xhc().mem.borrow_mut().write(LENT_BASE, &pattern);
+        usb.disks.submit(0, Work::Io { io: Io::Write { fua: true }, block: 300, blocks: 1, at: LENT_BASE, token: (1, 1) });
+        usb.disks.submit(0, Work::Io { io: Io::Write { fua: false }, block: 301, blocks: 1, at: LENT_BASE, token: (1, 2) });
+        w.run(&usb, &mut tasks, &mut owner, 700 * MS).unwrap();
+        let answered: Vec<bool> = usb
+            .disks
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Answered { ok, write: true, .. } => Some(ok),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answered, [true, true]);
+        assert_eq!(forced.get(), 1, "only the write asked with FUA carries it");
+        assert_eq!(&disk.borrow()[300 * 4096..301 * 4096], &pattern[..]);
+    }
 }
 
 /// Writes that each cross 64 KiB, so their data phase is a TD of two TRBs,
@@ -569,7 +612,8 @@ fn a_td_that_would_cross_the_rings_link_starts_behind_it() {
         while queued < works && usb.disks.has_room(0) {
             let write = queued % 2 == 0;
             let (block, blocks, at) = if write { (300, 2, LENT_BASE + 0xF000) } else { (310, 1, LENT_BASE + 0x1_8000) };
-            usb.disks.submit(0, Work::Io { write, block, blocks, at, token: (1, queued) });
+            let io = if write { Io::Write { fua: false } } else { Io::Read };
+            usb.disks.submit(0, Work::Io { io, block, blocks, at, token: (1, queued) });
             queued += 1;
         }
         until += 50 * MS;
@@ -787,7 +831,7 @@ fn a_stick_back_from_its_port_reset_keeps_its_disk_and_its_work() {
     assert!(matches!(answered(&usb).1[..], [Event::Arrived { disk: 0, .. }]));
     pipes.set(Pipes::SilentOut);
     let queued = w.host.now.get();
-    usb.disks.submit(0, Work::Io { write: true, block: 10, blocks: 1, at: LENT_BASE, token: (1, 1) });
+    usb.disks.submit(0, Work::Io { io: Io::Write { fua: false }, block: 10, blocks: 1, at: LENT_BASE, token: (1, 1) });
     w.run(&usb, &mut tasks, &mut owner, queued + crate::msc::COMMAND_NS + MS / 2).unwrap();
     assert!(w.said("the ladder climbs to its port reset"), "{:#?}", w.host.lines.borrow());
     pipes.set(Pipes::Answer);
@@ -812,7 +856,7 @@ fn a_different_stick_after_the_port_reset_ends_the_disk_that_left() {
     answered(&usb);
     pipes.set(Pipes::SilentOut);
     let queued = w.host.now.get();
-    usb.disks.submit(0, Work::Io { write: true, block: 10, blocks: 1, at: LENT_BASE, token: (1, 1) });
+    usb.disks.submit(0, Work::Io { io: Io::Write { fua: false }, block: 10, blocks: 1, at: LENT_BASE, token: (1, 1) });
     w.run(&usb, &mut tasks, &mut owner, queued + crate::msc::COMMAND_NS + MS / 2).unwrap();
     let (other, other_disk, _) = stick("OTHER");
     w.xhc().devices[0] = Some(Box::new(other));
@@ -899,8 +943,8 @@ fn a_stick_that_answers_late_once_is_served_again() {
     answered(&usb);
     pipes.set(Pipes::SilentIn);
     let queued = w.host.now.get();
-    usb.disks.submit(0, Work::Io { write: true, block: 10, blocks: 1, at: LENT_BASE, token: (1, 1) });
-    usb.disks.submit(0, Work::Io { write: false, block: 10, blocks: 1, at: LENT_BASE + 4096, token: (1, 2) });
+    usb.disks.submit(0, Work::Io { io: Io::Write { fua: false }, block: 10, blocks: 1, at: LENT_BASE, token: (1, 1) });
+    usb.disks.submit(0, Work::Io { io: Io::Read, block: 10, blocks: 1, at: LENT_BASE + 4096, token: (1, 2) });
     w.run(&usb, &mut tasks, &mut owner, queued + crate::msc::COMMAND_NS + 2_000 * MS).unwrap();
     pipes.set(Pipes::Answer);
     w.run(&usb, &mut tasks, &mut owner, queued + 6 * crate::msc::COMMAND_NS).unwrap();

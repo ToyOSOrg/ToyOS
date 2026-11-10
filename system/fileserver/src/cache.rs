@@ -13,6 +13,13 @@
 //! first, and is refused whole when that flush is, so memory bounds the
 //! write-back and not the other way round.
 //!
+//! **A durable write goes to the disk at once and alone**
+//! ([`BlockDev::write_durable`]): its blocks into the cache and then forced
+//! onto the disk's medium ([`Disk::write_shared_durable`]), with no flush of
+//! the disk and nothing else written. It runs as a flush does, one at a time
+//! with every flush, so no flush carries an older copy of its blocks beside
+//! it.
+//!
 //! **Clean blocks are kept up to the limit the cache is made with** and the
 //! oldest-read goes first; a dirty block is never dropped. A block read in
 //! is kept only if the allocator gives it and its place in the eviction order
@@ -62,6 +69,13 @@ pub trait Disk: BlockDev {
         let data: Vec<Block> = blocks.iter().map(|block| ***block).collect();
         self.write(lba, &data).await
     }
+
+    /// [`BlockDev::write_durable`] of `blocks`, shared or copied as
+    /// [`write_shared`](Self::write_shared) has it.
+    async fn write_shared_durable(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
+        let data: Vec<Block> = blocks.iter().map(|block| ***block).collect();
+        self.write_durable(lba, &data).await
+    }
 }
 
 impl Disk for diskserver::disk::Served {
@@ -75,6 +89,10 @@ impl Disk for diskserver::disk::Served {
 
     async fn write_shared(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
         diskserver::disk::Served::write_shared(self, lba, blocks).await
+    }
+
+    async fn write_shared_durable(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
+        diskserver::disk::Served::write_shared_durable(self, lba, blocks).await
     }
 }
 
@@ -344,28 +362,24 @@ impl<D: Disk> BlockDev for Cache<D> {
         if over {
             self.flush().await?;
         }
-        let mut inner = self.inner.borrow_mut();
-        for (block, chunk) in (lba..).zip(data) {
-            inner.versions += 1;
-            let version = inner.versions;
-            let newly = match inner.slots.get_mut(&block) {
-                Some(slot) => {
-                    match Rc::get_mut(&mut slot.data) {
-                        Some(data) => **data = *chunk,
-                        None => slot.data = Rc::new(Box::new(*chunk)),
-                    }
-                    slot.version = version;
-                    !std::mem::replace(&mut slot.dirty, true)
-                }
-                None => {
-                    inner.slots.insert(block, Slot { data: Rc::new(Box::new(*chunk)), dirty: true, version });
-                    true
-                }
-            };
-            if newly {
-                inner.dirty += 1;
-            }
+        self.inner.borrow_mut().put(lba, data);
+        Ok(())
+    }
+
+    /// Into the cache, and from it forced onto the disk's medium in runs,
+    /// with the flush's place held: the blocks are dirty only until their
+    /// run is answered, so they pass the dirty bound by, and a run the disk
+    /// refused stays dirty for the next flush.
+    async fn write_durable(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        within(lba, data.len(), self.disk.blocks())?;
+        self.until(|inner| !inner.flushing).await;
+        self.inner.borrow_mut().flushing = true;
+        let _flushing = Flushing(self);
+        self.inner.borrow_mut().put(lba, data);
+        for first in (0..data.len()).step_by(RUN) {
+            self.write_run(lba + first as u64, RUN.min(data.len() - first), true).await?;
         }
+        self.inner.borrow_mut().evict();
         Ok(())
     }
 
@@ -384,7 +398,7 @@ impl<D: Disk> BlockDev for Cache<D> {
         poll_fn(|cx| loop {
             while refused.is_ok() && flight.len() < self.disk.depth() {
                 let Some((first, count)) = runs.next() else { break };
-                flight.push(Box::pin(self.write_run(first, count)));
+                flight.push(Box::pin(self.write_run(first, count, false)));
             }
             let before = flight.len();
             flight.retain_mut(|run| match run.as_mut().poll(cx) {
@@ -426,9 +440,10 @@ impl<D: Disk> Cache<D> {
         runs
     }
 
-    /// One run of a flush: written once no fetch is reading it, and each block
-    /// clean afterwards unless written again meanwhile.
-    async fn write_run(&self, first: u64, count: usize) -> Result<(), Error> {
+    /// One run of dirty blocks: written once no fetch is reading it, forced
+    /// onto the medium if `durable`, and each block clean afterwards unless
+    /// written again meanwhile.
+    async fn write_run(&self, first: u64, count: usize, durable: bool) -> Result<(), Error> {
         let end = first + count as u64;
         self.until(|inner| !inner.fetches.values().any(|f| f.first < end && first < f.first + f.count as u64)).await;
         let (blocks, versions): (Vec<SharedBlock>, Vec<u64>) = {
@@ -441,9 +456,13 @@ impl<D: Disk> Cache<D> {
                 })
                 .unzip()
         };
-        let wrote = self.disk.write_shared(first, &blocks).await;
-        self.inner.borrow_mut().written += 1;
-        wrote?;
+        if durable {
+            self.disk.write_shared_durable(first, &blocks).await?;
+        } else {
+            let wrote = self.disk.write_shared(first, &blocks).await;
+            self.inner.borrow_mut().written += 1;
+            wrote?;
+        }
         let mut inner = self.inner.borrow_mut();
         for (block, version) in (first..).zip(versions) {
             // A block written again meanwhile stays dirty.
@@ -465,6 +484,31 @@ impl<D: Disk> Cache<D> {
 }
 
 impl Inner {
+    /// `data` at `lba`, each block dirty at a version of its own.
+    fn put(&mut self, lba: u64, data: &[Block]) {
+        for (block, chunk) in (lba..).zip(data) {
+            self.versions += 1;
+            let version = self.versions;
+            let newly = match self.slots.get_mut(&block) {
+                Some(slot) => {
+                    match Rc::get_mut(&mut slot.data) {
+                        Some(data) => **data = *chunk,
+                        None => slot.data = Rc::new(Box::new(*chunk)),
+                    }
+                    slot.version = version;
+                    !std::mem::replace(&mut slot.dirty, true)
+                }
+                None => {
+                    self.slots.insert(block, Slot { data: Rc::new(Box::new(*chunk)), dirty: true, version });
+                    true
+                }
+            };
+            if newly {
+                self.dirty += 1;
+            }
+        }
+    }
+
     /// Drop the oldest clean blocks past the limit.
     fn evict(&mut self) {
         while self.slots.len() - self.dirty > self.clean_limit {
@@ -508,6 +552,9 @@ mod tests {
         reads: Cell<u32>,
         writes: Cell<u32>,
         flushes: Cell<u32>,
+        /// Writes forced onto the medium, and whether they are refused.
+        forced: Cell<u32>,
+        refusing_forced: Cell<bool>,
         refusing_flush: Cell<bool>,
     }
 
@@ -518,6 +565,8 @@ mod tests {
                 reads: Cell::new(0),
                 writes: Cell::new(0),
                 flushes: Cell::new(0),
+                forced: Cell::new(0),
+                refusing_forced: Cell::new(false),
                 refusing_flush: Cell::new(false),
             }
         }
@@ -541,6 +590,13 @@ mod tests {
                 return Err(Error::Device);
             }
             self.ram.flush().await
+        }
+        async fn write_durable(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+            self.forced.set(self.forced.get() + 1);
+            if self.refusing_forced.get() {
+                return Err(Error::Device);
+            }
+            self.ram.write(lba, data).await
         }
     }
 
@@ -580,6 +636,41 @@ mod tests {
             block_on_ready(c.flush()).unwrap();
         }
         assert!(c.inner.borrow().order.len() <= 4 * (2 + DIRTY_LIMIT) + 2);
+    }
+
+    /// A durable write is on the disk when it returns, forced and alone: no
+    /// flush of the disk, and a dirty block beside it still unwritten. It
+    /// owes the disk no flush afterwards either.
+    #[test]
+    fn a_durable_write_is_forced_onto_the_disk_alone_and_owes_no_flush() {
+        let c = cache();
+        block_on_ready(c.write(3, &[[3; BLOCK]])).unwrap();
+        block_on_ready(c.write_durable(7, &[[0xAB; BLOCK]; 40])).unwrap();
+        assert_eq!((c.disk.forced.get(), c.disk.writes.get(), c.disk.flushes.get()), (2, 0, 0), "40 blocks are two runs");
+        assert_eq!(c.counts().dirty, 1, "the block beside it is still the cache's alone");
+        let mut on_disk = [[0; BLOCK]; 40];
+        block_on_ready(c.disk.ram.read(7, &mut on_disk)).unwrap();
+        assert_eq!(on_disk, [[0xAB; BLOCK]; 40]);
+        assert_eq!(read_one(&c, 46), Ok([0xAB; BLOCK]));
+        assert_eq!(c.disk.reads.get(), 0, "a durable write's blocks are read from the cache");
+
+        block_on_ready(c.flush()).unwrap();
+        assert_eq!((c.disk.writes.get(), c.disk.flushes.get()), (1, 1), "the flush is for the block beside it");
+        block_on_ready(c.write_durable(7, &[[0xCD; BLOCK]])).unwrap();
+        block_on_ready(c.flush()).unwrap();
+        assert_eq!((c.disk.forced.get(), c.disk.flushes.get()), (3, 1), "a forced write was flushed for");
+    }
+
+    /// A durable write the disk refused is an error, and its blocks stay
+    /// dirty: the next flush writes them and asks the disk to keep them.
+    #[test]
+    fn a_durable_write_the_disk_refused_stays_dirty_for_the_next_flush() {
+        let c = cache();
+        c.disk.refusing_forced.set(true);
+        assert_eq!(block_on_ready(c.write_durable(7, &[[0xAB; BLOCK]])), Err(Error::Device));
+        assert_eq!(c.counts().dirty, 1);
+        block_on_ready(c.flush()).unwrap();
+        assert_eq!((c.disk.writes.get(), c.disk.flushes.get(), c.counts().dirty), (1, 1, 0));
     }
 
     #[test]
@@ -895,6 +986,25 @@ mod tests {
         for k in 0..runs {
             block_on_ready(c.write(2 * k + 1, &[[k as u8 + 1; BLOCK]])).unwrap();
         }
+    }
+
+    /// A durable write of a block a flush is carrying waits for that flush:
+    /// the disk never has the older copy in flight beside the newer, and
+    /// holds the newer afterwards.
+    #[test]
+    fn a_durable_write_waits_for_the_flush_carrying_its_block() {
+        let c = Cache::new(Held::new(16), CLEAN_LIMIT);
+        block_on_ready(c.write(1, &[[1; BLOCK]])).unwrap();
+        c.disk.open.set(false);
+        let exec = Executor::new();
+        exec.spawn(async { c.flush().await.unwrap() });
+        exec.spawn(async { c.write_durable(1, &[[2; BLOCK]]).await.unwrap() });
+        exec.run_until_stalled();
+        assert_eq!(c.disk.writes_in_flight(), 1, "the durable write went out beside the flush");
+        c.disk.release();
+        assert_eq!(exec.run_until_stalled(), 0);
+        assert_eq!(c.disk.overlaps.get(), 0);
+        assert_eq!(on_disk(&c.disk, 1), [2; BLOCK]);
     }
 
     /// A flush keeps as many runs in flight as the disk takes, and no more.

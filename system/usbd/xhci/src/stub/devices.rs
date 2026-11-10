@@ -129,6 +129,11 @@ pub struct Stick {
     pub serial: String,
     /// CBWs it took, by operation code.
     pub commands: Rc<RefCell<Vec<u8>>>,
+    /// Whether its mode parameters set DPOFUA; a write with FUA is refused
+    /// where they do not.
+    pub dpofua: bool,
+    /// WRITE(10)s it took with FUA.
+    pub forced: Rc<Cell<u32>>,
     state: Bot,
     sense: (u8, u8, u8),
 }
@@ -142,6 +147,8 @@ impl Stick {
             pipes: Rc::default(),
             serial: serial.into(),
             commands: Rc::default(),
+            dpofua: false,
+            forced: Rc::default(),
             state: Bot::Idle,
             sense: (0, 0, 0),
         }
@@ -210,7 +217,15 @@ impl Stick {
                 let data = self.disk.borrow()[lba * SECTOR..(lba + count) * SECTOR].to_vec();
                 reply_in(data, &mut self.sense)
             }
+            // Mode parameter header alone: no block descriptor, no page.
+            0x1A => reply_in(vec![3, 0, u8::from(self.dpofua) << 4, 0], &mut self.sense),
+            0x2A if cdb[1] & 0x08 != 0 && !self.dpofua => {
+                // ILLEGAL REQUEST, INVALID FIELD IN CDB.
+                self.sense = (0x05, 0x24, 0x00);
+                Bot::Status(Self::csw(tag, length as u32, 1))
+            }
             0x2A => {
+                self.forced.set(self.forced.get() + u32::from(cdb[1] & 0x08 != 0));
                 let count = usize::from(u16::from_be_bytes([cdb[7], cdb[8]]));
                 Bot::DataOut { lba: u64::from(be32(2)), len: count * SECTOR, csw: Self::csw(tag, 0, 0) }
             }

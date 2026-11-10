@@ -9,6 +9,11 @@
 //! again, the disk held for its device's return ([`crate::identity`]); then
 //! offline, the last thing it is sent a reset.
 //!
+//! **A write is forced with FUA where the device says it takes it** (DPOFUA
+//! in its mode parameters, `toyos_scsi::dpofua`), asked once as the disk
+//! first comes up and said in its line. A disk that does not is offered
+//! without, and its sessions' clients write and then flush.
+//!
 //! **A command's bound is policy.** BOT and SBC give a command no time
 //! limit, and a stick has answered later than two seconds
 //! (`issues/a-stick-that-answers-late-is-broken-by-the-two-second-abandon.md`):
@@ -22,6 +27,7 @@ use core::cell::{Cell, RefCell};
 use core::num::NonZeroU16;
 
 use toyos_device_memory::{DmaBuffers, Registers};
+pub use toyos_scsi::Io;
 use toyos_scsi::{self as scsi, Cdb, Geometry, Reply, Sense, HOST_BLOCK, SENSE_BYTES};
 
 use crate::bot::{self, Answer, Bot, Broke, Pipe, RoundTrip, CBW_LEN, CSW_LEN};
@@ -56,7 +62,7 @@ pub struct Silent;
 pub enum Work {
     /// `blocks` host blocks at host block `block`, to or from device address
     /// `at`, which the controller's domain maps.
-    Io { write: bool, block: u64, blocks: u32, at: u64, token: (u64, u32) },
+    Io { io: Io, block: u64, blocks: u32, at: u64, token: (u64, u32) },
     /// The device's volatile cache to the medium.
     Flush { token: (u64, u32) },
 }
@@ -94,6 +100,8 @@ struct Disk {
     /// When this driver last reset its port.
     reset_at: Option<Nanos>,
     no_cache: bool,
+    /// The device said it takes FUA when the disk first came up.
+    fua: bool,
     debt: Debt,
 }
 
@@ -148,6 +156,11 @@ impl<T> Disks<T> {
         self.disks.borrow().get(&disk).is_some_and(|d| !d.no_cache)
     }
 
+    /// Whether disk `disk` forces a write asked with FUA onto its medium.
+    pub fn fua(&self, disk: u32) -> bool {
+        self.disks.borrow().get(&disk).is_some_and(|d| d.fua)
+    }
+
     /// Queue `work` on disk `disk`, which its sessions were offered and which
     /// has not gone.
     pub fn submit(&self, disk: u32, work: Work) {
@@ -172,7 +185,7 @@ impl<T> Disks<T> {
     fn end(&self, disk: u32) {
         let Some(d) = self.disks.borrow_mut().remove(&disk) else { return };
         for work in d.work {
-            let write = matches!(work, Work::Io { write: true, .. });
+            let write = matches!(work, Work::Io { io: Io::Write { .. }, .. });
             self.event(Event::Answered { disk, token: work.token(), write, ok: false, status: 0 });
         }
         self.event(Event::Gone { disk });
@@ -291,15 +304,18 @@ pub async fn serve<R: Registers, D: DmaBuffers, C: Host, T>(
         Some(disk) => disk,
         None => {
             let table = msc.table(&geometry).await?;
+            let fua = msc.takes_fua().await?;
             if msc.asked {
                 return Ok(());
             }
             let disk = disks.next.get();
             disks.next.set(disk + 1);
-            let held = Disk { identity, geometry, work: VecDeque::new(), away: None, reset_at: None, no_cache: false, debt: Debt::NONE };
+            let held =
+                Disk { identity, geometry, work: VecDeque::new(), away: None, reset_at: None, no_cache: false, fua, debt: Debt::NONE };
             disks.disks.borrow_mut().insert(disk, held);
             disks.event(Event::Arrived { disk, name: format!("usb disk {disk}"), table });
-            say(format_args!("serving it as disk {disk}"));
+            let forced = if fua { "DPOFUA set, so a forced write is a WRITE(10) with FUA" } else { "no DPOFUA, so a forced write is a write and a flush" };
+            say(format_args!("serving it as disk {disk}: {forced}"));
             disk
         }
     };
@@ -437,6 +453,14 @@ impl<'d, 'u, R: Registers, D: DmaBuffers, C: Host, T> Msc<'d, 'u, R, D, C, T> {
         }
     }
 
+    /// Whether the device's mode parameters say it takes FUA.
+    async fn takes_fua(&mut self) -> Result<bool, Dead> {
+        let at = self.addr(self.io + AT_SMALL);
+        let reply = self.command(&Cdb::MODE_SENSE, Data::In { at, len: scsi::MODE_BYTES as u32 }).await?;
+        let header = core::array::from_fn(|i| self.dev.read8(self.io + AT_SMALL + i));
+        Ok(scsi::dpofua(reply, &header))
+    }
+
     /// The table, as `Usb::table` reads it, its sectors fetched by replaying
     /// the read until it asks for none it has not been given.
     async fn table(&mut self, geometry: &Geometry) -> Result<T, Dead> {
@@ -462,7 +486,7 @@ impl<'d, 'u, R: Registers, D: DmaBuffers, C: Host, T> Msc<'d, 'u, R, D, C, T> {
                 let start = block * u64::from(per);
                 let sectors = u64::from(per).min(geometry.sectors() - start) as u32;
                 let len = sectors * geometry.sector_bytes();
-                let cdb = Cdb::transfer(false, start as u32, sectors as u16);
+                let cdb = Cdb::transfer(Io::Read, start as u32, sectors as u16);
                 let read = self.command(&cdb, Data::In { at, len }).await?;
                 for s in 0..u64::from(sectors) {
                     let first = (s as usize) * geometry.sector_bytes() as usize;
@@ -496,10 +520,10 @@ impl<'d, 'u, R: Registers, D: DmaBuffers, C: Host, T> Msc<'d, 'u, R, D, C, T> {
             .await;
             let Some(work) = next else { return Ok(()) };
             let geometry = disks.disks.borrow()[&disk].geometry;
-            let (ok, status, write) = match work {
-                Work::Io { write, block, blocks, at, .. } => {
-                    let (ok, status) = self.io(&geometry, write, block, blocks, at).await?;
-                    (ok, status, write)
+            let (ok, status, io) = match work {
+                Work::Io { io, block, blocks, at, .. } => {
+                    let (ok, status) = self.io(&geometry, io, block, blocks, at).await?;
+                    (ok, status, Some(io))
                 }
                 Work::Flush { .. } => {
                     let (ok, status, no_cache) = match scsi::flushed(self.command(&Cdb::SYNCHRONIZE_CACHE, Data::None).await?) {
@@ -514,7 +538,7 @@ impl<'d, 'u, R: Registers, D: DmaBuffers, C: Host, T> Msc<'d, 'u, R, D, C, T> {
                         }
                         d.no_cache |= no_cache;
                     }
-                    (ok, status, false)
+                    (ok, status, None)
                 }
             };
             if self.asked || self.dev.leaving.get() {
@@ -530,17 +554,19 @@ impl<'d, 'u, R: Registers, D: DmaBuffers, C: Host, T> Msc<'d, 'u, R, D, C, T> {
             let mut all = disks.disks.borrow_mut();
             let d = all.get_mut(&disk).expect("served");
             d.work.pop_front();
-            if write && ok {
+            // A write the device forced is on its medium: no flush is owed.
+            if ok && io == Some(Io::Write { fua: false }) {
                 d.debt.wrote();
             }
             drop(all);
+            let write = matches!(io, Some(Io::Write { .. }));
             disks.event(Event::Answered { disk, token: work.token(), write, ok, status });
         }
     }
 
     /// One read or write, in as many READ(10)s or WRITE(10)s as it takes.
-    async fn io(&mut self, geometry: &Geometry, write: bool, block: u64, blocks: u32, at: u64) -> Result<(bool, u32), Dead> {
-        let mut transfer = match scsi::Transfer::new(block, blocks, write, geometry, toyos_blockring::MAX_REQUEST_BLOCKS) {
+    async fn io(&mut self, geometry: &Geometry, io: Io, block: u64, blocks: u32, at: u64) -> Result<(bool, u32), Dead> {
+        let mut transfer = match scsi::Transfer::new(block, blocks, io, geometry, toyos_blockring::MAX_REQUEST_BLOCKS) {
             Ok(t) => t,
             Err(past) => {
                 self.dev.usb.say(format_args!("a transfer past the disk's end refused: {past:?}"));
@@ -550,7 +576,7 @@ impl<'d, 'u, R: Registers, D: DmaBuffers, C: Host, T> Msc<'d, 'u, R, D, C, T> {
         while let Some(batch) = transfer.next() {
             let at = at + batch.offset as u64;
             let len = batch.bytes as u32;
-            let data = if write { Data::Out { at, len } } else { Data::In { at, len } };
+            let data = if io == Io::Read { Data::In { at, len } } else { Data::Out { at, len } };
             let reply = self.command(&batch.cdb, data).await?;
             match transfer.answered(&batch, reply) {
                 scsi::Moved::Whole => {}

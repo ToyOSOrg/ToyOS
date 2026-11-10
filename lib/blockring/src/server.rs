@@ -13,7 +13,8 @@
 //! the device's loss count, and a flush's completion under the same count
 //! settles every writer and fails for this one if the disk lost writes of its
 //! own since it last heard. The loss count is the device's, bumped by whoever
-//! resets it.
+//! resets it. A write with `fua` is on the medium when the device answers it,
+//! so no loss can take it and it is recorded under none.
 
 use alloc::vec::Vec;
 
@@ -33,6 +34,9 @@ pub struct ServerSession {
     /// Its grant lets it write; a write on a session whose grant does not is
     /// answered `ReadOnly` and never reaches the device.
     writes: bool,
+    /// Its device forces a write to the medium; a write with `fua` on a
+    /// session whose device does not is answered `Invalid`.
+    fua: bool,
     /// Each request in flight, in the order it was taken: a tag is only ever
     /// compared for equality.
     inflight: Vec<(u32, Op)>,
@@ -49,9 +53,10 @@ pub enum Taken {
 
 impl ServerSession {
     /// A session over the partition at device block `first`, `blocks` long,
-    /// which `holds` already holds for it, taking writes if `writes`.
-    pub fn new(first: u64, blocks: u64, writes: bool) -> Self {
-        Self { blocks, first, writes, inflight: Vec::new() }
+    /// which `holds` already holds for it, taking writes if `writes` and
+    /// writes with `fua` if `fua`, as its open was answered.
+    pub fn new(first: u64, blocks: u64, writes: bool, fua: bool) -> Self {
+        Self { blocks, first, writes, fua, inflight: Vec::new() }
     }
 
     /// The writer this session's writes and flushes are accounted to.
@@ -76,10 +81,12 @@ impl ServerSession {
 
     /// Decide what one entry the client published is.
     ///
-    /// A malformed entry, a tag already in flight, and a write its grant does
-    /// not let it make, are answered at once and never reach the device: the
-    /// second would make one tag two requests, and the client could not tell
-    /// which answer was whose.
+    /// A malformed entry, a tag already in flight, a write its grant does not
+    /// let it make, and a write with `fua` its open did not offer, are
+    /// answered at once and never reach the device: the second would make one
+    /// tag two requests, and the client could not tell which answer was
+    /// whose; the last would be answered as durable by a device that cannot
+    /// say so.
     pub fn take(&mut self, words: [u32; SQE_WORDS]) -> Taken {
         let request = match Request::decode(words, self.blocks) {
             Ok(request) => request,
@@ -92,6 +99,9 @@ impl ServerSession {
         }
         if !self.writes && matches!(request.op, Op::Write { .. }) {
             return Taken::Answer(Completion { tag: request.tag, status: Status::ReadOnly });
+        }
+        if !self.fua && matches!(request.op, Op::Write { fua: true, .. }) {
+            return Taken::Answer(Completion { tag: request.tag, status: Status::Invalid });
         }
         self.inflight.push((request.tag, request.op));
         Taken::Issue(request)
@@ -112,7 +122,8 @@ impl ServerSession {
         let status = match (op, done) {
             (_, false) => Status::Device,
             (Op::Read { .. }, true) => Status::Ok,
-            (Op::Write { .. }, true) => {
+            (Op::Write { fua: true, .. }, true) => Status::Ok,
+            (Op::Write { fua: false, .. }, true) => {
                 holds.wrote(self.writer(), losses);
                 Status::Ok
             }
@@ -141,7 +152,10 @@ mod tests {
     use crate::layout::ARENA;
 
     fn write(tag: u32) -> [u32; SQE_WORDS] {
-        Request { op: Op::Write { run: ARENA.run(0, 1).unwrap(), lba: 0 }, tag }.encode()
+        Request { op: Op::Write { run: ARENA.run(0, 1).unwrap(), lba: 0, fua: false }, tag }.encode()
+    }
+    fn forced(tag: u32) -> [u32; SQE_WORDS] {
+        Request { op: Op::Write { run: ARENA.run(0, 1).unwrap(), lba: 0, fua: true }, tag }.encode()
     }
     fn flush(tag: u32) -> [u32; SQE_WORDS] {
         Request { op: Op::Flush, tag }.encode()
@@ -151,7 +165,7 @@ mod tests {
     fn a_reset_answers_once_and_the_late_device_answer_is_dropped() {
         let mut holds: Holds<u8> = Holds::new();
         holds.hold(10, 20, 1).unwrap();
-        let mut session = ServerSession::new(10, 10, true);
+        let mut session = ServerSession::new(10, 10, true, true);
         assert!(matches!(session.take(write(1)), Taken::Issue(_)));
         assert_eq!(session.abort_all(), [Completion { tag: 1, status: Status::Device }]);
         assert_eq!(session.complete(1, true, &mut holds, 1), None);
@@ -161,7 +175,7 @@ mod tests {
     /// tags' values: nothing orders a tag but its arrival.
     #[test]
     fn a_reset_answers_in_the_order_taken() {
-        let mut session = ServerSession::new(0, 10, true);
+        let mut session = ServerSession::new(0, 10, true, true);
         for tag in [9, 4] {
             assert!(matches!(session.take(write(tag)), Taken::Issue(_)));
         }
@@ -171,7 +185,7 @@ mod tests {
 
     #[test]
     fn a_tag_in_flight_twice_is_refused_unissued() {
-        let mut session = ServerSession::new(0, 10, true);
+        let mut session = ServerSession::new(0, 10, true, true);
         assert!(matches!(session.take(write(4)), Taken::Issue(_)));
         assert_eq!(session.take(write(4)), Taken::Answer(Completion { tag: 4, status: Status::Invalid }));
         assert_eq!(session.inflight().len(), 1);
@@ -183,7 +197,7 @@ mod tests {
     fn a_flush_after_a_loss_answers_lost_once() {
         let mut holds: Holds<u8> = Holds::new();
         holds.hold(0, 10, 1).unwrap();
-        let mut session = ServerSession::new(0, 10, true);
+        let mut session = ServerSession::new(0, 10, true, true);
         session.take(write(1));
         assert_eq!(session.complete(1, true, &mut holds, 0).unwrap().status, Status::Ok);
         session.take(flush(2));
@@ -192,11 +206,35 @@ mod tests {
         assert_eq!(session.complete(3, true, &mut holds, 1).unwrap().status, Status::Ok);
     }
 
+    /// A write with `fua` acknowledged before a reset is on the medium: the
+    /// flush after the reset has no loss of it to report. Without `fua` the
+    /// same write is the loss the test above reports.
+    #[test]
+    fn a_forced_write_is_no_loss_to_the_flush_after_a_reset() {
+        let mut holds: Holds<u8> = Holds::new();
+        holds.hold(0, 10, 1).unwrap();
+        let mut session = ServerSession::new(0, 10, true, true);
+        session.take(forced(1));
+        assert_eq!(session.complete(1, true, &mut holds, 0).unwrap().status, Status::Ok);
+        session.take(flush(2));
+        assert_eq!(session.complete(2, true, &mut holds, 1).unwrap().status, Status::Ok);
+    }
+
+    /// A session whose device forces no write refuses one with `fua`
+    /// unissued, and still takes a plain write.
+    #[test]
+    fn a_forced_write_on_a_session_that_offered_none_is_refused_unissued() {
+        let mut session = ServerSession::new(0, 10, true, false);
+        assert_eq!(session.take(forced(1)), Taken::Answer(Completion { tag: 1, status: Status::Invalid }));
+        assert_eq!(session.inflight().len(), 0);
+        assert!(matches!(session.take(write(2)), Taken::Issue(_)));
+    }
+
     /// A session whose grant does not write answers a write `ReadOnly` and
     /// holds nothing for the device, and still reads and flushes.
     #[test]
     fn a_read_only_session_refuses_a_write_unissued() {
-        let mut session = ServerSession::new(0, 10, false);
+        let mut session = ServerSession::new(0, 10, false, true);
         assert_eq!(session.take(write(1)), Taken::Answer(Completion { tag: 1, status: Status::ReadOnly }));
         assert_eq!(session.inflight().len(), 0);
         let read = Request { op: Op::Read { run: ARENA.run(0, 1).unwrap(), lba: 0 }, tag: 2 };

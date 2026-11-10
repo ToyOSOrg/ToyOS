@@ -21,6 +21,11 @@
 //! volatile cache a completed write is on the medium, and a flush has nothing
 //! to issue.
 //!
+//! **A write asked with `fua` sets FUA** (NVM Command Set 1.0 §3.2.6, Command
+//! Dword 12 bit 30): the controller writes the data to non-volatile medium
+//! before it completes the command. Every controller takes the bit, so every
+//! session is offered it.
+//!
 //! **A command the controller does not answer is reclaimed by a controller
 //! reset** (§3.7.2): `CC.EN` cleared, every command it held is gone, the queues
 //! are made again. Whoever owned one is told it was not done.
@@ -32,6 +37,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::SyscallError;
+use toyos_blockserve::Io;
 
 const REG_CAP: usize = 0x00;
 const REG_CC: usize = 0x14;
@@ -73,6 +79,8 @@ const FEATURE_NUMBER_OF_QUEUES: u32 = 0x07;
 const IO_FLUSH: u8 = 0x00;
 const IO_WRITE: u8 = 0x01;
 const IO_READ: u8 = 0x02;
+/// Write's Force Unit Access, in Command Dword 12.
+const WRITE_FUA: u32 = 1 << 30;
 
 /// Where everything this driver itself owns is in its one grant.
 const OFF_ADMIN_SQ: usize = 0x0000;
@@ -89,6 +97,17 @@ const _: () = assert!(OFF_IO + MAX_IO_QUEUES as usize * 2 * PAGE <= OFF_PRP);
 const _: () = assert!(OFF_PRP + MAX_IO_QUEUES as usize * IO_DEPTH as usize * PAGE <= GRANT_BYTES as usize);
 const _: () = assert!(ADMIN_DEPTH as usize * SQE_BYTES <= PAGE);
 const _: () = assert!(IO_DEPTH as usize * SQE_BYTES <= PAGE);
+
+/// The opcode and Command Dword 12 of `io` over `sectors` sectors: the count,
+/// zero-based, and FUA for a write asked with it.
+fn transfer(io: Io, sectors: u64) -> (u8, u32) {
+    let count = (sectors - 1) as u32;
+    match io {
+        Io::Read => (IO_READ, count),
+        Io::Write { fua: false } => (IO_WRITE, count),
+        Io::Write { fua: true } => (IO_WRITE, count | WRITE_FUA),
+    }
+}
 
 /// Whose a command is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -603,26 +622,27 @@ impl Controller {
         (0..self.io.len()).filter(|&i| !self.io[i].free.is_empty()).max_by_key(|&i| self.io[i].free.len())
     }
 
-    /// Issue a read or a write of `blocks` 4 KiB blocks at device block
-    /// `block`, to or from device address `at`, for `owner`.
+    /// Issue `io` of `blocks` 4 KiB blocks at device block `block`, to or
+    /// from device address `at`, for `owner`.
     ///
     /// # Panics
     /// With no room: the caller asks [`Self::has_room`] first.
-    pub fn submit_io(&mut self, write: bool, block: u64, blocks: u32, at: u64, owner: Owner) {
+    pub fn submit_io(&mut self, io: Io, block: u64, blocks: u32, at: u64, owner: Owner) {
         let per = (toyos_blockring::BLOCK_BYTES as u32 / self.lba_bytes) as u64;
-        self.submit_sectors(write, block * per, blocks as u64 * per, at, owner);
+        self.submit_sectors(io, block * per, blocks as u64 * per, at, owner);
     }
 
     /// [`Self::submit_io`] in the namespace's own sectors: `sectors` of them
     /// from `lba`, which a table at the device's end needs when its sector
     /// count is not whole blocks.
-    fn submit_sectors(&mut self, write: bool, lba: u64, sectors: u64, at: u64, owner: Owner) {
+    fn submit_sectors(&mut self, io: Io, lba: u64, sectors: u64, at: u64, owner: Owner) {
         let queue = self.roomiest().expect("nvme: an I/O submission with no queue room");
         let pages = (sectors * self.lba_bytes as u64).div_ceil(PAGE as u64) as usize;
         let (dma, dma_addr) = (self.dma, self.dma_addr);
         let list_base = OFF_PRP + queue * IO_DEPTH as usize * PAGE;
+        let (opcode, cdw12) = transfer(io, sectors);
         let cmd = Command {
-            opcode: if write { IO_WRITE } else { IO_READ },
+            opcode,
             nsid: 1,
             prp1: at,
             prp2: match pages {
@@ -632,7 +652,7 @@ impl Controller {
             },
             cdw10: lba as u32,
             cdw11: (lba >> 32) as u32,
-            cdw12: (sectors - 1) as u32,
+            cdw12,
         };
         // Every page after the first, in this slot's list page (§4.1.1).
         self.submit(Some(queue), cmd, owner, |cid| {
@@ -661,7 +681,7 @@ impl Controller {
         assert!(out.len() <= PAGE && out.len().is_multiple_of(self.lba_bytes as usize) && !out.is_empty());
         assert_eq!(self.busy(), 0, "nvme: a waited read beside other commands");
         let sectors = (out.len() / self.lba_bytes as usize) as u64;
-        self.submit_sectors(false, lba, sectors, self.dma_addr + OFF_SCRATCH as u64, Owner::Driver);
+        self.submit_sectors(Io::Read, lba, sectors, self.dma_addr + OFF_SCRATCH as u64, Owner::Driver);
         let start = Instant::now();
         let mut done = Vec::new();
         let ok = loop {
@@ -702,7 +722,7 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
-    use super::{page_size, sector_shift};
+    use super::{page_size, sector_shift, transfer, Io};
 
     /// An Identify Namespace page: `formats` LBA formats, each `(MS, LBADS)`.
     fn namespace(formats: &[(u16, u8)]) -> impl Fn(usize) -> u32 {
@@ -711,6 +731,13 @@ mod tests {
             let (ms, lbads) = formats[(at - 128) / 4];
             ms as u32 | (lbads as u32) << 16
         }
+    }
+
+    #[test]
+    fn only_a_write_asked_with_fua_sets_it() {
+        assert_eq!(transfer(Io::Read, 8), (0x02, 7));
+        assert_eq!(transfer(Io::Write { fua: false }, 8), (0x01, 7));
+        assert_eq!(transfer(Io::Write { fua: true }, 256), (0x01, 255 | 1 << 30));
     }
 
     #[test]

@@ -1441,10 +1441,13 @@ impl<D: BlockDev> Mount<D> {
     }
 
     /// Writes every closed entry through `upto`, in order, each after a
-    /// flush and followed by one (A2.12), so each is durable once written and
-    /// so is every node write that completed before it. An entry naming
-    /// itself has its header sector written last, after a flush. A failed
-    /// write is reissued with the same bytes, or the mount stops writing.
+    /// flush and itself durable as it is written (A2.12), so each is durable
+    /// once written and so is every node write that completed before it. An
+    /// entry naming itself has its header sector written last, once the rest
+    /// is durable. The journal's blocks are written no other way, so a
+    /// durable write of one is never over a write no flush has covered. A
+    /// failed write is reissued with the same bytes, or the mount stops
+    /// writing.
     async fn write_entries(&self, upto: u64) -> Result<()> {
         self.journal_queue.wait(|| (!self.journal_held.get()).then(|| self.journal_held.set(true))).await;
         let out = async {
@@ -1468,14 +1471,11 @@ impl<D: BlockDev> Mount<D> {
                     if header_last {
                         let mut headless = bytes.clone();
                         headless[..SECTOR].fill(0);
-                        mkfs::write(&self.dev, sector, &headless).await?;
-                        self.dev.flush().await?;
-                        mkfs::write(&self.dev, sector, &bytes[..BLOCK]).await?;
+                        mkfs::write_durable(&self.dev, sector, &headless).await?;
+                        mkfs::write_durable(&self.dev, sector, &bytes[..BLOCK]).await
                     } else {
-                        mkfs::write(&self.dev, sector, &bytes).await?;
+                        mkfs::write_durable(&self.dev, sector, &bytes).await
                     }
-                    self.dev.flush().await?;
-                    Ok(())
                 })
                 .await?;
                 let mut st = self.st.borrow_mut();

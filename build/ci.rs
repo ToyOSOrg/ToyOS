@@ -754,9 +754,9 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_SIM, "placement-ignores-staleness", Some("policy"), &[
         Fails("a_stopped_cpu_stops_taking_work"),
     ]),
-    // The block protocol's three: a completion lost to a session's end, a
-    // completion given twice after a reset, and a loss nothing is written
-    // again after.
+    // The block protocol's four: a completion lost to a session's end, a
+    // completion given twice after a reset, a loss nothing is written again
+    // after, and a forced write the device was not told to force.
     red(BLOCKRING, "mutate-session-end-forgets", None, &[
         Fails("model::tests::every_request_is_answered_exactly_once"),
     ]),
@@ -765,6 +765,9 @@ pub(crate) const CONTROLS: &[Control] = &[
     ]),
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
         Fails("model::tests::what_a_flush_calls_durable_is_on_the_medium"),
+    ]),
+    red(BLOCKRING, "mutate-fua-goes-out-unforced", None, &[
+        Fails("model::tests::a_forced_write_answered_done_stays_on_the_medium"),
     ]),
     // The link's one: a full ring's want swapped `Relaxed`, a wake lost.
     red(LINK, "mutate-want-relaxed", Some("ends_loom"), &[Fails("a_full_ring_is_never_left_asleep_on_room_it_has")]),

@@ -1,11 +1,12 @@
 //! Every ordering of a client, a server, a device and their failures.
 //!
-//! A scripted caller asks for writes and flushes; the rings between the client
-//! and the server are queues, and rings of the transport's own are driven
-//! beside them and held to them both ways ([`Queues`]); the server is [`ServerSession`]
-//! over a device of two blocks with a volatile cache. [`explore`] runs, depth
-//! first and exhaustively, every interleaving of: the caller asking for its
-//! next step, the server taking a request, the device completing any one it
+//! A scripted caller asks for writes, forced writes and flushes; the rings
+//! between the client and the server are queues, and rings of the transport's
+//! own are driven beside them and held to them both ways ([`Queues`]); the
+//! server is [`ServerSession`] over a device of two blocks with a volatile
+//! cache. [`explore`] runs, depth first and exhaustively, every interleaving
+//! of: the caller asking for its next step, the server taking a request, the
+//! device completing any one it
 //! holds, **the device failing any one it holds** (not done, answered so), the
 //! client reading a completion, **the device being reset** under whatever is in
 //! flight (each command dropped, or run before the stop with its completion
@@ -24,7 +25,9 @@
 //!   write acknowledged before the flush was asked for, or one asked for after
 //!   it; and a flush ends answered durable unless the run spent more failures
 //!   than [`MAX_ATTEMPTS`], which is the fewest that can make the client give
-//!   a write or a flush up ([`Law::Durable`]).
+//!   a write or a flush up ([`Law::Durable`]);
+//! - a forced write answered done is on the medium from then on, until a
+//!   write asked for after it replaces it ([`Law::Forced`]).
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
@@ -80,6 +83,8 @@ pub struct Explored {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Step {
     Write { block: u64, value: u8 },
+    /// A write with `fua`.
+    Forced { block: u64, value: u8 },
     Flush,
 }
 
@@ -90,6 +95,7 @@ pub enum Law {
     Durable,
     /// A caller's write first goes out while the client keeps its limit.
     Kept,
+    Forced,
 }
 
 /// One word of the session page. The model runs on one thread, so every order
@@ -297,7 +303,7 @@ fn start(failures: Failures, limit: u64) -> World {
 fn connect(world: &mut World) -> Result<(), (Law, String)> {
     let mut holds = Holds::new();
     holds.hold(0, BLOCKS as u64, 1).expect("a fresh server holds nothing");
-    world.server = Some(Server { session: ServerSession::new(0, BLOCKS as u64, true), holds });
+    world.server = Some(Server { session: ServerSession::new(0, BLOCKS as u64, true, true), holds });
     world.alive = true;
     world.losses = 0;
     world.client.session_started();
@@ -316,7 +322,7 @@ fn pump(world: &mut World) -> Result<(), (Law, String)> {
     loop {
         let kept = world.client.kept();
         let Some(request) = world.client.next_request(place) else { return Ok(()) };
-        if let Op::Write { run, .. } = request.op {
+        if let Op::Write { run, fua: false, .. } = request.op {
             let ticket = Ticket::from(run.first());
             if world.sent.insert(ticket) && kept >= world.limit {
                 return Err((Law::Kept, format!("write {ticket} went out with {kept} blocks kept")));
@@ -326,21 +332,26 @@ fn pump(world: &mut World) -> Result<(), (Law, String)> {
     }
 }
 
-/// A write step's block and value; a write's arena block is its ticket.
+/// A write step's block and value, forced or not; a write's arena block is
+/// its ticket.
 fn write_of(script: &[Step], ticket: Ticket) -> Option<(u64, u8)> {
     match script[ticket as usize] {
-        Step::Write { block, value } => Some((block, value)),
+        Step::Write { block, value } | Step::Forced { block, value } => Some((block, value)),
         Step::Flush => None,
     }
 }
 
-/// The device carries out `request`: a write lands in the cache, a flush moves
-/// the cache onto the medium.
+/// The device carries out `request`: a write lands in the cache, a write with
+/// `fua` on the medium in place of what the cache held of its block, and a
+/// flush moves the cache onto the medium.
 fn apply(script: &[Step], cache: &mut [Option<u8>; BLOCKS], media: &mut [u8; BLOCKS], request: Request) {
     match request.op {
-        Op::Write { run, lba } => {
+        Op::Write { run, lba, fua } => {
             let (_, value) = write_of(script, u64::from(run.first())).expect("a write's arena block is its ticket");
-            cache[lba as usize] = Some(value);
+            cache[lba as usize] = (!fua).then_some(value);
+            if fua {
+                media[lba as usize] = value;
+            }
         }
         Op::Flush => {
             for (b, slot) in cache.iter_mut().enumerate() {
@@ -408,7 +419,29 @@ fn settle(script: &[Step], world: &mut World) -> Result<(), (Law, String)> {
             durable(script, world, ticket).map_err(|why| (Law::Durable, why))?;
         }
     }
+    forced(script, world).map_err(|why| (Law::Forced, why))?;
     pump(world)
+}
+
+/// Every forced write answered done is on the medium, or a write asked for
+/// after it is.
+fn forced(script: &[Step], world: &World) -> Result<(), String> {
+    for (&ticket, answers) in &world.answers {
+        let Step::Forced { block, value } = script[ticket as usize] else { continue };
+        if answers.as_slice() != [Outcome::Done] {
+            continue;
+        }
+        let later = (ticket + 1..script.len() as u64).filter_map(|t| write_of(script, t)).filter(|&(b, _)| b == block);
+        let allowed: Vec<u8> = core::iter::once(value).chain(later.map(|(_, v)| v)).collect();
+        let on = world.media[block as usize];
+        if !allowed.contains(&on) {
+            return Err(format!(
+                "forced write {ticket} was answered done with block {block} holding {on}, not its {value} \
+                 (or a later one of {allowed:?})"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// What the flush `ticket`, just answered durable, promised is on the medium.
@@ -430,6 +463,15 @@ fn durable(script: &[Step], world: &World, flush: Ticket) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+/// Whether the write `ticket` was answered done before a flush that was then
+/// answered durable was asked for: the client keeps it no longer.
+fn covered(script: &[Step], world: &World, ticket: Ticket) -> bool {
+    (ticket + 1..script.len() as u64).any(|flush| {
+        world.acked_before.get(&flush).is_some_and(|acked| acked.contains(&ticket))
+            && world.answers.get(&flush).map(Vec::as_slice) == Some(&[Outcome::Durable])
+    })
 }
 
 /// Nothing more can happen: every ticket was answered, and every flush said
@@ -533,25 +575,45 @@ fn next(script: &[Step], world: &World) -> Vec<(String, After)> {
     };
 
     // The caller asks for its next step, never a write to a block with a write
-    // still unanswered: two writes in flight to one block are unordered.
+    // still unanswered: two writes in flight to one block are unordered. Nor
+    // a forced write to a block with a write no flush has covered, so the
+    // flush before a forced write waits for the writes it is to cover.
     if world.next < script.len() {
         let ticket = world.next as Ticket;
-        let busy = write_of(script, ticket).is_some_and(|(block, _)| {
+        let unanswered = |block: u64| {
             (0..ticket).any(|t| {
                 write_of(script, t).is_some_and(|(b, _)| b == block) && !world.answers.contains_key(&t)
             })
-        });
+        };
+        let busy = match (script[world.next], script.get(world.next + 1)) {
+            (Step::Write { block, .. }, _) => unanswered(block),
+            (Step::Forced { block, .. }, _) => {
+                unanswered(block)
+                    || (0..ticket).any(|t| {
+                        matches!(script[t as usize], Step::Write { block: b, .. } if b == block)
+                            && world.answers[&t].as_slice() == [Outcome::Done]
+                            && !covered(script, world, t)
+                    })
+            }
+            (Step::Flush, Some(&Step::Forced { block, .. })) => unanswered(block),
+            (Step::Flush, _) => false,
+        };
         if !busy {
             let mut w = world.clone();
             match script[world.next] {
                 Step::Write { block, .. } => {
-                    w.client.submit(ticket, Ask::Write { lba: block, blocks: 1, payload: ticket });
+                    w.client.submit(ticket, Ask::Write { lba: block, blocks: 1, payload: ticket, fua: false });
+                }
+                Step::Forced { block, .. } => {
+                    w.client.submit(ticket, Ask::Write { lba: block, blocks: 1, payload: ticket, fua: true });
                 }
                 Step::Flush => {
                     let acked = w
                         .answers
                         .iter()
-                        .filter(|(t, a)| write_of(script, **t).is_some() && a.as_slice() == [Outcome::Done])
+                        .filter(|(t, a)| {
+                            matches!(script[**t as usize], Step::Write { .. }) && a.as_slice() == [Outcome::Done]
+                        })
                         .map(|(t, _)| *t)
                         .collect();
                     w.acked_before.insert(ticket, acked);
@@ -729,10 +791,21 @@ mod tests {
         at_most(1, 1, MAX_ATTEMPTS as u8),
     ];
 
+    /// A forced write over a write a flush has covered, beside a write kept
+    /// through it: a loss after it issues the kept write again and the
+    /// covered one never.
+    const FORCED: [Step; 5] = [
+        Step::Write { block: 0, value: 1 },
+        Step::Flush,
+        Step::Forced { block: 0, value: 2 },
+        Step::Write { block: 1, value: 3 },
+        Step::Flush,
+    ];
+
     fn every_bound() -> impl Iterator<Item = (&'static [Step], Failures)> {
         BOUNDS
             .into_iter()
-            .map(|f| (&SCRIPT[..], f))
+            .flat_map(|f| [(&SCRIPT[..], f), (&FORCED[..], f)])
             .chain([(&ONE_BLOCK[..], ONE_BLOCK_BOUND)])
             .chain(GIVE_UP_BOUNDS.into_iter().map(|f| (&GIVE_UP[..], f)))
     }
@@ -771,6 +844,20 @@ mod tests {
                 panic!("{failures:?}: {why}");
             }
         }
+    }
+
+    /// A forced write answered done is on the medium whatever is lost after
+    /// it, with no flush asked for it.
+    #[test]
+    fn a_forced_write_answered_done_stays_on_the_medium() {
+        for (script, failures) in every_bound() {
+            if let Some((Law::Forced, why)) = verdict(script, failures).broken {
+                panic!("{failures:?}: {why}");
+            }
+        }
+        let explored = verdict(&FORCED, at_most(0, 0, 0));
+        assert_eq!(explored.broken, None);
+        assert!(explored.ends >= 1, "no run asked the forced write");
     }
 
     /// No caller's write goes out while the client keeps its limit: it waits

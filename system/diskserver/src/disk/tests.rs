@@ -15,7 +15,7 @@ use crate::{Outcome, Ticket};
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Asked {
     Read { lba: u64, blocks: u32 },
-    Write { lba: u64, data: Vec<u8> },
+    Write { lba: u64, data: Vec<u8>, fua: bool },
     Flush,
 }
 
@@ -37,6 +37,8 @@ struct Script {
     reconnects: VecDeque<Result<(), SessionError>>,
     reconnected: u32,
     read_only: bool,
+    /// What each session's open says of its device.
+    fua: bool,
 }
 
 impl Script {
@@ -52,6 +54,7 @@ impl Script {
             reconnects: VecDeque::new(),
             reconnected: 0,
             read_only: false,
+            fua: false,
         }
     }
 
@@ -73,7 +76,9 @@ impl Script {
                 (Outcome::Done, Some(self.disk[at..at + blocks as usize * BLOCK].to_vec()))
             }
             Asked::Write { .. } if self.read_only => (Outcome::ReadOnly, None),
-            Asked::Write { lba, data } => {
+            // A server refuses a forced write it did not offer.
+            Asked::Write { fua: true, .. } if !self.fua => (Outcome::Invalid, None),
+            Asked::Write { lba, data, .. } => {
                 let at = lba as usize * BLOCK;
                 self.disk[at..at + data.len()].copy_from_slice(&data);
                 (Outcome::Done, None)
@@ -93,8 +98,12 @@ impl Link for Script {
         self.ask(Asked::Read { lba, blocks })
     }
 
-    fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock]) -> Result<Ticket, Unsent> {
-        self.ask(Asked::Write { lba, data: blocks.iter().flat_map(|b| b.iter().copied()).collect() })
+    fn fua(&self) -> bool {
+        self.fua
+    }
+
+    fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock], fua: bool) -> Result<Ticket, Unsent> {
+        self.ask(Asked::Write { lba, data: blocks.iter().flat_map(|b| b.iter().copied()).collect(), fua })
     }
 
     fn submit_flush(&mut self) -> Result<Ticket, Unsent> {
@@ -152,10 +161,43 @@ fn a_request_on_the_wire_at_a_session_end_is_asked_again_after_the_reconnect() {
     let script = disk.link.borrow();
     assert_eq!(script.reconnected, 3);
     let read = Asked::Read { lba: 3, blocks: 1 };
-    let write = Asked::Write { lba: 5, data: vec![0x55; BLOCK] };
+    let write = Asked::Write { lba: 5, data: vec![0x55; BLOCK], fua: false };
     assert_eq!(script.log, [read.clone(), read, write.clone(), write, Asked::Flush, Asked::Flush]);
     assert!(script.disk[5 * BLOCK..6 * BLOCK].iter().all(|&b| b == 0x55));
     assert!(!disk.pending());
+}
+
+/// A durable write on a session whose device forces writes is one write with
+/// `fua` and no flush, split like any transfer; on one whose device does not
+/// it is the write and then a flush.
+#[test]
+fn a_durable_write_is_forced_where_the_session_offers_it_and_flushed_where_not() {
+    for fua in [true, false] {
+        let mut script = Script::new(40);
+        script.fua = fua;
+        let disk = Served::new(script);
+        now(&disk, disk.write_durable(2, &blocks(0x77, 33))).unwrap();
+        let script = disk.link.borrow();
+        let write = |lba, n| Asked::Write { lba, data: vec![0x77; n * BLOCK], fua };
+        let mut want = vec![write(2, 32), write(34, 1)];
+        if !fua {
+            want.push(Asked::Flush);
+        }
+        assert_eq!(script.log, want, "fua {fua}");
+        assert!(script.disk[2 * BLOCK..35 * BLOCK].iter().all(|&b| b == 0x77));
+    }
+}
+
+/// A forced write on the wire when its session ends is asked again, forced.
+#[test]
+fn a_forced_write_on_the_wire_at_a_session_end_is_asked_again_forced() {
+    let mut script = Script::new(4);
+    script.fua = true;
+    script.ends.push_back(0);
+    let disk = Served::new(script);
+    now(&disk, disk.write_durable(1, &blocks(9, 1))).unwrap();
+    let forced = Asked::Write { lba: 1, data: vec![9; BLOCK], fua: true };
+    assert_eq!(disk.link.borrow().log, [forced.clone(), forced]);
 }
 
 /// A request refused at every session end is asked once more than

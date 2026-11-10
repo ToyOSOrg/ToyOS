@@ -33,6 +33,10 @@ mutate-abort-keeps-inflight = []
 # re-issues nothing: writes it had acknowledged are gone and a later flush
 # still says durable.
 mutate-no-reissue-after-loss = []
+# `Client` puts a write asked with `fua` on the wire without it, and still
+# keeps nothing of it: the device holds it in its cache, and it was called
+# durable.
+mutate-fua-goes-out-unforced = []
 
 [dependencies]
 # Whose flush answers for which writes the disk lost, and who holds which span:

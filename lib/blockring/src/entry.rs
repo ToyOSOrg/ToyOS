@@ -16,8 +16,10 @@ use crate::layout::{ARENA, CQE_WORDS, MAX_REQUEST_BLOCKS, SQE_WORDS};
 pub enum Op {
     /// The run's blocks from the partition's block `lba` into the arena.
     Read { run: Run, lba: u64 },
-    /// The run's blocks from the arena to the partition's block `lba`.
-    Write { run: Run, lba: u64 },
+    /// The run's blocks from the arena to the partition's block `lba`. With
+    /// `fua` they are on the medium before it is answered, which only a
+    /// session opened saying so takes ([`crate::wire::Opened::fua`]).
+    Write { run: Run, lba: u64, fua: bool },
     /// Every write acknowledged before this was submitted, onto the medium.
     Flush,
 }
@@ -25,6 +27,9 @@ pub enum Op {
 const READ: u32 = 1;
 const WRITE: u32 = 2;
 const FLUSH: u32 = 3;
+
+/// A write's flags word: bit 0 is `fua`, and no other is defined.
+const FUA: u32 = 1;
 
 /// One request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -45,29 +50,31 @@ pub enum Refused {
 
 impl Request {
     pub fn encode(&self) -> [u32; SQE_WORDS] {
-        let (op, lba, first, count) = match self.op {
-            Op::Read { run, lba } => (READ, lba, run.first(), run.count()),
-            Op::Write { run, lba } => (WRITE, lba, run.first(), run.count()),
-            Op::Flush => (FLUSH, 0, 0, 0),
+        let (op, lba, first, count, flags) = match self.op {
+            Op::Read { run, lba } => (READ, lba, run.first(), run.count(), 0),
+            Op::Write { run, lba, fua } => (WRITE, lba, run.first(), run.count(), if fua { FUA } else { 0 }),
+            Op::Flush => (FLUSH, 0, 0, 0, 0),
         };
-        [op, self.tag, lba as u32, (lba >> 32) as u32, count, first, 0, 0]
+        [op, self.tag, lba as u32, (lba >> 32) as u32, count, first, flags, 0]
     }
 
     /// The request these words are, bounded against a partition of
     /// `partition_blocks`: every block it names is inside both the arena and
     /// the partition, a transfer moves at least one block and at most
-    /// [`MAX_REQUEST_BLOCKS`], and a flush names nothing.
+    /// [`MAX_REQUEST_BLOCKS`], only a write carries flags, and a flush names
+    /// nothing.
     pub fn decode(words: [u32; SQE_WORDS], partition_blocks: u64) -> Result<Self, Refused> {
-        let [op, tag, lba_low, lba_high, blocks, arena, reserved @ ..] = words;
+        let [op, tag, lba_low, lba_high, blocks, arena, flags, reserved] = words;
         let refused = Refused::Malformed { tag };
-        if reserved.iter().any(|&word| word != 0) {
+        if reserved != 0 {
             return Err(refused);
         }
         let lba = u64::from(lba_low) | (u64::from(lba_high) << 32);
-        let transfer: fn(Run, u64) -> Op = match op {
-            READ => |run, lba| Op::Read { run, lba },
-            WRITE => |run, lba| Op::Write { run, lba },
-            FLUSH if lba == 0 && blocks == 0 && arena == 0 => return Ok(Self { op: Op::Flush, tag }),
+        let transfer: fn(Run, u64) -> Op = match (op, flags) {
+            (READ, 0) => |run, lba| Op::Read { run, lba },
+            (WRITE, 0) => |run, lba| Op::Write { run, lba, fua: false },
+            (WRITE, FUA) => |run, lba| Op::Write { run, lba, fua: true },
+            (FLUSH, 0) if lba == 0 && blocks == 0 && arena == 0 => return Ok(Self { op: Op::Flush, tag }),
             _ => return Err(refused),
         };
         let run = Run::decode(arena, blocks, &ARENA).map_err(|_| refused)?;
@@ -83,7 +90,7 @@ impl Request {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Status {
     /// Done. For a flush, every write of its writer's acknowledged before it
-    /// was submitted is on the medium.
+    /// was submitted is on the medium; for a write with `fua`, that write is.
     Ok,
     /// Refused unread: the request was malformed ([`Refused`]).
     Invalid,
@@ -151,7 +158,8 @@ mod tests {
         let last = ARENA.slots() - MAX_REQUEST_BLOCKS;
         for request in [
             Request { op: Op::Read { run: run(0, 1), lba: 999 }, tag: 7 },
-            Request { op: Op::Write { run: run(last, MAX_REQUEST_BLOCKS), lba: 0 }, tag: u32::MAX },
+            Request { op: Op::Write { run: run(last, MAX_REQUEST_BLOCKS), lba: 0, fua: false }, tag: u32::MAX },
+            Request { op: Op::Write { run: run(2, 3), lba: 5, fua: true }, tag: 3 },
             Request { op: Op::Flush, tag: 0 },
         ] {
             assert_eq!(Request::decode(request.encode(), PARTITION), Ok(request));
@@ -164,14 +172,19 @@ mod tests {
     /// refusal still carries its tag.
     #[test]
     fn a_request_outside_its_bounds_is_refused_by_tag() {
-        let write = |lba| Request { op: Op::Write { run: run(5, 2), lba }, tag: 42 };
+        let write = |lba| Request { op: Op::Write { run: run(5, 2), lba, fua: false }, tag: 42 };
+        let read = Request { op: Op::Read { run: run(5, 2), lba: 10 }, tag: 42 };
         let good = write(10);
         let with = |at: usize, word: u32| {
             let mut words = good.encode();
             words[at] = word;
             words
         };
-        let cases: [(&str, [u32; SQE_WORDS]); 10] = [
+        let mut forced_read = read.encode();
+        forced_read[6] = 1;
+        let mut forced_flush = Request { op: Op::Flush, tag: 42 }.encode();
+        forced_flush[6] = 1;
+        let cases: [(&str, [u32; SQE_WORDS]); 13] = [
             ("op 0", with(0, 0)),
             ("op 4", with(0, 4)),
             ("no blocks", with(4, 0)),
@@ -182,6 +195,9 @@ mod tests {
             ("lba wraps", write(u64::MAX).encode()),
             ("reserved word", with(7, 1)),
             ("a flush with a range", with(0, 3)),
+            ("a flag no write defines", with(6, 2)),
+            ("a read with a write's flag", forced_read),
+            ("a flush with a write's flag", forced_flush),
         ];
         for (what, words) in cases {
             assert_eq!(

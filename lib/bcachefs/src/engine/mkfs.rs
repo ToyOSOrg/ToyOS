@@ -353,12 +353,26 @@ fn fields(geometry: &Geometry, member: &Member, crypt: Option<&Crypt>, roots: &[
     out
 }
 
-pub(crate) async fn write(dev: &impl BlockDev, sector: u64, bytes: &[u8]) -> Result<()> {
+/// The device block `sector` is, and `bytes` as whole blocks, zero past
+/// their end.
+fn blocks(sector: u64, bytes: &[u8]) -> (u64, Vec<[u8; BLOCK]>) {
     let at = sector * SECTOR as u64;
     assert!(at.is_multiple_of(BLOCK as u64), "a write off a block boundary");
     let mut blocks = alloc::vec![[0u8; BLOCK]; bytes.len().div_ceil(BLOCK)];
     blocks.as_flattened_mut()[..bytes.len()].copy_from_slice(bytes);
-    dev.write(at / BLOCK as u64, &blocks).await?;
+    (at / BLOCK as u64, blocks)
+}
+
+pub(crate) async fn write(dev: &impl BlockDev, sector: u64, bytes: &[u8]) -> Result<()> {
+    let (lba, blocks) = blocks(sector, bytes);
+    dev.write(lba, &blocks).await?;
+    Ok(())
+}
+
+/// [`write`], on the medium once it returns ([`BlockDev::write_durable`]).
+pub(crate) async fn write_durable(dev: &impl BlockDev, sector: u64, bytes: &[u8]) -> Result<()> {
+    let (lba, blocks) = blocks(sector, bytes);
+    dev.write_durable(lba, &blocks).await?;
     Ok(())
 }
 

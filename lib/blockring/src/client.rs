@@ -25,6 +25,12 @@
 //! is answered [`Outcome::Durable`] only by a device flush that succeeded
 //! after every loss it could have been told about.
 //!
+//! **A write with `fua` is on the medium once acknowledged**, so it is not
+//! kept and never issued again: [`Outcome::Done`] for it is durable. The
+//! caller asks one only of a session that offers it
+//! ([`crate::wire::Opened::fua`]), and never over a write of its own that is
+//! kept: issued again after a loss, the kept write would replace it.
+//!
 //! **What it keeps is bounded.** Once the acknowledged writes it keeps reach
 //! the limit it was made with, the caller's next write waits while the client
 //! asks a flush of its own. If that flush fails past [`MAX_ATTEMPTS`], writes
@@ -60,7 +66,7 @@ use crate::layout::DEPTH;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Ask<P> {
     Read { lba: u64, blocks: u32 },
-    Write { lba: u64, blocks: u32, payload: P },
+    Write { lba: u64, blocks: u32, payload: P, fua: bool },
     Flush,
 }
 
@@ -85,7 +91,7 @@ pub const MAX_ATTEMPTS: u32 = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Outcome {
     /// A read's data is in its arena blocks; a write was taken by the device,
-    /// which is not durable yet.
+    /// which is not durable yet unless it was asked with `fua`.
     Done,
     /// A flush: every write acknowledged before it was asked for is on the
     /// medium.
@@ -139,13 +145,13 @@ struct Queued<P> {
 impl<P> Queued<P> {
     fn reissue(acked: Acked<P>) -> Self {
         let Acked { lba, blocks, payload, first, attempts, .. } = acked;
-        Self { ask: Ask::Write { lba, blocks, payload }, kind: Kind::Reissue { first, attempts } }
+        Self { ask: Ask::Write { lba, blocks, payload, fua: false }, kind: Kind::Reissue { first, attempts } }
     }
 
     /// The write this reissue is, acknowledged again at `seq`.
     fn acked(self, seq: u64) -> Acked<P> {
         match (self.ask, self.kind) {
-            (Ask::Write { lba, blocks, payload }, Kind::Reissue { first, attempts }) => {
+            (Ask::Write { lba, blocks, payload, .. }, Kind::Reissue { first, attempts }) => {
                 Acked { lba, blocks, payload, first, seq, attempts }
             }
             _ => unreachable!("blockring: only a reissue is acknowledged again"),
@@ -270,14 +276,14 @@ impl<P: Clone, const D: usize> Client<P, D> {
                 // or a later one of the caller's.
                 (Kind::Reissue { .. }, &Ask::Write { lba, blocks, .. }) => {
                     let blocked = self.wire.values().any(|sent| {
-                        matches!(sent.op, Op::Write { run, lba: at } if at < lba + u64::from(blocks) && lba < at + u64::from(run.count()))
+                        matches!(sent.op, Op::Write { run, lba: at, .. } if at < lba + u64::from(blocks) && lba < at + u64::from(run.count()))
                     });
                     if blocked {
                         return None;
                     }
                 }
                 (_, _) if self.reissuing() => return None,
-                (Kind::User(ticket), Ask::Write { .. }) if self.kept >= self.limit => match self.pushback {
+                (Kind::User(ticket), Ask::Write { fua: false, .. }) if self.kept >= self.limit => match self.pushback {
                     Pushback::Failed => {
                         self.outbox.pop_front();
                         self.answers.push_back((ticket, Outcome::Device));
@@ -305,7 +311,10 @@ impl<P: Clone, const D: usize> Client<P, D> {
                 let Kind::User(ticket) = front.kind else { unreachable!("blockring: a read is the caller's") };
                 Op::Read { run: place(Placing::Read { ticket, blocks })?, lba }
             }
-            Ask::Write { lba, blocks, payload } => Op::Write { run: place(Placing::Write { payload, blocks: *blocks })?, lba: *lba },
+            Ask::Write { lba, blocks, payload, fua } => {
+                let fua = *fua && cfg!(not(feature = "mutate-fua-goes-out-unforced"));
+                Op::Write { run: place(Placing::Write { payload, blocks: *blocks })?, lba: *lba, fua }
+            }
         };
         let queued = self.outbox.pop_front().expect("just seen");
         if matches!(queued.kind, Kind::Reissue { .. }) {
@@ -326,7 +335,9 @@ impl<P: Clone, const D: usize> Client<P, D> {
         match (queued.kind, completion.status) {
             (Kind::User(ticket), Status::Ok) => {
                 match (queued.ask, op) {
-                    (Ask::Write { lba, blocks, payload }, Op::Write { .. }) => {
+                    // On the medium: no loss takes it, and nothing is kept.
+                    (Ask::Write { fua: true, .. }, Op::Write { .. }) => {}
+                    (Ask::Write { lba, blocks, payload, fua: false }, Op::Write { .. }) => {
                         let seq = self.bump();
                         self.kept += u64::from(blocks);
                         let acked = Acked { lba, blocks, payload, first: seq, seq, attempts: 0 };
@@ -594,7 +605,7 @@ mod tests {
     }
 
     fn write(ticket: Ticket, lba: u64, blocks: u32) -> Ask<Ticket> {
-        Ask::Write { lba, blocks, payload: ticket }
+        Ask::Write { lba, blocks, payload: ticket, fua: false }
     }
 
     fn up(limit: u64) -> C {
@@ -628,7 +639,7 @@ mod tests {
         let mut client = up(ROOMY);
         client.submit(1, write(1, 5, 2));
         let w = next(&mut client).unwrap();
-        assert_eq!(w.op, Op::Write { run: run_of(1, 2), lba: 5 });
+        assert_eq!(w.op, Op::Write { run: run_of(1, 2), lba: 5, fua: false });
         answer(&mut client, w, Status::Ok);
         assert_eq!(client.take_released().collect::<Vec<_>>(), [run_of(1, 2)]);
         assert_eq!(client.kept(), 2, "acknowledged, not yet covered");
@@ -648,7 +659,26 @@ mod tests {
         assert_eq!(client.next_request(|_| None), None);
         assert_eq!(client.take_answers().count(), 0);
         let w = next(&mut client).unwrap();
-        assert_eq!(w.op, Op::Write { run: run_of(1, 1), lba: 0 });
+        assert_eq!(w.op, Op::Write { run: run_of(1, 1), lba: 0, fua: false });
+    }
+
+    /// A write with `fua` goes out saying so, past the limit a kept write
+    /// would wait at, and is not kept once acknowledged: the session's end
+    /// after it issues nothing again.
+    #[test]
+    fn a_forced_write_is_not_kept_and_a_loss_issues_nothing_again() {
+        let mut client = up(0);
+        client.submit(1, Ask::Write { lba: 5, blocks: 2, payload: 1, fua: true });
+        let w = next(&mut client).unwrap();
+        assert_eq!(w.op, Op::Write { run: run_of(1, 2), lba: 5, fua: true });
+        answer(&mut client, w, Status::Ok);
+        assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::Done)]);
+        assert_eq!(client.kept(), 0);
+        assert!(client.quiet());
+        client.session_ended();
+        client.session_started();
+        assert_eq!(next(&mut client), None);
+        assert_eq!(client.reissued(), 0);
     }
 
     /// A write acknowledged, then a flush answered `Lost`: the write goes out
@@ -673,7 +703,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(placed, [(1, 2)]);
-        assert_eq!(again.op, Op::Write { run: run_of(1, 2), lba: 5 });
+        assert_eq!(again.op, Op::Write { run: run_of(1, 2), lba: 5, fua: false });
         assert_eq!(next(&mut client), None, "the flush waits for the write");
         answer(&mut client, again, Status::Ok);
         let f2 = next(&mut client).unwrap();
@@ -699,11 +729,11 @@ mod tests {
         client.session_ended();
         client.session_started();
         let first = next(&mut client).unwrap();
-        assert_eq!(first.op, Op::Write { run: run_of(1, 2), lba: 0 });
+        assert_eq!(first.op, Op::Write { run: run_of(1, 2), lba: 0, fua: false });
         assert_eq!(next(&mut client), None, "the overlapping one waits");
         answer(&mut client, first, Status::Ok);
         let second = next(&mut client).unwrap();
-        assert_eq!(second.op, Op::Write { run: run_of(2, 1), lba: 1 });
+        assert_eq!(second.op, Op::Write { run: run_of(2, 1), lba: 1, fua: false });
     }
 
     /// A write the device refused on every reissue is gone, and its caller was
@@ -719,7 +749,7 @@ mod tests {
         for _ in 0..=MAX_ATTEMPTS {
             client.session_started();
             let again = next(&mut client).unwrap();
-            assert_eq!(again.op, Op::Write { run: run_of(1, 1), lba: 0 });
+            assert_eq!(again.op, Op::Write { run: run_of(1, 1), lba: 0, fua: false });
             answer(&mut client, again, Status::Device);
         }
         assert_eq!(client.kept(), 0);
@@ -804,7 +834,7 @@ mod tests {
         assert_eq!(next(&mut client), None, "the write goes out, or the client asks its own flush");
         answer(&mut client, f, Status::Ok);
         let w = next(&mut client).unwrap();
-        assert_eq!(w.op, Op::Write { run: run_of(3, 1), lba: 4 });
+        assert_eq!(w.op, Op::Write { run: run_of(3, 1), lba: 4, fua: false });
     }
 
     /// The client's own flush, refused past `MAX_ATTEMPTS`, refuses a write
@@ -822,7 +852,7 @@ mod tests {
             assert_eq!(f.op, Op::Flush);
             answer(&mut client, f, Status::Device);
             if let Some(again) = next(&mut client) {
-                assert_eq!(again.op, Op::Write { run: run_of(1, 2), lba: 0 }, "the kept write goes again");
+                assert_eq!(again.op, Op::Write { run: run_of(1, 2), lba: 0, fua: false }, "the kept write goes again");
                 answer(&mut client, again, Status::Ok);
             }
         }
@@ -834,6 +864,6 @@ mod tests {
         answer(&mut client, f, Status::Ok);
         client.submit(4, write(4, 8, 1));
         let w = next(&mut client).unwrap();
-        assert_eq!(w.op, Op::Write { run: run_of(4, 1), lba: 8 });
+        assert_eq!(w.op, Op::Write { run: run_of(4, 1), lba: 8, fua: false });
     }
 }

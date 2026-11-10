@@ -2,7 +2,7 @@
 //! each answer means, and the bring-up between a configured interface and a
 //! disk with a size — as decisions with no transfer in them.
 //!
-//! One logical unit, READ(10)/WRITE(10) only, no MODE SENSE. **Everything a
+//! One logical unit, READ(10)/WRITE(10) only. **Everything a
 //! device answers is checked and never believed**, and a refusal is by name: a
 //! size this driver cannot address, a block size that does not divide the host
 //! block, a peripheral that is not a disk.
@@ -23,6 +23,16 @@ pub const READ_10: u8 = 0x28;
 pub const WRITE_10: u8 = 0x2A;
 /// INQUIRY's operation code (SPC-4 §6.4).
 pub const INQUIRY: u8 = 0x12;
+
+/// A transfer between the host and the medium.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Io {
+    Read,
+    /// With `fua`, WRITE(10)'s FUA bit (SBC-3 §5.32, byte 1 bit 3): the
+    /// device writes the blocks to its medium before it answers. Only a
+    /// device whose mode parameters say so takes it ([`dpofua`]).
+    Write { fua: bool },
+}
 
 /// One command descriptor block, with the direction of the data it moves.
 ///
@@ -54,12 +64,21 @@ impl Cdb {
     /// (SBC-3 §5.24).
     pub const SYNCHRONIZE_CACHE: Self = Self::of([0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0], false);
 
+    /// Every mode page (SPC-4, MODE SENSE(6): page code 3Fh), of which only
+    /// the mode parameter header is read. [`MODE_BYTES`] allocated, so a
+    /// device with pages to send has room to send them.
+    pub const MODE_SENSE: Self = Self::of([0x1A, 0, 0x3F, 0, MODE_BYTES as u8, 0], true);
+
     /// READ(10) or WRITE(10) of `sectors` at `lba`.
-    pub fn transfer(write: bool, lba: u32, sectors: u16) -> Self {
+    pub fn transfer(io: Io, lba: u32, sectors: u16) -> Self {
         let [a, b, c, d] = lba.to_be_bytes();
         let [hi, lo] = sectors.to_be_bytes();
-        let opcode = if write { WRITE_10 } else { READ_10 };
-        Self::of([opcode, 0, a, b, c, d, 0, hi, lo, 0], !write)
+        let (opcode, flags) = match io {
+            Io::Read => (READ_10, 0),
+            Io::Write { fua: false } => (WRITE_10, 0),
+            Io::Write { fua: true } => (WRITE_10, 1 << 3),
+        };
+        Self::of([opcode, flags, a, b, c, d, 0, hi, lo, 0], io == Io::Read)
     }
 
     /// The bytes that go into the CBW.
@@ -75,6 +94,19 @@ impl Cdb {
     pub fn data_in(&self) -> bool {
         self.data_in
     }
+}
+
+/// Bytes a MODE SENSE(6) asks for.
+pub const MODE_BYTES: usize = 192;
+
+/// Whether the device takes FUA in a write: DPOFUA, bit 4 of the
+/// device-specific parameter (SBC-3, mode parameters, table "DEVICE-SPECIFIC
+/// PARAMETER field for direct access block devices"), which is byte 2 of
+/// MODE SENSE(6)'s mode parameter header (SPC-4, mode parameter header
+/// formats). `header` is the first bytes of what `reply` delivered. A device
+/// that refuses MODE SENSE, or answers less than the header, takes none.
+pub fn dpofua(reply: Reply, header: &[u8; 4]) -> bool {
+    matches!(reply, Reply::Ok { delivered } if delivered >= 4) && header[2] & (1 << 4) != 0
 }
 
 /// Bytes a REQUEST SENSE asks for.
@@ -211,7 +243,7 @@ pub struct Transfer {
     lba: u64,
     count: u32,
     done: u32,
-    write: bool,
+    io: Io,
     sectors_per_block: u32,
     most: u32,
 }
@@ -249,14 +281,14 @@ impl Moved {
 
 impl Transfer {
     /// A transfer on a disk of `geometry`; nothing to do for `count` zero.
-    pub fn new(lba: u64, count: u32, write: bool, geometry: &Geometry, most: u32) -> Result<Self, PastTheEnd> {
+    pub fn new(lba: u64, count: u32, io: Io, geometry: &Geometry, most: u32) -> Result<Self, PastTheEnd> {
         let sectors = u64::from(most) * u64::from(geometry.sectors_per_block);
         assert!(most > 0 && u16::try_from(sectors).is_ok(), "a batch READ(10) cannot count");
         let fits = lba.checked_add(u64::from(count)).is_some_and(|end| end <= geometry.blocks);
         if count > 0 && !fits {
             return Err(PastTheEnd { lba, count, blocks: geometry.blocks });
         }
-        Ok(Self { lba, count, done: 0, write, sectors_per_block: geometry.sectors_per_block, most })
+        Ok(Self { lba, count, done: 0, io, sectors_per_block: geometry.sectors_per_block, most })
     }
 
     /// The command owed next, or `None` once every block has moved.
@@ -272,7 +304,7 @@ impl Transfer {
         let sector = u32::try_from(sector).expect("a sector past what READ(10) addresses");
         let sectors = (blocks * self.sectors_per_block) as u16;
         Some(Batch {
-            cdb: Cdb::transfer(self.write, sector, sectors),
+            cdb: Cdb::transfer(self.io, sector, sectors),
             blocks,
             bytes: blocks as usize * HOST_BLOCK as usize,
             offset: self.done as usize * HOST_BLOCK as usize,
@@ -579,10 +611,10 @@ mod tests {
     /// 2 to 5, the transfer length big endian in 7 and 8.
     #[test]
     fn a_transfer_cdb_is_laid_out_as_sbc_defines_it() {
-        let read = Cdb::transfer(false, 0x0102_0304, 0x0506);
+        let read = Cdb::transfer(Io::Read, 0x0102_0304, 0x0506);
         assert_eq!(read.bytes(), [0x28, 0, 1, 2, 3, 4, 0, 5, 6, 0]);
         assert!(read.data_in());
-        let write = Cdb::transfer(true, 0xFFFF_FFFF, 1);
+        let write = Cdb::transfer(Io::Write { fua: false }, 0xFFFF_FFFF, 1);
         assert_eq!(write.bytes(), [0x2A, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 1, 0]);
         assert!(!write.data_in());
     }
@@ -594,6 +626,12 @@ mod tests {
         assert_eq!(Cdb::SYNCHRONIZE_CACHE.bytes(), [0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert!(!Cdb::TEST_UNIT_READY.data_in() && !Cdb::SYNCHRONIZE_CACHE.data_in());
         assert!(Cdb::REQUEST_SENSE.data_in());
+        assert_eq!(Cdb::MODE_SENSE.bytes(), [0x1A, 0, 0x3F, 0, 192, 0]);
+        assert!(Cdb::MODE_SENSE.data_in());
+        assert_eq!(Cdb::transfer(Io::Read, 0x0102_0304, 0x0506).bytes(), [0x28, 0, 1, 2, 3, 4, 0, 5, 6, 0]);
+        assert_eq!(Cdb::transfer(Io::Write { fua: false }, 1, 8).bytes(), [0x2A, 0, 0, 0, 0, 1, 0, 0, 8, 0]);
+        assert_eq!(Cdb::transfer(Io::Write { fua: true }, 1, 8).bytes(), [0x2A, 0x08, 0, 0, 0, 1, 0, 0, 8, 0]);
+        assert!(Cdb::transfer(Io::Read, 0, 1).data_in() && !Cdb::transfer(Io::Write { fua: true }, 0, 1).data_in());
         assert_eq!(Query::Inquiry.cdb().bytes(), [0x12, 0, 0, 0, 36, 0]);
         assert_eq!(Query::Capacity10.cdb().bytes(), [0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(Query::Capacity16.cdb().bytes(), [0x9E, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0]);
@@ -604,6 +642,21 @@ mod tests {
         // The allocation length the CDB states is the data phase asked for.
         assert_eq!(usize::from(Query::Inquiry.cdb().bytes()[4]), Query::Inquiry.allocation());
         assert_eq!(usize::from(Query::Capacity16.cdb().bytes()[13]), Query::Capacity16.allocation());
+    }
+
+    /// DPOFUA is read from a header that arrived whole, and from nothing
+    /// else: not WP beside it, not a refusal, not a short answer.
+    #[test]
+    fn dpofua_is_the_headers_bit_and_a_device_that_does_not_say_takes_none() {
+        let whole = Reply::Ok { delivered: 4 };
+        assert!(dpofua(whole, &[3, 0, 0x10, 0]));
+        assert!(dpofua(Reply::Ok { delivered: 36 }, &[35, 0, 0x90, 8]));
+        assert!(!dpofua(whole, &[3, 0, 0x80, 0]), "write protect is not DPOFUA");
+        assert!(!dpofua(whole, &[3, 0, 0, 0]));
+        assert!(!dpofua(Reply::Ok { delivered: 3 }, &[3, 0, 0x10, 0]), "a header that did not arrive");
+        let illegal = Sense { key: 0x05, asc: 0x20, ..Sense::NONE };
+        assert!(!dpofua(Reply::Refused(illegal), &[3, 0, 0x10, 0]));
+        assert!(!dpofua(Reply::Broken, &[3, 0, 0x10, 0]));
     }
 
     fn fixed(code: u8, additional: u8, key: u8, asc: u8, ascq: u8) -> [u8; SENSE_BYTES] {
@@ -661,22 +714,22 @@ mod tests {
 
     #[test]
     fn a_transfer_past_the_disk_is_refused_and_an_empty_one_is_nothing() {
-        let past = |lba, count| Transfer::new(lba, count, false, &STICK, 8);
+        let past = |lba, count| Transfer::new(lba, count, Io::Read, &STICK, 8);
         assert_eq!(past(19, 2), Err(PastTheEnd { lba: 19, count: 2, blocks: 20 }));
         assert_eq!(past(u64::MAX, 1).map(|_| ()), Err(PastTheEnd { lba: u64::MAX, count: 1, blocks: 20 }));
         assert!(past(19, 1).is_ok());
         let empty = past(u64::MAX, 0).expect("nothing to move");
         assert_eq!(empty.next(), None);
-        let no_size = Transfer::new(0, 1, false, &Geometry::NONE, 8);
+        let no_size = Transfer::new(0, 1, Io::Read, &Geometry::NONE, 8);
         assert_eq!(no_size, Err(PastTheEnd { lba: 0, count: 1, blocks: 0 }));
-        assert_eq!(Transfer::new(0, 0, false, &Geometry::NONE, 8).expect("nothing to move").next(), None);
+        assert_eq!(Transfer::new(0, 0, Io::Read, &Geometry::NONE, 8).expect("nothing to move").next(), None);
     }
 
     /// Batches of at most `most` blocks, each at its own sector and offset,
     /// and a batch that did not move whole is not moved past.
     #[test]
     fn a_transfer_is_its_batches_in_order_and_only_a_whole_one_advances() {
-        let mut transfer = Transfer::new(2, 18, true, &STICK, 8).expect("fits");
+        let mut transfer = Transfer::new(2, 18, Io::Write { fua: false }, &STICK, 8).expect("fits");
         let mut seen = [None; 4];
         for slot in &mut seen {
             let Some(batch) = transfer.next() else { break };
@@ -687,9 +740,9 @@ mod tests {
             assert_eq!(transfer.answered(&batch, Reply::Ok { delivered: bytes }), Moved::Whole);
         }
         assert_eq!(seen, [
-            Some((Cdb::transfer(true, 16, 64), 8, 0, 2)),
-            Some((Cdb::transfer(true, 80, 64), 8, 8 * 4096, 10)),
-            Some((Cdb::transfer(true, 144, 16), 2, 16 * 4096, 18)),
+            Some((Cdb::transfer(Io::Write { fua: false }, 16, 64), 8, 0, 2)),
+            Some((Cdb::transfer(Io::Write { fua: false }, 80, 64), 8, 8 * 4096, 10)),
+            Some((Cdb::transfer(Io::Write { fua: false }, 144, 16), 2, 16 * 4096, 18)),
             None,
         ]);
     }
@@ -698,7 +751,7 @@ mod tests {
     /// the first batch moved.
     #[test]
     fn only_the_first_batch_may_answer_ask_again() {
-        let mut transfer = Transfer::new(0, 16, false, &STICK, 8).expect("fits");
+        let mut transfer = Transfer::new(0, 16, Io::Read, &STICK, 8).expect("fits");
         let first = transfer.next().expect("a batch");
         assert_eq!(transfer.answered(&first, Reply::Budget), Moved::Ended(Fail::Budget));
         assert_eq!(transfer.answered(&first, Reply::Broken), Moved::Ended(Fail::Device));

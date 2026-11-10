@@ -343,6 +343,7 @@ impl CswDue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toyos_scsi::Io;
 
     const EVERY: [Phase; 6] = [
         Phase::Closed,
@@ -372,11 +373,11 @@ mod tests {
     const WHOLE: Answer<Why> = Answer::Moved { code: CC_SUCCESS, residue: 0 };
 
     fn read(sectors: u16) -> Cdb {
-        Cdb::transfer(false, 0, sectors)
+        Cdb::transfer(Io::Read, 0, sectors)
     }
 
     fn write(sectors: u16) -> Cdb {
-        Cdb::transfer(true, 0, sectors)
+        Cdb::transfer(Io::Write { fua: false }, 0, sectors)
     }
 
     /// A CSW as §5.2 lays it out.

@@ -76,8 +76,10 @@ pub const DRIVER_BOUND_NS: u64 = 30_000_000_000;
 /// long again for the driver's answer to an open it hands over.
 pub const ANSWER_BOUND_NS: u64 = 2 * DRIVER_BOUND_NS;
 
-/// What an open was answered with: the partition's length in blocks, and its
-/// unique GUID as the table stores it.
+/// What an open was answered with: the partition's length in blocks, its
+/// unique GUID as the table stores it, and whether its device forces a write
+/// with `fua` onto the medium. A client of a session that does not offer it
+/// writes and then flushes instead.
 ///
 /// A server has one from [`Opened::over`], with its ends of the page:
 ///
@@ -85,28 +87,33 @@ pub const ANSWER_BOUND_NS: u64 = 2 * DRIVER_BOUND_NS;
 /// use core::sync::atomic::AtomicU32;
 /// use toyos_blockring::{layout::RING_WORDS, wire::Opened};
 /// let page: [AtomicU32; RING_WORDS] = core::array::from_fn(|_| AtomicU32::new(0));
-/// let (_ends, _answer) = Opened::over(&page, 1, [0; 16]);
+/// let (_ends, _answer) = Opened::over(&page, 1, [0; 16], false);
 /// ```
 ///
 /// and never without them:
 ///
 /// ```compile_fail
-/// let _answer = toyos_blockring::wire::Opened { blocks: 1, unique: [0; 16] };
+/// let _answer = toyos_blockring::wire::Opened { blocks: 1, unique: [0; 16], fua: false };
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Opened {
     blocks: u64,
     unique: [u8; GUID_BYTES],
+    fua: bool,
 }
 
 impl Opened {
-    pub const BYTES: usize = 8 + GUID_BYTES;
+    pub const BYTES: usize = 8 + GUID_BYTES + 1;
 
     /// A server's ends of the session `page` it was sent, every word it owns
     /// set to 0, and the answer to send after: `blocks` of the partition
-    /// `unique`.
-    pub fn over<W: Word>(page: &[W; RING_WORDS], blocks: u64, unique: [u8; GUID_BYTES]) -> (ServerRings, Self) {
-        (layout::server(page), Self { blocks, unique })
+    /// `unique`, on a device that forces a write if `fua`.
+    pub fn over<W: Word>(page: &[W; RING_WORDS], blocks: u64, unique: [u8; GUID_BYTES], fua: bool) -> (ServerRings, Self) {
+        (layout::server(page), Self { blocks, unique, fua })
+    }
+
+    pub fn fua(&self) -> bool {
+        self.fua
     }
 
     pub fn blocks(&self) -> u64 {
@@ -120,17 +127,21 @@ impl Opened {
     pub fn encode(&self) -> [u8; Self::BYTES] {
         let mut out = [0u8; Self::BYTES];
         out[..8].copy_from_slice(&self.blocks.to_le_bytes());
-        out[8..].copy_from_slice(&self.unique);
+        out[8..8 + GUID_BYTES].copy_from_slice(&self.unique);
+        out[8 + GUID_BYTES] = u8::from(self.fua);
         out
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != Self::BYTES {
-            return None;
-        }
+        let bytes: &[u8; Self::BYTES] = bytes.try_into().ok()?;
         let blocks = u64::from_le_bytes(bytes[..8].try_into().ok()?);
-        let unique = bytes[8..].try_into().ok()?;
-        Some(Self { blocks, unique })
+        let unique = bytes[8..8 + GUID_BYTES].try_into().ok()?;
+        let fua = match bytes[8 + GUID_BYTES] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        Some(Self { blocks, unique, fua })
     }
 }
 
@@ -535,9 +546,14 @@ mod tests {
         let bytes: Vec<u8> = listed.iter().flat_map(|l| l.encode()).collect();
         assert_eq!(Listed::decode_all(&bytes).map(|all| all.collect::<Vec<_>>()), Some(listed.to_vec()));
         assert!(Listed::decode_all(&bytes[1..]).is_none());
-        let opened = Opened { blocks: u64::MAX - 3, unique: [7; GUID_BYTES] };
-        assert_eq!(Opened::decode(&opened.encode()), Some(opened));
-        assert_eq!(Opened::decode(&opened.encode()[1..]), None);
+        for fua in [false, true] {
+            let opened = Opened { blocks: u64::MAX - 3, unique: [7; GUID_BYTES], fua };
+            assert_eq!(Opened::decode(&opened.encode()), Some(opened));
+            assert_eq!(Opened::decode(&opened.encode()[1..]), None);
+            let mut neither = opened.encode();
+            neither[Opened::BYTES - 1] = 2;
+            assert_eq!(Opened::decode(&neither), None, "a flag that is neither");
+        }
         for r in [
             Refusal::NotFound,
             Refusal::Held,

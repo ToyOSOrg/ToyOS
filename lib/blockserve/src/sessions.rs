@@ -51,13 +51,24 @@ pub struct Owner {
     pub write: bool,
 }
 
+/// A transfer a disk is asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Io {
+    Read,
+    /// With `fua`, on the medium before the device answers it.
+    Write { fua: bool },
+}
+
 /// What a disk's sessions ask of the controller it is on.
 pub trait Device {
     /// Whether one more command can be issued now.
     fn has_room(&self) -> bool;
-    /// Issue a read or a write of `blocks` blocks at the disk's block
-    /// `block`, to or from device address `at`, answered for `owner`.
-    fn submit_io(&mut self, write: bool, block: u64, blocks: u32, at: u64, owner: Owner);
+    /// Whether the disk forces a write onto its medium: a session is told at
+    /// its open, and only one told so is issued a write with `fua`.
+    fn fua(&self) -> bool;
+    /// Issue `io` of `blocks` blocks at the disk's block `block`, to or from
+    /// device address `at`, answered for `owner`.
+    fn submit_io(&mut self, io: Io, block: u64, blocks: u32, at: u64, owner: Owner);
     /// Issue a flush of the disk's volatile cache for `owner`; `false` for a
     /// disk with none, whose every write answered is on the medium already.
     fn submit_flush(&mut self, owner: Owner) -> bool;
@@ -203,7 +214,7 @@ impl Sessions {
             self.holds.release(first);
             return refuse(&conn, Refusal::Exhausted);
         };
-        let (rings, opened) = Opened::over(region.words(), blocks, unique);
+        let (rings, opened) = Opened::over(region.words(), blocks, unique, dev.fua());
         if conn.try_send_bytes_with(wire::MSG_OPENED, &opened.encode(), [client_ring.into(), answered.into()]).is_err() {
             // The client went before it heard: nothing of the session reached
             // the device, and what was taken for it goes back.
@@ -214,7 +225,7 @@ impl Sessions {
         }
         let id = self.next_id;
         self.next_id += 1;
-        let state = ServerSession::new(first, opened.blocks(), writes);
+        let state = ServerSession::new(first, opened.blocks(), writes, opened.fua());
         let served = Served { heard, ring, region, device_addr, rings, state, unique, closing: false, requests: 0, posted: false };
         self.sessions.insert(id, served);
         let access = if writes { "" } else { ", read-only" };
@@ -304,18 +315,19 @@ impl Sessions {
                     Taken::Issue(req) => {
                         let write = matches!(req.op, Op::Write { .. });
                         let owner = Owner { session: id, tag: req.tag, write };
-                        match req.op {
-                            Op::Read { run, lba } | Op::Write { run, lba } => {
-                                let at = s.device_addr + run.span().offset as u64;
-                                dev.submit_io(write, s.state.first() + lba, run.count(), at, owner);
-                            }
+                        let (io, run, lba) = match req.op {
+                            Op::Read { run, lba } => (Io::Read, run, lba),
+                            Op::Write { run, lba, fua } => (Io::Write { fua }, run, lba),
                             Op::Flush => {
                                 if !dev.submit_flush(owner) {
                                     let c = s.state.complete(req.tag, true, &mut self.holds, self.losses);
                                     Self::post(s, c.expect("just taken"));
                                 }
+                                continue;
                             }
-                        }
+                        };
+                        let at = s.device_addr + run.span().offset as u64;
+                        dev.submit_io(io, s.state.first() + lba, run.count(), at, owner);
                     }
                 }
             }
@@ -486,8 +498,10 @@ impl Sessions {
             let owner = |write| Owner { session: JOB, tag: 0, write };
             match job.steps.next(&mut job.region, dev.has_room()) {
                 Ask::Wait => return,
-                Ask::Read { block, count, at } => dev.submit_io(false, job.first + block, count, job.device_addr + at as u64, owner(false)),
-                Ask::Write { block, at } => dev.submit_io(true, job.first + block, 1, job.device_addr + at as u64, owner(true)),
+                Ask::Read { block, count, at } => dev.submit_io(Io::Read, job.first + block, count, job.device_addr + at as u64, owner(false)),
+                Ask::Write { block, at } => {
+                    dev.submit_io(Io::Write { fua: false }, job.first + block, 1, job.device_addr + at as u64, owner(true))
+                }
                 Ask::Flush => {
                     if !dev.submit_flush(owner(false)) {
                         job.steps.answered(true);
@@ -532,7 +546,10 @@ mod tests {
         fn has_room(&self) -> bool {
             unreachable!()
         }
-        fn submit_io(&mut self, _: bool, _: u64, _: u32, _: u64, _: Owner) {
+        fn fua(&self) -> bool {
+            false
+        }
+        fn submit_io(&mut self, _: Io, _: u64, _: u32, _: u64, _: Owner) {
             unreachable!()
         }
         fn submit_flush(&mut self, _: Owner) -> bool {

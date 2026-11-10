@@ -31,14 +31,14 @@ use toyos_abi::syscall::{SyscallError, DEV_PREFIX};
 use toyos_blockring::disk::Settled;
 use toyos_blockserve::link::{Handed, Link};
 use toyos_blockserve::sessions::{Owner as Request, MAX_SESSIONS};
-use toyos_blockserve::{table, Device, Sessions};
+use toyos_blockserve::{table, Device, Io, Sessions};
 use toyos_input::wire::{self, Record, MAX_PAYLOAD};
 use toyos_inspect::{Snapshot, MSG_INSPECT, MSG_SNAPSHOT};
 use toyos_pci_claim::{Bar, Grant};
 use toyos_xhci::exec::{Dead, Host, Nanos, Tasks};
 use toyos_xhci::hc::Reset;
 use toyos_xhci::input::{Opened, Owner, Sent};
-use toyos_xhci::msc::{Event, Work};
+use toyos_xhci::msc::{self, Event, Work};
 use toyos_xhci::usb::{self, Config, Usb};
 
 /// Connections accepted and not yet asked, and how long one may stay so.
@@ -116,8 +116,15 @@ impl Device for Disk<'_> {
     fn has_room(&self) -> bool {
         self.usb.disks.has_room(self.disk)
     }
-    fn submit_io(&mut self, write: bool, block: u64, blocks: u32, at: u64, owner: Request) {
-        self.usb.disks.submit(self.disk, Work::Io { write, block, blocks, at, token: (owner.session, owner.tag) });
+    fn fua(&self) -> bool {
+        self.usb.disks.fua(self.disk)
+    }
+    fn submit_io(&mut self, io: Io, block: u64, blocks: u32, at: u64, owner: Request) {
+        let io = match io {
+            Io::Read => msc::Io::Read,
+            Io::Write { fua } => msc::Io::Write { fua },
+        };
+        self.usb.disks.submit(self.disk, Work::Io { io, block, blocks, at, token: (owner.session, owner.tag) });
     }
     fn submit_flush(&mut self, owner: Request) -> bool {
         let cached = self.usb.disks.cached(self.disk);

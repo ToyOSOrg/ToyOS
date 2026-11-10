@@ -24,7 +24,7 @@ use toyos_blockring::disk::Settled;
 use toyos_blockring::BLOCK_BYTES;
 use toyos_blockserve::link::{Handed, Link};
 use toyos_blockserve::sessions::MAX_SESSIONS;
-use toyos_blockserve::{Device, Sessions};
+use toyos_blockserve::{Device, Io, Sessions};
 
 mod nvme;
 
@@ -82,8 +82,11 @@ impl Device for Controller {
     fn has_room(&self) -> bool {
         Controller::has_room(self)
     }
-    fn submit_io(&mut self, write: bool, block: u64, blocks: u32, at: u64, owner: toyos_blockserve::Owner) {
-        Controller::submit_io(self, write, block, blocks, at, Owner::Session(owner));
+    fn fua(&self) -> bool {
+        true
+    }
+    fn submit_io(&mut self, io: Io, block: u64, blocks: u32, at: u64, owner: toyos_blockserve::Owner) {
+        Controller::submit_io(self, io, block, blocks, at, Owner::Session(owner));
     }
     fn submit_flush(&mut self, owner: toyos_blockserve::Owner) -> bool {
         // No volatile cache: every write answered is on the medium already.
@@ -126,7 +129,8 @@ fn main() {
         }
     };
     println!(
-        "{name}: up: {} I/O queues of {} commands, volatile write cache {}, {}-byte sectors, {} sectors",
+        "{name}: up: {} I/O queues of {} commands, volatile write cache {}, a forced write is a Write with FUA, \
+         {}-byte sectors, {} sectors",
         ctrl.queues(),
         nvme::COMMANDS_PER_QUEUE,
         if ctrl.vwc { "present, so a flush issues Flush" } else { "absent, so a flush issues nothing" },

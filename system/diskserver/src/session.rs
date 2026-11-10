@@ -188,16 +188,25 @@ impl Session {
         t
     }
 
+    /// Whether the session's device forces a write asked with `fua` onto its
+    /// medium, as this session's open was answered: a reconnect may answer
+    /// otherwise.
+    pub fn fua(&self) -> bool {
+        self.opened.fua()
+    }
+
     /// Ask for `blocks` written at `lba`, which the session keeps a share of
     /// until a flush covers the write. With [`KEPT_BLOCKS`] kept, it goes out
-    /// after a flush of the session's own.
-    pub fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock]) -> Result<Ticket, Unsent> {
+    /// after a flush of the session's own. With `fua` it is on the medium
+    /// once answered [`Outcome::Done`] and nothing of it is kept; one asked
+    /// of a session that does not offer it is answered [`Outcome::Invalid`].
+    pub fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock], fua: bool) -> Result<Ticket, Unsent> {
         let count = transfer_blocks(blocks.len());
         if self.bells.is_none() {
             return Err(Unsent::Ended);
         }
         let ticket = self.ticket();
-        self.client.submit(ticket, Ask::Write { lba, blocks: count, payload: blocks.to_vec() });
+        self.client.submit(ticket, Ask::Write { lba, blocks: count, payload: blocks.to_vec(), fua });
         self.pending.insert(ticket, Pending::Write);
         Ok(ticket)
     }

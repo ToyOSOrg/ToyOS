@@ -14,7 +14,7 @@ pub mod region;
 pub mod sessions;
 pub mod table;
 
-pub use sessions::{Device, Owner, Sessions};
+pub use sessions::{Device, Io, Owner, Sessions};
 pub use table::Partition;
 
 /// A partition GUID as the lines say it.

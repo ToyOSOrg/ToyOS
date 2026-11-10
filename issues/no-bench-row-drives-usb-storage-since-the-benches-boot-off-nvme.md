@@ -31,6 +31,11 @@ the boot stick lost it:
 - `amdvi_translates_the_boot_controller` and `amdvi_remaps_the_boot_controller`
   judge the NVMe controller where they judged the stick's xHCI.
 
+- Whether a stick's mode parameters set DPOFUA, and whether it then takes a
+  WRITE(10) with FUA, is read on no bench: usbd asks MODE SENSE as a disk
+  first comes up and forces a durable write only where the stick says so
+  (`system/usbd/xhci/src/msc.rs`), judged against a host model alone.
+
 QEMU's machines still boot off a stick (`the_log_lands_on_the_boot_stick`).
 
 No row that writes the scratch disk is built. The owner declined the
