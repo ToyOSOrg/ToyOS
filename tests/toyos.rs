@@ -6299,7 +6299,8 @@ fn stream_holders(test_config: &Path) -> Result<(), String> {
 /// time the kernel answers a handle whose mapping reads the function's own
 /// register, two held at once map apart, and the job that asked ends on its
 /// own. And a syscall whose buffer is the mapping copies through it, which is
-/// x86-64's `rep movsb` on a function's registers and no host build's.
+/// x86-64's `rep movsb` on a function's registers, which no host test
+/// exercises.
 fn bar_map_again(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "bar_map_again";
     let tests = compile::repo_root().join("tests/guest/rust-tests");

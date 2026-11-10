@@ -36,7 +36,7 @@ const COMMON: u32 = 4;
 const DEVICE_FEATURE: usize = 4;
 
 /// `device_feature_select` of the same structure: read back as written, and
-/// what firmware left there wherever `device_feature` is read here.
+/// whatever the claim found there wherever `device_feature` is read here.
 const DEVICE_FEATURE_SELECT: usize = 0;
 
 /// What the function answers through `window`, a live mapping of its BAR.
@@ -67,6 +67,7 @@ fn copied_through(window: &SharedMemory) {
     assert_eq!(syscall::read(pipe.read, &mut copied), Ok(4), "bar_map_again: the pipe gave no bytes back");
     // SAFETY: each byte is inside the live mapping, read by a volatile load.
     let own: [u8; 4] = core::array::from_fn(|i| unsafe { base.add(DEVICE_FEATURE + i).read_volatile() });
+    assert_ne!(own[0], 0, "bar_map_again: the register's low byte cannot tell a copy from zeros");
     assert_eq!(copied, own, "bar_map_again: the write from the BAR carried other bytes than its holder reads");
 
     // SAFETY: the byte is inside the live mapping, read by a volatile load.
@@ -77,10 +78,11 @@ fn copied_through(window: &SharedMemory) {
     // address into the syscall.
     let select = unsafe { core::slice::from_raw_parts_mut(base.add(DEVICE_FEATURE_SELECT), 1) };
     assert_eq!(syscall::read(pipe.read, select), Ok(1), "bar_map_again: a read into the BAR");
-    // SAFETY: the byte is inside the live mapping, read and written volatile.
+    // SAFETY: the byte is inside the live mapping, read by a volatile load.
     let selected = unsafe { base.add(DEVICE_FEATURE_SELECT).read_volatile() };
-    // SAFETY: as above. Put back before the judgement: every later `read`
-    // is compared with the first.
+    // Put back before the judgement: every later `read` is compared with the
+    // first.
+    // SAFETY: the byte is inside the live mapping, written by a volatile store.
     unsafe { base.add(DEVICE_FEATURE_SELECT).write_volatile(before) };
     assert_eq!(selected, other, "bar_map_again: the read into the BAR did not reach the register");
 
