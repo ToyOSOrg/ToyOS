@@ -1298,6 +1298,21 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: BENCHCASE, judge: |b| clock_holds_over_minutes(b[0]) },
     ),
     (
+        // `osbench files`, `nvme` and `persist` alone: the disk's figures, on
+        // the bench's NVMe, for a change to the disk's path that the whole
+        // suite's boot need not measure. Evidence and not a verdict, as
+        // `osbench` is, whose boot measures the same groups: only a pass
+        // that names it runs it. The T14 and the AMD bench.
+        "osbench_disk",
+        metal::Metal {
+            arms: OSBENCH_DISK,
+            judge: |b| {
+                data_on_the_nvme(b[0])?;
+                osbench_ran(b[0], &OSBENCH_DISK_GROUPS)
+            },
+        },
+    ),
+    (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
         // compared with the same program under this bench's Linux on the same
         // path. A pass names it: the other bench has to be running the peer.
@@ -1864,6 +1879,17 @@ const BENCHCASE: &[metal::Arm] = &[metal::Arm {
 const OSBENCH_ENERGY: &[metal::Arm] = &[metal::Arm {
     adds_ms: 300_000,
     ..metal::once("energybenchcase", "tests/images/benchcase.toml", &[], &["osbench_energy"])
+}];
+
+/// The groups that write the disk, in the suite's order.
+const OSBENCH_DISK_GROUPS: [&str; 3] = ["osbench_files", "osbench_nvme", "osbench_persist"];
+
+/// No boot has timed the disk's groups apart from the rest of the suite, so
+/// they take the whole suite's bound, [`BENCHCASE`]'s, which covers them.
+const OSBENCH_DISK: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 465_000,
+    named_only: true,
+    ..metal::once("diskbenchcase", "tests/images/benchcase.toml", &[], &OSBENCH_DISK_GROUPS)
 }];
 
 /// The two groups that need another party share one boot when one pass names

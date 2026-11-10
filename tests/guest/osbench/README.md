@@ -234,6 +234,9 @@ What makes the disk rows one comparison, and what stays each system's own:
   evicting in insertion order, and the 4 KiB sequential read misses
   (`issues/a-sequential-read-of-a-file-as-large-as-datas-clean-cache-reads-the-disk.md`).
 
+The `osbench_disk` metal row runs `files`, `nvme` and `persist` alone, on
+the benchcase image.
+
 ## What is not a comparison
 
 The table also holds rows only one system can measure. They show the
