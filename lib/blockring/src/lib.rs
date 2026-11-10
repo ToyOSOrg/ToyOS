@@ -15,9 +15,11 @@
 //! the open's answer ([`wire::OPENED_HANDLES`]); each end's bell is also what
 //! tells it the other has gone: its waker's end is the session's end.
 //!
-//! **A completion means the device took the request, never that it is
-//! durable.** Durability is a flush's answer, and a flush answers for its own
-//! writer ([`server`], over `toyos-blockhold`): a flush whose writer's writes
+//! **A completion means the device took the request, and for a write only
+//! one asked with `fua` that it is durable** ([`entry::Op::Write`]), on a
+//! session whose open offered it. Durability is otherwise a flush's answer,
+//! and a flush answers for its own writer ([`server`], over
+//! `toyos-blockhold`): a flush whose writer's writes
 //! the disk lost since they were acknowledged is answered [`Status::Lost`].
 //! The client keeps every acknowledged write no flush has covered and issues
 //! it again after a loss — a `Lost` flush, or a session that ended — before
