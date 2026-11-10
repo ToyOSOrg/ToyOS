@@ -1676,6 +1676,8 @@ dependencies = [
  "toyos-elide",
  "toyos-inspect",
  "toyos-logstream",
+ "toyos-quiesce",
+ "toyos-tmpdir",
  "toyos-wallclock",
 ]
 

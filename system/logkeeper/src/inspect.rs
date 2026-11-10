@@ -46,7 +46,8 @@ const ACCEPT: u64 = u64::MAX;
 pub enum State {
     /// Every round written, flushed and published.
     Writing = 0,
-    /// Every round answered, and slower than a log is worth.
+    /// The volume answers slower than a log is worth, or refused the part
+    /// and is asked again: the replay keeps what the file is owed.
     Degraded = 1,
     /// No volume, or one given up on: the log is on the console only.
     ConsoleOnly = 2,

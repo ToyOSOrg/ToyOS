@@ -39,9 +39,12 @@ On such a machine whose image is on its NVMe disk, which
 it: `diskserver` is refused the controller (`diskserver: NOT SERVING —
 pci:1b36:0010 is on this machine and the kernel refused this service its
 claim`), so the three file servers say `Data serving … — absent`, `Log serving
-/log — absent` and `Boot serving /boot — absent`, and `logkeeper` says `no
-/log on this machine - this boot's kernel log is on the console only`. Read off the no-unit arm of `iommu_virtio_platform`, which is
-green with it: the arm asserts the refusal and reads no volume. **The kernel
+/log — absent` and `Boot serving /boot — absent`, and `logkeeper` says its
+first part `is asked again - this boot's lines are kept until /log takes
+them`, publishes `degraded`, and asks at a doubling wait to 64 s for the rest
+of the boot. The file servers' lines are read off the no-unit arm of
+`iommu_virtio_platform`, which is green with them; `logkeeper`'s is read from
+its code, since the arm asserts the refusal and reads no volume. **The kernel
 drives no USB either** since usbd took the xHCI (the small-kernel track's step
 10), so on such a machine usbd is refused its controller too, a USB stick's
 volumes are absent like the NVMe disk's, and no USB keyboard or pointer
