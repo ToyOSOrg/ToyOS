@@ -36,7 +36,7 @@ const COMMON: u32 = 4;
 const DEVICE_FEATURE: usize = 4;
 
 /// `device_feature_select` of the same structure: read back as written, and
-/// zero wherever `device_feature` is read here.
+/// what firmware left there wherever `device_feature` is read here.
 const DEVICE_FEATURE_SELECT: usize = 0;
 
 /// What the function answers through `window`, a live mapping of its BAR.
@@ -69,16 +69,20 @@ fn copied_through(window: &SharedMemory) {
     let own: [u8; 4] = core::array::from_fn(|i| unsafe { base.add(DEVICE_FEATURE + i).read_volatile() });
     assert_eq!(copied, own, "bar_map_again: the write from the BAR carried other bytes than its holder reads");
 
-    assert_eq!(syscall::write(pipe.write, &[1]), Ok(1), "bar_map_again: the pipe took no byte");
+    // SAFETY: the byte is inside the live mapping, read by a volatile load.
+    let before = unsafe { base.add(DEVICE_FEATURE_SELECT).read_volatile() };
+    let other = before ^ 1;
+    assert_eq!(syscall::write(pipe.write, &[other]), Ok(1), "bar_map_again: the pipe took no byte");
     // SAFETY: the byte is inside the live mapping; the slice only carries its
     // address into the syscall.
     let select = unsafe { core::slice::from_raw_parts_mut(base.add(DEVICE_FEATURE_SELECT), 1) };
     assert_eq!(syscall::read(pipe.read, select), Ok(1), "bar_map_again: a read into the BAR");
     // SAFETY: the byte is inside the live mapping, read and written volatile.
     let selected = unsafe { base.add(DEVICE_FEATURE_SELECT).read_volatile() };
-    // SAFETY: as above. Put back before the judgement: `read` wants word 0.
-    unsafe { base.add(DEVICE_FEATURE_SELECT).write_volatile(0) };
-    assert_eq!(selected, 1, "bar_map_again: the read into the BAR did not reach the register");
+    // SAFETY: as above. Put back before the judgement: every later `read`
+    // is compared with the first.
+    unsafe { base.add(DEVICE_FEATURE_SELECT).write_volatile(before) };
+    assert_eq!(selected, other, "bar_map_again: the read into the BAR did not reach the register");
 
     // SAFETY: no type holds this number.
     unsafe { syscall::close(pipe.read) };
