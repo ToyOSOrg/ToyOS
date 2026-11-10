@@ -23,6 +23,7 @@ kernel's part of a restart, and named module tests hold each program's
    What the loader named has left since (#1210): 214 files and 55,303 lines,
    75 fewer than the inventory below counts, and no link to the device-path
    parser.
+   A child's arguments and environment have left since (#1200).
 2. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
    where firmware put it, handed over in 4 KiB pages with its MSI-X table's
    page, under the owner's Q2 ruling. The orchestrator ruled on #900 that
@@ -173,7 +174,7 @@ Beside that order, each waiting on something outside it:
         (`toyos::files::starting_in`). A child's arguments and environment,
         that `PWD` among it, are a startup block its parent lays out below
         its program (`toyos::startup`), which the kernel neither stores nor
-        answers (#PRNUM): `SYS_GET_ENV` (73) and `ProcessData::env` are
+        answers (#1200): `SYS_GET_ENV` (73) and `ProcessData::env` are
         gone. The kernel still keeps one userland text of each process, the
         path its parent read the program from (`SpawnArgs::path_ptr`), which
         the spawn's record and a crash's frames name the file by and

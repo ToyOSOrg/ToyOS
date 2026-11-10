@@ -27,7 +27,7 @@ use crate::{AsHandle, BorrowedHandle};
 
 /// The bytes below the program kept for the block: its pages, and reserved
 /// ones up to the program.
-pub const RESERVED: u64 = 2 * 1024 * 1024;
+const RESERVED: u64 = 2 * 1024 * 1024;
 
 /// Where the block lies in every process.
 pub const AT: u64 = BASE - RESERVED;
