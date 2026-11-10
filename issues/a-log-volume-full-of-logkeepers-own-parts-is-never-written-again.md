@@ -19,8 +19,13 @@ So where `/log` has no room and holds fewer than `MAX_LOG_FILES` of
 create or a later write is refused, and every retry is refused the same way
 for the rest of the boot. A later boot whose first create is refused adds no
 file, so it stands where this one did. The boot's log is then in the replay
-and on the console only, which `logkeeper` says, and the stop is not marked. With `MAX_LOG_FILES` or more files the open's sweep makes room
-first and nothing is refused.
+and on the console only, which `logkeeper` says, and the stop is not marked.
+
+With `MAX_LOG_FILES` or more files the open's sweep deletes only as many as
+the count is over by, one where there are sixteen, and a rotation one more.
+That frees what the retired files held and no more, so on a volume otherwise
+full the boot is refused once it has written past that, and from there stands
+as above.
 
 Sixteen parts of `MAX_LOG_BYTES` are under half of the smallest log volume, so
 this needs something else to have filled it: the bootloader's files, a
