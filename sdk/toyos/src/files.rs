@@ -223,6 +223,7 @@ extern "C" {
     fn toyos_fs_write(fd: Fd, buf: *const u8, len: usize) -> i64;
     fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u64) -> i64;
     fn toyos_fs_pwrite(fd: Fd, buf: *const u8, len: usize, offset: u64) -> i64;
+    fn toyos_fs_map(fd: Fd, offset: u64, len: usize, place: u64, fixed: bool) -> i64;
     fn toyos_fs_seek(fd: Fd, whence: u32, delta: i64) -> i64;
     fn toyos_fs_truncate(fd: Fd, size: u64) -> i64;
     fn toyos_fs_fsync(fd: Fd) -> i64;
@@ -274,6 +275,22 @@ pub fn write(fd: Fd, buf: &[u8]) -> Result<usize, Error> {
 pub fn pread(fd: Fd, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
     // SAFETY: `buf` is live and writable for the call.
     decode(unsafe { toyos_fs_pread(fd, buf.as_mut_ptr(), buf.len(), offset) }).map(|n| n as usize)
+}
+
+/// `len` bytes of the file `fd` from the page boundary `offset`, mapped
+/// read-only and shared ([`crate::paged::Paged::map`]) where `at` says.
+/// `Kernel(NotSupported)` for a file its server maps no pages of.
+///
+/// # Safety
+/// A `Fixed` range replaces what those pages held, so nothing may still
+/// reach that.
+pub unsafe fn map(fd: Fd, offset: u64, len: usize, at: toyos_abi::syscall::VmAt) -> Result<*mut u8, Error> {
+    let (place, fixed) = match at {
+        toyos_abi::syscall::VmAt::Fixed(addr) => (addr as u64, true),
+        toyos_abi::syscall::VmAt::Anywhere { .. } => (0, false),
+    };
+    // SAFETY: the caller's.
+    decode(unsafe { toyos_fs_map(fd, offset, len, place, fixed) }).map(|addr| core::ptr::with_exposed_provenance_mut(addr as usize))
 }
 
 /// Write at `offset`, leaving the descriptor's offset where it is, whether or

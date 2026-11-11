@@ -553,6 +553,29 @@ unsafe extern "C" fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u6
     answer(n.map(|n| n as u64))
 }
 
+/// `len` bytes of the file `fd` names from the page boundary `offset`, mapped
+/// read-only and shared through its paged holder, at `place` where `fixed`,
+/// else anywhere: the address. `NotSupported` for a file its server supplied
+/// no holder for, and a descriptor that names no served file.
+///
+/// # Safety
+/// A fixed range replaces what those pages held, so nothing may still reach
+/// that.
+#[no_mangle]
+unsafe extern "C" fn toyos_fs_map(fd: Fd, offset: u64, len: usize, place: u64, fixed: bool) -> i64 {
+    let at = if fixed { syscall::VmAt::Fixed(place as usize) } else { syscall::VmAt::ANYWHERE };
+    let refused = || Ok(Err(SyscallError::NotSupported));
+    let mapped = on_fd_held(
+        fd,
+        |_| refused(),
+        is_directory,
+        // SAFETY: the caller's.
+        |holder, _| Some(unsafe { holder.map(offset, len, at) }.map(|ptr| ptr.addr() as u64)),
+        |_, _, _| refused(),
+    );
+    answer(mapped.and_then(|inner| inner.map_err(Error::Kernel)))
+}
+
 #[no_mangle]
 unsafe extern "C" fn toyos_fs_pwrite(fd: Fd, buf: *const u8, len: usize, offset: u64) -> i64 {
     // SAFETY: the caller's.
