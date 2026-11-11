@@ -1,7 +1,7 @@
 //! The C runtime's architecture-specific pieces, one module per architecture,
-//! each answering the same names: the process entry, the three copies and
-//! fills that must not be written in Rust (the compiler lowers a Rust loop that
-//! copies back into a call to `memcpy`), and the square roots.
+//! each answering the same names: the process entry, the copies and the fill,
+//! which no Rust loop may make (the compiler lowers a loop that copies back
+//! into a call to `memcpy`), and the square roots.
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
