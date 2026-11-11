@@ -56,27 +56,29 @@ record (`kernel/src/cpu_local.rs`), a line no other CPU writes.
 (2026-11-11, [evidence](https://github.com/ToyOSOrg/evidence/tree/36117dda5c9a1a3803745c45785cc8243c5b5d51/spawnperf-diag); the attribution is in
 `issues/spawning-a-process-costs-toyos-up-to-147-times-linuxs.md`). Under the
 build's 256 children, one a CPU, it is 99 % of every contended lock wait on
-both benches: 418,000 contended acquisitions and 243 ms of spin a round on
-the T14 (`j8`), 1.06 CPUs spinning for the whole round, and 605,000 and
-2,348 ms on the AMD bench (`j16`), 7.1 of its 16 CPUs. 82 % of the spin is in
-the children's `SHM_CREATE`s, which draw each frame of a 2 MiB window under its
-own hold (`SharedMemObject::create`), and 13 to 14 % in their faults, which draw
-each frame of a populated run under its own hold (`owned_frame`). The next
-contended lock waits under a hundredth as long.
+both benches: 418,000 contended acquisitions and 243 ms of wait a round on the
+T14 (`j8`), 1.05 of its 8 CPUs for the whole round, and 605,000 and 2,348 ms on
+the AMD bench (`j16`), 7.1 of its 16. 82 % of the spin is in the children's
+`SHM_CREATE`s, which draw each frame of what are, by inference from the SDK,
+their 2 MiB directory windows under its own hold (`SharedMemObject::create`),
+and 13 to 14 % in their faults, which draw each frame of a populated run under
+its own hold (`owned_frame`). The next contended lock waits under a hundredth
+as long. On the T14 the spin is a third of the children's growth in CPU, so
+the lock bounds less of the build there than on the AMD bench, where it is 72 %.
 
-Proposed, not built: **a draw of many frames takes the lock once.** A
-promised batch (`Frames::alloc_promised` for `n`, handing each to the caller
-as `alloc_held` does) serves a shared-memory region's frames and a fault's
-whole run, the way frees already go back, a region's drop through
-`pmm::free_all` and a space's teardown through `free_drawn`. That turns 512
-acquisitions a window and up to 16 a fault into one each, keeps promises and
-ledgers exactly as they are, and is host-testable in `kernel::frames`. A
-per-CPU cache of frames in front of the lock (Linux's per-CPU page lists)
-would take single draws off it too, but every promise must stay backed by a
-frame free now, so a draw that finds the shared pool empty while another
-CPU's cache holds frames has to reach them; that is worth building only if
-the batched build still waits on the lock.
+**Decided** (the orchestrator, 2026-11-11), first of three: **a draw of many
+frames takes the lock once.** A promised batch serves a shared-memory region's
+frames and a fault's whole run, the way frees already go back, a region's drop
+through `pmm::free_all` and a space's teardown through `free_drawn`: one
+acquisition a window or a run instead of one a frame, with promises and ledgers
+moving as for as many single draws. Per-CPU frame caches in front of the lock
+are held until the batched build is measured; they would take single draws off
+it too, but every promise must stay backed by a frame free now, so a draw that
+finds the shared pool empty while another CPU's cache holds frames has to reach
+them. The second, a region's frames drawn at first touch, and the third, the
+window's size, are in their own records (the spawn record names them).
 
-**Exit**: that attribution, posted, and read again after the change; and
-each of the three either written per CPU on a line no other CPU writes, or
-kept with its refusal reason at its site.
+**Exit**: that attribution, posted, and read again after the change; the
+all-CPU build's lock waits read again with the batched draw; and each of the
+three either written per CPU on a line no other CPU writes, or kept with its
+refusal reason at its site.

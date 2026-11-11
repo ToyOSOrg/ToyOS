@@ -99,7 +99,9 @@ one-at-a-time build is ahead on both.
 **Where the all-CPU build's time goes, 2026-11-11** ([evidence](https://github.com/ToyOSOrg/evidence/tree/36117dda5c9a1a3803745c45785cc8243c5b5d51/spawnperf-diag)): one
 diagnosis boot a bench at main 34cb4c918 with measurement commits, the build's
 256 children at `j1` and at one a CPU, three rounds each, a child's CPU split by
-system call, fault, lock spin and shootdown wait. A child does the same work at
+system call, fault, lock spin and shootdown wait. The probes slow the round
+(the AMD bench's `j16` round took 331 ms against 313 to 316 ms without them),
+so the shares are of a slightly slowed machine. A child does the same work at
 every width (53 system calls, 90 faults), and its CPU grows from 2.28 to 5.14 ms
 on the T14 (`j8`) and from 2.83 to 15.5 ms on the AMD bench (`j16`). Of that
 growth over the 256 children:
@@ -118,8 +120,11 @@ growth over the 256 children:
 The four `SHM_CREATE`s a child makes are, by inference from the SDK, the
 2 MiB windows of its four directory connections, each 512 frames drawn one at a
 time under the frame allocator's one lock and zeroed: 95 µs a window on the T14
-and 133 µs on the AMD bench even at `j1`, 17 and 19 % of a child's CPU there. At
-`j<cpus>` the draws queue on that lock. The windows are
+and 133 µs on the AMD bench even at `j1`, where a child's four are 17 and 19 % of
+its CPU. At `j<cpus>` the draws queue on that lock. Lock spin across the machine
+grows by 244 ms on the T14, a third of the children's growth, and by 2,354 ms
+on the AMD bench, 72 %; the rest of the growth, user time and exit among it,
+is not lock spin. The windows are
 `issues/a-served-directory-costs-each-process-a-two-mebibyte-window.md`, the
 lock `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`.
 The next contended lock, the process table's in `process_data`, waits 1.2 ms a
@@ -127,10 +132,20 @@ round on the T14 and 3.7 ms on the AMD bench; the kernel heap's 0.7 and 2.7 ms.
 The rest's growth is not split further: the lock spin outside the children's
 system calls and faults, which bounds the exit path's, is 10 and 77 ms.
 
+Decided, in this order (the orchestrator, 2026-11-11): a draw of many frames
+takes the allocator's lock once, with per-CPU frame caches held until that is
+measured (the frame allocator's record); a shared-memory region's frames are
+drawn at its pages' first touch, promised when it is made, and a device's run
+stays drawn whole
+(`issues/a-shared-memory-region-draws-and-zeroes-every-frame-when-it-is-made.md`);
+and the window's size waits for the file-call work (the window's record). The
+rest's growth is read again after the first two.
+
 **Exit**: these rows within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured to its parts
 and justified.
 
 **Owner**: process creation (`kernel/src/process.rs`, the SDK's spawn and
 `sdk/libc/src/spawn.rs`) and, for the parallel build, the frame allocator
-(`kernel/src/mm/pmm.rs`) and the file-call window (`sdk/toyos/src/fs.rs`).
+(`kernel/src/mm/pmm.rs`), the shared-memory object (`kernel/src/object/shm.rs`)
+and the file-call window (`sdk/toyos/src/fs.rs`).
