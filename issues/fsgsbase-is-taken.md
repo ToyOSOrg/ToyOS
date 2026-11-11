@@ -25,8 +25,9 @@ call that reads or writes another thread's registers
 
 **Built**: the ring transitions (`kernel/src/arch/x86_64/entry.rs`). Every
 gate but the IST ones swaps GS by its frame's `CS`, fenced as Intel's SWAPGS
-guidance asks; NMI, `#MC` and `#DF` install the kernel's base from `GDTR`
-whatever GS holds, and the NMI returns to the base it found. The
+guidance asks; NMI, `#DB`, `#MC` and `#DF` install the kernel's base from
+`GDTR` whatever GS holds, and the NMI and `#DB` return to the base they
+found. The
 `nmi-user-gs` actuator enters vector 2 at CPL 0 under a decoy kernel-half
 base, which a sign test of `IA32_GS_BASE` would take for the kernel's.
 
