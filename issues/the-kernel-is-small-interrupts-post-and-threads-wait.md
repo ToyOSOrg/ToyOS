@@ -341,8 +341,10 @@ Beside that order, each waiting on something outside it:
 
 ## What the kernel still holds
 
-An inventory at `9349705ce` (main, 2026-11-10): `git ls-files
-'kernel/src/*.rs'` is 215 files and 55,378 lines by `wc -l`. Each file is
+An inventory at `9349705ce` (main, 2026-11-10), when `git ls-files
+'kernel/src/*.rs'` was 215 files and 55,378 lines by `wc -l`; #1200 has since
+taken a child's arguments and environment out, about 140 lines of the
+process area below. Each file is
 counted once, in the area of its main responsibility. "Kept" is the design
 read against the code; "inferred" marks a reading the design does not
 state. Nothing here is ruled, and the ranking is a proposal.
@@ -386,11 +388,15 @@ the first.
 
 | What | Size | Dependents | Owner in the design, and what blocks it |
 |---|---|---|---|
-| A child's arguments and environment | about 140, by #1200's count | std, libc, `toyos::startup` | the parent's startup block: #1200 |
 | Endowment labels: a blob per process for its life, answered by `SYS_ENDOWMENTS`, of which the kernel compares three (`JOB_LABEL`, `SELF_LABEL`, `QUIT_LABEL`) and writes three more for the supervisor | ~130 | `toyos::endow`, the supervisor's table | the startup block (inferred); needs the child's handle numbers known to its parent and the three compared labels as typed spawn fields; after #1200 |
 | The TTY mark on a pipe end (`SYS_MARK_TTY`, `FileType::Tty`) | ~40 | std's spawn, libc's `isatty` and stdio, std's stdio | a fact about a stream that only libc and std read; a label or the block could carry it (inferred); after the labels |
+<<<<<<< HEAD
 | The main thread's stack: 8 MiB and a guard the kernel chooses and reserves | ~30 | `SYS_STACK_INFO`, which only a guest test calls | its creator's, since the design gives a thread's stack a caller-chosen size; after #1200, when a child's stack starts empty |
 | **Done** (#1210): the loader writes one record, the kernel hands it to the supervisor as a read-only boot image, and the supervisor parses it. What the loader named: partition GUIDs by role, in the inventory, and the boot sources `SYS_BOOT_SOURCES` answers, whose device paths `loaded.rs` parses (`toyos-devicepath`) only to refuse the loader's own bytes | ~95, and the kernel's link to a 324-line parser | the supervisor, `toyos::syscap`, the manifest's inventory reader | the design gives the kernel a typed description of what was loaded and keeps a partition GUID out of it; passing the description on unread, as a read-only boot image as ROOT is, fits both (inferred) and waits on no other change |
+=======
+| The main thread's stack: 8 MiB and a guard the kernel chooses and reserves | ~30 | `SYS_STACK_INFO`, which only a guest test calls | its creator's, since the design gives a thread's stack a caller-chosen size; a child's stack starts empty since #1200 |
+| What the loader named: partition GUIDs by role, in the inventory, and the boot sources `SYS_BOOT_SOURCES` answers, whose device paths `loaded.rs` parses (`toyos-devicepath`) only to refuse the loader's own bytes | ~95, and the kernel's link to a 324-line parser | the supervisor, `toyos::syscap`, the manifest's inventory reader | the design gives the kernel a typed description of what was loaded and keeps a partition GUID out of it; passing the description on unread, as a read-only boot image as ROOT is, fits both (inferred) and waits on no other change |
+>>>>>>> 8918af1e3 (issues: process_tree's judge record closes, and the inventory loses what #1200 took)
 | The IGD OpRegion's lookup: a firmware window is a granted privilege the design keeps, but `SYS_DEVICE_FIRMWARE_WINDOW` finds it by reading Intel graphics' `ASLS` | ~90 and ~30 of `pcidev` | tgl-display, the supervisor, the manifest | the lookup is device knowledge; a window the ACPI service names for a claim would be generic (inferred); needs a design |
 | The supervisor's last words, userland text written into the kernel's ring (`SYS_LOG_LAST_WORDS`) | ~20 | the supervisor | the design keeps userland output out of the kernel's ring and names no exception; this is one |
 
@@ -415,22 +421,26 @@ lines), `issues/x86-64-reads-the-cmos-for-a-wall-clock-the-loader-already-hands-
 
 By mechanisms eliminated:
 
-1. #1200: `SYS_GET_ENV`, the environment kept per process, the kernel's
-   write onto a child's stack.
-2. Endowment labels, after #1200: `SYS_ENDOWMENTS`, the per-process blob
+1. Endowment labels: `SYS_ENDOWMENTS`, the per-process blob
    and its charge, and label text the kernel compares.
+<<<<<<< HEAD
 3. What the loader named, independent of the others: `SYS_BOOT_SOURCES`,
    the inventory's partition records, the device-path parser. **Done**
    (#1210).
 4. The TTY mark, with or after 2: `SYS_MARK_TTY`. It meets
+=======
+2. What the loader named, independent of the others: `SYS_BOOT_SOURCES`,
+   the inventory's partition records, the device-path parser.
+3. The TTY mark, with or after 1: `SYS_MARK_TTY`. It meets
+>>>>>>> 8918af1e3 (issues: process_tree's judge record closes, and the inventory loses what #1200 took)
    `issues/a-received-handle-has-no-knowable-type.md`, which wants
    `SYS_FSTAT` to answer more, so the two are designed together.
-5. The main thread's stack, after #1200: `SYS_STACK_INFO` and the kernel's
+4. The main thread's stack: `SYS_STACK_INFO` and the kernel's
    two stack constants.
 
-By lines: none is large. The five ranked are about 435 of 55,378; with the
+By lines: none is large. The four ranked are about 295 of 55,239; with the
 OpRegion's lookup (~120, which needs a design) and the last words (~20),
-the table's rows are about 575. What the design gives userland is nearly
+the table's rows are about 435. What the design gives userland is nearly
 out, and a larger number needs one of the design changes above.
 
 ### Dead or nearly so, recorded and not deleted
@@ -443,8 +453,8 @@ out, and a larger number needs one of the design changes above.
   line, went with #1210.)
 - `KernelStack::heap` (`kernel/src/loader/start.rs`) charges every thread
   two strings at 64 KiB and a page, "as a rename's paths". No rename is
-  left: a spawn's path and arguments are the two strings today. After #1200
-  no call copies two, and one string of that bound remains for as long as
+  left, and since #1200 took a spawn's arguments out no call copies two:
+  one string of that bound remains for as long as
   a spawn's path or `SYS_NAMESPACE_OPEN`'s name, which nothing bounds below
   64 KiB, is copied; the page is the namespace names'.
 - `FileType::File`, `Directory` and `Symlink` are answered by no kernel
