@@ -171,6 +171,7 @@ members = [
     "tests/guest/osbench/compare",
     "tests/guest/osbench/lan",
     "tests/guest/osbench/rules",
+    "tests/guest/mapprobe",
     "tests/guest/pagerprobe",
     "tests/guest/pciholder",
     "tests/guest/starveling",
