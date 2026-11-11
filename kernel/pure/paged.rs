@@ -1748,4 +1748,217 @@ mod tests {
         }
         assert!(played > 10_000, "only {played} sequences played");
     }
+
+    /// Two spaces mapping one object of two pages, as the kernel drives the
+    /// index: a fault writes a leaf only for a present page, a visit clears
+    /// every leaf the index no longer holds present as that frame, and an
+    /// unmap clears its leaves before its node leaves the ring.
+    mod mapped {
+        use super::*;
+
+        #[derive(Clone, Copy, Debug)]
+        pub(super) enum Step {
+            Map(u32),
+            Unmap(u32),
+            Fault(u32, u64),
+            Supply(u64),
+            Withdraw(u64),
+            Fail(u64),
+            Shrink,
+            Grow,
+            End,
+            /// The walker's step under the pager's lock.
+            Walk,
+            /// The walker's visit of the node it took, under that space's lock.
+            Visit,
+        }
+
+        pub(super) const STEPS: [Step; 18] = [
+            Step::Map(0),
+            Step::Map(1),
+            Step::Unmap(0),
+            Step::Unmap(1),
+            Step::Fault(0, 0),
+            Step::Fault(0, 1),
+            Step::Fault(1, 0),
+            Step::Fault(1, 1),
+            Step::Supply(0),
+            Step::Supply(1),
+            Step::Withdraw(0),
+            Step::Withdraw(1),
+            Step::Fail(0),
+            Step::Shrink,
+            Step::Grow,
+            Step::End,
+            Step::Walk,
+            Step::Visit,
+        ];
+
+        pub(super) struct World {
+            p: Pages<u64>,
+            o: Object,
+            ring: Ring,
+            mapped: [bool; 2],
+            leaves: [[Option<u64>; 2]; 2],
+            next: u64,
+            freed: BTreeSet<u64>,
+            walking: bool,
+            visiting: Option<u32>,
+        }
+
+        impl World {
+            pub(super) fn new() -> Self {
+                let mut p = Pages::new(4, 4).unwrap();
+                let o = p.object(1, 2 * PAGE);
+                World {
+                    p,
+                    o,
+                    ring: Ring::default(),
+                    mapped: [false; 2],
+                    leaves: [[None; 2]; 2],
+                    next: 100,
+                    freed: BTreeSet::new(),
+                    walking: false,
+                    visiting: None,
+                }
+            }
+
+            /// Whether `step` can be taken now; takes it if so.
+            pub(super) fn step(&mut self, step: Step) -> bool {
+                match step {
+                    Step::Map(s) if !self.mapped[s as usize] => {
+                        self.ring.link(s, &self.o);
+                        self.mapped[s as usize] = true;
+                    }
+                    Step::Unmap(s) if self.mapped[s as usize] => {
+                        self.leaves[s as usize] = [None; 2];
+                        let at = self.ring.0.iter().position(|&(n, _)| n == s).expect("linked while mapped");
+                        self.ring.0.remove(at);
+                        self.mapped[s as usize] = false;
+                    }
+                    Step::Fault(s, page) if self.mapped[s as usize] && self.leaves[s as usize][page as usize].is_none() => {
+                        let Lookup::Present(_) = self.p.lookup(&self.o, page) else { return false };
+                        for at in 0..2 {
+                            if let (None, Lookup::Present(f)) = (self.leaves[s as usize][at], self.p.lookup(&self.o, at as u64)) {
+                                self.leaves[s as usize][at] = Some(f);
+                            }
+                        }
+                    }
+                    Step::Supply(page) if !self.o.gone() => {
+                        self.next += 1;
+                        let _ = self.p.supply(&mut self.o, page, self.next, false, (page + 1) * PAGE);
+                    }
+                    Step::Withdraw(page) if !self.o.gone() => {
+                        self.p.withdraw(&mut self.o, page, 1, &mut Nobody);
+                        self.revoke();
+                    }
+                    Step::Fail(page) if !self.o.gone() => {
+                        let _ = self.p.fail(&mut self.o, page, 1);
+                        self.revoke();
+                    }
+                    Step::Shrink if !self.o.gone() && self.o.size() == 2 * PAGE => {
+                        self.p.resize(&mut self.o, PAGE);
+                        self.revoke();
+                    }
+                    Step::Grow if !self.o.gone() && self.o.size() == PAGE => {
+                        self.p.resize(&mut self.o, 2 * PAGE);
+                        self.revoke();
+                    }
+                    Step::End if !self.o.gone() => {
+                        self.p.invalidate(&mut self.o);
+                        self.revoke();
+                    }
+                    Step::Walk if self.walking && self.visiting.is_none() => {
+                        let freed = &mut self.freed;
+                        match self.p.walk(&mut self.o, &mut self.ring, &mut Nobody, &mut |f, _, _| assert!(freed.insert(f), "frame {f} given back twice")) {
+                            Some(node) => self.visiting = Some(node),
+                            None => self.walking = false,
+                        }
+                    }
+                    Step::Visit if self.visiting.is_some() => {
+                        let s = self.visiting.take().unwrap() as usize;
+                        for page in 0..2 {
+                            if let Some(f) = self.leaves[s][page] {
+                                if self.p.lookup(&self.o, page as u64) != Lookup::Present(f) {
+                                    self.leaves[s][page] = None;
+                                }
+                            }
+                        }
+                    }
+                    _ => return false,
+                }
+                self.check(step);
+                true
+            }
+
+            fn revoke(&mut self) {
+                match self.o.revoke() {
+                    Revoke::Walk => {
+                        assert!(!self.walking, "a second walker");
+                        self.walking = true;
+                    }
+                    Revoke::Queued(_) => assert!(self.walking, "queued behind no walk"),
+                    Revoke::Done => {}
+                }
+            }
+
+            /// Every leaf maps the frame the index holds for its page, present
+            /// or revoking, and never one given back.
+            fn check(&self, step: Step) {
+                for (s, leaves) in self.leaves.iter().enumerate() {
+                    for (page, leaf) in leaves.iter().enumerate() {
+                        let Some(f) = *leaf else { continue };
+                        assert!(!self.freed.contains(&f), "after {step:?}: space {s} page {page} maps given-back frame {f}");
+                        let held = self.p.find(self.o.id, page as u64).map(|i| self.p.slot(i).frame);
+                        assert_eq!(held, Some(Some(f)), "after {step:?}: space {s} page {page} maps {f}, the index holds {held:?}");
+                    }
+                }
+                assert!(self.walking || self.o.revoking == 0, "after {step:?}: pages revoking with no walk");
+            }
+        }
+    }
+
+    fn play(steps: &[mapped::Step]) -> Option<mapped::World> {
+        let mut w = mapped::World::new();
+        steps.iter().all(|&s| w.step(s)).then_some(w)
+    }
+
+    /// From both spaces mapping both pages, every sequence of six steps of
+    /// faults, supplies, removals, mappings and the walk keeps each leaf on
+    /// its page's one frame.
+    #[test]
+    fn every_interleaving_keeps_each_leaf_on_its_pages_one_frame() {
+        use mapped::Step;
+        let prefix = [Step::Map(0), Step::Map(1), Step::Supply(0), Step::Supply(1), Step::Fault(0, 0), Step::Fault(1, 1)];
+        let mut stack = std::vec![prefix.to_vec()];
+        let mut played = 0u64;
+        while let Some(seq) = stack.pop() {
+            played += 1;
+            if seq.len() == prefix.len() + 6 {
+                continue;
+            }
+            for &step in &mapped::STEPS {
+                let mut next = seq.clone();
+                next.push(step);
+                if play(&next).is_some() {
+                    stack.push(next);
+                }
+            }
+        }
+        assert!(played > 50_000, "only {played} sequences played");
+    }
+
+    /// The same over long sequences, seeded: removals queued behind running
+    /// walks, ends meeting walks, unmaps while their node is visited.
+    #[test]
+    fn long_runs_keep_each_leaf_on_its_pages_one_frame() {
+        let mut x = 7u64;
+        for _ in 0..2_000 {
+            let mut w = mapped::World::new();
+            for _ in 0..200 {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                w.step(mapped::STEPS[(x >> 33) as usize % mapped::STEPS.len()]);
+            }
+        }
+    }
 }
