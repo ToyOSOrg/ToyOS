@@ -54,7 +54,7 @@ impl Refused {
 pub enum Notice {
     /// A reader waits for `count` pages from `first`.
     Requested { object: u64, first: u64, count: u64 },
-    /// The last holder handle went.
+    /// The last holder, a handle or a space's mapping, went.
     NoHolders { object: u64 },
 }
 

@@ -221,6 +221,17 @@ log-ring-loads-swapped = []
 tlb-tags-enter-relaxed = []
 # The same for `Tags::resume`, which must red the idle holder's model.
 tlb-tags-resume-relaxed = []
+# The negative control for a mapped object's range count. It makes
+# `object/paged/ranges.rs`'s `less` `Relaxed` with no fence, so the last range
+# to let go can unlink its node without seeing another's leaf cleared, and
+# `paged_ranges.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features ranges-less-relaxed \
+#     --test paged_ranges
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+ranges-less-relaxed = []
 
 # The negative control for the panic console's published descriptor. It drops
 # the publisher's `Release` fence between its odd mark and its words, so a

@@ -71,6 +71,9 @@ use crate::sync::{Lock, LockGuard};
 use crate::time::{Deadline, Duration};
 use crate::user_ptr::{Pinned, Stopped, UserBytes, UserBytesMut};
 use crate::watch::{self, Watch};
+
+mod ranges;
+use ranges::Ranges;
 use crate::DirectMap;
 
 use super::{KObjectVariant, ObjectCore, ZeroHandles};
@@ -1269,8 +1272,8 @@ pub struct MapNode {
     pager: Arc<PagerObject>,
     slot: u32,
     space: Weak<Space>,
-    /// The ranges holding it ([`PagedRange`]), each under its space's lock.
-    ranges: AtomicU32,
+    /// The ranges holding it ([`PagedRange`]).
+    ranges: Ranges,
     /// Under the pager's lock.
     link: UnsafeCell<Link>,
     /// Itself, for a walk to hold while it visits.
@@ -1474,18 +1477,14 @@ impl PagedRange {
 
 impl Clone for PagedRange {
     fn clone(&self) -> Self {
-        self.0.ranges.fetch_add(1, Ordering::Relaxed);
+        self.0.ranges.more();
         Self(Arc::clone(&self.0))
     }
 }
 
 impl Drop for PagedRange {
     fn drop(&mut self) {
-        // The last may be a parked fault's, holding no space lock: as `Arc`'s
-        // count, each drop releases what its holder cleared, and the last
-        // acquires every one before the node leaves the list.
-        if self.0.ranges.fetch_sub(1, Ordering::Release) == 1 {
-            core::sync::atomic::fence(Ordering::Acquire);
+        if self.0.ranges.less() {
             self.0.pager.unlink(&self.0);
         }
     }
@@ -1503,7 +1502,7 @@ impl PagerObject {
             pager: Arc::clone(self),
             slot,
             space,
-            ranges: AtomicU32::new(1),
+            ranges: Ranges::one(),
             link,
             this: this.clone(),
             _charge: charge,
