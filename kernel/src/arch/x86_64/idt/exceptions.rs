@@ -535,7 +535,7 @@ pub(super) fn page_fault_handler(frame: &mut TrapFrame) {
         if is_user {
             match process::handle_page_fault(fault_addr, access) {
                 process::Faulted::Unreachable => {}
-                process::Faulted::Lost(lost) => {
+                process::Faulted::Lost(lost) | process::Faulted::PastEnd(lost) => {
                     percpu::set_fault_state(percpu::CpuFaultState::Normal);
                     process::lost(fault_addr, lost);
                 }

@@ -262,6 +262,14 @@ pub enum Supplied {
     Present,
 }
 
+/// Where a reader of an object's revoking pages has read to
+/// ([`Pages::revoking`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cursor {
+    Start,
+    After(u32),
+}
+
 /// What a revoking page becomes once no mapping reaches its frame, by the
 /// object as the walk's end finds it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -334,6 +342,8 @@ struct Slot<F> {
     revoking: Option<Revoked>,
     prev: u32,
     next: u32,
+    /// The next of its object's revoking slots, in the order they were marked.
+    revoke_next: u32,
 }
 
 /// One object's part of the table: its size, whether its pager ended, the
@@ -351,8 +361,11 @@ pub struct Object {
     writing: u32,
     /// A call that did not take all it was given left its write under way.
     held: bool,
-    /// Its slots that are revoking.
+    /// Its slots that are revoking, and the walk's set of them: a list in
+    /// the order they were marked, which only the walk's end empties.
     revoking: usize,
+    revoke_head: u32,
+    revoke_tail: u32,
     /// The pass of the walk over its mappers, moved at each pass's start.
     epoch: u64,
     walk: Walk,
@@ -548,6 +561,8 @@ impl<F: Copy> Pages<F> {
             writing: 0,
             held: false,
             revoking: 0,
+            revoke_head: NONE,
+            revoke_tail: NONE,
             epoch: 0,
             walk: Walk::Idle,
             finished: 0,
@@ -600,7 +615,7 @@ impl<F: Copy> Pages<F> {
         if next != NONE {
             self.slot_mut(next).prev = i;
         }
-        self.slots[i as usize] = Some(Slot { object: o.id, page, frame, state, revoking: None, prev: NONE, next });
+        self.slots[i as usize] = Some(Slot { object: o.id, page, frame, state, revoking: None, prev: NONE, next, revoke_next: NONE });
         o.head = i;
         o.pages += 1;
         let mut at = self.hash(o.id, page);
@@ -690,18 +705,22 @@ impl<F: Copy> Pages<F> {
         let counted = s.state.counts_dirty();
         s.state = State::CLEAN;
         s.revoking = Some(becomes);
+        s.revoke_next = NONE;
         o.revoking += 1;
         if counted {
             self.dirty_held -= 1;
         }
+        match o.revoke_tail {
+            NONE => o.revoke_head = i,
+            tail => self.slot_mut(tail).revoke_next = i,
+        }
+        o.revoke_tail = i;
     }
 
     /// Visit `o`'s next mapper after pages were marked revoking
     /// ([`Object::revoke`]), or, once every mapper has been visited since the
     /// last marking, give out each revoking page's frame, its page and what it
-    /// became, and answer `None`. A page that ends absent was withdrawn,
-    /// perhaps after a supply for a waiter's notice, without moving the
-    /// version: every want of `waiters` it meets is named again.
+    /// became, and answer `None`: [`Self::next_visit`], then [`Self::finish`].
     pub fn walk<M: Mappers>(
         &mut self,
         o: &mut Object,
@@ -709,6 +728,17 @@ impl<F: Copy> Pages<F> {
         waiters: &mut impl Waiters,
         out: &mut impl FnMut(F, u64, Revoked),
     ) -> Option<M::Node> {
+        let next = self.next_visit(o, mappers);
+        if next.is_none() {
+            self.finish(o, waiters, out);
+        }
+        next
+    }
+
+    /// `o`'s next mapper to visit, a new pass begun where a removal queued
+    /// more pages meanwhile; `None` once every mapper has been visited since
+    /// the last marking, when [`Self::finish`] is owed under the same hold.
+    pub fn next_visit<M: Mappers>(&mut self, o: &mut Object, mappers: &mut M) -> Option<M::Node> {
         loop {
             if let Some(node) = mappers.head().filter(|&n| mappers.seen(n) != o.epoch) {
                 mappers.visited(node, o.epoch);
@@ -719,56 +749,59 @@ impl<F: Copy> Pages<F> {
                     o.epoch += 1;
                     o.walk = Walk::Running { again: false };
                 }
-                Walk::Running { again: false } => break,
+                Walk::Running { again: false } => return None,
                 Walk::Idle => panic!("paged: a walk of object {} that never began", o.id),
             }
         }
+    }
+
+    /// The walk's end, once [`Self::next_visit`] answered `None`: each
+    /// revoking page leaves, its frame given out with its page and what it
+    /// became. A page that ends absent was withdrawn, perhaps after a supply
+    /// for a waiter's notice, without moving the version: every want of
+    /// `waiters` it meets is named again.
+    pub fn finish(&mut self, o: &mut Object, waiters: &mut impl Waiters, out: &mut impl FnMut(F, u64, Revoked)) {
+        assert_eq!(o.walk, Walk::Running { again: false }, "paged: object {}'s walk ended with a pass owed", o.id);
         let held = !o.gone;
-        let mut at = o.head;
+        let mut at = core::mem::replace(&mut o.revoke_head, NONE);
+        o.revoke_tail = NONE;
         while at != NONE {
             let s = self.slot(at);
-            let (next, page, revoking) = (s.next, s.page, s.revoking);
-            if let Some(becomes) = revoking {
-                let frame = self.remove(o, at).expect("paged: a revoking page holds its frame");
-                let becomes = if held && page < o.page_end() { becomes } else { Revoked::Removed };
-                match becomes {
-                    Revoked::Failed => self.insert(o, page, None, State::CLEAN).expect("paged: the slot just freed"),
-                    Revoked::Absent => waiters.each(&mut |want| {
-                        want.withdrawn(page, 1);
-                    }),
-                    Revoked::Removed => {}
-                }
-                out(frame, page, becomes);
+            let (next, page, becomes) = (s.revoke_next, s.page, s.revoking.expect("paged: the walk's set holds revoking slots"));
+            let frame = self.remove(o, at).expect("paged: a revoking page holds its frame");
+            let becomes = if held && page < o.page_end() { becomes } else { Revoked::Removed };
+            match becomes {
+                Revoked::Failed => self.insert(o, page, None, State::CLEAN).expect("paged: the slot just freed"),
+                Revoked::Absent => waiters.each(&mut |want| {
+                    want.withdrawn(page, 1);
+                }),
+                Revoked::Removed => {}
             }
+            out(frame, page, becomes);
             at = next;
         }
         debug_assert_eq!(o.revoking, 0);
         o.walk = Walk::Idle;
         o.finished = o.epoch;
-        None
     }
 
-    /// `o`'s revoking pages at or past `from`, the lowest first, with the
-    /// frame each keeps until its walk ends: as many as fit in `out`, whose
-    /// count this answers. A walk's visit clears a mapper's leaves of them a
-    /// batch at a time, asking again from past the last.
-    pub fn revoking_from(&self, o: &Object, from: u64, out: &mut [(u64, F)]) -> usize {
+    /// `o`'s revoking pages from `at` on, in the order they were marked, each
+    /// with the frame it keeps until the walk's end: as many as fit in `out`,
+    /// whose count this answers, `at` moved past them. Only the walk's end
+    /// takes a slot off the set, so a cursor stays good across the drops of
+    /// the pager's lock between batches, and sees pages marked since.
+    pub fn revoking(&self, o: &Object, at: &mut Cursor, out: &mut [(u64, F)]) -> usize {
+        let mut next = match *at {
+            Cursor::Start => o.revoke_head,
+            Cursor::After(i) => self.slot(i).revoke_next,
+        };
         let mut n = 0;
-        let mut at = o.head;
-        while at != NONE {
-            let s = self.slot(at);
-            at = s.next;
-            let (Some(_), Some(frame)) = (s.revoking, s.frame) else { continue };
-            if s.page < from || (n == out.len() && s.page >= out[n - 1].0) {
-                continue;
-            }
-            let mut k = n.min(out.len() - 1);
-            n = (n + 1).min(out.len());
-            while k > 0 && out[k - 1].0 > s.page {
-                out[k] = out[k - 1];
-                k -= 1;
-            }
-            out[k] = (s.page, frame);
+        while n < out.len() && next != NONE {
+            let s = self.slot(next);
+            out[n] = (s.page, s.frame.expect("paged: a revoking page holds its frame"));
+            *at = Cursor::After(next);
+            next = s.revoke_next;
+            n += 1;
         }
         n
     }
@@ -1109,32 +1142,38 @@ mod tests {
         }
     }
 
-    /// A removed page reads as absent, takes no second frame and no write,
-    /// and keeps its frame until every mapper of its object was visited;
-    /// then its frame goes out once and the page is supplied afresh.
+    /// The walk's set holds each revoking page once, in the order they were
+    /// marked; a cursor reads it a batch at a time and sees pages marked
+    /// between batches; the walk's end empties it.
     #[test]
-    fn revoking_pages_come_lowest_first_a_batch_at_a_time() {
+    fn the_walks_set_is_read_a_batch_at_a_time_in_marking_order() {
         let mut p = Pages::new(16, 4).unwrap();
         let mut o = p.object(1, 16 * PAGE);
         for page in [9, 2, 14, 5, 0, 11, 7] {
             p.supply(&mut o, page, 100 + page, false, (page + 1) * PAGE).unwrap();
         }
-        let (removed, _) = p.withdraw(&mut o, 2, 12, &mut Nobody);
-        assert_eq!(removed, 5, "pages 2, 5, 7, 9 and 11 are withdrawn");
-        let mut batch = [(0, 0); 2];
-        let mut seen = Vec::new();
-        let mut from = 0;
-        loop {
-            let n = p.revoking_from(&o, from, &mut batch);
-            seen.extend_from_slice(&batch[..n]);
-            if n < batch.len() {
-                break;
-            }
-            from = batch[n - 1].0 + 1;
+        for page in [7, 2, 11] {
+            assert_eq!(p.withdraw(&mut o, page, 1, &mut Nobody).0, 1);
         }
-        assert_eq!(seen, [(2, 102), (5, 105), (7, 107), (9, 109), (11, 111)]);
+        let mut at = Cursor::Start;
+        let mut batch = [(0, 0); 2];
+        assert_eq!(p.revoking(&o, &mut at, &mut batch), 2);
+        assert_eq!(batch, [(7, 107), (2, 102)]);
+        assert_eq!(p.withdraw(&mut o, 2, 1, &mut Nobody).0, 0, "a revoking page is marked once");
+        assert_eq!(p.withdraw(&mut o, 0, 1, &mut Nobody).0, 1);
+        assert_eq!(p.revoking(&o, &mut at, &mut batch), 2, "a page marked between batches is read");
+        assert_eq!(batch, [(11, 111), (0, 100)]);
+        assert_eq!(p.revoking(&o, &mut at, &mut batch), 0);
+        assert_eq!(o.revoke(), Revoke::Walk);
+        let mut freed = Vec::new();
+        assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |f, _, _| freed.push(f)), None);
+        assert_eq!(freed, [107, 102, 111, 100]);
+        assert_eq!(p.revoking(&o, &mut Cursor::Start, &mut batch), 0, "the walk's end empties its set");
     }
 
+    /// A removed page reads as absent, takes no second frame and no write,
+    /// and keeps its frame until every mapper of its object was visited;
+    /// then its frame goes out once and the page is supplied afresh.
     #[test]
     fn a_revoking_page_keeps_its_one_frame_until_every_mapper_is_visited() {
         let mut p = Pages::new(8, 8).unwrap();
@@ -1185,7 +1224,7 @@ mod tests {
         let visits: Vec<_> = core::iter::from_fn(|| p.walk(&mut o, &mut ring, &mut Nobody, &mut out)).collect();
         assert_eq!(visits, [11, 10, 12, 11], "the first pass ends at 11, the second visits all three");
         assert!(o.finished(second));
-        assert_eq!(freed, [(8, 1, Revoked::Failed), (7, 0, Revoked::Absent)]);
+        assert_eq!(freed, [(7, 0, Revoked::Absent), (8, 1, Revoked::Failed)], "in marking order");
         assert_eq!((p.lookup(&o, 0), p.lookup(&o, 1)), (Lookup::Absent, Lookup::Failed));
     }
 
@@ -1220,7 +1259,7 @@ mod tests {
         assert_eq!(o.revoke(), Revoke::Walk);
         let mut ended = Vec::new();
         assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |f, page, becomes| ended.push((f, page, becomes))), None);
-        assert_eq!(ended, [(8, 1, Revoked::Removed), (7, 0, Revoked::Failed)]);
+        assert_eq!(ended, [(7, 0, Revoked::Failed), (8, 1, Revoked::Removed)]);
         assert_eq!((p.lookup(&o, 0), p.used()), (Lookup::Failed, 1));
     }
 
@@ -1874,7 +1913,9 @@ mod tests {
             next: u64,
             freed: BTreeSet<u64>,
             walking: bool,
-            visiting: Option<u32>,
+            /// The space a walk visits, and where its visit has read the
+            /// object's revoking pages to.
+            visiting: Option<(u32, Cursor)>,
             /// Faults parked on an absent page: the space, the page, and the
             /// request as the pager hears of it.
             parked: std::vec::Vec<(u32, u64, Want, Version)>,
@@ -1965,7 +2006,7 @@ mod tests {
                             assert!(freed.insert(f), "frame {f} given back twice");
                         });
                         match walked {
-                            Some(node) => self.visiting = Some(node),
+                            Some(node) => self.visiting = Some((node, Cursor::Start)),
                             None => self.walking = false,
                         }
                     }
@@ -2010,14 +2051,18 @@ mod tests {
                             }
                         }
                     }
+                    // The kernel's visit, a batch of one: the next revoking
+                    // page read, and the space's leaf of it cleared where it
+                    // maps that frame; anything may run between batches.
                     Step::Visit if self.visiting.is_some() => {
-                        let s = self.visiting.take().unwrap() as usize;
-                        for page in 0..2 {
-                            if let Some(f) = self.leaves[s][page] {
-                                if self.p.lookup(&self.o, page as u64) != Lookup::Present(f) {
-                                    self.leaves[s][page] = None;
-                                }
+                        let (s, mut at) = self.visiting.take().unwrap();
+                        let mut batch = [(0, 0)];
+                        if self.p.revoking(&self.o, &mut at, &mut batch) == 1 {
+                            let (page, f) = batch[0];
+                            if self.leaves[s as usize][page as usize] == Some(f) {
+                                self.leaves[s as usize][page as usize] = None;
                             }
+                            self.visiting = Some((s, at));
                         }
                     }
                     _ => return false,
@@ -2127,6 +2172,8 @@ mod tests {
             Step::Answer,
             Step::Shrink,
             Step::Walk,
+            // A batch of one: the revoked page, then the read that finds none.
+            Step::Visit,
             Step::Visit,
             Step::Walk,
             Step::Grow,

@@ -360,7 +360,7 @@ fn user_abort(frame: &mut Frame) {
         cpu::disable_interrupts();
         match faulted {
             crate::process::Faulted::Unreachable => {}
-            crate::process::Faulted::Lost(lost) => {
+            crate::process::Faulted::Lost(lost) | crate::process::Faulted::PastEnd(lost) => {
                 percpu::set_fault_state(CpuFaultState::Normal);
                 crate::process::lost(frame.far, lost);
             }

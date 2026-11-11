@@ -665,11 +665,11 @@ const MACHINE_TESTS: &[MachineTest] = &[
     // endowments a job gets is the image's and the supervisor's, which no
     // host build has, and the benches run osbench only nightly.
     ("osbench_capability_groups_exit_0", |_| osbench_capability_groups_exit_0()),
-    // `osbench map` on tests/images/benchcase.toml with only that job: its
-    // rows over a mapped file, eight threads faulting one mapping and 255
-    // processes holding one while it is truncated, each measured or refused
-    // by name. Whether they measure correctly is a guest's to say; what they
-    // measure is owed on metal (the memory track record).
+    // `osbench map` on tests/images/benchcase.toml with only that job, on
+    // QEMU x86-64's q35: its rows over a mapped file, eight threads faulting
+    // one mapping and 255 processes holding one while it is truncated, each
+    // required measured. Whether they measure correctly is a guest's to say;
+    // what they measure is owed on metal (the memory track record).
     ("osbench_map_group_exits_0", |_| osbench_map_group_exits_0()),
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the

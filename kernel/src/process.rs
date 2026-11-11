@@ -977,6 +977,8 @@ pub enum Faulted {
     Unreachable,
     /// A mapped file's page its pager cannot let the process have.
     Lost(crate::object::paged::Lost),
+    /// A mapped file's page wholly past its end.
+    PastEnd(crate::object::paged::Lost),
     /// A mapped file's page that is absent, met by a copy holding page pins
     /// (`user_ptr::Pinned`), which does not wait for it.
     Absent,
@@ -989,11 +991,10 @@ impl Faulted {
     /// What a copy this fault stopped short answers.
     pub fn stop(self) -> crate::user_ptr::Stop {
         match self {
-            // Nothing is there, as for a copy POSIX answers `EFAULT`.
-            Faulted::Lost(lost) if lost.why == crate::object::paged::Why::PastEnd => crate::user_ptr::Stop::Unreachable,
             Faulted::Lost(_) => crate::user_ptr::Stop::Lost,
             Faulted::Absent => crate::user_ptr::Stop::Absent,
-            Faulted::Served | Faulted::Unreachable | Faulted::Killed => crate::user_ptr::Stop::Unreachable,
+            // Nothing is there, so a copy answers `BadAddress`.
+            Faulted::Served | Faulted::Unreachable | Faulted::PastEnd(_) | Faulted::Killed => crate::user_ptr::Stop::Unreachable,
         }
     }
 }
@@ -1031,6 +1032,7 @@ fn touch(va: u64, access: kernel::vm::Access, mut wait: impl FnMut(crate::mm::sp
             Populated::At(_) => break,
             Populated::Unreachable => return Faulted::Unreachable,
             Populated::Lost(lost) => return Faulted::Lost(lost),
+            Populated::PastEnd(record) => return Faulted::PastEnd(record),
             Populated::Wait(page) => match wait(page) {
                 Faulted::Served => {}
                 stopped => return stopped,

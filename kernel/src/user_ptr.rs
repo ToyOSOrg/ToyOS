@@ -60,7 +60,7 @@ pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Result<u64, Untr
     let reached = unlocked_space().lock().reach(addr.raw(), asked(access));
     match reached {
         Populated::At(phys) => Ok(phys),
-        Populated::Unreachable => Err(Untranslated::Unreachable),
+        Populated::Unreachable | Populated::PastEnd(_) => Err(Untranslated::Unreachable),
         Populated::Lost(_) | Populated::Wait(_) => Err(Untranslated::Away),
     }
 }

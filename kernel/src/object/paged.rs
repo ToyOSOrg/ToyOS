@@ -58,7 +58,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel::chunked::Stack;
-use kernel::paged::{Core, Draw, Leave, Lookup, Mappers, Object, Pages, Refused, Revoke, Revoked, Supplied, Version, Waiters, Want, PAGE};
+use kernel::paged::{Core, Cursor, Draw, Leave, Lookup, Mappers, Object, Pages, Refused, Revoke, Revoked, Supplied, Version, Waiters, Want, PAGE};
 use kernel::sched::task::WaitClass;
 use kernel::slots::Slots;
 use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
@@ -379,31 +379,91 @@ impl PagerObject {
         }
         let job = self.core.job();
         state.entry_mut(slot).refs += 1;
-        let mut absent = false;
+        // Whether every futex wait on a revoking frame was ended since the
+        // last pass began: owed before any frame goes back.
+        let mut swept = false;
         loop {
-            let mut waiters = Linked { head: state.requests, slot };
-            let State { pages, entries, held, gone, .. } = &mut *state;
+            let State { pages, entries, .. } = &mut *state;
             let Entry { object, mappers, .. } = entries.get_mut(slot).expect("paged: a walked slot is held");
-            let next = pages.walk(object, &mut Ring(mappers), &mut waiters, &mut |phys, _, becomes| {
-                held.give_back(job, *gone, phys, true);
-                absent |= becomes == Revoked::Absent;
-            });
-            let Some(node) = next else { break };
-            // SAFETY: linked, so live, under the lock; a range holds it, so
-            // it upgrades, and the count kept holds it past its unlinking
-            // while the lock is dropped.
-            let node = unsafe { (*node).this.upgrade() }.expect("paged: a linked mapper is held by a range");
-            drop(state);
-            if let Some(space) = node.space.upgrade() {
-                space.lock().revoke_paged(&node);
+            match pages.next_visit(object, &mut Ring(mappers)) {
+                Some(node) => {
+                    swept = false;
+                    // SAFETY: linked, so live, under the lock; a range holds
+                    // it, so it upgrades, and the count kept holds it past
+                    // its unlinking while the lock is dropped.
+                    let node = unsafe { (*node).this.upgrade() }.expect("paged: a linked mapper is held by a range");
+                    state = self.visit(state, slot, &node);
+                }
+                None if !swept => {
+                    state = self.end_futex_waits(state, slot);
+                    swept = true;
+                }
+                None => break,
             }
-            state = self.state.lock();
         }
+        // Every mapper visited and every wait ended, in this hold since
+        // `next_visit` said so: the frames go back.
+        let mut absent = false;
+        let mut waiters = Linked { head: state.requests, slot };
+        let State { pages, entries, held, gone, .. } = &mut *state;
+        let object = &mut entries.get_mut(slot).expect("paged: a walked slot is held").object;
+        pages.finish(object, &mut waiters, &mut |phys, _, becomes| {
+            held.give_back(job, *gone, phys, true);
+            absent |= becomes == Revoked::Absent;
+        });
         self.unref_locked(&mut state, slot);
         if absent {
             self.watch.post();
         }
         (state, None)
+    }
+
+    /// A walk's visit of `node`'s space: the object's revoking pages read a
+    /// batch at a time under the pager's lock alone, each batch's leaves then
+    /// cleared and shot down under the space's lock alone
+    /// ([`Space::clear_paged`]). One lock at a time, and O(revoking pages).
+    fn visit<'a>(&'a self, mut state: LockGuard<'a, State>, slot: u32, node: &MapNode) -> LockGuard<'a, State> {
+        let mut at = Cursor::Start;
+        loop {
+            let mut batch = [(0u64, 0u64); REVOKE_BATCH];
+            let n = state.pages.revoking(&state.entry(slot).object, &mut at, &mut batch);
+            drop(state);
+            if n > 0 {
+                let Some(space) = node.space.upgrade() else { return self.state.lock() };
+                space.lock().clear_paged(node, &batch[..n]);
+            }
+            state = self.state.lock();
+            if n < REVOKE_BATCH {
+                return state;
+            }
+        }
+    }
+
+    /// Every futex wait on a revoking frame of the object at `slot` ends,
+    /// read a batch at a time under the pager's lock and ended outside it:
+    /// after every mapper's visit, so no leaf maps one any more and none is
+    /// waited on afresh, and before any frame goes back, so no waiter keyed
+    /// on one meets the frame reissued (`sched::futex::revoke_frames`). This
+    /// covers a leaf an unmap, `discard`, `protect` to none or a space's end
+    /// cleared before the frame was removed, whose clearing revokes no
+    /// frame it does not own.
+    fn end_futex_waits<'a>(&'a self, mut state: LockGuard<'a, State>, slot: u32) -> LockGuard<'a, State> {
+        let mut at = Cursor::Start;
+        loop {
+            let mut batch = [(0u64, 0u64); REVOKE_BATCH];
+            let n = state.pages.revoking(&state.entry(slot).object, &mut at, &mut batch);
+            drop(state);
+            let mut frames = [0u64; REVOKE_BATCH];
+            for (frame, &(_, phys)) in frames.iter_mut().zip(&batch[..n]) {
+                *frame = phys;
+            }
+            frames[..n].sort_unstable();
+            crate::sched::futex::revoke_sorted(&frames[..n], |&phys| phys);
+            state = self.state.lock();
+            if n < REVOKE_BATCH {
+                return state;
+            }
+        }
     }
 
     /// The pager lets object `id` go, in one hold of the lock: it answers
@@ -1304,6 +1364,8 @@ pub enum Missing {
     Hole,
     /// Its pager cannot let a mapping have it.
     Lost(Lost),
+    /// Wholly past the object's end: nothing is there.
+    PastEnd(Lost),
 }
 
 /// A page a fault was refused, as the record of its end names it.
@@ -1326,8 +1388,9 @@ pub enum Why {
     Ended,
     /// A hole of an anonymous object, and the pager has no room for its page.
     NoRoom,
-    /// The page lies wholly past the object's end, which POSIX answers a
-    /// touch of with `SIGBUS` and a copy with `EFAULT`.
+    /// The page lies wholly past the object's end: nothing is there, so a
+    /// touch of it ends the process and a copy from it is refused as a bad
+    /// address.
     PastEnd,
 }
 
@@ -1358,18 +1421,11 @@ impl Index<'_> {
             _ if self.state.gone => Err(self.lost(page, Why::Ended)),
             Lookup::Present(phys) => Ok(phys),
             Lookup::Absent => Err(Missing::Absent(object.version())),
-            Lookup::PastEnd => Err(self.lost(page, Why::PastEnd)),
+            Lookup::PastEnd => Err(Missing::PastEnd(self.record(page, Why::PastEnd))),
             Lookup::Zero => Err(Missing::Hole),
             Lookup::Failed => Err(self.lost(page, Why::Failed)),
             Lookup::Gone => Err(self.lost(page, Why::Released)),
         }
-    }
-
-    /// The object's revoking pages at or past `from`, lowest first, each
-    /// with the frame it keeps until its walk ends
-    /// ([`Pages::revoking_from`]).
-    pub fn revoking_from(&self, from: u64, out: &mut [(u64, u64)]) -> usize {
-        self.state.pages.revoking_from(&self.state.entry(self.slot).object, from, out)
     }
 
     /// As [`Self::page`], for the page a fault touched: a hole of an
@@ -1420,9 +1476,16 @@ impl Index<'_> {
     }
 
     fn lost(&self, page: u64, why: Why) -> Missing {
-        Missing::Lost(Lost { pager: self.pager.pid, object: self.slot, page, why })
+        Missing::Lost(self.record(page, why))
+    }
+
+    fn record(&self, page: u64, why: Why) -> Lost {
+        Lost { pager: self.pager.pid, object: self.slot, page, why }
     }
 }
+
+/// The revoking pages a walk reads under its pager's lock at once.
+const REVOKE_BATCH: usize = 64;
 
 /// The pages a fault's request names: the aligned run around its page.
 const FAULT_RUN: u64 = kernel::vm::AROUND / PAGE;

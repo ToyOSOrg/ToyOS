@@ -254,7 +254,7 @@ impl FutexWait {
             let mut held = space.lock();
             let phys = match held.reach(addr.raw(), Access::Read) {
                 Populated::At(phys) => phys,
-                Populated::Unreachable => return Err(Untranslated::Unreachable),
+                Populated::Unreachable | Populated::PastEnd(_) => return Err(Untranslated::Unreachable),
                 Populated::Lost(_) | Populated::Wait(_) => return Err(Untranslated::Away),
             };
             // Counted under this hold: a change made before it is in `at`,
@@ -555,55 +555,33 @@ impl AddressSpace {
         Ok(UserAddr::new(start))
     }
 
-    /// The visit of a walk of `node`'s object: every leaf of this space's
-    /// ranges of it that maps a revoking page's frame is cleared and shot
-    /// down, and then every futex wait on those frames ends. The pager's lock
-    /// is held only to read a batch of the revoking pages, never across a
-    /// shootdown; a fault meanwhile waits on this space's lock and then finds
-    /// the page as the index has it.
-    pub fn revoke_paged(&mut self, node: &MapNode) {
-        const BATCH: usize = 64;
-        let mut from = 0;
-        loop {
-            let mut batch = [(0u64, 0u64); BATCH];
-            let n = node.with_index(|index| index.revoking_from(from, &mut batch));
-            let mut hit = [false; BATCH];
-            let (mut lo, mut hi) = (u64::MAX, 0);
-            let tables = &mut self.tables;
-            for (start, entry) in self.inventory.meeting(FLOOR, TOP) {
-                let Kind::Object { object: Mapped::Paged(range), offset, .. } = &entry.kind else { continue };
-                if !core::ptr::eq(range.node(), node) {
-                    continue;
-                }
-                for (k, &(page, phys)) in batch[..n].iter().enumerate() {
-                    let Some(va) = (page * PAGE_SIZE).checked_sub(*offset).map(|into| start + into).filter(|&va| va < entry.end) else {
-                        continue;
-                    };
-                    tables.edit(va, va + PAGE_SIZE, |_, leaf| match leaf {
-                        Leaf::Mapped(m) if m.phys == phys => {
-                            hit[k] = true;
-                            (lo, hi) = (lo.min(va), hi.max(va + PAGE_SIZE));
-                            Some(Leaf::Empty)
-                        }
-                        _ => None,
-                    });
-                }
+    /// One batch of a walk's visit of `node`'s object ([`MapNode`]): every
+    /// leaf of this space's ranges of it that maps one of `revoking`'s
+    /// `(page, frame)` is cleared, and the span shot down, under this space's
+    /// lock alone. The walk ends the futex waits on those frames once every
+    /// mapper is visited, before any goes back. A fault meanwhile waits on
+    /// this space's lock and then finds the page as the index has it.
+    pub fn clear_paged(&mut self, node: &MapNode, revoking: &[(u64, u64)]) {
+        let (mut lo, mut hi) = (u64::MAX, 0);
+        let tables = &mut self.tables;
+        for (start, entry) in self.inventory.meeting(FLOOR, TOP) {
+            let Kind::Object { object: Mapped::Paged(range), offset, .. } = &entry.kind else { continue };
+            if !core::ptr::eq(range.node(), node) {
+                continue;
             }
-            if lo < hi {
-                let _reached = tables.shoot_down(lo, hi, &Unlinked::none());
-                let mut frames = [0u64; BATCH];
-                let mut m = 0;
-                for (&(_, phys), _) in batch[..n].iter().zip(hit).filter(|&(_, hit)| hit) {
-                    frames[m] = phys;
-                    m += 1;
-                }
-                frames[..m].sort_unstable();
-                crate::sched::futex::revoke_sorted(&frames[..m], |&phys| phys);
+            for &(page, phys) in revoking {
+                let Some(va) = vm::page_at(start, entry.end, *offset, page) else { continue };
+                tables.edit(va, va + PAGE_SIZE, |_, leaf| match leaf {
+                    Leaf::Mapped(m) if m.phys == phys => {
+                        (lo, hi) = (lo.min(va), hi.max(va + PAGE_SIZE));
+                        Some(Leaf::Empty)
+                    }
+                    _ => None,
+                });
             }
-            if n < BATCH {
-                return;
-            }
-            from = batch[n - 1].0 + 1;
+        }
+        if lo < hi {
+            let _reached = tables.shoot_down(lo, hi, &Unlinked::none());
         }
     }
 
@@ -1023,6 +1001,7 @@ impl AddressSpace {
                             Err(Missing::Absent(since)) => return Populated::Wait(PageWait { range: range.clone(), page: of(page), since }),
                             Err(Missing::Hole) => unreachable!("space: a fault's touch of a hole is filled"),
                             Err(Missing::Lost(lost)) => return Populated::Lost(lost),
+                            Err(Missing::PastEnd(record)) => return Populated::PastEnd(record),
                         }
                     }
                     Kind::Private { committed: true } | Kind::Copy { .. } => {
@@ -1061,9 +1040,11 @@ pub enum Populated {
     At(u64),
     /// No range allows the access there.
     Unreachable,
-    /// A paged page its pager failed or can no longer supply, or one wholly
-    /// past its object's end.
+    /// A paged page its pager failed or can no longer supply.
     Lost(Lost),
+    /// A paged page wholly past its object's end, with the record a touch
+    /// of it ends the process with.
+    PastEnd(Lost),
     /// A paged page that is absent: the thread waits for it, holding nothing,
     /// and touches it again.
     Wait(PageWait),

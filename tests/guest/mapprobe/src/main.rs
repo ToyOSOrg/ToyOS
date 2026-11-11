@@ -16,8 +16,11 @@
 //!   parked in a write's copy from the mapping, which writes nothing.
 //! - `hole`: an unwritten page of an anonymous object reads zero with no
 //!   request, and one the pager has no room for ends the mapper.
-//! - `shrunk`: a touch of a page the object shrank past ends its mapper with
-//!   `SIGBUS`, as POSIX says of a page wholly past a mapped file's end.
+//! - `shrunk`: an object of 80 pages, every one touched by two mappers, is
+//!   shrunk to one; a touch of the first page past the new end ends one
+//!   mapper and of the last the other, each with `SIGBUS`. The shrink revokes
+//!   79 pages, more than a walk reads at once, so one of the two is cleared
+//!   by a later batch.
 //! - `ends`, last: the pager's end answers a write from the mapping `Io`
 //!   and ends the mapper at its next touch.
 
@@ -224,16 +227,26 @@ fn hole(served: &mut Served) {
     println!("mapprobe: a touched hole is a zeroed page of the pager's, and none where it has no room");
 }
 
+/// The pages `shrunk`'s object holds before its shrink: more than a walk's
+/// batch, so its revocation takes two.
+const SHRUNK: u64 = 80;
+
 fn shrunk(served: &mut Served) {
-    let object = served.pager.object(4 * PAGE).expect("mapprobe: an object");
-    served.supply(object, 0, 4, 0x66);
-    let (ready, theirs) = pipe();
-    let (go, mine) = go_pipe();
-    let mut child = served.mapper(object, "shrunk", vec![(READY, theirs), (GO, mine)]);
-    assert_eq!(ready.read(&mut [0]), Ok(1), "mapprobe: the mapper never read its last page");
+    let object = served.pager.object(SHRUNK * PAGE).expect("mapprobe: an object");
+    served.supply(object, 0, SHRUNK, 0x66);
+    let mut mappers = Vec::new();
+    for page in [1, SHRUNK - 1] {
+        let (ready, theirs) = pipe();
+        let (go, mine) = go_pipe();
+        let child = served.mapper(object, &format!("shrunk:{page}"), vec![(READY, theirs), (GO, mine)]);
+        assert_eq!(ready.read(&mut [0]), Ok(1), "mapprobe: a mapper never read every page");
+        mappers.push((page, child, go));
+    }
     served.pager.resize(object, PAGE).expect("mapprobe: a shrink");
-    assert_eq!(go.write(&[1]), Ok(1));
-    assert_eq!(ended(&mut child), End::Fault(Fault::Mapping), "mapprobe: a touch past a shrunk object");
+    for (page, mut child, go) in mappers {
+        assert_eq!(go.write(&[1]), Ok(1));
+        assert_eq!(ended(&mut child), End::Fault(Fault::Mapping), "mapprobe: a touch of page {page} past a shrunk object");
+    }
     served.pager.release(object).expect("mapprobe: release");
     println!("mapprobe: a touch of a page the object shrank past ends its mapper as SIGBUS");
 }
@@ -316,13 +329,14 @@ fn map(case: &str) {
             let read = byte(at, 1);
             panic!("mapprobe --map: a hole the pager had no room for read {read}");
         }
-        "shrunk" => {
-            let at = mapped(4);
-            assert_eq!(byte(at, 3), 0x66);
+        shrunk if shrunk.starts_with("shrunk:") => {
+            let page: u64 = shrunk["shrunk:".len()..].parse().expect("mapprobe --map: a page");
+            let at = mapped(SHRUNK);
+            assert!((0..SHRUNK).all(|page| byte(at, page) == 0x66), "mapprobe --map: the supplied pages");
             assert_eq!(pipe_end(READY).write(&[1]), Ok(1));
             assert_eq!(pipe_end(GO).read(&mut [0]), Ok(1));
-            let read = byte(at, 3);
-            panic!("mapprobe --map: a page past the object read {read}");
+            let read = byte(at, page);
+            panic!("mapprobe --map: page {page}, past the object's end, read {read}");
         }
         "ends" => {
             let at = mapped(2);
