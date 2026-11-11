@@ -185,7 +185,9 @@ pub fn map_unmap_small() {
         once();
     }
     crate::clock::settle();
+    crate::mprobe::on();
     let mut ns: Vec<u64> = (0..2000).map(|_| once()).collect();
+    crate::mprobe::off();
     result("mem.map_unmap_4k", "ns", &mut ns, &[]);
 }
 

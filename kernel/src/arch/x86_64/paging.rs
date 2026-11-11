@@ -852,9 +852,11 @@ impl UserTables {
             let mut level = self.root_table_mut();
             for index in [a, b, c] {
                 if level[index] & PAGE_PRESENT == 0 {
+                    crate::mprobe::at(47);
                     let child = PageTablePage::try_new(&job)?;
                     level.write(index, va, child.phys() | TABLE_FLAGS).expect_install("build");
                     built += 1;
+                    crate::mprobe::at(48);
                 }
                 // SAFETY: present, so a table this space linked; `&mut self`.
                 level = unsafe { PageTablePage::from_phys_mut(level[index] & ADDR_MASK) };

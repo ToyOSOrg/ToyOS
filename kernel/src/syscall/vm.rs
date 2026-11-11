@@ -54,7 +54,15 @@ pub(super) fn sys_vm_reserve(len: u64, prot: u64, place: u64, kind: u64) -> u64 
             VM_AT_FIXED => At::Fixed(range(place, len)?.0),
             _ => return Err(SyscallError::InvalidArgument),
         };
-        process::current_address_space().lock().reserve(len, at, prot)
+        let space = process::current_address_space();
+        crate::mprobe::at(19);
+        let mut space = space.lock();
+        crate::mprobe::at(20);
+        let made = space.reserve(len, at, prot);
+        crate::mprobe::at(26);
+        drop(space);
+        crate::mprobe::at(27);
+        made
     })();
     reserved.map_or_else(SyscallError::to_u64, UserAddr::raw)
 }
@@ -69,9 +77,15 @@ pub(super) fn sys_vm_release(addr: u64, len: u64) -> u64 {
 pub(super) fn release(addr: u64, len: u64) -> Result<(), SyscallError> {
     let (start, len) = range(addr, len)?;
     let space = process::current_address_space();
+    crate::mprobe::at(29);
     let mut space = space.lock();
+    crate::mprobe::at(30);
     space.room(start.raw(), start.raw() + len, 0)?;
+    crate::mprobe::at(31);
     space.release(start, len);
+    crate::mprobe::at(45);
+    drop(space);
+    crate::mprobe::at(46);
     Ok(())
 }
 

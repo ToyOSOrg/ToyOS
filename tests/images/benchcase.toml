@@ -107,6 +107,7 @@ args = [
 "bin/osbench_net" = "/system/bin/osbench"
 "bin/osbench_procs" = "/system/bin/osbench"
 "bin/osbench_mem" = "/system/bin/osbench"
+"bin/osbench_memprobe" = "/system/bin/osbench"
 "bin/osbench_time" = "/system/bin/osbench"
 "bin/osbench_work" = "/system/bin/osbench"
 "bin/osbench_tail" = "/system/bin/osbench"

@@ -1290,6 +1290,8 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // MEASUREMENT ONLY, never lands: the mapping and copy rows on the probe kernel.
+    ("memprobe", metal::Metal { arms: MEMPROBE, judge: |b| osbench_ran(b[0], &MEMPROBE_GROUPS) }),
     (
         // `osbench energy`: the package's power, idle and under defined loads,
         // compared with the same program as root under the bench's Linux. A
@@ -1900,6 +1902,13 @@ const OSBENCH_GROUPS: [&str; 16] = [
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
     adds_ms: 465_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
+}];
+
+const MEMPROBE_GROUPS: [&str; 3] = ["osbench_system", "osbench_mem", "osbench_memprobe"];
+const MEMPROBE: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 300_000,
+    named_only: true,
+    ..metal::once("memprobecase", "tests/images/benchcase.toml", &[], &MEMPROBE_GROUPS)
 }];
 
 /// `energy` waits up to 120 s for the machine to go quiet, then measures 60 s

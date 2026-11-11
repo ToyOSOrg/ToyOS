@@ -353,19 +353,24 @@ impl AddressSpace {
             return Err(SyscallError::InvalidArgument);
         }
         self.room_at(len, at)?;
+        crate::mprobe::at(21);
         let start = self.place(len, at)?;
+        crate::mprobe::at(22);
         let entry = Entry { end: start + len, prot, kind };
         let promised = if entry.committed() { len / PAGE_SIZE } else { 0 };
         if !pmm::promise(&self.job, promised) {
             return Err(SyscallError::ResourceExhausted);
         }
+        crate::mprobe::at(23);
         if entry.backed() {
             if let Err(e) = self.build(start, start + len) {
                 pmm::unpromise(&self.job, promised);
                 return Err(e);
             }
         }
+        crate::mprobe::at(24);
         self.put(start, entry);
+        crate::mprobe::at(25);
         Ok(UserAddr::new(start))
     }
 
@@ -427,6 +432,7 @@ impl AddressSpace {
             return;
         }
         let removed = self.inventory.remove(start, end);
+        crate::mprobe::at(32);
         if removed.is_empty() {
             return;
         }
@@ -437,10 +443,13 @@ impl AddressSpace {
             .sum();
         let freed = self.clear(start, end);
         pmm::unpromise(&self.job, committed - freed);
+        crate::mprobe::at(42);
         self.usage.taken.fetch_add(1, Relaxed);
         // The objects go here, after every CPU has stopped reaching them.
         drop(removed);
+        crate::mprobe::at(43);
         self.settle();
+        crate::mprobe::at(44);
     }
 
     /// Give every page of `[start, start + len)` protection `prot`: a reserved
@@ -736,24 +745,33 @@ impl AddressSpace {
             }
             Leaf::Held(_) | Leaf::Empty => None,
         });
+        crate::mprobe::at(33);
         if present {
             self.shoot_down(start, end, &Unlinked::none());
+            crate::mprobe::at(34);
         }
         let mut freed = 0;
         self.tables.take_owned(start, end, |frames| {
+            crate::mprobe::at(35);
             frames.sort_unstable();
             crate::sched::futex::revoke_frames(frames);
+            crate::mprobe::at(36);
             // SAFETY: frames owned leaves gave up, which no leaf maps on any
             // CPU now and no waiter is keyed on.
             unsafe { pmm::free_drawn(&self.job, frames) };
+            crate::mprobe::at(37);
             freed += frames.len() as u64;
         });
+        crate::mprobe::at(38);
         let inventory = &self.inventory;
         let unlinked = self.tables.unlink(start, end, |s, e| inventory.backed(s, e));
+        crate::mprobe::at(39);
         if !unlinked.is_empty() {
             self.shoot_down(start, end, &unlinked);
+            crate::mprobe::at(40);
         }
         self.tables.free(unlinked);
+        crate::mprobe::at(41);
         self.usage.freed(freed);
         freed
     }

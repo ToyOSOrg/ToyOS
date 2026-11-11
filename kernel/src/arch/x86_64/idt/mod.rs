@@ -323,6 +323,7 @@ extern "sysv64" fn common_entry() {
 /// Deferred-preempt epilogue; caller must have IF=0 on entry and it returns with IF=0.
 pub(crate) extern "sysv64" fn kernel_exit_to_user_check() {
     crate::scheduler::exit_to_user();
+    crate::mprobe::at(3);
 }
 
 /// Routes by vector to the appropriate handler; #DF and #MC get dedicated arms because they are aborts with no instruction to return to.

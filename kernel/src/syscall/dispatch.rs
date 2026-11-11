@@ -76,6 +76,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     let ctx = unsafe { SyscallContext::new() };
 
     let bad_addr = SyscallError::BadAddress.to_u64();
+    crate::mprobe::at(1);
 
     // A closure so an arm's `return` lands at the epilogue, not past it.
     let result = (move || -> u64 { match num {
@@ -562,8 +563,17 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len as u64) else { return bad_addr };
             sys_paged_notices(RawHandle(a1 as u32), &mut buf)
         }
+        0xffff_5c07 => {
+            if a1 == 1 {
+                let Some(mut out) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
+                crate::mprobe::control(1, Some(&mut out))
+            } else {
+                crate::mprobe::control(a1, None)
+            }
+        }
         _ => SyscallError::InvalidArgument.to_u64(),
     } })();
+    crate::mprobe::at(512 + (num as u16 & 0xff));
 
     // The first of the object layer's three drain sites. Here, not at the drop that
     // queued it: a hook must not run under whatever guard the syscall held when the
@@ -574,6 +584,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     // Wall-clock, not CPU time: elapsed includes any preemption.
     let elapsed = crate::arch::cpu::counter().saturating_sub(entered);
     crate::sched::driver::note_syscall(num, elapsed);
+    crate::mprobe::at(2);
 
     result
 }

@@ -78,13 +78,17 @@ fn first_touch() {
 
 /// One touched 4 KiB page of a 2 MiB mapping made read-only and writable
 /// again, each change timed: 2,000 after 100.
-fn protect() {
+pub fn protect() {
     const BENCH: &str = "mem.mprotect.4k";
     let ptr = sys::map_anon(HUGE);
     // SAFETY: inside the mapping.
     unsafe { ptr.write_volatile(1) };
     match sys::protect(ptr, PAGE, false).and_then(|()| sys::protect(ptr, PAGE, true)) {
-        Ok(()) => each(BENCH, 100, 2000, &[], |i| sys::protect(ptr, PAGE, i % 2 == 1).map_err(sys::Refused::why)),
+        Ok(()) => {
+            crate::mprobe::on();
+            each(BENCH, 100, 2000, &[], |i| sys::protect(ptr, PAGE, i % 2 == 1).map_err(sys::Refused::why));
+            crate::mprobe::off();
+        }
         Err(refused) => refused.report(BENCH),
     }
     // SAFETY: the whole mapping, unused from here.
@@ -93,16 +97,18 @@ fn protect() {
 
 /// The first 4 KiB of a touched 2 MiB mapping given back, timed, then the
 /// rest: 500 after 20.
-fn unmap_part() {
+pub fn unmap_part() {
     const BENCH: &str = "mem.munmap_part.4k";
     let once = || -> Result<u64, sys::Refused> {
         let ptr = sys::map_anon(HUGE);
         // SAFETY: inside the mapping.
         unsafe { ptr.add(PAGE).write_volatile(1) };
+        crate::mprobe::on();
         let t = Instant::now();
         // SAFETY: the first page, never used again.
         let part = unsafe { sys::unmap_part(ptr, PAGE) };
         let ns = ns_since(t);
+        crate::mprobe::off();
         match part {
             Ok(()) => {
                 // SAFETY: the rest of the mapping, never used again.
@@ -290,7 +296,7 @@ const PAIR_PER_WINDOW: u64 = 200;
 /// window counts only where `osbench_rules::pair::admit` admits the four
 /// readings; `windows_refused` counts the rest. Both sides are pinned.
 /// Neither is put on the interrupts' CPU.
-fn unmap_touched_remote() {
+pub fn unmap_touched_remote() {
     const BENCH: &str = "mem.munmap_touched_remote.4k";
     if let Err(why) = crate::arch::cpu_id() {
         return crate::report::unsupported(BENCH, why);
@@ -351,11 +357,14 @@ fn initiate() -> PairMeasured {
         pair.page.store(page as u64, Ordering::Relaxed);
         pair.posted.store(round, Ordering::Release);
         wake::spin_until("the sibling's touch", || pair.touched.load(Ordering::Acquire) == round)?;
+        crate::mprobe::on();
         let t = Instant::now();
         // SAFETY: the whole mapping, which the sibling read before saying so
         // and reads no more.
         unsafe { sys::unmap(page, PAGE) };
-        Ok(ns_since(t))
+        let ns = ns_since(t);
+        crate::mprobe::off();
+        Ok(ns)
     };
     let mut run = || -> Result<(Vec<Vec<u64>>, Vec<Readings>), String> {
         for _ in 0..PAIR_WARMUP {

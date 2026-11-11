@@ -69,6 +69,7 @@ pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64) -> bool {
         Some(word) => *word |= 1 << (cpu % 64),
         None => beyond = true,
     });
+    crate::mprobe::at(50);
     // A CPU past what the targets hold reaches every other, as before.
     let Some(mine) = targets.get(me / 64).copied() else {
         shootdown(origin, Half::User);
@@ -78,6 +79,7 @@ pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64) -> bool {
     if mine & (1 << (me % 64)) != 0 {
         if (end - start) / crate::mm::PAGE_SIZE <= BY_PAGE {
             (start..end).step_by(crate::mm::PAGE_SIZE as usize).for_each(|va| crate::mm::paging::flush_user_page(tag, va));
+            crate::mprobe::at(51);
         } else {
             flush(Reach::Narrow);
         }
@@ -103,8 +105,11 @@ pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64) -> bool {
             }
         }
     };
+    crate::mprobe::at(52);
     each(&mut |cpu| apic::tlb_ipi_to(cpu));
+    crate::mprobe::at(53);
     each(&mut |cpu| wait_for(me, cpu, generation));
+    crate::mprobe::at(54);
     let took = crate::clock::nanos_since_boot().saturating_sub(began);
     WAIT_NS.fetch_add(took, Ordering::Relaxed);
     MAX_NS.fetch_max(took, Ordering::Relaxed);
@@ -242,6 +247,7 @@ fn wait_for(me: usize, cpu: u32, generation: Generation) {
 /// What `reach` asks of this CPU: every translation, or every one but the
 /// global ones a user-half change leaves.
 fn flush(reach: Reach) {
+    crate::mprobe::at(55);
     let stamp = USER.flushing();
     match reach {
         Reach::Wide => crate::mm::paging::flush_tlb_all(),
@@ -250,6 +256,7 @@ fn flush(reach: Reach) {
     if USER.sized() {
         USER.flushed(percpu::cpu_id() as usize, stamp);
     }
+    crate::mprobe::at(56);
 }
 
 /// Which side of a shootdown this CPU answers from: asked, by the interrupt or
@@ -271,8 +278,10 @@ fn answer(by: Answerer) -> impl FnOnce(Reach) {
 
 /// Vector 0xFE's whole body: flush this CPU and say which generation it covers.
 pub fn serve_ipi() {
+    crate::mprobe::at(57);
     let cpu = percpu::cpu_id() as usize;
     SHOOTDOWN.serve(cpu, answer(Answerer::Asked));
+    crate::mprobe::at(58);
 }
 
 /// Answers a pending shootdown without taking a lock or allocating, so it is
