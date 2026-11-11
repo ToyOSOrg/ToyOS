@@ -55,14 +55,11 @@ fn the_last_to_let_go_sees_every_leaf_cleared() {
                 }
             })
         };
-        let parked = {
-            let (ranges, leaf) = (ranges.clone(), leaf.clone());
-            loom::thread::spawn(move || {
-                if ranges.less() {
-                    unlink(&leaf);
-                }
-            })
-        };
+        let parked = loom::thread::spawn(move || {
+            if ranges.less() {
+                unlink(&leaf);
+            }
+        });
         unmap.join().unwrap();
         parked.join().unwrap();
     });
