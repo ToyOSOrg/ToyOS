@@ -72,10 +72,14 @@ impl World {
         })
     }
 
-    fn write<R>(&self, f: impl FnOnce(&mut Writer<'_, AtomicU32, Tracked, N>) -> Result<R, Fault>) -> R {
+    fn writer<R>(&self, f: impl FnOnce(&mut Writer<'_, AtomicU32, Tracked, N>) -> Result<R, Fault>) -> Result<R, Fault> {
         let _held = self.writing.lock().unwrap();
         // SAFETY: the one writer while `writing` is held.
-        f(&mut unsafe { self.table.writer() }).expect("the writer was refused")
+        f(&mut unsafe { self.table.writer() })
+    }
+
+    fn write<R>(&self, f: impl FnOnce(&mut Writer<'_, AtomicU32, Tracked, N>) -> Result<R, Fault>) -> R {
+        self.writer(f).expect("the writer was refused")
     }
 
     fn let_go(&self, object: usize) {
@@ -98,7 +102,12 @@ impl World {
 
     /// A call's hold of `fd`: its token and object.
     fn hold(&self, fd: Fd) -> Option<(usize, usize)> {
-        match self.table.acquire(fd, |object| self.let_go(object)) {
+        let held = match self.table.acquire(fd, |object| self.let_go(object)) {
+            Ok(Some(held)) => Ok(held),
+            Ok(None) => self.writer(|w| w.acquire(fd)),
+            Err(fault) => Err(fault),
+        };
+        match held {
             Ok(held) => Some(held),
             Err(Fault::Refused(Error::BadFd)) => None,
             Err(fault) => panic!("a call answered {fault:?}"),

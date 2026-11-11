@@ -514,9 +514,21 @@ mod owner {
         })
     }
 
+    /// A call whose descriptor named a free slot, held under the writer's
+    /// lock, where that is a finished close or a broken table.
+    #[cold]
+    #[inline(never)]
+    fn settled(fd: Fd) -> Result<(usize, Record), Error> {
+        change(|t| t.acquire(fd))
+    }
+
     #[no_mangle]
     unsafe extern "C" fn toyos_fd_acquire(fd: Fd, out: *mut Record) -> i32 {
-        let held = table().and_then(|t| t.acquire(fd, |record| released(Some(record))).map_err(refusal));
+        let held = table().and_then(|t| match t.acquire(fd, |record| released(Some(record))) {
+            Ok(Some(held)) => Ok(held),
+            Ok(None) => settled(fd),
+            Err(fault) => Err(refusal(fault)),
+        });
         match held {
             Ok((token, object)) => {
                 // SAFETY: the caller's live place.

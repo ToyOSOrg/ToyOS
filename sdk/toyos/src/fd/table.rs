@@ -169,22 +169,21 @@ impl<W: Word, P: Place, const N: usize> Table<W, P, N> {
         }
     }
 
-    /// `fd`'s object, held until [`Self::unuse`] of the token answered. An
-    /// object whose last reference a lost race left with this call goes to
-    /// `let_go`.
-    pub(super) fn acquire(&self, fd: Fd, mut let_go: impl FnMut(P::Object)) -> Result<(usize, P::Object), Fault> {
+    /// `fd`'s object, held until [`Self::unuse`] of the token answered, or
+    /// `None` for a descriptor naming a free slot: a close in flight or a
+    /// broken table, which only [`Writer::acquire`] tells apart. An object
+    /// whose last reference a lost race left with this call goes to `let_go`.
+    pub(super) fn acquire(&self, fd: Fd, mut let_go: impl FnMut(P::Object)) -> Result<Option<(usize, P::Object)>, Fault> {
         let word = self.word(fd)?;
         loop {
             let slot = Self::named(word.load(Ordering::Acquire))?;
-            // A free slot was closed since the word was read, which the next
-            // read of the word shows.
             if !self.reference(slot)? {
-                continue;
+                return Ok(None);
             }
             // SAFETY: the reference just taken.
             let object = unsafe { self.slots[slot].object.read() };
             if cfg!(feature = "fd-hold-unchecked") || Self::named(word.load(Ordering::Acquire)) == Ok(slot) {
-                return Ok((slot, object));
+                return Ok(Some((slot, object)));
             }
             // SAFETY: the reference just taken.
             if let Some(last) = unsafe { self.unref(slot) }? {
@@ -197,8 +196,8 @@ impl<W: Word, P: Place, const N: usize> Table<W, P, N> {
     /// names it any more.
     ///
     /// # Safety
-    /// `token` is one this table's [`Self::acquire`] answered, given back
-    /// once.
+    /// `token` is one this table's [`Self::acquire`] or [`Writer::acquire`]
+    /// answered, given back once.
     pub(super) unsafe fn unuse(&self, token: usize) -> Result<Option<P::Object>, Fault> {
         // SAFETY: the call's reference.
         unsafe { self.unref(token) }
@@ -274,6 +273,16 @@ impl<W: Word, P: Place, const N: usize> Writer<'_, W, P, N> {
     fn unname(&mut self, slot: usize) -> Result<Option<P::Object>, Fault> {
         // SAFETY: the name's reference, which `entry` found counted.
         unsafe { self.0.unref(slot) }
+    }
+
+    /// `fd`'s object for a call, held as [`Table::acquire`] holds it. Under
+    /// the writer no slot a descriptor names is freed, so one named free is
+    /// a broken table.
+    pub(super) fn acquire(&mut self, fd: Fd) -> Result<(usize, P::Object), Fault> {
+        let (_, slot, _) = self.entry(fd)?;
+        self.reference(slot)?;
+        // SAFETY: the reference just taken.
+        Ok((slot, unsafe { self.0.slots[slot].object.read() }))
     }
 
     /// Name `object` by the lowest free descriptor at or above `floor`.
@@ -376,7 +385,8 @@ mod tests {
     }
 
     fn acquire(t: &T, fd: Fd) -> Result<(usize, Record), Fault> {
-        t.acquire(fd, |_| panic!("a call with no race was left an object"))
+        let held = t.acquire(fd, |_| panic!("a call with no race was left an object"))?;
+        Ok(held.expect("a call with no race found a free slot"))
     }
 
     /// The objects something still references.
@@ -498,8 +508,24 @@ mod tests {
         assert_eq!(w(t.close(0)), Ok(Some(1)));
     }
 
+    /// A call the writer answers holds its object as any call does.
+    #[test]
+    fn a_call_the_writer_answers_holds_its_object_until_it_is_done() {
+        let table = T::new();
+        let mut t = writer(&table);
+        let fd = t.install(o(5), false, 0).unwrap();
+        let (token, object) = t.acquire(fd).unwrap();
+        assert_eq!(object.word, 5);
+        assert_eq!(w(t.close(fd)), Ok(None), "the object went under a call");
+        assert!(matches!(t.acquire(fd), Err(Fault::Refused(Error::BadFd))), "a closed descriptor still answered");
+        // SAFETY: a token the writer's `acquire` answered, given back once.
+        assert_eq!(w(unsafe { table.unuse(token) }), Ok(Some(5)));
+        assert_eq!(held(&table), 0, "an object outlived its call");
+    }
+
     /// A descriptor naming no slot, or a free one under the writer, is a
-    /// broken table, which the table answers rather than panics on.
+    /// broken table, which the table answers rather than panics on. A call
+    /// whose descriptor names a free slot is left to the writer.
     #[test]
     fn an_inconsistent_table_is_answered_not_panicked_on() {
         let table = T::new();
@@ -510,6 +536,8 @@ mod tests {
         table.fds[2].store(INHERITABLE, Ordering::Relaxed);
         assert_eq!(table.inheritable(2), Err(Fault::Broken));
         table.fds[2].store(1, Ordering::Relaxed);
+        assert!(matches!(table.acquire(2, |_| panic!("a call with no race was left an object")), Ok(None)));
+        assert_eq!(t.acquire(2).map(|_| ()), Err(Fault::Broken));
         assert_eq!(w(t.close(2)), Err(Fault::Broken));
         assert_eq!(t.dup(2, 0, false), Err(Fault::Broken));
     }
