@@ -375,7 +375,7 @@ impl Independent<'_> {
             job,
         };
         match launch::launch(&conn, request) {
-            Ok(Outcome::Started(handle)) => Ok(Process(handle)),
+            Ok(Outcome::Started(process)) => Ok(process),
             Ok(Outcome::NotPermitted) => {
                 Err(Refused::Permission("no row declares the program, or the launcher's row may not start it"))
             }

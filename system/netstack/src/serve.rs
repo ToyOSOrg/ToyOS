@@ -213,8 +213,8 @@ type Lent = (Region, [OwnedHandle; BELLS], Rc<Holders>);
 /// connection being `connection`: the session the node is lent, the bells the
 /// answer hands over, and the holders. Refused by name, nothing is
 /// mapped, and the connection is handed back with the refusal's word.
-fn lend(connection: Connection, region: toyos::OwnedHandle) -> Result<Lent, (Connection, u32)> {
-    let mapping = match Region::judged(region) {
+fn lend(connection: Connection, region: ipc::ReceivedHandle) -> Result<Lent, (Connection, u32)> {
+    let mapping = match Region::judged(region.into()) {
         Ok(mapping) => mapping,
         Err(why) => {
             say!("netstack: refusing a stream's region — {why}");

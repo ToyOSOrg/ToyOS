@@ -153,7 +153,7 @@ fn from_supervisor(
         wire::MSG_STARTED => {
             let started = Started::decode(payload).expect("session: the supervisor's start is one it writes");
             let [handle] = batch.exact::<1>().expect("session: a start carries its app");
-            let process: Process = toyos::endow::FromHandle::from_handle(handle);
+            let process: Process = handle.typed().expect("session: a start's handle is its app's process");
             apps.push((started.instance, process));
             owner.started(started.instance, started.name)
         }

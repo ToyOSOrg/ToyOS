@@ -49,14 +49,15 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
 
-use super::ends::{close_kept, kept, narrowed, Ends, HELD_BELL, HELD_CONNECTION, HELD_RUNG};
+use super::ends::{close_kept, kept, narrowed, narrowed_as, Ends, HELD_BELL, HELD_CONNECTION, HELD_RUNG};
 
-use crate::ipc::{self, Connection, FrameRx};
+use crate::ipc::{self, Connection, FrameRx, ReceivedHandle};
 use crate::shm::{Bytes, SharedMemory};
 use crate::sync::Lock;
 use crate::transport::session::{self, Bells, Doorbell, Holder, HungUp, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
 use crate::transport::stream::Place;
 use crate::transport::Span;
+use crate::wake::{Bell, Waker};
 use crate::{AsHandle, BorrowedHandle, OwnedHandle};
 
 use super::{answer, hangup, MsgType, NetError, NetstackConn, TcpAcceptResponse, TcpConnectRequest, TcpConnectResponse};
@@ -770,7 +771,8 @@ pub(super) fn accept(listener: BorrowedHandle<'_>, drain: super::socket::Drain<'
         let frame = answer(&listener, &mut rx)?;
         let accepted: TcpAcceptResponse = ipc::decode_payload(rx.payload(frame.payload_len)).map_err(hangup)?;
         let [connection, receive, send, rung] = rx.take_handles::<{ BELLS + 1 }>().ok_or(NetError::Protocol(frame.msg_type))?;
-        Ok((accepted, [receive, send, rung], Connection::received(connection)))
+        let connection = connection.typed().map_err(|_| NetError::Protocol(frame.msg_type))?;
+        Ok((accepted, [receive, send, rung], connection))
     })?;
     let answer = opened.answer;
     Ok(Accepted {
@@ -823,7 +825,7 @@ impl Answered for TcpAcceptResponse {
 fn open<A: Answered>(
     nodelay: bool,
     peer: Endpoint,
-    ask: impl FnOnce(OwnedHandle) -> Result<(A, [OwnedHandle; BELLS], Connection), NetError>,
+    ask: impl FnOnce(OwnedHandle) -> Result<(A, [ReceivedHandle; BELLS], Connection), NetError>,
 ) -> Result<Opened<A>, NetError> {
     let slot = TABLE.lock().reserve().ok_or(NetError::ResourceExhausted)?;
     let made = (|| {
@@ -895,10 +897,11 @@ pub(super) fn hold_connection(connection: OwnedHandle) -> Result<(OwnedHandle, R
 
 /// A holder's connection, its bells and its region mapped at `base`, taken up
 /// as [`Held`]. Refused, the region is unmapped and every handle closed.
-fn take_up(connection: OwnedHandle, bells: [OwnedHandle; BELLS], region: OwnedHandle, base: *mut u8) -> Result<Held, NetError> {
+fn take_up(connection: OwnedHandle, bells: [ReceivedHandle; BELLS], region: OwnedHandle, base: *mut u8) -> Result<Held, NetError> {
     let connection = hold_connection(connection);
     let [receive, send, rung] = bells;
-    let (receive, send, rung) = (narrowed(receive, HELD_BELL), narrowed(send, HELD_BELL), narrowed(rung, HELD_RUNG));
+    let (receive, send, rung) =
+        (narrowed_as::<Bell>(receive, HELD_BELL), narrowed_as::<Bell>(send, HELD_BELL), narrowed_as::<Waker>(rung, HELD_RUNG));
     let region = narrowed(region, HELD_REGION);
     match (connection, receive, send, rung, region) {
         (Ok((descriptor, connection)), Ok(receive_bell), Ok(send_bell), Ok(rung), Ok(region)) => {
@@ -969,7 +972,9 @@ pub(super) fn ask_export(connection: BorrowedHandle<'_>, rung: Option<BorrowedHa
     let frame = rx.recv(&connection).map_err(hangup)?;
     match frame.msg_type {
         EXPORTED => match rx.take_handles::<1>() {
-            Some([end]) if frame.payload_len == 0 => Ok(end),
+            Some([end]) if frame.payload_len == 0 => {
+                end.typed::<Connection>().map(Connection::into_owned).map_err(|_| NetError::Protocol(EXPORTED))
+            }
             _ => Err(NetError::Protocol(EXPORTED)),
         },
         REFUSED => {
@@ -1023,7 +1028,7 @@ pub(super) fn adopted(connection: Connection, first: Option<(&[u8], ipc::Batch)>
 }
 
 /// An [`ADOPT`] frame's holder, payload, this end and handles.
-fn adoption((payload, handles): (&[u8], ipc::Batch)) -> Option<(Holder, Adopt, Endpoint, [OwnedHandle; BELLS + 1])> {
+fn adoption((payload, handles): (&[u8], ipc::Batch)) -> Option<(Holder, Adopt, Endpoint, [ReceivedHandle; BELLS + 1])> {
     let adopt: Adopt = ipc::decode_payload(payload).ok()?;
     let handles = handles.exact::<{ BELLS + 1 }>()?;
     let local = local_end(adopt.local_addr, adopt.local_port)?;

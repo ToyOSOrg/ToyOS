@@ -26,7 +26,7 @@ impl Region {
 
     /// A region a driver sent, refused unless it is memory the kernel
     /// allocated and exactly a region long.
-    pub fn lent(handle: toyos::OwnedHandle) -> Result<Self, Lent> {
+    pub fn lent(handle: impl Into<toyos::OwnedHandle>) -> Result<Self, Lent> {
         Ok(Self { memory: SharedMemory::lent(handle, REGION_BYTES)? })
     }
 

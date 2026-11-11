@@ -137,7 +137,7 @@ pub mod ipc {
     use std::os::toyos::process::CommandExt;
     use std::process::{Child, Command, Stdio};
 
-    use toyos::endow::{Endowments, FromHandle};
+    use toyos::endow::Endowments;
     use toyos::ipc::{Connection, MAX_FRAME_LEN};
     use toyos::port::{self, Acceptor};
     use toyos::{OwnedHandle, Pipe};
@@ -199,8 +199,7 @@ pub mod ipc {
         pub fn recv_with(&self, buf: &mut [u8]) -> io::Result<Token> {
             let (_, handles) = self.0.recv_into(buf).map_err(|e| failed("receive", e))?;
             let [handle] = handles.exact::<1>().ok_or_else(|| io::Error::other("no handle came"))?;
-            // The peer sends only pipe ends.
-            Ok(Pipe::from_handle(handle))
+            handle.typed::<Pipe>().map_err(io::Error::other)
         }
     }
 

@@ -36,11 +36,11 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
-use crate::ipc::{self, Connection, FrameRx};
+use crate::ipc::{self, Connection, FrameRx, ReceivedHandle};
 use crate::sync::Lock;
 use crate::{AsHandle, BorrowedHandle, OwnedHandle};
 
-use super::ends::{close_kept, kept, narrowed, Ends, HELD_BELL, HELD_CONNECTION};
+use super::ends::{close_kept, kept, narrowed, narrowed_as, Ends, HELD_BELL, HELD_CONNECTION};
 use super::stream::{self, Wait};
 use super::{answer, hangup, BoundResponse, MAX_ANSWER, MsgType, NetError, NetstackConn, TcpListenRequest, TcpOptions, UdpBindRequest};
 
@@ -325,7 +325,7 @@ pub fn bind(addr: [u8; 4], port: u16) -> Result<Bound, NetError> {
 /// hands over the bell and makes the connection this process's holder. Refused
 /// [`NetError::ResourceExhausted`] before anything is made where the process holds
 /// [`MAX_SOCKETS`].
-fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(BoundResponse, [OwnedHandle; 1], Connection), NetError>) -> Result<Bound, NetError> {
+fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(BoundResponse, [ReceivedHandle; 1], Connection), NetError>) -> Result<Bound, NetError> {
     let slot = TABLE.lock().reserve().ok_or(NetError::ResourceExhausted)?;
     let made = NetstackConn::connect().and_then(ask).and_then(|(bound, [bell], connection)| {
         let (descriptor, connection, bell) = take_up(kind, connection.into_owned(), bell)?;
@@ -347,13 +347,13 @@ fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(Bou
 /// A holder's connection and bell, narrowed to what a `kind` socket's holder uses, and a copy of
 /// the bell for the descriptor: the descriptor's, the connection, the bell. Refused, every handle
 /// is closed.
-fn take_up(kind: Kind, connection: OwnedHandle, bell: OwnedHandle) -> Result<(OwnedHandle, BorrowedHandle<'static>, BorrowedHandle<'static>), NetError> {
+fn take_up(kind: Kind, connection: OwnedHandle, bell: ReceivedHandle) -> Result<(OwnedHandle, BorrowedHandle<'static>, BorrowedHandle<'static>), NetError> {
     let rights = match kind {
         Kind::Listener => HELD_CONNECTION.union(Rights::TRANSFER),
         Kind::Datagram => HELD_CONNECTION,
     };
     let connection = narrowed(connection, rights);
-    let bell = narrowed(bell, HELD_BELL);
+    let bell = narrowed_as::<crate::wake::Bell>(bell, HELD_BELL);
     let refused = match (connection, bell) {
         // SAFETY: narrowed here for the end being made, which keeps them until its `free`.
         (Ok(connection), Ok(bell)) => match unsafe { kept(bell) }.try_clone_to_owned() {

@@ -69,7 +69,8 @@ impl Ender {
         let quit = toyos::AsHandle::as_handle(child)
             .try_clone_narrowed(toyos_abi::Rights::MANAGE)
             .map_err(|e| format!("no handle to end it was had ({e:?})"))?;
-        Ok(Self(toyos::process::Process::from_handle(quit)))
+        // SAFETY: a duplicate of the child's own process handle.
+        Ok(Self(unsafe { toyos::process::Process::from_handle(quit) }))
     }
 
     /// Ask it to quit with a hang-up, whether or not a thread waits for it.

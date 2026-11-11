@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use kernel::message::{Head, Queue, Untaken};
 use kernel::pipe::{End, Holders, Released};
 use kernel::sched::task::WaitClass;
-use toyos_abi::handle::RawHandle;
+use toyos_abi::handle::ReceivedEntry;
 use toyos_abi::syscall::{MAX_MESSAGE_LEN, MAX_QUEUED_HANDLES, MAX_QUEUED_MESSAGES, MAX_TRANSFER_HANDLES};
 
 use crate::frame_bytes::{self, Bounce, Fill, FrameBytes, Spares};
@@ -162,7 +162,8 @@ pub enum Unsent {
 /// lock let go. Spares past its batch stay listed for the next take.
 pub struct Received {
     pub head: Head,
-    pub installed: [RawHandle; MAX_TRANSFER_HANDLES],
+    /// Each handle and its object's kind, read as it was installed.
+    pub installed: [ReceivedEntry; MAX_TRANSFER_HANDLES],
     _spares: Spares,
     boost: bool,
 }
@@ -293,13 +294,14 @@ impl QueueRef {
         if !table.has_room(head.handles) {
             return Err(Unclaimed::Room(head.handles));
         }
-        let mut installed = [RawHandle(0); MAX_TRANSFER_HANDLES];
+        let mut installed = [ReceivedEntry::NONE; MAX_TRANSFER_HANDLES];
         let Some(Ok((message, handles))) = state.queue.pop(head.len, head.handles, |_| true) else {
             unreachable!("message: a front its reader holds left the queue or was refused");
         };
         assert_eq!(message, head, "message: the front moved under its lock");
         for (slot, entry) in installed.iter_mut().zip(handles) {
-            *slot = table.install(entry).expect("the table had room");
+            let kind = entry.object().object_kind() as u32;
+            *slot = ReceivedEntry { handle: table.install(entry).expect("the table had room"), kind };
         }
         let spares = state.bytes.take(head.len, into);
         let boost = core::mem::take(&mut state.rt_boost_pending);

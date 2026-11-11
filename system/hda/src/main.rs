@@ -445,7 +445,7 @@ fn offered(control: &Connection, offer: &Offer) -> Result<OwnedHandle, Refusal> 
             let [ring] = rx
                 .take_handles::<{ output::ACCEPTED_HANDLES }>()
                 .ok_or_else(|| refused("its acceptance carried no ring".into()))?;
-            Ok(ring)
+            Ok(ring.into())
         }
         Some(ToDriver::Refused) => Err(Refusal::Declined),
         _ => Err(refused(format!("it answered the offer with frame {}", frame.msg_type))),

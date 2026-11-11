@@ -301,8 +301,8 @@ impl Host {
                         return Some(Notice::Dropped { client, why: "its foreground line grew past what a surface holds" });
                     }
                     match how {
-                        LINE_REPLACE => peer.line = line.collect(),
-                        LINE_ADD => peer.line.extend(line),
+                        LINE_REPLACE => peer.line = line.map(OwnedHandle::from).collect(),
+                        LINE_ADD => peer.line.extend(line.map(OwnedHandle::from)),
                         _ => {
                             drop(line.collect::<Vec<_>>());
                             self.close(i);

@@ -637,7 +637,7 @@ pub const MAX_LABELS_LEN: usize = 4096;
 pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len() - QUIT_LABEL.len();
 
 use crate::end::End;
-use crate::handle::{Rights, TransferEntry};
+use crate::handle::{ReceivedEntry, Rights, TransferEntry};
 use crate::pci::{DmaGrant, DmaMapping};
 use crate::{Pid, RawHandle, Tid, HANDLE_INVALID};
 
@@ -2186,6 +2186,7 @@ crate::user_safe! {
         pub head_len: u64,
         pub bytes: u64,
         pub len: u64,
+        /// `[ReceivedEntry]`.
         pub handles: u64,
         pub cap: u64,
         /// [`MESSAGE_NONBLOCK`] or none; any other bit is `InvalidArgument`.
@@ -2194,7 +2195,7 @@ crate::user_safe! {
 }
 
 impl MessageRecv {
-    fn new(head: &mut [u8], bytes: &mut [u8], handles: &mut [RawHandle], nonblock: bool) -> Self {
+    fn new(head: &mut [u8], bytes: &mut [u8], handles: &mut [ReceivedEntry], nonblock: bool) -> Self {
         Self {
             head: head.as_mut_ptr() as u64,
             head_len: head.len() as u64,
@@ -2229,9 +2230,10 @@ impl Received {
 const _: () = assert!(Received::encode(MAX_MESSAGE_LEN, MAX_TRANSFER_HANDLES) < u64::MAX - 255);
 
 /// Take `conn`'s next message whole: its first bytes into `head`, the rest
-/// into `bytes`, and its handles, each installed in this process's table,
-/// into `handles`. Two places, so a protocol's own header and the payload
-/// behind it each land where the caller keeps them, with no copy between.
+/// into `bytes`, and its handles, each installed in this process's table and
+/// beside it the kind of object it names, into `handles`. Two places, so a
+/// protocol's own header and the payload behind it each land where the caller
+/// keeps them, with no copy between.
 ///
 /// Waits for one unless `nonblock`, which answers `WouldBlock`. Once the peer
 /// has gone and nothing is queued, `Gone`. **A message is never cut**: one
@@ -2243,7 +2245,7 @@ pub fn message_recv(
     conn: RawHandle,
     head: &mut [u8],
     bytes: &mut [u8],
-    handles: &mut [RawHandle],
+    handles: &mut [ReceivedEntry],
     nonblock: bool,
 ) -> Result<Received, SyscallError> {
     let args = MessageRecv::new(head, bytes, handles, nonblock);

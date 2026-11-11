@@ -68,8 +68,13 @@ impl RawHandle {
 /// any table issues.
 pub const HANDLE_INVALID: RawHandle = RawHandle(u32::MAX);
 
-/// Every kind of kernel object a handle can name, as the word
+/// Every kind of kernel object a handle can name: the word a receive reports
+/// beside each handle it installs ([`ReceivedEntry`]) and
 /// [`CENSUS_KIND`](crate::syscall::debug_action::CENSUS_KIND) takes.
+///
+/// **A kind's word is ABI: it is never renumbered and never given to another
+/// kind.** A new kind takes the next word, a kind that goes leaves its word
+/// unused for good, and a receiver refuses a word it does not know.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ObjectKind {
@@ -371,6 +376,31 @@ impl TransferEntry {
 }
 
 const _: () = assert!(Rights::from_bits(TransferEntry::UNCHANGED).is_none());
+
+crate::user_safe! {
+    /// One handle a message carried, as [`message_recv`] answers it: where
+    /// it is in the receiver's table and what it names, read in the hold
+    /// that installed it.
+    ///
+    /// [`message_recv`]: crate::syscall::message_recv
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct ReceivedEntry {
+        pub handle: RawHandle,
+        /// An [`ObjectKind`] word.
+        pub kind: u32,
+    }
+}
+
+impl ReceivedEntry {
+    /// No handle, of no kind: what a receive's buffer holds before the kernel
+    /// writes it.
+    pub const NONE: Self = Self { handle: HANDLE_INVALID, kind: u32::MAX };
+
+    /// What the handle names; `None` for a word this ABI does not know.
+    pub const fn kind(self) -> Option<ObjectKind> {
+        ObjectKind::from_word(self.kind)
+    }
+}
 
 /// A rights word with a bit no right uses.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

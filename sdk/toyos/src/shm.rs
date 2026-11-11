@@ -96,7 +96,8 @@ impl SharedMemory {
     /// it is memory it allocated, `bytes` rounded up to whole pages, as
     /// [`Self::create`] makes it. The handle is consumed either way; one
     /// lent without `WRITE` is the kernel's `PermissionDenied`.
-    pub fn lent(handle: OwnedHandle, bytes: usize) -> Result<Self, Lent> {
+    pub fn lent(handle: impl Into<OwnedHandle>, bytes: usize) -> Result<Self, Lent> {
+        let handle = handle.into();
         let stat = syscall::fstat(handle.raw()).map_err(Lent::Kernel)?;
         judge(&stat, bytes)?;
         let ptr = map(&handle, stat.size as usize, VmProt::ReadWrite).map_err(Lent::Kernel)?;
@@ -375,7 +376,8 @@ impl ReadOnly {
     }
 
     /// [`SharedMemory::lent`], mapped read-only, whatever the handle allows.
-    pub fn lent(handle: OwnedHandle, bytes: usize) -> Result<Self, Lent> {
+    pub fn lent(handle: impl Into<OwnedHandle>, bytes: usize) -> Result<Self, Lent> {
+        let handle = handle.into();
         let stat = syscall::fstat(handle.raw()).map_err(Lent::Kernel)?;
         judge(&stat, bytes)?;
         let ptr = map(&handle, stat.size as usize, VmProt::Read).map_err(Lent::Kernel)?;

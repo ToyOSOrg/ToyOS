@@ -184,6 +184,13 @@ macro_rules! kobject {
                 }
             }
 
+            /// The word a receive reports this object as.
+            pub fn object_kind(&self) -> toyos_abi::handle::ObjectKind {
+                match self {
+                    $(Self::$variant(_) => toyos_abi::handle::ObjectKind::$variant,)+
+                }
+            }
+
             fn run_zero_handles(&self) {
                 match self {
                     $(Self::$variant(o) => o.on_zero_handles(),)+

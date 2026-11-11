@@ -532,7 +532,7 @@ impl Service {
         let (Some(guid), Some([region]), wire::MSG_OPEN) = (guid, handles, msg_type) else {
             return refuse(&p.conn, Refusal::Malformed);
         };
-        self.waiting.push(Waiting { conn: p.conn, badge, ask: Ask::Open { guid, region } });
+        self.waiting.push(Waiting { conn: p.conn, badge, ask: Ask::Open { guid, region: region.into() } });
     }
 
     /// Answer every waiting question the drivers have now answered, or whose
