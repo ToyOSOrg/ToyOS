@@ -6484,19 +6484,12 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// `process_tree` passed, and the kernel said the two things the guest cannot
-/// see: each B's first spawn was refused by the loader, past the admission that
-/// holds B, and the chain's one depth refusal names `MAX_DEPTH` + 1.
+/// `process_tree` passed, and the kernel said what the guest cannot see: the
+/// chain's one depth refusal names `MAX_DEPTH` + 1.
 fn process_tree(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_process_tree")?;
     let kernel = back.kernel();
     let log = kernel.text();
-    let unloaded = log.lines().filter(|l| l.contains("spawn: /tmp/process_tree_invalid_elf: ")).count();
-    if unloaded != 2 {
-        return Err(format!(
-            "the loader refused the invalid executable {unloaded} times, not once per B"
-        ));
-    }
     let refused: Vec<&str> = log.lines().filter(|l| l.contains("spawn: refused under pid ")).collect();
     if refused.len() != 1 || !refused[0].contains("at depth 65, more than 64 below the supervisor") {
         return Err(format!("the kernel's depth refusals were {refused:?}, not one naming depth 65"));

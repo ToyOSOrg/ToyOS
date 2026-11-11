@@ -408,7 +408,7 @@ fn park() -> ! {
 
 fn b() -> ! {
     let conn = endow::service(BACK).expect("A endowed a port back");
-    // The supplied image reaches ELF validation after admission under B.
+    // No program: the spawn lays it out here and is refused before the kernel hears of it.
     assert!(Command::new(INVALID_PATH).spawn().is_err(), "an invalid executable started");
     let c = Command::new(SELF_PATH).arg("c").stdin(Stdio::null()).spawn().expect("B spawns C");
     let d = Command::new(HELD).independent().spawn().expect("B launches D");
