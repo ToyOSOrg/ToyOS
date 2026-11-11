@@ -2,7 +2,6 @@
 //! (`arch::smp`) commits its APs to, what the rest of the kernel asks of it,
 //! and what starting an AP takes on either architecture.
 
-use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use alloc::boxed::Box;
@@ -109,11 +108,3 @@ pub fn skip_startup(id: u32) -> bool {
     crate::actuator::smp_skip_ap() && id == 2
 }
 
-/// The top of a stack an AP runs on from its entry until its idle loop, which
-/// has a stack of its own. Never freed: nothing says when the AP has left it.
-pub fn bringup_stack() -> u64 {
-    #[repr(C, align(16))]
-    struct Stack([u8; 64 * 1024]);
-    let stack = Box::leak(Box::<Stack>::new_uninit());
-    stack.as_ptr() as u64 + size_of::<Stack>() as u64
-}

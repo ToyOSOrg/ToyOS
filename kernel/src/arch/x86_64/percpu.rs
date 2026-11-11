@@ -8,6 +8,8 @@ use toyos_userbound::IoBitmap;
 
 use super::cpu;
 use crate::log;
+use crate::mm::stack::Stack;
+use crate::process::KERNEL_STACK_SIZE;
 
 const MSR_GS_BASE: u32 = 0xC000_0101;
 
@@ -321,12 +323,10 @@ pub(crate) mod gs {
 /// that can arrive with `rsp` not a kernel stack (SDM Vol. 3A §6.14.5); `ist[n-1]` is IST*n*.
 pub(crate) const IST_STACKS: usize = 3;
 
-/// One size for every IST stack, for [`crate::sched::idle_stack::SIZE`]'s reason; must leave room to double the measured high water.
+/// One size for every IST stack; must leave room to double the measured high water.
 const IST_STACK_SIZE: usize = 16384;
 
-/// Filled with [`STACK_FILL`], not unmapped: a fault already on IST1 is a triple fault, so detecting after the fact beats trapping it.
-const IST_GUARD_SIZE: usize = 4096;
-
+/// What an IST stack's untouched bytes hold, for [`ist1_report`].
 const STACK_FILL: u8 = 0xA5;
 const STACK_FILL_WORD: u64 = u64::from_ne_bytes([STACK_FILL; 8]);
 
@@ -423,21 +423,22 @@ pub fn reserve_log_slot(
     (shard as *const log::Shard, seq, cpu, tid, pid)
 }
 
+/// The same size as a task's kernel stack: a `deferred` [`kobject!`] object
+/// may own an `immediate` one, whose destructor then runs here instead.
 fn alloc_idle_stack(percpu: &mut PerCpu) {
-    percpu.idle_stack_top = crate::sched::idle_stack::alloc();
+    percpu.idle_stack_top = Stack::permanent(KERNEL_STACK_SIZE);
 }
 
 /// One stack per [`IST_STACKS`] row; an `ist[n-1]` left zero faults to address 0 unchecked.
+///
+/// A fault on an IST stack's guard page is a `#DF`, since its frame cannot be
+/// pushed, and a `#DF` loads IST1's top whatever stack it interrupted (SDM
+/// Vol. 3A §6.14.5), so even IST1's own overflow reaches the handler.
 fn alloc_ist_stacks(percpu: &mut PerCpu) {
-    let total = IST_GUARD_SIZE + IST_STACK_SIZE;
     for slot in 0..IST_STACKS {
-        let layout = Layout::from_size_align(total, 4096).unwrap();
-        // SAFETY: `alloc_percpu`'s argument; 4096 is load-bearing — the guard starts at a page.
-        let base = unsafe { alloc_zeroed(layout) };
-        assert!(!base.is_null(), "percpu: IST{} stack alloc failed", slot + 1);
-        // SAFETY: `total` bytes from `base`, exactly the allocation just made and asserted non-null.
-        unsafe { core::ptr::write_bytes(base, STACK_FILL, total) };
-        let top = base as u64 + total as u64;
+        let top = Stack::permanent(IST_STACK_SIZE);
+        // SAFETY: the fresh stack's own bytes, which nothing runs on yet.
+        unsafe { core::ptr::write_bytes((top - IST_STACK_SIZE as u64) as *mut u8, STACK_FILL, IST_STACK_SIZE) };
         // SAFETY: `Tss` is `repr(C, packed)` (possibly unaligned); `slot < IST_STACKS <= 7 == Tss::ist.len()`.
         unsafe { core::ptr::write_unaligned(&raw mut percpu.tss.ist[slot], top); }
     }
@@ -453,8 +454,7 @@ fn ist1_top() -> Option<u64> {
     }
     // SAFETY: the address is this CPU's own `self_ptr`, checked to be a kernel address; unaligned since `Tss` is packed.
     let top = unsafe { core::ptr::read_unaligned(&raw const (*percpu).tss.ist[0]) };
-    let total = (IST_GUARD_SIZE + IST_STACK_SIZE) as u64;
-    let base = top.checked_sub(total)?;
+    let base = top.checked_sub(IST_STACK_SIZE as u64)?;
     (crate::mm::is_kernel_addr(base) && top % 4096 == 0).then_some(top)
 }
 
@@ -467,8 +467,6 @@ pub fn ist1_report() {
         return;
     }
 
-    let guard_base = stack_bottom - IST_GUARD_SIZE as u64;
-    let intact = words(guard_base, IST_GUARD_SIZE).all(|w| w == STACK_FILL_WORD);
     let untouched = words(stack_bottom, IST_STACK_SIZE)
         .take_while(|&w| w == STACK_FILL_WORD)
         .count()
@@ -480,11 +478,44 @@ pub fn ist1_report() {
     uart.dec(used as u64);
     uart.write(b" of ");
     uart.dec(IST_STACK_SIZE as u64);
-    uart.write(if intact {
-        b" bytes, guard intact\n"
-    } else {
-        b" bytes, GUARD CORRUPTED\n"
+    uart.write(b" bytes\n");
+}
+
+/// One of the stacks this CPU runs on, as a fault report names it.
+#[derive(Clone, Copy)]
+pub enum OwnStack {
+    Task(crate::process::Pid, crate::process::Tid),
+    Idle(u32),
+    Ist(u32, usize),
+    Boot,
+}
+
+impl core::fmt::Display for OwnStack {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Task(pid, tid) => write!(f, "the kernel stack of pid={} tid={}", pid.raw(), tid.raw()),
+            Self::Idle(cpu) => write!(f, "cpu{cpu}'s idle stack"),
+            Self::Ist(cpu, n) => write!(f, "cpu{cpu}'s IST{n} stack"),
+            Self::Boot => f.write_str("the boot stack"),
+        }
+    }
+}
+
+/// The stack of this CPU's whose guard page holds `addr`, and that page: an
+/// access there ran off the stack's bottom.
+pub fn stack_guard_at(addr: u64) -> Option<(OwnStack, core::ops::Range<u64>)> {
+    use crate::mm::stack::guard_below;
+    let cpu = cpu_id();
+    let percpu = gs::read_u64::<OFF_SELF_PTR>() as *const PerCpu;
+    // SAFETY: this CPU's own block, as `ist1_top` reads it; unaligned since `Tss` is packed.
+    let ist = |n: usize| unsafe { core::ptr::read_unaligned(&raw const (*percpu).tss.ist[n]) };
+    let task = current_pid().zip(current_tid()).map(|(pid, tid)| {
+        (OwnStack::Task(pid, tid), guard_below(gs::read_u64::<OFF_KERNEL_RSP>(), KERNEL_STACK_SIZE))
     });
+    let boot = crate::mm::boot_stack_guard().map(|guard| (OwnStack::Boot, guard));
+    let idle = (OwnStack::Idle(cpu), guard_below(idle_stack_top(), KERNEL_STACK_SIZE));
+    let ists = (0..IST_STACKS).map(|n| (OwnStack::Ist(cpu, n + 1), guard_below(ist(n), IST_STACK_SIZE)));
+    task.into_iter().chain([idle]).chain(ists).chain(boot).find(|(_, guard)| guard.contains(&addr))
 }
 
 
@@ -649,12 +680,20 @@ pub fn last_armed_ticks() -> u32 {
 /// The last byte of this CPU's idle guard page — the first byte an overflow reaches.
 #[cfg(feature = "test-actuators")]
 pub fn idle_guard_byte() -> u64 {
-    idle_stack_top() - crate::sched::idle_stack::SIZE as u64 - 1
+    idle_stack_top() - KERNEL_STACK_SIZE as u64 - 1
 }
 
 /// Top of this CPU's idle stack.
 pub fn idle_stack_top() -> u64 {
     gs::read_u64::<OFF_IDLE_STACK_TOP>()
+}
+
+impl PerCpu {
+    /// Top of the idle stack of the CPU this block is, which an AP runs on
+    /// from its entry.
+    pub fn idle_stack_top(&self) -> u64 {
+        self.idle_stack_top
+    }
 }
 
 /// No task on this CPU is inside a syscall; [`pack_task`] never produces this value.

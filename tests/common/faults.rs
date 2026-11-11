@@ -139,6 +139,45 @@ pub fn kernel_wx_leaf_is_refused(test_config: &Path, profile: qemu::Profile) -> 
     }
 }
 
+/// The first line of a `#DF` report, and the line in it that names the stack
+/// whose guard page the fault was on (`kernel/src/arch/x86_64/idt/exceptions.rs`).
+const DOUBLE_FAULT: &str = "DOUBLE FAULT on CPU ";
+const STACK_OVERFLOW: &str = "KERNEL STACK OVERFLOW: ";
+
+/// Each kind of stack the kernel runs on, run off its bottom by its
+/// `stack-overflow-*` actuator, one boot each since each ends the machine:
+/// the fault is a `#DF` whose report names that stack's guard page. A stack
+/// with no unmapped page under it writes on into its neighbour and says
+/// neither line.
+pub fn a_kernel_stack_overflow_names_its_stack(test_config: &Path) -> Result<(), String> {
+    const ARMS: [(&[&str], &str); 4] = [
+        (&["stack-overflow-task"], " under the kernel stack of pid="),
+        (&["stack-overflow-idle"], "'s idle stack"),
+        (&["stack-overflow-nmi"], "'s IST2 stack"),
+        (&["stack-overflow-boot"], " under the boot stack"),
+    ];
+    for (kernel_params, stack) in ARMS {
+        let param = kernel_params[0];
+        let qemu = QemuInstance::boot_with_options(
+            test_config,
+            &[],
+            &[],
+            BootOptions { profile: qemu::Profile::Metal, kernel_params, ready_marker: stack, ..Default::default() },
+        );
+        let serial = qemu.boot_log();
+        let report = serial
+            .find(DOUBLE_FAULT)
+            .map(|at| &serial[at..])
+            .ok_or_else(|| format!("{param}: no {DOUBLE_FAULT:?} line\n{serial}"))?;
+        let line = report
+            .lines()
+            .find(|line| line.contains(STACK_OVERFLOW) && line.contains(stack))
+            .ok_or_else(|| format!("{param}: the double fault's report names no guard page{stack}\n{serial}"))?;
+        eprintln!("  [stack_overflow] {param}: {}", line.trim());
+    }
+    Ok(())
+}
+
 /// What `tsc-step` says of each step it stages, and the clock's records of
 /// slewing the first away and demoting the TSC at the second
 /// (`kernel/src/arch/x86_64/clocksource.rs`).

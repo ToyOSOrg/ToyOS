@@ -81,6 +81,10 @@ extern "sysv64" fn note(rflags: u64) {
     // Before the nested-NMI staging: a hard lockup ends the machine from here.
     crate::hardlockup::sample(rflags);
     #[cfg(feature = "boot-actuators")]
+    if crate::actuator::stack_overflow_nmi() {
+        crate::actuator::overflow_stack(0);
+    }
+    #[cfg(feature = "boot-actuators")]
     stage_nested_if_armed();
 }
 

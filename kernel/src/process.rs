@@ -24,12 +24,11 @@
 //! process writes the fault's report ([`dump_crash_diagnostics`]), which is
 //! several records because it is a crash and not an end.
 
-use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+use alloc::alloc::Layout;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::ptr::NonNull;
 use crate::arch::percpu;
 use crate::mm::charge::{self, Charge, Exhausted};
 use crate::object::{ops, HandleTable};
@@ -60,36 +59,6 @@ pub use crate::loader::{build_child_handles, spawn, spawn_supervisor};
 
 /// A process's space, which every thread of it runs in.
 pub use crate::mm::space::PageTables;
-
-/// Move-only wrapper around a heap allocation, freed on drop; not for user-mapped pages.
-pub struct OwnedAlloc {
-    ptr: NonNull<u8>,
-    layout: Layout,
-}
-
-impl OwnedAlloc {
-    /// `None` above `mm::MAX_HEAP_ALLOC`.
-    pub fn new(size: usize, align: usize) -> Option<Self> {
-        if size > crate::mm::MAX_HEAP_ALLOC { return None; }
-        let layout = Layout::from_size_align(size, align).ok()?;
-        // SAFETY: `layout` has non-zero size (checked above); a null return becomes `None` via `NonNull::new` rather than a dangling `OwnedAlloc`.
-        let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })?;
-        Some(Self { ptr, layout })
-    }
-
-    pub fn ptr(&self) -> *mut u8 { self.ptr.as_ptr() }
-}
-
-impl Drop for OwnedAlloc {
-    fn drop(&mut self) {
-        // SAFETY: same `ptr`/`layout` pair `new` produced; freed exactly once (move-only, no `Clone`).
-        unsafe { dealloc(self.ptr.as_ptr(), self.layout); }
-    }
-}
-
-// SAFETY: sole owner of the allocation moves with `self`; nothing else can reach `ptr`.
-unsafe impl Send for OwnedAlloc {}
-
 
 /// An object the kernel mapped into a process for it and takes back itself: an
 /// inbox's rings. The kernel writes what it owes the process into the object.

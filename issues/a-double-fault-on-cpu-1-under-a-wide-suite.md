@@ -79,8 +79,8 @@ verbatim, in the failure message:
   when it finds one: `rip`, `cs`, `rflags`, `rsp`, `error_code`, and then either
   the user context and a user backtrace or `Original fault was in kernel code`
   and a second kernel backtrace from the original `rbp`;
-- and from `halt_all_cpus`, after `panic_flush`: `[ist1] used N of M bytes,
-  guard intact` — whether the report overflowed the stack it was written from.
+- and from `halt_all_cpus`, after `panic_flush`: `[ist1] used N of M bytes` —
+  how near the report came to the end of the stack it was written from.
 
 What the handler still cannot say, and what no fix to the harness reaches: **the
 CPU records neither of the two vectors that combined.** `#DF` pushes an error
@@ -133,6 +133,12 @@ and **no unmapped page beneath it**. An overflow off it writes into whatever the
 allocator put there and is reported later, from ordinary context, as
 `KERNEL STACK OVERFLOW: tid=N` — never as a `#DF`.
 
+**Both paragraphs describe the tree of the sighting.** Every kernel stack now
+has that page (`kernel/src/mm/stack.rs`), so a task's overflow is a `#DF` too,
+and its report says so on a `KERNEL STACK OVERFLOW:` line naming the stack
+whose guard page `cr2` is in. A next sighting without that line is not an
+overflow of a stack its CPU runs on.
+
 So the textbook first reading of a double fault — a kernel stack overflow — is
 the one this kernel's shape argues *against*, on the strength of the one line
 that survived. Whoever reads the next sighting should say so out loud before
@@ -141,7 +147,7 @@ reaching for it.
 IST1 cannot be the cause either: `ist 1` is on the `DoubleFault` row alone
 (`arch/idt/mod.rs`), so nothing but a `#DF` ever runs on it. It can only be
 overrun *while reporting* one, and the report says whether it was —
-`[ist1] used N of M bytes, guard intact` against the `IST_STACK_SIZE` of 16384
+`[ist1] used N of M bytes` against the `IST_STACK_SIZE` of 16384
 that `0b4f305` and `9148057` sized, whose declared margin is half the stack.
 Measured on this tree on 2026-08-18, two `double_fault_stack` runs minutes
 apart: **6688** and **5312** bytes used of 16384, guard intact both times. The

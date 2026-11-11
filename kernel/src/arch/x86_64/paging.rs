@@ -509,6 +509,7 @@ impl KernelTables {
 
     /// Permanent: the caller must own `phys` for the machine's life, since
     /// handing the enclosing 2 MiB page back to the PMM would reissue memory with a hole.
+    /// Only this CPU is told: the caller owes every other a kernel-half shootdown.
     pub fn guard_4k(&mut self, phys: u64) {
         assert!(phys & 0xFFF == 0, "guard_4k: phys {phys:#x} not 4 KiB-aligned");
         let virt = crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
@@ -524,10 +525,6 @@ impl KernelTables {
         let pd = unsafe { PageTablePage::from_phys_mut(pd_phys) };
         let pde = pd[pd_idx];
         assert!(pde & PAGE_PRESENT != 0, "guard_4k: {phys:#x} is not in the direct map");
-        // Both writes discharge on this CPU alone: the guard belongs to one
-        // CPU, so only it dereferences the removed page; `alloc_idle_stack`
-        // runs on the BSP before an AP's TLB exists, and a sibling's stale
-        // 2 MiB entry stays correct for the other 511 pages it still maps.
         let target = self.root();
 
         // Already split: an earlier guard in the same 2 MiB region.
@@ -582,7 +579,7 @@ impl KernelTables {
         let pt = PageTablePage::new();
         for i in 0..512 {
             let page = phys + i as u64 * PAGE_4K;
-            pt.init_entry(i, page | kernel_leaf(CachePolicy::Normal, image.prot(page).unwrap_or(Prot::ReadWrite)));
+            pt.init_entry(i, image.prot(page).map_or(0, |prot| page | kernel_leaf(CachePolicy::Normal, prot)));
         }
         let pt_phys = pt.phys();
         let pd = self.ensure_table(virt, KERNEL_TABLE);
@@ -640,7 +637,8 @@ pub fn direct_map_policy(phys: u64) -> Option<CachePolicy> {
 }
 
 /// Take the 4 KiB page at `phys` out of the direct map for good: the caller
-/// owns it for the machine's life.
+/// owns it for the machine's life, and owes every other CPU a kernel-half
+/// shootdown before it relies on the hole.
 pub fn guard_4k(phys: u64) {
     KERNEL.lock().guard_4k(phys);
 }

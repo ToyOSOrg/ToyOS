@@ -70,12 +70,13 @@ fn a_malformed_section_is_refused_by_name() {
 }
 
 #[test]
-fn the_stack_after_an_image_is_aligned_wherever_the_image_ends() {
+fn the_stack_after_an_image_is_aligned_past_a_whole_page_wherever_the_image_ends() {
     const STACK: u64 = 8 * 1024 * 1024;
-    assert_eq!(StackedImage::place(0x41_0008, STACK), Some(StackedImage { size: 0xc1_1000, stack: 0x41_1000 }));
+    assert_eq!(StackedImage::place(0x41_0008, STACK), Some(StackedImage { size: 0xc1_2000, stack: 0x41_2000 }));
     for end in [1, 0x40_fc30, 0x41_0000, 0x41_0008, 0x41_0ff8, 0x41_0fff] {
         let placed = StackedImage::place(end, STACK).expect("fits");
-        assert!(placed.stack >= end && placed.stack - end < 4096, "{end:#x}: {placed:?}");
+        let guard = placed.stack - 4096;
+        assert!(guard >= end && guard - end < 4096, "{end:#x}: {placed:?}");
         assert_eq!(placed.stack % 16, 0);
         assert_eq!(placed.size - placed.stack, STACK);
     }

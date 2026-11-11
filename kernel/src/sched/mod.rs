@@ -6,4 +6,3 @@ pub mod driver;
 pub mod payload;
 pub mod reap_gate;
 pub mod futex;
-pub mod idle_stack;

@@ -199,7 +199,8 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
 
         let ap_percpu = percpu::alloc_ap(attempt.id(), attempt.token());
 
-        data.stack_top = smp::bringup_stack();
+        // SAFETY: `alloc_ap` just made the block, and its AP is not started yet.
+        data.stack_top = unsafe { (*ap_percpu).idle_stack_top() };
         data.entry = ap_entry as *const () as u64;
         data.percpu_ptr = ap_percpu as u64;
         // SAFETY: `target` is reserved physical memory written only here; unaligned because `TrampolineData` is `repr(C, packed)`; this AP has not been sent its SIPI yet, and the loop reaches a second write only after the previous AP committed — which happens in `ap_entry` past every trampoline read — so no CPU is reading it; a failed AP breaks the loop below instead of reaching another write.

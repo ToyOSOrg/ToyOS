@@ -98,6 +98,21 @@ actuators! {
     /// `kernel_wx_leaf_is_refused` and `virt_kernel_wx_leaf_is_refused`.
     kernel_wx_leaf = "kernel-wx-leaf";
 
+    /// Run the first task to start off the bottom of its kernel stack. Judged,
+    /// with the three below, by `a_kernel_stack_overflow_names_its_stack`.
+    stack_overflow_task = "stack-overflow-task";
+
+    /// Run the first CPU to idle off the bottom of its idle stack.
+    stack_overflow_idle = "stack-overflow-idle";
+
+    /// Send one NMI from the idle loop and run its handler off the bottom of
+    /// its IST stack.
+    stack_overflow_nmi = "stack-overflow-nmi";
+
+    /// Run the boot CPU off the bottom of the boot stack once boot phases are
+    /// done.
+    stack_overflow_boot = "stack-overflow-boot";
+
     /// Read the TSC 10 ms ahead in the clock's samples once it has held for
     /// a second, and 10 ms further once that step is slewed away, as steps
     /// `IA32_TSC_ADJUST` would not show: the first is slewed, the second
@@ -173,6 +188,20 @@ actuators! {
     /// Have the last boot checkpoint's painter go fatal holding the panel's
     /// latch: a fatal path meeting a painter that will never let go.
     panel_painter_stalls = "panel-painter-stalls";
+}
+
+/// Recurse until the stack this runs on is spent: the `stack-overflow-*`
+/// actuators' fault.
+#[cfg(feature = "boot-actuators")]
+#[inline(never)]
+pub fn overflow_stack(depth: u64) -> u64 {
+    let mut frame = [depth; 32];
+    // Opaque, so the frame is kept and the call below is not a tail call.
+    let frame = core::hint::black_box(&mut frame);
+    if frame[0] == u64::MAX {
+        return 0;
+    }
+    overflow_stack(depth + 1) + frame[31]
 }
 
 #[cfg(feature = "boot-actuators")]

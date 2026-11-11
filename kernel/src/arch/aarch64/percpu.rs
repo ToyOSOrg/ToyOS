@@ -87,7 +87,9 @@ pub fn alloc(cpu_id: u32) -> &'static PerCpu {
         last_seen_kernel_timer_fires: AtomicU32::new(0),
         armed_ticks: AtomicU64::new(0),
         kernel_stack: AtomicU64::new(0),
-        idle_stack_top: crate::sched::idle_stack::alloc(),
+        // The same size as a task's kernel stack: a `deferred` [`kobject!`]
+        // object may own an `immediate` one, whose destructor then runs here.
+        idle_stack_top: crate::mm::stack::Stack::permanent(crate::process::KERNEL_STACK_SIZE),
         syscall_pc: AtomicU64::new(0),
         syscall_num: AtomicU64::new(0),
         syscall_fp: AtomicU64::new(0),
@@ -174,10 +176,18 @@ pub fn idle_stack_top() -> u64 {
     this().idle_stack_top
 }
 
+impl PerCpu {
+    /// Top of the idle stack of the CPU this block is, which an AP runs on
+    /// from its entry.
+    pub fn idle_stack_top(&self) -> u64 {
+        self.idle_stack_top
+    }
+}
+
 /// The last byte of this CPU's idle guard page — the first byte an overflow reaches.
 #[cfg(feature = "test-actuators")]
 pub fn idle_guard_byte() -> u64 {
-    idle_stack_top() - crate::sched::idle_stack::SIZE as u64 - 1
+    idle_stack_top() - crate::process::KERNEL_STACK_SIZE as u64 - 1
 }
 
 /// No task on this CPU is inside a syscall; [`pack_task`] never produces this value.

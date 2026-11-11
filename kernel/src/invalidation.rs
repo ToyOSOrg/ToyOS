@@ -3,7 +3,8 @@
 //! of the address space it answers for.
 
 /// Which path issued a shootdown, so the census names who pays: `Pcid` (pool
-/// reclaim), `Mmio`, `Unmap` (a user space's leaves taken away), `Staged` (a test actuator's), `Bench`
+/// reclaim), `Mmio`, `Unmap` (a user space's leaves taken away), `Guard` (a
+/// kernel stack's guard page taken out of the direct map), `Staged` (a test actuator's), `Bench`
 /// (`arch::tlb::bench`'s own, so a measured shootdown is never counted as one
 /// a path in this kernel needed), `Stop` (the power-off's, for the answer from
 /// Ring 0 every other CPU owes it, not for a flush).
@@ -13,6 +14,7 @@ pub enum Origin {
     Pcid,
     Mmio,
     Unmap,
+    Guard,
     #[cfg_attr(not(feature = "test-actuators"), allow(dead_code))]
     Staged,
     #[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
@@ -34,8 +36,8 @@ pub enum Half {
 }
 
 impl Origin {
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 7;
     /// Order matches the variants.
     pub const NAMES: [&'static str; Self::COUNT] =
-        ["pcid", "mmio", "unmap", "staged", "bench", "stop"];
+        ["pcid", "mmio", "unmap", "guard", "staged", "bench", "stop"];
 }

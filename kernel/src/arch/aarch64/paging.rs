@@ -862,23 +862,24 @@ pub(crate) fn init(
 ) -> toyos_bootmap::DirectMapEnd {
     let extent = direct_map_end(memory_map).unwrap_or_else(|refusal| panic!("paging: firmware's memory map: {refusal}"));
     let end = extent.get();
-    let memory = |phys: u64| kernel_leaf(CachePolicy::Normal, image.prot(phys).unwrap_or(Prot::ReadWrite));
     let mut tables = Tables::new();
     let (mut blocks, mut pages) = (0u64, 0u64);
     let mut at = 0;
     while at < end {
         let va = PHYS_OFFSET + at;
-        match coverage(memory_map, at) {
-            Coverage::Nothing => {}
-            Coverage::Whole if image.block(at).is_some() => {
-                tables.directory(va).set(index(va, 2), at | memory(at));
+        match (coverage(memory_map, at), image.block(at)) {
+            (Coverage::Nothing, _) => {}
+            (Coverage::Whole, Some(prot)) => {
+                tables.directory(va).set(index(va, 2), at | kernel_leaf(CachePolicy::Normal, prot));
                 blocks += 1;
             }
-            held => {
+            (held, _) => {
                 let table = Table::new();
                 for j in (0..512).filter(|&j| held.holds(j)) {
                     let page = at + j * PAGE_4K;
-                    table.0[j as usize] = page | memory(page) | TABLE;
+                    // The boot stack's guard stays invalid.
+                    let Some(prot) = image.prot(page) else { continue };
+                    table.0[j as usize] = page | kernel_leaf(CachePolicy::Normal, prot) | TABLE;
                     pages += 1;
                 }
                 let table = table.phys();

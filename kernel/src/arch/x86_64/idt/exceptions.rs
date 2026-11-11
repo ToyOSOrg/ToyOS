@@ -231,7 +231,10 @@ fn crash_report_exception(ctx: &ExceptionContext) {
         }
     } else {
         match ctx.vector() {
-            Vector::PageFault => log!("KERNEL PANIC: {} {} at {:#x}", pf_action, pf_cause, ctx.cr2),
+            Vector::PageFault => {
+                log!("KERNEL PANIC: {} {} at {:#x}", pf_action, pf_cause, ctx.cr2);
+                report_stack_guard(ctx.cr2);
+            }
             _ => log!("KERNEL PANIC: {} (error_code={:#x})", name, ctx.frame.error_code),
         }
     }
@@ -360,15 +363,43 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
 }
 
 
+/// Name the stack of this CPU's that `addr` is in the guard page of, if it is
+/// in one: the fault is that stack's overflow.
+fn report_stack_guard(addr: u64) {
+    if let Some((stack, guard)) = percpu::stack_guard_at(addr) {
+        log!("  KERNEL STACK OVERFLOW: {:#x} is in the guard page {:#x}..{:#x} under {}", addr, guard.start, guard.end, stack);
+    }
+}
+
 /// Double fault handler — runs on IST1. Always from kernel. Never returns.
 pub(super) fn double_fault_handler(frame: &TrapFrame) -> ! {
     let cr2 = cpu::read_cr2();
     let cpu_id = percpu::cpu_id();
+    // A `#DF` restarts this handler at IST1's top whatever it interrupted, the
+    // report below included, so the report is made once: a second on its own
+    // CPU is the report's own fault, IST1's overflow among them.
+    static REPORTING: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+    use core::sync::atomic::Ordering::SeqCst;
+    match REPORTING.compare_exchange(u32::MAX, cpu_id, SeqCst, SeqCst) {
+        Ok(_) => {}
+        Err(first) if first == cpu_id => {
+            {
+                let mut uart = crate::drivers::serial::panic_registers();
+                uart.write(b"\nDOUBLE FAULT inside the double fault report above, which ends here: cr2=");
+                uart.hex(cr2);
+                uart.write(b"\n");
+            }
+            crate::panic::halt_all_cpus();
+        }
+        // The first reporter halts every CPU.
+        Err(_) => cpu::halt(),
+    }
     let tid = percpu::current_tid();
     let pid = percpu::current_pid();
 
     log!("DOUBLE FAULT on CPU {} (pid={:?} tid={:?})", cpu_id, pid, tid);
     log!("  cr2={:#018x} (address that caused the fault chain)", cr2);
+    report_stack_guard(cr2);
     log!("  rip={:#018x}  rsp={:#018x}  rbp={:#018x}", frame.rip, frame.rsp, frame.rbp);
     crate::mm::paging::debug_page_walk(cr2);
 

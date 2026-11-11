@@ -17,6 +17,12 @@
 - Shared memory may be installed at a requested address in a child before it
   starts; conflicts are refused. There is no address-space cloning.
 
+## The kernel's own memory
+
+- Every stack the kernel runs on sits above a page that is not mapped, so
+  running off one stops the machine with a report naming the stack instead of
+  writing memory another owner holds.
+
 ## Who owns what
 
 ```text
