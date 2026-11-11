@@ -18,7 +18,9 @@
 //! program. It exports `toyos_fd_*`, and every copy, the owner's included,
 //! reaches the table only through them, so all copies linked into one image
 //! share one table. Nothing catches a second owner at link time: the feature
-//! is set in those two builds and nowhere else.
+//! is set in those two builds and nowhere else. The owner tells the stream
+//! state, which it holds too (`crate::log::stdio`), of every change of what a
+//! descriptor names.
 //!
 //! **A process's descriptors arrive as endowments**, `fd:<n>` (`FD_PREFIX`)
 //! or `fd:<n>:<kind>` ([`Kind`]), each installed at its number at the table's
@@ -394,6 +396,7 @@ mod owner {
     use super::table::{Fault, ObjectCell, Table, Writer};
     use super::*;
     use crate::endow::Endowments;
+    use crate::log::stdio::owner::changed;
     use crate::sync::Lock;
     use crate::OwnedHandle;
 
@@ -507,11 +510,17 @@ mod owner {
 
     #[no_mangle]
     extern "C" fn toyos_fd_install(record: Record, inheritable: bool, floor: Fd) -> i32 {
-        change(|t| t.install(record, inheritable, floor)).unwrap_or_else(|e| {
-            // SAFETY: refused, so the record is still the caller's, given here.
-            unsafe { record.release() };
-            encode(e)
-        })
+        match change(|t| t.install(record, inheritable, floor)) {
+            Ok(fd) => {
+                changed(fd);
+                fd
+            }
+            Err(e) => {
+                // SAFETY: refused, so the record is still the caller's, given here.
+                unsafe { record.release() };
+                encode(e)
+            }
+        }
     }
 
     /// A call whose descriptor named a free slot, held under the writer's
@@ -551,6 +560,7 @@ mod owner {
     extern "C" fn toyos_fd_close(fd: Fd) -> i32 {
         match change(|t| t.close(fd)) {
             Ok(object) => {
+                changed(fd);
                 released(object);
                 0
             }
@@ -560,13 +570,17 @@ mod owner {
 
     #[no_mangle]
     extern "C" fn toyos_fd_dup(fd: Fd, floor: Fd, inheritable: bool) -> i32 {
-        change(|t| t.dup(fd, floor, inheritable)).unwrap_or_else(encode)
+        change(|t| t.dup(fd, floor, inheritable)).map_or_else(encode, |new| {
+            changed(new);
+            new
+        })
     }
 
     #[no_mangle]
     extern "C" fn toyos_fd_dup2(old: Fd, new: Fd, inheritable: bool) -> i32 {
         match change(|t| t.dup2(old, new, inheritable)) {
             Ok(displaced) => {
+                changed(new);
                 released(displaced);
                 new
             }
@@ -578,6 +592,7 @@ mod owner {
     extern "C" fn toyos_fd_replace(fd: Fd, record: Record) -> i32 {
         match change(|t| t.replace(fd, record)) {
             Ok(old) => {
+                changed(fd);
                 released(old);
                 0
             }

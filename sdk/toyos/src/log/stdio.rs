@@ -17,6 +17,15 @@
 //! reader counts the drop. Lines are assembled per stream, so a line that
 //! arrives in pieces (`eprintln!` writes each format fragment) is one record.
 //!
+//! **A process holds this state once**, in the copy of this crate that owns
+//! its descriptor table (`crate::fd`): what each stream's descriptor was found
+//! to name, the ring's mapping and the line each stream is assembling. Every
+//! copy linked into the image reaches it through `toyos_stdio_*`, which that
+//! copy defines, so std, libc and a program's own copy join one line and see
+//! one answer. The table's owner forgets a stream's answer with every change
+//! of what descriptor 1 or 2 names, whichever copy asked for the change, so
+//! the write after a redirect asks again.
+//!
 //! [`FileType::SharedMemory`]: toyos_abi::syscall::FileType::SharedMemory
 
 use core::fmt;
@@ -120,12 +129,12 @@ pub fn compose(severity: Severity, args: fmt::Arguments<'_>, emit: &mut impl FnM
     composer.finish(true, emit);
 }
 
-/// A lock around one stream's partial line, taken for the length of a copy.
+/// One stream's partial line, held by one write at a time.
 ///
-/// A spin and not a sleep: std already serialises each stream's writers with
-/// its own lock, so the only contender is a panic message racing an ordinary
-/// write — and a write to a ring takes no lock at all past this one.
-#[cfg(any(test, target_os = "toyos"))]
+/// **No write waits for it.** One that finds it held (a second thread's, or
+/// the message of a panic raised under the hold, on the holder's own thread)
+/// is answered `None` and writes what it has as records of its own.
+#[cfg(any(test, all(target_os = "toyos", feature = "fd-table")))]
 pub(crate) struct Held {
     busy: core::sync::atomic::AtomicBool,
     composer: core::cell::UnsafeCell<Composer>,
@@ -133,10 +142,10 @@ pub(crate) struct Held {
 
 // SAFETY: `composer` is reached only between a successful `busy` swap and its
 // release, so one thread at a time.
-#[cfg(any(test, target_os = "toyos"))]
+#[cfg(any(test, all(target_os = "toyos", feature = "fd-table")))]
 unsafe impl Sync for Held {}
 
-#[cfg(any(test, target_os = "toyos"))]
+#[cfg(any(test, all(target_os = "toyos", feature = "fd-table")))]
 impl Held {
     pub(crate) const fn new(stream: Stream) -> Self {
         Self {
@@ -145,43 +154,65 @@ impl Held {
         }
     }
 
-    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut Composer) -> R) -> R {
+    /// `f` on the line, or `None` where another write holds it.
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut Composer) -> R) -> Option<R> {
         use core::sync::atomic::Ordering;
-        while self.busy.swap(true, Ordering::Acquire) {
-            core::hint::spin_loop();
+        /// Lets go as `f` returns or unwinds.
+        struct Release<'a>(&'a core::sync::atomic::AtomicBool);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
         }
+        if self.busy.swap(true, Ordering::Acquire) {
+            return None;
+        }
+        let _release = Release(&self.busy);
         // SAFETY: the swap above made this thread the only holder.
-        let out = f(unsafe { &mut *self.composer.get() });
-        self.busy.store(false, Ordering::Release);
-        out
+        Some(f(unsafe { &mut *self.composer.get() }))
+    }
+
+    /// `bytes` onto the line, or as records of their own where the line is
+    /// held: whole, in order, and marked unended where they end no line.
+    pub(crate) fn feed(&self, severity: Severity, bytes: &[u8], emit: &mut impl FnMut(&mut Body)) {
+        if self.with(|composer| composer.feed(bytes, emit)).is_none() {
+            let mut own = Composer::new(severity);
+            own.feed(bytes, emit);
+            own.finish(false, emit);
+        }
     }
 }
 
 #[cfg(all(target_os = "toyos", not(test)))]
 pub use target::*;
 
-/// The guest's half: descriptors, rings and syscalls.
+/// The guest's half, in every copy: the owner's answers, and what a copy does
+/// with them itself.
 #[cfg(all(target_os = "toyos", not(test)))]
 mod target {
     use core::ptr::NonNull;
-    use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
     use toyos_abi::log::Severity;
-    use toyos_abi::syscall::{self, FileType, SyscallError};
+    use toyos_abi::syscall;
 
-    use super::{compose, Held, Stream};
-    use crate::log::region::{Body, Lane, Ring, RING_BYTES};
+    use super::{compose, Stream};
+    use crate::log::region::{Body, Lane, Ring};
 
-    /// Unasked, being asked, a descriptor — and past those, a ring's address.
-    const UNASKED: usize = 0;
-    const ASKING: usize = 1;
-    const DESCRIPTOR: usize = 2;
-
-    static SINKS: [AtomicUsize; 2] = [AtomicUsize::new(UNASKED), AtomicUsize::new(UNASKED)];
-    static PENDING: [Held; 2] = [Held::new(Stream::Out), Held::new(Stream::Err)];
-    /// This process's pid, asked once with the first ring: a record carries
-    /// it and a write makes no syscall.
-    static PID: AtomicU32 = AtomicU32::new(0);
+    // What every copy calls and the owner defines ([`owner`]).
+    extern "C" {
+        /// The base of the ring `stream` goes to, asking its descriptor if
+        /// nothing has since the descriptor last changed: null for a stream
+        /// that is written as its descriptor.
+        fn toyos_stdio_ring(stream: Stream) -> *mut u8;
+        /// `len` bytes at `buf` onto `stream`'s line in its ring: false, with
+        /// nothing written, for a stream that is written as its descriptor.
+        fn toyos_stdio_write(stream: Stream, buf: *const u8, len: usize) -> bool;
+        /// What `stream` holds of a line into its ring, ending the line if
+        /// `ended`. Asks no descriptor.
+        fn toyos_stdio_finish(stream: Stream, ended: bool);
+        /// This process's pid, once a stream was found to be a ring.
+        fn toyos_stdio_pid() -> u32;
+    }
 
     /// Where a stream's bytes go.
     pub enum Sink {
@@ -190,103 +221,15 @@ mod target {
         Descriptor(i32),
     }
 
-    fn index(stream: Stream) -> usize {
-        stream as usize - 1
-    }
-
-    /// The stream's sink, asking its descriptor the first time.
+    /// The stream's sink, asking its descriptor the first time and the first
+    /// time after each change of what the descriptor names.
     pub fn sink(stream: Stream) -> Sink {
-        let word = &SINKS[index(stream)];
-        loop {
-            match word.load(Ordering::Acquire) {
-                UNASKED => {
-                    if word.compare_exchange(UNASKED, ASKING, Ordering::Acquire, Ordering::Acquire).is_ok() {
-                        match ask(stream) {
-                            Ok(answer) => word.store(answer, Ordering::Release),
-                            // The descriptor first, so the panic's own message has a
-                            // stream to go to rather than a probe to wait on.
-                            Err(why) => {
-                                word.store(DESCRIPTOR, Ordering::Release);
-                                panic!("stdio: descriptor {} {why}", stream as u32);
-                            }
-                        }
-                    }
-                }
-                ASKING => core::hint::spin_loop(),
-                DESCRIPTOR => return Sink::Descriptor(stream as i32),
-                // SAFETY: only `ask` stores an address here, and it is the
-                // base of a ring mapping this process keeps for its life.
-                at => return Sink::Ring(unsafe { Ring::at(NonNull::new_unchecked(at as *mut u8)) }),
-            }
-        }
-    }
-
-    /// Ask a stream's descriptor what it names, once. A ring is mapped
-    /// through a handle of this process's own, so the mapping outlives
-    /// whatever later happens to the descriptor; a descriptor that is not open
-    /// is written as one, and its bytes go nowhere. `Err` finishes the
-    /// sentence the refusal panics with.
-    fn ask(stream: Stream) -> Result<usize, why::Why> {
-        use why::Why;
-        // A descriptor that is not open, or names a file a server holds, is
-        // written as a descriptor.
-        let asked = crate::fd::with(stream as i32, |o| o.kernel_handle().map(|h| syscall::fstat(h.raw())));
-        let Ok(Some(stat)) = asked else { return Ok(DESCRIPTOR) };
-        let stat = stat.map_err(Why::Fstat)?;
-        if stat.file_type != FileType::SharedMemory {
-            return Ok(DESCRIPTOR);
-        }
-        if (stat.size as usize) < RING_BYTES {
-            return Err(Why::Small(stat.size));
-        }
-        let own = crate::fd::with(stream as i32, |o| o.handle().map(|h| h.try_clone_to_owned()))
-            .ok()
-            .flatten()
-            .unwrap_or(Err(SyscallError::NotFound))
-            .map_err(Why::Dup)?
-            .into_raw();
-        // SAFETY: `own` is a live shared-memory handle this process holds and
-        // never closes, so the mapping stays for the process's life.
-        let at = unsafe { syscall::shm_map(own, syscall::VmProt::ReadWrite) }.map_err(Why::Map)?;
-        let at = NonNull::new(at).ok_or(Why::Null)?;
-        // SAFETY: a fresh mapping of a region at least `RING_BYTES` long.
-        if !unsafe { Ring::at(at) }.is_laid_out() {
-            return Err(Why::NotARing);
-        }
-        PID.store(syscall::getpid().0, Ordering::Relaxed);
-        Ok(at.as_ptr() as usize)
-    }
-
-    /// Why a descriptor could not be taken as a stream, in words that need no
-    /// allocation to say.
-    mod why {
-        use core::fmt;
-        use toyos_abi::syscall::SyscallError;
-
-        pub enum Why {
-            Fstat(SyscallError),
-            Small(u64),
-            Dup(SyscallError),
-            Map(SyscallError),
-            Null,
-            NotARing,
-        }
-
-        impl fmt::Display for Why {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                match self {
-                    Self::Fstat(e) => write!(f, "answers fstat with {e:?}"),
-                    Self::Small(size) => write!(
-                        f,
-                        "is a {size}-byte region, and a log ring is {}",
-                        crate::log::region::RING_BYTES
-                    ),
-                    Self::Dup(e) => write!(f, "holds a ring that will not duplicate: {e:?}"),
-                    Self::Map(e) => write!(f, "holds a ring that will not map: {e:?}"),
-                    Self::Null => write!(f, "holds a ring the kernel mapped at null"),
-                    Self::NotARing => write!(f, "holds a region that is not a log ring"),
-                }
-            }
+        // SAFETY: the owner's definition, of plain values.
+        match NonNull::new(unsafe { toyos_stdio_ring(stream) }) {
+            // SAFETY: the owner answers only the base of a ring's mapping,
+            // which it keeps for the process's life.
+            Some(base) => Sink::Ring(unsafe { Ring::at(base) }),
+            None => Sink::Descriptor(stream as i32),
         }
     }
 
@@ -298,14 +241,10 @@ mod target {
         let _ = sink(Stream::Err);
     }
 
-    /// Forget what a stream's descriptor named: it was just replaced.
-    pub fn forget(stream: Stream) {
-        SINKS[index(stream)].store(UNASKED, Ordering::Release);
-    }
-
     fn stamp(body: &mut Body) {
         body.at_ns = toyos_abi::clock::stamp_ns();
-        body.pid = PID.load(Ordering::Relaxed);
+        // SAFETY: the owner's definition, of no arguments.
+        body.pid = unsafe { toyos_stdio_pid() };
         body.tid = crate::tls::current_tid().0;
     }
 
@@ -321,15 +260,13 @@ mod target {
     /// descriptor, and none anywhere for a descriptor that is not open, as
     /// std on unix drops a closed stdout's bytes.
     pub fn write(stream: Stream, buf: &[u8]) -> Result<usize, crate::files::Error> {
-        match sink(stream) {
-            Sink::Descriptor(fd) => match crate::files::write(fd, buf) {
-                Err(crate::files::Error::Fd(crate::fd::Error::BadFd)) => Ok(buf.len()),
-                written => written,
-            },
-            Sink::Ring(ring) => {
-                PENDING[index(stream)].with(|composer| composer.feed(buf, &mut push(&ring)));
-                Ok(buf.len())
-            }
+        // SAFETY: `buf` is live for the call, which keeps nothing of it.
+        if unsafe { toyos_stdio_write(stream, buf.as_ptr(), buf.len()) } {
+            return Ok(buf.len());
+        }
+        match crate::files::write(stream as i32, buf) {
+            Err(crate::files::Error::Fd(crate::fd::Error::BadFd)) => Ok(buf.len()),
+            written => written,
         }
     }
 
@@ -337,22 +274,15 @@ mod target {
     /// from. Never asks the descriptor: a stream nothing was written to holds
     /// nothing.
     pub fn flush(stream: Stream) {
-        finish(stream, false);
+        // SAFETY: the owner's definition, of plain values.
+        unsafe { toyos_stdio_finish(stream, false) }
     }
 
     /// Whatever part of a line a stream holds, as the line's end: the
     /// process is leaving, so the line is as long as it gets.
     pub fn end(stream: Stream) {
-        finish(stream, true);
-    }
-
-    fn finish(stream: Stream, ended: bool) {
-        let at = SINKS[index(stream)].load(Ordering::Acquire);
-        if at > DESCRIPTOR {
-            // SAFETY: as in `sink`, only a ring's base is stored above `DESCRIPTOR`.
-            let ring = unsafe { Ring::at(NonNull::new_unchecked(at as *mut u8)) };
-            PENDING[index(stream)].with(|composer| composer.finish(ended, &mut push(&ring)));
-        }
+        // SAFETY: the owner's definition, of plain values.
+        unsafe { toyos_stdio_finish(stream, true) }
     }
 
     /// Claim one of the stderr ring's lanes for the calling thread, which
@@ -361,7 +291,8 @@ mod target {
     /// lane is claimed.
     pub fn claim_lane() -> Option<Lane> {
         match sink(Stream::Err) {
-            Sink::Ring(ring) => ring.claim_lane(PID.load(Ordering::Relaxed), crate::tls::current_tid().0),
+            // SAFETY: the owner's definition, of no arguments.
+            Sink::Ring(ring) => ring.claim_lane(unsafe { toyos_stdio_pid() }, crate::tls::current_tid().0),
             Sink::Descriptor(_) => None,
         }
     }
@@ -406,6 +337,210 @@ mod target {
                 }
             }),
         }
+    }
+}
+
+/// The stream state itself, in the copy that owns the descriptor table.
+///
+/// **A stream's word is `UNASKED`, `DESCRIPTOR` or the base of a mapping of
+/// the ring its descriptor named when it was asked**, and [`changed`] makes it
+/// `UNASKED` before a change of that descriptor returns to its caller. A
+/// ring's mapping stays for the process's life, so a write that read the word
+/// before a redirect finishes in the ring it found.
+#[cfg(all(target_os = "toyos", feature = "fd-table", not(test)))]
+pub(crate) mod owner {
+    use core::ptr::NonNull;
+    use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+    use toyos_abi::syscall::{self, FileType, SyscallError};
+
+    use super::{Held, Stream};
+    use crate::fd::Fd;
+    use crate::log::region::{Body, Ring, RING_BYTES};
+    use crate::sync::Lock;
+
+    const UNASKED: usize = 0;
+    const DESCRIPTOR: usize = 1;
+
+    static SINKS: [AtomicUsize; 2] = [AtomicUsize::new(UNASKED), AtomicUsize::new(UNASKED)];
+    static PENDING: [Held; 2] = [Held::new(Stream::Out), Held::new(Stream::Err)];
+    /// Held by the one thread asking a descriptor or forgetting an answer.
+    static ASKING: Lock<()> = Lock::new(());
+    /// The thread asking, 0 for none: its own write meanwhile, the message of
+    /// a panic under the ask, goes to the descriptor rather than waiting on
+    /// itself.
+    static ASKER: AtomicU32 = AtomicU32::new(0);
+    /// This process's pid, asked once with the first ring: a record carries
+    /// it and a write makes no syscall.
+    static PID: AtomicU32 = AtomicU32::new(0);
+
+    fn index(stream: Stream) -> usize {
+        stream as usize - 1
+    }
+
+    /// The ring a stream's word names, if it names one.
+    fn ring_at(word: usize) -> Option<Ring> {
+        // SAFETY: only `ask` stores an address in a stream's word, and it is
+        // the base of a ring mapping this process keeps for its life.
+        (word > DESCRIPTOR).then(|| unsafe { Ring::at(NonNull::new_unchecked(word as *mut u8)) })
+    }
+
+    /// The stream's word, asking its descriptor if it is unasked: never
+    /// `UNASKED`, but `DESCRIPTOR` to the thread that is asking.
+    fn answer(stream: Stream) -> usize {
+        let word = &SINKS[index(stream)];
+        let tid = crate::tls::current_tid().0;
+        loop {
+            match word.load(Ordering::Acquire) {
+                UNASKED if ASKER.load(Ordering::Relaxed) == tid => return DESCRIPTOR,
+                UNASKED => {}
+                answered => return answered,
+            }
+            let asking = ASKING.lock();
+            if word.load(Ordering::Acquire) != UNASKED {
+                continue;
+            }
+            let answer = {
+                /// Names no asker again as the ask returns or unwinds.
+                struct Asker;
+                impl Drop for Asker {
+                    fn drop(&mut self) {
+                        ASKER.store(0, Ordering::Relaxed);
+                    }
+                }
+                ASKER.store(tid, Ordering::Relaxed);
+                let _asker = Asker;
+                ask(stream)
+            };
+            word.store(*answer.as_ref().unwrap_or(&DESCRIPTOR), Ordering::Release);
+            drop(asking);
+            // Said with the stream answered and the lock let go, so the
+            // panic's own message has a descriptor to go to.
+            if let Err(why) = answer {
+                panic!("stdio: descriptor {} {why}", stream as u32);
+            }
+        }
+    }
+
+    /// Ask a stream's descriptor what it names. A ring is mapped, and a
+    /// mapping outlives whatever later happens to the descriptor and its
+    /// handle; a descriptor that is not open is written as one, and its bytes
+    /// go nowhere. `Err` finishes the sentence the refusal panics with.
+    fn ask(stream: Stream) -> Result<usize, why::Why> {
+        use why::Why;
+        // A descriptor that is not open, or names a file a server holds, is
+        // written as a descriptor.
+        let Ok(held) = crate::fd::hold(stream as Fd) else { return Ok(DESCRIPTOR) };
+        let Some(handle) = held.object().kernel_handle() else { return Ok(DESCRIPTOR) };
+        let stat = syscall::fstat(handle.raw()).map_err(Why::Fstat)?;
+        if stat.file_type != FileType::SharedMemory {
+            return Ok(DESCRIPTOR);
+        }
+        if (stat.size as usize) < RING_BYTES {
+            return Err(Why::Small(stat.size));
+        }
+        // SAFETY: the descriptor's handle, held for this call; the mapping is
+        // never taken away.
+        let at = unsafe { syscall::shm_map(handle.raw(), syscall::VmProt::ReadWrite) }.map_err(Why::Map)?;
+        let at = NonNull::new(at).ok_or(Why::Null)?;
+        // SAFETY: a fresh mapping of a region at least `RING_BYTES` long.
+        if !unsafe { Ring::at(at) }.is_laid_out() {
+            return Err(Why::NotARing);
+        }
+        PID.store(syscall::getpid().0, Ordering::Relaxed);
+        Ok(at.as_ptr() as usize)
+    }
+
+    /// Why a descriptor could not be taken as a stream, in words that need no
+    /// allocation to say.
+    mod why {
+        use core::fmt;
+
+        use super::SyscallError;
+
+        pub enum Why {
+            Fstat(SyscallError),
+            Small(u64),
+            Map(SyscallError),
+            Null,
+            NotARing,
+        }
+
+        impl fmt::Display for Why {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self {
+                    Self::Fstat(e) => write!(f, "answers fstat with {e:?}"),
+                    Self::Small(size) => write!(
+                        f,
+                        "is a {size}-byte region, and a log ring is {}",
+                        crate::log::region::RING_BYTES
+                    ),
+                    Self::Map(e) => write!(f, "holds a ring that will not map: {e:?}"),
+                    Self::Null => write!(f, "holds a ring the kernel mapped at null"),
+                    Self::NotARing => write!(f, "holds a region that is not a log ring"),
+                }
+            }
+        }
+    }
+
+    /// Descriptor `fd` names something else now: if it is a stream's, the
+    /// stream is asked again. The table's owner calls this before the change
+    /// returns to whoever asked for it, and never under its writer's lock: an
+    /// ask holds `ASKING` while `fd::hold` may take that lock.
+    pub(crate) fn changed(fd: Fd) {
+        let stream = match fd {
+            1 => Stream::Out,
+            2 => Stream::Err,
+            _ => return,
+        };
+        // After any ask already under way, whose answer may be the old one.
+        let _asking = ASKING.lock();
+        let old = SINKS[index(stream)].swap(UNASKED, Ordering::AcqRel);
+        // What was written of a line before the change went where the
+        // descriptor then led.
+        if let Some(ring) = ring_at(old) {
+            let _ = PENDING[index(stream)].with(|composer| composer.finish(false, &mut push(&ring)));
+        }
+    }
+
+    fn push(ring: &Ring) -> impl FnMut(&mut Body) + '_ {
+        move |body: &mut Body| {
+            body.at_ns = toyos_abi::clock::stamp_ns();
+            body.pid = PID.load(Ordering::Relaxed);
+            body.tid = crate::tls::current_tid().0;
+            // A dropped record is counted where it would have been read.
+            let _ = ring.push(body);
+        }
+    }
+
+    #[no_mangle]
+    extern "C" fn toyos_stdio_ring(stream: Stream) -> *mut u8 {
+        match answer(stream) {
+            DESCRIPTOR => core::ptr::null_mut(),
+            base => base as *mut u8,
+        }
+    }
+
+    #[no_mangle]
+    unsafe extern "C" fn toyos_stdio_write(stream: Stream, buf: *const u8, len: usize) -> bool {
+        let Some(ring) = ring_at(answer(stream)) else { return false };
+        // SAFETY: the caller's live bytes.
+        let buf = unsafe { core::slice::from_raw_parts(buf, len) };
+        PENDING[index(stream)].feed(stream.severity(), buf, &mut push(&ring));
+        true
+    }
+
+    #[no_mangle]
+    extern "C" fn toyos_stdio_finish(stream: Stream, ended: bool) {
+        if let Some(ring) = ring_at(SINKS[index(stream)].load(Ordering::Acquire)) {
+            // A line another write holds is that write's to go on with.
+            let _ = PENDING[index(stream)].with(|composer| composer.finish(ended, &mut push(&ring)));
+        }
+    }
+
+    #[no_mangle]
+    extern "C" fn toyos_stdio_pid() -> u32 {
+        PID.load(Ordering::Relaxed)
     }
 }
 
@@ -490,8 +625,9 @@ mod tests {
         assert_eq!(out, [(b"x=1 y=two".to_vec(), false, Some(Severity::Warn))]);
     }
 
-    /// Two threads writing lines in pieces through one stream's lock: every
-    /// record is one thread's whole line.
+    /// Two threads writing whole lines through one stream's hold, each
+    /// taking its turn or writing records of its own: every record is one
+    /// thread's whole line, and none is lost.
     #[test]
     fn a_stream_held_by_two_writers_keeps_each_line_whole() {
         use std::sync::{Arc, Mutex};
@@ -505,10 +641,7 @@ mod tests {
                     for _ in 0..200 {
                         let mut line = [tag; 32];
                         line[31] = b'\n';
-                        held.with(|composer| {
-                            composer.feed(&line[..10], &mut |b: &mut Body| got.lock().unwrap().push(b.text().to_vec()));
-                            composer.feed(&line[10..], &mut |b: &mut Body| got.lock().unwrap().push(b.text().to_vec()));
-                        });
+                        held.feed(Severity::Error, &line, &mut |b: &mut Body| got.lock().unwrap().push(b.text().to_vec()));
                     }
                 })
             })
@@ -521,6 +654,34 @@ mod tests {
         for line in got.iter() {
             assert!(line.len() == 31 && line.iter().all(|&b| b == line[0]), "{line:?}");
         }
+    }
+
+    /// A write from inside the hold, which is what the message of a panic
+    /// raised there is, returns: its bytes are records of their own, the
+    /// piece that ends no line marked unended, and the held line is untouched.
+    #[test]
+    fn a_write_under_the_streams_own_hold_is_its_own_records_and_does_not_wait() {
+        let held = Held::new(Stream::Err);
+        let mut inner = Vec::new();
+        let mut outer = Vec::new();
+        held.feed(Severity::Error, b"held ", &mut |_: &mut Body| unreachable!("no line ended"));
+        let entered = held.with(|composer| {
+            assert!(held.with(|_| ()).is_none(), "the hold is one write's");
+            held.feed(Severity::Error, b"panicked\nat x", &mut |b: &mut Body| inner.push((b.text().to_vec(), b.unended())));
+            composer.feed(b"line\n", &mut |b: &mut Body| outer.push((b.text().to_vec(), b.unended())));
+        });
+        assert!(entered.is_some());
+        assert_eq!(inner, [(b"panicked".to_vec(), false), (b"at x".to_vec(), true)]);
+        assert_eq!(outer, [(b"held line".to_vec(), false)]);
+    }
+
+    /// A hold whose write unwound is free again.
+    #[test]
+    fn a_hold_a_panic_unwound_through_is_let_go() {
+        let held = Held::new(Stream::Out);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| held.with(|_| panic!("under the hold"))));
+        assert!(unwound.is_err());
+        assert!(held.with(|_| ()).is_some());
     }
 }
 
