@@ -86,6 +86,13 @@ impl Want {
         true
     }
 
+    /// The waiter asks afresh, its wait having ended on a change of the
+    /// object: named in a notice whatever the old request said, as a new
+    /// read's would be.
+    pub fn anew(&mut self, first: u64, count: u64) {
+        *self = Self { first, count, reported: false };
+    }
+
     /// `count` pages from `first` were withdrawn: whether that makes the
     /// range news again.
     pub fn withdrawn(&mut self, first: u64, count: u64) -> bool {
@@ -378,6 +385,13 @@ impl Object {
     /// Where a holder's read begins: `None` while a write is under way.
     pub fn read_begin(&self) -> Option<Version> {
         (self.writing == 0).then_some(Version(self.version))
+    }
+
+    /// Where a fault's wait for one of its pages begins: a write or resize
+    /// since ends it ([`Pages::wait_over`]), and the fault asks afresh
+    /// ([`Want::anew`]).
+    pub fn version(&self) -> Version {
+        Version(self.version)
     }
 
     /// Whether no write or resize has begun since the read began at `v`.
@@ -1815,17 +1829,17 @@ mod tests {
             visiting: Option<u32>,
             /// Faults parked on an absent page: the space, the page, and the
             /// request as the pager hears of it.
-            parked: std::vec::Vec<(u32, u64, Want)>,
+            parked: std::vec::Vec<(u32, u64, Want, Version)>,
             /// Pages the server read requests for and has yet to supply.
             asked: std::collections::VecDeque<u64>,
         }
 
         /// The parked faults' wants, which removals name again.
-        struct Parked<'a>(&'a mut std::vec::Vec<(u32, u64, Want)>);
+        struct Parked<'a>(&'a mut std::vec::Vec<(u32, u64, Want, Version)>);
 
         impl Waiters for Parked<'_> {
             fn each(&mut self, f: &mut dyn FnMut(&mut Want)) {
-                for (_, _, want) in self.0.iter_mut() {
+                for (_, _, want, _) in self.0.iter_mut() {
                     f(want);
                 }
             }
@@ -1865,12 +1879,12 @@ mod tests {
                     }
                     Step::Fault(s, page) if self.mapped[s as usize] && self.leaves[s as usize][page as usize].is_none() => {
                         if !self.touch(s, page) {
-                            if self.p.lookup(&self.o, page) != Lookup::Absent || self.parked.iter().any(|&(t, q, _)| (t, q) == (s, page)) {
+                            if self.p.lookup(&self.o, page) != Lookup::Absent || self.parked.iter().any(|&(t, q, _, _)| (t, q) == (s, page)) {
                                 return false;
                             }
                             let mut want = Want::NONE;
                             want.ask(page, 1);
-                            self.parked.push((s, page, want));
+                            self.parked.push((s, page, want, self.o.version()));
                         }
                     }
                     Step::Supply(page) if !self.o.gone() => {
@@ -1909,7 +1923,7 @@ mod tests {
                     }
                     Step::Report => {
                         let before = self.asked.len();
-                        for (_, _, want) in &mut self.parked {
+                        for (_, _, want, _) in &mut self.parked {
                             if let Some((first, _)) = want.report() {
                                 self.asked.push_back(first);
                             }
@@ -1927,14 +1941,21 @@ mod tests {
                     }
                     Step::Retry if !self.parked.is_empty() => {
                         let parked = core::mem::take(&mut self.parked);
-                        for (s, page, mut want) in parked {
+                        // A wake may be stale: each looks whether or not its
+                        // wait is over, as a thread woken for another's page.
+                        for (s, page, mut want, since) in parked {
                             if !self.mapped[s as usize] || self.touch(s, page) {
                                 continue;
                             }
                             match self.p.lookup(&self.o, page) {
+                                // A write or resize ended the wait: ask afresh.
+                                Lookup::Absent if !self.o.unchanged(since) => {
+                                    want.anew(page, 1);
+                                    self.parked.push((s, page, want, self.o.version()));
+                                }
                                 Lookup::Absent => {
                                     want.ask(page, 1);
-                                    self.parked.push((s, page, want));
+                                    self.parked.push((s, page, want, since));
                                 }
                                 // Refused: failed, past the end, or gone.
                                 _ => {}
@@ -2013,19 +2034,15 @@ mod tests {
         steps.iter().all(|&s| w.step(s)).then_some(w)
     }
 
-    /// From both spaces mapping both pages, every sequence of five steps of
-    /// faults, supplies, removals, mappings and the walk keeps each leaf on
-    /// its page's one frame.
-    #[test]
-    fn every_interleaving_keeps_each_leaf_on_its_pages_one_frame() {
-        use mapped::Step;
-        let prefix = [Step::Map(0), Step::Map(1), Step::Supply(0), Step::Supply(1), Step::Fault(0, 0), Step::Fault(1, 1)];
+    /// Every sequence of `depth` steps after `prefix`, each then drained: how
+    /// many were played.
+    fn explore(prefix: &[mapped::Step], depth: usize) -> u64 {
         let mut stack = std::vec![prefix.to_vec()];
         let mut played = 0u64;
         while let Some(seq) = stack.pop() {
             played += 1;
             play(&seq).expect("a sequence played before").drain(&seq);
-            if seq.len() == prefix.len() + 5 {
+            if seq.len() == prefix.len() + depth {
                 continue;
             }
             for &step in &mapped::STEPS {
@@ -2036,7 +2053,38 @@ mod tests {
                 }
             }
         }
+        played
+    }
+
+    /// From both spaces mapping both pages, every sequence of five steps of
+    /// faults, supplies, removals, mappings and the walk keeps each leaf on
+    /// its page's one frame, and leaves no fault parked once drained.
+    #[test]
+    fn every_interleaving_keeps_each_leaf_on_its_pages_one_frame() {
+        use mapped::Step;
+        let played = explore(&[Step::Map(0), Step::Map(1), Step::Supply(0), Step::Supply(1), Step::Fault(0, 0), Step::Fault(1, 1)], 5);
         assert!(played > 20_000, "only {played} sequences played");
+    }
+
+    /// A fault whose request the pager read and answered, before the fault
+    /// looked again, meets a shrink and a grow: the version moved, so it
+    /// asks afresh and is heard.
+    #[test]
+    fn a_fault_answered_then_shrunk_and_grown_asks_afresh() {
+        use mapped::Step;
+        let steps = [
+            Step::Map(0),
+            Step::Fault(0, 1),
+            Step::Report,
+            Step::Answer,
+            Step::Shrink,
+            Step::Walk,
+            Step::Visit,
+            Step::Walk,
+            Step::Grow,
+            Step::Retry,
+        ];
+        play(&steps).expect("every step is taken").drain(&steps);
     }
 
     /// The same over long sequences, seeded: removals queued behind running
