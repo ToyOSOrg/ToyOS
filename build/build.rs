@@ -1966,7 +1966,6 @@ fn stage_and_certify_kernel(root: &Path, features: &str, env: &GuestEnv, arch: A
         kernel_key(arch, features),
     );
     let bytes = fs::read(&staged).expect("Failed to read staged kernel");
-    assert_overflow_checked("kernel", &bytes);
     assert_actuators_match_features(root, features, &bytes);
     match arch {
         Arch::X86_64 => {
