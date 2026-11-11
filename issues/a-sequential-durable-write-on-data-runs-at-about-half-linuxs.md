@@ -90,17 +90,36 @@ Where a round's time goes with #1216 (one boot a bench with stage timers):
   the 8 MiB and the commit's two Flushes 8.5 to 11.4 ms; the drive's slow
   mode decides it.
 
-**Not yet established.**
+**What lands, and what is owed.** The figures above are of cc718f61f.
+#1216 lands with a group of fresh extents changing its bucket once (one
+LRU move) rather than once an extent, and that code's speed-up is not
+measured on metal: the second A/B that was to measure it was staged when
+both benches went down.
 
-- #1216's code after its review on the benches: a group of fresh extents
-  now changes its bucket once (one LRU move) rather than once an extent.
-  The figures above are of cc718f61f.
-- The T14's fast mode, with one boot an arm.
-- On the T14 the free figure DATA's mount prints fell by 512 KiB after one
-  boot of cc718f61f, and after no other boot of either bench: one more
-  occupied bucket or one more btree node. Every mount's figure across the
-  next boots settles it: back up means transient metadata, steady means a
-  one-time change, a further drop after a boot of #1216 means a leak.
+- **Owed on metal:** an A/B of main from before #1216 against main after
+  it, row `osbench_disk` (`files`, `nvme` and `persist` on the bench's
+  NVMe), on the T14 and the AMD bench, in the order before, after, after,
+  before on each bench, DATA carried from boot to boot and every mount's
+  `bytes free` line recorded. Main after #1216 must show every boot
+  passing its row judge; DATA mounted once, nothing formatted and no
+  refusal from the storage path; no `fs.disk.*`, `nvme.*` or `persist.*`
+  row more than 5% worse than before with every boot of one beyond every
+  boot of the other; `persist.seq_write_fsync` and
+  `fs.disk.seq_write.1048576` above before's; and no drop of the free
+  figure at the mount after one of its boots. The T14's figure fell by
+  512 KiB after one boot of cc718f61f and after no other boot of either
+  bench: one more occupied bucket or one more btree node. On the T14 the
+  drive's fast mode (`persist.write_4k_fsync` p50 under 3 ms) needs two
+  boots a side to be judged apart from its slow mode; with fewer it is
+  reported as not established.
+- **Owed on metal:** the durable rows against Linux: `osbench persist`
+  under each bench's Linux on the same NVMe in the same session as main
+  after #1216, on both benches. Main must show `persist.seq_write_fsync`
+  and `fs.disk.seq_write.1048576` at or above Linux's for this record to
+  close (the exit below); otherwise each difference measured to its parts.
+- **Owed on metal:** `bench_data_survives_reboot` on the T14 at main after
+  #1216: 256 KiB written and synced, then read back whole after a
+  reboot. It passed at cc718f61f.
 
 **Exit.** `persist.seq_write_fsync` and `fs.disk.seq_write.1048576` at or
 above Linux's on both benches, in every boot of a back-to-back session, or
