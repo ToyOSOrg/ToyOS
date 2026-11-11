@@ -270,7 +270,6 @@ impl Asks {
         let one = asked == 1 || cfg!(feature = "shootdown-ask-many-as-one");
         flush(if one { self.boxes[asker].ask.load() } else { Flush::User });
         for_each(&taken, |asker| {
-            // Release: an asking CPU that reads its answer follows the flush.
             self.boxes[asker].answered[cpu / 64].fetch_or(1 << (cpu % 64), ANSWER);
         });
         true

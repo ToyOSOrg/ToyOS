@@ -48,5 +48,22 @@ four boots against five Linux runs) the T14 read `mem.munmap_part.4k` at
 (3,341 against 2,279 ns), each resolved, and `mem.mprotect.4k` ahead (816
 against 1,019 ns); the AMD bench is ahead on all three.
 
+- **Owed on metal** for the asks above (a reached CPU flushing only the
+  change's range, the initiator owing itself nothing):
+  - The T14's `shared-debug` boot (the actuator kernel), where main must pass
+    `test_rs_tlb_shootdown_waits`: a change still waits for every CPU running
+    the space.
+  - An A/B on both benches of `osbench_system` and `osbench_mem`, main from
+    before and after. Main after must read `mem.munmap_touched_remote.4k`
+    faster, and `mem.munmap_part.4k`, `mem.mprotect.4k` and the multi-thread
+    `mem.malloc_churn.*` rows no slower. Until then the gain is unmeasured.
+  - With it, each bench's cycles per flush, one page by `INVPCID` (the T14)
+    or `INVLPG` (the AMD bench, which has no PCID) against one flush of every
+    user translation. From those, the number of pages at which flushing one
+    by one costs as much as a full flush; the reached CPU's limit, 64, is
+    lowered if that number is well below it, or the reason not to is
+    recorded. Branches `memperf-sd-ab-base` and `memperf-sd-ab-head` carry a
+    measurement-only probe that logs both; they were staged and never booted.
+
 **Exit**: that case, on each proving machine with PCID, red with the flush on
 entry removed; and the T14's munmap and `vm_protect` figures against Linux.
