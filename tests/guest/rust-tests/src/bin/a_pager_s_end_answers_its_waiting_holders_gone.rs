@@ -3,7 +3,8 @@
 //! until its notices say the helper waits on a page it never supplies, and
 //! lets its pager go. The helper's read answers `Gone`, and the probe says so
 //! by its exit. The probe also asserts the kernel refuses a pager a holder's
-//! read of its own object.
+//! read of its own object, and admits its holders' writes: they land, are
+//! stated and read back, and one past a holder's reach or rights is refused.
 
 use std::os::toyos::process::CommandExt;
 use std::process::Command;

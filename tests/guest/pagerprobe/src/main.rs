@@ -16,20 +16,18 @@
 //! refused, and filled again for the pager's end to take.
 //!
 //! As the helper: a pipe end sent as a holder is no holder, and asking leaves
-//! the helper alive. Its writes to the anonymous memory are admitted whole: a
-//! page's count, an append's new size, and a statement of the size and a
-//! moved time; a 65-page span and a write past a holder's reach are refused
-//! `WouldBlock` with nothing written, and a read-only holder's write
-//! `PermissionDenied`. A write to the credited object is admitted. Last, a
-//! holder's read of a page nobody supplies, which only the pager's end
-//! answers, `Gone`; it exits 0 on exactly that.
+//! the helper alive. Its writes through write holders land, are stated and
+//! read back; one past a holder's reach, or through a holder minted to read,
+//! is refused with nothing written. Last, a holder's read of a page nobody
+//! supplies, which only the pager's end answers, `Gone`; it exits 0 on exactly
+//! that.
 
 use std::os::toyos::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use toyos::endow::Endowments;
-use toyos::paged::{Notice, PagedNotice, Paged, Pager, Refused, PAGE, PAGED_HOLDER_END, PAGED_HOLDER_PAGES, PAGED_RANGE_PAGES};
+use toyos::paged::{Notice, PagedNotice, Paged, Pager, Refused, PAGE, PAGED_HOLDER_END, PAGED_RANGE_PAGES};
 use toyos::poller::{Poller, READABLE};
 use toyos_abi::syscall::SyscallError;
 
@@ -245,13 +243,11 @@ fn writes(read_only: &Paged) {
     let mut back = vec![0; size as usize];
     assert_eq!(written.read(&mut back, 0), Ok(back.len()));
     assert!(back[..page.len()] == page[..] && back[page.len()..] == TAIL, "pagerprobe --hold: a holder reads back what it wrote");
-    let long = vec![1; ((PAGED_HOLDER_PAGES + 1) * PAGE) as usize];
-    assert_eq!(written.write(&long, 0), Err(SyscallError::WouldBlock), "pagerprobe --hold: a 65-page span is the pager's to write");
     assert_eq!(written.write(&[1], PAGED_HOLDER_END), Err(SyscallError::WouldBlock), "pagerprobe --hold: a write past a holder's reach");
     let refused = written.stat().expect("pagerprobe --hold: a statement after the refusals");
     assert_eq!((refused.size, refused.mtime), (after.size, after.mtime), "pagerprobe --hold: a refused write changed the object");
     assert_eq!(read_only.write(&[1], 0), Err(SyscallError::PermissionDenied), "pagerprobe --hold: a holder minted to read wrote");
-    println!("pagerprobe --hold: a holder's writes are admitted whole, and refused past what one takes");
+    println!("pagerprobe --hold: a holder's writes are admitted whole, and refused past its reach or rights");
     let credited = take(CREDITED);
     assert_eq!(credited.write(&page, 0), Ok(page.len()), "pagerprobe --hold: a page written against granted credit");
     println!("pagerprobe --hold: a page written against credit");

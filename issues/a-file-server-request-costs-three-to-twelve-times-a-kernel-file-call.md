@@ -93,6 +93,20 @@ not yet measured on metal, its speed-up included; its rows are owed:
   `readdir.1000`, `stat`, `open_close`, `rename`, `mkdir_rmdir` and
   `create_write_unlink` must lie within main before's spread, and no row may
   be beyond twice main before's.
+- **Owed on the `testcases` shared boot's x86-64 guest row**, once it exists:
+  - **The run.** `a_pager_s_end_answers_its_waiting_holders_gone` at #1258's code, or at any revision whose
+    paged object, pure paged module and pagerprobe are #1258's, run on several vCPUs. It shows order and contents
+    only. It must:
+    - pass, its log showing pagerprobe's helper's writes admitted, then the page written against credit, then the
+      owner's read-back, then the pager's end answering the wait `Gone`, then `pagerprobe: ok`;
+    - leave no paged overdue report;
+    - pass with the two served-file tests beside it.
+  - **The control.** With the kernel refusing every holder's write (#1258's control branch
+    `fileops-step1-ctl-refuse`), that test must go red: the helper on its first write, answered `WouldBlock`, and
+    the pager on never seeing the credited object dirtied. Every other member must stay green.
+- **Shown by no test yet:** that opening a file on `/tmp` or `/home` mints a write holder, and that the SDK writes
+  through the holder before it asks the server. Today that rests on reading the file server's open and the SDK's
+  write path, and on the owed `osbench_disk` rows, whose holder-path figures would show it.
 
 **Exit**: the cached `fs.disk.*` rows within Linux's on both benches, or
 each row's remaining difference measured to its parts and justified, in a
