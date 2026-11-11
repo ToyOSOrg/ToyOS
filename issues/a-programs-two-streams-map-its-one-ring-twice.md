@@ -19,11 +19,22 @@ a child whose parent put two different rings there. A program whose two
 descriptors share one table object, as the supervisor's own do, could be told
 by the table, and that covers no program the supervisor starts.
 
-**Exit condition**: one mapping per ring a process holds, shown by a guest
-test that counts the process's mappings of its ring. Two ways there, and the
-choice is the owner's since the first is a kernel answer: `fstat` of a memory
-object answering an identity of the object (the kernel numbers every object
-already and shows the number to nobody), which `ask` compares; or every
-launcher handing the ring once with the second slot named its alias, as a
-spawn already does for a file's shared description, which reaches `toyos::spawn`,
-std's and libc's spawn and the launch protocol.
+**Each redirect onto a ring maps it again.** The table's owner forgets a
+stream's answer at every change of descriptor 1 or 2, whichever runtime asked
+for it, and the next write maps the ring the descriptor then names. A mapping
+is kept for the process's life, because a write that read the old answer may
+still be in it. So a program that redirects a stream onto a ring repeatedly,
+even onto the same one, grows by 2 MiB of address space each time.
+
+**Chosen exit (2026-11-11, in the review of #1226): every launcher hands the ring once, with
+the second slot named its alias**, as a spawn already does for a file's shared
+description. That reaches `toyos::spawn`, std's and libc's spawn and the
+launch protocol, and needs no kernel change. A kernel answer of an object's
+identity from `fstat` would do it too, but a kernel addition must do
+something userland cannot, and this does not need one. With the two slots one
+table object, the stream state keys its mappings by table object, so a
+redirect back onto a ring it already mapped reuses that mapping.
+
+**Exit condition**: one mapping per ring object the table holds, shown by a
+guest test that counts the process's mappings of its ring after both streams
+are written and again after a redirect away and back.

@@ -364,11 +364,12 @@ pub(crate) mod owner {
 
     static SINKS: [AtomicUsize; 2] = [AtomicUsize::new(UNASKED), AtomicUsize::new(UNASKED)];
     static PENDING: [Held; 2] = [Held::new(Stream::Out), Held::new(Stream::Err)];
-    /// Held by the one thread asking a descriptor or forgetting an answer.
+    /// Held by the one thread asking a descriptor or forgetting an answer,
+    /// which is named the asker while it holds it ([`Asking`]).
     static ASKING: Lock<()> = Lock::new(());
-    /// The thread asking, [`NO_ASKER`] for none: its own write meanwhile, the
-    /// message of a panic under the ask, goes to the descriptor rather than
-    /// waiting on itself.
+    /// The thread holding `ASKING`, [`NO_ASKER`] for none: its own write
+    /// meanwhile, the message of a panic raised under the lock, goes to the
+    /// descriptor rather than waiting on the lock it holds.
     static ASKER: AtomicU32 = AtomicU32::new(NO_ASKER);
     /// The one tid the kernel never issues; a main thread's is 0.
     const NO_ASKER: u32 = toyos_abi::Tid::MAX.0;
@@ -387,8 +388,29 @@ pub(crate) mod owner {
         (word > DESCRIPTOR).then(|| unsafe { Ring::at(NonNull::new_unchecked(word as *mut u8)) })
     }
 
+    /// `ASKING`, held by the calling thread, which is the asker until this
+    /// drops, as its holder returns or unwinds.
+    struct Asking {
+        _held: crate::sync::Held<'static, ()>,
+    }
+
+    impl Asking {
+        fn take(tid: u32) -> Self {
+            let held = ASKING.lock();
+            ASKER.store(tid, Ordering::Relaxed);
+            Self { _held: held }
+        }
+    }
+
+    impl Drop for Asking {
+        /// Names no asker before the lock is let go.
+        fn drop(&mut self) {
+            ASKER.store(NO_ASKER, Ordering::Relaxed);
+        }
+    }
+
     /// The stream's word, asking its descriptor if it is unasked: never
-    /// `UNASKED`, but `DESCRIPTOR` to the thread that is asking.
+    /// `UNASKED`, but `DESCRIPTOR` to the thread that is the asker.
     fn answer(stream: Stream) -> usize {
         let word = &SINKS[index(stream)];
         let tid = crate::tls::current_tid().0;
@@ -398,22 +420,11 @@ pub(crate) mod owner {
                 UNASKED => {}
                 answered => return answered,
             }
-            let asking = ASKING.lock();
+            let asking = Asking::take(tid);
             if word.load(Ordering::Acquire) != UNASKED {
                 continue;
             }
-            let answer = {
-                /// Names no asker again as the ask returns or unwinds.
-                struct Asker;
-                impl Drop for Asker {
-                    fn drop(&mut self) {
-                        ASKER.store(NO_ASKER, Ordering::Relaxed);
-                    }
-                }
-                ASKER.store(tid, Ordering::Relaxed);
-                let _asker = Asker;
-                ask(stream)
-            };
+            let answer = ask(stream);
             word.store(*answer.as_ref().unwrap_or(&DESCRIPTOR), Ordering::Release);
             drop(asking);
             // Said with the stream answered and the lock let go, so the
@@ -496,7 +507,7 @@ pub(crate) mod owner {
             _ => return,
         };
         // After any ask already under way, whose answer may be the old one.
-        let _asking = ASKING.lock();
+        let _asking = Asking::take(crate::tls::current_tid().0);
         let old = SINKS[index(stream)].swap(UNASKED, Ordering::AcqRel);
         // What was written of a line before the change went where the
         // descriptor then led.

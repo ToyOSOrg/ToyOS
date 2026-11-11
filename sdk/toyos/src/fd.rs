@@ -580,7 +580,10 @@ mod owner {
     extern "C" fn toyos_fd_dup2(old: Fd, new: Fd, inheritable: bool) -> i32 {
         match change(|t| t.dup2(old, new, inheritable)) {
             Ok(displaced) => {
-                changed(new);
+                // A descriptor duplicated onto itself names what it named.
+                if old != new {
+                    changed(new);
+                }
                 released(displaced);
                 new
             }
