@@ -58,10 +58,12 @@ const TOKEN_CLIENTS: u64 = 1 << 32;
 const TOKEN_OWNERS: u64 = TOKEN_CLIENTS + CLIENTS.slots as u64;
 
 /// What a pass found of one waiting connection: its frame, off the
-/// connection and in memory, or why it is let go, said where its table says
-/// so. `came` says which port it came in on and the region its copy holds.
+/// connection and in memory, or why it is let go, said where its table, which
+/// `table` names, says so. `came` says which port it came in on and the
+/// region its copy holds.
 fn first_frame<K, C>(
     event: Event<K, C, { window::MAX_INLINE_PAYLOAD }>,
+    table: &str,
     out: &mut Vec<ClientFrame>,
     came: impl FnOnce(K, C) -> (Port, Option<CopyRegion>),
 ) {
@@ -84,7 +86,7 @@ fn first_frame<K, C>(
             eprintln!("compositor: dropping client {} — {reason}{unsaid}", conn.as_handle().raw().0);
         }
         Event::Left { .. } => {}
-        Event::Unsaid(unsaid) => eprintln!("compositor: {}", unsaid.alone()),
+        Event::Unsaid(unsaid) => eprintln!("compositor: {table}: {}", unsaid.alone()),
     }
 }
 
@@ -1212,10 +1214,10 @@ impl Session {
             }
         }
         while let Some(event) = self.clients.next(now) {
-            first_frame(event, &mut out, |(), copy| (Port::Compositor, copy));
+            first_frame(event, "clients", &mut out, |(), copy| (Port::Compositor, copy));
         }
         while let Some(event) = self.owners.next(now) {
-            first_frame(event, &mut out, |port, ()| (port, None));
+            first_frame(event, "prompt, clipboard and display", &mut out, |port, ()| (port, None));
         }
 
         for i in 0..self.stack.len() {

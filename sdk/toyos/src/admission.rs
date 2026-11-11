@@ -272,10 +272,10 @@ impl<K, C, const MAX: usize> AsHandle for Client<K, C, MAX> {
     }
 }
 
-/// A line its server says of a connection, and how many of the table's went
-/// unsaid since its last line: `Some` on a line said, `None` on one counted
-/// into the next. Its `Display` is that count, to follow the line, and
-/// nothing for none.
+/// How many of the table's refusals and let-gos went unsaid since its last
+/// line; as a `say`, `Some` on a line said and `None` on one counted into the
+/// next. Its `Display` is that count, to follow the line, and nothing for
+/// none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unsaid(pub usize);
 
@@ -299,7 +299,8 @@ struct Alone(usize);
 
 impl fmt::Display for Alone {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} more connections refused or let go since this table's last line went unsaid", self.0)
+        let s = if self.0 == 1 { "" } else { "s" };
+        write!(f, "{} more connection{s} refused or let go since this table's last line went unsaid", self.0)
     }
 }
 
@@ -508,8 +509,8 @@ where
             return Some(Event::Left { conn, key, context, why, say });
         }
         self.cursor = 0;
-        // Every line said before `now - LIMIT` has run its limit, so the
-        // shared line is free for the count.
+        // `last` is the latest line, the shared line's included, so every
+        // line has run its limit.
         if self.unsaid > 0 && self.last.is_some_and(|last| now >= last + LIMIT) {
             (self.shared, self.last) = (Some((now, None)), Some(now));
             return Some(Event::Unsaid(Unsaid(core::mem::take(&mut self.unsaid))));
