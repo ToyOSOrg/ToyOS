@@ -53,6 +53,18 @@ ahead and `ipc.reqrep.4096` at parity. No `ipc` row is behind on the AMD
 bench: `ipc.reqrep.65536` is unresolved, ToyOS's boots ranging 104%, and the
 rest are ahead.
 
+**Where it goes, 2026-11-11** ([evidence](https://github.com/ToyOSOrg/evidence/tree/3ddc686338d20b13528b597a7437e3b027479728/diagnosis)): segment probes on
+main 422915e2c, one boot a bench, each probe's own cost subtracted; a probe
+stalls the pipeline around it, so each part is an upper bound and their
+ranking is the finding. `ipc.reqrep.8`'s server CPU probed 5,844 ns a round
+trip on the T14 and 5,587 on the AMD bench: the run queue 1,400 and 1,080,
+the wake out of halt to the kick's handler 1,279 and 1,886, the message path
+924 and 814 (the receive's table lookup and take 558 and 482), the idle path
+485 and 443, the switch 398 and 362, the entry and exit 310 and 340, the
+pass's fixed work 282 and 240, the timer 267 and 155, the post and kick 255
+and 152, and the wait 245 and 115. #1260 makes the run queue's operations
+cheaper.
+
 **Exit**: `ipc.reqrep.8` and `ipc.reqrep_handle.8` within Linux's on both
 benches in a labelled current-state comparison, or each remaining difference
 measured to its parts and justified.
