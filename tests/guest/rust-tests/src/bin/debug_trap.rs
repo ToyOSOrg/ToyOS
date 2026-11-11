@@ -27,6 +27,8 @@ const ARMS: &[(&str, &str)] = &[
     ("tf-syscall", "RFLAGS.TF across a syscall, where IA32_FMASK decides who takes the trap"),
     ("tf-mov-ss-syscall", "RFLAGS.TF across a MOV SS and the syscall after it, whose trap AMD holds into Ring 0"),
     ("tf-mov-ss-int3", "RFLAGS.TF across a MOV SS and the INT3 after it, whose trap AMD holds onto the #BP gate"),
+    ("tf-mov-ss-int1", "RFLAGS.TF across a MOV SS and the INT1 after it, whose trap AMD holds onto the #DB entry itself"),
+    ("tf-int1", "RFLAGS.TF across an INT1, whose single-step may be pending after its own #DB's delivery"),
 ];
 
 fn main() {
@@ -176,6 +178,16 @@ fn raise(role: &str) -> ! {
         "tf-mov-ss-int3" => {
             mov_ss::single_step_over_mov_ss_into_int3();
             println!("SURVIVED tf-mov-ss-int3");
+        }
+        // And with `INT1`: the held trap lands on the `#DB` entry's own first
+        // instruction, over the frame `INT1`'s `#DB` left on the same stack.
+        "tf-mov-ss-int1" => {
+            mov_ss::single_step_over_mov_ss_into_int1();
+            println!("SURVIVED tf-mov-ss-int1");
+        }
+        "tf-int1" => {
+            mov_ss::single_step_into_int1();
+            println!("SURVIVED tf-int1");
         }
         other => panic!("unknown role {other:?}"),
     }

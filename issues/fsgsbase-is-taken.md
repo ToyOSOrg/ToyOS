@@ -33,6 +33,18 @@ base, which a sign test of `IA32_GS_BASE` would take for the kernel's.
 **Left**: `CR4.FSGSBASE` on every CPU, and the switch saving and restoring
 each thread's GS base beside its FS base.
 
+**Owed on metal** (#1262; the benches were down when it was reviewed). On
+the T14 and the AMD bench, main must show:
+- `debug_trap`, on the `testcases` boot: every arm's child ends as
+  `Fault::Trap` and the machine stays up. That includes `tf-mov-ss-syscall`,
+  `tf-mov-ss-int3`, `tf-mov-ss-int1` and `tf-int1`. On the AMD bench these
+  are the CPL-0 path of the `#DB` entry, which a single-step trap held over
+  a `MOV SS` reaches (APM Vol. 2 §8.1.4) and the guest runner's Intel part
+  never takes.
+- `gs_segment_load`, on the `testcases` boot: all 12 selectors reported.
+- `nmi_finds_the_kernels_gs`, on the `shared-debug` boot: `nmi-user-gs: PASS`.
+- `syscall_cost`, on the `testcases` boot: within its bound.
+
 **Exit**: on every proving machine and under TCG, a `boot-actuators` arm
 enters vector 2 at CPL 0 while the user GS base is live, between entry and its
 `swapgs` or after the exit path's, and the handler finds the kernel's per-CPU

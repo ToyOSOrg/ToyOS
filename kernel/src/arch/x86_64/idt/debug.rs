@@ -10,14 +10,16 @@
 //! first instruction of the gate or `SYSCALL` entry that instruction reached:
 //! before its `swapgs`, and for `SYSCALL` on the user's stack. So the entry
 //! installs the kernel's GS base whatever it finds, as the NMI's does, and
-//! resumes with the base it found. Nothing in the kernel sets `TF` or arms a
-//! debug register (`control_regs`), so a CPL-0 `#DB` anywhere else ends the
-//! machine.
+//! resumes with the base it found. On its own first instruction there is no
+//! entry to resume: the held trap followed an `INT1`, whose own `#DB` frame
+//! this one's delivery overwrote on IST4, and the thread that ran it ends as a
+//! trap. Nothing in the kernel sets `TF` or arms a debug register
+//! (`control_regs`), so a CPL-0 `#DB` anywhere else ends the machine.
 
 use core::arch::naked_asm;
 
 use crate::arch::entry::install_kernel_gs;
-use crate::arch::percpu::{MSR_GS_BASE, OFF_GDT, OFF_KERNEL_RSP};
+use crate::arch::percpu::{MSR_GS_BASE, OFF_GDT, OFF_KERNEL_RSP, USER_CS, USER_DS};
 
 /// Eleven pushes place the CPU frame's `rip` at 88.
 const RIP_OFFSET: usize = 88;
@@ -47,7 +49,7 @@ pub(super) extern "sysv64" fn debug_entry() {
         "push r10",
         "push r11",
         "push rbp",
-        "mov rdi, [rsp + {rip_offset}]",
+        "lea rdi, [rsp + {rip_offset}]",
         "mov rbp, rsp",
         "and rsp, -16",
         "call {deferred}",
@@ -68,6 +70,9 @@ pub(super) extern "sysv64" fn debug_entry() {
         "pop rdx",
         "pop rcx",
         "pop rax",
+        // `deferred` makes the frame a Ring 3 one where its thread is to end.
+        "test byte ptr [rsp + 8], 3",
+        "jnz 2f",
         "iretq",
         // From Ring 3: the CPU's five words to the top of this thread's
         // kernel stack, the one `tss.rsp0` names too (`percpu::set_kernel_stack`),
@@ -103,10 +108,27 @@ pub(super) extern "sysv64" fn debug_entry() {
     );
 }
 
-/// A `#DB` at CPL 0 on `rip`: resumed where `rip` is an entry Ring 3 reaches,
-/// whose trap it is.
-extern "sysv64" fn deferred(rip: u64) {
-    if rip != crate::arch::syscall::entry_address() && !super::is_gate_target(rip) {
-        panic!("#DB at {rip:#x} in Ring 0, which is no entry: nothing in this kernel arms a debug trap");
+/// The CPU's frame of an interrupt or exception without an error code.
+#[repr(C)]
+struct Frame {
+    rip: u64,
+    cs: u64,
+    rflags: u64,
+    rsp: u64,
+    ss: u64,
+}
+
+/// A `#DB` at CPL 0 on `frame`: resumed where its `rip` is an entry Ring 3
+/// reaches, whose trap it is. On `debug_entry`'s own first instruction the
+/// frame becomes a Ring 3 one, with `IF` set as every Ring 3 thread runs and
+/// the `rip` and `rsp` the overwritten frame held unknown, so its thread ends
+/// as the trap it raised.
+extern "sysv64" fn deferred(frame: &mut Frame) {
+    if frame.rip == debug_entry as *const () as u64 {
+        *frame = Frame { rip: 0, cs: u64::from(USER_CS), rflags: 0x202, rsp: 0, ss: u64::from(USER_DS) };
+        return;
+    }
+    if frame.rip != crate::arch::syscall::entry_address() && !super::is_gate_target(frame.rip) {
+        panic!("#DB at {:#x} in Ring 0, which is no entry: nothing in this kernel arms a debug trap", frame.rip);
     }
 }
