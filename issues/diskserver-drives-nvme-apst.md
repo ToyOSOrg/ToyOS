@@ -20,6 +20,13 @@ its design round's, chosen on its merits. It follows the specification
 with no table of drives: a drive that misbehaves under it is a defect,
 measured on the bench and filed.
 
+**Built** (#1131): the NVMe driver sets the table, the same one Linux sets
+on both benches' drives; no back-to-back disk row regressed on either
+(evidence `pr-1131` r10). The idle minute was measured in r1 to r4 and did
+not fall on the T14, for reasons that are
+`issues/the-t14s-idle-package-stays-in-pc2.md`'s. The first write after a
+wake is `issues/the-first-durable-write-after-the-drive-wakes-is-a-millisecond-behind-linuxs.md`'s.
+
 **Exit**: host tests of the APST table; on the
 T14, the one proving machine with a physical NVMe drive, the block figures and
 the idle minute with the drive idle. **Mutation**: a table that admits a state

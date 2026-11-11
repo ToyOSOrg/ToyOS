@@ -62,13 +62,34 @@ PR #1131's `osbench_disk` boots on the T14 add two readings
 - The drive is not short of host memory. Its HMPRE and HMMIN are 0, and it
   refuses Feature 0Dh as an invalid field, so it uses no Host Memory Buffer.
 
-Four boots of four that idled 80 s inside `persist` left the slow mode there
-(`issues/the-t14s-slow-durable-writes-ended-during-80-s-of-idle-in-four-boots-of-four.md`).
+**What ends the mode: idle under APST, and not idle alone.** `persist`'s
+after-idle row sleeps 10 s before each of eight samples. Of the boots that
+began `persist` in the slow mode, how many ran every durable row after that
+row fast (2026-11-11; evidence `pr-1202` `ab/`, `pr-1131` r10):
+
+| the boot had | left the mode | boots |
+|---|---|---|
+| APST and the idle row | 6 of 6 | four of `24f5de778`, two of `047e0a708` |
+| the idle row, no APST | 0 of 3 | `349ccb26b`, the same image but for the driver's APST |
+| neither | 1 of 11, by itself, inside its first durable row | seven of the first A/B's, and the scoreboard's four at ad5db5a65 above |
+
+- With three boots an arm this is consistent with APST ending the mode and
+  does not prove it. The reading is that the drive leaves the mode when it
+  enters a non-operational power state, which the table lets it do 100 ms
+  into an idle.
+- APST does not keep a boot out of the mode: two of three boots with it
+  began `persist` slow (6.28 and 6.45 ms), before any idle long enough.
+- Linux, which sets the same table, shows the same shape: its
+  `write_4k_fsync` ran slow in two of three runs (4.68 and 5.22 ms) and
+  every row after its idle row fast.
+- What puts the drive into the mode is still not known.
 
 **Exit**: repeated boots on the T14 read every durable `persist` row
 (`write_4k_fsync`, `append_4k_fsync`, `create_fsync_unlink` and
 `seq_write_fsync`) within Linux's, in every boot and for the whole of each
-boot's run. Or the slow mode is explained by a measured cause.
+boot's run. Or the slow mode is explained by a measured cause. With APST
+the rows after the first idle meet it; the row before does not, on either
+system, and the cause of entering the mode is not measured.
 
 **Owner**: the NVMe driver (`system/nvme/`) and the DATA volume's commit
 (`lib/bcachefs/src/engine/mount/`).
