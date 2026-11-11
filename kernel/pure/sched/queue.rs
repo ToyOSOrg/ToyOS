@@ -143,8 +143,8 @@ impl<X: SchedPayload> RunQueue<X> {
         let carried = core::mem::take(&mut standing.group_lag);
         let left = standing.left.take();
         let group = match self.member(jk) {
-            Ok(at) => {
-                let group = self.members[at].1;
+            Ok(i) => {
+                let group = self.members[i].1;
                 if carried != Lag::ZERO {
                     let weight = self.group_slots.weight(group);
                     self.groups.readmit(&mut self.group_slots, group, weight, |mut held| {
@@ -154,7 +154,7 @@ impl<X: SchedPayload> RunQueue<X> {
                 }
                 group
             }
-            Err(at) => {
+            Err(i) => {
                 // At the weight it holds once this thread is counted here.
                 let weight = job.group_weight(1);
                 let group = self.groups.join(
@@ -165,7 +165,7 @@ impl<X: SchedPayload> RunQueue<X> {
                     carried,
                     Group { job, threads: Queue::new() },
                 );
-                self.members.insert(at, (jk, group));
+                self.members.insert(i, (jk, group));
                 group
             }
         };
@@ -189,8 +189,8 @@ impl<X: SchedPayload> RunQueue<X> {
         group.job.leave();
         if group.threads.is_empty() {
             let (left, group) = self.groups.leave(&mut self.group_slots, at.group);
-            let at = self.member(group.job.key()).expect("a queued group is a member");
-            self.members.remove(at);
+            let i = self.member(group.job.key()).expect("a queued group is a member");
+            self.members.remove(i);
             standing.group_lag = left.lag.clamp_ns(LAG_BOUND_NS);
         } else {
             self.reweigh(at.group);

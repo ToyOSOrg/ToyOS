@@ -1,7 +1,7 @@
-//! The run queue and its EEVDF queue as they stood before their operations
-//! were made cheap, unchanged but for the protocol port's escape hatches: the
-//! oracle [`super::differential`] holds every answer of the run queue to. A
-//! change that means to decide differently deletes both.
+//! Main's run queue and its EEVDF queue at 67713cbc1, less the protocol
+//! port's escape hatches and what the test does not call: the oracle
+//! [`super::differential`] holds every answer of the run queue to. A change
+//! that means to decide differently deletes both.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
