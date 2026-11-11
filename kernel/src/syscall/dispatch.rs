@@ -81,11 +81,17 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     let result = (move || -> u64 { match num {
         SYS_WRITE => {
             let Some(buf) = ctx.user_bytes(UserAddr::new(a2), a3) else { return bad_addr };
-            sys_write(RawHandle(a1 as u32), &buf)
+            let t = crate::probe::now();
+            let r = sys_write(RawHandle(a1 as u32), &buf);
+            crate::probe::span(0, t);
+            r
         }
         SYS_READ => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
-            sys_read(RawHandle(a1 as u32), &mut buf)
+            let t = crate::probe::now();
+            let r = sys_read(RawHandle(a1 as u32), &mut buf);
+            crate::probe::span(1, t);
+            r
         }
         SYS_THREAD_EXIT => sys_thread_exit(a1 as i32, a2, a3, a4),
         SYS_RANDOM => {
@@ -553,7 +559,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_PAGED_HOLDER => sys_paged_holder(RawHandle(a1 as u32), a2),
         SYS_PAGED_READ => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
-            sys_paged_read(RawHandle(a1 as u32), &mut buf, a4)
+            let t = crate::probe::now();
+            let r = sys_paged_read(RawHandle(a1 as u32), &mut buf, a4);
+            crate::probe::span(2, t);
+            r
         }
         SYS_PAGED_OP => sys_paged_op(&ctx, RawHandle(a1 as u32), a2, UserAddr::new(a3)),
         SYS_PAGED_NOTICES => {
@@ -562,6 +571,13 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len as u64) else { return bad_addr };
             sys_paged_notices(RawHandle(a1 as u32), &mut buf)
         }
+        crate::probe::SYSCALL => match a1 {
+            2 => match ctx.user_bytes_mut(UserAddr::new(a2), a3) {
+                Some(mut out) => crate::probe::control(2, Some(&mut out)),
+                None => bad_addr,
+            },
+            op => crate::probe::control(op, None),
+        },
         _ => SyscallError::InvalidArgument.to_u64(),
     } })();
 

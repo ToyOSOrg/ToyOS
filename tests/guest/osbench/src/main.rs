@@ -41,6 +41,7 @@ mod mem;
 mod net;
 mod nvme;
 mod pingpong;
+mod pipeprobe;
 mod place;
 mod procs;
 mod ran;
@@ -157,7 +158,8 @@ const GROUPS: [(&str, fn()); 16] = [
 /// The groups that run only by name: `lan` needs the `osbench-peer` on the
 /// other bench, `internet` the public internet, and `energy` a machine
 /// running nothing else, in a ToyOS boot of its own and as root on Linux.
-const BY_NAME: [(&str, fn()); 3] = [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite)];
+const BY_NAME: [(&str, fn()); 4] =
+    [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite), ("pipeprobe", pipeprobe::suite)];
 
 /// A group between its first and last lines, after the machine's conditions
 /// and the clock its CPU starts at.

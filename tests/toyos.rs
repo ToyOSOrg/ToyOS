@@ -607,6 +607,8 @@ const MACHINE_TESTS: &[&str] = &[
     // endowments a job gets is the image's and the supervisor's, which no
     // host build has, and the benches run osbench only nightly.
     "osbench_capability_groups_exit_0",
+    // SCRATCH: the probe group ends.
+    "osbench_pipeprobe_smoke",
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the
     // firmware's tables, to COM1, to `PM1a_CNT`, to a function's configuration
@@ -1326,6 +1328,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // SCRATCH: `osbench pipeprobe`, a pipe's and a cached read's stages.
+        "osbench_pipeprobe",
+        metal::Metal {
+            arms: OSBENCH_PIPEPROBE,
+            judge: |b| {
+                data_on_the_nvme(b[0])?;
+                osbench_ran(b[0], &["osbench_pipeprobe"])
+            },
+        },
+    ),
+    (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
         // compared with the same program under this bench's Linux on the same
         // path. A pass names it: the other bench has to be running the peer.
@@ -1913,6 +1926,13 @@ const OSBENCH_ENERGY: &[metal::Arm] = &[metal::Arm {
 /// `persist`, which writes the disk, with the two groups that run before it
 /// in the suite's order.
 const OSBENCH_DISK_GROUPS: [&str; 3] = ["osbench_files", "osbench_nvme", "osbench_persist"];
+
+/// SCRATCH: the probe group alone.
+const OSBENCH_PIPEPROBE: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 240_000,
+    named_only: true,
+    ..metal::once("pipeprobebenchcase", "tests/images/benchcase.toml", &[], &["osbench_pipeprobe"])
+}];
 
 /// The whole suite's bound, [`BENCHCASE`]'s, reused as a ceiling.
 const OSBENCH_DISK: &[metal::Arm] = &[metal::Arm {
@@ -3166,10 +3186,15 @@ fn acpi_holder_is_refused_a_held_functions_configuration() -> Result<(), String>
 /// does only once every row it ran measured or said why not, its capability
 /// rows among them. A guest reads no package energy, so `energy` says why.
 fn osbench_capability_groups_exit_0() -> Result<(), String> {
-    const JOBS: [&str; 3] = ["osbench_identity", "osbench_fair", "osbench_energy"];
+    osbench_jobs_exit_0(&["osbench_identity", "osbench_fair", "osbench_energy"])
+}
+
+fn osbench_jobs_exit_0(jobs: &[&str]) -> Result<(), String> {
+    #[allow(non_snake_case)]
+    let JOBS = jobs;
     let committed = compile::repo_root().join("tests/images/benchcase.toml");
     let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
-    let derived = toyos_metal::image::derive(&text, 300_000, &JOBS, &[]).map_err(|why| why.to_string())?;
+    let derived = toyos_metal::image::derive(&text, 300_000, JOBS, &[]).map_err(|why| why.to_string())?;
     let config = common::lane::dir().join("osbench-capability-groups.toml");
     fs::write(&config, derived).map_err(|e| format!("{}: {e}", config.display()))?;
     let mut qemu = QemuInstance::boot_with_options(
@@ -4937,6 +4962,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "acpi_holder_is_refused_a_held_functions_configuration" => acpi_holder_is_refused_a_held_functions_configuration(),
         "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),
+        "osbench_pipeprobe_smoke" => osbench_jobs_exit_0(&["osbench_pipeprobe"]),
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),

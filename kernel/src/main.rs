@@ -64,6 +64,7 @@ mod watch;
 mod object;
 mod inbox;
 mod pipe;
+mod probe;
 mod frame_bytes;
 mod message;
 

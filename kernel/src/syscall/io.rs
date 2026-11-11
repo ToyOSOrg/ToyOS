@@ -47,14 +47,19 @@ fn pipe_write_now(h: RawHandle, buf: &UserBytes) -> Option<u64> {
         return None;
     }
     let mut bounce = PipeBounce::new();
+    let t = crate::probe::now();
     // A buffer that faults is the general path's to answer, after its handle.
     let src = bounce.read(buf).ok()?.bytes();
+    let t = crate::probe::span(10, t);
     let (word, pipe) = process::with_process_data(|data| {
         let KObjectRef::PipeWrite(w) = data.handles.get_ref(h, Rights::WRITE).ok()? else { return None };
         let word = ops::pipe_written(w.pipe().put_now(src)?)?;
         Some((word, w.pipe().clone()))
     })?;
+    let t = crate::probe::span(11, t);
     process::wake_pipe_readers(&pipe);
+    crate::probe::span(12, t);
+    crate::probe::add(40, word);
     Some(word)
 }
 
@@ -63,15 +68,20 @@ fn pipe_write_now(h: RawHandle, buf: &UserBytes) -> Option<u64> {
 /// `None` for anything else, which the general path answers.
 fn pipe_read_now(h: RawHandle, buf: &mut UserBytesMut) -> Option<u64> {
     let mut bounce = PipeBounce::new();
+    let t = crate::probe::now();
     let (taken, pipe) = process::with_process_data(|data| {
         let KObjectRef::PipeRead(r) = data.handles.get_ref(h, Rights::READ).ok()? else { return None };
         Some((r.pipe().take_now(buf.len(), &mut bounce)?, r.pipe().clone()))
     })?;
     let n = taken.n;
     drop(taken);
+    let t = crate::probe::span(20, t);
     // A reader whose buffer faults loses what it took, as a claimed read does.
     let copied = buf.write_at(0, bounce.bytes());
+    let t = crate::probe::span(21, t);
     process::wake_pipe_writers(&pipe);
+    crate::probe::span(22, t);
+    crate::probe::add(41, n as u64);
     Some(copied.map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| n as u64))
 }
 
@@ -82,13 +92,17 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
     loop {
         // Looked up again after each wait: a write whose handle a sibling
         // closed meanwhile is refused, not landed past its reader's EOF.
+        let t = crate::probe::now();
         let object = match object(h, Rights::WRITE) {
             Ok(object) => object,
             Err(e) => return e.refuse(),
         };
+        crate::probe::span(13, t);
         let blocked = match ops::try_write(&object, buf) {
             Some(n) => {
+                let t = crate::probe::now();
                 if let Some(pipe) = ops::pipe_write(&object) { process::wake_pipe_readers(pipe); }
+                crate::probe::span(18, t);
                 return n;
             }
             None => match ops::pipe_write(&object) {
@@ -99,11 +113,13 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
         match blocked {
             WriteBlock::Pipe(pipe, room) => {
                 let parkable = crate::scheduler::Parkable::at_entry();
+                let t = crate::probe::now();
                 if watch::wait_until(&parkable, pipe.write_watch(), 0, WaitClass::Pipe, Deadline::never(), || pipe.has_space(room))
                     .is_err()
                 {
                     return cancelled();
                 }
+                crate::probe::span(19, t);
             }
             WriteBlock::Refused(word) => return word,
         }
@@ -142,25 +158,31 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
     if let Some(n) = pipe_read_now(h, buf) {
         return n;
     }
+    let t = crate::probe::now();
     let object = match readable(h, buf.len()) {
         Ok(Readable::Object(object)) => object,
         // No device class blocks: an empty read answers `NotFound`.
         Ok(Readable::Device(read)) => return read.map_or(SyscallError::NotFound.to_u64(), |read| read.deliver(buf)),
         Err(e) => return e.refuse(),
     };
+    crate::probe::span(23, t);
     loop {
         if let Some(n) = ops::try_read(&object, buf) {
+            let t = crate::probe::now();
             if let Some(pipe) = ops::pipe_read(&object) { process::wake_pipe_writers(pipe); }
+            crate::probe::span(27, t);
             return n;
         }
         match read_block(&object) {
             ReadBlock::Pipe(pipe) => {
                 let parkable = crate::scheduler::Parkable::at_entry();
+                let t = crate::probe::now();
                 if watch::wait_until(&parkable, pipe.read_watch(), 0, WaitClass::Pipe, Deadline::never(), || pipe.has_data())
                     .is_err()
                 {
                     return cancelled();
                 }
+                crate::probe::span(28, t);
             }
             ReadBlock::Notice(notice) => {
                 let parkable = crate::scheduler::Parkable::at_entry();

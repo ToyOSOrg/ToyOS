@@ -467,6 +467,7 @@ impl PagerObject {
         let mut since: Option<Version> = None;
         loop {
             let at = offset.saturating_add(done as u64);
+            let t = crate::probe::now();
             let step = {
                 let mut state = self.state.lock();
                 let size = state.entry(slot).object.size();
@@ -485,6 +486,7 @@ impl PagerObject {
                     self.pin_chunk(&mut state, slot, at..end, &mut pieces, waiter)
                 }
             };
+            let t = crate::probe::span(31, t);
             match step {
                 Step::Copy(count) => {
                     // A chunk of frames is copied a frame at a time: populated
@@ -494,6 +496,7 @@ impl PagerObject {
                     if count > 1 {
                         out.fault_in(done, pieces[..count].iter().map(|piece| piece.len).sum());
                     }
+                    let t = crate::probe::span(32, t);
                     let mut faulted = false;
                     for piece in &pieces[..count] {
                         let copied = match piece.phys {
@@ -508,14 +511,18 @@ impl PagerObject {
                         }
                         done += piece.len;
                     }
+                    let t = crate::probe::span(33, t);
                     for piece in &pieces[..count] {
                         if let Some(phys) = piece.phys { pmm::unpin_range(phys, PAGE as usize); }
                     }
+                    let t = crate::probe::span(34, t);
                     let (gone, written) = {
                         let state = self.state.lock();
                         let object = &state.entry(slot).object;
                         (state.gone || object.gone(), waits && !Self::unwritten(object, &mut since))
                     };
+                    crate::probe::span(35, t);
+                    crate::probe::add(42, count as u64);
                     // A frame copied as its pager ended is no byte to report.
                     if gone {
                         return SyscallError::Io.to_u64();

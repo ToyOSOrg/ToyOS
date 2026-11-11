@@ -201,6 +201,7 @@ impl PipeRef {
     /// claim to end, never for bytes.
     pub fn read(&self, p: &Parkable, buf: &mut UserBytesMut) -> Result<Option<usize>, ReadStopped> {
         let mut bounce = PipeBounce::new();
+        let t = crate::probe::now();
         let (n, runs, boost) = {
             let mut pipe = self.turn(p, End::Read)?;
             let available = pipe.held.len();
@@ -219,7 +220,10 @@ impl PipeRef {
                 if boost {
                     crate::scheduler::boost_current_rt_inherited();
                 }
+                let t = crate::probe::span(29, t);
                 buf.write_at(0, bounce.bytes()).map_err(|_| ReadStopped::Faulted)?;
+                crate::probe::span(21, t);
+                crate::probe::add(41, n as u64);
                 return Ok(Some(n));
             }
             pipe.held.claim_read(n);
@@ -229,7 +233,9 @@ impl PipeRef {
             // Outside the pipe's lock: the scheduler takes its own CPU-queue lock.
             crate::scheduler::boost_current_rt_inherited();
         }
+        let t = crate::probe::span(24, t);
         let copied = frame_bytes::drain(&self.0.state, |s| &mut s.held, 0, buf, n, runs);
+        let t = crate::probe::span(25, t);
         let (spares, ended, unread) = {
             let mut pipe = self.0.state.lock();
             let (spares, ended) = pipe.held.consume();
@@ -238,6 +244,8 @@ impl PipeRef {
         frame_bytes::give_back(&self.0.state, |s| &mut s.held, spares);
         drop(unread);
         frame_bytes::wake(&self.0.read_watch, ended);
+        crate::probe::span(26, t);
+        crate::probe::add(41, n as u64);
         copied.map_err(|_| ReadStopped::Faulted)?;
         Ok(Some(n))
     }
@@ -247,11 +255,17 @@ impl PipeRef {
     pub fn write(&self, p: &Parkable, buf: &UserBytes) -> Result<PipeWrite, Cancelled> {
         if buf.len() <= BOUNCE {
             let mut bounce = PipeBounce::new();
+            let t = crate::probe::now();
             return match bounce.read(buf) {
-                Ok(src) => self.write_bounced(p, src),
+                Ok(src) => {
+                    let wrote = self.write_bounced(p, src);
+                    crate::probe::span(30, t);
+                    wrote
+                }
                 Err(_) => Ok(PipeWrite::Faulted),
             };
         }
+        let t = crate::probe::now();
         let (n, first) = {
             let mut pipe = self.turn(p, End::Write)?;
             if !pipe.holders.held(End::Read) {
@@ -266,10 +280,16 @@ impl PipeRef {
                 }
             }
         };
+        let t = crate::probe::span(14, t);
         let supplied = match first {
             frame_bytes::Fill::Runs(runs) => Ok(runs),
-            frame_bytes::Fill::Supply(needs) => frame_bytes::supply(&self.0.state, |s| &mut s.held, needs, n),
+            frame_bytes::Fill::Supply(needs) => {
+                let runs = frame_bytes::supply(&self.0.state, |s| &mut s.held, needs, n);
+                crate::probe::span(15, t);
+                runs
+            }
         };
+        let t = crate::probe::now();
         let wrote = match supplied {
             Ok(runs) => match frame_bytes::fill(&self.0.state, |s| &mut s.held, buf, n, runs) {
                 Ok(()) => PipeWrite::Wrote(n),
@@ -277,6 +297,7 @@ impl PipeRef {
             },
             Err(Exhausted) => PipeWrite::NoMemory,
         };
+        let t = crate::probe::span(16, t);
         let (ended, unread) = {
             let mut pipe = self.0.state.lock();
             let ended = match wrote {
@@ -287,6 +308,8 @@ impl PipeRef {
         };
         drop(unread);
         frame_bytes::wake(&self.0.write_watch, ended);
+        crate::probe::span(17, t);
+        crate::probe::add(40, n as u64);
         Ok(wrote)
     }
 

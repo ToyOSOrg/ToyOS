@@ -80,8 +80,12 @@ pub(super) fn sys_paged_holder(h: RawHandle, object: u64) -> u64 {
 /// on itself or on another pager. The handle is often a peer's, sent as a
 /// holder, so another kind is refused `InvalidArgument`, never a fault.
 pub(super) fn sys_paged_read(h: RawHandle, out: &mut UserBytesMut, offset: u64) -> u64 {
+    let t = crate::probe::now();
     match holder(h) {
-        Ok(holder) => holder.read(out, offset),
+        Ok(holder) => {
+            crate::probe::span(36, t);
+            holder.read(out, offset)
+        }
         Err(refused) => refused,
     }
 }
