@@ -288,6 +288,107 @@ impl<D: BlockDev> Mount<D> {
         Ok(done)
     }
 
+    /// The bytes of one block: what each block of a pool holds.
+    pub fn block_bytes(&self) -> u64 {
+        self.sb.block_bytes() as u64
+    }
+
+    /// Capacity for `blocks` whole blocks of `ino`, none of them bound to a
+    /// place in the file: each is placed where [`Self::write_placed`] writes
+    /// it. A pool for pages dirtied anywhere in a file, which a write into
+    /// one range ([`Self::reserve`]) cannot serve.
+    pub async fn reserve_blocks(&self, ino: u64, blocks: u64) -> Result<Reservation> {
+        let len = blocks.checked_mul(self.sb.block_bytes() as u64).and_then(|len| usize::try_from(len).ok());
+        self.reserve(ino, 0, len.ok_or(Error::Invalid("a pool past 2^63-1 bytes"))?).await
+    }
+
+    /// `blocks` more blocks into a pool [`Self::reserve_blocks`] made: whole
+    /// or refused, as [`Self::extend`] is.
+    pub async fn extend_blocks(&self, pool: &mut Reservation, blocks: u64) -> Result<()> {
+        let len = blocks.checked_mul(self.sb.block_bytes() as u64).and_then(|len| usize::try_from(len).ok());
+        self.extend(pool, len.ok_or(Error::Invalid("a pool past 2^63-1 bytes"))?).await
+    }
+
+    /// Gives back `blocks` of a pool's unwritten blocks, or all it has where
+    /// it has fewer: how many went.
+    pub fn cut_blocks(&self, pool: &mut Reservation, blocks: u64) -> u64 {
+        let cut = blocks.min(self.unwritten_blocks(pool));
+        // Placed writes take the lowest blocks first, so the highest are unwritten.
+        self.cut(pool, pool.range().1 - cut * self.sb.block_bytes() as u64);
+        cut
+    }
+
+    /// The blocks of `reservation` not yet written.
+    pub fn unwritten_blocks(&self, reservation: &Reservation) -> u64 {
+        self.reservations.borrow().active.get(&reservation.id).map_or(0, Reserved::unwritten)
+    }
+
+    /// Writes `data` at `offset` into the lowest blocks of a pool
+    /// ([`Self::reserve_blocks`]) not yet written, wherever they lie: one
+    /// extent for each run of them the bytes take. As
+    /// [`Self::write_reserved`] otherwise; a pool with too few blocks left
+    /// refuses what does not fit.
+    pub async fn write_placed(&self, pool: &mut Reservation, offset: u64, data: &[u8], now: i64) -> Result<usize> {
+        if !Rc::ptr_eq(&pool.owner, &self.reservations) {
+            return Err(Error::Invalid("reservation belongs to another mount"));
+        }
+        let block = self.sb.block_bytes() as u64;
+        if data.is_empty() || offset.checked_add(data.len() as u64).is_none_or(|end| i64::try_from(end).is_err()) {
+            return Err(Error::Invalid("a placed write of nothing or past 2^63-1"));
+        }
+        let _slot = self.data_slot().await;
+        self.observe(now);
+        let bucket = u64::from(self.sb.member.bucket_sectors);
+        let end = offset + data.len() as u64;
+        let mut done = 0;
+        while done < data.len() {
+            let at = offset + done as u64;
+            let wanted = (end.div_ceil(block) - at / block) as u32;
+            // The lowest unwritten block, and those after it in its run.
+            let (ino, sector, took) = {
+                let reservations = self.reservations.borrow();
+                let reserved = reservations.active.get(&pool.id).ok_or(Error::Invalid("a pool with no block left"))?;
+                let (run, first) = reserved
+                    .runs
+                    .iter()
+                    .find_map(|r| (0..r.blocks).find(|b| r.written & 1 << b == 0).map(|b| (r, b)))
+                    .ok_or(Error::Invalid("a pool with no block left"))?;
+                let free = (first..run.blocks).take_while(|b| run.written & 1 << b == 0).count() as u32;
+                (reserved.ino, run.sector + u64::from(first) * reserved.block_sectors, free.min(wanted))
+            };
+            let stop = end.min((at / block + u64::from(took)) * block);
+            let version = match self.data_version().await {
+                Ok(version) => version,
+                Err(_) if done > 0 => return Ok(done),
+                Err(e) => return Err(e),
+            };
+            let n = match self.write_run(ino, at, &data[done..(stop - offset) as usize], now, version, Some((pool.id, sector))).await {
+                Ok(n) => n,
+                Err(_) if done > 0 => return Ok(done),
+                Err(e) => return Err(e),
+            };
+            let mut reservations = self.reservations.borrow_mut();
+            let mut st = self.st.borrow_mut();
+            let reserved = reservations.active.get_mut(&pool.id).expect("a pool being written");
+            let block_sectors = reserved.block_sectors;
+            let run = reserved
+                .runs
+                .iter_mut()
+                .find(|r| (r.sector..r.sector + u64::from(r.blocks) * block_sectors).contains(&sector))
+                .expect("the run just written");
+            let first = ((sector - run.sector) / block_sectors) as u32;
+            for b in first..first + ((at + n as u64).div_ceil(block) - at / block) as u32 {
+                run.written |= 1 << b;
+                st.alloc.unpin(run.sector / bucket);
+            }
+            // A pool lives as long as its file is written, and grows again
+            // once spent: only its runs written whole go.
+            reserved.runs.retain(|r| r.written.count_ones() < r.blocks);
+            done += n;
+        }
+        Ok(done)
+    }
+
     pub(super) async fn create_symlink(&self, dir: u64, name: &[u8], target: &[u8], owner: Owner, now: i64) -> Result<Inode> {
         if target.is_empty() || target.len() >= 4096 || target.contains(&0) {
             return Err(Error::Invalid("symlink target empty, holding NUL or past 4095 bytes"));

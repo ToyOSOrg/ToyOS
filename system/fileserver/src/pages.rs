@@ -21,19 +21,32 @@
 //! nothing reads the volume for them
 //! meanwhile, and a write refused part way is cut back to what it put.
 //!
+//! **Holders write too**, without a request, against a credit of pages this
+//! server granted on a volume that holds room for them ([`Volume::grant`]):
+//! [`BULK`] at a time while a holder minted to write lives, taken back when
+//! the last holder goes. Their writes move the object's size and time past
+//! the volume's, so while it has an object a file's size and time are the
+//! object's ([`Files::meta`]), which the volume takes at each write-back. A
+//! holder's dirtying is told once ([`Notice::Dirtied`]); a write-back, a sync
+//! or the last holder's going takes the pages it dirtied from the object.
+//!
 //! **A server with no pager** (ROOT's, whose files are immutable) reads and
 //! writes the volume directly, and each open holds its own node.
 
 use std::collections::BTreeMap;
 
-use toyos::fs::Error;
-use toyos::paged::{Notice, Refused, PAGE, PAGED_RANGE_PAGES};
+use toyos::fs::{Error, Record};
+use toyos::paged::{Notice, PagedStatus, Refused, PAGE, PAGED_RANGE_PAGES, PAGED_RECORD};
 use toyos::shm::Bytes;
 
-use crate::volume::{Buf, Node, Reserved, Volume, Window, Writes};
+use crate::volume::{Buf, Kind, Meta, Node, Reserved, Volume, Window, Writes};
 
 /// The most pages one supply or write-back carries.
 const RANGE: u64 = PAGED_RANGE_PAGES;
+
+/// The pages of credit an object's holders are granted at once, and kept
+/// topped up to: room the volume holds and no holder may have dirtied yet.
+pub const BULK: u64 = 64;
 
 /// A pager's calls on its objects, by id, as `toyos::paged::Pager` makes them.
 pub trait Pager {
@@ -50,6 +63,11 @@ pub trait Pager {
     fn writeback_begin(&self, id: u64, first: u64, count: u64) -> Result<[u64; 8], Refused>;
     fn writeback_end(&self, id: u64, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused>;
     fn release(&self, id: u64) -> Result<(), Refused>;
+    fn grant(&self, id: u64, pages: u64) -> Result<u64, Refused>;
+    fn take_back(&self, id: u64) -> Result<u64, Refused>;
+    fn set_record(&self, id: u64, record: Option<&[u8; PAGED_RECORD]>, mtime: Option<u64>) -> Result<(), Refused>;
+    fn status(&self, id: u64) -> Result<PagedStatus, Refused>;
+    fn take_dirtied(&self, id: u64) -> Result<Option<(u64, u64)>, Refused>;
 }
 
 impl Pager for toyos::paged::Pager {
@@ -92,6 +110,21 @@ impl Pager for toyos::paged::Pager {
     fn release(&self, id: u64) -> Result<(), Refused> {
         toyos::paged::Pager::release(self, id)
     }
+    fn grant(&self, id: u64, pages: u64) -> Result<u64, Refused> {
+        toyos::paged::Pager::grant(self, id, pages)
+    }
+    fn take_back(&self, id: u64) -> Result<u64, Refused> {
+        toyos::paged::Pager::take_back(self, id)
+    }
+    fn set_record(&self, id: u64, record: Option<&[u8; PAGED_RECORD]>, mtime: Option<u64>) -> Result<(), Refused> {
+        toyos::paged::Pager::set_record(self, id, record, mtime)
+    }
+    fn status(&self, id: u64) -> Result<PagedStatus, Refused> {
+        toyos::paged::Pager::status(self, id)
+    }
+    fn take_dirtied(&self, id: u64) -> Result<Option<(u64, u64)>, Refused> {
+        toyos::paged::Pager::take_dirtied(self, id)
+    }
 }
 
 /// What a client is answered for a refusal of the object's.
@@ -113,6 +146,15 @@ struct File {
     held: bool,
     /// The pages written since their last write-back: a range, `lo..hi`.
     dirty: Option<(u64, u64)>,
+    /// A holder dirtied pages the object has not told the range of yet.
+    holder_dirty: bool,
+    /// Credit is granted, and kept topped up, for a holder minted to write.
+    granting: bool,
+    /// A holder may have written it: its size and time are the object's,
+    /// past the volume's, until the volume takes them with no holder left.
+    moved: bool,
+    /// What its holders read of it beside its size and time.
+    record: Record,
     /// When it was last used, by [`Files::tick`].
     used: u64,
     anonymous: bool,
@@ -126,7 +168,13 @@ impl File {
     }
 
     fn droppable(&self) -> bool {
-        self.opens == 0 && !self.held && self.dirty.is_none()
+        self.opens == 0 && !self.held && self.dirty.is_none() && !self.holder_dirty
+    }
+
+    /// Whether pages may wait for its write-back: ones it knows, or ones a
+    /// holder may have dirtied without a notice yet.
+    fn may_owe(&self) -> bool {
+        !self.anonymous && (self.dirty.is_some() || self.holder_dirty || self.held)
     }
 }
 
@@ -167,16 +215,60 @@ impl<P: Pager> Files<P> {
         self.files.get(&identity).map(|f| f.object)
     }
 
-    /// A holder of `identity`'s object went out.
-    pub fn held(&mut self, identity: u64) {
-        if let Some(f) = self.files.get_mut(&identity) {
-            f.held = true;
+    /// A holder of `identity`'s object went out, minted to write where
+    /// `writes`: its credit is granted where the volume holds room for it.
+    pub fn held(&mut self, volume: &mut dyn Volume, identity: u64, writes: bool) {
+        let Some(f) = self.files.get_mut(&identity) else { return };
+        f.held = true;
+        // A holder writes where the object is anonymous or the volume grants it credit.
+        f.moved |= writes && (f.anonymous || volume.grants());
+        if writes && !f.anonymous && !f.granting && volume.grants() {
+            f.granting = true;
+            self.top_up(volume, identity);
+        }
+    }
+
+    /// The credit of `identity`'s holders made up to [`BULK`] again, room
+    /// for it held first. A volume that holds no more room leaves it short,
+    /// and holders ask this server, which answers the write.
+    fn top_up(&mut self, volume: &mut dyn Volume, identity: u64) {
+        let Some(f) = self.files.get(&identity).filter(|f| f.granting) else { return };
+        let (object, node) = (f.object, f.node);
+        let Ok(status) = self.pg().status(object) else { return };
+        let want = BULK.saturating_sub(status.credit);
+        if want == 0 || volume.grant(node, want).is_err() {
+            return;
+        }
+        if let Err(why) = self.pg().grant(object, want) {
+            println!("fileserver: file {identity}'s credit was not granted ({why:?})");
+            volume.ungrant(node, want);
+        }
+    }
+
+    /// What `identity` is, its size and time its object's while a holder may
+    /// have moved them past the volume's.
+    pub fn meta(&self, identity: u64, meta: Meta) -> Meta {
+        let Some(f) = self.files.get(&identity).filter(|f| f.moved && meta.kind == Kind::File) else { return meta };
+        match self.pg().status(f.object) {
+            Ok(status) => Meta { size: status.size, mtime: status.mtime, ..meta },
+            Err(why) => {
+                println!("fileserver: file {identity}'s object would not say its size ({why:?})");
+                meta
+            }
+        }
+    }
+
+    /// `identity`'s object stamped as last written at `mtime`, where it has one.
+    pub fn stamp(&self, identity: u64, mtime: u64) -> Result<(), Error> {
+        match self.files.get(&identity) {
+            Some(f) => self.pg().set_record(f.object, None, Some(mtime)).map_err(word),
+            None => Ok(()),
         }
     }
 
     /// One line of what is held, for the server's.
     pub fn describe(&self) -> String {
-        let dirty = self.files.values().filter(|f| f.dirty.is_some()).count();
+        let dirty = self.files.values().filter(|f| f.dirty.is_some() || f.holder_dirty).count();
         format!("{} paged files, {dirty} dirty", self.files.len())
     }
 
@@ -188,21 +280,22 @@ impl<P: Pager> Files<P> {
         Some(f)
     }
 
-    /// After an open of `identity` that truncated: its object holds
-    /// no page of before. The volume went first, so a refused open changed
-    /// nothing, and nothing writes back between the two.
-    pub fn truncated(&mut self, identity: u64) -> Result<(), Error> {
+    /// After an open of `identity` at `node` that truncated: its object
+    /// holds no page of before, and the volume's time. The volume went first,
+    /// so a refused open changed nothing, and nothing writes back between the
+    /// two.
+    pub fn truncated(&mut self, volume: &mut dyn Volume, identity: u64, node: Node) -> Result<(), Error> {
         let Some(f) = self.files.get(&identity) else { return Ok(()) };
         let id = f.object;
         self.pg().resize(id, 0).map_err(word)?;
         self.files.get_mut(&identity).expect("found").dirty = None;
-        Ok(())
+        self.stamp(identity, volume.node_meta(node)?.mtime)
     }
 
     /// A description opened `identity` at `node`, which the volume holds once
-    /// more for it. The object's file holds it once for good, so a second
-    /// hold goes back at once.
-    pub fn opened(&mut self, volume: &mut dyn Volume, identity: u64, node: Node) -> Result<(), Error> {
+    /// more for it, its holders to read `record` of it. The object's file
+    /// holds it once for good, so a second hold goes back at once.
+    pub fn opened(&mut self, volume: &mut dyn Volume, identity: u64, node: Node, record: Record) -> Result<(), Error> {
         assert!(!volume.memory() || self.pager.is_some(), "memory files require a pager");
         if self.pager.is_none() {
             return Ok(());
@@ -227,9 +320,26 @@ impl<P: Pager> Files<P> {
                 Err(why) => return Err(word(why)),
             }
         };
-        self.files.insert(identity, File { object, node, opens: 1, held: false, dirty: None, used: 0, anonymous: volume.memory() });
+        let file = File {
+            object,
+            node,
+            opens: 1,
+            held: false,
+            dirty: None,
+            holder_dirty: false,
+            granting: false,
+            moved: false,
+            record,
+            used: 0,
+            anonymous: volume.memory(),
+        };
+        self.files.insert(identity, file);
         self.by_object.insert(object, identity);
         self.touch(identity);
+        if let Err(why) = self.pg().set_record(object, Some(&record.encode()), Some(meta.mtime)) {
+            self.forget(volume, identity);
+            return Err(word(why));
+        }
         Ok(())
     }
 
@@ -246,9 +356,14 @@ impl<P: Pager> Files<P> {
         }
     }
 
-    /// A removed name does not invalidate an inode the volume still holds.
+    /// A removed name does not invalidate an inode the volume still holds:
+    /// its holders read that it has none.
     pub fn unlinked(&mut self, volume: &mut dyn Volume, identity: u64) -> Result<(), Error> {
-        let Some(f) = self.files.get(&identity) else { return Ok(()) };
+        let Some(f) = self.files.get_mut(&identity) else { return Ok(()) };
+        f.record.nlink = 0;
+        let (object, record) = (f.object, f.record.encode());
+        self.pg().set_record(object, Some(&record), None).map_err(word)?;
+        let f = &self.files[&identity];
         match volume.node_meta(f.node) {
             Ok(_) => self.collect_unlinked(volume, identity),
             Err(Error::Stale) => { self.forget(volume, identity); Ok(()) }
@@ -283,7 +398,7 @@ impl<P: Pager> Files<P> {
         if self.pager.is_none() || !self.files.contains_key(&identity) {
             return volume.read(node, offset, &mut Window(out));
         }
-        let size = volume.node_meta(node)?.size;
+        let size = self.meta(identity, volume.node_meta(node)?).size;
         if offset >= size {
             return Ok(0);
         }
@@ -315,7 +430,8 @@ impl<P: Pager> Files<P> {
     fn fill(&mut self, volume: &mut dyn Volume, identity: u64, first: u64, count: u64) -> Result<u64, Error> {
         let Some(f) = self.files.get(&identity) else { return Ok(0) };
         let node = f.node;
-        let size = volume.node_meta(node)?.size;
+        // The volume reads what lies past its own size as the hole it is.
+        let size = self.meta(identity, volume.node_meta(node)?).size;
         let end = (first + count).min(size.div_ceil(PAGE));
         let mut buf = std::mem::take(&mut self.buf);
         let mut at = first;
@@ -417,10 +533,11 @@ impl<P: Pager> Files<P> {
         if self.pager.is_none() || !self.files.contains_key(&identity) {
             return volume.write(node, offset, data);
         }
-        let reserved = volume.reserve(node, offset, data.len() as u64)?;
-        let old = reserved.size;
-        self.touch(identity);
         let id = self.files[&identity].object;
+        // The object's size, which holders' writes move past the volume's.
+        let old = self.pg().status(id).map_err(word)?.size;
+        let reserved = volume.reserve(node, offset, data.len() as u64)?;
+        self.touch(identity);
         let mut put = Put { done: 0, held: false };
         let writing = Writing { identity, node, reserved, offset, data };
         let written = self.put(volume, &writing, &mut put);
@@ -443,7 +560,11 @@ impl<P: Pager> Files<P> {
                 Err(why) => println!("fileserver: file {identity}'s write would not end ({why:?}); its holders ask this server"),
             }
         }
-        written
+        written?;
+        self.stamp(identity, volume.node_meta(node)?.mtime)?;
+        // A holder asks this server once its credit is spent.
+        self.top_up(volume, identity);
+        Ok(())
     }
 
     /// The bytes of a write into the object, each absent page supplied dirty,
@@ -521,6 +642,10 @@ impl<P: Pager> Files<P> {
     /// changes nothing, then the object, before anything can write a page
     /// past the size back.
     pub fn truncate(&mut self, volume: &mut dyn Volume, identity: u64, node: Node, size: u64) -> Result<(), Error> {
+        if let Some(f) = self.files.get(&identity) {
+            let status = self.pg().status(f.object).map_err(word)?;
+            volume.adopt(node, status.size, status.mtime);
+        }
         volume.truncate(node, size)?;
         if !self.files.contains_key(&identity) {
             return Ok(());
@@ -531,19 +656,31 @@ impl<P: Pager> Files<P> {
             f.dirty = (lo < hi).then_some((lo, hi));
         }
         let id = f.object;
-        self.pg().resize(id, size).map_err(word)
+        self.pg().resize(id, size).map_err(word)?;
+        self.stamp(identity, volume.node_meta(node)?.mtime)
     }
 
     /// `identity`'s dirty pages written to the volume. A page dirtied again
     /// meanwhile, or whose write was refused, stays dirty.
     fn write_back(&mut self, volume: &mut dyn Volume, identity: u64) -> Result<(), Error> {
-        let Some(f) = self.files.get(&identity) else { return Ok(()) };
+        let Some(f) = self.files.get(&identity).filter(|f| f.may_owe()) else { return Ok(()) };
+        let (object, node) = (f.object, f.node);
+        // The pages holders dirtied first, then the size: a page whose write
+        // has not grown the size yet waits for the next write-back.
+        let taken = self.pg().take_dirtied(object).map_err(word)?;
+        let status = self.pg().status(object).map_err(word)?;
+        volume.adopt(node, status.size, status.mtime);
+        let f = self.files.get_mut(&identity).expect("found");
+        f.holder_dirty = false;
+        if let Some((first, count)) = taken {
+            f.dirtied(first, first + count);
+        }
         let Some((lo, hi)) = f.dirty else { return Ok(()) };
-        let node = f.node;
-        let size = volume.node_meta(node)?.size;
-        let hi = hi.min(size.div_ceil(PAGE));
+        let reach = status.size.div_ceil(PAGE);
+        let mut kept: Option<(u64, u64)> = (hi > reach).then_some((reach.max(lo), hi));
+        let hi = hi.min(reach);
+        let size = status.size;
         let mut buf = std::mem::take(&mut self.buf);
-        let mut kept: Option<(u64, u64)> = None;
         let mut failed = Ok(());
         let mut first = lo;
         while first < hi {
@@ -589,14 +726,39 @@ impl<P: Pager> Files<P> {
             first += count;
         }
         self.buf = buf;
-        self.files.get_mut(&identity).expect("found").dirty = kept;
+        let f = self.files.get_mut(&identity).expect("found");
+        f.dirty = kept;
+        // Nothing waits for its write-back and no holder can dirty a page:
+        // the room it holds for one goes back.
+        if kept.is_none() && !f.held && !f.holder_dirty {
+            volume.ungrant(node, u64::MAX);
+        }
+        self.settle(volume, identity);
         failed
+    }
+
+    /// Where no holder is left to write `identity` and no page it wrote
+    /// waits for a write-back, the volume takes the object's size and time,
+    /// and they are the volume's again.
+    fn settle(&mut self, volume: &mut dyn Volume, identity: u64) {
+        let Some(f) = self.files.get(&identity) else { return };
+        if !f.moved || f.held || f.dirty.is_some() || f.holder_dirty {
+            return;
+        }
+        let (object, node) = (f.object, f.node);
+        match self.pg().status(object) {
+            Ok(status) => {
+                volume.adopt(node, status.size, status.mtime);
+                self.files.get_mut(&identity).expect("found").moved = false;
+            }
+            Err(why) => println!("fileserver: file {identity}'s object would not say its size ({why:?})"),
+        }
     }
 
     /// Every dirty page to the volume, then the volume synced: the files
     /// whose entries or pages were refused, with why.
     pub fn sync(&mut self, volume: &mut dyn Volume) -> Result<Vec<(Node, Error)>, Error> {
-        let dirty: Vec<u64> = self.files.iter().filter(|(_, f)| f.dirty.is_some()).map(|(id, _)| *id).collect();
+        let dirty: Vec<u64> = self.files.iter().filter(|(_, f)| f.may_owe()).map(|(id, _)| *id).collect();
         let mut refused = Vec::new();
         for id in dirty {
             if let Err(e) = self.write_back(volume, id) {
@@ -621,7 +783,7 @@ impl<P: Pager> Files<P> {
         let owed: Vec<u64> = self
             .files
             .iter()
-            .filter(|(id, f)| f.dirty.is_some() && (Some(**id) == named || volume.carried(f.node)))
+            .filter(|(id, f)| f.may_owe() && (Some(**id) == named || volume.carried(f.node)))
             .map(|(id, _)| *id)
             .collect();
         for id in owed {
@@ -638,35 +800,56 @@ impl<P: Pager> Files<P> {
     /// Whether a change is not yet durable: a dirty page, or an entry the
     /// volume owes ([`Volume::owes`]).
     pub fn owes(&self, volume: &dyn Volume) -> bool {
-        self.files.values().any(|f| f.dirty.is_some()) || volume.owes()
+        self.files.values().any(|f| f.dirty.is_some() || f.holder_dirty) || volume.owes()
     }
 
-    /// What the pager's objects asked.
-    pub fn notice(&mut self, volume: &mut dyn Volume, notice: Notice) {
+    /// What the pager's objects asked: whether a write-back is owed.
+    pub fn notice(&mut self, volume: &mut dyn Volume, notice: Notice) -> bool {
         match notice {
             Notice::Requested { object, first, count } => {
-                let Some(&identity) = self.by_object.get(&object) else { return };
+                let Some(&identity) = self.by_object.get(&object) else { return false };
                 let count = count.min(RANGE);
                 // A reader waits for its pages until they are supplied or
                 // failed: a range the volume will not read, or holds none of,
                 // is failed.
                 let why = match self.fill(volume, identity, first, count) {
                     Ok(0) => "the volume holds none of them".to_string(),
-                    Ok(_) => return,
+                    Ok(_) => return false,
                     Err(e) => format!("{e:?}"),
                 };
                 println!("fileserver: pages {first}+{count} of file {identity} were not supplied ({why}); failing them");
                 if let Err(why) = self.pg().fail(object, first, count) {
                     println!("fileserver: and the failure was refused ({why:?})");
                 }
+                false
             }
             Notice::NoHolders { object } => {
-                if let Some(&identity) = self.by_object.get(&object) {
-                    self.files.get_mut(&identity).expect("an indexed object has a file").held = false;
-                    if let Err(e) = self.collect_unlinked(volume, identity) {
-                        println!("fileserver: unlinked file {identity} would not be collected ({e:?})");
-                    }
+                let Some(&identity) = self.by_object.get(&object) else { return false };
+                // No holder writes again: what one dirtied is this server's
+                // to know now, and the credit it did not spend is room again.
+                let taken = self.pg().take_dirtied(object);
+                let credit = self.pg().take_back(object);
+                let f = self.files.get_mut(&identity).expect("an indexed object has a file");
+                f.held = false;
+                if let Ok(Some((first, count))) = taken {
+                    f.dirtied(first, first + count);
+                    f.holder_dirty = false;
                 }
+                if std::mem::take(&mut f.granting) && let Ok(credit) = credit {
+                    volume.ungrant(f.node, credit);
+                }
+                let owed = f.dirty.is_some() || f.holder_dirty;
+                self.settle(volume, identity);
+                if let Err(e) = self.collect_unlinked(volume, identity) {
+                    println!("fileserver: unlinked file {identity} would not be collected ({e:?})");
+                }
+                owed
+            }
+            Notice::Dirtied { object } => {
+                let Some(&identity) = self.by_object.get(&object) else { return false };
+                let f = self.files.get_mut(&identity).expect("an indexed object has a file");
+                f.holder_dirty = !f.anonymous;
+                f.holder_dirty
             }
         }
     }

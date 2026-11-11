@@ -1,6 +1,6 @@
-//! Paged objects (memory design §7, stage 7a): a pager process's memory,
-//! one object per file node, which holders read only through
-//! `SYS_PAGED_READ`. Nothing here is mapped.
+//! Paged objects: a pager process's memory, one object per file node, which
+//! holders read, write and stat through `SYS_PAGED_READ`, `SYS_PAGED_WRITE`
+//! and `SYS_PAGED_STAT`. Nothing here is mapped.
 //!
 //! **Two kinds.** A [`PagerObject`] is its process's one pager: its index of
 //! `capacity` pages ([`kernel::paged::Pages`]), its objects by id, its
@@ -8,24 +8,32 @@
 //! through it, so a pager holds one handle however many objects it serves. It
 //! neither duplicates nor transfers, so its last handle goes with its
 //! process, and that ends every object it serves: each reader answers `Gone`.
-//! A [`PagedHolderObject`] reads one object, and may be narrowed and sent.
+//! A [`PagedHolderObject`] reads one object, writes it where minted to, and
+//! may be narrowed and sent.
+//!
+//! **A holder's write never waits on its pager**: a page it cannot admit at
+//! once, absent, past the credit or the ceiling, refuses it whole before any
+//! byte lands, and the holder asks the pager instead. A holder's write stamps
+//! the object's modification time; the pager sets it for its own changes, and
+//! its record of the rest is bytes the kernel keeps and never reads.
 //!
 //! **Supply copies into fresh frames**, so no frame the pager still maps
 //! enters an object. A frame leaves at withdrawal, failure, shrink or the
 //! object's release: out of the index under the pager's lock, then freed,
 //! which a reader's pin defers to its last unpin.
 //!
-//! **A reader waits only on its pager.** An absent page is requested in the
-//! waiter's own record, linked on its pager's list, and the wait ends on a
-//! supply, a failure, a shrink, a release, the pager's end or a kill; a wait
-//! past the pager's report time is counted and logged overdue and goes on.
-//! A pager's own process is refused a holder's read, so no pager waits on a
-//! pager.
+//! **A reader waits only on its pager and on holders' copies.** An absent
+//! page is requested in the waiter's own record, linked on its pager's list,
+//! and the wait ends on a supply, a failure, a shrink, a release, the pager's
+//! end or a kill; a wait past the pager's report time is counted and logged
+//! overdue and goes on. A pager's own process is refused a holder's calls, so
+//! no pager waits on a pager.
 //!
-//! **A holder's read is atomic against its pager's writes**
-//! ([`kernel::paged::Object::read_begin`]): one that meets a write is answered
-//! `WouldBlock`, and the holder asks the pager, whose own reads its writes
-//! order.
+//! **A holder's read is atomic against every write**
+//! ([`kernel::paged::Object::read_begin`]): one that meets a pager's write is
+//! answered `WouldBlock`, and the holder asks the pager, whose own reads its
+//! writes order; one that meets only holders' writes, which wait on nothing
+//! but their copies, waits them out and reads again.
 //!
 //! **Lock order.** The pager's lock is innermost but for the allocator's. A
 //! copy to or from user memory holds pins, never the lock; no wait holds a
@@ -46,9 +54,12 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel::chunked::{Chunked, Stack};
-use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, Version, PAGE};
+use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, Version, Writer, PAGE};
 use kernel::sched::task::WaitClass;
-use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
+use toyos_abi::syscall::{
+    PagedNotice, PagedRange, PagedStat, PagedStatus, SyscallError, NOTICE_DIRTIED, NOTICE_NO_HOLDERS, NOTICE_REQUESTED,
+    PAGED_RECORD,
+};
 
 use crate::mm::pmm;
 use crate::process::Pid;
@@ -99,6 +110,10 @@ struct Entry {
     owned: bool,
     /// The last holder went and no notice has said so.
     no_holders: bool,
+    /// A holder dirtied pages and no notice has said so.
+    dirtied: bool,
+    /// The pager's record, which holders read beside the size and time.
+    record: [u8; PAGED_RECORD],
 }
 
 struct State {
@@ -109,6 +124,8 @@ struct State {
     requests: *mut Request,
     /// Entries whose `no_holders` is set.
     no_holders: usize,
+    /// Entries whose `dirtied` is set.
+    dirtied: usize,
     held: Held,
     gone: bool,
 }
@@ -186,6 +203,20 @@ impl State {
         (&mut self.pages, &mut entry.object)
     }
 
+    /// The object at `slot` owes a notice of holders' dirtying, or no longer
+    /// does: whether it is owed newly.
+    fn owe_dirtied(&mut self, slot: u32, owed: bool) -> bool {
+        let entry = self.entry_mut(slot);
+        if entry.dirtied == owed {
+            return false;
+        }
+        entry.dirtied = owed;
+        match owed {
+            true => self.dirtied += 1,
+            false => self.dirtied -= 1,
+        }
+        owed
+    }
 }
 
 pub struct PagerObject {
@@ -243,6 +274,7 @@ impl PagerObject {
             free,
             requests: ptr::null_mut(),
             no_holders: 0,
+            dirtied: 0,
             held: Held { core: Core::new(core_pages), spare, draining },
             gone: false,
         };
@@ -267,13 +299,13 @@ impl PagerObject {
         (state.pages.capacity() - state.pages.used()) as u64
     }
 
-    /// Whether a notice is owed: a request no notice has named, or a last
-    /// holder gone.
+    /// Whether a notice is owed: a request no notice has named, a last
+    /// holder gone, or a holder's dirtying.
     pub fn has_notices(&self) -> bool {
         let state = self.state.lock();
         // SAFETY: every node on the list is live while linked, under this lock.
         let unreported = requests(&state).any(|r| unsafe { !(*r).reported });
-        unreported || state.no_holders > 0
+        unreported || state.no_holders > 0 || state.dirtied > 0
     }
 
     /// A new object of `size` bytes: its id.
@@ -288,7 +320,8 @@ impl PagerObject {
         }
         let Some(slot) = state.free.pop() else { return SyscallError::ResourceExhausted.to_u64() };
         let object = if anonymous { state.pages.anonymous(slot, size) } else { state.pages.object(slot, size) };
-        state.entries[slot as usize] = Some(Entry { object, refs: 1, holders: 0, owned: true, no_holders: false });
+        state.entries[slot as usize] =
+            Some(Entry { object, refs: 1, holders: 0, owned: true, no_holders: false, dirtied: false, record: [0; PAGED_RECORD] });
         u64::from(slot)
     }
 
@@ -331,18 +364,19 @@ impl PagerObject {
         if core::mem::take(&mut entry.no_holders) {
             *no_holders -= 1;
         }
+        state.owe_dirtied(slot, false);
         self.unref_locked(state, slot);
     }
 
-    /// A holder of object `id`, which counts as one once its handle is
-    /// installed ([`PagedHolderObject::held`]).
-    pub fn holder(self: &Arc<Self>, id: u64) -> Result<Arc<PagedHolderObject>, SyscallError> {
+    /// A holder of object `id`, which writes it where `writes`, and counts
+    /// as one once its handle is installed ([`PagedHolderObject::held`]).
+    pub fn holder(self: &Arc<Self>, id: u64, writes: bool) -> Result<Arc<PagedHolderObject>, SyscallError> {
         let core = PagedHolderObject::new_core(0)?;
         let mut state = self.state.lock();
         let slot = state.live(id)?;
         state.entry_mut(slot).refs += 1;
         drop(state);
-        Ok(Arc::new(PagedHolderObject { core, named: Named { pager: Arc::clone(self), slot } }))
+        Ok(Arc::new(PagedHolderObject { core, named: Named { pager: Arc::clone(self), slot }, writes }))
     }
 
     /// A holder object's handles went.
@@ -372,6 +406,7 @@ impl PagerObject {
         }
         let entry = state.entries[slot as usize].take().expect("paged: a slot an object names is held");
         state.no_holders -= usize::from(entry.no_holders);
+        state.dirtied -= usize::from(entry.dirtied);
         let job = self.core.job();
         let State { pages, held, gone, .. } = state;
         pages.release(entry.object, &mut |phys| held.give_back(job, *gone, phys, true));
@@ -421,6 +456,19 @@ impl PagerObject {
                     }
                 }
                 state.no_holders = owed;
+                let mut owed = state.dirtied;
+                for slot in 0..state.entries.len() {
+                    if n == want || owed == 0 {
+                        break;
+                    }
+                    let Some(entry) = state.entries[slot].as_mut() else { continue };
+                    if core::mem::take(&mut entry.dirtied) {
+                        owed -= 1;
+                        batch[n] = PagedNotice { object: slot as u64, kind: NOTICE_DIRTIED, first: 0, count: 0 };
+                        n += 1;
+                    }
+                }
+                state.dirtied = owed;
                 n
             };
             // SAFETY: a `PagedNotice` is `UserSafe`: every byte of it is a
@@ -476,7 +524,7 @@ impl PagerObject {
                     // Whole, each copy counted as it ended; or nothing to copy.
                     Step::Done
                 } else if waits && !Self::unwritten(&state.entry(slot).object, &mut since) {
-                    Step::Written
+                    Step::Written { pager: state.entry(slot).object.pager_writing() }
                 } else if at >= size {
                     Step::Done
                 } else {
@@ -514,14 +562,26 @@ impl PagerObject {
                     let (gone, written) = {
                         let state = self.state.lock();
                         let object = &state.entry(slot).object;
-                        (state.gone || object.gone(), waits && !Self::unwritten(object, &mut since))
+                        let written = waits && !Self::unwritten(object, &mut since);
+                        (state.gone || object.gone(), written.then(|| object.pager_writing()))
                     };
                     // A frame copied as its pager ended is no byte to report.
                     if gone {
                         return SyscallError::Io.to_u64();
                     }
-                    if written {
-                        return SyscallError::WouldBlock.to_u64();
+                    match written {
+                        Some(true) => return SyscallError::WouldBlock.to_u64(),
+                        // What was copied may be a holder's write in part: wait
+                        // it out and read again.
+                        Some(false) => {
+                            if let Err(e) = self.wait_written(slot, offset, want) {
+                                return e.to_u64();
+                            }
+                            done = 0;
+                            since = None;
+                            continue;
+                        }
+                        None => {}
                     }
                     // After the checks: bytes copied before the fault count only
                     // as every copied chunk's do.
@@ -529,7 +589,14 @@ impl PagerObject {
                         return if done > 0 { done as u64 } else { SyscallError::BadAddress.to_u64() };
                     }
                 }
-                Step::Written => return SyscallError::WouldBlock.to_u64(),
+                Step::Written { pager: true } => return SyscallError::WouldBlock.to_u64(),
+                Step::Written { pager: false } => {
+                    if let Err(e) = self.wait_written(slot, offset, want) {
+                        return e.to_u64();
+                    }
+                    done = 0;
+                    since = None;
+                }
                 Step::Done => return done as u64,
                 Step::Gone if done > 0 => return done as u64,
                 Step::Gone => return SyscallError::Gone.to_u64(),
@@ -572,6 +639,32 @@ impl PagerObject {
                 since.is_some()
             }
         }
+    }
+
+    /// A holder's read of `len` bytes at `offset` waits out the holders'
+    /// writes it met: until none is under way, a pager's write begins, or
+    /// the object or the pager ends. Past the report time it is reported
+    /// overdue, as a wait for a page is, and goes on.
+    fn wait_written(&self, slot: u32, offset: u64, len: usize) -> Result<(), SyscallError> {
+        let ready = || {
+            let state = self.state.lock();
+            let object = &state.entry(slot).object;
+            state.gone || object.gone() || object.read_begin().is_some() || object.pager_writing()
+        };
+        let parkable = crate::scheduler::Parkable::at_entry();
+        let began = crate::clock::now();
+        let report = Deadline::at(began + self.report);
+        if watch::wait_until(&parkable, &self.changed, 0, WaitClass::Io, report, ready).is_err() {
+            return Err(SyscallError::Gone);
+        }
+        if !ready() {
+            let (first, count) = (offset / PAGE, (len as u64).div_ceil(PAGE).max(1));
+            let _overdue = Overdue::begin(self, slot, first, count, began);
+            if watch::wait_until(&parkable, &self.changed, 0, WaitClass::Io, Deadline::never(), ready).is_err() {
+                return Err(SyscallError::Gone);
+            }
+        }
+        Ok(())
     }
 
     /// Under the lock: pin the present pages of `range`, at most [`CHUNK`],
@@ -630,7 +723,7 @@ impl PagerObject {
         let slot = state.live(id)?;
         let entry = state.entry_mut(slot);
         entry.refs += 1;
-        entry.object.write_begin();
+        entry.object.write_begin(Writer::Pager);
         Ok(slot)
     }
 
@@ -638,7 +731,7 @@ impl PagerObject {
     /// everything it was given: its reference goes.
     fn write_end(&self, slot: u32, whole: bool) {
         let mut state = self.state.lock();
-        state.entry_mut(slot).object.write_end(whole);
+        state.entry_mut(slot).object.write_end(whole, Writer::Pager);
         self.unref_locked(&mut state, slot);
     }
 
@@ -812,7 +905,7 @@ impl PagerObject {
                 while count < CHUNK && (pos - offset) < src.len() as u64 {
                     let page = pos / PAGE;
                     let (pages, object) = state.split(slot);
-                    match pages.write_pin(object, page) {
+                    match pages.admit(object, page, Writer::Pager) {
                         Ok(phys) => {
                             assert!(pmm::pin_range(phys, PAGE as usize), "paged: a frame's pins overflowed");
                             let within = (pos % PAGE) as usize;
@@ -851,8 +944,9 @@ impl PagerObject {
                     let (pages, object) = state.split(slot);
                     if k < copied {
                         pages.write_unpin(object, page, phys, page * PAGE + (within + n) as u64);
-                    } else {
-                        pages.write_abandon(object, page, phys);
+                    } else if let Some(frame) = pages.write_abandon(object, page, phys) {
+                        let gone = state.gone;
+                        state.held.give_back(self.core.job(), gone, frame, true);
                     }
                 }
             }
@@ -892,16 +986,19 @@ impl PagerObject {
             return SyscallError::InvalidArgument.to_u64();
         }
         let resized = self.removing(id, |pages, object, out| {
-            if let Some(phys) = pages.resize(object, size, &mut |f| out(f)) {
+            let tail = pages.resize(object, size, &mut |f| out(f))?;
+            if let Some(phys) = tail {
                 let within = (size % PAGE) as usize;
                 // SAFETY: the last page's frame, the object's while the lock is
                 // held: zeroed past the size through the direct map, never
                 // through a reference, as a reader may copy it meanwhile.
                 unsafe { core::ptr::write_bytes(DirectMap::from_phys(phys).as_mut_ptr::<u8>().add(within), 0, PAGE as usize - within) };
             }
+            Ok(())
         });
         match resized {
-            Ok(()) => 0,
+            Ok(Ok(())) => 0,
+            Ok(Err(why)) => word(why).to_u64(),
             Err(e) => e.to_u64(),
         }
     }
@@ -930,6 +1027,254 @@ impl PagerObject {
             Err(why) => word(why).to_u64(),
         }
     }
+
+    /// `f` over the live object `id`, under the lock.
+    fn on_live<R>(&self, id: u64, f: impl FnOnce(&mut State, u32) -> R) -> Result<R, SyscallError> {
+        let mut state = self.state.lock();
+        let slot = state.live(id)?;
+        Ok(f(&mut state, slot))
+    }
+
+    /// Holders may turn `pages` more pages of object `id` dirty: the credit now.
+    pub fn grant(&self, id: u64, pages: u64) -> Result<u64, SyscallError> {
+        self.on_live(id, |state, slot| state.entry_mut(slot).object.grant(pages))
+    }
+
+    /// The credit of object `id` holders have not spent, taken back.
+    pub fn take_back(&self, id: u64) -> Result<u64, SyscallError> {
+        self.on_live(id, |state, slot| state.entry_mut(slot).object.take_back())
+    }
+
+    /// Object `id`'s record, where given, and modification time, where given.
+    pub fn set_record(&self, id: u64, record: Option<[u8; PAGED_RECORD]>, mtime: Option<u64>) -> Result<(), SyscallError> {
+        self.on_live(id, |state, slot| {
+            let entry = state.entry_mut(slot);
+            if let Some(record) = record {
+                entry.record = record;
+            }
+            if let Some(mtime) = mtime {
+                entry.object.stamp(mtime);
+            }
+        })
+    }
+
+    pub fn status(&self, id: u64) -> Result<PagedStatus, SyscallError> {
+        self.on_live(id, |state, slot| {
+            let object = &state.entry(slot).object;
+            PagedStatus { size: object.size(), mtime: object.mtime(), credit: object.credit() }
+        })
+    }
+
+    /// The pages of object `id` holders dirtied since the last call: a notice
+    /// not yet taken of them is owed no more.
+    pub fn take_dirtied(&self, id: u64) -> Result<PagedRange, SyscallError> {
+        self.on_live(id, |state, slot| {
+            state.owe_dirtied(slot, false);
+            let (first, count) = state.entry_mut(slot).object.take_dirtied().unwrap_or((0, 0));
+            PagedRange { first, count }
+        })
+    }
+
+    /// What a holder of the object at `slot` reads of it, of one moment.
+    fn stat(&self, slot: u32) -> Result<PagedStat, SyscallError> {
+        let state = self.state.lock();
+        let entry = state.entry(slot);
+        if state.gone || entry.object.gone() {
+            return Err(SyscallError::Gone);
+        }
+        Ok(PagedStat { size: entry.object.size(), mtime: entry.object.mtime(), record: entry.record })
+    }
+
+    /// A holder's write of `src` at `offset` into the object at `slot`:
+    /// admitted whole ([`Pages::holder_fits`]) or refused with nothing
+    /// written, then copied a chunk at a time, each chunk admitted in one
+    /// hold of the lock. Only a race cuts it short: a page withdrawn, or the
+    /// credit spent by another write, between chunks. The caller holds the
+    /// holder, so the slot is the object's for the call.
+    fn holder_write(&self, slot: u32, src: &UserBytes, offset: u64) -> u64 {
+        if src.len() == 0 {
+            return 0;
+        }
+        let first = offset / PAGE;
+        let count = (offset + src.len() as u64).div_ceil(PAGE) - first;
+        {
+            let mut state = self.state.lock();
+            if state.gone {
+                return SyscallError::Gone.to_u64();
+            }
+            let (pages, object) = state.split(slot);
+            if let Err(why) = pages.holder_fits(object, first, count) {
+                return holder_word(why).to_u64();
+            }
+            object.write_begin(Writer::Holder);
+        }
+        let answer = self.holder_pages(slot, src, offset);
+        {
+            let mut state = self.state.lock();
+            let object = &mut state.entry_mut(slot).object;
+            object.write_end(true, Writer::Holder);
+            if wrote(answer) {
+                object.stamp(now());
+            }
+            if object.take_tell() && !state.gone && state.entry(slot).owned && state.owe_dirtied(slot, true) {
+                self.watch.post();
+            }
+        }
+        // A read that met this write waits for its end.
+        self.changed.post();
+        answer
+    }
+
+    fn holder_pages(&self, slot: u32, src: &UserBytes, offset: u64) -> u64 {
+        let end = offset + src.len() as u64;
+        let mut done = 0usize;
+        while done < src.len() {
+            // Each pinned page: its number, frame, where the bytes begin in
+            // it, and how many.
+            let mut pinned = [(0u64, 0u64, 0usize, 0usize); CHUNK];
+            let mut count = 0;
+            let mut stopped = None;
+            let mut pos = offset + done as u64;
+            // Pages that read as zeros, which the chunk begins with, and the
+            // frames drawn for them: one held aside, or a promise.
+            let mut aside = [None; CHUNK];
+            let mut fresh = 0;
+            {
+                let mut state = self.state.lock();
+                while count < CHUNK && pos < end {
+                    let page = pos / PAGE;
+                    let (pages, object) = state.split(slot);
+                    match pages.admit(object, page, Writer::Holder) {
+                        Ok(phys) => {
+                            assert!(pmm::pin_range(phys, PAGE as usize), "paged: a frame's pins overflowed");
+                            let within = (pos % PAGE) as usize;
+                            let n = (PAGE - pos % PAGE).min(end - pos) as usize;
+                            pinned[count] = (page, phys, within, n);
+                            count += 1;
+                            pos += n as u64;
+                        }
+                        Err(Refused::InvalidArgument) => {
+                            match pages.lookup(object, page) {
+                                Lookup::Zero | Lookup::PastEnd if count == 0 => {
+                                    fresh = ((end - pos).div_ceil(PAGE) as usize).min(CHUNK);
+                                }
+                                // The next chunk begins with it.
+                                Lookup::Zero | Lookup::PastEnd => {}
+                                Lookup::Gone => stopped = Some(SyscallError::Gone),
+                                // A page withdrawn or failed since the check.
+                                _ => stopped = Some(SyscallError::WouldBlock),
+                            }
+                            break;
+                        }
+                        Err(why) => {
+                            stopped = Some(holder_word(why));
+                            break;
+                        }
+                    }
+                }
+                if fresh > 0 {
+                    state.held.settle();
+                    let mut drawn = 0;
+                    while drawn < fresh {
+                        let ready = !state.held.spare.is_empty();
+                        match state.held.core.draw(ready) {
+                            Draw::Aside => aside[drawn] = state.held.spare.pop(),
+                            Draw::Pool => {}
+                            Draw::Beyond if pmm::promise(self.core.job(), 1) => state.held.core.promised(),
+                            Draw::Beyond => break,
+                        }
+                        drawn += 1;
+                    }
+                    if drawn == 0 {
+                        stopped = Some(SyscallError::WouldBlock);
+                    }
+                    fresh = drawn;
+                }
+            }
+            if fresh > 0 {
+                let mut frames = [0u64; CHUNK];
+                for (frame, aside) in frames.iter_mut().zip(aside).take(fresh) {
+                    *frame = match aside {
+                        Some(phys) => {
+                            // SAFETY: a frame held aside, out of the index and
+                            // unpinned, which nothing else reaches.
+                            unsafe { core::ptr::write_bytes(DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE as usize) };
+                            phys
+                        }
+                        None => pmm::alloc_promised().into_raw(),
+                    };
+                }
+                let mut state = self.state.lock();
+                let job = self.core.job();
+                for (k, &phys) in frames[..fresh].iter().enumerate() {
+                    let page = pos / PAGE;
+                    let admitted = match stopped.is_none() && count == k {
+                        true => {
+                            let (pages, object) = state.split(slot);
+                            pages.admit_fresh(object, page, phys, Writer::Holder)
+                        }
+                        false => Err(Refused::InvalidArgument),
+                    };
+                    match admitted {
+                        Ok(()) => {
+                            state.held.core.installed();
+                            assert!(pmm::pin_range(phys, PAGE as usize), "paged: a fresh frame's pins overflowed");
+                            let within = (pos % PAGE) as usize;
+                            let n = (PAGE - pos % PAGE).min(end - pos) as usize;
+                            pinned[count] = (page, phys, within, n);
+                            count += 1;
+                            pos += n as u64;
+                        }
+                        Err(why) => {
+                            let gone = state.gone;
+                            state.held.give_back(job, gone, phys, false);
+                            // A page present since the draw is the next chunk's to admit.
+                            if why != Refused::InvalidArgument {
+                                stopped.get_or_insert(holder_word(why));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut from = done;
+            // The pages whose bytes all came: a fault in the writer's buffer stops there.
+            let mut copied = 0;
+            let mut faulted = false;
+            for &(_, phys, within, n) in &pinned[..count] {
+                // SAFETY: a frame of the object, pinned and write-pinned above.
+                if unsafe { src.read_raw(from, DirectMap::from_phys(phys).as_mut_ptr::<u8>().add(within), n) }.is_err() {
+                    faulted = true;
+                    break;
+                }
+                from += n;
+                copied += 1;
+            }
+            {
+                let mut state = self.state.lock();
+                for (k, &(page, phys, within, n)) in pinned[..count].iter().enumerate() {
+                    let (pages, object) = state.split(slot);
+                    if k < copied {
+                        pages.write_unpin(object, page, phys, page * PAGE + (within + n) as u64);
+                    } else if let Some(frame) = pages.write_abandon(object, page, phys) {
+                        // A fresh page whose bytes never came holds none of the file.
+                        let gone = state.gone;
+                        state.held.give_back(self.core.job(), gone, frame, true);
+                    }
+                }
+            }
+            for &(_, phys, _, _) in &pinned[..count] {
+                pmm::unpin_range(phys, PAGE as usize);
+            }
+            done = from;
+            if faulted {
+                return refusal(done as u64, SyscallError::BadAddress);
+            }
+            if let Some(e) = stopped {
+                return refusal(done as u64, e);
+            }
+        }
+        done as u64
+    }
 }
 
 /// Part of one pinned frame or unwritten anonymous page a read copies.
@@ -945,8 +1290,8 @@ enum Step {
     /// This many pieces were pinned.
     Copy(usize),
     Absent(u64),
-    /// A write met a holder's read.
-    Written,
+    /// A write met a holder's read: the pager's, or only holders'.
+    Written { pager: bool },
     Failed,
     Gone,
     Done,
@@ -957,12 +1302,37 @@ fn refusal(done: u64, e: SyscallError) -> u64 {
     if done > 0 { done } else { e.to_u64() }
 }
 
+/// Whether a write's answer counts bytes or pages that landed.
+fn wrote(answer: u64) -> bool {
+    answer > 0 && SyscallError::from_u64(answer).is_none()
+}
+
+/// What a write is stamped with: nanoseconds since the Unix epoch, as the
+/// file servers stamp their volumes, or 0 where the machine has no time.
+fn now() -> u64 {
+    crate::clock::utc_nanos().unwrap_or(0)
+}
+
 fn word(why: Refused) -> SyscallError {
     match why {
         Refused::Gone => SyscallError::Gone,
         Refused::PastEnd | Refused::InvalidArgument => SyscallError::InvalidArgument,
+        Refused::Absent => SyscallError::NotFound,
         Refused::NoRoom => SyscallError::ResourceExhausted,
-        Refused::DirtyFull => SyscallError::WouldBlock,
+        Refused::DirtyFull | Refused::NoCredit => SyscallError::WouldBlock,
+        Refused::Sealed => SyscallError::Busy,
+    }
+}
+
+/// A holder's write refused: whatever the pager can do instead of it —
+/// supply a page, grant credit, write back or make room — sends the holder
+/// to the pager.
+fn holder_word(why: Refused) -> SyscallError {
+    match why {
+        Refused::Gone => SyscallError::Gone,
+        Refused::Sealed => SyscallError::Busy,
+        Refused::Absent | Refused::NoCredit | Refused::DirtyFull | Refused::NoRoom => SyscallError::WouldBlock,
+        Refused::PastEnd | Refused::InvalidArgument => SyscallError::InvalidArgument,
     }
 }
 
@@ -1087,11 +1457,13 @@ impl ZeroHandles for PagerObject {
         for slot in 0..state.entries.len() as u32 {
             let Some(entry) = state.entries[slot as usize].as_mut() else { continue };
             entry.no_holders = false;
+            entry.dirtied = false;
             if entry.owned {
                 self.let_go(&mut state, slot);
             }
         }
         state.no_holders = 0;
+        state.dirtied = 0;
         let job = self.core.job();
         while let Some(phys) = state.held.spare.pop().or_else(|| state.held.draining.pop()) {
             // SAFETY: a frame this pager drew and held aside, which nothing
@@ -1141,11 +1513,21 @@ impl Drop for Named {
 pub struct PagedHolderObject {
     pub(super) core: ObjectCore,
     named: Named,
+    /// Minted to write: its first handle carries `WRITE`.
+    writes: bool,
 }
 
 impl PagedHolderObject {
-    pub const RIGHTS: toyos_abi::handle::Rights =
+    const READS: toyos_abi::handle::Rights =
         toyos_abi::handle::Rights::READ.union(toyos_abi::handle::Rights::DUP).union(toyos_abi::handle::Rights::TRANSFER);
+
+    /// What its first handle carries.
+    pub fn rights(&self) -> toyos_abi::handle::Rights {
+        match self.writes {
+            true => Self::READS.union(toyos_abi::handle::Rights::WRITE),
+            false => Self::READS,
+        }
+    }
 
     /// Its handle is installed: it counts as a holder until its last goes.
     pub fn held(&self) {
@@ -1154,6 +1536,14 @@ impl PagedHolderObject {
 
     pub fn read(&self, out: &mut UserBytesMut, offset: u64) -> u64 {
         self.named.pager.read(self.named.slot, out, offset, true)
+    }
+
+    pub fn write(&self, src: &UserBytes, offset: u64) -> u64 {
+        self.named.pager.holder_write(self.named.slot, src, offset)
+    }
+
+    pub fn stat(&self) -> Result<PagedStat, SyscallError> {
+        self.named.pager.stat(self.named.slot)
     }
 }
 

@@ -66,7 +66,7 @@ fn main() {
     anonymous_contents(&bytes);
     assert_eq!(pager.room(), Ok(0), "a zero-hole read needs no quota");
     let object = pager.object(4096).expect("pagerprobe: an object");
-    let own = pager.holder(object).expect("pagerprobe: a holder for itself");
+    let own = pager.holder(object, false).expect("pagerprobe: a holder for itself");
     // The handle is a holder, and this process a pager: refused by the kernel.
     assert_eq!(
         Paged::received(own).err(),
@@ -75,8 +75,8 @@ fn main() {
     );
     println!("pagerprobe: a pager is refused a holder's read");
 
-    let theirs = pager.holder(object).expect("pagerprobe: a holder to hand on");
-    let memory = pager.holder(anonymous).expect("pagerprobe: an anonymous holder");
+    let theirs = pager.holder(object, false).expect("pagerprobe: a holder to hand on");
+    let memory = pager.holder(anonymous, false).expect("pagerprobe: an anonymous holder");
     let mut helper = Command::new(SELF)
         .arg("--hold")
         .endow(HOLDER, theirs.into())

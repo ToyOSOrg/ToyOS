@@ -27,6 +27,7 @@ pub(crate) const EINVAL: i32 = 22;
 pub(crate) const ENFILE: i32 = 23;
 pub(crate) const EMFILE: i32 = 24;
 pub(crate) const ENOTTY: i32 = 25;
+pub(crate) const ETXTBSY: i32 = 26;
 pub(crate) const EFBIG: i32 = 27;
 pub(crate) const ENOSPC: i32 = 28;
 pub(crate) const EROFS: i32 = 30;
@@ -65,6 +66,7 @@ pub(crate) fn of(e: SyscallError) -> i32 {
         // A write whose reader is gone, and not `ENOENT`, which says the file does not exist.
         SyscallError::Gone => EPIPE,
         SyscallError::Io => EIO,
+        SyscallError::Busy => ETXTBSY,
         // The kernel's word for a full handle table and for no memory alike.
         SyscallError::ResourceExhausted => ENOMEM,
         SyscallError::NotSupported => EOPNOTSUPP,
