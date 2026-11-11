@@ -64,9 +64,47 @@ pub fn microcode_cpu() -> Option<Result<toyos_microcode::Cpu, &'static str>> {
 
 /// What the loader says about the CPU as firmware handed it over, or why the
 /// kernel cannot run on it. A UEFI x86-64 loader runs in long mode at CPL 0,
-/// the state the kernel's entry takes, so there is nothing to say or refuse.
+/// the state the kernel's entry takes; what is left to refuse is a CPU with
+/// no execute-disable, which the boot map's data pages are mapped with.
 pub fn cpu_as_entered() -> Result<Option<alloc::string::String>, alloc::string::String> {
+    use core::arch::x86_64::__cpuid;
+    // CPUID.80000001H:EDX[20] (SDM Vol. 2A, CPUID).
+    let has_nx = __cpuid(0x8000_0000).eax >= 0x8000_0001 && __cpuid(0x8000_0001).edx & 1 << 20 != 0;
+    if !has_nx {
+        return Err(alloc::string::String::from(
+            "CPU: no execute-disable (CPUID.80000001H:EDX[20]), so no boot map can keep its data from being executed",
+        ));
+    }
     Ok(None)
+}
+
+/// The pages the boot map holds executable beside the kernel's text: the one
+/// the switch to it runs from, and the one each AP starts in.
+pub fn code_pages() -> [u64; 2] {
+    [switch_to_kernel as *const () as u64 & !0xFFF, encoding::AP_TRAMPOLINE]
+}
+
+// Sixteen-byte aligned and eight bytes long, so it lies in one page: the one
+// `code_pages` names. `rdi` is the boot map's root, `rsi` the kernel's entry
+// and `rdx` its argument.
+core::arch::global_asm!(
+    ".text",
+    ".p2align 4",
+    ".global switch_to_kernel",
+    "switch_to_kernel:",
+    "mov cr3, rdi",
+    "mov rdi, rdx",
+    "jmp rsi",
+);
+
+unsafe extern "sysv64" {
+    /// Load `root` and jump to `entry` with `args` in `rdi`, as the boot
+    /// protocol `toyos-abi::boot` and the kernel's entry define between them.
+    ///
+    /// # Safety
+    /// `root` maps this function's page executable at identity and `entry`
+    /// executable, with `IA32_EFER.NXE` set if it uses bit 63.
+    fn switch_to_kernel(root: u64, entry: u64, args: &KernelArgs) -> !;
 }
 
 /// The I/O port space the chipset's TCO block answers in.
@@ -101,21 +139,30 @@ pub mod pio {
 /// image's entry through the high half, handing it `args`.
 ///
 /// # Safety
-/// The boot map identity-maps the memory this code and its stack run from and
-/// maps the kernel image at `PHYS_OFFSET`; `image` is that relocated image,
+/// The boot map holds [`code_pages`] executable at identity and maps the
+/// kernel image at `PHYS_OFFSET`; `image` is that relocated image,
 /// `entry_offset` its entry point's offset in it, and `args` stays where it is
 /// until the kernel copies it.
 pub unsafe fn enter_kernel(image: (u64, u64), entry_offset: u64, args: &KernelArgs) -> ! {
+    const IA32_EFER: u32 = 0xC000_0080;
+    const NXE: u32 = 1 << 11;
     let root = args.boot_pml4_addr;
     let entry = crate::PHYS_OFFSET + image.0 + entry_offset;
-    // SAFETY: the caller's contract: the switch keeps this code and stack
-    // mapped, and the jump lands in the image it mapped.
-    unsafe { core::arch::asm!("mov cr3, {}", in(reg) root, options(nostack)) };
-    // SAFETY: the kernel image's entry point takes `&KernelArgs` in `rdi` by the boot
-    // protocol `toyos-abi::boot` and the kernel side of it define between them —
-    // `sysv64`, because this target's own `"C"` is the Microsoft convention —
-    // and this bootloader has no way to check the callee's signature, only to
-    // keep its own side of that contract.
-    let entry: extern "sysv64" fn(&KernelArgs) -> ! = unsafe { core::mem::transmute(entry) };
-    entry(args)
+    // SAFETY: `cpu_as_entered` found execute-disable, so the bit is this
+    // CPU's to set (SDM Vol. 3A §2.2.1), and under firmware's tables it
+    // changes nothing: an entry of theirs with bit 63 set already means it.
+    unsafe {
+        core::arch::asm!(
+            "rdmsr",
+            "or eax, {nxe}",
+            "wrmsr",
+            nxe = const NXE,
+            in("ecx") IA32_EFER,
+            out("eax") _,
+            out("edx") _,
+            options(nomem, nostack),
+        );
+    }
+    // SAFETY: the caller's contract, and `NXE` is set above.
+    unsafe { switch_to_kernel(root, entry, args) }
 }

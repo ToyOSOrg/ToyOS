@@ -5,8 +5,10 @@
 //! there is one mapping in the machine, and everything the kernel touches in
 //! that window has to be in it — its own image, the boot parameter, and the
 //! panel it reports a wedge on — and so is the loader's own image, wherever
-//! firmware put it: on x86-64 the switch runs from it. The kernel's text is
-//! read-only in it ([`Access`]).
+//! firmware put it: on x86-64 the switch runs from it. No page of it is both
+//! writable and executable: the kernel's text and the few pages of code
+//! beside it are read-only, and everything else is never executed
+//! ([`Access`]).
 //!
 //! Both architectures walk the same shape — a root (x86-64's PML4, AArch64's
 //! L0), a table per 512 GiB (PDPT, L1), a table per GiB (page directory, L2)
@@ -150,9 +152,13 @@ pub const PAGE_4K: u64 = 4096;
 /// Leaves in one table.
 const PAGES_PER_TABLE: u64 = PAGE_2M / PAGE_4K;
 
+/// The pages of code a [`Plan`] holds beside the kernel's text, at most.
+pub const CODE_PAGES: usize = 2;
+
 /// The 2 MiB pages split into 4 KiB leaves: the first and last a scanout
-/// covers only in part, and the same two of the kernel's text.
-const FINE_TABLES: usize = 4;
+/// covers only in part, the same two of the kernel's text, and the one around
+/// each page of code.
+const FINE_TABLES: usize = 4 + CODE_PAGES;
 
 /// The pool a builder needs: a root, every second-level table, every
 /// directory, and a table of 4 KiB leaves per split page.
@@ -197,6 +203,8 @@ pub enum Refusal {
     OffPage(u64),
     /// The kernel's text is not whole 4 KiB pages inside [`BOOT_MAP_BYTES`].
     Text { base: u64, len: u64 },
+    /// A page of code that is not a 4 KiB page the map holds.
+    Code(u64),
 }
 
 impl fmt::Display for Refusal {
@@ -225,6 +233,7 @@ impl fmt::Display for Refusal {
                 f,
                 "the kernel's text at {base:#x}+{len:#x} is not whole {PAGE_4K:#x}-byte pages below {BOOT_MAP_BYTES:#x}"
             ),
+            Self::Code(page) => write!(f, "the page of code at {page:#x} is not a {PAGE_4K:#x}-byte page the map holds"),
         }
     }
 }
@@ -243,13 +252,13 @@ pub enum Cache {
     Scanout,
 }
 
-/// What a leaf may be used for.
+/// What a leaf may be used for: never both written and executed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Access {
-    /// The kernel's text: read and executed, never written.
+    /// Code, the kernel's text and the pages named beside it: read and
+    /// executed, never written.
     Text,
-    /// Everything else: read and written. Where the architecture's encoding
-    /// can, never executed.
+    /// Everything else: read and written, never executed.
     Data,
 }
 
@@ -319,12 +328,15 @@ pub struct Plan<'a> {
     loader: (u64, u64),
     /// The kernel's text, `(base, end)`.
     text: (u64, u64),
+    /// The pages of code beside it, by base.
+    code: &'a [u64],
     typing: Typing<'a>,
 }
 
 impl<'a> Plan<'a> {
     /// Lay out [`BOOT_MAP_BYTES`], `scanout` and `loader`, typed by `typing`,
-    /// with `text` read-only, or say why they cannot be.
+    /// with `text` and `code` read-only and nothing else executable, or say
+    /// why they cannot be.
     ///
     /// `scanout` is firmware's framebuffer as firmware reports it. Under
     /// [`Typing::Firmware`] its base must be 2 MiB aligned and its length is
@@ -338,17 +350,24 @@ impl<'a> Plan<'a> {
     /// `loader` is the loader's own image as firmware loaded it, anywhere: the
     /// x86-64 loader's switch to these tables runs from it, so it is mapped at
     /// identity or the first fetch after the switch faults. It is plain memory,
-    /// so its pages are rounded out both ways and typed as the rest of memory.
+    /// so its pages are rounded out both ways and typed as the rest of memory,
+    /// and it is data but for the page of it `code` names.
     ///
     /// A byte of either past [`DIRECT_MAP_WINDOW`] is [`Refusal::PastWindow`].
     ///
     /// `text` is the kernel's text, `(base, len)` in whole 4 KiB pages inside
     /// the low map, where the loader places the kernel. A 2 MiB page it covers
     /// in part is split, so the pages beside it stay writable.
+    ///
+    /// `code` is at most [`CODE_PAGES`] 4 KiB pages, by base, inside the low
+    /// map or `loader`, that are executed through this map and never written
+    /// through it: the architecture's own, such as the page the switch runs
+    /// from. The 2 MiB page around each is split.
     pub fn new(
         scanout: Option<(u64, u64)>,
         loader: (u64, u64),
         text: (u64, u64),
+        code: &'a [u64],
         typing: Typing<'a>,
     ) -> Result<Self, Refusal> {
         let (base, len) = text;
@@ -366,8 +385,16 @@ impl<'a> Plan<'a> {
             scanout: None,
             loader: whole_pages(loader.0, loader.1)?,
             text: (base, base + len),
+            code,
             typing,
         };
+        assert!(code.len() <= CODE_PAGES, "a boot map holds {CODE_PAGES} pages of code and was given {}", code.len());
+        for &page in code {
+            let held = page < BOOT_MAP_BYTES || (plan.loader.0..plan.loader.0 + plan.loader.1).contains(&page);
+            if !page.is_multiple_of(PAGE_4K) || !held {
+                return Err(Refusal::Code(page));
+            }
+        }
         let scanout = scanout.map(|(base, len)| plan.scanout_extent(base, len)).transpose()?;
         let spans = [
             scanout.map(|(base, end)| (base / PAGE_2M * PAGE_2M, end)),
@@ -398,6 +425,9 @@ impl<'a> Plan<'a> {
             plan.split_scanout(base, end);
         }
         plan.split_partial(plan.text.0, plan.text.1);
+        for &page in code {
+            plan.split_partial(page, page + PAGE_4K);
+        }
         // Every leaf that is not the scanout typed once here, so `entries`
         // cannot meet a refusal.
         for page in 0..BOOT_MAP_BYTES / PAGE_2M {
@@ -600,10 +630,11 @@ impl<'a> Plan<'a> {
         self.typing.of(phys, size).expect("`new` typed every leaf")
     }
 
-    /// A leaf is the text's only where all of it is, and a page the text
-    /// covers in part is split, so no leaf is the text's in part.
+    /// A leaf is code only where all of it is, and a page code covers in part
+    /// is split, so no leaf is code in part.
     fn access_of(&self, phys: u64, size: u64) -> Access {
-        if self.text.0 <= phys && phys + size <= self.text.1 {
+        let code = size == PAGE_4K && self.code.contains(&phys);
+        if code || self.text.0 <= phys && phys + size <= self.text.1 {
             Access::Text
         } else {
             Access::Data

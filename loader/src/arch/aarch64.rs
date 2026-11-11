@@ -55,6 +55,12 @@ pub fn counter_hz() -> Option<u64> {
     (hz != 0).then_some(hz)
 }
 
+/// The pages the boot map holds executable beside the kernel's text: none,
+/// since the kernel's entry turns translation on from its own text.
+pub fn code_pages() -> [u64; 0] {
+    []
+}
+
 /// What the loader says about the CPU as firmware handed it over, or why the
 /// kernel cannot run on it: entered at EL2 on a CPU without FEAT_E2H0,
 /// `HCR_EL2.E2H` is RES1, so the kernel's entry cannot clear it and every

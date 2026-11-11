@@ -13,7 +13,11 @@ use alloc::vec::Vec;
 use kernel::cpu::TopologyRefusal;
 use kernel::sched::topology::CpuKeys;
 
-const TRAMPOLINE_PAGE: u64 = 0x8000;
+/// The page the boot map holds executable and read-only for this: an AP runs
+/// the trampoline there and writes nothing to it. The trampoline's absolute
+/// operands spell the same address.
+const TRAMPOLINE_PAGE: u64 = toyos_bootmap::x86_64::AP_TRAMPOLINE;
+const _: () = assert!(TRAMPOLINE_PAGE == 0x8000);
 const TRAMPOLINE_VECTOR: u8 = 0x08;
 const DATA_OFFSET: usize = 0xF00;
 
@@ -147,11 +151,13 @@ fn build_trampoline_data() -> TrampolineData {
             base: data_base + 0x40, // points to temp_gdt field
         },
         _pad3: [0; 2],
+        // Each already accessed, so loading one never writes its descriptor
+        // (SDM Vol. 3A §3.4.5.1) on a page the AP holds read-only.
         temp_gdt: [
             0x0000_0000_0000_0000, // null
-            0x00CF_9A00_0000_FFFF, // code32
-            0x00CF_9200_0000_FFFF, // data
-            0x00AF_9A00_0000_FFFF, // code64
+            0x00CF_9B00_0000_FFFF, // code32
+            0x00CF_9300_0000_FFFF, // data
+            0x00AF_9B00_0000_FFFF, // code64
         ],
         pm32_far: FarPointer { offset: pm32_addr, selector: 0x08 },
         _pad4: [0; 2],
@@ -323,7 +329,8 @@ global_asm!(
     "mov cr3, eax",
 
     // IA32_EFER from TrampolineData.efer (+0x80): long mode, and `NXE` before
-    // the kernel's tables, where bit 63 is otherwise a reserved bit.
+    // paging turns on under the boot map, where bit 63 is otherwise a
+    // reserved bit.
     "mov ecx, 0xC0000080",
     "mov eax, [0x8F80]",
     "mov edx, [0x8F84]",

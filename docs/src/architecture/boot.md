@@ -23,6 +23,9 @@
   by role, and the firmware's device paths for them travel as a record the kernel
   keeps read-only and hands the supervisor unread. The supervisor validates it
   once and refuses a record it cannot read.
+- The mapping the kernel runs under until it has built its own holds no page
+  both writable and executable, on either architecture, for every CPU that
+  starts under it.
 - On every boot it asks the firmware to overwrite memory before the next one
   (the TCG memory-overwrite request), so on firmware that defines and honours
   the request a reset leaves nothing of this boot in RAM for whoever boots
