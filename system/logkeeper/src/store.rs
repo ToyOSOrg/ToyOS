@@ -330,7 +330,8 @@ impl Volume {
     /// `budget` bytes of the boot this call, through part-sized writes and
     /// their continuations, each part synced as it fills; `note(lost)` is the
     /// line in place of a gap. Whether the file has every byte the replay
-    /// has; an `Err` is the volume refusing again.
+    /// has, which a file that does is synced to, whatever the budget left;
+    /// an `Err` is the volume refusing again.
     pub fn catch_up(
         &mut self,
         mut owed: impl FnMut(u64, usize) -> Owed,
@@ -349,11 +350,13 @@ impl Volume {
                     return Ok(false);
                 }
             }
-            if written >= budget {
-                return Ok(false);
-            }
-            let room = (self.rotate_at - self.size).min(budget - written);
+            let room = (self.rotate_at - self.size).min(budget.saturating_sub(written));
             match owed(self.through, room as usize) {
+                Owed::Nothing => {
+                    self.sync()?;
+                    return Ok(true);
+                }
+                _ if written >= budget => return Ok(false),
                 Owed::Text(text) => {
                     written += text.len() as u64;
                     self.write(&text)?;
@@ -361,10 +364,6 @@ impl Volume {
                 Owed::Gap { lost, at } => {
                     self.put(&note(lost))?;
                     self.through = at;
-                }
-                Owed::Nothing => {
-                    self.sync()?;
-                    return Ok(true);
                 }
             }
         }
@@ -541,6 +540,23 @@ mod tests {
             assert_eq!(fs::read(v.path()).unwrap(), want);
             assert_eq!(v.durable, v.size, "what was written is synced");
         }
+    }
+
+    /// **A catch-up whose budget runs out on the replay's last line is caught
+    /// up and synced**: nothing is left owed, so no later batch would come
+    /// for that tail, and the file thread would have no due write to wait for.
+    #[test]
+    fn a_budget_spent_on_the_replays_last_line_is_caught_up_and_synced() {
+        let tmp = toyos_tmpdir::TempDir::new("logkeeper-store");
+        let dir = tmp.path().to_str().unwrap();
+        let hub = Hub::start(1 << 16, None);
+        let mut v = Volume::open(dir, Some(STEM.into()), 1 << 16, |_| {}).unwrap();
+        for n in 0..4 {
+            hub.append(&line(n), None);
+        }
+        let caught = v.catch_up(|at, max| hub.owed(at, max), note, hub.end(), |_| {}).unwrap();
+        assert!(caught && v.through() == hub.end(), "the file has every byte");
+        assert_eq!((v.durable, v.durable_through), (v.size, v.through), "and they are synced");
     }
 
     /// A stop whose reopen is refused after an unsynced write: the file is
