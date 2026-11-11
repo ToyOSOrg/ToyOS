@@ -669,9 +669,10 @@ fn start_kernel(kernel: LoadedKernel, kernel_section: vec::Vec<u8>, cmdline: vec
     mem::forget(cmdline);
 
     let image = (kernel_phys, kernel_args.kernel_memory_size);
-    // SAFETY: `kernel_args.boot_pml4_addr` is the table built above,
-    // identity-mapping low memory and this loader's own image (so the code and
-    // stack a switch to it runs from stay mapped across it; the stack
+    // SAFETY: `kernel_args.boot_pml4_addr` is the table built above from a
+    // plan given `arch::code_pages()`, so it holds the switch's page
+    // executable at identity, and it identity-maps low memory (so the
+    // stack a switch to it runs from stays mapped across it; the stack
     // `kernel_args` lives on was proved inside the low map before the exit) and
     // mapping the same at `PHYS_OFFSET`;
     // the assert before the exit proved the whole kernel image is inside that

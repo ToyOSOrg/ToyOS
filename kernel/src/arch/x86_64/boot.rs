@@ -48,8 +48,10 @@ pub fn before_panel() {
 
 /// Once the console and the boot parameter exist.
 pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
-    // The IDT loads inside `interrupts`, much later: a fault here would reach
-    // firmware's handlers, so the actuator is refused by name instead.
+    // The IDT loads inside `interrupts`, much later: a fault here would vector
+    // through firmware's table to handlers the boot map does not hold
+    // executable, and reset the machine, so the actuator is refused by name
+    // instead.
     if crate::actuator::test_early_fault() {
         panic!("test-early-fault: x86-64 has no vectors of its own this early");
     }
@@ -80,9 +82,14 @@ pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
 }
 
 /// Physical memory only this architecture's boot uses, kept from the
-/// allocator: the AP trampoline page.
-pub fn reserved() -> Region {
-    Region { start: 0x8000, end: 0x9000 }
+/// allocator: the AP trampoline page, and the boot map's tables, which every
+/// AP loads as its first `CR3` long after `mm::init`.
+pub fn reserved(args: &KernelArgs) -> [Region; 2] {
+    let tables = (toyos_bootmap::MAX_PAGES as u64) * toyos_bootmap::PAGE_4K;
+    [
+        Region { start: toyos_bootmap::x86_64::AP_TRAMPOLINE, end: toyos_bootmap::x86_64::AP_TRAMPOLINE + toyos_bootmap::PAGE_4K },
+        Region { start: args.boot_pml4_addr, end: args.boot_pml4_addr + tables },
+    ]
 }
 
 /// What the boot learns bringing interrupts up and hands later steps.

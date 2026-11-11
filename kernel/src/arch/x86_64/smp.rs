@@ -14,8 +14,8 @@ use kernel::cpu::TopologyRefusal;
 use kernel::sched::topology::CpuKeys;
 
 /// The page the boot map holds executable and read-only for this: an AP runs
-/// the trampoline there and writes nothing to it. The trampoline's absolute
-/// operands spell the same address.
+/// the trampoline there under `CR0.WP`, so it can write nothing to it. The
+/// trampoline's absolute operands spell the same address.
 const TRAMPOLINE_PAGE: u64 = toyos_bootmap::x86_64::AP_TRAMPOLINE;
 const _: () = assert!(TRAMPOLINE_PAGE == 0x8000);
 const TRAMPOLINE_VECTOR: u8 = 0x08;
@@ -68,9 +68,10 @@ struct TrampolineData {
     cs_reload_addr: u64,                     // +0x70
     percpu_ptr: u64,                         // +0x78
     efer: u64,                               // +0x80
+    cr0: u64,                                // +0x88
 }
 
-const _: () = assert!(size_of::<TrampolineData>() == 0x88);
+const _: () = assert!(size_of::<TrampolineData>() == 0x90);
 
 
 
@@ -151,8 +152,9 @@ fn build_trampoline_data() -> TrampolineData {
             base: data_base + 0x40, // points to temp_gdt field
         },
         _pad3: [0; 2],
-        // Each already accessed, so loading one never writes its descriptor
-        // (SDM Vol. 3A §3.4.5.1) on a page the AP holds read-only.
+        // Each already accessed: loading one that is not writes its descriptor
+        // (SDM Vol. 3A §3.4.5.1), which faults on this page once the AP has
+        // paging and `CR0.WP` on.
         temp_gdt: [
             0x0000_0000_0000_0000, // null
             0x00CF_9B00_0000_FFFF, // code32
@@ -166,6 +168,7 @@ fn build_trampoline_data() -> TrampolineData {
         cs_reload_addr,
         percpu_ptr: 0, // filled per-AP
         efer: crate::arch::control_regs::EFER_BEFORE_LONG_MODE,
+        cr0: crate::arch::control_regs::CR0_ENTERING_PAGING,
     }
 }
 
@@ -336,9 +339,11 @@ global_asm!(
     "mov edx, [0x8F84]",
     "wrmsr",
 
-    // Enable Paging (CR0.PG)
+    // Paging on with TrampolineData.cr0 (+0x88): `PG`, and `WP` with it, so
+    // the boot map's read-only leaves, this page among them, are read-only
+    // here from the first instruction under them.
     "mov eax, cr0",
-    "or eax, 0x80000000",
+    "or eax, [0x8F88]",
     "mov cr0, eax",
 
     // Far jump to LM64 via TrampolineData.lm64_far (+0x68)

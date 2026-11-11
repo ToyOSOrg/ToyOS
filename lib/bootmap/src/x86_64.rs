@@ -32,7 +32,8 @@ const PWT: u64 = 1 << 3;
 const PCD: u64 = 1 << 4;
 /// A page directory entry that maps 2 MiB rather than naming a table, bit 7.
 const PAGE_SIZE: u64 = 1 << 7;
-/// Execute-disable, bit 63: reserved unless `IA32_EFER.NXE` is set (§4.1.4).
+/// Execute-disable, bit 63 of each entry's table: reserved unless
+/// `IA32_EFER.NXE` is set.
 const EXECUTE_DISABLE: u64 = 1 << 63;
 
 /// The page every AP starts in: the kernel copies its trampoline there and
@@ -51,9 +52,10 @@ pub const fn table(phys: u64) -> u64 {
 /// `pat::init`.
 ///
 /// Code is read-only and everything else execute-disabled, so no leaf is both
-/// writable and executable. Whoever loads these tables sets `IA32_EFER.NXE`
-/// first: the loader before its switch, an AP's trampoline before it turns
-/// paging on.
+/// writable and executable. Whoever loads these tables first sets
+/// `IA32_EFER.NXE`, which gives bit 63 its meaning, and `CR0.WP`, which makes
+/// read-only hold at CPL 0 (§4.6.1): the loader before its switch, an AP's
+/// trampoline as it turns paging on.
 pub const fn block(phys: u64, cache: Cache, access: Access) -> u64 {
     let typed = match cache {
         Cache::Firmware | Cache::Memory => 0,

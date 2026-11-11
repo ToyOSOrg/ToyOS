@@ -29,8 +29,9 @@ const XD: u64 = 1 << 63;
 
 /// What a linear address translates to: the physical address, the PAT entry
 /// its type comes from (§11.12.3: PAT·4 + PCD·2 + PWT), whether a
-/// supervisor write is allowed (R/W set at every level, §4.6.1), and whether a
-/// fetch is (XD clear at every level, §4.6.1, with `IA32_EFER.NXE` set).
+/// supervisor write is allowed (R/W set at every level, §4.6.1, with `CR0.WP`
+/// set), and whether a fetch is (XD clear at every level, §4.6.1, with
+/// `IA32_EFER.NXE` set).
 #[derive(Debug, PartialEq, Eq)]
 struct Translation {
     phys: u64,
@@ -251,5 +252,23 @@ fn nothing_is_writable_and_executable_and_the_code_pages_run() {
         }
     }
     assert_eq!(executable, 2 * (text.1 / PAGE_4K + code.len() as u64));
+    every_leaf_translates_in_both_views(&plan, &pool, root);
+}
+
+/// A loader firmware put above the low map, as a bench may: the page its
+/// switch runs from is reached at identity through its own directory, read-only
+/// and executable, between data.
+#[test]
+fn a_switch_page_above_the_low_map_runs_and_its_neighbours_do_not() {
+    let loader = (5 * GIB, 0x7_8000);
+    let switch = loader.0 + 0x2000;
+    let code = [x86_64::AP_TRAMPOLINE, switch];
+    let plan = Plan::new(None, loader, TEXT, &code, Typing::Firmware).expect("the plan");
+    let (pool, root) = written(&plan);
+    assert_eq!(walk(&pool, root, switch), Some(Translation { phys: switch, pat: 0, writable: false, executable: true }));
+    for beside in [switch - PAGE_4K, switch + PAGE_4K, loader.0 + PAGE_2M - PAGE_4K] {
+        let data = Some(Translation { phys: beside, pat: 0, writable: true, executable: false });
+        assert_eq!(walk(&pool, root, beside), data, "{beside:#x}");
+    }
     every_leaf_translates_in_both_views(&plan, &pool, root);
 }

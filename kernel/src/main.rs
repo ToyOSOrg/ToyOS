@@ -338,13 +338,15 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
             region.start, region.end
         );
     }
-    // The architecture's own page is not a loader allocation, so it is named
+    // The architecture's own regions are named apart from the loader's
+    // allocations, so they are added
     // here rather than folded into `loader` above. Destructuring `loader` by
     // name, rather than indexing it, means a region added to `loader` fails
     // to compile here instead of compiling and being silently dropped from
     // what `mm::init` withholds.
     let [image, elf, supervisor, fileserver, root, names, map, microcode] = loader;
-    let reserved = [image, elf, supervisor, fileserver, root, names, map, microcode, arch::boot::reserved()];
+    let [own, tables] = arch::boot::reserved(kernel_args);
+    let reserved = [image, elf, supervisor, fileserver, root, names, map, microcode, own, tables];
     // A region another one shares is two allocations the loader made of one
     // byte, and whichever writes it second corrupts the first.
     let extents = reserved.map(|r| r.start..r.end);

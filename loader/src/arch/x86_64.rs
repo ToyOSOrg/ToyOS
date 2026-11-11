@@ -62,20 +62,51 @@ pub fn microcode_cpu() -> Option<Result<toyos_microcode::Cpu, &'static str>> {
     })
 }
 
+const IA32_EFER: u32 = 0xC000_0080;
+/// `IA32_EFER.NXE`, bit 11 (SDM Vol. 3A §2.2.1).
+const NXE: u64 = 1 << 11;
+/// `CR0.WP`, bit 16 (SDM Vol. 3A §2.5).
+const WP: u64 = 1 << 16;
+
+/// `IA32_EFER`, which every x86-64 CPU has.
+fn efer() -> u64 {
+    let (low, high): (u32, u32);
+    // SAFETY: RDMSR of `IA32_EFER` at CPL 0 reads it and nothing else.
+    unsafe {
+        core::arch::asm!("rdmsr", in("ecx") IA32_EFER, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
+    }
+    u64::from(high) << 32 | u64::from(low)
+}
+
+fn cr0() -> u64 {
+    let value: u64;
+    // SAFETY: reading `CR0` at CPL 0 changes nothing.
+    unsafe { core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    value
+}
+
 /// What the loader says about the CPU as firmware handed it over, or why the
 /// kernel cannot run on it. A UEFI x86-64 loader runs in long mode at CPL 0,
 /// the state the kernel's entry takes; what is left to refuse is a CPU with
-/// no execute-disable, which the boot map's data pages are mapped with.
+/// no execute-disable, which the boot map's data pages are mapped with, and
+/// what is left to say is which of the two bits the map's permissions rest on
+/// firmware had already set.
 pub fn cpu_as_entered() -> Result<Option<alloc::string::String>, alloc::string::String> {
     use core::arch::x86_64::__cpuid;
     // CPUID.80000001H:EDX[20] (SDM Vol. 2A, CPUID).
     let has_nx = __cpuid(0x8000_0000).eax >= 0x8000_0001 && __cpuid(0x8000_0001).edx & 1 << 20 != 0;
     if !has_nx {
         return Err(alloc::string::String::from(
-            "CPU: no execute-disable (CPUID.80000001H:EDX[20]), so no boot map can keep its data from being executed",
+            "CPU: no execute-disable (CPUID.80000001H:EDX[20]), so no boot map can keep its data from being \
+             executed; on an Intel CPU that has it, firmware's XD-bit setting (IA32_MISC_ENABLE[34]) hides it",
         ));
     }
-    Ok(None)
+    let held = |set: bool| if set { "set" } else { "clear" };
+    Ok(Some(alloc::format!(
+        "CPU: firmware hands over EFER.NXE {} and CR0.WP {}; the loader sets both before its switch",
+        held(efer() & NXE != 0),
+        held(cr0() & WP != 0),
+    )))
 }
 
 /// The pages the boot map holds executable beside the kernel's text: the one
@@ -139,30 +170,36 @@ pub mod pio {
 /// image's entry through the high half, handing it `args`.
 ///
 /// # Safety
-/// The boot map holds [`code_pages`] executable at identity and maps the
+/// The boot map was planned with [`code_pages`], so it holds them executable
+/// at identity, and maps the
 /// kernel image at `PHYS_OFFSET`; `image` is that relocated image,
 /// `entry_offset` its entry point's offset in it, and `args` stays where it is
 /// until the kernel copies it.
 pub unsafe fn enter_kernel(image: (u64, u64), entry_offset: u64, args: &KernelArgs) -> ! {
-    const IA32_EFER: u32 = 0xC000_0080;
-    const NXE: u32 = 1 << 11;
     let root = args.boot_pml4_addr;
     let entry = crate::PHYS_OFFSET + image.0 + entry_offset;
-    // SAFETY: `cpu_as_entered` found execute-disable, so the bit is this
-    // CPU's to set (SDM Vol. 3A §2.2.1), and under firmware's tables it
-    // changes nothing: an entry of theirs with bit 63 set already means it.
+    // SAFETY: `cpu_as_entered` found execute-disable, so `NXE` is this CPU's
+    // to set (SDM Vol. 3A §2.2.1), and under firmware's tables it changes
+    // nothing: an entry of theirs with bit 63 set already means it. `WP`
+    // makes a read-only leaf read-only at CPL 0 (§4.6.1); from here to the
+    // switch this code writes only its own stack.
     unsafe {
         core::arch::asm!(
             "rdmsr",
             "or eax, {nxe}",
             "wrmsr",
+            "mov {scratch}, cr0",
+            "or {scratch}, {wp}",
+            "mov cr0, {scratch}",
             nxe = const NXE,
+            wp = const WP,
+            scratch = out(reg) _,
             in("ecx") IA32_EFER,
             out("eax") _,
             out("edx") _,
             options(nomem, nostack),
         );
     }
-    // SAFETY: the caller's contract, and `NXE` is set above.
+    // SAFETY: the caller's contract, and `NXE` and `WP` are set above.
     unsafe { switch_to_kernel(root, entry, args) }
 }
