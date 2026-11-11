@@ -989,6 +989,8 @@ impl Faulted {
     /// What a copy this fault stopped short answers.
     pub fn stop(self) -> crate::user_ptr::Stop {
         match self {
+            // Nothing is there, as for a copy POSIX answers `EFAULT`.
+            Faulted::Lost(lost) if lost.why == crate::object::paged::Why::PastEnd => crate::user_ptr::Stop::Unreachable,
             Faulted::Lost(_) => crate::user_ptr::Stop::Lost,
             Faulted::Absent => crate::user_ptr::Stop::Absent,
             Faulted::Served | Faulted::Unreachable | Faulted::Killed => crate::user_ptr::Stop::Unreachable,
@@ -1048,8 +1050,12 @@ pub fn wait_in(start: u64, end: u64, access: kernel::vm::Access) -> Result<(), c
         let touched = touch(page, access, |page| if page.wait() { Faulted::Served } else { Faulted::Killed });
         match touched {
             Faulted::Served => {}
-            Faulted::Lost(_) => return Err(crate::user_ptr::Faulted::Lost),
-            Faulted::Unreachable | Faulted::Absent | Faulted::Killed => return Err(crate::user_ptr::Faulted::Unreachable),
+            stopped => {
+                return Err(match stopped.stop() {
+                    crate::user_ptr::Stop::Lost => crate::user_ptr::Faulted::Lost,
+                    _ => crate::user_ptr::Faulted::Unreachable,
+                })
+            }
         }
         page += crate::mm::PAGE_SIZE;
     }
@@ -1057,8 +1063,9 @@ pub fn wait_in(start: u64, end: u64, access: kernel::vm::Access) -> Result<(), c
 }
 
 /// A Ring 3 touch at `fault_addr` of a mapped file's page its pager cannot
-/// let the process have ends the process as `SIGBUS`, with one record of what
-/// was lost. The caller has put the CPU's fault mark down.
+/// let the process have, or of one wholly past the file's end, ends the
+/// process as `SIGBUS`, with one record of what was lost. The caller has put
+/// the CPU's fault mark down.
 pub fn lost(fault_addr: u64, lost: crate::object::paged::Lost) -> ! {
     log!(
         "fault: pid {} touched {fault_addr:#x}, page {} of pid {}'s object {}: {}",

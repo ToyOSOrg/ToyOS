@@ -1300,8 +1300,6 @@ unsafe impl Sync for MapNode {}
 pub enum Missing {
     /// Absent, or revoking, at this version of the object: the fault waits.
     Absent(Version),
-    /// At or past the object's end: nothing is there.
-    PastEnd,
     /// A hole of an anonymous object, which only [`Index::fault`] fills.
     Hole,
     /// Its pager cannot let a mapping have it.
@@ -1328,6 +1326,9 @@ pub enum Why {
     Ended,
     /// A hole of an anonymous object, and the pager has no room for its page.
     NoRoom,
+    /// The page lies wholly past the object's end, which POSIX answers a
+    /// touch of with `SIGBUS` and a copy with `EFAULT`.
+    PastEnd,
 }
 
 impl Why {
@@ -1337,6 +1338,7 @@ impl Why {
             Why::Released => "released by its pager",
             Why::Ended => "its pager ended",
             Why::NoRoom => "no room in its pager",
+            Why::PastEnd => "past the object's end",
         }
     }
 }
@@ -1356,11 +1358,18 @@ impl Index<'_> {
             _ if self.state.gone => Err(self.lost(page, Why::Ended)),
             Lookup::Present(phys) => Ok(phys),
             Lookup::Absent => Err(Missing::Absent(object.version())),
-            Lookup::PastEnd => Err(Missing::PastEnd),
+            Lookup::PastEnd => Err(self.lost(page, Why::PastEnd)),
             Lookup::Zero => Err(Missing::Hole),
             Lookup::Failed => Err(self.lost(page, Why::Failed)),
             Lookup::Gone => Err(self.lost(page, Why::Released)),
         }
+    }
+
+    /// The object's revoking pages at or past `from`, lowest first, each
+    /// with the frame it keeps until its walk ends
+    /// ([`Pages::revoking_from`]).
+    pub fn revoking_from(&self, from: u64, out: &mut [(u64, u64)]) -> usize {
+        self.state.pages.revoking_from(&self.state.entry(self.slot).object, from, out)
     }
 
     /// As [`Self::page`], for the page a fault touched: a hole of an
@@ -1416,7 +1425,7 @@ impl Index<'_> {
 }
 
 /// The pages a fault's request names: the aligned run around its page.
-const FAULT_RUN: u64 = 16;
+const FAULT_RUN: u64 = kernel::vm::AROUND / PAGE;
 
 impl MapNode {
     /// `f` over the object's pages, under the pager's lock.

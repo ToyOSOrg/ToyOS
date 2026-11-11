@@ -748,6 +748,31 @@ impl<F: Copy> Pages<F> {
         None
     }
 
+    /// `o`'s revoking pages at or past `from`, the lowest first, with the
+    /// frame each keeps until its walk ends: as many as fit in `out`, whose
+    /// count this answers. A walk's visit clears a mapper's leaves of them a
+    /// batch at a time, asking again from past the last.
+    pub fn revoking_from(&self, o: &Object, from: u64, out: &mut [(u64, F)]) -> usize {
+        let mut n = 0;
+        let mut at = o.head;
+        while at != NONE {
+            let s = self.slot(at);
+            at = s.next;
+            let (Some(_), Some(frame)) = (s.revoking, s.frame) else { continue };
+            if s.page < from || (n == out.len() && s.page >= out[n - 1].0) {
+                continue;
+            }
+            let mut k = n.min(out.len() - 1);
+            n = (n + 1).min(out.len());
+            while k > 0 && out[k - 1].0 > s.page {
+                out[k] = out[k - 1];
+                k -= 1;
+            }
+            out[k] = (s.page, frame);
+        }
+        n
+    }
+
     pub fn lookup(&self, o: &Object, page: u64) -> Lookup<F> {
         if o.gone {
             return Lookup::Gone;
@@ -1087,6 +1112,29 @@ mod tests {
     /// A removed page reads as absent, takes no second frame and no write,
     /// and keeps its frame until every mapper of its object was visited;
     /// then its frame goes out once and the page is supplied afresh.
+    #[test]
+    fn revoking_pages_come_lowest_first_a_batch_at_a_time() {
+        let mut p = Pages::new(16, 4).unwrap();
+        let mut o = p.object(1, 16 * PAGE);
+        for page in [9, 2, 14, 5, 0, 11, 7] {
+            p.supply(&mut o, page, 100 + page, false, (page + 1) * PAGE).unwrap();
+        }
+        let (removed, _) = p.withdraw(&mut o, 2, 12, &mut Nobody);
+        assert_eq!(removed, 5, "pages 2, 5, 7, 9 and 11 are withdrawn");
+        let mut batch = [(0, 0); 2];
+        let mut seen = Vec::new();
+        let mut from = 0;
+        loop {
+            let n = p.revoking_from(&o, from, &mut batch);
+            seen.extend_from_slice(&batch[..n]);
+            if n < batch.len() {
+                break;
+            }
+            from = batch[n - 1].0 + 1;
+        }
+        assert_eq!(seen, [(2, 102), (5, 105), (7, 107), (9, 109), (11, 111)]);
+    }
+
     #[test]
     fn a_revoking_page_keeps_its_one_frame_until_every_mapper_is_visited() {
         let mut p = Pages::new(8, 8).unwrap();

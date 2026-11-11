@@ -16,7 +16,8 @@
 //!   parked in a write's copy from the mapping, which writes nothing.
 //! - `hole`: an unwritten page of an anonymous object reads zero with no
 //!   request, and one the pager has no room for ends the mapper.
-//! - `shrunk`: a page the object shrank past ends its mapper as nothing.
+//! - `shrunk`: a touch of a page the object shrank past ends its mapper with
+//!   `SIGBUS`, as POSIX says of a page wholly past a mapped file's end.
 //! - `ends`, last: the pager's end answers a write from the mapping `Io`
 //!   and ends the mapper at its next touch.
 
@@ -232,9 +233,9 @@ fn shrunk(served: &mut Served) {
     assert_eq!(ready.read(&mut [0]), Ok(1), "mapprobe: the mapper never read its last page");
     served.pager.resize(object, PAGE).expect("mapprobe: a shrink");
     assert_eq!(go.write(&[1]), Ok(1));
-    assert_eq!(ended(&mut child), End::Fault(Fault::Memory), "mapprobe: a touch past a shrunk object");
+    assert_eq!(ended(&mut child), End::Fault(Fault::Mapping), "mapprobe: a touch past a shrunk object");
     served.pager.release(object).expect("mapprobe: release");
-    println!("mapprobe: a page the object shrank past is nothing to its mapper");
+    println!("mapprobe: a touch of a page the object shrank past ends its mapper as SIGBUS");
 }
 
 fn ends(mut served: Served) {

@@ -64,7 +64,9 @@
   waits' own timeouts, bound it.
 - A touch of a mapped page its file server failed, or of a file whose server
   ended, ends the program with a diagnostic naming the file's page and the
-  cause; a copying system call answers an I/O error instead. A touched
+  cause; a copying system call answers an I/O error instead. A touch of a
+  mapped page wholly past the file's end ends the program the same way, as
+  POSIX's `SIGBUS`, and a copy from one is refused as a bad address. A touched
   unwritten page of a file held in RAM becomes resident within its server's
   capacity and is refused once that is full.
 - Clean pages are reclaimed; dirty pages are written back first, without losing
