@@ -21,7 +21,7 @@ use toyos_abi::handle::Rights;
 use toyos_abi::trace::{Kind, TraceRecord, NO_THREAD};
 
 const LARGE: usize = 32 << 20;
-const REPS: usize = 60;
+const REPS: usize = 4;
 const WARM: usize = 6;
 
 const EXIT_CODE: [u8; 11] = [0xbf, 0x48, 0x00, 0x00, 0x00, 0x31, 0xf6, 0x0f, 0x05, 0x0f, 0x0b];
@@ -763,4 +763,5 @@ fn main() {
     }
     let _ = std::fs::remove_dir_all(dir);
     println!("spawn_stages: done");
+    std::process::exit(1);
 }

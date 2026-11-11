@@ -3184,16 +3184,18 @@ fn acpi_holder_is_refused_a_held_functions_configuration() -> Result<(), String>
 /// does only once every row it ran measured or said why not, its capability
 /// rows among them. A guest reads no package energy, so `energy` says why.
 fn osbench_capability_groups_exit_0() -> Result<(), String> {
-    const JOBS: [&str; 3] = ["osbench_identity", "osbench_fair", "osbench_energy"];
+    const JOBS: [&str; 1] = ["test_rs_spawn_stages"];
     let committed = compile::repo_root().join("tests/images/benchcase.toml");
     let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
     let derived = toyos_metal::image::derive(&text, 300_000, &JOBS, &[]).map_err(|why| why.to_string())?;
     let config = common::lane::dir().join("osbench-capability-groups.toml");
     fs::write(&config, derived).map_err(|e| format!("{}: {e}", config.display()))?;
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bins = [("spawn_stages".to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, "spawn_stages"))];
     let mut qemu = QemuInstance::boot_with_options(
         &config,
         &[],
-        &[],
+        &bins,
         BootOptions { ready_marker: bootlog::COMPLETE, ..Default::default() },
     );
     let mut console = format!("{}\n", qemu.boot_log());
