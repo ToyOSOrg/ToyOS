@@ -17,8 +17,9 @@
 //!
 //! **A reader waits only on its pager.** An absent page is requested in the
 //! waiter's own record, linked on its pager's list, and the wait ends on a
-//! supply, a failure, a shrink, a release, the pager's end or a kill; a wait
-//! past the pager's report time is counted and logged overdue and goes on.
+//! supply, a failure, a write or resize of the object (which the read answers
+//! `WouldBlock`), a release, the pager's end or a kill; a wait past the
+//! pager's report time is counted and logged overdue and goes on.
 //! A pager's own process is refused a holder's read, so no pager waits on a
 //! pager.
 //!
@@ -46,7 +47,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel::chunked::{Chunked, Stack};
-use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, Version, Want, PAGE};
+use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, Version, Waiters, Want, PAGE};
 use kernel::sched::task::WaitClass;
 use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
 
@@ -290,15 +291,20 @@ impl PagerObject {
         u64::from(slot)
     }
 
-    /// `f` over the index and the live object `id`, each frame it removes
-    /// given back as it goes; waiters read again.
-    fn removing<R>(&self, id: u64, f: impl FnOnce(&mut Pages<u64>, &mut Object, &mut dyn FnMut(u64)) -> R) -> Result<R, SyscallError> {
+    /// `f` over the index, the live object `id` and its waiters, each frame
+    /// it removes given back as it goes; waiters read again.
+    fn removing<R>(
+        &self,
+        id: u64,
+        f: impl FnOnce(&mut Pages<u64>, &mut Object, &mut Linked, &mut dyn FnMut(u64)) -> R,
+    ) -> Result<R, SyscallError> {
         let mut state = self.state.lock();
         let slot = state.live(id)?;
         let job = self.core.job();
-        let State { pages, entries, held, gone, .. } = &mut *state;
+        let State { pages, entries, held, gone, requests, .. } = &mut *state;
         let object = &mut entries[slot as usize].as_mut().expect("live").object;
-        let answer = f(pages, object, &mut |phys| held.give_back(job, *gone, phys, true));
+        let mut waiters = Linked { head: *requests, slot };
+        let answer = f(pages, object, &mut waiters, &mut |phys| held.give_back(job, *gone, phys, true));
         drop(state);
         self.changed.post();
         Ok(answer)
@@ -535,9 +541,10 @@ impl PagerObject {
                 Step::Absent(_) if !waits && done > 0 => return done as u64,
                 Step::Absent(_) if !waits => return SyscallError::WouldBlock.to_u64(),
                 Step::Absent(page) => {
+                    let since = since.expect("paged: a holder's read waits only once it began");
                     let ready = || {
                         let state = self.state.lock();
-                        state.gone || !matches!(state.pages.lookup(&state.entry(slot).object, page), Lookup::Absent)
+                        state.gone || state.pages.wait_over(&state.entry(slot).object, page, since)
                     };
                     let parkable = crate::scheduler::Parkable::at_entry();
                     let began = crate::clock::now();
@@ -872,43 +879,19 @@ impl PagerObject {
     /// Its pages end absent, so every reader waiting on one is named in a
     /// notice again (`Want::withdrawn`).
     pub fn withdraw(&self, id: u64, first: u64, count: u64) -> u64 {
-        let withdrawn = self.removing(id, |pages, object, out| pages.withdraw(object, first, count, &mut |f| out(f)));
-        match withdrawn {
-            Ok(n) => {
-                self.ask_again(id, first, count);
+        match self.removing(id, |pages, object, waiters, out| pages.withdraw(object, first, count, waiters, &mut |f| out(f))) {
+            Ok((n, news)) => {
+                if news {
+                    self.watch.post();
+                }
                 n as u64
             }
             Err(e) => e.to_u64(),
         }
     }
 
-    /// Every request of object `id` that `count` pages from `first` meet,
-    /// named in a notice again.
-    fn ask_again(&self, id: u64, first: u64, count: u64) {
-        let news = {
-            let state = self.state.lock();
-            let Ok(slot) = state.live(id) else { return };
-            let mut news = false;
-            for at in requests(&state) {
-                // SAFETY: linked, so live, under the lock; its waiter writes it
-                // only under the lock too, and nothing forms a reference to it.
-                unsafe {
-                    let mut want = (*at).want;
-                    if (*at).slot == slot && want.withdrawn(first, count) {
-                        (*at).want = want;
-                        news = true;
-                    }
-                }
-            }
-            news
-        };
-        if news {
-            self.watch.post();
-        }
-    }
-
     pub fn fail(&self, id: u64, first: u64, count: u64) -> u64 {
-        match self.removing(id, |pages, object, out| pages.fail(object, first, count, &mut |f| out(f))) {
+        match self.removing(id, |pages, object, _, out| pages.fail(object, first, count, &mut |f| out(f))) {
             Ok(Ok(())) => 0,
             Ok(Err(why)) => word(why).to_u64(),
             Err(e) => e.to_u64(),
@@ -919,7 +902,7 @@ impl PagerObject {
         if size > kernel::paged::LAST_END {
             return SyscallError::InvalidArgument.to_u64();
         }
-        let resized = self.removing(id, |pages, object, out| {
+        let resized = self.removing(id, |pages, object, _, out| {
             if let Some(phys) = pages.resize(object, size, &mut |f| out(f)) {
                 let within = (size % PAGE) as usize;
                 // SAFETY: the last page's frame, the object's while the lock is
@@ -1074,6 +1057,32 @@ impl Drop for Waiting<'_> {
             }
             if !(*at).next.is_null() {
                 (*(*at).next).prev = (*at).prev;
+            }
+        }
+    }
+}
+
+/// The requests linked on a pager's list for the object at `slot`, under the
+/// pager's lock for as long as it lives.
+struct Linked {
+    head: *mut Request,
+    slot: u32,
+}
+
+impl Waiters for Linked {
+    fn each(&mut self, f: &mut dyn FnMut(&mut Want)) {
+        let mut at = self.head;
+        while !at.is_null() {
+            // SAFETY: linked, so live, under the lock the holder of `self`
+            // keeps; its waiter writes it only under the lock too, and
+            // nothing forms a reference to it.
+            unsafe {
+                if (*at).slot == self.slot {
+                    let mut want = (*at).want;
+                    f(&mut want);
+                    (*at).want = want;
+                }
+                at = (*at).next;
             }
         }
     }
