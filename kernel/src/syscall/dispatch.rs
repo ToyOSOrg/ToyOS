@@ -158,8 +158,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {
-            match process::with_process_data(|data| {
-                data.handles
+            match process::with_handles(|handles| {
+                handles
                     .get::<crate::object::process::ProcessObject>(RawHandle(a1 as u32), Rights::MANAGE)
             }) {
                 Ok(object) => process::kill_process(&object),
@@ -441,7 +441,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 let Ok(slot) = u16::try_from(a2) else {
                     return SyscallError::InvalidArgument.to_u64();
                 };
-                match process::with_process_data(|d| d.handles.stage_last_generation(slot)) {
+                match process::with_handles(|handles| handles.stage_last_generation(slot)) {
                     Some(h) => u64::from(h.0),
                     None => SyscallError::InvalidArgument.to_u64(),
                 }

@@ -1,7 +1,7 @@
 //! One process's handle table.
 //!
-//! Lives behind `ProcessData`'s own lock; every accessor returns an owned
-//! value, so no borrow into the table outlives the guard.
+//! Lives behind its own lock (`process::Handles`); every accessor returns an
+//! owned value, so no borrow into the table outlives the guard.
 //!
 //! Not a file-descriptor table — `fd` names only `sdk/libc`'s POSIX
 //! surface (owner ruling) — and a slot at its last generation retires
@@ -22,7 +22,7 @@ use crate::mm::charge::{self, Charge};
 
 use super::{KObjectRef, KObjectVariant};
 
-/// The table has no slot left, or no memory to grow by one — its own type since `install` runs under the process's own lock, where [`HandleError::refuse`] must not be called.
+/// The table has no slot left, or no memory to grow by one — its own type since `install` runs under the table's own lock, where [`HandleError::refuse`] must not be called.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TableFull;
 

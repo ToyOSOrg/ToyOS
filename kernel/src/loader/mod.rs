@@ -135,7 +135,7 @@ pub fn spawn<C: Commit>(
     parent: Parent,
 ) -> Result<(Pid, C::Held), crate::object::Refusal> {
     let job = Arc::clone(commit.job());
-    let pager = if commit.pager() { crate::process::PagerRole::May } else { crate::process::PagerRole::None };
+    let pager = commit.pager();
     // Before anything is built; dropped on every way out below but the insert.
     let admission = Admission::ask(parent)?;
     let charge = ProcessData::charge(&job, path).map_err(SyscallError::from)?;
@@ -189,15 +189,15 @@ pub fn spawn<C: Commit>(
     // The point of no return: every failure above answers the caller with its
     // table untouched.
     let (handles, endowments, held) = commit.commit(start::Own::new(&object, &notice))?;
+    let handles = crate::process::Handles::new(handles, pager);
     let proc_data = Arc::new(Lock::new(ProcessData {
-        handles,
+        handles: Arc::clone(&handles),
         space: Arc::clone(&child_pt),
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
         endowments,
         job: job.clone(),
         _charge: charge,
-        pager,
     }));
 
     let thread_data = Arc::new(Lock::new(ThreadData {
@@ -231,6 +231,7 @@ pub fn spawn<C: Commit>(
             thread_pointer: 0,
             job,
             image,
+            handles,
             // The spawning thread's, as a new thread's is.
             mask: crate::sched::driver::current_mask(),
             near: None,

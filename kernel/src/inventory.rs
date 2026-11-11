@@ -35,8 +35,8 @@ fn claims() -> Vec<Claim> {
     };
     let mut out = Vec::new();
     for (pid, name, data) in processes {
-        let data = data.lock();
-        for (_, entry) in data.handles.iter() {
+        let handles = Arc::clone(&data.lock().handles);
+        for (_, entry) in handles.lock().iter() {
             let KObjectRef::Device(claim) = entry.object() else { continue };
             let on = if claim.class() == toyos_abi::syscall::DeviceType::PciFunction {
                 // A function the last handle has let go names nothing.

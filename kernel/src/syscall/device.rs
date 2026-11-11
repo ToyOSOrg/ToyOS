@@ -27,8 +27,8 @@ pub(super) fn sys_device_reg_read(handle: RawHandle, offset: u64, width: u64) ->
     let Some(width) = toyos_abi::syscall::RegWidth::from_raw(width) else {
         return SyscallError::InvalidArgument.to_u64();
     };
-    let claim = process::with_process_data(|data| {
-        data.handles.get::<DeviceClaim>(handle, Rights::NONE).map(|claim| {
+    let claim = process::with_handles(|handles| {
+        handles.get::<DeviceClaim>(handle, Rights::NONE).map(|claim| {
             (claim.class() == device::DeviceType::PciFunction).then_some(claim)
         })
     });
@@ -59,7 +59,7 @@ pub(super) fn sys_device_reg_read(handle: RawHandle, offset: u64, width: u64) ->
 /// `PermissionDenied`, as its ports answer nothing there.
 pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64) -> u64 {
     use toyos_abi::acpi::op as ops;
-    let claim = match process::with_process_data(|data| data.handles.get::<DeviceClaim>(handle, Rights::WRITE)) {
+    let claim = match process::with_handles(|handles| handles.get::<DeviceClaim>(handle, Rights::WRITE)) {
         Ok(claim) if claim.class() == device::DeviceType::Acpi => claim,
         Ok(claim) => {
             let held = claim.class().class_name();
@@ -171,8 +171,8 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
         // Not yet, rather than never: the device set says when.
         Err(device::ClaimError::Undeclared) => return SyscallError::WouldBlock.to_u64(),
     };
-    process::with_process_data(|data| {
-        handle_result(ops::install(&mut data.handles, KObjectRef::Device(claim)))
+    process::with_handles(|handles| {
+        handle_result(ops::install(handles, KObjectRef::Device(claim)))
     })
 }
 
@@ -186,8 +186,8 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
 /// **The claim, and nothing read out of it**: a call reaches its function only
 /// through [`on_function`], so what it acts on is this claim's or nothing.
 fn pci_claim(handle: RawHandle) -> Result<Arc<DeviceClaim>, crate::object::Refusal> {
-    let claim = process::with_process_data(|data| {
-        data.handles.get::<DeviceClaim>(handle, Rights::WRITE)
+    let claim = process::with_handles(|handles| {
+        handles.get::<DeviceClaim>(handle, Rights::WRITE)
     })?;
     // A claim of another class is the wrong kind of thing here, not a missing
     // device: it names a device this call has no meaning for.
@@ -236,12 +236,12 @@ fn install_handed(
     claim: &Arc<DeviceClaim>,
     entry: crate::object::HandleEntry,
 ) -> Result<RawHandle, SyscallError> {
-    process::with_process_data(|data| {
-        let held = data.handles.get::<DeviceClaim>(handle, Rights::NONE).is_ok_and(|held| Arc::ptr_eq(&held, claim));
+    process::with_handles(|handles| {
+        let held = handles.get::<DeviceClaim>(handle, Rights::NONE).is_ok_and(|held| Arc::ptr_eq(&held, claim));
         if !held {
             return Err(SyscallError::Gone);
         }
-        data.handles.install(entry).map_err(|_| SyscallError::ResourceExhausted)
+        handles.install(entry).map_err(|_| SyscallError::ResourceExhausted)
     })
 }
 
@@ -312,8 +312,8 @@ pub(super) fn sys_device_dma_alloc(
         Ok(grant) => grant,
         Err(e) => return e.to_u64(),
     };
-    let installed = process::with_process_data(|data| {
-        ops::install(&mut data.handles, KObjectRef::SharedMem(alloc::sync::Arc::clone(&memory)))
+    let installed = process::with_handles(|handles| {
+        ops::install(handles, KObjectRef::SharedMem(alloc::sync::Arc::clone(&memory)))
     });
     let shm = match installed {
         Ok(handle) => handle,
@@ -348,8 +348,8 @@ pub(super) fn sys_device_dma_map(
         Ok(claim) => claim,
         Err(e) => return e.refuse(),
     };
-    let memory = match process::with_process_data(|data| {
-        data.handles.get::<crate::object::shm::SharedMemObject>(region, Rights::MAP.union(Rights::WRITE))
+    let memory = match process::with_handles(|handles| {
+        handles.get::<crate::object::shm::SharedMemObject>(region, Rights::MAP.union(Rights::WRITE))
     }) {
         Ok(memory) => memory,
         Err(e) => {

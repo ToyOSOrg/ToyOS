@@ -20,7 +20,7 @@ use crate::time::Deadline;
 use crate::DirectMap;
 
 pub use crate::sched::driver::{
-    current_address_space, enter_idle_loop, in_pass as in_schedule_self, total_cpu_ns,
+    current_address_space, current_handles, enter_idle_loop, in_pass as in_schedule_self, total_cpu_ns,
     NewTask, Ticket,
 };
 #[cfg(feature = "heap-tripwire")]

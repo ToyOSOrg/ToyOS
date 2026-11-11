@@ -14,7 +14,7 @@ use crate::object::notice::NoticeObject;
 use crate::object::process::ProcessObject;
 use crate::object::{ops, HandleEntry, HandleTable, KObjectRef, Refusal};
 use crate::process::{
-    process_data, Endowments, KERNEL_STACK_SIZE,
+    handles, process_data, with_handles, Endowments, KERNEL_STACK_SIZE,
 };
 use crate::user_ptr::UserBytes;
 use toyos_abi::handle::{RawHandle, Rights};
@@ -114,7 +114,7 @@ pub trait Commit {
     /// The job the child runs in, which everything built for it is counted to.
     fn job(&self) -> &Arc<Job>;
 
-    /// Whether the child starts as a pager (`process::PagerRole`).
+    /// Whether the child starts as a pager (`process::Handles::is_pager`).
     fn pager(&self) -> bool;
 
     /// The child's table around `own`, what the kernel puts beside its
@@ -138,8 +138,9 @@ impl Commit for PendingHandles {
     /// last answer. The handle under [`JOB_LABEL`] still names [`job`](Self::job), or the spawn is refused.
     fn commit(self, own: Own) -> Result<(HandleTable, Endowments, RawHandle), Refusal> {
         let Self { mut table, endow, mut labels, job, .. } = self;
-        let data_arc = process_data();
-        let mut data = data_arc.lock();
+        let own_job = process_data().lock().job.clone();
+        let caller = handles();
+        let mut handles = caller.lock();
 
         let mut moving: Vec<(EndowEntry, RawHandle, Rights)> = Vec::with_capacity(endow.len());
         let mut endowed_job: Option<Arc<Job>> = None;
@@ -156,10 +157,10 @@ impl Commit for PendingHandles {
                 if endowed_job.is_some() {
                     return Err(SyscallError::InvalidArgument.into());
                 }
-                endowed_job = Some(data.handles.get_sent::<JobObject>(handle, Rights::WRITE)?.job().clone());
+                endowed_job = Some(handles.get_sent::<JobObject>(handle, Rights::WRITE)?.job().clone());
             }
             // Checked before any removal, so a missing `TRANSFER` refuses the spawn instead of leaving a hole.
-            let rights = data.handles.rights_to_move(handle, want)?;
+            let rights = handles.rights_to_move(handle, want)?;
             // A duplicate is refused here: unremoved handles let it pass twice, then the second removal's
             // `expect` below panics.
             if moving.iter().any(|(_, seen, _)| *seen == handle) {
@@ -169,11 +170,11 @@ impl Commit for PendingHandles {
         }
         // Before any removal: the table changed under the spawn if the job
         // everything was built for is no longer the one it names.
-        if !Arc::ptr_eq(&job, endowed_job.as_ref().unwrap_or(&data.job)) {
+        if !Arc::ptr_eq(&job, endowed_job.as_ref().unwrap_or(&own_job)) {
             return Err(SyscallError::InvalidArgument.into());
         }
         // Checked before any removal, so a failed install can't strand a handle out of a table that never spawned.
-        if !table.make_room(moving.len() + Own::LABELS.len()) || !data.handles.make_room(1) {
+        if !table.make_room(moving.len() + Own::LABELS.len()) || !handles.make_room(1) {
             return Err(SyscallError::ResourceExhausted.into());
         }
         let mut entries = Vec::with_capacity(moving.len());
@@ -181,8 +182,7 @@ impl Commit for PendingHandles {
         // it under the caller's lock and revoked once that lock is let go.
         let mut handed = Vec::new();
         for (mut entry, parent_handle, rights) in moving {
-            let moved = data
-                .handles
+            let moved = handles
                 .remove(parent_handle)
                 .expect("an endowed handle verified under this lock stopped resolving")
                 .arriving_with(rights);
@@ -195,9 +195,9 @@ impl Commit for PendingHandles {
             entries.push(entry);
         }
         // Minted while `own` is held, and `own` goes into a table no thread reaches until the child lands: another thread of the caller closing this handle never closes the object's last.
-        let held = ops::install(&mut data.handles, own.process.object().clone())
+        let held = ops::install(&mut handles, own.process.object().clone())
             .expect("a caller's table with verified room refused its child");
-        drop(data);
+        drop(handles);
         for handed in handed {
             handed.revoke();
         }
@@ -268,12 +268,11 @@ fn label_of(labels: &[u8], off: u32, len: u32) -> Option<&[u8]> {
 /// The job a child runs in: the one endowed under [`JOB_LABEL`], or else the
 /// caller's. Only looked up: [`PendingHandles::commit`] refuses the rest.
 fn child_job(endow: &[SpawnEndow], labels: &[u8]) -> Result<Arc<Job>, Refusal> {
-    let data_arc = process_data();
-    let data = data_arc.lock();
     for entry in endow {
         if label_of(labels, entry.label_off, entry.label_len) == Some(JOB_LABEL.as_bytes()) {
-            return Ok(data.handles.get_sent::<JobObject>(entry.moved.handle, Rights::WRITE)?.job().clone());
+            let named = with_handles(|handles| handles.get_sent::<JobObject>(entry.moved.handle, Rights::WRITE))?;
+            return Ok(named.job().clone());
         }
     }
-    Ok(data.job.clone())
+    Ok(process_data().lock().job.clone())
 }

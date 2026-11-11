@@ -397,6 +397,8 @@ pub struct NewTask {
     pub job: Arc<kernel::sched::job::Job>,
     /// The process's image.
     pub image: Arc<crate::process::UserImage>,
+    /// The process's handles.
+    pub handles: Arc<crate::process::Handles>,
     /// The CPUs it may run on.
     pub mask: CpuMask,
     /// For a thread spawned into its own process, its spawner and its
@@ -430,6 +432,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
             address_space: new.address_space,
             handle: handle.clone(),
             image: new.image,
+            handles: new.handles,
         },
         rt: RtState::default(),
         mask: new.mask,
@@ -779,6 +782,11 @@ pub fn current_cpu() -> CpuId {
 /// The address space the running task runs in. `None` means "no task is running" — `KernelPayload::address_space` is not `Option`.
 pub fn current_address_space() -> Option<PageTables> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().address_space.clone())).flatten()
+}
+
+/// The running task's process's handles. `None` off-task.
+pub fn current_handles() -> Option<Arc<crate::process::Handles>> {
+    try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handles.clone())).flatten()
 }
 
 pub fn with_current_acct<R>(

@@ -11,19 +11,19 @@ use toyos_abi::syscall::*;
 /// Requires that `syscap` resolves to a `SysCap` holding `need`, and answers
 /// every right it holds, read under the same guard.
 pub(super) fn demand_syscap(syscap: RawHandle, need: Rights) -> Result<Rights, crate::object::HandleError> {
-    process::with_process_data(|data| {
-        data.handles.get::<crate::object::syscap::SysCap>(syscap, need)?;
-        data.handles.rights_of(syscap)
+    process::with_handles(|handles| {
+        handles.get::<crate::object::syscap::SysCap>(syscap, need)?;
+        handles.rights_of(syscap)
     })
 }
 
-/// The object `h` names, cloned out of the process's lock: what a call that
+/// The object `h` names, cloned out of the handle table's lock: what a call that
 /// copies to or from its caller, or may park, works on (`user_ptr`).
 pub(super) fn object(h: RawHandle, need: Rights) -> Result<KObjectRef, crate::object::HandleError> {
-    process::with_process_data(|data| data.handles.get_ref(h, need).cloned())
+    process::with_handles(|handles| handles.get_ref(h, need).cloned())
 }
 
-/// `f` over the object `h` names, outside the process's lock, for the calls
+/// `f` over the object `h` names, outside the handle table's lock, for the calls
 /// whose answer is already a raw syscall word.
 pub(super) fn with_object(h: RawHandle, need: Rights, f: impl FnOnce(&KObjectRef) -> u64) -> u64 {
     match object(h, need) {
@@ -41,8 +41,8 @@ pub(super) fn handle_result(r: Result<RawHandle, SyscallError>) -> u64 {
 
 /// Wakes nobody: `pipe::close_write`'s own zero-refcount path does that.
 pub(super) fn sys_close(h: RawHandle) -> u64 {
-    let result = process::with_process_data(|data| {
-        ops::close(&mut data.handles, h)
+    let result = process::with_handles(|handles| {
+        ops::close(handles, h)
     });
     match result {
         Ok(()) => 0,
@@ -56,15 +56,15 @@ pub(super) fn sys_close(h: RawHandle) -> u64 {
 ///
 /// `want` is the wire form of `Option<Rights>` (`RIGHTS_UNCHANGED` = the source's own set), decoded here and nowhere else.
 pub(super) fn sys_handle_dup(h: RawHandle, want: u64) -> u64 {
-    let duplicated = process::with_process_data(|data| {
-        let held = data.handles.rights_of(h)?;
+    let duplicated = process::with_handles(|handles| {
+        let held = handles.rights_of(h)?;
         let rights = if want == RIGHTS_UNCHANGED {
             held
         } else {
             let bits = u32::try_from(want).map_err(|_| SyscallError::InvalidArgument)?;
             Rights::from_bits(bits).ok_or(SyscallError::InvalidArgument)?
         };
-        Ok::<_, crate::object::Refusal>(data.handles.duplicate(h, rights)?)
+        Ok::<_, crate::object::Refusal>(handles.duplicate(h, rights)?)
     });
     match duplicated {
         Ok(new_h) => new_h.0 as u64,

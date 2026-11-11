@@ -531,9 +531,9 @@ fn process_watch(inbox: &Arc<Inbox>, submission: &Submission) {
 }
 
 /// The object `handle` names in this process's table, not the thread's: a ring is process-wide.
-/// Cloned out, so what follows holds no process lock.
+/// Cloned out, so what follows holds no handle-table lock.
 fn resolve(handle: RawHandle) -> Result<KObjectRef, HandleError> {
-    process::with_process_data(|data| data.handles.get_ref(handle, Rights::WAIT).cloned())
+    process::with_handles(|handles| handles.get_ref(handle, Rights::WAIT).cloned())
 }
 
 /// Keep `poll` as its handle's one poll, or in the place of `looked_at`, the
@@ -663,13 +663,13 @@ impl Submitter<Arc<Inbox>> for Arc<Inbox> {
 fn process_accept(inbox: &Arc<Inbox>, submission: &Submission) {
     let user_data = submission.token;
 
-    let acceptor = process::with_process_data(|data| {
-        data.handles.get::<crate::object::port::Acceptor>(submission.handle, Rights::READ)
+    let acceptor = process::with_handles(|handles| {
+        handles.get::<crate::object::port::Acceptor>(submission.handle, Rights::READ)
     });
 
     let acceptor = match acceptor {
         Ok(a) => a,
-        // Nothing held: `with_process_data` has given the guard up.
+        // Nothing held: `with_handles` has given the guard up.
         Err(e) => {
             let refusal = e.refuse_as_error();
             polls::complete(inbox, user_data, -(refusal as i32));
@@ -687,8 +687,8 @@ fn process_accept(inbox: &Arc<Inbox>, submission: &Submission) {
     };
     match acceptor.pop() {
         Some(conn) => {
-            let installed = process::with_process_data(|data| {
-                ops::install(&mut data.handles, KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(core, conn)))
+            let installed = process::with_handles(|handles| {
+                ops::install(handles, KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(core, conn)))
             });
             match installed {
                 Ok(h) => polls::complete(inbox, user_data, h.0 as i32),
