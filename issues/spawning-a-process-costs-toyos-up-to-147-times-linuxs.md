@@ -96,7 +96,7 @@ behind: `posix_spawn_wait.std` and `process.spawn_wait` are unresolved against
 Linux's 60% spread, and the rest are ahead. The all-CPU build is behind on both, 2.22x and 2.57x, where the
 one-at-a-time build is ahead on both.
 
-**Where the all-CPU build's time goes, 2026-11-11** ([evidence](https://github.com/ToyOSOrg/evidence/tree/36117dda5c9a1a3803745c45785cc8243c5b5d51/spawnperf-diag)): one
+**Where the all-CPU build's time goes, 2026-11-11** ([evidence](https://github.com/ToyOSOrg/evidence/tree/a22307591cfdefcf9fa1fef2ae5d1de79b926e9e/spawnperf-diag)): one
 diagnosis boot a bench at main 34cb4c918 with measurement commits, the build's
 256 children at `j1` and at one a CPU, three rounds each, a child's CPU split by
 system call, fault, lock spin and shootdown wait. The probes slow the round
