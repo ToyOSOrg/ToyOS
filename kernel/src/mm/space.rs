@@ -611,10 +611,10 @@ impl AddressSpace {
     /// its source again, an object's page is mapped again from the object.
     ///
     /// A private page's frame is freed and the page promised a frame again;
-    /// one a user copy pins is zeroed in place instead and kept, since freed
-    /// it would come back only at its last unpin and the promise would be
-    /// backed by nothing meanwhile (`Frames::discard`). No pin is taken
-    /// meanwhile: a copy pins under this space's lock, which this holds.
+    /// one a user copy pins is filled as new in place instead and kept,
+    /// since freed it would come back only at its last unpin and the promise
+    /// would be backed by nothing meanwhile (`Frames::discard`). No pin is
+    /// taken meanwhile: a copy pins under this space's lock, which this holds.
     pub fn discard(&mut self, start: UserAddr, len: u64) -> Result<(), SyscallError> {
         let (start, end) = self.held(start, len)?;
         let mut present = false;
@@ -649,14 +649,11 @@ impl AddressSpace {
                         false
                     }
                     pmm::Discarded::Kept => {
+                        let (s, entry) = inventory.find(va).unwrap_or_else(|| panic!("space: a frame owned at {va:#x} outside every range"));
                         // SAFETY: the page's own frame, which a copy may be
-                        // reading or writing as the page's contents; zeroing
-                        // it is what the discard makes those contents.
-                        unsafe { core::ptr::write_bytes(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE_SIZE as usize) };
-                        // A copied page's contents start as its source's again.
-                        if let Some((s, Entry { kind: Kind::Copy { source, offset, len }, .. })) = inventory.find(va) {
-                            copy_in(&**source, offset + (va - s), len.saturating_sub(va - s), phys);
-                        }
+                        // reading or writing as the page's contents; what the
+                        // page starts as is what the discard makes them.
+                        unsafe { fill_as_new(entry, va - s, phys) };
                         true
                     }
                 };
@@ -892,7 +889,7 @@ impl AddressSpace {
         let phys = match leaves.get(page) {
             Leaf::Mapped(m) => m.phys,
             // A frame the page keeps while no leaf maps it: a discard that
-            // zeroed a pinned frame in place.
+            // filled a pinned frame as new in place.
             Leaf::Held(phys) => {
                 leaves.set(page, Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal }));
                 phys
@@ -945,21 +942,36 @@ fn copyable(entry: &SpaceEntry) -> bool {
     }
 }
 
-/// A fresh frame for `page` of the committed range `entry` at `start`: zeros,
-/// or for a copied range as many of its source's bytes as the range's copy
-/// and the source both hold, and zeros after them.
+/// A fresh frame for `page` of the committed range `entry` at `start`.
 fn owned_frame(start: u64, entry: &SpaceEntry, page: u64) -> u64 {
-    let Kind::Copy { source, offset, len } = &entry.kind else {
-        return pmm::alloc_promised().into_raw();
-    };
-    let (at, offset) = (page - start, offset + (page - start));
-    let n = len.saturating_sub(at).min(PAGE_SIZE).min(source.size().saturating_sub(offset)) as usize;
     let phys = pmm::alloc_promised_unzeroed().into_raw();
     // SAFETY: a frame just allocated to this page, which no leaf maps yet, so
     // nothing else reaches it.
-    let frame = unsafe { core::slice::from_raw_parts_mut(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), PAGE_SIZE as usize) };
-    vm::copied_page(frame, n, |bytes| source.read(offset, bytes));
+    unsafe { fill_as_new(entry, page - start, phys) };
     phys
+}
+
+/// Write every byte of the frame at `phys` as the page `at` bytes into the
+/// committed range `entry` starts: zeros, or for a copied range as many of
+/// its source's bytes as the range's copy and the source both hold, and
+/// zeros after them.
+///
+/// # Safety
+///
+/// `phys` is the page's own frame, which nothing reaches meanwhile but a
+/// user copy that pins the page.
+unsafe fn fill_as_new(entry: &SpaceEntry, at: u64, phys: u64) {
+    // SAFETY: the caller's; a frame is a page of RAM the direct map reaches.
+    let frame = unsafe { core::slice::from_raw_parts_mut(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), PAGE_SIZE as usize) };
+    match &entry.kind {
+        Kind::Private { .. } => frame.fill(0),
+        Kind::Copy { source, offset, len } => {
+            let offset = offset + at;
+            let n = len.saturating_sub(at).min(PAGE_SIZE).min(source.size().saturating_sub(offset)) as usize;
+            vm::copied_page(frame, n, |bytes| source.read(offset, bytes));
+        }
+        Kind::Object { .. } => unreachable!("space: an object's page owns no frame"),
+    }
 }
 
 /// Every frame the space owns goes back; its tables go with `UserTables`.
