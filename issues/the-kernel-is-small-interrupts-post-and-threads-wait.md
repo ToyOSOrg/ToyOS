@@ -327,6 +327,115 @@ Beside that order, each waiting on something outside it:
       `a_stream_truncated_at_any_offset_resyncs_within_two_packets`.
       **Done** (#899).
 
+## What the kernel still holds
+
+An inventory at `9349705ce` (main, 2026-11-10): `git ls-files
+'kernel/src/*.rs'` is 215 files and 55,378 lines by `wc -l`. Each file is
+counted once, in the area of its main responsibility. "Kept" is the manual's
+kernel page read against the code; the notes say where that reading is an
+inference. Nothing here is ruled, and the ranking is a proposal.
+
+| Area | Files | Lines | Kept by the design |
+|---|---|---|---|
+| Memory: page tables, address spaces, frames, heap, TLB, user copies, shared memory | 27 | 7,975 | yes |
+| CPU bring-up, per-CPU state, control registers, microcode, FPU state, the boot handoff | 24 | 6,304 | yes |
+| IOMMU: VT-d, AMD-Vi, SMMUv3, domains, faults | 19 | 6,126 | yes |
+| Objects, handles and IPC: pipes, messages, ports, namespaces, events, inboxes, the watch | 22 | 5,751 | yes, but the TTY mark and the file-shaped `SYS_FSTAT` (below) |
+| Device claims: PCI enumeration, config space, MSI, BARs, hot-plug, `isa` rows, the framebuffer | 18 | 5,585 | yes, but the OpRegion window (below) |
+| Interrupt controllers, vectors, traps | 10 | 3,970 | yes |
+| Log ring, console UART, panic console, panic capture, own symbols | 17 | 3,517 | yes |
+| Scheduling: the core's driver, context switch, idle states, jobs, preemption | 20 | 3,160 | yes |
+| Firmware tables, ACPI mode, reset and power-off, the machine's stop, what the loader named | 12 | 3,099 | yes for the tables, the `acpi` row and power; the rest below |
+| Processes, threads, spawn | 8 | 2,736 | yes, less the userland text a spawn carries (below) |
+| Clocks: TSC and generic timer, the wall clock, typed durations | 7 | 1,847 | the clock yes; the manual names no CMOS driver |
+| Counters, the diary, IRQ census, mask windows, boot deadline, hard lockup, chipset watchdog | 14 | 1,844 | counters and diary yes; the three bounds are unnamed there and inferred to be the kernel's, since they bound the kernel |
+| Paged objects and their pager calls | 2 | 1,325 | yes |
+| Syscall entry and argument decode | 3 | 806 | yes |
+| Test-only: actuators, `SYS_DEBUG`, the IOMMU test device, the log storm | 6 | 668 | behind `boot-actuators` or `test-actuators` |
+| Locks, seqlock, hasher, random | 6 | 665 | yes |
+
+The kernel also links the crates beside it, whose lines carry their host
+tests: `kernel/pure` (49 files, 26,108, the scheduler core 15,570 of it),
+`kernel/proclife` (3,550), `kernel/pci` (2,211), `kernel/smmu` (1,463),
+`kernel/its` (985), `kernel/amdvi` (902) and four under 200. `kernel/sim`
+(10,242) and `kernel/loom` (6,088) are harnesses no kernel links.
+
+Observed: no filesystem, storage, input, network, audio or USB driver, no
+ELF or AML parser and no virtio is left in `kernel/src`. What it parses is
+firmware's static tables (`toyos-acpi`), the build's own table
+(`toyos-kimage`), the vendor's microcode container, and, below, a UEFI
+device path.
+
+### Userland's, by the manual, and still here
+
+Sizes are of `kernel/src` and read off the functions, so estimates but for
+the first.
+
+| What | Size | Dependents | Owner in the design, and what blocks it |
+|---|---|---|---|
+| A child's arguments and environment | about 140, by #1200's count | std, libc, `toyos::startup` | the parent's startup block: #1200 |
+| Endowment labels: a blob per process for its life, answered by `SYS_ENDOWMENTS`, of which the kernel reads three (`JOB_LABEL`, `SELF_LABEL`, `QUIT_LABEL`) | ~130 | `toyos::endow`, the supervisor's table | the startup block (inferred, and #1200's record says so); needs the child's handle numbers known to its parent and the three kernel-read labels as typed spawn fields; after #1200 |
+| The path a program was read from, up to 64 KiB of text per process, which a crash's frames and the spawn's log lines name | ~40 | `symbolize`, `lib/symbols` | userland, once a frame is named by build-id and something maps a build-id to a file; unbuilt |
+| The TTY mark on a pipe end (`SYS_MARK_TTY`, `FileType::Tty`) | ~40 | std's spawn, libc's `isatty` and stdio, std's stdio | a fact about a stream that only libc and std read; a label or the block could carry it (inferred); after the labels |
+| The main thread's stack: 8 MiB and a guard the kernel chooses and reserves | ~30 | `SYS_STACK_INFO`, which only a guest test calls | the parent's layout, as a thread's stack already is its process's (inferred); after #1200, when a child's stack starts empty |
+| What the loader named: partition GUIDs by role, in the inventory, and the boot sources `SYS_BOOT_SOURCES` answers, whose device paths `loaded.rs` parses (`toyos-devicepath`) only to refuse the loader's own bytes | ~95, and the kernel's link to a 324-line parser | the supervisor, `toyos::syscap`, the manifest's inventory reader | the supervisor's, handed as a read-only boot image as ROOT is (inferred); the manual says a partition GUID is never the kernel's; blocked on nothing |
+| The IGD OpRegion window: `SYS_DEVICE_FIRMWARE_WINDOW` reads Intel graphics' `ASLS` and maps what it names | ~90 and ~30 of `pcidev` | tgl-display, the supervisor, the manifest | device-specific knowledge in the kernel; a window of firmware memory the ACPI service names for a claim would be generic (inferred); needs a design |
+| The supervisor's last words, userland text written into the kernel's ring (`SYS_LOG_LAST_WORDS`) | ~20 | the supervisor | the manual says userland output never enters the kernel ring; this is its one exception, and the manual does not name it |
+
+Kept by the manual's text, where a second reading is the owner's:
+namespaces are kernel objects (~215 lines with their three calls) while the
+overview keeps service lookup out of the kernel; the stop's quiesce
+(`quiesce.rs`, the stop half of `syscall/machine.rs`, `toyos-quiesce`, ~330
+and 294) stops every userland thread in the kernel while the supervisor owns
+the orderly stop; and x86-64 drives the CMOS clock and its IRQ8 (285) while
+the loader hands firmware's `GetTime` on both architectures and only AArch64
+reads it. The CMOS is also the TSC's reference (`clocksource.rs`); whether
+that needs it is not investigated.
+
+### The next removals, ranked (a proposal)
+
+By mechanisms eliminated:
+
+1. #1200: `SYS_GET_ENV`, the environment kept per process, the kernel's
+   write onto a child's stack.
+2. Endowment labels, after #1200: `SYS_ENDOWMENTS`, the per-process blob
+   and its charge, and label text the kernel compares.
+3. The path, after #1200 gives the process a name of its own: the last
+   64 KiB string a spawn copies, and with it the 132 KiB a thread is charged
+   for two such strings (below).
+4. What the loader named, independent of the others: `SYS_BOOT_SOURCES`,
+   the inventory's partition records, the device-path parser.
+5. The TTY mark, with or after 2: `SYS_MARK_TTY`. It meets
+   `issues/a-received-handle-has-no-knowable-type.md`, which wants
+   `SYS_FSTAT` to answer more, so the two are designed together.
+6. The main thread's stack, after #1200: `SYS_STACK_INFO` and the kernel's
+   two stack constants.
+
+By lines: none of these is large. Together they are about 590 of 55,378;
+what the manual assigns to userland is nearly out. The larger numbers are
+the three second readings above (about 830 together) and need the owner
+before any is work, and the OpRegion window needs a design first.
+
+### Dead or nearly so, recorded and not deleted
+
+- `SYS_STACK_INFO` is called by `tests/guest/rust-tests/src/bin/std_threads.rs`
+  alone, and `SYS_VM_DECOMMIT` by two guest tests alone (`mmap_stress`,
+  `starveling`).
+- `KernelArgs::boot_partition_start_lba` and `boot_partition_blocks` are
+  read by one log line (`kernel/src/main.rs`), and `wall_clock_*` by no
+  x86-64 code.
+- `KernelStack::heap` (`kernel/src/loader/start.rs`) charges every thread
+  two strings at 64 KiB and a page, "as a rename's paths"; no call takes
+  two strings since the file calls went, and after #1200 the spawn's path
+  is the one string of that bound.
+- `FileType::File`, `Directory` and `Symlink` are answered by no kernel path
+  and named by nothing in `sdk`, `system`, `lib` or `apps`; the kernel's
+  `Stat` answers `mtime`, `volume` and `node` as zero for every object.
+- Stale text: `kernel/Cargo.toml`'s description says "filesystem";
+  `kernel/CLAUDE.md`'s first caveat is about a filesystem on the idle path;
+  `quiesce.rs`'s header speaks of the block layer and a USB stop, neither
+  of which the kernel has.
+
 ## Standing
 
 No device wait, spin or poll happens while holding a spinlock or inside a
