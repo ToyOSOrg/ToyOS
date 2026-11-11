@@ -100,18 +100,24 @@ pub fn encode(scenario: &str, expect_failure: bool, decisions: &[usize]) -> Stri
 pub struct CorpusEntry {
     pub scenario: String,
     pub expect_failure: bool,
+    /// The invariant a failing trace was committed for, as `# expect: fail I14`
+    /// names it: a replay that fails only some other way has lost its case.
+    pub expect_violation: Option<String>,
     pub decisions: Vec<usize>,
 }
 
 pub fn decode(text: &str) -> CorpusEntry {
     let mut scenario = String::new();
     let mut expect_failure = false;
+    let mut expect_violation = None;
     let mut decisions = Vec::new();
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("# scenario:") {
             scenario = rest.trim().to_string();
         } else if let Some(rest) = line.strip_prefix("# expect:") {
-            expect_failure = rest.trim() == "fail";
+            let mut words = rest.split_whitespace();
+            expect_failure = words.next() == Some("fail");
+            expect_violation = words.next().map(str::to_string);
         } else if !line.starts_with('#') {
             decisions.extend(line.split_whitespace().map(|token| {
                 token
@@ -124,6 +130,7 @@ pub fn decode(text: &str) -> CorpusEntry {
     CorpusEntry {
         scenario,
         expect_failure,
+        expect_violation,
         decisions,
     }
 }
