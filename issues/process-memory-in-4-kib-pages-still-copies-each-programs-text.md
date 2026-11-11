@@ -97,10 +97,11 @@ live split of a user leaf.
    A shared segment's mapping is never widened, so a program can no longer
    make its own read-only segment writable (`mprotect`). Exit for that: a
    protect that adds write to such a range commits its pages and makes it a
-   copy range of the same object (7b's R4, which step 2 did not build: it
-   maps a paged object read-only only, and its range refuses a protect past
-   that); only a page shared until its first write waits for step 5's write
-   faults. Exit:
+   copy range of the same object (7b's R4, which step 3 builds, since a
+   program's writable segment mapped from its image is a copy range with a
+   paged source; step 2 maps a paged object read-only only, and its range
+   refuses a protect past that); only a page shared until its first write
+   waits for step 5's write faults. Exit:
    two processes of one binary hold its text once, wherever it is served
    from.
 6. **`/apps` image sharing.** Decided by the orchestrator under the owner's
@@ -121,7 +122,7 @@ live split of a user leaf.
 mapped where the caller says, an immutable one shared and executable, which
 is stage 5 for `/system`: built; (2) a paged object mapped read-only and
 shared: faults that park on the pager, reverse records, revocation: built,
-but for R4's copy ranges of a paged object, which item 5 owes; (3) a
+but for R4's copy ranges of a paged object, which step 3 builds (item 5); (3) a
 spawn maps its image from any pager-backed volume (stage 6), sealed against
 writes in place while it runs; (4) the
 storage track's attributes and names without a request; (5) writable shared
@@ -141,23 +142,41 @@ mappings and write-back; (6) the #1077 retry
   that makes it faster is not measured on metal.
 - **Owed on metal:** step 2 (#1269), on the T14 and the AMD bench: the whole
   `testcases` boot, whose `mapped_file` member maps a paged object from a
-  second process (faults that wait, revocation, refusals, kills), and the
-  `shared-debug` and `proctreecase` boots. Main must show every job of each
-  boot exit 0.
+  second process (faults that wait, revocation, refusals, kills) and whose
+  `a_pager_s_end_answers_its_waiting_holders_gone` runs only there and
+  exercises the rewritten pager end, and the `shared-debug` and
+  `proctreecase` boots. Main must show every job of each boot exit 0.
 - **Owed on metal:** step 2 (#1269), on the T14 and the AMD bench: osbench's
-  `fs`, `pipe`, `ipc`, `mem` and `proc` groups, main before #1269 against
-  main after, four boots a side. Main after must be no slower, since the
-  fault and copy paths changed under all of them.
+  `system` (its pipe rows), `files`, `ipc`, `procs` and `mem` groups, main
+  before #1269 against main after, four boots a side. Main after must show no row
+  worse than noise: every fault and pinned copy changed, and every process
+  exit now empties its space through the full clear (futex bucket walks,
+  shootdowns, table unlinks) where its drop skipped them.
 - **Owed on metal:** step 2 (#1269), on the T14 and the AMD bench: osbench's
-  `fs.*.map_touch_16m` and `fs.*.map_read_4k` (a cached file's pages faulted
-  through a mapping, and 4 KiB read through one) on main, beside Linux's
-  `mmap` of the same file. Main must show both rows on every file target;
-  how a mapping compares with Linux's is not measured on metal.
+  `map` group on main beside Linux's `mmap` of the same files, recorded with
+  each row's ratio to Linux's: `touch_16m` and `threads_touch_16m` (a cached
+  file's pages faulted through a mapping, by one thread and by eight),
+  `read_4k` (4 KiB read through one) and `truncate_255` (a file 255
+  processes map, truncated). Their correctness runs in a guest
+  (`osbench_map_group_exits_0`); what they measure is unmeasured until then.
 
-Rows step 2 did not write, owed by map7b: a cold DATA page's miss in stages,
-one object mapped by 255 children and withdrawn (a revocation's cost grows
-with its mappers), and many threads cold-faulting one large file; each exits
-as an osbench row judged against Linux on metal.
+What these rows price: fault waiters wake on their pager's watch, so a
+supply, a write's end or a removal wakes every fault waiter of that pager and
+not only those its pages meet, a departure from the design's per-request
+wakes (§3, S4) that `threads_touch_16m` on a file past its server's capacity
+prices; and a revocation visits each mapper once per batch of 64 revoking
+pages, each batch read by walking the object's resident pages under its
+pager's lock, which `truncate_255` prices. Exit for both: per-request wakes
+or a cheaper visit where those rows show the cost. A cold DATA page's miss in
+stages is not yet an osbench row (owner map7b; exit: such a row on DATA,
+judged against Linux on metal).
+
+The pinned-copy mode (a copy holding a page pin stops at an absent page, lets
+its pins go, waits holding nothing and copies again) is reached by no process
+until #1258's holder write, which copies from user memory under a write pin.
+Its guest test, a holder write sourced from a mapped file's absent page that
+completes, lands with whichever of #1258 and #1269 lands second (owner
+map7b).
 
 Step 2 measures a cached page's fault and a 4 KiB read through a mapping
 against Linux (osbench `fs.*.map_touch_16m`, `fs.*.map_read_4k`). Owed, by
