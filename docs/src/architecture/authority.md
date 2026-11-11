@@ -32,7 +32,7 @@
 - Some handles, such as a device claim, cannot be duplicated, so passing one on
   means giving it away. Some, such as an inbox, cannot be moved at all.
 - Nothing takes a handle back from a running process: what it was given it
-  holds until it closes it or ends.
+  holds until it gives it up or ends.
 
 ## Kernel objects
 

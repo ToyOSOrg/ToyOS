@@ -2448,10 +2448,10 @@ pub fn nanosleep(nanos: u64) {
 /// source's own set.
 ///
 /// A wire encoding of `Option<Rights>`, decoded at the syscall boundary and
-/// never carried inward: `Rights::ALL` fits in sixteen bits, so this value is not a
-/// rights set and never becomes one. The two wrappers below are the only
-/// writers, so no caller ever spells it.
-pub const RIGHTS_UNCHANGED: u64 = u64::MAX;
+/// never carried inward: the word a move's [`TransferEntry`] says the same
+/// with. The two wrappers below are the only writers, so no caller ever
+/// spells it.
+pub const RIGHTS_UNCHANGED: u64 = TransferEntry::UNCHANGED as u64;
 
 /// A second handle to the same object, carrying what the first carries.
 ///
