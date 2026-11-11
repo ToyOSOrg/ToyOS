@@ -134,7 +134,7 @@ pub fn compose(severity: Severity, args: fmt::Arguments<'_>, emit: &mut impl FnM
 /// **No write waits for it.** One that finds it held (a second thread's, or
 /// the message of a panic raised under the hold, on the holder's own thread)
 /// is answered `None` and writes what it has as records of its own.
-#[cfg(any(test, all(target_os = "toyos", feature = "fd-table")))]
+#[cfg(any(test, feature = "fd-table"))]
 pub(crate) struct Held {
     busy: core::sync::atomic::AtomicBool,
     composer: core::cell::UnsafeCell<Composer>,
@@ -142,10 +142,10 @@ pub(crate) struct Held {
 
 // SAFETY: `composer` is reached only between a successful `busy` swap and its
 // release, so one thread at a time.
-#[cfg(any(test, all(target_os = "toyos", feature = "fd-table")))]
+#[cfg(any(test, feature = "fd-table"))]
 unsafe impl Sync for Held {}
 
-#[cfg(any(test, all(target_os = "toyos", feature = "fd-table")))]
+#[cfg(any(test, feature = "fd-table"))]
 impl Held {
     pub(crate) const fn new(stream: Stream) -> Self {
         Self {
@@ -347,7 +347,7 @@ mod target {
 /// `UNASKED` before a change of that descriptor returns to its caller. A
 /// ring's mapping stays for the process's life, so a write that read the word
 /// before a redirect finishes in the ring it found.
-#[cfg(all(target_os = "toyos", feature = "fd-table", not(test)))]
+#[cfg(all(feature = "fd-table", not(test)))]
 pub(crate) mod owner {
     use core::ptr::NonNull;
     use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
