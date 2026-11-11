@@ -105,13 +105,12 @@ struct Entry {
     holders: u32,
     /// Not released: owner calls reach it.
     owned: bool,
-    /// The last holder went and no notice has said so.
-    no_holders: bool,
 }
 
 struct State {
     pages: Pages<u64>,
-    /// Every object, at its id's slot.
+    /// Every object, at its id's slot, marked while its last holder has gone
+    /// and no notice has said so.
     entries: Slots<Entry>,
     /// The most objects the pager serves at once.
     objects: usize,
@@ -119,8 +118,6 @@ struct State {
     /// made.
     pieces: Charge,
     requests: *mut Request,
-    /// Entries whose `no_holders` is set.
-    no_holders: usize,
     held: Held,
     gone: bool,
 }
@@ -265,7 +262,6 @@ impl PagerObject {
             objects,
             pieces: Charge::none(core.job()),
             requests: ptr::null_mut(),
-            no_holders: 0,
             held: Held { core: Core::new(core_pages), spare, draining },
             gone: false,
         };
@@ -296,7 +292,7 @@ impl PagerObject {
         let state = self.state.lock();
         // SAFETY: every node on the list is live while linked, under this lock.
         let unreported = requests(&state).any(|r| unsafe { (*r).want.unreported() });
-        unreported || state.no_holders > 0
+        unreported || state.entries.any_marked()
     }
 
     /// A new object of `size` bytes: its id. `ResourceExhausted` where the
@@ -319,7 +315,7 @@ impl PagerObject {
         let State { pages, entries, .. } = &mut *state;
         let made = entries.insert_with(|slot| {
             let object = if anonymous { pages.anonymous(slot, size) } else { pages.object(slot, size) };
-            Entry { object, refs: 1, holders: 0, owned: true, no_holders: false }
+            Entry { object, refs: 1, holders: 0, owned: true }
         });
         u64::from(made.expect("paged: a slot was made free"))
     }
@@ -361,13 +357,11 @@ impl PagerObject {
     /// Under the lock, `state`: the unreleased object at `slot` released.
     fn let_go(&self, state: &mut State, slot: u32) {
         let job = self.core.job();
-        let State { pages, entries, held, gone, no_holders, .. } = state;
+        let State { pages, entries, held, gone, .. } = state;
         let entry = entries.get_mut(slot).expect("paged: a slot an object names is held");
         pages.invalidate(&mut entry.object, &mut |phys| held.give_back(job, *gone, phys, true));
         assert!(core::mem::take(&mut entry.owned), "paged: an object released twice");
-        if core::mem::take(&mut entry.no_holders) {
-            *no_holders -= 1;
-        }
+        entries.unmark(slot);
         self.unref_locked(state, slot);
     }
 
@@ -388,9 +382,7 @@ impl PagerObject {
         let gone = state.gone;
         let entry = state.entry_mut(slot);
         entry.holders -= 1;
-        if entry.holders == 0 && entry.owned && !gone && !entry.no_holders {
-            entry.no_holders = true;
-            state.no_holders += 1;
+        if entry.holders == 0 && entry.owned && !gone && state.entries.mark(slot) {
             self.watch.post();
         }
     }
@@ -408,7 +400,6 @@ impl PagerObject {
             return;
         }
         let entry = state.entries.remove(slot).expect("paged: a slot an object names is held");
-        state.no_holders -= usize::from(entry.no_holders);
         let job = self.core.job();
         let State { pages, held, gone, .. } = state;
         pages.release(entry.object, &mut |phys| held.give_back(job, *gone, phys, true));
@@ -439,23 +430,14 @@ impl PagerObject {
                     }
                     at = next;
                 }
-                let mut owed = state.no_holders;
-                for slot in 0..state.entries.len() as u32 {
-                    if n == want || owed == 0 {
-                        break;
-                    }
-                    let Some(entry) = state.entries.get_mut(slot) else { continue };
-                    if entry.no_holders {
-                        entry.no_holders = false;
-                        owed -= 1;
-                        // Said only while still so: a holder made since is held.
-                        if entry.holders == 0 {
-                            batch[n] = PagedNotice { object: u64::from(slot), kind: NOTICE_NO_HOLDERS, first: 0, count: 0 };
-                            n += 1;
-                        }
+                while n < want {
+                    let Some(slot) = state.entries.take_marked() else { break };
+                    // Said only while still so: a holder made since is held.
+                    if state.entry(slot).holders == 0 {
+                        batch[n] = PagedNotice { object: u64::from(slot), kind: NOTICE_NO_HOLDERS, first: 0, count: 0 };
+                        n += 1;
                     }
                 }
-                state.no_holders = owed;
                 n
             };
             // SAFETY: a `PagedNotice` is `UserSafe`: every byte of it is a
@@ -1157,13 +1139,10 @@ impl ZeroHandles for PagerObject {
         let mut state = self.state.lock();
         state.gone = true;
         for slot in 0..state.entries.len() as u32 {
-            let Some(entry) = state.entries.get_mut(slot) else { continue };
-            entry.no_holders = false;
-            if entry.owned {
+            if state.entries.get(slot).is_some_and(|e| e.owned) {
                 self.let_go(&mut state, slot);
             }
         }
-        state.no_holders = 0;
         let job = self.core.job();
         while let Some(phys) = state.held.spare.pop().or_else(|| state.held.draining.pop()) {
             // SAFETY: a frame this pager drew and held aside, which nothing

@@ -55,6 +55,9 @@ supervisor's own memory, which closes it (below).
   instead. Owner: the supervisor track. Exit: a start refused for
   the supervisor's own memory waits on the supervisor's own job's readiness,
   as one refused for the service's waits on the service's.
+- **A client's `/tmp` files are counted to the file server that holds them**,
+  so the job a person would stop for them is a service every client needs
+  (`issues/four-shares-take-a-file-server.md`).
 - **Connect-time capacity.** Both rings of a connection are its connecting
   job's, allocated at each one's first write, so a server's reply spends
   nothing of its own; but a client's sends are not yet capacity its receiver

@@ -717,9 +717,10 @@ const MACHINE_TESTS: &[MachineTest] = &[
     ("a_user_copy_highest_first_faults_or_ends_as_bad_address", |test_config| {
         a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &["copies-go-down"])
     }),
-    // `/tmp` holds more empty files than its guest has MiB of memory: the
-    // memory file server's objects as the kernel makes and charges them,
-    // which no host build has. One boot of QEMU's x86-64 machine, whose
+    // `/tmp` holds more empty files than its guest has MiB of memory, and
+    // each one's last holder going reaches its server: the memory file
+    // server's objects as the kernel makes, charges and reports them, which
+    // no host build has. One boot of QEMU's x86-64 machine, whose
     // 4 GiB is what the count is held against; the shared boots run it on
     // each bench.
     ("tmp_holds_empty_files_by_what_each_costs", |test_config| tmp_holds_empty_files_by_what_each_costs(test_config)),
@@ -5926,11 +5927,11 @@ fn ring3_debug_traps_end_their_process(test_config: &Path) -> Result<(), String>
     Ok(())
 }
 
-/// `tmp_empty_files` alone: ten thousand empty files made in `/tmp` and
-/// removed, on a guest of 4 GiB.
+/// `tmp_empty_files` alone: ten thousand empty files made in `/tmp`, each
+/// opened to read and closed, and removed, on a guest of 4 GiB.
 fn tmp_holds_empty_files_by_what_each_costs(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "tmp_empty_files";
-    const SAID: &str = "tmp_empty_files: 10000 empty files made and removed";
+    const SAID: &str = "tmp_empty_files: 10000 empty files made, read-opened and removed";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
     serial::Serial::boot(&qemu).must_be_clean()?;

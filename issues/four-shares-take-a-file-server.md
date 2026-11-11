@@ -87,3 +87,28 @@ which removes it.
 started, in the machine's session; two logins through it hold two shares, shown by a test in which one at its parts leaves the
 other's first connection and first stream answered; a login past the cap is
 refused by name; and a login's end ends its session.
+
+## One client can fill the `/tmp` server's memory
+
+A memory volume's files are bounded only by what its server's job can be
+charged (`pager` in `system/fileserver/src/main.rs`). Everything a `/tmp`
+file costs is the MEMORY file server's: its object's slot in the kernel, the
+server's own record of it, and its pages up to the pager's capacity. A
+directory or a link there costs the server's record alone. None of it is
+charged to the client that made it, and nothing bounds one share's part. So
+one client can make files, directories and links in `/tmp` until the memory
+is spent. Then every other client's create there is refused. The server's
+next allocation of its own may be among the refused, which ends it, and with
+it every client's `/tmp`. The memory is counted to the file server, so
+nothing names the client that took it (`issues/no-physical-memory-fairness.md`).
+
+Owner: the file server and the kernel's paged objects, once the owner has
+decided the exit below.
+
+**Exit** (proposed, pending the owner's decision): what a server keeps for one
+client is charged to that client's job. A pager's object, and the pages
+supplied to it, are charged to a job the client's grant names, which the
+kernel lets the server charge by that authority. This changes the manual's
+rule that services own their private state, so it is the owner's to decide.
+The alternatives are a per-share allowance in the server, which is a fixed
+part again, and leaving the charge with the server.
