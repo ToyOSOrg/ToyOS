@@ -286,7 +286,7 @@ pub fn pread(fd: Fd, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
 /// reach that.
 pub unsafe fn map(fd: Fd, offset: u64, len: usize, at: toyos_abi::syscall::VmAt) -> Result<*mut u8, Error> {
     let (place, fixed) = match at {
-        toyos_abi::syscall::VmAt::Fixed(addr) => (addr as u64, true),
+        toyos_abi::syscall::VmAt::Fixed(addr) => (addr.expose_provenance() as u64, true),
         toyos_abi::syscall::VmAt::Anywhere { .. } => (0, false),
     };
     // SAFETY: the caller's.

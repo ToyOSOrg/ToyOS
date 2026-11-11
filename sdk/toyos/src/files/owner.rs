@@ -563,15 +563,17 @@ unsafe extern "C" fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u6
 /// that.
 #[no_mangle]
 unsafe extern "C" fn toyos_fs_map(fd: Fd, offset: u64, len: usize, place: u64, fixed: bool) -> i64 {
-    let at = if fixed { syscall::VmAt::Fixed(place as usize) } else { syscall::VmAt::ANYWHERE };
-    let refused = || Ok(Err(SyscallError::NotSupported));
+    let at = match fixed {
+        true => syscall::VmAt::Fixed(core::ptr::with_exposed_provenance_mut(place as usize)),
+        false => syscall::VmAt::ANYWHERE,
+    };
     let mapped = on_fd_held(
         fd,
-        |_| refused(),
+        |_| Ok(Err(SyscallError::NotSupported)),
         is_directory,
         // SAFETY: the caller's.
-        |holder, _| Some(unsafe { holder.map(offset, len, at) }.map(|ptr| ptr.addr() as u64)),
-        |_, _, _| refused(),
+        |holder, _| Some(unsafe { holder.map(offset, len, at) }.map(|ptr| ptr.expose_provenance() as u64)),
+        |_, _, _| Ok(Err(SyscallError::NotSupported)),
     );
     answer(mapped.and_then(|inner| inner.map_err(Error::Kernel)))
 }
