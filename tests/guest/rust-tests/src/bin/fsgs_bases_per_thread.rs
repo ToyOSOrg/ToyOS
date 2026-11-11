@@ -5,6 +5,7 @@
 //! allows and no kernel entry may take for its own.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Barrier;
 use std::thread;
 
 use core_affinity::CoreId;
@@ -18,6 +19,10 @@ const ROUNDS: u64 = 500;
 /// Each thread's finished rounds: a change in the other's across one of a
 /// thread's rounds is the other having run on their one CPU meanwhile.
 static ROUNDS_DONE: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Both threads pinned before either starts its rounds, so each runs across
+/// the other's.
+static PINNED: Barrier = Barrier::new(2);
 
 fn main() {
     let sibling = thread::spawn(|| rounds(1));
@@ -33,6 +38,7 @@ fn main() {
 /// Thread `me`'s rounds, and how many of them the other thread ran across.
 fn rounds(me: usize) -> u64 {
     assert!(core_affinity::set_for_current(CoreId { id: 0 }), "pin thread {me} to cpu0");
+    PINNED.wait();
     let mut crossed = 0;
     for round in 0..ROUNDS {
         let fs = 0x0000_7000_0000_0000 | (me as u64) << 40 | round << 4;

@@ -625,9 +625,11 @@ pub fn alloc_ap(cpu_id: u32, token: u32) -> *mut PerCpu {
 pub fn init_ap(percpu_ptr: *mut PerCpu) {
     // SAFETY: this CPU's own `PerCpu`, read from `gs:[0]`; the BSP dropped its `&mut` before the SIPI.
     let percpu = unsafe { &mut *percpu_ptr };
+    // Before `load_gdt`'s `ltr`: from there the IST entries have their stacks,
+    // and they need `CR4.FSGSBASE` for `rdgsbase` and `wrgsbase`.
+    super::control_regs::init(percpu.cpu_id);
     // SAFETY: `load_gdt`'s once-per-CPU contract; this is this AP's call.
     unsafe { percpu.load_gdt(); }
-    super::control_regs::init(percpu.cpu_id);
     super::control_regs::init_performance(percpu.cpu_id);
     super::fpu::init(percpu.cpu_id);
     super::fpu::log_state(percpu.cpu_id);
