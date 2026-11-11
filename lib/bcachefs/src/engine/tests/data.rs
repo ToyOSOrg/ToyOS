@@ -750,3 +750,122 @@ fn a_reserved_write_inside_a_large_block_lands_on_that_block() {
     assert_eq!(read_all(&v, neighbour).unwrap(), [0x5a; 16 << 10], "the neighbour's bytes");
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }
+
+/// A reserved write's bytes reach the device as one write for each stretch
+/// of contiguous sectors, however many extents they are, and no pointer
+/// exists until they have: a write the device refuses leaves every extent
+/// of the file as it was.
+#[test]
+fn a_reserved_write_sends_each_contiguous_stretch_once_before_any_pointer() {
+    use core::cell::{Cell, RefCell};
+    use toyos_blockdev::Block;
+    struct Recording<'a> {
+        dev: &'a Image,
+        data: RefCell<Vec<(u64, usize)>>,
+        refuse: Cell<bool>,
+    }
+    impl BlockDev for Recording<'_> {
+        fn blocks(&self) -> u64 {
+            self.dev.blocks()
+        }
+        async fn read(&self, lba: u64, out: &mut [Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+            self.dev.read(lba, out).await
+        }
+        async fn write(&self, lba: u64, data: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+            self.dev.write(lba, data).await
+        }
+        async fn flush(&self) -> core::result::Result<(), toyos_blockdev::Error> {
+            self.dev.flush().await
+        }
+        async fn write_data(&self, lba: u64, data: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+            self.data.borrow_mut().push((lba, data.len()));
+            if self.refuse.get() {
+                return Err(toyos_blockdev::Error::Device);
+            }
+            self.dev.write(lba, data).await
+        }
+    }
+    let dev = formatted(256 << 20, None);
+    let old = vec![0x11u8; 256 << 10];
+    let new: Vec<u8> = (0..256 << 10).map(|i| (i * 7) as u8).collect();
+    let ino = mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap().ino;
+        assert_eq!(m.write(ino, 0, &old, NOW).await.unwrap(), old.len());
+        ino
+    });
+    let recording = Recording { dev: &dev, data: RefCell::default(), refuse: Cell::new(false) };
+    let m = block_on_ready(Mount::open(&recording, MEMORY, random())).unwrap();
+    let mut token = block_on_ready(m.reserve(ino, 0, new.len())).unwrap();
+    assert_eq!(block_on_ready(m.write_reserved(&mut token, 0, &new[..192 << 10], NOW)).unwrap(), 192 << 10);
+    let sent = recording.data.borrow().clone();
+    assert_eq!(sent.iter().map(|&(_, blocks)| blocks).sum::<usize>(), 48);
+    for pair in sent.windows(2) {
+        assert_ne!(pair[0].0 + pair[0].1 as u64, pair[1].0, "two writes for one stretch of contiguous sectors");
+    }
+    assert!(sent.len() < 3, "{} device writes for three extents", sent.len());
+
+    recording.refuse.set(true);
+    assert_eq!(block_on_ready(m.write_reserved(&mut token, 192 << 10, &new[192 << 10..], NOW)), Err(Error::Device(toyos_blockdev::Error::Device)));
+    let mut got = vec![0; old.len()];
+    block_on_ready(m.read(ino, 0, &mut got)).unwrap();
+    assert_eq!(got[..192 << 10], new[..192 << 10]);
+    assert_eq!(got[192 << 10..], old[192 << 10..], "an extent points at bytes the device refused");
+}
+
+/// A reserved write of several extents over a file, cut at every device
+/// request with writes torn and reordered: the file reads as it was, as
+/// it is once committed, or with the extents an entry already carried, in
+/// order, and the volume checks clean.
+#[test]
+fn a_reserved_write_of_several_extents_survives_torn_reordered_writes() {
+    use super::crash::Watched;
+    use core::cell::Cell;
+    use toyos_blockdev::model::{Model, Overlay};
+
+    const EXTENT: usize = 64 << 10;
+    let dev = formatted(64 << 20, None);
+    let old = vec![0x33u8; 3 * EXTENT];
+    let new: Vec<u8> = (0..3 * EXTENT).map(|i| (i * 7) as u8 | 1).collect();
+    let ino = mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.create(m.root(), b"file", New::File, OWNER, NOW).await.unwrap().ino;
+        m.write(ino, 0, &old, NOW).await.unwrap();
+        ino
+    });
+    let committed = Cell::new(false);
+    let requests = Cell::new(0u64);
+    let model = Model::new(dev.into_inner(), 512);
+    let watched = Watched {
+        model: &model,
+        after: Box::new(|model| {
+            requests.set(requests.get() + 1);
+            model
+                .check(16, requests.get(), |bytes| {
+                    let dev = Overlay::new(bytes);
+                    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).map_err(|e| format!("mount: {e:?}"))?;
+                    let mut got = vec![0; old.len()];
+                    block_on_ready(m.read(ino, 0, &mut got)).map_err(|e| format!("read: {e:?}"))?;
+                    let pointed = (0..=3).find(|&k| got[..k * EXTENT] == new[..k * EXTENT] && got[k * EXTENT..] == old[k * EXTENT..]);
+                    match pointed {
+                        Some(3) => {}
+                        Some(_) if !committed.get() => {}
+                        _ => return Err(format!("unexpected bytes at request {}, committed {}", requests.get(), committed.get())),
+                    }
+                    block_on_ready(m.unmount()).map_err(|e| format!("unmount: {e:?}"))?;
+                    let v = block_on_ready(Volume::open(&dev)).map_err(|e| format!("reopen: {e:?}"))?;
+                    let findings = block_on_ready(fsck(&v)).map_err(|e| format!("fsck: {e:?}"))?;
+                    if !findings.is_empty() {
+                        return Err(format!("fsck: {findings:?}"));
+                    }
+                    Ok(())
+                })
+                .unwrap_or_else(|e| panic!("{e}"));
+        }),
+    };
+    let m = block_on_ready(Mount::open(&watched, MEMORY, random())).unwrap();
+    let mut token = block_on_ready(m.reserve(ino, 0, new.len())).unwrap();
+    assert_eq!(block_on_ready(m.write_reserved(&mut token, 0, &new, NOW)).unwrap(), new.len());
+    block_on_ready(m.commit()).unwrap();
+    committed.set(true);
+    block_on_ready(m.unmount()).unwrap();
+    assert!(requests.get() > 4);
+}
