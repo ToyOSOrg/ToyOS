@@ -1072,9 +1072,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // How long a spawn of `toybox` takes to its exit, printed by the job and
-        // read off the log for an A/B against another build: that it ran, and
-        // what it said, are the verdict.
+        // How long a spawn of `toybox` takes to its exit, and the machine's
+        // busy CPU a spawn, printed by the job and read off the log for an A/B
+        // against another build: that it ran, and what it said, are the verdict.
         "spawn_cost",
         metal::Metal {
             arms: TESTCASES,
