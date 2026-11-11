@@ -1229,10 +1229,12 @@ impl Driver {
     /// [`taken`] of the list read as the machine came back. A `BootNext` no
     /// boot took is deleted before the refusal, or the bench's next reboot,
     /// for whatever reason, would boot its entry once; a failure to delete it
-    /// does not replace the refusal.
+    /// is said, and does not replace the refusal.
     fn took_bootnext(&self, listing: &str) -> Result<(), Refusal> {
         taken(listing).inspect_err(|_| {
-            let _ = self.as_root("deleting the BootNext no boot took", Job::DeleteBootNext, None);
+            if let Err(kept) = self.as_root("deleting the BootNext no boot took", Job::DeleteBootNext, None) {
+                println!("  the BootNext stays set: {kept}");
+            }
         })
     }
 
