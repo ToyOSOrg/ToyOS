@@ -1,0 +1,16 @@
+[package]
+name = "shell-copies"
+description = "A host test of the shell's quit handling against the kernel's quit and spawn, in every order: its module that names nothing of ToyOS's SDK, compiled as it is."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# A package of its own because the shell links std's ToyOS extensions, which a
+# host build has not: this compiles only its quit handling.
+
+[lib]
+doctest = false
+
+[dev-dependencies]
+toyos-abi = { path = "../../../sdk/abi" }
