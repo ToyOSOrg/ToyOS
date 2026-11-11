@@ -20,13 +20,12 @@ which 32 MiB may be dirty. The eighth is the bound netstack and the
 compositor take for want of a kernel memory limit
 (`issues/no-physical-memory-fairness.md`); it is an interim, not a sizing.
 
-A pager also serves at most the objects it was made for, each charged as it
-is made: DATA one per 16 pages of its capacity, between 1,024 and 65,536, LOG
-and BOOT 1,024 each, and a memory volume's as many as its job can be charged
-for, up to the kernel's most (`PAGER_MAX_OBJECTS`).
-So the DATA server holds at most that many files' objects machine-wide; past
-it, a file nobody holds goes to make room, and an open is refused `NoSpace`
-only while every one is held open.
+A pager's objects are charged as they are made. A server on a disk keeps at
+most a count of files (`Files::opened` in `system/fileserver/src/pages.rs`):
+DATA one per 16 pages of its capacity, between 1,024 and 65,536, LOG and
+BOOT 1,024 each. Past it, a file nobody holds goes to make room, and an open
+is refused `NoSpace` only while every one is held open. A memory volume keeps
+no count (`issues/one-client-can-fill-the-tmp-servers-memory-and-deny-every-other-client.md`).
 
 No other job can take a pager's clean pages back. A pager withdraws them
 only for its own sake (`system/fileserver/src/pages.rs`, `Files::make_room`),

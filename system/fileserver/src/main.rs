@@ -76,7 +76,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor};
 use toyos::shm::{Bytes, SharedMemory};
 use toyos::Pipe;
-use toyos_abi::syscall::{SyscallError, MAX_BADGE, PAGER_MAX_OBJECTS, PIPE_CAPACITY, SERVE_PREFIX};
+use toyos_abi::syscall::{SyscallError, MAX_BADGE, PIPE_CAPACITY, SERVE_PREFIX};
 
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
@@ -238,7 +238,8 @@ fn main() {
         dirs.iter().map(|d| d.dir).collect::<Vec<_>>().join(", "),
         volume.describe()
     );
-    let files = Files::new(pager(role, volume.memory()));
+    let (pager, keeps) = pager(role, volume.memory());
+    let files = Files::new(pager, keeps);
     Server {
         volume,
         files,
@@ -271,31 +272,26 @@ const SMALL_PAGES: u64 = (16 << 20) / toyos::paged::PAGE;
 /// The most pages a DATA pager holds dirty: 32 MiB.
 const DATA_DIRTY: u64 = 8 * 1024;
 
-/// The role's pager: how many pages its files hold, how many of them may be
-/// dirty and how many files it keeps. None for SYSTEM, whose files are
+/// The role's pager: how many pages its files hold and how many of them may
+/// be dirty, and how many files it keeps. None for SYSTEM, whose files are
 /// immutable and are served from ROOT's memory.
-fn pager(role: Role, anonymous: bool) -> Option<toyos::paged::Pager> {
-    let (capacity, dirty, objects) = match role {
-        Role::System => return None,
+fn pager(role: Role, anonymous: bool) -> (Option<toyos::paged::Pager>, Option<usize>) {
+    let (capacity, dirty, keeps) = match role {
+        Role::System => return (None, None),
         Role::Data | Role::Memory => {
             let share = toyos::system::memory_total() / PAGES_SHARE / toyos::paged::PAGE;
             let capacity = (share.saturating_sub(2 * SMALL_PAGES) / 2).max(SMALL_PAGES);
-            // A volume on a disk keeps a file for every 16 pages, at most
-            // 65,536, and lets the oldest nobody holds go past that. A memory
-            // volume's objects are its files, which nothing can let go: they
-            // are bounded by what each is charged as it is made.
-            let objects = match anonymous {
-                true => PAGER_MAX_OBJECTS,
-                false => (capacity / 16).clamp(1024, 64 * 1024),
-            };
-            (capacity, DATA_DIRTY.min(capacity / 2), objects)
+            // A file kept for every 16 pages, at most 65,536.
+            (capacity, DATA_DIRTY.min(capacity / 2), (capacity / 16).clamp(1024, 64 * 1024))
         }
         Role::Log => (SMALL_PAGES, 512, 1024),
         Role::Boot => (SMALL_PAGES, 0, 1024),
     };
-    let pager = toyos::paged::Pager::create(capacity, if anonymous { 0 } else { dirty }, objects, REPORT)
+    let pager = toyos::paged::Pager::create(capacity, if anonymous { 0 } else { dirty }, REPORT)
         .unwrap_or_else(|e| panic!("fileserver: the {role:?} server makes no pager ({e:?}); its row is no pager row"));
-    Some(pager)
+    // A memory volume's objects are its files, which nothing can let go: they
+    // are bounded by what each is charged as it is made.
+    (Some(pager), (!anonymous).then_some(keeps as usize))
 }
 
 /// A session on the partition diskserver serves under `guid`.

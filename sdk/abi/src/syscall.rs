@@ -3173,26 +3173,22 @@ pub const NOTICE_REQUESTED: u64 = 1;
 /// The object's last holder handle went: it may be released.
 pub const NOTICE_NO_HOLDERS: u64 = 2;
 
-/// The most objects one pager serves at once ([`pager_create`]).
-pub const PAGER_MAX_OBJECTS: u64 = 1 << 23;
-
 /// Make this process's one pager, whose objects' pages are at most
-/// `capacity`, `dirty` of them dirty at once, and which serves at most
-/// `objects` objects, at most [`PAGER_MAX_OBJECTS`]. A reader waiting past
+/// `capacity`, `dirty` of them dirty at once. A reader waiting past
 /// `report_ns` (bounded by the kernel) is reported overdue and waits on.
 /// Committed at once, and charged with the pager: `dirty` pages and the
 /// headroom a read's pages need, and the index, which a capacity the job
-/// cannot hold is refused for (`ResourceExhausted`). Each object is charged
-/// to the pager's job as it is made ([`paged_create`]). `PermissionDenied`
+/// cannot hold is refused for (`ResourceExhausted`). Its objects are charged
+/// to the pager's job as they are made ([`paged_create`]). `PermissionDenied`
 /// for a process not started as a pager, `AlreadyExists` for a second.
-pub fn pager_create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_PAGER_CREATE, capacity, dirty, objects, report_ns)).map(|raw| RawHandle(raw as u32))
+pub fn pager_create(capacity: u64, dirty: u64, report_ns: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_PAGER_CREATE, capacity, dirty, report_ns, 0)).map(|raw| RawHandle(raw as u32))
 }
 
 /// A paged object of `size` bytes, its pages absent:
 /// its id, which `pager`'s calls and notices name it by.
-/// `ResourceExhausted` where the pager serves as many objects as it was made
-/// for, or its job cannot be charged the object.
+/// `ResourceExhausted` where the pager's job cannot be charged the object, or
+/// the pager serves as many as the kernel's table holds.
 pub fn paged_create(pager: RawHandle, size: u64) -> Result<u64, SyscallError> {
     check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, 0, 0))
 }

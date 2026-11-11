@@ -16,12 +16,12 @@ use crate::process;
 use crate::user_ptr::{SyscallContext, UserBytesMut};
 use crate::UserAddr;
 
-pub(super) fn sys_pager_create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> u64 {
+pub(super) fn sys_pager_create(capacity: u64, dirty: u64, report_ns: u64) -> u64 {
     let handles = process::handles();
     if let Err(e) = handles.claim_pager() {
         return e.to_u64();
     }
-    let made = PagerObject::create(capacity, dirty, objects, report_ns).map_err(|why| match why {
+    let made = PagerObject::create(capacity, dirty, report_ns).map_err(|why| match why {
         Unmade::Invalid => SyscallError::InvalidArgument,
         Unmade::Exhausted => SyscallError::ResourceExhausted,
     });

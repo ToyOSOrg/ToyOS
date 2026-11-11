@@ -549,7 +549,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // kernel decides each access by what its address is.
         SYS_ACPI => sys_acpi(&ctx, RawHandle(a1 as u32), a2, a3),
         SYS_DEVICE_REG_READ => sys_device_reg_read(RawHandle(a1 as u32), a2, a3),
-        SYS_PAGER_CREATE => sys_pager_create(a1, a2, a3, a4),
+        SYS_PAGER_CREATE => sys_pager_create(a1, a2, a3),
         SYS_PAGED_CREATE => match a3 {
             0 | 1 => sys_paged_create(RawHandle(a1 as u32), a2, a3 != 0),
             _ => SyscallError::InvalidArgument.to_u64(),

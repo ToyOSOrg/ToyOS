@@ -39,7 +39,8 @@
 //! a time and given back as each goes. Its index and the frames it holds
 //! aside are charged with it. Its objects' slots are made a piece at a time,
 //! each piece charged as an object first needs it and kept for the pager's
-//! life, so making an object is the one call that allocates.
+//! life (`issues/one-client-can-fill-the-tmp-servers-memory-and-deny-every-other-client.md`),
+//! so making an object is the one call that allocates.
 
 use alloc::sync::Arc;
 use core::cell::{Cell, UnsafeCell};
@@ -52,7 +53,7 @@ use kernel::chunked::Stack;
 use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, Version, Waiters, Want, PAGE};
 use kernel::sched::task::WaitClass;
 use kernel::slots::Slots;
-use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED, PAGER_MAX_OBJECTS};
+use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
 
 use crate::mm::charge::Charge;
 use crate::mm::pmm;
@@ -68,9 +69,7 @@ use super::{KObjectVariant, ObjectCore, ZeroHandles};
 // Two pieces of a table and their allocator headers share one superframe.
 const _: () = assert!(2 * kernel::chunked::CHUNK_BYTES < crate::mm::MAX_HEAP_ALLOC);
 
-// Every object a pager may serve has a slot, and a piece of them is one
-// allocation the heap takes.
-const _: () = assert!(PAGER_MAX_OBJECTS as usize <= Slots::<Entry>::MAX);
+// A piece of slots is one allocation the heap takes.
 const _: () = assert!(Slots::<Entry>::PIECE_BYTES <= kernel::chunked::CHUNK_BYTES);
 
 /// Pages one copy pins, and one supply or write draws, at once.
@@ -112,11 +111,9 @@ struct State {
     /// Every object, at its id's slot, marked while its last holder has gone
     /// and no notice has said so.
     entries: Slots<Entry>,
-    /// The most objects the pager serves at once.
-    objects: usize,
     /// The heap the slots take, charged to the pager's job as each piece is
     /// made.
-    pieces: Charge,
+    slots_charge: Charge,
     requests: *mut Request,
     held: Held,
     gone: bool,
@@ -195,16 +192,17 @@ impl State {
         (&mut self.pages, &mut entry.object)
     }
 
-    /// A free slot for the next object, its piece charged where one is made.
+    /// A free slot for the next object, its piece charged where one is made:
+    /// `ResourceExhausted` where the charge is refused or the table is whole.
     fn make_slot(&mut self) -> Result<(), SyscallError> {
         if self.entries.has_free() {
             return Ok(());
         }
         let grown = self.entries.grown_bytes().ok_or(SyscallError::ResourceExhausted)?;
         let more = grown - self.entries.heap_bytes();
-        self.pieces.grow(more)?;
+        self.slots_charge.grow(more)?;
         if !self.entries.grow() {
-            self.pieces.shrink(more);
+            self.slots_charge.shrink(more);
             return Err(SyscallError::ResourceExhausted);
         }
         Ok(())
@@ -235,12 +233,9 @@ impl PagerObject {
         toyos_abi::handle::Rights::READ.union(toyos_abi::handle::Rights::WRITE).union(toyos_abi::handle::Rights::WAIT);
 
     /// The calling process's pager: `capacity` pages, `dirty` of them dirty at
-    /// once, at most `objects` objects, readers overdue past `report_ns`.
-    pub fn create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> Result<Arc<Self>, Unmade> {
-        let fits = |n: u64, most: usize| usize::try_from(n).ok().filter(|&n| n > 0 && n <= most);
-        let (Some(slots), Some(objects)) =
-            (fits(capacity, Pages::<u64>::MAX_CAPACITY), fits(objects, PAGER_MAX_OBJECTS as usize))
-        else {
+    /// once, readers overdue past `report_ns`.
+    pub fn create(capacity: u64, dirty: u64, report_ns: u64) -> Result<Arc<Self>, Unmade> {
+        let Some(slots) = usize::try_from(capacity).ok().filter(|&n| n > 0 && n <= Pages::<u64>::MAX_CAPACITY) else {
             return Err(Unmade::Invalid);
         };
         if dirty > capacity {
@@ -259,8 +254,7 @@ impl PagerObject {
         let state = State {
             pages,
             entries: Slots::new(),
-            objects,
-            pieces: Charge::none(core.job()),
+            slots_charge: Charge::none(core.job()),
             requests: ptr::null_mut(),
             held: Held { core: Core::new(core_pages), spare, draining },
             gone: false,
@@ -295,9 +289,9 @@ impl PagerObject {
         unreported || state.entries.any_marked()
     }
 
-    /// A new object of `size` bytes: its id. `ResourceExhausted` where the
-    /// pager serves as many as it was made for, or its job cannot be charged
-    /// the slots for another.
+    /// A new object of `size` bytes: its id. `ResourceExhausted` where its
+    /// job cannot be charged the slots for another, or the table holds as
+    /// many as it can.
     pub fn add(&self, size: u64, anonymous: bool) -> u64 {
         if size > kernel::paged::LAST_END {
             return SyscallError::InvalidArgument.to_u64();
@@ -305,9 +299,6 @@ impl PagerObject {
         let mut state = self.state.lock();
         if state.gone {
             return SyscallError::Gone.to_u64();
-        }
-        if state.entries.held() >= state.objects {
-            return SyscallError::ResourceExhausted.to_u64();
         }
         if let Err(e) = state.make_slot() {
             return e.to_u64();

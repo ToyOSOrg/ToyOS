@@ -1,0 +1,27 @@
+# One job, `test_rs_tmp_empty_files`, on AArch64: `/tmp` is the memory file
+# server's, whose paged objects the kernel makes and charges as the job's
+# files ask for them.
+[boot]
+start = ["logkeeper", "uart", "fileserver", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread", "console"]
+serves = ["log-wire"]
+holds = ["log-origins"]
+
+[programs.uart]
+devices = ["uart"]
+holds = ["console-input"]
+receives = ["log-wire"]
+restart = true
+
+[programs.fileserver]
+restart = true
+pager = true
+roles = ["memory"]
+
+# Four minutes from boot: the job runs on an emulated CPU, and a job past the
+# bound reboots the guest with the job named.
+[programs.test-runner]
+args = ["--bound-ms=240000", "test_rs_tmp_empty_files"]

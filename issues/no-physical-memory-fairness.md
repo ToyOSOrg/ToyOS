@@ -57,7 +57,7 @@ supervisor's own memory, which closes it (below).
   as one refused for the service's waits on the service's.
 - **A client's `/tmp` files are counted to the file server that holds them**,
   so the job a person would stop for them is a service every client needs
-  (`issues/four-shares-take-a-file-server.md`).
+  (`issues/one-client-can-fill-the-tmp-servers-memory-and-deny-every-other-client.md`).
 - **Connect-time capacity.** Both rings of a connection are its connecting
   job's, allocated at each one's first write, so a server's reply spends
   nothing of its own; but a client's sends are not yet capacity its receiver

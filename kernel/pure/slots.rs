@@ -37,7 +37,6 @@ pub struct Slots<T> {
     pieces: Vec<Box<[Slot<T>]>>,
     /// The first free slot, `NONE` while every slot made is held.
     free: u32,
-    held: usize,
     /// The slot marked last, `NONE` while none is.
     marked: u32,
 }
@@ -57,7 +56,7 @@ impl<T> Slots<T> {
     pub const PIECE_BYTES: usize = PIECE * core::mem::size_of::<Slot<T>>();
 
     pub const fn new() -> Self {
-        Self { pieces: Vec::new(), free: NONE, held: 0, marked: NONE }
+        Self { pieces: Vec::new(), free: NONE, marked: NONE }
     }
 
     /// Slots made, each held or free.
@@ -67,11 +66,6 @@ impl<T> Slots<T> {
 
     pub fn is_empty(&self) -> bool {
         self.pieces.is_empty()
-    }
-
-    /// Slots holding a value.
-    pub fn held(&self) -> usize {
-        self.held
     }
 
     /// The heap the table holds.
@@ -111,12 +105,14 @@ impl<T> Slots<T> {
         if pieces * PIECE > Self::MAX {
             return false;
         }
-        let listed = self.listed_for(pieces);
-        if self.pieces.try_reserve_exact(listed - self.pieces.len()).is_err() {
-            return false;
-        }
+        // The piece first: a refused list then drops it, and the list keeps
+        // the capacity it had.
         let mut piece = Vec::new();
         if piece.try_reserve_exact(PIECE).is_err() {
+            return false;
+        }
+        let listed = self.listed_for(pieces);
+        if self.pieces.try_reserve_exact(listed - self.pieces.len()).is_err() {
             return false;
         }
         let first = self.len() as u32;
@@ -136,7 +132,6 @@ impl<T> Slots<T> {
         let Slot::Free(next) = *at else { panic!("slots: the free list named held slot {slot}") };
         *at = Slot::Held(f(slot), Mark::Off);
         self.free = next;
-        self.held += 1;
         Some(slot)
     }
 
@@ -151,7 +146,6 @@ impl<T> Slots<T> {
         }
         let Slot::Held(value, _) = core::mem::replace(at, Slot::Free(free)) else { unreachable!("held above") };
         self.free = slot;
-        self.held -= 1;
         Some(value)
     }
 
@@ -247,13 +241,12 @@ mod tests {
             held.push(t.insert_with(|slot| u64::from(slot) * 7).unwrap());
             assert_eq!(*held.last().unwrap(), n);
         }
-        assert_eq!((t.len(), t.held()), (4 * PIECE, 3 * PIECE + 1));
+        assert_eq!(t.len(), 4 * PIECE);
         assert!(held.iter().all(|&s| t.get(s) == Some(&(u64::from(s) * 7))));
         assert_eq!(t.remove(5), Some(35));
         assert_eq!(t.remove(700), Some(4900));
         assert_eq!(t.get(5), None, "a free slot holds nothing");
         assert_eq!(t.remove(5), None, "nor gives anything back");
-        assert_eq!(t.held(), 3 * PIECE - 1);
         assert_eq!(t.insert_with(|_| 1), Some(700));
         assert_eq!(t.insert_with(|_| 2), Some(5));
         assert_eq!(t.insert_with(|_| 3), Some(3 * PIECE as u32 + 1), "then the piece's own free slots");

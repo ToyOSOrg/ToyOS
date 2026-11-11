@@ -83,7 +83,7 @@ fn main() {
     println!("a_served_file_reads_through_its_paged_object: std reads the same");
 
     assert_eq!(
-        Pager::create(1, 0, 1, std::time::Duration::from_secs(1)).err(),
+        Pager::create(1, 0, std::time::Duration::from_secs(1)).err(),
         Some(toyos_abi::syscall::SyscallError::PermissionDenied),
         "a process started as no pager made one"
     );
