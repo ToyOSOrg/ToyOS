@@ -117,6 +117,40 @@ fn parts(
     each(&name("pread_8"), 100, 2000, fields, |i| io("pread", f.read_at(&mut buf[..8], page_at(i, pages))).map(drop));
 }
 
+/// The 16 MiB file `big`, its pages cached, mapped read-only and shared.
+/// Mapped, each page touched once and unmapped, so each touch is a fault
+/// unless fault-around mapped its page already: 20 after 2. Then 4 KiB copied
+/// out of a page of one mapping every page of which was touched: 2,000 after
+/// 100.
+fn mapped(name: &dyn Fn(&str) -> String, fields: &[(&'static str, String)], big: &Path, pages: usize) {
+    let len = pages * 4096;
+    let touch = |at: *mut u8| (0..pages).fold(0u8, |sum, page| {
+        // SAFETY: a page of the mapping, read-only.
+        sum.wrapping_add(unsafe { at.add(page * 4096).read_volatile() })
+    });
+    each(&name("map_touch_16m"), 2, 20, fields, |_| {
+        let at = crate::sys::map_file(big, len)?;
+        std::hint::black_box(touch(at));
+        // SAFETY: the mapping just made, which nothing else names.
+        unsafe { crate::sys::unmap(at, len) };
+        Ok(())
+    });
+    let at = match crate::sys::map_file(big, len) {
+        Ok(at) => at,
+        Err(why) => return refuse(&name("map_read_4k"), why),
+    };
+    std::hint::black_box(touch(at));
+    let mut buf = [0u8; 4096];
+    each(&name("map_read_4k"), 100, 2000, fields, |i| {
+        // SAFETY: a page of the mapping, every one of which is mapped.
+        unsafe { core::ptr::copy_nonoverlapping(at.add(page_at(i, pages) as usize), buf.as_mut_ptr(), buf.len()) };
+        std::hint::black_box(&buf);
+        Ok(())
+    });
+    // SAFETY: the mapping made above, which nothing else names.
+    unsafe { crate::sys::unmap(at, len) };
+}
+
 /// Every benchmark under `target`, each line naming what served it and its
 /// medium. Each one's comment is its warm-up and repetitions.
 pub fn suite(target: &Target) {
@@ -203,6 +237,7 @@ pub fn suite(target: &Target) {
         }
         Err(e) => refuse(&name("read_4k_at"), e),
     }
+    mapped(&name, &with(&[("file_bytes", (16 * MIB).to_string())]), &big, pages);
     let _ = fs::remove_file(&big);
 
     // Listing a directory of 1,000 files, every name: 50 after 5.

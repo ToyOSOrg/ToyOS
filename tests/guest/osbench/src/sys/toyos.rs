@@ -105,6 +105,21 @@ pub fn huge_backing() -> String {
 /// # Safety
 /// `ptr` and `len` are one whole mapping from [`map_anon`], and nothing
 /// reaches it afterwards.
+/// `len` bytes of the file at `path` from its start, mapped read-only and
+/// shared: its file server's own cached pages.
+pub fn map_file(path: &std::path::Path, len: usize) -> Result<*mut u8, String> {
+    use toyos::files::{At, Open};
+    let path = path.to_str().ok_or("a path that is not UTF-8")?;
+    let fd = toyos::files::open(At::Cwd, path.as_bytes(), Open { read: true, cloexec: true, ..Open::default() })
+        .map_err(|e| format!("open: {e:?}"))?;
+    // SAFETY: placed anywhere, so it replaces nothing.
+    let mapped = unsafe { toyos::files::map(fd, 0, len, VmAt::Anywhere { align: 4096 }) };
+    // SAFETY: the descriptor this opened, which nothing else names; the
+    // mapping holds the file.
+    let _ = unsafe { toyos::fd::close(fd) };
+    mapped.map_err(|e| format!("map: {e:?}"))
+}
+
 pub unsafe fn unmap(ptr: *mut u8, len: usize) {
     // SAFETY: as the caller promises.
     unsafe { syscall::vm_release(ptr, len) }.expect("vm_release of a whole mapping");
