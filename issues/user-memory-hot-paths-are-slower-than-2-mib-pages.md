@@ -97,6 +97,33 @@ accepted on 2026-10-27 that `mem.malloc_churn.1048576` loses heap reuse for
 this (T14: 29,505 to 194 kops/s; Linux 215) until ToyOS's own allocator
 brings it back.
 
+**Current state, 2026-11-11** ([evidence](https://github.com/ToyOSOrg/evidence/tree/d44ebdae1f9f584d7b826e1498dbfd791a8d2339)): ToyOS at main ad5db5a65, four
+boots a bench interleaved with five runs of its Linux as installed; a cell is
+the median of the runs' p50s with their range, and the last column of each
+bench is ToyOS against Linux, above 1 slower. The AMD bench's Linux timed
+runs 1 to 3 through the HPET, so its medians overstate Linux's per-operation
+times there.
+
+| row | unit | T14 ToyOS | T14 Linux | T14 | AMD ToyOS | AMD Linux | AMD |
+|---|---|---|---|---|---|---|---|
+| `ipc.reqrep.65536` | ns | 26,074 (2.3%) | 18,920 (3.9%) | 1.38x | 21,721 (104.3%) | 47,109 (40.9%) | 0.46x |
+| `mem.anon.total` | ns/MiB | 80,894 (2.5%) | 258,932 (0.7%) | 0.31x | 128,716 (1.9%) | 513,887 (4.7%) | 0.25x |
+| `mem.first_touch.2m` | ns/MiB | 78,274 (4.8%) | 100,272 (0.3%) | 0.78x | 125,570 (0.7%) | 132,969 (0.6%) | 0.94x |
+| `mem.first_touch.4k` | ns/MiB | 84,170 (4.2%) | 236,835 (0.4%) | 0.36x | 125,372 (0.7%) | 435,299 (2.8%) | 0.29x |
+| `mem.map_unmap_4k` | ns | 2,072 (0.4%) | 1,609 (2.1%) | 1.29x | 1,538 (0.7%) | 5,378 (26.4%) | 0.29x |
+| `pipe.throughput.1024` | MB/s | 1,637 (9.8%) | 1,767 (2.1%) | 1.08x | 1,930 (2.8%) | 1,608 (19.4%) | 0.83x |
+| `pipe.throughput.16384` | MB/s | 12,540 (5.4%) | 3,877 (2.1%) | 0.31x | 3,020 (1.1%) | 3,714 (6.5%) | 1.23x |
+| `pipe.throughput.256` | MB/s | 440 (7.0%) | 651 (4.5%) | 1.48x | 492 (3.3%) | 419 (4.1%) | 0.85x |
+| `pipe.throughput.4096` | MB/s | 4,848 (7.9%) | 4,167 (1.7%) | 0.86x | 3,022 (0.5%) | 4,951 (28.5%) | 1.64x |
+| `pipe.throughput.64` | MB/s | 116 (3.4%) | 168 (0.6%) | 1.45x | 126 (1.6%) | 107 (15.0%) | 0.85x |
+| `pipe.throughput.65536` | MB/s | 17,600 (2.7%) | 4,120 (8.3%) | 0.23x | 3,032 (0.8%) | 1,593 (80.3%) | 0.53x |
+
+The faults and `mem.anon.total` are now ahead of Linux on both benches. Behind:
+`mem.map_unmap_4k` on the T14, `ipc.reqrep.65536` on the T14, and the pipe at
+64 to 1024 bytes on the T14 and at 4 KiB and 16 KiB on the AMD bench, where
+`issues/many-osbench-rows-on-the-amd-bench-are-bimodal-per-boot.md` says
+what its modes are.
+
 Owner: the memory track. Exit: each path above measured on the T14 at a
 change and at its base, and against Linux; a regression is fixed or its cost
 accepted by the owner, or by the coordinator for an implementation tradeoff,

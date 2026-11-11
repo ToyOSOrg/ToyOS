@@ -66,6 +66,37 @@ whose loss where the serial build wins is unmeasured.
 `issues/idle-cpus-enter-the-c-states-cst-names.md` records the T14's `j1`
 under deep idle.
 
+**Current state, 2026-11-11** ([evidence](https://github.com/ToyOSOrg/evidence/tree/d44ebdae1f9f584d7b826e1498dbfd791a8d2339)): ToyOS at main ad5db5a65, four
+boots a bench interleaved with five runs of its Linux as installed; a cell is
+the median of the runs' p50s with their range, and the last column of each
+bench is ToyOS against Linux, above 1 slower. The AMD bench's Linux timed
+runs 1 to 3 through the HPET, so its medians overstate Linux's per-operation
+times there.
+
+| row | unit | T14 ToyOS | T14 Linux | T14 | AMD ToyOS | AMD Linux | AMD |
+|---|---|---|---|---|---|---|---|
+| `proc.posix_spawn_wait.std` | ns | 387,182 (0.7%) | 178,366 (3.3%) | 2.17x | 399,298 (27.4%) | 940,595 (60.3%) | 0.42x |
+| `proc.posix_spawn_wait.tiny` | ns | 78,475 (5.0%) | 43,904 (3.0%) | 1.79x | 80,996 (14.5%) | 223,754 (60.1%) | 0.36x |
+| `proc.spawn_wait.large` | ns | 8,072,387 (1.0%) | 54,731 (1.1%) | 147.49x | 12,586,708 (1.1%) | 278,643 (17.1%) | 45.17x |
+| `proc.spawn_wait.tiny` | ns | 72,164 (7.3%) | 52,413 (2.1%) | 1.38x | 95,038 (22.1%) | 270,089 (9.9%) | 0.35x |
+| `proc.spawn_wait_loop.100` | ns | 7,687,359 (10.5%) | 5,439,550 (2.7%) | 1.41x | 9,660,886 (15.6%) | 30,219,148 (20.5%) | 0.32x |
+| `process.spawn_wait` | ns | 376,368 (1.3%) | 187,675 (2.2%) | 2.01x | 391,340 (4.2%) | 962,158 (63.8%) | 0.41x |
+| `thread.spawn_join` | ns | 22,800 (9.7%) | 25,183 (3.2%) | 0.91x | 17,904 (1.7%) | 69,169 (31.9%) | 0.26x |
+| `thread.spawn_join.default` | ns | 20,519 (11.2%) | 25,145 (0.5%) | 0.82x | 18,149 (0.5%) | 78,572 (11.4%) | 0.23x |
+| `thread.spawn_join.stack64k` | ns | 21,230 (9.5%) | 23,558 (0.8%) | 0.90x | 15,514 (0.6%) | 73,335 (30.2%) | 0.21x |
+| `work.build_shaped.j1` | ns | 690,704,458 (1.4%) | 1,013,128,216 (7.5%) | 0.68x | 886,883,802 (1.9%) | 1,639,173,487 (38.9%) | 0.54x |
+| `work.build_shaped.j8` (T14), `.j16` (AMD) | ns | 220,886,682 (2.5%) | 99,510,091 (1.7%) | 2.22x | 277,092,641 (0.7%) | 107,734,386 (24.4%) | 2.57x |
+
+`proc.spawn_wait.large` now takes 8.1 ms on the T14 and 12.6 ms on the AMD
+bench in every boot, 147 and 45 times Linux's: the 32 MiB image is a served
+file now, read through the pager
+(`issues/a-large-spawn-on-the-amd-bench-is-a-seventh-slower-than-mains.md`).
+On the T14 every process row is behind, 1.38x to 2.17x beside it, and the
+thread rows are now ahead. On the AMD bench no other spawn or thread row is
+behind: `posix_spawn_wait.std` and `process.spawn_wait` are unresolved against
+Linux's 60% spread, and the rest are ahead. The all-CPU build is behind on both, 2.22x and 2.57x, where the
+one-at-a-time build is ahead on both.
+
 **Exit**: these rows within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured to its parts
 and justified.
