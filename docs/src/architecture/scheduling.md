@@ -37,6 +37,10 @@
 - Idle cores sleep within their wake-latency constraints. Placement and
   idle-state selection account for wake cost and known upcoming work.
 - Ordinary load never starves audio.
+- An idle disk rests in the low-power states its controller has. The
+  controller moves itself, by a table its driver builds from the latencies
+  the drive states of itself, so the first request after idle waits within a
+  bound; there is no table of drives.
 - The kernel declares the CPU's performance and power bounds as part of its
   one CPU declaration and reports them back; the CPU chooses frequencies within
   them.

@@ -53,6 +53,15 @@ interleaved with five Linux runs, p50 per boot):
 
 Those boots had no idle row. Their clean fsync read 7.4 to 7.6 µs.
 
+PR #1131's `osbench_disk` boots on the T14 add two readings
+(evidence `pr-1131` r1, r3, r4):
+- The slow mode took all 4 boots without APST, and 2 of 5 with it.
+- Linux's own `persist.write_4k_fsync` ran slow in r6, at 4.73-5.02 ms in
+  all three runs, against 1.0-1.08 ms in r3's. So the slow mode is not
+  ToyOS's alone. This reading points at the drive, not the driver.
+- The drive is not short of host memory. Its HMPRE and HMMIN are 0, and it
+  refuses Feature 0Dh as an invalid field, so it uses no Host Memory Buffer.
+
 Four boots of four that idled 80 s inside `persist` left the slow mode there
 (`issues/the-t14s-slow-durable-writes-ended-during-80-s-of-idle-in-four-boots-of-four.md`).
 
@@ -62,4 +71,4 @@ Four boots of four that idled 80 s inside `persist` left the slow mode there
 boot's run. Or the slow mode is explained by a measured cause.
 
 **Owner**: the NVMe driver (`system/nvme/`) and the DATA volume's commit
-(`lib/bcachefs/src/fs.rs`).
+(`lib/bcachefs/src/engine/mount/`).
