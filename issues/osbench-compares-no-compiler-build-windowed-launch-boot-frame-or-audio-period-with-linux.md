@@ -119,7 +119,8 @@ span from a present to its callback, ns. Both draw in software through
 softbuffer into the compositor's shared buffer, each system's native path
 for these apps. It waits on everything the windowed launch does. The panel's
 refresh rate is a condition both must state; Wayland gives it
-(`wl_output.mode`), and ToyOS's window protocol does not.
+(`wl_output.mode`), and ToyOS's compositor learns it from the display driver
+but its window protocol tells no client.
 
 ## An audio period: `audio.period.late`, `audio.underruns`
 
