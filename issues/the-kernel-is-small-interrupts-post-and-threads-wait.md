@@ -358,7 +358,7 @@ state. Nothing here is ruled, and the ranking is a proposal.
 | Interrupt controllers, vectors, traps | 10 | 3,970 | yes |
 | Log ring, console UART, panic console, panic capture, own symbols | 17 | 3,517 | yes |
 | Scheduling: the core's driver, context switch, idle states, jobs, preemption | 20 | 3,160 | yes |
-| Firmware tables, ACPI mode, reset and power-off, the machine's stop, what the loader named | 12 | 3,099 | yes for the tables, the `acpi` row and power; the rest below |
+| Firmware tables, ACPI mode, reset and power-off, the machine's stop, what the loader named | 12 | 3,099 | yes for the tables, the `acpi` row, power and the stop's gate; what the loader named has left (#1210) |
 | Processes, threads, spawn | 8 | 2,736 | yes, less the userland text a spawn carries (below) |
 | Clocks: TSC and generic timer, the wall clock, typed durations | 7 | 1,847 | yes; the x86-64 CMOS driver and its IRQ8, 285 of these lines, went after this count |
 | Counters, the diary, IRQ census, mask windows, boot deadline, hard lockup, chipset watchdog | 14 | 1,844 | counters and diary yes; the three bounds are unnamed and inferred to be the kernel's, since they bound the kernel |
@@ -404,8 +404,6 @@ Changes of the design, each inferred and none of them work until resolved:
   something in userland that maps a build-id to a file; neither is built.
 - **Namespaces**:
   `issues/a-namespace-is-a-kernel-object-and-service-lookup-is-kept-out-of-the-kernel.md`.
-- **The stop's sweep of userland threads**:
-  `issues/the-kernel-stops-every-userland-thread-at-a-stop-the-supervisor-orders.md`.
 
 ### The next removals, ranked (a proposal)
 
@@ -448,8 +446,7 @@ out, and a larger number needs one of the design changes above.
   (`issues/fstats-answer-is-declared-twice.md` owns its two declarations).
 - Stale text: `kernel/Cargo.toml`'s description says "filesystem";
   `kernel/CLAUDE.md`'s first caveat is about a filesystem on the idle path;
-  `quiesce.rs`'s header speaks of the block layer and a USB stop, neither
-  of which the kernel has; `UserImage`'s doc comment
+  `UserImage`'s doc comment
   (`kernel/src/process.rs`) says "the file the kernel opened", and the
   kernel opens none.
 

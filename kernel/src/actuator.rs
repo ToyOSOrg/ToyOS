@@ -52,9 +52,6 @@ actuators! {
     /// name. Judged by `isa_claim_refused_on_a_kernel_port`.
     isa_port_declared = "isa-port-declared";
 
-    /// Give the machine's stop no time: one sweep, and a thread not parked at
-    /// it outlasts the stop. Judged by `machine_shutdown_short_stop`.
-    stop_budget_spent = "stop-budget-spent";
 
     /// Send one NMI from the idle loop, and return from its handler via `iretq` with a second NMI already pending.
     nmi_nested = "nmi-nested";

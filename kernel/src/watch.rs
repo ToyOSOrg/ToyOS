@@ -193,6 +193,7 @@ enum Ended {
 }
 
 /// Only a futex's watch is revoked, and only [`wait_until`] waits on one.
+#[cfg(feature = "boot-actuators")]
 #[track_caller]
 fn not_revocable() -> ! {
     panic!("watch: a revoke reached a wait that does not end on one");
@@ -200,7 +201,9 @@ fn not_revocable() -> ! {
 
 /// Park once, for a wait a kill may not end: until a post reaches this
 /// registration or the deadline passes. A return is not an answer — the
-/// caller re-reads its condition.
+/// caller re-reads its condition. The SYSRET probe's alone
+/// (`arch::hw::sysret_ss_probe`).
+#[cfg(feature = "boot-actuators")]
 #[track_caller]
 pub fn wait_uncancellable<L: CellLock<List>>(p: &Parkable, armed: &Armed<'_, L>, deadline: Deadline) {
     match wait_inner(p, armed, deadline, Cancel::Ignores) {

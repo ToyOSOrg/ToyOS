@@ -439,6 +439,8 @@ pub enum Kick {
 
 const KICK_PENDING: u32 = 1 << 0;
 const SLEEPING: u32 = 1 << 1;
+/// A pass was demanded and none has begun since ([`Doorbell::demand_pass`]).
+const PASS_DEMANDED: u32 = 1 << 2;
 
 /// The ordering [`Doorbell::ring`]'s read-modify-write carries.
 ///
@@ -495,12 +497,31 @@ impl Doorbell {
         }
     }
 
+    /// Raise the edge with a mark only this CPU's next pass clears, for a
+    /// caller that waits on [`Self::pass_demanded`] to know a pass began after
+    /// this call. That pass's acquire reads this release, so what the CPU
+    /// reads after it follows everything the caller wrote before.
+    pub fn demand_pass(&self) -> Kick {
+        let prev = self.bits.fetch_or(KICK_PENDING | PASS_DEMANDED, KICK);
+        if prev & KICK_PENDING == 0 {
+            Kick::Send
+        } else {
+            Kick::Elide
+        }
+    }
+
+    /// Whether a demanded pass has yet to begin.
+    pub fn pass_demanded(&self) -> bool {
+        self.bits.load(Ordering::Acquire) & PASS_DEMANDED != 0
+    }
+
     /// Consumer side, at pass start: clear the edge *before* draining, so a
     /// message posted after the drain re-raises it. Also clears
-    /// SLEEPING — a CPU running a pass is by definition awake.
+    /// SLEEPING — a CPU running a pass is by definition awake — and answers
+    /// a demand for this pass.
     pub fn begin_pass(&self) {
         self.bits
-            .fetch_and(!(KICK_PENDING | SLEEPING), Ordering::AcqRel);
+            .fetch_and(!(KICK_PENDING | SLEEPING | PASS_DEMANDED), Ordering::AcqRel);
     }
 
     /// Consumer side, idle path: publish SLEEPING *before* the final
@@ -668,6 +689,23 @@ mod tests {
         assert_eq!(d.ring(Urgency::Preempt), Kick::Send);
         d.begin_pass();
         assert!(!d.kick_pending() && !d.sleeping());
+    }
+
+    /// A demand stands until a pass begins, whoever else rings meanwhile.
+    #[test]
+    fn a_demanded_pass_is_answered_by_the_next_pass_and_nothing_else() {
+        let d = Doorbell::new();
+        assert!(!d.pass_demanded());
+        assert_eq!(d.demand_pass(), Kick::Send);
+        assert_eq!(d.ring(Urgency::Normal), Kick::Elide, "the demand raised the edge");
+        d.arm_sleep().abandon();
+        assert!(d.pass_demanded());
+        d.begin_pass();
+        assert!(!d.pass_demanded());
+        // A demand behind an edge already raised sends nothing and still stands.
+        assert_eq!(d.ring(Urgency::Normal), Kick::Send);
+        assert_eq!(d.demand_pass(), Kick::Elide);
+        assert!(d.pass_demanded());
     }
 
     #[test]

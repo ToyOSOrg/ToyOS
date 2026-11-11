@@ -41,10 +41,10 @@ pub fn reboot(mut wire: StopWire) -> ! {
 /// Reset the machine and do nothing else.
 ///
 /// **[`reboot`] is not reachable from a wedge**, which is why this exists
-/// beside it: that path is the stop's, which waits on userland's stop and the
-/// console's registers, and a `BackendGuard` masks interrupts for its whole
-/// life — so a CPU stuck inside one holds what the stop would wait for, on
-/// exactly the boots `crate::deadline` exists for. This takes no lock.
+/// beside it: that path is the stop's, which waits for every other CPU's pass
+/// and the console's registers, and a `BackendGuard` masks interrupts for its
+/// whole life — so a CPU stuck inside one holds what the stop would wait for,
+/// on exactly the boots `crate::deadline` exists for. This takes no lock.
 ///
 /// A machine with no reset halts here rather than returning: holding is what
 /// such a machine has always done.

@@ -104,11 +104,6 @@ pub fn check_cpu<X: SchedPayload>(cpu: &CpuSched<X>) {
             "stopped task {:?} disagrees with its state word",
             task.key(),
         );
-        assert!(
-            task.shared().stop_pending(),
-            "a live task {:?} is in the stopped band",
-            task.key(),
-        );
     }
 
     for task in cpu.rq().tasks() {
@@ -116,11 +111,6 @@ pub fn check_cpu<X: SchedPayload>(cpu: &CpuSched<X>) {
             task.shared().state(),
             TaskState::Ready(id),
             "ready task {:?} disagrees with its state word",
-            task.key(),
-        );
-        assert!(
-            !task.shared().stop_pending(),
-            "stopped task {:?} is in the run queue, where a pick will serve it",
             task.key(),
         );
     }

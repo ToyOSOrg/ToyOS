@@ -235,8 +235,9 @@ const RUST_SKIP: &[&str] = &[
     // needs a boot with no ACPI server:
     // `a_claim_before_the_declaration_is_refused_at_once` runs it.
     "pci_undeclared",
-    // It powers the machine off: `machine_shutdown_short_stop` runs it.
-    "stop_short",
+    // It powers the machine off: `machine_shutdown_with_a_thread_spinning`
+    // runs it.
+    "stop_spinning",
     // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
     // runs it.
     "bar_map_again",
@@ -630,10 +631,11 @@ const MACHINE_TESTS: &[&str] = &[
     // by stopping. No host test reaches either, and the T14 is never asked to
     // power off.
     "acpi_supply_outlives_holder",
-    // The power-off after a stop that left a thread running, in ACPI mode: it
-    // ends the machine, so only one QEMU reports stopping can be asked, and
-    // the T14 hands over in legacy mode, where no holder means no quieting.
-    "machine_shutdown_short_stop",
+    // The power-off asked for with a thread spinning in userland on another
+    // CPU, in ACPI mode: it ends the machine, so only one QEMU reports
+    // stopping can be asked, and the T14 hands over in legacy mode, where no
+    // holder means no quieting.
+    "machine_shutdown_with_a_thread_spinning",
     // A clean stop proves its image: the stop mark `logkeeper` writes at the
     // stop's flush, and the next loader pass's floor raise. x86-64 q35: it
     // takes the loader's second pass on the same disk and firmware variables,
@@ -3362,7 +3364,7 @@ fn a_bent_supervisor_is_refused_and_nothing_boots(profile: qemu::Profile, test_c
 /// judge's verdict: this boot's `logkeeper` files hold `Boot: complete` and the
 /// supervisor's stop line, so the log went through usbd's disk to the stick and
 /// was made durable before the power went. Then usbd handed the stick back
-/// with a port reset and left its controller reset, before the kernel's stop
+/// with a port reset and left its controller reset, before the kernel's last word
 /// ([`usb_stopped_before_the_reset`]).
 fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
     let options = BootOptions {
@@ -3420,7 +3422,7 @@ fn stick_load_line(line: &str) -> Option<u64> {
 /// usbd ended for the stop with every connected port's reset finished and its
 /// controller halted and reset (its exit code, which the kernel records,
 /// because its own line may reach no log), and it ended before the kernel's
-/// stop: the supervisor waited for it.
+/// last word: the supervisor waited for it.
 fn usb_stopped_before_the_reset(log: &str, console: &str) -> Result<(), String> {
     // On the boot's one clock: the request is in the file (its line can be
     // one the console dropped under the load), and what follows the flush
@@ -3433,12 +3435,12 @@ fn usb_stopped_before_the_reset(log: &str, console: &str) -> Result<(), String> 
     };
     let asked = at(log, Source::Program("supervisor"), "supervisor: power: the machine stops");
     let ended = at(console, Source::Kernel, "exit: usbd pid=");
-    let stopped = at(console, Source::Kernel, toyos_quiesce::STOPPED);
+    let stopped = at(console, Source::Kernel, power::SHUTTING_DOWN);
     let (Some((Some(asked), _)), Some((Some(ended), line)), Some((Some(stopped), _))) = (asked, ended, stopped) else {
-        return Err(format!("no stop request in the file, or no usbd end and kernel stop on the console\n{console}"));
+        return Err(format!("no stop request in the file, or no usbd end and kernel last word on the console\n{console}"));
     };
     if !(asked <= ended && ended <= stopped) {
-        return Err(format!("usbd ended at {ended} ms, not between the stop's request ({asked} ms) and the kernel's stop ({stopped} ms)"));
+        return Err(format!("usbd ended at {ended} ms, not between the stop's request ({asked} ms) and the kernel's last word ({stopped} ms)"));
     }
     if !line.contains(" code=0 ") {
         return Err(format!("usbd's stop left a port in reset or its controller running: {line}"));
@@ -4176,17 +4178,10 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     judge_virt_job(&mut qemu, &mut serial, "test_rs_counters_read", COUNTERS_READ_SAID)?;
     judge_virt_job(&mut qemu, &mut serial, "test_rs_trace_read", TRACE_READ_SAID)?;
     judge_virt_job(&mut qemu, &mut serial, "test_rs_timing_protection", TIMING_DIT_SAID)?;
-    let (console, calls) =
+    let (_, calls) =
         ended_through_psci(&mut qemu, &mut stop, serial, power::SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
-    let record = console
-        .lines()
-        .find_map(toyos_quiesce::Record::parse)
-        .ok_or_else(|| format!("the kernel wrote no stop record\n{console}"))?;
-    if record.cpus != VIRT_CPUS {
-        return Err(format!("the stop ran across {} CPUs, not {VIRT_CPUS}: {record}\n{console}", record.cpus));
-    }
     let last = psci_powered_off(&calls, VIRT_CPUS, &[])?;
-    eprintln!("  [virt] {record}; every CPU but {last:#x} called CPU_OFF, then {last:#x} SYSTEM_OFF");
+    eprintln!("  [virt] every CPU but {last:#x} called CPU_OFF, then {last:#x} SYSTEM_OFF");
     Ok(())
 }
 
@@ -4966,7 +4961,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
-        "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
+        "machine_shutdown_with_a_thread_spinning" => power::machine_shutdown_with_a_thread_spinning(test_config),
         "a_clean_stop_proves_its_image" => power::a_clean_stop_proves_its_image(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),

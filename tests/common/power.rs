@@ -45,23 +45,22 @@ pub fn ended(
     Ok(())
 }
 
-/// A stop that ends with a userland thread still running is followed by a
-/// power-off all the same, with the sleep type `acpiserver` handed the
-/// kernel: q35 hands over in ACPI mode, so the power-off
-/// quiets the events `acpiserver` enabled, and QEMU stops for
-/// `guest-shutdown`. One CPU and `stop-budget-spent`, so the stop's one sweep
-/// finds `stop_short`'s spinner queued behind the stop's caller.
-pub fn machine_shutdown_short_stop(test_config: &Path) -> Result<(), String> {
-    let short = qemu::build_toyos_bin(
+/// A stop asked for while a thread spins in userland on another CPU ends in
+/// a power-off, with the sleep type `acpiserver` handed the kernel: the stop
+/// returns once that CPU has answered its kick, q35 hands over in ACPI mode,
+/// so the power-off quiets the events `acpiserver` enabled, and QEMU stops
+/// for `guest-shutdown`. Two CPUs, so the spinner is in Ring 3 when the stop
+/// begins.
+pub fn machine_shutdown_with_a_thread_spinning(test_config: &Path) -> Result<(), String> {
+    let spinning = qemu::build_toyos_bin(
         qemu::SUITE_ARCH,
         &super::compile::repo_root().join("tests/guest/rust-tests"),
-        "stop_short",
+        "stop_spinning",
     );
     let options = BootOptions {
         qmp: true,
-        smp: 1,
-        kernel_params: &["stop-budget-spent"],
-        extra_root_files: vec![("bin/test_rs_stop_short".to_string(), short)],
+        smp: 2,
+        extra_root_files: vec![("bin/test_rs_stop_spinning".to_string(), spinning)],
         ..Default::default()
     };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
@@ -77,22 +76,11 @@ pub fn machine_shutdown_short_stop(test_config: &Path) -> Result<(), String> {
     serial::Serial::named("boot", console.clone()).must_say(HANDED_OVER_IN_ACPI_MODE)?;
 
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
-    writeln!(qemu.stdin_mut(), "run test_rs_stop_short").expect("write to QEMU stdin");
+    writeln!(qemu.stdin_mut(), "run test_rs_stop_spinning").expect("write to QEMU stdin");
     qemu.flush_stdin();
     let asked_at = console.len();
     ended(&mut qemu, &mut stop, &mut console, SHUTTING_DOWN, "guest-shutdown")?;
-    let after = serial::Serial::named("the short stop", console[asked_at..].to_string());
-    after.must_be_clean()?;
-    let record = after
-        .text()
-        .lines()
-        .find_map(toyos_quiesce::Record::parse)
-        .ok_or_else(|| format!("no stop record:\n{}", after.text()))?;
-    if record.stopped_the_machine() {
-        return Err(format!("the stop left no thread running, so this boot staged no short stop: {record}"));
-    }
-    eprintln!("  [power] a short stop, then the power-off: {record}");
-    Ok(())
+    serial::Serial::named("the stop", console[asked_at..].to_string()).must_be_clean()
 }
 
 /// The loader's lines about the proof, in `loader/src/proof.rs`.

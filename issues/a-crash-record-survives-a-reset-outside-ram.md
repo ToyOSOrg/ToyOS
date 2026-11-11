@@ -17,8 +17,8 @@ What went with the black-box page and comes back with this track: the
 metal rows that judged a sealed record (`boot_deadline_ends_a_wedge`,
 `hard_lockup_ends_a_deaf_cpu`, `watchdog_resets` and the
 `wedge-before-reset` and `hard-lockup-probe` arms they staged), the
-records a stop writes after `logkeeper`'s last flush (its stop record, the
-machine's census and the panel's, which `irq_census_conservation` and the
+records a stop writes after `logkeeper`'s last flush (the machine's census
+and the panel's, which `irq_census_conservation` and the
 boot's panel timings read), and the window between `logkeeper`'s stop mark
 and the reset: a hang in the drivers' stop, the kernel's quiesce or the
 reset, which the deadline then ends, leaves the volume of a clean stop and

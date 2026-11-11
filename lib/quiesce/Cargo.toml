@@ -1,6 +1,6 @@
 [package]
 name = "toyos-quiesce"
-description = "Every decision the machine's stop makes, and none of its effects."
+description = "The bounds of the supervisor's orderly stop, shared with the programs it stops."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
