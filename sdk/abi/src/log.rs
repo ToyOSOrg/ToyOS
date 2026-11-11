@@ -307,7 +307,9 @@ impl core::fmt::Display for Head<'_> {
 /// A shard is a CPU the firmware names, online or not, so a CPU that started,
 /// logged and never came up is read with the rest. A position past the number
 /// its shard issues next is refused; one not yet published issues 1 next, and
-/// a position of 0 reads from the oldest record its shard holds.
+/// a position of 0 reads from the oldest record its shard holds. **No
+/// position is answered below 1**, by a read or by `SYS_LOG_SPOKEN`, so the
+/// positions the two answer compare shard by shard.
 pub const CURSOR_HEAD_WORDS: usize = 2;
 
 /// A cursor's head, as its first two words carry it.

@@ -53,7 +53,8 @@ impl<const W: usize, const N: usize> Rings<W, N> for [Option<&'static Ring<W, N>
     }
 }
 
-/// A walk's position in each ring, and what it counted lost.
+/// A walk's position in each ring, and what it counted lost. Every position
+/// is at or past `FIRST_SEQ`, which a walk counts its loss from.
 pub trait Positions {
     fn count(&self) -> usize;
     fn next(&self, ring: usize) -> u64;
