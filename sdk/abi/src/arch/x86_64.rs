@@ -1,21 +1,23 @@
-/// The counter the clock page's line describes: the time-stamp counter,
-/// read after every earlier load has completed, so a stamp taken after reading
-/// another writer's record cannot be older than that record's, and before any
-/// later instruction starts, so a load after it cannot have been answered
-/// before it (SDM Vol. 2B, RDTSC: "If software requires RDTSC to be executed
-/// prior to execution of any subsequent instruction (including any memory
-/// accesses), it can execute the sequence LFENCE immediately after RDTSC").
+/// The counter the clock page's line describes: the time-stamp counter, read
+/// once every earlier instruction has executed and every earlier load is
+/// globally visible (SDM Vol. 2B, RDTSCP; AMD APM Vol. 3, RDTSCP, "forces all
+/// older instructions to retire before reading the time-stamp counter"), so a
+/// reading is never older than one this thread took before it, or than one
+/// whose writer's record this thread has loaded. Not `LFENCE; RDTSC`: on AMD
+/// `LFENCE` holds later instructions back only where DE_CFG bit 1 or CPUID
+/// Fn8000_0021 EAX bit 2 makes it dispatch serializing. Nothing holds a later
+/// instruction back ([`crate::clock`]).
 #[inline]
 pub fn counter() -> u64 {
-    // SAFETY: `lfence` has no operands; `rdtsc` is unprivileged while CR4.TSD
-    // is clear, which the kernel's control-register declaration makes true on
-    // every CPU.
-    unsafe {
-        core::arch::x86_64::_mm_lfence();
-        let now = core::arch::x86_64::_rdtsc();
-        core::arch::x86_64::_mm_lfence();
-        now
-    }
+    let lo: u32;
+    let hi: u32;
+    // SAFETY: reads the time-stamp counter and `IA32_TSC_AUX` into the declared
+    // outputs; unprivileged while CR4.TSD is clear, which the kernel's
+    // control-register declaration makes true on every CPU, and the kernel's
+    // clock refuses to start on a CPU without RDTSCP. Not `nomem`, which would
+    // let the compiler move the clock page's loads across the read.
+    unsafe { core::arch::asm!("rdtscp", out("eax") lo, out("edx") hi, out("ecx") _, options(nostack, preserves_flags)) };
+    (hi as u64) << 32 | lo as u64
 }
 
 /// The processor's CPUID identity.

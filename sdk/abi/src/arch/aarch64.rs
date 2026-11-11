@@ -1,6 +1,6 @@
 /// The counter the clock page's line describes: the generic timer's
 /// virtual count, which EL0 may read, read after every earlier instruction and
-/// before any later one, as the x86-64 one is.
+/// before any later one.
 #[inline]
 pub fn counter() -> u64 {
     let now: u64;

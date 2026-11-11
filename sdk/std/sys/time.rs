@@ -1,7 +1,9 @@
 use crate::time::Duration;
 
+/// Nanoseconds since boot, as the clock page counts them: a reading is the
+/// page's and no arithmetic after it.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-pub struct Instant(Duration);
+pub struct Instant(u64);
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct SystemTime(Duration);
@@ -9,20 +11,21 @@ pub struct SystemTime(Duration);
 pub const UNIX_EPOCH: SystemTime = SystemTime(Duration::from_secs(0));
 
 impl Instant {
+    #[inline]
     pub fn now() -> Instant {
-        Instant(Duration::from_nanos(toyos_abi::clock::nanos_since_boot()))
+        Instant(toyos_abi::clock::nanos_since_boot())
     }
 
     pub fn checked_sub_instant(&self, other: &Instant) -> Option<Duration> {
-        self.0.checked_sub(other.0)
+        self.0.checked_sub(other.0).map(Duration::from_nanos)
     }
 
     pub fn checked_add_duration(&self, other: &Duration) -> Option<Instant> {
-        Some(Instant(self.0.checked_add(*other)?))
+        Some(Instant(self.0.checked_add(u64::try_from(other.as_nanos()).ok()?)?))
     }
 
     pub fn checked_sub_duration(&self, other: &Duration) -> Option<Instant> {
-        Some(Instant(self.0.checked_sub(*other)?))
+        Some(Instant(self.0.checked_sub(u64::try_from(other.as_nanos()).ok()?)?))
     }
 }
 
