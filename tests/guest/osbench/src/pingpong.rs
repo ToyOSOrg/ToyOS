@@ -1,13 +1,22 @@
 //! A round trip between two threads, on one CPU and across two cores, through
 //! a pipe and through a futex.
+//!
+//! A side that finds its futex word already changed never sleeps. On one CPU
+//! a round still cannot pass without each side leaving the CPU. Across two
+//! cores it can, at a fraction of a wake's cost, so that row keeps only the
+//! rounds in which both wakes found their waiter queued in the kernel and
+//! reports the others as `<bench>.unparked`. Both futex rows say how many
+//! such wakes a kept round had, of two (`parks_per_round`).
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
+use osbench_rules::parked::Woke;
+
 use crate::place;
-use crate::report::{refuse, result};
+use crate::report::{refuse, result, unmeasured};
 use crate::{ns_since, sys, wake};
 
 const WARMUP: u32 = 500;
@@ -19,8 +28,8 @@ const CHECK_EVERY: u32 = 256;
 /// One side of the exchange: `ping` hands the turn over and waits for it
 /// back, `pong` waits for it and hands it back.
 trait Channel: Send + 'static {
-    fn ping(&mut self, round: u32) -> std::io::Result<()>;
-    fn pong(&mut self, round: u32) -> std::io::Result<()>;
+    fn ping(&mut self, round: u32) -> std::io::Result<Woke>;
+    fn pong(&mut self, round: u32) -> std::io::Result<Woke>;
 }
 
 struct PipeEnd {
@@ -29,14 +38,16 @@ struct PipeEnd {
 }
 
 impl Channel for PipeEnd {
-    fn ping(&mut self, _: u32) -> std::io::Result<()> {
+    fn ping(&mut self, _: u32) -> std::io::Result<Woke> {
         self.writer.write_all(&[1])?;
-        self.reader.read_exact(&mut [0])
+        self.reader.read_exact(&mut [0])?;
+        Ok(None)
     }
 
-    fn pong(&mut self, _: u32) -> std::io::Result<()> {
+    fn pong(&mut self, _: u32) -> std::io::Result<Woke> {
         self.reader.read_exact(&mut [0])?;
-        self.writer.write_all(&[1])
+        self.writer.write_all(&[1])?;
+        Ok(None)
     }
 }
 
@@ -62,18 +73,17 @@ fn wait_for(word: &AtomicU32, round: u32) {
 }
 
 impl Channel for FutexEnd {
-    fn ping(&mut self, round: u32) -> std::io::Result<()> {
+    fn ping(&mut self, round: u32) -> std::io::Result<Woke> {
         self.0.ping.store(round, Ordering::Release);
-        sys::futex_wake(&self.0.ping, 1);
+        let woke = sys::futex_wake(&self.0.ping, 1) == 1;
         wait_for(&self.0.pong, round);
-        Ok(())
+        Ok(Some(woke))
     }
 
-    fn pong(&mut self, round: u32) -> std::io::Result<()> {
+    fn pong(&mut self, round: u32) -> std::io::Result<Woke> {
         wait_for(&self.0.ping, round);
         self.0.pong.store(round, Ordering::Release);
-        sys::futex_wake(&self.0.pong, 1);
-        Ok(())
+        Ok(Some(sys::futex_wake(&self.0.pong, 1) == 1))
     }
 }
 
@@ -128,15 +138,18 @@ fn run(kind: &str, at: Where, mut pinger: impl Channel, mut ponger: impl Channel
             let mut seen = Vec::new();
             for round in 1..=WARMUP + ROUNDS {
                 let t = Instant::now();
-                if let Err(e) = pinger.ping(round) {
-                    let _ = ping_said.send(Err(e.to_string()));
-                    return;
-                }
+                let woke = match pinger.ping(round) {
+                    Ok(woke) => woke,
+                    Err(e) => {
+                        let _ = ping_said.send(Err(e.to_string()));
+                        return;
+                    }
+                };
                 let took = ns_since(t);
                 if round % CHECK_EVERY == 0 {
                     seen.push(sys::current_cpu());
                 } else if round > WARMUP {
-                    kept.push(took);
+                    kept.push((round, took, woke));
                 }
             }
             let _ = ping_said.send(Ok((kept, seen)));
@@ -159,15 +172,17 @@ fn run(kind: &str, at: Where, mut pinger: impl Channel, mut ponger: impl Channel
             return;
         }
         let mut seen = Vec::new();
+        let mut woke = Vec::with_capacity((WARMUP + ROUNDS) as usize);
         for round in 1..=WARMUP + ROUNDS {
-            if ponger.pong(round).is_err() {
-                break;
+            match ponger.pong(round) {
+                Ok(found) => woke.push(found),
+                Err(_) => break,
             }
             if round % CHECK_EVERY == 0 {
                 seen.push(sys::current_cpu());
             }
         }
-        let _ = pong_said.send(seen);
+        let _ = pong_said.send((seen, woke));
     });
     let go = pong_side.is_ok();
     // A refused send is a side that already ended, which its join reports.
@@ -178,22 +193,36 @@ fn run(kind: &str, at: Where, mut pinger: impl Channel, mut ponger: impl Channel
         Err(why) => return refuse(&bench, format!("the ponger was not placed: {why}")),
     };
     pong_side.thread.join().expect("the ponger panicked");
-    let (mut kept, ping_seen) = match ping_heard.recv() {
+    let (kept, ping_seen) = match ping_heard.recv() {
         Ok(Ok(measured)) => measured,
         Ok(Err(why)) => return refuse(&bench, why),
         Err(_) => return refuse(&bench, "the pinger said nothing"),
     };
-    let pong_seen = pong_heard.recv().unwrap_or_default();
+    let (pong_seen, pong_woke) = pong_heard.recv().unwrap_or_default();
+    if pong_woke.len() != (WARMUP + ROUNDS) as usize {
+        return refuse(&bench, format!("the ponger answered {} of {} rounds", pong_woke.len(), WARMUP + ROUNDS));
+    }
     let checks = ping_seen.len().min(pong_seen.len());
     let held = ping_seen.iter().zip(&pong_seen).filter(|(&ping, &pong)| ping == ping_cpu && wanted(pong)).count();
-    result(
-        &bench,
-        "ns",
-        &mut kept,
-        &[
-            ("ping_cpu", ping_cpu.to_string()),
-            ("pong_cpu", pong_side.cpu.to_string()),
-            ("placed_held", format!("{held}/{checks}")),
-        ],
-    );
+    let mut fields = vec![
+        ("ping_cpu", ping_cpu.to_string()),
+        ("pong_cpu", pong_side.cpu.to_string()),
+        ("placed_held", format!("{held}/{checks}")),
+    ];
+    if let Some(parks) = osbench_rules::parked::parks(&kept, &pong_woke) {
+        let hundredths = parks * 100 / kept.len().max(1) as u64;
+        fields.push(("parks_per_round", format!("{}.{:02}", hundredths / 100, hundredths % 100)));
+    }
+    let (mut parked, mut unparked) = match at {
+        Where::CrossCore => osbench_rules::parked::split(&kept, &pong_woke),
+        Where::SameCpu => (kept.iter().map(|&(_, took, _)| took).collect(), Vec::new()),
+    };
+    if parked.is_empty() {
+        unmeasured(&bench, "no round found both sides asleep", &fields);
+    } else {
+        result(&bench, "ns", &mut parked, &fields);
+    }
+    if !unparked.is_empty() {
+        result(&format!("{bench}.unparked"), "ns", &mut unparked, &fields);
+    }
 }

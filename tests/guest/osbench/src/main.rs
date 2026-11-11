@@ -8,6 +8,9 @@
 //! under, `osbench_<group>`. Every other command is one this program gives its
 //! own children.
 //!
+//! A Linux boot that keeps time on a clocksource its vDSO cannot read is
+//! refused before any group runs, with exit 3.
+//!
 //! Every result is one line of `key=value` words (`report`): a distribution
 //! with its sample count, minimum, p50, p90, p99, p99.9, maximum and mean,
 //! the clock it was taken at, and the conditions it was taken under. Each
@@ -21,8 +24,9 @@
 //! tail group's diagnostics. Everything else is the same source on both.
 //!
 //! On Linux `nvme` and `energy` read what only root may (the raw namespace,
-//! the model-specific registers) and say so unprivileged. `README.md` is how
-//! the Linux half is built and how a comparison is run.
+//! the model-specific registers) and say so unprivileged; `all` starts `nvme`
+//! through `sudo` where that asks no password. `README.md` is how the Linux
+//! half is built and how a comparison is run.
 
 mod arch;
 mod around;
@@ -159,9 +163,19 @@ const GROUPS: [(&str, fn()); 16] = [
 /// running nothing else, in a ToyOS boot of its own and as root on Linux.
 const BY_NAME: [(&str, fn()); 3] = [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite)];
 
+/// Exit 3 on a Linux boot whose clock is unfit to measure by.
+fn refuse_unfit_clock() {
+    #[cfg(target_os = "linux")]
+    if let Some(why) = sys::unfit_clock() {
+        eprintln!("osbench: {why}");
+        std::process::exit(3);
+    }
+}
+
 /// A group between its first and last lines, after the machine's conditions
 /// and the clock its CPU starts at.
 fn group(name: &str, run: fn()) {
+    refuse_unfit_clock();
     report::group(name, "start");
     conditions();
     around::ran_during(&format!("{name}.cpu.clock"), clock::distribution);
@@ -173,10 +187,16 @@ fn group(name: &str, run: fn()) {
 /// Every group in [`GROUPS`], each a child of its own, so no group runs in a
 /// process an earlier one shaped: exits 1 if any did not measure.
 fn all() {
+    refuse_unfit_clock();
     let exe = std::env::current_exe().expect("a path to this program");
     let mut failed = Vec::new();
     for (name, _) in GROUPS {
-        let status = std::process::Command::new(&exe).arg(name).status();
+        let mut command = std::process::Command::new(&exe);
+        #[cfg(target_os = "linux")]
+        if name == "nvme" {
+            command = sys::as_root(&exe);
+        }
+        let status = command.arg(name).status();
         match status {
             Ok(status) if status.success() => {}
             Ok(status) => failed.push(format!("{name} ({status})")),
