@@ -24,6 +24,23 @@ On the T14 every boot read 21.0 ns against Linux's 14.3 ns in every run,
 runs; its HPET runs read 1.2 µs. The 2026-10-28 scoreboard read the T14 at
 19.8 against 14.3 ns. What the T14's read spends its 7 ns on is unmeasured.
 
+#1240 reads the counter with `RDTSCP` and nothing after it, where the read
+was `LFENCE; RDTSC; LFENCE`, and keeps the page's nanoseconds in std's
+`Instant`, which divided every reading by 10^9. Its speed-up is not yet
+measured on metal.
+
+- **Owed on metal:** an A/B of main before and after #1240, on the T14 and
+  the AMD bench: `osbench time`'s `time.now`, four boots a side in rotated
+  order, each boot's p50, compared by an exact two-sided Mann-Whitney test,
+  with the rest of `osbench time`, `files`, `ipc` and `sched` as controls;
+  and Linux's TSC-timed `osbench time` on each bench. Main after must read
+  `time.now` lower than main before in every T14 boot, set against Linux's
+  14.3 ns there, with no control row 5% or more worse unless the code #1240
+  changed explains it. On the AMD bench a rise is recorded as undetermined
+  between ordering's price and a regression, unless a ToyOS boot logs MSR
+  C001_1029 bit 1 before writing it (#1243's boot line): on that bench's
+  family the bit decides whether main before's read was ordered at all.
+
 **Exit**: `time.now` within Linux's on the T14 in a labelled current-state
 comparison, or the difference measured to its parts and justified.
 
