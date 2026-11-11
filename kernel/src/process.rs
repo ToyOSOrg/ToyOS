@@ -968,17 +968,6 @@ pub fn handle_page_fault(fault_addr: u64, access: kernel::vm::Access) -> bool {
     served
 }
 
-/// Populate the running thread's pages over `[start, end)` for `access`, in
-/// one hold of its space's lock, stopping at the first its ranges refuse.
-pub fn fault_in(start: u64, end: u64, access: kernel::vm::Access) {
-    let Some(space) = scheduler::current_address_space() else { return };
-    let mut space = space.lock();
-    let mut page = start & !(crate::mm::PAGE_SIZE - 1);
-    while page < end && space.fault(page, access) {
-        page += crate::mm::PAGE_SIZE;
-    }
-}
-
 /// Dump memory around `fault_addr` and the instruction pointer for the
 /// current process; called from the exception handler on user-mode crashes.
 pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {

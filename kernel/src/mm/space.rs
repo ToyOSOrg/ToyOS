@@ -790,30 +790,32 @@ impl AddressSpace {
                 leaves.set(page, Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal }));
                 phys
             }
-            Leaf::Empty => match &entry.kind {
-                Kind::Private { committed: false } => unreachable!("space: a reservation at {page:#x} allows an access"),
-                Kind::Object { object, offset, .. } => {
-                    let phys = object.page(offset + (page - start));
-                    leaves.set(page, Leaf::Mapped(Mapping { phys, prot, owned: false, cache: object.cache() }));
-                    phys
+            Leaf::Empty => {
+                // A neighbour in the next table down or up is another run's.
+                let (lo, hi) = vm::around(start, entry.end, page, |at| leaves.covers(at) && leaves.get(at) != Leaf::Empty);
+                match &entry.kind {
+                    Kind::Private { committed: false } => unreachable!("space: a reservation at {page:#x} allows an access"),
+                    Kind::Object { object, offset, .. } => {
+                        let phys = |at: u64| object.page(offset + (at - start));
+                        leaves.fill(lo, hi, |at| Leaf::Mapped(Mapping { phys: phys(at), prot, owned: false, cache: object.cache() }));
+                        phys(page)
+                    }
+                    Kind::Private { committed: true } | Kind::Copy { .. } => {
+                        let (mut filled, mut own) = (0, 0);
+                        leaves.fill(lo, hi, |at| {
+                            let phys = owned_frame(start, entry, at);
+                            filled += 1;
+                            if at == page {
+                                own = phys;
+                            }
+                            Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal })
+                        });
+                        assert_ne!(own, 0, "space: {page:#x} touched and not filled");
+                        self.usage.populated(filled);
+                        own
+                    }
                 }
-                Kind::Private { committed: true } | Kind::Copy { .. } => {
-                    // A neighbour in the next table down or up is another run's.
-                    let (lo, hi) = vm::around(start, entry.end, page, |at| leaves.covers(at) && leaves.get(at) != Leaf::Empty);
-                    let (mut filled, mut own) = (0, 0);
-                    leaves.fill(lo, hi, |at| {
-                        let phys = owned_frame(start, entry, at);
-                        filled += 1;
-                        if at == page {
-                            own = phys;
-                        }
-                        Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal })
-                    });
-                    assert_ne!(own, 0, "space: {page:#x} touched and not filled");
-                    self.usage.populated(filled);
-                    own
-                }
-            },
+            }
         };
         Some(phys + va % PAGE_SIZE)
     }

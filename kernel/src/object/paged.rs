@@ -475,8 +475,7 @@ impl PagerObject {
                 let size = state.entry(slot).object.size();
                 if state.gone || state.entry(slot).object.gone() {
                     Step::Gone
-                } else if done == want || (done == 0 && at >= size) {
-                    // Whole, each copy counted as it ended; or nothing to copy.
+                } else if done == 0 && (want == 0 || at >= size) {
                     Step::Done
                 } else if waits && !Self::unwritten(&state.entry(slot).object, &mut since) {
                     Step::Written
@@ -489,14 +488,7 @@ impl PagerObject {
                 }
             };
             match step {
-                Step::Copy(count) => {
-                    // A chunk of frames is copied a frame at a time: populated
-                    // first, fresh memory takes one hold rather than a fault
-                    // for each page. A one-frame read, the common small one,
-                    // would pay that hold on every call to save at most two faults.
-                    if count > 1 {
-                        out.fault_in(done, pieces[..count].iter().map(|piece| piece.len).sum());
-                    }
+                Step::Copy { count, last } => {
                     let mut faulted = false;
                     for piece in &pieces[..count] {
                         let copied = match piece.phys {
@@ -530,6 +522,9 @@ impl PagerObject {
                     // as every copied chunk's do.
                     if faulted {
                         return if done > 0 { done as u64 } else { SyscallError::BadAddress.to_u64() };
+                    }
+                    if last {
+                        return done as u64;
                     }
                 }
                 Step::Written => return SyscallError::WouldBlock.to_u64(),
@@ -623,7 +618,7 @@ impl PagerObject {
                 Lookup::PastEnd => return Step::Done,
             }
         }
-        Step::Copy(count)
+        Step::Copy { count, last: pos == range.end }
     }
 
     /// A write call on object `id` begins: its slot is held by a reference
@@ -962,8 +957,8 @@ struct Piece {
 
 /// What one look at the next pages found.
 enum Step {
-    /// This many pieces were pinned.
-    Copy(usize),
+    /// This many pieces were pinned, `last` where they reach the read's end.
+    Copy { count: usize, last: bool },
     Absent(u64),
     /// A write met a holder's read.
     Written,
