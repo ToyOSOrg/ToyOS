@@ -9,8 +9,8 @@
 //! kernel stack's top, the same switch [`restore`]s them when it returns into
 //! that thread, and a thread that has never run starts from the declared state
 //! [`load_initial`] puts. The area is compacted under `XSAVES` and `XSAVEC`,
-//! standard under `XSAVEOPT`; its header starts zero, as `OwnedAlloc` zeroes
-//! the stack, and is written by nothing but the saves after it. A kernel
+//! standard under `XSAVEOPT`; its header starts zero, as a fresh kernel stack
+//! is zeroed, and is written by nothing but the saves after it. A kernel
 //! thread never enters Ring 3, so it has no area and its switches neither save
 //! nor restore: the registers keep the state of the last thread that ran.
 //!

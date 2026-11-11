@@ -361,7 +361,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
             reserved[a].start, reserved[a].end, reserved[b].start, reserved[b].end
         );
     }
-    let image = mm::Image::new(&kernel_image, image);
+    let image = mm::Image::new(&kernel_image, image, kernel_args.kernel_stack_addr);
 
     // Before the first hash container, `mm::init`'s address space.
     hasher::seed();
@@ -483,6 +483,11 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     #[cfg(feature = "boot-actuators")]
     if actuator::panel_painter_stalls() {
         drivers::panic_console::stall::inside_the_latch();
+    }
+
+    #[cfg(feature = "boot-actuators")]
+    if actuator::stack_overflow_boot() {
+        actuator::overflow_stack(0);
     }
 
     #[cfg(feature = "boot-actuators")]

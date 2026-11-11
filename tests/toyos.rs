@@ -577,6 +577,13 @@ const MACHINE_TESTS: &[&str] = &[
     // the same audit passing. q35 on `Profile::Metal`, whose 16550 carries
     // the panic.
     "kernel_wx_leaf_is_refused",
+    // Every kernel stack's guard page, by running each kind of stack off its
+    // bottom: the double fault ends the machine, so each is its own boot and
+    // no metal row reaches one. q35 on `Profile::Metal`, whose 16550 carries
+    // the report; x86-64 alone, since AArch64 takes the fault on the stack
+    // that overflowed
+    // (`issues/a-kernel-stack-overflow-on-aarch64-reports-nothing.md`).
+    "a_kernel_stack_overflow_names_its_stack",
     // The clock's response to TSC steps an actuator stages where
     // `IA32_TSC_ADJUST` would not show them: the first slewed away, the
     // second demoting the TSC, after which processes' readings of now reach
@@ -4932,6 +4939,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, qemu::Profile::Metal),
+        "a_kernel_stack_overflow_names_its_stack" => faults::a_kernel_stack_overflow_names_its_stack(test_config),
         "a_stepped_tsc_is_slewed_then_demoted" => faults::a_stepped_tsc_is_slewed_then_demoted(test_config),
         "a_stalled_hpet_is_left_out" => faults::a_stalled_hpet_is_left_out(test_config),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),

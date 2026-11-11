@@ -73,6 +73,8 @@ impl Runs {
 /// Everything the kernel owns per task, released exactly once (the address-space `Arc` cannot double-drop).
 pub struct KernelPayload {
     pub id: TaskId,
+    /// Held for the task's life; only an instrument reads it.
+    #[cfg_attr(not(any(feature = "stack-witness", feature = "heap-tripwire")), allow(dead_code))]
     pub kernel_stack: KernelStack,
     /// The address space this task runs in.
     pub address_space: PageTables,

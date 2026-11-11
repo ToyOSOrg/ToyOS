@@ -14,9 +14,8 @@ use crate::object::notice::NoticeObject;
 use crate::object::process::ProcessObject;
 use crate::object::{ops, HandleEntry, HandleTable, KObjectRef, Refusal};
 use crate::process::{
-    process_data, Endowments, OwnedAlloc, KERNEL_STACK_SIZE,
+    process_data, Endowments, KERNEL_STACK_SIZE,
 };
-use crate::scheduler;
 use crate::user_ptr::UserBytes;
 use toyos_abi::handle::{RawHandle, Rights};
 use kernel::sched::job::Job;
@@ -37,13 +36,13 @@ pub(crate) enum Start {
 /// switched out (`arch::fpu`): a switch's save above [`top`](Self::top) lands
 /// inside this allocation.
 pub(crate) struct KernelStack {
-    alloc: OwnedAlloc,
+    stack: crate::mm::stack::Stack,
     /// The stack, and the records its task keeps for as long as it does.
     _charge: Charge,
 }
 
 impl KernelStack {
-    /// The heap a thread takes: its stack, its scheduler records, its place
+    /// The heap a thread takes beside its stack's frames: its scheduler records, its place
     /// on the one watch it may wait on, whose list doubles, its place in its
     /// process's thread table, its own data, and what one of its calls copies
     /// in and may hold while it is preempted — two strings at their bound, as
@@ -57,28 +56,27 @@ impl KernelStack {
         let process = charge::map_entry::<toyos_abi::Tid, crate::process::ThreadEntry>()
             + charge::arc::<crate::sync::Lock<crate::process::ThreadData>>()
             + call;
-        charge::heap(Self::layout()) + records + process
+        records + process
     }
 
-    /// What one is allocated as.
-    pub(crate) fn layout() -> core::alloc::Layout {
-        core::alloc::Layout::from_size_align(KERNEL_STACK_SIZE + crate::arch::fpu::area_bytes(), crate::mm::PAGE_BYTES)
-            .expect("a kernel stack's layout")
+    /// The stack and the area above it, in whole pages.
+    fn bytes() -> usize {
+        KERNEL_STACK_SIZE + crate::arch::fpu::area_bytes().next_multiple_of(crate::mm::PAGE_BYTES)
     }
 
-    /// The stack's lowest byte, where its canary sits.
+    /// The stack's lowest byte, above its guard page.
+    #[cfg(any(feature = "stack-witness", feature = "heap-tripwire"))]
     pub(crate) fn bottom(&self) -> *mut u8 {
-        self.alloc.ptr()
+        self.stack.bottom()
     }
 
     /// The stack's end, and where its area starts.
     pub(crate) fn top(&self) -> u64 {
-        self.alloc.ptr() as u64 + KERNEL_STACK_SIZE as u64
+        self.stack.bottom() as u64 + KERNEL_STACK_SIZE as u64
     }
-
 }
 
-/// Allocate a kernel stack, charged to the job its task runs in, and lay out
+/// Allocate a kernel stack, its frames held by the job its task runs in, and lay out
 /// the frame `context_switch` will restore.
 pub(crate) fn alloc_kernel_stack(job: &Arc<Job>, start: Start) -> Option<(KernelStack, u64)> {
     use crate::arch::entry::{process_start, thread_start};
@@ -87,10 +85,9 @@ pub(crate) fn alloc_kernel_stack(job: &Arc<Job>, start: Start) -> Option<(Kernel
         Start::Thread { entry, sp, arg } => (thread_start, entry.addr(), sp, arg),
     };
     let charge = Charge::new(job, KernelStack::heap()).ok()?;
-    let layout = KernelStack::layout();
-    let alloc = OwnedAlloc::new(layout.size(), layout.align())?;
-    scheduler::write_stack_canary(&alloc);
-    let stack = KernelStack { alloc, _charge: charge };
+    let stack = KernelStack { stack: crate::mm::stack::Stack::new(job, KernelStack::bytes())?, _charge: charge };
+    #[cfg(feature = "heap-tripwire")]
+    crate::scheduler::paint_stack(&stack);
     // SAFETY: `stack` is fresh and exclusively owned, and its `top` ends the stack.
     let frame = unsafe { crate::arch::entry::initial_frame(stack.top(), trampoline, user_entry, user_sp, arg) };
     Some((stack, frame))

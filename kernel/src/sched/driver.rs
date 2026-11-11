@@ -23,7 +23,7 @@ use kernel::sched::task::Refused;
 use crate::arch::percpu;
 use crate::hw::HW;
 use crate::loader::KernelStack;
-use crate::process::{OwnedAlloc, PageTables, TaskId};
+use crate::process::{PageTables, TaskId};
 #[cfg(feature = "heap-tripwire")]
 use crate::process::KERNEL_STACK_SIZE;
 
@@ -508,7 +508,7 @@ pub fn pass(dispose: Dispose) {
     let action = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
         if let Some(current) = pass.cpu().running() {
-            check_stack_canary(current.ext());
+            check_stack(current.ext());
             current.ext().handle.publish(current.acct(), None);
         }
         let disposed = match dispose {
@@ -580,7 +580,7 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
     let (action, parked) = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
         if let Some(current) = pass.cpu().running() {
-            check_stack_canary(current.ext());
+            check_stack(current.ext());
             current.ext().handle.publish(current.acct(), None);
         }
         match ticket.commit() {
@@ -662,9 +662,13 @@ pub fn enter_idle_loop() -> ! {
 extern "C" fn idle_loop() -> ! {
     crate::idle::init_here();
     loop {
-        // The first NMI; its handler stages the nested one.
+        // The first NMI; its handler stages the nested one, or overflows.
         #[cfg(feature = "boot-actuators")]
-        if crate::actuator::nmi_nested() {
+        if crate::actuator::stack_overflow_idle() {
+            crate::actuator::overflow_stack(0);
+        }
+        #[cfg(feature = "boot-actuators")]
+        if crate::actuator::nmi_nested() || crate::actuator::stack_overflow_nmi() {
             static SENT: AtomicBool = AtomicBool::new(false);
             if !SENT.swap(true, Ordering::Relaxed) {
                 crate::arch::irqchip::send_nmi(percpu::cpu_id());
@@ -798,11 +802,13 @@ pub fn current_is_rt() -> bool {
 /// Tail of the first switch into a fresh task. No lock to release, no outgoing task to park: only the
 /// preempt-count bracket's other half is owed.
 pub extern "C" fn trampoline_entry() {
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::stack_overflow_task() {
+        crate::actuator::overflow_stack(0);
+    }
     crate::preempt::enable_no_resched();
     crate::scheduler::exit_to_user();
 }
-
-const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
 
 /// What every untouched stack word holds under `heap-tripwire` — not zero, which a stack legitimately writes.
 #[cfg(feature = "heap-tripwire")]
@@ -835,26 +841,16 @@ pub fn stack_high_water() -> Option<(usize, usize)> {
     None
 }
 
-pub fn write_stack_canary(stack: &OwnedAlloc) {
-    // Painted before the canary word, so the canary survives the fill.
-    // SAFETY: `stack` is a fresh, exclusively-owned allocation of
-    // exactly this size, so this writes only its own bytes.
-    #[cfg(feature = "heap-tripwire")]
-    unsafe { core::ptr::write_bytes(stack.ptr(), STACK_FILL, KERNEL_STACK_SIZE) };
-    // SAFETY: the same fresh allocation; eight bytes at offset zero are
-    // its own and 4096-aligned.
-    unsafe { *(stack.ptr() as *mut u64) = STACK_CANARY };
+/// Fill a fresh stack for the depth ladder, before its first frame is written.
+#[cfg(feature = "heap-tripwire")]
+pub fn paint_stack(stack: &KernelStack) {
+    // SAFETY: fresh and exclusively owned, `KERNEL_STACK_SIZE` bytes from its bottom.
+    unsafe { core::ptr::write_bytes(stack.bottom(), STACK_FILL, KERNEL_STACK_SIZE) };
 }
 
-fn check_stack_canary(payload: &KernelPayload) {
-    // SAFETY: `payload.kernel_stack` is the allocation `write_stack_canary` painted, alive as long as the task is.
-    let canary = unsafe { *(payload.kernel_stack.bottom() as *const u64) };
-    if canary != STACK_CANARY {
-        panic!(
-            "KERNEL STACK OVERFLOW: tid={} canary={:#x} expected={:#x}",
-            payload.id.1, canary, STACK_CANARY
-        );
-    }
+/// What a pass's instruments read of the running task's kernel stack.
+#[cfg_attr(not(any(feature = "stack-witness", feature = "heap-tripwire")), allow(unused_variables))]
+fn check_stack(payload: &KernelPayload) {
     #[cfg(feature = "stack-witness")]
     check_stack_ownership(payload);
     #[cfg(feature = "heap-tripwire")]
@@ -890,14 +886,10 @@ fn check_stack_ownership(payload: &KernelPayload) {
     );
 }
 
-/// The heap bands around this task's kernel stack, and how deep it has been. Both ends: the canary catches
-/// a write at the bottom, this reads the head and tail band words for a frame that stepped over it.
+/// How deep this task's kernel stack has been.
 #[cfg(feature = "heap-tripwire")]
 fn stack_depth(payload: &KernelPayload) {
     let bottom = payload.kernel_stack.bottom();
-    // SAFETY: the running task's own stack, allocated with exactly its
-    // `layout()`; running on this CPU, so nothing is freeing it.
-    unsafe { crate::mm::check_heap_bands(bottom, KernelStack::layout(), "kernel stack") };
     let mut used = 0;
     for rung in DEPTH_RUNGS {
         // SAFETY: `rung < KERNEL_STACK_SIZE`, so this reads a word of that

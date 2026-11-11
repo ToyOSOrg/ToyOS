@@ -395,6 +395,62 @@ pub fn guard_4k(phys: u64) {
     tlb::kernel_page(va);
 }
 
+/// The table of 4 KiB pages over the 2 MiB at `va` in the kernel stacks'
+/// range: made with the tables above it where absent and `make` asks, or
+/// `None` with no frame for one; only looked for where it does not. They are
+/// the kernel's and stay for good.
+fn stack_table(high: &mut Tables, va: u64, make: bool) -> Option<&mut Table> {
+    let mut table: *mut Table = high.root_mut();
+    for level in 0..3 {
+        // SAFETY: the root or a table it linked, and `high` is the only reference.
+        let current = unsafe { &mut *table };
+        let i = index(va, level);
+        if current.0[i] & VALID == 0 {
+            if !make {
+                return None;
+            }
+            current.set(i, crate::mm::pmm::alloc_frame()?.into_raw() | TABLE | VALID);
+        }
+        let entry = current.0[i];
+        assert!(entry & TABLE != 0, "stack_table: a block at level {level} over {va:#x}, where only stacks' tables belong");
+        // SAFETY: valid and a table: one this root linked.
+        table = unsafe { Table::at_mut(entry & ADDR) };
+    }
+    // SAFETY: as in the loop.
+    Some(unsafe { &mut *table })
+}
+
+/// Map `frames` at consecutive 4 KiB pages from `va`, inside one 2 MiB page
+/// of the kernel stacks' range (`mm::stack`) that maps nothing there, as
+/// kernel data. `false`, with nothing mapped, where no frame can be had for a
+/// table. An invalid descriptor made valid owes no invalidation.
+pub fn map_stack(va: u64, frames: &[u64]) -> bool {
+    let mut high = high();
+    let high = high.as_mut().expect("map_stack: before the kernel's tables exist");
+    let Some(pages) = stack_table(high, va, true) else { return false };
+    for (j, &frame) in frames.iter().enumerate() {
+        pages.set(index(va, 3) + j, frame | kernel_leaf(CachePolicy::Normal, Prot::ReadWrite) | TABLE);
+    }
+    published();
+    true
+}
+
+/// Clear the `pages` descriptors [`map_stack`] wrote from `va`, handing each
+/// frame to `each`, and drop their translations on every CPU before
+/// returning: the broadcast needs no other CPU's answer.
+pub fn unmap_stack(va: u64, pages: usize, mut each: impl FnMut(u64)) {
+    let mut high = high();
+    let high = high.as_mut().expect("unmap_stack: before the kernel's tables exist");
+    let table = stack_table(high, va, false).expect("unmap_stack: a mapped stack has its table");
+    for j in index(va, 3)..index(va, 3) + pages {
+        let leaf = table.0[j];
+        assert!(leaf & VALID != 0, "unmap_stack: nothing mapped in {va:#x}'s table at {j}");
+        table.set(j, 0);
+        each(leaf & ADDR);
+    }
+    tlb::kernel_pages(va, pages);
+}
+
 /// The direct map's type for `phys`, read off the kernel's tables, which
 /// every space shares.
 pub fn direct_map_policy(phys: u64) -> Option<CachePolicy> {
@@ -862,23 +918,24 @@ pub(crate) fn init(
 ) -> toyos_bootmap::DirectMapEnd {
     let extent = direct_map_end(memory_map).unwrap_or_else(|refusal| panic!("paging: firmware's memory map: {refusal}"));
     let end = extent.get();
-    let memory = |phys: u64| kernel_leaf(CachePolicy::Normal, image.prot(phys).unwrap_or(Prot::ReadWrite));
     let mut tables = Tables::new();
     let (mut blocks, mut pages) = (0u64, 0u64);
     let mut at = 0;
     while at < end {
         let va = PHYS_OFFSET + at;
-        match coverage(memory_map, at) {
-            Coverage::Nothing => {}
-            Coverage::Whole if image.block(at).is_some() => {
-                tables.directory(va).set(index(va, 2), at | memory(at));
+        match (coverage(memory_map, at), image.block(at)) {
+            (Coverage::Nothing, _) => {}
+            (Coverage::Whole, Some(prot)) => {
+                tables.directory(va).set(index(va, 2), at | kernel_leaf(CachePolicy::Normal, prot));
                 blocks += 1;
             }
-            held => {
+            (held, _) => {
                 let table = Table::new();
                 for j in (0..512).filter(|&j| held.holds(j)) {
                     let page = at + j * PAGE_4K;
-                    table.0[j as usize] = page | memory(page) | TABLE;
+                    // The boot stack's guard stays invalid.
+                    let Some(prot) = image.prot(page) else { continue };
+                    table.0[j as usize] = page | kernel_leaf(CachePolicy::Normal, prot) | TABLE;
                     pages += 1;
                 }
                 let table = table.phys();

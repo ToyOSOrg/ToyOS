@@ -23,7 +23,7 @@ use crate::{clock, log};
 pub struct ApStart {
     /// The root it turns its MMU on under: [`paging::bringup_root`].
     pub(super) root: u64,
-    /// The top of the stack it runs on until the idle loop, a kernel address.
+    /// The top of the stack it runs on, a kernel address: its idle stack.
     pub(super) stack_top: u64,
     percpu: &'static PerCpu,
     /// Its redistributor's physical frame, which the boot CPU mapped.
@@ -70,10 +70,11 @@ fn start_others(gic: &irqchip::Gic, me: u32, online: &mut Vec<Gicc>) {
     let entry = DirectMap::phys_of(super::boot::ap_start as *const u8);
     for gicc in others {
         let attempt = ROSTER.begin_attempt();
+        let block = percpu::alloc(attempt.id());
         let start: &'static ApStart = Box::leak(Box::new(ApStart {
             root,
-            stack_top: smp::bringup_stack(),
-            percpu: percpu::alloc(attempt.id()),
+            stack_top: block.idle_stack_top(),
+            percpu: block,
             redistributor: gic.redistributor(packed_affinity(gicc.mpidr)),
             token: attempt.token(),
         }));

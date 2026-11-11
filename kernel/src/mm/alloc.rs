@@ -68,7 +68,7 @@ unsafe impl dlmalloc::Allocator for KernelPageSource {
     }
 }
 
-/// Bands of known bytes around every heap allocation, checked at free and, for live allocations, by [`check_live`] and [`sweep`].
+/// Bands of known bytes around every heap allocation, checked at free and, for live allocations, by [`sweep`].
 #[cfg(feature = "heap-tripwire")]
 mod tripwire {
     use core::alloc::Layout;
@@ -269,17 +269,6 @@ mod tripwire {
     /// Trivially sound: it hands back its arguments.
     #[inline(always)]
     pub unsafe fn disarm(ptr: *mut u8, layout: Layout) -> (*mut u8, Layout) { (ptr, layout) }
-}
-
-/// Reads the bands of a live heap allocation, before it is freed.
-///
-/// Gated on the feature rather than a no-op without it: its one caller is gated too.
-///
-/// # Safety
-/// `ptr` and `layout` are a pair `GlobalAlloc::alloc` returned, and nothing is freeing that allocation concurrently.
-#[cfg(feature = "heap-tripwire")]
-pub unsafe fn check_live(ptr: *mut u8, layout: Layout, site: &str) {
-    tripwire::check(ptr, layout, site)
 }
 
 /// Reads every live band in the heap, at a point the caller chooses rather than waiting for a free that may never come.

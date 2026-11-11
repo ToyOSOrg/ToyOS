@@ -271,7 +271,8 @@ impl Supervisor<'_> {
 }
 
 /// A static image loaded at its own addresses into one allocation with its
-/// stack after it, in offsets from the allocation's base.
+/// stack after it and a page between them, which the image's owner leaves
+/// unmapped as the stack's guard; in offsets from the allocation's base.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StackedImage {
     /// Bytes to allocate: the image, then the stack.
@@ -282,15 +283,15 @@ pub struct StackedImage {
 
 impl StackedImage {
     /// The image ending at `end` with a `stack_size`-byte stack after it, or
-    /// `None` for one no address holds. The stack starts on the next page:
-    /// both ABIs want the stack pointer 16-byte aligned, which AArch64's
-    /// `SCTLR_EL1.SA` enforces on every access through it. `stack_size` is
-    /// whole pages, so the top is too.
+    /// `None` for one no address holds. The stack starts a whole page past
+    /// the image's last: both ABIs want the stack pointer 16-byte aligned,
+    /// which AArch64's `SCTLR_EL1.SA` enforces on every access through it.
+    /// `stack_size` is whole pages, so the top is too.
     pub fn place(end: u64, stack_size: u64) -> Option<StackedImage> {
         if !stack_size.is_multiple_of(PAGE) {
             return None;
         }
-        let stack = end.checked_next_multiple_of(PAGE)?;
+        let stack = end.checked_next_multiple_of(PAGE)?.checked_add(PAGE)?;
         Some(StackedImage { size: stack.checked_add(stack_size)?, stack })
     }
 }

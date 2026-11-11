@@ -49,6 +49,19 @@ pub(super) fn kernel_page(va: u64) {
     tlbi!("vaae1is", (va >> 12) & 0xFFF_FFFF_FFFF);
 }
 
+/// The global translations of the `pages` 4 KiB pages from `va`, on every
+/// CPU, under one pair of barriers.
+pub(super) fn kernel_pages(va: u64, pages: usize) {
+    // SAFETY: as `tlbi!`'s.
+    unsafe {
+        core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+        for page in 0..pages as u64 {
+            core::arch::asm!("tlbi vaae1is, {}", in(reg) ((va >> 12) + page) & 0xFFF_FFFF_FFFF, options(nostack, preserves_flags));
+        }
+        core::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
+    }
+}
+
 /// Every EL1&0 translation every CPU holds, dropped before this returns —
 /// what a returned ASID needs before it is issued again.
 pub(super) fn all(origin: Origin) {

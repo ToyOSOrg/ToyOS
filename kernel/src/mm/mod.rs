@@ -11,10 +11,8 @@ mod image;
 mod mmio;
 pub mod policy;
 pub mod space;
+pub mod stack;
 
-/// Behind the same feature as its only caller, `sched::driver`'s ladder.
-#[cfg(feature = "heap-tripwire")]
-pub use alloc::check_live as check_heap_bands;
 /// Reads every live band; only that tells an absorbed stray write from a merely displaced one.
 #[cfg(feature = "heap-sweep")]
 pub use alloc::sweep as sweep_heap_bands;
@@ -168,6 +166,16 @@ pub fn firmware_map() -> &'static [MemoryMapEntry] {
     unsafe { core::slice::from_raw_parts(at, FIRMWARE_MAP.1.load(Acquire)) }
 }
 
+/// The page under the boot stack, set once by [`init`]: its first byte, or
+/// zero before that.
+static BOOT_STACK_GUARD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The unmapped page under the boot stack; `None` before [`init`].
+pub fn boot_stack_guard() -> Option<core::ops::Range<u64>> {
+    let start = BOOT_STACK_GUARD.load(core::sync::atomic::Ordering::Relaxed);
+    (start != 0).then(|| start..start + PAGE_SIZE)
+}
+
 /// Call once at boot, in order: pmm (physical pages) → paging (direct map) →
 /// alloc (heap) → every kernel root slot, before the first user space copies
 /// them. `reserved` holds `memory_map`'s own memory and `image`'s.
@@ -177,6 +185,12 @@ pub fn init(memory_map: &'static [MemoryMapEntry], reserved: &[Region], image: &
     alloc::init_early();
     pmm::init(memory_map, reserved);
     DIRECT_MAP_END.set(paging::init(memory_map, crate::drivers::panic_console::scanout(), image));
+    assert!(
+        PHYS_OFFSET + DIRECT_MAP_END.get().get() <= stack::RANGE,
+        "mm: the direct map ends at {:#x}, inside the kernel stacks' range",
+        PHYS_OFFSET + DIRECT_MAP_END.get().get(),
+    );
+    BOOT_STACK_GUARD.store(image.stack_guard().start, core::sync::atomic::Ordering::Relaxed);
     alloc::init();
     charge::init();
     paging::seal_kernel_half();

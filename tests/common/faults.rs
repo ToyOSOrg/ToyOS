@@ -139,6 +139,57 @@ pub fn kernel_wx_leaf_is_refused(test_config: &Path, profile: qemu::Profile) -> 
     }
 }
 
+/// The first line of a `#DF` report, the line in it that names the stack
+/// whose guard the fault was on, and the raw line a second `#DF` on the
+/// reporting CPU ends it with (`kernel/src/arch/x86_64/idt/exceptions.rs`).
+const DOUBLE_FAULT: &str = "DOUBLE FAULT on CPU ";
+const STACK_OVERFLOW: &str = "KERNEL STACK OVERFLOW: ";
+const REPORT_FAULTED: &str = "DOUBLE FAULT inside the double fault report above";
+
+/// Each kind of stack the kernel runs on, run off its bottom by its
+/// `stack-overflow-*` actuator, one boot each since each ends the machine:
+/// the fault is a `#DF` whose report names that stack's guard. A stack with
+/// nothing unmapped under it writes on into its neighbour and says neither
+/// line. The last boot runs the report itself off IST1: the `#DF` that makes
+/// restarts the handler on the same stack, which ends the report on one raw
+/// line instead of making it again; the first report's records reach the
+/// console after that line, when the halt drains them.
+pub fn a_kernel_stack_overflow_names_its_stack(test_config: &Path) -> Result<(), String> {
+    const ARMS: [(&[&str], &str, Option<&str>); 5] = [
+        (&["stack-overflow-task"], " under the kernel stack of pid=", None),
+        (&["stack-overflow-idle"], "'s idle stack", None),
+        (&["stack-overflow-nmi"], "'s IST2 stack", None),
+        (&["stack-overflow-boot"], " under the boot stack", None),
+        (&["stack-overflow-report"], "'s idle stack", Some(REPORT_FAULTED)),
+    ];
+    for (kernel_params, stack, also) in ARMS {
+        let param = kernel_params[0];
+        let qemu = QemuInstance::boot_with_options(
+            test_config,
+            &[],
+            &[],
+            BootOptions { profile: qemu::Profile::Metal, kernel_params, ready_marker: stack, ..Default::default() },
+        );
+        let serial = qemu.boot_log();
+        let report = serial
+            .find(DOUBLE_FAULT)
+            .map(|at| &serial[at..])
+            .ok_or_else(|| format!("{param}: no {DOUBLE_FAULT:?} line\n{serial}"))?;
+        let line = report
+            .lines()
+            .find(|line| line.contains(STACK_OVERFLOW) && line.contains(stack))
+            .ok_or_else(|| format!("{param}: the double fault's report names no guard{stack}\n{serial}"))?;
+        if let Some(also) = also.filter(|also| !serial.contains(also)) {
+            return Err(format!("{param}: no {also:?} line\n{serial}"));
+        }
+        if report.matches(DOUBLE_FAULT).count() != 1 {
+            return Err(format!("{param}: the double fault was reported more than once\n{serial}"));
+        }
+        eprintln!("  [stack_overflow] {param}: {}", line.trim());
+    }
+    Ok(())
+}
+
 /// What `tsc-step` says of each step it stages, and the clock's records of
 /// slewing the first away and demoting the TSC at the second
 /// (`kernel/src/arch/x86_64/clocksource.rs`).

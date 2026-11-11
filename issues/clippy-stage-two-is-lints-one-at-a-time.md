@@ -500,7 +500,8 @@ through `OwnedAlloc::slice` → `KernelSlice`, which would bound them — but ev
 `KernelSlice` accessor is itself an `unsafe fn`, so the trade is one block for
 another *plus* an `assert!`, and the reader runs inside `with_cpu`'s exclusive
 region on every scheduler pass. Zero blocks removed for a per-pass cost is not
-a reduction; both sites say so.
+a reduction. Both sites and `OwnedAlloc` have since been deleted: the canary
+went when every kernel stack got unmapped memory under it.
 
 The scheduler substitution's oracle was the compiler. Emitting the kernel's
 assembly at the guest's own `[profile.toyos]` (`opt-level = 2`) before and
