@@ -90,8 +90,8 @@ other, with the same per-session isolation (owner, 2026-11-05).
    redirect into `/apps` is refused with the file server's read-only reason
    while the same redirect into `/home` writes, and the two are one volume
    and one server differing only in the grant, so the grant is what
-   refused. Owed on a machine: that row, and the second, which is
-   `pkg_install_gbae`'s
+   refused. That row is green on the T14, both lines in its log (#1203).
+   Owed on a machine: the second, which is `pkg_install_gbae`'s
    (`issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`,
    stage D), whose client launches `pkg`.
    `/dev/null` is a name only libc's `open` knows, answered with a kernel

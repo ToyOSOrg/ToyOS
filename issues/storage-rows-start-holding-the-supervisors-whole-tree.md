@@ -9,7 +9,7 @@ opened: 2026-11-11
 By inspection, and unverified on a machine: `diskserver` and the file servers
 for the `memory` and `system` roles are started holding a duplicate of the
 supervisor's own namespace, every directory of the tree read-write but
-`/system`, `/apps` and `/log` among them.
+`/system`; `/apps` and `/log` are among them.
 
 The supervisor gives a storage row no view (`Grants::view` in
 `system/supervisor/src/main.rs`), since a file server resolving a path
@@ -25,7 +25,8 @@ But "a storage row sees none" is not what happens, and no other row is
 started this way.
 
 Evidence owed: `names.open("fs:/apps")` from one of those processes, which
-answers a connection if this is right and `NotFound` if not.
+answers a connection if this is right; if not, the process holds no
+namespace, or one without `fs:/apps`.
 
 Exit: a storage row is started with an empty namespace where its row names
 nothing, the check above refused on a machine, as part of stage 2 of

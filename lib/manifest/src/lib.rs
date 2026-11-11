@@ -1138,7 +1138,7 @@ mod tests {
         // Named like the installer and declaring nothing.
         let named = parse("program pkg /system/bin/pkg\n");
         assert_eq!(apps(&named, "pkg"), Some(("apps".into(), false)));
-        // A package's row has no word for it: its own directory stays read-only.
+        // Even declaring it, a package's own directory stays read-only.
         let package = Program { installs: true, ..m.app_row("gbae", "/apps/gbae/gbae").unwrap() };
         assert!(views(&package).iter().all(|v| !v.1.starts_with(package::DIR) || !v.3));
     }
