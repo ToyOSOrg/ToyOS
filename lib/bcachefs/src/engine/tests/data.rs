@@ -812,19 +812,24 @@ fn a_reserved_write_sends_each_contiguous_stretch_once_before_any_pointer() {
     assert_eq!(got[192 << 10..], old[192 << 10..], "an extent points at bytes the device refused");
 }
 
-/// A reserved write of several extents over a file, cut at every device
-/// request with writes torn and reordered: the file reads as it was, as
-/// it is once committed, or with the extents an entry already carried, in
-/// order, and the volume checks clean.
+/// A reserved write of three extents over a file whose old bytes lie under
+/// the first only, cut at every device request with writes torn and
+/// reordered, each transaction committed as it applies. The first extent
+/// replaces an old one and is pointed alone; the other two are fresh in one
+/// bucket and pointed together. A crash leaves none, the first or all three
+/// pointed, never two, and the volume checks clean. Red when the group is
+/// split.
 #[test]
-fn a_reserved_write_of_several_extents_survives_torn_reordered_writes() {
+fn a_reserved_write_cut_anywhere_points_its_group_whole() {
     use super::crash::Watched;
-    use core::cell::Cell;
+    use core::cell::{Cell, RefCell};
+    use std::collections::BTreeSet;
     use toyos_blockdev::model::{Model, Overlay};
 
     const EXTENT: usize = 64 << 10;
-    let dev = formatted(64 << 20, None);
-    let old = vec![0x33u8; 3 * EXTENT];
+    // Buckets of 256 KiB: the three extents land in one.
+    let dev = formatted(512 << 20, None);
+    let old = vec![0x33u8; EXTENT];
     let new: Vec<u8> = (0..3 * EXTENT).map(|i| (i * 7) as u8 | 1).collect();
     let ino = mounted(&dev, async |m: &Mount<&Image>| {
         let ino = m.create(m.root(), b"file", New::File, OWNER, NOW).await.unwrap().ino;
@@ -833,6 +838,7 @@ fn a_reserved_write_of_several_extents_survives_torn_reordered_writes() {
     });
     let committed = Cell::new(false);
     let requests = Cell::new(0u64);
+    let seen = RefCell::new(BTreeSet::new());
     let model = Model::new(dev.into_inner(), 512);
     let watched = Watched {
         model: &model,
@@ -842,14 +848,19 @@ fn a_reserved_write_of_several_extents_survives_torn_reordered_writes() {
                 .check(16, requests.get(), |bytes| {
                     let dev = Overlay::new(bytes);
                     let m = block_on_ready(Mount::open(&dev, MEMORY, random())).map_err(|e| format!("mount: {e:?}"))?;
-                    let mut got = vec![0; old.len()];
-                    block_on_ready(m.read(ino, 0, &mut got)).map_err(|e| format!("read: {e:?}"))?;
-                    let pointed = (0..=3).find(|&k| got[..k * EXTENT] == new[..k * EXTENT] && got[k * EXTENT..] == old[k * EXTENT..]);
+                    let mut got = vec![0; new.len()];
+                    let n = block_on_ready(m.read(ino, 0, &mut got)).map_err(|e| format!("read: {e:?}"))?;
+                    let pointed = match n {
+                        EXTENT if got[..n] == old[..] => 0,
+                        _ if n % EXTENT == 0 && got[..n] == new[..n] => n / EXTENT,
+                        _ => return Err(format!("{n} bytes that are neither the old nor the new at request {}", requests.get())),
+                    };
                     match pointed {
-                        Some(3) => {}
-                        Some(_) if !committed.get() => {}
-                        _ => return Err(format!("unexpected bytes at request {}, committed {}", requests.get(), committed.get())),
+                        3 => {}
+                        0 | 1 if !committed.get() => {}
+                        _ => return Err(format!("{pointed} of three extents pointed at request {}, committed {}", requests.get(), committed.get())),
                     }
+                    seen.borrow_mut().insert(pointed);
                     block_on_ready(m.unmount()).map_err(|e| format!("unmount: {e:?}"))?;
                     let v = block_on_ready(Volume::open(&dev)).map_err(|e| format!("reopen: {e:?}"))?;
                     let findings = block_on_ready(fsck(&v)).map_err(|e| format!("fsck: {e:?}"))?;
@@ -862,20 +873,30 @@ fn a_reserved_write_of_several_extents_survives_torn_reordered_writes() {
         }),
     };
     let m = block_on_ready(Mount::open(&watched, MEMORY, random())).unwrap();
+    m.test_commit_each();
     let mut token = block_on_ready(m.reserve(ino, 0, new.len())).unwrap();
     assert_eq!(block_on_ready(m.write_reserved(&mut token, 0, &new, NOW)).unwrap(), new.len());
     block_on_ready(m.commit()).unwrap();
     committed.set(true);
     block_on_ready(m.unmount()).unwrap();
-    assert!(requests.get() > 4);
+    assert_eq!(*seen.borrow(), BTreeSet::from([0, 1, 3]), "the crashes did not cut between the lone extent and the group");
 }
 
-/// Extents pointed and removed together stay inside one transaction's
-/// journal bound and node footprint with room to spare, on a plain and on
-/// an encrypted volume, whose extent values are the larger: a streaming
-/// write of buckets full of 64 KiB extents, then its truncation.
+/// A transaction of extents pointed or removed together leaves a quarter of
+/// its journal bound and half its node footprint to spare.
+fn within_margins([u64s, nodes]: [u64; 2]) {
+    assert!(u64s * 4 <= super::super::mount::K_TX * 3, "a transaction of {u64s} u64s leaves under a quarter of its bound");
+    assert!(nodes as usize * 2 <= super::super::mount::FOOTPRINT, "a transaction of {nodes} nodes leaves under half its footprint");
+}
+
+/// A streaming write of buckets full of 64 KiB extents, then its
+/// truncation, on a plain and on an encrypted volume, whose extent values are
+/// the larger: each transaction stays within its margins, and the write
+/// takes a pointer transaction for every [`POINTED`] extents and no more
+/// (the encrypted volume one more, raising its version mark).
 #[test]
 fn extents_pointed_and_removed_together_stay_within_a_transaction() {
+    use super::super::mount::POINTED;
     use super::buckets::Sparse;
     for encryption in [None, Some(Encryption { passphrase: b"test", kdf: MIN_KDF })] {
         let encrypted = encryption.is_some();
@@ -885,19 +906,124 @@ fn extents_pointed_and_removed_together_stay_within_a_transaction() {
         let data: Vec<u8> = (0..5 << 20).map(|i| (i * 7) as u8).collect();
         let ino = block_on_ready(m.create(m.root(), b"f", New::File, OWNER, NOW)).unwrap().ino;
         let mut token = block_on_ready(m.reserve(ino, 0, data.len())).unwrap();
-        m.test_largest_transaction();
+        m.test_applied();
         assert_eq!(block_on_ready(m.write_reserved(&mut token, 0, &data, NOW)).unwrap(), data.len());
-        let pointed = m.test_largest_transaction();
+        let (transactions, pointed) = m.test_applied();
+        let extents = (data.len() / (64 << 10)) as u64;
+        assert_eq!(transactions, extents.div_ceil(POINTED as u64) + u64::from(encrypted), "pointer transactions for {extents} extents");
         block_on_ready(m.truncate(ino, 0, NOW)).unwrap();
-        let removed = m.test_largest_transaction();
-        eprintln!("encrypted {encrypted}: pointed {pointed:?}, removed {removed:?}");
-        for [u64s, nodes] in [pointed, removed] {
-            assert!(u64s * 4 <= super::super::mount::K_TX * 3, "a transaction of {u64s} u64s leaves under a quarter of its bound");
-            assert!(nodes as usize * 2 <= super::super::mount::FOOTPRINT, "a transaction of {nodes} nodes leaves under half its footprint");
-        }
+        let (_, removed) = m.test_applied();
+        within_margins(pointed);
+        within_margins(removed);
         block_on_ready(m.unmount()).unwrap();
         let v = if encrypted { block_on_ready(Volume::unlock(&dev, b"test", LIMITS)).unwrap() } else { block_on_ready(Volume::open(&dev)).unwrap() };
         assert_eq!(read_all(&v, ino).unwrap(), []);
         assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
     }
+}
+
+/// A full group of fresh extents that moves its bucket's fragmentation LRU
+/// entry from a sixteenth full to nine, on 1 MiB buckets of 16 KiB nodes:
+/// once with the LRU in one leaf, and once with it spread over many by
+/// buckets left at every fill, so the entry leaves one leaf for another.
+/// The group is one transaction, within its margins on both.
+#[test]
+fn a_group_moving_its_lru_entry_across_leaves_stays_within_a_transaction() {
+    use super::super::mkfs::{mkfs_shaped, Shape};
+    use super::buckets::Sparse;
+    use toyos_blockdev::executor::Executor;
+    const EXTENT: usize = 64 << 10;
+    for fragmented in [false, true] {
+        let dev = Sparse::new(2 << 30);
+        let options = Options { label: b"data", time: NOW as u64, encryption: None };
+        block_on_ready(mkfs_shaped(&dev, &options, &Tree::new(), &mut Seeded(7), Shape { block: 8, node: Some(32) })).unwrap();
+        assert_eq!(super::super::read::Source::superblock(&block_on_ready(Volume::open(&dev)).unwrap()).member.bucket_sectors, 2048, "1 MiB buckets");
+        let m = block_on_ready(Mount::open(&dev, MountOptions { cache_nodes: 4096 }, random())).unwrap();
+        let stalled = || panic!("stalled; {}", m.dump());
+        let measured = Executor::new().block_on(
+            async {
+                if fragmented {
+                    // A bucket each, zeros the device keeps nothing of, cut
+                    // back to between one and fifteen sixteenths.
+                    let bucket = vec![0u8; 1 << 20];
+                    for i in 0..1500usize {
+                        let ino = m.create(m.root(), format!("f{i}").as_bytes(), New::File, OWNER, NOW).await.unwrap().ino;
+                        let mut token = m.reserve(ino, 0, bucket.len()).await.unwrap();
+                        assert_eq!(m.write_reserved(&mut token, 0, &bucket, NOW).await.unwrap(), bucket.len());
+                        m.truncate(ino, ((i % 15 + 1) * EXTENT) as u64, NOW).await.unwrap();
+                        if i % 32 == 31 {
+                            m.commit().await.unwrap();
+                        }
+                    }
+                }
+                // The next bucket a sixteenth full, then eight extents after it.
+                let pad = m.create(m.root(), b"pad", New::File, OWNER, NOW).await.unwrap().ino;
+                m.write(pad, 0, &[1; EXTENT], NOW).await.unwrap();
+                let ino = m.create(m.root(), b"group", New::File, OWNER, NOW).await.unwrap().ino;
+                let data = vec![2u8; 8 * EXTENT];
+                let mut token = m.reserve(ino, 0, data.len()).await.unwrap();
+                m.test_applied();
+                assert_eq!(m.write_reserved(&mut token, 0, &data, NOW).await.unwrap(), data.len());
+                m.test_applied()
+            },
+            stalled,
+        );
+        block_on_ready(m.unmount()).unwrap();
+        let (transactions, largest) = measured;
+        assert_eq!(transactions, 1, "eight fresh extents of one bucket, fragmented {fragmented}");
+        within_margins(largest);
+        let v = block_on_ready(Volume::open(&dev)).unwrap();
+        let spread = v.roots().iter().any(|r| r.btree == Btree::Lru && r.level > 0);
+        assert_eq!(spread, fragmented, "the LRU spans several leaves only where buckets were left at every fill");
+        assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+    }
+}
+
+/// The bench's sequential durable round again and again on 512 KiB buckets:
+/// the file truncated as it is opened, eight 1 MiB reserved writes and a
+/// commit, the volume remounted between rounds, so the buckets the round
+/// before emptied are taken again and filled a group of extents at a time.
+/// Once the file is gone every bucket it filled is empty again, and the
+/// volume checks clean after every round. Red when a refilled bucket keeps
+/// sectors, or a count, its extents no longer hold.
+#[test]
+fn buckets_refilled_in_groups_come_back_empty() {
+    use super::buckets::{empty_buckets, formatted_on, Sparse};
+    const MIB: usize = 1 << 20;
+    let dev = Sparse::new(1 << 30);
+    formatted_on(&dev);
+    assert_eq!(super::super::read::Source::superblock(&block_on_ready(Volume::open(&dev)).unwrap()).member.bucket_sectors, 1024, "512 KiB buckets");
+    let ino = {
+        let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+        let ino = block_on_ready(m.create(m.root(), b"seq", New::File, OWNER, NOW)).unwrap().ino;
+        block_on_ready(m.unmount()).unwrap();
+        ino
+    };
+    let empty = empty_buckets(&block_on_ready(Volume::open(&dev)).unwrap());
+    let mut reused = 0;
+    for round in 1..=6u8 {
+        let data = vec![round; MIB];
+        let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+        block_on_ready(m.truncate(ino, 0, NOW)).unwrap();
+        let mut tokens: Vec<_> = (0..8).map(|i| block_on_ready(m.reserve(ino, (i * MIB) as u64, MIB)).unwrap()).collect();
+        for (i, token) in tokens.iter_mut().enumerate() {
+            assert_eq!(block_on_ready(m.write_reserved(token, (i * MIB) as u64, &data, NOW)).unwrap(), MIB);
+        }
+        block_on_ready(m.commit()).unwrap();
+        reused += m.reused();
+        block_on_ready(m.unmount()).unwrap();
+        let v = block_on_ready(Volume::open(&dev)).unwrap();
+        assert_eq!(read_all(&v, ino).unwrap(), vec![round; 8 * MIB], "round {round}");
+        assert_eq!(block_on_ready(fsck(&v)).unwrap(), [], "round {round}");
+    }
+    // A round's truncation is durable from its commit on, so from the third
+    // round on each refills the sixteen buckets the round two before filled.
+    assert!(reused >= 4 * 16, "{reused} buckets taken again: the rounds did not refill what earlier ones emptied");
+    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+    let removed = block_on_ready(m.unlink(m.root(), b"seq", false, NOW)).unwrap();
+    block_on_ready(m.release(removed.node)).unwrap();
+    block_on_ready(m.unmount()).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(empty_buckets(&v), empty, "empty buckets once the file is gone");
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }

@@ -178,7 +178,7 @@ impl<L: Link> Served<L> {
     /// `blocks` written at `lba`, shared: the session keeps them until a
     /// flush covers the write, rather than a copy of them. Its requests are
     /// all asked at once, and it ends when the last is answered: the first
-    /// refusal, in block order, if any was refused.
+    /// failure, in block order, if any failed.
     pub async fn write_shared(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
         within(lba, blocks.len(), self.blocks)?;
         let per = MAX_REQUEST_BLOCKS as usize;

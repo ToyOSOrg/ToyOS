@@ -1,9 +1,5 @@
 //! Copy-on-write file data. A pointer is journaled only after its bytes
 //! have completed; journal preflush orders those bytes before the pointer.
-//!
-//! A reserved write's sectors are known before it starts, so its bytes go to
-//! the device first, each stretch of contiguous sectors as one write, and its
-//! extents' pointers follow, up to [`POINTED`] fresh ones a transaction.
 
 use super::super::crypt::Nonce;
 use super::super::value::{csum_type, Extent};
@@ -38,10 +34,13 @@ struct Piece {
     fresh: bool,
 }
 
-/// The most extents of a reserved write one transaction points at: fresh
-/// ones in one bucket, whose keys beyond the first's are an extent and a
-/// backpointer each, in at most a node of each tree more.
-const POINTED: usize = 8;
+/// The most extents of one bucket one transaction points at (fresh ones of
+/// a reserved write) or removes (whole ones a truncation passes). The
+/// group shares one change of its bucket: its alloc key, its LRU entry,
+/// which moves once from the fill before to the fill after, and its
+/// accounting. Each extent past the first adds only its extent key and
+/// its backpointer, in at most one node more of each of those two trees.
+pub(crate) const POINTED: usize = 8;
 
 /// Contiguous sectors for consecutive blocks of a file, each written once.
 struct Run {
@@ -268,6 +267,11 @@ impl<D: BlockDev> Mount<D> {
     /// of its bytes, and counts as written. Bytes written; a
     /// failure after some returns their count, and the rest stay reserved
     /// for a retry until dropped.
+    ///
+    /// The sectors are known before it starts, so the bytes go to the device
+    /// first, each stretch of contiguous sectors as one write, and the
+    /// extents' pointers follow, up to [`POINTED`] fresh ones of a bucket a
+    /// transaction.
     pub async fn write_reserved(&self, reservation: &mut Reservation, offset: u64, data: &[u8], now: i64) -> Result<usize> {
         if !Rc::ptr_eq(&reservation.owner, &self.reservations) {
             return Err(Error::Invalid("reservation belongs to another mount"));
@@ -280,30 +284,28 @@ impl<D: BlockDev> Mount<D> {
         self.check_writable()?;
         self.observe(now);
         let bucket = u64::from(self.sb.member.bucket_sectors);
+        let ino = self.reservations.borrow().active.get(&reservation.id).ok_or(Error::Invalid("reservation already written"))?.ino;
+        regular_mode(self.inode(ino).await?.mode)?;
         // The data slot keeps the file's extents as they are from here to the
-        // last pointer, so each extent is cut and sealed once, before its bytes go.
+        // last pointer but for this write's own, so each extent is cut and
+        // sealed once, before its bytes go.
         let mut pieces: Vec<Piece> = Vec::new();
         let mut buf: Vec<[u8; BLOCK]> = Vec::new();
         let mut planned = 0;
-        let mut ino = 0;
         while planned < data.len() {
             let at = offset + planned as u64;
             // The extent starts at the block holding `at`, and so do its sectors.
             let (sector, end) = {
                 let pool = self.reservations.borrow();
-                let reserved = pool.active.get(&reservation.id).ok_or(Error::Invalid("reservation already written"))?;
+                let reserved = pool.active.get(&reservation.id).expect("a reservation being written");
                 let run = reserved.runs.iter().find(|r| (r.first..r.first + u64::from(r.blocks) * block).contains(&at)).expect("a reservation covers its range");
                 let end = (offset + data.len() as u64).min(run.first + u64::from(run.blocks) * block);
                 let (from, to) = (((at - run.first) / block) as u32, ((end - run.first).div_ceil(block)) as u32);
                 if (from..to).any(|b| run.written & 1 << b != 0) {
                     return Err(Error::Invalid("a reserved block written twice"));
                 }
-                ino = reserved.ino;
                 (run.sector + (at / block * block - run.first) / SECTOR as u64, end)
             };
-            if pieces.is_empty() {
-                regular_mode(self.inode(ino).await?.mode)?;
-            }
             let version = self.data_version().await?;
             let input = &data[planned..(end - offset) as usize];
             let (first, end, old) = self.span(ino, at, input.len()).await?;
@@ -315,37 +317,43 @@ impl<D: BlockDev> Mount<D> {
             pieces.push(Piece { at, n, first, end, blocks, sector, version, seal, fresh: old.is_empty() });
             planned += n;
         }
-        let mut next = 0;
-        while next < pieces.len() {
-            let from = next;
-            next += 1;
-            while next < pieces.len() && pieces[next].sector == pieces[next - 1].sector + (pieces[next - 1].end - pieces[next - 1].first) / SECTOR as u64 {
-                next += 1;
-            }
-            let stretch = &buf[pieces[from].blocks.start..pieces[next - 1].blocks.end];
+        for stretch in pieces.chunk_by(|a, b| b.sector == a.sector + (a.end - a.first) / SECTOR as u64) {
+            let (head, last) = (&stretch[0], &stretch[stretch.len() - 1]);
+            let bytes = &buf[head.blocks.start..last.blocks.end];
             self.reissue("file data write failed", async || {
-                self.dev.write_data(pieces[from].sector * SECTOR as u64 / BLOCK as u64, stretch).await?;
+                self.dev.write_data(head.sector * SECTOR as u64 / BLOCK as u64, bytes).await?;
                 Ok(())
             })
             .await?;
         }
         drop(buf);
         let mut done = 0;
-        let mut rest = &pieces[..];
-        while let Some(head) = rest.first() {
-            let together = |p: &Piece| p.fresh && head.fresh && p.sector / bucket == head.sector / bucket;
-            let (group, after) = rest.split_at(rest.iter().take(POINTED).take_while(|p| together(p)).count().max(1));
-            rest = after;
+        let groups = pieces.chunk_by(|a, b| a.fresh && b.fresh && a.sector / bucket == b.sector / bucket).flat_map(|together| together.chunks(POINTED));
+        for group in groups {
             let pointed = self
                 .transact(K_TX, FOOTPRINT, Draw::Reserved(reservation.id), async |txn: &mut Txn| {
                     let mut inode = self.inode_in(txn, ino).await?;
                     regular(&inode)?;
-                    for piece in group {
-                        let (first, end, old) = self.span(ino, piece.at, piece.n).await?;
-                        assert_eq!((first, end), (piece.first, piece.end), "a file's extents changed under its reserved write");
-                        self.point_extent(txn, ino, &mut inode, first..end, old, piece.version, piece.sector, piece.seal).await?;
-                        inode.size = inode.size.max(piece.at + piece.n as u64);
+                    match group {
+                        // An earlier piece may have left a slice of an old
+                        // extent this one replaces: its old extents are read
+                        // again here.
+                        [piece] if !piece.fresh => {
+                            let (first, end, old) = self.span(ino, piece.at, piece.n).await?;
+                            assert_eq!((first, end), (piece.first, piece.end), "a file's extents changed under its reserved write");
+                            self.point_extent(txn, ino, &mut inode, first..end, old, piece.version, piece.sector, piece.seal).await?;
+                        }
+                        // A fresh piece's blocks held no extent when it was
+                        // planned, and no earlier piece leaves a slice there:
+                        // an old extent reaching them would have made it not
+                        // fresh. The group's one bucket changes once for all.
+                        _ => {
+                            let gen = self.bucket(txn, group[0].sector / bucket).await?.reused_gen();
+                            let new = group.iter().map(|p| self.new_extent(ino, p.first..p.end, p.version, Ptr { sector: p.sector, dev: 0, gen, cached: false, unwritten: false }, p.seal)).collect();
+                            self.replace_data_keys(txn, &mut inode, Vec::new(), new).await?;
+                        }
                     }
+                    inode.size = group.iter().fold(inode.size, |size, p| size.max(p.at + p.n as u64));
                     self.touch(&mut inode, now);
                     self.set_inode(txn, ino, &inode).await
                 })
@@ -497,11 +505,12 @@ impl<D: BlockDev> Mount<D> {
         assert_eq!(st.sparse_data, metadata.sparse_data);
     }
 
-    /// The largest transaction applied since the last ask: its journal u64s
-    /// and the nodes it changed.
+    /// The transactions applied since the last ask, and the largest of them:
+    /// its journal u64s and the nodes it changed.
     #[cfg(test)]
-    pub(crate) fn test_largest_transaction(&self) -> [u64; 2] {
-        core::mem::take(&mut self.st.borrow_mut().largest)
+    pub(crate) fn test_applied(&self) -> (u64, [u64; 2]) {
+        let mut st = self.st.borrow_mut();
+        (core::mem::take(&mut st.applied), core::mem::take(&mut st.largest))
     }
 
     #[cfg(test)]
@@ -699,15 +708,19 @@ impl<D: BlockDev> Mount<D> {
                 retained.push(slice(k, v, range.end, to)?);
             }
         }
-        let physical = ((range.end - range.start) / SECTOR as u64) as u32;
         let gen = self.bucket(txn, sector / u64::from(self.sb.member.bucket_sectors)).await?.reused_gen();
-        let ptr = Ptr { sector, dev: 0, gen, cached: false, unwritten: false };
+        retained.push(self.new_extent(ino, range, version, Ptr { sector, dev: 0, gen, cached: false, unwritten: false }, seal));
+        self.replace_data_keys(txn, inode, old, retained).await
+    }
+
+    /// The extent of `ino`'s blocks `range` whose bytes lie at `ptr`, sealed
+    /// as `seal`.
+    fn new_extent(&self, ino: u64, range: core::ops::Range<u64>, version: Version, ptr: Ptr, seal: Seal) -> (Key, Vec<u8>) {
+        let physical = ((range.end - range.start) / SECTOR as u64) as u32;
         let value = sealed(physical, seal, ptr, self.sb.flag(1, 9, 1) != 0);
         let pos = Bpos::new(ino, range.end / SECTOR as u64, ROOT_SNAPSHOT);
-        let key = Key { size: physical, version, ..Key::new(kind::EXTENT, pos) };
         self.st.borrow_mut().clocks[1] += u64::from(physical);
-        retained.push((key, value));
-        self.replace_data_keys(txn, inode, old, retained).await
+        (Key { size: physical, version, ..Key::new(kind::EXTENT, pos) }, value)
     }
 
     /// `data` as it goes to the device, encrypted in place on an encrypted
