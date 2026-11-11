@@ -314,8 +314,7 @@ trait Move {
 
 impl Move for Moved {
     fn entry(&self) -> TransferEntry {
-        let handle = self.handle.raw();
-        self.rights.map_or(TransferEntry::unchanged(handle), |rights| TransferEntry::narrowed(handle, rights))
+        Moved::entry(self)
     }
 }
 

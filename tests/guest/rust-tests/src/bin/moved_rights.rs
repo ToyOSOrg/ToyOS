@@ -26,6 +26,8 @@ use toyos_abi::syscall::{self, SpawnArgs, SpawnEndow, SyscallError, MAX_TRANSFER
 use toyos_abi::RawHandle;
 
 const SELF: &str = "/system/bin/test_rs_moved_rights";
+/// The name the child goes by.
+const NAME: &str = "moved_rights";
 /// The label a child finds its endowment under.
 const LABEL: &str = "moved";
 /// The role a spawned copy takes: its exit code is what it found its
@@ -167,18 +169,15 @@ fn a_refused_send_gives_back_the_rights_it_had(pair: &Pair) {
 /// `SYS_SPAWN` of this binary as [`CHILD`], endowed `moved` under [`LABEL`].
 fn spawn(moved: TransferEntry) -> Result<RawHandle, SyscallError> {
     static OWN: std::sync::OnceLock<toyos::process::Image> = std::sync::OnceLock::new();
-    let laid = image::laid(OWN.get_or_init(|| image::image_of(SELF)));
-    let argv = format!("{SELF}\0{CHILD}");
+    let laid = image::laid(OWN.get_or_init(|| image::image_of(SELF)), &format!("{SELF}\0{CHILD}"));
     let entry = SpawnEndow { label_off: 0, label_len: LABEL.len() as u32, moved };
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {
             path_ptr: SELF.as_ptr() as u64,
             path_len: SELF.len() as u64,
-            argv_ptr: argv.as_ptr() as u64,
-            argv_len: argv.len() as u64,
-            env_ptr: 0,
-            env_len: 0,
+            name_ptr: NAME.as_ptr() as u64,
+            name_len: NAME.len() as u64,
             endow_ptr: &entry as *const SpawnEndow as u64,
             endow_count: 1,
             labels_ptr: LABEL.as_ptr() as u64,

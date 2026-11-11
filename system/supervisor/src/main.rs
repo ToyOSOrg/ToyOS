@@ -3225,15 +3225,14 @@ fn start<'a>(
     }
 
     if !program.syscap.is_empty() {
-        // A duplicate carrying exactly what the manifest asked for and nothing
-        // else. Rights only shrink, so soundserver's `rt` cap can never mint a claim
-        // or open a process however it asks.
+        // A duplicate that arrives carrying exactly what the manifest asked
+        // for and nothing else. Rights only shrink, so soundserver's `rt` cap
+        // can never mint a claim or open a process however it asks, and a row
+        // that names no `dup` cannot hand it to anyone.
         let rights = toyos_manifest::syscap_rights(&program.syscap)
             .unwrap_or_else(|e| panic!("supervisor: {}: {e}", program.name));
-        let narrowed = syscap
-            .narrowed(rights)
-            .expect("supervisor: the system capability refused a narrowed duplicate");
-        command.endow(SYSCAP_LABEL, narrowed.into());
+        let copy = syscap.duplicate().expect("supervisor: the system capability refused a duplicate");
+        command.endow_narrowed(SYSCAP_LABEL, copy.into(), rights.bits());
     }
 
     // Where the program's output goes.

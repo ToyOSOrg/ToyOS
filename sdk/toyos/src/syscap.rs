@@ -92,9 +92,9 @@ impl SysCap {
 
     /// A second handle to this capability, carrying the same rights.
     ///
-    /// Only usable by a holder whose own cap carries [`Rights::DUP`], which in
-    /// the whole tree is the test estate: its binaries mint their own claims,
-    /// and one boot runs several that each need the keyboard.
+    /// Only usable by a holder whose own cap carries [`Rights::DUP`]: the
+    /// supervisor, and a row naming `dup`, which in the whole tree is the
+    /// test estate.
     pub fn duplicate(&self) -> Result<Self, SyscallError> {
         self.0.try_clone().map(Self)
     }

@@ -495,15 +495,16 @@ pub const MAX_SPAWN_MAPS: usize = 64;
 /// The most bytes of a build-id a spawn carries.
 pub const MAX_BUILD_ID: usize = 32;
 
-/// One handle a spawn moves out of its caller's table into the child's, and
-/// the label the child finds it under ([`EndowEntry`]): `label_off` and
-/// `label_len` index [`SpawnArgs`]'s label blob.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SpawnEndow {
-    pub label_off: u32,
-    pub label_len: u32,
-    pub moved: TransferEntry,
+crate::user_safe! {
+    /// One handle a spawn moves out of its caller's table into the child's,
+    /// and the label the child finds it under ([`EndowEntry`]): `label_off`
+    /// and `label_len` index [`SpawnArgs`]'s label blob.
+    #[derive(Clone, Copy)]
+    pub struct SpawnEndow {
+        pub label_off: u32,
+        pub label_len: u32,
+        pub moved: TransferEntry,
+    }
 }
 
 const _: () = assert!(core::mem::size_of::<SpawnEndow>() == 16);

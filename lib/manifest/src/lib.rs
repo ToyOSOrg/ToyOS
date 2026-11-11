@@ -211,17 +211,17 @@ pub use toyos_abi::syscall::{DeviceRequest, DeviceType};
 /// can write a name the supervisor cannot act on is what this being the only spelling
 /// prevents.
 ///
-/// `TRANSFER` is not nameable and is always added: the supervisor endows the duplicate,
-/// and endowing is a transfer, so a cap without it could not reach the program
-/// the config is talking about at all.
+/// These are the rights the program's capability arrives with. No name but
+/// `dup` lets it leave the program it was given to.
 const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
     ("rt", Rights::RT),
     ("device", Rights::DEVICE),
     // Not an authority over the machine but over the *capability*: it says out
-    // loud that this program hands the cap on to its own children. The test
-    // estate is its one holder — one boot runs several binaries that each need
-    // the keyboard, and a claim moves.
-    ("dup", Rights::DUP),
+    // loud that this program hands the cap on to its own children, which takes
+    // duplicating it and moving the duplicate. The test estate is its one
+    // holder — one boot runs several binaries that each need the keyboard, and
+    // a claim moves.
+    ("dup", Rights::DUP.union(Rights::TRANSFER)),
     // Read the whole machine's kernel log: every record every CPU wrote, which
     // is every process's business and no process's right by default.
     //
@@ -269,7 +269,7 @@ const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
 
 /// The whole right set a program's `syscap` list asks for.
 pub fn syscap_rights(names: &[String]) -> Result<Rights, String> {
-    let mut rights = Rights::TRANSFER;
+    let mut rights = Rights::NONE;
     for name in names {
         let (_, right) = SYSCAP_RIGHTS
             .iter()
@@ -1178,16 +1178,20 @@ mod tests {
         assert!(matches!(render(&newline), Err(RenderError::Unrepresentable { .. })));
     }
 
-    /// `TRANSFER` is in every set and is nameable in none: the supervisor endows the
-    /// duplicate, so a set without it names a capability that cannot reach the
-    /// program the config is about.
+    /// A set is what its names say: only `dup` lets the capability be
+    /// duplicated and moved on, and `TRANSFER` is nameable by itself in none.
     #[test]
-    fn a_syscap_set_always_carries_transfer_and_never_an_invented_right() {
-        assert_eq!(syscap_rights(&[]).unwrap(), Rights::TRANSFER);
+    fn a_syscap_set_leaves_its_program_only_under_dup_and_carries_no_invented_right() {
+        assert_eq!(syscap_rights(&[]).unwrap(), Rights::NONE);
+        assert_eq!(syscap_rights(&["device".into()]).unwrap(), Rights::DEVICE);
         assert_eq!(
             syscap_rights(&["device".into(), "dup".into()]).unwrap(),
             Rights::TRANSFER.union(Rights::DEVICE).union(Rights::DUP)
         );
+        for (name, _) in SYSCAP_RIGHTS.iter().filter(|(name, _)| *name != "dup") {
+            let rights = syscap_rights(&[(*name).to_string()]).unwrap();
+            assert!(!rights.contains(Rights::TRANSFER) && !rights.contains(Rights::DUP), "{name} lets its capability leave");
+        }
         assert!(syscap_rights(&["transfer".into()]).is_err());
         assert!(syscap_rights(&["root".into()]).is_err());
     }
@@ -1200,7 +1204,7 @@ mod tests {
     fn logread_carries_both_halves_of_reading_a_stream_that_never_blocks() {
         assert_eq!(
             syscap_rights(&["logread".into()]).unwrap(),
-            Rights::TRANSFER.union(Rights::LOG).union(Rights::WAIT)
+            Rights::LOG.union(Rights::WAIT)
         );
         // And it is not the RT band's, nor a device claim's, however it is
         // spelled.
@@ -1219,7 +1223,7 @@ mod tests {
     fn the_process_roster_is_its_own_name_and_its_own_bit() {
         assert_eq!(
             syscap_rights(&["roster".into()]).unwrap(),
-            Rights::TRANSFER.union(Rights::ROSTER)
+            Rights::ROSTER
         );
         assert!(!syscap_rights(&["roster".into()]).unwrap().contains(Rights::LOG));
         assert!(!syscap_rights(&["logread".into()]).unwrap().contains(Rights::ROSTER));

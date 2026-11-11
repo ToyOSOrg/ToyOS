@@ -14,14 +14,14 @@ use crate::object::notice::NoticeObject;
 use crate::object::process::ProcessObject;
 use crate::object::{ops, HandleEntry, HandleTable, KObjectRef, Refusal};
 use crate::process::{
-    process_data, Endowments, OwnedAlloc, ENDOW_ENTRY_LEN, KERNEL_STACK_SIZE,
+    process_data, Endowments, OwnedAlloc, KERNEL_STACK_SIZE,
 };
 use crate::scheduler;
 use crate::user_ptr::UserBytes;
 use toyos_abi::handle::{RawHandle, Rights};
 use kernel::sched::job::Job;
 use toyos_abi::syscall::{
-    EndowEntry, SyscallError, JOB_LABEL, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, QUIT_LABEL, SELF_LABEL,
+    EndowEntry, SpawnEndow, SyscallError, JOB_LABEL, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, QUIT_LABEL, SELF_LABEL,
 };
 
 /// Where a new context first runs.
@@ -100,7 +100,7 @@ pub(crate) fn alloc_kernel_stack(job: &Arc<Job>, start: Start) -> Option<(Kernel
 // The move must be last: an earlier move leaves a failed spawn's caller holding handles that name nothing.
 pub struct PendingHandles {
     table: HandleTable,
-    endow: Vec<u8>,
+    endow: Vec<SpawnEndow>,
     labels: Vec<u8>,
     /// The job the child runs in, which everything built for it is counted to.
     job: Arc<Job>,
@@ -144,23 +144,12 @@ impl Commit for PendingHandles {
         let data_arc = process_data();
         let mut data = data_arc.lock();
 
-        let count = endow.len() / ENDOW_ENTRY_LEN;
-        let mut moving: Vec<(EndowEntry, RawHandle, Rights)> = Vec::with_capacity(count);
+        let mut moving: Vec<(EndowEntry, RawHandle, Rights)> = Vec::with_capacity(endow.len());
         let mut endowed_job: Option<Arc<Job>> = None;
-        for raw in endow.as_chunks::<ENDOW_ENTRY_LEN>().0 {
-            let label_off = u32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
-            let label_len = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
-            let handle = RawHandle(u32::from_ne_bytes([raw[8], raw[9], raw[10], raw[11]]));
-            let want = toyos_abi::handle::TransferEntry { handle, rights: u32::from_ne_bytes([raw[12], raw[13], raw[14], raw[15]]) }
-                .rights()
-                .map_err(|_| SyscallError::InvalidArgument)?;
-            let end = (label_off as usize)
-                .checked_add(label_len as usize)
-                .ok_or(SyscallError::InvalidArgument)?;
-            if end > labels.len() {
-                return Err(SyscallError::InvalidArgument.into());
-            }
-            let label = &labels[label_off as usize..end];
+        for SpawnEndow { label_off, label_len, moved } in endow {
+            let handle = moved.handle;
+            let want = moved.rights().map_err(|_| SyscallError::InvalidArgument)?;
+            let label = label_of(&labels, label_off, label_len).ok_or(SyscallError::InvalidArgument)?;
             // The kernel's own, which a caller's of that name would shadow in the child's lookup.
             if Own::LABELS.iter().any(|own| label == own.as_bytes()) {
                 return Err(SyscallError::InvalidArgument.into());
@@ -254,28 +243,39 @@ impl Own {
 /// Reads `SpawnArgs`'s endowments into the child's pending handle state.
 // Every refusal here precedes any child state, so nothing is enqueued or orphaned.
 pub fn build_child_handles(endow: &UserBytes, labels: &[u8], pager: bool) -> Result<PendingHandles, Refusal> {
-    if endow.len() / ENDOW_ENTRY_LEN > MAX_SPAWN_ENDOWMENTS {
+    let count = endow.len() / SPAWN_ENDOW_LEN;
+    if count > MAX_SPAWN_ENDOWMENTS {
         return Err(SyscallError::InvalidArgument.into());
     }
     if labels.len() > MAX_SPAWN_LABELS_LEN {
         return Err(SyscallError::InvalidArgument.into());
     }
-    let mut raw = alloc::vec![0u8; endow.len()];
-    endow.read_at(0, &mut raw).map_err(SyscallError::from)?;
-    let job = child_job(&raw, labels)?;
-    Ok(PendingHandles { table: HandleTable::new(&job), endow: raw, labels: labels.to_vec(), job, pager })
+    let mut entries = Vec::with_capacity(count);
+    for i in 0..count {
+        let mut entry: SpawnEndow = toyos_abi::usersafe::zeroed();
+        endow.read_at(i * SPAWN_ENDOW_LEN, toyos_abi::usersafe::bytes_mut(&mut entry)).map_err(SyscallError::from)?;
+        entries.push(entry);
+    }
+    let job = child_job(&entries, labels)?;
+    Ok(PendingHandles { table: HandleTable::new(&job), endow: entries, labels: labels.to_vec(), job, pager })
+}
+
+/// One endowment of a spawn's request on the wire.
+const SPAWN_ENDOW_LEN: usize = core::mem::size_of::<SpawnEndow>();
+
+/// The label an entry's offset and length name in `labels`, if they are inside it.
+fn label_of(labels: &[u8], off: u32, len: u32) -> Option<&[u8]> {
+    labels.get(off as usize..(off as usize).checked_add(len as usize)?)
 }
 
 /// The job a child runs in: the one endowed under [`JOB_LABEL`], or else the
 /// caller's. Only looked up: [`PendingHandles::commit`] refuses the rest.
-fn child_job(raw: &[u8], labels: &[u8]) -> Result<Arc<Job>, Refusal> {
+fn child_job(endow: &[SpawnEndow], labels: &[u8]) -> Result<Arc<Job>, Refusal> {
     let data_arc = process_data();
     let data = data_arc.lock();
-    for entry in raw.as_chunks::<ENDOW_ENTRY_LEN>().0 {
-        let word = |at: usize| u32::from_ne_bytes([entry[at], entry[at + 1], entry[at + 2], entry[at + 3]]) as usize;
-        let named = word(0).checked_add(word(4)).and_then(|end| labels.get(word(0)..end));
-        if named == Some(JOB_LABEL.as_bytes()) {
-            return Ok(data.handles.get_sent::<JobObject>(RawHandle(word(8) as u32), Rights::WRITE)?.job().clone());
+    for entry in endow {
+        if label_of(labels, entry.label_off, entry.label_len) == Some(JOB_LABEL.as_bytes()) {
+            return Ok(data.handles.get_sent::<JobObject>(entry.moved.handle, Rights::WRITE)?.job().clone());
         }
     }
     Ok(data.job.clone())
