@@ -142,17 +142,6 @@ mod tests {
         Box::new(Slots::new())
     }
 
-    /// A taker that flushes when asked, and what it then gets.
-    fn take(slots: &mut Slots, stale: &mut BTreeSet<u32>) -> Take {
-        match slots.take() {
-            Take::Flush => {
-                stale.clear();
-                slots.flushed();
-                slots.take()
-            }
-            other => other,
-        }
-    }
 
     #[test]
     fn fresh_slots_come_in_order_and_nothing_flushes_below_the_batch() {
@@ -215,15 +204,17 @@ mod tests {
         assert_eq!(slots.take(), Take::Slot(0));
     }
 
-    /// Over a long run of takes and drops in an order a generator picks: no
-    /// slot is handed out while live, none that retired since the last flush,
-    /// and never more than the batch beyond what was live at once is used.
+    /// Over a long run of takes and drops in an order a generator picks, with
+    /// another take and another drop landing inside every flush: no slot is
+    /// handed out while live, none that retired since the last flush began,
+    /// and never more than the batch and those racing takes beyond what was
+    /// live at once is used.
     #[test]
     fn no_slot_retired_since_the_last_flush_is_handed_out() {
         let mut slots = slots();
         let mut live: Vec<u32> = Vec::new();
         let mut stale = BTreeSet::new();
-        let mut peak = 0;
+        let (mut peak, mut raced) = (0, 0);
         let mut state = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = || {
             state ^= state << 13;
@@ -233,9 +224,30 @@ mod tests {
         };
         for _ in 0..200_000 {
             if live.is_empty() || next() % 3 != 0 {
-                let Take::Slot(slot) = take(&mut slots, &mut stale) else { panic!("the range is nowhere near spent") };
-                assert!(!live.contains(&slot), "slot {slot} handed out while live");
-                assert!(!stale.contains(&slot), "slot {slot} handed out with no flush since it retired");
+                let check = |slot: u32, live: &Vec<u32>, stale: &BTreeSet<u32>| {
+                    assert!(!live.contains(&slot), "slot {slot} handed out while live");
+                    assert!(!stale.contains(&slot), "slot {slot} handed out with no flush since it retired");
+                };
+                let slot = match slots.take() {
+                    Take::Slot(slot) => slot,
+                    Take::Spent => panic!("the range is nowhere near spent"),
+                    Take::Flush => {
+                        // The flush is under way: it covers what retired before it.
+                        let covered = stale.clone();
+                        let Take::Slot(racing) = slots.take() else { panic!("a take beside a flush takes a fresh slot") };
+                        check(racing, &live, &stale);
+                        live.push(racing);
+                        raced += 1;
+                        let dropped = live.swap_remove(0);
+                        slots.retire(dropped);
+                        stale.insert(dropped);
+                        slots.flushed();
+                        stale.retain(|slot| !covered.contains(slot));
+                        let Take::Slot(slot) = slots.take() else { panic!("a flushed slot is clean") };
+                        slot
+                    }
+                };
+                check(slot, &live, &stale);
                 live.push(slot);
                 peak = peak.max(live.len() as u32);
             } else {
@@ -243,7 +255,7 @@ mod tests {
                 slots.retire(slot);
                 stale.insert(slot);
             }
-            assert!(slots.fresh <= peak + FLUSH_BATCH, "{} slots used for a peak of {peak}", slots.fresh);
+            assert!(slots.fresh <= peak + FLUSH_BATCH + raced, "{} slots used for a peak of {peak}", slots.fresh);
         }
     }
 }
