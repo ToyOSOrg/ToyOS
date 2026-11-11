@@ -150,9 +150,9 @@ const TSC_DEMOTED: &str = "clock: DEMOTED: ";
 const DEMOTED_READS: &str = "clock: a process's reading of now asked the kernel since the TSC was demoted";
 
 /// A TSC `tsc-step` reads 10 ms ahead, and 10 ms further once the clock has
-/// slewed the first step away: the clock reports the first
-/// ([`kernel::clock::TSC_STEP_READ`]) and slews it, the second demotes the
-/// TSC, and processes' readings of now reach the kernel after it.
+/// slewed the first step away: the clock reports the first and slews it, the
+/// second demotes the TSC, and processes' readings of now reach the kernel
+/// after it.
 pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
@@ -161,13 +161,12 @@ pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), St
         BootOptions { profile: qemu::Profile::Metal, kernel_params: &["tsc-step"], ready_marker: TSC_STEP_SLEWED, ..Default::default() },
     );
     let mut serial = qemu.boot_log().to_string();
-    // A 10 ms step at 500 ppm is 20 s of slewing; the rest is the RTC's edges either side of each step.
+    // A 10 ms step at 500 ppm is 20 s of slewing.
     serial.push_str(&qemu.drain_until(std::time::Duration::from_secs(120), |l| l.contains(DEMOTED_READS) || l.contains("PANIC")));
     let lines: Vec<&str> = serial.lines().collect();
     let at = |marker: &str| lines.iter().position(|l| l.contains(marker)).ok_or_else(|| format!("no {marker:?} line\n{serial}"));
     let order = [
         at(TSC_STEP_STAGED)?,
-        at(kernel::clock::TSC_STEP_READ)?,
         at(TSC_STEP_SLEWED)?,
         at(TSC_SLEWED_AWAY)?,
         at(TSC_STEP_AGAIN)?,
@@ -177,11 +176,11 @@ pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), St
     if !order.is_sorted() || serial.contains("PANIC") {
         return Err(format!("the steps, the slew and the demotion are out of order: {order:?}\n{serial}"));
     }
-    let stepped: Option<i64> = lines[order[2]].split(TSC_STEP_SLEWED).nth(1).and_then(|r| r.split(" ns").next()).and_then(|n| n.parse().ok());
+    let stepped: Option<i64> = lines[order[1]].split(TSC_STEP_SLEWED).nth(1).and_then(|r| r.split(" ns").next()).and_then(|n| n.parse().ok());
     if !stepped.is_some_and(|ns| (9_000_000..=11_000_000).contains(&ns)) {
-        return Err(format!("the slewed step is not the staged 10 ms: {}\n{serial}", lines[order[2]].trim()));
+        return Err(format!("the slewed step is not the staged 10 ms: {}\n{serial}", lines[order[1]].trim()));
     }
-    for i in [1, 2, 5, 6] {
+    for i in [1, 4, 5] {
         eprintln!("  [tsc_step] {}", lines[order[i]].trim());
     }
     Ok(())
@@ -217,5 +216,37 @@ pub fn a_stalled_hpet_is_left_out(test_config: &Path) -> Result<(), String> {
         return Err(format!("the clock did not report again after it left the span out\n{after}"));
     }
     eprintln!("  [hpet_stall] {}", staged_then_moved.trim());
+    Ok(())
+}
+
+/// The records `log` holds of the span `hpet-stall` staged, on a machine: the
+/// first disagreement the clock wrote after the staging is that span's, since
+/// the sample after the staging reads it. The span is left out, and the PM
+/// timer reads the TSC 10 ms nearer than the HPET does, which is the staged
+/// stall put on the HPET and not on the TSC; and the clock reported again
+/// after it. A step the machine's own TSC took is no part of it, in another
+/// span or in this one, where every counter then disagrees and the PM timer
+/// still stands the 10 ms from the HPET, to within a millisecond: the two
+/// counters' allowances over a second, about half a millisecond each.
+pub fn stalled_hpet_left_out(log: &str) -> Result<(), String> {
+    const ALL_DISAGREE: &str = "all disagree, so this span is left out: ";
+    const DISAGREED: [&str; 4] = [HPET_MOVED, ALL_DISAGREE, kernel::clock::TSC_STEP, TSC_DEMOTED];
+    let mut after = log.lines().skip_while(|line| !line.contains(HPET_STALL_STAGED)).skip(1);
+    let read = after
+        .by_ref()
+        .find(|line| DISAGREED.iter().any(|said| line.contains(said)))
+        .ok_or_else(|| format!("no record of the span {HPET_STALL_STAGED:?} staged: the boot was not armed, or ended before the next sample"))?;
+    let apart = |spans: &str| -> Option<i64> { spans.split_once(" and reads ")?.1.split_once(" ns apart")?.0.parse().ok() };
+    let told = [HPET_MOVED, ALL_DISAGREE].iter().find_map(|said| read.split_once(said)).and_then(|(_, spans)| {
+        let (hpet, pm) = spans.split_once("; the PM timer counted ")?;
+        Some(apart(hpet)? - apart(pm)?)
+    });
+    if !told.is_some_and(|ns| (9_000_000..=11_000_000).contains(&ns)) {
+        return Err(format!("the PM timer did not put the staged 10 ms on the HPET and leave the span out: {}", read.trim()));
+    }
+    if !after.any(|line| line.contains(CLOCK_REPORT)) {
+        return Err("the clock did not report again after it left the staged span out".to_string());
+    }
+    eprintln!("  [hpet_stall] {}", read.trim());
     Ok(())
 }

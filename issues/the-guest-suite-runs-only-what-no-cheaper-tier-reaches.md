@@ -95,11 +95,8 @@ and a compile-fail case.
 - metal `tls_rebase_window`: a thread's TLS block is never reachable before its rebase.
 - metal `kernel_heartbeat`: the kernel's heartbeat record arrives on its period; brings back
   `kernel/src/heartbeat.rs`.
-- metal `wall_clock_utc`: the wall clock reads the RTC as UTC.
 - metal `spawn_cwd`: a spawn's working directory.
 - host `log_conservation_smp2`: every record is read or counted lost.
-- host `wall_clock_rtc_dead`, `wall_clock_rtc_unstable`, `wall_clock_no_century`,
-  `wall_clock_century_register`: each RTC shape decodes or is refused.
 - unrepresentable `lock_across_switch_halts`: a lock guard cannot be held across a switch.
 - unrepresentable `hash_seed_precedes_every_map`: no kernel map is built before its seed.
 

@@ -17,8 +17,8 @@ its own: a read of COM1's data register takes the received byte, and a read of
 its line status clears the error bits. `outb` and `outw` are `unsafe`, under a
 contract that the caller owns what the write commands; the reads carry none.
 
-**Evidence:** the code. `inb`'s callers are `arch::console_uart`, `arch::rtc`
-and `arch::acpi_mode`; `inw`'s are `arch::acpi_mode`, `arch::power` and
+**Evidence:** the code. `inb`'s callers are `arch::console_uart` and
+`arch::acpi_mode`; `inw`'s are `arch::acpi_mode`, `arch::power` and
 `arch::watchdog`.
 
 **Exit:** no safe call reads a port it was not handed.

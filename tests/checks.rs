@@ -368,7 +368,7 @@ mod checks {
         const PROGRAM: &str = "[2026-11-03 22:34:24 13.800 test-runner pid=7] counters_metal settle: the log holds this first line";
         const BEFORE: &str = "[2026-11-03 22:34:23 12.094 cpu2 kernel] isa: a line before the second";
         const REFINED: &str = "[2026-11-04 06:25:59 13.700 cpu5 kernel] clock: over 1 s the TSC counted 2419185510351 mHz against the HPET, within 11437 ppb; the clock keeps CPUID 15H's 2419200000000 mHz";
-        const STEP: &str = "[2026-11-04 06:26:03 13.750 cpu12 kernel] clock: the TSC reads 1718866 ns from the chipset's counters over the last span; the RTC's edges after it will say which moved";
+        const STEP: &str = "[2026-11-04 06:26:03 13.750 cpu12 kernel] clock: TSC STEP: the TSC stepped 1718866 ns forward against the HPET and the PM timer; the clock slews it away at most 500 ppm, most of it in about 3437 ms";
         const SLEWED: &str = "[2026-11-04 06:26:03 13.760 cpu12 kernel] clock: the TSC's step is slewed away, 601 ns left";
         let log = |lines: &[&str]| lines.join("\n");
 
@@ -644,6 +644,71 @@ mod checks {
         )?;
         refused("a report that skips a CPU", &good.replace(&windows(0, (3_000_000, 1_100_000)), ""), "names cpu1 at place 0")?;
         Ok(())
+    }
+
+    /// A line dated by the loader's reading carried on the log's clock
+    /// passes, to the second it lands in; an anchor ten seconds off is red,
+    /// whichever way; and a bench whose clock stands two hours east carries
+    /// its reading as well as any, and is red as the bench's.
+    #[test]
+    fn a_date_off_the_loaders_reading_is_red_and_a_bench_off_utc_is_the_benchs() {
+        const RATE: &str = "[10.300 cpu0 kernel] clock: the TSC counts at 1000000000 Hz, as CPUID 15H states, held to the HPET from a reading 90 cycles wide\n";
+        // Read 10.000 s on the log's clock, so a line at 12.165 is dated two seconds on.
+        let loader = |read: &str| format!("[10.000 cpu0 loader] Wall clock: firmware's GetTime reads {read} UTC at counter 10000000000\n");
+        let log = |dated: &str| format!("[{dated} 12.165 cpu0 kernel] Boot: complete (1165ms)\n");
+        let carried = |read: &str, dated: &str| dates_carry_the_loaders_reading(&loader(read), RATE, &log(dated));
+        let read = carried("2026-09-29 18:22:37", "2026-09-29 18:22:39").expect("a line dated by the reading");
+        for dated in ["2026-09-29 18:22:37", "2026-09-29 18:22:40"] {
+            assert_eq!(carried("2026-09-29 18:22:37", dated), Ok(read), "{dated} is inside what the divisions drop");
+        }
+        for dated in ["2026-09-29 18:22:49", "2026-09-29 18:22:29", "2026-09-29 18:22:36", "2026-09-29 18:22:41"] {
+            let refused = carried("2026-09-29 18:22:37", dated).expect_err(dated);
+            assert!(refused.contains("from the loader's reading"), "{refused}");
+        }
+        assert!(dates_carry_the_loaders_reading(&loader("2026-09-29 18:22:37"), RATE, "[12.165 cpu0 kernel] undated\n").is_err());
+
+        let boot = metal::Readback::new("boot", String::new(), String::new(), &metal_checks::boot_file()).expect("a readback");
+        assert_eq!(bench_clock_keeps_utc(read, boot.ran_within()), Ok(()));
+        let east = carried("2026-09-29 20:22:37", "2026-09-29 20:22:39").expect("a bench off UTC carries its reading too");
+        for off in [east, read - 900] {
+            let refused = bench_clock_keeps_utc(off, boot.ran_within()).expect_err("a bench off UTC");
+            assert!(refused.contains("this bench's hardware clock stands"), "{refused}");
+        }
+    }
+
+    /// The staged stall's row reads the staged span alone: left out with the
+    /// PM timer 10 ms from the HPET and a report after it, on a bench whose
+    /// TSC steps for real in another span or in that one; and red where the
+    /// span was read as the TSC's, where the PM timer stood with the HPET, or
+    /// never, or no report followed.
+    #[test]
+    fn a_staged_stall_is_judged_by_its_own_span() {
+        const FIRST: &str = "[11.370 cpu0 kernel] clock: over 1 s the TSC counted 2419185510351 mHz against the HPET, within 11437 ppb; the clock keeps CPUID 15H's 2419200000000 mHz; 0 spans left out; 0 TSC step(s) slewed\n";
+        const STAGED: &str = "[11.370 cpu0 kernel] hpet-stall: the HPET reads 192000 ticks behind from here\n";
+        const MOVED: &str = "[12.375 cpu3 kernel] clock: the HPET moved and the TSC did not, so this span is left out: the TSC counted 2431296000 ticks, the HPET 995001000 ns and reads 9999052 ns apart, 523256 allowed (a to b); the PM timer counted 1005000100 ns and reads 1487 ns apart, 516738 allowed (c to d)\n";
+        const REPORT: &str = "[13.380 cpu1 kernel] clock: over 2 s the TSC counted 2419185510351 mHz against the HPET, within 5718 ppb; the clock keeps CPUID 15H's 2419200000000 mHz; 1 spans left out; 0 TSC step(s) slewed\n";
+        const REAL_STEP: &str = "[ 9.120 cpu5 kernel] clock: TSC STEP: the TSC stepped 1718866 ns forward against the HPET and the PM timer; the clock slews it away at most 500 ppm, most of it in about 3437 ms: the TSC counted 1799000000 ticks, the HPET 998281134 ns and reads 1718866 ns apart, 520000 allowed (a to b); the PM timer counted 998281000 ns and reads 1718700 ns apart, 518000 allowed (c to d)\n";
+        const AS_THE_TSCS: &str = "[12.375 cpu3 kernel] clock: TSC STEP: the TSC stepped 9999052 ns forward against the HPET; the clock slews it away at most 500 ppm, most of it in about 19998 ms: the TSC counted 2431296000 ticks, the HPET 995001000 ns and reads 9999052 ns apart, 523256 allowed (a to b); no PM timer\n";
+        const ALL: &str = "[12.375 cpu3 kernel] clock: the TSC, the HPET and the ACPI PM timer all disagree, so this span is left out: the TSC counted 2431296000 ticks, the HPET 995001000 ns and reads 11717918 ns apart, 523256 allowed (a to b); the PM timer counted 1003281134 ns and reads 1718866 ns apart, 516738 allowed (c to d)\n";
+        let judged = |lines: &[&str]| faults::stalled_hpet_left_out(&lines.concat());
+
+        assert_eq!(judged(&[FIRST, STAGED, MOVED, REPORT]), Ok(()));
+        // The AMD bench: its own step before the staging, or after the staged span was read.
+        assert_eq!(judged(&[REAL_STEP, FIRST, STAGED, MOVED, REPORT]), Ok(()));
+        assert_eq!(judged(&[FIRST, STAGED, MOVED, REAL_STEP, REPORT]), Ok(()));
+        // Its own step inside the staged span: every counter disagrees, and the PM timer still tells the stall.
+        assert_eq!(judged(&[FIRST, STAGED, ALL, REPORT]), Ok(()));
+        let untold = ALL.replace("reads 1718866 ns apart", "reads 9100000 ns apart");
+        for (why, lines) in [
+            ("read as the TSC's", &[FIRST, STAGED, AS_THE_TSCS, REPORT][..]),
+            ("a PM timer that stands with neither", &[FIRST, STAGED, untold.as_str(), REPORT]),
+            ("the bench's step read where the stall should be", &[FIRST, STAGED, REAL_STEP, MOVED, REPORT]),
+            ("no report after", &[FIRST, STAGED, MOVED]),
+            ("never read", &[FIRST, STAGED]),
+            ("never staged", &[FIRST, MOVED, REPORT]),
+        ] {
+            assert!(judged(lines).is_err(), "{why} judged green");
+        }
     }
 
     /// A slewed step passes the clock's rows and a demotion fails them.

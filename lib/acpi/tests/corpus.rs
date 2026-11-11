@@ -12,7 +12,7 @@ use common::{declare_len, entry, madt, rsdp, sdt, xsdt, Machine};
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
     definition_blocks, dsdt_address, ecam_allocations, find_by_id, find_table, fixed_hardware, hpet_base, isa_line,
-    madt_entries, pm1a_control, psci, reset_register, rtc_century, sci_line, Century,
+    madt_entries, pm1a_control, psci, reset_register, sci_line,
     Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci, SmiCmd,
     Reset, SourceOverride, Table, TableError, Trigger,
     FADT_FOR_FIXED_HARDWARE, MADT_ENTRIES, MAX_TABLE_LEN,
@@ -236,13 +236,12 @@ fn an_rsdp_address_the_reader_cannot_reach_is_refused() {
     assert_eq!(hpet_base(Machine { regions }, RSDP_AT).err(), Some(TableError::BadRsdp));
 }
 
-/// An ACPI 1.0-length FADT: 116 bytes, no `X_DSDT`, and the century byte still
-/// inside it. The 32-bit `DSDT` is what such a table names.
+/// An ACPI 1.0-length FADT: 116 bytes, no `X_DSDT`. The 32-bit `DSDT` is
+/// what such a table names.
 #[test]
 fn a_fadt_of_the_acpi_1_0_length_is_read_without_its_x_fields() {
     let mut body = vec![0u8; 80];
     body[40 - 36..44 - 36].copy_from_slice(&0x7ffb_9000u32.to_le_bytes());
-    body[108 - 36] = 0x32;
     let t = sdt(b"FACP", 1, &body);
     assert_eq!(t.len(), 116);
     let head = rsdp(XSDT_AT, 2, 36);
@@ -252,20 +251,6 @@ fn a_fadt_of_the_acpi_1_0_length_is_read_without_its_x_fields() {
 
     let fadt = find_table(m, RSDP_AT, b"FACP", 109).expect("FADT");
     assert_eq!(dsdt_address(&fadt), 0x7ffb_9000);
-    assert_eq!(rtc_century(m, RSDP_AT), Ok(Century::At(0x32)));
-}
-
-/// A FADT that ends with the century byte reads it.
-#[test]
-fn a_fadt_that_ends_at_the_century_byte_reads_it() {
-    let t = sdt(b"FACP", 1, &[0u8; 73]);
-    assert_eq!(t.len(), 109);
-    let head = rsdp(XSDT_AT, 2, 36);
-    let root = xsdt(&[TABLE_AT]);
-    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
-    let m = Machine { regions };
-    // The century byte at 108 is the last one it holds.
-    assert_eq!(rtc_century(m, RSDP_AT), Ok(Century::Absent));
 }
 
 #[test]
@@ -308,26 +293,6 @@ fn a_revision_1_fadt_long_enough_to_hold_x_dsdt_is_still_read_at_its_32_bit_fiel
     assert_eq!(dsdt_address(&fadt), 0xdead_beef_0000);
 }
 
-#[test]
-fn a_century_register_outside_cmos_ram_is_told_apart_from_none() {
-    for (byte, want) in [
-        (0u8, Century::Absent),
-        (0x0d, Century::OutOfRange(0x0d)),
-        (0x80, Century::OutOfRange(0x80)),
-        (0xff, Century::OutOfRange(0xff)),
-        (0x0e, Century::At(0x0e)),
-        (0x7f, Century::At(0x7f)),
-    ] {
-        let mut body = vec![0u8; 80];
-        body[108 - 36] = byte;
-        let t = sdt(b"FACP", 1, &body);
-        let head = rsdp(XSDT_AT, 2, 36);
-        let root = xsdt(&[TABLE_AT]);
-        let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
-        assert_eq!(rtc_century(Machine { regions }, RSDP_AT), Ok(want), "century byte {byte:#04x}");
-    }
-}
-
 const FIXTURES: &[(&str, &[u8], u64)] = &[
     ("rsdp", include_bytes!("../fixtures/qemu-11.1.1/rsdp.bin"), 0x7fb7_e014),
     ("xsdt", include_bytes!("../fixtures/qemu-11.1.1/xsdt.bin"), 0x7fb7_d0e8),
@@ -341,7 +306,7 @@ const FIXTURES: &[(&str, &[u8], u64)] = &[
 
 /// **No panic and no unbounded walk, over every byte of every table this crate
 /// decodes.** Each byte of each fixture takes each of its 255 other values in
-/// turn, and the MCFG walk, `hpet_base`, `rtc_century` and the
+/// turn, and the MCFG walk, `hpet_base` and the
 /// MADT walk to exhaustion all run over it. A panic anywhere — including the
 /// reader's own, which fires on a read no bound accepted — reds this.
 ///
@@ -387,7 +352,6 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
                         assert!(allocations.count() <= MAX_TABLE_LEN / 16 + 1, "{which}[{offset}]={value:#04x}: the MCFG walk is not ending");
                     }
                     let _ = hpet_base(m, rsdp_at);
-                    let _ = rtc_century(m, rsdp_at);
                     if let Ok(blocks) = definition_blocks(m, rsdp_at) {
                         // The DSDT, and at most an item an 8-byte entry of the largest XSDT.
                         assert!(blocks.count() <= 1 + MAX_TABLE_LEN / 8, "{which}[{offset}]={value:#04x}: the block walk is not ending");

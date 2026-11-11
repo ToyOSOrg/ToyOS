@@ -782,7 +782,7 @@ pub struct Stat {
     /// When the file was last written: nanoseconds since the Unix epoch, UTC,
     /// off the wall clock at the write, to the resolution its mount keeps —
     /// the nanosecond on `/tmp` and DATA, two seconds at the flush on FAT. 0 is
-    /// undated: written on a machine whose RTC never answered, or shipped in
+    /// undated: written on a machine whose firmware gave no time, or shipped in
     /// ROOT's reproducible image.
     pub mtime: u64,
     /// The volume the file is on; 0 for an object that is no file of any
@@ -1316,10 +1316,10 @@ pub fn random(buf: &mut [u8]) -> Result<(), SyscallError> {
 
 /// Seconds since the Unix epoch (1970-01-01 00:00:00 UTC).
 ///
-/// `None` is a machine that never said what time it is — an RTC that is absent,
-/// wedged, or answering with something that is not a date. It is `None` for the
-/// whole of such a boot rather than intermittently, because the kernel reads
-/// the clock once.
+/// `None` is a machine that never said what time it is: firmware's `GetTime`
+/// failed, or answered something that is not a date. It is `None` for the
+/// whole of such a boot rather than intermittently, because the loader asks
+/// once.
 /// Cheap: the kernel serves it from an anchor it took at boot plus the
 /// monotonic clock, so this is a syscall and not a device access.
 pub fn clock_epoch() -> Option<u64> {

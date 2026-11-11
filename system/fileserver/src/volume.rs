@@ -397,7 +397,7 @@ pub fn take_anchor() {
 
 /// What a file written now is stamped with (`toyos_abi::syscall::Stat::mtime`):
 /// nanoseconds since the Unix epoch, UTC, and 0 — undated — on a machine whose
-/// RTC never answered.
+/// firmware gave no time.
 pub fn now_nanos() -> u64 {
     let anchor = ANCHOR.get().expect("fileserver takes the anchor at its start");
     anchor.map_or(0, |secs| secs.saturating_mul(NANOS_PER_SEC).saturating_add(nanos_since_boot()))

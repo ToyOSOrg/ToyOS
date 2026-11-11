@@ -374,7 +374,8 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
     symbols::load_kernel(kernel_image.symbols, mm::PHYS_OFFSET + kernel_args.kernel_memory_addr);
 
-    arch::boot::clock(kernel_args);
+    arch::boot::clock(kernel_args.rsdp_addr);
+    clock::init_wall(kernel_args);
     trace::enable();
     arch::boot::timer();
     // After both halves of what it needs: a counter period to convert its bound

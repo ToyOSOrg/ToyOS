@@ -222,6 +222,8 @@ pub struct Readback {
     pub boot_ms: Option<u64>,
     /// What the machine spent getting back to Ubuntu's ssh server.
     pub back_secs: u64,
+    /// The host's clock as it got there, in Unix seconds.
+    back_at: u64,
     /// The machine the loop read before the flash.
     pub machine: Result<Machine, String>,
     /// Where the loop's wall time went.
@@ -238,6 +240,8 @@ impl Readback {
         let kernel = bootlog::kernel_records(&log);
         let back_secs = toyos_metal::back_secs(boot)
             .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
+        let back_at = toyos_metal::back_unix_secs(boot)
+            .ok_or_else(|| format!("{label}'s boot file names no `back_unix_secs`: {boot:?}"))?;
         let phases = toyos_metal::phases(boot)
             .map_err(|why| format!("{label}'s boot file {why}: {boot:?}"))?;
         Ok(Readback {
@@ -247,6 +251,7 @@ impl Readback {
             kernel,
             log,
             back_secs,
+            back_at,
             machine: toyos_metal::machine(boot)
                 .map_err(|why| format!("{label}'s boot file {why}")),
             phases,
@@ -270,6 +275,14 @@ impl Readback {
     /// `loader.log`: the pass that handed this boot its kernel.
     pub fn loader(&self) -> Serial {
         Serial::named(&format!("{}'s loader.log", self.label), self.loader.as_str())
+    }
+
+    /// The Unix seconds, by the host's clock, this boot ran within: from the
+    /// reboot that started it to the machine answering again, a second's
+    /// rounding either side.
+    pub fn ran_within(&self) -> std::ops::RangeInclusive<u64> {
+        let since = self.back_secs + self.phases.down.ceil() as u64 + 1;
+        self.back_at.saturating_sub(since)..=self.back_at + 1
     }
 
     /// When the last record this boot left was written, on the log's clock.

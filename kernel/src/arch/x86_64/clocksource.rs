@@ -5,16 +5,16 @@
 //! The clock counts the TSC only where every CPU states it invariant, or under
 //! a hypervisor, whose TSC is its own to synthesise and whose CPUID need not
 //! say so. Every AP's TSC is bounded against the BSP's as it starts
-//! ([`measure_offset`]). While it runs, one CPU a second samples the HPET, the
-//! ACPI PM timer and the RTC's latest edge, and every CPU a second checks its
-//! `IA32_TSC_ADJUST` and that its TSC is not behind another's ([`check`]).
+//! ([`measure_offset`]). While it runs, one CPU a second samples the HPET and
+//! the ACPI PM timer, and every CPU a second checks its `IA32_TSC_ADJUST` and
+//! that its TSC is not behind another's ([`check`]).
 //!
-//! **Where the TSC and the HPET disagree, the other two say which moved.** The
-//! PM timer agreeing with the TSC is the HPET moving, and the span is left out.
-//! The PM timer agreeing with the HPET leaves the chipset's 14.318 MHz clock
-//! or the TSC; the RTC's edges, off its own 32.768 kHz crystal, choose: with
-//! the TSC, the span is left out; with the chipset's counters, or saying
-//! neither, the TSC stepped. The boot's first forward step is slewed away;
+//! **Where the TSC and the HPET disagree, the PM timer says which moved.** It
+//! agreeing with the TSC is the HPET moving, and the span is left out. It
+//! agreeing with the HPET, or a machine with none, is taken as the TSC's
+//! step, which the chipset's counters standing still together would read as
+//! too (`issues/chipset-counters-that-stall-together-read-as-a-tsc-step.md`).
+//! The boot's first forward step is slewed away;
 //! a second, one back, a check that finds a CPU's TSC written or behind, or
 //! an AP's start that proves its offset demotes the TSC ([`demote`]), and
 //! every process's reading of now asks the kernel, which counts by the HPET.
@@ -22,7 +22,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use kernel::clock::reference::{self, Agreement, Arbitration, Calibration, Edges, Failure, Kept, Offset, Reference, Response, Sample, Slew, Third, Watch};
+use kernel::clock::reference::{self, Agreement, Arbitration, Calibration, Failure, Kept, Offset, Reference, Response, Sample, Slew, Watch};
 use toyos_abi::clock::Line;
 
 use super::cpu;
@@ -126,8 +126,8 @@ impl Hpet {
 
 /// The ACPI PM timer, the second reference: which of the TSC and the HPET
 /// moved, where the two disagree. **It and the HPET are both the chipset's
-/// (the FCH's on AMD, the PCH's on Intel)**, and may share its clock, so the
-/// RTC's edges judge a stall common to both.
+/// (the FCH's on AMD, the PCH's on Intel)**, and may share its clock: a stall
+/// common to both reads as the TSC's step.
 struct PmTimer {
     port: Declared,
     bits: u32,
@@ -184,26 +184,11 @@ struct Held {
     hpet: Hpet,
     watch: Watch,
     pm: Option<PmTimer>,
-    /// The RTC's edges, the third reference, on its own crystal.
-    edges: Edges,
-    /// A step the HPET and the PM timer read the TSC take, waiting for the
-    /// RTC's edges after it.
-    pending: Option<Pending>,
     /// The steps this boot slewed away, and the slew under way.
     slewed: u32,
     slew: Option<Slewing>,
-    /// Spans left out: one reference moved, or the RTC said both did.
+    /// Spans left out: a reference moved, or the TSC stepped.
     left_out: u64,
-}
-
-/// A step the chipset's counters agree the TSC took over `from..to`.
-#[derive(Clone, Copy)]
-struct Pending {
-    step_ns: i64,
-    from: Sample,
-    to: Sample,
-    /// When the sampler gives up waiting for the RTC's edges after it.
-    until_ns: u64,
 }
 
 /// A slew, and the line it runs on since the counter read `since`: at `ran`
@@ -215,11 +200,6 @@ struct Slewing {
     ran: u64,
     kept: u64,
 }
-
-/// How long a step waits for the RTC's edges after it before it is taken
-/// unconfirmed: [`reference::EDGES_EACH_SIDE`] edges a second apart, and two
-/// more for their interrupts.
-const RTC_WAIT_NS: u64 = (reference::EDGES_EACH_SIDE as u64 + 2) * 1_000_000_000;
 
 static HELD: Lock<Option<Held>> = Lock::new(None);
 
@@ -321,7 +301,7 @@ pub fn start(hpet_base: u64, pm_timer: Result<toyos_acpi::PmTimer, alloc::string
     let pm = pm_timer.and_then(PmTimer::new);
     match &pm {
         Ok(pm) => log!("clock: the ACPI PM timer at {:#x}, {} bits, tells the TSC from the HPET where they disagree", pm.port.port(0).number(), pm.bits),
-        Err(why) => log!("clock: no ACPI PM timer to tell the TSC from the HPET ({why}); the RTC alone tells them apart"),
+        Err(why) => log!("clock: no ACPI PM timer to tell the TSC from the HPET ({why}); where they disagree the TSC is taken to have stepped"),
     }
     LAST_HELD.publish([anchor.before, anchor.reference, crate::clock::stamp_at(anchor.before)]);
     *HPET_COPY.lock() = Some(hpet);
@@ -330,8 +310,6 @@ pub fn start(hpet_base: u64, pm_timer: Result<toyos_acpi::PmTimer, alloc::string
         watch: Watch::new(hpet.reference, anchor, kept),
         hpet,
         pm: pm.ok(),
-        edges: Edges::new(),
-        pending: None,
         slewed: 0,
         slew: None,
         left_out: 0,
@@ -539,7 +517,7 @@ pub fn check(now_ns: u64) {
         return;
     };
     if let Some(held) = held.as_mut() {
-        sample(held, now_ns);
+        sample(held);
     }
 }
 
@@ -681,20 +659,16 @@ pub fn stamp_now() -> u64 {
     answered
 }
 
-/// One sample of the HPET, of the PM timer beside it and of the RTC's
-/// latest edge: each span the TSC and the HPET agree over is held; where
-/// they do not, the PM timer and then the RTC say which moved.
-fn sample(held: &mut Held, now_ns: u64) {
+/// One sample of the HPET and of the PM timer beside it: each span the TSC
+/// and the HPET agree over is held; where they do not, the PM timer says
+/// which moved.
+fn sample(held: &mut Held) {
     let kept = held.watch.kept();
     let last = held.watch.last();
     let hpet = held.hpet.sample(held.hpet.near(last, kept.mult), 1);
     let pm = held.pm.as_ref().map(|pm| (pm.last, pm.next(kept.mult)));
-    let edge = super::rtc::last_edge();
     #[cfg(feature = "boot-actuators")]
-    let (hpet, pm, edge) = staged(hpet, pm, edge);
-    if let Some((seen, at)) = edge {
-        held.edges.push(seen, at);
-    }
+    let (hpet, pm) = staged(hpet, pm);
     let pm_agreement = held.pm.as_ref().zip(pm).map(|(timer, (from, to))| {
         let span = reference::Span::between(timer.reference, from, to);
         let tolerance = kept.bound_ppb + timer.reference.tolerance_over(timer.reference.span_ns(from, to));
@@ -721,18 +695,7 @@ fn sample(held: &mut Held, now_ns: u64) {
                 Some(Arbitration::AllDisagree) => {
                     log!("clock: the TSC, the HPET and the ACPI PM timer all disagree, so this span is left out: {spans}")
                 }
-                Some(Arbitration::CounterMoved) | None => {
-                    if let Some(earlier) = held.pending.take() {
-                        settle(held, earlier);
-                    }
-                    log!(
-                        "{}{} ns from the chipset's counters over the last span; the RTC's edges after it will \
-                         say which moved: {spans}",
-                        kernel::clock::TSC_STEP_READ,
-                        agreement.apart_ns,
-                    );
-                    held.pending = Some(Pending { step_ns: agreement.apart_ns, from, to, until_ns: now_ns + RTC_WAIT_NS });
-                }
+                Some(Arbitration::CounterMoved) | None => stepped(held, agreement.apart_ns, &spans),
             }
         }
         Err(Failure::Drift { since, to, agreement }) => panic!(
@@ -744,53 +707,32 @@ fn sample(held: &mut Held, now_ns: u64) {
             agreement.allowed_ns,
         ),
     }
-    if let Some(pending) = held.pending.filter(|p| held.edges.complete_after(p.to.after) || now_ns >= p.until_ns) {
-        held.pending = None;
-        settle(held, pending);
-    }
     KEPT_MULT.store(held.watch.kept().mult, Ordering::Relaxed);
     slew(held);
 }
 
-/// What the RTC says of a pending step, and what the clock does about it.
-fn settle(held: &mut Held, pending: Pending) {
+/// What the clock does about a step of `step` ns the TSC took against the
+/// chipset's counters, whose readings of it are `spans`.
+fn stepped(held: &mut Held, step: i64, spans: &str) {
     let kept = held.watch.kept();
-    let apart = held.edges.apart_across(pending.from.before, pending.to.after, kept.mult);
-    let rtc = match apart {
-        Some(apart) => alloc::format!("the RTC's edges read {apart} ns"),
-        None => alloc::string::String::from("no RTC edge either side"),
-    };
-    let step = pending.step_ns;
-    let confirmed = match reference::third_says(step, apart) {
-        Third::References => {
-            return log!(
-                "clock: the chipset's counters moved {step} ns from the TSC and {rtc}, with the TSC, so the span \
-                 was left out"
-            );
-        }
-        Third::Counter => "confirmed by the RTC",
-        Third::Unsure => "unconfirmed by the RTC",
-    };
-    held.edges.forget_before(pending.to.after);
+    let against = if held.pm.is_some() { "the HPET and the PM timer" } else { "the HPET" };
     if IS_DEMOTED.load(Ordering::Acquire) {
-        return log!("clock: TSC STEP: the demoted TSC stepped {step} ns against the HPET and the PM timer, {confirmed} ({rtc}); not slewed");
+        return log!("{}the demoted TSC stepped {step} ns against {against}; not slewed: {spans}", kernel::clock::TSC_STEP);
     }
     match reference::respond(step, held.slewed) {
         Response::Slew => {
             held.slewed += 1;
             held.slew = Some(Slewing { slew: Slew::new(step), since: cpu::counter(), ran: crate::clock::mult(), kept: kept.mult });
             log!(
-                "clock: TSC STEP: the TSC stepped {step} ns forward against the HPET and the PM timer, {confirmed} \
-                 ({rtc}); the clock slews it away at most {} ppm, most of it in about {} ms",
+                "{}the TSC stepped {step} ns forward against {against}; the clock slews it away at most {} ppm, most \
+                 of it in about {} ms: {spans}",
+                kernel::clock::TSC_STEP,
                 reference::SLEW_MOST_PPB / 1_000,
                 u128::from(step.unsigned_abs()) * u128::from(reference::PPB) / reference::SLEW_MOST_PPB as u128 / 1_000_000,
             );
         }
         Response::Demote => {
-            demote(format_args!(
-                "the TSC stepped {step} ns against the HPET and the PM timer, {confirmed} ({rtc}), after {} step(s) slewed",
-                held.slewed,
-            ));
+            demote(format_args!("the TSC stepped {step} ns against {against}, after {} step(s) slewed: {spans}", held.slewed));
         }
     }
 }
@@ -874,15 +816,13 @@ fn spans(
     )
 }
 
-/// The PM timer's span, and the RTC's latest edge, as one sample reads them.
+/// The PM timer's span, as one sample reads it.
 #[cfg(feature = "boot-actuators")]
 type PmSpan = Option<(Sample, Sample)>;
-#[cfg(feature = "boot-actuators")]
-type Edge = Option<(u64, u64)>;
 
 /// `tsc-step` and `hpet-stall`: from the first report on, every reading reads
-/// either the TSC 10 ms ahead of where it is, the HPET's, the PM timer's and
-/// the RTC's edges alike, or the HPET 10 ms behind, as a TSC that stepped and
+/// either the TSC 10 ms ahead of where it is, the HPET's and the PM timer's
+/// alike, or the HPET 10 ms behind, as a TSC that stepped and
 /// an HPET that stood still; and the TSC 10 ms further once its first step is
 /// slewed away. A hypervisor's TSC may ignore a write (QEMU's TCG does), so
 /// each is staged in the readings the sampler takes, from the counter it
@@ -904,12 +844,12 @@ mod stage {
 }
 
 #[cfg(feature = "boot-actuators")]
-fn staged(hpet: Sample, pm: PmSpan, edge: Edge) -> (Sample, PmSpan, Edge) {
+fn staged(hpet: Sample, pm: PmSpan) -> (Sample, PmSpan) {
     use stage::*;
     let forward = |s: Sample| Sample { before: ahead(s.before), after: ahead(s.after), ..s };
     let stalled = if hpet.before >= STALLED_AT.load(Ordering::Relaxed) { STALL_TICKS.load(Ordering::Relaxed) } else { 0 };
     let hpet = Sample { reference: hpet.reference - stalled, ..forward(hpet) };
-    (hpet, pm.map(|(from, to)| (from, forward(to))), edge.map(|(seen, at)| (seen, ahead(at))))
+    (hpet, pm.map(|(from, to)| (from, forward(to))))
 }
 
 /// `tsc-step`'s and `hpet-stall`'s first, at the clock's first report.

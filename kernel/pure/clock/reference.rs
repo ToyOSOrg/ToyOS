@@ -7,9 +7,7 @@
 //! the counter readings either side of a reference reading bracket the moment
 //! it latched, and the reference's tick bounds where in that tick it was, so a
 //! bound that fails is a counter, a reference or a read that did not do what
-//! it says. The one estimate is a third reference read by its interrupts
-//! ([`Edges`]): their least latency, and its crystal's drift carried across a
-//! span, which only choose between a step and none ([`third_says`]).
+//! it says.
 
 use toyos_abi::clock::MULT_SHIFT;
 
@@ -423,114 +421,6 @@ pub const fn arbitrate(first: Agreement, second: Agreement) -> Arbitration {
     }
 }
 
-/// The RTC's edges the sampler has read, the latest [`EDGES_KEPT`]: each
-/// edge's count and the counter as its interrupt was taken, which is the edge
-/// plus the interrupt's latency, never earlier.
-#[derive(Clone, Copy, Debug)]
-pub struct Edges {
-    kept: [(u64, u64); EDGES_KEPT],
-    len: usize,
-}
-
-pub const EDGES_KEPT: usize = 16;
-/// The edges either side of a span its least-latency edge is taken from.
-pub const EDGES_EACH_SIDE: usize = 3;
-
-impl Edges {
-    pub const fn new() -> Self {
-        Self { kept: [(0, 0); EDGES_KEPT], len: 0 }
-    }
-
-    /// Keep the edge `seen` as the counter read `at`, where it is later than
-    /// the latest kept.
-    pub fn push(&mut self, seen: u64, at: u64) {
-        if self.len > 0 && self.kept[self.len - 1].0 >= seen {
-            return;
-        }
-        if self.len == EDGES_KEPT {
-            self.kept.copy_within(1.., 0);
-            self.len -= 1;
-        }
-        self.kept[self.len] = (seen, at);
-        self.len += 1;
-    }
-
-    /// Drop the edges taken before the counter read `at`, where the counter
-    /// stepped: an edge from before a step and one from after it measure the
-    /// step, not the RTC crystal's drift, so neither a drift base nor a side
-    /// of a later span may reach across it.
-    pub fn forget_before(&mut self, at: u64) {
-        let kept = self.kept[..self.len].iter().position(|&(_, taken)| taken >= at).unwrap_or(self.len);
-        self.kept.copy_within(kept..self.len, 0);
-        self.len -= kept;
-    }
-
-    /// Whether [`EDGES_EACH_SIDE`] edges have come after the counter read `to`.
-    pub fn complete_after(&self, to: u64) -> bool {
-        self.kept[..self.len].iter().filter(|&&(_, at)| at >= to).count() >= EDGES_EACH_SIDE
-    }
-
-    /// The counter's span, at `mult`, less the RTC's seconds, from before
-    /// `from` to after `to`: from the least-latency of the [`EDGES_EACH_SIDE`]
-    /// edges before `from` to that of those after `to`. An edge reads late by
-    /// its interrupt's latency and never early, so the least on each side is
-    /// the nearest its edge. Less the RTC crystal's own drift from the
-    /// counter, where edges at least [`DRIFT_BASE_NS`] before give it: the
-    /// least-latency of the oldest kept to that before `from`, carried on
-    /// across the span. `None` without an edge either side.
-    pub fn apart_across(&self, from: u64, to: u64, mult: u64) -> Option<i64> {
-        let kept = &self.kept[..self.len];
-        let &(seen_ref, at_ref) = kept.iter().rev().find(|&&(_, at)| at <= from)?;
-        let offset = |&(seen, at): &(u64, u64)| {
-            let ns = ((at as i128 - at_ref as i128) * mult as i128) >> MULT_SHIFT;
-            (ns - (seen as i128 - seen_ref as i128) * 1_000_000_000, at)
-        };
-        let least = |edges: &mut dyn Iterator<Item = &(u64, u64)>| edges.map(offset).min_by_key(|&(ns, _)| ns);
-        let before = least(&mut kept.iter().rev().filter(|&&(_, at)| at <= from).take(EDGES_EACH_SIDE))?;
-        let after = least(&mut kept.iter().filter(|&&(_, at)| at >= to).take(EDGES_EACH_SIDE))?;
-        let base_ticks = ((DRIFT_BASE_NS as u128) << MULT_SHIFT) / mult as u128;
-        let older = least(&mut kept.iter().filter(|&&(_, at)| (at as u128) + base_ticks <= before.1 as u128).take(EDGES_EACH_SIDE));
-        let drift = older.map_or(0, |older| (before.0 - older.0) * (after.1 as i128 - before.1 as i128) / (before.1 as i128 - older.1 as i128));
-        Some((after.0 - before.0 - drift) as i64)
-    }
-}
-
-/// How far back edges must reach for [`Edges::apart_across`] to measure the
-/// RTC crystal's drift from the counter: over this, a few microseconds of
-/// latency are a part per million.
-pub const DRIFT_BASE_NS: u64 = 4_000_000_000;
-
-impl Default for Edges {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Which of the counter's step and no step at all a third reference, on
-/// another oscillator, reads nearest: within a quarter of the step of
-/// either, or of neither.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Third {
-    /// It reads the step: the counter moved.
-    Counter,
-    /// It reads no step: the two references moved together.
-    References,
-    /// It reads neither, or has no edge either side of the span yet.
-    Unsure,
-}
-
-pub fn third_says(step_ns: i64, apart_ns: Option<i64>) -> Third {
-    let Some(apart) = apart_ns else { return Third::Unsure };
-    let zone = step_ns.unsigned_abs() / 4;
-    if apart.abs_diff(step_ns) <= zone {
-        Third::Counter
-    } else if apart.unsigned_abs() <= zone {
-        Third::References
-    } else {
-        Third::Unsure
-    }
-}
-
 /// What the clock does about a step of its counter: the boot's first, forward,
 /// is slewed away; a second, or one back, leaves the counter for the
 /// reference.
@@ -874,49 +764,6 @@ mod tests {
         assert_eq!(extend(0x0400_0010, 0x00ff_fff0, 24), 0x03ff_fff0);
     }
 
-    /// A 1 GHz counter, so ticks are nanoseconds.
-    const NS: u64 = 1 << MULT_SHIFT;
-
-    /// Edges a second apart on the RTC, each read as late as its latency;
-    /// the counter steps by `step` at `step_at`.
-    fn edges(latency_ns: &[u64], step_at: u64, step: u64) -> Edges {
-        let mut edges = Edges::new();
-        for (n, latency) in latency_ns.iter().enumerate() {
-            let edge = 10_000_000_000 + n as u64 * 1_000_000_000;
-            edges.push(n as u64 + 1, edge + latency + if edge >= step_at { step } else { 0 });
-        }
-        edges
-    }
-
-    /// The least-latency edge either side reads the step, however late the
-    /// edge nearest it was taken; and reads none where there was none.
-    #[test]
-    fn the_rtc_reads_a_step_through_its_interrupts_latency() {
-        let latency = [40_000, 700_000, 3_000, 650_000, 520_000, 9_000, 700_000, 2_000];
-        let step = 1_700_000;
-        let stepped = edges(&latency, 14_500_000_000, step);
-        let (from, to) = (13_900_000_000, 14_900_000_000);
-        assert!(stepped.complete_after(to + step));
-        let apart = stepped.apart_across(from, to + step, NS).expect("edges either side");
-        assert!(apart.abs_diff(step as i64) <= 10_000, "read {apart} ns for a {step} ns step");
-        assert_eq!(third_says(step as i64, Some(apart)), Third::Counter);
-
-        let still = edges(&latency, u64::MAX, 0);
-        let apart = still.apart_across(from, to, NS).expect("edges either side");
-        assert!(apart.unsigned_abs() <= 10_000, "read {apart} ns where nothing stepped");
-        assert_eq!(third_says(step as i64, Some(apart)), Third::References);
-    }
-
-    #[test]
-    fn the_rtc_is_unsure_without_an_edge_either_side_or_between_the_two() {
-        let few = edges(&[1_000, 1_000], u64::MAX, 0);
-        assert_eq!(few.apart_across(9_000_000_000, 10_500_000_000, NS), None);
-        assert!(!few.complete_after(10_500_000_000));
-        assert_eq!(third_says(1_700_000, None), Third::Unsure);
-        assert_eq!(third_says(1_700_000, Some(850_000)), Third::Unsure);
-        assert_eq!(third_says(-1_700_000, Some(-1_600_000)), Third::Counter);
-    }
-
     #[test]
     fn only_a_first_forward_step_is_slewed() {
         assert_eq!(respond(1_700_000, 0), Response::Slew);
@@ -964,55 +811,5 @@ mod tests {
         later.ran(10 * period, kept, later.mult(kept, period));
         assert!(later.debt_ns() < 0);
         assert!(later.mult(kept, period) > kept, "an overpaid slew runs the clock faster");
-    }
-
-    /// An RTC crystal 60 ppm off the counter drifts 420 µs over the edges
-    /// either side of a span, about a quarter of a 1.7 ms step: corrected by
-    /// its own earlier edges, it reads the step and reads a stall as none.
-    #[test]
-    fn the_rtcs_crystal_drift_is_taken_out() {
-        let drifting = |step: u64| {
-            let mut edges = Edges::new();
-            for n in 0..EDGES_KEPT as u64 {
-                let edge = 10_000_000_000 + n * 1_000_060_000;
-                let latency = [3_000, 650_000, 20_000][n as usize % 3];
-                edges.push(n + 1, edge + latency + if n >= 11 { step } else { 0 });
-            }
-            edges
-        };
-        let (from, to) = (20_900_000_000, 21_900_000_000);
-        let apart = drifting(1_700_000).apart_across(from, to + 1_700_000, NS).expect("edges either side");
-        assert_eq!(third_says(1_700_000, Some(apart)), Third::Counter, "read {apart} ns");
-        let apart = drifting(0).apart_across(from, to, NS).expect("edges either side");
-        assert!(apart.unsigned_abs() <= 30_000, "a stall read {apart} ns through the drift");
-        assert_eq!(third_says(1_700_000, Some(apart)), Third::References);
-    }
-
-    /// A 1.7 ms step after a 4 ms one reads as itself once the edges from
-    /// before the first are forgotten; with them, the drift base reaches
-    /// across the first step and takes a quarter of it for the crystal's drift.
-    #[test]
-    fn a_drift_base_never_reaches_across_a_step() {
-        let (first, second) = (4_000_000u64, 1_700_000u64);
-        let stepped = || {
-            let mut edges = Edges::new();
-            for n in 0..EDGES_KEPT as u64 {
-                let edge = 10_000_000_000 + n * 1_000_000_000;
-                let latency = [3_000, 650_000, 20_000][n as usize % 3];
-                let steps = if n >= 4 { first } else { 0 } + if n >= 13 { second } else { 0 };
-                edges.push(n + 1, edge + latency + steps);
-            }
-            edges
-        };
-        let first_taken_at = 14_000_000_000 + first;
-        let (from, to) = (22_500_000_000 + first, 22_900_000_000 + first + second);
-
-        let mut forgotten = stepped();
-        forgotten.forget_before(first_taken_at);
-        let apart = forgotten.apart_across(from, to, NS).expect("edges either side");
-        assert_eq!(third_says(second as i64, Some(apart)), Third::Counter, "read {apart} ns");
-
-        let apart = stepped().apart_across(from, to, NS).expect("edges either side");
-        assert_ne!(third_says(second as i64, Some(apart)), Third::Counter, "read {apart} ns across the first step");
     }
 }

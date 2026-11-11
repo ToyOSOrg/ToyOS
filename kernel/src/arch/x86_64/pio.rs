@@ -68,7 +68,6 @@ pub const PIC_PRIMARY: Declared = Declared::fixed(0x20, 2);
 pub const PIC_SECONDARY: Declared = Declared::fixed(0xA0, 2);
 /// POST codes, which nothing decodes: one bus cycle of delay.
 pub const POST: Declared = Declared::fixed(0x80, 1);
-pub const CMOS: Declared = Declared::fixed(0x70, 2);
 
 /// The runs every machine has, and their holders. The PCI configuration
 /// mechanism is here though this kernel reaches configuration space through
@@ -80,9 +79,9 @@ const FIXED: &[(&str, Declared, Mediated)] = &[
     ("the 8259 pair", PIC_SECONDARY, Mediated::Kept),
     // A write nothing decodes costs the kernel nothing whoever makes it.
     ("the POST port", POST, Mediated::Open),
-    // Index and data: a holder's access between the kernel's two would move
-    // the index under it.
-    ("the CMOS RTC", CMOS, Mediated::Kept),
+    // Index and data, which nothing in ToyOS reads: a holder's write would
+    // set the clock firmware's `GetTime` answers the loader from.
+    ("the CMOS RTC", Declared::fixed(0x70, 2), Mediated::Kept),
     ("the PCI configuration mechanism", Declared::fixed(0xCF8, 1), Mediated::Kept),
     ("the PCI configuration mechanism", Declared::fixed(0xCFC, 4), Mediated::Kept),
 ];

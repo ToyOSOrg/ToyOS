@@ -360,7 +360,7 @@ state. Nothing here is ruled, and the ranking is a proposal.
 | Scheduling: the core's driver, context switch, idle states, jobs, preemption | 20 | 3,160 | yes |
 | Firmware tables, ACPI mode, reset and power-off, the machine's stop, what the loader named | 12 | 3,099 | yes for the tables, the `acpi` row and power; the rest below |
 | Processes, threads, spawn | 8 | 2,736 | yes, less the userland text a spawn carries (below) |
-| Clocks: TSC and generic timer, the wall clock, typed durations | 7 | 1,847 | the clock yes; the CMOS driver is a recorded defect (below) |
+| Clocks: TSC and generic timer, the wall clock, typed durations | 7 | 1,847 | yes; the x86-64 CMOS driver and its IRQ8, 285 of these lines, went after this count |
 | Counters, the diary, IRQ census, mask windows, boot deadline, hard lockup, chipset watchdog | 14 | 1,844 | counters and diary yes; the three bounds are unnamed and inferred to be the kernel's, since they bound the kernel |
 | Paged objects and their pager calls | 2 | 1,325 | yes |
 | Syscall entry and argument decode | 3 | 806 | yes |
@@ -409,9 +409,6 @@ Changes of the design, each inferred and none of them work until resolved:
 - **The quit's walk**:
   `issues/the-kernel-decides-who-is-asked-to-quit-and-who-is-killed.md`.
 
-Already a defect with its exit: the x86-64 CMOS driver and its IRQ8 (285
-lines), `issues/x86-64-reads-the-cmos-for-a-wall-clock-the-loader-already-hands-it.md`.
-
 ### The next removals, ranked (a proposal)
 
 By mechanisms eliminated:
@@ -439,9 +436,6 @@ out, and a larger number needs one of the design changes above.
 - `SYS_STACK_INFO` is called by `tests/guest/rust-tests/src/bin/std_threads.rs`
   alone, and `SYS_VM_DECOMMIT` by two guest tests alone (`mmap_stress`,
   `starveling`).
-- `KernelArgs::wall_clock_*` is read by no x86-64 code. (Its
-  `boot_partition_start_lba` and `boot_partition_blocks`, read by one log
-  line, went with #1210.)
 - `KernelStack::heap` (`kernel/src/loader/start.rs`) charges every thread
   two strings at 64 KiB and a page, "as a rename's paths". No rename is
   left: a spawn's path and arguments were the two strings. Since #1200

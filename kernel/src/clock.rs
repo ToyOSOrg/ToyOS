@@ -1,10 +1,9 @@
 //! The machine's clocks: monotonic since boot, read off the CPU's free-running
 //! counter along the line the architecture's boot starts in [`set_counter`]
 //! and may retune once it measures the counter's rate better ([`retune`]);
-//! wall-clock, the architecture's one reading of the RTC — on x86-64 a CMOS
-//! read, which can block for up to a second, and on AArch64 firmware's, which
-//! the loader hands over — anchored in [`init_wall`] and answered after as
-//! that reading plus [`nanos_since_boot`]; and the log's stamp ([`stamp`]), the
+//! wall-clock, firmware's reading the loader hands over, anchored in
+//! [`init_wall`] and answered after as that reading plus
+//! [`nanos_since_boot`]; and the log's stamp ([`stamp`]), the
 //! same clock counted from the counter's zero, which is where every line of
 //! the log — the loader's, the kernel's and every program's — counts from.
 //!
@@ -15,6 +14,7 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 
 use alloc::sync::Arc;
+use toyos_abi::boot::KernelArgs;
 use toyos_abi::clock::{Clock, ClockPage, Line};
 
 use crate::arch::cpu;
@@ -240,35 +240,37 @@ static BOOT_SECS: AtomicU64 = AtomicU64::new(0);
 /// Whether the above means anything; zero is a valid instant, not a sentinel.
 static WALL_KNOWN: AtomicBool = AtomicBool::new(false);
 
-/// Anchors the wall clock, once, after [`set_counter`], to the architecture's
-/// reading of the RTC, which keeps UTC: the instant, and the counter when it
-/// was true, which on a machine whose loader read it is before boot.
-pub fn init_wall(reading: Result<(Civil, u64), impl core::fmt::Display>) {
-    let (civil, at) = match reading {
-        Ok(reading) => reading,
-        Err(fault) => {
-            log!("clock: this machine will not say what time it is — {fault}");
+/// Anchors the wall clock, once, after [`set_counter`], to firmware's
+/// `GetTime`, which the loader asked before `ExitBootServices` since the
+/// kernel calls no UEFI service: the instant, UTC, and the counter when it was
+/// true, which is before boot.
+pub fn init_wall(args: &KernelArgs) {
+    let (secs, at) = match args.wall_clock_known {
+        0 => {
+            log!("clock: this machine will not say what time it is: the loader handed no reading of firmware's GetTime");
             return;
         }
+        1 => (args.wall_clock_secs, args.wall_clock_counter),
+        other => panic!("the loader wrote {other} as wall_clock_known, which is 0 or 1"),
     };
 
     let clock = clock().expect("clock: the wall clock anchored before the counter started");
-    BOOT_SECS.store(anchor(civil.to_unix_secs(), clock.stamp_of(at), clock.stamp_at_boot), Relaxed);
+    BOOT_SECS.store(anchor(secs, clock.stamp_of(at), clock.stamp_at_boot), Relaxed);
     WALL_KNOWN.store(true, Release);
-    log!("clock: the RTC reads {civil} UTC");
+    log!("clock: firmware's clock read {} UTC", Civil::from_unix_secs(secs));
 }
 
 /// Unix seconds, now — what `SYS_CLOCK_EPOCH` serves: the whole seconds of
-/// [`utc_nanos`]. `None` if the RTC never answered.
+/// [`utc_nanos`]. `None` if firmware never answered.
 pub fn utc_secs() -> Option<u64> {
     utc_nanos().map(|nanos| nanos / NANOS_PER_SEC)
 }
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
-/// Nanoseconds since the Unix epoch, UTC: the RTC's whole-second reading carried
-/// on by the counter, so its resolution is the counter's and its accuracy the
-/// RTC's second.
+/// Nanoseconds since the Unix epoch, UTC: firmware's whole-second reading
+/// carried on by the counter, so its resolution is the counter's and its
+/// accuracy firmware's second.
 pub fn utc_nanos() -> Option<u64> {
     WALL_KNOWN
         .load(Acquire)

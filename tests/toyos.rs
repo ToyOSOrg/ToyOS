@@ -80,6 +80,9 @@ const RUST_SKIP: &[&str] = &[
     // The log-write load `mask_windows` reads windows under, on the boot
     // whose kernel reports them.
     "log_write",
+    // It waits for records only a boot armed with `hpet-stall` writes: the
+    // `a_stalled_hpet_is_told_by_the_pm_timer` metal row runs it there.
+    "hpet_stall_read",
     // It opens a window, which needs a compositor the shared boot does not
     // run: `a_window_is_drawn_at_the_scale_and_relaid_at_the_next` runs it on
     // tests/images/scalecase.toml, and the `gop_edid_scale` metal row on
@@ -1159,7 +1162,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     // ---- the boot facts, riding the same tests/images/testcases.toml image ----
     //
-    // **Seven names and no extra minute of the machine.** Every needle below is a
+    // **Eight names and no extra minute of the machine.** Every needle below is a
     // record the *shipping* kernel writes on any boot it takes, so each rides
     // whatever image is already going on the bench; the two rows after them are
     // the two things this suite measures rather than reads, and those cost a
@@ -1201,6 +1204,14 @@ const METAL: &[(&str, metal::Metal)] = &[
                 tsc_rate_at_boot(b[0].kernel().text())
             },
         },
+    ),
+    (
+        // Every dated line is the loader's reading of firmware's `GetTime`
+        // carried on by the log's clock, and that reading is this host's
+        // time: which answer each bench's firmware gives is the machine's,
+        // and QEMU's is OVMF's.
+        "wall_clock_is_firmwares",
+        metal::Metal { arms: TESTCASES, judge: |b| wall_clock_is_firmwares(b[0]) },
     ),
     (
         "pci_inventory",
@@ -1434,6 +1445,22 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "lapic_spurious_vector",
         metal::Metal { arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
+    ),
+    (
+        // The HPET an actuator stalls, told from the TSC by each bench's own
+        // ACPI PM timer, which is all that tells them apart: its readings and
+        // their brackets are the machine's.
+        "a_stalled_hpet_is_told_by_the_pm_timer",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: ACTUATOR_KERNEL,
+                ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_hpet_stall_read"])
+            }],
+            judge: |b| {
+                b[0].job_passed("test_rs_hpet_stall_read")?;
+                faults::stalled_hpet_left_out(b[0].kernel().text())
+            },
+        },
     ),
     (
         // No drain on this side: the whole boot's records are on the log, so
@@ -2139,12 +2166,15 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
 /// what the machine *is*: each stages inputs the hardware cannot produce — a
 /// crafted capability list, a malformed descriptor, a vector nothing claims —
 /// runs a check over them and prints a count. So they arm the boot
-/// [`ACTUATOR_TESTS`] ride, which is the same kernel.
+/// [`ACTUATOR_TESTS`] ride, which is the same kernel. `hpet-stall` rides it
+/// too: it changes one reading the clock's sampler takes, which leaves one
+/// span out.
 const SELFTEST_PARAMS: &[&str] = &[
     "pci-cap-selftest",
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
     "sysret-ss-probe",
+    "hpet-stall",
 ];
 
 const SELFTESTS: &[metal::Arm] = &[metal::Arm {
@@ -7067,7 +7097,7 @@ const ACPI_FIRST_INTERRUPT: &str = "isa: the ACPI fixed hardware took its first 
 ///   once;
 /// - the clock's TSC refinement ([`kernel::clock::TSC_REFINED`]), written on a
 ///   scheduler pass and arming no timer;
-/// - its step report ([`kernel::clock::TSC_STEP_READ`]), which the AMD bench's
+/// - its step report ([`kernel::clock::TSC_STEP`]), which the AMD bench's
 ///   deep idle provokes once a boot
 ///   (`issues/the-amd-benchs-tsc-steps-1-7-ms-forward-once-a-boot.md`).
 fn idle_second_lines(log: &str, from_ms: u64, to_ms: u64) -> Result<Vec<&str>, Vec<&str>> {
@@ -7082,7 +7112,7 @@ fn idle_second_lines(log: &str, from_ms: u64, to_ms: u64) -> Result<Vec<&str>, V
                 .is_some_and(|p| p.source == toyos_logstream::Source::Kernel && p.text == ACPI_FIRST_INTERRUPT);
         let clock = toyos_logstream::parse(line).is_some_and(|p| {
             p.source == toyos_logstream::Source::Kernel
-                && (p.text.starts_with(kernel::clock::TSC_REFINED) || p.text.starts_with(kernel::clock::TSC_STEP_READ))
+                && (p.text.starts_with(kernel::clock::TSC_REFINED) || p.text.starts_with(kernel::clock::TSC_STEP))
         });
         named && once(line) || clock
     };
@@ -7911,6 +7941,86 @@ fn timer_calibration(log: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// How far a bench's hardware clock may stand from this host's: a third of
+/// the smallest step between two zones, 15 minutes, so a clock kept in any
+/// zone but UTC is outside it, and far past what the bench's other system
+/// leaves a clock it disciplines. A bound on the bench, not on ToyOS.
+const BENCH_CLOCK_APART_SECS: u64 = 300;
+
+/// `YYYY-MM-DD HH:MM:SS` where `text` starts, as Unix seconds.
+fn unix_secs_at(text: &str) -> Option<u64> {
+    let mut fields = text.get(..19)?.split(['-', ' ', ':']).map(|field| field.parse::<u64>().ok());
+    let mut next = || fields.next().flatten();
+    let civil = toyos_wallclock::Civil { year: next()?, month: next()?, day: next()?, hour: next()?, min: next()?, sec: next()? };
+    civil.is_valid().then(|| civil.to_unix_secs())
+}
+
+/// **Every dated line is the loader's reading carried on by the log's own
+/// clock.** The loader says the instant firmware's `GetTime` answered and the
+/// counter then; the counter over the rate the clock started at is that
+/// reading's time on the log's clock, which counts from the counter's zero.
+/// A line stamped `ms` is dated the reading plus the seconds between, less up
+/// to three and plus up to one: the kernel's anchor, `SYS_CLOCK_EPOCH`, and
+/// `logkeeper`'s two divisions each drop a part of a second, three one way and
+/// one the other. A tenth of a second more either side is for the rate the
+/// clock retunes to and a step it slews, which move a boot's stamps far less.
+/// No host's clock is read.
+fn dates_carry_the_loaders_reading(loader: &str, kernel: &str, log: &str) -> Result<u64, String> {
+    const READ: &str = "Wall clock: firmware's GetTime reads ";
+    const AT: &str = " UTC at counter ";
+    let said = loader.lines().find(|line| line.contains(READ)).ok_or_else(|| format!("the loader never said {READ:?}"))?;
+    let (read, counter) = said
+        .split_once(READ)
+        .and_then(|(_, rest)| Some((unix_secs_at(rest)?, rest.split_once(AT)?.1.trim().parse::<u64>().ok()?)))
+        .ok_or_else(|| format!("no instant and counter in {said:?}"))?;
+    let read_ms = u128::from(counter) * 1_000_000 / u128::from(boot_rate(kernel)?.millihertz);
+    let mut dated = 0;
+    for line in log.lines() {
+        let Some(date) = line.strip_prefix('[').and_then(unix_secs_at) else { continue };
+        let Some(ms) = toyos_logstream::parse(line).and_then(|said| said.ms) else { continue };
+        let carried = i128::from(read) * 1_000 + i128::from(ms) - read_ms as i128;
+        let ahead = i128::from(date) * 1_000 - carried;
+        if !(-3_100..=1_100).contains(&ahead) {
+            return Err(format!(
+                "a line is dated {ahead} ms from the loader's reading of {read} carried {} ms on by the log's clock: {}",
+                i128::from(ms) - read_ms as i128,
+                line.trim()
+            ));
+        }
+        dated += 1;
+    }
+    if dated == 0 {
+        return Err("no line of the log carries a date and a time".to_string());
+    }
+    eprintln!("  [wall] {dated} dated lines carry the loader's reading of {read}, taken {read_ms} ms on the log's clock");
+    Ok(read)
+}
+
+/// **The bench's part: its hardware clock keeps UTC.** Firmware's reading
+/// lies in the span this host's clock saw the boot run in
+/// ([`metal::Readback::ran_within`]), [`BENCH_CLOCK_APART_SECS`] either side.
+/// With the bench's clock set, it is the independent reading of the loader's
+/// decode of `EFI_TIME`.
+fn bench_clock_keeps_utc(read: u64, ran: std::ops::RangeInclusive<u64>) -> Result<(), String> {
+    let apart = if read < *ran.start() { ran.start() - read } else { read.saturating_sub(*ran.end()) };
+    if apart > BENCH_CLOCK_APART_SECS {
+        return Err(format!(
+            "this bench's hardware clock stands {apart} s from this host's: firmware read {read} in Unix seconds and the \
+             host saw the boot run in {ran:?}. The design requires the hardware clock to keep UTC; this is the bench's \
+             setting and not ToyOS's reading of it"
+        ));
+    }
+    eprintln!("  [wall] firmware read {read}, {apart} s outside the span the host saw the boot run in");
+    Ok(())
+}
+
+/// The wall clock on a bench: ToyOS's carrying of firmware's reading, then
+/// the bench's own clock.
+fn wall_clock_is_firmwares(boot: &metal::Readback) -> Result<(), String> {
+    let read = dates_carry_the_loaders_reading(boot.loader().text(), boot.kernel().text(), boot.log().text())?;
+    bench_clock_keeps_utc(read, boot.ran_within())
+}
+
 /// The rate the boot started the clock at: CPUID 15H's, or one the HPET
 /// measured with its bound, which on the bench is a rate the clock can keep at
 /// all. Its bound is held against minutes by [`clock_holds_over_minutes`].
@@ -7966,11 +8076,11 @@ fn clock_report(line: &str) -> Option<ClockReport> {
     })
 }
 
-/// Whether the boot's clock kept the TSC: every step it slewed, every span it
-/// left out and every step it waited on the RTC for is printed, and a
-/// demotion fails the row, since a demoted boot's processes read the HPET.
+/// Whether the boot's clock kept the TSC: every step it slewed and every span
+/// it left out is printed, and a demotion fails the row, since a demoted
+/// boot's processes read the HPET.
 fn clock_kept_its_counter(log: &str) -> Result<(), String> {
-    const SAID: [&str; 4] = ["clock: TSC STEP: ", "so this span is left out", "so the span was left out", "the RTC's edges after it will say which moved"];
+    const SAID: [&str; 2] = [kernel::clock::TSC_STEP, "so this span is left out"];
     for line in log.lines().filter(|line| SAID.iter().any(|said| line.contains(said))) {
         eprintln!("  [clock] {}", line.trim());
     }

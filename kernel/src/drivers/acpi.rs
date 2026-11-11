@@ -13,7 +13,7 @@ use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile};
 use crate::log;
 use crate::DirectMap;
-use toyos_acpi::{Century, MadtEntry, Mapped, Memory, CMOS_RAM, MADT_ENTRIES, SDT_HEADER_LEN, SDT_REVISION};
+use toyos_acpi::{MadtEntry, Mapped, Memory, MADT_ENTRIES, SDT_HEADER_LEN, SDT_REVISION};
 
 pub use toyos_acpi::{IoApicEntry, SourceOverride, TableError};
 
@@ -165,30 +165,6 @@ pub fn ecam_windows(rsdp_addr: u64) -> Vec<toyos_acpi::EcamWindow> {
         log!("ACPI: {} more MCFG allocations refused", refused - REFUSALS_SAID);
     }
     windows
-}
-
-/// Which CMOS register holds the RTC's century, as the FADT names it.
-// `Ok(None)` is "no century register", distinct from `Err`, which the caller must not treat as one.
-pub fn rtc_century_register(rsdp_addr: u64) -> Result<Option<u8>, TableError> {
-    let named = toyos_acpi::rtc_century(direct_phys(), rsdp_addr)?;
-    match named {
-        Century::Absent => {
-            log!("ACPI: the FADT names no RTC century register");
-            Ok(None)
-        }
-        Century::OutOfRange(index) => {
-            log!(
-                "ACPI: the FADT puts the RTC century register at CMOS {index:#04x}, outside {:#04x}..={:#04x} — ignoring it",
-                CMOS_RAM.start(),
-                CMOS_RAM.end()
-            );
-            Ok(None)
-        }
-        Century::At(index) => {
-            log!("ACPI: the FADT puts the RTC century register at CMOS {index:#04x}");
-            Ok(Some(index))
-        }
-    }
 }
 
 /// Given the RSDP address, parse XSDT -> HPET table -> return HPET MMIO base address.
