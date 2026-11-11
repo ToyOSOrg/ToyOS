@@ -2126,7 +2126,23 @@ crate::user_safe! {
 /// last handle. [`SyscallError::Gone`] for such a window whose last handle was
 /// closed under the call: nothing is mapped.
 ///
+/// **A paged holder** ([`paged_holder`]) maps its object's pages as its pager's
+/// index holds them, [`VmProt::Read`] only, which needs [`Rights::READ`];
+/// any other protection is `InvalidArgument`, and a pager's own process is
+/// refused `PermissionDenied`, as its holder reads are. The range may reach
+/// past the object's end, where the object may grow. The mapping counts as a
+/// holder of the object until it goes ([`NOTICE_NO_HOLDERS`]). A touch of a
+/// page the pager has not supplied waits for it, as [`paged_read`] does, and
+/// is reported when overdue, never ended by a timeout; a touch of a page the
+/// pager failed, of any page once the object is released or the pager ends,
+/// or of a page wholly past the object's end ends the process with
+/// [`Fault::Mapping`], and a copy a call makes from such a page answers
+/// [`SyscallError::Io`] (past the end, `BadAddress`). `Gone` for an object
+/// released or a pager ended before the call.
+///
 /// [`Rights::MAP`]: crate::handle::Rights::MAP
+/// [`Rights::READ`]: crate::handle::Rights::READ
+/// [`Fault::Mapping`]: crate::end::Fault::Mapping
 /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
 ///
 /// # Safety
@@ -2893,7 +2909,7 @@ mod tests {
 
 
 // ---------------------------------------------------------------------------
-// Paged objects: memory a pager supplies, read by its holders through the kernel.
+// Paged objects: memory a pager supplies, read and mapped by its holders through the kernel.
 // ---------------------------------------------------------------------------
 
 /// The most pages one write-back range covers.
@@ -2901,6 +2917,8 @@ pub const PAGED_RANGE_PAGES: u64 = 512;
 
 /// What a pager asks of one of its objects through [`SYS_PAGED_OP`], each
 /// with a [`PagedArgs`] naming the object by the id [`paged_create`] answered.
+/// A withdraw, a failure and a shrink return only once no mapping reaches a
+/// page they removed: every mapper's leaves of it are cleared.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PagedOp {
@@ -2990,7 +3008,8 @@ crate::user_safe! {
 
 /// A reader waits for pages of the object.
 pub const NOTICE_REQUESTED: u64 = 1;
-/// The object's last holder handle went: it may be released.
+/// The object's last holder went, a handle or a mapping ([`vm_map`]): it may be
+/// released.
 pub const NOTICE_NO_HOLDERS: u64 = 2;
 
 /// Make this process's one pager, whose objects' pages are at most
