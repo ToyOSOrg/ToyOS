@@ -136,7 +136,7 @@ a signal an event raises (`sdk/libc/src/sigreq.rs`).
    session's `logout` acts on every session. An owner's end other than its
    sign-out's is a failure, and a login authority whose sessions failed more
    than the restart budget's three times in ten seconds is refused its next
-   open; no other open is counted. Its namespace is
+   open; no other open is counted. What it holds is
    `issues/a-user-is-a-home-tree-and-a-login-row.md`'s login row; the SSH
    session's shell holds no host key and no SSH service authority.
    *Exit*: ending the desktop's session owner ends every program of that

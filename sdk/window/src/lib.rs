@@ -586,8 +586,8 @@ impl Window {
         Self::create_with_flags(COMPOSITOR, size, title, WINDOW_FLAG_TOPMOST)
     }
 
-    /// A window asked for on the compositor's port named `port` in this
-    /// program's namespace rather than on `compositor`: which port a window
+    /// A window asked for on the compositor's port this program was given as
+    /// the service `port` rather than on `compositor`: which port a window
     /// came in on is what the compositor places it by.
     pub fn create_on(port: &str, size: Size, title: &str) -> Result<Self, CreateError> {
         Self::create_with_flags(port, size, title, 0)
