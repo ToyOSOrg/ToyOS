@@ -2784,12 +2784,9 @@ fn discover_rust_tests() -> Vec<String> {
 }
 
 fn compile_c_tests(names: &[String]) -> Vec<(String, Vec<u8>)> {
-    // Made before the hook below goes in: a C sysroot that cannot be made is
-    // no case's failure, and says so in its own words.
+    // Made before any case: a C sysroot that cannot be made is no case's
+    // failure, and says so in its own words.
     compile::c_sysroot();
-    // Suppress panic messages during compilation — we handle failures via catch_unwind.
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
 
     // A clang and a link per case, so the cases are spread over threads; the
     // result is in `names`' order whatever order they finish in.
@@ -2801,20 +2798,13 @@ fn compile_c_tests(names: &[String]) -> Vec<(String, Vec<u8>)> {
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .map(|name| {
-                            let built = std::panic::catch_unwind(|| {
-                                compile::link_toyos(&compile::compile_c(name), name)
-                            });
-                            (name, built.map_err(|e| panic_message(&e)))
-                        })
+                        .map(|name| (name, compile::compile_c(name).and_then(|objects| compile::link_toyos(&objects, name))))
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
         workers.into_iter().flat_map(|w| w.join().expect("a compile thread")).collect()
     });
-
-    std::panic::set_hook(prev_hook);
 
     let mut bins = Vec::new();
     let mut broken: Vec<(&str, String)> = Vec::new();
@@ -2850,8 +2840,6 @@ fn check_not_run() {
     let mut seen: BTreeSet<&str> = BTreeSet::new();
 
     compile::c_sysroot();
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
 
     for entry in NOT_RUN {
         let case = entry.case;
@@ -2864,10 +2852,8 @@ fn check_not_run() {
             wrong.push(format!("{case}: no such file in the corpus — a rename left this behind"));
             continue;
         }
-        let compiled = std::panic::catch_unwind(|| compile::compile_c(case));
-        match (&entry.stage, compiled) {
-            (Stage::Refused(says), Err(e)) => {
-                let said = panic_message(&e);
+        match (&entry.stage, compile::compile_c(case)) {
+            (Stage::Refused(says), Err(said)) => {
                 if !said.contains(says) {
                     wrong.push(format!(
                         "{case}: refused, but not for the declared reason.\n    \
@@ -2879,15 +2865,12 @@ fn check_not_run() {
                 "{case}: compiles now — it was declared to stop with {says:?}. \
                  The fix arrived; delete the entry and let the case run."
             )),
-            (_, Err(e)) => wrong.push(format!(
-                "{case}: no longer compiles, and it was declared to get further: {}",
-                panic_message(&e)
+            (_, Err(said)) => wrong.push(format!(
+                "{case}: no longer compiles, and it was declared to get further: {said}"
             )),
             (stage, Ok(objects)) => {
-                let linked = std::panic::catch_unwind(|| compile::link_toyos(&objects, case));
-                match (stage, linked) {
-                    (Stage::NoLink(symbol), Err(e)) => {
-                        let said = panic_message(&e);
+                match (stage, compile::link_toyos(&objects, case)) {
+                    (Stage::NoLink(symbol), Err(said)) => {
                         if !said.contains(symbol) {
                             wrong.push(format!(
                                 "{case}: the link fails on something else.\n    \
@@ -2899,9 +2882,8 @@ fn check_not_run() {
                         "{case}: links now — it was declared to fail on {symbol:?}. \
                          The fix arrived; delete the entry and let the case run."
                     )),
-                    (Stage::Built, Err(e)) => wrong.push(format!(
-                        "{case}: no longer links, and it was declared to build: {}",
-                        panic_message(&e)
+                    (Stage::Built, Err(said)) => wrong.push(format!(
+                        "{case}: no longer links, and it was declared to build: {said}"
                     )),
                     (Stage::Built, Ok(_)) => {}
                     (Stage::Refused(_), _) => unreachable!("handled above"),
@@ -2913,25 +2895,12 @@ fn check_not_run() {
         }
     }
 
-    std::panic::set_hook(prev_hook);
-
     assert!(
         wrong.is_empty(),
         "NOT_RUN no longer describes the corpus. Every entry is attempted to its declared \
          stage on every run, so this is a case that moved:\n  {}",
         wrong.join("\n  "),
     );
-}
-
-/// What a caught panic said, first line, whole. A refusal quoted in `NOT_RUN`
-/// is compared against this, so nothing here may shorten it.
-fn panic_message(e: &Box<dyn std::any::Any + Send>) -> String {
-    let full = e
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
-        .unwrap_or_else(|| "<non-string panic>".to_string());
-    full.lines().next().unwrap_or_default().to_string()
 }
 
 /// A case's committed expectation as both comparators read it, the host's and
@@ -8765,8 +8734,7 @@ type Binaries = Vec<(String, Vec<u8>)>;
 
 /// The binaries the shared boots carry, C and Rust, built once a run: every
 /// Rust test binary, and the C corpus, compiled once its declared cases have
-/// been attempted to their stages. Once, because both shared rows carry them
-/// and a corpus compile swaps the process's panic hook.
+/// been attempted to their stages. Once, because both shared rows carry them.
 fn build_shared_bins() -> &'static (Binaries, Binaries) {
     static BUILT: std::sync::OnceLock<(Binaries, Binaries)> = std::sync::OnceLock::new();
     BUILT.get_or_init(|| {
