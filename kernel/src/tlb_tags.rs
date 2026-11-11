@@ -159,11 +159,16 @@ impl Tags {
         }
     }
 
-    /// A thread of `tag`, whose root `cpu`'s idle context kept, resumes there:
-    /// `true` where it must flush every user translation first, since a change
-    /// that passed it by ([`Self::idle`]) came after its last.
+    /// A thread of `tag` resumes on `cpu`, which holds its root: `true` where
+    /// it must flush every user translation first, since a change passed it by
+    /// while it was idle there ([`Self::idle`]). A CPU that ran a thread of
+    /// `tag` until now was reached by every change since.
     pub fn resume(&self, cpu: usize, tag: usize) -> bool {
         let Some(idle) = self.idle.get(cpu) else { return false };
+        // Only `cpu` writes its mark.
+        if !idle.0.load(Ordering::Relaxed) {
+            return false;
+        }
         idle.0.store(false, Ordering::Relaxed);
         pair_resume();
         // Acquire: as `enter`'s.
@@ -234,7 +239,9 @@ impl Tags {
             let mut bits = self.running[tag * words + w].load(Ordering::Relaxed);
             while bits != 0 {
                 let cpu = w * 64 + bits.trailing_zeros() as usize;
-                if tables || !self.idle[cpu].0.load(Ordering::Relaxed) {
+                // Acquire: what the CPU did in the space before it idled
+                // comes before the change's frames go.
+                if tables || !self.idle[cpu].0.load(Ordering::Acquire) {
                     reach(cpu);
                 }
                 bits &= bits - 1;

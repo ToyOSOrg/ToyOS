@@ -1204,6 +1204,10 @@ impl<X: SchedPayload> RunningTask<X> {
         })
     }
 
+    pub(crate) fn ctx_mut(&mut self) -> &mut X::Ctx {
+        &mut self.0 .0.ctx
+    }
+
     /// Time consumed since dispatch or since the last charge, folded into the
     /// accounting. The pass charges the run queue with the same number.
     pub(crate) fn charge(&mut self, now: Nanos) -> u64 {

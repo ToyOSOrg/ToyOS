@@ -834,7 +834,7 @@ enum Leaving {
 /// Returns rather than diverging: the exit pass never comes back, and the live `Arc`s here would leak with no scope left to drop them.
 fn leave_as(leaving: Leaving) {
     let (pid, tid) = (current_process(), current_tid());
-    crate::mm::paging::activate_kernel();
+    crate::sched::driver::leave_address_space();
     let process_data = process_data();
     scheduler::flush_current_stats(&mut process_data.lock().accounting);
     let out = {

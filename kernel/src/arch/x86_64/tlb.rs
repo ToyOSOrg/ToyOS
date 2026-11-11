@@ -72,9 +72,9 @@ pub fn idle() {
     }
 }
 
-/// A thread of the space tagged `tag`, whose root this CPU's idle context
-/// kept, resumes here: every user translation is flushed first where a change
-/// passed this CPU by.
+/// A thread of the space tagged `tag` resumes on this CPU, which holds its
+/// root: every user translation is flushed first where a change passed this
+/// CPU by while it idled there.
 pub fn resume(tag: u16) {
     if USER.sized() && USER.resume(percpu::cpu_id() as usize, usize::from(tag)) {
         flush(Reach::Narrow);
@@ -84,7 +84,6 @@ pub fn resume(tag: u16) {
 /// No thread will load the root of the space tagged `tag` again: every CPU
 /// still idle on it has loaded the kernel's before this returns.
 pub fn retire(tag: u16) {
-    leave_idle_space();
     user_change(Origin::Retire, tag, 0, u64::MAX, true);
     assert!(!held(tag), "tlb: a CPU still holds the root of a space no thread runs in");
 }

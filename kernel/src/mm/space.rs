@@ -192,10 +192,10 @@ impl Space {
         &self.usage
     }
 
-    /// Called by the last thread out of its process, which runs on the
-    /// kernel's root from `process::leave_as` on, so no thread will load this
-    /// space's root again: every CPU still holding it has left it before this
-    /// returns, and its drop waits on none.
+    /// Called once every thread of its process has left this space for good
+    /// (`sched::driver::leave_address_space`), so none loads its root again:
+    /// every CPU still holding it has left it before this returns, and its
+    /// drop waits on none.
     pub fn retire(&self) {
         self.lock().tables.retire();
     }
