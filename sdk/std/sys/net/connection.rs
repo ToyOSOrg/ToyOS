@@ -68,7 +68,8 @@ fn addr_to_v4(addr: &SocketAddr) -> io::Result<([u8; 4], u16)> {
 fn timeout_ms(d: Option<Duration>) -> io::Result<u32> {
     match d {
         Some(Duration::ZERO) => Err(io::Error::ZERO_TIMEOUT),
-        Some(d) => Ok(d.as_millis().clamp(1, u32::MAX as u128) as u32),
+        // NEGATIVE CONTROL: truncated to whole milliseconds, 0 for one under one
+        Some(d) => Ok(d.as_millis().min(u32::MAX as u128) as u32),
         None => Ok(0),
     }
 }

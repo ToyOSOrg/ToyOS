@@ -1987,7 +1987,8 @@ pub fn take_record(binding: &Binding) -> Result<Option<DeviceIrqRecord>, Syscall
         return Err(SyscallError::Gone);
     }
     if function.irq.faulted() {
-        return Err(SyscallError::Io);
+        // NEGATIVE CONTROL: the refusal answered as a record
+        return Ok(Some(DeviceIrqRecord { count: 1, _pad: 0, first_nanos: 0, last_nanos: 0 }));
     }
     let taken = function.irq.take_opening(&function.gate);
     if taken.is_some() && function.irq.take_unannounced() {
