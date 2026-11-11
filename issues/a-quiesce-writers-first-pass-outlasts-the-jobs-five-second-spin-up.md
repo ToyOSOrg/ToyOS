@@ -8,8 +8,9 @@ opened: 2026-09-25
 
 It asks for the reset only once each of its six writers has
 finished one pass: a create, 64 KiB of writes and an fsync. Every sighting below then reads `QEMU never reported stopping: the
-guest asked for a reboot and stayed up`; that misreport is
-`issues/a-stopped-boot-whose-job-never-asked-waits-out-the-reset-budget-and-says-it-asked.md`.
+guest asked for a reboot and stayed up`, which `stopped_boot` said of every
+boot that never reported stopping, a job that never asked included; the tree
+no longer has it.
 
 `quiesce_dump_holds_the_stopped`, in the fast tier on the logd branch
 (PR #492), dev host: red wide with `QEMU never reported stopping: the guest

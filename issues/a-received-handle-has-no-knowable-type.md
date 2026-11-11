@@ -94,4 +94,4 @@ takes bells from its server and uses them typed in `sdk/toyos/src/audio.rs`,
 `sdk/toyos/src/net/stream.rs`, `sdk/toyos/src/net/socket.rs` and
 `lib/link/src/driver.rs`. Read from the code, not exercised.
 
-`launcher_refusals` is deleted; `issues/parallel-tests-red-under-other-suites.md` records the commit that restores it.
+`launcher_refusals` is deleted: `4c191469f` took it out.

@@ -14,9 +14,9 @@ FAIL i8042_mouse: 872 pointer events reached userland out of 876 packets injecte
   FAIL  i8042_mouse  (17s)
 ```
 
-Earlier sightings of this
-message are in `issues/parallel-tests-red-under-other-suites.md`'s
-`i8042_mouse` entry.
+An earlier sighting of this message, 2026-08-07 under two suites on the
+host: `1003 pointer events reached userland out of 1004 packets injected`,
+on a branch and on `main`'s kernel in the same tree alike.
 
 ## What is known
 
