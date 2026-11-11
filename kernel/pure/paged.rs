@@ -2,11 +2,20 @@
 //! serves, in one table of `capacity` slots made when the pager is, so no
 //! supply, read, write or write-back allocates.
 //!
-//! **A page is present, failed or absent.** A present page holds a frame and
-//! its dirty state; a failed one holds no frame and answers `EIO` until it is
-//! supplied again; an absent one has no slot. Unwritten anonymous memory
-//! reads zeros without a slot, and its present pages cannot be withdrawn. Nothing here waits: a caller
-//! that finds a page absent records its request in its own wait record.
+//! **A page is present, failed, revoking or absent.** A present page holds a
+//! frame and its dirty state; a failed one holds no frame and answers `EIO`
+//! until it is supplied again; an absent one has no slot. Unwritten anonymous
+//! memory reads zeros without a slot, and its present pages cannot be
+//! withdrawn. Nothing here waits: a caller that finds a page absent records
+//! its request in its own wait record.
+//!
+//! **A removed page keeps its frame until no mapping reaches it.** A
+//! withdraw, failure, shrink or the object's end marks the page revoking: it
+//! reads as absent, takes no supply or write, and keeps its slot and frame,
+//! so no page is ever two frames at once. One walk per object visits each of
+//! its mappers ([`Mappers`]) after the marking, and a removal that finds a
+//! walk running is taken by that walk's next pass; the last pass's end gives
+//! every revoking page's frame out ([`Pages::walk`]).
 //!
 //! **A dirty page holds a slot until a write-back cleans it.** Slots are
 //! bounded by `dirty_ceiling`. A write-back begin clears the dirty bit and
@@ -25,7 +34,7 @@
 //! call until [`Object::end_write`]: the pager's whole write.
 //!
 //! What a removed frame owes (the last pin's free, a zeroed tail) is the
-//! caller's: every removal answers its frames.
+//! caller's: the walk's end answers every frame.
 
 #![forbid(unsafe_code)]
 
@@ -246,6 +255,52 @@ pub enum Supplied {
     Present,
 }
 
+/// What a revoking page becomes once no mapping reaches its frame, by the
+/// object as the walk's end finds it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Revoked {
+    /// Absent inside the object: a reader waiting on it is named again.
+    Absent,
+    Failed,
+    /// Past the size, or the object is gone.
+    Removed,
+}
+
+/// The mappers of one object, one node per space that maps it, in the order
+/// a walk visits them. A node links at the tail, seen at
+/// [`Object::epoch`] then, and leaves only once its space maps none of the
+/// object's frames.
+pub trait Mappers {
+    type Node: Copy;
+    fn head(&self) -> Option<Self::Node>;
+    /// The epoch of the walk that last visited `node`, or the one current
+    /// when it linked.
+    fn seen(&self, node: Self::Node) -> u64;
+    /// `node` is visited at `epoch`: it moves to the tail.
+    fn visited(&mut self, node: Self::Node, epoch: u64);
+}
+
+/// Where an object's walk stands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Walk {
+    Idle,
+    /// A walker visits its mappers; `again` where pages were marked since
+    /// its pass began, which another pass covers.
+    Running { again: bool },
+}
+
+/// What the caller that marked an object's pages does about their mappers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Revoke {
+    /// Nothing is revoking.
+    Done,
+    /// No walk ran: the caller walks it ([`Pages::walk`]) to its end.
+    Walk,
+    /// The running walk takes the pages in a later pass: they are gone once
+    /// [`Object::finished`] answers true of this epoch.
+    Queued(u64),
+}
+
 #[derive(Clone, Copy)]
 struct State {
     dirty: bool,
@@ -268,6 +323,8 @@ struct Slot<F> {
     /// `None` for a failed page.
     frame: Option<F>,
     state: State,
+    /// Removed, its frame kept until no mapping reaches it.
+    revoking: Option<Revoked>,
     prev: u32,
     next: u32,
 }
@@ -287,6 +344,13 @@ pub struct Object {
     writing: u32,
     /// A call that did not take all it was given left its write under way.
     held: bool,
+    /// Its slots that are revoking.
+    revoking: usize,
+    /// The pass of the walk over its mappers, moved at each pass's start.
+    epoch: u64,
+    walk: Walk,
+    /// The epoch whose pass last ended the walk.
+    finished: u64,
 }
 
 /// What a holder's read began at ([`Object::read_begin`]).
@@ -346,6 +410,41 @@ impl Object {
         }
         self.write_end(true);
         Ok(())
+    }
+
+    /// The epoch a mapper linking now is seen at: the walk running passes it
+    /// by, since nothing it maps from now on is revoking.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Pages were marked revoking in this hold of the lock: what the caller
+    /// does about their mappers.
+    pub fn revoke(&mut self) -> Revoke {
+        if self.revoking == 0 {
+            return Revoke::Done;
+        }
+        match self.walk {
+            Walk::Idle => {
+                self.epoch += 1;
+                self.walk = Walk::Running { again: false };
+                Revoke::Walk
+            }
+            Walk::Running { .. } => {
+                self.walk = Walk::Running { again: true };
+                Revoke::Queued(self.epoch + 1)
+            }
+        }
+    }
+
+    /// Whether the walk's pass at `epoch`, or a later one, ended.
+    pub fn finished(&self, epoch: u64) -> bool {
+        self.finished >= epoch
+    }
+
+    /// Whether every page it held is gone, and no walk still owes a frame.
+    pub fn empty(&self) -> bool {
+        self.pages == 0 && self.walk == Walk::Idle
     }
 }
 
@@ -424,7 +523,21 @@ impl<F: Copy> Pages<F> {
     /// [`release`](Self::release) takes every page it held.
     pub fn object(&mut self, id: u32, size: u64) -> Object {
         assert!(size <= LAST_END, "an object of {size} bytes past the last page");
-        Object { id, anonymous: false, size, gone: false, head: NONE, pages: 0, version: 0, writing: 0, held: false }
+        Object {
+            id,
+            anonymous: false,
+            size,
+            gone: false,
+            head: NONE,
+            pages: 0,
+            version: 0,
+            writing: 0,
+            held: false,
+            revoking: 0,
+            epoch: 0,
+            walk: Walk::Idle,
+            finished: 0,
+        }
     }
 
     /// An anonymous object owns its pages: no backing can supply them again,
@@ -473,7 +586,7 @@ impl<F: Copy> Pages<F> {
         if next != NONE {
             self.slot_mut(next).prev = i;
         }
-        self.slots[i as usize] = Some(Slot { object: o.id, page, frame, state, prev: NONE, next });
+        self.slots[i as usize] = Some(Slot { object: o.id, page, frame, state, revoking: None, prev: NONE, next });
         o.head = i;
         o.pages += 1;
         let mut at = self.hash(o.id, page);
@@ -531,6 +644,9 @@ impl<F: Copy> Pages<F> {
         if s.state.counts_dirty() {
             self.dirty_held -= 1;
         }
+        if s.revoking.is_some() {
+            o.revoking -= 1;
+        }
         self.free[self.free_len] = i;
         self.free_len += 1;
         s.frame
@@ -543,6 +659,81 @@ impl<F: Copy> Pages<F> {
         !o.unchanged(since) || !matches!(self.lookup(o, page), Lookup::Absent)
     }
 
+    /// Remove slot `i` as `becomes` once no mapping reaches it: at once for a
+    /// failed page, which no mapping reaches, and as the walk's end for a
+    /// frame. A page already revoking becomes failed if either removal fails it.
+    fn revoke(&mut self, o: &mut Object, i: u32, becomes: Revoked) {
+        let s = self.slot_mut(i);
+        if s.frame.is_none() {
+            self.remove(o, i);
+            return;
+        }
+        if let Some(was) = s.revoking {
+            s.revoking = Some(if was == Revoked::Failed { was } else { becomes });
+            return;
+        }
+        // Its bytes are no longer the file's: no write-back takes them.
+        let counted = s.state.counts_dirty();
+        s.state = State::CLEAN;
+        s.revoking = Some(becomes);
+        o.revoking += 1;
+        if counted {
+            self.dirty_held -= 1;
+        }
+    }
+
+    /// Visit `o`'s next mapper after pages were marked revoking
+    /// ([`Object::revoke`]), or, once every mapper has been visited since the
+    /// last marking, give out each revoking page's frame, its page and what it
+    /// became, and answer `None`. A page that ends absent was withdrawn,
+    /// perhaps after a supply for a waiter's notice, without moving the
+    /// version: every want of `waiters` it meets is named again.
+    pub fn walk<M: Mappers>(
+        &mut self,
+        o: &mut Object,
+        mappers: &mut M,
+        waiters: &mut impl Waiters,
+        out: &mut impl FnMut(F, u64, Revoked),
+    ) -> Option<M::Node> {
+        loop {
+            if let Some(node) = mappers.head().filter(|&n| mappers.seen(n) != o.epoch) {
+                mappers.visited(node, o.epoch);
+                return Some(node);
+            }
+            match o.walk {
+                Walk::Running { again: true } => {
+                    o.epoch += 1;
+                    o.walk = Walk::Running { again: false };
+                }
+                Walk::Running { again: false } => break,
+                Walk::Idle => panic!("paged: a walk of object {} that never began", o.id),
+            }
+        }
+        let held = !o.gone;
+        let mut at = o.head;
+        while at != NONE {
+            let s = self.slot(at);
+            let (next, page, revoking) = (s.next, s.page, s.revoking);
+            if let Some(becomes) = revoking {
+                let frame = self.remove(o, at).expect("paged: a revoking page holds its frame");
+                let becomes = if held && page < o.page_end() { becomes } else { Revoked::Removed };
+                match becomes {
+                    Revoked::Failed => self.insert(o, page, None, State::CLEAN).expect("paged: the slot just freed"),
+                    Revoked::Absent => waiters.each(&mut |want| {
+                        want.withdrawn(page, 1);
+                    }),
+                    Revoked::Removed => {}
+                }
+                out(frame, page, becomes);
+            }
+            at = next;
+        }
+        debug_assert_eq!(o.revoking, 0);
+        o.walk = Walk::Idle;
+        o.finished = o.epoch;
+        None
+    }
+
     pub fn lookup(&self, o: &Object, page: u64) -> Lookup<F> {
         if o.gone {
             return Lookup::Gone;
@@ -550,16 +741,18 @@ impl<F: Copy> Pages<F> {
         if page >= o.page_end() {
             return Lookup::PastEnd;
         }
-        match self.find(o.id, page) {
+        match self.find(o.id, page).map(|i| self.slot(i)) {
             None if o.anonymous => Lookup::Zero,
             None => Lookup::Absent,
-            Some(i) => self.slot(i).frame.map_or(Lookup::Failed, Lookup::Present),
+            Some(s) if s.revoking.is_some() => Lookup::Absent,
+            Some(s) => s.frame.map_or(Lookup::Failed, Lookup::Present),
         }
     }
 
     /// Install `frame` at `page`, clean, or dirty with a slot. A dirty page
     /// extends the size to `end`, where its bytes end past it; a clean one is
-    /// what the file holds and moves nothing. A failed page is replaced.
+    /// what the file holds and moves nothing. A failed page is replaced; a
+    /// revoking one is present until its walk ends.
     pub fn supply(&mut self, o: &mut Object, page: u64, frame: F, dirty: bool, end: u64) -> Result<Supplied, Refused> {
         if o.gone {
             return Err(Refused::Gone);
@@ -572,7 +765,7 @@ impl<F: Copy> Pages<F> {
             return Err(Refused::PastEnd);
         }
         match self.find(o.id, page) {
-            Some(i) if self.slot(i).frame.is_some() => return Ok(Supplied::Present),
+            Some(i) if self.slot(i).frame.is_some() || self.slot(i).revoking.is_some() => return Ok(Supplied::Present),
             Some(i) => {
                 self.remove(o, i);
             }
@@ -601,7 +794,7 @@ impl<F: Copy> Pages<F> {
         }
         let i = self.find(o.id, page).ok_or(Refused::InvalidArgument)?;
         let s = self.slot(i);
-        let frame = s.frame.ok_or(Refused::InvalidArgument)?;
+        let frame = s.frame.filter(|_| s.revoking.is_none()).ok_or(Refused::InvalidArgument)?;
         let needs_slot = !o.anonymous && !s.state.counts_dirty();
         if needs_slot && self.dirty_held >= self.dirty_ceiling {
             return Err(Refused::DirtyFull);
@@ -620,9 +813,9 @@ impl<F: Copy> Pages<F> {
 
     /// The end of a [`write_pin`](Self::write_pin) of `frame`, once its
     /// bytes are in: the size grows to `end`. A page a shrink or a failure
-    /// removed meanwhile, even one supplied again since, holds another frame
-    /// or none; there is nothing left to unpin, and the bytes are not the
-    /// file's. The caller keeps `frame` pinned until this, so it is not
+    /// removed meanwhile is revoking, or, supplied again since, holds another
+    /// frame or none; there is nothing left to unpin, and the bytes are not
+    /// the file's. The caller keeps `frame` pinned until this, so it is not
     /// another page's meanwhile.
     pub fn write_unpin(&mut self, o: &mut Object, page: u64, frame: F, end: u64)
     where
@@ -631,7 +824,7 @@ impl<F: Copy> Pages<F> {
         assert!(end <= (page + 1) * PAGE && end > page * PAGE, "a write pin's end {end} outside page {page}");
         let Some(i) = self.find(o.id, page) else { return };
         let s = self.slot_mut(i);
-        if s.frame != Some(frame) {
+        if s.frame != Some(frame) || s.revoking.is_some() {
             return;
         }
         s.state.write_pins = s.state.write_pins.checked_sub(1).expect("a write pin released twice");
@@ -647,7 +840,7 @@ impl<F: Copy> Pages<F> {
     {
         let Some(i) = self.find(o.id, page) else { return };
         let s = self.slot_mut(i);
-        if s.frame != Some(frame) {
+        if s.frame != Some(frame) || s.revoking.is_some() {
             return;
         }
         s.state.write_pins = s.state.write_pins.checked_sub(1).expect("a write pin released twice");
@@ -712,22 +905,28 @@ impl<F: Copy> Pages<F> {
     }
 
     /// Remove the clean pages of the range that no write-back or write pin
-    /// holds: their frames, for the caller to free at their last pin. How
-    /// many, and whether a waiter's range they meet is news its pager must
-    /// hear again: they end absent without moving the version, so they may
-    /// have been supplied for a notice the waiter has not yet looked at.
+    /// holds, and the failed ones: how many, and whether a waiter's want is
+    /// news its pager must hear again. Each ends absent without moving the
+    /// version, perhaps after a supply for a waiter's notice, so every want of
+    /// `waiters` it meets is named again: a failed page's now, as it goes at
+    /// once, a present page's at its walk's end, as it is revoking until then
+    /// ([`Object::revoke`]).
     /// A range longer than the object holds pages walks its pages, not the range.
-    pub fn withdraw(&mut self, o: &mut Object, first: u64, count: u64, waiters: &mut impl Waiters, out: &mut impl FnMut(F)) -> (usize, bool) {
+    pub fn withdraw(&mut self, o: &mut Object, first: u64, count: u64, waiters: &mut impl Waiters) -> (usize, bool) {
         if o.anonymous { return (0, false); }
         let end = first.saturating_add(count);
-        let mut removed = 0;
+        let (mut removed, mut news) = (0, false);
         let mut take = |pages: &mut Self, o: &mut Object, i: u32| {
             let s = pages.slot(i);
-            if s.state.counts_dirty() || s.state.write_pins > 0 {
+            if s.revoking.is_some() || s.state.counts_dirty() || s.state.write_pins > 0 {
                 return;
             }
-            if let Some(frame) = pages.remove(o, i) {
-                out(frame);
+            if s.frame.is_none() {
+                let page = s.page;
+                pages.remove(o, i);
+                waiters.each(&mut |want| news |= want.withdrawn(page, 1));
+            } else {
+                pages.revoke(o, i, Revoked::Absent);
             }
             removed += 1;
         };
@@ -748,25 +947,20 @@ impl<F: Copy> Pages<F> {
                 }
             }
         }
-        let mut news = false;
-        if removed > 0 {
-            waiters.each(&mut |want| news |= want.withdrawn(first, count));
-        }
         (removed, news)
     }
 
-    /// Mark the range failed: present pages give up their frames, and a read
-    /// of any page of it answers `Failed` until it is supplied again.
-    pub fn fail(&mut self, o: &mut Object, first: u64, count: u64, out: &mut impl FnMut(F)) -> Result<(), Refused> {
+    /// Mark the range failed: a read of any page of it answers `Failed` until
+    /// it is supplied again, a present page's from its walk's end.
+    pub fn fail(&mut self, o: &mut Object, first: u64, count: u64) -> Result<(), Refused> {
         if o.anonymous { return Err(Refused::InvalidArgument); }
         let end = first.saturating_add(count).min(o.page_end());
         for page in first..end {
-            if let Some(i) = self.find(o.id, page) {
-                if let Some(frame) = self.remove(o, i) {
-                    out(frame);
-                }
+            match self.find(o.id, page) {
+                Some(i) if self.slot(i).frame.is_some() => self.revoke(o, i, Revoked::Failed),
+                Some(_) => {}
+                None => self.insert(o, page, None, State::CLEAN)?,
             }
-            self.insert(o, page, None, State::CLEAN)?;
         }
         Ok(())
     }
@@ -774,7 +968,7 @@ impl<F: Copy> Pages<F> {
     /// Set the size. A shrink removes every page past it, dirty or not, and
     /// answers the frame of a partial last page, whose tail past the size the
     /// caller zeroes.
-    pub fn resize(&mut self, o: &mut Object, size: u64, out: &mut impl FnMut(F)) -> Option<F> {
+    pub fn resize(&mut self, o: &mut Object, size: u64) -> Option<F> {
         o.version += 1;
         let keep = size.div_ceil(PAGE);
         if size < o.size {
@@ -785,9 +979,7 @@ impl<F: Copy> Pages<F> {
                     (s.next, s.page)
                 };
                 if page >= keep {
-                    if let Some(frame) = self.remove(o, at) {
-                        out(frame);
-                    }
+                    self.revoke(o, at, Revoked::Absent);
                 }
                 at = next;
             }
@@ -802,12 +994,14 @@ impl<F: Copy> Pages<F> {
         }
     }
 
-    /// The pager ended: every page goes, and every later call answers `Gone`.
-    pub fn invalidate(&mut self, o: &mut Object, out: &mut impl FnMut(F)) {
-        while o.head != NONE {
-            if let Some(frame) = self.remove(o, o.head) {
-                out(frame);
-            }
+    /// The pager ended or let the object go: every page goes, and every
+    /// later call answers `Gone`.
+    pub fn invalidate(&mut self, o: &mut Object) {
+        let mut at = o.head;
+        while at != NONE {
+            let next = self.slot(at).next;
+            self.revoke(o, at, Revoked::Absent);
+            at = next;
         }
         o.gone = true;
         for range in &mut self.open {
@@ -815,11 +1009,6 @@ impl<F: Copy> Pages<F> {
                 *range = None;
             }
         }
-    }
-
-    /// The object is let go: every page goes, as at [`invalidate`](Self::invalidate).
-    pub fn release(&mut self, mut o: Object, out: &mut impl FnMut(F)) {
-        self.invalidate(&mut o, out);
     }
 }
 
@@ -830,10 +1019,147 @@ mod tests {
 
     use super::*;
 
-    fn none(_: u64) {}
+    /// No space maps anything: a walk ends at its first step.
+    struct Unmapped;
 
-    fn sink(freed: &mut Vec<u64>) -> impl FnMut(u64) + '_ {
-        |f| freed.push(f)
+    impl Mappers for Unmapped {
+        type Node = ();
+        fn head(&self) -> Option<()> {
+            None
+        }
+        fn seen(&self, (): ()) -> u64 {
+            0
+        }
+        fn visited(&mut self, (): (), _: u64) {}
+    }
+
+    /// The frames of `o`'s revoking pages, once a walk over no mappers ends.
+    fn settle(p: &mut Pages<u64>, o: &mut Object) -> Vec<u64> {
+        let mut freed = Vec::new();
+        match o.revoke() {
+            Revoke::Done => {}
+            Revoke::Walk => assert_eq!(p.walk(o, &mut Unmapped, &mut Nobody, &mut |f, _, _| freed.push(f)), None),
+            Revoke::Queued(_) => panic!("a walk ran with no walker"),
+        }
+        freed
+    }
+
+    /// One object's mappers: each node's space and the epoch it was last
+    /// seen at, in visiting order.
+    #[derive(Default)]
+    struct Ring(std::collections::VecDeque<(u32, u64)>);
+
+    impl Ring {
+        fn link(&mut self, space: u32, o: &Object) {
+            self.0.push_back((space, o.epoch()));
+        }
+    }
+
+    impl Mappers for Ring {
+        type Node = u32;
+        fn head(&self) -> Option<u32> {
+            self.0.front().map(|&(n, _)| n)
+        }
+        fn seen(&self, node: u32) -> u64 {
+            self.0.iter().find(|&&(n, _)| n == node).expect("linked").1
+        }
+        fn visited(&mut self, node: u32, epoch: u64) {
+            let at = self.0.iter().position(|&(n, _)| n == node).expect("linked");
+            self.0.remove(at);
+            self.0.push_back((node, epoch));
+        }
+    }
+
+    /// A removed page reads as absent, takes no second frame and no write,
+    /// and keeps its frame until every mapper of its object was visited;
+    /// then its frame goes out once and the page is supplied afresh.
+    #[test]
+    fn a_revoking_page_keeps_its_one_frame_until_every_mapper_is_visited() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, 2 * PAGE);
+        let mut ring = Ring::default();
+        ring.link(10, &o);
+        ring.link(11, &o);
+        p.supply(&mut o, 0, 7, false, PAGE).unwrap();
+        assert_eq!(p.withdraw(&mut o, 0, 1, &mut Nobody).0, 1);
+        assert_eq!(p.lookup(&o, 0), Lookup::Absent);
+        assert_eq!(p.supply(&mut o, 0, 8, false, PAGE), Ok(Supplied::Present), "a second frame for the page");
+        assert_eq!(p.write_pin(&mut o, 0), Err(Refused::InvalidArgument));
+        assert_eq!(p.withdraw(&mut o, 0, 1, &mut Nobody).0, 0, "withdrawn once");
+        assert_eq!(o.revoke(), Revoke::Walk);
+        let mut freed = Vec::new();
+        let mut out = |f, page, becomes| freed.push((f, page, becomes));
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Some(10));
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Some(11));
+        assert!(!o.empty());
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), None);
+        assert_eq!(freed, [(7, 0, Revoked::Absent)]);
+        assert!(o.finished(o.epoch()));
+        assert_eq!(p.supply(&mut o, 0, 8, false, PAGE), Ok(Supplied::Installed));
+        assert_eq!(o.revoke(), Revoke::Done, "nothing revoking");
+    }
+
+    /// A removal while a walk runs is taken by a second pass over every
+    /// mapper, those the first visited and one linked during it, which may
+    /// map the newly removed page; its caller knows the pass by its epoch.
+    #[test]
+    fn a_removal_during_a_walk_is_taken_by_a_second_pass() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, 2 * PAGE);
+        let mut ring = Ring::default();
+        ring.link(10, &o);
+        ring.link(11, &o);
+        p.supply(&mut o, 0, 7, false, PAGE).unwrap();
+        p.supply(&mut o, 1, 8, false, 2 * PAGE).unwrap();
+        p.withdraw(&mut o, 0, 1, &mut Nobody);
+        assert_eq!(o.revoke(), Revoke::Walk);
+        let mut freed = Vec::new();
+        let mut out = |f, page, becomes| freed.push((f, page, becomes));
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Some(10));
+        ring.link(12, &o);
+        p.fail(&mut o, 1, 1).unwrap();
+        let Revoke::Queued(second) = o.revoke() else { panic!("a walk runs") };
+        assert!(!o.finished(second));
+        let visits: Vec<_> = core::iter::from_fn(|| p.walk(&mut o, &mut ring, &mut Nobody, &mut out)).collect();
+        assert_eq!(visits, [11, 10, 12, 11], "the first pass ends at 11, the second visits all three");
+        assert!(o.finished(second));
+        assert_eq!(freed, [(8, 1, Revoked::Failed), (7, 0, Revoked::Absent)]);
+        assert_eq!((p.lookup(&o, 0), p.lookup(&o, 1)), (Lookup::Absent, Lookup::Failed));
+    }
+
+    /// A mapper linked during a walk that nothing else joins maps nothing
+    /// revoking, so the walk passes it by.
+    #[test]
+    fn a_mapper_linked_during_a_walk_is_passed_by() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, PAGE);
+        let mut ring = Ring::default();
+        ring.link(10, &o);
+        p.supply(&mut o, 0, 7, false, PAGE).unwrap();
+        p.withdraw(&mut o, 0, 1, &mut Nobody);
+        assert_eq!(o.revoke(), Revoke::Walk);
+        let mut out = |_, _, _| {};
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Some(10));
+        ring.link(11, &o);
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), None);
+    }
+
+    /// A page failed and then shrunk away while revoking ends with no slot,
+    /// and one failed and then withdrawn still ends failed.
+    #[test]
+    fn a_revoking_page_ends_failed_only_where_the_object_still_holds_it() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, 2 * PAGE);
+        p.supply(&mut o, 0, 7, false, PAGE).unwrap();
+        p.supply(&mut o, 1, 8, false, 2 * PAGE).unwrap();
+        p.fail(&mut o, 0, 2).unwrap();
+        assert_eq!(p.withdraw(&mut o, 0, 2, &mut Nobody).0, 0, "nothing left to withdraw");
+        p.resize(&mut o, PAGE);
+        assert_eq!(o.revoke(), Revoke::Walk);
+        let mut ended = Vec::new();
+        assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |f, page, becomes| ended.push((f, page, becomes))), None);
+        assert_eq!(ended, [(8, 1, Revoked::Removed), (7, 0, Revoked::Failed)]);
+        assert_eq!((p.lookup(&o, 0), p.used()), (Lookup::Failed, 1));
     }
 
     /// No reader waits.
@@ -877,7 +1203,7 @@ mod tests {
         assert!(!o.unchanged(before), "and still does once it ended");
         let after = o.read_begin().expect("the write ended");
         assert!(o.unchanged(after));
-        p.resize(&mut o, 0, &mut none);
+        p.resize(&mut o, 0);
         assert!(!o.unchanged(after), "a shrink is a change a read meets");
     }
 
@@ -912,20 +1238,20 @@ mod tests {
         assert_eq!(pages.dirty_held(), 0);
         assert_eq!(pages.write_pin(&mut object, 0), Ok(42));
         pages.write_unpin(&mut object, 0, 42, PAGE);
-        assert_eq!(pages.withdraw(&mut object, 0, 1, &mut Nobody, &mut none).0, 0);
+        assert_eq!(pages.withdraw(&mut object, 0, 1, &mut Nobody).0, 0);
         assert_eq!(pages.writeback_begin(&mut object, 0, 1), Err(Refused::InvalidArgument));
-        assert_eq!(pages.fail(&mut object, 0, 1, &mut none), Err(Refused::InvalidArgument));
+        assert_eq!(pages.fail(&mut object, 0, 1), Err(Refused::InvalidArgument));
         assert_eq!(pages.lookup(&object, 0), Lookup::Present(42));
         assert_eq!(pages.supply(&mut object, 1, 43, true, 2 * PAGE), Ok(Supplied::Installed));
         assert_eq!(pages.supply(&mut object, 2, 44, true, 3 * PAGE), Err(Refused::NoRoom));
-        pages.resize(&mut object, 4 * PAGE, &mut none);
+        pages.resize(&mut object, 4 * PAGE);
         assert_eq!(pages.lookup(&object, 3), Lookup::Zero, "a hole reads without any free slot");
-        let mut freed = Vec::new();
-        pages.resize(&mut object, PAGE, &mut sink(&mut freed));
-        assert_eq!(freed, [43]);
-        pages.release(object, &mut sink(&mut freed));
-        assert_eq!(freed, [43, 42]);
+        pages.resize(&mut object, PAGE);
+        assert_eq!(settle(&mut pages, &mut object), [43]);
+        pages.invalidate(&mut object);
+        assert_eq!(settle(&mut pages, &mut object), [42]);
         assert_eq!(pages.used(), 0);
+        assert!(object.empty());
     }
 
     #[test]
@@ -986,11 +1312,12 @@ mod tests {
         let mut o = p.object(5, PAGE);
         p.supply(&mut o, 0, 7, false, PAGE).unwrap();
         p.write_pin(&mut o, 0).unwrap();
-        p.resize(&mut o, 0, &mut none);
+        p.resize(&mut o, 0);
+        settle(&mut p, &mut o);
         p.supply(&mut o, 0, 8, true, 10).unwrap();
         p.write_unpin(&mut o, 0, 7, PAGE);
         assert_eq!(o.size(), 10, "the shrink's size, and the new page's, stand over a copy they overtook");
-        assert_eq!(p.withdraw(&mut o, 0, 1, &mut Nobody, &mut none).0, 0, "the new page is dirty");
+        assert_eq!(p.withdraw(&mut o, 0, 1, &mut Nobody).0, 0, "the new page is dirty");
         p.writeback_begin(&mut o, 0, 1).unwrap();
         assert_eq!(p.writeback_end(&mut o, 0, 1, true).unwrap()[0], 0, "and holds no pin of the old one");
     }
@@ -1022,9 +1349,10 @@ mod tests {
         p.write_unpin(&mut o, 0, 0, PAGE);
         p.write_pin(&mut o, 1).unwrap(); // dirtied inside
         p.write_unpin(&mut o, 1, 1, 2 * PAGE);
-        let mut freed = Vec::new();
-        p.resize(&mut o, 5 * PAGE, &mut sink(&mut freed)); // page 5 removed inside
-        p.fail(&mut o, 4, 1, &mut sink(&mut freed)).unwrap(); // page 4 failed inside
+        p.resize(&mut o, 5 * PAGE); // page 5 removed inside
+        p.fail(&mut o, 4, 1).unwrap(); // page 4 failed inside
+        assert_eq!(p.dirty_held(), 4, "a revoking page's bytes are no longer written back");
+        assert_eq!(settle(&mut p, &mut o), [5, 4]);
         let kept = p.writeback_end(&mut o, 0, 6, true).unwrap()[0];
         assert_eq!(kept, 0b11, "pinned since the begin and dirtied since it; the removed are clear");
         assert_eq!(p.dirty_held(), 2);
@@ -1067,9 +1395,9 @@ mod tests {
         p.supply(&mut o, 3, 13, false, 4 * PAGE).unwrap();
         p.writeback_begin(&mut o, 2, 1).unwrap(); // clean but under write-back
         p.write_pin(&mut o, 3).unwrap(); // write-pinned
-        let mut freed = Vec::new();
-        assert_eq!(p.withdraw(&mut o, 0, 4, &mut Nobody, &mut sink(&mut freed)).0, 1);
-        assert_eq!(freed, [10]);
+        assert_eq!(p.withdraw(&mut o, 0, 4, &mut Nobody).0, 1);
+        assert_eq!(p.lookup(&o, 0), Lookup::Absent, "revoking reads as absent");
+        assert_eq!(settle(&mut p, &mut o), [10]);
         assert_eq!(p.lookup(&o, 0), Lookup::Absent);
     }
 
@@ -1121,13 +1449,13 @@ mod tests {
         let mut o = p.object(1, LAST_END);
         p.supply(&mut o, 7, 1, false, 8 * PAGE).unwrap();
         p.supply(&mut o, 1 << 40, 2, false, ((1 << 40) + 1) * PAGE).unwrap();
-        let mut freed = Vec::new();
         p.probes.set(0);
-        assert_eq!(p.withdraw(&mut o, 8, 1 << 24, &mut Nobody, &mut sink(&mut freed)).0, 0, "neither page lies in 8..8+2^24");
+        assert_eq!(p.withdraw(&mut o, 8, 1 << 24, &mut Nobody).0, 0, "neither page lies in 8..8+2^24");
         assert!(p.probes.get() < 8, "{} probes for a range of 2^24 pages", p.probes.get());
-        assert_eq!(p.withdraw(&mut o, 8, u64::MAX, &mut Nobody, &mut sink(&mut freed)).0, 1);
-        assert_eq!(freed, [2], "only the page inside the range");
-        assert_eq!(p.withdraw(&mut o, 0, u64::MAX, &mut Nobody, &mut sink(&mut freed)).0, 1);
+        assert_eq!(p.withdraw(&mut o, 8, u64::MAX, &mut Nobody).0, 1);
+        assert_eq!(settle(&mut p, &mut o), [2], "only the page inside the range");
+        assert_eq!(p.withdraw(&mut o, 0, u64::MAX, &mut Nobody).0, 1);
+        settle(&mut p, &mut o);
         assert_eq!(o.pages(), 0);
     }
 
@@ -1153,12 +1481,11 @@ mod tests {
         for page in 0..3 {
             p.supply(&mut o, page, page + 100, true, (page + 1) * PAGE).unwrap();
         }
-        let mut freed = Vec::new();
-        assert_eq!(p.resize(&mut o, PAGE + 5, &mut sink(&mut freed)), Some(101));
-        assert_eq!(freed, [102]);
+        assert_eq!(p.resize(&mut o, PAGE + 5), Some(101));
         assert_eq!(p.dirty_held(), 2);
         assert_eq!(p.lookup(&o, 2), Lookup::PastEnd);
-        assert_eq!(p.resize(&mut o, 4 * PAGE, &mut none), None, "growth removes nothing");
+        assert_eq!(settle(&mut p, &mut o), [102]);
+        assert_eq!(p.resize(&mut o, 4 * PAGE), None, "growth removes nothing");
         assert_eq!(p.lookup(&o, 2), Lookup::Absent, "and leaves the new range absent");
     }
 
@@ -1167,9 +1494,9 @@ mod tests {
         let mut p = Pages::new(8, 8).unwrap();
         let mut o = p.object(12, 2 * PAGE);
         p.supply(&mut o, 0, 5, false, PAGE).unwrap();
-        let mut freed = Vec::new();
-        p.fail(&mut o, 0, 2, &mut sink(&mut freed)).unwrap();
-        assert_eq!(freed, [5]);
+        p.fail(&mut o, 0, 2).unwrap();
+        assert_eq!((p.lookup(&o, 0), p.lookup(&o, 1)), (Lookup::Absent, Lookup::Failed), "page 0 revoking");
+        assert_eq!(settle(&mut p, &mut o), [5]);
         assert_eq!((p.lookup(&o, 0), p.lookup(&o, 1)), (Lookup::Failed, Lookup::Failed));
         assert_eq!(p.supply(&mut o, 1, 6, false, 2 * PAGE), Ok(Supplied::Installed));
         assert_eq!(p.lookup(&o, 1), Lookup::Present(6));
@@ -1181,8 +1508,9 @@ mod tests {
         let mut o = p.object(13, 4 * PAGE);
         p.supply(&mut o, 0, 1, true, PAGE).unwrap();
         p.supply(&mut o, 2, 3, false, 3 * PAGE).unwrap();
-        let mut freed = Vec::new();
-        p.invalidate(&mut o, &mut sink(&mut freed));
+        p.invalidate(&mut o);
+        assert_eq!(p.lookup(&o, 0), Lookup::Gone);
+        let mut freed = settle(&mut p, &mut o);
         freed.sort();
         assert_eq!(freed, [1, 3]);
         assert_eq!((p.used(), p.dirty_held()), (0, 0));
@@ -1202,9 +1530,8 @@ mod tests {
             let page = (x >> 40) % 97;
             let o = &mut objects[which];
             if (x >> 20).is_multiple_of(3) {
-                let mut freed = Vec::new();
-                p.withdraw(o, page, 1, &mut Nobody, &mut sink(&mut freed));
-                if !freed.is_empty() {
+                p.withdraw(o, page, 1, &mut Nobody);
+                if !settle(&mut p, o).is_empty() {
                     assert!(model.remove(&(which, page)));
                 }
             } else {
@@ -1238,14 +1565,15 @@ mod tests {
         assert!(!p.wait_over(&o, 0, since), "absent");
         p.supply(&mut o, 0, 7, false, PAGE).unwrap();
         assert!(p.wait_over(&o, 0, since), "supplied");
-        p.resize(&mut o, 0, &mut none);
-        p.resize(&mut o, PAGE, &mut none);
+        p.resize(&mut o, 0);
+        settle(&mut p, &mut o);
+        p.resize(&mut o, PAGE);
         assert_eq!(p.lookup(&o, 0), Lookup::Absent);
         assert!(p.wait_over(&o, 0, since), "shrunk and grown back before the reader looked");
 
         let mut failed = p.object(2, PAGE);
         let since = failed.read_begin().unwrap();
-        p.fail(&mut failed, 0, 1, &mut none).unwrap();
+        p.fail(&mut failed, 0, 1).unwrap();
         failed.write_begin();
         assert_eq!(p.supply(&mut failed, 0, 8, true, PAGE), Err(Refused::DirtyFull));
         failed.write_end(true);
@@ -1258,10 +1586,12 @@ mod tests {
         let mut want = Want::NONE;
         want.ask(0, 1);
         assert_eq!(want.report(), Some((0, 1)));
-        let mut waiting = One(&mut want);
-        assert_eq!(p.withdraw(&mut taken, 0, 1, &mut waiting, &mut none), (1, true));
+        assert_eq!(p.withdraw(&mut taken, 0, 1, &mut Nobody).0, 1);
+        assert_eq!(taken.revoke(), Revoke::Walk);
+        assert!(!want.unreported(), "named only once no mapping reaches the page");
+        assert_eq!(p.walk(&mut taken, &mut Unmapped, &mut One(&mut want), &mut |_, _, _| ()), None);
         assert!(!p.wait_over(&taken, 0, since), "a withdraw leaves the read waiting");
-        assert!(want.unreported(), "and names its range again");
+        assert!(want.unreported(), "and its walk's end names its range again");
     }
 
     /// One reader's want.
@@ -1325,17 +1655,20 @@ mod tests {
                 let next = self.next + 1;
                 match step {
                     Step::Withdraw => {
-                        let mut waiting = One(&mut self.want);
-                        self.p.withdraw(&mut self.o, 0, 1, &mut waiting, &mut |_| ());
+                        self.p.withdraw(&mut self.o, 0, 1, &mut One(&mut self.want));
+                        self.settle();
                     }
                     Step::Fail => {
-                        self.p.fail(&mut self.o, 0, 1, &mut |_| ()).unwrap();
+                        self.p.fail(&mut self.o, 0, 1).unwrap();
+                        self.settle();
                     }
                     Step::Shrink if self.o.size() == PAGE => {
-                        self.p.resize(&mut self.o, 0, &mut |_| ());
+                        self.p.resize(&mut self.o, 0);
+                        self.settle();
                     }
                     Step::Grow if self.o.size() == 0 => {
-                        self.p.resize(&mut self.o, PAGE, &mut |_| ());
+                        self.p.resize(&mut self.o, PAGE);
+                        self.settle();
                     }
                     Step::Refused => {
                         self.o.write_begin();
@@ -1351,7 +1684,7 @@ mod tests {
                         // The file server fails a requested range past the
                         // end, which inserts nothing there.
                         if self.p.supply(&mut self.o, 0, next, false, PAGE) == Err(Refused::PastEnd) {
-                            self.p.fail(&mut self.o, 0, 1, &mut |_| ()).unwrap();
+                            self.p.fail(&mut self.o, 0, 1).unwrap();
                         }
                     }
                     Step::Look if self.waits && self.p.wait_over(&self.o, 0, self.since) => {
@@ -1367,6 +1700,14 @@ mod tests {
                 }
                 self.next = next;
                 true
+            }
+
+            /// A removal's walk, over no mapper, to its end.
+            fn settle(&mut self) {
+                if self.o.revoke() == Revoke::Walk {
+                    let walked = self.p.walk(&mut self.o, &mut super::Unmapped, &mut One(&mut self.want), &mut |_, _, _| ());
+                    assert_eq!(walked, None);
+                }
             }
 
             /// The pager answers what it hears and the reader looks whenever

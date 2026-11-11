@@ -50,7 +50,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel::chunked::Stack;
-use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, Version, Waiters, Want, PAGE};
+use kernel::paged::{Core, Draw, Leave, Lookup, Mappers, Object, Pages, Refused, Revoke, Revoked, Supplied, Version, Waiters, Want, PAGE};
 use kernel::sched::task::WaitClass;
 use kernel::slots::Slots;
 use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
@@ -311,23 +311,43 @@ impl PagerObject {
         u64::from(made.expect("paged: a slot was made free"))
     }
 
-    /// `f` over the index, the live object `id` and its waiters, each frame
-    /// it removes given back as it goes; waiters read again.
-    fn removing<R>(
-        &self,
-        id: u64,
-        f: impl FnOnce(&mut Pages<u64>, &mut Object, &mut Linked, &mut dyn FnMut(u64)) -> R,
-    ) -> Result<R, SyscallError> {
+    /// `f` over the index, the live object `id` and its waiters, marking
+    /// pages revoking, then their walk ([`Self::revoked`]); waiters read again.
+    fn removing<R>(&self, id: u64, f: impl FnOnce(&mut Pages<u64>, &mut Object, &mut Linked) -> R) -> Result<R, SyscallError> {
         let mut state = self.state.lock();
         let slot = state.live(id)?;
-        let job = self.core.job();
-        let State { pages, entries, held, gone, requests, .. } = &mut *state;
-        let object = &mut entries.get_mut(slot).expect("live").object;
-        let mut waiters = Linked { head: *requests, slot };
-        let answer = f(pages, object, &mut waiters, &mut |phys| held.give_back(job, *gone, phys, true));
+        let mut waiters = Linked { head: state.requests, slot };
+        let (pages, object) = state.split(slot);
+        let answer = f(pages, object, &mut waiters);
+        self.revoked(&mut state, slot);
         drop(state);
         self.changed.post();
         Ok(answer)
+    }
+
+    /// Under the lock, `state`: the pages of the object at `slot` just marked
+    /// revoking leave once no mapping reaches them, each frame given back,
+    /// and every waiter's want a page that ends absent meets is named again
+    /// in a notice (`Pages::walk`).
+    fn revoked(&self, state: &mut State, slot: u32) {
+        let job = self.core.job();
+        let mut waiters = Linked { head: state.requests, slot };
+        let State { pages, entries, held, gone, .. } = &mut *state;
+        let object = &mut entries.get_mut(slot).expect("paged: a slot an object names is held").object;
+        match object.revoke() {
+            Revoke::Done => return,
+            Revoke::Walk => {}
+            Revoke::Queued(_) => unreachable!("paged: a walk outlived the hold of the lock that began it"),
+        }
+        let mut absent = false;
+        let next = pages.walk(object, &mut Unmapped, &mut waiters, &mut |phys, _, becomes| {
+            held.give_back(job, *gone, phys, true);
+            absent |= becomes == Revoked::Absent;
+        });
+        debug_assert!(next.is_none());
+        if absent {
+            self.watch.post();
+        }
     }
 
     /// The pager lets object `id` go, in one hold of the lock: it answers
@@ -347,12 +367,12 @@ impl PagerObject {
 
     /// Under the lock, `state`: the unreleased object at `slot` released.
     fn let_go(&self, state: &mut State, slot: u32) {
-        let job = self.core.job();
-        let State { pages, entries, held, gone, .. } = state;
+        let State { pages, entries, .. } = &mut *state;
         let entry = entries.get_mut(slot).expect("paged: a slot an object names is held");
-        pages.invalidate(&mut entry.object, &mut |phys| held.give_back(job, *gone, phys, true));
+        pages.invalidate(&mut entry.object);
         assert!(core::mem::take(&mut entry.owned), "paged: an object released twice");
         entries.unmark(slot);
+        self.revoked(state, slot);
         self.unref_locked(state, slot);
     }
 
@@ -391,9 +411,7 @@ impl PagerObject {
             return;
         }
         let entry = state.entries.remove(slot).expect("paged: a slot an object names is held");
-        let job = self.core.job();
-        let State { pages, held, gone, .. } = state;
-        pages.release(entry.object, &mut |phys| held.give_back(job, *gone, phys, true));
+        assert!(entry.object.empty(), "paged: an object's slot freed while it holds pages");
     }
 
     /// Fill `out` with notices, each answered once.
@@ -885,10 +903,8 @@ impl PagerObject {
         done as u64
     }
 
-    /// Its pages end absent, so every reader waiting on one is named in a
-    /// notice again (`Want::withdrawn`).
     pub fn withdraw(&self, id: u64, first: u64, count: u64) -> u64 {
-        match self.removing(id, |pages, object, waiters, out| pages.withdraw(object, first, count, waiters, &mut |f| out(f))) {
+        match self.removing(id, |pages, object, waiters| pages.withdraw(object, first, count, waiters)) {
             Ok((n, news)) => {
                 if news {
                     self.watch.post();
@@ -900,7 +916,7 @@ impl PagerObject {
     }
 
     pub fn fail(&self, id: u64, first: u64, count: u64) -> u64 {
-        match self.removing(id, |pages, object, _, out| pages.fail(object, first, count, &mut |f| out(f))) {
+        match self.removing(id, |pages, object, _| pages.fail(object, first, count)) {
             Ok(Ok(())) => 0,
             Ok(Err(why)) => word(why).to_u64(),
             Err(e) => e.to_u64(),
@@ -911,8 +927,8 @@ impl PagerObject {
         if size > kernel::paged::LAST_END {
             return SyscallError::InvalidArgument.to_u64();
         }
-        let resized = self.removing(id, |pages, object, _, out| {
-            if let Some(phys) = pages.resize(object, size, &mut |f| out(f)) {
+        let resized = self.removing(id, |pages, object, _| {
+            if let Some(phys) = pages.resize(object, size) {
                 let within = (size % PAGE) as usize;
                 // SAFETY: the last page's frame, the object's while the lock is
                 // held: zeroed past the size through the direct map, never
@@ -1154,6 +1170,20 @@ impl Drop for PagerObject {
         assert!(state.held.spare.is_empty() && state.held.draining.is_empty(), "paged: a pager went holding frames aside");
         pmm::unpromise(self.core.job(), state.held.core.pool());
     }
+}
+
+/// No space maps a paged object yet: every walk ends at its first step.
+struct Unmapped;
+
+impl Mappers for Unmapped {
+    type Node = ();
+    fn head(&self) -> Option<()> {
+        None
+    }
+    fn seen(&self, (): ()) -> u64 {
+        0
+    }
+    fn visited(&mut self, (): (), _: u64) {}
 }
 
 /// One call's reference to its pager's object.
