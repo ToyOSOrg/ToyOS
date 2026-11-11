@@ -41,5 +41,14 @@ The larger gaps have records of their own
 Evidence: #1152's evidence, `storage-integration/r10-known-gaps`
 (`osbench-a1f07627e/` and `osbench-table-a1f07627e.md`).
 
+- **Owed on metal:** both benches, `osbench_disk`'s `fs.disk.*` rows in one
+  A/B of main before and after #1236, which reads a DATA listing's inodes in
+  one pass (`issues/a-data-directory-listing-is-read-whole-for-every-readdir-request.md`).
+  On the AMD bench, unmeasured, main after must show `readdir.1000` below main
+  before on every boot. On both, no other row may resolve against main after:
+  in #1236's T14 A/B `open_close` and `stat` did (1.8 and 8 %), though the
+  code on their path is the same but for its addresses, so a second A/B is
+  where they recur or not.
+
 **Exit.** Each row within 1.1 times main's on both benches, or its cause
 shown to be inherent.
