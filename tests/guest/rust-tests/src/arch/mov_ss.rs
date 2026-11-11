@@ -57,9 +57,10 @@ mod x86_64 {
     }
 
     /// The same `TF` and `MOV SS`, with `INT1` after them: `INT1`'s own `#DB`
-    /// takes the `#DB` stack from Ring 3, and a trap the `MOV SS` held lands
-    /// on that entry's first instruction. The thread ends as a trap; nothing
-    /// here returns.
+    /// takes the `#DB` stack from Ring 3, and a trap the `MOV SS` held may
+    /// land on that entry's first instruction: AMD documents the delay (APM
+    /// Vol. 2 §8.1.4), not whether `INT1`'s own `#DB` absorbs it. The thread
+    /// ends as a trap; nothing here returns.
     pub fn single_step_over_mov_ss_into_int1() {
         // SAFETY: as `single_step_over_mov_ss_into_int3`; `.byte 0xf1` is
         // `INT1`, which this toolchain's assembler does not spell.

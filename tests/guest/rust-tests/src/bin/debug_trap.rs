@@ -27,7 +27,7 @@ const ARMS: &[(&str, &str)] = &[
     ("tf-syscall", "RFLAGS.TF across a syscall, where IA32_FMASK decides who takes the trap"),
     ("tf-mov-ss-syscall", "RFLAGS.TF across a MOV SS and the syscall after it, whose trap AMD holds into Ring 0"),
     ("tf-mov-ss-int3", "RFLAGS.TF across a MOV SS and the INT3 after it, whose trap AMD holds onto the #BP gate"),
-    ("tf-mov-ss-int1", "RFLAGS.TF across a MOV SS and the INT1 after it, whose trap AMD holds onto the #DB entry itself"),
+    ("tf-mov-ss-int1", "RFLAGS.TF across a MOV SS and the INT1 after it, whose held trap may land on the #DB entry itself"),
     ("tf-int1", "RFLAGS.TF across an INT1, whose single-step may be pending after its own #DB's delivery"),
 ];
 

@@ -37,14 +37,28 @@ each thread's GS base beside its FS base.
 **Owed on metal** (#1262; the benches were down when it was reviewed). On
 the T14 and the AMD bench, main must show:
 - `debug_trap`, on the `testcases` boot: every arm's child ends as
-  `Fault::Trap` and the machine stays up. That includes `tf-mov-ss-syscall`,
-  `tf-mov-ss-int3`, `tf-mov-ss-int1` and `tf-int1`. On the AMD bench these
-  are the CPL-0 path of the `#DB` entry, which a single-step trap held over
-  a `MOV SS` reaches (APM Vol. 2 §8.1.4) and the guest runner's Intel part
-  never takes.
+  `Fault::Trap` and the machine stays up, `tf-mov-ss-syscall`,
+  `tf-mov-ss-int3`, `tf-mov-ss-int1` and `tf-int1` among them.
+- For `tf-mov-ss-int1` and `tf-int1`, which path ended the child, read off
+  the kernel's `FAULT rip=… rsp=…` line for it and recorded here. Either is a
+  pass. `rip` and `rsp` 0 mean a held single-step landed on the `#DB`
+  entry's first instruction and its CPL-0 path rewrote the frame; the
+  user's address after the `INT1` means `INT1`'s own `#DB` ended it. A CPU
+  may hold a single-step a `MOV SS` delays over the `INT1` (APM Vol. 2
+  §8.1.4 documents the delay, not whether `INT1`'s `#DB` absorbs it), and
+  nothing documents whether one is pending after `INT1` without one.
 - `gs_segment_load`, on the `testcases` boot: all 12 selectors reported.
 - `nmi_finds_the_kernels_gs`, on the `shared-debug` boot: `nmi-user-gs: PASS`.
 - `syscall_cost`, on the `testcases` boot: within its bound.
+
+**Unobserved**: the `#DB` entry's resume into a gate it interrupted, where
+a single-step held over a `MOV SS` lands on the first instruction of
+`SYSCALL`'s entry or of the `#BP` gate (`tf-mov-ss-syscall`,
+`tf-mov-ss-int3`), has run on no machine that could show it. Those arms end
+the same way whether or not it ran, and the resume logs nothing, so no row of
+main tells. **Its exit**: a CPU that holds the trap shows the resume ran,
+through something main reports — a count of resumed CPL-0 `#DB`s that the
+kernel logs and `debug_trap`'s judge reads after those arms, say.
 
 **Exit**: on every proving machine and under TCG, a `boot-actuators` arm
 enters vector 2 at CPL 0 while the user GS base is live, between entry and its

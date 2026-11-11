@@ -119,10 +119,8 @@ struct Frame {
 }
 
 /// A `#DB` at CPL 0 on `frame`: resumed where its `rip` is an entry Ring 3
-/// reaches, whose trap it is. On `debug_entry`'s own first instruction the
-/// frame becomes a Ring 3 one, with `IF` set as every Ring 3 thread runs and
-/// the `rip` and `rsp` the overwritten frame held unknown, so its thread ends
-/// as the trap it raised.
+/// reaches, whose trap it is. On `debug_entry` itself the frame becomes a Ring
+/// 3 one, its lost `rip` and `rsp` zero, so its thread ends as a trap.
 extern "sysv64" fn deferred(frame: &mut Frame) {
     if frame.rip == debug_entry as *const () as u64 {
         *frame = Frame { rip: 0, cs: u64::from(USER_CS), rflags: 0x202, rsp: 0, ss: u64::from(USER_DS) };
