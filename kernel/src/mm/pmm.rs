@@ -301,10 +301,16 @@ pub unsafe fn discard(phys: u64) -> Discarded {
 
 /// A zeroed frame a promise held, which the promise guarantees is free.
 pub fn alloc_promised() -> Frame {
-    let frame = Frame { phys: with(Frames::alloc_promised) };
+    let frame = alloc_promised_unzeroed();
     // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
     unsafe { core::ptr::write_bytes(frame.direct_map().as_mut_ptr::<u8>(), 0, FRAME as usize) };
     frame
+}
+
+/// [`alloc_promised`]'s frame holding what its last owner left: its caller
+/// writes every byte of it before anything maps it.
+pub fn alloc_promised_unzeroed() -> Frame {
+    Frame { phys: with(Frames::alloc_promised) }
 }
 
 /// A zeroed frame for a page table of `job`'s, refused rather than take what

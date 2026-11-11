@@ -35,6 +35,14 @@ pub fn around(start: u64, end: u64, page: u64, populated: impl Fn(u64) -> bool) 
     (run.max(start), (run + AROUND).min(end))
 }
 
+/// Make `frame`, which holds what its last owner left, a copied range's page:
+/// its first `n` bytes as `read` writes them, and zeros after.
+pub fn copied_page(frame: &mut [u8], n: usize, read: impl FnOnce(&mut [u8])) {
+    let (bytes, rest) = frame.split_at_mut(n);
+    read(bytes);
+    rest.fill(0);
+}
+
 /// What a page may be used for. No variant is both writable and executable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Prot {
@@ -429,6 +437,21 @@ mod tests {
         ] {
             assert_eq!(writable.maps(Prot::Read, offset, len), maps, "{offset:#x}+{len:#x}");
             assert!(!aperture.maps(Prot::Read, offset, len), "an aperture's {offset:#x}+{len:#x}");
+        }
+    }
+
+    /// A copied page holds its bytes and zeros after them, whatever the
+    /// frame held: none of them, some and all.
+    #[test]
+    fn a_copied_page_keeps_nothing_its_frame_held() {
+        for n in [0, 100, PAGE as usize] {
+            let mut frame = vec![0xa5u8; PAGE as usize];
+            copied_page(&mut frame, n, |bytes| {
+                assert_eq!(bytes.len(), n);
+                bytes.fill(7);
+            });
+            assert!(frame[..n].iter().all(|&b| b == 7), "{n} bytes copied");
+            assert!(frame[n..].iter().all(|&b| b == 0), "zeros past {n} bytes");
         }
     }
 
