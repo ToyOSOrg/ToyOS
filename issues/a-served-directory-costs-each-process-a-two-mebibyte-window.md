@@ -40,22 +40,6 @@ refuses, and is cut to what that needs. Before that, its creation costs what
 its region's first-touch draw makes it
 (`issues/a-shared-memory-region-draws-and-zeroes-every-frame-when-it-is-made.md`).
 
-- **Owed on metal:** the first-touch region (a window's frames drawn at its
-  pages' first touch). An A/B of main before and after it on the T14 and the
-  AMD bench, of `osbench work` (`work.build_shaped.j1`, and `.j8` on the T14
-  and `.j16` on the AMD bench), `spawn_cost`, `osbench procs` and `osbench
-  files`. Main after must show `work.build_shaped.j1` and `.j<cpus>` faster on
-  both benches, and no `proc` or `fs` row slower beyond the before run's
-  spread.
-- **Owed by the object fault-around (#1259):** a region's page is drawn one
-  hold of the frame allocator's lock at a time, so a region written whole,
-  such as `proc.spawn_wait.large`'s 32 MiB image, takes 8,192 holds where
-  drawing it whole took 16. Whichever of #1259 and #1270 (the first-touch
-  region) lands second draws an object run's holes in one
-  `pmm::alloc_promised_into` hold, zeroes them outside it and installs them
-  under the region's first-touch lock. Exit: #1259's object arm populates a
-  run that way.
-
 **Exit**: the resident memory of a desktop boot's processes with and without
 their windows, measured, and the window's size justified from it or cut once
 the file-call work carries reads and writes on the paged object.

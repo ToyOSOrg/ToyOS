@@ -249,8 +249,9 @@ fn kept_supers(frames: &Frames) -> u64 {
 }
 
 /// Promise `frames` to a commitment of `job`'s, which draws each with
-/// [`alloc_promised`] or [`alloc_promised_into`] when it is first touched;
-/// `false`, and nothing promised, where that would take what is held back.
+/// [`alloc_promised`], [`alloc_promised_into`] or
+/// [`alloc_promised_zeroed_into`] when it is first touched; `false`, and
+/// nothing promised, where that would take what is held back.
 pub fn promise(job: &Job, frames: u64) -> bool {
     frames == 0 || with(|f| f.promise(job.memory(), frames))
 }
@@ -310,6 +311,16 @@ pub(super) fn alloc_promised_into(out: &mut [u64]) {
                 filled += 1;
             });
         });
+    }
+}
+
+/// `out.len()` zeroed frames promises held, drawn as
+/// [`alloc_promised_into`] draws them and zeroed outside the allocator's lock.
+pub fn alloc_promised_zeroed_into(out: &mut [u64]) {
+    alloc_promised_into(out);
+    for &phys in out.iter() {
+        // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
+        unsafe { core::ptr::write_bytes(DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, FRAME as usize) };
     }
 }
 

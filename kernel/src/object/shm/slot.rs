@@ -1,9 +1,5 @@
-//! A region's page whose frame is drawn at its first touch. A touch that finds
-//! the frame installed takes it with one load; the first touch draws it while
-//! holding the region's first-touch lock, which every first touch of the
-//! region's pages takes, so a page draws exactly once, against its own
-//! promise, and every toucher is handed that frame with what its drawer wrote
-//! into it.
+//! A region's page whose frame is drawn at its first touch, alone or with the
+//! rest of a fault's run.
 //!
 //! Compiled a second time by `kernel-loom`, so it names only atomics and takes
 //! the lock as its caller's.
@@ -36,30 +32,46 @@ impl Slot {
         Self(AtomicU64::new(HOLE))
     }
 
-    /// The page's frame: the one installed, or else `draw`'s, drawn and
-    /// installed while the guard `first_touch` answers is held, which is the
-    /// region's lock that every first touch of its pages takes.
-    pub fn frame<G>(&self, first_touch: impl FnOnce() -> G, draw: impl FnOnce() -> u64) -> u64 {
-        let installed = self.0.load(FOUND);
-        if installed != HOLE {
-            return installed;
-        }
-        let _held = first_touch();
-        // Under the lock, which orders this after any install its last holder
-        // made, and what that holder wrote into the frame.
-        let installed = self.0.load(Ordering::Relaxed);
-        if installed != HOLE {
-            return installed;
-        }
-        let drawn = draw();
-        self.0.store(drawn, INSTALL);
-        drawn
-    }
-
     /// The frame installed, or `None` for a page never touched: for the
     /// region's end, when nothing else reaches it.
     pub fn drawn(&self) -> Option<u64> {
         let frame = self.0.load(Ordering::Relaxed);
         (frame != HOLE).then_some(frame)
     }
+}
+
+/// The frame of each of `slots` into `out`: the one it holds, each taken with
+/// one load, or for every hole one of the frames a single call of `draw`
+/// writes into `drawn`, drawn and installed while the guard `first_touch`
+/// answers is held, the region's lock that every first touch of its pages
+/// takes. So a page draws once however many touches and runs ask for it.
+/// `out` and `drawn` are as long as `slots`.
+pub fn frames<G>(slots: &[&Slot], out: &mut [u64], drawn: &mut [u64], first_touch: impl FnOnce() -> G, draw: impl FnOnce(&mut [u64])) {
+    if look(slots, out, FOUND) == 0 {
+        return;
+    }
+    let _held = first_touch();
+    // Under the lock, which orders these loads after every install made
+    // under it, and what was written into those frames.
+    let holes = look(slots, out, Ordering::Relaxed);
+    if holes == 0 {
+        return;
+    }
+    let drawn = &mut drawn[..holes];
+    draw(drawn);
+    let mut drawn = drawn.iter();
+    for (slot, frame) in slots.iter().zip(out.iter_mut()).filter(|(_, frame)| **frame == HOLE) {
+        *frame = *drawn.next().expect("slot: fewer frames drawn than holes");
+        slot.0.store(*frame, INSTALL);
+    }
+}
+
+/// Each of `slots`' frames into `out`, a hole as [`HOLE`]: how many holes.
+fn look(slots: &[&Slot], out: &mut [u64], order: Ordering) -> usize {
+    let mut holes = 0;
+    for (slot, frame) in slots.iter().zip(out.iter_mut()) {
+        *frame = slot.0.load(order);
+        holes += usize::from(*frame == HOLE);
+    }
+    holes
 }

@@ -11,7 +11,7 @@
 //! process that mapped it.
 //!
 //! **A region `SYS_SHM_CREATE` makes is promised whole when it is made and
-//! draws each page's frame at its first touch** ([`SharedMemObject::page`]),
+//! draws each page's frame at its first touch** ([`SharedMemObject::pages`]),
 //! so it is refused then and never at a touch, and costs only the pages its
 //! users touch. A frame, once drawn, is the region's until its end. A device's
 //! run and an inbox's rings are drawn whole when they are made: a device
@@ -49,11 +49,14 @@ const _: () = assert!(toyos_abi::syscall::SHM_DEVICE_PAGE == PAGE_2M);
 /// are 512 KiB.
 const CHUNK: usize = 1 << 16;
 
+/// The most pages [`SharedMemObject::pages`] answers at once: a fault's run.
+const RUN: usize = (kernel::vm::AROUND / PAGE_SIZE) as usize;
+
 /// What an object's bytes are.
 enum Backing {
     /// A frame of its own for each page, drawn at the page's first touch,
     /// [`CHUNK`] slots to a piece so that no piece is past one heap
-    /// allocation, and the lock every first touch of its pages takes.
+    /// allocation, and its first-touch lock.
     Frames { pieces: Vec<Box<[Slot]>>, first_touch: Lock<()> },
     /// 2 MiB pages of its own in one physical run: what a device may be lent
     /// or granted, and what a kernel-built image addresses as one slice.
@@ -113,8 +116,10 @@ impl SharedMemObject {
     /// for memory the kernel reaches in interrupt context, an inbox's rings.
     pub fn create_whole(job: &Arc<Job>, size: u64) -> Result<Arc<Self>, SyscallError> {
         let region = Self::create(job, size)?;
-        for page in (0..region.size).step_by(PAGE_SIZE as usize) {
-            region.page(page);
+        let mut frames = [0u64; RUN];
+        for run in (0..region.size).step_by(RUN * PAGE_SIZE as usize) {
+            let n = ((region.size - run) / PAGE_SIZE).min(RUN as u64) as usize;
+            region.pages(run, &mut frames[..n]);
         }
         Ok(region)
     }
@@ -229,24 +234,48 @@ impl SharedMemObject {
     }
 
     /// The physical address of the page `offset` bytes in, which lies inside
-    /// it. A region's page nothing has touched draws its zeroed frame here,
-    /// which the page's promise holds, under the region's first-touch lock and
-    /// then the frame allocator's (a space's lock, where a fault holds one,
-    /// comes before both), so a caller is one that may take them: never in
-    /// interrupt context, and never holding either. A whole region
+    /// it, as [`pages`](Self::pages) answers it.
+    pub fn page(&self, offset: u64) -> u64 {
+        let mut frame = [0u64];
+        self.pages(offset & !(PAGE_SIZE - 1), &mut frame);
+        frame[0]
+    }
+
+    /// The physical address of each of the `out.len()` pages from `offset`, a
+    /// whole page in: at most a fault's run, all inside it. A region's pages
+    /// nothing has touched draw their zeroed frames here, which their promises
+    /// hold, together: under the region's first-touch lock and one hold of the
+    /// frame allocator's (a space's lock, where a fault holds one, comes
+    /// before both). So a caller is one that may take them: never in interrupt
+    /// context, and never holding either. A whole region
     /// ([`create_whole`](Self::create_whole)) has drawn every frame already,
     /// and any other backing draws none.
-    pub fn page(&self, offset: u64) -> u64 {
-        assert!(offset < self.size, "shm koid {}: page {offset:#x} of {:#x} bytes", self.core.koid().raw(), self.size);
-        let page = offset & !(PAGE_SIZE - 1);
+    pub fn pages(&self, offset: u64, out: &mut [u64]) {
+        let n = out.len();
+        assert!(
+            n <= RUN && offset.is_multiple_of(PAGE_SIZE) && offset < self.size && n as u64 <= (self.size - offset) / PAGE_SIZE,
+            "shm koid {}: {n} pages at {offset:#x} of {:#x} bytes",
+            self.core.koid().raw(),
+            self.size
+        );
+        if n == 0 {
+            return;
+        }
+        let at = |k: usize| offset + k as u64 * PAGE_SIZE;
         match &self.backing {
             Backing::Frames { pieces, first_touch } => {
-                let i = (page / PAGE_SIZE) as usize;
-                pieces[i / CHUNK][i % CHUNK].frame(|| first_touch.lock(), || pmm::alloc_promised().into_raw())
+                let first = (offset / PAGE_SIZE) as usize;
+                // Entries past `n` repeat the last page and go unused.
+                let slots: [&Slot; RUN] = core::array::from_fn(|k| {
+                    let i = first + k.min(n - 1);
+                    &pieces[i / CHUNK][i % CHUNK]
+                });
+                let mut drawn = [0u64; RUN];
+                slot::frames(&slots[..n], out, &mut drawn[..n], || first_touch.lock(), pmm::alloc_promised_zeroed_into);
             }
-            Backing::Run(run) => run.direct_map().phys() + page,
-            Backing::Boot { phys, .. } | Backing::Aperture { phys, .. } => phys + page,
-            Backing::Sub { whole, offset, .. } => whole.page(offset + page),
+            Backing::Run(run) => out.iter_mut().enumerate().for_each(|(k, frame)| *frame = run.direct_map().phys() + at(k)),
+            Backing::Boot { phys, .. } | Backing::Aperture { phys, .. } => out.iter_mut().enumerate().for_each(|(k, frame)| *frame = phys + at(k)),
+            Backing::Sub { whole, offset: base, .. } => whole.pages(base + offset, out),
         }
     }
 

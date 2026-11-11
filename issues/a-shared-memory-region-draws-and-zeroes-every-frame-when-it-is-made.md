@@ -32,7 +32,23 @@ drawn into the pager's index under its lock. A region's slot is never revoked
 and a pager's page is, so the two keep their own stores. The module header's
 "a fault on a mapping of one never allocates" changes with it.
 
-**Assigned**: the spawn-path work, after the batched draw lands.
+**Built** (#1270). A region's pages are slots, holes until touched;
+`SharedMemObject::pages()`, which `page()` and an object range's fault go
+through, draws the holes it is asked for under the region's first-touch lock,
+a fault's whole run in one hold of the frame allocator's lock
+(`pmm::alloc_promised_zeroed_into`, the batched form of the same promised
+draw), zeroes them outside that hold and installs each with one store. A page
+draws once however many touches and runs ask for it (`kernel-loom`'s
+`shm_slot`).
+
+- **Owed on metal:** an A/B of main before and after #1270 on the T14 and the
+  AMD bench, of `osbench work` (`work.build_shaped.j1`, and `.j8` on the T14
+  and `.j16` on the AMD bench), `spawn_cost`, `osbench procs` and `osbench
+  files`. Main after must show `work.build_shaped.j1` and `.j<cpus>` faster on
+  both benches, and no `proc` or `fs` row slower beyond the before run's
+  spread.
+
+**Assigned**: the spawn-path work, until the metal reading above is taken.
 
 **Exit**: a region's creation draws no frame and a first touch draws one,
 promised whole at creation and refused only there, but for a device's run and

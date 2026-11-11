@@ -876,7 +876,12 @@ impl AddressSpace {
                 match &entry.kind {
                     Kind::Private { committed: false } => unreachable!("space: a reservation at {page:#x} allows an access"),
                     Kind::Object { object, offset, .. } => {
-                        let phys = |at: u64| object.page(offset + (at - start));
+                        // The run's frames at once: a region's pages nothing
+                        // has touched are drawn together.
+                        let mut frames = [0u64; (vm::AROUND / PAGE_SIZE) as usize];
+                        let frames = &mut frames[..((hi - lo) / PAGE_SIZE) as usize];
+                        object.pages(offset + (lo - start), frames);
+                        let phys = |at: u64| frames[((at - lo) / PAGE_SIZE) as usize];
                         leaves.fill(lo, hi, |at| Leaf::Mapped(Mapping { phys: phys(at), prot, owned: false, cache: object.cache() }));
                         phys(page)
                     }
