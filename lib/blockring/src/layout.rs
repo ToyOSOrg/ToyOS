@@ -53,10 +53,9 @@ pub type ClientRings = (Producer<SQE_WORDS, DEPTH, RING_WORDS>, Consumer<CQE_WOR
 /// A server's two ends: requests in, completions out.
 pub type ServerRings = (Consumer<SQE_WORDS, DEPTH, RING_WORDS>, Producer<CQE_WORDS, DEPTH, RING_WORDS>);
 
-/// The client's ends of a session page, every word it owns set to 0. Done
-/// before the page is sent to a server, and again before it is sent to the
-/// next one.
-pub fn client<W: Word>(page: &[W; RING_WORDS]) -> ClientRings {
+/// The client's ends of a session page, every word it owns set to 0. A
+/// client's way to them is [`crate::ends::ClientEnds::new`].
+pub(crate) fn client<W: Word>(page: &[W; RING_WORDS]) -> ClientRings {
     (Producer::new(page, REQUESTS), Consumer::new(page, COMPLETIONS))
 }
 

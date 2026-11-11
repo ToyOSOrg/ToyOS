@@ -1,6 +1,6 @@
 //! Blocking `read`/`write` register on the object's watch before re-checking the
 //! condition — closing the check-then-block window. Each works on its object
-//! cloned out of the process's lock, which no copy and no park runs under.
+//! cloned out of the handle table's lock, which no copy and no park runs under.
 //!
 //! Buffers arrive already bounded: `super::dispatch` converts the caller's
 //! pointer and length into a [`UserBytes`]/[`UserBytesMut`] window before
@@ -39,7 +39,7 @@ enum ReadBlock {
 }
 
 /// A write of at most `BOUNCE` bytes to a pipe, made whole in the hold of the
-/// process's lock that looks its handle up, its bytes copied in before it, as
+/// handle table's lock that looks its handle up, its bytes copied in before it, as
 /// a write was before any copy left the locks: `None` for anything else, which
 /// the general path answers (copying a small write to another object again).
 fn pipe_write_now(h: RawHandle, buf: &UserBytes) -> Option<u64> {
@@ -49,8 +49,8 @@ fn pipe_write_now(h: RawHandle, buf: &UserBytes) -> Option<u64> {
     let mut bounce = PipeBounce::new();
     // A buffer that faults is the general path's to answer, after its handle.
     let src = bounce.read(buf).ok()?.bytes();
-    let (word, pipe) = process::with_process_data(|data| {
-        let KObjectRef::PipeWrite(w) = data.handles.get_ref(h, Rights::WRITE).ok()? else { return None };
+    let (word, pipe) = process::with_handles(|handles| {
+        let KObjectRef::PipeWrite(w) = handles.get_ref(h, Rights::WRITE).ok()? else { return None };
         let word = ops::pipe_written(w.pipe().put_now(src)?)?;
         Some((word, w.pipe().clone()))
     })?;
@@ -59,12 +59,12 @@ fn pipe_write_now(h: RawHandle, buf: &UserBytes) -> Option<u64> {
 }
 
 /// A read of a pipe holding at most `BOUNCE` bytes for it, taken in the hold
-/// of the process's lock that looks its handle up and copied out after it:
+/// of the handle table's lock that looks its handle up and copied out after it:
 /// `None` for anything else, which the general path answers.
 fn pipe_read_now(h: RawHandle, buf: &mut UserBytesMut) -> Option<u64> {
     let mut bounce = PipeBounce::new();
-    let (taken, pipe) = process::with_process_data(|data| {
-        let KObjectRef::PipeRead(r) = data.handles.get_ref(h, Rights::READ).ok()? else { return None };
+    let (taken, pipe) = process::with_handles(|handles| {
+        let KObjectRef::PipeRead(r) = handles.get_ref(h, Rights::READ).ok()? else { return None };
         Some((r.pipe().take_now(buf.len(), &mut bounce)?, r.pipe().clone()))
     })?;
     let n = taken.n;
@@ -121,7 +121,7 @@ fn read_block(object: &KObjectRef) -> ReadBlock {
     }
 }
 
-/// What a read's handle names, out of the process's lock: a device claim is
+/// What a read's handle names, out of the handle table's lock: a device claim is
 /// read under it, since describing one installs handles, and its answer copied
 /// out after.
 enum Readable {
@@ -130,11 +130,11 @@ enum Readable {
 }
 
 fn readable(h: RawHandle, room: usize) -> Result<Readable, crate::object::HandleError> {
-    process::with_process_data(|data| {
-        let object = data.handles.get_ref(h, Rights::READ)?;
+    process::with_handles(|handles| {
+        let object = handles.get_ref(h, Rights::READ)?;
         let KObjectRef::Device(claim) = object else { return Ok(Readable::Object(object.clone())) };
         let claim = alloc::sync::Arc::clone(claim);
-        Ok(Readable::Device(ops::read_device(&claim, &mut data.handles, room)))
+        Ok(Readable::Device(ops::read_device(&claim, handles, room)))
     })
 }
 
@@ -228,7 +228,7 @@ pub(super) fn sys_null(want: u64) -> u64 {
         Err(e) => return SyscallError::from(e).to_u64(),
     };
     let entry = crate::object::HandleEntry::new(object, rights);
-    match process::with_process_data(|data| data.handles.install(entry)) {
+    match process::with_handles(|handles| handles.install(entry)) {
         Ok(h) => h.0 as u64,
         Err(_) => SyscallError::ResourceExhausted.to_u64(),
     }

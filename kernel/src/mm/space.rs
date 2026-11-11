@@ -21,7 +21,8 @@
 //! waits on the lock, whose spin answers the shootdown, and finds it gone.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::cell::Cell;
+use core::sync::atomic::{fence, AtomicU64, Ordering::{Acquire, Relaxed}};
 
 use kernel::vm::{self, Access, Entry, Kind, Prot};
 use toyos_abi::syscall::SyscallError;
@@ -82,7 +83,8 @@ impl At {
 }
 
 /// What a space holds, read without its lock: by `SYS_SYSINFO`, by a
-/// process's statistics, and by its end's record.
+/// process's statistics, and by its end's record; and how often its leaves
+/// changed, by a futex wait ([`Translation`]).
 #[derive(Default)]
 pub struct Usage {
     /// Private frames populated now.
@@ -94,6 +96,10 @@ pub struct Usage {
     /// Faults served, and the time they took.
     faults: AtomicU64,
     fault_ns: AtomicU64,
+    /// Changes to a leaf a CPU may have cached: every one is shot down, and
+    /// counted under the lock before its shootdown, so before a frame it
+    /// gave up is freed.
+    shot_down: AtomicU64,
     /// Changes to the space's leaves that reached another CPU by interrupt,
     /// for the test kernel's `SYS_DEBUG`.
     #[cfg(feature = "test-actuators")]
@@ -190,6 +196,52 @@ impl Space {
     pub fn release_object(&self, at: UserAddr, len: u64, object: &SharedMemObject) {
         self.lock().release_object(at, len, object);
     }
+
+    /// The frame behind `va`, populated where its range allows `access`
+    /// ([`AddressSpace::reach`]), as a translation a holder can ask about
+    /// later without the lock.
+    pub fn translate(space: PageTables, va: u64, access: Access) -> Option<Translation> {
+        let (phys, at) = {
+            let mut held = space.lock();
+            let phys = held.reach(va, access)?;
+            // Counted under this hold: a change made before it is in `at`,
+            // and one after it moves the count.
+            (phys, space.usage.shot_down.load(Relaxed))
+        };
+        Some(Translation { space, va, phys, at: Cell::new(at) })
+    }
+}
+
+/// A user address's frame as a hold of its space's lock found it.
+pub struct Translation {
+    space: PageTables,
+    va: u64,
+    phys: u64,
+    /// The space's count of changes when `va` was last found mapping `phys`.
+    at: Cell<u64>,
+}
+
+impl Translation {
+    pub fn phys(&self) -> u64 {
+        self.phys
+    }
+
+    /// Whether the address still maps the frame, which is then not freed: no
+    /// leaf of the space has changed since it was last found there, or a hold
+    /// of the lock finds it there again. A load before this one is ordered
+    /// before it, so a value read from the frame was read while this held.
+    pub fn holds(&self) -> bool {
+        fence(Acquire);
+        if self.space.usage.shot_down.load(Relaxed) == self.at.get() {
+            return true;
+        }
+        let held = self.space.lock();
+        let found = held.get(self.va).is_some_and(|(phys, _)| phys == self.phys);
+        if found {
+            self.at.set(self.space.usage.shot_down.load(Relaxed));
+        }
+        found
+    }
 }
 
 pub struct AddressSpace {
@@ -206,13 +258,13 @@ pub struct AddressSpace {
 /// rarely charges anything.
 const RANGE_GRAIN: usize = 32;
 
-/// The heap one range takes, at most: its entry, the free range beside it and
-/// that one's place by length, and its place in the lists a removal gathers.
+/// The heap one range takes, at most: its entry, the free range beside it by
+/// length, and its place in the list a removal gathers, which holds up to three
+/// times its length while it doubles.
 fn range_heap() -> usize {
     charge::map_entry::<u64, SpaceEntry>()
-        + charge::map_entry::<u64, u64>()
         + charge::map_entry::<(u64, u64), ()>()
-        + 2 * core::mem::size_of::<(u64, u64, SpaceEntry)>()
+        + 3 * core::mem::size_of::<(u64, SpaceEntry)>()
 }
 
 /// What a leaf of a range with protection `prot` says, `None` for one that
@@ -379,7 +431,7 @@ impl AddressSpace {
         let inventory = &self.inventory;
         let unlinked = self.tables.unlink(start, end, |s, e| inventory.backed(s, e));
         if !unlinked.is_empty() {
-            self.tables.shoot_down(start, end, &unlinked);
+            self.shoot_down(start, end, &unlinked);
         }
         self.tables.free(unlinked);
         Err(SyscallError::ResourceExhausted)
@@ -526,7 +578,7 @@ impl AddressSpace {
             Leaf::Held(_) | Leaf::Empty => None,
         });
         if present {
-            self.tables.shoot_down(start, end, &Unlinked::none());
+            self.shoot_down(start, end, &Unlinked::none());
         }
         let mut freed = 0;
         let inventory = &self.inventory;
@@ -684,6 +736,7 @@ impl AddressSpace {
     /// Every CPU has dropped what it cached of `[start, end)` and of the
     /// tables `unlinked` took out.
     fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) {
+        self.usage.shot_down.fetch_add(1, Relaxed);
         let _reached = self.tables.shoot_down(start, end, unlinked);
         #[cfg(feature = "test-actuators")]
         if _reached {
@@ -790,30 +843,32 @@ impl AddressSpace {
                 leaves.set(page, Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal }));
                 phys
             }
-            Leaf::Empty => match &entry.kind {
-                Kind::Private { committed: false } => unreachable!("space: a reservation at {page:#x} allows an access"),
-                Kind::Object { object, offset, .. } => {
-                    let phys = object.page(offset + (page - start));
-                    leaves.set(page, Leaf::Mapped(Mapping { phys, prot, owned: false, cache: object.cache() }));
-                    phys
+            Leaf::Empty => {
+                // A neighbour in the next table down or up is another run's.
+                let (lo, hi) = vm::around(start, entry.end, page, |at| leaves.covers(at) && leaves.get(at) != Leaf::Empty);
+                match &entry.kind {
+                    Kind::Private { committed: false } => unreachable!("space: a reservation at {page:#x} allows an access"),
+                    Kind::Object { object, offset, .. } => {
+                        let phys = |at: u64| object.page(offset + (at - start));
+                        leaves.fill(lo, hi, |at| Leaf::Mapped(Mapping { phys: phys(at), prot, owned: false, cache: object.cache() }));
+                        phys(page)
+                    }
+                    Kind::Private { committed: true } | Kind::Copy { .. } => {
+                        let (mut filled, mut own) = (0, 0);
+                        leaves.fill(lo, hi, |at| {
+                            let phys = owned_frame(start, entry, at);
+                            filled += 1;
+                            if at == page {
+                                own = phys;
+                            }
+                            Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal })
+                        });
+                        assert_ne!(own, 0, "space: {page:#x} touched and not filled");
+                        self.usage.populated(filled);
+                        own
+                    }
                 }
-                Kind::Private { committed: true } | Kind::Copy { .. } => {
-                    // A neighbour in the next table down or up is another run's.
-                    let (lo, hi) = vm::around(start, entry.end, page, |at| leaves.covers(at) && leaves.get(at) != Leaf::Empty);
-                    let (mut filled, mut own) = (0, 0);
-                    leaves.fill(lo, hi, |at| {
-                        let phys = owned_frame(start, entry, at);
-                        filled += 1;
-                        if at == page {
-                            own = phys;
-                        }
-                        Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal })
-                    });
-                    assert_ne!(own, 0, "space: {page:#x} touched and not filled");
-                    self.usage.populated(filled);
-                    own
-                }
-            },
+            }
         };
         Some(phys + va % PAGE_SIZE)
     }

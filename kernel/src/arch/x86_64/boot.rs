@@ -67,6 +67,7 @@ pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     microcode::load(0);
 
     let rule = match cpu::vendor() {
+        _ if crate::actuator::copies_go_down() => copy::Rule { window: 4096 },
         kernel::cpu::Vendor::Amd => copy::Rule::AMD,
         kernel::cpu::Vendor::Intel | kernel::cpu::Vendor::Other(_) => copy::Rule::NEVER,
     };

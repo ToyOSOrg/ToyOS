@@ -545,19 +545,20 @@ mod checks {
         let t14 = |cpu: u32| (cpu, T14);
         let amd = |cpu: u32| (cpu, if cpu.is_multiple_of(2) { AMD } else { AMD_SIBLING });
 
-        let judged = |loader: &str, what: &str, lines: &[(u32, &str)], cpus: u32, says: &str| {
-            match microcode_on_metal(loader, &log(lines), cpus) {
+        let judged = |bench: Bench, loader: &str, what: &str, lines: &[(u32, &str)], cpus: u32, says: &str| {
+            match microcode_on_metal(bench, loader, &log(lines), cpus) {
                 Ok(()) => Err(format!("{what} was accepted")),
                 Err(e) if e.contains(says) => Ok(()),
                 Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
             }
         };
-        let refused = |what: &str, lines: &[(u32, &str)], cpus: u32, says: &str| judged(T14_LOADER, what, lines, cpus, says);
-        let amd_refused = |what: &str, lines: &[(u32, &str)], says: &str| judged(AMD_LOADER, what, lines, 8, says);
+        let refused =
+            |what: &str, lines: &[(u32, &str)], cpus: u32, says: &str| judged(Bench::T14, T14_LOADER, what, lines, cpus, says);
+        let amd_refused = |what: &str, lines: &[(u32, &str)], says: &str| judged(Bench::Amd, AMD_LOADER, what, lines, 8, says);
 
-        microcode_on_metal(T14_LOADER, &log(&(0..8).map(t14).collect::<Vec<_>>()), 8)
+        microcode_on_metal(Bench::T14, T14_LOADER, &log(&(0..8).map(t14).collect::<Vec<_>>()), 8)
             .map_err(|e| format!("the T14 at Intel's 0xbe was refused: {e}"))?;
-        microcode_on_metal(AMD_LOADER, &log(&(0..8).map(amd).collect::<Vec<_>>()), 8)
+        microcode_on_metal(Bench::Amd, AMD_LOADER, &log(&(0..8).map(amd).collect::<Vec<_>>()), 8)
             .map_err(|e| format!("the AMD bench at AMD's 0x860010d was refused: {e}"))?;
 
         refused("seven lines for eight CPUs", &(0..7).map(t14).collect::<Vec<_>>(), 8, "one microcode line")?;
@@ -577,12 +578,12 @@ mod checks {
         let handed_none = (0..8)
             .map(|cpu| (cpu, "Intel signature 0x806c1 platform 7 found 0xbe loads nothing: the loader handed no patch running 0xbe"))
             .collect::<Vec<_>>();
-        match microcode_on_metal(none, &log(&handed_none), 8) {
+        match microcode_on_metal(Bench::T14, none, &log(&handed_none), 8) {
             Ok(()) => return Err("a T14 whose loader handed no patch was accepted".into()),
             Err(e) if e.contains("loader.log does not say") => {}
             Err(e) => return Err(format!("a T14 whose loader handed no patch was refused for the wrong reason: {e}")),
         }
-        judged(AMD_LOADER, "a T14 whose loader handed the AMD bench's patch", &(0..8).map(t14).collect::<Vec<_>>(), 8, "loader.log does not say")?;
+        judged(Bench::T14, AMD_LOADER, "a T14 whose loader handed the AMD bench's patch", &(0..8).map(t14).collect::<Vec<_>>(), 8, "loader.log does not say")?;
         let flipped: Vec<_> = (0..8)
             .map(|cpu| (cpu, "Amd signature 0x860f01 found 0x8600106 refused 0x860010d with #GP(0x0) running 0x8600106"))
             .collect();
@@ -595,13 +596,8 @@ mod checks {
         amd_refused("an AMD CPU that did not write its patch", &unwritten, "loaded 0x860010d")?;
         let mut other: Vec<_> = (0..8).map(t14).collect();
         other[2] = (2, "Intel signature 0x806c2 platform 7 found 0xbe current 0xbe running 0xbe");
-        refused("two signatures in one machine", &other, 8, "is not")?;
-        refused(
-            "a machine that is no bench",
-            &[(0, "Intel signature 0x906a3 platform 7 found 0x4 current 0x4 running 0x4"), (1, "Intel signature 0x906a3 platform 7 found 0x4 current 0x4 running 0x4")],
-            2,
-            "no bench",
-        )?;
+        refused("a CPU of another signature than its bench's", &other, 8, "is not")?;
+        amd_refused("the T14's lines read as the AMD bench's", &(0..8).map(t14).collect::<Vec<_>>(), "is not")?;
         eprintln!("  [microcode] the verdict refuses 12 machines and accepts both benches");
         Ok(())
     }
@@ -703,7 +699,8 @@ mod checks {
         }
         assert!(dates_carry_the_loaders_reading(&loader("2026-09-29 18:22:37"), RATE, "[12.165 cpu0 kernel] undated\n").is_err());
 
-        let boot = metal::Readback::new("boot", String::new(), String::new(), &metal_checks::boot_file()).expect("a readback");
+        let boot = metal::Readback::new("boot", String::new(), metal_checks::ON_T14.into(), &metal_checks::boot_file())
+            .expect("a readback");
         assert_eq!(bench_clock_keeps_utc(read, boot.ran_within()), Ok(()));
         let east = carried("2026-09-29 20:22:37", "2026-09-29 20:22:39").expect("a bench off UTC carries its reading too");
         for off in [east, read - 900] {
@@ -1013,8 +1010,8 @@ mod checks {
             let (machine, screen) = select(filters);
             machine
                 .iter()
-                .map(|n| n.to_string())
-                .chain(screen.iter().map(|(n, _)| n.to_string()))
+                .map(|(n, _)| n.to_string())
+                .chain(screen.iter().map(|(n, _, _)| n.to_string()))
                 .collect()
         };
         let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
@@ -1161,6 +1158,31 @@ mod checks {
     }
 
     #[test]
+    fn metal_bench_takes_its_own_rows_and_names_the_rest() {
+        metal_checks::a_bench_takes_its_own_rows_and_names_the_rest();
+    }
+
+    #[test]
+    fn metal_profile_gives_each_bench_its_own_jobs() {
+        metal_checks::the_profile_gives_each_bench_its_own_jobs();
+    }
+
+    #[test]
+    fn metal_runs_bench_is_its_readbacks_and_else_the_lines() {
+        metal_checks::a_runs_bench_is_its_readbacks_and_else_the_lines();
+    }
+
+    #[test]
+    fn metal_judge_names_the_bench_it_judged() {
+        metal_checks::a_judge_names_the_bench_it_judged();
+    }
+
+    #[test]
+    fn metal_each_benchs_own_readback_is_judged_as_that_bench() {
+        metal_checks::each_benchs_own_readback_is_judged_as_that_bench();
+    }
+
+    #[test]
     fn metal_loader_kernel_and_program_count_from_one_zero() {
         metal_checks::the_loader_the_kernel_and_a_program_count_from_one_zero();
     }
@@ -1179,7 +1201,8 @@ mod checks {
             .find(|(name, _)| *name == "memory_overwrite_requested")
             .map(|(name, decl)| vec![(*name, decl)])
             .ok_or_else(|| "memory_overwrite_requested is not registered".to_string())?;
-        let verdict = metal::run(mode, None, &selected, &[], &[], true);
+        let taken = metal::Taken { rows: selected, shared: Vec::new(), left: Vec::new() };
+        let verdict = metal::run(mode, Bench::T14, Bench::T14.host(), &taken, &[], true);
         if verdict != metal::Verdict::Green {
             return Err(format!("--metal --list produced {verdict:?}, not Green"));
         }
@@ -1194,9 +1217,10 @@ mod checks {
         }
     }
 
-    /// One boot's readback, out of a `loader.log` and a `logkeeper` text.
+    /// One T14 boot's readback, out of a `loader.log` and a `logkeeper` text.
     fn readback(label: &str, loader: &str, log: &str) -> metal::Readback {
-        metal::Readback::new(label, loader.into(), log.into(), &metal_checks::boot_file())
+        let log = format!("{}{log}", metal_checks::ON_T14);
+        metal::Readback::new(label, loader.into(), log, &metal_checks::boot_file())
             .expect("a boot file as the loop writes it")
     }
 

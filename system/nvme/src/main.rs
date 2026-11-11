@@ -28,12 +28,7 @@ use toyos_blockserve::{Device, Sessions};
 
 mod nvme;
 
-use nvme::{Controller, Done, Owner};
-
-/// How long a command may go unanswered before the controller is reset to
-/// take it back. Policy: NVMe defines no per-command bound, and a flush of a
-/// large cache is the slowest thing a healthy drive does.
-const COMMAND_SILENCE: Duration = Duration::from_secs(10);
+use nvme::{Controller, Done, Owner, COMMAND_SILENCE};
 
 /// How long the stop's normal shutdown is given: a policy, below the
 /// supervisor's wait for every disk driver (`toyos_quiesce::DRIVERS_MS`).

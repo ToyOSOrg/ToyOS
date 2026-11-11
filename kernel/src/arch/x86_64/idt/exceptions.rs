@@ -550,7 +550,7 @@ pub(super) fn page_fault_handler(frame: &mut TrapFrame) {
 
 /// A user copy's fault on `addr` (`arch::uaccess`): served as the process's
 /// own fault would be, after which the copy resumes where it stopped, or else
-/// resumed at `fixup`, which answers the bytes not copied. The copy was made
+/// resumed at `fixup`, which answers that the copy failed. The copy was made
 /// holding no lock at its syscall's depth (`user_ptr`), so the service runs at
 /// that depth too.
 fn user_copy_fault(frame: &mut TrapFrame, addr: u64, fixup: u64) {

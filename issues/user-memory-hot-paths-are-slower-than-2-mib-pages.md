@@ -10,11 +10,11 @@ User memory moved from 2 MiB pages filled when mapped to 4 KiB pages filled
 at first touch (`kernel/src/mm/space.rs`). Each of these costs more than it
 did; the T14's numbers are below:
 
-- **Faults.** A touch beside a populated page of a private range fills its
-  aligned 64 KiB run (`kernel::vm::around`), so memory touched in order takes
-  a fault per 16 pages; a lone touch is still one fault per page. Each fault
-  takes the space's lock, an inventory lookup, one table walk and, per frame,
-  the frame allocator's one lock
+- **Faults.** A touch beside a populated page fills its aligned 64 KiB run
+  (`kernel::vm::around`), or maps it in a range of a memory object, so memory
+  touched in order takes a fault per 16 pages; a lone touch is still one fault
+  per page. Each fault takes the space's lock, an inventory lookup, one table
+  walk and, per frame, the frame allocator's one lock
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`)
   and a 4 KiB zeroing. Probed on the T14 at `b48c7dd9d` (scratch probe, one
   frame per fault): about 345 ns from the trap handler's entry to its return —
@@ -46,8 +46,9 @@ did; the T14's numbers are below:
   held an owned frame (at most 512 frames each), whether or not anything waits.
 - **Commits.** A committed range's tables are built when it is made, under the
   space's lock: 1/512 of the range.
-- **Copies.** One round trip of the space's lock per 16 pages, plus an
-  inventory lookup and a table walk per page.
+- **Copies.** A copy into memory nothing has touched takes the faults a touch
+  would, one per 64 KiB run, each an exception's delivery and return on top
+  of a touch's. Into present pages it takes none.
 - **Spawn.** A segment is copied a page at a time at first touch, so while a
   child lives the image is held twice: once by the spawner's object or the
   `/tmp` file's snapshot, which the child's ranges keep alive, and once
@@ -124,9 +125,42 @@ The faults and `mem.anon.total` are now ahead of Linux on both benches. Behind:
 `issues/many-osbench-rows-on-the-amd-bench-are-bimodal-per-boot.md` says
 what its modes are.
 
+**Where `mem.map_unmap_4k` goes, 2026-11-11** ([evidence](https://github.com/ToyOSOrg/evidence/tree/cf6a882c04a646a8998e3bf0ad66e9f699b8e8aa/memperf/diagnosis)):
+stage probes at 31eb5416b, one boot a bench. Of the T14's 2,070 ns the
+inventory's insert took 735 and its removal 720 (`kernel/pure/vm.rs`; 515
+and 504 on the AMD bench), and the two calls' entry, dispatch, lock and exit
+about 300. No table is built or unlinked and nothing is flushed: best fit
+places the page in a span that already has tables. `mem.munmap_part.4k`'s
+removal took 665 of its 1,398 ns. The inventory kept its free ranges twice,
+by start and by length, rewrote both on every change, and listed a removal's
+starts before taking them; it now keeps them once, by length
+([evidence](https://github.com/ToyOSOrg/evidence/tree/fffbc92ad7894c5c3c3867be65a655899a6f1e5b/memperf/inventory)).
+On the host, under load, one page's insert went from 116-176 to 50-82 ns and
+its removal from 148-177 to 105-145, with one allocation where there were
+two.
+
+- **Owed on metal:** an A/B on both benches of `osbench_system` and
+  `osbench_mem`, main from before and after the single free index. Main after
+  must read `mem.map_unmap_4k` and `mem.munmap_part.4k` faster, and no other
+  row of the two groups slower; rows that map and unmap may improve. Until
+  then the gain on metal is unmeasured.
+
 Owner: the memory track. Exit: each path above measured on the T14 at a
 change and at its base, and against Linux; a regression is fixed or its cost
 accepted by the owner, or by the coordinator for an implementation tradeoff,
 which the owner delegated on 2026-10-23. Cheap remedies when measurement asks: a
 per-CPU frame cache, a count of armed futex waiters that lets a clear
 with none skip the buckets, and tables built at the first touch of their span.
+
+- **Owed on metal:** #1245, which drops the paged read's pass that faulted its
+  destination in and its third pass of the pager's lock, is not measured on
+  metal; its speed-up is a prediction. Owed: one A/B of main from before and
+  after it on both benches, four boots a side, each running `osbench pipeab`
+  (the measurement-only commit on `pipeperf-ab-base`). A row changes where all
+  four paired boots move one way and their median ratio is beyond 1 ± 3%.
+  Main after must show `ab.fs.memory.pread.8.d0` and
+  `ab.fs.memory.pread.1048576.d0` lower (predicted: about 45 ns of 470 to 520,
+  and 5 to 9%); `ab.fs.memory.fresh.*` and `ab.fs.memory.shm.*`, reads into
+  memory nothing has touched and the price of the change, unchanged or their
+  loss recorded here against the gain; and main's `testcases` and
+  `shared-debug` boots passing on both benches.

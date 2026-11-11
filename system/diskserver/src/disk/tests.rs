@@ -233,3 +233,46 @@ fn answers_reach_the_tasks_that_asked_whatever_their_order() {
     assert_eq!(exec.run_until_stalled(), 0);
     assert_eq!((first.get(), second.get()), (1, 2));
 }
+
+/// **A write's requests are in flight together**: all asked before the
+/// first is answered, so the device holds as many as the session carries,
+/// and the write ends with the last answer, whatever order they come in.
+#[test]
+fn a_write_past_one_request_asks_them_all_before_any_is_answered() {
+    let disk = Served::new(Script::new(80));
+    let data: Vec<Block> = (0..70).map(|i| [i as u8; BLOCK]).collect();
+    let exec = Executor::new();
+    let done = Rc::new(Cell::new(None));
+    {
+        let (disk, data, done) = (&disk, &data, Rc::clone(&done));
+        exec.spawn(async move { done.set(Some(disk.write(4, data).await)) });
+    }
+    assert_eq!(exec.run_until_stalled(), 1);
+    let on_the_wire: Vec<_> = disk.link.borrow().wire.iter().map(|(_, asked)| match asked {
+        Asked::Write { lba, data } => (*lba, data.len() / BLOCK),
+        other => panic!("asked {other:?}"),
+    }).collect();
+    assert_eq!(on_the_wire, [(4, 32), (36, 32), (68, 6)], "every request of the write, before any answer");
+    assert_eq!(done.get(), None);
+    disk.progress(true);
+    assert_eq!(exec.run_until_stalled(), 0);
+    assert_eq!(done.get(), Some(Ok(())));
+    assert!(disk.link.borrow().disk[4 * BLOCK..74 * BLOCK].chunks(BLOCK).enumerate().all(|(i, b)| b.iter().all(|&x| x == i as u8)));
+}
+
+/// A session that ends under a write's requests has each asked again, and
+/// the write still ends once.
+#[test]
+fn a_write_whose_requests_met_a_session_end_asks_each_again() {
+    let mut script = Script::new(80);
+    script.ends.push_back(0);
+    let disk = Served::new(script);
+    now(&disk, disk.write(0, &blocks(7, 70))).unwrap();
+    let log = disk.link.borrow().log.clone();
+    let lbas: Vec<u64> = log.iter().map(|asked| match asked {
+        Asked::Write { lba, .. } => *lba,
+        other => panic!("asked {other:?}"),
+    }).collect();
+    assert_eq!(lbas, [0, 32, 64, 0, 32, 64]);
+    assert!(disk.link.borrow().disk[..70 * BLOCK].iter().all(|&b| b == 7));
+}

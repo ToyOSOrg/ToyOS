@@ -5,7 +5,10 @@
 //! **Every request asked for is answered exactly once**, by [`Client::complete`]
 //! or by [`Client::session_ended`], and never twice: a completion for a tag
 //! that is not on the wire is the server breaking the session
-//! ([`Violation::Tag`]), not a second answer.
+//! ([`Violation::Tag`]), not a second answer. So is a word no server says of
+//! the request it names ([`Violation::Entry`]): [`Status::Lost`] of anything
+//! but a flush, or [`Status::ReadOnly`] of anything but a caller's write. Its
+//! request stays on the wire, for the session's end to answer.
 //!
 //! **The arena holds only what is on the wire.** A read or a write is given
 //! its arena blocks as it goes out ([`Client::next_request`]'s `place`) and
@@ -40,7 +43,15 @@
 //! **What was on the wire when a session ended is answered
 //! [`Outcome::Refused`]**: a write it took may or may not be on the disk, and
 //! the caller is told so rather than told either. What had not yet been put on
-//! the wire waits for the next session, unchanged.
+//! the wire waits for the next session, unchanged. A session that ended with
+//! nothing on the wire ended over the first request waiting to go, which is
+//! treated as if it had been on it.
+//!
+//! **A session's end is a failed attempt**, as a device's refusal is, of each
+//! flush and each write issued again that it took with it, so a server that
+//! ends every session over the same one cannot hold it, or the requests
+//! behind it, for good: past [`MAX_ATTEMPTS`] the flush is answered
+//! [`Outcome::Device`] and the write is given up.
 //!
 //! **Requests in flight at once are unordered.** A caller must not have two in
 //! flight whose ranges overlap when either is a write, nor reuse arena blocks
@@ -76,9 +87,10 @@ pub enum Placing<'a, P> {
 /// The caller's name for one thing it asked for.
 pub type Ticket = u64;
 
-/// How many times a flush is asked again after a loss before its caller is
-/// told the device would not make its writes durable, and how many times one
-/// write is issued again before the same.
+/// How many times a flush is asked again after it failed, on the device or
+/// with its session, before its caller is told the device would not make its
+/// writes durable, and how many times one write is issued again before the
+/// same.
 pub const MAX_ATTEMPTS: u32 = 4;
 
 /// What became of one ticket.
@@ -172,6 +184,17 @@ impl<P> Sent<P> {
         match self.op {
             Op::Read { run, .. } | Op::Write { run, .. } => Some(run),
             Op::Flush => None,
+        }
+    }
+
+    /// Whether a server says `status` of this request: [`Status::Lost`] only
+    /// of a flush, and [`Status::ReadOnly`] only of a caller's write, which a
+    /// write issued again is not: the grant took it once.
+    fn admits(&self, status: Status) -> bool {
+        match status {
+            Status::Ok | Status::Invalid | Status::Device => true,
+            Status::Lost => self.op == Op::Flush,
+            Status::ReadOnly => matches!((self.queued.kind, self.op), (Kind::User(_), Op::Write { .. })),
         }
     }
 }
@@ -316,17 +339,18 @@ impl<P: Clone, const D: usize> Client<P, D> {
         Some(Request { op, tag })
     }
 
-    /// What the server answered.
+    /// What the server answered. A completion refused answers nothing: the
+    /// session is over, and [`Self::session_ended`] answers what it named.
     pub fn complete(&mut self, completion: Completion) -> Result<(), Violation> {
-        let sent = self.wire.answer(completion.tag)?;
+        let sent = self.wire.answer_admitted(completion.tag, |sent| sent.admits(completion.status))?;
         // Answered, whatever the word: its arena blocks are free once a read's
         // data has been taken, which the caller does before it releases them.
         self.released.extend(sent.run());
         let Sent { queued, op, covers, losses } = sent;
         match (queued.kind, completion.status) {
             (Kind::User(ticket), Status::Ok) => {
-                match (queued.ask, op) {
-                    (Ask::Write { lba, blocks, payload }, Op::Write { .. }) => {
+                match queued.ask {
+                    Ask::Write { lba, blocks, payload } => {
                         let seq = self.bump();
                         self.kept += u64::from(blocks);
                         let acked = Acked { lba, blocks, payload, first: seq, seq, attempts: 0 };
@@ -340,8 +364,8 @@ impl<P: Clone, const D: usize> Client<P, D> {
                             self.acked.push_back(acked);
                         }
                     }
-                    (Ask::Read { .. }, Op::Read { .. }) => {}
-                    _ => return Err(Violation::Entry),
+                    Ask::Read { .. } => {}
+                    Ask::Flush => unreachable!("blockring: a caller's flush is not sent as its read or write"),
                 }
                 self.answers.push_back((ticket, Outcome::Done));
             }
@@ -349,18 +373,14 @@ impl<P: Clone, const D: usize> Client<P, D> {
                 let outcome = match status {
                     Status::Invalid => Outcome::Invalid,
                     Status::Device => Outcome::Device,
-                    Status::ReadOnly if matches!(op, Op::Write { .. }) => Outcome::ReadOnly,
-                    // A read or a write answered `Lost`, or a read answered
-                    // `ReadOnly`, is a server that does not know which op it
-                    // was.
-                    Status::ReadOnly | Status::Lost | Status::Ok => return Err(Violation::Entry),
+                    Status::ReadOnly => Outcome::ReadOnly,
+                    Status::Lost | Status::Ok => unreachable!("blockring: {status:?} admitted for a caller's {op:?}"),
                 };
                 self.answers.push_back((ticket, outcome));
             }
-            // A write the session took once, refused by the same grant on its
-            // way again, or a flush refused as a write: a server that does
-            // not know what it granted.
-            (Kind::Reissue { .. } | Kind::Flush(_) | Kind::Pushback, Status::ReadOnly) => return Err(Violation::Entry),
+            (Kind::Reissue { .. } | Kind::Flush(_) | Kind::Pushback, Status::ReadOnly) => {
+                unreachable!("blockring: ReadOnly admitted for {:?}", queued.kind)
+            }
             (Kind::Reissue { .. }, Status::Ok) => {
                 let seq = self.bump();
                 let acked = queued.acked(seq);
@@ -372,19 +392,7 @@ impl<P: Clone, const D: usize> Client<P, D> {
                     self.insert_acked(acked);
                 }
             }
-            (Kind::Reissue { .. }, _) => {
-                let mut acked = queued.acked(0);
-                acked.attempts += 1;
-                if acked.attempts > MAX_ATTEMPTS {
-                    // The device will not take the only copy there is: every
-                    // flush waiting is told so, and the write is gone.
-                    self.kept -= u64::from(acked.blocks);
-                    self.gave_up = true;
-                    self.fail_waiting_flushes();
-                } else {
-                    self.requeue_reissue(acked);
-                }
-            }
+            (Kind::Reissue { .. }, _) => self.reissue_failed(queued),
             // A flush that succeeded after a loss it was sent before covers
             // writes that are being issued again: it is asked again, after them.
             (kind @ (Kind::Flush(_) | Kind::Pushback), Status::Ok) if losses != self.losses => self.queue_flush(kind),
@@ -402,54 +410,42 @@ impl<P: Clone, const D: usize> Client<P, D> {
             }
             (Kind::Flush(ticket), _) => {
                 self.lost();
-                let attempts = self.attempts.entry(ticket).or_insert(0);
-                *attempts += 1;
-                if *attempts > MAX_ATTEMPTS {
-                    self.attempts.remove(&ticket);
-                    self.answers.push_back((ticket, Outcome::Device));
-                } else {
-                    self.queue_flush(Kind::Flush(ticket));
-                }
+                self.flush_failed(ticket);
             }
             (Kind::Pushback, _) => {
                 self.lost();
-                // A caller's flush that covered the writes since has made it
-                // moot: nothing waits on it.
-                if let Pushback::Asked(failed) = self.pushback {
-                    if failed + 1 > MAX_ATTEMPTS {
-                        self.pushback = Pushback::Failed;
-                    } else {
-                        self.pushback = Pushback::Asked(failed + 1);
-                        self.queue_flush(Kind::Pushback);
-                    }
-                }
+                self.pushback_failed();
             }
         }
         Ok(())
     }
 
-    /// The session is over: the server hung up, broke the protocol, or died.
+    /// The session is over: the server hung up, broke the protocol, went
+    /// silent, or died.
     pub fn session_ended(&mut self) {
         self.up = false;
-        let mut wire = Vec::new();
-        self.wire.end(|_, sent| wire.push(sent));
-        let mut flushes = Vec::new();
-        for sent in wire {
-            self.released.extend(sent.run());
-            match sent.queued.kind {
+        let mut taken = Vec::new();
+        self.wire.end(|_, sent| taken.push(sent));
+        self.released.extend(taken.iter().filter_map(Sent::run));
+        let mut taken: Vec<Queued<P>> = taken.into_iter().map(|sent| sent.queued).collect();
+        if taken.is_empty() {
+            taken.extend(self.outbox.pop_front());
+        }
+        // Flushes first, so a write given up below answers them at once.
+        taken.sort_by_key(|q| matches!(q.kind, Kind::Reissue { .. }));
+        self.lost();
+        for queued in taken {
+            match queued.kind {
                 Kind::User(ticket) => {
                     #[cfg(not(feature = "mutate-session-end-forgets"))]
                     self.answers.push_back((ticket, Outcome::Refused));
                     #[cfg(feature = "mutate-session-end-forgets")]
                     let _ = ticket;
                 }
-                Kind::Reissue { .. } => self.requeue_reissue(sent.queued.acked(0)),
-                kind @ (Kind::Flush(_) | Kind::Pushback) => flushes.push(kind),
+                Kind::Reissue { .. } => self.reissue_failed(queued),
+                Kind::Flush(ticket) => self.flush_failed(ticket),
+                Kind::Pushback => self.pushback_failed(),
             }
-        }
-        self.lost();
-        for kind in flushes {
-            self.queue_flush(kind);
         }
     }
 
@@ -472,6 +468,17 @@ impl<P: Clone, const D: usize> Client<P, D> {
     /// Arena runs nothing will read or write again.
     pub fn take_released(&mut self) -> impl Iterator<Item = Run> + '_ {
         self.released.drain(..)
+    }
+
+    /// Something asked for is waiting or on the wire: a completion is owed
+    /// before the caller hears of it.
+    pub fn owed(&self) -> bool {
+        !self.outbox.is_empty() || self.wire.values().next().is_some()
+    }
+
+    /// Answers are decided that [`Self::take_answers`] has not taken.
+    pub fn answered(&self) -> bool {
+        !self.answers.is_empty()
     }
 
     /// Nothing is waiting, on the wire, or held for a flush.
@@ -540,6 +547,49 @@ impl<P: Clone, const D: usize> Client<P, D> {
             let acked = core::mem::take(&mut self.acked);
             for a in acked {
                 self.requeue_reissue(a);
+            }
+        }
+    }
+
+    /// A write issued again failed: it goes again, or past [`MAX_ATTEMPTS`]
+    /// the device will not take the only copy there is, every flush waiting
+    /// is told so, and the write is gone.
+    fn reissue_failed(&mut self, queued: Queued<P>) {
+        let mut acked = queued.acked(0);
+        acked.attempts += 1;
+        if acked.attempts > MAX_ATTEMPTS {
+            self.kept -= u64::from(acked.blocks);
+            self.gave_up = true;
+            self.fail_waiting_flushes();
+        } else {
+            self.requeue_reissue(acked);
+        }
+    }
+
+    /// An attempt at the caller's flush `ticket` failed: it is asked again, or
+    /// past [`MAX_ATTEMPTS`] answered [`Outcome::Device`].
+    fn flush_failed(&mut self, ticket: Ticket) {
+        let attempts = self.attempts.entry(ticket).or_insert(0);
+        *attempts += 1;
+        if *attempts > MAX_ATTEMPTS {
+            self.attempts.remove(&ticket);
+            self.answers.push_back((ticket, Outcome::Device));
+        } else {
+            self.queue_flush(Kind::Flush(ticket));
+        }
+    }
+
+    /// An attempt at the client's own flush failed: it is asked again, or past
+    /// [`MAX_ATTEMPTS`] writes that meet the limit are refused. A caller's
+    /// flush that covered the writes since has made it moot: nothing waits on
+    /// it.
+    fn pushback_failed(&mut self) {
+        if let Pushback::Asked(failed) = self.pushback {
+            if failed + 1 > MAX_ATTEMPTS {
+                self.pushback = Pushback::Failed;
+            } else {
+                self.pushback = Pushback::Asked(failed + 1);
+                self.queue_flush(Kind::Pushback);
             }
         }
     }
@@ -746,11 +796,74 @@ mod tests {
         assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::ReadOnly)]);
         assert_eq!(client.take_released().collect::<Vec<_>>(), [run_of(1, 1)]);
         assert_eq!(client.kept(), 0);
-        for ask in [Ask::Read { lba: 0, blocks: 1 }, Ask::Flush] {
-            client.submit(2, ask);
+        for (ticket, ask) in [(2, Ask::Read { lba: 0, blocks: 1 }), (3, Ask::Flush)] {
+            client.submit(ticket, ask);
             let r = next(&mut client).unwrap();
             assert_eq!(client.complete(Completion { tag: r.tag, status: Status::ReadOnly }), Err(Violation::Entry));
         }
+        assert_eq!(client.take_answers().count(), 0);
+        client.session_ended();
+        assert_eq!(client.take_answers().collect::<Vec<_>>(), [(2, Outcome::Refused)], "the flush is asked again");
+    }
+
+    /// A write issued again and answered `ReadOnly` or `Lost`, words no
+    /// server says of it, is refused on the wire, so the session's end keeps
+    /// it to issue again: it is the only copy.
+    #[test]
+    fn a_reissue_answered_a_word_no_server_says_of_it_is_kept() {
+        let mut client = up(ROOMY);
+        client.submit(1, write(1, 0, 1));
+        let w = next(&mut client).unwrap();
+        answer(&mut client, w, Status::Ok);
+        client.session_ended();
+        client.session_started();
+        for status in [Status::ReadOnly, Status::Lost] {
+            let again = next(&mut client).unwrap();
+            assert_eq!(again.op, Op::Write { run: run_of(1, 1), lba: 0 });
+            assert_eq!(client.complete(Completion { tag: again.tag, status }), Err(Violation::Entry), "{status:?}");
+            client.session_ended();
+            client.session_started();
+        }
+        assert_eq!(next(&mut client).unwrap().op, Op::Write { run: run_of(1, 1), lba: 0 });
+        assert_eq!(client.kept(), 1);
+    }
+
+    /// A caller's flush on the wire at every session's end: each end is an
+    /// attempt, and past [`MAX_ATTEMPTS`] it is answered `Device`.
+    #[test]
+    fn a_flush_every_session_ends_over_is_answered_device() {
+        let mut client = up(ROOMY);
+        client.submit(1, Ask::Flush);
+        for _ in 0..=MAX_ATTEMPTS {
+            assert_eq!(client.take_answers().count(), 0);
+            assert_eq!(next(&mut client).unwrap().op, Op::Flush);
+            client.session_ended();
+            client.session_started();
+        }
+        assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::Device)]);
+        assert_eq!(next(&mut client), None);
+    }
+
+    /// A write issued again and on the wire at every session's end is given
+    /// up past [`MAX_ATTEMPTS`], and a flush waiting on it is told so.
+    #[test]
+    fn a_reissue_every_session_ends_over_is_given_up() {
+        let mut client = up(ROOMY);
+        client.submit(1, write(1, 0, 1));
+        let w = next(&mut client).unwrap();
+        answer(&mut client, w, Status::Ok);
+        assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::Done)]);
+        client.session_ended();
+        client.session_started();
+        client.submit(2, Ask::Flush);
+        for _ in 0..=MAX_ATTEMPTS {
+            assert_eq!(next(&mut client).unwrap().op, Op::Write { run: run_of(1, 1), lba: 0 });
+            assert_eq!(next(&mut client), None, "the flush waits for it");
+            client.session_ended();
+            client.session_started();
+        }
+        assert_eq!(client.kept(), 0);
+        assert_eq!(client.take_answers().collect::<Vec<_>>(), [(2, Outcome::Device)]);
     }
 
     #[test]

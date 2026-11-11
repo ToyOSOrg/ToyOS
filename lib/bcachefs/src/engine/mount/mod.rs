@@ -49,6 +49,8 @@ mod reclaim;
 
 use allocator::{Allocator, Draw, Readers};
 pub use data::Reservation;
+#[cfg(test)]
+pub(crate) use data::POINTED;
 pub use ops::{Link, Removed, Rename};
 pub(crate) use reclaim::Order;
 #[cfg(test)]
@@ -165,6 +167,14 @@ struct State {
     waits: [usize; 2],
     #[cfg(test)]
     journal_bytes: [usize; 3],
+    /// Transactions applied, and the largest: its journal u64s and its nodes.
+    #[cfg(test)]
+    applied: u64,
+    #[cfg(test)]
+    largest: [u64; 2],
+    /// Each ordinary transaction is committed as it applies.
+    #[cfg(test)]
+    commit_each: bool,
     #[cfg(test)]
     published: Published,
     /// Bytes of keys past which a terminal publication splits a new node,
@@ -502,6 +512,12 @@ impl<D: BlockDev> Mount<D> {
             waits: [0; 2],
             #[cfg(test)]
             journal_bytes: [0; 3],
+            #[cfg(test)]
+            applied: 0,
+            #[cfg(test)]
+            largest: [0; 2],
+            #[cfg(test)]
+            commit_each: false,
             #[cfg(test)]
             published: Published::default(),
             #[cfg(test)]
@@ -1229,7 +1245,7 @@ impl<D: BlockDev> Mount<D> {
         assert!(nodes <= FOOTPRINT, "a grant of {nodes} nodes, past the largest any operation takes");
         assert!(credit >= bound * 8, "a grant's credit covers its own records");
         self.check_writable()?;
-        let _slot = loop {
+        let slot = loop {
             self.admit(Class::Ordinary, draw, bound, credit, nodes).await?;
             let slot = self.slot(Class::Ordinary).await;
             let mut st = self.st.borrow_mut();
@@ -1242,7 +1258,19 @@ impl<D: BlockDev> Mount<D> {
         let mut txn = Txn::default();
         let out = prepare(&mut txn).await;
         self.finish(txn, out.is_ok(), Class::Ordinary, bound, credit, nodes)?;
+        drop(slot);
+        #[cfg(test)]
+        if out.is_ok() && self.st.borrow().commit_each {
+            self.commit().await?;
+        }
         out
+    }
+
+    /// Commits each ordinary transaction as it applies, so that a crash can
+    /// fall between any two.
+    #[cfg(test)]
+    pub(crate) fn test_commit_each(&self) {
+        self.st.borrow_mut().commit_each = true;
     }
 
     fn prepare_pending(&self, class: Class, bound: u64, credit: u64, nodes: usize) -> Result<()> {
@@ -1333,6 +1361,11 @@ impl<D: BlockDev> Mount<D> {
         let emptied: Vec<u64> = txn.emptied.iter().map(|&(b, _)| b).collect();
         let size = (records(&stamped(&txn, 0), 0, 0).0.len() / 8) as u64;
         assert!(size <= bound, "a transaction of {size} u64s past its bound of {bound}");
+        #[cfg(test)]
+        {
+            st.applied += 1;
+            st.largest = [st.largest[0].max(size), st.largest[1].max(txn.dirtied.len() as u64)];
+        }
         if !st.journal.fits(size) {
             if st.journal.open.is_some() {
                 self.close(st, false);

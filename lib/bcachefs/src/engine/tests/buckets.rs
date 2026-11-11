@@ -139,7 +139,7 @@ fn buckets_of_eight_nodes_fill_slot_by_slot_and_are_reused_once_all_eight_are_go
 
 /// Empty buckets as `v`'s device accounting counts them: free and
 /// need_discard (A7.12).
-fn empty_buckets<D: BlockDev>(v: &Volume<D>) -> u64 {
+pub(super) fn empty_buckets<D: BlockDev>(v: &Volume<D>) -> u64 {
     [super::value::data_type::FREE, super::value::data_type::NEED_DISCARD]
         .iter()
         .map(|&t| {

@@ -23,6 +23,8 @@
 
 use toyos_userbound::USER_TOP;
 
+use crate::user_ptr::Faulted;
+
 core::arch::global_asm!(
     ".pushsection .text.toyos_uaccess, \"ax\"",
     // toyos_copy_from_user(x0 = kernel dst, x1 = user src, x2 = len) -> x0 = bytes not copied
@@ -162,34 +164,38 @@ unsafe extern "C" {
     static toyos_clear_user_end: u8;
 }
 
-/// Copy `len` bytes from user address `user` to `dst`; answers the bytes not
-/// copied.
+/// A routine's answer: 0 where it copied every byte.
+fn whole(left: usize) -> Result<(), Faulted> {
+    if left == 0 { Ok(()) } else { Err(Faulted) }
+}
+
+/// Copy `len` bytes from user address `user` to `dst`. On `Err` some or none
+/// of them were copied.
 ///
 /// # Safety
 /// `dst` is writable kernel memory for `len` bytes; `[user, user + len)` lies
 /// below [`USER_TOP`]; no lock is held (`crate::user_ptr`).
-pub unsafe fn copy_from_user(dst: *mut u8, user: u64, len: usize) -> usize {
+pub unsafe fn copy_from_user(dst: *mut u8, user: u64, len: usize) -> Result<(), Faulted> {
     // SAFETY: the caller's contract; the routine touches nothing else.
-    unsafe { toyos_copy_from_user(dst, user, len) }
+    whole(unsafe { toyos_copy_from_user(dst, user, len) })
 }
 
-/// Copy `len` bytes from `src` to user address `user`; answers the bytes not
-/// copied.
+/// Copy `len` bytes from `src` to user address `user`, as [`copy_from_user`].
 ///
 /// # Safety
 /// As [`copy_from_user`], with `src` readable.
-pub unsafe fn copy_to_user(user: u64, src: *const u8, len: usize) -> usize {
+pub unsafe fn copy_to_user(user: u64, src: *const u8, len: usize) -> Result<(), Faulted> {
     // SAFETY: the caller's contract; the routine touches nothing else.
-    unsafe { toyos_copy_to_user(user, src, len) }
+    whole(unsafe { toyos_copy_to_user(user, src, len) })
 }
 
-/// Zero `len` bytes at user address `user`; answers the bytes not zeroed.
+/// Zero `len` bytes at user address `user`, as [`copy_from_user`].
 ///
 /// # Safety
 /// As [`copy_from_user`].
-pub unsafe fn clear_user(user: u64, len: usize) -> usize {
+pub unsafe fn clear_user(user: u64, len: usize) -> Result<(), Faulted> {
     // SAFETY: the caller's contract; the routine touches nothing else.
-    unsafe { toyos_clear_user(user, len) }
+    whole(unsafe { toyos_clear_user(user, len) })
 }
 
 /// Where an EL1 abort at `pc` resumes when it cannot be served: `Some` only

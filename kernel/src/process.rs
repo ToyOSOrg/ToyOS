@@ -30,10 +30,11 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::percpu;
 use crate::mm::charge::{self, Charge, Exhausted};
 use crate::object::{ops, HandleTable};
-use crate::sync::Lock;
+use crate::sync::{Lock, LockGuard};
 use crate::sched::driver;
 use crate::sched::payload::ThreadSched;
 use kernel::sched::cpu::{homes, Near};
@@ -60,6 +61,51 @@ pub use crate::loader::{build_child_handles, spawn, spawn_supervisor};
 
 /// A process's space, which every thread of it runs in.
 pub use crate::mm::space::PageTables;
+
+/// What a process names kernel objects by. Each of its threads carries it, so
+/// a lookup ([`with_handles`]) takes neither the process table nor
+/// [`ProcessData`]'s lock.
+pub struct Handles {
+    /// Every kernel object it can name; stdio is handles `0`, `1`, `2`.
+    table: Lock<HandleTable>,
+    /// Started as a pager, which no call changes (`object::paged`): it may
+    /// make one pager object, and is refused a holder's read, which would wait
+    /// on itself or on another pager.
+    pager: bool,
+    /// It made that pager object.
+    made_pager: AtomicBool,
+}
+
+impl Handles {
+    pub fn new(table: HandleTable, pager: bool) -> Arc<Self> {
+        Arc::new(Self { table: Lock::new(table), pager, made_pager: AtomicBool::new(false) })
+    }
+
+    pub fn lock(&self) -> LockGuard<'_, HandleTable> {
+        self.table.lock()
+    }
+
+    pub fn is_pager(&self) -> bool {
+        self.pager
+    }
+
+    /// Claim the one pager object a pager may make: `PermissionDenied` for a
+    /// process started as none, `AlreadyExists` once claimed.
+    pub fn claim_pager(&self) -> Result<(), SyscallError> {
+        if !self.pager {
+            return Err(SyscallError::PermissionDenied);
+        }
+        if self.made_pager.swap(true, Ordering::Relaxed) {
+            return Err(SyscallError::AlreadyExists);
+        }
+        Ok(())
+    }
+
+    /// Give the claim back: its pager object was never installed.
+    pub fn unclaim_pager(&self) {
+        self.made_pager.store(false, Ordering::Relaxed);
+    }
+}
 
 /// An object the kernel mapped into a process for it and takes back itself: an
 /// inbox's rings. The kernel writes what it owes the process into the object.
@@ -230,8 +276,9 @@ impl Processes for ProcessTable {
 
 /// Process-level data shared across all threads via `Arc<Lock<ProcessData>>`.
 pub struct ProcessData {
-    /// Every kernel object this process can name; stdio is handles `0`, `1`, `2`.
-    pub handles: HandleTable,
+    /// What its threads carry, under a lock of its own; here for a reader that
+    /// is not one of them.
+    pub handles: Arc<Handles>,
     /// The space every thread of it runs in.
     pub space: PageTables,
 
@@ -244,25 +291,6 @@ pub struct ProcessData {
     pub job: Arc<kernel::sched::job::Job>,
     /// What [`ProcessData::charge`] charged.
     pub _charge: Charge,
-    /// Whether it was started as a pager, which no call changes, and whether
-    /// it made its one pager object.
-    pub pager: PagerRole,
-}
-
-/// A process's part in paged objects (`object::paged`): set at its spawn.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PagerRole {
-    None,
-    /// Started as a pager; it has not made its pager object.
-    May,
-    /// It made it.
-    Made,
-}
-
-impl PagerRole {
-    pub fn is_pager(self) -> bool {
-        self != PagerRole::None
-    }
 }
 
 impl ProcessData {
@@ -276,6 +304,7 @@ impl ProcessData {
         // A thread table of one thread is a whole leaf.
         let threads = charge::heap(Layout::array::<(Tid, ThreadEntry)>(11).expect("process: a leaf's layout"));
         let records = charge::arc::<Lock<ProcessData>>()
+            + charge::arc::<Handles>()
             + charge::arc::<UserImage>()
             + charge::arc::<crate::mm::space::Space>()
             + charge::arc::<crate::mm::space::Usage>()
@@ -476,6 +505,17 @@ pub fn with_process_data<R>(f: impl FnOnce(&mut ProcessData) -> R) -> R {
     f(&mut guard)
 }
 
+/// The running thread's process's handles, off the thread itself.
+pub fn handles() -> Arc<Handles> {
+    scheduler::current_handles().expect("handles: no thread is running")
+}
+
+/// `f` over the running thread's process's handle table, under the table's
+/// own lock: the lookup every handle-taking call makes.
+pub fn with_handles<R>(f: impl FnOnce(&mut HandleTable) -> R) -> R {
+    f(&mut handles().lock())
+}
+
 /// Whom a new process is placed under.
 #[derive(Clone, Copy)]
 pub enum Parent {
@@ -566,6 +606,7 @@ pub fn spawn_thread(
         (addr_space, Arc::clone(&proc.process_data))
     };
     let job = process_data_arc.lock().job.clone();
+    let handles = handles();
 
     // Phase 2: the kernel stack, outside any lock.
     let (ks_alloc, ks_sp) = alloc_kernel_stack(&job, Start::Thread { entry, sp: stack_ptr, arg })?;
@@ -602,6 +643,7 @@ pub fn spawn_thread(
         thread_pointer: 0,
         job,
         image,
+        handles,
         mask,
         near: Some(Near { spawner: driver::current_cpu(), homes }),
     });
@@ -657,11 +699,12 @@ fn teardown_resources(
     #[cfg(feature = "mask-windows")]
     crate::windows::report();
 
-    let mut data = process_data_arc.lock();
-    ops::close_all(&mut data.handles);
+    let handles = Arc::clone(&process_data_arc.lock().handles);
+    ops::close_all(&mut handles.lock());
     // Every thread has left, and none returns to Ring 3 to use them.
     crate::isa::process_ends(pid);
 
+    let data = process_data_arc.lock();
     let usage = data.space.usage();
     Consumed {
         peak_memory: usage.peak_bytes(),
@@ -901,9 +944,9 @@ pub fn thread_sched(pid: Pid, tid: Tid) -> Option<ThreadSched> {
     table.get(pid)?.threads.get(&tid)?.sched().cloned()
 }
 
-/// The physical address of a futex word, its page populated like any other user access. Alignment matters: the scheduler dereferences this directly on every wake check, so an unaligned word could straddle into the next physical page.
-/// Not a lease: nothing pins the frame, and a sibling's `munmap` can free it under a parked wait. Made safe by an unmap ending the waits on the frames it frees (`sched::futex::revoke_frames`), and `scheduler::futex_wait` re-deriving the translation on every check.
-fn futex_word(addr: UserAddr) -> Option<crate::mm::DirectMap> {
+/// A futex word's frame, its page populated like any other user access. Alignment matters: the scheduler reads the word through the frame, so an unaligned word could straddle into the next physical page.
+/// Not a lease: nothing pins the frame, and a sibling's `munmap` can free it under a parked wait. Made safe by an unmap ending the waits on the frames it frees (`sched::futex::revoke_frames`) after it counts the change the translation's `holds` reads.
+fn futex_word(addr: UserAddr) -> Option<crate::mm::space::Translation> {
     if !addr.raw().is_multiple_of(4) {
         return None;
     }
@@ -921,12 +964,12 @@ pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
     };
 
     // Physical, so a futex in shared memory works across processes.
-    let Some(phys_addr) = futex_word(addr) else {
+    let Some(word) = futex_word(addr) else {
         return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
     };
 
     // 0 covers both woken and never-blocked (the caller re-checks the word either way); 1 means only the caller's own deadline ended it.
-    match scheduler::futex_wait(addr, phys_addr, expected, deadline) {
+    match scheduler::futex_wait(&word, expected, deadline) {
         scheduler::FutexEnd::Changed => 0,
         scheduler::FutexEnd::Timeout => 1,
     }
@@ -934,10 +977,10 @@ pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
 
 /// Wake up to `count` threads blocked on the same physical address as `addr`.
 pub fn futex_wake(addr: UserAddr, count: u64) -> u64 {
-    let Some(phys_addr) = futex_word(addr) else {
+    let Some(word) = futex_word(addr) else {
         return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
     };
-    scheduler::futex_wake(phys_addr, count as usize)
+    scheduler::futex_wake(word.phys(), count as usize)
 }
 
 /// Wake processes blocked on reading from a pipe that now has data.
@@ -966,17 +1009,6 @@ pub fn handle_page_fault(fault_addr: u64, access: kernel::vm::Access) -> bool {
         space.usage().faulted(crate::clock::nanos_since_boot().saturating_sub(began));
     }
     served
-}
-
-/// Populate the running thread's pages over `[start, end)` for `access`, in
-/// one hold of its space's lock, stopping at the first its ranges refuse.
-pub fn fault_in(start: u64, end: u64, access: kernel::vm::Access) {
-    let Some(space) = scheduler::current_address_space() else { return };
-    let mut space = space.lock();
-    let mut page = start & !(crate::mm::PAGE_SIZE - 1);
-    while page < end && space.fault(page, access) {
-        page += crate::mm::PAGE_SIZE;
-    }
 }
 
 /// Dump memory around `fault_addr` and the instruction pointer for the

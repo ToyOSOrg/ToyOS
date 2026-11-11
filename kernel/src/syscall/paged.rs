@@ -13,8 +13,8 @@ use toyos_abi::syscall::{
 };
 
 use crate::object::paged::{PagedHolderObject, PagerObject, Unmade};
-use crate::object::{ops, KObjectRef};
-use crate::process::{self, PagerRole};
+use crate::object::{ops, HandleError, HandleTable, KObjectRef};
+use crate::process;
 use crate::user_ptr::{SyscallContext, UserBytesMut};
 use crate::UserAddr;
 
@@ -22,35 +22,26 @@ const _: () = assert!(kernel::paged::HOLDER_PAGES == toyos_abi::syscall::PAGED_H
 const _: () = assert!(kernel::paged::HOLDER_END == toyos_abi::syscall::PAGED_HOLDER_END);
 
 pub(super) fn sys_pager_create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> u64 {
-    let claimed = process::with_process_data(|data| match data.pager {
-        PagerRole::May => {
-            data.pager = PagerRole::Made;
-            Ok(())
-        }
-        PagerRole::Made => Err(SyscallError::AlreadyExists),
-        PagerRole::None => Err(SyscallError::PermissionDenied),
-    });
-    if let Err(e) = claimed {
+    let handles = process::handles();
+    if let Err(e) = handles.claim_pager() {
         return e.to_u64();
     }
     let made = PagerObject::create(capacity, dirty, objects, report_ns).map_err(|why| match why {
         Unmade::Invalid => SyscallError::InvalidArgument,
         Unmade::Exhausted => SyscallError::ResourceExhausted,
     });
-    let installed = made.and_then(|pager| {
-        process::with_process_data(|data| ops::install(&mut data.handles, KObjectRef::Pager(pager)))
-    });
+    let installed = made.and_then(|pager| ops::install(&mut handles.lock(), KObjectRef::Pager(pager)));
     match installed {
         Ok(h) => u64::from(h.0),
         Err(e) => {
-            process::with_process_data(|data| data.pager = PagerRole::May);
+            handles.unclaim_pager();
             e.to_u64()
         }
     }
 }
 
 fn pager(h: RawHandle, rights: Rights) -> Result<Arc<PagerObject>, u64> {
-    process::with_process_data(|data| data.handles.get::<PagerObject>(h, rights)).map_err(|e| e.refuse())
+    process::with_handles(|handles| handles.get::<PagerObject>(h, rights)).map_err(|e| e.refuse())
 }
 
 pub(super) fn sys_paged_create(h: RawHandle, size: u64, anonymous: bool) -> u64 {
@@ -73,8 +64,8 @@ pub(super) fn sys_paged_holder(h: RawHandle, object: u64, flags: u64) -> u64 {
         Err(e) => return e.to_u64(),
     };
     // Counted under the same hold as its install: no close can come between.
-    let installed = process::with_process_data(|data| {
-        let h = ops::install(&mut data.handles, KObjectRef::Paged(Arc::clone(&holder)))?;
+    let installed = process::with_handles(|handles| {
+        let h = ops::install(handles, KObjectRef::Paged(Arc::clone(&holder)))?;
         holder.held();
         Ok::<_, SyscallError>(h)
     });
@@ -126,21 +117,30 @@ pub(super) fn sys_paged_stat(ctx: &SyscallContext<'_>, h: RawHandle, out: UserAd
 }
 
 fn holder(h: RawHandle, right: Rights) -> Result<Arc<PagedHolderObject>, u64> {
-    let resolved = process::with_process_data(|data| {
-        let KObjectRef::Paged(holder) = data.handles.get_ref(h, Rights::NONE)? else {
-            return Ok(Err(SyscallError::InvalidArgument));
-        };
-        let holder = Arc::clone(holder);
-        if !data.handles.rights_of(h)?.contains(right) {
-            return Ok(Err(SyscallError::PermissionDenied));
-        }
-        Ok(if data.pager.is_pager() { Err(SyscallError::PermissionDenied) } else { Ok(holder) })
-    });
+    let handles = process::handles();
+    let resolved = holder_with(&handles.lock(), h, right, handles.is_pager());
     match resolved {
         Ok(Ok(holder)) => Ok(holder),
         Ok(Err(e)) => Err(e.to_u64()),
-        Err(e) => Err(crate::object::HandleError::refuse(e)),
+        Err(e) => Err(HandleError::refuse(e)),
     }
+}
+
+/// The holder `h` names in `table`, if it carries `right` and its process is
+/// no `pager`.
+fn holder_with(
+    table: &HandleTable,
+    h: RawHandle,
+    right: Rights,
+    pager: bool,
+) -> Result<Result<Arc<PagedHolderObject>, SyscallError>, HandleError> {
+    let KObjectRef::Paged(holder) = table.get_ref(h, Rights::NONE)? else {
+        return Ok(Err(SyscallError::InvalidArgument));
+    };
+    if !table.rights_of(h)?.contains(right) || pager {
+        return Ok(Err(SyscallError::PermissionDenied));
+    }
+    Ok(Ok(Arc::clone(holder)))
 }
 
 pub(super) fn sys_paged_op(ctx: &SyscallContext<'_>, h: RawHandle, op: u64, args: UserAddr) -> u64 {

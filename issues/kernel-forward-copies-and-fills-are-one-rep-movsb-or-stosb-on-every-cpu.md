@@ -7,7 +7,8 @@ opened: 2026-09-29
 # Kernel forward copies and fills are one `rep movsb` or `rep stosb` on every CPU
 
 The kernel's `memcpy` is its own (`kernel/src/arch/x86_64/copy.rs`): one
-`rep movsb` on every CPU, but for a copy it sends highest first. It replaced
+`rep movsb` on every CPU, but for a copy it sends highest first, and its
+user copies go by the same rule (`arch::x86_64::uaccess`). It replaced
 `compiler_builtins`' `rep movsb; rep movsq; rep movsb`, so every forward copy
 changed with it, on Zen 2 without ERMS too: a kernel tmpfs read of 4 or 8 KiB
 took 0.92-0.96 times as long on both benches, at every distance outside the
@@ -40,3 +41,19 @@ with no `rep movsq` or `rep stosq`; the T14's pipe figures; and Zen 2's cost
 recorded, as a family-0x17 figure against the build without `ermsb` or as a
 `tooling` issue that owes it. **Mutation**: the build without `ermsb` reds the
 gate. **Oracle**: Linux's pipe figures.
+
+- **Owed on metal:** #1244, which sends user copies down by this rule, is not
+  measured on metal; its speed-up is a prediction. Owed: one A/B of main from
+  before and after it on both benches, four boots a side, each running
+  `osbench pipeab` (the measurement-only commit on `pipeperf-ab-base`): the
+  pipe rows by reader placement (`ab.pipe.natural.*`, `ab.pipe.<size>.r<r>.w<w>`)
+  and the positioned cached reads at 0, 16 and 64 bytes into a page
+  (`ab.fs.memory.pread.*`). A row changes where all four paired boots move one
+  way and their median ratio is beyond 1 ± 3%. Main after must show, on the
+  AMD bench, `ab.pipe.natural.4096`, `.16384` and `.65536` (the reader 16
+  bytes into a page) up from about 3.0 GB/s to about 7, 15 and 20 GB/s, the
+  rows with the reader at 0; each read 16 bytes into a page at most 1.25 times
+  the same read at 0, against 1.9 to 4 times before; and on the T14 none of
+  those rows changed. And main's `testcases` and `shared-debug` boots pass on
+  both benches, `user_copy_faults` among them, which on the AMD bench copies
+  down by its own rule.

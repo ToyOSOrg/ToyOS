@@ -6,7 +6,8 @@
 //! It runs on the development host and reaches the machine over `ssh`: the
 //! T14 bench unless `--host` names another, whose account's home holds the
 //! log's mount point and which has passwordless sudo. [`Target::argv`] is the
-//! one place a root command line ([`Job`]) is written.
+//! one place a root command line ([`Job`]) is written, and every command it
+//! runs over `ssh` is [`bounded`].
 //!
 //! **The bench's own partitions are never written.** The machine must answer
 //! as a recorded bench by its SMBIOS, the disk must be one
@@ -18,8 +19,9 @@
 //! hands the next boot to Ubuntu.
 //!
 //! Beside the loop: [`testargs`], the suite's command line, which carries the
-//! metal profile's flags; [`image`], the config a metal boot derives; and
-//! [`timings`], each bench's record.
+//! metal profile's flags; [`bench`], the benches and how a boot names its own;
+//! [`image`], the config a metal boot derives; and [`timings`], each bench's
+//! record.
 
 use std::fmt;
 use std::io::{Read, Seek};
@@ -34,12 +36,39 @@ use toyos_gpt::Guid;
 use crate::internal::Owned;
 use crate::timings::{Machine, Record};
 
+pub mod bench;
 pub mod image;
 pub mod internal;
 pub mod testargs;
 pub mod timings;
 
 const CONNECT_SECS: u64 = 10;
+
+/// How long `ssh` lets the machine say nothing before it asks whether the
+/// machine is still there, and how many such asks may go unanswered before it
+/// ends the connection with [`SSH_FAILED`]. A connection the machine dropped
+/// without closing so ends within about 40 s, before its command's bound and
+/// told apart from it: a reboot whose connection went with the machine is
+/// ridden, and a transfer over a dead link fails early.
+const ALIVE_SECS: u64 = 10;
+const ALIVE_ASKS: u64 = 3;
+
+/// What `ssh` exits with where it failed itself rather than carried the remote
+/// command's status (ssh(1), EXIT STATUS): before the command ran, or after.
+const SSH_FAILED: i32 = 255;
+
+/// The line the machine's shell prints before it runs `reboot`.
+const REBOOT_STARTED: &str = "rebooting";
+
+/// How long one command over `ssh` that carries no image's or volume's bytes
+/// may take before it is ended and refused: a failure bound, far over what any
+/// takes, and over what the asks take to end a dropped connection.
+const COMMAND_SECS: u64 = 120;
+const _: () = assert!(ALIVE_SECS * (ALIVE_ASKS + 1) < COMMAND_SECS);
+
+/// The rate a transfer's failure bound allows the link to a bench, under a
+/// fifth of the slowest a flash over it has gone.
+const FLOOR_BYTES_PER_SEC: u64 = 32 * 1024;
 
 /// The port the machine's ssh server listens on, which is the protocol's own.
 const SSH_PORT: u16 = 22;
@@ -162,8 +191,13 @@ pub enum Refusal {
     Remote { what: String, status: String, stderr: String },
     /// The machine did not go down, or did not come back.
     Silent { what: &'static str, secs: u64 },
+    /// A command over `ssh` outlasted its failure bound and was ended.
+    Expired { what: String, secs: u64 },
+    /// The machine answered again with `BootNext` still set, so the firmware
+    /// never took the entry it names.
+    Untaken { next: String },
     /// The firmware booted the entry [`fall_through`] made unbootable, or
-    /// kept the `BootNext` naming it.
+    /// another than the first of its order.
     FellThrough(String),
     /// The log the boot left is not a passing boot's.
     Log(bootlog::Unfit),
@@ -267,6 +301,16 @@ impl fmt::Display for Refusal {
                 "the machine did not {what} within {secs} s, which is longer than every watchdog \
                  a boot runs under plus the time coming back costs; why it did not is what the \
                  panel and the log partition say, and neither is readable from here"
+            ),
+            Self::Expired { what, secs } => write!(
+                f,
+                "{what} on the machine had not ended after {secs} s, its failure bound, so it was \
+                 ended: the machine or the link to it stopped"
+            ),
+            Self::Untaken { next } => write!(
+                f,
+                "the machine answered again with BootNext still reading {next}: the firmware deletes \
+                 it before it boots the entry it names, so what answered is no boot of that entry"
             ),
             Self::FellThrough(why) => write!(f, "the firmware did not fall through past an unbootable entry: {why}"),
             Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
@@ -483,6 +527,7 @@ enum Job {
     Create { label: &'static str, loader: &'static str },
     Delete(String),
     BootNext(String),
+    DeleteBootNext,
     /// One of the install's FAT volumes, read-only, at [`Home::mount`].
     Mount(Owned),
     Umount,
@@ -495,6 +540,19 @@ enum Job {
     /// A scratch disk's table on `sd`, which `sysfs` sizes at `sectors` of
     /// 512 bytes whatever its logical block.
     Scratch { sd: Sd, sectors: u64 },
+}
+
+impl Job {
+    /// The job's failure bound when `fed` bytes are streamed into it: a
+    /// transfer's grows with its bytes, and a settle's by udevd's own bound.
+    fn secs(&self, fed: u64) -> u64 {
+        let (moved, own) = match self {
+            Self::ReadLog { bytes } => (*bytes, 0),
+            Self::Settle => (fed, SETTLE_SECS),
+            _ => (fed, 0),
+        };
+        COMMAND_SECS + own + moved / FLOOR_BYTES_PER_SEC
+    }
 }
 
 /// One word as the machine's login shell must receive it: `ssh` hands the whole
@@ -547,9 +605,10 @@ impl Target {
     /// The T14 bench, with the runner key this host holds.
     fn bench_t14() -> Result<Self, Refusal> {
         let home = std::env::var_os("HOME").ok_or(Refusal::NoHome)?;
+        let (user, host) = host_of(bench::Bench::T14.host()).expect("a bench's host reads as one");
         Ok(Self {
-            user: "toyos".to_string(),
-            host: "bench-t14".to_string(),
+            user: user.to_string(),
+            host: host.to_string(),
             key: PathBuf::from(home).join(".ssh/id_ed25519_toyos_runner"),
             internal: Node::Nvme { controller: b'0', namespace: b'1' },
         })
@@ -594,6 +653,7 @@ impl Target {
             ]),
             Job::Delete(id) => words(&[EFIBOOTMGR, "--delete-bootnum", "--bootnum", id]),
             Job::BootNext(id) => words(&[EFIBOOTMGR, "--bootnext", id]),
+            Job::DeleteBootNext => words(&[EFIBOOTMGR, "--delete-bootnext"]),
             Job::Mount(o) => words(&[MOUNT, "-o", "ro", &o.node(&self.internal), &home.mount()]),
             Job::Umount => words(&[UMOUNT, &home.mount()]),
             Job::Reboot => words(&[REBOOT]),
@@ -645,7 +705,13 @@ impl Target {
     /// One job as the machine's login shell must receive it.
     fn remote(&self, job: &Job, home: &Home) -> String {
         let words: Vec<String> = self.argv(job, home).iter().map(|w| shell_word(w)).collect();
-        format!("sudo -n {}", words.join(" "))
+        let line = format!("sudo -n {}", words.join(" "));
+        match job {
+            // Said first, so an `ssh` that fails itself afterwards is known to
+            // have reached the machine ([`reboot_asked`]).
+            Job::Reboot => format!("echo {REBOOT_STARTED} && {line}"),
+            _ => line,
+        }
     }
 
     /// `ssh`'s argv without its own name, so a test reads the whole line.
@@ -659,9 +725,20 @@ impl Target {
             "BatchMode=yes".to_string(),
             "-o".to_string(),
             format!("ConnectTimeout={CONNECT_SECS}"),
+            "-o".to_string(),
+            format!("ServerAliveInterval={ALIVE_SECS}"),
+            "-o".to_string(),
+            format!("ServerAliveCountMax={ALIVE_ASKS}"),
             format!("{}@{}", self.user, self.host),
             command.to_string(),
         ]
+    }
+
+    /// `ssh` running `command` on the machine.
+    fn ssh(&self, command: &str) -> Command {
+        let mut ssh = Command::new("ssh");
+        ssh.args(self.ssh_argv(command));
+        ssh
     }
 }
 
@@ -871,6 +948,16 @@ fn unordered(listing: &str, entry: &str) -> Result<(), Refusal> {
     }
 }
 
+/// Refused where a listing still holds a `BootNext:` line: the firmware deletes
+/// `BootNext` before it boots the entry it names (UEFI 2.10 §3.1.2), so a
+/// machine still holding one never took it.
+fn taken(listing: &str) -> Result<(), Refusal> {
+    match listing.lines().find_map(|line| line.trim().strip_prefix("BootNext:")) {
+        Some(next) => Err(Refusal::Untaken { next: next.trim().to_string() }),
+        None => Ok(()),
+    }
+}
+
 /// systemd's *effective* logind policy, out of `systemd-analyze cat-config`:
 /// the last assignment of a key wins, and `Key = value` is legal spacing.
 fn lid_policy(text: &str) -> Result<(), Refusal> {
@@ -901,12 +988,88 @@ struct Driver {
 
 /// One command on `target`, as its account and never as root.
 fn ssh(target: &Target, what: &str, command: &str) -> Result<String, Refusal> {
-    let out = Command::new("ssh")
-        .args(target.ssh_argv(command))
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| unstarted(what, &e))?;
+    let out = bounded(what, target.ssh(command), None, COMMAND_SECS)?;
     answer(what, out).map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// `command` with `feed` streamed into its stdin, waited on until it exits or
+/// `secs` pass, whichever is first: one still running then is killed and
+/// refused as [`Refusal::Expired`].
+fn bounded(what: &str, mut command: Command, feed: Option<Feed<'_>>, secs: u64) -> Result<Output, Refusal> {
+    let source = feed
+        .map(|feed| {
+            let unread = |e: std::io::Error| Refusal::File { path: feed.path.display().to_string(), why: e.to_string() };
+            let mut file = std::fs::File::open(feed.path).map_err(unread)?;
+            file.seek(std::io::SeekFrom::Start(feed.at)).map_err(unread)?;
+            Ok(file.take(feed.len))
+        })
+        .transpose()?;
+    let stdin = if source.is_some() { Stdio::piped() } else { Stdio::null() };
+    let mut child = command
+        .stdin(stdin)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| unstarted(what, &e))?;
+    let (closed, closing) = std::sync::mpsc::channel();
+    let stdout = drained(child.stdout.take().expect("piped"), closed.clone());
+    let stderr = drained(child.stderr.take().expect("piped"), closed);
+    let pump = source.map(|mut source| {
+        let mut pipe = child.stdin.take().expect("piped");
+        // A copy that stops early is caught by the byte count `dd` reports,
+        // which every caller compares.
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut source, &mut pipe);
+        })
+    });
+    // Both pipes close as the command exits.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let ended = (0..2).all(|_| closing.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).is_ok());
+    if !ended {
+        // One that exited meanwhile is waited on below all the same.
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|e| Refusal::Remote {
+        what: what.to_string(),
+        status: format!("could not be waited on: {e}"),
+        stderr: String::new(),
+    })?;
+    let stdout = stdout.join().expect("a pipe's reader does not panic");
+    let stderr = stderr.join().expect("a pipe's reader does not panic");
+    if let Some(pump) = pump {
+        pump.join().expect("the feed's copy does not panic");
+    }
+    match ended {
+        true => Ok(Output { status, stdout, stderr }),
+        false => Err(Refusal::Expired { what: what.to_string(), secs }),
+    }
+}
+
+/// Everything `pipe` carries until it closes, read on a thread of its own that
+/// says so on `closed` as it ends.
+fn drained(mut pipe: impl Read + Send + 'static, closed: std::sync::mpsc::Sender<()>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut said = Vec::new();
+        let _ = pipe.read_to_end(&mut said);
+        let _ = closed.send(());
+        said
+    })
+}
+
+/// `reboot`'s answer over `ssh`. **`ssh`'s own failure once the machine said
+/// [`REBOOT_STARTED`] is no refusal**: a shutdown that stops the network before
+/// `sshd` closes the session ends `ssh` with [`SSH_FAILED`] once [`ALIVE_ASKS`]
+/// go unanswered, and whether the machine rebooted is what riding it and then
+/// [`taken`] establish. Without that line `ssh` may have failed before the
+/// command ran, which is the loop's own failure.
+fn reboot_asked(out: Output) -> Result<(), Refusal> {
+    let started = String::from_utf8_lossy(&out.stdout).lines().any(|line| line == REBOOT_STARTED);
+    if out.status.code() == Some(SSH_FAILED) && started {
+        let said = String::from_utf8_lossy(&out.stderr);
+        println!("  ssh failed itself once the machine had started the reboot ({}); it is ridden", said.trim());
+        return Ok(());
+    }
+    answer("rebooting", out).map(drop)
 }
 
 impl Driver {
@@ -924,28 +1087,23 @@ impl Driver {
     /// One root command, with `feed` streamed into it. Announced either way,
     /// and run only when this is not a dry run — which is what `None` means.
     fn as_root(&self, what: &str, job: Job, feed: Option<Feed<'_>>) -> Result<Option<Output>, Refusal> {
+        self.run_as_root(what, job, feed)?.map(|out| answer(what, out)).transpose()
+    }
+
+    /// [`Driver::as_root`] with whatever status `ssh` exited with.
+    fn run_as_root(&self, what: &str, job: Job, feed: Option<Feed<'_>>) -> Result<Option<Output>, Refusal> {
         let line = self.target.remote(&job, &self.home);
         println!("  {} {line}", if self.dry_run { "would run:" } else { "run:" });
         if self.dry_run {
             return Ok(None);
         }
-        let mut command = Command::new("ssh");
-        command.args(self.target.ssh_argv(&line)).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let Some(feed) = feed else {
-            let out = command.stdin(Stdio::null()).output().map_err(|e| unstarted(what, &e))?;
-            return answer(what, out).map(Some);
-        };
-        let unread = |e: std::io::Error| Refusal::File { path: feed.path.display().to_string(), why: e.to_string() };
-        let mut source = std::fs::File::open(feed.path).map_err(unread)?;
-        source.seek(std::io::SeekFrom::Start(feed.at)).map_err(unread)?;
-        let mut child = command.stdin(Stdio::piped()).spawn().map_err(|e| unstarted(what, &e))?;
-        let mut pipe = child.stdin.take().expect("the pipe was just asked for");
-        // A copy that stops early is caught by the byte count `dd` reports,
-        // which every caller compares; the child is waited on either way.
-        let _ = std::io::copy(&mut source.take(feed.len), &mut pipe);
-        drop(pipe);
-        let out = child.wait_with_output().map_err(|e| unstarted(what, &e))?;
-        answer(what, out).map(Some)
+        let secs = job.secs(feed.map_or(0, |feed| feed.len));
+        bounded(what, self.target.ssh(&line), feed, secs).map(Some)
+    }
+
+    /// The reboot a ride follows, answered by [`reboot_asked`].
+    fn reboot(&self) -> Result<(), Refusal> {
+        self.run_as_root("rebooting", Job::Reboot, None)?.map_or(Ok(()), reboot_asked)
     }
 
     /// The loop refuses to run at all without passwordless sudo on the machine.
@@ -1063,12 +1221,24 @@ impl Driver {
     /// **`reboot` is `systemctl` and returns before the machine goes down**, so
     /// the machine is watched down before it is watched back up: a probe that
     /// caught dying Ubuntu would read a log ToyOS had never written. Answers
-    /// the wall seconds going down took, and the whole seconds coming back did.
-    fn ride_the_reboot(&self, secs: u64) -> Result<(f64, u64), Refusal> {
-        let began = std::time::Instant::now();
+    /// the wall seconds from the reboot's ask at `asked_at` to the machine
+    /// gone, and the whole seconds coming back took.
+    fn ride_the_reboot(&self, asked_at: std::time::Instant, secs: u64) -> Result<(f64, u64), Refusal> {
         self.wait(GOING_DOWN_SECS, "go down", false)?;
-        let down = began.elapsed().as_secs_f64();
+        let down = asked_at.elapsed().as_secs_f64();
         Ok((down, self.wait(secs, "come back", true)?))
+    }
+
+    /// [`taken`] of the list read as the machine came back. A `BootNext` no
+    /// boot took is deleted before the refusal, or the bench's next reboot,
+    /// for whatever reason, would boot its entry once; a failure to delete it
+    /// is said, and does not replace the refusal.
+    fn took_bootnext(&self, listing: &str) -> Result<(), Refusal> {
+        taken(listing).inspect_err(|_| {
+            if let Err(kept) = self.as_root("deleting the BootNext no boot took", Job::DeleteBootNext, None) {
+                println!("  the BootNext stays set: {kept}");
+            }
+        })
     }
 
     /// [`wait_on`] the machine's `ssh`.
@@ -1139,14 +1309,9 @@ impl Driver {
     /// filtered through a FAT driver — the same family of code that wrote the
     /// volume. This reads the sectors.
     fn raw_log(&self, bytes: u64) -> Result<Vec<u8>, Refusal> {
-        let line = self.target.remote(&Job::ReadLog { bytes }, &self.home);
-        println!("  run: {line}");
-        let out = Command::new("ssh")
-            .args(self.target.ssh_argv(&line))
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| unstarted("reading the log partition", &e))?;
-        let out = answer("reading the log partition", out)?;
+        let out = self
+            .as_root("reading the log partition", Job::ReadLog { bytes }, None)?
+            .expect("a dry run returns before the boot it would read");
         let got = out.stdout.len() as u64;
         if got != bytes {
             return Err(Refusal::Landed { what: "the log volume read back".to_string(), want: bytes, got });
@@ -1234,7 +1399,9 @@ impl Driver {
             let what = format!("writing the image's {o:?} to {}", part.node);
             let feed = Feed { path: &image.path, at: piece.at, len: piece.len };
             if let Some(out) = self.as_root(&what, Job::Write(o), Some(feed))? {
-                dd += self.fed(&what, &out, piece.len)?.secs;
+                let said = self.fed(&what, &out, piece.len)?;
+                println!("  dd took {:.1} s of its {} s bound", said.secs, Job::Write(o).secs(piece.len));
+                dd += said.secs;
             }
         }
         let create = Job::Create { label: INTERNAL_LABEL, loader: LOADER };
@@ -1684,8 +1851,9 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let before = driver.ssh("listing boot entries", EFIBOOTMGR)?;
     unordered(&before, &installed.entry)?;
     driver.as_root("setting bootnext", Job::BootNext(installed.entry), None)?;
-    driver.as_root("rebooting", Job::Reboot, None)?;
     let entry = began.elapsed().as_secs_f64();
+    let asked_at = std::time::Instant::now();
+    driver.reboot()?;
     if driver.dry_run {
         driver.as_root("mounting the log partition", Job::Mount(Owned::Log), None)?;
         driver.as_root("unmounting the log partition", Job::Umount, None)?;
@@ -1693,12 +1861,14 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         return Ok(None);
     }
 
-    let (down, back) = driver.ride_the_reboot(wait_secs)?;
+    let (down, back) = driver.ride_the_reboot(asked_at, wait_secs)?;
     let back_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("this host's clock reads after 1970")
         .as_secs();
     println!("the machine answered ssh again after {back} s");
+    let after = driver.ssh("listing boot entries", EFIBOOTMGR)?;
+    driver.took_bootnext(&after)?;
     let began = std::time::Instant::now();
     let (loader, log_text, stopped) = driver.read_log()?;
     let read_log = began.elapsed().as_secs_f64();
@@ -1728,7 +1898,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let verdict = judge_and_write_readback(&armed, &loader, &log_text, stopped, args.readback.as_deref(), &boot);
     // After the readback, so a boot that moved the order is still judged; the
     // order's refusal is the louder answer, since the next failure loops.
-    order_kept(&before, &driver.ssh("listing boot entries", EFIBOOTMGR)?)?;
+    order_kept(&before, &after)?;
     verdict.map(Some)
 }
 
@@ -1812,20 +1982,19 @@ fn fall_through(target: &Target, dry_run: bool, how: Unbootable) -> Result<(), R
     let before = driver.ssh("listing boot entries", EFIBOOTMGR)?;
     unordered(&before, &entry)?;
     driver.as_root("setting bootnext", Job::BootNext(entry.clone()), None)?;
-    driver.as_root("rebooting", Job::Reboot, None)?;
+    let asked_at = std::time::Instant::now();
+    driver.reboot()?;
     if dry_run {
         println!("dry run: nothing was created and the machine was not rebooted");
         return Ok(());
     }
-    let (_, back) = driver.ride_the_reboot(RETURN_ALLOWANCE_SECS)?;
+    let (_, back) = driver.ride_the_reboot(asked_at, RETURN_ALLOWANCE_SECS)?;
     let listing = driver.ssh("listing boot entries", EFIBOOTMGR)?;
     let deleted = driver.as_root("deleting the unbootable entry", Job::Delete(entry.clone()), None);
+    driver.took_bootnext(&listing)?;
     let current = listing.lines().find_map(|l| l.strip_prefix("BootCurrent:")).map(str::trim);
     if current == Some(entry.as_str()) {
         return Err(Refusal::FellThrough(format!("BootCurrent is Boot{entry}, the unbootable entry")));
-    }
-    if let Some(next) = listing.lines().find_map(|l| l.strip_prefix("BootNext:")) {
-        return Err(Refusal::FellThrough(format!("BootNext still reads {}", next.trim())));
     }
     let first = boot_order(&listing).split(',').next().unwrap_or_default().trim().to_string();
     if current != Some(first.as_str()) {
@@ -1992,8 +2161,9 @@ pub struct Phases {
     /// What `dd` itself said of the writes. It reads `ssh`'s stdin, so this is
     /// whichever of the wire and the disk is slower, and splits neither out.
     pub dd_secs: f64,
-    /// `--bootnext` and `reboot`.
+    /// `--bootnext`, up to the reboot's ask.
     pub entry: f64,
+    /// From the reboot's ask until the machine stopped answering.
     pub down: f64,
     pub read_log: f64,
     /// The volume read whole and the outside judge's check of it; `None` on a
@@ -2701,6 +2871,10 @@ mod tests {
                 "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=10",
+                "-o",
+                "ServerAliveCountMax=3",
                 "toyos@bench-t14",
                 "true",
             ]
@@ -2715,6 +2889,7 @@ mod tests {
             "sudo -n '/usr/bin/dd' 'of=/dev/nvme0n1p9' 'bs=4M' 'conv=fsync,nocreat'"
         );
         assert_eq!(t.remote(&Job::Settle, &home()), "sudo -n '/usr/bin/udevadm' 'settle' '--timeout=180'");
+        assert_eq!(t.remote(&Job::DeleteBootNext, &home()), "sudo -n '/usr/bin/efibootmgr' '--delete-bootnext'");
         assert_eq!(t.remote(&Job::Reread(Sd(b'a')), &home()), "sudo -n '/usr/sbin/blockdev' '--rereadpt' '/dev/sda'");
         assert_eq!(
             t.remote(&Job::WipePartition { sd: Sd(b'a'), part: 1 }, &home()),
@@ -2730,6 +2905,69 @@ mod tests {
             "sudo -n '/usr/bin/efibootmgr' '--create-only' '--disk' '/dev/nvme0n1' '--part' '5' \
              '--label' 'ToyOS-unbootable' '--loader' '\\toyos\\log.guid'"
         );
+    }
+
+    /// **A command that never ends is ended and refused by its bound**, and
+    /// not waited on.
+    #[test]
+    fn a_command_that_outlasts_its_bound_is_ended_and_refused() {
+        let began = std::time::Instant::now();
+        let mut sleeping = Command::new("sleep");
+        sleeping.arg("30");
+        let out = bounded("sleeping", sleeping, None, 1);
+        assert_eq!(out, Err(Refusal::Expired { what: "sleeping".to_string(), secs: 1 }));
+        assert!(began.elapsed() < std::time::Duration::from_secs(20), "{:?}", began.elapsed());
+    }
+
+    /// A bounded command is fed exactly its slice of the file, and answers its
+    /// status and both its streams whole.
+    #[test]
+    fn a_bounded_command_is_fed_its_slice_and_answers_whole() {
+        let dir = toyos_tmpdir::TempDir::new("feed");
+        let path = dir.join("image");
+        std::fs::write(&path, b"0123456789").expect("stage the file");
+        let mut said = Command::new("sh");
+        said.args(["-c", "cat; echo said >&2; exit 3"]);
+        let out = bounded("feeding", said, Some(Feed { path: &path, at: 2, len: 5 }), 60).expect("it ends");
+        assert_eq!(out.stdout, b"23456");
+        assert_eq!(out.stderr, b"said\n");
+        assert_eq!(out.status.code(), Some(3));
+    }
+
+    /// **Only a reboot whose connection failed after the machine started it is
+    /// ridden.** `ssh` fails itself the same way before the command ran, as on
+    /// a refused connect, and that is the loop's own failure, as is a remote
+    /// failure, `sudo`'s or `reboot`'s; neither is the boot's. Each is staged
+    /// as the machine's shell would answer the reboot's own line.
+    #[test]
+    fn only_a_reboot_the_machine_started_is_ridden_when_ssh_fails() {
+        let answered = |said: &str, code: i32| {
+            let mut answered = Command::new("sh");
+            answered.args(["-c", &format!("{said}echo said >&2; exit {code}")]);
+            bounded("rebooting", answered, None, 60).expect("it ends")
+        };
+        let started = format!("echo {REBOOT_STARTED}; ");
+        assert_eq!(reboot_asked(answered(&started, 0)), Ok(()));
+        assert_eq!(reboot_asked(answered(&started, SSH_FAILED)), Ok(()));
+        for (said, code) in [("", SSH_FAILED), (started.as_str(), 1)] {
+            let refused = answered(said, code);
+            let status = format!("exited {}", refused.status);
+            let refusal = reboot_asked(refused).expect_err("refused");
+            assert_eq!(refusal, Refusal::Remote { what: "rebooting".to_string(), status, stderr: "said".to_string() });
+            assert!(!refusal.about_the_boot(), "{refusal}");
+        }
+        let line = target().remote(&Job::Reboot, &home());
+        assert_eq!(line, format!("echo {REBOOT_STARTED} && sudo -n '/usr/sbin/reboot'"));
+    }
+
+    /// **A machine that came back still holding `BootNext` never took it**, so
+    /// it is no boot of the entry, whatever `reboot` answered.
+    #[test]
+    fn a_machine_still_holding_bootnext_never_booted_its_entry() {
+        let back = "BootCurrent: 0001\nTimeout: 0 seconds\nBootOrder: 0001,001D\nBoot0001* Ubuntu\n";
+        assert_eq!(taken(back), Ok(()));
+        let untaken = "BootNext: 0004\nBootCurrent: 0001\nBootOrder: 0001,001D\nBoot0001* Ubuntu\n";
+        assert_eq!(taken(untaken), Err(Refusal::Untaken { next: "0004".to_string() }));
     }
 
     #[test]
@@ -2881,7 +3119,9 @@ mod tests {
         assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
         assert!(Refusal::Silent { what: "come back", secs: 420 }.about_the_boot());
-        assert!(Refusal::FellThrough("BootNext still reads 0002".to_string()).about_the_boot());
+        assert!(Refusal::FellThrough("BootCurrent is Boot0004, the unbootable entry".to_string()).about_the_boot());
+        assert!(!Refusal::Untaken { next: "0002".to_string() }.about_the_boot());
+        assert!(!Refusal::Expired { what: "rebooting".to_string(), secs: 120 }.about_the_boot());
         assert!(!Refusal::Install("it carries no log".to_string()).about_the_boot());
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());

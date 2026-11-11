@@ -315,18 +315,7 @@ pub unsafe extern "C" fn dup(raw_fd: i32) -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
     // SAFETY: C's `dup2`: the caller gives up what `new_fd` named.
-    match unsafe { toyos::fd::dup2(old_fd, new_fd, true) } {
-        Ok(fd) => {
-            // The descriptor names something else now, so the stream is asked again.
-            match fd {
-                1 => toyos::log::stdio::forget(toyos::log::stdio::Stream::Out),
-                2 => toyos::log::stdio::forget(toyos::log::stdio::Stream::Err),
-                _ => {}
-            }
-            fd
-        }
-        Err(e) => refuse(fd_errno(e)),
-    }
+    unsafe { toyos::fd::dup2(old_fd, new_fd, true) }.unwrap_or_else(|e| refuse(fd_errno(e)))
 }
 
 #[no_mangle]

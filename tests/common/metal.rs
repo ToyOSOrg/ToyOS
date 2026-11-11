@@ -3,10 +3,15 @@
 //! bench's internal disk.
 //!
 //! **A registration's metal declaration is a separate table**, so a test that
-//! runs only under QEMU simply has no row. What a row says is: the boots this
-//! test needs — each a boot config, the parameters its image is armed with, and
-//! the jobs it needs in that boot's job list — and one predicate over the
-//! readbacks those boots produced, in the order the row names them.
+//! runs only under QEMU simply has no row. What a row says is: the benches it
+//! runs on, the boots this test needs — each a boot config, the parameters its
+//! image is armed with, and the jobs it needs in that boot's job list — and
+//! one predicate over the readbacks those boots produced, in the order the row
+//! names them.
+//!
+//! **A run is one bench's**: [`select`] takes no row its bench does not run,
+//! so no job rides a boot of a machine it was not written for, and every
+//! readback names the bench it came from ([`Bench::of_log`]).
 //!
 //! Two tests naming the same boot share one image and one flash; their job
 //! lists are unioned. That is what makes the suite cost boots rather than
@@ -22,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use toyos_build::bootlog;
+pub use toyos_metal::bench::{Bench, Device};
 use toyos_metal::image;
 use toyos_metal::timings::{self, Machine, Reading, Record};
 use toyos_metal::testargs::MetalMode;
@@ -152,20 +158,29 @@ impl SharedBoot {
     }
 }
 
-/// The rows and the shared boots a run takes.
-pub type Taken = (Vec<(&'static str, &'static Metal)>, Vec<SharedBoot>);
+/// What a run takes of the profile.
+pub struct Taken {
+    pub rows: Vec<(&'static str, &'static Metal)>,
+    pub shared: Vec<SharedBoot>,
+    /// The rows the run's words take that its bench does not run, each with
+    /// why.
+    pub left: Vec<(&'static str, String)>,
+}
 
-/// What a run's words take of the profile: every row and shared member a
-/// `names` word is part of, and every boot a `boots` word names, whole — all
-/// its shared members, and every row with an arm on it, which brings that
-/// row's other boots. No word at all takes everything but the rows with a
-/// [`Arm::named_only`] arm, which a `names` word takes only by being the
-/// row's whole name, and a `boots` word by naming its boot.
+/// What a run's words take of the profile on `bench`: every row and shared
+/// member a `names` word is part of, and every boot a `boots` word names,
+/// whole — all its shared members, and every row with an arm on it, which
+/// brings that row's other boots. No word at all takes everything but the rows
+/// with a [`Arm::named_only`] arm, which a `names` word takes only by being
+/// the row's whole name, and a `boots` word by naming its boot. A row `bench`
+/// does not run ([`Metal::on`]) is never taken: it is left, with why.
 ///
 /// **A word that takes nothing is refused**: it would be dropped in silence.
+/// So is a run whose every row is left.
 pub fn select(
     names: &[&str],
     boots: &[&str],
+    bench: Bench,
     rows: &'static [(&'static str, Metal)],
     shared: &[SharedBoot],
 ) -> Result<Taken, String> {
@@ -195,16 +210,49 @@ pub fn select(
         .filter_map(|boot| boot.keeping(|job| boots.contains(&boot.boot.as_str()) || named(bare(job))))
         .collect();
     let row_named = |name: &str, decl: &Metal| if named_only(decl) { names.contains(&name) } else { named(name) };
-    let rows = rows
-        .iter()
-        .filter(|(name, decl)| row_named(name, decl) || decl.arms.iter().any(|arm| boots.contains(&arm.boot)))
-        .map(|(name, decl)| (*name, decl))
-        .collect();
-    Ok((rows, taken))
+    let mut out = Taken { rows: Vec::new(), shared: taken, left: Vec::new() };
+    for (name, decl) in rows {
+        if !(row_named(name, decl) || decl.arms.iter().any(|arm| boots.contains(&arm.boot))) {
+            continue;
+        }
+        match decl.on.leaves_out(bench) {
+            None => out.rows.push((*name, decl)),
+            Some(why) => out.left.push((*name, why)),
+        }
+    }
+    if out.rows.is_empty() && out.shared.is_empty() && !out.left.is_empty() {
+        let left: Vec<String> = out.left.iter().map(|(row, why)| format!("{row} {why}")).collect();
+        return Err(format!("the run takes nothing on {bench}: {}", left.join("; ")));
+    }
+    Ok(out)
 }
 
-/// How a registration runs on the T14.
+/// The benches a row runs on.
+pub enum On {
+    Every,
+    /// Each bench that has all of these.
+    Having(&'static [Device]),
+    /// One bench, whose own tables or parts the judge is written against.
+    Only(Bench),
+}
+
+impl On {
+    /// Why `bench` does not run the row, `None` where it does.
+    pub fn leaves_out(&self, bench: Bench) -> Option<String> {
+        match self {
+            Self::Every => None,
+            Self::Having(devices) => devices
+                .iter()
+                .find(|device| !bench.has(**device))
+                .map(|device| format!("needs {device}, which {bench} has not")),
+            Self::Only(only) => (*only != bench).then(|| format!("is written for {only} alone")),
+        }
+    }
+}
+
+/// How a registration runs on metal.
 pub struct Metal {
+    pub on: On,
     pub arms: &'static [Arm],
     /// The readbacks in `arms` order.
     pub judge: fn(&[&Readback]) -> Result<(), String>,
@@ -224,6 +272,8 @@ pub struct Readback {
     pub back_secs: u64,
     /// The host's clock as it got there, in Unix seconds.
     back_at: u64,
+    /// The bench this boot ran on, as its kernel named it.
+    pub bench: Bench,
     /// The machine the loop read before the flash.
     pub machine: Result<Machine, String>,
     /// Where the loop's wall time went.
@@ -244,6 +294,7 @@ impl Readback {
             .ok_or_else(|| format!("{label}'s boot file names no `back_unix_secs`: {boot:?}"))?;
         let phases = toyos_metal::phases(boot)
             .map_err(|why| format!("{label}'s boot file {why}: {boot:?}"))?;
+        let bench = Bench::of_log(&kernel).map_err(|why| format!("{label}'s log {why}"))?;
         Ok(Readback {
             label: label.to_string(),
             boot_ms: bootlog::boot_millis(&kernel),
@@ -252,6 +303,7 @@ impl Readback {
             log,
             back_secs,
             back_at,
+            bench,
             machine: toyos_metal::machine(boot)
                 .map_err(|why| format!("{label}'s boot file {why}")),
             phases,
@@ -410,8 +462,9 @@ impl Readback {
         match self.exit_code(binary)? {
             0 => Ok(()),
             code => Err(format!(
-                "{binary} exited {code} on the T14; its own lines are in the boot's log under \
-                 the name of whoever ran it"
+                "{binary} exited {code} on {}; its own lines are in the boot's log under the name \
+                 of whoever ran it",
+                self.bench
             )),
         }
     }
@@ -758,10 +811,9 @@ fn fingerprint(text: &str) -> u64 {
     h.finish()
 }
 
-/// `cargo`'s words for one `toyos-metal` run, on the bench `host` names or the
-/// T14.
-pub fn invocation(image: &Path, home: &Path, host: Option<&str>) -> Vec<String> {
-    let mut words = vec![
+/// `cargo`'s words for one `toyos-metal` run on the machine `host` names.
+pub fn invocation(image: &Path, home: &Path, host: &str) -> Vec<String> {
+    vec![
         "run".to_string(),
         "-p".to_string(),
         "toyos-metal".to_string(),
@@ -775,11 +827,9 @@ pub fn invocation(image: &Path, home: &Path, host: Option<&str>) -> Vec<String> 
         // `/log` has no reader of those bytes that is not the family of code
         // that wrote them.
         "--fat32-check".to_string(),
-    ];
-    if let Some(host) = host {
-        words.extend(["--host".to_string(), host.to_string()]);
-    }
-    words
+        "--host".to_string(),
+        host.to_string(),
+    ]
 }
 
 /// One `toyos-metal` run. Its stderr is echoed here as it comes and kept, so a
@@ -832,6 +882,62 @@ pub fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
     Readback::new(label, loader, log, &boot)
 }
 
+/// The bench a run's rows are taken for, and the machine its boots go to.
+/// Readbacks under `mode`'s directory say the bench themselves, and a `named`
+/// bench that is not theirs is refused; with none there it is `named`, or the
+/// T14. The machine is the bench's own ([`Bench::host`]) unless `host` names
+/// another, and one that is another bench's is refused: its boots would carry
+/// this bench's rows.
+pub fn target_of(mode: &MetalMode, named: Option<Bench>, host: Option<&str>) -> Result<(Bench, String), String> {
+    let bench = bench_of(mode, named)?;
+    let Some(host) = host else { return Ok((bench, bench.host().to_string())) };
+    let machine = |host: &str| toyos_metal::host_of(host).map(|(_, machine)| machine.to_string()).map_err(|e| e.to_string());
+    let asked = machine(host)?;
+    for other in Bench::ALL.into_iter().filter(|other| *other != bench) {
+        if machine(other.host())? == asked {
+            return Err(format!(
+                "--metal-host names {asked}, {other}'s machine, and the run takes {bench}'s rows; a boot carries \
+                 its own bench's rows alone"
+            ));
+        }
+    }
+    Ok((bench, host.to_string()))
+}
+
+/// The bench a run's rows are taken for, as [`target_of`] says it.
+fn bench_of(mode: &MetalMode, named: Option<Bench>) -> Result<Bench, String> {
+    let mut read: Option<(Bench, String)> = None;
+    if let MetalMode::Offline(dir) = mode {
+        let mut labels: Vec<PathBuf> =
+            std::fs::read_dir(dir).into_iter().flatten().filter_map(|entry| Some(entry.ok()?.path())).collect();
+        labels.sort();
+        for home in labels {
+            let Ok(log) = std::fs::read_to_string(home.join(toyos_metal::READBACK_KERNEL)) else { continue };
+            // One that names none is refused where it is read to be judged.
+            let Ok(bench) = Bench::of_log(&log) else { continue };
+            let label = home.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            match &read {
+                Some((first, at)) if *first != bench => {
+                    return Err(format!(
+                        "{} holds {at}'s readback from {first} and {label}'s from {bench}; one run is one bench's",
+                        dir.display()
+                    ))
+                }
+                Some(_) => {}
+                None => read = Some((bench, label)),
+            }
+        }
+    }
+    match (read, named) {
+        (Some((bench, label)), Some(named)) if bench != named => Err(format!(
+            "--metal-bench names {named} and {label}'s readback is from {bench}; a readback says which bench \
+             it is from, so judging one needs no --metal-bench"
+        )),
+        (Some((bench, _)), _) => Ok(bench),
+        (None, named) => Ok(named.unwrap_or(Bench::T14)),
+    }
+}
+
 /// The machine every boot that came back names, or why there is not one.
 fn one_machine(readbacks: &BTreeMap<String, Result<Readback, String>>) -> Result<Machine, String> {
     let mut named: Option<Machine> = None;
@@ -854,7 +960,7 @@ pub enum Verdict {
     /// Every selected test passed on the machine, or — for [`MetalMode::List`]
     /// — the selection batched cleanly and nothing was touched.
     Green,
-    /// One did not. **A red on the T14 is a red.**
+    /// One did not.
     Red,
     /// The images were built and nothing was judged, because nothing has been
     /// run on the machine yet. Neither of the other two: a run that reached no
@@ -862,19 +968,17 @@ pub enum Verdict {
     Staged,
 }
 
-/// The whole metal profile over what [`select`] took of it: batch, build,
-/// drive, judge, report.
-// Each argument is one of the suite's own flags or tables, passed through
-// once; a struct holding them would be a second name for the command line.
-#[allow(clippy::too_many_arguments)]
+/// The whole metal profile over what [`select`] took of it for `bench`: batch,
+/// build, drive, judge, report.
 pub fn run(
     mode: MetalMode,
-    host: Option<&str>,
-    tests: &[(&str, &'static Metal)],
-    shared: &[SharedBoot],
+    bench: Bench,
+    host: &str,
+    taken: &Taken,
     rust_bins: &[(String, Vec<u8>)],
     quiet: bool,
 ) -> Verdict {
+    let Taken { rows: tests, shared, left } = taken;
     let root = super::compile::repo_root();
     let batches = match batches(tests, shared) {
         Ok(batches) => batches,
@@ -885,11 +989,14 @@ pub fn run(
     };
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
     eprintln!(
-        "[metal] {} registration(s) and {} shared member(s) over {} boot(s)",
+        "[metal] {} registration(s) and {} shared member(s) over {} boot(s) of {bench}",
         runs.len(),
         shared.iter().map(|b| b.members.len()).sum::<usize>(),
         batches.len(),
     );
+    for (row, why) in left {
+        eprintln!("[metal] not run on {bench}: {row} {why}");
+    }
 
     let (dir, offline): (PathBuf, bool) = match &mode {
         MetalMode::List => {
@@ -941,8 +1048,8 @@ pub fn run(
     }
 
     if offline && !judging {
-        let mut request = String::from(
-            "# One boot per image. Each invocation is `cargo <words>` from this worktree.\n",
+        let mut request = format!(
+            "# One boot per image, staged for {bench}. Each invocation is `cargo <words>` from this worktree.\n",
         );
         for (label, image) in &images {
             request.push_str(&format!(
@@ -990,7 +1097,7 @@ pub fn run(
         };
         readbacks.insert(label.clone(), back);
     }
-    if judge_readbacks(&timings::dir(), &readbacks, &runs, shared) {
+    if judge_readbacks(&timings::dir(), bench, &readbacks, &runs, shared) {
         Verdict::Red
     } else {
         Verdict::Green
@@ -1027,6 +1134,9 @@ fn own(
 /// them: one function of the readbacks, whether the loop wrote them a moment
 /// ago or a run long past did. Answers whether anything was red.
 ///
+/// `bench` is the one `runs` were taken for: a boot that ran on another is
+/// red, and so is every row that rode it.
+///
 /// **A number is its owner's, and fails with its owner alone.** What a boot
 /// reads off itself is the boot's, and stands or falls with the boot's own
 /// checks; what a row's judge measured is the row's, and stands or falls with
@@ -1038,6 +1148,7 @@ fn own(
 /// a check.
 pub fn judge_readbacks(
     records: &Path,
+    bench: Bench,
     readbacks: &BTreeMap<String, Result<Readback, String>>,
     runs: &[&(&str, &'static Metal)],
     shared: &[SharedBoot],
@@ -1045,6 +1156,11 @@ pub fn judge_readbacks(
     let mut red = false;
     let mut measured: BTreeMap<String, Reading> = BTreeMap::new();
     eprintln!("\n[metal] the boots");
+    // A boot of another bench carried that bench's jobs, not these rows'.
+    let elsewhere = |back: &Readback| {
+        (back.bench != bench)
+            .then(|| format!("{} ran on {} and this run's rows are {bench}'s", back.label, back.bench))
+    };
     for (label, back) in readbacks {
         let back = match back {
             Err(why) => {
@@ -1056,12 +1172,14 @@ pub fn judge_readbacks(
         };
         let ms = back.boot_ms.map_or_else(|| "-".to_string(), |ms| ms.to_string());
         eprintln!(
-            "  {label}: Boot: complete {ms} ms, a log of {} bytes, back in {} s",
+            "  {label}: on {}, Boot: complete {ms} ms, a log of {} bytes, back in {} s",
+            back.bench,
             back.log.len(),
             back.back_secs
         );
         eprintln!("    phases: {}", back.phases);
         let mut findings: Vec<String> = Vec::new();
+        findings.extend(elsewhere(back));
         if let Some(ms) = back.boot_ms {
             findings.extend(back.measured(&format!("boot.{label}.complete_ms"), ms).err());
         } else {
@@ -1084,7 +1202,7 @@ pub fn judge_readbacks(
     eprintln!("\n[metal] the tests");
     let mut passed = 0usize;
     for (name, decl) in runs {
-        let Metal { arms, judge } = decl;
+        let Metal { arms, judge, .. } = decl;
         let mut owed: Vec<&Readback> = Vec::new();
         let mut missing: Option<String> = None;
         for arm in *arms {
@@ -1093,7 +1211,7 @@ pub fn judge_readbacks(
                 Err(why) => missing = Some(why.clone()),
             }
         }
-        let verdict = match missing {
+        let verdict = match missing.or_else(|| owed.iter().find_map(|back| elsewhere(back))) {
             Some(why) => Err(why),
             None => judge(&owed),
         };
@@ -1123,7 +1241,7 @@ pub fn judge_readbacks(
             members += 1;
             let verdict = match back {
                 Err(why) => Err(why.clone()),
-                Ok(back) => back.job_passed(job),
+                Ok(back) => elsewhere(back).map_or_else(|| back.job_passed(job), Err),
             };
             match verdict {
                 Ok(()) => {
@@ -1197,11 +1315,8 @@ pub fn judge_readbacks(
                 );
             }
             eprintln!(
-                "  {} number(s) on {} {}, BIOS {}; {} past its record, {} whose owner failed",
+                "  {} number(s) on {bench}; {} past its record, {} whose owner failed",
                 measured.len(),
-                machine.vendor,
-                machine.product,
-                machine.bios,
                 judged.over.len(),
                 measured.values().filter(|reading| !reading.passed).count()
             );

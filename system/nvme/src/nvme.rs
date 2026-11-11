@@ -29,7 +29,9 @@
 //!
 //! **A command the controller does not answer is reclaimed by a controller
 //! reset** (§3.7.2): `CC.EN` cleared, every command it held is gone, the queues
-//! are made again. Whoever owned one is told it was not done.
+//! are made again. Whoever owned one is told it was not done. Every wait of
+//! the reset is bounded, so a session's command is answered within the block
+//! protocol's bound on a server's silence ([`ANSWERED_WITHIN`]).
 
 use std::time::{Duration, Instant};
 
@@ -108,6 +110,96 @@ pub enum Power {
     TooManyStates(u8),
     /// The states, and each one's transition.
     Autonomous { states: Vec<nvme_apst::PowerState>, plan: Vec<Option<nvme_apst::Transition>> },
+}
+
+/// How long a command may go unanswered before the controller is reset to
+/// take it back. Policy: NVMe defines no per-command bound, and a flush of a
+/// large cache is the slowest thing a healthy drive does.
+pub const COMMAND_SILENCE: Duration = Duration::from_secs(10);
+
+/// How long an admin command is waited for, at bring-up and in a reset: the
+/// same policy as any other command's.
+const ADMIN_BOUND: Duration = COMMAND_SILENCE;
+
+/// `CAP.TO`'s unit, and its largest value: the controller's own bound on a
+/// `CSTS.RDY` transition, in 500 ms units, at most 255 (NVMe Base 2.0
+/// §3.1.4.1).
+const READY_UNIT: Duration = Duration::from_millis(500);
+const READY_BOUND_MOST: Duration = READY_UNIT.checked_mul(255).unwrap();
+
+/// One admin command of a reset, in the order it is sent: the queue count, a
+/// completion and a submission queue for each I/O queue the controller grants,
+/// and the APST table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    QueueCount,
+    CompletionQueue(u16),
+    SubmissionQueue(u16),
+    PowerTable,
+}
+
+impl Step {
+    fn named(self) -> &'static str {
+        match self {
+            Self::QueueCount => "Set Features (Number of Queues)",
+            Self::CompletionQueue(_) => "Create I/O Completion Queue",
+            Self::SubmissionQueue(_) => "Create I/O Submission Queue",
+            Self::PowerTable => "Set Features (Autonomous Power State Transition)",
+        }
+    }
+}
+
+/// Every step [`Controller::configure`] takes, at bring-up and in a reset,
+/// each at most one admin command: the reset waits for no other.
+const STEPS: [Step; 2 + 2 * MAX_IO_QUEUES as usize] = {
+    let mut steps = [Step::QueueCount; 2 + 2 * MAX_IO_QUEUES as usize];
+    let mut q = 0;
+    while q < MAX_IO_QUEUES {
+        steps[1 + 2 * q as usize] = Step::CompletionQueue(q);
+        steps[2 + 2 * q as usize] = Step::SubmissionQueue(q);
+        q += 1;
+    }
+    steps[steps.len() - 1] = Step::PowerTable;
+    steps
+};
+
+/// The most admin commands a reset waits for.
+const RESET_ADMIN_COMMANDS: u32 = STEPS.len() as u32;
+
+/// The longest a command goes unanswered, from its submission to the device:
+/// [`COMMAND_SILENCE`], then the reset, whose two `CSTS.RDY` transitions are
+/// each bounded by `CAP.TO` and whose admin commands each by [`ADMIN_BOUND`].
+const ANSWERED_WITHIN: Duration = COMMAND_SILENCE
+    .checked_add(READY_BOUND_MOST.checked_mul(2).unwrap())
+    .unwrap()
+    .checked_add(ADMIN_BOUND.checked_mul(RESET_ADMIN_COMMANDS).unwrap())
+    .unwrap();
+const _: () = assert!(
+    ANSWERED_WITHIN.as_nanos() <= toyos_blockring::SILENCE_BOUND_NS as u128,
+    "a command the controller leaves silent would be answered past the block protocol's bound"
+);
+
+/// The submission and completion queue pages of I/O queue `q`.
+fn queue_pages(q: u16) -> (usize, usize) {
+    let sq = OFF_IO + usize::from(q) * 2 * PAGE;
+    (sq, sq + PAGE)
+}
+
+/// What `step` answers, asked until it answers or `bound` has passed by
+/// `elapsed`. `step` is given how long it may wait before it looks: nothing
+/// the first time, then never more than is left of the bound, so a wake just
+/// before the bound buys no second one.
+fn within<T>(bound: Duration, elapsed: impl Fn() -> Duration, mut step: impl FnMut(Duration) -> Option<T>) -> Option<T> {
+    let mut left = Duration::ZERO;
+    loop {
+        if let Some(answer) = step(left) {
+            return Some(answer);
+        }
+        left = bound.saturating_sub(elapsed());
+        if left.is_zero() {
+            return None;
+        }
+    }
 }
 
 /// Whose a command is.
@@ -257,7 +349,8 @@ pub struct Controller {
     dma: Window,
     dma_addr: u64,
     stride: usize,
-    /// `CAP.TO`: the controller's own worst case for a `CSTS.RDY` transition.
+    /// `CAP.TO`: the controller's own worst case for a `CSTS.RDY` transition,
+    /// at most [`READY_BOUND_MOST`].
     ready_bound: Duration,
     admin: Queue,
     io: Vec<Queue>,
@@ -321,7 +414,7 @@ impl Controller {
             dma,
             dma_addr,
             stride,
-            ready_bound: Duration::from_millis(to * 500),
+            ready_bound: READY_UNIT.saturating_mul(to as u32),
             admin: Queue::new(0, ADMIN_DEPTH, OFF_ADMIN_SQ, OFF_ADMIN_CQ),
             io: Vec::new(),
             lba_bytes: 0,
@@ -336,8 +429,7 @@ impl Controller {
         };
         ctrl.enable()?;
         ctrl.identify()?;
-        ctrl.make_io_queues()?;
-        let refused = ctrl.set_power()?;
+        let refused = ctrl.configure()?;
         Ok((ctrl, refused))
     }
 
@@ -356,16 +448,18 @@ impl Controller {
     /// (§3.1.4.1, §3.5.1).
     fn settle(&self, ready: bool, what: &'static str) -> Result<(), Refusal> {
         let start = Instant::now();
-        while (self.csts() & CSTS_RDY != 0) != ready {
-            if self.csts() & CSTS_CFS != 0 {
-                return Err(Refusal::Fatal(what));
+        let settled = within(self.ready_bound, || start.elapsed(), |_| {
+            let csts = self.csts();
+            if (csts & CSTS_RDY != 0) == ready {
+                return Some(Ok(()));
             }
-            if start.elapsed() > self.ready_bound {
-                return Err(Refusal::Silent(what, self.ready_bound));
+            if csts & CSTS_CFS != 0 {
+                return Some(Err(Refusal::Fatal(what)));
             }
             std::thread::yield_now();
-        }
-        Ok(())
+            None
+        });
+        settled.unwrap_or(Err(Refusal::Silent(what, self.ready_bound)))
     }
 
     /// The machine stops: a normal shutdown (NVMe Base 2.0 §3.6.2), which has
@@ -446,80 +540,84 @@ impl Controller {
         Ok(())
     }
 
-    /// Set the APST table Identify built, through the identify page, which
-    /// nothing reads after bring-up; nothing is sent where it built none. A
-    /// table with no transition is sent with APST disabled (APSTE, CDW11 bit
-    /// 0). The answer is the status the controller refused it with, if it
-    /// did, after which it serves from its operational state.
-    fn set_power(&mut self) -> Result<Option<u16>, Refusal> {
-        let Power::Autonomous { plan, .. } = &self.power else {
-            return Ok(None);
-        };
-        let enable = plan.iter().any(Option::is_some);
-        self.dma.copy_in(OFF_IDENTIFY, &nvme_apst::encode(plan));
-        let cmd = Command {
-            opcode: ADMIN_SET_FEATURES,
-            prp1: self.dma_addr + OFF_IDENTIFY as u64,
-            cdw10: FEATURE_APST,
-            cdw11: u32::from(enable),
-            ..Command::default()
-        };
-        match self.admin_command("Set Features (Autonomous Power State Transition)", cmd) {
-            Ok(_) => Ok(None),
-            Err(Refusal::Admin(_, status)) => Ok(Some(status)),
-            Err(why) => Err(why),
-        }
-    }
-
-    fn make_io_queues(&mut self) -> Result<(), Refusal> {
-        let asked = MAX_IO_QUEUES as u32 - 1;
-        let answer = self.admin_command(
-            "Set Features (Number of Queues)",
-            Command {
-                opcode: ADMIN_SET_FEATURES,
-                cdw10: FEATURE_NUMBER_OF_QUEUES,
-                cdw11: (asked << 16) | asked,
-                ..Command::default()
-            },
-        )?;
-        let sqs = (answer & 0xFFFF) + 1;
-        let cqs = (answer >> 16) + 1;
-        let n = sqs.min(cqs).min(MAX_IO_QUEUES as u32) as u16;
+    /// Make the I/O queues and set the APST table Identify built, at bring-up
+    /// and after a reset: the admin command of each of [`STEPS`] that applies
+    /// and no other. The answer is the status the controller refused the
+    /// table with, if it did, after which it serves from its operational
+    /// state.
+    fn configure(&mut self) -> Result<Option<u16>, Refusal> {
+        let asked = u32::from(MAX_IO_QUEUES) - 1;
+        let size = (u32::from(IO_DEPTH) - 1) << 16;
+        let mut granted = 0;
+        let mut refused = None;
         self.io.clear();
-        for q in 0..n {
-            let qid = q + 1;
-            let sq = OFF_IO + q as usize * 2 * PAGE;
-            let cq = sq + PAGE;
-            self.dma.sub(sq, PAGE).zero();
-            self.dma.sub(cq, PAGE).zero();
-            let size = (IO_DEPTH as u32 - 1) << 16;
-            // Physically contiguous, interrupts on, on the claim's vector 0.
-            self.admin_command(
-                "Create I/O Completion Queue",
-                Command {
-                    opcode: ADMIN_CREATE_IO_CQ,
-                    prp1: self.dma_addr + cq as u64,
-                    cdw10: size | qid as u32,
-                    cdw11: 0b11,
+        for step in STEPS {
+            let cmd = match step {
+                Step::QueueCount => Command {
+                    opcode: ADMIN_SET_FEATURES,
+                    cdw10: FEATURE_NUMBER_OF_QUEUES,
+                    cdw11: (asked << 16) | asked,
                     ..Command::default()
                 },
-            )?;
-            self.admin_command(
-                "Create I/O Submission Queue",
-                Command {
-                    opcode: ADMIN_CREATE_IO_SQ,
-                    prp1: self.dma_addr + sq as u64,
-                    cdw10: size | qid as u32,
-                    cdw11: ((qid as u32) << 16) | 1,
-                    ..Command::default()
-                },
-            )?;
-            self.io.push(Queue::new(qid, IO_DEPTH, sq, cq));
+                // Physically contiguous, interrupts on, on the claim's vector 0.
+                Step::CompletionQueue(q) if q < granted => {
+                    let (_, cq) = queue_pages(q);
+                    self.dma.sub(cq, PAGE).zero();
+                    Command {
+                        opcode: ADMIN_CREATE_IO_CQ,
+                        prp1: self.dma_addr + cq as u64,
+                        cdw10: size | u32::from(q + 1),
+                        cdw11: 0b11,
+                        ..Command::default()
+                    }
+                }
+                Step::SubmissionQueue(q) if q < granted => {
+                    let (sq, _) = queue_pages(q);
+                    self.dma.sub(sq, PAGE).zero();
+                    Command {
+                        opcode: ADMIN_CREATE_IO_SQ,
+                        prp1: self.dma_addr + sq as u64,
+                        cdw10: size | u32::from(q + 1),
+                        cdw11: (u32::from(q + 1) << 16) | 1,
+                        ..Command::default()
+                    }
+                }
+                Step::CompletionQueue(_) | Step::SubmissionQueue(_) => continue,
+                // Through the identify page, which nothing reads after
+                // bring-up; nothing is sent where Identify built no table. A
+                // table with no transition is sent with APST disabled (APSTE,
+                // CDW11 bit 0).
+                Step::PowerTable => {
+                    let Power::Autonomous { plan, .. } = &self.power else { continue };
+                    let enable = plan.iter().any(Option::is_some);
+                    self.dma.copy_in(OFF_IDENTIFY, &nvme_apst::encode(plan));
+                    Command {
+                        opcode: ADMIN_SET_FEATURES,
+                        prp1: self.dma_addr + OFF_IDENTIFY as u64,
+                        cdw10: FEATURE_APST,
+                        cdw11: u32::from(enable),
+                        ..Command::default()
+                    }
+                }
+            };
+            match (step, self.admin_command(step.named(), cmd)) {
+                (Step::QueueCount, Ok(answer)) => {
+                    let (sqs, cqs) = ((answer & 0xFFFF) + 1, (answer >> 16) + 1);
+                    granted = sqs.min(cqs).min(u32::from(MAX_IO_QUEUES)) as u16;
+                }
+                (Step::SubmissionQueue(q), Ok(_)) => {
+                    let (sq, cq) = queue_pages(q);
+                    self.io.push(Queue::new(q + 1, IO_DEPTH, sq, cq));
+                }
+                (Step::PowerTable, Err(Refusal::Admin(_, status))) => refused = Some(status),
+                (_, Ok(_)) => {}
+                (_, Err(why)) => return Err(why),
+            }
         }
         if self.issued.len() != self.io.len() {
             self.issued = vec![0; self.io.len()];
         }
-        Ok(())
+        Ok(refused)
     }
 
     pub fn queues(&self) -> usize {
@@ -637,20 +735,22 @@ impl Controller {
     /// An admin command, waited for: bring-up and reset are the only callers,
     /// and nothing else is on the device then.
     fn admin_command(&mut self, what: &'static str, cmd: Command) -> Result<u32, Refusal> {
-        let cid = self.submit(None, cmd, Owner::Driver, |_| 0);
+        self.submit(None, cmd, Owner::Driver, |_| 0);
         let start = Instant::now();
         let mut out = Vec::new();
-        loop {
+        let done = within(ADMIN_BOUND, || start.elapsed(), |left| {
+            if !left.is_zero() {
+                self.wait_interrupt(left);
+            }
             self.reap_queue(None, &mut out);
-            if let Some(done) = out.pop() {
-                debug_assert!(out.is_empty());
-                let _ = cid;
-                return if done.ok { Ok(done.dw0) } else { Err(Refusal::Admin(what, done.status)) };
-            }
-            if start.elapsed() > self.ready_bound {
-                return Err(Refusal::Silent(what, self.ready_bound));
-            }
-            self.wait_interrupt(self.ready_bound);
+            let done = out.pop();
+            debug_assert!(out.is_empty());
+            done
+        });
+        match done {
+            Some(done) if done.ok => Ok(done.dw0),
+            Some(done) => Err(Refusal::Admin(what, done.status)),
+            None => Err(Refusal::Silent(what, ADMIN_BOUND)),
         }
     }
 
@@ -748,8 +848,7 @@ impl Controller {
             .map(|slot| slot.owner)
             .collect();
         self.enable()?;
-        self.make_io_queues()?;
-        let refused = self.set_power()?;
+        let refused = self.configure()?;
         Ok((aborted, refused))
     }
 
@@ -761,7 +860,64 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
-    use super::{page_size, sector_shift};
+    use core::cell::Cell;
+    use std::time::Duration;
+
+    use super::{page_size, sector_shift, within, Step, ANSWERED_WITHIN, STEPS};
+
+    /// A command left silent is answered `Device` after 10 s and a reset of two
+    /// `CSTS.RDY` transitions at the largest `CAP.TO`, 127.5 s each, and ten
+    /// admin commands at 10 s each: 365 s, the block protocol's bound.
+    #[test]
+    fn a_command_left_silent_is_answered_within_365_s() {
+        assert_eq!(ANSWERED_WITHIN, Duration::from_secs(365));
+        assert_eq!(ANSWERED_WITHIN.as_nanos(), u128::from(toyos_blockring::SILENCE_BOUND_NS));
+    }
+
+    /// The queue count, then each of four queues' completion and submission
+    /// queue, then the APST table.
+    #[test]
+    fn a_reset_steps_through_the_queues_then_the_power_table() {
+        let mut want = vec![Step::QueueCount];
+        for q in 0..4 {
+            want.extend([Step::CompletionQueue(q), Step::SubmissionQueue(q)]);
+        }
+        want.push(Step::PowerTable);
+        assert_eq!(STEPS[..], want[..]);
+    }
+
+    /// A wake for something else 1 ms before the bound, then nothing: the wait
+    /// after it is for the 1 ms left, so the whole takes the bound.
+    #[test]
+    fn a_wake_before_the_bound_buys_no_second_bound() {
+        let bound = Duration::from_secs(10);
+        let clock = Cell::new(Duration::ZERO);
+        let mut waits = Vec::new();
+        let answer: Option<()> = within(bound, || clock.get(), |left| {
+            waits.push(left);
+            let woke = if waits.len() == 2 { left.saturating_sub(Duration::from_millis(1)) } else { left };
+            clock.set(clock.get() + woke);
+            None
+        });
+        assert_eq!(answer, None);
+        assert_eq!(clock.get(), bound);
+        assert_eq!(waits, [Duration::ZERO, bound, Duration::from_millis(1)]);
+    }
+
+    /// An answer at the first look ends the wait without one, and an answer
+    /// after a wait is the answer.
+    #[test]
+    fn an_answer_ends_the_wait() {
+        assert_eq!(within(Duration::from_secs(10), || Duration::ZERO, |_| Some(7)), Some(7));
+        let clock = Cell::new(Duration::ZERO);
+        let mut looks = 0;
+        let answer = within(Duration::from_secs(10), || clock.get(), |left| {
+            looks += 1;
+            clock.set(clock.get() + left.min(Duration::from_secs(3)));
+            (looks == 3).then_some("done")
+        });
+        assert_eq!((answer, looks, clock.get()), (Some("done"), 3, Duration::from_secs(6)));
+    }
 
     /// An Identify Namespace page: `formats` LBA formats, each `(MS, LBADS)`.
     fn namespace(formats: &[(u16, u8)]) -> impl Fn(usize) -> u32 {

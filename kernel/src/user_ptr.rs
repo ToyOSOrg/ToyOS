@@ -45,12 +45,10 @@ fn asked(access: Access) -> Asked {
     }
 }
 
-/// Translate a user virtual address to its direct-map address, populating its
-/// page if needed; `pub(crate)` because the futex word outlives its syscall.
-pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm::DirectMap> {
-    let space = unlocked_space();
-    let phys = space.lock().reach(addr.raw(), asked(access))?;
-    Some(crate::mm::DirectMap::from_phys(phys))
+/// Translate a user virtual address to its frame, populating its page if
+/// needed; `pub(crate)` because the futex word outlives its syscall.
+pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm::space::Translation> {
+    crate::mm::space::Space::translate(unlocked_space(), addr.raw(), asked(access))
 }
 
 /// The current space, for a reach made holding no lock.
@@ -77,11 +75,6 @@ impl From<Faulted> for SyscallError {
     fn from(_: Faulted) -> Self {
         SyscallError::BadAddress
     }
-}
-
-/// `Ok` where a copy left no byte behind.
-fn whole(left: usize) -> Result<(), Faulted> {
-    if left == 0 { Ok(()) } else { Err(Faulted) }
 }
 
 /// The backtrace names the copy's caller.
@@ -192,7 +185,7 @@ impl View {
         let user = self.at("UserBytes::read", off, len);
         // SAFETY: the caller's `dst`; `at` keeps the user range in the half,
         // and `gate` holds no lock across the copy.
-        whole(unsafe { uaccess::copy_from_user(dst, user, len) })
+        unsafe { uaccess::copy_from_user(dst, user, len) }
     }
 
     /// # Safety
@@ -200,13 +193,13 @@ impl View {
     unsafe fn write_raw(&self, off: usize, src: *const u8, len: usize) -> Result<(), Faulted> {
         let user = self.at("UserBytesMut::write", off, len);
         // SAFETY: as `read_raw`.
-        whole(unsafe { uaccess::copy_to_user(user, src, len) })
+        unsafe { uaccess::copy_to_user(user, src, len) }
     }
 
     fn fill_zero(&self, off: usize, len: usize) -> Result<(), Faulted> {
         let user = self.at("UserBytesMut::fill_zero", off, len);
         // SAFETY: as `read_raw`, with no kernel memory touched.
-        whole(unsafe { uaccess::clear_user(user, len) })
+        unsafe { uaccess::clear_user(user, len) }
     }
 }
 
@@ -264,13 +257,5 @@ impl UserBytesMut<'_> {
     /// Zero `len` bytes of the window at `off`.
     pub fn fill_zero(&mut self, off: usize, len: usize) -> Result<(), Faulted> {
         self.0.fill_zero(off, len)
-    }
-
-    /// Populate the window's pages under `[off, off + len)` for writing, in
-    /// one hold of the space's lock, up to the first its process may not
-    /// write; the copy faults on any left out. `len` bounds the hold.
-    pub fn fault_in(&mut self, off: usize, len: usize) {
-        let start = self.0.at("UserBytesMut::fault_in", off, len);
-        crate::process::fault_in(start, start + len as u64, kernel::vm::Access::Write);
     }
 }
