@@ -1297,6 +1297,8 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // MEASUREMENT ONLY, never lands: the mapping rows' A/B.
+    ("memab", metal::Metal { arms: MEMAB, judge: |b| osbench_ran(b[0], &MEMAB_GROUPS) }),
     (
         // `osbench energy`: the package's power, idle and under defined loads,
         // compared with the same program as root under the bench's Linux. A
@@ -1908,6 +1910,13 @@ const OSBENCH_GROUPS: [&str; 16] = [
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
     adds_ms: 545_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
+}];
+
+const MEMAB_GROUPS: [&str; 2] = ["osbench_system", "osbench_mem"];
+const MEMAB: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 300_000,
+    named_only: true,
+    ..metal::once("memabcase", "tests/images/benchcase.toml", &[], &MEMAB_GROUPS)
 }];
 
 /// `energy` waits up to 120 s for the machine to go quiet, then measures 60 s
