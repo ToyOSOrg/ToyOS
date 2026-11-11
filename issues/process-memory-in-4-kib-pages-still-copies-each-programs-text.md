@@ -124,6 +124,19 @@ writes in place while it runs; (4) the
 storage track's attributes and names without a request; (5) writable shared
 mappings and write-back; (6) the #1077 retry
 (`issues/a-tcp-connect-zeroes-twelve-mebibytes.md`).
+
+- **Owed on metal:** step 1 (#1259), on the T14 and the AMD bench: the whole
+  `testcases` boot, whose `vm_map_shares` member is the x86-64 verdict that a
+  program's read-only segments are its image's pages and take no private
+  frame (`spawn_cost` among its other members), and the `shared-debug` and
+  `proctreecase` boots. Main must show every job of each boot exit 0.
+- **Owed on metal:** step 1 (#1259), on the T14 and the AMD bench: osbench's
+  `process.spawn_wait`, `proc.spawn_wait.*` and `proc.posix_spawn_wait.*`,
+  main before #1259
+  against main after, four boots a side. Main after must be no slower than
+  before; a spawn no longer copies a `/system` program's text, and whether
+  that makes it faster is not measured on metal.
+
 Until step 2's revocation exists, an object a space maps must keep its frames
 for the object's life: ROOT's pages stay non-reclaimable, and ROOT is not
 served through a pager, until then.
