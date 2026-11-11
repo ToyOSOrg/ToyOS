@@ -13,7 +13,9 @@
 //! keeps. A job refused memory can wait for it to come back: [`ready`]
 //! answers whether it has, and [`returned`] is posted once it has.
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use kernel::frames::{self, Frames, Pins, PoolSplit, Super, Unpinned, FRAME, SUPER};
@@ -142,7 +144,7 @@ pub unsafe fn free_drawn(job: &Job, frames: &[u64]) {
 
 /// Give back every frame of `frames`, drawn for pages `job` committed, under
 /// one hold of the allocator's lock.
-pub fn free_all(job: &Job, frames: alloc::boxed::Box<[Frame]>) {
+pub fn free_all(job: &Job, frames: Box<[Frame]>) {
     let pins = pins();
     with(|f| f.free_drawn(job.memory(), frames.iter().map(|frame| frame.phys), &pins));
     // Given up only once the allocator's lock is let go: the list goes back
@@ -261,9 +263,9 @@ fn kept_supers(frames: &Frames) -> u64 {
 }
 
 /// Promise `frames` to a commitment of `job`'s, which draws each with
-/// [`alloc_promised`] or [`alloc_promised_unzeroed`] when it is first
-/// touched; `false`, and nothing promised, where that would take what is
-/// held back.
+/// [`alloc_promised`], [`alloc_promised_many`] or [`alloc_promised_into`]
+/// when it is first touched; `false`, and nothing promised, where that would
+/// take what is held back.
 pub fn promise(job: &Job, frames: u64) -> bool {
     frames == 0 || with(|f| f.promise(job.memory(), frames))
 }
@@ -306,11 +308,40 @@ pub fn alloc_promised() -> Frame {
     frame
 }
 
-/// [`alloc_promised`]'s frame holding what its last owner left, by its
-/// address: its caller writes every byte of it before anything maps it, and
-/// gives it back through [`free_drawn`].
-pub(super) fn alloc_promised_unzeroed() -> u64 {
-    with(Frames::alloc_promised)
+/// The most frames a batch draws under one hold of the allocator's lock, a
+/// superframe's: a large region lets other CPUs' draws in between its holds.
+const DRAWS_A_HOLD: usize = frames::PER_SUPER;
+
+/// `count` zeroed frames promises held, drawn [`DRAWS_A_HOLD`] to a hold of
+/// the allocator's lock.
+pub fn alloc_promised_many(count: usize) -> Box<[Frame]> {
+    let mut frames = Vec::with_capacity(count);
+    while frames.len() < count {
+        let n = (count - frames.len()).min(DRAWS_A_HOLD);
+        // Inside the capacity reserved above: nothing allocates under the lock.
+        with(|f| f.alloc_promised_each(n as u64, |phys| frames.push(Frame { phys })));
+    }
+    for frame in &frames {
+        // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
+        unsafe { core::ptr::write_bytes(frame.direct_map().as_mut_ptr::<u8>(), 0, FRAME as usize) };
+    }
+    frames.into_boxed_slice()
+}
+
+/// `out.len()` frames promises held, drawn [`DRAWS_A_HOLD`] to a hold of the
+/// allocator's lock, each holding what its last owner left: its caller
+/// writes every byte of each before anything maps it, and gives them back
+/// through [`free_drawn`].
+pub(super) fn alloc_promised_into(out: &mut [u64]) {
+    for slots in out.chunks_mut(DRAWS_A_HOLD) {
+        let mut filled = 0;
+        with(|f| {
+            f.alloc_promised_each(slots.len() as u64, |phys| {
+                slots[filled] = phys;
+                filled += 1;
+            });
+        });
+    }
 }
 
 /// A zeroed frame for a page table of `job`'s, refused rather than take what

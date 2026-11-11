@@ -789,17 +789,25 @@ impl AddressSpace {
                 Kind::Private { committed: true } | Kind::Copy { .. } => {
                     // A neighbour in the next table down or up is another run's.
                     let (lo, hi) = vm::around(start, entry.end, page, |at| leaves.covers(at) && leaves.get(at) != Leaf::Empty);
-                    let (mut filled, mut own) = (0, 0);
+                    // Every empty page of the run takes a frame, all drawn
+                    // under one hold of the allocator's lock.
+                    let empty = (lo..hi).step_by(PAGE_SIZE as usize).filter(|&at| leaves.get(at) == Leaf::Empty).count();
+                    let mut drawn = [0u64; (vm::AROUND / PAGE_SIZE) as usize];
+                    pmm::alloc_promised_into(&mut drawn[..empty]);
+                    let mut frames = drawn[..empty].iter().copied();
+                    let mut own = 0;
                     leaves.fill(lo, hi, |at| {
-                        let phys = owned_frame(start, entry, at);
-                        filled += 1;
+                        let phys = frames.next().expect("space: a run filled past its empty pages");
+                        // SAFETY: a frame just drawn for this page, which no
+                        // leaf maps yet, so nothing else reaches it.
+                        unsafe { fill_new(start, entry, at, phys) };
                         if at == page {
                             own = phys;
                         }
                         Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal })
                     });
                     assert_ne!(own, 0, "space: {page:#x} touched and not filled");
-                    self.usage.populated(filled);
+                    self.usage.populated(empty as u64);
                     own
                 }
             },
@@ -825,20 +833,22 @@ fn copyable(entry: &SpaceEntry) -> bool {
     }
 }
 
-/// A fresh frame for `page` of the committed range `entry` at `start`, every
-/// byte of it written: zeros, or for a copied range its source's bytes as far
-/// as the range's copy and the source both go, and zeros after them.
-fn owned_frame(start: u64, entry: &SpaceEntry, page: u64) -> u64 {
-    let phys = pmm::alloc_promised_unzeroed();
-    // SAFETY: a frame just drawn for this page, which no leaf maps yet, so
-    // nothing else reaches it.
+/// Write every byte of `phys`, a frame just drawn for `page` of the committed
+/// range `entry` at `start`, as the page starts: zeros, or for a copied range
+/// its source's bytes as far as the range's copy and the source both go, and
+/// zeros after them.
+///
+/// # Safety
+///
+/// No leaf maps `phys` yet, so nothing else reaches it.
+unsafe fn fill_new(start: u64, entry: &SpaceEntry, page: u64, phys: u64) {
+    // SAFETY: the caller's; a frame is a page of RAM the direct map reaches.
     let frame = unsafe { core::slice::from_raw_parts_mut(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), PAGE_SIZE as usize) };
     match &entry.kind {
         Kind::Private { .. } => frame.fill(0),
         Kind::Copy { source, offset, len } => vm::copied_page(frame, page - start, *offset, *len, source.size(), |from, bytes| source.read(from, bytes)),
         Kind::Object { .. } => unreachable!("space: an object's page owns no frame"),
     }
-    phys
 }
 
 /// Every frame the space owns goes back; its tables go with `UserTables`.
