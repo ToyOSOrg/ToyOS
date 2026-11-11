@@ -24,7 +24,7 @@ exports them.
   and keeps every boot's beginning. Severity is an ordered ladder.
 - The file is written in batches: at once for an error, an alert or the
   machine's stop, and otherwise within a second. A machine that dies without
-  stopping loses at most that second from its file, never from its console.
+  stopping loses at most that second of its file; the console is not batched.
   No file call holds up the console or a reader, and a stop waits on the file
   within a bound.
 - A slow sink drops and counts; it never blocks a producer and fails alone.

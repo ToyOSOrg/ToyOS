@@ -13,11 +13,13 @@
 //! stderr, a fault the kernel reports an `Alert`) and at the stop's flush.
 //! Each batch is written and synced whole.
 //!
-//! **What a crash costs the file** is the batch not yet written: at most
-//! [`BATCH_AGE`] of lines below `Error`, which the console carried as they
-//! were read. A stop writes the batch before the stop mark, and after the
-//! mark this thread makes no call until the stop is refused.
+//! **What a crash costs the file** is the batch not yet written: on a volume
+//! that answers, at most [`BATCH_AGE`] of lines below `Error`, which the
+//! console was handed as they were read. From the stop's flush until the stop
+//! is refused this thread makes no call but the stop mark, so the mark is the
+//! volume's last write from this program.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -39,9 +41,10 @@ use crate::store::{self, Volume, DIR, MAX_LOG_BYTES, MAX_LOG_PARTS};
 /// second says.
 pub const BATCH_AGE: Duration = Duration::from_secs(1);
 
-/// How much owed text is written at once, whatever its age: a flood is
-/// written in pieces this size rather than held for [`BATCH_AGE`], so no one
-/// write is a burst the stick's other users wait behind.
+/// How much owed text is written whatever its age. Policy: a flood reaches
+/// the file in writes of about this size rather than in one large one a
+/// [`BATCH_AGE`], and at this size the fixed cost of a write is small beside
+/// what it carries.
 pub const BATCH_BYTES: u64 = 64 * 1024;
 
 /// Whether a batch is written at `now`: `owed` bytes, the oldest owed since
@@ -55,9 +58,17 @@ pub fn urgent(severity: Severity) -> bool {
     severity >= Severity::Error
 }
 
+/// The replay's growth the file's thread has not taken yet, one atomic shared
+/// by the two: [`TOLD`] while an [`Ask::Grew`] is in the channel, so any
+/// number of rounds is one ask and a file whose `/log` call never returns has
+/// no more than that queued; [`URGENT`] for a line among them at `Error` or
+/// above.
+const TOLD: u8 = 1;
+const URGENT: u8 = 2;
+
 enum Ask {
-    /// The replay grew; `urgent` where by a line written at once.
-    Grew { urgent: bool },
+    /// The replay grew: what by is in the shared growth.
+    Grew,
     /// The stop: reach the replay's end and sync, stopping the catch-up at
     /// `by`, and answer.
     Finish { by: Instant, answer: SyncSender<()> },
@@ -71,6 +82,7 @@ enum Ask {
 /// The loop's handle on the file's thread.
 pub struct File {
     asks: Sender<Ask>,
+    growth: Arc<AtomicU8>,
 }
 
 impl File {
@@ -78,6 +90,8 @@ impl File {
     /// (an undated boot's where `None`) and says so with `dated`.
     pub fn start(stem: Option<String>, dated: String, hub: Arc<Hub>, published: Arc<Published>) -> Self {
         let (asks, asked) = mpsc::channel();
+        let growth = Arc::new(AtomicU8::new(0));
+        let theirs = Arc::clone(&growth);
         std::thread::Builder::new()
             .name("log-file".into())
             .spawn(move || {
@@ -88,6 +102,7 @@ impl File {
                     volume,
                     hub,
                     published,
+                    growth: theirs,
                     retry,
                     degraded: false,
                     owed_since: None,
@@ -98,12 +113,16 @@ impl File {
                 writer.run(asked);
             })
             .expect("logkeeper: the file's thread could not be started");
-        Self { asks }
+        Self { asks, growth }
     }
 
-    /// The replay grew by a round.
+    /// The replay grew by a round, holding a line written at once where
+    /// `urgent`.
     pub fn grew(&self, urgent: bool) {
-        self.ask(Ask::Grew { urgent });
+        let bits = if urgent { TOLD | URGENT } else { TOLD };
+        if self.growth.fetch_or(bits, Ordering::AcqRel) & TOLD == 0 {
+            self.ask(Ask::Grew);
+        }
     }
 
     /// The stop's flush, its catch-up ended at `by`: whether the file
@@ -153,6 +172,7 @@ struct Writer {
     volume: Option<Volume>,
     hub: Arc<Hub>,
     published: Arc<Published>,
+    growth: Arc<AtomicU8>,
     /// When a part the volume refused is next opened again.
     retry: Option<Retry>,
     /// Whether the volume answers, slower than [`LOG_WRITE_BUDGET`] a batch.
@@ -175,10 +195,7 @@ impl Writer {
                 None => asked.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
             match ask {
-                Ok(Ask::Grew { urgent }) => {
-                    self.owed_since.get_or_insert_with(Instant::now);
-                    self.urgent |= urgent;
-                }
+                Ok(Ask::Grew) => self.took_growth(),
                 Ok(Ask::Finish { by, answer }) => {
                     self.finish(by);
                     // A loop that gave up on the answer has said so.
@@ -196,6 +213,13 @@ impl Writer {
                 self.write();
             }
         }
+    }
+
+    /// The replay's growth since the last [`Ask::Grew`], taken whole: a round
+    /// after this one asks again.
+    fn took_growth(&mut self) {
+        self.urgent |= self.growth.swap(0, Ordering::AcqRel) & URGENT != 0;
+        self.owed_since.get_or_insert_with(Instant::now);
     }
 
     fn publish(&self) {
@@ -360,7 +384,7 @@ mod tests {
     #[test]
     fn a_batch_falls_due_at_its_size_its_age_or_an_urgent_line() {
         let since = Instant::now();
-        let young = since + BATCH_AGE - Duration::from_nanos(1);
+        let young = (since + BATCH_AGE).checked_sub(Duration::from_nanos(1)).expect("a nanosecond after `since`");
         assert!(!batch_due(BATCH_BYTES - 1, Some(since), false, young));
         assert!(batch_due(BATCH_BYTES, Some(since), false, young), "a full batch waits for no age");
         assert!(batch_due(1, Some(since), false, since + BATCH_AGE), "an old line waits no longer");
@@ -375,6 +399,7 @@ mod tests {
             volume,
             hub: Arc::new(Hub::start(1 << 20, None)),
             published: Arc::new(Published::new()),
+            growth: Arc::new(AtomicU8::new(0)),
             retry: None,
             degraded: false,
             owed_since: None,
@@ -412,6 +437,25 @@ mod tests {
         assert!(w.due(t + BATCH_AGE));
         w.write();
         assert_eq!(on_disk(&w), b"one\ntwo\npanicked\n");
+    }
+
+    /// **Any number of rounds is one ask in the channel** until the file's
+    /// thread takes it, with an urgent line among them kept: a file whose
+    /// `/log` call never returns has no growing queue behind it.
+    #[test]
+    fn rounds_the_file_has_not_taken_are_one_ask() {
+        let tmp = toyos_tmpdir::TempDir::new("logkeeper-file");
+        let mut w = writer(tmp.path().to_str().unwrap());
+        let (asks, asked) = mpsc::channel();
+        let file = File { asks, growth: Arc::clone(&w.growth) };
+        for round in 0..100 {
+            file.grew(round == 50);
+        }
+        assert_eq!(asked.try_iter().count(), 1);
+        w.took_growth();
+        assert!(w.urgent && w.owed_since.is_some(), "the urgent round among them is kept");
+        file.grew(false);
+        assert_eq!(asked.try_iter().count(), 1, "a round after the take asks again");
     }
 
     /// **From the stop's flush until it is refused the file takes no call**,
