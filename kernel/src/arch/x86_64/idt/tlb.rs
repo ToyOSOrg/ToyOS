@@ -1,9 +1,9 @@
-use crate::arch::entry::ring3_naked_asm;
+use crate::arch::entry::{gate_iretq, ring3_naked_asm};
 
 /// IDT entry point for the TLB-shootdown IPI vector.
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn tlb_flush_entry() {
-    ring3_naked_asm!(
+    ring3_naked_asm!(cs = 8;
         // Every pushed register must be popped before `iretq`: `flush` may clobber any System V scratch register.
         "push rax",
         "push rcx",
@@ -43,7 +43,7 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         "pop rdx",
         "pop rcx",
         "pop rax",
-        "iretq",
+        gate_iretq!(),
         flush = sym flush,
         exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
         preempt_count = const crate::arch::percpu::OFF_PREEMPT_COUNT,

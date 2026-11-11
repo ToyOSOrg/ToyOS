@@ -9,10 +9,10 @@
 //! counted apart with no vector to blame. Does not log — this handler can run
 //! inside the log's own commit bracket.
 
-use core::arch::naked_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::apic;
+use crate::arch::entry::{gate_iretq, ring3_naked_asm};
 
 /// One bit per vector taken through this gate; [`log_vectors`] reads it back.
 static TAKEN: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
@@ -21,11 +21,7 @@ static NO_ISR: AtomicU64 = AtomicU64::new(0);
 
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn unclaimed_entry() {
-    naked_asm!(
-        // This vector can interrupt `memmove`'s `std` … `cld` window, so it
-        // owes its own `cld`, and Ring 3, so its own `clac`.
-        "cld",
-        "clac",
+    ring3_naked_asm!(cs = 8;
         "push rax",
         "push rcx",
         "push rdx",
@@ -51,7 +47,7 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
         "pop rcx",
         "pop rax",
         // #VC/#SX (0x1D/0x1E) iretq into their unpopped error code — unreachable without SEV-ES.
-        "iretq",
+        gate_iretq!(),
         took = sym took,
     );
 }

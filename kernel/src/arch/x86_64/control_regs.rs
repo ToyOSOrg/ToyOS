@@ -201,9 +201,10 @@ impl core::fmt::Display for Cr4Names {
 const CR4_OPTIONAL: u64 = cr4::PCIDE | cr4::UMIP;
 
 /// The `CR4` bit no shipping CPU may hold: `FSGSBASE` gives Ring 3 `WRGSBASE`,
-/// and `GS.base` aims the first memory access of every kernel entry
-/// (`arch::percpu::gs`) — a user-writable `GS.base` is a Ring 3 arbitrary write.
-/// The kernel's FS base uses `IA32_FS_BASE` (`cpu::write_fs_base`) instead.
+/// and the switch moves no thread's GS base, which every Ring 3 GS load
+/// leaves zero (`percpu::clear_user_gs_base`) — one thread's would reach the
+/// next. The kernel's FS base uses `IA32_FS_BASE` (`cpu::write_fs_base`)
+/// instead.
 const CR4_FORBIDDEN: u64 = cr4::FSGSBASE;
 
 // Forbidden in the declaration, and never optional.

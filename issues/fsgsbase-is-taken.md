@@ -7,9 +7,8 @@ opened: 2026-09-29
 # FSGSBASE is taken
 
 `CR4.FSGSBASE` is forbidden (`CR4_FORBIDDEN`, `kernel/src/arch/x86_64/control_regs.rs`):
-GS always holds the kernel's per-CPU base and the kernel runs no `swapgs`.
-Taking it costs a `swapgs` entry and the swapgs barriers of
-`issues/user-pointer-checks-have-no-spectre-v1-fence.md`.
+the switch moves no thread's GS base, since every GS load Ring 3 can make
+leaves it zero, so a `WRGSBASE` would reach the next thread on the CPU.
 Intel names what it gives, user programs' FS and GS bases without a system
 call and a more efficient kernel context switch, and has it used "never in
 production environments unless accompanied by a complete OS implementation":
@@ -23,6 +22,16 @@ restores each thread's FS and GS bases as the thread left them, its ring
 transitions are insensitive to the GS base they find, and it has no system
 call that reads or writes another thread's registers
 (`sdk/abi/src/syscall.rs`). Its figure is reported and decides nothing.
+
+**Built**: the ring transitions (`kernel/src/arch/x86_64/entry.rs`). Every
+gate but the IST ones swaps GS by its frame's `CS`, fenced as Intel's SWAPGS
+guidance asks; NMI, `#MC` and `#DF` install the kernel's base from `GDTR`
+whatever GS holds, and the NMI returns to the base it found. The
+`nmi-user-gs` actuator enters vector 2 at CPL 0 under a decoy kernel-half
+base, which a sign test of `IA32_GS_BASE` would take for the kernel's.
+
+**Left**: `CR4.FSGSBASE` on every CPU, and the switch saving and restoring
+each thread's GS base beside its FS base.
 
 **Exit**: on every proving machine and under TCG, a `boot-actuators` arm
 enters vector 2 at CPL 0 while the user GS base is live, between entry and its

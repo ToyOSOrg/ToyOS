@@ -15,7 +15,7 @@ pub(crate) use user_dev::ClaimVector;
 use core::arch::naked_asm;
 
 use super::cpu;
-use super::entry::ring3_naked_asm;
+use super::entry::{gate_iretq, install_kernel_gs, ring3_naked_asm};
 use super::cpu::{outb, io_wait};
 use super::pio::{Port, PIC_PRIMARY, PIC_SECONDARY};
 use super::percpu;
@@ -145,8 +145,15 @@ pub struct TrapFrame {
 
 /// Pushes the vector, and a zero error code where the CPU pushes none, so [`TrapFrame`] has one shape.
 /// Misclassifying a vector's error-code column shifts every `TrapFrame` field above `error_code` by eight bytes.
+/// A vector on an IST stack goes on to [`fatal_entry`], every other to [`common_entry`].
 macro_rules! exception_stub {
-    ($stub:ident, $variant:ident, no_error_code) => {
+    ($stub:ident, $variant:ident, $err:ident) => {
+        exception_stub!(@ $stub, $variant, $err, common_entry);
+    };
+    ($stub:ident, $variant:ident, $err:ident, ist $ist:literal) => {
+        exception_stub!(@ $stub, $variant, $err, fatal_entry);
+    };
+    (@ $stub:ident, $variant:ident, no_error_code, $common:ident) => {
         #[unsafe(naked)]
         extern "sysv64" fn $stub() {
             naked_asm!(
@@ -154,18 +161,18 @@ macro_rules! exception_stub {
                 "push {vector}",
                 "jmp {common}",
                 vector = const Vector::$variant as usize,
-                common = sym common_entry,
+                common = sym $common,
             );
         }
     };
-    ($stub:ident, $variant:ident, error_code) => {
+    (@ $stub:ident, $variant:ident, error_code, $common:ident) => {
         #[unsafe(naked)]
         extern "sysv64" fn $stub() {
             naked_asm!(
                 "push {vector}",
                 "jmp {common}",
                 vector = const Vector::$variant as usize,
-                common = sym common_entry,
+                common = sym $common,
             );
         }
     };
@@ -195,7 +202,7 @@ macro_rules! idt_vectors {
             }
         }
 
-        $(exception_stub!($stub, $ex, $err);)*
+        $(exception_stub!($stub, $ex, $err $(, ist $ist)?);)*
 
         /// Every vector whose row carries an `ist` index, paired with the index.
         const IST_VECTORS: &[(usize, u8)] = &[
@@ -293,7 +300,8 @@ extern "sysv64" fn stub_halt_all() {
 /// 16-byte-aligned stack, so `rsp` is aligned for the calls.
 #[unsafe(naked)]
 extern "sysv64" fn common_entry() {
-    ring3_naked_asm!(
+    // The stub's vector and error code, and `rip`, are below `cs`.
+    ring3_naked_asm!(cs = 24;
         "push r15", "push r14", "push r13", "push r12",
         "push r11", "push r10", "push r9",  "push r8",
         "push rbp", "push rdi", "push rsi", "push rdx",
@@ -313,10 +321,34 @@ extern "sysv64" fn common_entry() {
         "pop r8",   "pop r9",   "pop r10",  "pop r11",
         "pop r12",  "pop r13",  "pop r14",  "pop r15",
         "add rsp, 16",
-        "iretq",
+        gate_iretq!(),
         dispatch = sym trap_dispatch,
         exit_to_user = sym kernel_exit_to_user_check,
         preempt_count = const percpu::OFF_PREEMPT_COUNT,
+    );
+}
+
+/// The second half of an exception on an IST stack, `#DF` and `#MC`: the
+/// [`TrapFrame`] as [`common_entry`] lays it, with the kernel's GS base
+/// installed whatever it found, since these arrive in the kernel's CPL-0
+/// stretches with a user's base live (`arch::entry`). Never returns: both
+/// handlers end the machine.
+#[unsafe(naked)]
+extern "sysv64" fn fatal_entry() {
+    naked_asm!(
+        "cld",
+        "clac",
+        "push r15", "push r14", "push r13", "push r12",
+        "push r11", "push r10", "push r9",  "push r8",
+        "push rbp", "push rdi", "push rsi", "push rdx",
+        "push rcx", "push rbx", "push rax",
+        install_kernel_gs!(),
+        "mov rdi, rsp",
+        "call {dispatch}",
+        "ud2",
+        dispatch = sym trap_dispatch,
+        gs_base_msr = const percpu::MSR_GS_BASE,
+        gdt_in_percpu = const percpu::OFF_GDT,
     );
 }
 

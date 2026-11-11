@@ -7,8 +7,8 @@ use crate::hw::HW;
 // Ring 3 exit runs `kernel_exit_to_user_check` like every other return to userland: skipping it here let a thread killed in Ring 3 be redispatched to userland with the kill unread.
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn timer_entry() {
-    ring3_naked_asm!(
-        // No error code for interrupts. CS is at [rsp + 8].
+    // No error code for interrupts. CS is at [rsp + 8].
+    ring3_naked_asm!(cs = 8;
         "test dword ptr [rsp + 8], 3",
         "jz 2f",
 
@@ -31,6 +31,7 @@ pub(super) extern "sysv64" fn timer_entry() {
         "pop rsi",  "pop rdi",  "pop rbp",
         "pop r8",   "pop r9",   "pop r10",  "pop r11",
         "pop r12",  "pop r13",  "pop r14",  "pop r15",
+        "swapgs",
         "iretq",
 
         "2:",
