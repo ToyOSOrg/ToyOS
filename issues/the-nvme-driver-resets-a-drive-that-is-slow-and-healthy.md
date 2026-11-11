@@ -25,3 +25,15 @@ size and write rate, or a measured worst Flush on the T14's NVMe and on QEMU),
 or a silent command is first aborted (NVMe Abort, §5.1) before the controller
 is reset; and a guest test holds a Flush past the old bound without the
 session hearing `Device`.
+
+Every admin command, at bring-up and in a reset, is held to the same ten
+seconds since #1235, where it was `CAP.TO`. The T14 brought its controller up
+under it at #1235's head (a `metalcase` boot: up in 2 ms, APST on, DATA served
+off the NVMe).
+
+- **Owed on metal:** the AMD bench, the `microcode` and `machine_reboot` rows
+  (the `metalcase` image) in one boot of main after #1235. Main must pass both
+  rows, and its log must show the nvme driver's `up:` line with no `NOT
+  SERVING` and no `was not answered in`, `fileserver: Data serving` off the
+  NVMe, and no session's server that broke the protocol, answered nothing in
+  the bound, or would not take the session back.
