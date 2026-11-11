@@ -124,7 +124,7 @@ fn p(points: &mut Vec<Point>, name: &str) {
 }
 
 /// One spawn-and-wait through the SDK's own pieces, stamped between them.
-fn staged(t: &Target, cursor: &mut TraceCursor<Vec<u64>>) -> Rep {
+fn staged(t: &Target, cursor: &mut TraceCursor<Vec<u64>>, idle_after: bool) -> Rep {
     let (_, _) = read_to_now(cursor);
     let cpu_before = toyos_abi::syscall::current_cpu();
     let mut pts = Vec::new();
@@ -182,7 +182,9 @@ fn staged(t: &Target, cursor: &mut TraceCursor<Vec<u64>>) -> Rep {
     assert!(matches!(end, toyos_abi::end::End::Exited(0)), "{} ended {end:?}", t.name);
     let cpu_after = toyos_abi::syscall::current_cpu();
     // The reap follows in an idle loop; give it its moment before the read.
-    std::thread::sleep(std::time::Duration::from_millis(2));
+    if idle_after {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
     let (raw, lost) = read_to_now(cursor);
     if lost != 0 {
         println!("stages {}: the diary lost {lost} records in one rep", t.name);
@@ -254,8 +256,7 @@ fn last(points: &[Point], name: &str) -> Option<u64> {
     points.iter().rev().find(|pt| pt.name == name).map(|pt| pt.ns)
 }
 
-fn report(t: &Target, reps: &[Rep], command_ns: &mut [u64], command_after: &mut [u64]) {
-    let n = t.name;
+fn report(_t: &Target, n: &str, reps: &[Rep], command_ns: &mut [u64], command_after: &mut [u64]) {
     let total: Vec<u64> = reps.iter().map(|r| at(&r.points, "u.process_dropped").unwrap() - at(&r.points, "u.begin").unwrap()).collect();
     let mut sorted = total.clone();
     println!(
@@ -454,6 +455,28 @@ fn report(t: &Target, reps: &[Rep], command_ns: &mut [u64], command_after: &mut 
 
 /// `read_image`'s own parts for a served file, each timed alone.
 fn image_parts(t: &Target) {
+    let mut alone: Vec<u64> = (0..WARM + 40)
+        .map(|_| {
+            let a = now();
+            let image = files::read_image(t.path.as_bytes()).expect("read_image");
+            let b = now();
+            drop(image);
+            b - a
+        })
+        .skip(WARM)
+        .collect();
+    let mut opens: Vec<u64> = (0..WARM + 40)
+        .map(|_| {
+            let a = now();
+            let fd = files::open(At::Cwd, t.path.as_bytes(), Open { read: true, cloexec: true, ..Open::default() }).expect("open");
+            let b = now();
+            // SAFETY: the descriptor opened above, named nowhere else.
+            unsafe { toyos::fd::close(fd) }.expect("close");
+            b - a
+        })
+        .skip(WARM)
+        .collect();
+    println!("image {}: hot loops: read_image p50={} open p50={}", t.name, p50(&mut alone), p50(&mut opens));
     let mut open_ns = Vec::new();
     let mut stat_ns = Vec::new();
     let mut create_ns = Vec::new();
@@ -474,7 +497,7 @@ fn image_parts(t: &Target) {
         let d = now();
         // SAFETY: a fresh mapping of `size` bytes this process alone holds.
         let bytes = unsafe { core::slice::from_raw_parts_mut(memory.as_ptr(), size) };
-        let mut done = 0;
+        let mut done = if t.name == "std" || t.name == "link" { size } else { 0 };
         while done < size {
             done += files::read(fd, &mut bytes[done..]).expect("read");
         }
@@ -696,18 +719,30 @@ fn main() {
         Target { name: "tiny", path: format!("{dir}/tiny"), argv: argv(&[&format!("{dir}/tiny")]) },
         Target { name: "large", path: format!("{dir}/large"), argv: argv(&[&format!("{dir}/large")]) },
         Target { name: "std", path: std_path.into(), argv: argv(&[std_path, std_arg]) },
+        // The same program named through the symlink a bench job runs as.
+        Target { name: "link", path: "/system/bin/osbench_procs".into(), argv: argv(&["/system/bin/osbench_procs", "nop"]) },
         Target { name: "tmpstd", path: format!("{dir}/osbench"), argv: argv(&[&format!("{dir}/osbench"), std_arg]) },
     ];
     let words = cap().trace_cursor_words().expect("the capability sizes a cursor");
     let mut cursor = TraceCursor::new(vec![0; words]);
     println!("spawn_stages: cpus={} std={std_path}", toyos_abi::syscall::cpu_count());
+    println!("spawn_stages: current_exe={:?}", std::env::current_exe());
     for t in &targets {
+        if std::fs::metadata(&t.path).is_err() {
+            println!("stages {}: absent, {} is not in this image", t.name, t.path);
+            continue;
+        }
         // std's Command first, undisturbed by anything this job adds.
         let mut cmd: Vec<u64> = (0..WARM + REPS).map(|_| command(t)).skip(WARM).collect();
-        let reps: Vec<Rep> = (0..WARM + REPS).map(|_| staged(t, &mut cursor)).skip(WARM).collect();
+        // Back to back, as the Command loop runs: the stages as they are hot.
+        let reps: Vec<Rep> = (0..WARM + REPS).map(|_| staged(t, &mut cursor, false)).skip(WARM).collect();
         let mut cmd_after: Vec<u64> = (0..WARM + REPS).map(|_| command(t)).skip(WARM).collect();
         cmd.sort_unstable();
-        report(t, &reps, &mut cmd, &mut cmd_after);
+        report(t, t.name, &reps, &mut cmd, &mut cmd_after);
+        // With 2 ms of idle after each, so the reap and the space's drop are
+        // read, and what a spawn costs a machine that went idle.
+        let idle: Vec<Rep> = (0..WARM + 20).map(|_| staged(t, &mut cursor, true)).skip(WARM).collect();
+        report(t, &format!("{}.after_idle", t.name), &idle, &mut cmd, &mut cmd_after);
         image_parts(t);
     }
     // The build-shaped workload, where the image has osbench to run.
