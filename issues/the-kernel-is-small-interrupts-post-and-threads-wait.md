@@ -409,6 +409,22 @@ By mechanisms eliminated:
 2. Endowment labels, after #1200: `SYS_ENDOWMENTS`, the per-process blob
    and its charge, and label text the kernel compares. **Done** (#1252),
    with the namespaces.
+   - **Owed on metal:** the `endow-a` boots, `testcases`, `shared-debug`
+     and `proctreecase`, on the T14 and the AMD bench. Main must show:
+     - every job green, `endowment_denied`, `abuse_handle_table` (97
+       endowments refused, 96 start), `abuse_connect_flood` (a refused
+       connect leaves the caller's table as it was), `abuse_listener_hijack`,
+       `user_copy_faults`, `adopted_services_stay`, `handle_lifetime`,
+       `process_tree` and `launch_toctou` among them;
+     - no kernel panic from the slot-order assertions;
+     - `spawn_cost` within its guard.
+   - **Owed on metal:** the spawn A/B of main before #1252 against main
+     after, in one session on the T14 and the AMD bench. The rows are
+     `spawn_cost` and osbench's spawn rows (`system`'s process spawn, the
+     `procs` group). Main after must show no spawn slower beyond run-to-run
+     spread; a slower one is answered by measuring a spawn entry that
+     copies rather than moves. osbench's IPC rendezvous row is not
+     comparable across the change.
 3. What the loader named, independent of the others: `SYS_BOOT_SOURCES`,
    the inventory's partition records, the device-path parser. **Done**
    (#1210).
