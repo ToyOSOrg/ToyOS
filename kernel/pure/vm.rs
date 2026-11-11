@@ -4,8 +4,8 @@
 //!
 //! Ranges are whole 4 KiB pages inside `[floor, top)`, never overlapping.
 //! What is not an entry is free, and placement looks at nothing else: the
-//! free ranges are kept by address and by length, so finding room, cutting a
-//! range out and inserting one are logarithmic in the entries.
+//! free ranges, the gaps the entries leave, are kept by length, so finding
+//! room, cutting a range out and inserting one are logarithmic in the entries.
 //!
 //! **Every change is all-or-nothing.** A caller asks what a change would do
 //! before making it ([`Inventory::covered`], [`Inventory::is_free`],
@@ -157,19 +157,15 @@ pub struct Inventory<O, S = O> {
     floor: u64,
     top: u64,
     entries: BTreeMap<u64, Entry<O, S>>,
-    /// Free ranges by start, each to its end.
-    free: BTreeMap<u64, u64>,
-    /// The same ranges by `(length, start)`.
-    by_len: BTreeSet<(u64, u64)>,
+    /// Every gap in `[floor, top)` between entries, by `(length, start)`.
+    free: BTreeSet<(u64, u64)>,
 }
 
 impl<O: Object, S: Object> Inventory<O, S> {
     /// Nothing held in `[floor, top)`, both on pages.
     pub fn new(floor: u64, top: u64) -> Self {
         assert!(floor.is_multiple_of(PAGE) && top.is_multiple_of(PAGE) && floor < top, "vm: {floor:#x}..{top:#x}");
-        let mut inventory = Self { floor, top, entries: BTreeMap::new(), free: BTreeMap::new(), by_len: BTreeSet::new() };
-        inventory.add_free(floor, top);
-        inventory
+        Self { floor, top, entries: BTreeMap::new(), free: BTreeSet::from([(top - floor, floor)]) }
     }
 
     pub fn floor(&self) -> u64 {
@@ -244,25 +240,43 @@ impl<O: Object, S: Object> Inventory<O, S> {
     pub fn place(&self, len: u64, align: u64) -> Option<u64> {
         debug_assert!(len.is_multiple_of(PAGE) && len > 0 && align.is_power_of_two() && align >= PAGE);
         let need = len.checked_add(align - PAGE)?;
-        let &(_, start) = self.by_len.range((need, 0)..).next()?;
+        let &(_, start) = self.free.range((need, 0)..).next()?;
         Some(start.next_multiple_of(align))
     }
 
-    /// Hold `[start, entry.end)`, which is free.
+    /// Hold `[start, entry.end)`, which is free. It joins a neighbour it
+    /// continues.
     pub fn insert(&mut self, start: u64, entry: Entry<O, S>) {
-        assert!(self.holds(start, entry.end), "vm: {start:#x}..{:#x} is not pages of this space", entry.end);
-        let (free_start, free_end) = self.free.range(..=start).next_back().map(|(&s, &e)| (s, e)).expect("vm: inserted over held memory");
-        assert!(entry.end <= free_end, "vm: {start:#x}..{:#x} inserted over held memory", entry.end);
-        self.take_free(free_start, free_end);
-        if free_start < start {
-            self.add_free(free_start, start);
-        }
-        if entry.end < free_end {
-            self.add_free(entry.end, free_end);
-        }
         let end = entry.end;
-        self.entries.insert(start, entry);
-        self.join(start, end);
+        assert!(self.holds(start, end), "vm: {start:#x}..{end:#x} is not pages of this space");
+        let (hi, joins_next) = match self.entries.range(start..).next() {
+            Some((&next, following)) => (next, next == end && entry.continued_by(start, following)),
+            None => (self.top, false),
+        };
+        let prev = self.entries.range_mut(..start).next_back();
+        let lo = prev.as_ref().map_or(self.floor, |(_, e)| e.end);
+        assert!(lo <= start && end <= hi, "vm: {start:#x}..{end:#x} inserted over held memory");
+        self.free.remove(&(hi - lo, lo));
+        if lo < start {
+            self.free.insert((start - lo, lo));
+        }
+        if end < hi {
+            self.free.insert((hi - end, end));
+        }
+        let joined = match prev {
+            Some((&s, before)) if lo == start && before.continued_by(s, &entry) => {
+                before.end = end;
+                s
+            }
+            _ => {
+                self.entries.insert(start, entry);
+                start
+            }
+        };
+        if joins_next {
+            let following = self.entries.remove(&end).expect("vm: the range just found");
+            self.entries.get_mut(&joined).expect("vm: the range just held").end = following.end;
+        }
     }
 
     /// Take every entry out of `[start, end)`, cutting any that crosses its
@@ -270,11 +284,24 @@ impl<O: Object, S: Object> Inventory<O, S> {
     pub fn remove(&mut self, start: u64, end: u64) -> Vec<(u64, Entry<O, S>)> {
         self.split_at(start);
         self.split_at(end);
-        let starts: Vec<u64> = self.entries.range(start..end).map(|(&s, _)| s).collect();
-        let removed: Vec<(u64, Entry<O, S>)> =
-            starts.into_iter().map(|s| (s, self.entries.remove(&s).expect("vm: a start just listed"))).collect();
-        for (s, entry) in &removed {
-            self.release(*s, entry.end);
+        let lo = self.entries.range(..start).next_back().map_or(self.floor, |(_, e)| e.end);
+        // The gaps from `lo` up to the last entry taken join into one.
+        let mut gap = lo;
+        let mut removed = Vec::new();
+        while let Some((&s, _)) = self.entries.range(start..end).next() {
+            let entry = self.entries.remove(&s).expect("vm: a start just found");
+            if gap < s {
+                self.free.remove(&(s - gap, gap));
+            }
+            gap = entry.end;
+            removed.push((s, entry));
+        }
+        if !removed.is_empty() {
+            let hi = self.entries.range(gap..).next().map_or(self.top, |(&s, _)| s);
+            if gap < hi {
+                self.free.remove(&(hi - gap, gap));
+            }
+            self.free.insert((hi - lo, lo));
         }
         removed
     }
@@ -327,32 +354,6 @@ impl<O: Object, S: Object> Inventory<O, S> {
                 _ => at = next,
             }
         }
-    }
-
-    /// `[start, end)` was held and is free now.
-    fn release(&mut self, start: u64, end: u64) {
-        let (mut lo, mut hi) = (start, end);
-        if let Some((&s, &e)) = self.free.range(..start).next_back() {
-            if e == start {
-                self.take_free(s, e);
-                lo = s;
-            }
-        }
-        if let Some(&e) = self.free.get(&end) {
-            self.take_free(end, e);
-            hi = e;
-        }
-        self.add_free(lo, hi);
-    }
-
-    fn add_free(&mut self, start: u64, end: u64) {
-        self.free.insert(start, end);
-        self.by_len.insert((end - start, start));
-    }
-
-    fn take_free(&mut self, start: u64, end: u64) {
-        self.free.remove(&start);
-        self.by_len.remove(&(end - start, start));
     }
 }
 
@@ -473,6 +474,12 @@ mod tests {
         v.insert(FLOOR + 11 * PAGE, object(FLOOR + 12 * PAGE, 7, 2 * PAGE));
         v.insert(FLOOR + 12 * PAGE, object(FLOOR + 13 * PAGE, 7, 3 * PAGE));
         assert_eq!(v.len(), 3);
+        // A range that fills the hole between two it continues makes one of the three.
+        v.insert(FLOOR + 20 * PAGE, private(FLOOR + 21 * PAGE, Prot::Read));
+        v.insert(FLOOR + 22 * PAGE, private(FLOOR + 23 * PAGE, Prot::Read));
+        v.insert(FLOOR + 21 * PAGE, private(FLOOR + 22 * PAGE, Prot::Read));
+        assert_eq!(v.find(FLOOR + 20 * PAGE).map(|(s, e)| (s, e.end)), Some((FLOOR + 20 * PAGE, FLOOR + 23 * PAGE)));
+        assert_eq!(v.len(), 4);
     }
 
     #[test]
@@ -605,17 +612,31 @@ mod tests {
                 let ((s, a), (t, b)) = (pair[0], pair[1]);
                 assert!(!(a.end == t && a.continued_by(s, b)), "round {round}: {s:#x} and {t:#x} were left apart");
             }
-            // The free index is exactly the gaps.
-            let longest_gap = {
-                let (mut best, mut run) = (0, 0);
-                for p in &map {
-                    run = if p.is_none() { run + 1 } else { 0 };
-                    best = best.max(run);
+            // The free index is exactly the gaps: a placement is the smallest
+            // gap that holds it at any alignment, the lowest of equals.
+            let mut gaps: Vec<(u64, u64)> = Vec::new();
+            for (p, held) in map.iter().enumerate() {
+                match (held, gaps.last_mut()) {
+                    (Some(_), _) => {}
+                    (None, Some((s, len))) if *s + *len == p as u64 => *len += 1,
+                    (None, _) => gaps.push((p as u64, 1)),
                 }
-                best
-            };
-            assert!(longest_gap == 0 || v.place(longest_gap * PAGE, PAGE).is_some(), "round {round}");
-            assert_eq!(v.place((longest_gap + 1) * PAGE, PAGE), None, "round {round}");
+            }
+            let by_len: BTreeSet<(u64, u64)> =
+                gaps.iter().map(|&(s, len)| (len * PAGE, FLOOR + s * PAGE)).collect();
+            assert_eq!(v.free, by_len, "round {round}: the free index is not the gaps");
+            let longest = gaps.iter().map(|&(_, len)| len).max().unwrap_or(0);
+            for (n, align) in [(1, 1), (2, 1), (3, 4), (8, 1), (5, 16), (longest, 1), (longest + 1, 1)] {
+                if n == 0 {
+                    continue;
+                }
+                let want = gaps
+                    .iter()
+                    .filter(|&&(_, len)| len >= n + align - 1)
+                    .min_by_key(|&&(s, len)| (len, s))
+                    .map(|&(s, _)| (FLOOR + s * PAGE).next_multiple_of(align * PAGE));
+                assert_eq!(v.place(n * PAGE, align * PAGE), want, "round {round}: {n} pages aligned to {align}");
+            }
         }
     }
 
