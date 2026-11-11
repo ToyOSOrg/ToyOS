@@ -3078,9 +3078,8 @@ pub enum PagedOp {
     /// pager's lands, and no holder reads half of one, so its writes, its
     /// truncations and its own reads in between are each one whole to every
     /// other writer and reader, however many calls and waits they take. It
-    /// waits for a holder's write or a holder's read already holding them,
-    /// which wait on nothing. Answers the size; `InvalidArgument` for a
-    /// second hold.
+    /// waits for a holder's write under way, which waits on nothing. Answers
+    /// the size; `InvalidArgument` for a second hold.
     Hold = 10,
     /// Unused slots in the pager's resident-page quota. This advisory
     /// snapshot reserves nothing and promises no physical memory.

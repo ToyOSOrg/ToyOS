@@ -510,8 +510,9 @@ pub const WRITES_A_READ_MEETS: u32 = 3;
 /// The most pages one holder's write takes, whole.
 pub const HOLDER_PAGES: u64 = 64;
 
-/// The furthest a holder's write ends: a served file's largest size, which
-/// its pager keeps for every other write.
+/// The furthest a holder's write ends, the kernel's reach for holders: one
+/// past it is refused and is the pager's to write, and a pager that mints
+/// write holders accepts that no holder grows an object past it.
 pub const HOLDER_END: u64 = 1 << 44;
 
 /// The pages a holder's write of `len` bytes at `offset` spans, which one
@@ -738,7 +739,7 @@ impl<F: Copy> Pages<F> {
 
     /// Whether a holder's read of `o` that began at `since` and waits for
     /// `page` looks again: the page is no longer absent, or a write or resize
-    /// moved the version, which the read answers `WouldBlock`.
+    /// moved the version, and the read begins again.
     pub fn wait_over(&self, o: &Object, page: u64, since: Version) -> bool {
         !o.unchanged(since) || !matches!(self.lookup(o, page), Lookup::Absent)
     }
