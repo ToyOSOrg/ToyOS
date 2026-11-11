@@ -97,8 +97,9 @@ not yet measured on metal, its speed-up included; its rows are owed:
   - **The run.** `a_pager_s_end_answers_its_waiting_holders_gone` at #1258's code, or at any revision whose
     paged object, pure paged module and pagerprobe are #1258's, run on several vCPUs. It shows order and contents
     only. It must:
-    - pass, its log showing pagerprobe's helper's writes admitted, then the page written against credit, then the
-      owner's read-back, then the pager's end answering the wait `Gone`, then `pagerprobe: ok`;
+    - pass, its log showing pagerprobe's helper's writes admitted, then the owner's read-back, then the pager's
+      end answering the wait `Gone`, then `pagerprobe: ok`; the helper's page written against credit somewhere
+      between its writes admitted and `Gone`, since its process and the owner's print in either order;
     - leave no paged overdue report;
     - pass with the two served-file tests beside it.
   - **The control.** With the kernel refusing every holder's write (#1258's control branch
