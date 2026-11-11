@@ -16,10 +16,15 @@ holds = ["console-input"]
 receives = ["log-wire"]
 restart = true
 
+# `starts` because the job launches the installer: `/apps` is read-write in
+# that row's view alone.
 [programs.test-runner]
+starts = ["pkg"]
 
-# The installer the job runs, as `images/system.toml` declares it.
+# The installer the job launches, as `images/system.toml` declares it.
 [programs.pkg]
+state = true
+installs = true
 
 # The block service, the NVMe driver for the disk DATA is on, and the file
 # servers.

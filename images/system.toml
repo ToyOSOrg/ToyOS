@@ -32,9 +32,9 @@ memory-floor-mib = 96
 start = ["logkeeper", "uart", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver", "ps2server", "wlan", "vdagent"]
 
 # What every program launched out of `/apps` holds, whatever its own directory
-# says. A package is unpacked by `/system/bin/pkg` into a writable directory, so
-# a row read out of one would be a directory deciding what the machine hands
-# out; this is the image's answer, one for all of them. Connectors only —
+# says. A package is what an archive carried, so a row read out of one would
+# be a directory deciding what the machine hands out; this is the image's
+# answer, one for all of them. Connectors only —
 # `devices` and `syscap` have no spelling here, so nothing installed claims
 # hardware or enters the RT band — and no directory: a package sees its own
 # `/apps/<name>` read-only and its own `/home/toy/Apps/<name>`, its `HOME`.
@@ -52,10 +52,13 @@ folder = "read-write"
 # with the session user's home, and `state = true` gives it a `/state/<name>`
 # beside it. No row's view holds any other part of `/state`.
 [programs]
-# The installer. It writes under `/apps` because `/apps` is writable to it.
+# The installer: `installs = true` makes `/apps` read-write in its view, and
+# it is read-only in every other row's, so `launch pkg install <file>` installs
+# and a shell's own writes and its helpers' are refused, a `pkg` it spawns as
+# one among them. Who may install is the `starts` that list it.
 # `/state/pkg` is where the machine's copy of the repository metadata it last
 # accepted belongs (`toyos_update::repo::Holder::Machine`).
-pkg = { state = true }
+pkg = { state = true, installs = true }
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring, writes the console only before

@@ -10,6 +10,8 @@
 # And `app_view`: test-runner's row lists `/apps`, so a job launches the
 # package it installed under the image's `[apps]` row and the view an
 # installed package is minted, and is refused one named after the `shell` row.
+# The job writes its packages under `/apps` itself and rewrites one, which no
+# installer does, so test-runner's row is this image's installer.
 # It grants that package a folder through `grants`, which test-runner's row
 # and the shell's list, in the login session test-runner opens for its jobs:
 # test-runner is a login authority, so its jobs launch in that session and
@@ -43,6 +45,7 @@ restart = true
 syscap = ["dup", "roster"]
 starts = ["toybox", "shell", "grants", "/apps"]
 login = true
+installs = true
 
 # `roster`, which a child the job spawns itself never holds: a child holding
 # it ran under this row, and `launch_toctou` asks which bytes that child was.

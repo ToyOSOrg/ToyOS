@@ -22,8 +22,8 @@ prefix. An empty view names nothing.
   reaches it only through the file picker, which hands over that one file.
 - **No special cases.** The boot partition is in the updater's view and nobody
   else's; login data is in the login authority's view alone; `/apps` is
-  writable only in the installer service's view, and every other program sees
-  it read-only.
+  writable only in the installer's view, and every other program sees it
+  read-only.
 
 The working directory is the client's: a spawn states the child's starting
 directory, which the child resolves in its own view.

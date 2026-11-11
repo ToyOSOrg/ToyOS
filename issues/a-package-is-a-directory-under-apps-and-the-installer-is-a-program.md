@@ -37,9 +37,13 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
   stay for crates, `rust/` and LLVM. Recipes and patches live in this
   repository, where `NOTICE` and the licence gate carry them, not in a ports
   repository.
-- **The installer** is `/system/bin/pkg`. Who may write `/apps` (owner
-  ruling, 2026-11-05) is staged in stage 2 of
-  `issues/every-program-sees-only-the-files-it-was-given.md`. `pkg`
+- **The installer** is `/system/bin/pkg`, and only its row's view holds
+  `/apps` read-write (owner ruling, 2026-11-05; stage 2 of
+  `issues/every-program-sees-only-the-files-it-was-given.md`): it installs
+  and removes launched, `launch pkg install <file>`, and a `pkg` spawned as
+  a helper lists and refuses the rest by name. A caller that can launch
+  `pkg` answers its question itself, by `--yes` or the stdin it supplies, so
+  who decides an install is the `starts` that list `pkg`. `pkg`
   fetches, verifies, unpacks and commits, and it asks the user
   before it installs — at install, the moment the user typed the command,
   never at first run, so a refusal leaves nothing on disk and no answer has
@@ -72,7 +76,7 @@ The storage track's users and mount-protocol stages do not block this one.
    `issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`
    owes. **What a package holds is the image's `[apps]` row, never
    its own `manifest.toml`** — that file names which of the directory's
-   binaries a launch starts and nothing else, so a writable `/apps` cannot name
+   binaries a launch starts and nothing else, so no file under `/apps` can name
    a device or a right. The stage-then-commit above amends it: `pkg` writes
    `/apps/<name>/` in place today, its `manifest.toml` last
    (`system/pkg/src/main.rs`). It streams an archive of any size that fits
