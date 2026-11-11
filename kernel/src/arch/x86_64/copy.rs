@@ -1,4 +1,5 @@
-//! The kernel's `memcpy`, in place of `compiler_builtins`' weak one: one
+//! The kernel's `memcpy`, in place of `compiler_builtins`' weak one, and the
+//! rule and the descending copy its user copies share (`super::uaccess`): one
 //! `rep movsb`, or a descending copy where a forward one would stall.
 //!
 //! A load matching an older in-flight store on address bits 11:0 alone waits
@@ -54,7 +55,7 @@ pub fn set_rule(rule: Rule) {
 }
 
 #[cfg(target_os = "none")]
-fn rule() -> Rule {
+pub(super) fn rule() -> Rule {
     Rule { window: WINDOW.load(Ordering::Relaxed) }
 }
 
@@ -101,55 +102,71 @@ pub unsafe fn movsb(dest: *mut u8, src: *const u8, n: usize) {
     }
 }
 
-/// Copy `n` bytes, at least 8, between disjoint ranges, highest first: the
-/// top 8 bytes in one store, then down 32 and 8 bytes a step from the
+/// The descending copy's instructions, for `rdi` the destination, `rsi` the
+/// source and `rdx` the length, at least 8: it keeps those three, uses no
+/// stack and leaves `rax`, `rcx`, `r8`, `r9` and `r10` changed. The top 8
+/// bytes go in one store, then 32 and 8 bytes a step down from the
 /// destination's last 8-byte boundary, so no other store splits a line, and
 /// the bottom 8 bytes last. Stores past the boundary overlap one another,
 /// with the same bytes.
+macro_rules! copy_down_asm {
+    () => {
+        concat!(
+            "lea rcx, [rdi + rdx]\n",
+            "and rcx, -8\n",
+            "sub rcx, rdi\n",
+            "mov rax, [rsi + rdx - 8]\n",
+            "mov [rdi + rdx - 8], rax\n",
+            "cmp rcx, 32\n",
+            "jb 3f\n",
+            "2:\n",
+            "sub rcx, 32\n",
+            "mov rax, [rsi + rcx + 24]\n",
+            "mov r8, [rsi + rcx + 16]\n",
+            "mov r9, [rsi + rcx + 8]\n",
+            "mov r10, [rsi + rcx]\n",
+            "mov [rdi + rcx + 24], rax\n",
+            "mov [rdi + rcx + 16], r8\n",
+            "mov [rdi + rcx + 8], r9\n",
+            "mov [rdi + rcx], r10\n",
+            "cmp rcx, 32\n",
+            "jae 2b\n",
+            "3:\n",
+            "cmp rcx, 8\n",
+            "jb 5f\n",
+            "4:\n",
+            "sub rcx, 8\n",
+            "mov rax, [rsi + rcx]\n",
+            "mov [rdi + rcx], rax\n",
+            "cmp rcx, 8\n",
+            "jae 4b\n",
+            "5:\n",
+            "mov rax, [rsi]\n",
+            "mov [rdi], rax\n",
+        )
+    };
+}
+#[cfg(target_os = "none")]
+pub(super) use copy_down_asm;
+
+/// Copy `n` bytes, at least 8, between disjoint ranges, highest first
+/// ([`copy_down_asm`]).
 ///
 /// # Safety
 /// As [`copy_by`], with `n` at least 8.
 pub unsafe fn copy_down(dest: *mut u8, src: *const u8, n: usize) {
-    let aligned_end = ((dest as usize).wrapping_add(n) & !7).wrapping_sub(dest as usize);
     // SAFETY: every access is inside `[0, n)` of its range, as the caller promises.
     unsafe {
         core::arch::asm!(
-            "mov {a}, [{s} + {n} - 8]",
-            "mov [{d} + {n} - 8], {a}",
-            "cmp {p}, 32",
-            "jb 3f",
-            "2:",
-            "sub {p}, 32",
-            "mov {a}, [{s} + {p} + 24]",
-            "mov {b}, [{s} + {p} + 16]",
-            "mov {c}, [{s} + {p} + 8]",
-            "mov {e}, [{s} + {p}]",
-            "mov [{d} + {p} + 24], {a}",
-            "mov [{d} + {p} + 16], {b}",
-            "mov [{d} + {p} + 8], {c}",
-            "mov [{d} + {p}], {e}",
-            "cmp {p}, 32",
-            "jae 2b",
-            "3:",
-            "cmp {p}, 8",
-            "jb 5f",
-            "4:",
-            "sub {p}, 8",
-            "mov {a}, [{s} + {p}]",
-            "mov [{d} + {p}], {a}",
-            "cmp {p}, 8",
-            "jae 4b",
-            "5:",
-            "mov {a}, [{s}]",
-            "mov [{d}], {a}",
-            s = in(reg) src,
-            d = in(reg) dest,
-            n = in(reg) n,
-            p = inout(reg) aligned_end => _,
-            a = out(reg) _,
-            b = out(reg) _,
-            c = out(reg) _,
-            e = out(reg) _,
+            copy_down_asm!(),
+            in("rdi") dest,
+            in("rsi") src,
+            in("rdx") n,
+            out("rax") _,
+            out("rcx") _,
+            out("r8") _,
+            out("r9") _,
+            out("r10") _,
             options(nostack),
         );
     }

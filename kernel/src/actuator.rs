@@ -43,6 +43,11 @@ actuators! {
     /// x86-64 loads its IDT later, and panics by name instead.
     test_early_fault = "test-early-fault";
 
+    /// Send every copy of at least 64 bytes whose ends differ modulo 4 KiB
+    /// highest first, whatever the CPU (`arch::x86_64::copy`). Judged by
+    /// `a_user_copy_highest_first_faults_or_ends_as_bad_address`.
+    copies_go_down = "copies-go-down";
+
     /// Have the first syscall null SS, force a switch, and report whether it reloaded — the
     /// AMD `SYSRET` SS-attributes workaround's only guest-observable proof.
     sysret_ss_probe = "sysret-ss-probe";

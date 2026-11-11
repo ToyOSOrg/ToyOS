@@ -680,6 +680,12 @@ const MACHINE_TESTS: &[&str] = &[
     // reaches. One boot of QEMU's x86-64 machine; the shared boots run it on
     // each bench.
     "a_user_copy_faults_in_mid_copy_or_ends_as_bad_address",
+    // The same job with every copy sent highest first, as an x86-64 kernel
+    // sends some on a CPU whose forward copy stalls: the descending copy's
+    // fixup, which the guest runner's CPU never takes by its own rule. One
+    // boot of QEMU's x86-64 machine on the actuator kernel; the AMD bench's
+    // shared boot takes it by its rule.
+    "a_user_copy_highest_first_faults_or_ends_as_bad_address",
     // The boot's log written through usbd onto the stick it booted from, and
     // still there once the machine has stopped: the path every metal boot's
     // `/log` takes, which no other QEMU row reads, because their console is
@@ -3306,10 +3312,11 @@ fn a_spawn_from_an_image_frees_it_when_the_child_ends(test_config: &Path) -> Res
 
 /// `user_copy_faults` alone: its copies that fault mid-copy and are served,
 /// and its refusals, each said by name.
-fn a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config: &Path) -> Result<(), String> {
+fn a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config: &Path, kernel_params: &'static [&'static str]) -> Result<(), String> {
     const JOB: &str = "user_copy_faults";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
-    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    let options = BootOptions { kernel_params, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], options);
     serial::Serial::boot(&qemu).must_be_clean()?;
     let result = qemu.run_test("test_rs_user_copy_faults", Duration::from_secs(60));
     if let Some(why) = &result.error {
@@ -3321,6 +3328,7 @@ fn a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config: &Path) -> 
     for claim in [
         "a fault served mid-copy resumes: 600 bytes",
         "a fault served mid-copy resumes: 12888 bytes",
+        "a fault served mid-copy resumes 16 bytes from the pipe's frames: 12888 bytes",
         "a byte nothing serves ends the copy as BadAddress",
         "user copies: all checks passed",
     ] {
@@ -4970,7 +4978,10 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "the_uart_carries_the_boot_once_across_the_hand_over" => the_uart_carries_the_boot_once_across_the_hand_over(),
         "a_supervisor_that_fails_early_says_why_on_the_uart" => a_supervisor_that_fails_early_says_why_on_the_uart(),
         "a_spawn_from_an_image_frees_it_when_the_child_ends" => a_spawn_from_an_image_frees_it_when_the_child_ends(test_config),
-        "a_user_copy_faults_in_mid_copy_or_ends_as_bad_address" => a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config),
+        "a_user_copy_faults_in_mid_copy_or_ends_as_bad_address" => a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &[]),
+        "a_user_copy_highest_first_faults_or_ends_as_bad_address" => {
+            a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &["copies-go-down"])
+        }
         "a_bent_supervisor_is_refused_and_nothing_boots" => [qemu::Profile::HeadlessNoConsolePort, qemu::Profile::Virt]
             .into_iter()
             .try_for_each(|profile| a_bent_supervisor_is_refused_and_nothing_boots(profile, test_config)),
