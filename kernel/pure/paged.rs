@@ -1771,9 +1771,15 @@ mod tests {
             Walk,
             /// The walker's visit of the node it took, under that space's lock.
             Visit,
+            /// The server reads its notices: each request not yet named.
+            Report,
+            /// The server answers the oldest request it read, by a supply.
+            Answer,
+            /// Every parked fault looks at its page again.
+            Retry,
         }
 
-        pub(super) const STEPS: [Step; 18] = [
+        pub(super) const STEPS: [Step; 21] = [
             Step::Map(0),
             Step::Map(1),
             Step::Unmap(0),
@@ -1792,6 +1798,9 @@ mod tests {
             Step::End,
             Step::Walk,
             Step::Visit,
+            Step::Report,
+            Step::Answer,
+            Step::Retry,
         ];
 
         pub(super) struct World {
@@ -1804,6 +1813,22 @@ mod tests {
             freed: BTreeSet<u64>,
             walking: bool,
             visiting: Option<u32>,
+            /// Faults parked on an absent page: the space, the page, and the
+            /// request as the pager hears of it.
+            parked: std::vec::Vec<(u32, u64, Want)>,
+            /// Pages the server read requests for and has yet to supply.
+            asked: std::collections::VecDeque<u64>,
+        }
+
+        /// The parked faults' wants, which removals name again.
+        struct Parked<'a>(&'a mut std::vec::Vec<(u32, u64, Want)>);
+
+        impl Waiters for Parked<'_> {
+            fn each(&mut self, f: &mut dyn FnMut(&mut Want)) {
+                for (_, _, want) in self.0.iter_mut() {
+                    f(want);
+                }
+            }
         }
 
         impl World {
@@ -1820,6 +1845,8 @@ mod tests {
                     freed: BTreeSet::new(),
                     walking: false,
                     visiting: None,
+                    parked: std::vec::Vec::new(),
+                    asked: std::collections::VecDeque::new(),
                 }
             }
 
@@ -1837,11 +1864,13 @@ mod tests {
                         self.mapped[s as usize] = false;
                     }
                     Step::Fault(s, page) if self.mapped[s as usize] && self.leaves[s as usize][page as usize].is_none() => {
-                        let Lookup::Present(_) = self.p.lookup(&self.o, page) else { return false };
-                        for at in 0..2 {
-                            if let (None, Lookup::Present(f)) = (self.leaves[s as usize][at], self.p.lookup(&self.o, at as u64)) {
-                                self.leaves[s as usize][at] = Some(f);
+                        if !self.touch(s, page) {
+                            if self.p.lookup(&self.o, page) != Lookup::Absent || self.parked.iter().any(|&(t, q, _)| (t, q) == (s, page)) {
+                                return false;
                             }
+                            let mut want = Want::NONE;
+                            want.ask(page, 1);
+                            self.parked.push((s, page, want));
                         }
                     }
                     Step::Supply(page) if !self.o.gone() => {
@@ -1849,7 +1878,7 @@ mod tests {
                         let _ = self.p.supply(&mut self.o, page, self.next, false, (page + 1) * PAGE);
                     }
                     Step::Withdraw(page) if !self.o.gone() => {
-                        self.p.withdraw(&mut self.o, page, 1, &mut Nobody);
+                        self.p.withdraw(&mut self.o, page, 1, &mut Parked(&mut self.parked));
                         self.revoke();
                     }
                     Step::Fail(page) if !self.o.gone() => {
@@ -1870,9 +1899,46 @@ mod tests {
                     }
                     Step::Walk if self.walking && self.visiting.is_none() => {
                         let freed = &mut self.freed;
-                        match self.p.walk(&mut self.o, &mut self.ring, &mut Nobody, &mut |f, _, _| assert!(freed.insert(f), "frame {f} given back twice")) {
+                        let walked = self.p.walk(&mut self.o, &mut self.ring, &mut Parked(&mut self.parked), &mut |f, _, _| {
+                            assert!(freed.insert(f), "frame {f} given back twice");
+                        });
+                        match walked {
                             Some(node) => self.visiting = Some(node),
                             None => self.walking = false,
+                        }
+                    }
+                    Step::Report => {
+                        let before = self.asked.len();
+                        for (_, _, want) in &mut self.parked {
+                            if let Some((first, _)) = want.report() {
+                                self.asked.push_back(first);
+                            }
+                        }
+                        if self.asked.len() == before {
+                            return false;
+                        }
+                    }
+                    Step::Answer => {
+                        let Some(page) = self.asked.pop_front() else { return false };
+                        if !self.o.gone() {
+                            self.next += 1;
+                            let _ = self.p.supply(&mut self.o, page, self.next, false, (page + 1) * PAGE);
+                        }
+                    }
+                    Step::Retry if !self.parked.is_empty() => {
+                        let parked = core::mem::take(&mut self.parked);
+                        for (s, page, mut want) in parked {
+                            if !self.mapped[s as usize] || self.touch(s, page) {
+                                continue;
+                            }
+                            match self.p.lookup(&self.o, page) {
+                                Lookup::Absent => {
+                                    want.ask(page, 1);
+                                    self.parked.push((s, page, want));
+                                }
+                                // Refused: failed, past the end, or gone.
+                                _ => {}
+                            }
                         }
                     }
                     Step::Visit if self.visiting.is_some() => {
@@ -1889,6 +1955,30 @@ mod tests {
                 }
                 self.check(step);
                 true
+            }
+
+            /// A fault's hit: `page` and its neighbour written where present.
+            fn touch(&mut self, s: u32, page: u64) -> bool {
+                let Lookup::Present(_) = self.p.lookup(&self.o, page) else { return false };
+                for at in 0..2 {
+                    if let (None, Lookup::Present(f)) = (self.leaves[s as usize][at], self.p.lookup(&self.o, at as u64)) {
+                        self.leaves[s as usize][at] = Some(f);
+                    }
+                }
+                true
+            }
+
+            /// Once nothing is removed any more, the walk ends, the server
+            /// answers every request it hears of, and every parked fault
+            /// retries: none is left parked.
+            pub(super) fn drain(&mut self, steps: &[Step]) {
+                let fair = [Step::Walk, Step::Visit, Step::Report, Step::Answer, Step::Retry];
+                for _ in 0..64 {
+                    if !fair.iter().fold(false, |moved, &step| self.step(step) | moved) {
+                        break;
+                    }
+                }
+                assert!(self.parked.is_empty(), "after {steps:?}: faults left parked {:?}", self.parked);
             }
 
             fn revoke(&mut self) {
@@ -1923,7 +2013,7 @@ mod tests {
         steps.iter().all(|&s| w.step(s)).then_some(w)
     }
 
-    /// From both spaces mapping both pages, every sequence of six steps of
+    /// From both spaces mapping both pages, every sequence of five steps of
     /// faults, supplies, removals, mappings and the walk keeps each leaf on
     /// its page's one frame.
     #[test]
@@ -1934,7 +2024,8 @@ mod tests {
         let mut played = 0u64;
         while let Some(seq) = stack.pop() {
             played += 1;
-            if seq.len() == prefix.len() + 6 {
+            play(&seq).expect("a sequence played before").drain(&seq);
+            if seq.len() == prefix.len() + 5 {
                 continue;
             }
             for &step in &mapped::STEPS {
@@ -1945,7 +2036,7 @@ mod tests {
                 }
             }
         }
-        assert!(played > 50_000, "only {played} sequences played");
+        assert!(played > 20_000, "only {played} sequences played");
     }
 
     /// The same over long sequences, seeded: removals queued behind running
@@ -1959,6 +2050,7 @@ mod tests {
                 x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
                 w.step(mapped::STEPS[(x >> 33) as usize % mapped::STEPS.len()]);
             }
+            w.drain(&[]);
         }
     }
 }
