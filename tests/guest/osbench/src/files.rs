@@ -117,6 +117,20 @@ fn parts(
     each(&name("pread_8"), 100, 2000, fields, |i| io("pread", f.read_at(&mut buf[..8], page_at(i, pages))).map(drop));
 }
 
+/// `measure`, while another thread asks `metadata` of `path` until it ends.
+fn beside_a_thread(path: &Path, measure: impl FnOnce()) {
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = fs::metadata(path);
+            }
+        });
+        measure();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
 /// Every benchmark under `target`, each line naming what served it and its
 /// medium. Each one's comment is its warm-up and repetitions.
 pub fn suite(target: &Target) {
@@ -154,6 +168,14 @@ pub fn suite(target: &Target) {
         Err(e) => refuse(&name("fstat"), e),
     }
 
+    // The same `metadata` and open, while another thread of this process asks
+    // `metadata` of the same file as fast as it is answered: what a second
+    // thread's calls on one directory cost this one's. 2,000 after 100 each.
+    beside_a_thread(&small, || {
+        each(&name("stat.beside_a_thread"), 100, 2000, &with(&[]), |_| io("stat", fs::metadata(&small)).map(drop));
+        each(&name("open_close.beside_a_thread"), 100, 2000, &with(&[]), |_| io("open", File::open(&small)).map(drop));
+    });
+
     // A new file, 100 bytes written to it, closed and removed: 1,000 after 50.
     let fresh = scratch.at("fresh");
     each(&name("create_write_unlink"), 50, 1000, &with(&[("bytes", "100".into())]), |_| {
@@ -188,11 +210,11 @@ pub fn suite(target: &Target) {
             parts(&name, &fields, &mut f, &mut buf, pages);
             #[cfg(target_os = "toyos")]
             match crate::sys::direct::connect(&target.dir) {
-                Ok(Some(mut dir)) => {
+                Ok(Some(dir)) => {
                     let under = |p: &Path| p.strip_prefix(&target.dir).ok().and_then(Path::to_str).map(str::to_string);
                     match (under(&small), under(&big)) {
                         (Some(s), Some(b)) => {
-                            crate::sys::direct::rows(&mut dir, &name, &with(&[]), &fields, &s, &b, |i| page_at(i, pages));
+                            crate::sys::direct::rows(&dir, &name, &with(&[]), &fields, &s, &b, |i| page_at(i, pages));
                         }
                         _ => refuse(&name("direct"), "the scratch files are not under the served directory"),
                     }

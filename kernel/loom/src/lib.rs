@@ -266,3 +266,71 @@ pub mod sched;
 
 #[cfg(feature = "loom")]
 pub mod sched_model;
+
+/// What a file server connection's requests in flight are built on, as loom's:
+/// its atomics, cells and lock, and the futex. A wait sleeps, as the kernel's
+/// does, only while its word still says what the waiter saw, checked under
+/// the lock a wake takes after its store; every wake wakes every sleeper,
+/// which a futex allows as spurious returns. A waiter nobody wakes is then
+/// loom's deadlock, not a spin.
+#[cfg(feature = "loom")]
+pub mod flight_prim {
+    pub use loom::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use loom::sync::{Condvar, Mutex};
+
+    /// Loom's cell, reached as the SDK's is.
+    pub struct Cell<T>(loom::cell::UnsafeCell<T>);
+
+    impl<T> Cell<T> {
+        pub fn new(value: T) -> Self {
+            Self(loom::cell::UnsafeCell::new(value))
+        }
+
+        pub fn with_mut<R>(&self, f: impl FnOnce(*mut T) -> R) -> R {
+            self.0.with_mut(f)
+        }
+    }
+
+    pub struct Lock<T>(Mutex<T>);
+
+    impl<T> Lock<T> {
+        pub fn new(value: T) -> Self {
+            Self(Mutex::new(value))
+        }
+
+        pub fn lock(&self) -> loom::sync::MutexGuard<'_, T> {
+            self.0.lock().unwrap()
+        }
+    }
+
+    struct Futex {
+        lock: Mutex<()>,
+        woken: Condvar,
+    }
+
+    loom::lazy_static! {
+        static ref FUTEX: Futex = Futex { lock: Mutex::new(()), woken: Condvar::new() };
+    }
+
+    pub fn wait(word: &AtomicU32, expected: u32) {
+        let held = FUTEX.lock.lock().unwrap();
+        if word.load(Ordering::SeqCst) == expected {
+            drop(FUTEX.woken.wait(held).unwrap());
+        }
+    }
+
+    pub fn wake_one(word: &AtomicU32) {
+        wake_all(word);
+    }
+
+    pub fn wake_all(_: &AtomicU32) {
+        let _held = FUTEX.lock.lock().unwrap();
+        FUTEX.woken.notify_all();
+    }
+}
+
+/// One file server connection's requests in flight, the SDK's, driven by
+/// `tests/fs_flight.rs` over [`flight_prim`].
+#[cfg(feature = "loom")]
+#[path = "../../../sdk/toyos/src/fs/flight.rs"]
+pub mod fs_flight;

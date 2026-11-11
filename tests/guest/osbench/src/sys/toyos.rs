@@ -653,7 +653,7 @@ pub mod direct {
     /// the target's `fields`, and `big`, with `big_fields`; each a path
     /// under the directory `dir` serves.
     pub fn rows(
-        dir: &mut Dir,
+        dir: &Dir,
         name: &dyn Fn(&str) -> String,
         fields: &[(&'static str, String)],
         big_fields: &[(&'static str, String)],

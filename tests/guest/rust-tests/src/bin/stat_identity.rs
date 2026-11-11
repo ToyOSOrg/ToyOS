@@ -94,7 +94,7 @@ fn directory_replacement(root: &str) {
     fs::create_dir(&source).unwrap();
     fs::create_dir(&target).unwrap();
     write(&format!("{source}/file"));
-    let mut directory = Dir::named(&format!("fs:{root}")).unwrap();
+    let directory = Dir::named(&format!("fs:{root}")).unwrap();
     let original = directory.open(Base::Root, "stat-identity-source", O_DIRECTORY | O_READ).unwrap().fid;
     let alias = directory.dup(original).unwrap();
     let replaced = directory.open(Base::Root, "stat-identity-target", O_DIRECTORY | O_READ).unwrap().fid;

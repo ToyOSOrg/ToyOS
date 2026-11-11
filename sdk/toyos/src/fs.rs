@@ -48,14 +48,42 @@
 //! here keeps a write the server acknowledged and never made durable: that is
 //! what `Fsync` is for.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use toyos_abi::syscall::{SyscallError, MAX_BADGE};
 
 use crate::ipc::{Connection, FrameRx, IpcError};
 use crate::ipc_payload;
 use crate::shm::{Bytes, SharedMemory};
+use crate::sync::Lock;
 use crate::Pipe;
+
+mod flight;
+
+use flight::{Flight, Taken};
+
+/// What [`flight`] is built on: the SDK's futex and lock, which `kernel-loom`
+/// swaps for loom's.
+mod flight_prim {
+    pub use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    pub(crate) use crate::sync::{wait, wake_all, wake_one, Lock};
+
+    /// A cell its users reach through a raw pointer, as loom's is reached.
+    pub struct Cell<T>(core::cell::UnsafeCell<T>);
+
+    impl<T> Cell<T> {
+        pub fn new(value: T) -> Self {
+            Self(core::cell::UnsafeCell::new(value))
+        }
+
+        pub fn with_mut<R>(&self, f: impl FnOnce(*mut T) -> R) -> R {
+            f(self.0.get())
+        }
+    }
+}
 
 /// What a directory capability's service name begins with.
 pub const CAPABILITY_PREFIX: &str = "fs:";
@@ -729,12 +757,12 @@ impl Change {
 }
 
 /// Why a request on a path was not answered with its result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refused {
     Error(Error),
-    /// The path met an absolute symlink; [`Dir::follow_target`] holds the
-    /// absolute path, `.0` bytes long, to resolve in the client's own table.
-    Follow(usize),
+    /// The path met an absolute symlink: the absolute path to resolve in the
+    /// client's own table, as the server wrote it.
+    Follow(Vec<u8>),
 }
 
 impl From<Error> for Refused {
@@ -751,31 +779,71 @@ enum Source {
     Exported,
 }
 
-/// One directory capability, or one exported connection, connected. It keeps
-/// one request outstanding at a time, its span the window's start.
+/// The window's share one request takes, unless it needs more, when it takes
+/// the whole window.
+const SLOT_BYTES: usize = WINDOW_BYTES / MAX_OUTSTANDING;
+
+const _: () = assert!(flight::SLOTS == MAX_OUTSTANDING);
+
+/// A reply as it came: its frame type, its words and the handles it carried.
+type Answered = (u32, Reply, crate::ipc::Batch);
+
+/// One directory capability, or one exported connection, connected. Its
+/// threads' requests are in flight on one connection at once, each in its
+/// own share of the window ([`flight`]).
 pub struct Dir {
     source: Source,
-    conn: Option<Connection>,
     window: SharedMemory,
-    generation: u64,
-    writable: bool,
-    /// The tag the next request carries.
-    tag: u64,
+    /// The connection requests go out on: `None` once it ended, until the
+    /// next request connects again.
+    link: Lock<Option<Arc<Link>>>,
+    /// Held while a connection is made, so two callers make one.
+    connecting: Lock<()>,
+    /// Connections made: the last one's generation.
+    generation: AtomicU64,
+    flight: Flight<Answered, Error>,
 }
 
-/// A path request's two paths: the second is a path, or a symlink's target,
-/// which is stored as written and so held to no rule but its length.
+/// One connection, which requests in flight on it keep open after a newer
+/// one replaced it.
+struct Link {
+    conn: Connection,
+    generation: u64,
+    /// Whether its grant lets this process change what it names.
+    writable: bool,
+}
+
+/// A request's share of the window, on one connection: given back when it
+/// drops.
+struct Ticket<'a> {
+    dir: &'a Dir,
+    link: Arc<Link>,
+    taken: Taken,
+}
+
+/// What a path request names: two paths from `bases`, the second a path or a
+/// symlink's target, which is stored as written and so held to no rule but
+/// its length; and the open file a replacing link names.
 struct Paths<'a> {
+    bases: [Base; 2],
     first: &'a str,
     second: &'a [u8],
+    expected: Option<Fid>,
+}
+
+impl<'a> Paths<'a> {
+    /// One path from `base`.
+    fn one(base: Base, first: &'a str) -> Self {
+        Self { bases: [base, Base::Root], first, second: &[], expected: None }
+    }
 }
 
 impl Dir {
     /// Connect to the directory capability `connector`, which this process
     /// holds for its life: [`Error::NotHeld`] for one it may only pass on.
     pub fn connect(connector: crate::BorrowedHandle<'static>) -> Result<Self, Error> {
-        let mut dir = Self::unconnected(Source::Held(connector))?;
-        dir.reconnect()?;
+        let dir = Self::unconnected(Source::Held(connector))?;
+        dir.connection()?;
         Ok(dir)
     }
 
@@ -789,36 +857,54 @@ impl Dir {
     /// 1.. in the order exported. It names no path, and is not connected again
     /// once it has ended.
     pub fn adopt(conn: Connection) -> Result<Self, Error> {
-        let mut dir = Self::unconnected(Source::Exported)?;
-        dir.attach(conn)?;
+        let dir = Self::unconnected(Source::Exported)?;
+        let link = dir.attach(conn)?;
+        *dir.link.lock() = Some(Arc::new(link));
         Ok(dir)
     }
 
     fn unconnected(source: Source) -> Result<Self, Error> {
         let window = SharedMemory::create(WINDOW_BYTES).map_err(|e| Error::kernel("a window", e))?;
-        Ok(Self { source, conn: None, window, generation: 0, writable: false, tag: 0 })
+        Ok(Self {
+            source,
+            window,
+            link: Lock::new(None),
+            connecting: Lock::new(()),
+            generation: AtomicU64::new(0),
+            flight: Flight::new(),
+        })
     }
 
     /// Counts this directory's connections; a file id is good only on the one
     /// it was answered on.
     pub fn generation(&self) -> u64 {
-        self.generation
+        self.generation.load(Ordering::Relaxed)
     }
 
-    /// Whether the capability lets this process change what it names.
+    /// Whether the capability lets this process change what it names, as its
+    /// connection was answered: `false` while none is open.
     pub fn writable(&self) -> bool {
-        self.writable
+        self.link.lock().as_ref().is_some_and(|link| link.writable)
     }
 
-    fn window(&self) -> Bytes<'_> {
-        self.window.bytes()
+    /// The connection to send on, made where the last one ended.
+    fn connection(&self) -> Result<Arc<Link>, Error> {
+        if let Some(link) = &*self.link.lock() {
+            return Ok(Arc::clone(link));
+        }
+        let _connecting = self.connecting.lock();
+        if let Some(link) = &*self.link.lock() {
+            return Ok(Arc::clone(link));
+        }
+        let link = Arc::new(self.reconnect()?);
+        *self.link.lock() = Some(Arc::clone(&link));
+        Ok(link)
     }
 
-    /// Open a fresh connection through the same connector, and lend it the
-    /// window again. The old one's file ids name nothing from here on; an
-    /// exported connection has no connector, and stays gone.
-    fn reconnect(&mut self) -> Result<(), Error> {
-        self.conn = None;
+    /// A fresh connection through the same connector, lent the window again.
+    /// The old one's file ids name nothing on it; an exported connection has
+    /// no connector, and stays gone.
+    fn reconnect(&self) -> Result<Link, Error> {
         let Source::Held(connector) = self.source else { return Err(Error::Gone) };
         let conn = match crate::port::connect(connector) {
             Ok(conn) => conn,
@@ -828,110 +914,57 @@ impl Dir {
         self.attach(conn)
     }
 
-    /// Lend `conn` the window and serve on it.
-    fn attach(&mut self, conn: Connection) -> Result<(), Error> {
+    /// Lend `conn` the window: the connection to serve on.
+    fn attach(&self, conn: Connection) -> Result<Link, Error> {
         let reply = hello(&conn, &self.window)?;
-        self.writable = reply.value & RIGHT_WRITE != 0;
-        self.conn = Some(conn);
-        self.generation += 1;
-        Ok(())
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        Ok(Link { conn, generation, writable: reply.value & RIGHT_WRITE != 0 })
     }
 
-    /// The one handle a reply that answers with one carries; an error carries
-    /// none, and any other count ends the connection.
-    fn one(&mut self, msg_type: u32, reply: Reply, carried: crate::ipc::Batch) -> Result<crate::ipc::ReceivedHandle, Error> {
-        let n = carried.len();
-        match (answer(msg_type, reply), carried.exact::<1>()) {
-            (Ok(_), Some([handle])) => Ok(handle),
-            (Err(e), None) if n == 0 => Err(e),
-            _ => {
-                self.conn = None;
-                Err(Error::Malformed)
-            }
+    /// No request goes out on `link` again: one that ended, or whose server
+    /// speaks another protocol. Requests in flight on it are answered or fail
+    /// with it, and the next request connects again.
+    fn retire(&self, link: &Arc<Link>) {
+        let mut current = self.link.lock();
+        if current.as_ref().is_some_and(|now| Arc::ptr_eq(now, link)) {
+            *current = None;
         }
     }
 
-    /// One request and its reply on the current connection. A connection that
-    /// has ended answers `Gone` and is dropped, so the next call reconnects.
-    fn call(&mut self, op: u32, request: Request) -> Result<(u32, Reply), Error> {
-        let (msg_type, reply, carried) = self.call_with(op, request)?;
-        if !carried.is_empty() {
-            // A reply that brings handles nobody asked for speaks another protocol.
-            self.conn = None;
-            return Err(Error::Malformed);
-        }
-        Ok((msg_type, reply))
+    /// A share of the window for a request of `span` bytes, on the current
+    /// connection: one slot, or the whole window for more than a slot holds.
+    fn ticket(&self, span: usize) -> Result<Ticket<'_>, Error> {
+        let link = self.connection()?;
+        let taken = self.flight.take(span > SLOT_BYTES);
+        Ok(Ticket { dir: self, link, taken })
     }
 
-    /// [`Self::call`], and the handles the reply frame carries into `batch`.
-    /// A reply to another tag than the request's is [`Error::Malformed`].
-    fn call_with(
-        &mut self,
-        op: u32,
-        mut request: Request,
-    ) -> Result<(u32, Reply, crate::ipc::Batch), Error> {
-        if self.conn.is_none() {
-            self.reconnect()?;
-        }
-        self.tag = self.tag.wrapping_add(1);
-        request.tag = self.tag;
-        let conn = self.conn.as_ref().expect("connected above");
-        let mut rx = FrameRx::<{ core::mem::size_of::<Reply>() }>::new();
-        let answered = conn.send(op, &request).map_err(transport).and_then(|()| {
-            let frame = rx.recv(conn).map_err(transport)?;
-            let reply: Reply = crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(transport)?;
-            if reply.tag != request.tag {
-                return Err(Error::Malformed);
-            }
-            Ok((frame.msg_type, reply, rx.take_batch()))
-        });
-        if answered.is_err() {
-            self.conn = None;
-        }
-        answered
-    }
-
-    /// The file id `base` names on the current connection, and whether a
-    /// request from it means the same on a fresh one: [`Error::Stale`] for an
-    /// id of an earlier connection.
-    fn base(&self, base: Base) -> Result<(u64, bool), Error> {
-        match base {
-            Base::Root => Ok((ROOT, true)),
-            Base::Fid(fid) => self.held(fid).map(|id| (id, false)),
-        }
-    }
-
-    /// `fid`'s id on the current connection, or [`Error::Stale`].
-    fn held(&self, fid: Fid) -> Result<u64, Error> {
-        match fid.generation == self.generation && self.conn.is_some() {
-            true => Ok(fid.id),
-            false => Err(Error::Stale),
-        }
+    /// A call on a file id, with `span` bytes of its share of the window.
+    fn fid_call(&self, op: u32, fid: Fid, request: Request, span: usize) -> Result<Reply, Error> {
+        self.ticket(span)?.fid_call(op, fid, request, span)
     }
 
     /// A request naming paths, from `bases`: put them in the span first, which
     /// is `room` bytes at least for what the answer puts there. A server that
     /// has gone is asked again once on a fresh connection when every base is
     /// the root, since a path from it means the same thing on both.
-    fn path_call(&mut self, op: u32, request: Request, bases: [Base; 2], paths: Paths<'_>, room: usize) -> Result<Reply, Refused> {
-        let (reply, carried) = self.path_call_with(op, request, bases, paths, room)?;
-        if !carried.is_empty() {
-            // A reply that brings handles nobody asked for speaks another protocol.
-            self.conn = None;
-            return Err(Refused::Error(Error::Malformed));
-        }
-        Ok(reply)
+    fn path_call(&self, op: u32, request: Request, paths: Paths<'_>, room: usize) -> Result<Reply, Refused> {
+        self.path_call_then(op, request, paths, room, |ticket, reply, carried| {
+            ticket.none_carried(carried).map_err(Refused::Error)?;
+            Ok(reply)
+        })
     }
 
-    /// [`Self::path_call`], and the handles the reply carries.
-    fn path_call_with(
-        &mut self,
+    /// [`Self::path_call`], and `then` on its reply and the handles it
+    /// carried, while the request still holds its share of the window.
+    fn path_call_then<T>(
+        &self,
         op: u32,
         mut request: Request,
-        bases: [Base; 2],
         paths: Paths<'_>,
         room: usize,
-    ) -> Result<(Reply, crate::ipc::Batch), Refused> {
+        then: impl FnOnce(&Ticket<'_>, Reply, crate::ipc::Batch) -> Result<T, Refused>,
+    ) -> Result<T, Refused> {
         if !relative(paths.first) {
             return Err(Refused::Error(Error::InvalidPath));
         }
@@ -939,93 +972,85 @@ impl Dir {
         let span = (paths.first.len() + paths.second.len()).max(room).clamp(MAX_PATH, WINDOW_BYTES);
         let mut attempt = 0;
         loop {
-            let (fid, again) = self.base(bases[0])?;
-            let (fid2, again2) = self.base(bases[1])?;
-            self.window().write(0, paths.first.as_bytes());
-            self.window().write(paths.first.len(), paths.second);
+            let ticket = self.ticket(span)?;
+            let (fid, again) = ticket.base(paths.bases[0])?;
+            let (fid2, again2) = ticket.base(paths.bases[1])?;
+            if let Some(expected) = paths.expected {
+                request.expected = ticket.held(expected)?;
+            }
+            ticket.window().write(0, paths.first.as_bytes());
+            ticket.window().write(paths.first.len(), paths.second);
             request.fid = fid;
             request.fid2 = fid2;
-            request.at = 0;
-            request.span = span as u64;
             request.len = paths.first.len() as u64;
             request.len2 = paths.second.len() as u64;
-            match self.call_with(op, request) {
-                Ok((msg_type, reply, carried)) => return path_answer(msg_type, reply, span).map(|reply| (reply, carried)),
-                Err(Error::Gone) if attempt == 0 && again && again2 => {
-                    attempt += 1;
-                    self.reconnect()?;
-                }
+            match ticket.call_with(op, request, span) {
+                Ok((msg_type, reply, carried)) => match path_answer(msg_type, reply, span)? {
+                    PathAnswer::Reply(reply) => return then(&ticket, reply, carried),
+                    PathAnswer::Follow(len) => {
+                        ticket.none_carried(carried)?;
+                        let mut target = alloc::vec![0; len];
+                        ticket.window().read(0, &mut target);
+                        return Err(Refused::Follow(target));
+                    }
+                },
+                // The ticket drops, and the next takes a fresh connection.
+                Err(Error::Gone) if attempt == 0 && again && again2 => attempt += 1,
                 Err(e) => return Err(Refused::Error(e)),
             }
         }
     }
 
-    /// The absolute path a [`Refused::Follow`] of `len` bytes left in the
-    /// window.
-    pub fn follow_target<'b>(&self, len: usize, buf: &'b mut [u8; MAX_PATH]) -> &'b [u8] {
-        self.window().read(0, &mut buf[..len]);
-        &buf[..len]
-    }
-
-    /// A call on a file id, with `span` bytes of the window from its start.
-    fn fid_call(&mut self, op: u32, fid: Fid, mut request: Request, span: usize) -> Result<Reply, Error> {
-        request.fid = self.held(fid)?;
-        request.at = 0;
-        request.span = span as u64;
-        let (msg_type, reply) = self.call(op, request)?;
-        answer(msg_type, reply)
-    }
-
-    pub fn open(&mut self, base: Base, path: &str, flags: u64) -> Result<Opened, Refused> {
+    pub fn open(&self, base: Base, path: &str, flags: u64) -> Result<Opened, Refused> {
         self.opened(OPEN, base, path, flags)
     }
 
     /// A file with no name in the directory `path` names, opened by `flags`
     /// as [`Self::open`] opens: [`Self::link`] gives it one.
-    pub fn create_unnamed(&mut self, base: Base, path: &str, flags: u64) -> Result<Opened, Refused> {
+    pub fn create_unnamed(&self, base: Base, path: &str, flags: u64) -> Result<Opened, Refused> {
         self.opened(CREATE_UNNAMED, base, path, flags)
     }
 
-    fn opened(&mut self, op: u32, base: Base, path: &str, flags: u64) -> Result<Opened, Refused> {
-        let paths = Paths { first: path, second: &[] };
-        let (reply, mut carried) = self.path_call_with(op, Request { flags, ..Request::new() }, [base, Base::Root], paths, 0)?;
-        let fid = Fid { id: reply.value, generation: self.generation };
-        let holder = carried.next().map(crate::OwnedHandle::from);
-        if !carried.is_empty() {
-            self.close(fid);
-            self.conn = None;
-            return Err(Refused::Error(Error::Malformed));
-        }
-        Ok(Opened { fid, stat: stat_of(&reply), holder })
+    fn opened(&self, op: u32, base: Base, path: &str, flags: u64) -> Result<Opened, Refused> {
+        self.path_call_then(op, Request { flags, ..Request::new() }, Paths::one(base, path), 0, |ticket, reply, mut carried| {
+            let fid = Fid { id: reply.value, generation: ticket.link.generation };
+            let holder = carried.next().map(crate::OwnedHandle::from);
+            if !carried.is_empty() {
+                self.close(fid);
+                self.retire(&ticket.link);
+                return Err(Refused::Error(Error::Malformed));
+            }
+            Ok(Opened { fid, stat: stat_of(&reply), holder })
+        })
     }
 
     /// Let `fid` go, without waiting for the server: [`CLOSE`] is answered
-    /// with nothing.
-    pub fn close(&mut self, fid: Fid) {
-        let Ok(id) = self.held(fid) else { return };
-        let conn = self.conn.as_ref().expect("an id is held on a connection");
-        if conn.send(CLOSE, &Request { fid: id, ..Request::new() }).is_err() {
-            self.conn = None;
+    /// with nothing, and so holds no share of the window.
+    pub fn close(&self, fid: Fid) {
+        let Some(link) = self.link.lock().clone() else { return };
+        if fid.generation == link.generation && link.conn.send(CLOSE, &Request { fid: fid.id, ..Request::new() }).is_err() {
+            self.retire(&link);
         }
     }
 
     /// Read at most `out.len()` bytes, and at most the window, at the
     /// description's offset, which moves past them.
-    pub fn read(&mut self, fid: Fid, out: &mut [u8]) -> Result<usize, Error> {
+    pub fn read(&self, fid: Fid, out: &mut [u8]) -> Result<usize, Error> {
         self.read_with(READ, fid, 0, out)
     }
 
     /// Read at most `out.len()` bytes, and at most the window, at `offset`,
     /// leaving the description's offset where it is.
-    pub fn pread(&mut self, fid: Fid, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+    pub fn pread(&self, fid: Fid, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
         self.read_with(PREAD, fid, offset, out)
     }
 
-    fn read_with(&mut self, op: u32, fid: Fid, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+    fn read_with(&self, op: u32, fid: Fid, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
         let len = out.len().min(WINDOW_BYTES);
-        let reply = self.fid_call(op, fid, Request { offset, ..Request::new() }, len)?;
+        let ticket = self.ticket(len)?;
+        let reply = ticket.fid_call(op, fid, Request { offset, ..Request::new() }, len)?;
         let n = counted(reply.value, len)?;
-        self.window().read(0, &mut out[..n]);
+        ticket.window().read(0, &mut out[..n]);
         Ok(n)
     }
 
@@ -1033,32 +1058,34 @@ impl Dir {
     /// the end for a file opened to append; the offset moves past it. Answers
     /// how much, and the offset after it, which is never past
     /// [`MAX_FILE_BYTES`].
-    pub fn write(&mut self, fid: Fid, data: &[u8]) -> Result<Written, Error> {
+    pub fn write(&self, fid: Fid, data: &[u8]) -> Result<Written, Error> {
         let len = data.len().min(WINDOW_BYTES);
-        self.window().write(0, &data[..len]);
-        let reply = self.fid_call(WRITE, fid, Request::new(), len)?;
+        let ticket = self.ticket(len)?;
+        ticket.window().write(0, &data[..len]);
+        let reply = ticket.fid_call(WRITE, fid, Request::new(), len)?;
         let offset = Some(reply.value2).filter(|&at| at <= MAX_FILE_BYTES).ok_or(Error::Malformed)?;
         Ok(Written { len: counted(reply.value, len)?, offset })
     }
 
     /// Write at most the window of `data` at `offset`, leaving the
     /// description's offset where it is: how much.
-    pub fn pwrite(&mut self, fid: Fid, offset: u64, data: &[u8]) -> Result<usize, Error> {
+    pub fn pwrite(&self, fid: Fid, offset: u64, data: &[u8]) -> Result<usize, Error> {
         let len = data.len().min(WINDOW_BYTES);
-        self.window().write(0, &data[..len]);
-        let reply = self.fid_call(PWRITE, fid, Request { offset, ..Request::new() }, len)?;
+        let ticket = self.ticket(len)?;
+        ticket.window().write(0, &data[..len]);
+        let reply = ticket.fid_call(PWRITE, fid, Request { offset, ..Request::new() }, len)?;
         counted(reply.value, len)
     }
 
     /// Move the description's offset `delta` from `whence` ([`SEEK_START`],
     /// [`SEEK_CURRENT`] or [`SEEK_END`]): where it landed.
-    pub fn seek(&mut self, fid: Fid, whence: u64, delta: i64) -> Result<u64, Error> {
+    pub fn seek(&self, fid: Fid, whence: u64, delta: i64) -> Result<u64, Error> {
         let request = Request { offset: delta as u64, flags: whence, ..Request::new() };
         self.fid_call(SEEK, fid, request, 0).map(|r| r.value)
     }
 
     /// A second id on `fid`'s description, sharing its offset.
-    pub fn dup(&mut self, fid: Fid) -> Result<Fid, Error> {
+    pub fn dup(&self, fid: Fid) -> Result<Fid, Error> {
         let reply = self.fid_call(DUP, fid, Request::new(), 0)?;
         Ok(Fid { id: reply.value, generation: fid.generation })
     }
@@ -1066,66 +1093,61 @@ impl Dir {
     /// A connection for another process holding the descriptions `fids` name,
     /// as ids 1.. in this order ([`Dir::adopt`]). It spends a served slot of
     /// this connection's share for as long as anybody holds it.
-    pub fn export(&mut self, fids: &[Fid]) -> Result<Connection, Error> {
+    pub fn export(&self, fids: &[Fid]) -> Result<Connection, Error> {
         if fids.is_empty() || fids.len() * 8 > WINDOW_BYTES {
             return Err(Error::InvalidRequest);
         }
+        let span = fids.len() * 8;
+        let ticket = self.ticket(span)?;
         for (i, fid) in fids.iter().enumerate() {
-            self.window().write(i * 8, &self.held(*fid)?.to_le_bytes());
+            ticket.window().write(i * 8, &ticket.held(*fid)?.to_le_bytes());
         }
-        let request = Request { len: fids.len() as u64, span: (fids.len() * 8) as u64, ..Request::new() };
-        let (msg_type, reply, carried) = self.call_with(EXPORT, request)?;
-        self.one(msg_type, reply, carried)?.typed().map_err(|_| Error::Malformed)
+        let request = Request { len: fids.len() as u64, ..Request::new() };
+        let (msg_type, reply, carried) = ticket.call_with(EXPORT, request, span)?;
+        ticket.one(msg_type, reply, carried)?.typed().map_err(|_| Error::Malformed)
     }
 
     /// What `path` names from `base`: the link itself where `follow` is
     /// false.
-    pub fn stat(&mut self, base: Base, path: &str, follow: bool) -> Result<Stat, Refused> {
+    pub fn stat(&self, base: Base, path: &str, follow: bool) -> Result<Stat, Refused> {
         let flags = if follow { FOLLOW_LAST } else { 0 };
-        let reply = self.path_call(STAT, Request { flags, ..Request::new() }, [base, Base::Root], Paths { first: path, second: &[] }, 0)?;
+        let reply = self.path_call(STAT, Request { flags, ..Request::new() }, Paths::one(base, path), 0)?;
         Ok(stat_of(&reply))
     }
 
     /// What the file or directory `fid` names is.
-    pub fn fstat(&mut self, fid: Fid) -> Result<Stat, Error> {
-        self.stat(Base::Fid(fid), "", false).map_err(|refused| match refused {
-            Refused::Error(e) => e,
-            // An id names one node, which nothing follows from.
-            Refused::Follow(_) => Error::Malformed,
-        })
+    pub fn fstat(&self, fid: Fid) -> Result<Stat, Error> {
+        self.stat(Base::Fid(fid), "", false).map_err(unfollowed)
     }
 
     /// Make `change` to what `path` names from `base`, following a link in
     /// its last component where `follow`. A size is changed only through an
     /// id opened to write, with the empty path.
-    pub fn set_attr(&mut self, base: Base, path: &str, follow: bool, change: &Change) -> Result<(), Refused> {
+    pub fn set_attr(&self, base: Base, path: &str, follow: bool, change: &Change) -> Result<(), Refused> {
         let mut request = Request { flags: if follow { FOLLOW_LAST } else { 0 }, ..Request::new() };
         change.encode(&mut request);
-        self.path_call(SETATTR, request, [base, Base::Root], Paths { first: path, second: &[] }, 0).map(drop)
+        self.path_call(SETATTR, request, Paths::one(base, path), 0).map(drop)
     }
 
     /// Set the size of the file `fid` opened to write.
-    pub fn truncate(&mut self, fid: Fid, size: u64) -> Result<(), Error> {
+    pub fn truncate(&self, fid: Fid, size: u64) -> Result<(), Error> {
         let change = Change { size: Some(size), ..Change::default() };
-        self.set_attr(Base::Fid(fid), "", false, &change).map_err(|refused| match refused {
-            Refused::Error(e) => e,
-            Refused::Follow(_) => Error::Malformed,
-        })
+        self.set_attr(Base::Fid(fid), "", false, &change).map_err(unfollowed)
     }
 
     /// Make what this file was written durable on the volume.
-    pub fn fsync(&mut self, fid: Fid) -> Result<(), Error> {
+    pub fn fsync(&self, fid: Fid) -> Result<(), Error> {
         self.fid_call(FSYNC, fid, Request::new(), 0).map(drop)
     }
 
     /// Make the whole volume durable. It names no path, and so is asked again
     /// once on a fresh connection.
-    pub fn sync(&mut self) -> Result<(), Error> {
+    pub fn sync(&self) -> Result<(), Error> {
         self.unpathed(SYNC).map(drop)
     }
 
     /// The volume's [`Room`]. Like [`Self::sync`], it names no path.
-    pub fn room(&mut self) -> Result<Room, Error> {
+    pub fn room(&self) -> Result<Room, Error> {
         let reply = self.unpathed(ROOM)?;
         match reply.value2 {
             0 => Err(Error::Malformed),
@@ -1133,28 +1155,27 @@ impl Dir {
         }
     }
 
-    fn unpathed(&mut self, op: u32) -> Result<Reply, Error> {
-        self.path_call(op, Request::new(), [Base::Root; 2], Paths { first: "", second: &[] }, 0).map_err(|refused| match refused {
-            Refused::Error(e) => e,
-            Refused::Follow(_) => Error::Malformed,
-        })
+    fn unpathed(&self, op: u32) -> Result<Reply, Error> {
+        self.path_call(op, Request::new(), Paths::one(Base::Root, ""), 0).map_err(unfollowed)
     }
 
     /// A pipe whose bytes the server writes to this file at the description's
     /// offset, which they move, for a program's standard output: the write end.
-    pub fn stream(&mut self, fid: Fid) -> Result<Pipe, Error> {
-        let mut request = Request::new();
-        request.fid = self.held(fid)?;
-        let (msg_type, reply, carried) = self.call_with(STREAM, request)?;
-        self.one(msg_type, reply, carried)?.typed().map_err(|_| Error::Malformed)
+    pub fn stream(&self, fid: Fid) -> Result<Pipe, Error> {
+        self.handle_call(STREAM, fid)?.typed().map_err(|_| Error::Malformed)
     }
 
     /// The bytes of the file `fid` opened, as [`IMAGE`] answers them.
-    pub fn image(&mut self, fid: Fid) -> Result<crate::OwnedHandle, Error> {
-        let mut request = Request::new();
-        request.fid = self.held(fid)?;
-        let (msg_type, reply, carried) = self.call_with(IMAGE, request)?;
-        self.one(msg_type, reply, carried).map(crate::OwnedHandle::from)
+    pub fn image(&self, fid: Fid) -> Result<crate::OwnedHandle, Error> {
+        self.handle_call(IMAGE, fid).map(crate::OwnedHandle::from)
+    }
+
+    /// A request on `fid` answered with one handle.
+    fn handle_call(&self, op: u32, fid: Fid) -> Result<crate::ipc::ReceivedHandle, Error> {
+        let ticket = self.ticket(0)?;
+        let request = Request { fid: ticket.held(fid)?, ..Request::new() };
+        let (msg_type, reply, carried) = ticket.call_with(op, request, 0)?;
+        ticket.one(msg_type, reply, carried)
     }
 
     /// The entries of the directory `dir` opened, from `cursor` (0 at its
@@ -1162,78 +1183,194 @@ impl Dir {
     /// most the window of them, into `out`: the cursor to ask from next,
     /// `None` after the last. A first entry larger than `room` is refused
     /// [`Error::LimitExceeded`].
-    pub fn read_dir(&mut self, dir: Fid, cursor: u64, room: usize, out: &mut Vec<u8>) -> Result<Option<u64>, Error> {
+    pub fn read_dir(&self, dir: Fid, cursor: u64, room: usize, out: &mut Vec<u8>) -> Result<Option<u64>, Error> {
         let room = room.min(WINDOW_BYTES);
-        let reply = self.fid_call(READDIR, dir, Request { offset: cursor, ..Request::new() }, room)?;
+        let ticket = self.ticket(room)?;
+        let reply = ticket.fid_call(READDIR, dir, Request { offset: cursor, ..Request::new() }, room)?;
         let n = counted(reply.value, room)?;
         let next = next_batch(n, reply.value2)?;
         out.clear();
         out.resize(n, 0);
-        self.window().read(0, out);
+        ticket.window().read(0, out);
         Ok(next)
     }
 
-    pub fn mkdir(&mut self, base: Base, path: &str) -> Result<(), Refused> {
-        self.path_call(MKDIR, Request::new(), [base, Base::Root], Paths { first: path, second: &[] }, 0).map(drop)
+    pub fn mkdir(&self, base: Base, path: &str) -> Result<(), Refused> {
+        self.path_call(MKDIR, Request::new(), Paths::one(base, path), 0).map(drop)
     }
 
     /// Remove the name `path`: a directory's only where `dir`, which removes
     /// nothing else.
-    pub fn unlink(&mut self, base: Base, path: &str, dir: bool) -> Result<(), Refused> {
+    pub fn unlink(&self, base: Base, path: &str, dir: bool) -> Result<(), Refused> {
         let flags = if dir { UNLINK_DIR } else { 0 };
-        self.path_call(UNLINK, Request { flags, ..Request::new() }, [base, Base::Root], Paths { first: path, second: &[] }, 0).map(drop)
+        self.path_call(UNLINK, Request { flags, ..Request::new() }, Paths::one(base, path), 0).map(drop)
     }
 
-    pub fn rename(&mut self, from: (Base, &str), to: (Base, &str)) -> Result<(), Refused> {
+    pub fn rename(&self, from: (Base, &str), to: (Base, &str)) -> Result<(), Refused> {
         if !relative(to.1) {
             return Err(Refused::Error(Error::InvalidPath));
         }
-        self.path_call(RENAME, Request::new(), [from.0, to.0], Paths { first: from.1, second: to.1.as_bytes() }, 0).map(drop)
+        let paths = Paths { bases: [from.0, to.0], first: from.1, second: to.1.as_bytes(), expected: None };
+        self.path_call(RENAME, Request::new(), paths, 0).map(drop)
     }
 
     /// Make `link` a symlink holding `target`, which is stored as written and
     /// resolved by whoever follows it.
-    pub fn symlink(&mut self, target: &str, link: (Base, &str)) -> Result<(), Refused> {
+    pub fn symlink(&self, target: &str, link: (Base, &str)) -> Result<(), Refused> {
         if target.is_empty() {
             return Err(Refused::Error(Error::InvalidRequest));
         }
         if target.len() > MAX_PATH {
             return Err(Refused::Error(Error::NameTooLong));
         }
-        self.path_call(SYMLINK, Request::new(), [link.0, Base::Root], Paths { first: link.1, second: target.as_bytes() }, 0).map(drop)
+        let paths = Paths { second: target.as_bytes(), ..Paths::one(link.0, link.1) };
+        self.path_call(SYMLINK, Request::new(), paths, 0).map(drop)
     }
 
     /// What the symlink at `path` holds, into `out`.
-    pub fn read_link(&mut self, base: Base, path: &str, out: &mut [u8; MAX_PATH]) -> Result<usize, Refused> {
-        let reply = self.path_call(READLINK, Request::new(), [base, Base::Root], Paths { first: path, second: &[] }, MAX_PATH)?;
-        let n = counted(reply.value, MAX_PATH)?;
-        self.window().read(0, &mut out[..n]);
-        Ok(n)
+    pub fn read_link(&self, base: Base, path: &str, out: &mut [u8; MAX_PATH]) -> Result<usize, Refused> {
+        self.path_call_then(READLINK, Request::new(), Paths::one(base, path), MAX_PATH, |ticket, reply, carried| {
+            ticket.none_carried(carried)?;
+            let n = counted(reply.value, MAX_PATH)?;
+            ticket.window().read(0, &mut out[..n]);
+            Ok(n)
+        })
     }
 
     /// Give what `from` names, following a link in its last component where
     /// `follow`, the name `to` too. With `replace`, `to` is taken from the
     /// node of that open file, and only if it still names it: [`Error::Stale`]
     /// when it no longer does.
-    pub fn link(&mut self, from: (Base, &str), follow: bool, to: (Base, &str), replace: Option<Fid>) -> Result<(), Refused> {
+    pub fn link(&self, from: (Base, &str), follow: bool, to: (Base, &str), replace: Option<Fid>) -> Result<(), Refused> {
         if !relative(to.1) {
             return Err(Refused::Error(Error::InvalidPath));
         }
         let mut request = Request { flags: if follow { FOLLOW_LAST } else { 0 }, ..Request::new() };
-        if let Some(expected) = replace {
+        if replace.is_some() {
             request.flags |= LINK_REPLACE;
-            request.expected = self.held(expected)?;
         }
-        self.path_call(LINK, request, [from.0, to.0], Paths { first: from.1, second: to.1.as_bytes() }, 0).map(drop)
+        let paths = Paths { bases: [from.0, to.0], first: from.1, second: to.1.as_bytes(), expected: replace };
+        self.path_call_then(LINK, request, paths, 0, |ticket, _, carried| {
+            ticket.none_carried(carried).map_err(Refused::Error)
+        })
     }
 }
 
-/// A path request's reply frame: its reply, an absolute link to resolve again
-/// from the span's first `span` bytes, or the refusal it names.
-fn path_answer(msg_type: u32, reply: Reply, span: usize) -> Result<Reply, Refused> {
+impl Ticket<'_> {
+    /// This request's share of the window.
+    fn window(&self) -> Bytes<'_> {
+        let at = self.taken.first() * SLOT_BYTES;
+        self.dir.window.bytes().sub(at, self.taken.count() * SLOT_BYTES)
+    }
+
+    /// `fid`'s id on this request's connection, or [`Error::Stale`] for one
+    /// answered on another.
+    fn held(&self, fid: Fid) -> Result<u64, Error> {
+        match fid.generation == self.link.generation {
+            true => Ok(fid.id),
+            false => Err(Error::Stale),
+        }
+    }
+
+    /// The file id `base` names on this connection, and whether a request
+    /// from it means the same on a fresh one.
+    fn base(&self, base: Base) -> Result<(u64, bool), Error> {
+        match base {
+            Base::Root => Ok((ROOT, true)),
+            Base::Fid(fid) => self.held(fid).map(|id| (id, false)),
+        }
+    }
+
+    /// The request, its span the first `span` bytes of its share, and its
+    /// reply with the handles it carried. A connection that ended answers
+    /// `Gone`, and the next request connects again.
+    fn call_with(&self, op: u32, mut request: Request, span: usize) -> Result<Answered, Error> {
+        request.at = (self.taken.first() * SLOT_BYTES) as u64;
+        request.span = span as u64;
+        request.tag = self.dir.flight.sent(self.taken, self.link.generation);
+        let conn = &self.link.conn;
+        let answered = conn.send(op, &request).map_err(transport).and_then(|()| {
+            let receive = || {
+                let mut rx = FrameRx::<{ core::mem::size_of::<Reply>() }>::new();
+                let frame = rx.recv(conn).map_err(transport)?;
+                let reply: Reply = crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(transport)?;
+                Ok((reply.tag, (frame.msg_type, reply, rx.take_batch())))
+            };
+            self.dir.flight.answer(self.taken, receive, Error::Malformed)
+        });
+        if answered.is_err() {
+            self.dir.retire(&self.link);
+        }
+        answered
+    }
+
+    /// [`Self::call_with`] for a reply that carries no handle.
+    fn call(&self, op: u32, request: Request, span: usize) -> Result<Reply, Error> {
+        let (msg_type, reply, carried) = self.call_with(op, request, span)?;
+        self.none_carried(carried)?;
+        answer(msg_type, reply)
+    }
+
+    /// A call on a file id, with `span` bytes of this share.
+    fn fid_call(&self, op: u32, fid: Fid, mut request: Request, span: usize) -> Result<Reply, Error> {
+        request.fid = self.held(fid)?;
+        self.call(op, request, span)
+    }
+
+    /// A reply that brings handles nobody asked for speaks another protocol:
+    /// its connection takes no request again.
+    fn none_carried(&self, carried: crate::ipc::Batch) -> Result<(), Error> {
+        if carried.is_empty() {
+            return Ok(());
+        }
+        self.dir.retire(&self.link);
+        Err(Error::Malformed)
+    }
+
+    /// The one handle a reply that answers with one carries; an error carries
+    /// none, and any other count retires the connection.
+    fn one(&self, msg_type: u32, reply: Reply, carried: crate::ipc::Batch) -> Result<crate::ipc::ReceivedHandle, Error> {
+        let n = carried.len();
+        match (answer(msg_type, reply), carried.exact::<1>()) {
+            (Ok(_), Some([handle])) => Ok(handle),
+            (Err(e), None) if n == 0 => Err(e),
+            _ => {
+                self.dir.retire(&self.link);
+                Err(Error::Malformed)
+            }
+        }
+    }
+}
+
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        self.dir.flight.give(self.taken);
+    }
+}
+
+/// What a path request's reply frame answers, refusals aside.
+enum PathAnswer {
+    Reply(Reply),
+    /// An absolute link to resolve again, this many bytes from the span's
+    /// start.
+    Follow(usize),
+}
+
+/// A path request's reply frame, whose span is `span` bytes: its reply, a
+/// link to follow, or the refusal it names.
+fn path_answer(msg_type: u32, reply: Reply, span: usize) -> Result<PathAnswer, Error> {
     match msg_type {
-        FOLLOW => Err(Refused::Follow(counted(reply.value, MAX_PATH.min(span))?)),
-        _ => answer(msg_type, reply).map_err(Refused::Error),
+        FOLLOW => Ok(PathAnswer::Follow(counted(reply.value, MAX_PATH.min(span))?)),
+        _ => answer(msg_type, reply).map(PathAnswer::Reply),
+    }
+}
+
+/// A refusal of a request on a file id, which no link follows from: an id
+/// names one node.
+fn unfollowed(refused: Refused) -> Error {
+    match refused {
+        Refused::Error(e) => e,
+        Refused::Follow(_) => Error::Malformed,
     }
 }
 
@@ -1543,14 +1680,14 @@ mod tests {
         }
         for msg_type in [0, HELLO, OPEN, FOLLOW + 1, u32::MAX] {
             assert_eq!(answer(msg_type, Reply::ok()).err(), Some(Error::Malformed), "frame {msg_type:#x}");
-            assert_eq!(path_answer(msg_type, Reply::ok(), MAX_PATH).err(), Some(Refused::Error(Error::Malformed)), "frame {msg_type:#x}");
+            assert_eq!(path_answer(msg_type, Reply::ok(), MAX_PATH).err(), Some(Error::Malformed), "frame {msg_type:#x}");
         }
         assert_eq!(answer(FOLLOW, Reply::ok()).err(), Some(Error::Malformed), "a link to follow answers only a path");
         let follow = |value| Reply { value, ..Reply::ok() };
-        assert_eq!(path_answer(FOLLOW, follow(MAX_PATH as u64), MAX_PATH).err(), Some(Refused::Follow(MAX_PATH)));
-        assert_eq!(path_answer(FOLLOW, follow(MAX_PATH as u64 + 1), 2 * MAX_PATH).err(), Some(Refused::Error(Error::Malformed)));
-        assert_eq!(path_answer(FOLLOW, follow(9), 8).err(), Some(Refused::Error(Error::Malformed)), "a link past the span");
-        assert_eq!(path_answer(REPLY, Reply::refused(Error::Loop), MAX_PATH).err(), Some(Refused::Error(Error::Loop)));
+        assert!(matches!(path_answer(FOLLOW, follow(MAX_PATH as u64), MAX_PATH), Ok(PathAnswer::Follow(MAX_PATH))));
+        assert_eq!(path_answer(FOLLOW, follow(MAX_PATH as u64 + 1), 2 * MAX_PATH).err(), Some(Error::Malformed));
+        assert_eq!(path_answer(FOLLOW, follow(9), 8).err(), Some(Error::Malformed), "a link past the span");
+        assert_eq!(path_answer(REPLY, Reply::refused(Error::Loop), MAX_PATH).err(), Some(Error::Loop));
         assert_eq!(next_batch(0, READDIR_END), Ok(None));
         assert_eq!(next_batch(19, READDIR_END), Ok(None));
         assert_eq!(next_batch(19, 5), Ok(Some(5)));
