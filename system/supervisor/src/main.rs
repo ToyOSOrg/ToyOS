@@ -3317,14 +3317,16 @@ fn start<'a>(
     if endows_origins {
         log.acceptor = None;
     }
+    let pid = child.id();
     if let (Some(ring), Some(alive)) = (ring, alive) {
-        log.register(&program.name, child.id(), ring, alive);
+        log.register(&program.name, pid, ring, alive);
     }
     // A launch is answered to its caller and recorded in the kernel's
     // `spawn:`; a line of the supervisor's for each would be a line on the
-    // console beside every command typed at it.
+    // console beside every command typed at it. The pid is what finds that
+    // record: its path is this program's word and any other spawner's alike.
     if booting {
-        say!("supervisor: started {}", program.name);
+        say!("supervisor: started {} pid={}", program.name, pid);
     }
     Ok((child, endowed))
 }

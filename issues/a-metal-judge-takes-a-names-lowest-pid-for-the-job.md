@@ -17,6 +17,12 @@ admission gives its pid back, and the next admission takes it
 job landed hands a pid below the job's to the next spawn, and if that is the
 job's child of the same name the judge reads the child's exit as the job's.
 
+The name is no better than the pid: it is the label a child's spawner states
+(`toyos_abi::syscall::process_name`), so a job that ran earlier on the boot
+can leave a child under a later job's name, with a pid below that job's and
+an exit of its choosing. `claims::job_records` (`tests/common/claims.rs`)
+finds its job's pid by the same rule.
+
 Evidence: by reading. No boot has shown it: the runner starts one job at a
 time, so it takes another process inside `SYS_SPAWN` across a job's start.
 

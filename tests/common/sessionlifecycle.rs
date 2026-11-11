@@ -17,7 +17,7 @@
 use std::io::Write;
 use std::time::Duration;
 
-use toyos_build::bootlog::REBOOTING;
+use toyos_build::bootlog::{self, REBOOTING};
 
 use super::qemu::{self, await_marker, await_marker_new, BootOptions, QemuInstance, QmpInput};
 use super::screen::Ppm;
@@ -69,12 +69,16 @@ fn desktop(qemu: &mut QemuInstance, console: &mut String) -> Result<(), String> 
 
     let from = console.len();
     press(qemu, &["ctrl", "n"]);
-    await_marker_new(qemu, console, "spawn: /system/bin/shell", from, "Ctrl+N's terminal to start its shell")?;
-    await_marker_new(qemu, console, "terminal: ready", from, "the terminal to take keys")?;
+    // The terminal's own line, which it says once its shell is started.
+    await_marker_new(qemu, console, "terminal: ready", from, "Ctrl+N's terminal to start its shell and take keys")?;
     let from = console.len();
     type_paced(qemu, "detach /system/bin/hangupholder")?;
     press(qemu, &["ret"]);
-    await_marker_new(qemu, console, "spawn: /system/bin/hangupholder", from, "the shell to detach the holder")?;
+    // The kernel's record of a spawn that landed since the command was typed,
+    // whatever path it quotes: the sign-out below names what it waits for.
+    qemu::await_guest(qemu, console, "the shell to detach the holder", |said| {
+        bootlog::spawned_pids(&said[from..]).next().is_some()
+    })?;
 
     let waiting = "compositor: signing out, waiting for: hangupholder";
     let from = console.len();

@@ -393,7 +393,8 @@ crate::user_safe! {
     #[derive(Clone, Copy)]
     pub struct SpawnArgs {
         /// The path the caller read the program from, which names it in the
-        /// spawn's record and a crash's. Nothing opens it.
+        /// spawn's record and a crash's. Nothing opens it. `InvalidArgument`
+        /// unless [`spawn_path`] takes it.
         pub path_ptr: u64,
         pub path_len: u64,
         /// The name the child goes by in the roster, its exit record and a
@@ -459,6 +460,25 @@ pub fn process_name(name: &[u8]) -> Option<[u8; crate::inventory::NAME_BYTES]> {
     let mut padded = [0; crate::inventory::NAME_BYTES];
     padded[..name.len()].copy_from_slice(name);
     Some(padded)
+}
+
+/// `path` as a spawn's record quotes it (`SpawnArgs::path_ptr`): `None` unless
+/// it is at most [`MAX_PATH`] bytes of UTF-8 every character of which
+/// [`spawn_path_holds`], so it is text of one line.
+pub fn spawn_path(path: &[u8]) -> Option<&str> {
+    if path.len() > MAX_PATH {
+        return None;
+    }
+    let text = core::str::from_utf8(path).ok()?;
+    text.chars().all(spawn_path_holds).then_some(text)
+}
+
+/// Whether a spawn's path may hold `c`: anything but a control character,
+/// which could end the record's line. White space stays, since a file's name
+/// may hold a space: the record says what it knows of the child before the
+/// path.
+pub fn spawn_path_holds(c: char) -> bool {
+    !c.is_control()
 }
 
 crate::user_safe! {
@@ -2862,6 +2882,20 @@ mod tests {
         assert!(process_name("h\u{e9}llo".as_bytes()).is_some());
         for refused in [&b""[..], &[b'n'; MAX_PROCESS_NAME + 1], b"a\nb", b"a b", b"a\0b", b"a\x1b[0m", b"\xff"] {
             assert_eq!(process_name(refused), None, "{refused:?}");
+        }
+    }
+
+    /// A path is one line of bounded UTF-8, spaces and all: the bound is a
+    /// limit, and what would break a record's line is refused.
+    #[test]
+    fn a_spawn_path_is_one_bounded_line() {
+        let longest = [b'p'; MAX_PATH];
+        assert_eq!(spawn_path(&longest).map(str::len), Some(MAX_PATH));
+        for taken in ["", "/system/bin/echo", "/home/My Programs/h\u{e9}llo", "a\u{2028}b"] {
+            assert_eq!(spawn_path(taken.as_bytes()), Some(taken));
+        }
+        for refused in [&[b'p'; MAX_PATH + 1][..], b"a\nb", b"a\rb", b"a\tb", b"a\0b", b"a\x1b[0m", b"a\x7fb", "a\u{85}b".as_bytes(), b"\xff"] {
+            assert_eq!(spawn_path(refused), None, "{refused:?}");
         }
     }
 

@@ -20,8 +20,8 @@
 
 use toyos_abi::handle::TransferEntry;
 use toyos_abi::syscall::{
-    self, SpawnArgs, SpawnEndow, SyscallError, FD_PREFIX, JOB_LABEL, MAX_PROCESS_NAME, MAX_SPAWN_ENDOWMENTS,
-    MAX_SPAWN_LABELS_LEN, SVC_LABEL,
+    self, SpawnArgs, SpawnEndow, SyscallError, FD_PREFIX, JOB_LABEL, MAX_PATH, MAX_PROCESS_NAME,
+    MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, SVC_LABEL,
 };
 
 use crate::fd::Kind as FdKind;
@@ -207,7 +207,7 @@ impl Helper<'_> {
     pub fn spawn(self, image: Option<&Image>) -> Result<Process, Refused> {
         let s = self.0;
         let image = image.ok_or(Refused::Invalid("a spawn names the program it runs"))?;
-        let path = image_and_name(s.program, s.image).0;
+        let path = path_label(image_and_name(s.program, s.image).0);
         let name = name(s.argv.split(|&b| b == 0).find(|arg| !arg.is_empty()).unwrap_or(s.program.as_bytes()));
         let env = crate::files::starting_in(s.env, s.cwd)
             .ok_or(Refused::Invalid("a working directory that is not absolute, is too long or holds a NUL"))?;
@@ -421,6 +421,23 @@ fn name(program: &[u8]) -> String {
     name
 }
 
+/// The path a child run from `path` is spawned under (`SpawnArgs::path_ptr`),
+/// a label in the kernel's records that nothing opens: each character a
+/// spawn's path may not hold ([`syscall::spawn_path_holds`]) replaced with
+/// U+FFFD, cut at a character to [`MAX_PATH`] bytes. A file's name may hold any
+/// of them, and its program still runs.
+fn path_label(path: &str) -> String {
+    let mut label = String::new();
+    for c in path.chars() {
+        let c = if syscall::spawn_path_holds(c) { c } else { char::REPLACEMENT_CHARACTER };
+        if label.len() + c.len_utf8() > MAX_PATH {
+            break;
+        }
+        label.push(c);
+    }
+    label
+}
+
 /// What a helper runs, and the name it runs it under: the image named, else
 /// the program; `argv[0]` is the program's either way.
 pub fn image_and_name<'a>(program: &'a str, image: Option<&'a str>) -> (&'a str, &'a str) {
@@ -486,6 +503,24 @@ mod tests {
         assert_eq!(name(wide.as_bytes()), "\u{e9}".repeat(13));
         for program in [&b"/system/bin/cat"[..], b"", b"a b\n", b"\xff\xfe", wide.as_bytes(), &[b'n'; 100]] {
             assert!(process_name(name(program).as_bytes()).is_some(), "{program:?}");
+        }
+    }
+
+    /// Whatever a program's path, the label it is spawned under is one the
+    /// kernel takes, so a file whose name holds a control character still runs.
+    #[test]
+    fn a_path_label_is_the_path_as_the_kernel_takes_one() {
+        use toyos_abi::syscall::spawn_path;
+        assert_eq!(path_label("/system/bin/cat"), "/system/bin/cat");
+        assert_eq!(path_label("/home/My Programs/h\u{e9}llo"), "/home/My Programs/h\u{e9}llo");
+        assert_eq!(path_label("/tmp/a\nb\x1b[2J\u{85}"), "/tmp/a\u{fffd}b\u{fffd}[2J\u{fffd}");
+        let long = "p".repeat(MAX_PATH + 1);
+        assert_eq!(path_label(&long), long[..MAX_PATH]);
+        // Each one-byte control character becomes three bytes.
+        let grows = "\u{1}".repeat(MAX_PATH);
+        assert_eq!(path_label(&grows), "\u{fffd}".repeat(MAX_PATH / 3));
+        for path in ["", "/system/bin/cat", "a\nb", "a\tb\0", "\u{7f}", &long, &grows] {
+            assert!(spawn_path(path_label(path).as_bytes()).is_some(), "{path:?}");
         }
     }
 

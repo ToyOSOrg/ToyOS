@@ -30,23 +30,20 @@ fn records(log: &Serial) -> impl Iterator<Item = &str> {
 
 /// The kernel's records from `job`'s spawn to its exit: what it did, apart
 /// from every other job on a shared boot. Both ends are the kernel's own
-/// records, so nothing another channel carries can reorder them.
+/// records of one pid, so nothing another channel carries can reorder them:
+/// the lowest that ended under the job's name, which is the runner's child and
+/// none of its own (`metal::Readback::exit_code`), and the spawn that pid
+/// landed by, whatever path its record quotes.
 fn job_records<'a>(log: &'a Serial, job: &str) -> Result<Vec<&'a str>, String> {
-    let spawned = format!("/{job} pid=");
-    let mut all = records(log);
-    let pid = all
-        .by_ref()
-        .find_map(|m| m.strip_prefix("spawn: ")?.split_once(&spawned)?.1.split_whitespace().next())
-        .ok_or_else(|| format!("no spawn record names {job}:\n{}", log.text()))?;
-    let exited = format!("{}{} pid={pid} ", bootlog::EXIT, bootlog::recorded_name(job));
-    let mut window = Vec::new();
-    for record in all {
-        if record.starts_with(&exited) {
-            return Ok(window);
-        }
-        window.push(record);
-    }
-    Err(format!("{job} pid={pid} never exited:\n{}", log.text()))
+    let exited = format!("{}{} pid=", bootlog::EXIT, bootlog::recorded_name(job));
+    let ended = |record: &str| record.strip_prefix(&exited)?.split_whitespace().next()?.parse::<u32>().ok();
+    let pid = records(log)
+        .filter_map(ended)
+        .min()
+        .ok_or_else(|| format!("no exit record names {job}:\n{}", log.text()))?;
+    let mut from_spawn = records(log).skip_while(|record| bootlog::spawned_pid(record) != Some(pid));
+    from_spawn.next().ok_or_else(|| format!("no spawn record names {job}'s pid {pid}:\n{}", log.text()))?;
+    Ok(from_spawn.take_while(|record| ended(record) != Some(pid)).collect())
 }
 
 /// One `key=value` word of a record.

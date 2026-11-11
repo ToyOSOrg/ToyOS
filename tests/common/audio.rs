@@ -3,20 +3,39 @@
 
 use super::serial::Serial;
 
-/// The text of `log` from the kernel's record of `job`'s spawn to the end of
-/// what soundserver said about the one stream it played.
+/// Where `log` goes on after the test runner's line that it starts `job`,
+/// which it says before it spawns it: the kernel's record of the spawn names
+/// the job only by the path its spawner stated. The line is the runner's own,
+/// under the head the supervisor registered for it with no `pid=`, which a
+/// line a job writes into the runner's ring carries.
+fn after_job_start<'a>(log: &'a str, job: &str) -> Result<&'a str, String> {
+    use toyos_logstream::{parse, Source};
+    let marker = format!("===TEST_START {job}===");
+    let starts_it = |line: &str| {
+        parse(line).is_some_and(|p| p.source == Source::Program("test-runner") && !p.rest.contains("pid=") && p.text == marker)
+    };
+    let mut rest = log;
+    while let Some((line, after)) = rest.split_once('\n') {
+        rest = after;
+        if starts_it(line) {
+            return Ok(rest);
+        }
+    }
+    Err(format!("the test runner never said `{marker}`: {job} never ran"))
+}
+
+/// The text of `log` from the test runner's start of `job` to the end of what
+/// soundserver said about the one stream it played.
 ///
 /// The session ends at soundserver's flush on its last client leaving — the stats
 /// line that carries `clients=0`, which soundserver writes after the removal — and
-/// not at the next job's spawn, which can land before it.
+/// not at the next job's start, which can land before it.
 ///
 /// It is refused unless it is one stream: soundserver counts one window across
 /// every client it holds, so a session another job's stream shared has no count
 /// that is the job's alone.
 fn job_window<'a>(log: &'a str, job: &str) -> Result<&'a str, String> {
-    let head = format!("spawn: /system/bin/{job} ");
-    let at = log.find(&head).ok_or_else(|| format!("no `{head}` record: {job} never ran"))?;
-    let rest = &log[at + head.len()..];
+    let rest = after_job_start(log, job)?;
     let flushed = rest
         .match_indices(SESSION_ENDED)
         .find(|&(line_at, _)| is_soundserver_stats(rest, line_at))
@@ -31,7 +50,7 @@ fn job_window<'a>(log: &'a str, job: &str) -> Result<&'a str, String> {
     let said = |what: &str| {
         window.lines().filter(|l| l.contains("soundserver: client ") && l.contains(what)).count()
     };
-    // A removal counts too: a stream soundserver held before the spawn connected
+    // A removal counts too: a stream soundserver held before the start connected
     // outside the window and leaves inside it.
     let (streams, removed) = (said(" connected (id="), said(" removed ("));
     if streams != 1 || removed != 1 {
@@ -56,23 +75,22 @@ fn is_soundserver_stats(text: &str, at: usize) -> bool {
 
 /// soundserver played to an output driver's device before `job` opened its
 /// stream, so the stream did not play to the null sink. The stream's
-/// opening and not the job's spawn: a job may wait for something before it
+/// opening and not the job's start: a job may wait for something before it
 /// plays.
 fn on_an_output(log: &str, job: &str) -> Result<(), String> {
     let playing = log
         .find(PLAYING)
         .ok_or_else(|| format!("soundserver never said `{PLAYING}`: no output was offered, and it stayed the null sink"))?;
-    let head = format!("spawn: /system/bin/{job} ");
-    let spawned = log.find(&head).ok_or_else(|| format!("no `{head}` record: {job} never ran"))?;
-    let mut at = spawned;
-    let opened = log[spawned..]
+    let started = log.len() - after_job_start(log, job)?.len();
+    let mut at = started;
+    let opened = log[started..]
         .split_inclusive('\n')
         .find_map(|line| {
             let here = at;
             at += line.len();
             (line.contains(CLIENT) && line.contains(CONNECTED)).then_some(here)
         })
-        .ok_or_else(|| format!("soundserver never said a client connected after {job} spawned: it opened no stream"))?;
+        .ok_or_else(|| format!("soundserver never said a client connected after {job} started: it opened no stream"))?;
     if playing > opened {
         return Err(format!("soundserver played to an output only after {job} opened its stream, so it played to the null sink"));
     }

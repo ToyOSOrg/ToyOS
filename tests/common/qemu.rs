@@ -1956,30 +1956,6 @@ impl QemuInstance {
                     }
                     if line.contains(&format!("===TEST_START {want}===")) {
                         in_test = true;
-                        // **The console carries `logkeeper`'s rounds in stamp
-                        // order**, so the kernel's record of this test's spawn,
-                        // and what followed it, may arrive before the marker
-                        // that opens the window. Everything from that record on is this
-                        // test's, and moves into the window.
-                        let spawned = format!("/{want} pid=");
-                        let from = before
-                            .match_indices('\n')
-                            .map(|(at, _)| at + 1)
-                            .chain(std::iter::once(0))
-                            .filter(|&start| {
-                                before[start..].lines().next().is_some_and(|l| {
-                                    l.contains("spawn: ") && l.contains(&spawned)
-                                })
-                            })
-                            .max();
-                        if let Some(at) = from {
-                            let moved = before.split_off(at);
-                            for early in moved.lines() {
-                                serial.push_str(early);
-                                serial.push('\n');
-                                push_user_half(early, &mut stdout);
-                            }
-                        }
                     } else if let Some(rest) = user_text(&line).strip_prefix(END_MARKER) {
                         let rest = rest.split_once("===").map_or(rest, |(head, _)| head);
                         let parts: Vec<&str> = rest.splitn(2, ' ').collect();

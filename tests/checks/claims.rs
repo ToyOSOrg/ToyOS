@@ -34,7 +34,7 @@ const FIRST_CLAIM: &str = "[2026-09-29 12:10:34  1.191 cpu0 kernel] iommu: irte"
 /// `records` with its claims inside the re-claim job's spawn and exit, and
 /// `after` past the exit: what another job on the same boot did.
 fn in_the_job(records: &str, after: &str) -> String {
-    let spawn = "[2026-09-29 12:10:34  1.190 cpu3 kernel] spawn: /system/bin/test_rs_pci_reclaim pid=7 (layout=0ms tls=0ms total=0ms)\n";
+    let spawn = "[2026-09-29 12:10:34  1.190 cpu3 kernel] spawn: pid=7 (total=0ms) /system/bin/test_rs_pci_reclaim\n";
     let exit = "[2026-09-29 12:10:55 22.001 cpu1 kernel] exit: test_rs_pci_reclaim pid=7 code=0 cpu=1ms\n";
     format!("{}{exit}{after}", records.replacen(FIRST_CLAIM, &format!("{spawn}{FIRST_CLAIM}"), 1))
 }
@@ -61,8 +61,15 @@ pub fn one_entry_per_slot() {
     assert_eq!(claims::reuses_its_entry(&log(&green)), Ok(()));
 
     let no_exit = green.replace("pid=7 code=0", "pid=8 code=0");
-    let why = claims::reuses_its_entry(&log(&no_exit)).expect_err("a job that never exited");
-    assert!(why.contains("never exited"), "{why}");
+    let why = claims::reuses_its_entry(&log(&no_exit)).expect_err("an exit of a pid no spawn record names");
+    assert!(why.contains("no spawn record names test_rs_pci_reclaim's pid 8"), "{why}");
+
+    // A spawn record is its job's by its pid: another process started under
+    // the job's path opens no window, so what was claimed after it is not the
+    // job's.
+    let stated = "[2026-09-29 12:10:30  1.000 cpu0 kernel] spawn: pid=3 (total=0ms) /system/bin/test_rs_pci_reclaim\n";
+    let earlier = ANOTHER_JOBS_CLAIM.replace("12:10:56 23.", "12:10:31  1.1").replace("12:11:06 33.", "12:10:32  1.2");
+    assert_eq!(claims::reuses_its_entry(&log(&format!("{stated}{earlier}{green}"))), Ok(()));
 
     let recorded = in_the_job(&format!("{RECORDED}{RELEASED}"), "");
     let why = claims::reuses_its_entry(&log(&recorded)).expect_err("the recorded second entry");
