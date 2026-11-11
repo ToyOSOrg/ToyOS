@@ -353,7 +353,9 @@ pub fn flush_tlb_all() {
 }
 
 /// Flush this CPU's translation of the user page `va` in the space tagged
-/// `tag`, which this CPU runs.
+/// `tag`: by the tag where PCIDs are on; otherwise in the space this CPU runs,
+/// since without them loading a root drops every translation of the one it
+/// replaces (SDM Vol. 3A §4.10.4.1).
 pub fn flush_user_page(tag: u16, va: u64) {
     match pcid_active() {
         Some(have) => crate::arch::cpu::invpcid(have, Invpcid::Address, tag, va),
