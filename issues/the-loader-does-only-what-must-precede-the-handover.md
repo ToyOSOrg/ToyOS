@@ -57,11 +57,17 @@ Each stage lands on its own, in this order.
      PR #583 asserts. The kernel compares it right after arming the panel,
      and refuses any other value by name. `update`
      never replaces the ESP loader, so a slot's kernel can meet a loader built
-     to another layout. (The word is at offset 112 since the boot-partition
-     and log fields before it left `KernelArgs` for the supervisor's record;
-     a loader older than that wrote the low half of its ESP's first block
-     there.) Every field before the word keeps its offset in every
-     layout.
+     to another layout. Every field before the word kept its offset from
+     this stage until #1210, which moved the word to offset 112 when the
+     boot-partition and log fields before it left `KernelArgs` for the
+     supervisor's record. What holds since: the word follows only the
+     fields the kernel reads before it compares it (the memory map, its own
+     memory and stack, the RSDP, its image, the scanout and the boot map),
+     each pinned by `offset_of!`, and a field leaves or joins that prefix
+     only with the word moving again. A loader older than #1210 wrote the
+     low half of its ESP's first block at offset 112, and a kernel older
+     than it reads the high half of the handoff counter at 164; each
+     refuses the other by the word.
    - The kernel logs `boot: IA32_TSC_ADJUST` beside its power-on report, and
      the loader no longer reads it. aarch64's `counter_origin` is deleted.
    - The loader's TCO arm stays until stage 8.

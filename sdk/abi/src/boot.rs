@@ -21,8 +21,8 @@ pub struct KernelArgs {
     pub boot_pml4_addr: u64,
     /// The layout the loader wrote this struct in: [`LAYOUT`] from a loader built
     /// with this file. The kernel refuses any other value before it reads a
-    /// field after this one, so every field before it keeps its offset in every
-    /// layout.
+    /// field after this one, so the fields before it are the ones it reads
+    /// first and keep their offsets while the word keeps its own.
     pub layout: u32,
     /// The boot parameter, as ASCII with no terminator: comma-separated tokens
     /// read out of `\toyos\cmdline` on the slot's volume, with the word the
