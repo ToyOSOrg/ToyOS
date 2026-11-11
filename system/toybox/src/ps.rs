@@ -69,12 +69,12 @@ pub fn main(_args: Vec<String>) {
     };
     let mut buf = vec![0u8; HEADER + ENTRY * 128];
     let Some((first_uptime, _, first)) = sample(&cap, &mut buf) else {
-        eprintln!("ps: refused — this capability carries no ROSTER");
+        eprintln!("ps: refused — this capability carries no ROSTER, or this program's job has no room for the roster");
         std::process::exit(1);
     };
     std::thread::sleep(std::time::Duration::from_nanos(SAMPLE_NS));
     let Some((uptime_ns, total_cpu_ns, rows)) = sample(&cap, &mut buf) else {
-        eprintln!("ps: refused — this capability carries no ROSTER");
+        eprintln!("ps: refused — this capability carries no ROSTER, or this program's job has no room for the roster");
         std::process::exit(1);
     };
     let window_ns = uptime_ns.saturating_sub(first_uptime);

@@ -287,9 +287,6 @@ fn sysinfo_laid(max_entries: usize) -> Result<Vec<u8>, SyscallError> {
     let table = guard.as_ref().unwrap();
 
     let entry_count = live_threads(table) as u32;
-    if entry_count as usize > sysinfo_thread_bound() {
-        return Err(SyscallError::ResourceExhausted);
-    }
 
     let mut header = [0u8; HEADER_SIZE];
     header[0..8].copy_from_slice(&total_mem.to_le_bytes());
@@ -302,9 +299,13 @@ fn sysinfo_laid(max_entries: usize) -> Result<Vec<u8>, SyscallError> {
     let mut laid = Vec::new();
     laid.extend_from_slice(&header);
 
-    // Header-only callers pay for no sort of the roster below.
+    // Header-only callers pay for no sort of the roster below, and the bound
+    // guards the roster's allocations alone.
     if max_entries == 0 {
         return Ok(laid);
+    }
+    if entry_count as usize > sysinfo_thread_bound() {
+        return Err(SyscallError::ResourceExhausted);
     }
     laid.reserve_exact(max_entries.min(entry_count as usize) * ENTRY_SIZE);
 
