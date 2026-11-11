@@ -33,6 +33,26 @@ The bulk-copy rows (`ipc.reqrep.4096`, `65536`) are
 `issues/user-memory-hot-paths-are-slower-than-2-mib-pages.md`'s. What the
 T14's 8-byte round trip spends its time on is unmeasured.
 
+**Current state, 2026-11-11** ([evidence](https://github.com/ToyOSOrg/evidence/tree/d44ebdae1f9f584d7b826e1498dbfd791a8d2339)): ToyOS at main ad5db5a65, four
+boots a bench interleaved with five runs of its Linux as installed; a cell is
+the median of the runs' p50s with their range, and the last column of each
+bench is ToyOS against Linux, above 1 slower. The AMD bench's Linux timed
+runs 1 to 3 through the HPET, so its medians overstate Linux's per-operation
+times there.
+
+| row | unit | T14 ToyOS | T14 Linux | T14 | AMD ToyOS | AMD Linux | AMD |
+|---|---|---|---|---|---|---|---|
+| `ipc.connect_accept` | ns | 2,326 (0.9%) | 3,828 (1.1%) | 0.61x | 2,018 (2.0%) | 12,362 (12.2%) | 0.16x |
+| `ipc.reqrep.4096` | ns | 6,574 (20.8%) | 7,184 (1.5%) | 0.92x | 6,662 (1.4%) | 18,369 (28.0%) | 0.36x |
+| `ipc.reqrep.65536` | ns | 26,074 (2.3%) | 18,920 (3.9%) | 1.38x | 21,721 (104.3%) | 47,109 (40.9%) | 0.46x |
+| `ipc.reqrep.8` | ns | 5,973 (1.6%) | 3,492 (14.2%) | 1.71x | 5,966 (1.0%) | 13,689 (33.9%) | 0.44x |
+| `ipc.reqrep_handle.8` | ns | 6,403 (1.7%) | 7,248 (3.0%) | 0.88x | 6,412 (32.0%) | 22,000 (8.4%) | 0.29x |
+
+On the T14 `ipc.reqrep.8` is behind at 1.71x; `ipc.reqrep_handle.8` is now
+ahead and `ipc.reqrep.4096` at parity. No `ipc` row is behind on the AMD
+bench: `ipc.reqrep.65536` is unresolved, ToyOS's boots ranging 104%, and the
+rest are ahead.
+
 **Exit**: `ipc.reqrep.8` and `ipc.reqrep_handle.8` within Linux's on both
 benches in a labelled current-state comparison, or each remaining difference
 measured to its parts and justified.

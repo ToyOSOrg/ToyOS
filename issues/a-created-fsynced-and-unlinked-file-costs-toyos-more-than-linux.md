@@ -22,6 +22,13 @@ benches. What the difference is made of is unmeasured. The create and the
 unlink are file server requests, and the fsync commits the whole volume
 with its superblock.
 
+On 2026-11-11 at ad5db5a65 ([evidence](https://github.com/ToyOSOrg/evidence/tree/d44ebdae1f9f584d7b826e1498dbfd791a8d2339), four boots against five Linux
+runs) the AMD bench read the row ahead: 2.83, 3.01, 2.86 and 2.54 ms against
+Linux's 3.01 to 3.37 ms. The T14 read 6.87 to 7.41 ms against 0.86 to
+0.97 ms, with every durable row of those four boots in the slow mode of
+`issues/toyos-durable-writes-on-the-t14s-nvme-run-six-times-slower-in-some-boots.md`,
+so the row's own difference there is not separated.
+
 **Exit**: the row within Linux's on both benches, or its difference
 measured to its parts and justified, in a labelled current-state
 comparison.
