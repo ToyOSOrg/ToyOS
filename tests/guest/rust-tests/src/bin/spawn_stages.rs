@@ -522,17 +522,19 @@ fn main() {
     let _ = std::fs::create_dir_all(dir);
     std::fs::write(format!("{dir}/tiny"), program(0)).expect("write tiny");
     std::fs::write(format!("{dir}/large"), program(LARGE)).expect("write large");
-    std::fs::copy("/system/bin/osbench", format!("{dir}/osbench")).expect("copy osbench");
+    // osbench where the image has it (the bench's), toybox elsewhere.
+    let (std_path, std_arg) = if std::fs::metadata("/system/bin/osbench").is_ok() { ("/system/bin/osbench", "nop") } else { ("/system/bin/toybox", "echo") };
+    std::fs::copy(std_path, format!("{dir}/osbench")).expect("copy the std program");
     let argv = |parts: &[&str]| parts.iter().flat_map(|p| p.bytes().chain([0])).collect::<Vec<u8>>();
     let targets = [
         Target { name: "tiny", path: format!("{dir}/tiny"), argv: argv(&[&format!("{dir}/tiny")]) },
         Target { name: "large", path: format!("{dir}/large"), argv: argv(&[&format!("{dir}/large")]) },
-        Target { name: "std", path: "/system/bin/osbench".into(), argv: argv(&["/system/bin/osbench", "nop"]) },
-        Target { name: "tmpstd", path: format!("{dir}/osbench"), argv: argv(&[&format!("{dir}/osbench"), "nop"]) },
+        Target { name: "std", path: std_path.into(), argv: argv(&[std_path, std_arg]) },
+        Target { name: "tmpstd", path: format!("{dir}/osbench"), argv: argv(&[&format!("{dir}/osbench"), std_arg]) },
     ];
     let words = cap().trace_cursor_words().expect("the capability sizes a cursor");
     let mut cursor = TraceCursor::new(vec![0; words]);
-    println!("spawn_stages: cpus={} tsc clock page in use", toyos_abi::syscall::cpu_count());
+    println!("spawn_stages: cpus={} std={std_path}", toyos_abi::syscall::cpu_count());
     for t in &targets {
         // std's Command first, undisturbed by anything this job adds.
         let mut cmd: Vec<u64> = (0..WARM + REPS).map(|_| command(t)).skip(WARM).collect();
