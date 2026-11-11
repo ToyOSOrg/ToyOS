@@ -9,9 +9,9 @@
 //! - E, which the supervisor started under its session's owner, runs on: detached is the one way to outlive a starter;
 //! - after the kill, a spawn and a launch under B's `self` answer `Gone`.
 //!
-//! B's first act is a spawn the loader refuses once it is admitted under B: its
-//! hold on B goes with it, or B is never published and the arm's wait never
-//! answers.
+//! B's first act is a spawn of 64 zero bytes, which lay out as no program: it
+//! is refused in B, before the kernel hears of it, and B asserts that nothing
+//! started.
 //!
 //! **The other arms.** A `MANAGE`-only handle is no place, and the supervisor refuses a
 //! launch whose place is a pipe and answers the launches after it. A chain —
