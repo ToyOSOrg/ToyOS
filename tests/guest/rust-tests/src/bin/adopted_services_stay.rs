@@ -8,8 +8,9 @@
 //! test's `fs:/system`, reads its helper's image through it, and the helper
 //! reports holding no service at all.
 //!
-//! A guest test because what a helper holds is what the kernel moved into its
-//! table and its parent named in its startup block.
+//! A guest test because it runs the supervisor's path whole: std's adoption,
+//! a spawn whose image is read through an adopted service, and the names the
+//! helper reads back.
 
 use std::os::toyos::process::CommandExt;
 use std::process::Command;

@@ -424,9 +424,6 @@ struct LauncherCell(Once<Option<Connector>>);
 struct ProcessCell(Once<Process>);
 struct AdoptedCell(Once<Vec<(String, Connector)>>);
 
-/// What a process whose table is malformed writes to its `fd:2`.
-const MALFORMED_LINE: &[u8] = b"this program's endowment table is malformed: it cannot start\n";
-
 impl EndowTable {
     /// The table its parent wrote, or the process's end: every channel a
     /// process speaks on is named by the table, so a malformed one is said on
@@ -437,9 +434,9 @@ impl EndowTable {
             let mut names = [""; MAX_SPAWN_ENDOWMENTS];
             match crate::startup::endowed(&mut names) {
                 Ok(count) => Endowments::of(names, count),
-                Err(_) => {
+                Err(why) => {
                     if let Some(stderr) = crate::startup::early(b"fd:2") {
-                        let _ = toyos_abi::syscall::write_nonblock(RawHandle::endowed(stderr), MALFORMED_LINE);
+                        let _ = toyos_abi::syscall::write_nonblock(RawHandle::endowed(stderr), why.line());
                     }
                     toyos_abi::syscall::exit(crate::startup::MALFORMED_STATUS)
                 }
