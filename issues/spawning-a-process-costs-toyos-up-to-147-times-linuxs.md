@@ -141,6 +141,15 @@ stays drawn whole
 and the window's size waits for the file-call work (the window's record). The
 rest's growth is read again after the first two.
 
+- **Owed on metal:** #1250, a spawn that reserves its stack once and writes a
+  copied page once. An A/B of main before and after it on the T14 and the AMD
+  bench, of `spawn_cost` and `osbench procs` (`proc.spawn_wait.*`,
+  `proc.posix_spawn_wait.*`, `process.spawn_wait`). Main after must show
+  `proc.spawn_wait.tiny` and `proc.posix_spawn_wait.tiny` p50 lower by about the
+  stack stage it removed (7.0 µs on the T14 and 7.4 µs on the AMD bench, hot,
+  in the spawn diagnosis's boot 2), and no `proc` row slower beyond the before
+  run's spread.
+
 **Exit**: these rows within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured to its parts
 and justified.
