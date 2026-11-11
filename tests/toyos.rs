@@ -1308,6 +1308,24 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: BENCHCASE, judge: |b| clock_holds_over_minutes(b[0]) },
     ),
     (
+        // `osbench persist` without the rest of the suite, for a change to
+        // the disk's path: it alone writes the bench's NVMe, the durable rows
+        // and `fs.disk.*`. `files` rides along as their memory-filesystem
+        // counterpart, `fs.mem.*`, and `nvme` for its place in the list: it
+        // only reads, and on ToyOS reports its rows unsupported. Evidence and
+        // not a verdict, as `osbench` is, whose boot measures the same
+        // groups: only a pass that names it runs it. The T14 and the AMD
+        // bench.
+        "osbench_disk",
+        metal::Metal {
+            arms: OSBENCH_DISK,
+            judge: |b| {
+                data_on_the_nvme(b[0])?;
+                osbench_ran(b[0], &OSBENCH_DISK_GROUPS)
+            },
+        },
+    ),
+    (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
         // compared with the same program under this bench's Linux on the same
         // path. A pass names it: the other bench has to be running the peer.
@@ -1890,6 +1908,17 @@ const BENCHCASE: &[metal::Arm] = &[metal::Arm {
 const OSBENCH_ENERGY: &[metal::Arm] = &[metal::Arm {
     adds_ms: 300_000,
     ..metal::once("energybenchcase", "tests/images/benchcase.toml", &[], &["osbench_energy"])
+}];
+
+/// `persist`, which writes the disk, with the two groups that run before it
+/// in the suite's order.
+const OSBENCH_DISK_GROUPS: [&str; 3] = ["osbench_files", "osbench_nvme", "osbench_persist"];
+
+/// The whole suite's bound, [`BENCHCASE`]'s, reused as a ceiling.
+const OSBENCH_DISK: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 465_000,
+    named_only: true,
+    ..metal::once("diskbenchcase", "tests/images/benchcase.toml", &[], &OSBENCH_DISK_GROUPS)
 }];
 
 /// The two groups that need another party share one boot when one pass names

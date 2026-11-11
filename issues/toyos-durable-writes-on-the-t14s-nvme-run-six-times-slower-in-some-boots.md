@@ -39,6 +39,9 @@ ac6b89a, `metal-t14/`). The second of those boots ran slow, its
 `write_4k_fsync` at 6.26 ms, and its clean fsync still read 16 µs: the slow
 mode appears only where a Flush or a write is owed.
 
+Four boots of four that idled 80 s inside `persist` left the slow mode there
+(`issues/the-t14s-slow-durable-writes-ended-during-80-s-of-idle-in-four-boots-of-four.md`).
+
 **Exit**: repeated boots on the T14 read every durable `persist` row
 (`write_4k_fsync`, `append_4k_fsync`, `create_fsync_unlink` and
 `seq_write_fsync`) within Linux's, in every boot and for the whole of each
