@@ -1,6 +1,7 @@
-//! Calls beside the writer on two CPUs, under loom: every interleaving and
-//! every memory order of a hold against a close, a reuse and a `dup2`. Each
-//! case names the controls that red it.
+//! Calls beside the writer on two CPUs, under loom: every interleaving it
+//! explores of a hold against a close, a reuse and a `dup2`. Loom does not
+//! explore load buffering. `build/ci.rs`'s `CONTROLS` names the cases each
+//! control reds.
 //!
 //!   cargo test -p toyos --lib --features <control> fd::table::model
 
@@ -12,20 +13,18 @@ use loom::thread;
 
 use super::{Error, Fault, Fd, Place, Slot, Table, Word, Writer};
 
-struct Shared(AtomicU32);
-
-impl Word for Shared {
+impl Word for AtomicU32 {
     fn load(&self, order: Ordering) -> u32 {
-        self.0.load(order)
+        AtomicU32::load(self, order)
     }
     fn store(&self, value: u32, order: Ordering) {
-        self.0.store(value, order)
+        AtomicU32::store(self, value, order)
     }
     fn compare_exchange(&self, current: u32, new: u32, success: Ordering, failure: Ordering) -> Result<u32, u32> {
-        self.0.compare_exchange(current, new, success, failure)
+        AtomicU32::compare_exchange(self, current, new, success, failure)
     }
     fn fetch_sub(&self, value: u32, order: Ordering) -> u32 {
-        self.0.fetch_sub(value, order)
+        AtomicU32::fetch_sub(self, value, order)
     }
 }
 
@@ -52,7 +51,7 @@ const N: usize = 2;
 const OBJECTS: usize = 3;
 
 struct World {
-    table: Table<Shared, Tracked, N>,
+    table: Table<AtomicU32, Tracked, N>,
     writing: Mutex<()>,
     /// How often each object was let go.
     gone: [AtomicU32; OBJECTS],
@@ -62,9 +61,9 @@ impl World {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             table: Table {
-                fds: core::array::from_fn(|_| Shared(AtomicU32::new(0))),
+                fds: core::array::from_fn(|_| AtomicU32::new(0)),
                 slots: core::array::from_fn(|_| Slot {
-                    refs: Shared(AtomicU32::new(0)),
+                    refs: AtomicU32::new(0),
                     object: Tracked(loom::cell::UnsafeCell::new(usize::MAX)),
                 }),
             },
@@ -73,7 +72,7 @@ impl World {
         })
     }
 
-    fn write<R>(&self, f: impl FnOnce(&mut Writer<'_, Shared, Tracked, N>) -> Result<R, Fault>) -> R {
+    fn write<R>(&self, f: impl FnOnce(&mut Writer<'_, AtomicU32, Tracked, N>) -> Result<R, Fault>) -> R {
         let _held = self.writing.lock().unwrap();
         // SAFETY: the one writer while `writing` is held.
         f(&mut unsafe { self.table.writer() }).expect("the writer was refused")
@@ -129,9 +128,6 @@ impl World {
     }
 }
 
-/// `fd-hold-revives` counts a call onto the slot the close freed, so the
-/// call holds an object already let go, here and in the two cases below
-/// that free a slot under a call.
 #[test]
 fn a_call_beside_a_close_holds_a_live_object_or_none() {
     loom::model(|| {
@@ -165,12 +161,9 @@ fn two_calls_beside_a_close_let_the_object_go_once() {
     });
 }
 
-/// The close frees the descriptor's slot and another descriptor's object
-/// takes it. `fd-hold-unchecked` keeps a reference without looking at the
-/// descriptor again, so the call holds an object its descriptor never named;
-/// `fd-publish-relaxed` stores the new count unordered after the object, so
-/// the call reads an object it need not see written, here and in the next
-/// case.
+/// The close frees the descriptor's slot, another descriptor's object takes
+/// it and is closed in turn, so a call that counted itself onto the slot can
+/// be left the object its own descriptor never named.
 #[test]
 fn a_call_on_a_closed_descriptor_never_holds_the_object_that_took_its_slot() {
     loom::model(|| {
@@ -182,9 +175,9 @@ fn a_call_on_a_closed_descriptor_never_holds_the_object_that_took_its_slot() {
         });
         world.close(fd);
         let other = world.install(1, fd + 1);
+        world.close(other);
         let held = caller.join().unwrap();
         assert!(matches!(held, None | Some(0)), "a call on a closed descriptor held {held:?}");
-        world.close(other);
         world.all_gone([0, 1]);
     });
 }

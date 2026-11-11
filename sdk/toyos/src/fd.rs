@@ -391,14 +391,14 @@ fn file_group(label: &str) -> Option<Fd> {
 mod owner {
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    use super::table::{Cell, Fault, Table, Writer};
+    use super::table::{Fault, ObjectCell, Table, Writer};
     use super::*;
     use crate::endow::Endowments;
     use crate::sync::Lock;
     use crate::OwnedHandle;
 
-    type Descriptors = Table<AtomicU32, Cell<Record>, MAX_FDS>;
-    type Names<'a> = Writer<'a, AtomicU32, Cell<Record>, MAX_FDS>;
+    type Descriptors = Table<AtomicU32, ObjectCell<Record>, MAX_FDS>;
+    type TableWriter<'a> = Writer<'a, AtomicU32, ObjectCell<Record>, MAX_FDS>;
 
     static TABLE: Descriptors = Table::new();
     /// Held by whoever changes what a descriptor names.
@@ -415,22 +415,22 @@ mod owner {
 
     /// `f` on the table's writer, whose first use installs every descriptor
     /// the process was endowed at its number. Nothing panics under the lock.
-    fn change<R>(f: impl FnOnce(&mut Names<'_>) -> Result<R, Fault>) -> Result<R, Error> {
+    fn change<R>(f: impl FnOnce(&mut TableWriter<'_>) -> Result<R, Fault>) -> Result<R, Error> {
         let endowed = Endowments::get();
         let mut refused = 0;
         let answer = {
             let _held = WRITING.lock();
             // SAFETY: the one writer while `WRITING` is held.
-            let mut names = unsafe { TABLE.writer() };
+            let mut writer = unsafe { TABLE.writer() };
             let installed = match ENDOWED.load(Ordering::Relaxed) {
                 true => Ok(()),
                 false => {
-                    let installed = endow(&mut names, endowed).map(|n| refused = n);
+                    let installed = endow(&mut writer, endowed).map(|n| refused = n);
                     ENDOWED.store(true, Ordering::Release);
                     installed
                 }
             };
-            installed.and_then(|()| f(&mut names))
+            installed.and_then(|()| f(&mut writer))
         };
         // Said once the lock is let go: the write may block.
         for _ in 0..refused {
@@ -452,7 +452,7 @@ mod owner {
     /// this process's holder first. One whose number another already took,
     /// or whose socket this process holds no room for, is refused, its handle
     /// closed: how many were.
-    fn endow(table: &mut Names<'_>, endowed: &Endowments) -> Result<usize, Fault> {
+    fn endow(table: &mut TableWriter<'_>, endowed: &Endowments) -> Result<usize, Fault> {
         let mut refused = 0;
         let mut files = alloc::collections::BTreeMap::new();
         for label in endowed.labels() {

@@ -853,6 +853,10 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("fd::table::model::a_call_on_a_closed_descriptor_never_holds_the_object_that_took_its_slot"),
         Fails("fd::table::model::a_call_on_a_reopened_descriptor_holds_the_old_object_or_the_new"),
     ]),
+    red(SDK, "fd-reuse-relaxed", None, &[
+        Fails("fd::table::model::a_call_on_a_closed_descriptor_never_holds_the_object_that_took_its_slot"),
+        Fails("fd::table::model::a_call_on_a_reopened_descriptor_holds_the_old_object_or_the_new"),
+    ]),
 ];
 
 /// Whether a control's run showed its teeth.

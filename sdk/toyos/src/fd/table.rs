@@ -67,12 +67,12 @@ pub(super) trait Place {
     unsafe fn write(&self, object: Self::Object);
 }
 
-pub(super) struct Cell<O>(UnsafeCell<MaybeUninit<O>>);
+pub(super) struct ObjectCell<O>(UnsafeCell<MaybeUninit<O>>);
 
 // SAFETY: reached only through `Place`, whose callers keep a write alone.
-unsafe impl<O: Send + Sync> Sync for Cell<O> {}
+unsafe impl<O: Send + Sync> Sync for ObjectCell<O> {}
 
-impl<O: Copy> Place for Cell<O> {
+impl<O: Copy> Place for ObjectCell<O> {
     type Object = O;
 
     unsafe fn read(&self) -> O {
@@ -100,8 +100,8 @@ impl From<Error> for Fault {
     }
 }
 
-/// An object's slot, on a cache line of its own: calls on two descriptors
-/// write no line they share.
+/// An object's slot, on a cache line of its own: calls on two objects write
+/// no line they share.
 #[repr(align(64))]
 struct Slot<W, P> {
     /// The slot's count of references.
@@ -114,12 +114,12 @@ pub(super) struct Table<W, P, const N: usize> {
     slots: [Slot<W, P>; N],
 }
 
-impl<O, const N: usize> Table<AtomicU32, Cell<O>, N> {
+impl<O, const N: usize> Table<AtomicU32, ObjectCell<O>, N> {
     pub(super) const fn new() -> Self {
         assert!(N < INHERITABLE as usize);
         Self {
             fds: [const { AtomicU32::new(0) }; N],
-            slots: [const { Slot { refs: AtomicU32::new(0), object: Cell(UnsafeCell::new(MaybeUninit::uninit())) } }; N],
+            slots: [const { Slot { refs: AtomicU32::new(0), object: ObjectCell(UnsafeCell::new(MaybeUninit::uninit())) } }; N],
         }
     }
 }
@@ -254,7 +254,8 @@ impl<W: Word, P: Place, const N: usize> Writer<'_, W, P, N> {
     /// A free slot holding `object`, referenced once.
     fn hold(&mut self, object: P::Object) -> Result<usize, Error> {
         // The load that finds a slot free is ordered after its last reader.
-        let index = self.0.slots.iter().position(|slot| slot.refs.load(Ordering::Acquire) == 0).ok_or(Error::Full)?;
+        let free = if cfg!(feature = "fd-reuse-relaxed") { Ordering::Relaxed } else { Ordering::Acquire };
+        let index = self.0.slots.iter().position(|slot| slot.refs.load(free) == 0).ok_or(Error::Full)?;
         let slot = &self.0.slots[index];
         // SAFETY: a free slot is this writer's alone until its count is stored.
         unsafe { slot.object.write(object) };
@@ -360,8 +361,8 @@ mod tests {
         Record { handle: toyos_abi::HANDLE_INVALID, tag: super::super::UNTAGGED, word, release: Some(nothing) }
     }
 
-    type T = Table<AtomicU32, Cell<Record>, 8>;
-    type W<'a> = Writer<'a, AtomicU32, Cell<Record>, 8>;
+    type T = Table<AtomicU32, ObjectCell<Record>, 8>;
+    type W<'a> = Writer<'a, AtomicU32, ObjectCell<Record>, 8>;
 
     /// These tests' one writer of `t`.
     fn writer(t: &T) -> W<'_> {

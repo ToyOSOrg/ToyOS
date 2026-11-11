@@ -107,6 +107,9 @@ fd-hold-unchecked = []
 # The writer stores a new object's count `Relaxed`, so a call that counts
 # itself on need not see the object written.
 fd-publish-relaxed = []
+# The writer finds a slot free by a `Relaxed` load, so its write of a new
+# object need not follow the last call's read of the old one.
+fd-reuse-relaxed = []
 
 [lints.rust]
 # The guest's target: its stream sinks are compiled only for it.
