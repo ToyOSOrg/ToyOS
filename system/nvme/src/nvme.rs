@@ -22,10 +22,10 @@
 //! to issue.
 //!
 //! **The controller is let into its own idle power states** by Autonomous
-//! Power State Transitions (§5.1.25.1.6, §8.1.17.2), where it supports them,
-//! with the table `nvme_apst` builds from its power state descriptors under
-//! that crate's latency bound. It is set at bring-up and again after every
-//! reset, which returns features to their defaults.
+//! Power State Transitions (Base 2.1 §5.1.25.1.6, §8.1.17.2), where it
+//! supports them, with the table `nvme_apst` builds from its power state
+//! descriptors under that crate's latency bound. It is set at bring-up and
+//! again after every reset, which returns features to their defaults.
 //!
 //! **A command the controller does not answer is reclaimed by a controller
 //! reset** (§3.7.2): `CC.EN` cleared, every command it held is gone, the queues
@@ -97,18 +97,17 @@ const _: () = assert!(OFF_PRP + MAX_IO_QUEUES as usize * IO_DEPTH as usize * PAG
 const _: () = assert!(ADMIN_DEPTH as usize * SQE_BYTES <= PAGE);
 const _: () = assert!(IO_DEPTH as usize * SQE_BYTES <= PAGE);
 
-/// What the controller's idle power states came to at the last bring-up.
+/// The controller's power states and the APST table built over them, read
+/// once from Identify Controller.
 #[derive(Clone, Debug)]
 pub enum Power {
     /// APSTA's bit 0 is clear: the controller makes no autonomous transition.
     Unsupported,
-    /// The table set, and the states it was built from.
-    Autonomous {
-        states: Vec<nvme_apst::PowerState>,
-        plan: Box<[Option<nvme_apst::Transition>; nvme_apst::STATES]>,
-    },
-    /// The controller refused the Set Features, with this status.
-    Refused(u16),
+    /// NPSS names more power states than Identify Controller holds: none is
+    /// read, and no table is set.
+    TooManyStates(u8),
+    /// The states, and each one's transition.
+    Autonomous { states: Vec<nvme_apst::PowerState>, plan: Vec<Option<nvme_apst::Transition>> },
 }
 
 /// Whose a command is.
@@ -267,9 +266,6 @@ pub struct Controller {
     pub vwc: bool,
     /// The most 4 KiB blocks one command may move (`MDTS`).
     pub max_blocks: u32,
-    /// The power states Identify Controller states, and whether APST is
-    /// supported, read once at bring-up.
-    states: (bool, Vec<nvme_apst::PowerState>),
     pub power: Power,
     poller: Poller,
     /// A device answer naming no waiting slot, said once.
@@ -282,9 +278,10 @@ pub struct Controller {
 
 impl Controller {
     /// Bring the controller up (§3.5.1): disable, program the admin queue,
-    /// enable, identify, and make the I/O queue pairs.
-    /// `info` is the claim's one description.
-    pub fn open(dev: PciDev, info: &toyos_abi::pci::PciFunctionInfo) -> Result<Self, Refusal> {
+    /// enable, identify, make the I/O queue pairs and set the APST table.
+    /// `info` is the claim's one description. With the controller, the
+    /// status it refused the table with, if it did.
+    pub fn open(dev: PciDev, info: &toyos_abi::pci::PciFunctionInfo) -> Result<(Self, Option<u16>), Refusal> {
         let class = dev
             .config_read(0x08, toyos_abi::syscall::RegWidth::U32)
             .map_err(|e| Refusal::Kernel("the class code", e))?;
@@ -331,7 +328,6 @@ impl Controller {
             sectors: 0,
             vwc: false,
             max_blocks: 0,
-            states: (false, Vec::new()),
             power: Power::Unsupported,
             poller: Poller::new(1),
             stray: false,
@@ -341,8 +337,8 @@ impl Controller {
         ctrl.enable()?;
         ctrl.identify()?;
         ctrl.make_io_queues()?;
-        ctrl.power = ctrl.set_power()?;
-        Ok(ctrl)
+        let refused = ctrl.set_power()?;
+        Ok((ctrl, refused))
     }
 
     pub fn claim(&self) -> &PciDev {
@@ -413,9 +409,13 @@ impl Controller {
         let id = self.dma.sub(OFF_IDENTIFY, PAGE);
         id.zero();
         self.admin_command("Identify Controller", Command { opcode: ADMIN_IDENTIFY, prp1: buf, cdw10: 1, ..Command::default() })?;
-        let mut whole = vec![0u8; PAGE];
-        id.copy_out(0, &mut whole);
-        self.states = nvme_apst::states(&whole).expect("Identify Controller is a page");
+        let mut page = [0u8; nvme_apst::IDENTIFY_BYTES];
+        id.copy_out(0, &mut page);
+        self.power = match nvme_apst::states(&page) {
+            Err(nvme_apst::TooManyStates(npss)) => Power::TooManyStates(npss),
+            Ok((false, _)) => Power::Unsupported,
+            Ok((true, states)) => Power::Autonomous { plan: nvme_apst::plan(&states), states },
+        };
         let mdts: u8 = id.read(77);
         let vwc: u8 = id.read(525);
         self.vwc = vwc & 1 != 0;
@@ -446,26 +446,27 @@ impl Controller {
         Ok(())
     }
 
-    /// Set the APST table, through the identify page, which nothing reads
-    /// after bring-up. A refusal is the controller's answer and is reported;
-    /// the controller then serves from its operational state.
-    fn set_power(&mut self) -> Result<Power, Refusal> {
-        let (supported, states) = self.states.clone();
-        if !supported {
-            return Ok(Power::Unsupported);
-        }
-        let plan = nvme_apst::plan(&states);
-        self.dma.copy_in(OFF_IDENTIFY, &nvme_apst::encode(&plan));
+    /// Set the APST table Identify built, through the identify page, which
+    /// nothing reads after bring-up; nothing is sent where it built none. A
+    /// table with no transition is sent with APST disabled (APSTE, CDW11 bit
+    /// 0). The answer is the status the controller refused it with, if it
+    /// did, after which it serves from its operational state.
+    fn set_power(&mut self) -> Result<Option<u16>, Refusal> {
+        let Power::Autonomous { plan, .. } = &self.power else {
+            return Ok(None);
+        };
+        let enable = plan.iter().any(Option::is_some);
+        self.dma.copy_in(OFF_IDENTIFY, &nvme_apst::encode(plan));
         let cmd = Command {
             opcode: ADMIN_SET_FEATURES,
             prp1: self.dma_addr + OFF_IDENTIFY as u64,
             cdw10: FEATURE_APST,
-            cdw11: 1,
+            cdw11: u32::from(enable),
             ..Command::default()
         };
         match self.admin_command("Set Features (Autonomous Power State Transition)", cmd) {
-            Ok(_) => Ok(Power::Autonomous { states, plan: Box::new(plan) }),
-            Err(Refusal::Admin(_, status)) => Ok(Power::Refused(status)),
+            Ok(_) => Ok(None),
+            Err(Refusal::Admin(_, status)) => Ok(Some(status)),
             Err(why) => Err(why),
         }
     }
@@ -734,9 +735,11 @@ impl Controller {
     }
 
     /// Take every command back by resetting the controller (§3.7.2), and
-    /// make its queues again; answers whose commands they were. What the
-    /// device answered before the reset is read first and goes into `out`.
-    pub fn reset(&mut self, out: &mut Vec<Done>) -> Result<Vec<Owner>, Refusal> {
+    /// make its queues and set its APST table again; answers whose commands
+    /// they were, and the status the controller refused the table with, if
+    /// it did. What the device answered before the reset is read first and
+    /// goes into `out`.
+    pub fn reset(&mut self, out: &mut Vec<Done>) -> Result<(Vec<Owner>, Option<u16>), Refusal> {
         self.reap(out);
         let aborted: Vec<Owner> = self
             .io
@@ -746,8 +749,8 @@ impl Controller {
             .collect();
         self.enable()?;
         self.make_io_queues()?;
-        self.power = self.set_power()?;
-        Ok(aborted)
+        let refused = self.set_power()?;
+        Ok((aborted, refused))
     }
 
     /// The queues each command was issued down, as a line.

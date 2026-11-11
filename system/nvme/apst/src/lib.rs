@@ -3,40 +3,45 @@
 //! Identify Controller, Figure 312; the descriptor, Figure 313; the feature,
 //! §5.1.25.1.6, Figures 392 and 393; power management, §8.1.17).
 //!
-//! **The controller is let into a non-operational state only where the
-//! latency it states for the round trip fits [`EXIT_BOUND_US`].** A
-//! transition costs the old state's exit latency plus the new state's entry
-//! latency (§8.1.17), so the first I/O after an idle period waits at most the
-//! sum of the target's entry and exit latencies. A state that does not report
-//! both (`0h` is "not reported") has no stated bound and is never a target.
+//! **A target is a non-operational state whose stated round trip, its entry
+//! plus its exit latency, is within [`ROUND_TRIP_BOUND_US`].** A state that
+//! does not report both (`0h` is "not reported") states no round trip and is
+//! never a target. The bound is on the target's own latencies: a transition
+//! also costs the exit latency of the state it leaves (§8.1.17).
 //!
-//! **Each state goes to the deepest admitted state of the first [`TIERS`]
-//! tier that holds one deeper than itself**, by round-trip latency, reporting
-//! no higher idle power, after that tier's idle time: a state within 15 ms
-//! after 100 ms idle, one within 100 ms after 2 s. The tiers are policy: a
-//! state cheap to leave is entered soon, and a dear one only once the drive
-//! has been idle twenty times longer than leaving it costs. A drive's table
-//! is taken as it states it; there is no table of drives.
+//! **Each state goes to the highest-numbered target after it within the first
+//! [`TIERS`] tier that holds one**, reporting no higher idle power, after that
+//! tier's idle time: a round trip within 15 ms after 100 ms idle, one within
+//! 100 ms after 2 s. States are ranked by number because the specification
+//! numbers them so that none consumes more maximum power than the one before
+//! it (§8.1.17); their latencies carry no order. The tiers are policy: a state
+//! cheap to leave is entered soon, and a dear one only once the drive has been
+//! idle twenty times longer than leaving it costs. A drive's table is taken as
+//! it states it; there is no table of drives.
 
 #![forbid(unsafe_code)]
 
-/// Identify Controller's bytes this reads: NPSS at 263, APSTA at 265, and
-/// the 32 power state descriptors from 2048, 32 bytes each (Figure 312).
+/// Identify Controller's length, and the bytes this reads of it: NPSS at 263,
+/// APSTA at 265, and up to 32 power state descriptors from 2048, 32 bytes each
+/// (Figure 312).
+pub const IDENTIFY_BYTES: usize = 4096;
 pub const NPSS: usize = 263;
 pub const APSTA: usize = 265;
 pub const DESCRIPTORS: usize = 2048;
 pub const DESCRIPTOR_BYTES: usize = 32;
 pub const STATES: usize = 32;
 
-/// The most the first I/O after idle may wait for the drive's power state
-/// round trip, in microseconds: under a tenth of a second, below what a
-/// person notices as a pause.
-pub const EXIT_BOUND_US: u64 = 100_000;
+const _: () = assert!(DESCRIPTORS + STATES * DESCRIPTOR_BYTES <= IDENTIFY_BYTES);
 
-/// The tiers, shallowest first: the most round-trip latency a target may
-/// have, in microseconds, and the idle time before the transition, in
-/// milliseconds. The last tier's latency is [`EXIT_BOUND_US`].
-pub const TIERS: [(u64, u64); 2] = [(15_000, 100), (EXIT_BOUND_US, 2_000)];
+/// The most round trip a target may state, in microseconds: under a tenth of
+/// a second, below what a person notices as a pause. The specification bounds
+/// no latency; this is policy.
+pub const ROUND_TRIP_BOUND_US: u64 = 100_000;
+
+/// The tiers, shallowest first: the most round trip a target may state, in
+/// microseconds, and the idle time before the transition, in milliseconds.
+/// The last tier's round trip is [`ROUND_TRIP_BOUND_US`].
+pub const TIERS: [(u64, u64); 2] = [(15_000, 100), (ROUND_TRIP_BOUND_US, 2_000)];
 
 /// One power state as its descriptor states it (Figure 313).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,27 +81,24 @@ impl PowerState {
     pub fn round_trip_us(&self) -> Option<u64> {
         (self.entry_us != 0 && self.exit_us != 0).then(|| u64::from(self.entry_us) + u64::from(self.exit_us))
     }
-
-    /// Whether this state may be a transition's target at all.
-    fn admitted(&self) -> bool {
-        self.non_operational && self.round_trip_us().is_some_and(|t| t <= EXIT_BOUND_US)
-    }
 }
 
-/// The controller's states from its Identify Controller data, and whether it
-/// supports APST; `None` for data too short to hold them.
-pub fn states(identify: &[u8]) -> Option<(bool, Vec<PowerState>)> {
-    if identify.len() < DESCRIPTORS + STATES * DESCRIPTOR_BYTES {
-        return None;
+/// Identify Controller's NPSS, a zero-based count, names more power states
+/// than the [`STATES`] it holds descriptors for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TooManyStates(pub u8);
+
+/// The controller's power states from its Identify Controller data, in state
+/// order, and whether it supports APST.
+pub fn states(identify: &[u8; IDENTIFY_BYTES]) -> Result<(bool, Vec<PowerState>), TooManyStates> {
+    let npss = identify[NPSS];
+    let count = usize::from(npss) + 1;
+    if count > STATES {
+        return Err(TooManyStates(npss));
     }
-    let count = usize::from(identify[NPSS]) + 1;
-    let states = identify[DESCRIPTORS..DESCRIPTORS + count * DESCRIPTOR_BYTES]
-        .as_chunks::<DESCRIPTOR_BYTES>()
-        .0
-        .iter()
-        .map(PowerState::parse)
-        .collect();
-    Some((identify[APSTA] & 1 != 0, states))
+    let descriptors = &identify[DESCRIPTORS..DESCRIPTORS + count * DESCRIPTOR_BYTES];
+    let states = descriptors.as_chunks::<DESCRIPTOR_BYTES>().0.iter().map(PowerState::parse).collect();
+    Ok((identify[APSTA] & 1 != 0, states))
 }
 
 /// One entry of the table: the state to move to and the idle time before
@@ -107,35 +109,37 @@ pub struct Transition {
     pub after_ms: u64,
 }
 
-/// Each state's transition, in state order.
-pub fn plan(states: &[PowerState]) -> [Option<Transition>; STATES] {
-    let mut out = [None; STATES];
-    for (n, from) in states.iter().enumerate() {
-        let floor = if from.non_operational { from.round_trip_us() } else { None };
-        let deeper: Vec<(usize, u64)> = states
-            .iter()
-            .enumerate()
-            .filter(|&(t, to)| t != n && to.admitted())
-            .filter_map(|(t, to)| Some((t, to, to.round_trip_us()?)))
-            .filter(|&(_, _, trip)| floor.is_none_or(|f| trip > f))
-            .filter(|(_, to, _)| match (to.idle_power, from.idle_power) {
-                (Some(to), Some(from)) => to <= from,
-                _ => true,
+/// Each state's transition, in state order, for `states` as [`states`] reads
+/// them: at most [`STATES`].
+pub fn plan(states: &[PowerState]) -> Vec<Option<Transition>> {
+    assert!(states.len() <= STATES, "a controller has at most {STATES} power states");
+    states
+        .iter()
+        .enumerate()
+        .map(|(n, from)| {
+            let targets: Vec<(usize, u64)> = states
+                .iter()
+                .enumerate()
+                .skip(n + 1)
+                .filter(|(_, to)| to.non_operational)
+                .filter(|(_, to)| match (to.idle_power, from.idle_power) {
+                    (Some(to), Some(from)) => to <= from,
+                    _ => true,
+                })
+                .filter_map(|(t, to)| Some((t, to.round_trip_us()?)))
+                .collect();
+            TIERS.iter().find_map(|&(within_us, after_ms)| {
+                let &(to, _) = targets.iter().rev().find(|&&(_, trip)| trip <= within_us)?;
+                Some(Transition { to: to as u8, after_ms })
             })
-            .map(|(t, _, trip)| (t, trip))
-            .collect();
-        out[n] = TIERS.iter().find_map(|&(within_us, after_ms)| {
-            let (t, _) = deeper.iter().filter(|&&(_, trip)| trip <= within_us).max_by_key(|&&(_, trip)| trip)?;
-            Some(Transition { to: *t as u8, after_ms })
-        });
-    }
-    out
+        })
+        .collect()
 }
 
 /// The feature's 256-byte data structure for `plan` (Figure 393): each entry
 /// ITPT in bits 31:08 and ITPS in bits 07:03, little-endian, unused entries
 /// zero.
-pub fn encode(plan: &[Option<Transition>; STATES]) -> [u8; STATES * 8] {
+pub fn encode(plan: &[Option<Transition>]) -> [u8; STATES * 8] {
     let mut out = [0u8; STATES * 8];
     for (n, entry) in plan.iter().enumerate() {
         if let Some(t) = entry {
@@ -164,8 +168,15 @@ mod tests {
         d
     }
 
-    fn identify(descriptors: &[[u8; 32]], apsta: bool) -> [u8; 4096] {
-        let mut id = [0u8; 4096];
+    /// `d` with its maximum power in 0.0001 W, MXPS set.
+    fn fine(mut d: [u8; 32], max_tenth_milliwatts: u16) -> [u8; 32] {
+        d[0..2].copy_from_slice(&max_tenth_milliwatts.to_le_bytes());
+        d[3] |= 1;
+        d
+    }
+
+    fn identify(descriptors: &[[u8; 32]], apsta: bool) -> [u8; IDENTIFY_BYTES] {
+        let mut id = [0u8; IDENTIFY_BYTES];
         id[NPSS] = descriptors.len() as u8 - 1;
         id[APSTA] = apsta as u8;
         for (n, d) in descriptors.iter().enumerate() {
@@ -206,18 +217,48 @@ mod tests {
         assert!(apst);
         assert_eq!(read.len(), 5);
         assert!(!states(&identify(&client(), false)).unwrap().0);
-        assert!(states(&[0u8; 2048]).is_none());
+    }
+
+    /// Identify Controller holds 32 descriptors, so NPSS 31 is the most there
+    /// is; a controller saying more is refused, not read past.
+    #[test]
+    fn an_npss_past_31_is_refused_and_31_reads_all_32_states() {
+        let mut id = identify(&client(), true);
+        id[DESCRIPTORS + 31 * 32..DESCRIPTORS + 32 * 32].copy_from_slice(&descriptor(1, true, 1_000, 1_000, 0));
+        id[NPSS] = 31;
+        let (_, s) = states(&id).unwrap();
+        assert_eq!(s.len(), STATES);
+        // The last state is a target, and its number fills ITPS's five bits.
+        let plan = plan(&s);
+        assert_eq!(plan[0], Some(Transition { to: 31, after_ms: 100 }));
+        assert_eq!(plan[31], None);
+        assert_eq!(u64::from_le_bytes(encode(&plan)[0..8].try_into().unwrap()), (100 << 8) | (31 << 3));
+        for npss in [32, 255] {
+            id[NPSS] = npss;
+            assert_eq!(states(&id), Err(TooManyStates(npss)));
+        }
     }
 
     #[test]
     fn a_state_past_the_first_tier_is_reached_from_the_first_tiers_after_the_second_tiers_time() {
         let (_, s) = states(&identify(&client(), true)).unwrap();
-        let plan = plan(&s);
         let three = Some(Transition { to: 3, after_ms: 100 });
-        assert_eq!(plan[..3], [three, three, three]);
-        assert_eq!(plan[3], Some(Transition { to: 4, after_ms: 2_000 }));
-        assert_eq!(plan[4], None);
-        assert!(plan[5..].iter().all(Option::is_none));
+        assert_eq!(plan(&s), [three, three, three, Some(Transition { to: 4, after_ms: 2_000 }), None]);
+    }
+
+    /// The specification numbers states by maximum power, not by latency, and
+    /// permits a later state to be quicker to leave: here PS2 draws less than
+    /// PS1 and leaves faster. Every state goes to PS2, and none goes back.
+    #[test]
+    fn the_target_is_the_highest_numbered_whatever_the_latencies() {
+        let d = [
+            descriptor(650, false, 0, 0, 0),
+            descriptor(4, true, 5_000, 5_000, 0),
+            descriptor(1, true, 1_000, 1_000, 0),
+        ];
+        let (_, s) = states(&identify(&d, true)).unwrap();
+        let two = Some(Transition { to: 2, after_ms: 100 });
+        assert_eq!(plan(&s), [two, two, None]);
     }
 
     /// The mutation the track names: a state past the bound is never a target.
@@ -273,20 +314,37 @@ mod tests {
         assert!(table[32..].iter().all(|&b| b == 0));
     }
 
-    /// The T14's SK hynix BC501, as its descriptors state it: every state
-    /// goes straight to PS4 after 100 ms, past PS3, both within the first
-    /// tier.
+    /// The T14's SK hynix BC501, as the driver logs its descriptors: every
+    /// state goes straight to PS4 after 100 ms, past PS3, both within the
+    /// first tier. The table Linux sets on it too.
     #[test]
-    fn the_deepest_state_within_a_tier_is_the_target_past_shallower_ones() {
+    fn the_t14s_drive_gets_the_table_linux_sets() {
         let d = [
             descriptor(350, false, 5, 5, 0),
             descriptor(240, false, 30, 30, 0),
             descriptor(190, false, 100, 100, 0),
-            descriptor(4, true, 1_000, 1_000, 0),
-            descriptor(1, true, 1_000, 5_000, 0),
+            fine(descriptor(0, true, 1_000, 1_000, 0), 350),
+            fine(descriptor(0, true, 1_000, 5_000, 0), 50),
         ];
         let (_, s) = states(&identify(&d, true)).unwrap();
         let four = Some(Transition { to: 4, after_ms: 100 });
-        assert_eq!(plan(&s)[..5], [four, four, four, four, None]);
+        assert_eq!(plan(&s), [four, four, four, four, None]);
+    }
+
+    /// The AMD bench's drive, as the driver logs its descriptors: PS3 a
+    /// 1.41 ms round trip and PS4 10 ms, both within the first tier, so every
+    /// state goes to PS4 after 100 ms. The table Linux sets on it too.
+    #[test]
+    fn the_amd_benchs_drive_gets_the_table_linux_sets() {
+        let d = [
+            descriptor(800, false, 0, 0, 0),
+            descriptor(630, false, 0, 0, 0),
+            descriptor(350, false, 0, 0, 0),
+            fine(descriptor(0, true, 210, 1_200, 0), 760),
+            fine(descriptor(0, true, 2_000, 8_000, 0), 50),
+        ];
+        let (_, s) = states(&identify(&d, true)).unwrap();
+        let four = Some(Transition { to: 4, after_ms: 100 });
+        assert_eq!(plan(&s), [four, four, four, four, None]);
     }
 }

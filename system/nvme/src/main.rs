@@ -117,8 +117,8 @@ fn main() {
     let stop = Endowments::get().take::<toyos::wake::Bell>(toyos_quiesce::DRIVER_STOP);
     let mut link = Link::new(name.clone())
         .unwrap_or_else(|| panic!("{name}: started with no `{}` port: a disk driver's row receives it", toyos_blockring::disk::PORT));
-    let mut ctrl = match Controller::open(dev, &info) {
-        Ok(ctrl) => ctrl,
+    let (mut ctrl, refused) = match Controller::open(dev, &info) {
+        Ok(opened) => opened,
         Err(why) => {
             println!("{name}: NOT SERVING — {why}");
             link.settle(Settled::Unusable);
@@ -133,7 +133,7 @@ fn main() {
         ctrl.lba_bytes,
         ctrl.sectors
     );
-    say_power(&name, &ctrl.power);
+    say_power(&name, &ctrl.power, refused);
     let read = toyos_blockserve::table::read(&mut Sectors { ctrl: &mut ctrl, block: vec![0u8; BLOCK_BYTES] });
     let mut disk = Sessions::new(name.clone(), read);
     link.offer(DISK, disk.offered());
@@ -141,36 +141,52 @@ fn main() {
     serve(&name, &mut ctrl, &mut disk, &mut link, stop.as_ref())
 }
 
-/// The controller's power states and the APST table set over them, one line
-/// each: what a bench's idle power and its first I/O after idle are read
-/// against.
-fn say_power(name: &str, power: &nvme::Power) {
-    match power {
-        nvme::Power::Unsupported => println!("{name}: no autonomous power state transitions: the controller supports none"),
-        nvme::Power::Refused(status) => {
-            println!("{name}: no autonomous power state transitions: the controller refused the table (status {status:#x})")
+/// The controller's power states, the APST table built over them and whether
+/// the controller took it, one line each: what a bench's idle power and its
+/// first I/O after idle are read against.
+fn say_power(name: &str, power: &nvme::Power, refused: Option<u16>) {
+    let (states, plan) = match power {
+        nvme::Power::Unsupported => {
+            println!("{name}: no autonomous power state transitions: the controller supports none");
+            return;
         }
-        nvme::Power::Autonomous { states, plan } => {
-            for (n, s) in states.iter().enumerate() {
-                let watts = |p: Option<u64>| p.map_or("unreported".to_string(), |p| format!("{}.{:04} W", p / 10_000, p % 10_000));
-                println!(
-                    "{name}: power state {n}: {}, entry {} us, exit {} us, max {}, idle {}",
-                    if s.non_operational { "non-operational" } else { "operational" },
-                    s.entry_us,
-                    s.exit_us,
-                    watts(s.max_power),
-                    watts(s.idle_power),
-                );
-            }
-            let steps: Vec<String> =
-                plan.iter().enumerate().filter_map(|(n, t)| t.map(|t| format!("{n}->{} after {} ms", t.to, t.after_ms))).collect();
+        nvme::Power::TooManyStates(npss) => {
             println!(
-                "{name}: autonomous power state transitions on, round trips within {} us: {}",
-                nvme_apst::EXIT_BOUND_US,
-                if steps.is_empty() { "no state admitted".to_string() } else { steps.join(", ") }
+                "{name}: no autonomous power state transitions: Identify Controller's NPSS {npss} names more power \
+                 states than it holds descriptors for"
             );
+            return;
         }
+        nvme::Power::Autonomous { states, plan } => (states, plan),
+    };
+    for (n, s) in states.iter().enumerate() {
+        let watts = |p: Option<u64>| p.map_or("unreported".to_string(), |p| format!("{}.{:04} W", p / 10_000, p % 10_000));
+        println!(
+            "{name}: power state {n}: {}, entry {} us, exit {} us, max {}, idle {}",
+            if s.non_operational { "non-operational" } else { "operational" },
+            s.entry_us,
+            s.exit_us,
+            watts(s.max_power),
+            watts(s.idle_power),
+        );
     }
+    let steps: Vec<String> =
+        plan.iter().enumerate().filter_map(|(n, t)| t.map(|t| format!("{n}->{} after {} ms", t.to, t.after_ms))).collect();
+    let bound = nvme_apst::ROUND_TRIP_BOUND_US;
+    match refused {
+        Some(status) => say_refused(name, status),
+        None if steps.is_empty() => {
+            println!("{name}: autonomous power state transitions off: the table, round trips within {bound} us, has no transition")
+        }
+        None => println!("{name}: autonomous power state transitions on, round trips within {bound} us: {}", steps.join(", ")),
+    }
+}
+
+fn say_refused(name: &str, status: u16) {
+    println!(
+        "{name}: no autonomous power state transitions: the controller refused the table (status {status:#x}), and \
+         serves from its operational state"
+    );
 }
 
 /// A driver whose controller cannot be used: it keeps its link, so the
@@ -272,7 +288,7 @@ fn answer(name: &str, disk: &mut Sessions, done: Done) {
 fn reset(name: &str, ctrl: &mut Controller, disk: &mut Sessions) {
     println!("{name}: a command went unanswered for {COMMAND_SILENCE:?}; resetting the controller");
     let mut done = Vec::new();
-    let aborted = ctrl
+    let (aborted, refused) = ctrl
         .reset(&mut done)
         .unwrap_or_else(|why| panic!("{name}: the controller did not come back from its reset: {why}"));
     for d in done {
@@ -285,4 +301,7 @@ fn reset(name: &str, ctrl: &mut Controller, disk: &mut Sessions) {
         aborted.len(),
         disk.losses()
     );
+    if let Some(status) = refused {
+        say_refused(name, status);
+    }
 }
