@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::log::console::StopWire;
+use crate::mm::charge::{self, Charge};
 use crate::power;
 use crate::user_ptr::{SyscallContext, UserBytes, UserBytesMut};
 use crate::UserAddr;
@@ -255,10 +256,15 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
             return e.refuse();
         }
     }
-    match sysinfo_laid(max_entries) {
-        Ok(laid) => out.write_at(0, &laid).map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| laid.len() as u64),
-        Err(e) => e.to_u64(),
-    }
+    let laid = match sysinfo_laid(max_entries) {
+        Ok(laid) => laid,
+        Err(e) => return e.to_u64(),
+    };
+    // Charged to the caller's job for the copy-out, which can fault and wait.
+    let Ok(_held) = Charge::current(charge::array::<u8>(laid.capacity())) else {
+        return SyscallError::ResourceExhausted.to_u64();
+    };
+    out.write_at(0, &laid).map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| laid.len() as u64)
 }
 
 /// [`sys_sysinfo`]'s answer, its header and at most `max_entries` entries,

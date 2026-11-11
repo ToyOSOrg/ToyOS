@@ -2194,6 +2194,9 @@ pub fn log_last_words(syscap: RawHandle, text: &[u8]) -> Result<(), SyscallError
 /// `syscap`: a capability without the bit is refused with a word, and a handle
 /// the caller does not hold ends it.
 ///
+/// The answer the kernel lays out is charged to the caller's job while it is
+/// copied out; a job without the room is answered 0.
+///
 /// [`HANDLE_INVALID`]: crate::handle::HANDLE_INVALID
 pub fn sysinfo(syscap: RawHandle, buf: &mut [u8]) -> usize {
     let n = syscall(
