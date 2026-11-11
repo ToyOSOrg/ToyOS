@@ -174,10 +174,12 @@ pub fn wait(plan: &idle::Plan) {
         // Falling back to C1: what this CPU publishes is what it waits in.
         crate::sched::driver::publish_idle_exit(0);
     }
+    kernel::scout::at(71);
     match (state, &d) {
         (Some(state), Some(d)) => crate::arch::idle::enter(d.entries[state]),
         _ => crate::arch::hw::halt(),
     }
+    kernel::scout::at(if state.is_some() { 76 } else { 72 });
     // Awake: no hold has a reason to wake this CPU until it waits again.
     crate::sched::driver::publish_idle_exit(0);
     let woke = crate::clock::nanos_since_boot();
@@ -190,6 +192,7 @@ pub fn wait(plan: &idle::Plan) {
     plan.learn(&mut history, costs, woke);
     local.learned_under.store(d.generation, Ordering::Relaxed);
     local.history.store(history.bits(), Ordering::Relaxed);
+    kernel::scout::at(73);
 }
 
 /// A `WakeLatencyObject`'s bound, held until it goes: from when this returns

@@ -383,6 +383,9 @@ entry-df-unclean = []
 pass-spin = []
 heap-lockspin = ["pass-spin"]
 
+# Measurement scout, never landed: per-CPU segment timing of the hot paths.
+scout-seg = []
+
 [lib]
 path = "pure/lib.rs"
 

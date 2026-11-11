@@ -97,6 +97,7 @@ extern "sysv64" fn timer_handler() {
         crate::windows::irqs_masked();
         crate::windows::handler_entered();
     }
+    kernel::scout::at(82);
     crate::arch::percpu::irq_took!(Timer);
     // Before anything that can take a lock: a CPU running userland is the other
     // half of the coverage the Ring 0 branch above gives a CPU holding one.

@@ -92,6 +92,7 @@ impl Watch {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
             self.0.post(cause, &env);
         });
+        kernel::scout::at(20);
     }
 
     /// Wake at most `limit` threads waiting with `token`, and answer how many
@@ -227,11 +228,14 @@ pub fn wait_until<L: CellLock<List>>(
     if ready() {
         return Ok(());
     }
+    kernel::scout::at(12);
     let Some(armed) = arm(watch, token, class) else {
         // No current task (boot or an idle CPU): neither reaches a blocking syscall.
         return Ok(());
     };
+    kernel::scout::at(13);
     while !ready() {
+        kernel::scout::at(14);
         if deadline.reached(crate::clock::now()) {
             return Ok(());
         }
@@ -266,7 +270,9 @@ fn wait_inner<L: CellLock<List>>(
         Err(Refused::Notified) => return Ok(()),
         Err(Refused::Revoked) => return Err(Ended::Revoked),
     };
+    kernel::scout::at(15);
     crate::scheduler::block_on(ticket, deadline);
+    kernel::scout::at(16);
     if killed() {
         // This wait may hold a bounded post's count, from a claim at its
         // commit or its park; pass one on before unwinding. Where none was

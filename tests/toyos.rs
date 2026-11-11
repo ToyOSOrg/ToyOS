@@ -1290,6 +1290,10 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // Measurement scout, never landed: the wake, IPC and clock groups on a
+    // kernel that times its hot paths' segments, and on the tree's own.
+    ("scout_seg", metal::Metal { arms: SCOUT_SEG, judge: |b| osbench_ran(b[0], &SCOUT_GROUPS) }),
+    ("scout_plain", metal::Metal { arms: SCOUT_PLAIN, judge: |b| osbench_ran(b[0], &SCOUT_GROUPS) }),
     (
         // `osbench energy`: the package's power, idle and under defined loads,
         // compared with the same program as root under the bench's Linux. A
@@ -1900,6 +1904,19 @@ const OSBENCH_GROUPS: [&str; 16] = [
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
     adds_ms: 465_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
+}];
+
+const SCOUT_GROUPS: [&str; 4] = ["osbench_system", "osbench_sched", "osbench_ipc", "osbench_time"];
+const SCOUT_SEG: &[metal::Arm] = &[metal::Arm {
+    features: &["scout-seg"],
+    adds_ms: 240_000,
+    named_only: true,
+    ..metal::once("scoutseg", "tests/images/benchcase.toml", &[], &SCOUT_GROUPS)
+}];
+const SCOUT_PLAIN: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 240_000,
+    named_only: true,
+    ..metal::once("scoutplain", "tests/images/benchcase.toml", &[], &SCOUT_GROUPS)
 }];
 
 /// `energy` waits up to 120 s for the machine to go quiet, then measures 60 s

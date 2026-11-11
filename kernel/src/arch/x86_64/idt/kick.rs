@@ -1,6 +1,7 @@
 use super::device_irq::device_irq_entry;
 
 extern "sysv64" fn kick_handler() {
+    kernel::scout::at(80);
     crate::arch::percpu::irq_took!(Kick);
     crate::counters::serve_here();
     crate::arch::smi_cmd::serve_here();
@@ -9,6 +10,7 @@ extern "sysv64" fn kick_handler() {
         crate::preempt::set_need_resched();
     }
     crate::arch::apic::eoi();
+    kernel::scout::at(81);
 }
 
 device_irq_entry! {

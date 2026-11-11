@@ -1648,8 +1648,11 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             cpu.relocate(task, env, now);
         }
         cpu.holding = true;
+        crate::scout::at(40);
         cpu.drain(env, now);
+        crate::scout::at(41);
         cpu.fire_deadlines(env, now);
+        crate::scout::at(42);
         Self {
             cpu,
             env,
@@ -1720,6 +1723,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         let name = current.ext().name();
         let class = ticket.class();
         self.cpu.rq.leave_running(key, current.standing_mut());
+        crate::scout::at(43);
         let task = current.park(
             &ticket,
             self.cpu.id,
@@ -1735,9 +1739,11 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
                 class,
             },
         );
+        crate::scout::at(44);
         self.cpu
             .trace(self.env, self.now, TraceKind::ParkCommit { task: key, name });
         self.settle();
+        crate::scout::at(45);
         self.dispose()
     }
 
@@ -1819,9 +1825,12 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     fn finish_inner(mut self) -> Action<<H as Hw>::Payload> {
         loop {
             self.preempt_if_due();
+            crate::scout::at(46);
             self.pick();
+            crate::scout::at(47);
             self.answer_steal_requests();
             self.balance_busy();
+            crate::scout::at(48);
             // **Two numbers, because two consumers ask two questions** — see
             // [`CpuHandle::load`] and [`CpuHandle::surplus`]. Spawn placement
             // wants everything a new task would queue behind, and a corpse
@@ -1847,6 +1856,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             // The stamp goes with them: it is what says they are about now.
             handle.publish_pass(self.now);
             self.push_on_surplus(surplus, takers);
+            crate::scout::at(49);
             if self.cpu.running.is_some() {
                 // The re-arm's allowance is per idle period, so a CPU that is
                 // given work starts its next one with a full one.
@@ -2209,6 +2219,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
 
     fn switch_to_current(&mut self) -> Action<<H as Hw>::Payload> {
         self.apply_timer();
+        crate::scout::at(50);
         let outgoing = match self.cpu.loaded {
             Loaded::Idle => None,
             Loaded::Task(key) => Some(key),
@@ -2235,6 +2246,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// zombie.
     fn switch_to_idle(&mut self) -> Action<<H as Hw>::Payload> {
         self.apply_timer();
+        crate::scout::at(50);
         let outgoing = match self.cpu.loaded {
             Loaded::Idle => unreachable!("switch_to_idle while already idle"),
             Loaded::Task(key) => Some(key),
@@ -2257,15 +2269,18 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// arrived in between — stay awake and decide again.
     fn try_sleep(&mut self) -> Result<Action<<H as Hw>::Payload>, ()> {
         self.post_steal_probe();
+        crate::scout::at(51);
         let rearm = self.rearm_deadline();
         // The idle choice is made against the timer the CPU would sleep
         // with, and its own wake joins the same plan: one write of the timer.
         let deadline = TimerPlan::compute(None, self.cpu.earliest_deadline()).no_later_than(rearm).armed();
         let idle = self.env.hw.idle_plan(deadline, self.now);
+        crate::scout::at(52);
         let timer = self.apply_timer_no_later_than(match (rearm, idle.wake_at().map(Nanos)) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         });
+        crate::scout::at(53);
         let arm: SleepArm<'_> = self.env.cpus.get(self.cpu.id).doorbell().arm_sleep();
         // [`Balance::PushOnSurplus`]'s other half, and the half that makes the
         // push an ordering rather than a hope: SLEEPING is published above, so
@@ -2280,7 +2295,10 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             return Err(());
         }
         match arm.confirm(&self.cpu.mailbox) {
-            Ok(quiesced) => Ok(Action::Idle(SleepToken::new(quiesced, timer, idle))),
+            Ok(quiesced) => {
+                crate::scout::at(54);
+                Ok(Action::Idle(SleepToken::new(quiesced, timer, idle)))
+            }
             Err(_awake) => {
                 self.env.cpus.get(self.cpu.id).doorbell().begin_pass();
                 self.cpu.drain(self.env, self.now);

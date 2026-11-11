@@ -312,21 +312,26 @@ impl Hw for KernelHw {
                 feature = "switch-witness-mutate-rsp"
             ))]
             switch_witness_mutate(restore);
+            kernel::scout::at(60);
             crate::preempt::set_count(incoming.preempt);
             let incoming_id = incoming.runs.id();
             percpu::set_current_tid(incoming_id.map(|id| id.1));
             percpu::set_current_pid(incoming_id.map(|id| id.0));
             super::pio::switch_to(incoming_id.map(|id| id.0));
+            kernel::scout::at(61);
             match incoming_id {
                 Some(_) => {
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
                     incoming.root.activate();
+                    kernel::scout::at(62);
                     cpu::write_fs_base(incoming.thread_pointer);
+                    kernel::scout::at(63);
                 }
                 // idle's stack top is per-CPU, unknowable at boot-time init, so it is read here instead.
                 None => {
                     percpu::set_kernel_stack(percpu::idle_stack_top());
                     incoming.root.activate();
+                    kernel::scout::at(62);
                 }
             }
             crate::hw::note_running(restore);
@@ -339,15 +344,19 @@ impl Hw for KernelHw {
                 ds = in(reg) percpu::KERNEL_DS as u64,
                 options(nomem, nostack, preserves_flags),
             );
+            kernel::scout::at(64);
             if let Some(area) = area {
                 super::fpu::save(area);
             }
+            kernel::scout::at(65);
             context_switch(&raw mut (*save).sp, rsp);
+            kernel::scout::at(66);
             // The preempt count is still raised: nothing switches this task
             // out before its state is back.
             if let Some(area) = area {
                 super::fpu::restore(area);
             }
+            kernel::scout::at(67);
         }
     }
 

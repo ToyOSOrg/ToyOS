@@ -490,6 +490,7 @@ pub fn pass(dispose: Dispose) {
     crate::arch::cpu::df_witness_mutate();
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("a scheduler pass");
+    kernel::scout::at(30);
     crate::preempt::disable();
     // Cleared before the pass, so a wake landing during it survives into the next poll.
     crate::preempt::clear_need_resched();
@@ -505,20 +506,25 @@ pub fn pass(dispose: Dispose) {
     #[cfg(feature = "pass-spin")]
     maybe_hold(now);
     let stops = matches!(dispose, Dispose::Stop);
+    kernel::scout::at(32);
     let action = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
+        kernel::scout::at(33);
         if let Some(current) = pass.cpu().running() {
             check_stack_canary(current.ext());
             current.ext().handle.publish(current.acct(), None);
         }
+        kernel::scout::at(34);
         let disposed = match dispose {
             Dispose::None => pass.dispose_none(),
             Dispose::Yield => pass.dispose_yield(),
             Dispose::Exit => pass.dispose_exit(),
             Dispose::Stop => pass.dispose_stop(),
         };
+        kernel::scout::at(36);
         disposed.finish()
     });
+    kernel::scout::at(37);
     #[cfg(feature = "mask-windows")]
     crate::windows::scheduled();
     charge_cpu_time(now);
@@ -535,7 +541,9 @@ pub fn pass(dispose: Dispose) {
     if stops {
         crate::quiesce::note_progress();
     }
+    kernel::scout::at(38);
     execute(action);
+    kernel::scout::at(39);
     crate::preempt::enable_no_resched();
 }
 
@@ -574,17 +582,26 @@ impl Ticket {
 /// wake nor a double park.
 pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
     // No `preempt::disable()` of its own: the ticket has held the count raised since registration; that guard is this bracket.
+    kernel::scout::at(31);
     let ticket = ticket.into_raw();
     crate::preempt::clear_need_resched();
     let now = HW.now();
+    kernel::scout::at(32);
     let (action, parked) = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
+        kernel::scout::at(33);
         if let Some(current) = pass.cpu().running() {
             check_stack_canary(current.ext());
             current.ext().handle.publish(current.acct(), None);
         }
+        kernel::scout::at(34);
         match ticket.commit() {
-            Commit::Parked(committed) => (pass.dispose_block(committed, deadline).finish(), true),
+            Commit::Parked(committed) => {
+                kernel::scout::at(35);
+                let disposed = pass.dispose_block(committed, deadline);
+                kernel::scout::at(36);
+                (disposed.finish(), true)
+            }
             // A post landed between phase 1 and the commit: do not park; the quantum may still have expired.
             Commit::AlreadyWoken => (pass.dispose_none().finish(), false),
             // A retire landed while deciding to park: the thread keeps running and unwinds rather than exit through a dead switch.
@@ -603,7 +620,9 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
     if parked {
         crate::quiesce::note_progress();
     }
+    kernel::scout::at(38);
     execute(action);
+    kernel::scout::at(39);
     crate::preempt::enable_no_resched();
 }
 
@@ -635,12 +654,14 @@ fn execute(action: Action<KernelPayload>) {
                 // nearer than that is met by passing again, not by sleeping
                 // past it.
                 || token.armed().is_some_and(|at| at.0 < HW.now().0.saturating_add(crate::hw::MIN_ONE_SHOT.nanos()));
+            kernel::scout::at(70);
             if awake {
                 crate::arch::cpu::enable_interrupts();
                 drop(token);
                 return;
             }
             HW.idle_wait(token);
+            kernel::scout::at(75);
         }
     }
 }
@@ -678,6 +699,7 @@ extern "C" fn idle_loop() -> ! {
         // `pass` below covers this too; here as well so a CPU that
         // halts immediately has still run every hook first.
         crate::object::drain_zero_handles();
+        kernel::scout::at(74);
         pass(Dispose::None);
     }
 }

@@ -106,6 +106,7 @@ extern "sysv64" fn syscall_handler(num: u64, a1: u64, a2: u64, _: u64, a3: u64, 
     cpu::df_witness("syscall_handler");
     #[cfg(feature = "test-actuators")]
     cpu::ac_witness("syscall_handler");
+    kernel::scout::at(256 + (num as u16 & 0xff));
     percpu::enter_syscall();
     cpu::enable_interrupts();
     let out = syscall_dispatch(num, a1, a2, a3, a4);

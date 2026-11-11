@@ -38,7 +38,9 @@ impl Kicker for KernelHw {
         if self.runs_on(target) {
             crate::preempt::set_need_resched();
         } else {
+            kernel::scout::at(18);
             irqchip::kick_cpu(target.0);
+            kernel::scout::at(19);
         }
     }
 

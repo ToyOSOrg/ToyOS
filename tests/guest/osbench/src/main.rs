@@ -45,6 +45,7 @@ mod place;
 mod procs;
 mod ran;
 mod report;
+mod scout;
 mod storage;
 mod sys;
 mod system;

@@ -40,6 +40,9 @@ pub fn periodic(bench: &str, period: Duration) {
     let start = Instant::now();
     let mut late = Vec::with_capacity(SAMPLES as usize);
     for i in 1..=WARMUP + SAMPLES {
+        if i == WARMUP + 1 {
+            crate::scout::begin();
+        }
         let target = start + period * i;
         if let Some(left) = target.checked_duration_since(Instant::now()) {
             thread::sleep(left);
@@ -48,6 +51,7 @@ pub fn periodic(bench: &str, period: Duration) {
             late.push(ns_since(target));
         }
     }
+    crate::scout::end(bench);
     result(bench, "ns", &mut late, &[("period_ns", period.as_nanos().to_string())]);
 }
 
@@ -253,6 +257,7 @@ fn rounds_onto_busy() -> Measured {
     }
     let mut ns = Vec::with_capacity(ROUNDS);
     let mut ran_on_busy = 0usize;
+    crate::scout::begin();
     for (partner, seat) in partners.iter().filter(|_| failed.is_none()) {
         let sent = Instant::now();
         seat.phase.store(RUN, Ordering::Release);
@@ -264,6 +269,7 @@ fn rounds_onto_busy() -> Measured {
         ns.push(ns_since(sent));
         ran_on_busy += usize::from(seat.ran_on.load(Ordering::Relaxed) == busy);
     }
+    crate::scout::end("wake.onto_busy");
     stop.store(true, Ordering::Relaxed);
     spinner.thread.join().expect("the spinner panicked");
     end(partners);
@@ -313,6 +319,7 @@ pub fn storm() {
         }
         let (mut call, mut drain) = (Vec::new(), Vec::new());
         let mut failed = None;
+        crate::scout::begin();
         for _ in 0..ATTEMPTS {
             if call.len() == ROUNDS {
                 break;
@@ -336,6 +343,7 @@ pub fn storm() {
             }
         }
         let bench = |what: &str| format!("wake.storm.{what}.w{width}");
+        crate::scout::end(&bench("all"));
         match failed {
             Some(why) => refuse(&bench("call"), why),
             None if call.len() < ROUNDS => {

@@ -8,6 +8,7 @@ use crate::report::result;
 use crate::ns_since;
 
 pub fn suite() {
+    crate::scout::calibrate();
     clock_read();
     sleeps("");
     // A timer at 1 kHz: the periodic wake at a 1 ms period.
@@ -62,7 +63,9 @@ fn sleeps(suffix: &str) {
         for _ in 0..20 {
             once();
         }
+        crate::scout::begin();
         let mut late: Vec<u64> = (0..samples).map(|_| once()).collect();
+        crate::scout::end(&format!("time.sleep_late.{name}{suffix}"));
         result(&format!("time.sleep_late.{name}{suffix}"), "ns", &mut late, &[("asked_ns", asked.as_nanos().to_string())]);
     }
 }
@@ -81,6 +84,8 @@ fn yields() {
     };
     round();
     crate::clock::settle();
+    crate::scout::begin();
     let mut ps: Vec<u64> = (0..15).map(|_| round()).collect();
+    crate::scout::end("time.yield");
     result("time.yield", "ps", &mut ps, &[("calls_per_sample", CALLS.to_string())]);
 }

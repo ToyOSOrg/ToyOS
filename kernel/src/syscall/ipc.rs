@@ -490,15 +490,18 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
     let mut bounce = MessageBounce::new();
     let src = bounce.read(&out.bytes).map_err(|faulted| SyscallError::from(faulted).to_u64())?.bytes();
     let parkable = crate::scheduler::Parkable::at_entry();
+    kernel::scout::at(100);
     loop {
         let moved = process::with_process_data(|data| {
             let tx = checked(data)?;
             let (moved, handed) = move_handles(data, wanted, |batch| tx.send_now(src, batch));
             Ok::<_, crate::object::Refusal>((tx, moved, handed))
         });
+        kernel::scout::at(101);
         let (tx, refused) = match moved {
             Ok((tx, Ok(()), handed)) => {
                 sent(&tx, handed);
+                kernel::scout::at(102);
                 return Ok(());
             }
             Ok((tx, Err(Unsent::Refused(refused)), _)) => (tx, Some(refused)),
@@ -600,6 +603,7 @@ fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
             };
             Ok::<_, crate::object::HandleError>((rx, taken))
         });
+        kernel::scout::at(103);
         let rx = match looked {
             // Refused outside this hold: ending the caller takes the same non-reentrant lock.
             Err(e) => return e.refuse(),
@@ -609,6 +613,7 @@ fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
                 let copied = into.head.write_at(0, &bytes[..first]).and_then(|()| into.bytes.write_at(0, &bytes[first..]));
                 let (head, installed) = (received.head, received.installed);
                 drop(received);
+                kernel::scout::at(104);
                 return match copied {
                     Ok(()) => delivered(&rx, into, head, &installed),
                     Err(faulted) => undelivered(&rx, &installed[..head.handles], faulted),

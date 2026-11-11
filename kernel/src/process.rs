@@ -966,6 +966,7 @@ pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
         return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
     };
 
+    kernel::scout::at(10);
     // 0 covers both woken and never-blocked (the caller re-checks the word either way); 1 means only the caller's own deadline ended it.
     match scheduler::futex_wait(addr, phys_addr, expected, deadline) {
         scheduler::FutexEnd::Changed => 0,
@@ -978,7 +979,10 @@ pub fn futex_wake(addr: UserAddr, count: u64) -> u64 {
     let Some(phys_addr) = futex_word(addr) else {
         return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
     };
-    scheduler::futex_wake(phys_addr, count as usize)
+    kernel::scout::at(10);
+    let woken = scheduler::futex_wake(phys_addr, count as usize);
+    kernel::scout::at(17);
+    woken
 }
 
 /// Wake processes blocked on reading from a pipe that now has data.

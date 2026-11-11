@@ -57,6 +57,8 @@ mod irq_census;
 #[cfg(feature = "mask-windows")]
 mod windows;
 mod trace;
+#[cfg(feature = "scout-seg")]
+mod scout;
 mod time;
 mod clock;
 

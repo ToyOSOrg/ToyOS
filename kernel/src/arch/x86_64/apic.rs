@@ -379,8 +379,12 @@ impl OneShot {
 
 /// Arm a one-shot timer to fire after `nanos` nanoseconds, or after [`MIN_ONE_SHOT`] if that is longer.
 pub fn arm_one_shot(nanos: u64) {
-    OneShot::after(nanos).arm();
+    let shot = OneShot::after(nanos);
+    kernel::scout::at(90);
+    shot.arm();
+    kernel::scout::at(91);
     crate::trace::trace(crate::trace::Kind::TimerArm, nanos as u32);
+    kernel::scout::at(92);
 }
 
 /// Shorten this CPU's armed interval to at most `nanos`, arming it if stopped.
@@ -421,7 +425,10 @@ pub(crate) extern "sysv64" fn ring0_fire() {
 
 /// Stop the timer. No more interrupts until re-armed.
 pub fn stop_timer() {
+    kernel::scout::at(93);
     percpu::set_last_armed_ticks(0);
     Reg::TIMER_INIT.write(0);
+    kernel::scout::at(94);
     crate::trace::trace(crate::trace::Kind::TimerStop, 0);
+    kernel::scout::at(92);
 }

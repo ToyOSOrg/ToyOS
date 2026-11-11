@@ -118,6 +118,7 @@ fn run(kind: &str, at: Where, mut pinger: impl Channel, mut ponger: impl Channel
     let (go_pong, pong_go) = mpsc::channel::<bool>();
     let (ping_said, ping_heard) = mpsc::channel();
     let (pong_said, pong_heard) = mpsc::channel();
+    let row = bench.clone();
     let ping_side = place::spawn_on(
         |on| on != wake::IRQ_CPU,
         move || {
@@ -127,6 +128,9 @@ fn run(kind: &str, at: Where, mut pinger: impl Channel, mut ponger: impl Channel
             let mut kept = Vec::with_capacity(ROUNDS as usize);
             let mut seen = Vec::new();
             for round in 1..=WARMUP + ROUNDS {
+                if round == WARMUP + 1 {
+                    crate::scout::begin();
+                }
                 let t = Instant::now();
                 if let Err(e) = pinger.ping(round) {
                     let _ = ping_said.send(Err(e.to_string()));
@@ -139,6 +143,7 @@ fn run(kind: &str, at: Where, mut pinger: impl Channel, mut ponger: impl Channel
                     kept.push(took);
                 }
             }
+            crate::scout::end(&row);
             let _ = ping_said.send(Ok((kept, seen)));
         },
     );

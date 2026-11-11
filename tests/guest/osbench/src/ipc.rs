@@ -83,12 +83,14 @@ pub fn suite() {
             crate::clock::settle();
             let before = sys::counts();
             let mut ns = Vec::with_capacity(samples as usize);
+            crate::scout::begin();
             for _ in 0..samples {
                 let t = Instant::now();
                 peer.send(&buf)?;
                 peer.recv(&mut buf)?;
                 ns.push(ns_since(t));
             }
+            crate::scout::end(&bench);
             let mut counts = Counts::per_op(&before, u64::from(samples));
             counts.extend(ran.fields());
             Ok((ns, counts))
@@ -131,11 +133,13 @@ pub fn suite() {
         crate::clock::settle();
         let before = sys::counts();
         let mut ns = Vec::with_capacity(samples as usize);
+        crate::scout::begin();
         for _ in 0..samples {
             let t = Instant::now();
             token = trip(token)?;
             ns.push(ns_since(t));
         }
+        crate::scout::end(bench);
         let mut counts = Counts::per_op(&before, u64::from(samples));
         counts.extend(ran.fields());
         Ok((ns, counts))
