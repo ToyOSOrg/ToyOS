@@ -52,6 +52,31 @@ benches.
 A fourth, `IN_PASS`, was measured with them and now sits in its CPU's own
 record (`kernel/src/cpu_local.rs`), a line no other CPU writes.
 
+**The frame allocator's lock is what the all-CPU build waits on**
+(2026-11-11, [evidence](EVIDENCE); the attribution is in
+`issues/spawning-a-process-costs-toyos-up-to-147-times-linuxs.md`). Under the
+build's 256 children, one a CPU, it is 99 % of every contended lock wait on
+both benches: 418,000 contended acquisitions and 243 ms of spin a round on
+the T14 (`j8`), 1.06 CPUs spinning for the whole round, and 605,000 and
+2,348 ms on the AMD bench (`j16`), 7.1 of its 16 CPUs. 82 % of the spin is in
+the children's `SHM_CREATE`s, which draw each frame of a 2 MiB window under its
+own hold (`SharedMemObject::create`), and 13 to 14 % in their faults, which draw
+each frame of a populated run under its own hold (`owned_frame`). The next
+contended lock waits under a hundredth as long.
+
+Proposed, not built: **a draw of many frames takes the lock once.** A
+promised batch (`Frames::alloc_promised` for `n`, handing each to the caller
+as `alloc_held` does) serves a shared-memory region's frames and a fault's
+whole run, the way frees already go back, a region's drop through
+`pmm::free_all` and a space's teardown through `free_drawn`. That turns 512
+acquisitions a window and up to 16 a fault into one each, keeps promises and
+ledgers exactly as they are, and is host-testable in `kernel::frames`. A
+per-CPU cache of frames in front of the lock (Linux's per-CPU page lists)
+would take single draws off it too, but every promise must stay backed by a
+frame free now, so a draw that finds the shared pool empty while another
+CPU's cache holds frames has to reach them; that is worth building only if
+the batched build still waits on the lock.
+
 **Exit**: that attribution, posted, and read again after the change; and
 each of the three either written per CPU on a line no other CPU writes, or
 kept with its refusal reason at its site.

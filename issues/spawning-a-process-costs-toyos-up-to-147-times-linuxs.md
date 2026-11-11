@@ -62,7 +62,6 @@ spawner now reads a served image whole, through the pager, into fresh memory
 (`issues/a-large-spawn-on-the-amd-bench-is-a-seventh-slower-than-mains.md`),
 and shared text is stage 5 of
 `issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`.
-The parallel build's loss where the serial build wins is unmeasured.
 `issues/idle-cpus-enter-the-c-states-cst-names.md` records the T14's `j1`
 under deep idle.
 
@@ -97,9 +96,41 @@ behind: `posix_spawn_wait.std` and `process.spawn_wait` are unresolved against
 Linux's 60% spread, and the rest are ahead. The all-CPU build is behind on both, 2.22x and 2.57x, where the
 one-at-a-time build is ahead on both.
 
+**Where the all-CPU build's time goes, 2026-11-11** ([evidence](EVIDENCE)): one
+diagnosis boot a bench at main 34cb4c918 with measurement commits, the build's
+256 children at `j1` and at one a CPU, three rounds each, a child's CPU split by
+system call, fault, lock spin and shootdown wait. A child does the same work at
+every width (53 system calls, 90 faults), and its CPU grows from 2.28 to 5.14 ms
+on the T14 (`j8`) and from 2.83 to 15.5 ms on the AMD bench (`j16`). Of that
+growth over the 256 children:
+
+| | T14 `j1` -> `j8` | AMD `j1` -> `j16` |
+|---|---|---|
+| children's CPU, ms a round | 583 -> 1,316 | 724 -> 3,977 |
+| `SHM_CREATE`, of the growth | 432 ms, 59 % (201 ms spin) | 2,342 ms, 72 % (1,934 ms spin) |
+| faults, of the growth | 91 ms, 12 % (33 ms spin) | 456 ms, 14 % (324 ms spin) |
+| every other system call | 28 ms | 57 ms |
+| user time and exit, the rest | 182 ms | 400 ms |
+| lock spin across the machine, a CPU's worth | 1.06 of 8 | 7.1 of 16 |
+| of the contended lock waits, the frame allocator's one lock | 99 % | 99.7 % |
+| shootdown waits, issued or served | none | none |
+
+The four `SHM_CREATE`s a child makes are, by inference from the SDK, the
+2 MiB windows of its four directory connections, each 512 frames drawn one at a
+time under the frame allocator's one lock and zeroed: 95 µs a window on the T14
+and 133 µs on the AMD bench even at `j1`, 17 and 19 % of a child's CPU there. At
+`j<cpus>` the draws queue on that lock. The windows are
+`issues/a-served-directory-costs-each-process-a-two-mebibyte-window.md`, the
+lock `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`.
+The next contended lock, the process table's in `process_data`, waits 1.2 ms a
+round on the T14 and 3.7 ms on the AMD bench; the kernel heap's 0.7 and 2.7 ms.
+The rest's growth is not split further: the lock spin outside the children's
+system calls and faults, which bounds the exit path's, is 10 and 77 ms.
+
 **Exit**: these rows within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured to its parts
 and justified.
 
 **Owner**: process creation (`kernel/src/process.rs`, the SDK's spawn and
-`sdk/libc/src/spawn.rs`) and, for the parallel build, the scheduler (`kernel/src/sched/`).
+`sdk/libc/src/spawn.rs`) and, for the parallel build, the frame allocator
+(`kernel/src/mm/pmm.rs`) and the file-call window (`sdk/toyos/src/fs.rs`).
