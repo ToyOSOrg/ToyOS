@@ -45,7 +45,8 @@ and the C library beneath it are each system's own.
 - **The machine on AC power and otherwise idle**, for both.
 - **A ToyOS run counts once its readback passes the row**:
   `cargo test --test toyos-build -- --metal --metal-readback <dir> osbench`,
-  with `--metal-host` for a bench other than the T14.
+  staged for the AMD bench with `--metal-bench amd` and `--metal-host` naming
+  its machine, and judged as the bench its readback names.
 - **Compare** every run of the bench in one call:
   `cargo run -p osbench-compare -- <linux runs> <toyos kernel.logs>`. It
   refuses runs of one system that disagree on their setup (`SETUP`) and

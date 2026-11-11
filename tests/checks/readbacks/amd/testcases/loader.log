@@ -1,0 +1,4 @@
+[--.--- cpu0 loader] ToyOS Bootloader 1.0
+[--.--- cpu0 loader] Loader clock: this CPU states no counter rate, so no line carries the time it was said
+[--.--- cpu0 loader] Microcode: /system/share/microcode/amd/17-60-01, 3200 bytes at 0xb66fd000, handed over
+[--.--- cpu0 loader] Loader log: the kernel handoff begins, so this file ends here

@@ -9,6 +9,8 @@
 use toyos_build::flags::declare_flags;
 use std::path::PathBuf;
 
+use crate::bench::Bench;
+
 declare_flags!(pub SUITE = {
     pub DEBUG = "--debug", None;
     pub LIST = "--list", None;
@@ -22,9 +24,13 @@ declare_flags!(pub SUITE = {
     /// machine is not touched**: the run builds the images and writes down what
     /// to run on them, or judges readbacks a driver already left there.
     pub METAL_READBACK = "--metal-readback", Next;
-    /// The bench those images boot on, as `<user>@<machine>`: `toyos-metal`'s
+    /// The machine those images boot on, as `<user>@<machine>`: `toyos-metal`'s
     /// own `--host`, handed to every run of it. The T14 without it.
     pub METAL_HOST = "--metal-host", Next;
+    /// The bench whose rows the run takes, by [`Bench::word`]. The T14 without
+    /// it and without [`METAL_HOST`], which a run booting another bench needs
+    /// beside it; a run judging readbacks reads it off them.
+    pub METAL_BENCH = "--metal-bench", Next;
 });
 
 /// How a filter word names one of the metal profile's boots whole, ahead of
@@ -42,6 +48,8 @@ pub struct Parsed<'a> {
     pub metal: Option<MetalMode>,
     /// [`METAL_HOST`]'s value, checked as `toyos-metal` checks its `--host`.
     pub metal_host: Option<&'a str>,
+    /// [`METAL_BENCH`]'s value.
+    pub metal_bench: Option<Bench>,
 }
 
 /// Validate the harness's argv and return the run's filters and metal mode.
@@ -92,7 +100,7 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
         );
     }
     if has(&METAL_HOST) && !has(&METAL) {
-        return Err("--metal-host names the bench the metal profile boots on and decides nothing \
+        return Err("--metal-host names the machine the metal profile boots on and decides nothing \
                     on its own; add --metal"
             .to_string());
     }
@@ -100,6 +108,15 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
     if let Some(host) = metal_host {
         crate::host_of(host).map_err(|refusal| format!("--metal-host: {refusal}"))?;
     }
+    if has(&METAL_BENCH) && !has(&METAL) {
+        return Err("--metal-bench names the bench whose rows the metal profile takes and decides \
+                    nothing on its own; add --metal"
+            .to_string());
+    }
+    let metal_bench = SUITE
+        .value(args, &METAL_BENCH)
+        .map(|word| Bench::parse(word).map_err(|why| format!("--metal-bench: {why}")))
+        .transpose()?;
     if has(&METAL) {
         for flag in [&JOBS, &JOBS_SHORT] {
             if has(flag) {
@@ -152,7 +169,7 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
         }
     });
 
-    Ok(Parsed { filters, boots, metal, metal_host })
+    Ok(Parsed { filters, boots, metal, metal_host, metal_bench })
 }
 
 /// What `--metal`'s own flags resolve a run to.
@@ -284,6 +301,8 @@ mod tests {
             vec!["--metal"],
             vec!["--metal", "--metal-readback", "target/metal"],
             vec!["--metal", "--metal-readback", "target/metal", "--metal-host", "dev@box"],
+            vec!["--metal", "--metal-readback", "target/metal", "--metal-host", "dev@box", "--metal-bench", "amd"],
+            vec!["--metal", "--list", "--metal-bench", "amd"],
         ] {
             assert!(parse_owned(&argv).is_ok(), "{argv:?}");
         }
@@ -316,7 +335,7 @@ mod tests {
 
     #[test]
     fn metal_refuses_a_filter_that_is_a_flags_name_or_empty() {
-        for word in ["list", "metal", "jobs", "debug", "metal-readback"] {
+        for word in ["list", "metal", "jobs", "debug", "metal-readback", "metal-bench"] {
             let refusal = metal_owned(&["--metal", word]).expect_err(word);
             assert!(refusal.contains("without its dashes"), "{word}: {refusal}");
         }
@@ -379,6 +398,20 @@ mod tests {
             let refusal = parsed(&["--metal", "--metal-host", host]).unwrap_err();
             assert!(refusal.starts_with("--metal-host: "), "{host}: {refusal}");
         }
+    }
+
+    /// The bench is a word of [`Bench`]'s, `--metal`'s alone, and a plan is
+    /// printed for the one it names.
+    #[test]
+    fn a_metal_bench_is_one_of_the_benches_words() {
+        let parsed = |argv: &[&str]| parse(&owned(argv)).map(|p| p.metal_bench);
+        assert_eq!(parsed(&["--metal"]), Ok(None));
+        assert_eq!(parsed(&["--metal", "--metal-bench", "amd"]), Ok(Some(Bench::Amd)));
+        assert_eq!(parsed(&["--metal", "--list", "--metal-bench", "t14"]), Ok(Some(Bench::T14)));
+        let refusal = parsed(&["--metal-bench", "amd"]).unwrap_err();
+        assert!(refusal.contains("add --metal"), "{refusal}");
+        let refusal = parsed(&["--metal", "--metal-bench", "dev@box"]).unwrap_err();
+        assert!(refusal.starts_with("--metal-bench: ") && refusal.contains("t14 and amd"), "{refusal}");
     }
 
     #[test]

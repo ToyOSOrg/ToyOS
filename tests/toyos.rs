@@ -14,6 +14,7 @@ use common::qemu::{
     self, await_guest, await_marker, await_marker_new, BootOptions, QemuInstance,
     STALLED, TIMED_OUT,
 };
+use common::metal::{Bench, Device, On};
 use common::{audio, claims, compile, devices, faults, isa, metal, power, ps2server, screen, serial};
 use toyos_build::bootlog::{self};
 use toyos_metal::testargs::{self, SUITE};
@@ -395,63 +396,71 @@ const KERNEL_RELRO_HOLDS: &str = ", none writable over the RELRO 0x";
 /// report puts on serial.
 const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
 
+/// A test that reads a decoded screendump: its profile, and the function that
+/// runs it on that profile and the test image's config. `Err` carries the
+/// decoded screen, the only readable form of "the text is not what I
+/// expected".
+type ScreenTest = (&'static str, qemu::Profile, fn(qemu::Profile, &Path) -> Result<(), String>);
+
 // Tests that read a decoded screendump, which is exactly the set for which
 // the screen is the device under test: the panel. The T14 has no serial port
 // and the metal loop cannot read its glass, so what reaches the panel is
 // asserted here and nowhere else. The AArch64 rows boot the `virt` machine,
 // the only one that architecture has.
-const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
-    ("screen_panic_muted", qemu::Profile::Metal),
+const SCREEN_TESTS: &[ScreenTest] = &[
+    ("screen_panic_muted", qemu::Profile::Metal, screen_panic_muted),
     // The same fatal path from inside a boot checkpoint's painter, holding the
     // panel's latch it will never give back: the report has to take the screen
     // anyway, and its CPU has to go on to watch the reset bound. The profile
     // whose 16550 is the console, where the fatal path writes its last line raw.
-    ("screen_fatal_behind_a_painter", qemu::Profile::Metal),
+    ("screen_fatal_behind_a_painter", qemu::Profile::Metal, screen_fatal_behind_a_painter),
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in.
-    ("screen_fatal_halt_composited", qemu::Profile::Metal),
-    ("virt_early_panic", qemu::Profile::Virt),
-    ("virt_early_fault", qemu::Profile::Virt),
+    ("screen_fatal_halt_composited", qemu::Profile::Metal, screen_fatal_halt_composited),
+    ("virt_early_panic", qemu::Profile::Virt, virt_early_panic),
+    ("virt_early_fault", qemu::Profile::Virt, virt_early_fault),
     // `kernel_wx_leaf_is_refused` on `virt`: no metal bench is AArch64.
-    ("virt_kernel_wx_leaf_is_refused", qemu::Profile::Virt),
-    ("virt_el2_drop", qemu::Profile::VirtEl2NoVhe),
-    ("virt_user_mode", qemu::Profile::Virt),
-    ("virt_timer_preempts", qemu::Profile::Virt),
-    ("virt_irq_storm", qemu::Profile::Virt),
-    ("virt_timer_floor", qemu::Profile::Virt),
-    ("virt_fp_isolation", qemu::Profile::Virt),
-    ("virt_first_entry", qemu::Profile::Virt),
+    ("virt_kernel_wx_leaf_is_refused", qemu::Profile::Virt, |profile, test_config| faults::kernel_wx_leaf_is_refused(test_config, profile)),
+    ("virt_el2_drop", qemu::Profile::VirtEl2NoVhe, virt_el2_drop),
+    ("virt_user_mode", qemu::Profile::Virt, virt_user_mode),
+    ("virt_timer_preempts", qemu::Profile::Virt, |profile, _| virt_job(profile, "preempt")),
+    ("virt_irq_storm", qemu::Profile::Virt, virt_irq_storm),
+    ("virt_timer_floor", qemu::Profile::Virt, |profile, test_config| virt_selftest(profile, test_config, &["timer-floor"])),
+    ("virt_fp_isolation", qemu::Profile::Virt, |profile, _| virt_job(profile, "fp_isolation")),
+    ("virt_first_entry", qemu::Profile::Virt, |profile, _| virt_job(profile, "first_entry")),
     // Under HVF, an Apple CPU's own PAN.
-    ("virt_pan_refuses_el1_a_user_page", qemu::Profile::Virt),
-    ("virt_unmap_touch", qemu::Profile::Virt),
-    ("virt_debug_refused", qemu::Profile::Virt),
-    ("virt_readonly_copyout", qemu::Profile::Virt),
+    ("virt_pan_refuses_el1_a_user_page", qemu::Profile::Virt, |profile, _| virt_pan_refuses_el1_a_user_page(profile)),
+    ("virt_unmap_touch", qemu::Profile::Virt, |profile, _| virt_job(profile, "unmap_touch")),
+    ("virt_debug_refused", qemu::Profile::Virt, |profile, _| virt_job(profile, "debug_refused")),
+    ("virt_readonly_copyout", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_COPYOUT}"))),
     // `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` on AArch64:
     // the unprivileged copies and their EL1 fixup (`arch::uaccess`).
-    ("virt_user_copy_faults", qemu::Profile::Virt),
-    ("virt_ring0_timer_in_syscall", qemu::Profile::Virt),
+    ("virt_user_copy_faults", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_USER_COPY}"))),
+    ("virt_ring0_timer_in_syscall", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_RING0_TIMER}"))),
     // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and
     // `virt_reboot`: under HVF a woken thread can go undispatched for seconds
     // (issues/a-woken-thread-can-wait-seconds-on-an-idle-cpu-under-hvf.md).
-    ("virt_mask_windows", qemu::Profile::VirtEl2),
-    ("virt_smp", qemu::Profile::VirtEl2),
-    ("virt_el1_smp", qemu::Profile::VirtTcg),
-    ("virt_failed_ap_leaves_no_hole", qemu::Profile::Virt),
-    ("virt_fatal_halts_the_others_first", qemu::Profile::Virt),
+    ("virt_mask_windows", qemu::Profile::VirtEl2, |profile, _| virt_mask_windows(profile)),
+    ("virt_smp", qemu::Profile::VirtEl2, |profile, _| virt_smp(profile, "SMC", 2)),
+    // The EL1 entry's own arm, which fetches at a physical address under
+    // the bring-up root, and PSCI through `HVC`: the path HVF takes.
+    ("virt_el1_smp", qemu::Profile::VirtTcg, |profile, _| virt_smp(profile, "HVC", 1)),
+    ("virt_failed_ap_leaves_no_hole", qemu::Profile::Virt, |profile, _| virt_failed_ap_leaves_no_hole(profile)),
+    ("virt_fatal_halts_the_others_first", qemu::Profile::Virt, |profile, _| virt_fatal_halts_the_others_first(profile)),
     // Emulated at EL2: its last word comes through the same stop, and it is
     // the one test of `SYSTEM_RESET` through the SMC conduit.
-    ("virt_reboot", qemu::Profile::VirtEl2),
-    ("virt_off_names_the_cpus_left_on", qemu::Profile::VirtEl2),
-    ("virt_reboot_refused_without_psci", qemu::Profile::Virt),
+    ("virt_reboot", qemu::Profile::VirtEl2, |profile, _| virt_reboot(profile)),
+    ("virt_off_names_the_cpus_left_on", qemu::Profile::VirtEl2, |profile, _| virt_off_names_the_cpus_left_on(profile)),
+    ("virt_reboot_refused_without_psci", qemu::Profile::Virt, |profile, _| virt_reboot_refused_without_psci(profile)),
     // The job case entered at EL2, once: the entry's EL2 writes for the timer
     // and FP, which no boot under HVF runs.
-    ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
-    ("virt_random_differs", qemu::Profile::Virt),
-    ("virt_smmu", qemu::Profile::VirtSmmu),
-    ("virt_claim_lpi", qemu::Profile::VirtIts),
-    ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
-    ("virt_wall_clock_utc", qemu::Profile::Virt),
-    ("virt_low_ecam", qemu::Profile::VirtLowEcam),
+    ("virt_jobs_at_el2", qemu::Profile::VirtEl2, |profile, _| virt_jobs_at_el2(profile)),
+    ("virt_random_differs", qemu::Profile::Virt, |profile, _| virt_random_differs(profile)),
+    ("virt_smmu", qemu::Profile::VirtSmmu, |profile, test_config| virt_smmu(profile, test_config)),
+    ("virt_claim_lpi", qemu::Profile::VirtIts, |profile, _| virt_claim_lpi(profile)),
+    ("virt_no_seed_refused", qemu::Profile::VirtNoRng, |profile, test_config| virt_no_seed_refused(profile, test_config)),
+    ("virt_wall_clock_utc", qemu::Profile::Virt, |profile, _| virt_wall_clock_utc(profile)),
+    ("virt_low_ecam", qemu::Profile::VirtLowEcam, |profile, test_config| virt_low_ecam(profile, test_config)),
 ];
 
 /// Which handle the loader took the panel's EDID from, and what the compositor
@@ -459,15 +468,10 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
 /// size and scale `lib/edid`'s fixture of that bench's panel gives; the
 /// desktop drawn at that scale, and `scale_window`'s 200x100 logical window
 /// given its buffer at it.
-fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
-    let signature = microcode_lines(kernel)?
-        .first()
-        .ok_or("the kernel wrote no microcode line to tell the bench by")?
-        .signature;
-    let (handle, panel) = match signature {
-        T14_SIGNATURE => (0, "panel 309x173 mm, scale 1.5"),
-        AMD_BENCH_SIGNATURE => (1, "panel 309x174 mm, scale 1.5"),
-        other => return Err(format!("no bench of signature {other:#x} says which panel it has")),
+fn gop_edid_scale(bench: Bench, loader: &str, log: &str) -> Result<(), String> {
+    let (handle, panel) = match bench {
+        Bench::T14 => (0, "panel 309x173 mm, scale 1.5"),
+        Bench::Amd => (1, "panel 309x174 mm, scale 1.5"),
     };
     let handed = format!("EDID: GOP handle {handle} of 2 shows the scanout and publishes 128 byte(s), the base block handed over");
     if !loader.contains(&handed) {
@@ -492,20 +496,23 @@ fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
             return Err(format!("the log does not say {drawn:?}; the compositor and the window said {said:?}"));
         }
     }
-    eprintln!("  [gop_edid_scale] signature {signature:#x}: GOP handle {handle}, {panel}, a 200x100 window drawn 300x150");
+    eprintln!("  [gop_edid_scale] {bench}: GOP handle {handle}, {panel}, a 200x100 window drawn 300x150");
     Ok(())
 }
 
+/// A test that owns its QEMU, and the function that runs it on the test
+/// image's config.
+type MachineTest = (&'static str, fn(&Path) -> Result<(), String>);
+
 /// The tests whose machine shape *is* the test, each on a boot of its own.
-/// `run_machine_test` dispatches them.
-const MACHINE_TESTS: &[&str] = &[
+const MACHINE_TESTS: &[MachineTest] = &[
     // A `drives` row's one process per function, on QEMU x86-64's q35 with
     // two `edu` (`Profile::HeadlessTwoEdu`): which functions get one is
     // `toyos-supervisor`'s, host-tested, and this is the supervisor
     // performing it — two claims by arrival on identical functions, two
     // spawns, each process holding its own — which no host build has. No
     // bench has two identical functions the kernel leaves to a claim.
-    "a_drives_row_holds_one_process_per_function",
+    ("a_drives_row_holds_one_process_per_function", |_| a_drives_row_holds_one_process_per_function()),
     // PCIe native hot-plug, on QEMU x86-64's q35 with a `pcie-root-port`
     // whose `_OSC` grants it and an `edu` behind it from boot
     // (`Profile::HeadlessHotplugPort`): a function pulled out and plugged in
@@ -514,7 +521,7 @@ const MACHINE_TESTS: &[&str] = &[
     // lets a driver claim behind, so physical arrival is QEMU's alone. Its
     // decisions are host-tested: the slot's in `toyos_pci::hotplug`, the
     // supervisor's in `toyos-supervisor`.
-    "a_function_arrives_and_leaves",
+    ("a_function_arrives_and_leaves", |_| a_function_arrives_and_leaves()),
     // A PCI claim on a boot whose `acpi` claim holder never declares the root
     // bridges' memory: the supervisor starting no driver and saying why, and
     // the kernel refusing a job's claim at once while the
@@ -524,7 +531,7 @@ const MACHINE_TESTS: &[&str] = &[
     // `toyos-pci`'s and `toyos-supervisor`'s, host-tested; the set's header
     // and the refusal are a booted kernel's. No bench boots without its ACPI
     // server.
-    "a_claim_before_the_declaration_is_refused_at_once",
+    ("a_claim_before_the_declaration_is_refused_at_once", |_| a_claim_before_the_declaration_is_refused_at_once()),
     // Two HDA controllers, each with an `hda` driver behind VT-d: the one
     // with no codec plays nothing, soundserver plays to the other, and the
     // master job the benches' rows judge steps that output's codec. Which
@@ -532,75 +539,75 @@ const MACHINE_TESTS: &[&str] = &[
     // two claims, which no host build has. The tone rows' stream is the
     // benches' alone. q35 only: `virt` has no unit to put the functions
     // behind.
-    "hda_plays_to_the_controller_that_reaches_an_output",
+    ("hda_plays_to_the_controller_that_reaches_an_output", |test_config| hda_plays_to_the_controller_that_reaches_an_output(test_config)),
     // Whether QEMU's virtio functions negotiated `VIRTIO_F_ACCESS_PLATFORM`
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
-    "iommu_virtio_platform",
+    ("iommu_virtio_platform", |_| common::iommu::iommu_virtio_platform()),
     // A virtio NIC created without `iommu_platform=on` on q35 with VT-d, so
     // its DMA bypasses the unit: the supervisor refuses it to netstack by
     // name. Only QEMU can create such a function; q35 only.
-    "a_virtio_function_without_access_platform_is_refused",
+    ("a_virtio_function_without_access_platform_is_refused", |_| common::iommu::a_virtio_function_without_access_platform_is_refused()),
     // The VM's console port unplugged under a running guest: its driver
     // ends, logkeeper sees its carrier gone and the UART carries the log
     // again. Three processes, the kernel and QEMU's hot-unplug, which no host
     // build has. q35 only: no other machine carries a console port.
-    "the_uart_carries_the_log_again_once_the_console_carrier_goes",
+    ("the_uart_carries_the_log_again_once_the_console_carrier_goes", |test_config| common::vmconsole::the_uart_carries_the_log_again_once_the_console_carrier_goes(test_config)),
     // The UART carries the boot once across the kernel's hand-over to its
     // driver: the kernel's last inline record once, and the driver's first
     // after it. The kernel's drain, logkeeper's start offset and the driver
     // are three components only a boot has; q35 with no console port, so the
     // UART is the one console, read whole, which no bench's is.
-    "the_uart_carries_the_boot_once_across_the_hand_over",
+    ("the_uart_carries_the_boot_once_across_the_hand_over", |_| the_uart_carries_the_boot_once_across_the_hand_over()),
     // A supervisor that fails before `logkeeper` runs says why on the UART,
     // and the kernel ends the machine on its end: its last words and the
     // kernel's fatal path, which only a boot has, on a `/system` missing the
     // first file it reads, which only a staged image is. q35 with no console
     // port, so the UART is the one console.
-    "a_supervisor_that_fails_early_says_why_on_the_uart",
+    ("a_supervisor_that_fails_early_says_why_on_the_uart", |_| a_supervisor_that_fails_early_says_why_on_the_uart()),
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot disk is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
     // hand rather than by CI.
-    "amdvi_firmware_left",
+    ("amdvi_firmware_left", |test_config| common::iommu::amdvi_firmware_left(test_config)),
     // A VT-d unit left translating, with no protected memory regions to guard
     // its hand-over: the T14's units have them, so only QEMU's takes this one.
-    "vtd_firmware_left",
+    ("vtd_firmware_left", |test_config| common::iommu::vtd_firmware_left(test_config)),
     // A translating AMD-Vi unit's refusal, recorded and read: a kernel-owned
     // record halts the machine, so no metal row reaches it, and only QEMU's
     // `iommu-testdev` aims a DMA where no domain maps.
-    "amdvi_selftest",
+    ("amdvi_selftest", |test_config| common::iommu::amdvi_selftest(test_config)),
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
-    "nested_nmi_is_loud",
+    ("nested_nmi_is_loud", |test_config| faults::nested_nmi_is_loud(test_config)),
     // The boot's W^X audit refusing a leaf an actuator staged: the panic ends
     // the boot, so it cannot share one, and the T14's `kernel_wx` row reads
     // the same audit passing. q35 on `Profile::Metal`, whose 16550 carries
     // the panic.
-    "kernel_wx_leaf_is_refused",
+    ("kernel_wx_leaf_is_refused", |test_config| faults::kernel_wx_leaf_is_refused(test_config, qemu::Profile::Metal)),
     // Every kernel stack's guard page, by running each kind of stack off its
     // bottom: the double fault ends the machine, so each is its own boot and
     // no metal row reaches one. q35 on `Profile::Metal`, whose 16550 carries
     // the report; x86-64 alone, since AArch64 takes the fault on the stack
     // that overflowed
     // (`issues/a-kernel-stack-overflow-on-aarch64-reports-nothing.md`).
-    "a_kernel_stack_overflow_names_its_stack",
+    ("a_kernel_stack_overflow_names_its_stack", |test_config| faults::a_kernel_stack_overflow_names_its_stack(test_config)),
     // The clock's response to TSC steps an actuator stages where
     // `IA32_TSC_ADJUST` would not show them: the first slewed away, the
     // second demoting the TSC, after which processes' readings of now reach
     // the kernel. q35 on `Profile::Metal`; the order, the step's size and a
     // demoted reading are what it holds, and no bench's TSC steps on demand.
-    "a_stepped_tsc_is_slewed_then_demoted",
+    ("a_stepped_tsc_is_slewed_then_demoted", |test_config| faults::a_stepped_tsc_is_slewed_then_demoted(test_config)),
     // Its counterpart: the HPET an actuator stalled while the TSC and the PM
     // timer count on is left out, and the boot goes on. q35 on
     // `Profile::Metal`, whose PM timer is at 0x608; no bench's HPET stalls on
     // demand.
-    "a_stalled_hpet_is_left_out",
+    ("a_stalled_hpet_is_left_out", |test_config| faults::a_stalled_hpet_is_left_out(test_config)),
     // A press of the fixed power button reaches the `acpi` claim's holder as
     // one SCI, its line masked until the holder serves it: the kernel's SCI
     // and its mask have no host build, QEMU raises the event on demand, and
     // nothing presses the T14's button but a hand.
-    "acpi_press_is_one_sci",
+    ("acpi_press_is_one_sci", |_| acpi_press_is_one_sci()),
     // The `acpi` claim's holder refused a held function's configuration past
     // its header: the kernel's `held` fed to the fence `toyos-userbound`
     // host-tests, on a boot whose first job's server declared the root
@@ -609,55 +616,55 @@ const MACHINE_TESTS: &[&str] = &[
     // bench boots only for `acpi_server_death`, and a function its driver
     // holds whose configuration a broken fence would write; q35 on
     // `Profile::Headless`.
-    "acpi_holder_is_refused_a_held_functions_configuration",
+    ("acpi_holder_is_refused_a_held_functions_configuration", |_| acpi_holder_is_refused_a_held_functions_configuration()),
     // The osbench groups that use the runner's capability for a row of their
     // own, on the image they are measured on, on QEMU x86-64's q35: which
     // endowments a job gets is the image's and the supervisor's, which no
     // host build has, and the benches run osbench only nightly.
-    "osbench_capability_groups_exit_0",
+    ("osbench_capability_groups_exit_0", |_| osbench_capability_groups_exit_0()),
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the
     // firmware's tables, to COM1, to `PM1a_CNT`, to a function's configuration
     // space — and the take that finds the Global Lock owned and the release
     // that owes `GBL_RLS` need the FACS's word staged as only an idle firmware
     // allows: neither is done to the T14, which nothing powers on again.
-    "acpi_mediated_access",
+    ("acpi_mediated_access", |_| acpi_mediated_access(2)),
     // The same boot on one CPU, where the power-off's CPU is the only one
     // there is: what it logs reaches the console by the stop's own drain or
     // not at all.
-    "acpi_lock_given_back_on_one_cpu",
+    ("acpi_lock_given_back_on_one_cpu", |_| acpi_mediated_access(1)),
     // A power-off on the sleep type of a holder that is gone: the kernel's
     // static across a claim's release, and a machine that answers the write
     // by stopping. No host test reaches either, and the T14 is never asked to
     // power off.
-    "acpi_supply_outlives_holder",
+    ("acpi_supply_outlives_holder", |_| acpi_supply_outlives_holder()),
     // The power-off asked for with a thread spinning in userland on another
     // CPU, in ACPI mode: it ends the machine, so only one QEMU reports
     // stopping can be asked, and the T14 hands over in legacy mode, where no
     // holder means no quieting.
-    "machine_shutdown_with_a_thread_spinning",
+    ("machine_shutdown_with_a_thread_spinning", |test_config| power::machine_shutdown_with_a_thread_spinning(test_config)),
     // A clean stop proves its image: the stop mark `logkeeper` writes at the
     // stop's flush, and the next loader pass's floor raise. x86-64 q35: it
     // takes the loader's second pass on the same disk and firmware variables,
     // which no host test has, and a metal run reflashes before any second pass.
-    "a_clean_stop_proves_its_image",
+    ("a_clean_stop_proves_its_image", |test_config| power::a_clean_stop_proves_its_image(test_config)),
     // A claimable function with a mappable BAR that no program of the boot
     // holds: QEMU's virtio NIC on `tests/images/testcases.toml`. The T14's one such
     // function is its I219, and a kernel that dies on this takes the bench's
     // machine down with it.
-    "bar_map_again",
+    ("bar_map_again", |test_config| bar_map_again(test_config)),
     // The same claim with the NIC behind a root port: the BAR is handed over
     // where firmware put it inside the port's window, which no host test
     // reads off firmware's enumeration. Behind a bridge on metal it is the
     // AMD bench's `amdvi_usbd_drives_its_own_entry`.
-    "bar_map_behind_a_bridge",
+    ("bar_map_behind_a_bridge", |test_config| bar_map_behind_a_bridge(test_config)),
     // A region that is not memory the kernel allocated, lent as a window: the
     // kernel describes the BAR of a function no program of the boot holds,
     // which on the T14 is its I219, as `bar_map_again` says.
-    "lent_device_memory_refused",
+    ("lent_device_memory_refused", |test_config| lent_device_memory_refused(test_config)),
     // `images/console.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
-    "console_image_boots",
+    ("console_image_boots", |_| console_image_boots()),
     // The UEFI loader's check of a boot program and what follows its refusal,
     // which no host test reaches: a marked slot whose supervisor is bent is
     // refused before boot services end, and the machine stops with the whole
@@ -665,53 +672,55 @@ const MACHINE_TESTS: &[&str] = &[
     // the loader's serial port as its console; no metal row, since the metal
     // loop judges a boot by the kernel's own record, which this one never
     // writes.
-    "a_bent_supervisor_is_refused_and_nothing_boots",
+    ("a_bent_supervisor_is_refused_and_nothing_boots", |test_config| [qemu::Profile::HeadlessNoConsolePort, qemu::Profile::Virt] .into_iter() .try_for_each(|profile| a_bent_supervisor_is_refused_and_nothing_boots(profile, test_config))),
     // A spawn and its child's end leave the census as it was, for a program
     // the root server holds in memory, and one each on DATA and `/tmp` read
     // whole: the image's
     // owners and the kernel's object lifetimes together, which no host test
     // holds. One boot of QEMU's x86-64 machine on the actuator kernel, for the
     // census.
-    "a_spawn_from_an_image_frees_it_when_the_child_ends",
+    ("a_spawn_from_an_image_frees_it_when_the_child_ends", |test_config| a_spawn_from_an_image_frees_it_when_the_child_ends(test_config)),
     // A user copy through the process's own mapping (`arch::uaccess`): a page
     // first touched inside the copy is served and the copy resumes, both
     // directions and past a bounce; a released, unreadable or kernel address
     // ends it `BadAddress`. The kernel's fault fixup, which no host test
     // reaches. One boot of QEMU's x86-64 machine; the shared boots run it on
     // each bench.
-    "a_user_copy_faults_in_mid_copy_or_ends_as_bad_address",
+    ("a_user_copy_faults_in_mid_copy_or_ends_as_bad_address", |test_config| a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &[])),
     // The same job with every copy sent highest first, as an x86-64 kernel
     // sends some on a CPU whose forward copy stalls: the descending copy's
     // fixup, which the guest runner's CPU never takes by its own rule. One
     // boot of QEMU's x86-64 machine on the actuator kernel; the AMD bench's
     // shared boot takes it by its rule.
-    "a_user_copy_highest_first_faults_or_ends_as_bad_address",
+    ("a_user_copy_highest_first_faults_or_ends_as_bad_address", |test_config| {
+        a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &["copies-go-down"])
+    }),
     // The boot's log written through usbd onto the stick it booted from, and
     // still there once the machine has stopped: the path every metal boot's
     // `/log` takes, which no other QEMU row reads, because their console is
     // the serial line. Its oracle is the image read back on the host.
-    "the_log_lands_on_the_boot_stick",
+    ("the_log_lands_on_the_boot_stick", |test_config| the_log_lands_on_the_boot_stick(test_config)),
     // Keys QEMU's `usb-kbd` reports, through usbd, to the owner of input:
     // the console image's shell runs the command they spell. QEMU's xHC and
     // keyboard are the independent end of the report the stub cannot be.
-    "a_usb_key_reaches_the_console",
+    ("a_usb_key_reaches_the_console", |_| a_usb_key_reaches_the_console()),
     // The desktop on CPUs that offer no x2APIC, whose local APICs run in
     // xAPIC mode: every IPI, EOI and timer write goes through the MMIO page,
     // which no host build has and the T14, whose CPUs offer x2APIC, never
     // reaches; the AMD laptop that needs it is not on the bench.
-    "desktop_without_x2apic",
+    ("desktop_without_x2apic", |_| desktop_without_x2apic()),
     // A machine whose one NVMe disk is all it has boots the image off it and
     // serves every role off it: the firmware that reads it, the loader and
     // kernel it hands the image to, and the claim the nvme driver serves the
     // block service's sessions through have no host build. A bench boots the
     // same way from its own disk, beside another system's partitions.
-    "nvme_disk_boots",
+    ("nvme_disk_boots", |test_config| nvme_disk_boots(test_config)),
     // A stick boot beside an NVMe disk that is another system's, on a
     // controller under Intel's id: the row drives it by its class through the
     // kernel's claim, the block service and the file servers, none of which a
     // host test runs together, and the disk is read back whole on the host
     // after the stop. QEMU x86-64; on a bench it is `nvme_leaves_the_benchs_disk_alone`.
-    "a_host_disk_beside_the_stick_is_left_alone",
+    ("a_host_disk_beside_the_stick_is_left_alone", |test_config| a_host_disk_beside_the_stick_is_left_alone(test_config)),
     // The same disk's DATA designated from inside the guest: the supervisor
     // minting the designation image's one authorization, the block service
     // resolving and routing it, and the NVMe driver judging, stamping,
@@ -719,23 +728,23 @@ const MACHINE_TESTS: &[&str] = &[
     // runs together; the host reads the disk image after the stop for the
     // stamp and for every other byte. QEMU x86-64; on a bench it is
     // `bench_data_designated`.
-    "the_data_partition_beside_the_stick_is_designated",
+    ("the_data_partition_beside_the_stick_is_designated", |_| the_data_partition_beside_the_stick_is_designated()),
     // clang and LLD built for ToyOS, installed by `pkg` and compiling and
     // linking inside it: the claim is that they install and run on ToyOS,
     // which no host test can make, and the T14 would read nothing a guest does
     // not. On demand: [`ON_DEMAND`]. Red at the link until item 5 of
     // `issues/toyos-builds-itself.md` lands.
-    "hosted_clang_hello",
+    ("hosted_clang_hello", |_| common::hostedclang::hosted_clang_hello()),
     // libc's children, and a quit's walk over a tree of std children: each
     // program starts and waits for its own, which is order, completion,
     // contents and counts, and no hardware is in it.
-    "libc_children",
+    ("libc_children", |_| common::libcchildren::libc_children()),
     // A stream shared by a parent and the child it was exported to, the test
     // its own netstack: when a dead holder's handles close, and that the
     // survivor's write and read then work, are the kernel's, which no host
     // build has; no hardware is in it. x86-64 alone, the architecture the
     // suite builds guest binaries for (`qemu::SUITE_ARCH`).
-    "stream_holders",
+    ("stream_holders", |test_config| stream_holders(test_config)),
     // A stream, a listener and a datagram socket exported through std's
     // `Command` and adopted in a child, through the real netstack of
     // `tests/images/netcase.toml`: the export, the endowment, the adoption and
@@ -747,14 +756,14 @@ const MACHINE_TESTS: &[&str] = &[
     // QEMU's `e1000e`, which the image's I219 row matches by its id alone: a
     // NIC no row names a machine for, up with no configuration of its own.
     // x86-64 alone (`qemu::SUITE_ARCH`).
-    "netstack_holders_exported_to_children",
+    ("netstack_holders_exported_to_children", |_| netstack_holders_exported_to_children()),
     // A datagram receive with a read timeout ends at it, a timeout under a
     // millisecond included, and a zero timeout is refused: std's conversion
     // of every socket timeout and its datagram wait, through the real
     // netstack of `tests/images/netcase.toml`, which no host build has. No
     // peer and no public network. Order and completion: QEMU's clock bounds
     // nothing but the hang. x86-64 alone (`qemu::SUITE_ARCH`).
-    "udp_receive_times_out",
+    ("udp_receive_times_out", |_| udp_receive_times_out()),
     // A stream netstack holds across its link's end: the NIC's driver killed
     // and started again on a fresh claim, and a line answered on the stream
     // both before and after. netstack keeping its node across a link's end,
@@ -763,7 +772,7 @@ const MACHINE_TESTS: &[&str] = &[
     // holds. QEMU x86-64 (`qemu::SUITE_ARCH`); the harness is the peer, on
     // the host's loopback that QEMU's user network reaches, so no public
     // network. Order and completion only.
-    "a_link_ends_under_a_held_stream_and_comes_back",
+    ("a_link_ends_under_a_held_stream_and_comes_back", |_| a_link_ends_under_a_held_stream_and_comes_back()),
     // A client killed while its connect is unanswered gives its place back to
     // the real netstack of `tests/images/netcase.toml` at once, where only its
     // connection can say it left: a process's death and netstack's watch of
@@ -772,7 +781,7 @@ const MACHINE_TESTS: &[&str] = &[
     // clock a hang ceiling only: the kill has to land within the about 3 s
     // netstack takes to give the address up, or the test is red. x86-64 alone
     // (`qemu::SUITE_ARCH`).
-    "a_client_killed_mid_connect_gives_its_place_back",
+    ("a_client_killed_mid_connect_gives_its_place_back", |_| a_client_killed_mid_connect_gives_its_place_back()),
     // netstack over two links: the default route leaves by the first, by the
     // second while QMP holds the first's NIC down, and by the first again
     // when it is up. Two drivers' links, a NIC's carrier and netstack's
@@ -788,54 +797,54 @@ const MACHINE_TESTS: &[&str] = &[
     // `restrict=on`: with it the job's first datagram off both networks was
     // refused for want of a route, and the default route is what is tested.
     // Order and counts only.
-    "traffic_leaves_by_the_second_link_while_the_first_is_down",
+    ("traffic_leaves_by_the_second_link_while_the_first_is_down", |_| traffic_leaves_by_the_second_link_while_the_first_is_down()),
     // Login sessions: their owner parents, signs out and ends with each, and
     // the machine's reboot waits for them until forced, which only processes
     // in one boot show, as order, completion and counts. The reboot ends the
     // boot, so it is last and the boot is the test's own.
-    "session_lifecycle",
+    ("session_lifecycle", |_| common::sessionlifecycle::session_lifecycle()),
     // A launch's unsent stdio slots: its own boot, because the launcher it
     // needs makes every spawn of a declared program a launch.
-    "a_launch_gives_each_unsent_stdio_slot_a_null",
+    ("a_launch_gives_each_unsent_stdio_slot_a_null", |_| common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null()),
     // A job reaches its row's own `/state/<name>` and nothing else of `/state`:
     // which grants the supervisor mints and the file server honours, which no
     // host build has. Contents and refusals, and no hardware is in it.
-    "a_row_reaches_its_own_state_and_no_other",
+    ("a_row_reaches_its_own_state_and_no_other", |_| common::stateview::a_row_reaches_its_own_state_and_no_other()),
     // A controller no row names, handed over to a claim whose holder's No-Op
     // is answered by an interrupt through it, and a transfer aimed past the
     // claim's grants: the hand-over, the interrupt through the claim and the
     // unit have no host build, and the T14's unit is not asked to fault. What
     // usbd does on the bus is `toyos-xhci`'s stub tests' to hold.
-    "usbd_drives_the_spare",
+    ("usbd_drives_the_spare", |test_config| usbd_drives_the_spare(test_config)),
     // The same behind QEMU's AMD unit, remapping and with no SMI filter: the
     // claim is refused by that reason before anything on the function
     // changes. No metal machine in reach has an AMD-Vi unit without the
     // filter.
-    "usbd_refused_without_smi_filter",
+    ("usbd_refused_without_smi_filter", |test_config| usbd_refused_on_amdvi(test_config, qemu::Profile::HeadlessUsbSpareAmdVi, "has no SMI filter", claims::SMI_UNFILTERED)),
     // The same machine with its AMD unit remapping nothing: the claim is
     // refused by that reason. No metal row asks it: no bench is without
     // remapping.
-    "usbd_refused_without_amdvi_remapping",
+    ("usbd_refused_without_amdvi_remapping", |test_config| usbd_refused_on_amdvi(test_config, qemu::Profile::HeadlessUsbSpareAmdViNoRemap, "no message is remapped", claims::NOT_REMAPPED)),
     // Every vector register a thread holds, across switches to threads holding
     // others, against a scheduler, which no host build has. The shared boot's
     // run is the benches'; this is TCG's, whose XSAVE is QEMU's own reading of
     // the SDM, and the KVM runner's CPU.
-    "vector_state_survives_a_switch",
+    ("vector_state_survives_a_switch", |test_config| vector_state_survives_a_switch(test_config)),
     // std's CPU count against the CPUs the guest booted with, and an ended
     // thread's stack and table place given back, joined or detached, on the
     // two-CPU q35 guest: std's ToyOS layer, which no host builds.
-    "std_threads_count_the_cpus_and_give_back_ended_threads",
+    ("std_threads_count_the_cpus_and_give_back_ended_threads", |test_config| std_threads_count_the_cpus_and_give_back_ended_threads(test_config)),
     // A thread pinned to each CPU in turn stays there across sleeps beside a
     // spinner pinned with it, by the CPU's own x2APIC ID, on the two-CPU q35
     // guest under TCG: placement against a real scheduler and CPUs, which no
     // host model has. Order and identity only, nothing timed.
-    "affinity_pins_hold_on_every_cpu",
+    ("affinity_pins_hold_on_every_cpu", |test_config| affinity_pins_hold_on_every_cpu(test_config)),
     // A process holding every frame it may is refused every kernel object it
     // asks for more, and the kernel never panics for it: on the two-CPU,
     // 4 GiB q35 guest, in a boot of its own, since every other process is
     // refused meanwhile. QEMU establishes the refusals and that the machine
     // goes on; nothing in it is timing.
-    "kernel_objects_refused_alone",
+    ("kernel_objects_refused_alone", |test_config| kernel_objects_refused_alone(test_config)),
     // With one ordinary job holding every frame it may, the supervisor answers
     // a stop's request, a key reaches the owner of input through ps2server, a
     // system holder kills the greedy job, and a service the exhaustion ended is
@@ -845,17 +854,17 @@ const MACHINE_TESTS: &[&str] = &[
     // `tests/images/floorcase.toml`; QEMU types the key. Order and completion
     // only: nothing in it is timing. The `memory_floor` metal row runs it on the
     // T14 without the key.
-    "memory_floor_holds_the_controls",
+    ("memory_floor_holds_the_controls", |_| memory_floor_holds_the_controls()),
     // The parity instrument's two builds in one boot, behind ring's known
     // answers: that every row runs and both builds print the same whole table.
     // Its timings decide nothing here; the `crypto_instrument` metal row takes
     // them on the benches.
-    "crypto_instrument_prints_its_table",
+    ("crypto_instrument_prints_its_table", |test_config| crypto_instrument_prints_its_table(test_config)),
     // The clipboard agent's opening exchange with QEMU's own vdagent: the
     // device exists only under QEMU, so no metal row reaches it, and the other
     // end of the handshake and of the request is QEMU's vdagent chardev and
     // virtio-serial device, which no host test runs.
-    "the_opening_exchange_with_qemus_agent_completes",
+    ("the_opening_exchange_with_qemus_agent_completes", |_| the_opening_exchange_with_qemus_agent_completes()),
     // The compositor driving QEMU's virtio-gpu through its claim, and a host
     // display resize reaching the guest's mode: no metal machine has a
     // virtio-gpu, and the host tests drive `toyos-virtio-gpu` against a model
@@ -863,7 +872,7 @@ const MACHINE_TESTS: &[&str] = &[
     // says it was read right. x86-64 q35, `Profile::HeadlessVirtioGpu`. A boot of its own:
     // its `-vnc` display changes the display configuration the clipboard
     // test's premise, `-display none`, rests on.
-    "the_compositor_drives_the_virtio_gpu",
+    ("the_compositor_drives_the_virtio_gpu", |_| the_compositor_drives_the_virtio_gpu()),
     // A client's window, asked for in logical pixels at scale 2, is drawn at
     // twice that on the panel, and the display port's `screen scale 1` relays
     // it to its logical size with the chrome around it: what reaches the
@@ -872,12 +881,12 @@ const MACHINE_TESTS: &[&str] = &[
     // composes. On `Profile::Metal`'s q35, whose 1920x1080 GOP panel holds 2
     // and whose firmware publishes no EDID, so the image's `scale=2` sets it;
     // no metal machine's glass can be read.
-    "a_window_is_drawn_at_the_scale_and_relaid_at_the_next",
+    ("a_window_is_drawn_at_the_scale_and_relaid_at_the_next", |_| a_window_is_drawn_at_the_scale_and_relaid_at_the_next()),
 ];
 
-/// **The metal profile**: which registrations run on a bench, what boots each
-/// one needs, and how each is judged off the log the boot left on the bench's
-/// disk.
+/// **The metal profile**: which registrations run on which bench, what boots
+/// each one needs, and how each is judged off the log the boot left on the
+/// bench's disk.
 ///
 /// Two rows naming the same boot share one image and one boot, and their job
 /// lists are unioned. A boot is about a minute of the machine's time, so that
@@ -891,44 +900,47 @@ const METAL: &[(&str, metal::Metal)] = &[
         // independent of the `control_regs:` lines it is then held to.
         "control_regs",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| control_regs(b[0].kernel().text(), b[0].cpus()?),
         },
     ),
     (
         // The firmware defines the TCG memory-overwrite request and took the
-        // loader's write. The T14 and the AMD bench.
+        // loader's write.
         "memory_overwrite_requested",
-        metal::Metal { arms: TESTCASES, judge: |b| power::memory_overwrite_requested(&b[0].loader()) },
+        metal::Metal { on: On::Every, arms: TESTCASES, judge: |b| power::memory_overwrite_requested(&b[0].loader()) },
     ),
     (
         "ioapic_topology",
-        metal::Metal { arms: TESTCASES, judge: |b| ioapic_topology(b[0].kernel().text()) },
+        metal::Metal { on: On::Every, arms: TESTCASES, judge: |b| ioapic_topology(b[0].kernel().text()) },
     ),
     (
         "console_uart_driven",
-        metal::Metal { arms: TESTCASES, judge: |b| console_uart_driven(&b[0].log()) },
+        metal::Metal { on: On::Every, arms: TESTCASES, judge: |b| console_uart_driven(&b[0].log()) },
     ),
     (
         // The windows on the machine that owes them: every CPU in every
         // report, and a held window read back.
         "mask_windows",
-        metal::Metal { arms: WINDOWSCASE, judge: |b| windows_on_metal(b[0]) },
+        metal::Metal { on: On::Every, arms: WINDOWSCASE, judge: |b| windows_on_metal(b[0]) },
     ),
     (
         "kernel_objects_refused",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES_REFUSED,
             judge: |b| b[0].job_passed("test_rs_kernel_objects_refused"),
         },
     ),
     (
         "memory_floor",
-        metal::Metal { arms: FLOORCASE, judge: |b| b[0].job_passed("test_rs_memory_floor") },
+        metal::Metal { on: On::Every, arms: FLOORCASE, judge: |b| b[0].job_passed("test_rs_memory_floor") },
     ),
     (
         "wake_storm_cost",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| b[0].job_passed("test_rs_wake_storm_cost"),
         },
@@ -937,9 +949,10 @@ const METAL: &[(&str, metal::Metal)] = &[
     // laptops, so these rows run with soundserver's master muted, which none
     // of their claims needs to hear (`tests/guest/rust-tests/src/master.rs`).
     (
-        // A tone through soundserver's HDA path. The T14 and the AMD bench.
+        // A tone through soundserver's HDA path.
         "hda_tone",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| {
                 b[0].job_passed("test_rs_audio_tone")?;
@@ -951,9 +964,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         // `hda_tone`'s tone while a thread of its process writes the log
         // disk, the bench's NVMe: no period soundserver had to fill. It is the
         // kernel's: one claim's interrupts and its holder's threads never
-        // starve another holder's deadline. The T14 and the AMD bench.
+        // starve another holder's deadline.
         "tone_beside_a_log_write",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| {
                 b[0].job_passed(audio::TONE_BESIDE_LOG_WRITE)?;
@@ -967,6 +981,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The T14 (44.1 kHz) and the AMD bench (48 kHz).
         "hda_tone_resampled",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| {
                 b[0].job_passed("test_rs_audio_tone_resampled")?;
@@ -977,13 +992,27 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // One step of the codec's master up from its bottom and back, each
         // read back from the codec, on the HDA path soundserver configured,
-        // and the master muted again. The T14 and the AMD bench.
+        // and the master muted again.
         "hda_volume_step",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| {
                 b[0].job_passed("test_rs_volume_step")?;
                 b[0].log().must_say(audio::PLAYING).map(|_| ())
+            },
+        },
+    ),
+    (
+        // The I219 claimed, given back and claimed again: both claims name
+        // one remapping entry, and each release leaves it not present.
+        "claim_reuses_its_remapping_entry",
+        metal::Metal {
+            on: On::Having(&[Device::I219]),
+            arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &[claims::RECLAIM])],
+            judge: |b| {
+                b[0].job_passed(claims::RECLAIM)?;
+                claims::reuses_its_entry(&b[0].kernel())
             },
         },
     ),
@@ -995,6 +1024,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // several other verdicts were already taken from.
         "loader_watchdog_arms",
         metal::Metal {
+            on: On::Every,
             arms: &[
                 metal::once("testcases-watchdog", "tests/images/testcases.toml", &["watchdog"], &[]),
                 // The batch's job list is the union of its riders'; this arm
@@ -1013,6 +1043,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // is held and what is only read.
         "counters",
         metal::Metal {
+            on: On::Having(&[Device::Hwp]),
             arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &["test_rs_counters_metal"])],
             judge: |b| counters_on_metal(b[0]),
         },
@@ -1024,6 +1055,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // past the server's count interval.
         "acpi_server_events",
         metal::Metal {
+            on: On::Having(&[Device::EmbeddedController]),
             arms: &[metal::Arm { jobs: &["test_rs_acpi_counted"], ..TESTCASES_HELD[0] }],
             judge: |b| acpi_events_on_metal(b[0]),
         },
@@ -1034,6 +1066,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The same boot as `acpi_server_events`.
         "acpi_tables_loaded",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES_HELD,
             judge: |b| acpi_tables_on_metal(b[0]),
         },
@@ -1045,6 +1078,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // `acpi_tables_loaded`.
         "idle_entered",
         metal::Metal {
+            on: On::Only(Bench::Amd),
             arms: &[metal::Arm { jobs: &["test_rs_idle_entered"], ..TESTCASES_HELD[0] }],
             judge: |b| idle_entered_on_metal(b[0]),
         },
@@ -1057,6 +1091,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // sources, which follow the first reading.
         "battery_read",
         metal::Metal {
+            on: On::Having(&[Device::EmbeddedController]),
             arms: TESTCASES_HELD,
             judge: |b| battery_on_metal(b[0]),
         },
@@ -1068,6 +1103,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // server's declaration started.
         "acpi_server_death",
         metal::Metal {
+            on: On::Only(Bench::T14),
             arms: &[metal::once("acpicase", "tests/images/acpicase.toml", &[], &["test_rs_acpi_release"])],
             judge: |b| acpi_death_on_metal(b[0]),
         },
@@ -1077,6 +1113,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // off the log: that it ran, and what it said, are the verdict.
         "syscall_cost",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| {
                 b[0].job_passed("test_rs_syscall_cost")?;
@@ -1092,6 +1129,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // what it said, are the verdict.
         "spawn_cost",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| {
                 b[0].job_passed("test_rs_spawn_cost")?;
@@ -1106,6 +1144,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // and every wait it asserts is a floor, which no load shortens.
         "tlb_shootdown_waits",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::Arm {
                 features: ACTUATOR_KERNEL,
                 ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_tlb_shootdown_waits"])
@@ -1119,6 +1158,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // is the guest's own exit, its control first.
         "a_global_kernel_leafs_discharge_drops_it",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::Arm {
                 features: ACTUATOR_KERNEL,
                 ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_global_leaf_discharge"])
@@ -1129,6 +1169,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "a_kernel_half_shootdown_drops_a_global_kernel_translation",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::Arm {
                 features: ACTUATOR_KERNEL,
                 ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_global_leaf_flush"])
@@ -1139,6 +1180,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "a_user_half_shootdown_keeps_a_global_kernel_translation",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::Arm {
                 features: ACTUATOR_KERNEL,
                 ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_global_leaf_user_flush"])
@@ -1152,6 +1194,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // with interrupts closed. Read, not held: the number is the product.
         "trace_record_cost",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::Arm {
                 features: ACTUATOR_KERNEL,
                 ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_trace_flood"])
@@ -1169,6 +1212,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // which a chipset reset anywhere in it would have cut short.
         "watchdog_fed",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::once("testcases-watchdog", "tests/images/testcases.toml", &["watchdog"], &[])],
             // The driver's verdict is the claim: the volume carries the
             // supervisor's stop and the stop mark.
@@ -1185,27 +1229,29 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "smp_roster_and_tsc_trail",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             // Each bench's local APIC in the mode its CPUs offer
             // ([`apic_mode_offered`]), which the declaration takes.
             judge: |b| {
                 let (log, cpus) = (b[0].kernel(), b[0].cpus()?);
                 smp_roster_and_tsc_trail(log.text(), cpus)?;
-                apic_mode_held(&log, cpus, apic_mode_offered(log.text())?)
+                apic_mode_held(&log, cpus, apic_mode_offered(b[0].bench))
             },
         },
     ),
     (
         "topology_readback",
-        metal::Metal { arms: TESTCASES, judge: |b| topology_readback(b[0].kernel().text(), b[0].cpus()?) },
+        metal::Metal { on: On::Every, arms: TESTCASES, judge: |b| topology_readback(b[0].bench, b[0].kernel().text(), b[0].cpus()?) },
     ),
     (
         "pmm_accounting",
-        metal::Metal { arms: TESTCASES, judge: |b| pmm_accounting(b[0].kernel().text()) },
+        metal::Metal { on: On::Every, arms: TESTCASES, judge: |b| pmm_accounting(b[0].kernel().text()) },
     ),
     (
         "acpi_table_inventory",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| acpi_table_inventory(b[0].kernel().text()),
         },
@@ -1213,6 +1259,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "timer_calibration",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| {
                 timer_calibration(b[0].kernel().text())?;
@@ -1226,11 +1273,11 @@ const METAL: &[(&str, metal::Metal)] = &[
         // time: which answer each bench's firmware gives is the machine's,
         // and QEMU's is OVMF's.
         "wall_clock_is_firmwares",
-        metal::Metal { arms: TESTCASES, judge: |b| wall_clock_is_firmwares(b[0]) },
+        metal::Metal { on: On::Every, arms: TESTCASES, judge: |b| wall_clock_is_firmwares(b[0]) },
     ),
     (
         "pci_inventory",
-        metal::Metal { arms: TESTCASES, judge: |b| pci_inventory(b[0].kernel().text()) },
+        metal::Metal { on: On::Every, arms: TESTCASES, judge: |b| pci_inventory(b[0].kernel().text()) },
     ),
     (
         // The shipping kernel's W^X audit of its own tables, on the firmware
@@ -1238,6 +1285,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // negative control is `kernel_wx_leaf_is_refused`, on QEMU.
         "kernel_wx",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| {
                 let kernel = b[0].kernel();
@@ -1254,6 +1302,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "tlb_shootdown_cost",
         metal::Metal {
+            on: On::Every,
             arms: LATENCYCASE,
             // The machine's own CPU count, off the bring-up records rather than
             // off a number the harness staged.
@@ -1267,6 +1316,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "latency_wake",
         metal::Metal {
+            on: On::Every,
             arms: LATENCYCASE,
             judge: |b| {
                 in_acpi_mode_before_any_job(b[0])?;
@@ -1279,14 +1329,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         // A ping-pong whose partner parks beside a spinner, with idle CPUs
         // beside them: the partner's wake lands on a busy CPU.
         "wake_onto_busy",
-        metal::Metal { arms: TESTCASES, judge: |b| wake_onto_busy(b[0]) },
+        metal::Metal { on: On::Every, arms: TESTCASES, judge: |b| wake_onto_busy(b[0]) },
     ),
     (
         // Two builds and a helper-heavy job, each its own job, on a saturated
         // machine: each takes a third whatever its helper count. Its widths are
         // the benches', eight CPUs and sixteen.
         "job_fairness",
-        metal::Metal { arms: TESTCASES, judge: |b| job_fairness(b[0]) },
+        metal::Metal { on: On::Every, arms: TESTCASES, judge: |b| job_fairness(b[0]) },
     ),
     // ---- one image: tests/images/benchcase.toml, `osbench`'s ToyOS half ----
     (
@@ -1298,6 +1348,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // three runs.
         "osbench",
         metal::Metal {
+            on: On::Every,
             arms: BENCHCASE,
             judge: |b| {
                 data_on_the_nvme(b[0])?;
@@ -1313,14 +1364,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         // row holds that the idle row measured, which it does only where the
         // kernel reads the package's energy. The T14 and the AMD bench.
         "osbench_energy",
-        metal::Metal { arms: OSBENCH_ENERGY, judge: |b| osbench_energy_measured(b[0]) },
+        metal::Metal { on: On::Every, arms: OSBENCH_ENERGY, judge: |b| osbench_energy_measured(b[0]) },
     ),
     (
         // The clock's boot rate against the HPET's over the minutes the suite
         // runs, through its idle, busy and hot phases: the T14 and the AMD
         // bench, riding the `osbench` boot.
         "clock_holds_over_minutes",
-        metal::Metal { arms: BENCHCASE, judge: |b| clock_holds_over_minutes(b[0]) },
+        metal::Metal { on: On::Every, arms: BENCHCASE, judge: |b| clock_holds_over_minutes(b[0]) },
     ),
     (
         // `osbench persist` without the rest of the suite, for a change to
@@ -1333,6 +1384,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // runs it. The T14 and the AMD bench.
         "osbench_disk",
         metal::Metal {
+            on: On::Every,
             arms: OSBENCH_DISK,
             judge: |b| {
                 data_on_the_nvme(b[0])?;
@@ -1344,57 +1396,55 @@ const METAL: &[(&str, metal::Metal)] = &[
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
         // compared with the same program under this bench's Linux on the same
         // path. A pass names it: the other bench has to be running the peer.
-        // The T14 over its I219; the AMD bench has no card ToyOS drives.
         "osbench_lan",
-        metal::Metal { arms: OSBENCH_LAN, judge: |b| osbench_ran(b[0], &["osbench_lan"]) },
+        metal::Metal { on: On::Having(&[Device::I219]), arms: OSBENCH_LAN, judge: |b| osbench_ran(b[0], &["osbench_lan"]) },
     ),
     (
         // `osbench internet`: exploratory evidence over the public internet,
         // which no automated test depends on, so only a pass that names it runs
-        // it. The T14; the AMD bench has no card ToyOS drives.
+        // it.
         "osbench_internet",
-        metal::Metal { arms: OSBENCH_INTERNET, judge: |b| osbench_ran(b[0], &["osbench_internet"]) },
+        metal::Metal { on: On::Having(&[Device::I219]), arms: OSBENCH_INTERNET, judge: |b| osbench_ran(b[0], &["osbench_internet"]) },
     ),
     (
         // What the PHY's ULP registers hold after the I219's disarm and the
-        // full reset, which the stub only assumes. The T14 only: the AMD bench
-        // has no card ToyOS drives. It rides `osbench`'s boot, whose i219 row
-        // drives the card, and reads two of the driver's lines once its job
-        // has seen the lease, which follows the bring-up.
+        // full reset, which the stub only assumes. It rides `osbench`'s boot,
+        // whose i219 row drives the card, and reads two of the driver's lines
+        // once its job has seen the lease, which follows the bring-up.
         "i219_leaves_ulp_unarmed",
-        metal::Metal { arms: BENCHCASE_ALONE, judge: |b| i219_leaves_ulp_unarmed(b[0]) },
+        metal::Metal { on: On::Having(&[Device::I219]), arms: BENCHCASE_ALONE, judge: |b| i219_leaves_ulp_unarmed(b[0]) },
     ),
     (
         // The I219's driver a process of its own: its link open at netstack,
         // up, and a lease from the bench's router carried over it, with no
-        // link ending. The T14 only, for the same reason, on the same boot.
+        // link ending. On the same boot.
         "i219_carries_netstacks_link",
-        metal::Metal { arms: BENCHCASE_ALONE, judge: |b| i219_carries_netstacks_link(b[0]) },
+        metal::Metal { on: On::Having(&[Device::I219]), arms: BENCHCASE_ALONE, judge: |b| i219_carries_netstacks_link(b[0]) },
     ),
     // ---- one image: tests/images/proctreecase.toml ----
     (
         // A parent's end takes its children down. The guest carries every
         // verdict but the kernel's silence on a refused spawn.
         "process_tree",
-        metal::Metal { arms: PROCTREECASE, judge: |b| process_tree(b[0]) },
+        metal::Metal { on: On::Every, arms: PROCTREECASE, judge: |b| process_tree(b[0]) },
     ),
     (
         // A launched row runs its own program, never what the caller's path
         // names when it is opened again.
         "launch_toctou",
-        metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_launch_toctou") },
+        metal::Metal { on: On::Every, arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_launch_toctou") },
     ),
     (
         // A connection's badge is the minted bytes, read back by its own
         // port's acceptor alone.
         "port_badge",
-        metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_port_badge") },
+        metal::Metal { on: On::Every, arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_port_badge") },
     ),
     (
         // An installed package sees its own directory read-only and its own
         // folder as `HOME`, and nothing else of `/apps` or `/home`.
         "app_view",
-        metal::Metal { arms: PROCTREECASE, judge: |b| app_view(b[0]) },
+        metal::Metal { on: On::Every, arms: PROCTREECASE, judge: |b| app_view(b[0]) },
     ),
     // ---- one image: tests/images/metalcase.toml, whose one job is the hold ----
     //
@@ -1402,7 +1452,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     // writes, so they ride this one.
     (
         "metal_sim_scanout_wc",
-        metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
+        metal::Metal { on: On::Every, arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
     ),
     (
         // The panel's EDID from the firmware's GOP to the compositor's scale,
@@ -1411,10 +1461,11 @@ const METAL: &[(&str, metal::Metal)] = &[
         // EDID protocol.
         "gop_edid_scale",
         metal::Metal {
+            on: On::Every,
             arms: METALCASE_SCALE,
             judge: |b| {
                 b[0].job_passed("test_rs_scale_window")?;
-                gop_edid_scale(b[0].loader().text(), b[0].log().text(), b[0].kernel().text())
+                gop_edid_scale(b[0].bench, b[0].loader().text(), b[0].log().text())
             },
         },
     ),
@@ -1424,18 +1475,19 @@ const METAL: &[(&str, metal::Metal)] = &[
         // device armed or found absent by name, and no i8042 source in the
         // kernel's interrupt census.
         "ps2server_arms",
-        metal::Metal { arms: METALCASE, judge: |b| ps2server::armed(&b[0].log(), &b[0].kernel()) },
+        metal::Metal { on: On::Every, arms: METALCASE, judge: |b| ps2server::armed(&b[0].log(), &b[0].kernel()) },
     ),
     (
         // The patch the loader found on ROOT, and every CPU's microcode line,
         // held to what its bench is held to: `microcode_on_metal` says which
         // machine is held to what. Metal alone: no host model has either
         // vendor's patch loader, and a QEMU guest's microcode is the
-        // hypervisor's. The T14 and the AMD bench.
+        // hypervisor's.
         "microcode",
         metal::Metal {
+            on: On::Every,
             arms: METALCASE,
-            judge: |b| microcode_on_metal(b[0].loader().text(), b[0].kernel().text(), b[0].cpus()?),
+            judge: |b| microcode_on_metal(b[0].bench, b[0].loader().text(), b[0].kernel().text(), b[0].cpus()?),
         },
     ),
     (
@@ -1444,17 +1496,16 @@ const METAL: &[(&str, metal::Metal)] = &[
         // established it before this judge ran. What is left is the kernel's own
         // decode, and `0xcf9 <- 0x0f` is q35's register rather than this one's.
         "machine_reboot",
-        metal::Metal { arms: METALCASE, judge: |b| power::reset_register_decoded(&b[0].kernel()) },
+        metal::Metal { on: On::Every, arms: METALCASE, judge: |b| power::reset_register_decoded(&b[0].kernel()) },
     ),
     (
         // The T14's display driver offers the compositor the firmware's
         // output on `display-output`, and the compositor's presents are
         // answered at their vblanks, which only the iGPU's interrupt raises.
         // Beside it `hda` still plays to the analog codec with the display
-        // engine's PG3, which holds the display codec, powered down. The T14
-        // alone: no other bench has a Tiger Lake iGPU.
+        // engine's PG3, which holds the display codec, powered down.
         "display_output_presents",
-        metal::Metal { arms: METALCASE_TONE, judge: |b| display_output_presents(b[0]) },
+        metal::Metal { on: On::Having(&[Device::TigerLakeGpu]), arms: METALCASE_TONE, judge: |b| display_output_presents(b[0]) },
     ),
     (
         // The IGD OpRegion the signed image grants tgl-display's claim: the
@@ -1463,7 +1514,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // driver's copy validates as the specification lays it out. Only the
         // T14's firmware sets one up, and QEMU's has no IGD.
         "igd_opregion_window",
-        metal::Metal { arms: METALCASE, judge: |b| igd_opregion_window(&b[0].log()) },
+        metal::Metal { on: On::Having(&[Device::TigerLakeGpu]), arms: METALCASE, judge: |b| igd_opregion_window(&b[0].log()) },
     ),
     // ---- the `SYS_DEBUG` members' boot, armed ----
     // The cheapest cluster there is: every one of these arms a check that runs
@@ -1473,11 +1524,11 @@ const METAL: &[(&str, metal::Metal)] = &[
     // pre-flash gate is what says the machine survives each one.
     (
         "pci_capability_walk",
-        metal::Metal { arms: SELFTESTS, judge: |b| pci_cap_selftest(b[0].kernel().text()) },
+        metal::Metal { on: On::Every, arms: SELFTESTS, judge: |b| pci_cap_selftest(b[0].kernel().text()) },
     ),
     (
         "lapic_spurious_vector",
-        metal::Metal { arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
+        metal::Metal { on: On::Every, arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
     ),
     (
         // The HPET an actuator stalls, told from the TSC by each bench's own
@@ -1485,6 +1536,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // their brackets are the machine's.
         "a_stalled_hpet_is_told_by_the_pm_timer",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::Arm {
                 features: ACTUATOR_KERNEL,
                 ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_hpet_stall_read"])
@@ -1499,7 +1551,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // No drain on this side: the whole boot's records are on the log, so
         // the probe's line is either in them or it never ran.
         "sysret_ss_reload",
-        metal::Metal { arms: SELFTESTS, judge: |b| sysret_ss(b[0].kernel().text()) },
+        metal::Metal { on: On::Every, arms: SELFTESTS, judge: |b| sysret_ss(b[0].kernel().text()) },
     ),
     (
         // A unit handed over translating, remapping and queueing, or on an
@@ -1507,21 +1559,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         // log running, on real silicon: each field goes off by its own write
         // before the unit is programmed or left off, and the boot goes on.
         "iommu_firmware_left",
-        metal::Metal { arms: FIRMWARE_LEFT, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
+        metal::Metal { on: On::Every, arms: FIRMWARE_LEFT, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
     ),
     // ---- a claimed function at the unit, on tests/images/testcases.toml ----
-    (
-        // Claimed, given back and claimed again: both claims name one
-        // remapping entry, and each release leaves it not present.
-        "claim_reuses_its_remapping_entry",
-        metal::Metal {
-            arms: TESTCASES,
-            judge: |b| {
-                b[0].job_passed(claims::RECLAIM)?;
-                claims::reuses_its_entry(&b[0].kernel())
-            },
-        },
-    ),
     (
         // The I219's interrupts on the function itself, which QEMU's e1000e
         // is not: no MSI-X capability, causes forced through `ICS` counted on
@@ -1533,6 +1573,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // judge reads only its own job's records.
         "i219_messages_on_its_msi_vector",
         metal::Metal {
+            on: On::Having(&[Device::I219]),
             arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &[claims::MSI])],
             judge: |b| {
                 b[0].job_passed(claims::MSI)?;
@@ -1544,21 +1585,21 @@ const METAL: &[(&str, metal::Metal)] = &[
         // Every device address a domain maps is outside every root-bridge
         // window firmware declared.
         "domains_map_clear_of_the_host_bridges",
-        metal::Metal { arms: TESTCASES, judge: |b| claims::clear_of_host_bridges(&b[0].kernel()) },
+        metal::Metal { on: On::Every, arms: TESTCASES, judge: |b| claims::clear_of_host_bridges(&b[0].kernel()) },
     ),
     (
         // An AMD-Vi unit programmed, and the boot disk's controller read
         // through a domain of its own: the register sequence, the device
-        // table and the host tables on real silicon. The AMD bench's row.
+        // table and the host tables on real silicon.
         "amdvi_translates_the_boot_controller",
-        metal::Metal { arms: TESTCASES, judge: |b| amdvi_translates(&b[0].kernel(), &b[0].log()) },
+        metal::Metal { on: On::Having(&[Device::AmdVi]), arms: TESTCASES, judge: |b| amdvi_translates(&b[0].kernel(), &b[0].log()) },
     ),
     (
         // An AMD-Vi unit remapping every message: the boot disk's
         // controller's interrupt delivered through an entry of its own
         // table, on real silicon, and every I/O APIC named.
         "amdvi_remaps_the_boot_controller",
-        metal::Metal { arms: TESTCASES, judge: |b| amdvi_remaps(&b[0].kernel(), &b[0].log()) },
+        metal::Metal { on: On::Having(&[Device::AmdVi]), arms: TESTCASES, judge: |b| amdvi_remaps(&b[0].kernel(), &b[0].log()) },
     ),
     (
         // The AMD bench's first xHCI, which the image's usbd row leaves,
@@ -1568,6 +1609,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // own table entry to a vector not its own, refused and recorded.
         "amdvi_usbd_drives_its_own_entry",
         metal::Metal {
+            on: On::Having(&[Device::AmdVi]),
             arms: &[metal::once(
                 "testcases",
                 "tests/images/testcases.toml",
@@ -1588,6 +1630,30 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The T14's first xHCI, the Type-C one, which the image's usbd row
+        // leaves, claimed, and usbd driving it: handed
+        // over, MSI armed through remapping, and the No-Op answered by an
+        // interrupt; usbd is killed, so the release says which reset the
+        // function advertises. Then a holder of it is killed and the claim
+        // asked for again at once, each round: its end follows its release.
+        "usbd_drives_the_type_c_controller",
+        metal::Metal {
+            on: On::Having(&[Device::Vtd]),
+            arms: &[metal::once(
+                "testcases",
+                "tests/images/testcases.toml",
+                &[],
+                &["test_rs_usbd_spare", "test_rs_end_returns_claims"],
+            )],
+            judge: |b| {
+                b[0].job_passed("test_rs_usbd_spare")?;
+                usbd_on_metal(&b[0].kernel(), &b[0].log())?;
+                b[0].job_passed("test_rs_end_returns_claims")?;
+                ends_returned_claims(b[0].log().text()).map(drop)
+            },
+        },
+    ),
+    (
         // Each radio P1 names (`issues/there-is-no-wifi.md`) that the machine
         // has, claimed with its BARs where firmware put them, and the MSI-X
         // entry the kernel armed read back through its holder's mapping of
@@ -1595,6 +1661,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // bridge. It rides the `testcases` boot.
         "msix_table_read_in_place",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &["test_rs_msix_in_place"])],
             judge: |b| {
                 b[0].job_passed("test_rs_msix_in_place")?;
@@ -1615,6 +1682,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // disk is the other half.
         "nvme_leaves_the_benchs_disk_alone",
         metal::Metal {
+            on: On::Every,
             arms: TESTCASES,
             judge: |b| common::hostdisk::left_alone(&b[0].log(), &common::hostdisk::loader_named(&b[0].loader())?).map(drop),
         },
@@ -1628,13 +1696,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         // bench, so named only: the T14 and the AMD bench, whose p4s are the
         // owner's empty ToyOS DATA.
         "bench_data_designated",
-        metal::Metal { arms: DESIGNATE, judge: |b| bench_data_designated(&b[0].log(), &b[1].log()) },
+        metal::Metal { on: On::Every, arms: DESIGNATE, judge: |b| bench_data_designated(&b[0].log(), &b[1].log()) },
     ),
     (
         // Explicitly destroys the unique DATA partition on either bench.
         // Never part of an unfiltered suite; no production image holds this grant.
         "bench_data_formatted",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::Arm {
                 named_only: true,
                 ..metal::once("data-format", "tests/images/formatcase.toml", &[], &["disks format data --commit"])
@@ -1652,6 +1721,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // survive a real reboot and a fresh native DATA mount.
         "bench_data_survives_reboot",
         metal::Metal {
+            on: On::Every,
             arms: &[
                 metal::Arm { named_only: true, ..metal::once("data-roundtrip-1-write", "tests/images/datacase.toml", &[], &["test_rs_data_roundtrip write"]) },
                 metal::Arm { named_only: true, ..metal::once("data-roundtrip-2-read", "tests/images/datacase.toml", &[], &["test_rs_data_roundtrip read"]) },
@@ -1678,31 +1748,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         // reset path that is judged; the job is the load.
         "the_disk_survives_a_reset_under_load",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::once("usbload", "tests/images/testcases.toml", &[], &[metal::STICK_LOAD_JOB])],
             judge: |b| power::the_disk_survives_a_reset_under_load(b[0]),
-        },
-    ),
-    (
-        // The T14's first xHCI, the Type-C one, which the image's usbd row
-        // leaves, claimed, and usbd driving it: handed
-        // over, MSI armed through remapping, and the No-Op answered by an
-        // interrupt; usbd is killed, so the release says which reset the
-        // function advertises. Then a holder of it is killed and the claim
-        // asked for again at once, each round: its end follows its release.
-        "usbd_drives_the_type_c_controller",
-        metal::Metal {
-            arms: &[metal::once(
-                "testcases",
-                "tests/images/testcases.toml",
-                &[],
-                &["test_rs_usbd_spare", "test_rs_end_returns_claims"],
-            )],
-            judge: |b| {
-                b[0].job_passed("test_rs_usbd_spare")?;
-                usbd_on_metal(&b[0].kernel(), &b[0].log())?;
-                b[0].job_passed("test_rs_end_returns_claims")?;
-                ends_returned_claims(b[0].log().text()).map(drop)
-            },
         },
     ),
     // ---- the `isa` claim: the machine's i8042, driven by a test process ----
@@ -1712,6 +1760,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // by name.
         "isa_ports_are_the_binders_alone",
         metal::Metal {
+            on: On::Every,
             arms: ISA,
             judge: |b| {
                 b[0].job_passed("test_rs_isa_grant")?;
@@ -1724,6 +1773,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // the claim's holder, and to nobody once the claim is gone.
         "isa_lines_reach_their_holder",
         metal::Metal {
+            on: On::Every,
             arms: ISA,
             judge: |b| {
                 b[0].job_passed("test_rs_isa_lines")?;
@@ -1736,6 +1786,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // 0x64 is: the claim is refused naming who holds it.
         "isa_claim_refused_on_a_kernel_port",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::once(
                 "isa-port-declared",
                 "tests/images/testcases.toml",
@@ -1751,6 +1802,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "crash_report_reads_no_kernel_memory",
         metal::Metal {
+            on: On::Every,
             arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &["test_rs_fault_gates"])],
             judge: |b| {
                 b[0].job_passed("test_rs_fault_gates")?;
@@ -1762,9 +1814,9 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // `toyos-crypto` beside ring on the bench's own CPU, both builds'
         // tables printed: that ring runs at all, and that every row measured.
-        // The T14 and the AMD bench.
         "crypto_instrument",
         metal::Metal {
+            on: On::Every,
             arms: CRYPTOCASE,
             judge: |b| {
                 for line in crypto_table(b[0])?.render() {
@@ -1780,16 +1832,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         // `issues/toyos-crypto-is-in-the-tree-on-par-with-ring-and-secure.md`):
         // each routine's verdict is printed and recorded there, and decides
         // nothing here. The job fails only where its leaky control goes
-        // unseen. The T14 and the AMD bench.
+        // unseen.
         "crypto_secret_timing",
-        metal::Metal { arms: CRYPTO_CT, judge: |b| crypto_ct_lines(b[0], "test_rs_crypto_constant_time") },
+        metal::Metal { on: On::Every, arms: CRYPTO_CT, judge: |b| crypto_ct_lines(b[0], "test_rs_crypto_constant_time") },
     ),
     (
         // The same of the NIST curves and Ed25519, whose million
         // measurements a routine take the bench for hours, in a boot of
-        // their own. The T14 and the AMD bench.
+        // their own.
         "crypto_secret_timing_curves",
         metal::Metal {
+            on: On::Every,
             arms: CRYPTO_CT_CURVES,
             judge: |b| crypto_ct_lines(b[0], "test_rs_crypto_constant_time_curves"),
         },
@@ -1876,7 +1929,6 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_syscall_cost",
         "test_rs_spawn_cost",
         "test_rs_job_fairness",
-        claims::RECLAIM,
     ],
 )];
 
@@ -4468,384 +4520,355 @@ fn virt_selftest(
     Ok(())
 }
 
-/// Run one screen test. `Err` carries the decoded screen, because a failure
-/// here is almost always "the text is not what I expected" and the decoded
-/// grid is the only readable form of that.
-fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
-    match name {
-        "screen_panic_muted" => {
-            // The machine the whole M0/M1 line exists for: metal-sim with the
-            // 16550 taken away, so `uart_present()` is false, `panic_flush`
-            // returns without draining anywhere, and the rendered screen is
-            // the only channel the report can possibly reach. It is the one
-            // place the absent-UART branches run at all.
-            let options = BootOptions {
-                profile,
-                qmp: true,
-                mute: true,
-                kernel_params: &["test-late-panic"],
-                ..Default::default()
-            };
-            let argv = qemu::profile_argv(&options);
-            metal_sim_argv_check(&argv)?;
-            match argv.iter().position(|a| a == "-serial") {
-                Some(i) if argv.get(i + 1).is_some_and(|v| v == "none") => {}
-                _ => return Err(format!("the muted profile still has a 16550: {argv:?}")),
-            }
-            if argv.iter().any(|a| a.contains("stdio")) {
-                return Err(format!("the muted profile still has a stdio chardev: {argv:?}"));
-            }
-
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, &[], &[], options);
-            // The arm line is here and nowhere else: this is the machine whose
-            // panel is its only account, so it is the only one whose capture
-            // `halt_all_cpus` refreshes to carry it.
-            // The bound is derived: a panel promising a minute while the kernel
-            // counts something else is the failure this line exists to catch.
-            let armed = format!(
-                "panic: rebooting in {} s, timed by ",
-                toyos_tco::PANIC_BOUND_MS / 1_000
-            );
-            const PLAIN: &str = "late_panic::Nest";
-            let wanted = ["PANIC:", "test-late-panic: on-screen console check", PLAIN, &armed];
-            // Nothing announces the panic here — there is no console for a
-            // marker to arrive on — so the screen is polled until it carries
-            // the report. 30s covers firmware plus the root filesystem read off USB.
-            let dump = qemu.screendump_until(&wanted, Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            for want in wanted {
-                if !text.contains(want) {
-                    return Err(format!(
-                        "{want:?} not on screen of a guest with no serial port at all\ndecoded screen:\n{text}"
-                    ));
-                }
-            }
-            check_colors(
-                &dump,
-                FILL_FATAL,
-                &["PANIC:", "test-late-panic: on-screen console check"],
-                PLAIN,
-            )?;
-            Ok(())
-        }
-        "virt_early_panic" => {
-            // The AArch64 port's stage 3, whole: the loader on AAVMF, the entry's
-            // drop and declaration, the PL011 SPCR names, the boot's survey of
-            // the machine, and a panic on both channels, before the kernel
-            // reaches the AArch64 userland its ROOT carries.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                &[],
-                &[],
-                BootOptions {
-                    profile,
-                    qmp: true,
-                    kernel_params: &["test-early-panic"],
-                    ready_marker: "EARLY PANIC:",
-                    ..Default::default()
-                },
-            );
-            const PLAIN: &str = "ACPI: GTDT timers:";
-            let on_the_panel = ["EARLY PANIC:", "test-early-panic: on-screen console check", PLAIN];
-            let dump = qemu.screendump_until(&on_the_panel, Duration::from_secs(6));
-            let rest = qemu.drain_until(Duration::from_secs(6), |l| l.contains(EARLY_PANIC_MESSAGE));
-            let serial = format!("{}\n{rest}", qemu.boot_log());
-            // What stage 3 prints before it panics: every item is a record
-            // only the AArch64 side of the loader or the kernel writes.
-            for want in [
-                "CPU: entered at EL1",
-                "serial: PL011 at",
-                "control registers: SCTLR_EL1=",
-                "as declared; entered at EL",
-                "memory: 0x0000400",
-                "ACPI: MADT GICD at 0x8000000, GIC version 3",
-                "ACPI: MADT GICC uid=0 mpidr=0x0 enabled=true",
-                "ACPI: GTDT timers:",
-                "EARLY PANIC: panicked at",
-                EARLY_PANIC_MESSAGE,
-            ] {
-                if !serial.contains(want) {
-                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
-                }
-            }
-            let text = dump.text();
-            print_screen(name, &text);
-            for want in on_the_panel {
-                if !text.contains(want) {
-                    return Err(format!("{want:?} not on the ramfb panel\ndecoded screen:\n{text}"));
-                }
-            }
-            check_colors(
-                &dump,
-                FILL_FATAL,
-                &["EARLY PANIC:", "test-early-panic: on-screen console check"],
-                PLAIN,
-            )?;
-            Ok(())
-        }
-        "virt_el2_drop" => {
-            // The entry's drop from EL2 on a CPU with neither FEAT_VHE nor
-            // FEAT_PAN, which HVF never exercises: `virt` with EL2 under TCG,
-            // where firmware hands the loader the CPU at EL2. A loader that
-            // refuses the CPU says so and stops; a handover with EL2's MMU on
-            // halts in a named refusal, or faults first where firmware maps the
-            // image execute-never; a drop that leaves `HCR_EL2` other than
-            // declared halts in a named refusal and says nothing; one that
-            // lands anywhere but EL1 on `SP_EL1` panics in the declaration's
-            // read-back before it reaches FEAT_PAN. Each way the refusal this
-            // waits for never comes.
-            const REFUSED: &str = "control registers: this CPU, entered at EL2, has no FEAT_PAN";
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                &[],
-                &[],
-                BootOptions { profile, ready_marker: "EARLY PANIC:", ..Default::default() },
-            );
-            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(REFUSED));
-            let serial = format!("{}\n{rest}", qemu.boot_log());
-            for want in [
-                "CPU: entered at EL2, HCR_EL2.E2H 0,",
-                "ID_AA64MMFR4_EL1.E2H0 0x0: the kernel's entry writes E2H clear",
-                "EARLY PANIC: panicked at",
-                REFUSED,
-            ] {
-                if !serial.contains(want) {
-                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
-                }
-            }
-            Ok(())
-        }
-        "virt_kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, profile),
-        "virt_early_fault" => {
-            // The vectors, judged by the one thing a broken table cannot do:
-            // report. An undefined instruction right after the console step
-            // reaches `trap::exception`, which says what was taken and panics,
-            // and the panic reaches both channels. A table that is misaligned,
-            // never installed, or whose entry does not reach the handler
-            // leaves the guest silent, and this waits for a line that never
-            // comes.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                &[],
-                &[],
-                BootOptions {
-                    profile,
-                    qmp: true,
-                    kernel_params: &["test-early-fault"],
-                    ready_marker: "EARLY PANIC:",
-                    ..Default::default()
-                },
-            );
-            let on_the_panel = ["EARLY PANIC:", "undefined instruction"];
-            let dump = qemu.screendump_until(&on_the_panel, Duration::from_secs(6));
-            const FAULT_MESSAGE: &str = "synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction) at 0x";
-            let rest = qemu.drain_until(Duration::from_secs(6), |l| l.contains(FAULT_MESSAGE));
-            let serial = format!("{}\n{rest}", qemu.boot_log());
-            for want in [
-                "KERNEL PANIC: synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction)",
-                "EARLY PANIC: panicked at",
-                FAULT_MESSAGE,
-            ] {
-                if !serial.contains(want) {
-                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
-                }
-            }
-            let text = dump.text();
-            print_screen(name, &text);
-            if !on_the_panel.iter().all(|want| text.contains(want)) {
-                return Err(format!("the fault's report is not on the ramfb panel\ndecoded screen:\n{text}"));
-            }
-            Ok(())
-        }
-        "virt_user_mode" => {
-            // The port's stage 4: the generator keyed from the seed the loader
-            // read from firmware's virtio-rng, the kernel's own tables, the GIC
-            // and the timer, and a process at EL0 — the supervisor, whose every
-            // page arrives by a demand fault and whose first spawn is a syscall
-            // the kernel answered.
-            let options =
-                BootOptions { profile, ready_marker: "control registers: SCTLR_EL1=", ..Default::default() };
-            let argv = qemu::profile_argv(&options);
-            if !argv.iter().any(|a| a.starts_with("virtio-rng-pci")) {
-                return Err(format!("`virt` has no virtio-rng for firmware's EFI_RNG_PROTOCOL: {argv:?}"));
-            }
-            let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-            let serial = until_a_program_spawns(&mut qemu)?;
-            for want in [
-                LOADER_SEED_MIXED,
-                "random: the generator is keyed from",
-                "paging: the direct map holds memory below",
-                "percpu: BSP cpu_id=0",
-                "GIC: v",
-                "clock: the generic timer counts at",
-                "spawned the supervisor pid=",
-            ] {
-                if !serial.contains(want) {
-                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
-                }
-            }
-            Ok(())
-        }
-        "virt_timer_preempts" => virt_job(profile, "preempt"),
-        "virt_fp_isolation" => virt_job(profile, "fp_isolation"),
-        "virt_first_entry" => virt_job(profile, "first_entry"),
-        "virt_unmap_touch" => virt_job(profile, "unmap_touch"),
-        "virt_debug_refused" => virt_job(profile, "debug_refused"),
-        "virt_readonly_copyout" => virt_job(profile, &format!("test_rs_{VIRT_COPYOUT}")),
-        "virt_user_copy_faults" => virt_job(profile, &format!("test_rs_{VIRT_USER_COPY}")),
-        "virt_ring0_timer_in_syscall" => virt_job(profile, &format!("test_rs_{VIRT_RING0_TIMER}")),
-        "virt_jobs_at_el2" => virt_jobs_at_el2(profile),
-        "virt_random_differs" => virt_random_differs(profile),
-        "virt_wall_clock_utc" => virt_wall_clock_utc(profile),
-        "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
-        "virt_pan_refuses_el1_a_user_page" => virt_pan_refuses_el1_a_user_page(profile),
-        "virt_smmu" => virt_smmu(profile, test_config),
-        "virt_claim_lpi" => virt_claim_lpi(profile),
-        "virt_low_ecam" => virt_low_ecam(profile, test_config),
-        "virt_mask_windows" => virt_mask_windows(profile),
-        "virt_irq_storm" => {
-            // The CPU floods itself with SGIs until the timer has fired a
-            // thousand times through the flood, then waits for every SGI it
-            // sent. A tick lost or never re-armed, or an SGI lost, leaves the
-            // storm running and the verdict unsaid.
-            virt_selftest(profile, test_config, &["irq-storm"])
-        }
-        "virt_timer_floor" => virt_selftest(profile, test_config, &["timer-floor"]),
-        "virt_smp" => virt_smp(profile, "SMC", 2),
-        // The EL1 entry's own arm, which fetches at a physical address under
-        // the bring-up root, and PSCI through `HVC`: the path HVF takes.
-        "virt_el1_smp" => virt_smp(profile, "HVC", 1),
-        "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(profile),
-        "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(profile),
-        "virt_reboot" => virt_reboot(profile),
-        "virt_off_names_the_cpus_left_on" => virt_off_names_the_cpus_left_on(profile),
-        "virt_reboot_refused_without_psci" => virt_reboot_refused_without_psci(profile),
-        "screen_fatal_behind_a_painter" => {
-            // The fatal halt with a painter holding the panel's latch and
-            // never giving it back — which is what a painter is when the halt
-            // IPI lands mid-paint. The actuator has the last boot checkpoint's
-            // painter go fatal once it holds the latch, so the fatal path meets a
-            // holder beneath itself; the report must take the screen
-            // regardless, and its CPU must go on to watch the reset bound,
-            // which is what the reset proves.
-            const HELD: &str = "panel: a painter holding the panel went fatal";
-            /// `panic_reboot::reboot_now`'s line, raw on the 16550, which is
-            /// this profile's console.
-            const BOUND_OVER: &str = "panic: the bound is over";
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                &[],
-                &[],
-                BootOptions {
-                    profile,
-                    qmp: true,
-                    kernel_params: &["panel-painter-stalls", "panic-reboot-fast"],
-                    // The fatal path is the boot's own end: it never reaches userland.
-                    ready_marker: HELD,
-                    ..Default::default()
-                },
-            );
-            let dump = qemu.screendump_until(&[HELD], Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            if !text.contains(HELD) || dump.fill() != FILL_FATAL {
-                return Err(format!(
-                    "a fatal path behind a painter that holds the panel left it at fill {:?} \
-                     without {HELD:?}: the report never took the screen\ndecoded screen:\n{text}",
-                    dump.fill()
-                ));
-            }
-            // Only the CPU that claimed the panel watches the reset bound, so
-            // the machine resetting at it is that CPU's proof: QEMU exits on a
-            // reset, and the fatal path's last line says whose reset it was.
-            let by = qemu.budget(Duration::from_secs(15));
-            let said = qemu.await_exit(by).map_err(|why| {
-                format!("no CPU is watching the reset bound: {why}\ndecoded screen:\n{text}")
-            })?;
-            if !said.contains(BOUND_OVER) {
-                return Err(format!(
-                    "QEMU exited without {BOUND_OVER:?} on the console, so this was not the panic \
-                     path's reset\n{said}"
-                ));
-            }
-            Ok(())
-        }
-        "screen_fatal_halt_composited" => {
-            // **Can a fatal panic reach the panel once a compositor owns the
-            // scanout?** Three investigations into the T14 have rested on the
-            // answer being yes. The owner pulled his stick, waited a minute,
-            // and saw the desktop unchanged — which is what this test is for:
-            // if the fatal path cannot paint over a claimed framebuffer, every
-            // "nothing appeared on the panel" observation to date says nothing
-            // about what the kernel did.
-            // Driven by `metal-panic-probe`, which is the same kernel the owner
-            // flashes: a gate that staged this with SYS_DEBUG would certify a
-            // path his image does not contain.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/images/panelcase.toml");
-            let options = BootOptions {
-                profile,
-                smp: 8,
-                qmp: true,
-                // The T14's literal shape: no console, so the panel is the
-                // report's only channel. The probe is time-based, so it needs
-                // no console to drive it.
-                mute: true,
-                kernel_params: &["metal-panic-probe"],
-                ..Default::default()
-            };
-            metal_sim_argv_check(&qemu::profile_argv(&options))?;
-            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-
-            // The compositor has the screen *before* anything panics. Asserted
-            // on the fill: every kernel paint fills with `FILL_BOOT`, so
-            // anything else is userland holding the panel. Without this the
-            // test would prove that a fatal panic paints a screen nobody had
-            // taken.
-            let up = qemu.screendump_while(Duration::from_secs(96), Duration::from_millis(200), |d| {
-                d.fill() != FILL_BOOT
-            });
-            if up.fill() == FILL_BOOT {
-                return Err("the compositor never took the screen".to_string());
-            }
-
-            // The probe fires 5 s after the claim; the poll is for that.
-            const MARKER: &str = "metal-panic-probe";
-            let dump = qemu.screendump_while(
-                Duration::from_secs(40),
-                Duration::from_millis(100),
-                |d| d.text().contains(MARKER),
-            );
-            let text = dump.text();
-            print_screen(name, &text);
-            if !text.contains(MARKER) {
-                return Err(format!(
-                    "a fatal panic never reached the panel a compositor was holding — on a \
-                     machine with no serial port that is a kernel that cannot report its own \
-                     death\ndecoded screen:\n{text}"
-                ));
-            }
-            if !text.contains("PANIC:") {
-                return Err(format!(
-                    "the marker is on the panel without the panic banner, so this painted \
-                     something other than a fatal report\ndecoded screen:\n{text}"
-                ));
-            }
-
-            drop(qemu);
-            eprintln!("  [panic] the fatal report is on the panel");
-            if dump.fill() != FILL_FATAL {
-                return Err(format!(
-                    "the panel still carries {:?} rather than the fatal fill, so the compositor's \
-                     screen was never taken back",
-                    dump.fill()
-                ));
-            }
-            Ok(())
-        }
-        other => Err(format!("unknown screen test {other}")),
+fn screen_panic_muted(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    // The machine the whole M0/M1 line exists for: metal-sim with the
+    // 16550 taken away, so `uart_present()` is false, `panic_flush`
+    // returns without draining anywhere, and the rendered screen is
+    // the only channel the report can possibly reach. It is the one
+    // place the absent-UART branches run at all.
+    let options = BootOptions {
+        profile,
+        qmp: true,
+        mute: true,
+        kernel_params: &["test-late-panic"],
+        ..Default::default()
+    };
+    let argv = qemu::profile_argv(&options);
+    metal_sim_argv_check(&argv)?;
+    match argv.iter().position(|a| a == "-serial") {
+        Some(i) if argv.get(i + 1).is_some_and(|v| v == "none") => {}
+        _ => return Err(format!("the muted profile still has a 16550: {argv:?}")),
     }
+    if argv.iter().any(|a| a.contains("stdio")) {
+        return Err(format!("the muted profile still has a stdio chardev: {argv:?}"));
+    }
+
+    let mut qemu =
+        QemuInstance::boot_with_options(test_config, &[], &[], options);
+    // The arm line is here and nowhere else: this is the machine whose
+    // panel is its only account, so it is the only one whose capture
+    // `halt_all_cpus` refreshes to carry it.
+    // The bound is derived: a panel promising a minute while the kernel
+    // counts something else is the failure this line exists to catch.
+    let armed = format!(
+        "panic: rebooting in {} s, timed by ",
+        toyos_tco::PANIC_BOUND_MS / 1_000
+    );
+    const PLAIN: &str = "late_panic::Nest";
+    let wanted = ["PANIC:", "test-late-panic: on-screen console check", PLAIN, &armed];
+    // Nothing announces the panic here — there is no console for a
+    // marker to arrive on — so the screen is polled until it carries
+    // the report. 30s covers firmware plus the root filesystem read off USB.
+    let dump = qemu.screendump_until(&wanted, Duration::from_secs(30));
+    let text = dump.text();
+    print_screen("screen_panic_muted", &text);
+    for want in wanted {
+        if !text.contains(want) {
+            return Err(format!(
+                "{want:?} not on screen of a guest with no serial port at all\ndecoded screen:\n{text}"
+            ));
+        }
+    }
+    check_colors(
+        &dump,
+        FILL_FATAL,
+        &["PANIC:", "test-late-panic: on-screen console check"],
+        PLAIN,
+    )?;
+    Ok(())
+}
+
+fn virt_early_panic(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    // The AArch64 port's stage 3, whole: the loader on AAVMF, the entry's
+    // drop and declaration, the PL011 SPCR names, the boot's survey of
+    // the machine, and a panic on both channels, before the kernel
+    // reaches the AArch64 userland its ROOT carries.
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions {
+            profile,
+            qmp: true,
+            kernel_params: &["test-early-panic"],
+            ready_marker: "EARLY PANIC:",
+            ..Default::default()
+        },
+    );
+    const PLAIN: &str = "ACPI: GTDT timers:";
+    let on_the_panel = ["EARLY PANIC:", "test-early-panic: on-screen console check", PLAIN];
+    let dump = qemu.screendump_until(&on_the_panel, Duration::from_secs(6));
+    let rest = qemu.drain_until(Duration::from_secs(6), |l| l.contains(EARLY_PANIC_MESSAGE));
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    // What stage 3 prints before it panics: every item is a record
+    // only the AArch64 side of the loader or the kernel writes.
+    for want in [
+        "CPU: entered at EL1",
+        "serial: PL011 at",
+        "control registers: SCTLR_EL1=",
+        "as declared; entered at EL",
+        "memory: 0x0000400",
+        "ACPI: MADT GICD at 0x8000000, GIC version 3",
+        "ACPI: MADT GICC uid=0 mpidr=0x0 enabled=true",
+        "ACPI: GTDT timers:",
+        "EARLY PANIC: panicked at",
+        EARLY_PANIC_MESSAGE,
+    ] {
+        if !serial.contains(want) {
+            return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+        }
+    }
+    let text = dump.text();
+    print_screen("virt_early_panic", &text);
+    for want in on_the_panel {
+        if !text.contains(want) {
+            return Err(format!("{want:?} not on the ramfb panel\ndecoded screen:\n{text}"));
+        }
+    }
+    check_colors(
+        &dump,
+        FILL_FATAL,
+        &["EARLY PANIC:", "test-early-panic: on-screen console check"],
+        PLAIN,
+    )?;
+    Ok(())
+}
+
+fn virt_el2_drop(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    // The entry's drop from EL2 on a CPU with neither FEAT_VHE nor
+    // FEAT_PAN, which HVF never exercises: `virt` with EL2 under TCG,
+    // where firmware hands the loader the CPU at EL2. A loader that
+    // refuses the CPU says so and stops; a handover with EL2's MMU on
+    // halts in a named refusal, or faults first where firmware maps the
+    // image execute-never; a drop that leaves `HCR_EL2` other than
+    // declared halts in a named refusal and says nothing; one that
+    // lands anywhere but EL1 on `SP_EL1` panics in the declaration's
+    // read-back before it reaches FEAT_PAN. Each way the refusal this
+    // waits for never comes.
+    const REFUSED: &str = "control registers: this CPU, entered at EL2, has no FEAT_PAN";
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions { profile, ready_marker: "EARLY PANIC:", ..Default::default() },
+    );
+    let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(REFUSED));
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    for want in [
+        "CPU: entered at EL2, HCR_EL2.E2H 0,",
+        "ID_AA64MMFR4_EL1.E2H0 0x0: the kernel's entry writes E2H clear",
+        "EARLY PANIC: panicked at",
+        REFUSED,
+    ] {
+        if !serial.contains(want) {
+            return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+        }
+    }
+    Ok(())
+}
+
+fn virt_early_fault(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    // The vectors, judged by the one thing a broken table cannot do:
+    // report. An undefined instruction right after the console step
+    // reaches `trap::exception`, which says what was taken and panics,
+    // and the panic reaches both channels. A table that is misaligned,
+    // never installed, or whose entry does not reach the handler
+    // leaves the guest silent, and this waits for a line that never
+    // comes.
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions {
+            profile,
+            qmp: true,
+            kernel_params: &["test-early-fault"],
+            ready_marker: "EARLY PANIC:",
+            ..Default::default()
+        },
+    );
+    let on_the_panel = ["EARLY PANIC:", "undefined instruction"];
+    let dump = qemu.screendump_until(&on_the_panel, Duration::from_secs(6));
+    const FAULT_MESSAGE: &str = "synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction) at 0x";
+    let rest = qemu.drain_until(Duration::from_secs(6), |l| l.contains(FAULT_MESSAGE));
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    for want in [
+        "KERNEL PANIC: synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction)",
+        "EARLY PANIC: panicked at",
+        FAULT_MESSAGE,
+    ] {
+        if !serial.contains(want) {
+            return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+        }
+    }
+    let text = dump.text();
+    print_screen("virt_early_fault", &text);
+    if !on_the_panel.iter().all(|want| text.contains(want)) {
+        return Err(format!("the fault's report is not on the ramfb panel\ndecoded screen:\n{text}"));
+    }
+    Ok(())
+}
+
+fn virt_user_mode(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    // The port's stage 4: the generator keyed from the seed the loader
+    // read from firmware's virtio-rng, the kernel's own tables, the GIC
+    // and the timer, and a process at EL0 — the supervisor, whose every
+    // page arrives by a demand fault and whose first spawn is a syscall
+    // the kernel answered.
+    let options =
+        BootOptions { profile, ready_marker: "control registers: SCTLR_EL1=", ..Default::default() };
+    let argv = qemu::profile_argv(&options);
+    if !argv.iter().any(|a| a.starts_with("virtio-rng-pci")) {
+        return Err(format!("`virt` has no virtio-rng for firmware's EFI_RNG_PROTOCOL: {argv:?}"));
+    }
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let serial = until_a_program_spawns(&mut qemu)?;
+    for want in [
+        LOADER_SEED_MIXED,
+        "random: the generator is keyed from",
+        "paging: the direct map holds memory below",
+        "percpu: BSP cpu_id=0",
+        "GIC: v",
+        "clock: the generic timer counts at",
+        "spawned the supervisor pid=",
+    ] {
+        if !serial.contains(want) {
+            return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+        }
+    }
+    Ok(())
+}
+
+fn virt_irq_storm(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    // The CPU floods itself with SGIs until the timer has fired a
+    // thousand times through the flood, then waits for every SGI it
+    // sent. A tick lost or never re-armed, or an SGI lost, leaves the
+    // storm running and the verdict unsaid.
+    virt_selftest(profile, test_config, &["irq-storm"])
+}
+
+fn screen_fatal_behind_a_painter(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    // The fatal halt with a painter holding the panel's latch and
+    // never giving it back — which is what a painter is when the halt
+    // IPI lands mid-paint. The actuator has the last boot checkpoint's
+    // painter go fatal once it holds the latch, so the fatal path meets a
+    // holder beneath itself; the report must take the screen
+    // regardless, and its CPU must go on to watch the reset bound,
+    // which is what the reset proves.
+    const HELD: &str = "panel: a painter holding the panel went fatal";
+    /// `panic_reboot::reboot_now`'s line, raw on the 16550, which is
+    /// this profile's console.
+    const BOUND_OVER: &str = "panic: the bound is over";
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions {
+            profile,
+            qmp: true,
+            kernel_params: &["panel-painter-stalls", "panic-reboot-fast"],
+            // The fatal path is the boot's own end: it never reaches userland.
+            ready_marker: HELD,
+            ..Default::default()
+        },
+    );
+    let dump = qemu.screendump_until(&[HELD], Duration::from_secs(30));
+    let text = dump.text();
+    print_screen("screen_fatal_behind_a_painter", &text);
+    if !text.contains(HELD) || dump.fill() != FILL_FATAL {
+        return Err(format!(
+            "a fatal path behind a painter that holds the panel left it at fill {:?} \
+             without {HELD:?}: the report never took the screen\ndecoded screen:\n{text}",
+            dump.fill()
+        ));
+    }
+    // Only the CPU that claimed the panel watches the reset bound, so
+    // the machine resetting at it is that CPU's proof: QEMU exits on a
+    // reset, and the fatal path's last line says whose reset it was.
+    let by = qemu.budget(Duration::from_secs(15));
+    let said = qemu.await_exit(by).map_err(|why| {
+        format!("no CPU is watching the reset bound: {why}\ndecoded screen:\n{text}")
+    })?;
+    if !said.contains(BOUND_OVER) {
+        return Err(format!(
+            "QEMU exited without {BOUND_OVER:?} on the console, so this was not the panic \
+             path's reset\n{said}"
+        ));
+    }
+    Ok(())
+}
+
+fn screen_fatal_halt_composited(profile: qemu::Profile, _test_config: &Path) -> Result<(), String> {
+    // **Can a fatal panic reach the panel once a compositor owns the
+    // scanout?** Three investigations into the T14 have rested on the
+    // answer being yes. The owner pulled his stick, waited a minute,
+    // and saw the desktop unchanged — which is what this test is for:
+    // if the fatal path cannot paint over a claimed framebuffer, every
+    // "nothing appeared on the panel" observation to date says nothing
+    // about what the kernel did.
+    // Driven by `metal-panic-probe`, which is the same kernel the owner
+    // flashes: a gate that staged this with SYS_DEBUG would certify a
+    // path his image does not contain.
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/images/panelcase.toml");
+    let options = BootOptions {
+        profile,
+        smp: 8,
+        qmp: true,
+        // The T14's literal shape: no console, so the panel is the
+        // report's only channel. The probe is time-based, so it needs
+        // no console to drive it.
+        mute: true,
+        kernel_params: &["metal-panic-probe"],
+        ..Default::default()
+    };
+    metal_sim_argv_check(&qemu::profile_argv(&options))?;
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+
+    // The compositor has the screen *before* anything panics. Asserted
+    // on the fill: every kernel paint fills with `FILL_BOOT`, so
+    // anything else is userland holding the panel. Without this the
+    // test would prove that a fatal panic paints a screen nobody had
+    // taken.
+    let up = qemu.screendump_while(Duration::from_secs(96), Duration::from_millis(200), |d| {
+        d.fill() != FILL_BOOT
+    });
+    if up.fill() == FILL_BOOT {
+        return Err("the compositor never took the screen".to_string());
+    }
+
+    // The probe fires 5 s after the claim; the poll is for that.
+    const MARKER: &str = "metal-panic-probe";
+    let dump = qemu.screendump_while(
+        Duration::from_secs(40),
+        Duration::from_millis(100),
+        |d| d.text().contains(MARKER),
+    );
+    let text = dump.text();
+    print_screen("screen_fatal_halt_composited", &text);
+    if !text.contains(MARKER) {
+        return Err(format!(
+            "a fatal panic never reached the panel a compositor was holding — on a \
+             machine with no serial port that is a kernel that cannot report its own \
+             death\ndecoded screen:\n{text}"
+        ));
+    }
+    if !text.contains("PANIC:") {
+        return Err(format!(
+            "the marker is on the panel without the panic banner, so this painted \
+             something other than a fatal report\ndecoded screen:\n{text}"
+        ));
+    }
+
+    drop(qemu);
+    eprintln!("  [panic] the fatal report is on the panel");
+    if dump.fill() != FILL_FATAL {
+        return Err(format!(
+            "the panel still carries {:?} rather than the fatal fill, so the compositor's \
+             screen was never taken back",
+            dump.fill()
+        ));
+    }
+    Ok(())
 }
 
 /// Run a test that owns its QEMU, turning a panic into a failed test.
@@ -4942,96 +4965,6 @@ fn scanout_wc(console: &str) -> Result<(), String> {
     eprintln!("  [metal-sim] scanout {effective} over an MTRR that says {mtrr}");
     eprintln!("  [metal-sim] {}", handed.trim());
     Ok(())
-}
-
-/// Run the machine-shape test, which owns its QEMU: the machine shape *is* the
-/// test.
-fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
-    match name {
-        "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(),
-        "a_virtio_function_without_access_platform_is_refused" => {
-            common::iommu::a_virtio_function_without_access_platform_is_refused()
-        }
-        "the_uart_carries_the_log_again_once_the_console_carrier_goes" => {
-            common::vmconsole::the_uart_carries_the_log_again_once_the_console_carrier_goes(test_config)
-        }
-        "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
-        "vtd_firmware_left" => common::iommu::vtd_firmware_left(test_config),
-        "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
-        "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
-        "kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, qemu::Profile::Metal),
-        "a_kernel_stack_overflow_names_its_stack" => faults::a_kernel_stack_overflow_names_its_stack(test_config),
-        "a_stepped_tsc_is_slewed_then_demoted" => faults::a_stepped_tsc_is_slewed_then_demoted(test_config),
-        "a_stalled_hpet_is_left_out" => faults::a_stalled_hpet_is_left_out(test_config),
-        "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
-        "acpi_holder_is_refused_a_held_functions_configuration" => acpi_holder_is_refused_a_held_functions_configuration(),
-        "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),
-        "acpi_mediated_access" => acpi_mediated_access(2),
-        "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
-        "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
-        "machine_shutdown_with_a_thread_spinning" => power::machine_shutdown_with_a_thread_spinning(test_config),
-        "a_clean_stop_proves_its_image" => power::a_clean_stop_proves_its_image(test_config),
-        "bar_map_again" => bar_map_again(test_config),
-        "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),
-        "lent_device_memory_refused" => lent_device_memory_refused(test_config),
-        "console_image_boots" => console_image_boots(),
-        "the_uart_carries_the_boot_once_across_the_hand_over" => the_uart_carries_the_boot_once_across_the_hand_over(),
-        "a_supervisor_that_fails_early_says_why_on_the_uart" => a_supervisor_that_fails_early_says_why_on_the_uart(),
-        "a_spawn_from_an_image_frees_it_when_the_child_ends" => a_spawn_from_an_image_frees_it_when_the_child_ends(test_config),
-        "a_user_copy_faults_in_mid_copy_or_ends_as_bad_address" => a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &[]),
-        "a_user_copy_highest_first_faults_or_ends_as_bad_address" => {
-            a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &["copies-go-down"])
-        }
-        "a_bent_supervisor_is_refused_and_nothing_boots" => [qemu::Profile::HeadlessNoConsolePort, qemu::Profile::Virt]
-            .into_iter()
-            .try_for_each(|profile| a_bent_supervisor_is_refused_and_nothing_boots(profile, test_config)),
-        "the_log_lands_on_the_boot_stick" => the_log_lands_on_the_boot_stick(test_config),
-        "a_usb_key_reaches_the_console" => a_usb_key_reaches_the_console(),
-        "desktop_without_x2apic" => desktop_without_x2apic(),
-        "nvme_disk_boots" => nvme_disk_boots(test_config),
-        "a_host_disk_beside_the_stick_is_left_alone" => a_host_disk_beside_the_stick_is_left_alone(test_config),
-        "the_data_partition_beside_the_stick_is_designated" => the_data_partition_beside_the_stick_is_designated(),
-        "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
-        "libc_children" => common::libcchildren::libc_children(),
-        "stream_holders" => stream_holders(test_config),
-        "netstack_holders_exported_to_children" => netstack_holders_exported_to_children(),
-        "udp_receive_times_out" => udp_receive_times_out(),
-        "a_link_ends_under_a_held_stream_and_comes_back" => a_link_ends_under_a_held_stream_and_comes_back(),
-        "a_client_killed_mid_connect_gives_its_place_back" => a_client_killed_mid_connect_gives_its_place_back(),
-        "traffic_leaves_by_the_second_link_while_the_first_is_down" => traffic_leaves_by_the_second_link_while_the_first_is_down(),
-        "session_lifecycle" => common::sessionlifecycle::session_lifecycle(),
-        "a_launch_gives_each_unsent_stdio_slot_a_null" => common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null(),
-        "a_row_reaches_its_own_state_and_no_other" => common::stateview::a_row_reaches_its_own_state_and_no_other(),
-        "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
-        "usbd_refused_without_smi_filter" => usbd_refused_on_amdvi(
-            test_config,
-            qemu::Profile::HeadlessUsbSpareAmdVi,
-            "has no SMI filter",
-            claims::SMI_UNFILTERED,
-        ),
-        "usbd_refused_without_amdvi_remapping" => usbd_refused_on_amdvi(
-            test_config,
-            qemu::Profile::HeadlessUsbSpareAmdViNoRemap,
-            "no message is remapped",
-            claims::NOT_REMAPPED,
-        ),
-        "a_drives_row_holds_one_process_per_function" => a_drives_row_holds_one_process_per_function(),
-        "a_function_arrives_and_leaves" => a_function_arrives_and_leaves(),
-        "a_claim_before_the_declaration_is_refused_at_once" => a_claim_before_the_declaration_is_refused_at_once(),
-        "hda_plays_to_the_controller_that_reaches_an_output" => {
-            hda_plays_to_the_controller_that_reaches_an_output(test_config)
-        }
-        "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
-        "std_threads_count_the_cpus_and_give_back_ended_threads" => std_threads_count_the_cpus_and_give_back_ended_threads(test_config),
-        "affinity_pins_hold_on_every_cpu" => affinity_pins_hold_on_every_cpu(test_config),
-        "kernel_objects_refused_alone" => kernel_objects_refused_alone(test_config),
-        "memory_floor_holds_the_controls" => memory_floor_holds_the_controls(),
-        "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
-        "crypto_instrument_prints_its_table" => crypto_instrument_prints_its_table(test_config),
-        "the_compositor_drives_the_virtio_gpu" => the_compositor_drives_the_virtio_gpu(),
-        "a_window_is_drawn_at_the_scale_and_relaid_at_the_next" => a_window_is_drawn_at_the_scale_and_relaid_at_the_next(),
-        other => Err(format!("unknown machine test {other}")),
-    }
 }
 
 /// `tests/guest/rust-tests`' `scale_window`'s fills, before and after the
@@ -6892,31 +6825,28 @@ fn ioapic_topology(log: &str) -> Result<(), String> {
 ///   Family 17h container holds for it, and `loaded` it: its firmware loads
 ///   0x8600106, and a core's second thread writes the patch too, over the
 ///   level its first loaded.
-fn microcode_on_metal(loader: &str, log: &str, cpus: u32) -> Result<(), String> {
-    const T14: u32 = 0x0008_06c1;
-    const AMD_BENCH: u32 = 0x0086_0f01;
+fn microcode_on_metal(bench: Bench, loader: &str, log: &str, cpus: u32) -> Result<(), String> {
     let lines = microcode_lines(log)?;
     let ids: BTreeSet<u32> = lines.iter().map(|line| line.cpu).collect();
     let want: BTreeSet<u32> = (0..cpus).collect();
     if ids != want || lines.len() != want.len() {
         return Err(format!("expected one microcode line from each of {want:?}, got {lines:?}"));
     }
-    let signature = lines[0].signature;
+    let signature = bench.signature();
     if let Some(other) = lines.iter().find(|line| line.signature != signature) {
-        return Err(format!("cpu0 is signature {signature:#x} and {other:?} is not"));
+        return Err(format!("{bench}'s CPUs are of signature {signature:#x} and {other:?} is not"));
     }
-    let (handed, holds, held_to): (&str, fn(&MicrocodeSaid) -> bool, &str) = match signature {
-        T14 => (
+    let (handed, holds, held_to): (&str, fn(&MicrocodeSaid) -> bool, &str) = match bench {
+        Bench::T14 => (
             "Microcode: /system/share/microcode/intel/06-8c-01/80, 112640 bytes at ",
             |said| matches!(said, MicrocodeSaid::Read { outcome, running: 0xbe } if ["current", "loaded"].contains(&outcome.as_str())),
             "every CPU runs 0xbe, which Intel's 06-8c-01 holds for it",
         ),
-        AMD_BENCH => (
+        Bench::Amd => (
             "Microcode: /system/share/microcode/amd/17-60-01, 3200 bytes at ",
             |said| matches!(said, MicrocodeSaid::Read { outcome, running: 0x0860_010d } if outcome == "loaded"),
             "every CPU loaded 0x860010d, which AMD's Family 17h container holds for it",
         ),
-        _ => return Err(format!("no bench of signature {signature:#x} says what its CPUs are held to")),
     };
     if !loader.contains(handed) {
         let said: Vec<&str> = loader.lines().filter(|l| l.contains("Microcode: ")).collect();
@@ -6945,10 +6875,6 @@ enum MicrocodeSaid {
     /// It read nothing: its vendor has no loader.
     Unread,
 }
-
-/// Each bench's CPUID.01H:EAX, which its kernel's `microcode:` lines name it by.
-const T14_SIGNATURE: u32 = 0x0008_06c1;
-const AMD_BENCH_SIGNATURE: u32 = 0x0086_0f01;
 
 /// Every `microcode:` line in `log`, or the first CPU that refused the update
 /// it was handed, on any machine.
@@ -7439,7 +7365,7 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
 
 /// What one bench's tables are, as the check outside the tree read them on
 /// their dump and the bench's own boots on this row (#875) found them.
-struct Bench {
+struct AcpiTables {
     /// The kernel's line for the ACPI row the FADT names, to its SCI.
     row: &'static str,
     /// How many definition blocks the XSDT and the FADT name.
@@ -7503,7 +7429,7 @@ fn said_writes(lines: &[&str], head: &str) -> Result<Vec<u64>, String> {
 /// hotkey device's `_INI` writes MCHBAR's cTDP control and turbo activation
 /// ratio, at 5F50h and 5F54h, and PL1 at 59A0h, which the kernel keeps
 /// (`issues/the-t14s-thermal-modes-do-not-move-its-package-power-limits.md`).
-const T14: Bench = Bench {
+const T14: AcpiTables = AcpiTables {
     row: "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high",
     blocks: 14,
     refused: &[],
@@ -7523,7 +7449,7 @@ const T14: Bench = Bench {
 /// controller's `_REG(3, 1)` and its
 /// adapter's `_PSR` each reach `ALIB`, whose mailbox writes the root
 /// complex's 0xB8 and 0xBC through ECAM, in 00:00.0's page at 0xF8000000.
-const AMD: Bench = Bench {
+const AMD: AcpiTables = AcpiTables {
     row: "acpi: the ACPI row: PM1a events 0x400+4, GPE0 0x420+8, SCI gsi 9 level/low",
     blocks: 17,
     refused: &[(9, "a name that does not resolve")],
@@ -7537,7 +7463,7 @@ const AMD: Bench = Bench {
 /// The server's load of a bench's tables, every access the kernel's to make
 /// for it, read in the log up to the server's power sources line, which the
 /// boot was held for: each of the machine's definition blocks, fetched through `SYS_ACPI`, summing to zero as its firmware sealed
-/// it, and loaded or refused as its [`Bench`] says; `\_S5`'s `SLP_TYPa`
+/// it, and loaded or refused as its [`AcpiTables`] say; `\_S5`'s `SLP_TYPa`
 /// handed to the kernel, which says it powers this machine off with that
 /// value, and never does on this row. Then the namespace initialised (ACPI
 /// 6.5 §6.5.1): every `_STA` and `_INI` the walk runs, none refused, and the
@@ -7569,7 +7495,11 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
         return Err(format!("the server died: {fired}"));
     }
-    let bench = [T14, AMD].into_iter().find(|bench| kernel.text().contains(bench.row)).ok_or("no bench of this row's names its ACPI row so")?;
+    let bench = match back.bench {
+        Bench::T14 => T14,
+        Bench::Amd => AMD,
+    };
+    kernel.must_say(bench.row)?;
     let said: Vec<&str> = lines.iter().filter_map(|l| l.split_once("acpiserver: table ").map(|(_, said)| said.trim())).filter(|said| said.contains(" of ")).collect();
     let expected: Vec<String> = (1..=bench.blocks)
         .map(|place| {
@@ -7663,7 +7593,7 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     let aml = log.must_say("acpiserver: the tables' AML read SystemMemory ")?;
     let memory = number_between(aml, "AML read SystemMemory ", " times, SystemIO ")?;
     let takes = number_between(aml, "; took the Global Lock ", " times, ")?;
-    if bench.blocks == T14.blocks && (memory == 0 || takes == 0) {
+    if back.bench == Bench::T14 && (memory == 0 || takes == 0) {
         return Err(format!("this machine's tables read memory and take the Global Lock as they load, and the server's did not: {aml}"));
     }
     let size = log.must_say(" table(s) loaded at run time and 0 refused; the namespace holds ")?;
@@ -7687,14 +7617,10 @@ const AMD_KEPT_STATES: &str = "waits in C1 or port 0x414 (exit 400 µs, residenc
 /// request of port 0x415: the kernel chooses the deepest state whose exit and
 /// residency fit and whose history admits it (`kernel::sched::idle::choose`),
 /// and 0x415's exit and residency are both below 0x414's. What the core then
-/// entered no counter on this part says. The AMD bench alone: the T14 has not
-/// run it.
+/// entered no counter on this part says.
 fn idle_entered_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_idle_entered")?;
     let kernel = back.kernel();
-    if !kernel.text().contains(AMD.row) {
-        return Err("this row runs on the AMD bench, and this machine's ACPI row is not that bench's".into());
-    }
     let cpus = back.cpus()?;
     for cpu in 0..cpus {
         let kept = kernel.must_say(&format!("idle: cpu{cpu} (processor UID "))?;
@@ -7867,34 +7793,27 @@ fn tsc_offset_bound(line: &str) -> Option<(i64, i64)> {
 /// bench's scout read it on every CPU (`kernel/sim/tests/scout/`): the T14's
 /// `0x77fafbbf` sets it and the AMD bench's `0x76d8320b` does not, so the
 /// declaration keeps x2APIC on the one and xAPIC on the other.
-fn apic_mode_offered(log: &str) -> Result<&'static str, String> {
-    let signature =
-        microcode_lines(log)?.first().ok_or("the kernel wrote no microcode line to tell the bench by")?.signature;
-    match signature {
-        T14_SIGNATURE => Ok("X2apic"),
-        AMD_BENCH_SIGNATURE => Ok("Xapic"),
-        other => Err(format!("no bench of signature {other:#x} has a recorded APIC mode")),
+fn apic_mode_offered(bench: Bench) -> &'static str {
+    match bench {
+        Bench::T14 => "X2apic",
+        Bench::Amd => "Xapic",
     }
 }
 
 /// Each CPU's `topo:` line against its bench's tree as the bench's own scout
 /// read it (`kernel/sim/tests/scout/`, decoded by the simulator's
-/// `a_benchs_shape_is_what_its_scout_read`), the bench told by its CPU
-/// signature. The line is the CPUID the kernel read live; the expectation is
+/// `a_benchs_shape_is_what_its_scout_read`). The line is the CPUID the kernel read live; the expectation is
 /// words another kernel logged.
 ///
 /// - **T14**: x2APIC ids `0, 2, 4, 6, 1, 3, 5, 7` in MADT order, a core per
 ///   id pair and one L3 for the package.
 /// - **AMD bench**: APIC ids `0..16`, a core per id pair, an L3 per eight ids
 ///   and one package.
-fn topology_readback(log: &str, cpus: u32) -> Result<(), String> {
-    let signature =
-        microcode_lines(log)?.first().ok_or("the kernel wrote no microcode line to tell the bench by")?.signature;
+fn topology_readback(bench: Bench, log: &str, cpus: u32) -> Result<(), String> {
     const AMD_IDS: [u32; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-    let (bench, ids, smt, llc, package): (&str, &[u32], u32, u32, u32) = match signature {
-        T14_SIGNATURE => ("the T14", &[0, 2, 4, 6, 1, 3, 5, 7], 1, 4, 4),
-        AMD_BENCH_SIGNATURE => ("the AMD bench", &AMD_IDS, 1, 3, 7),
-        other => return Err(format!("no bench of signature {other:#x} has a recorded tree")),
+    let (ids, smt, llc, package): (&[u32], u32, u32, u32) = match bench {
+        Bench::T14 => (&[0, 2, 4, 6, 1, 3, 5, 7], 1, 4, 4),
+        Bench::Amd => (&AMD_IDS, 1, 3, 7),
     };
     if cpus as usize > ids.len() {
         return Err(format!("{cpus} CPUs came up and {bench}'s MADT names {}", ids.len()));
@@ -8448,8 +8367,8 @@ fn crypto_parity_unasserted() -> (String, Vec<u8>) {
 /// What one worker takes off the queue: one test, and every boot it owns.
 #[derive(Clone)]
 enum Task {
-    Machine(&'static str),
-    Screen(&'static str, qemu::Profile),
+    Machine(MachineTest),
+    Screen(ScreenTest),
 }
 
 /// What the suite has to say about one test once it has finished.
@@ -8761,8 +8680,8 @@ fn run_task(task: Task, test_config: &Path, report: &std::sync::mpsc::Sender<Out
     eprintln!("{}", toyos_build::printer::started("RUN", name));
     let start = common::clock::mark();
     let outcome = catching(|| match task {
-        Task::Machine(name) => run_machine_test(name, test_config),
-        Task::Screen(name, profile) => run_screen_test(name, profile, test_config),
+        Task::Machine((_, run)) => run(test_config),
+        Task::Screen((_, profile, run)) => run(profile, test_config),
     });
     let outcome = Outcome {
         name: name.to_string(),
@@ -8780,7 +8699,7 @@ impl Task {
     /// The test this task reports an outcome for.
     fn name(&self) -> &'static str {
         match self {
-            Task::Machine(name) | Task::Screen(name, _) => name,
+            Task::Machine((name, _)) | Task::Screen((name, _, _)) => name,
         }
     }
 }
@@ -8834,12 +8753,9 @@ fn run_tasks(tasks: Vec<Task>, width: usize, test_config: &Path) -> Vec<Outcome>
 }
 
 /// Every test with a boot, as the task it runs as.
-fn build_tasks(
-    machine_to_run: &[&'static str],
-    screen_to_run: &[(&'static str, qemu::Profile)],
-) -> Vec<Task> {
-    let machine = machine_to_run.iter().map(|&name| Task::Machine(name));
-    let screen = screen_to_run.iter().map(|&(name, profile)| Task::Screen(name, profile));
+fn build_tasks(machine_to_run: &[MachineTest], screen_to_run: &[ScreenTest]) -> Vec<Task> {
+    let machine = machine_to_run.iter().copied().map(Task::Machine);
+    let screen = screen_to_run.iter().copied().map(Task::Screen);
     machine.chain(screen).collect()
 }
 
@@ -8855,19 +8771,19 @@ fn kept(filters: &[&str], name: &str) -> bool {
 }
 
 /// The machine tests and the screen tests a run boots.
-type Selection = (Vec<&'static str>, Vec<(&'static str, qemu::Profile)>);
+type Selection = (Vec<MachineTest>, Vec<ScreenTest>);
 
 /// Every declared test a run [`kept`].
 fn select(filters: &[&str]) -> Selection {
     (
-        MACHINE_TESTS.iter().filter(|n| kept(filters, n)).copied().collect(),
-        SCREEN_TESTS.iter().filter(|(n, _)| kept(filters, n)).copied().collect(),
+        MACHINE_TESTS.iter().filter(|(n, _)| kept(filters, n)).copied().collect(),
+        SCREEN_TESTS.iter().filter(|(n, _, _)| kept(filters, n)).copied().collect(),
     )
 }
 
 /// Every claim the metal table makes about itself, before anything boots:
-/// every row is its test's one declaration and asks for at least one boot, and
-/// every boot it asks for is a committed config.
+/// every row is its test's one declaration, runs on a bench and asks for at
+/// least one boot, and every boot it asks for is a committed config.
 fn check_registration() {
     devices::the_config_runs_exactly_these_jobs();
     if let Err(why) = the_metal_gate_refuses_what_it_names() {
@@ -8889,6 +8805,9 @@ fn metal_rows_are_whole(rows: &[(&str, metal::Metal)]) -> Result<(), String> {
         if decl.arms.is_empty() {
             return Err(format!("{name}'s metal declaration asks for no boot at all"));
         }
+        if Bench::ALL.iter().all(|bench| decl.on.leaves_out(*bench).is_some()) {
+            return Err(format!("{name}'s metal declaration runs on no bench"));
+        }
         for arm in decl.arms {
             let at = compile::repo_root().join(arm.config);
             if !at.is_file() {
@@ -8905,9 +8824,12 @@ fn the_metal_gate_refuses_what_it_names() -> Result<(), String> {
     fn judge(_: &[&metal::Readback]) -> Result<(), String> {
         Ok(())
     }
-    const RUNS: metal::Metal = metal::Metal { arms: METALCASE, judge };
-    const NONE: metal::Metal = metal::Metal { arms: &[], judge };
+    const RUNS: metal::Metal = metal::Metal { on: On::Every, arms: METALCASE, judge };
+    const NONE: metal::Metal = metal::Metal { on: On::Every, arms: &[], judge };
+    const NO_BENCH: metal::Metal =
+        metal::Metal { on: On::Having(&[Device::I219, Device::AmdVi]), arms: METALCASE, judge };
     const NO_CONFIG: metal::Metal = metal::Metal {
+        on: On::Every,
         arms: &[metal::once("nowhere", "tests/images/no-such-config.toml", &[], &[])],
         judge,
     };
@@ -8919,6 +8841,7 @@ fn the_metal_gate_refuses_what_it_names() -> Result<(), String> {
         ("a row twice", &[("one", RUNS), ("one", RUNS)], Some("has two metal declarations")),
         ("no boot", &[("one", NONE)], Some("asks for no boot at all")),
         ("no config", &[("one", NO_CONFIG)], Some("which is no image config")),
+        ("no bench", &[("one", NO_BENCH)], Some("runs on no bench")),
     ];
     for (case, rows, refused) in cases {
         match (metal_rows_are_whole(rows), refused) {
@@ -8938,7 +8861,7 @@ fn the_metal_gate_refuses_what_it_names() -> Result<(), String> {
 
 /// Every name the two declared registries give.
 fn declared<'a>() -> impl Iterator<Item = &'a str> {
-    MACHINE_TESTS.iter().copied().chain(SCREEN_TESTS.iter().map(|(n, _)| *n))
+    MACHINE_TESTS.iter().map(|(n, _)| *n).chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
 }
 
 /// What the shared boots answer for: every discovered Rust binary, the T14's
@@ -9017,10 +8940,18 @@ fn main() {
     };
 
     if let Some(mode) = parsed.metal {
+        // Before the shared binaries' build, which a refusal would waste.
+        let bench = match metal::bench_of(&mode, parsed.metal_bench, parsed.metal_host) {
+            Ok(bench) => bench,
+            Err(refusal) => {
+                eprintln!("[toyos] {refusal}");
+                run.exit(1);
+            }
+        };
         let (c_bins, rust_bins) = build_shared_bins();
         let boots = shared_metal(&c_bins);
-        let (selected, boots) = match metal::select(filters, &parsed.boots, METAL, &boots) {
-            Ok(selection) => selection,
+        let taken = match metal::select(filters, &parsed.boots, bench, METAL, &boots) {
+            Ok(taken) => taken,
             Err(refusal) => {
                 eprintln!("[toyos] {refusal}");
                 run.exit(1);
@@ -9031,8 +8962,7 @@ fn main() {
         // and "measured nothing" — a run that staged images and never reached
         // the machine has no claim to make.
         run.exit(
-            match metal::run(mode, parsed.metal_host, &selected, &boots, &rust_bins, !nocapture && !debug_mode)
-            {
+            match metal::run(mode, bench, parsed.metal_host, &taken, &rust_bins, !nocapture && !debug_mode) {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,
                 metal::Verdict::Staged => 2,

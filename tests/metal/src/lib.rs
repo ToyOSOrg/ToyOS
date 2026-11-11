@@ -18,8 +18,9 @@
 //! hands the next boot to Ubuntu.
 //!
 //! Beside the loop: [`testargs`], the suite's command line, which carries the
-//! metal profile's flags; [`image`], the config a metal boot derives; and
-//! [`timings`], each bench's record.
+//! metal profile's flags; [`bench`], the benches and how a boot names its own;
+//! [`image`], the config a metal boot derives; and [`timings`], each bench's
+//! record.
 
 use std::fmt;
 use std::io::{Read, Seek};
@@ -34,6 +35,7 @@ use toyos_gpt::Guid;
 use crate::internal::Owned;
 use crate::timings::{Machine, Record};
 
+pub mod bench;
 pub mod image;
 pub mod internal;
 pub mod testargs;

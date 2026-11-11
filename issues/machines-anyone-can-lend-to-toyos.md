@@ -11,7 +11,8 @@ machine anywhere, whether the owner's, a friend's or a community member's,
 could boot ToyOS for the suite with no one standing next to it.
 
 **What exists.**
-- `--metal-host` targets any bench.
+- `--metal-host` reaches any machine, but a run takes one of the two
+  benches' rows, and a readback is judged only as a bench its boot names.
 - `toyos-metal --record` captures a machine into the host store
   (`timings::dir()`), never into the tree.
 - The loop writes the image to the machine's internal install area over
@@ -43,8 +44,8 @@ through this loop with no hand on it.
   before anything leaves the orchestrator's host, by construction rather
   than by a mask written after the fact.
 - **Hardware requirements.** A row names the hardware it needs, so a machine
-  without it skips the row instead of failing it
-  (`issues/a-metal-row-names-no-hardware-and-a-bench-without-it-reds.md`).
+  without it skips the row instead of failing it. Rows declare this for the
+  two benches (`metal::On`); a lent machine is not yet one a row can name.
 - **Scheduling.** Several machines, each with one boot at a time, and the
   results judged per machine.
 - **Reachability.** Today it is a tailnet. Name what replaces it for
