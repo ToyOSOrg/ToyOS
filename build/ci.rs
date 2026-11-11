@@ -566,6 +566,21 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("an_acknowledged_flush_postdates_the_page_table_write"),
         Fails("one_serve_answers_two_concurrent_shootdowns"),
     ]),
+    red(KERNEL_LOOM, "shootdown-take-relaxed", Some("tlb_shootdown"), &[
+        Fails("an_answered_ask_flushed_its_range_after_the_write"),
+    ]),
+    red(KERNEL_LOOM, "shootdown-answer-relaxed", Some("tlb_shootdown"), &[
+        Fails("an_answered_ask_flushed_its_range_after_the_write"),
+    ]),
+    red(KERNEL_LOOM, "shootdown-ask-range-late", Some("tlb_shootdown"), &[
+        Fails("an_answered_ask_flushed_its_range_after_the_write"),
+    ]),
+    red(KERNEL_LOOM, "shootdown-ask-stale-answers", Some("tlb_shootdown"), &[
+        Fails("a_mailbox_reused_waits_for_its_new_answer"),
+    ]),
+    red(KERNEL_LOOM, "shootdown-ask-many-as-one", Some("tlb_shootdown"), &[
+        Fails("two_asks_of_one_cpu_are_each_answered_for_their_own_page"),
+    ]),
     red(KERNEL_LOOM, "tlb-tags-enter-relaxed", Some("tlb_tags"), &[
         Fails("a_change_reaches_a_runner_or_the_entering_cpu_flushes"),
     ]),

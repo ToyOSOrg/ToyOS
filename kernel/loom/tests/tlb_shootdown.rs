@@ -41,7 +41,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
-use kernel_loom::shootdown::{Reach, Shootdown};
+use kernel_loom::shootdown::{Asks, CpuSet, Flush, Reach, Shootdown};
 use loom::sync::Arc;
 use loom::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -126,7 +126,8 @@ impl Machine {
         }
     }
 
-    /// One serve of vector 0xFE's body on cpu 1.
+    /// One serve on cpu 1: vector 0xFE's body serves when owed, and serving
+    /// regardless explores every schedule that one does and more.
     fn serve(&self) {
         self.shootdown.serve(1, |reach| self.flush(reach));
     }
@@ -218,49 +219,6 @@ fn one_serve_answers_two_concurrent_shootdowns() {
 
         target.join().unwrap();
         first.is_some() || second.is_some()
-    });
-}
-
-/// A CPU that is waiting for an acknowledgement has not stopped giving them.
-///
-/// **Not an interleaving question, so loom explores nothing here** — the
-/// schedule below is written out because it is the one two CPUs took on
-/// 2026-08-07, and it is the whole defect. `loom::model` is still what wraps it:
-/// this crate compiles `shootdown.rs` against loom's atomics, which panic
-/// outside a model, and the property under test is the protocol's shape rather
-/// than any edge between its atomics.
-///
-/// `IF` is clear for the whole of a syscall (`arch::syscall`'s `MSR_FMASK`), so
-/// neither CPU below can take the other's IPI. Each one's own wait is the only
-/// thing left that can answer the other, and until this test existed the wait
-/// asked without answering: both spun until `ACK_TIMEOUT_NS` killed them, as a
-/// double kernel panic and as seven wide-phase test failures sharing one line.
-#[test]
-fn an_initiator_answers_while_it_waits() {
-    model(|| {
-        let s = two_cpus();
-
-        // cpu 0 unmaps and answers for itself; cpu 1 has not issued yet, so the
-        // generation cpu 0 publishes is its own.
-        let g0 = s.issue(Reach::Narrow);
-        s.serve(0, |_| {});
-
-        // cpu 1 unmaps while cpu 0 is between its own `serve` and its wait.
-        let g1 = s.issue(Reach::Narrow);
-
-        // cpu 0's wait is not satisfied — cpu 1 has not flushed — and that turn
-        // is nevertheless where cpu 1's answer comes from.
-        assert!(!s.wait_turn(0, 1, g0, |_| {}));
-        assert!(
-            s.served(0, g1),
-            "cpu 0 is waiting for cpu 1 and has stopped answering it, which is \
-             a wait neither CPU can leave",
-        );
-
-        // And cpu 1's own wait then has an answer to find.
-        s.serve(1, |_| {});
-        assert!(s.wait_turn(1, 0, g1, |_| {}));
-        assert!(s.wait_turn(0, 1, g0, |_| {}));
     });
 }
 
@@ -397,8 +355,9 @@ fn a_serve_nested_in_an_unfinished_wide_one_answers_wide() {
 /// kernel-half one, which it answers wide once: a user-half change keeps the
 /// kernel's global translations.
 ///
-/// **Not an interleaving question**, as `an_initiator_answers_while_it_waits`
-/// is not; reds when a serve answers wide with no wide generation owed.
+/// **Not an interleaving question**: `loom::model` wraps it because this
+/// crate's atomics are loom's. Reds when a serve answers wide with no wide
+/// generation owed.
 #[test]
 fn only_a_kernel_half_shootdown_asks_a_wide_answer() {
     model(|| {
@@ -428,4 +387,169 @@ fn two_cpus() -> Shootdown {
     let shootdown = Shootdown::new();
     shootdown.size(2);
     shootdown
+}
+
+/// A user change's range asked of the CPUs running its space ([`Asks`]): cpu 1
+/// is the target and holds a translation of each of two pages, page 0 and
+/// page 1, as one cell each. A range answer re-walks the pages it names, an
+/// answer to more than one ask at once every page.
+struct Asked {
+    asks: Asks,
+    pte: [AtomicU64; 2],
+    tlb: [AtomicU64; 2],
+}
+
+impl Asked {
+    fn new() -> Arc<Self> {
+        let asks = Asks::new();
+        asks.size(3);
+        Arc::new(Self {
+            asks,
+            pte: [AtomicU64::new(MAPPED), AtomicU64::new(MAPPED)],
+            tlb: [AtomicU64::new(MAPPED), AtomicU64::new(MAPPED)],
+        })
+    }
+
+    fn rewalk(&self, page: usize) {
+        self.tlb[page].store(self.pte[page].load(Relaxed), Relaxed);
+    }
+
+    /// cpu 1's answers, `SERVES` of them.
+    fn take_interrupts(&self) {
+        for _ in 0..SERVES {
+            loom::thread::yield_now();
+            self.asks.serve(1, |what| match what {
+                Flush::Range { start, end, .. } => (start..end.min(2)).for_each(|page| self.rewalk(page as usize)),
+                Flush::User => (0..2).for_each(|page| self.rewalk(page)),
+            });
+        }
+    }
+
+    /// `me` unmaps `page` and asks cpu 1 to flush it; what cpu 1 holds of the
+    /// page once it has answered, `None` when the bounded poll ran out.
+    fn unmap_and_ask(&self, me: usize, page: usize) -> Option<u64> {
+        self.pte[page].store(UNMAPPED, Relaxed);
+        let mut targets = CpuSet::default();
+        targets[0] = 1 << 1;
+        self.asks.ask(me, 0, page as u64, page as u64 + 1, &targets);
+        for _ in 0..POLLS {
+            if self.asks.answered(me, 1) {
+                return Some(self.tlb[page].load(Relaxed));
+            }
+            loom::thread::yield_now();
+        }
+        None
+    }
+}
+
+/// An answered ask means cpu 1 has re-walked the page asked after the unmap.
+///
+/// Reds when the target takes its asks `Relaxed`
+/// (`shootdown-take-relaxed`), so its flush no longer follows the write; when
+/// it answers `Relaxed` (`shootdown-answer-relaxed`), so the asking CPU can
+/// read its answer before the flush; and when the asking CPU writes its range
+/// after asking (`shootdown-ask-range-late`), so the target can flush a range
+/// it was never asked.
+#[test]
+fn an_answered_ask_flushed_its_range_after_the_write() {
+    acknowledged_model(|| {
+        let m = Asked::new();
+        let target = {
+            let m = m.clone();
+            loom::thread::spawn(move || m.take_interrupts())
+        };
+        let answer = m.unmap_and_ask(0, 0);
+        if let Some(reachable) = answer {
+            assert_eq!(reachable, UNMAPPED, "cpu 1 answered the ask while still holding the page asked");
+        }
+        target.join().unwrap();
+        answer.is_some()
+    });
+}
+
+/// Two CPUs ask cpu 1 at once, each for its own page: an answer to one alone
+/// flushes its range, an answer to both every page, and each asking CPU finds
+/// its own page gone once answered, whichever way its ask was taken.
+///
+/// Reds when an answer to two asks at once flushes one of their ranges
+/// (`shootdown-ask-many-as-one`).
+#[test]
+fn two_asks_of_one_cpu_are_each_answered_for_their_own_page() {
+    acknowledged_model(|| {
+        let m = Asked::new();
+        let target = {
+            let m = m.clone();
+            loom::thread::spawn(move || m.take_interrupts())
+        };
+        let second = {
+            let m = m.clone();
+            loom::thread::spawn(move || m.unmap_and_ask(2, 1))
+        };
+        let first = m.unmap_and_ask(0, 0);
+        if let Some(reachable) = first {
+            assert_eq!(reachable, UNMAPPED, "cpu 0 was answered while cpu 1 still held page 0");
+        }
+        let second = second.join().unwrap();
+        if let Some(reachable) = second {
+            assert_eq!(reachable, UNMAPPED, "cpu 2 was answered while cpu 1 still held page 1");
+        }
+        target.join().unwrap();
+        first.is_some() || second.is_some()
+    });
+}
+
+/// A CPU asks again only once every CPU it asked has answered, and its next
+/// ask waits for answers of its own: its earlier answers do not stand for it.
+///
+/// Reds when an ask leaves the previous ask's answers standing
+/// (`shootdown-ask-stale-answers`): the mailbox reused would be answered at
+/// once, while cpu 1 still holds the second page.
+#[test]
+fn a_mailbox_reused_waits_for_its_new_answer() {
+    acknowledged_model(|| {
+        let m = Asked::new();
+        let target = {
+            let m = m.clone();
+            loom::thread::spawn(move || {
+                m.take_interrupts();
+                m.take_interrupts();
+            })
+        };
+        let mut answered = false;
+        if m.unmap_and_ask(0, 0).is_some() {
+            let again = m.unmap_and_ask(0, 1);
+            if let Some(reachable) = again {
+                assert_eq!(reachable, UNMAPPED, "cpu 0's second ask was answered while cpu 1 still held page 1");
+            }
+            answered = again.is_some();
+        }
+        target.join().unwrap();
+        answered
+    });
+}
+
+/// A serve answers each CPU asking it once, with that CPU's own range: two
+/// CPUs that ask each other each find their answer once the other has
+/// served, and a second serve finds nothing left to answer. **Not an
+/// interleaving question.** The order in which a waiting CPU answers before
+/// it reads its own answer is `arch::tlb::wait_for`'s, which loom does not
+/// compile; its doc states it and inspection holds it.
+#[test]
+fn each_asker_is_answered_once_with_its_own_range() {
+    model(|| {
+        let asks = Asks::new();
+        asks.size(2);
+        let (mut to_one, mut to_zero) = (CpuSet::default(), CpuSet::default());
+        to_one[0] = 1 << 1;
+        to_zero[0] = 1;
+        asks.ask(0, 0, 0, 1, &to_one);
+        asks.ask(1, 0, 1, 2, &to_zero);
+        // cpu 0's serve answers cpu 1 with cpu 1's range.
+        assert!(asks.serve(0, |what| assert_eq!(what, Flush::Range { tag: 0, start: 1, end: 2 })));
+        assert!(!asks.answered(0, 1));
+        assert!(asks.answered(1, 0), "cpu 0 served and did not answer cpu 1");
+        assert!(asks.serve(1, |_| {}));
+        assert!(asks.answered(0, 1));
+        assert!(!asks.serve(0, |_| {}), "an ask was answered twice");
+    });
 }

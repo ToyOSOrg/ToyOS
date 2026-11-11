@@ -50,6 +50,21 @@ reap-raise-relaxed = []
 shootdown-serve-relaxed = []
 # `src/shootdown.rs`'s `served` reads `Relaxed`, and `counters_round` reds.
 shootdown-served-relaxed = []
+# `src/shootdown.rs`'s `Asks::serve` takes its asks `Relaxed`, and
+# `tlb_shootdown` reds.
+shootdown-take-relaxed = []
+# `src/shootdown.rs`'s `Asks::serve` answers `Relaxed`, and `tlb_shootdown`
+# reds.
+shootdown-answer-relaxed = []
+# `src/shootdown.rs`'s `Asks::ask` writes its range after asking, and
+# `tlb_shootdown` reds.
+shootdown-ask-range-late = []
+# `src/shootdown.rs`'s `Asks::ask` leaves the last ask's answers standing, and
+# `tlb_shootdown` reds.
+shootdown-ask-stale-answers = []
+# `src/shootdown.rs`'s `Asks::serve` answers two asks with one's range, and
+# `tlb_shootdown` reds.
+shootdown-ask-many-as-one = []
 # `src/tlb_tags.rs`'s `enter` loses its fence, and `tlb_tags` reds.
 tlb-tags-enter-relaxed = []
 # `src/log/shard.rs`'s publishing store goes `Relaxed`, and `log_record` reds.
