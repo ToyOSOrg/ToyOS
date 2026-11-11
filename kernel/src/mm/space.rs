@@ -613,6 +613,15 @@ impl AddressSpace {
         self.settle();
     }
 
+    /// Empty the space as its process ends, every range taken away as
+    /// [`release`](Self::release) takes one: a paged range lets its node go
+    /// only after its leaves are cleared and shot down, so the space's last
+    /// reference, wherever it drops (a revoker's visit among them), frees
+    /// nothing but its empty tables.
+    pub fn end(&mut self) {
+        self.release(UserAddr::new(FLOOR), TOP - FLOOR);
+    }
+
     /// Give every page of `[start, start + len)` protection `prot`: a reserved
     /// private page is committed unless `prot` is `None`, promised its frame
     /// here, and a committed one keeps its frame and commitment whatever
@@ -1096,9 +1105,12 @@ fn copy_in(source: &dyn CopySource, offset: u64, len: u64, phys: u64) {
 /// Not through [`AddressSpace::clear`]: no thread runs in a space that drops,
 /// no CPU holds its root ([`Space::retire`]), and a private frame is mapped in
 /// no other, so no CPU caches its leaves, no futex waiter is keyed on its
-/// frames and no copy pins them.
+/// frames and no copy pins them. A paged range is gone by then: its process's
+/// end took every range ([`AddressSpace::end`]), and a spawn lays out none.
 impl Drop for AddressSpace {
     fn drop(&mut self) {
+        let paged = self.inventory.meeting(FLOOR, TOP).any(|(_, entry)| matches!(entry.kind, Kind::Object { object: Mapped::Paged(_), .. }));
+        assert!(!paged, "space: dropped holding a paged range its end did not take");
         let committed = self.committed_pages(FLOOR, TOP);
         self.tables.edit(FLOOR, TOP, |_, leaf| matches!(leaf, Leaf::Mapped(Mapping { owned: false, .. })).then_some(Leaf::Empty));
         let mut freed = 0;

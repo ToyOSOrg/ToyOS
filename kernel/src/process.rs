@@ -663,6 +663,7 @@ fn teardown_resources(
 
     let handles = Arc::clone(&process_data_arc.lock().handles);
     ops::close_all(&mut handles.lock());
+    process_data_arc.lock().space.lock().end();
     // Every thread has left, and none returns to Ring 3 to use them.
     crate::isa::process_ends(pid);
     let space = Arc::clone(&process_data_arc.lock().space);
