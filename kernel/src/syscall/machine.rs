@@ -260,8 +260,13 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
         Ok(laid) => laid,
         Err(e) => return e.to_u64(),
     };
-    // Charged to the caller's job for the copy-out, which can fault and wait.
-    let Ok(_held) = Charge::current(charge::array::<u8>(laid.capacity())) else {
+    // A roster is charged to the caller's job for the copy-out, which can
+    // fault and wait; a header alone is a fixed few bytes, and never refused.
+    let charged = match max_entries {
+        0 => Ok(None),
+        _ => Charge::current(charge::array::<u8>(laid.capacity())).map(Some),
+    };
+    let Ok(_held) = charged else {
         return SyscallError::ResourceExhausted.to_u64();
     };
     out.write_at(0, &laid).map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| laid.len() as u64)
