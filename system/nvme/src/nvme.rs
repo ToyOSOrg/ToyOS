@@ -166,9 +166,9 @@ const STEPS: [Step; 2 + 2 * MAX_IO_QUEUES as usize] = {
 /// The most admin commands a reset waits for.
 const RESET_ADMIN_COMMANDS: u32 = STEPS.len() as u32;
 
-/// The longest a command goes unanswered: [`COMMAND_SILENCE`], then the reset,
-/// whose two `CSTS.RDY` transitions are each bounded by `CAP.TO` and whose
-/// admin commands each by [`ADMIN_BOUND`].
+/// The longest a command goes unanswered, from its submission to the device:
+/// [`COMMAND_SILENCE`], then the reset, whose two `CSTS.RDY` transitions are
+/// each bounded by `CAP.TO` and whose admin commands each by [`ADMIN_BOUND`].
 const ANSWERED_WITHIN: Duration = COMMAND_SILENCE
     .checked_add(READY_BOUND_MOST.checked_mul(2).unwrap())
     .unwrap()

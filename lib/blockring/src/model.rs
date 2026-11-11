@@ -724,10 +724,11 @@ mod tests {
     /// given up in.
     const GIVE_UP: [Step; 2] = [Step::Write { block: 0, value: 1 }, Step::Flush];
 
-    /// What it is held under: a reset and two deaths, the most failures of
-    /// those kinds that never give a flush up; two deaths and resets, and a
-    /// death followed by more device errors than [`MAX_ATTEMPTS`] — what makes
-    /// the client give an acknowledged write up.
+    /// What it is held under: a reset and two deaths, failures that cost
+    /// exactly [`MAX_ATTEMPTS`] attempts, the boundary where the law forbids a
+    /// give-up; two deaths and resets, and a death followed by more device
+    /// errors than [`MAX_ATTEMPTS`] — what makes the client give an
+    /// acknowledged write up.
     const GIVE_UP_BOUNDS: [Failures; 4] = [
         at_most(1, 2, 0),
         at_most(2, 2, 0),

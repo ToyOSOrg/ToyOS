@@ -61,10 +61,11 @@ pub mod wire;
 #[cfg(test)]
 mod model;
 
-/// The protocol's bound on a server's silence, set by the slowest server: the
-/// NVMe driver, a command's silence before it resets the controller and the
-/// reset, which it shows fit. A driver whose worst case does not fit cannot
-/// serve a client that keeps to it.
+/// The protocol's bound on a server's silence. It is set from the NVMe
+/// driver's figure, counted from a command's submission to the device: the
+/// command's silence before the driver resets the controller, and the reset.
+/// What that figure leaves out, and usbd's worst case, which does not fit, are
+/// `issues/a-usb-disk-session-can-wait-past-the-block-silence-bound-behind-other-sessions.md`.
 pub const SILENCE_BOUND_NS: u64 = 365_000_000_000;
 
 pub use entry::{Completion, Op, Request, Status};
