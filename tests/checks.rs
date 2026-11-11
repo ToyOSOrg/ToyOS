@@ -526,6 +526,62 @@ mod checks {
         Ok(())
     }
 
+    /// [`mitigations_on_metal`] against a boot's lines as the kernel writes
+    /// them and the ways a boot could fall short of them, with no guest.
+    #[test]
+    fn mitigations_verdict() -> Result<(), String> {
+        const WORDS: &str = "words Amd signature=0x860f01 microcode=0x860010d hypervisor=false smt=true cpuid.7.0.ebx=0x219c91a9 \
+                             cpuid.7.0.edx=0x0 cpuid.7.2.edx=0x0 arch_capabilities=0x0 cpuid.80000008.ebx=0x1109100 \
+                             cpuid.80000021.eax=0x0 cpuid.80000021.ecx=0x0";
+        const LINES: [&str; 17] = [
+            "spectre_v1: mitigated: user pointers clamped without a branch, LFENCE dispatch-serializing",
+            "spectre_v2: vulnerable: needs retpoline, return predictor fill, IBPB between programs that ask, STIBP for programs that ask; has SMEP",
+            "branch_history_injection: not affected",
+            "retbleed: vulnerable: needs STIBP for programs that ask, Jmp2Ret; has DE_CFG2[SuppressBPOnNonBr]",
+            "spec_rstack_overflow: vulnerable: needs IBPB between programs that ask, Safe-RET",
+            "indirect_target_selection: not affected",
+            "spec_store_bypass: vulnerable: needs SSBD for programs that ask",
+            "meltdown: not affected",
+            "l1tf: not affected",
+            "mds: not affected",
+            "tsx_async_abort: not affected",
+            "mmio_stale_data: not affected",
+            "reg_file_data_sampling: not affected",
+            "srbds: not affected",
+            "gather_data_sampling: not affected",
+            "tsa: not affected",
+            "itlb_multihit: not affected",
+        ];
+        let log = |words: &str, lines: &[&str]| -> String {
+            core::iter::once(words).chain(lines.iter().copied()).map(|said| format!("[ 0.050 cpu0 kernel] mitigations: cpu0 {said}\n")).collect()
+        };
+        mitigations_on_metal(&log(WORDS, &LINES)).map_err(|e| format!("a boot's own lines were refused: {e}"))?;
+        // The register read the other way is another boot's lines, and as good.
+        let mut unset = LINES;
+        unset[3] = "retbleed: vulnerable: needs STIBP for programs that ask, Jmp2Ret, DE_CFG2[SuppressBPOnNonBr]";
+        mitigations_on_metal(&log(WORDS, &unset)).map_err(|e| format!("the register read clear was refused: {e}"))?;
+
+        let refused = |what: &str, log: String, says: &str| match mitigations_on_metal(&log) {
+            Ok(()) => Err(format!("{what} was accepted")),
+            Err(e) if e.contains(says) => Ok(()),
+            Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
+        };
+        refused("a boot with no lines", String::new(), "no `mitigations:` words line")?;
+        refused("sixteen lines", log(WORDS, &LINES[..16]), "expected one `mitigations: cpu0 itlb_multihit: ` line")?;
+        let mut wrong = LINES;
+        wrong[7] = "meltdown: vulnerable: needs kernel unmapped in user mode";
+        refused("a line the words do not decide", log(WORDS, &wrong), "not the decision on its words")?;
+        let mut lfence = LINES;
+        lfence[0] = "spectre_v1: vulnerable: needs LFENCE dispatch-serializing; has user pointers clamped without a branch";
+        refused("the bit the kernel sets read clear", log(WORDS, &lfence), "not the decision on its words")?;
+        // Lines of another CPU's words: the same lines under words without SSBD.
+        refused("words the lines were not decided from", log(&WORDS.replace("0x1109100", "0x109100"), &LINES), "not the decision on its words")?;
+        refused("a guest's words", log(&WORDS.replace("hypervisor=false", "hypervisor=true"), &LINES), "a hypervisor's guest's")?;
+        refused("another vendor's words", log(&WORDS.replace("words Amd", "words Other(\"HygonGenuine\")"), &LINES), "whose guidance nothing reads")?;
+        refused("words without a field", log(&WORDS.replace(" smt=true", ""), &LINES), "carry no smt")?;
+        Ok(())
+    }
+
     /// [`microcode_on_metal`] against both benches' machines and the ways a
     /// boot of either could fall short of what its bench is held to, with no
     /// guest.

@@ -619,6 +619,19 @@ pub fn topology_keys() -> Result<kernel::sched::topology::CpuKeys, kernel::cpu::
     kernel::cpu::topology_keys(&levels[..level_count], &caches[..cache_count])
 }
 
+/// The logical processors of this CPU's core: EBX[15:0] of the SMT level of
+/// CPUID.1FH, or 0BH where that enumerates nothing (SDM Vol. 2A, which AMD's
+/// `CPUID_Fn0000000B` follows), and 1 where neither does.
+pub fn threads_per_core() -> u32 {
+    let max = cpuid(0, 0).0;
+    [0x1F, 0x0B]
+        .into_iter()
+        .filter(|&leaf| max >= leaf)
+        .map(|leaf| cpuid(leaf, 0))
+        .find(|&(_, ebx, ecx, _)| ebx & 0xFFFF != 0 && (ecx >> 8) & 0xFF == 1)
+        .map_or(1, |(_, ebx, _, _)| ebx & 0xFFFF)
+}
+
 /// This CPU's APIC id, from CPUID: the id the hardware gives it, readable
 /// before any per-CPU state exists.
 ///

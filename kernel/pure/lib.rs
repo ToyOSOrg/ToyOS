@@ -18,6 +18,7 @@ pub mod frames;
 pub mod iova;
 pub mod message;
 pub mod microcode;
+pub mod mitigation;
 pub mod mtrr;
 pub mod owners;
 pub mod chunked;

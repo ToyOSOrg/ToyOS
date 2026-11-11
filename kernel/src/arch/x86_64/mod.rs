@@ -30,6 +30,7 @@ pub mod idt;
 pub mod iommu_unit;
 pub mod ioapic;
 pub mod microcode;
+pub mod mitigation;
 pub mod mtrr;
 pub mod opregion;
 pub mod paging;
