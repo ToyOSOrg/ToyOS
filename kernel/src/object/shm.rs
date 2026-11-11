@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 
 use slot::Slot;
 
+use kernel::frames::PER_SUPER;
 use kernel::sched::job::Job;
 use kernel::vm::{Prot, Shared};
 
@@ -34,6 +35,7 @@ use crate::mm::policy::CachePolicy;
 use crate::mm::pmm::{self, Run};
 use crate::mm::space::Space;
 use crate::mm::{PAGE_2M, PAGE_SIZE};
+use crate::sync::Lock;
 use crate::{DirectMap, UserAddr};
 
 use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
@@ -51,8 +53,8 @@ const CHUNK: usize = 1 << 16;
 enum Backing {
     /// A frame of its own for each page, drawn at the page's first touch,
     /// [`CHUNK`] slots to a piece so that no piece is past one heap
-    /// allocation.
-    Frames(Vec<Box<[Slot]>>),
+    /// allocation, and the lock every first touch of its pages takes.
+    Frames { pieces: Vec<Box<[Slot]>>, first_touch: Lock<()> },
     /// 2 MiB pages of its own in one physical run: what a device may be lent
     /// or granted, and what a kernel-built image addresses as one slice.
     Run(Run),
@@ -103,7 +105,8 @@ impl SharedMemObject {
             pieces.push((0..n).map(|_| Slot::hole()).collect());
             left -= n;
         }
-        Ok(Self::new(core, Backing::Frames(pieces), pages * PAGE_SIZE, CachePolicy::Normal))
+        let backing = Backing::Frames { pieces, first_touch: Lock::new(()) };
+        Ok(Self::new(core, backing, pages * PAGE_SIZE, CachePolicy::Normal))
     }
 
     /// [`create`](Self::create)'s region with every page's frame drawn now:
@@ -157,7 +160,7 @@ impl SharedMemObject {
         let (whole, base) = match &object.backing {
             Backing::Sub { whole, offset, .. } => (whole, *offset),
             Backing::Aperture { .. } => return Err(SyscallError::InvalidArgument),
-            Backing::Frames(_) | Backing::Run(_) | Backing::Boot { .. } => (object, 0),
+            Backing::Frames { .. } | Backing::Run(_) | Backing::Boot { .. } => (object, 0),
         };
         let held = object.immutable().unwrap_or(object.size);
         if len == 0 || !offset.is_multiple_of(PAGE_SIZE) || offset.checked_add(len).is_none_or(|end| end > held) {
@@ -182,7 +185,7 @@ impl SharedMemObject {
     /// device's, firmware's or the loader's.
     pub fn is_ram(&self) -> bool {
         match &self.backing {
-            Backing::Frames(_) | Backing::Run(_) => true,
+            Backing::Frames { .. } | Backing::Run(_) => true,
             Backing::Sub { whole, .. } => whole.is_ram(),
             Backing::Boot { .. } | Backing::Aperture { .. } => false,
         }
@@ -194,7 +197,7 @@ impl SharedMemObject {
         match &self.backing {
             Backing::Boot { len, .. } => Some(*len),
             Backing::Sub { whole, len, .. } => whole.immutable().map(|_| *len),
-            Backing::Frames(_) | Backing::Run(_) | Backing::Aperture { .. } => None,
+            Backing::Frames { .. } | Backing::Run(_) | Backing::Aperture { .. } => None,
         }
     }
 
@@ -221,28 +224,25 @@ impl SharedMemObject {
     pub fn run(&self) -> Option<(u64, u64)> {
         match &self.backing {
             Backing::Run(run) => Some((run.direct_map().phys(), run.count() as u64 * PAGE_2M)),
-            Backing::Frames(_) | Backing::Boot { .. } | Backing::Aperture { .. } | Backing::Sub { .. } => None,
+            Backing::Frames { .. } | Backing::Boot { .. } | Backing::Aperture { .. } | Backing::Sub { .. } => None,
         }
     }
 
     /// The physical address of the page `offset` bytes in, which lies inside
     /// it. A region's page nothing has touched draws its zeroed frame here,
-    /// which the region's promise holds, so a caller is one that may take the
-    /// frame allocator's lock: never in interrupt context, and never holding
-    /// that lock. A whole region ([`create_whole`](Self::create_whole)) has
-    /// drawn every frame already, and any other backing draws none.
+    /// which the page's promise holds, under the region's first-touch lock and
+    /// then the frame allocator's (a space's lock, where a fault holds one,
+    /// comes before both), so a caller is one that may take them: never in
+    /// interrupt context, and never holding either. A whole region
+    /// ([`create_whole`](Self::create_whole)) has drawn every frame already,
+    /// and any other backing draws none.
     pub fn page(&self, offset: u64) -> u64 {
         assert!(offset < self.size, "shm koid {}: page {offset:#x} of {:#x} bytes", self.core.koid().raw(), self.size);
         let page = offset & !(PAGE_SIZE - 1);
         match &self.backing {
-            Backing::Frames(pieces) => {
+            Backing::Frames { pieces, first_touch } => {
                 let i = (page / PAGE_SIZE) as usize;
-                pieces[i / CHUNK][i % CHUNK].frame(
-                    || pmm::alloc_promised().into_raw(),
-                    // SAFETY: a frame just drawn for this page that lost to
-                    // another touch's, so nothing maps or reaches it.
-                    |lost| unsafe { pmm::discard(lost) },
-                )
+                pieces[i / CHUNK][i % CHUNK].frame(|| first_touch.lock(), || pmm::alloc_promised().into_raw())
             }
             Backing::Run(run) => run.direct_map().phys() + page,
             Backing::Boot { phys, .. } | Backing::Aperture { phys, .. } => phys + page,
@@ -323,17 +323,18 @@ fn pages(size: u64) -> Result<u64, SyscallError> {
 /// The frames go back once no space maps the object and nothing holds it:
 /// first every futex wait on a word in them ends, so none is left keyed on a
 /// frame the allocator hands out again; and the promises of pages never
-/// touched go back with them. Nothing is allocated: the frames go 512 at a
-/// time, each batch sorted on the stack, its waits ended by one walk of the
-/// 64 buckets and its frames freed under one hold of the allocator's lock.
+/// touched go back with them. Nothing is allocated: the frames go a
+/// superframe's worth at a time, each batch sorted on the stack, its waits
+/// ended by one walk of the 64 buckets and its frames freed under one hold of
+/// the allocator's lock.
 impl Drop for SharedMemObject {
     fn drop(&mut self) {
         match &mut self.backing {
-            Backing::Frames(pieces) => {
+            Backing::Frames { pieces, .. } => {
                 let job = self.core.job();
                 let mut holes = 0;
-                for slots in pieces.iter().flat_map(|piece| piece.chunks(512)) {
-                    let mut batch = [0u64; 512];
+                for slots in pieces.iter().flat_map(|piece| piece.chunks(PER_SUPER)) {
+                    let mut batch = [0u64; PER_SUPER];
                     let mut n = 0;
                     for frame in slots.iter().map(Slot::drawn) {
                         match frame {

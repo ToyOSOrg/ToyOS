@@ -46,8 +46,15 @@ its region's first-touch draw makes it
   and `.j16` on the AMD bench), `spawn_cost`, `osbench procs` and `osbench
   files`. Main after must show `work.build_shaped.j1` and `.j<cpus>` faster on
   both benches, and no `proc` or `fs` row slower beyond the before run's
-  spread: `proc.spawn_wait.large`, whose 32 MiB image region is written whole
-  and now draws a frame a page as it is written, most of all.
+  spread.
+- **Owed by the object fault-around (#1259):** a region's page is drawn one
+  hold of the frame allocator's lock at a time, so a region written whole,
+  such as `proc.spawn_wait.large`'s 32 MiB image, takes 8,192 holds where
+  drawing it whole took 16. Whichever of #1259 and #1270 (the first-touch
+  region) lands second draws an object run's holes in one
+  `pmm::alloc_promised_into` hold, zeroes them outside it and installs them
+  under the region's first-touch lock. Exit: #1259's object arm populates a
+  run that way.
 
 **Exit**: the resident memory of a desktop boot's processes with and without
 their windows, measured, and the window's size justified from it or cut once

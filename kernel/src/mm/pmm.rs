@@ -249,8 +249,8 @@ fn kept_supers(frames: &Frames) -> u64 {
 }
 
 /// Promise `frames` to a commitment of `job`'s, which draws each with
-/// [`alloc_promised`] or [`alloc_promised_into`] when it is first touched; `false`, and nothing promised, where that would
-/// take what is held back.
+/// [`alloc_promised`] or [`alloc_promised_into`] when it is first touched;
+/// `false`, and nothing promised, where that would take what is held back.
 pub fn promise(job: &Job, frames: u64) -> bool {
     frames == 0 || with(|f| f.promise(job.memory(), frames))
 }
@@ -279,8 +279,7 @@ pub fn unpromise(job: &Job, frames: u64) {
 /// the page a frame again ([`Frames::discard`]).
 ///
 /// # Safety
-/// `phys` is a frame drawn for a committed page, which nothing maps or
-/// reaches any more and nothing else frees.
+/// `phys` is an owned leaf's frame, which no leaf on any CPU maps any more.
 pub unsafe fn discard(phys: u64) {
     let pins = pins();
     with(|f| f.discard(phys, &pins));

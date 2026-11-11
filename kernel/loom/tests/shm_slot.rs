@@ -1,16 +1,18 @@
 //! Loom: a region page's first touch.
 //!
 //! A region draws a page's frame at its first touch, and two CPUs may touch it
-//! at once: two threads of a process, or two processes mapping the region.
-//! Each draws a zeroed frame and races to install it. What must hold, from
-//! every interleaving loom can build:
+//! at once: two threads of a process, or two processes mapping the region. A
+//! touch that finds the frame installed takes it with one load; one that finds
+//! a hole takes the region's first-touch lock, looks again, and draws only if
+//! the page is still a hole. What must hold, from every interleaving loom can
+//! build:
 //!
-//! * **One frame a page.** Both touchers are handed the same frame, and every
-//!   draw but the installed one goes back exactly once, so no frame is lost or
-//!   mapped twice. A touch that finds the frame installed draws none.
-//! * **A frame comes with its zeros.** A toucher handed another's frame reads
-//!   what its drawer wrote into it before installing it. On x86 every store is
-//!   a release and every load an acquire, so no guest test can see this fail.
+//! * **One draw a page.** However the touches interleave, the page draws one
+//!   frame, against its own promise, and every toucher is handed it.
+//! * **A frame comes with its zeros.** A toucher that takes the frame off the
+//!   one load reads what its drawer wrote into it before installing it. On x86
+//!   every store is a release and every load an acquire, so no guest test can
+//!   see this fail.
 //!
 //! The negative case is a cargo feature:
 //!
@@ -19,53 +21,48 @@
 //!   --test shm_slot
 //! ```
 //!
-//! makes the install and its loads `Relaxed`, and
+//! makes the install and the one load `Relaxed`, and
 //! [`a_frame_is_handed_over_with_what_its_drawer_wrote`] must red.
 
 #![cfg(feature = "loom")]
 
 use kernel_loom::shm_slot::Slot;
 use loom::cell::UnsafeCell;
-use loom::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use loom::sync::Arc;
+use loom::sync::atomic::{AtomicUsize, Ordering};
+use loom::sync::{Arc, Mutex};
 
-/// Two frames, by the address each touch draws.
+/// Two frames, by the address each touch would draw.
 const FRAMES: [u64; 2] = [0x1000, 0x2000];
 
-/// A page two touches race for: its slot, each frame's contents, how many
-/// frames were drawn and what was given back.
+/// A page two touches race for: its slot, the region's first-touch lock, each
+/// frame's contents and how many frames were drawn.
 struct Page {
     slot: Slot,
+    first_touch: Mutex<()>,
     contents: [UnsafeCell<u64>; 2],
     draws: AtomicUsize,
-    given_back: AtomicUsize,
-    returned: AtomicU64,
 }
 
 impl Page {
     fn new() -> Self {
         Self {
             slot: Slot::hole(),
+            first_touch: Mutex::new(()),
             contents: [UnsafeCell::new(0xa5), UnsafeCell::new(0xa5)],
             draws: AtomicUsize::new(0),
-            given_back: AtomicUsize::new(0),
-            returned: AtomicU64::new(0),
         }
     }
 
-    /// Touch `i`: draw frame `i`, zero it, and race to install it; the frame
-    /// handed back and what it holds.
+    /// Touch `i`, which would draw frame `i` and zero it: the frame handed
+    /// back and what it holds.
     fn touch(&self, i: usize) -> (u64, u64) {
         let frame = self.slot.frame(
+            || self.first_touch.lock().unwrap(),
             || {
                 self.draws.fetch_add(1, Ordering::Relaxed);
                 // SAFETY: frame `i` is this touch's alone until it is installed.
                 self.contents[i].with_mut(|p| unsafe { *p = 0 });
                 FRAMES[i]
-            },
-            |lost| {
-                self.given_back.fetch_add(1, Ordering::Relaxed);
-                self.returned.store(lost, Ordering::Relaxed);
             },
         );
         let at = FRAMES.iter().position(|&f| f == frame).expect("a frame no touch drew");
@@ -75,9 +72,9 @@ impl Page {
     }
 }
 
-/// Two touches are handed one frame, and a draw that lost goes back once.
+/// Two touches draw one frame between them and are both handed it.
 #[test]
-fn two_touches_keep_one_frame_and_give_the_other_back() {
+fn two_touches_draw_once_and_are_handed_one_frame() {
     loom::model(|| {
         let page = Arc::new(Page::new());
         let other = {
@@ -87,11 +84,7 @@ fn two_touches_keep_one_frame_and_give_the_other_back() {
         let mine = page.touch(0).0;
         let theirs = other.join().unwrap();
         assert_eq!(mine, theirs, "two touches of one page were handed two frames");
-        let (draws, back) = (page.draws.load(Ordering::Relaxed), page.given_back.load(Ordering::Relaxed));
-        assert_eq!(back, draws - 1, "{draws} frames drawn and {back} given back: every draw but the installed one goes back");
-        if back == 1 {
-            assert_ne!(page.returned.load(Ordering::Relaxed), mine, "the frame handed out went back");
-        }
+        assert_eq!(page.draws.load(Ordering::Relaxed), 1, "a page drew more than once");
         assert_eq!(page.slot.drawn(), Some(mine), "the slot holds another frame than the touches were handed");
     });
 }
