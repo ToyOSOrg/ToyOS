@@ -6,7 +6,7 @@
 /// whose writer's record this thread has loaded. Not `LFENCE; RDTSC`: on AMD
 /// `LFENCE` holds later instructions back only where DE_CFG bit 1 or CPUID
 /// Fn8000_0021 EAX bit 2 makes it dispatch serializing. Nothing holds a later
-/// instruction back ([`crate::clock::Latch::read_with`]).
+/// instruction back ([`crate::clock`]).
 #[inline]
 pub fn counter() -> u64 {
     let lo: u32;
