@@ -840,6 +840,19 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(SDK, "transport-end-keeps-inflight", None, &[Fails(
         "transport::inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
     )]),
+    // The descriptor table's hold beside its writer.
+    red(SDK, "fd-hold-revives", None, &[
+        Fails("fd::table::model::a_call_beside_a_close_holds_a_live_object_or_none"),
+        Fails("fd::table::model::two_calls_beside_a_close_let_the_object_go_once"),
+        Fails("fd::table::model::a_call_beside_a_dup2_holds_the_old_object_or_the_new"),
+    ]),
+    red(SDK, "fd-hold-unchecked", None, &[Fails(
+        "fd::table::model::a_call_on_a_closed_descriptor_never_holds_the_object_that_took_its_slot",
+    )]),
+    red(SDK, "fd-publish-relaxed", None, &[
+        Fails("fd::table::model::a_call_on_a_closed_descriptor_never_holds_the_object_that_took_its_slot"),
+        Fails("fd::table::model::a_call_on_a_reopened_descriptor_holds_the_old_object_or_the_new"),
+    ]),
 ];
 
 /// Whether a control's run showed its teeth.
