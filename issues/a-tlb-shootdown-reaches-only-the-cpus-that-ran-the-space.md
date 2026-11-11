@@ -48,6 +48,31 @@ four boots against five Linux runs) the T14 read `mem.munmap_part.4k` at
 (3,341 against 2,279 ns), each resolved, and `mem.mprotect.4k` ahead (816
 against 1,019 ns); the AMD bench is ahead on all three.
 
+Stage probes at 31eb5416b, before the asks above, one boot a bench ([evidence](https://github.com/ToyOSOrg/evidence/tree/cf6a882c04a646a8998e3bf0ad66e9f699b8e8aa/memperf/diagnosis)),
+put the shootdown at about 900 of the T14's 3,341 ns for
+`mem.munmap_touched_remote.4k` and 750 on the AMD bench. Most of the rest
+was the inventory's removal (1,004 ns) and a walk of the futex buckets
+(1,159 ns), which an unmap no longer makes while no thread of its space
+waits. Of the shootdown, on
+the T14:
+
+- 542 ns from the IPI's send to the target's answer. Inside it the
+  initiator flushed every user translation of its own, 200 ns, in every one
+  of 2,050 unmaps: its wait served the generation it had just issued, though
+  it had flushed its pages one by one already (92 ns).
+- 63 ns to send the IPI, 64 to issue the generation, 52 to read who runs
+  the space.
+- The reached CPU flushed every user translation, 254 ns, where the change
+  was one page.
+
+The generation was machine-wide, so a CPU the change did not target owed a
+flush of every user translation at its next lock spin or its own next
+shootdown's wait. No such flush was seen in these rows, whose other CPUs sat
+idle. No timed unmap issued the second shootdown a clear makes when tables
+go: best fit placed each page in a span that kept its tables.
+`mem.munmap_part.4k` flushes nothing; its time is the inventory's
+(`issues/user-memory-hot-paths-are-slower-than-2-mib-pages.md`).
+
 - **Owed on metal** for the asks above (a reached CPU flushing only the
   change's range, the initiator owing itself nothing):
   - The T14's `shared-debug` boot (the actuator kernel), where main must pass
