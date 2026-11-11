@@ -10,11 +10,22 @@ opened: 2026-09-29
 `kernel::mitigation::decide` decided for that CPU from the words it logs on
 the line before them: `not affected`, `mitigated: ` and what by, or
 `vulnerable: needs ` and what is missing, with what is in force and what the
-CPU does not enumerate. A vulnerability that needs a guest reads `mitigated:
-no guest runs`. The `mitigations` metal row holds every CPU's lines to the
+CPU does not enumerate, then `; SMT vulnerable: ` and the exposure where the
+kernel stays open to the core's other thread. A vulnerability that needs a
+guest reads `mitigated: no guest runs`. The `mitigations` metal row holds every CPU's lines to the
 decision on its words, and a bench's words to its pinned ones.
 
 **Left**:
+- **Owed on metal:** the `mitigations` and `microcode` rows, one `metalcase`
+  boot each on the T14 and on the AMD bench. Main must show both rows green,
+  with no hang and no early or `mitigation:` panic, and:
+  - on the T14, cpu0's lines exactly `checks::T14_BENCH_LINES`, and
+    `mcu_opt_ctrl` with bits 0 (`RNGDS_MITG_DIS`) and 4 (`GDS_MITG_DIS`)
+    clear; a set bit is reported, since those lines assume both clear;
+  - on the AMD bench, cpu0's lines exactly `checks::AMD_BENCH_LINES`,
+    `de_cfg2` and `c001_1029` each with bit 1 set, and the value of
+    `c001_1029_found` reported, which tells whether firmware had set the bit;
+  - on either, a later CPU's lines only where its registers differ.
 - `spec_store_bypass` reads `vulnerable: needs SSBD for programs that ask`:
   nothing applies SSBD for a program that asks yet.
 - The lines read on each proving machine, compared there with the lines

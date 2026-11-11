@@ -30,8 +30,7 @@ const DE_CFG2: u32 = 0xC001_10E3;
 /// AMD 70586 G-2.
 const C001_1029: u32 = 0xC001_1029;
 
-/// What one CPU read of itself at bring-up. `Copy`, so it owns no heap: the
-/// boot CPU takes and keeps one before the allocator is up.
+/// What one CPU read of itself at bring-up.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Read {
     /// Its `smt` is [`report`]'s: which CPUs share its core is known once

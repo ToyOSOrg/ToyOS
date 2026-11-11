@@ -144,7 +144,7 @@ impl CpuLocal {
 }
 
 /// What this architecture keeps for each of the `cpus` CPUs the firmware
-/// names outside that record: the TLB's and the SMI command port's rounds.
+/// names outside that record.
 pub fn size(cpus: usize) {
     tlb::size(cpus);
     smi_cmd::size(cpus);

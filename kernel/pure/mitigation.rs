@@ -1346,6 +1346,7 @@ mod tests {
             ..INTEL_806C1
         };
         assert_eq!(mmio(&primary), Verdict::NotAffected);
+        assert_eq!(mmio(&Facts { arch_capabilities: primary.arch_capabilities & !cap::MDS_NO, ..primary }), needs(&[ReadAfterSecret]));
         let tsx = Facts { cpuid_7_0_ebx: RTM, ..primary };
         assert_eq!(mmio(&tsx), needs(&[ReadAfterSecret]));
         assert_eq!(mmio(&Facts { cpuid_7_0_ebx: HLE, ..primary }), needs(&[ReadAfterSecret]));
