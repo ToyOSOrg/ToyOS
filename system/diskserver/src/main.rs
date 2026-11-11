@@ -41,7 +41,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use toyos::admission::{self, Admission, Client, Event, Left, Policy};
+use toyos::admission::{self, Admission, Client, Event, Policy, Refused};
 use toyos::endow;
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::poller::{Poller, READABLE};
@@ -64,9 +64,11 @@ const DRIVER_BOUND: Duration = Duration::from_nanos(wire::DRIVER_BOUND_NS);
 const ASKING: Policy = Policy::quartered(16);
 /// Requests that wait for a driver at once.
 const MAX_WAITING: usize = 16;
-/// Disk drivers connected at once, each one connection, named or not yet.
+/// Disk drivers connected at once, each one connection, named or still
+/// naming itself.
 const MAX_DRIVERS: usize = 16;
-const NAMING: Policy = Policy { slots: MAX_DRIVERS, share: 1, limit: admission::LIMIT };
+/// Drivers' connections not yet named, one a driver badge.
+const NAMING: Policy = Policy { slots: MAX_DRIVERS, share: 1 };
 
 /// Argv: each disk driver the supervisor started before this service, by the
 /// badge of its `disk` connector, and each disk controller it started none
@@ -255,6 +257,9 @@ const DRIVER_FRAME: usize = 4 + disk::MAX_PARTS * Part::BYTES;
 /// A driver's connection, keyed by who the supervisor says it is.
 type DriverLine = Client<DriverBadge, (), DRIVER_FRAME>;
 
+/// Drivers' connections that have not said their name.
+type Naming = Admission<DriverBadge, (), Instant, DRIVER_FRAME>;
+
 /// What a waiting client asked.
 enum Ask {
     List,
@@ -333,16 +338,17 @@ fn main() {
 
 impl Service {
     fn serve(&mut self, clients: &toyos::port::Acceptor, drivers: &toyos::port::Acceptor) -> ! {
-        let poller = Poller::new(2 + ASKING.slots as u32 + 2 * MAX_DRIVERS as u32);
+        let poller = Poller::new(2 + ASKING.slots as u32 + MAX_DRIVERS as u32);
         let mut asking: Admission<Option<admission::Badge>, (), Instant, { wire::GUID_BYTES }> = Admission::new(ASKING);
-        let mut naming: Admission<DriverBadge, (), Instant, DRIVER_FRAME> = Admission::new(NAMING);
+        let mut naming = Naming::new(NAMING);
         let mut ready: Vec<u64> = Vec::new();
         let mut was_settled = false;
         loop {
             if asking.has_room() && self.waiting.len() < MAX_WAITING {
                 poller.watch(clients, READABLE, TOKEN_ACCEPT);
             }
-            if self.drivers.len() < MAX_DRIVERS && naming.has_room() {
+            let drivers_room = |service: &Self, naming: &Naming| service.drivers.len() + naming.held() < MAX_DRIVERS;
+            if drivers_room(self, &naming) {
                 poller.watch(drivers, READABLE, TOKEN_DRIVERS);
             }
             asking.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_ASKING + slot));
@@ -365,26 +371,29 @@ impl Service {
                     _ => {}
                 }
             }
-            if ready.contains(&TOKEN_DRIVERS) {
-                match drivers.accept() {
-                    Ok(conn) => match driver_badge(drivers, &conn) {
+            // A watch armed while there was room fires after it is gone too,
+            // so the room is asked again here.
+            if ready.contains(&TOKEN_DRIVERS) && drivers_room(self, &naming) {
+                match naming.accept(drivers) {
+                    None => {}
+                    Some(Ok(conn)) => match driver_badge(drivers, &conn) {
                         None => println!("diskserver: a `disk` connection with no badge the supervisor mints is let go"),
                         Some(badge) if self.drivers.values().any(|d| d.badge() == badge) => {
                             println!("diskserver: a second connection of disk driver {badge} is let go")
                         }
                         Some(badge) => {
-                            if let Err(refused) = naming.admit(conn, badge, (), now) {
-                                println!("diskserver: a connection of disk driver {badge} is let go: {}", refused.why)
+                            if let Err(Refused { why, say: Some(unsaid), .. }) = naming.admit(conn, badge, (), now) {
+                                println!("diskserver: a connection of disk driver {badge} is let go: {why}{unsaid}")
                             }
                         }
                     },
-                    Err(why) => println!("diskserver: the kernel refused a driver's connection: {why:?}"),
+                    Some(Err(why)) => println!("diskserver: the kernel refused a driver's connection: {why:?}"),
                 }
             }
             while let Some(event) = naming.next(now) {
                 match event {
                     Event::Admitted(line) => self.named(line),
-                    Event::Left { key, why, .. } => self.unnamed(key, &why.to_string()),
+                    Event::Left { key, why, say, .. } => self.unnamed(key, say.map(|unsaid| format!("{why}{unsaid}"))),
                 }
             }
             let ids: Vec<u64> = self.drivers.keys().copied().collect();
@@ -394,23 +403,26 @@ impl Service {
                 }
             }
 
-            if ready.contains(&TOKEN_ACCEPT) {
-                match clients.accept() {
-                    Ok(conn) => {
-                        let key = admission::Badge::of(clients, &conn);
-                        if let Err(refused) = asking.admit(conn, key, (), now) {
-                            refuse(&refused.conn, Refusal::Exhausted);
-                            println!("diskserver: letting a connection of {:?} go: {}", refused.key, refused.why);
+            match ready.contains(&TOKEN_ACCEPT).then(|| asking.accept(clients)).flatten() {
+                None => {}
+                Some(Ok(conn)) => {
+                    let key = admission::Badge::of(clients, &conn);
+                    if let Err(refused) = asking.admit(conn, key, (), now) {
+                        refuse(&refused.conn, Refusal::Exhausted);
+                        if let Some(unsaid) = refused.say {
+                            println!("diskserver: letting a connection of {:?} go: {}{unsaid}", refused.key, refused.why);
                         }
                     }
-                    Err(why) => panic!("diskserver: its own acceptor refused an accept: {why:?}"),
                 }
+                Some(Err(why)) => panic!("diskserver: its own acceptor refused an accept: {why:?}"),
             }
             while let Some(event) = asking.next(now) {
                 match event {
                     Event::Admitted(asker) => self.asked(asker),
-                    Event::Left { why: Left::HungUp, .. } => {}
-                    Event::Left { key, why, .. } => println!("diskserver: letting a connection of {key:?} go: {why}"),
+                    Event::Left { key, why, say: Some(unsaid), .. } => {
+                        println!("diskserver: letting a connection of {key:?} go: {why}{unsaid}")
+                    }
+                    Event::Left { .. } => {}
                 }
             }
 
@@ -528,13 +540,16 @@ impl Service {
                 self.next_driver += 1;
                 self.drivers.insert(id, Driver { line, label, settled: false, disks: BTreeMap::new() });
             }
-            Err(why) => self.unnamed(badge, why),
+            Err(why) => self.unnamed(badge, Some(why.to_string())),
         }
     }
 
-    /// Driver `badge`'s connection is let go before it said its name.
-    fn unnamed(&mut self, badge: DriverBadge, why: &str) {
-        println!("diskserver: dropping disk driver {badge} (unnamed) — {why}");
+    /// Driver `badge`'s connection is let go before it said its name, and
+    /// why where its table says it.
+    fn unnamed(&mut self, badge: DriverBadge, why: Option<String>) {
+        if let Some(why) = why {
+            println!("diskserver: dropping disk driver {badge} (unnamed) — {why}");
+        }
         self.driver_ended(badge);
     }
 

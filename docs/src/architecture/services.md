@@ -34,8 +34,14 @@ Every server admits its clients the same way, through one shared mechanism:
   its share its next connection is refused by name while another client's is
   taken; a port whose connector carries no badge that names its holder has one
   share for all its holders.
-- **A full table accepts no more.** The port's queue holds the next
-  connection, and the kernel refuses the one past that queue by name.
+- **A full table accepts no more**, whatever wakes its server. The port's
+  queue holds the next connection, and the kernel refuses the one past that
+  queue by name.
+- **No client writes its server's log at its own rate.** Of a client's
+  refusals and of connections let go for what they sent or did not, its
+  server says one line a client a limit, carrying a count of the rest. A
+  hang-up is not said: a client may connect only to learn that its server is
+  there.
 - **The size of a table and of a share are the server's**; the mechanism and
   its limit are the same for all.
 

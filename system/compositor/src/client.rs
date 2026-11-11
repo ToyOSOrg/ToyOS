@@ -13,7 +13,7 @@
 
 use std::fmt;
 
-use toyos::admission::{self, Policy};
+use toyos::admission::Policy;
 use toyos::shm::ReadOnly;
 use toyos::{ipc, AsHandle, Connection, OwnedHandle};
 use toyos_abi::syscall::SyscallError;
@@ -28,7 +28,7 @@ pub const CLIENTS: Policy = Policy::unshared(32);
 /// One connection off each of `prompt`, `clipboard` and `display`, in a table
 /// of their own: no client filling [`CLIENTS`] keeps the prompt from being
 /// made, the clipboard from being watched or the display from being set.
-pub const OWNERS: Policy = Policy { slots: 3, share: 1, limit: admission::LIMIT };
+pub const OWNERS: Policy = Policy { slots: 3, share: 1 };
 
 /// One client's inbound framing: [`window::MAX_INLINE_PAYLOAD`] is the whole
 /// of what a client inlines — `MSG_CLIPBOARD_SET` is the widest, every typed

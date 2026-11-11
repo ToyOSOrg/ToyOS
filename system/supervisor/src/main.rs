@@ -125,7 +125,7 @@ use toyos_supervisor::declaration::{self, declares, is_block, is_disk_driver, is
 use toyos_abi::devset::Declaration;
 use toyos_supervisor::drives::{self, Act, Drives};
 use toyos_supervisor::restart::{self, AfterEnd, Budget};
-use toyos::admission::{self, Admission, Event, Left, Policy};
+use toyos::admission::{self, Admission, Event, Policy, Refused};
 use toyos::endow::{Endowments, FromHandle};
 use toyos::fs::{Access, Grant, CAPABILITY_PREFIX};
 use toyos::ipc::{self, Connection, RxStep};
@@ -184,9 +184,11 @@ type LaunchRx = ipc::FrameRx<REQUEST_BYTES>;
 type Asking = Admission<Option<admission::Badge>, Port, Instant, REQUEST_BYTES>;
 
 /// The next connection of `acceptor`, one of the supervisor's own, which
-/// reads ready.
-fn accepted(acceptor: &Acceptor) -> Connection {
-    acceptor.accept().unwrap_or_else(|e| panic!("supervisor: an acceptor of the supervisor's own refused: {e:?}"))
+/// reads ready, while `table` has room for it; `None` while it is full, the
+/// connection queued until the acceptor is watched again.
+fn accepted<K: PartialEq + Clone, C>(table: &Admission<K, C, Instant, REQUEST_BYTES>, acceptor: &Acceptor) -> Option<Connection> {
+    let accepted = table.accept(acceptor)?;
+    Some(accepted.unwrap_or_else(|e| panic!("supervisor: an acceptor of the supervisor's own refused: {e:?}")))
 }
 
 /// A launch's caller: the row and session the badge on its connection names.
@@ -1718,10 +1720,9 @@ impl<'a> Supervisor<'a> {
                 (TOKEN_ADMIN_ACCEPTOR, &self.minted.admin, |s, c| s.caller(&s.minted.admin, c).map(Port::Admin)),
                 (TOKEN_SWAP_ACCEPTOR, swap, |_, _| Ok(Port::Swap)),
             ] {
-                if !ready.contains(&token) {
+                let Some(conn) = ready.contains(&token).then(|| accepted(&asking, acceptor)).flatten() else {
                     continue;
-                }
-                let conn = accepted(acceptor);
+                };
                 let port = match port(self, &conn) {
                     Ok(port) => port,
                     Err(why) => {
@@ -1730,13 +1731,13 @@ impl<'a> Supervisor<'a> {
                     }
                 };
                 let key = admission::Badge::of(acceptor, &conn);
-                if let Err(refused) = asking.admit(conn, key, port, now) {
-                    say!("supervisor: letting a connection of {:?} go: {}", refused.key, refused.why);
+                if let Err(Refused { key, why, say: Some(unsaid), .. }) = asking.admit(conn, key, port, now) {
+                    say!("supervisor: letting a connection of {key:?} go: {why}{unsaid}");
                 }
             }
-            if ready.contains(&TOKEN_POWER_ACCEPTOR) {
-                if let Err(refused) = stopping.admit(accepted(power), (), (), now) {
-                    say!("supervisor: power: letting a connection go: {}", refused.why);
+            if let Some(conn) = ready.contains(&TOKEN_POWER_ACCEPTOR).then(|| accepted(&stopping, power)).flatten() {
+                if let Err(Refused { why, say: Some(unsaid), .. }) = stopping.admit(conn, (), (), now) {
+                    say!("supervisor: power: letting a connection go: {why}{unsaid}");
                 }
             }
 
@@ -1749,21 +1750,18 @@ impl<'a> Supervisor<'a> {
                         let (msg_type, payload) = (asker.msg_type(), asker.payload().to_vec());
                         self.serve_power(asker.into_connection(), msg_type, &payload)
                     }
-                    Event::Left { why: Left::HungUp, .. } => {}
-                    Event::Left { why, .. } => say!("supervisor: power: letting a connection go: {why}"),
+                    Event::Left { why, say: Some(unsaid), .. } => say!("supervisor: power: letting a connection go: {why}{unsaid}"),
+                    Event::Left { .. } => {}
                 }
             }
             while let Some(event) = asking.next(now) {
                 let mut asker = match event {
                     Event::Admitted(asker) => asker,
-                    // Unlogged: a caller may connect to find out whether it
-                    // holds a launcher at all and hang up, which is its
-                    // business.
-                    Event::Left { why: Left::HungUp, .. } => continue,
-                    Event::Left { key, why, .. } => {
-                        say!("supervisor: letting a connection of {key:?} go: {why}");
+                    Event::Left { key, why, say: Some(unsaid), .. } => {
+                        say!("supervisor: letting a connection of {key:?} go: {why}{unsaid}");
                         continue;
                     }
+                    Event::Left { .. } => continue,
                 };
                 let (msg_type, payload, carried) = (asker.msg_type(), asker.payload().to_vec(), asker.take_batch());
                 let (conn, _, port) = asker.into_parts();

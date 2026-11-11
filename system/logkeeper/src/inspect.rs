@@ -150,9 +150,10 @@ fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
                 continue;
             }
             accept_armed = false;
-            // A reader the kernel would not hand over, or one past the table,
-            // is told by its connection closing.
-            if let Ok(conn) = acceptor.accept() {
+            // One past the table stays queued until a slot is free, and a
+            // table with room and no shares refuses nobody. A reader the
+            // kernel would not hand over is told by its connection closing.
+            if let Some(Ok(conn)) = readers.accept(acceptor) {
                 let _ = readers.admit(conn, (), (), now);
             }
         }
@@ -165,10 +166,12 @@ fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
                     READ => hub.read(&reader.into_connection()),
                     _ => {}
                 },
-                // The table lets go at most its own size each limit, so this
-                // line is no reader's to write at its own rate. A reader that
-                // hung up or spoke another protocol is told by its closing.
-                Event::Left { why: why @ Left::Silent(_), .. } => say!("logkeeper: letting a reader go: {why}"),
+                // A reader that hung up or spoke another protocol is told by
+                // its closing, and said of nowhere: every holder of `log`
+                // would write into it at its own rate.
+                Event::Left { why: why @ Left::Silent, say: Some(unsaid), .. } => {
+                    say!("logkeeper: letting a reader go: {why}{unsaid}")
+                }
                 Event::Left { .. } => {}
             }
         }

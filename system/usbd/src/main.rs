@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use toyos::endow::{self, EndowError, Endowments};
-use toyos::admission::{self, Admission, Client, Left, Policy};
+use toyos::admission::{self, Admission, Client, Policy};
 use toyos::ipc::{Connection, TrySendError};
 use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::{AsHandle, PciDev};
@@ -324,13 +324,14 @@ fn serve(
         // inspect's clients.
         let now = Instant::now();
         if let (true, Some(acceptor)) = (ready.contains(&TOKEN_ACCEPT), &acceptor) {
-            match acceptor.accept() {
-                Ok(conn) => {
-                    if let Err(refused) = asking.admit(conn, (), (), now) {
-                        println!("{name}: letting a connection go: {}", refused.why);
+            match asking.accept(acceptor) {
+                None => {}
+                Some(Ok(conn)) => {
+                    if let Err(admission::Refused { why, say: Some(unsaid), .. }) = asking.admit(conn, (), (), now) {
+                        println!("{name}: letting a connection go: {why}{unsaid}");
                     }
                 }
-                Err(why) => println!("{name}: the kernel refused a client's connection: {why:?}"),
+                Some(Err(why)) => println!("{name}: the kernel refused a client's connection: {why:?}"),
             }
         }
         for slot in ready.iter().filter_map(|token| token.checked_sub(TOKEN_PENDING)).filter(|slot| *slot < ASKING.slots as u64) {
@@ -339,8 +340,8 @@ fn serve(
         while let Some(event) = asking.next(now) {
             match event {
                 admission::Event::Admitted(asker) if asker.msg_type() == MSG_INSPECT => answer(&asker, usb, &wakes, wake_at),
-                admission::Event::Admitted(_) | admission::Event::Left { why: Left::HungUp, .. } => {}
-                admission::Event::Left { why, .. } => println!("{name}: letting a connection go: {why}"),
+                admission::Event::Left { why, say: Some(unsaid), .. } => println!("{name}: letting a connection go: {why}{unsaid}"),
+                admission::Event::Admitted(_) | admission::Event::Left { .. } => {}
             }
         }
 

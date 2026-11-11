@@ -448,8 +448,9 @@ impl Supervisor<'_> {
                     wire::MSG_HANDOVER => match self.handed_over(session, &payload, batch) {
                         Ok((conn, caller)) => {
                             let key = toyos::admission::Badge::new(&payload);
-                            if let Err(refused) = asking.admit(conn, key, Port::Launcher(caller), Instant::now()) {
-                                say!("supervisor: launcher: letting a handed-over launch of {:?} go: {}", refused.key, refused.why);
+                            let admitted = asking.admit(conn, key, Port::Launcher(caller), Instant::now());
+                            if let Err(toyos::admission::Refused { key, why, say: Some(unsaid), .. }) = admitted {
+                                say!("supervisor: launcher: letting a handed-over launch of {key:?} go: {why}{unsaid}");
                             }
                         }
                         Err(why) => say!("supervisor: launcher: a launch session {} handed over is dropped: {why}", session.share()),

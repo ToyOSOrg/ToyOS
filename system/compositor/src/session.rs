@@ -58,11 +58,10 @@ const TOKEN_CLIENTS: u64 = 1 << 32;
 const TOKEN_OWNERS: u64 = TOKEN_CLIENTS + CLIENTS.slots as u64;
 
 /// What a pass found of one waiting connection: its frame, off the
-/// connection and in memory, or why it is let go. `came` says which port it
-/// came in on and the region its copy holds.
+/// connection and in memory, or why it is let go, said where its table says
+/// so. `came` says which port it came in on and the region its copy holds.
 fn first_frame<K, C>(
     event: Event<K, C, { window::MAX_INLINE_PAYLOAD }>,
-    dead: &mut Vec<Dead>,
     out: &mut Vec<ClientFrame>,
     came: impl FnOnce(K, C) -> (Port, Option<CopyRegion>),
 ) {
@@ -75,15 +74,16 @@ fn first_frame<K, C>(
             frame.conn = Some(conn);
             out.push(frame);
         }
-        Event::Left { conn, key, context, why } => {
+        Event::Left { conn, key, context, why, say: Some(unsaid) } => {
             let reason = match (why, came(key, context).1) {
                 (Left::HungUp, _) => DropReason::Gone,
                 (Left::Malformed, _) => DropReason::OutOfProtocol,
-                (Left::Silent(_), Some(_)) => DropReason::CopyTimeout,
-                (Left::Silent(_), None) => DropReason::HandshakeTimeout,
+                (Left::Silent, Some(_)) => DropReason::CopyTimeout,
+                (Left::Silent, None) => DropReason::HandshakeTimeout,
             };
-            mark_dead(dead, conn.as_handle().raw(), reason);
+            eprintln!("compositor: dropping client {} — {reason}{unsaid}", conn.as_handle().raw().0);
         }
+        Event::Left { .. } => {}
     }
 }
 
@@ -313,9 +313,10 @@ pub struct Session {
     clients: Waiting<(), Option<CopyRegion>>,
     /// The other ports' connections waiting on a first frame, one each.
     owners: Waiting<Port, ()>,
-    /// `compositor`'s acceptor fired while [`Self::clients`] was full: it is
-    /// watched again once a slot is free, and its queue holds the next.
-    accept_parked: bool,
+    /// The ports whose acceptor fired while their table was full: each is
+    /// watched again once its table has a slot free, and its queue holds the
+    /// connection meanwhile.
+    parked: Vec<Port>,
     damage: Damage,
     cursor: Point,
     prev_buttons: u8,
@@ -481,7 +482,7 @@ impl Session {
             stack: Stack::default(),
             clients: Admission::new(CLIENTS),
             owners: Admission::new(OWNERS),
-            accept_parked: false,
+            parked: Vec::new(),
             damage,
             cursor,
             prev_buttons: 0,
@@ -564,9 +565,13 @@ impl Session {
         let now = Instant::now();
         let waiting_ready = self.ready.iter().any(|token| *token >= TOKEN_CLIENTS)
             || [self.clients.left(now), self.owners.left(now)].contains(&Some(Duration::ZERO));
-        if self.accept_parked && self.clients.has_room() {
-            self.accept_parked = false;
-            self.poller.watch(&self.acceptor, READABLE, self.acceptor.as_handle().raw().0 as u64);
+        for port in std::mem::take(&mut self.parked) {
+            if self.has_room(port) {
+                let acceptor = self.acceptor_of(port);
+                self.poller.watch(acceptor, READABLE, acceptor.as_handle().raw().0 as u64);
+            } else {
+                self.parked.push(port);
+            }
         }
         let client_ready = self.stack.iter().any(|w| self.is_ready(w.client.conn.as_handle().raw()))
             || waiting_ready
@@ -1132,35 +1137,55 @@ impl Session {
         self.motion(&states);
     }
 
-    /// One connection off `port`.
-    fn accept(&mut self, port: Port) {
-        // `accept` installs a descriptor, so it answers `ResourceExhausted` on
-        // a full handle table — and clients drive that table, one handle per
-        // connection. The connection is lost either way; the desktop is not.
-        let acceptor = match port {
+    /// The acceptor of `port`.
+    fn acceptor_of(&self, port: Port) -> &Acceptor {
+        match port {
             Port::Compositor => &self.acceptor,
             Port::Prompt => &self.prompts,
             Port::Clipboard => &self.clipboards,
             Port::Display => &self.settings,
-        };
-        if port == Port::Compositor && !self.clients.has_room() {
-            self.accept_parked = true;
-            return;
         }
+    }
+
+    /// Whether the table `port`'s connections wait in has a slot free.
+    fn has_room(&self, port: Port) -> bool {
+        match port {
+            Port::Compositor => self.clients.has_room(),
+            _ => self.owners.has_room(),
+        }
+    }
+
+    /// One connection off `port`, while its table has room; else `port` is
+    /// parked until it does.
+    fn accept(&mut self, port: Port) {
+        let acceptor = self.acceptor_of(port);
+        let accepted = match port {
+            Port::Compositor => self.clients.accept(acceptor),
+            _ => self.owners.accept(acceptor),
+        };
+        let Some(accepted) = accepted else {
+            if !self.parked.contains(&port) {
+                self.parked.push(port);
+            }
+            return;
+        };
         let now = Instant::now();
-        match acceptor.accept() {
+        // `accept` installs a descriptor, so it answers `ResourceExhausted` on
+        // a full handle table — and clients drive that table, one handle per
+        // connection. The connection is lost either way; the desktop is not.
+        match accepted {
             Err(e) => eprintln!("compositor: a connection could not be accepted ({e:?})"),
             Ok(_) if port == Port::Clipboard && self.watcher.is_some() => {
                 eprintln!("compositor: refusing a clipboard watcher's connection — one is watching");
             }
             Ok(conn) if port == Port::Compositor => {
-                if let Err(refused) = self.clients.admit(conn, (), None, now) {
-                    eprintln!("compositor: letting a connection go: {}", refused.why);
+                if let Err(admission::Refused { why, say: Some(unsaid), .. }) = self.clients.admit(conn, (), None, now) {
+                    eprintln!("compositor: letting a connection go: {why}{unsaid}");
                 }
             }
             Ok(conn) => {
-                if self.owners.admit(conn, port, (), now).is_err() {
-                    eprintln!("compositor: refusing a connection off {port:?} — another is waiting");
+                if let Err(admission::Refused { why, say: Some(unsaid), .. }) = self.owners.admit(conn, port, (), now) {
+                    eprintln!("compositor: refusing a connection off {port:?}: {why}{unsaid}");
                 }
             }
         }
@@ -1186,10 +1211,10 @@ impl Session {
             }
         }
         while let Some(event) = self.clients.next(now) {
-            first_frame(event, &mut self.dead, &mut out, |(), copy| (Port::Compositor, copy));
+            first_frame(event, &mut out, |(), copy| (Port::Compositor, copy));
         }
         while let Some(event) = self.owners.next(now) {
-            first_frame(event, &mut self.dead, &mut out, |port, ()| (port, None));
+            first_frame(event, &mut out, |port, ()| (port, None));
         }
 
         for i in 0..self.stack.len() {
@@ -1507,8 +1532,9 @@ impl Session {
             return;
         }
         // Its commit is owed as a first frame is: within the limit.
-        if let Err(refused) = self.clients.admit(conn, (), Some(CopyRegion::new(region)), Instant::now()) {
-            eprintln!("compositor: client {} gets no copy: {}", handle.0, refused.why);
+        let admitted = self.clients.admit(conn, (), Some(CopyRegion::new(region)), Instant::now());
+        if let Err(admission::Refused { why, say: Some(unsaid), .. }) = admitted {
+            eprintln!("compositor: client {} gets no copy: {why}{unsaid}", handle.0);
         }
     }
 
@@ -1928,14 +1954,11 @@ impl Session {
         if inputs {
             self.poller.watch(&self.inputs, READABLE, self.inputs.as_handle().raw().0 as u64);
         }
-        if prompts {
-            self.poller.watch(&self.prompts, READABLE, self.prompts.as_handle().raw().0 as u64);
-        }
-        if clipboards {
-            self.poller.watch(&self.clipboards, READABLE, self.clipboards.as_handle().raw().0 as u64);
-        }
-        if settings {
-            self.poller.watch(&self.settings, READABLE, self.settings.as_handle().raw().0 as u64);
+        for (fired, port) in [(prompts, Port::Prompt), (clipboards, Port::Clipboard), (settings, Port::Display)] {
+            if fired && !self.parked.contains(&port) {
+                let acceptor = self.acceptor_of(port);
+                self.poller.watch(acceptor, READABLE, acceptor.as_handle().raw().0 as u64);
+            }
         }
         if let Some(w) = &self.watcher {
             let handle = w.conn.as_handle().raw();
@@ -1943,7 +1966,7 @@ impl Session {
                 self.poller.watch(&w.conn, READABLE, handle.0 as u64);
             }
         }
-        if acceptor && !self.accept_parked {
+        if acceptor && !self.parked.contains(&Port::Compositor) {
             let h = self.acceptor.as_handle().raw();
             self.poller.watch(&self.acceptor, READABLE, h.0 as u64);
         }

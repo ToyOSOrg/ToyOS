@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use toyos::admission::{self, Admission, Event, Left};
+use toyos::admission::{self, Admission, Event};
 
 use fileserver::absent::Absent;
 use fileserver::bounds::{self, Hello, Slot, HANDSHAKES, MAX_SERVED, MAX_STREAMS};
@@ -521,10 +521,10 @@ impl Server {
             while let Some(event) = self.hellos.next(now) {
                 match event {
                     Event::Admitted(greeter) => self.hello(greeter),
-                    Event::Left { why: Left::HungUp, .. } => {}
-                    Event::Left { key, context, why, .. } => {
-                        println!("fileserver: letting a connection of {:?}, share {key}, go: {why}", context.root)
+                    Event::Left { key, context, why, say: Some(unsaid), .. } => {
+                        println!("fileserver: letting a connection of {:?}, share {key}, go: {why}{unsaid}", context.root)
                     }
+                    Event::Left { .. } => {}
                 }
             }
             if self.writeback.take_due(now) && let Err(e) = self.sync() {
@@ -533,14 +533,15 @@ impl Server {
         }
     }
 
-    /// Take the next connection and read its grant. Only the supervisor mints
-    /// on this port, so a connection without one this server reads is let go
-    /// by name; one whose share already holds its part of the handshakes is
-    /// answered `TooManyConnections` and let go.
+    /// Take the next connection, while a hello may wait, and read its grant.
+    /// Only the supervisor mints on this port, so a connection without one
+    /// this server reads is let go by name; one whose share already holds its
+    /// part of the handshakes is answered `TooManyConnections` and let go.
     fn accept(&mut self) {
-        let conn = match self.acceptor.accept() {
-            Ok(conn) => conn,
-            Err(why) => panic!("fileserver: its own acceptor refused an accept: {why:?}"),
+        let conn = match self.hellos.accept(&self.acceptor) {
+            None => return,
+            Some(Ok(conn)) => conn,
+            Some(Err(why)) => panic!("fileserver: its own acceptor refused an accept: {why:?}"),
         };
         let mut badge = [0u8; MAX_BADGE];
         let grant = match self.acceptor.badge(&conn, &mut badge) {
@@ -555,7 +556,9 @@ impl Server {
         if let Err(refused) = self.hellos.admit(conn, grant.share, granted, Instant::now()) {
             // Let go whether or not the refusal went: either way it is said.
             let _ = refused.conn.try_send(REPLY, &Reply::refused(Error::TooManyConnections));
-            println!("fileserver: letting a connection of share {} go: {}", refused.key, refused.why);
+            if let Some(unsaid) = refused.say {
+                println!("fileserver: letting a connection of share {} go: {}{unsaid}", refused.key, refused.why);
+            }
         }
     }
 

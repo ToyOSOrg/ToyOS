@@ -1,31 +1,42 @@
 //! How a server admits its clients: the one table every server keeps the
-//! connections it has accepted in until each has sent a whole request.
+//! connections it has accepted in until each has sent its first whole request.
 //!
-//! **A request comes only from an admitted client.** A connection enters with
+//! **A first request comes only from an admitted client.** A connection is
+//! taken off its port with [`Admission::accept`], enters with
 //! [`Admission::admit`] and leaves [`Admission::next`] as a [`Client`] holding
-//! its first request, or as the reason it was let go; a [`Client`] is the only
-//! thing a request is read from, and it has no call that waits on its peer: a
-//! request is taken whole or not at all ([`Client::next_request`]) and a reply is one
-//! send that is refused when the peer has no room ([`Client::try_send`]).
+//! its first request, or as the reason it was let go. A [`Client`] has no call
+//! that waits on its peer: a request is taken whole or not at all
+//! ([`Client::next_request`]) and a reply is one send that is refused when the
+//! peer has no room ([`Client::try_send`]).
 //!
 //! **What one client can do to another**: nothing past its share. A client is
 //! the key its server reads off the connection's badge, which whoever minted
 //! its connector wrote and no holder can change, and one key holds at most
 //! [`Policy::share`] of the table's [`Policy::slots`]; its next connection is
 //! refused by name ([`Refused`]) while another key's is taken. A client that
-//! says nothing costs its own slot for [`Policy::limit`], one that hangs up
-//! is noticed by the same read that would have taken its request, and one
-//! that does not read its replies is refused the reply and dropped by its
-//! server. How many keys a program can hold is its minter's to bound.
+//! says nothing costs its own slot for [`LIMIT`], one that hangs up is noticed
+//! by the same read that would have taken its request, and one that does not
+//! read its replies is refused the reply and dropped by its server. How many
+//! keys a program can hold is its minter's to bound.
+//!
+//! **No client writes its server's log at its own rate.** Of what befalls a
+//! key's connections, a refusal, a frame no protocol describes or a silence,
+//! the table has its server say one line a key a [`LIMIT`] and counts the rest
+//! into that key's next line ([`Unsaid`]). A hang-up is never said: a client
+//! may connect only to learn whether its server is there.
 //!
 //! **Every wait here is the server's own.** The table waits on nothing: the
 //! server's wait wakes for a connection that became readable
 //! ([`Admission::watch`], [`Admission::woke`]) and no later than the oldest
 //! entry's limit ([`Admission::left`]). A connection is read before it is let
 //! go on its limit, so a request that is whole is served however late the pass
-//! that finds it. A full table takes no more ([`Admission::has_room`]): the
-//! server stops watching its acceptor, the port's queue holds the next
-//! connection, and the kernel refuses the one past that queue.
+//! that finds it.
+//!
+//! **A full table accepts no more.** [`Admission::accept`] takes a connection
+//! only while there is room, whatever woke the server: a watch on an acceptor
+//! stays armed until it fires, so one armed before the table filled still
+//! fires after. The port's queue holds the connection, and the kernel refuses
+//! the one past that queue by name.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -56,21 +67,19 @@ pub struct Policy {
     pub slots: usize,
     /// How many of them one key may hold.
     pub share: usize,
-    /// How long one may wait.
-    pub limit: Duration,
 }
 
 impl Policy {
-    /// `slots` connections, a quarter of them one key's, each for [`LIMIT`].
+    /// `slots` connections, a quarter of them one key's.
     pub const fn quartered(slots: usize) -> Self {
-        Self { slots, share: slots / 4, limit: LIMIT }
+        Self { slots, share: slots / 4 }
     }
 
-    /// `slots` connections any key may hold all of, each for [`LIMIT`]: for a
-    /// port whose connections carry no badge that names their holder, where
-    /// a share would be every holder's at once.
+    /// `slots` connections any key may hold all of: for a port whose
+    /// connections carry no badge that names their holder, where a share
+    /// would be every holder's at once.
     pub const fn unshared(slots: usize) -> Self {
-        Self { slots, share: slots, limit: LIMIT }
+        Self { slots, share: slots }
     }
 }
 
@@ -115,6 +124,23 @@ impl fmt::Debug for Badge {
             Ok(text) if text.chars().all(|c| c.is_ascii_graphic()) => write!(f, "{text}"),
             _ => write!(f, "{:02x?}", self.bytes()),
         }
+    }
+}
+
+/// Where connections wait to be accepted: an [`Acceptor`], and a test's port.
+pub trait Queue {
+    type Line;
+
+    /// The connection at the head of the queue, which its server's watch
+    /// said is there.
+    fn accept(&self) -> Result<Self::Line, SyscallError>;
+}
+
+impl Queue for Acceptor {
+    type Line = Connection;
+
+    fn accept(&self) -> Result<Connection, SyscallError> {
+        Acceptor::accept(self)
     }
 }
 
@@ -239,12 +265,30 @@ impl<K, C, const MAX: usize> AsHandle for Client<K, C, MAX> {
     }
 }
 
+/// A line its server says of a key's connection, and how many of that key's
+/// went unsaid since its last: `Some` on the first of a key's in a
+/// [`LIMIT`], `None` on the rest, which its next counts. Its `Display` is
+/// that count, to follow the line, and nothing for none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unsaid(pub usize);
+
+impl fmt::Display for Unsaid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            0 => Ok(()),
+            n => write!(f, " ({n} more of its holder's unsaid since its last line)"),
+        }
+    }
+}
+
 /// Why a connection was not taken into the table, and the connection, which
 /// closes with this unless its server answers it first.
 pub struct Refused<K, L = Connection> {
     pub conn: L,
     pub key: K,
     pub why: Full,
+    /// Whether its server says it.
+    pub say: Option<Unsaid>,
 }
 
 /// What a refused connection found full.
@@ -272,8 +316,8 @@ pub enum Left {
     HungUp,
     /// It sent a frame its server's protocol cannot describe.
     Malformed,
-    /// It sent no whole request within the limit.
-    Silent(Duration),
+    /// It sent no whole request within [`LIMIT`].
+    Silent,
 }
 
 impl fmt::Display for Left {
@@ -281,7 +325,7 @@ impl fmt::Display for Left {
         match self {
             Self::HungUp => write!(f, "it hung up before its first request"),
             Self::Malformed => write!(f, "it sent a frame this protocol cannot describe"),
-            Self::Silent(limit) => write!(f, "it sent no whole request within {limit:?}"),
+            Self::Silent => write!(f, "it sent no whole request within {LIMIT:?}"),
         }
     }
 }
@@ -290,8 +334,9 @@ impl fmt::Display for Left {
 pub enum Event<K, C, const MAX: usize, L = Connection> {
     /// Its first request is whole: it is a client.
     Admitted(Client<K, C, MAX, L>),
-    /// It is let go unanswered; the connection closes with this.
-    Left { conn: L, key: K, context: C, why: Left },
+    /// It is let go unanswered; the connection closes with this. `say` is
+    /// whether its server says so, never for a hang-up.
+    Left { conn: L, key: K, context: C, why: Left, say: Option<Unsaid> },
 }
 
 struct Waiting<K, C, I, const MAX: usize, L> {
@@ -308,6 +353,14 @@ struct Waiting<K, C, I, const MAX: usize, L> {
     woken: bool,
 }
 
+/// When a key's last line was said, and how many of its have gone unsaid
+/// since.
+struct Said<K, I> {
+    key: K,
+    at: I,
+    unsaid: usize,
+}
+
 /// The connections a server has accepted that have not yet sent a whole
 /// request, keyed by `K` and each carrying its server's `C`. `I` is the
 /// server's clock, an `Instant`; `MAX` the widest first request.
@@ -316,29 +369,46 @@ pub struct Admission<K, C, I, const MAX: usize, L = Connection> {
     waiting: Vec<Waiting<K, C, I, MAX, L>>,
     /// Where [`Self::next`] reads on from within one pass.
     cursor: usize,
+    /// The keys said of within a limit, or with lines unsaid since: at most
+    /// [`Policy::slots`] of them.
+    said: Vec<Said<K, I>>,
 }
 
 impl<K, C, I, const MAX: usize, L> Admission<K, C, I, MAX, L>
 where
-    K: PartialEq,
+    K: PartialEq + Clone,
     I: Copy + PartialOrd + Add<Duration, Output = I> + Sub<I, Output = Duration>,
     L: Line,
 {
     pub fn new(policy: Policy) -> Self {
         assert!(policy.slots > 0 && policy.share > 0, "a table nobody can enter");
-        Self { policy, waiting: Vec::new(), cursor: 0 }
+        Self { policy, waiting: Vec::new(), cursor: 0, said: Vec::new() }
     }
 
-    /// Whether another connection may wait. While it may not, the server
-    /// leaves its acceptor unwatched and the port's queue holds the next.
+    /// Whether another connection may wait. While it may not,
+    /// [`Self::accept`] takes none, and its server need not watch its
+    /// acceptor.
     pub fn has_room(&self) -> bool {
         self.waiting.len() < self.policy.slots
     }
 
+    /// How many connections wait.
+    pub fn held(&self) -> usize {
+        self.waiting.len()
+    }
+
+    /// The next connection on `acceptor`, for [`Self::admit`], while the
+    /// table has room for it; `None` while it is full, with the connection
+    /// left in the port's queue, where the acceptor's readiness says it is
+    /// once its server watches the acceptor again.
+    pub fn accept(&self, acceptor: &impl Queue<Line = L>) -> Option<Result<L, SyscallError>> {
+        self.has_room().then(|| acceptor.accept())
+    }
+
     /// Take `conn`, just accepted, to wait for its first request until
-    /// `now + limit`, under `key`'s share; or refuse it.
+    /// `now + LIMIT`, under `key`'s share; or refuse it.
     pub fn admit(&mut self, conn: L, key: K, context: C, now: I) -> Result<(), Refused<K, L>> {
-        let Policy { slots, share, limit } = self.policy;
+        let Policy { slots, share } = self.policy;
         let why = if self.waiting.len() >= slots {
             Some(Full::Table(slots))
         } else if self.waiting.iter().filter(|w| w.key == key).count() >= share {
@@ -347,13 +417,14 @@ where
             None
         };
         if let Some(why) = why {
-            return Err(Refused { conn, key, why });
+            let say = self.say(&key, now);
+            return Err(Refused { conn, key, why, say });
         }
         let slot = (0..slots).find(|n| self.waiting.iter().all(|w| w.slot != *n)).expect("fewer wait than there are slots");
         // Read at the next pass whether or not anything wakes for it: its
         // request may have been sent before it was accepted.
         let rx = FrameRx::new();
-        self.waiting.push(Waiting { conn, rx, key, context, deadline: now + limit, slot, armed: false, woken: true });
+        self.waiting.push(Waiting { conn, rx, key, context, deadline: now + LIMIT, slot, armed: false, woken: true });
         Ok(())
     }
 
@@ -402,15 +473,39 @@ where
                     self.cursor += 1;
                     continue;
                 }
-                RxStep::Idle => Left::Silent(self.policy.limit),
+                RxStep::Idle => Left::Silent,
                 RxStep::Eof => Left::HungUp,
                 RxStep::Malformed => Left::Malformed,
             };
             let Waiting { conn, key, context, .. } = self.waiting.remove(self.cursor);
-            return Some(Event::Left { conn, key, context, why });
+            let say = if why == Left::HungUp { None } else { self.say(&key, now) };
+            return Some(Event::Left { conn, key, context, why, say });
         }
         self.cursor = 0;
         None
+    }
+
+    /// Whether a line is said of `key`'s connection at `now`: the first of a
+    /// key's in a [`LIMIT`], with the count of those unsaid since its last.
+    /// Past [`Policy::slots`] keys the one said of longest ago is forgotten,
+    /// and its count with it.
+    fn say(&mut self, key: &K, now: I) -> Option<Unsaid> {
+        self.said.retain(|s| s.unsaid > 0 || now < s.at + LIMIT);
+        if let Some(s) = self.said.iter_mut().find(|s| s.key == *key) {
+            if now < s.at + LIMIT {
+                s.unsaid += 1;
+                return None;
+            }
+            let unsaid = s.unsaid;
+            (s.at, s.unsaid) = (now, 0);
+            return Some(Unsaid(unsaid));
+        }
+        if self.said.len() >= self.policy.slots {
+            let oldest = (1..self.said.len()).fold(0, |o, n| if self.said[n].at < self.said[o].at { n } else { o });
+            self.said.swap_remove(oldest);
+        }
+        self.said.push(Said { key: key.clone(), at: now, unsaid: 0 });
+        Some(Unsaid(0))
     }
 }
 
@@ -422,8 +517,7 @@ mod tests {
 
     use super::*;
 
-    const LIMIT: Duration = Duration::from_secs(20);
-    const POLICY: Policy = Policy { slots: 8, share: 2, limit: LIMIT };
+    const POLICY: Policy = Policy { slots: 8, share: 2 };
     const REQUEST: u32 = 7;
 
     /// What a test's client does to its end.
@@ -488,6 +582,35 @@ mod tests {
         peer
     }
 
+    /// A port's queue of connections, as its server's acceptor takes them.
+    #[derive(Default)]
+    struct Queued(RefCell<VecDeque<Peer>>);
+
+    impl Queue for Queued {
+        type Line = Peer;
+
+        fn accept(&self) -> Result<Peer, SyscallError> {
+            self.0.borrow_mut().pop_front().ok_or(SyscallError::WouldBlock)
+        }
+    }
+
+    /// Whether `key`'s connection, refused at `now`, is said.
+    fn refuse(table: &mut Table, key: &'static str, now: Duration) -> Option<Unsaid> {
+        let Err(refused) = table.admit(Peer::default(), key, 0, now) else { panic!("{key}'s connection was taken") };
+        refused.say
+    }
+
+    /// Whether each connection let go in one pass at `now` is said.
+    fn said(table: &mut Table, now: Duration) -> Vec<(Left, Option<Unsaid>)> {
+        let mut said = Vec::new();
+        while let Some(event) = table.next(now) {
+            if let Event::Left { why, say, .. } = event {
+                said.push((why, say));
+            }
+        }
+        said
+    }
+
     /// Every event of one pass at `now`, as `(key, what happened)`.
     fn pass(table: &mut Table, now: Duration) -> Vec<(&'static str, Result<u32, Left>)> {
         let mut seen = Vec::new();
@@ -506,7 +629,7 @@ mod tests {
         connect(&mut table, "silent", at(0));
         assert_eq!(pass(&mut table, at(0)), []);
         assert_eq!(pass(&mut table, LIMIT.saturating_sub(Duration::from_nanos(1))), []);
-        assert_eq!(pass(&mut table, LIMIT), [("silent", Err(Left::Silent(LIMIT)))]);
+        assert_eq!(pass(&mut table, LIMIT), [("silent", Err(Left::Silent))]);
         assert_eq!(table.left(LIMIT), None, "still waiting after it was let go");
     }
 
@@ -520,7 +643,7 @@ mod tests {
         connect(&mut table, "new", at(5));
         assert_eq!(table.left(at(7)), Some(LIMIT.saturating_sub(at(7))));
         assert_eq!(table.left(LIMIT + at(1)), Some(Duration::ZERO));
-        assert_eq!(pass(&mut table, LIMIT), [("old", Err(Left::Silent(LIMIT)))]);
+        assert_eq!(pass(&mut table, LIMIT), [("old", Err(Left::Silent))]);
         assert_eq!(table.left(LIMIT), Some(at(5)));
     }
 
@@ -569,7 +692,7 @@ mod tests {
 
     #[test]
     fn a_frame_no_protocol_describes_and_a_hang_up_each_free_their_slot() {
-        let mut table = Table::new(Policy { slots: 2, share: 2, limit: LIMIT });
+        let mut table = Table::new(Policy { slots: 2, share: 2 });
         let half = connect(&mut table, "half", at(0));
         let closes = connect(&mut table, "closes", at(0));
         assert!(!table.has_room());
@@ -599,10 +722,11 @@ mod tests {
         connect(&mut table, "greedy", LIMIT.saturating_sub(at(1)));
     }
 
-    /// A full table refuses whoever asks, and says it has no room first.
+    /// A full table refuses whoever asks it to admit, as a launch handed
+    /// over does, and says it has no room first.
     #[test]
     fn a_full_table_has_no_room_and_refuses_the_next() {
-        let mut table = Table::new(Policy { slots: 3, share: 1, limit: LIMIT });
+        let mut table = Table::new(Policy { slots: 3, share: 1 });
         for key in ["a", "b", "c"] {
             assert!(table.has_room());
             connect(&mut table, key, at(0));
@@ -616,7 +740,7 @@ mod tests {
     /// waiting connections, so a slot is a token.
     #[test]
     fn two_waiting_connections_never_share_a_slot() {
-        let mut table = Table::new(Policy { slots: 3, share: 3, limit: LIMIT });
+        let mut table = Table::new(Policy { slots: 3, share: 3 });
         let a = connect(&mut table, "k", at(0));
         connect(&mut table, "k", at(0));
         a.does(Does::HangsUp);
@@ -661,5 +785,73 @@ mod tests {
         assert_eq!((client.msg_type(), client.payload()), (2, &b"second"[..]));
         assert!(matches!(client.next_request(), RxStep::Idle));
         assert_eq!(client.msg_type(), 2);
+    }
+
+    /// A full table takes nothing off its port, whatever woke its server: a
+    /// watch armed before the table filled still fires. The connection stays
+    /// queued and is taken once a slot is free.
+    #[test]
+    fn a_full_table_accepts_nothing_and_its_port_keeps_the_connection() {
+        let mut table = Table::new(Policy { slots: 2, share: 2 });
+        let peers: Vec<Peer> = (0..3).map(|_| Peer::default()).collect();
+        let port = Queued(RefCell::new(peers.iter().cloned().collect()));
+        for _ in 0..2 {
+            let conn = table.accept(&port).expect("a table with room accepts").expect("a connection is queued");
+            assert!(table.admit(conn, "k", 0, at(0)).is_ok());
+        }
+        assert!(table.accept(&port).is_none(), "a full table accepted");
+        assert_eq!(port.0.borrow().len(), 1, "a full table took a connection off its port");
+
+        peers[0].does(Does::Sends(REQUEST, b""));
+        assert_eq!(pass(&mut table, at(1)), [("k", Ok(REQUEST))]);
+        assert!(table.accept(&port).is_some_and(|conn| conn.is_ok()), "a freed slot took nothing");
+        assert!(port.0.borrow().is_empty());
+    }
+
+    /// A key that keeps meeting its share is said once a limit, carrying how
+    /// many went unsaid since, and its quiet hushes no other key.
+    #[test]
+    fn a_key_s_refusals_are_said_once_a_limit_with_the_count_between() {
+        let mut table = Table::new(Policy { slots: 4, share: 1 });
+        connect(&mut table, "greedy", at(0));
+        assert_eq!(refuse(&mut table, "greedy", at(0)), Some(Unsaid(0)));
+        for secs in 1..4 {
+            assert_eq!(refuse(&mut table, "greedy", at(secs)), None, "said twice within its limit");
+        }
+        connect(&mut table, "other", at(4));
+        assert_eq!(refuse(&mut table, "other", at(4)), Some(Unsaid(0)), "one key's quiet hushed another's");
+        assert_eq!(refuse(&mut table, "greedy", LIMIT), Some(Unsaid(3)));
+        assert_eq!(refuse(&mut table, "greedy", LIMIT + at(1)), None);
+    }
+
+    /// What a key's connections do is said under the same bound, and a
+    /// hang-up is neither said nor counted.
+    #[test]
+    fn a_key_s_malformed_frames_are_said_once_a_limit_and_hang_ups_never() {
+        let mut table = Table::new(POLICY);
+        let mut connects = |does: fn() -> Does, now| {
+            let peer = Peer::default();
+            peer.does(does());
+            assert!(table.admit(peer, "noisy", 0, now).is_ok());
+            said(&mut table, now)
+        };
+        assert_eq!(connects(|| Does::SendsWhatNoProtocolDescribes, at(0)), [(Left::Malformed, Some(Unsaid(0)))]);
+        assert_eq!(connects(|| Does::SendsWhatNoProtocolDescribes, at(1)), [(Left::Malformed, None)]);
+        assert_eq!(connects(|| Does::HangsUp, at(2)), [(Left::HungUp, None)]);
+        assert_eq!(connects(|| Does::SendsWhatNoProtocolDescribes, LIMIT), [(Left::Malformed, Some(Unsaid(1)))]);
+    }
+
+    /// A table remembers what it said of at most as many keys as it has
+    /// slots, so no number of keys grows it.
+    #[test]
+    fn a_table_remembers_the_lines_of_at_most_its_slots_keys() {
+        let mut table = Table::new(Policy { slots: 2, share: 1 });
+        connect(&mut table, "a", at(0));
+        connect(&mut table, "b", at(1));
+        assert_eq!(refuse(&mut table, "a", at(1)), Some(Unsaid(0)));
+        assert_eq!(refuse(&mut table, "b", at(2)), Some(Unsaid(0)));
+        assert_eq!(refuse(&mut table, "c", at(3)), Some(Unsaid(0)));
+        assert_eq!(refuse(&mut table, "a", at(4)), Some(Unsaid(0)), "a third key's line kept the oldest");
+        assert_eq!(refuse(&mut table, "c", at(5)), None);
     }
 }

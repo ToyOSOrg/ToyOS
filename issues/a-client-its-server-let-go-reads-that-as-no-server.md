@@ -17,12 +17,13 @@ machine with no netstack, and a surface host's client as `GrabError::HostGone`
 A connection refused for its holder's share is answered before it is closed
 where the protocol has a refusal: `ERR_RESOURCE_EXHAUSTED` by netstack,
 `TooManyConnections` by a file server, `Exhausted` by the block service. The
-supervisor, the compositor, filepicker, logkeeper and usbd close it with a
-line in their own log and no answer.
+supervisor, filepicker and the compositor's `prompt`, `clipboard` and
+`display` close it with no answer. The tables of logkeeper, usbd, netstack's
+`link` and the compositor's `compositor` have one share for all holders, so
+none of them refuses a connection for its share.
 
-Not seen since the limit became 20 s; under the 2 s limit it was seen once,
-`netstack_socket_churn` at `be929d941`, where a connect answered
-`NetstackNotFound` was asserted `ResourceExhausted`.
+Under the 2 s limit it was seen once, `netstack_socket_churn` at `be929d941`,
+where a connect answered `NetstackNotFound` was asserted `ResourceExhausted`.
 
 **Owner**: the orchestrator, which dispatches the fix.
 

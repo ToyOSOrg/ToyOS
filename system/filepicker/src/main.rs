@@ -6,7 +6,7 @@ use filepicker_api::{
 use font::Font;
 use std::fs;
 use std::time::Instant;
-use toyos::admission::{self, Admission, Left, Policy};
+use toyos::admission::{self, Admission, Policy, Refused};
 use toyos::poller::{Poller, READABLE};
 use toyos::Connection;
 use toyos::endow;
@@ -514,7 +514,7 @@ fn run_picker(mode: PickerMode, start_dir: &str, client: &Connection, ttf: &[u8]
 /// Connections accepted and not yet asking, from either port: half are the
 /// supervisor's questions' and half the picker's callers', so neither holds
 /// the other out.
-const ASKING: Policy = Policy { slots: 32, share: 16, limit: admission::LIMIT };
+const ASKING: Policy = Policy { slots: 32, share: 16 };
 
 /// Which port a connection came in on, which is whose share it spends.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -569,12 +569,14 @@ fn main() {
                     continue;
                 }
             };
-            // An accept that fails costs one connection and never the picker.
-            match acceptor.accept() {
-                Err(e) => eprintln!("filepicker: a connection could not be accepted ({e:?})"),
-                Ok(conn) => {
-                    if let Err(refused) = asking.admit(conn, port, (), Instant::now()) {
-                        eprintln!("filepicker: letting a connection go: {}", refused.why);
+            // An accept that fails costs one connection and never the picker;
+            // one past a full table stays queued until a slot is free.
+            match asking.accept(acceptor) {
+                None => {}
+                Some(Err(e)) => eprintln!("filepicker: a connection could not be accepted ({e:?})"),
+                Some(Ok(conn)) => {
+                    if let Err(Refused { why, say: Some(unsaid), .. }) = asking.admit(conn, port, (), Instant::now()) {
+                        eprintln!("filepicker: letting a connection go: {why}{unsaid}");
                     }
                 }
             }
@@ -585,13 +587,11 @@ fn main() {
         while let Some(event) = asking.next(Instant::now()) {
             let asker = match event {
                 admission::Event::Admitted(asker) => asker,
-                // Unlogged: a caller may connect to find out whether it holds a
-                // picker at all and hang up, which is its business.
-                admission::Event::Left { why: Left::HungUp, .. } => continue,
-                admission::Event::Left { why, .. } => {
-                    eprintln!("filepicker: letting a connection go: {why}");
+                admission::Event::Left { why, say: Some(unsaid), .. } => {
+                    eprintln!("filepicker: letting a connection go: {why}{unsaid}");
                     continue;
                 }
+                admission::Event::Left { .. } => continue,
             };
             match *asker.key() {
                 Port::Consent => match consent::question(asker.payload(), asker.msg_type()) {

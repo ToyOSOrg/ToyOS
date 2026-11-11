@@ -33,7 +33,7 @@
 
 use std::time::{Duration, Instant as Wall};
 
-use toyos::admission::{self, Admission, Event, Left, Policy};
+use toyos::admission::{self, Admission, Event, Policy, Refused};
 use toyos::endow;
 use toyos::ipc;
 use toyos::poller::{Poller, READABLE};
@@ -378,8 +378,8 @@ fn hear_links(greeting: &mut Greeting, now: Wall) -> Vec<Asked> {
             Event::Admitted(greeter) => {
                 asked.extend(link::hello(greeter).map(|(hello, mac, region, conn)| Asked { hello, mac, conn, region }))
             }
-            Event::Left { why: Left::HungUp, .. } => {}
-            Event::Left { why, .. } => say!("netstack: letting a NIC driver's connection go: {why}"),
+            Event::Left { why, say: Some(unsaid), .. } => say!("netstack: letting a NIC driver's connection go: {why}{unsaid}"),
+            Event::Left { .. } => {}
         }
     }
     asked
@@ -438,15 +438,16 @@ fn hellos(asked: Vec<Asked>, links: &mut Vec<Held>, node: &mut Node, now: Instan
     }
 }
 
-/// A driver's connection, kept to hear its hello.
+/// A driver's connection, kept to hear its hello while one may wait.
 fn accept_link(links: &Acceptor, greeting: &mut Greeting, now: Wall) {
-    match links.accept() {
-        Ok(conn) => {
-            if let Err(refused) = greeting.admit(conn, (), (), now) {
-                say!("netstack: refused a NIC driver's connection: {}", refused.why);
+    match greeting.accept(links) {
+        None => {}
+        Some(Ok(conn)) => {
+            if let Err(Refused { why, say: Some(unsaid), .. }) = greeting.admit(conn, (), (), now) {
+                say!("netstack: refused a NIC driver's connection: {why}{unsaid}");
             }
         }
-        Err(why) => say!("netstack: the kernel refused a NIC driver's connection: {why:?}"),
+        Some(Err(why)) => say!("netstack: the kernel refused a NIC driver's connection: {why:?}"),
     }
 }
 
@@ -655,7 +656,7 @@ fn main() {
         // A connection the kernel would not hand over is gone from its
         // queue, and its client told: the first of a run is named, and the
         // next accept says how many followed it.
-        let accepted = match ready.contains(&TOKEN_ACCEPTOR).then(|| acceptor.accept()) {
+        let accepted = match ready.contains(&TOKEN_ACCEPTOR).then(|| asking.accept(&acceptor)).flatten() {
             Some(Err(why)) => {
                 if accept_refused == 0 {
                     say!("netstack: the kernel refused a client's connection: {why:?}");
@@ -676,7 +677,9 @@ fn main() {
             let key = admission::Badge::of(&acceptor, &conn);
             if let Err(refused) = asking.admit(conn, key, (), now_wall) {
                 Client { conn: refused.conn }.error(toyos::net::ERR_RESOURCE_EXHAUSTED);
-                say!("netstack: letting a connection of {:?} go: {}", refused.key, refused.why);
+                if let Some(unsaid) = refused.say {
+                    say!("netstack: letting a connection of {:?} go: {}{unsaid}", refused.key, refused.why);
+                }
             }
         }
 
@@ -684,10 +687,10 @@ fn main() {
         while let Some(event) = asking.next(now_wall) {
             match event {
                 Event::Admitted(asker) => requests.push(Request::of(asker)),
-                // Unlogged: a client may connect to find out whether netstack
-                // exists and hang up, which is its business.
-                Event::Left { why: Left::HungUp, .. } => {}
-                Event::Left { key, why, .. } => say!("netstack: letting a connection of {key:?} go: {why}"),
+                Event::Left { key, why, say: Some(unsaid), .. } => {
+                    say!("netstack: letting a connection of {key:?} go: {why}{unsaid}")
+                }
+                Event::Left { .. } => {}
             }
         }
 

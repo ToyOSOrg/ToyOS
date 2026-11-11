@@ -16,17 +16,22 @@ names the holder:
 - **Shared out by holder**: a file server's hellos, by its grant's share
   (`system/fileserver/src/bounds.rs`, `HANDSHAKES`); netstack's requests
   (`system/netstack/src/client.rs`, `ASKING`) and the supervisor's `launcher`,
-  `grants`, `admin` and `login` (`system/supervisor/src/main.rs`, `ASKING`), by
-  the row and session the supervisor minted the connector for.
+  `grants` and `admin` (`system/supervisor/src/main.rs`, `ASKING`), by the row
+  and session the supervisor minted the connector for; the supervisor's
+  `login` by the row alone (`opener`), so every session of one `login` row
+  spends one share.
 - **Shared out by grant, not holder**: the block service's
   (`system/diskserver/src/main.rs`, `ASKING`). Its badge names what is reached,
   so two holders of one grant spend one share.
 - **One share for every holder**, since the connector carries no badge: the
-  compositor's `compositor` port (`system/compositor/src/client.rs`,
-  `CLIENTS`), filepicker's, logkeeper's `log`, usbd's `inspect`, netstack's
-  `link`, and the supervisor's `swap` and `power`. One program that connects
-  again each time a connection of its own is let go keeps such a table full for
-  as long as it runs, and every other client waits in the port's queue.
+  whole table of the compositor's `compositor` port
+  (`system/compositor/src/client.rs`, `CLIENTS`), logkeeper's `log`, usbd's
+  `inspect`, netstack's `link` and the supervisor's `power`; half of
+  filepicker's for each of its two ports; and the quarter of the supervisor's
+  shared table that `swap`'s holders spend. One program that connects again
+  each time a connection of its own is let go keeps such a share full for as
+  long as it runs, and every other client of it waits in the port's queue: a
+  stop behind eight silent `power` connections waits up to the 20 s limit.
 - **Not on the mechanism, and with no limit**: soundserver's control plane, 63
   slots (`MAX_CONTROL_CLIENTS`, `system/soundserver/src/control.rs`), and a
   surface host's clients, 4 (`toyos::surface::MAX_CLIENTS`,
@@ -46,8 +51,7 @@ several sessions, or that launches other rows, holds as many keys:
 change to what a badge says (the manual: what was granted, never who
 connects), which is the owner's to decide.
 
-**Exit condition**: every table named above holds at most a per-holder share
-of itself, keyed by a badge that names the holder, written by whoever mints
-the connector: the supervisor for the servers it spawns, console and terminal
-for their own ports; soundserver's control plane and a surface host admit
-through `toyos::admission` and bound their served clients by the same key.
+**Exit condition**: no one holder can take more than its share of any table
+named above, however its connector came to it; soundserver's control plane and
+a surface host admit through `toyos::admission` and bound their served clients
+the same way.
