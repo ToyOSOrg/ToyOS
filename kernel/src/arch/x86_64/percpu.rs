@@ -129,8 +129,13 @@ pub struct PerCpu {
     /// `IA32_FS_BASE` as `load_gdt` left it or this CPU's last switch read or
     /// wrote it. Exact at every switch-in, since every switch away from a user
     /// thread reads the register back; stale while a thread runs, which moves
-    /// it by a segment load or `SYS_SET_THREAD_POINTER`.
+    /// it by a segment load, `WRFSBASE` or `SYS_SET_THREAD_POINTER`.
     fs_base: u64,
+    /// `IA32_KERNEL_GS_BASE`, the user GS base while the kernel runs, as this
+    /// CPU's last switch read or wrote it; `u64::MAX`, which no base is, before
+    /// the first. Exact at every switch-in as `fs_base` is; stale while a thread
+    /// runs, which moves it by a segment load or `WRGSBASE`.
+    user_gs_base: u64,
     /// The context whose switch-out last left its user state in this CPU's
     /// registers, 0 before the first: `arch::fpu`'s record.
     fpu_holder: u64,
@@ -147,13 +152,6 @@ const GDT_ENTRIES: [u64; 7] = [
     0,                      // TSS low (runtime)
     0,                      // TSS high (runtime)
 ];
-
-/// A descriptor's base, bits 16–39 and 56–63 (SDM Vol. 3A §3.4.5).
-const DESCRIPTOR_BASE: u64 = 0xFF00_00FF_FFFF_0000;
-
-// The two descriptors Ring 3 may load into GS, its data and its code: their
-// base is the one a user GS load makes (`clear_user_gs_base`).
-const _: () = assert!(GDT_ENTRIES[3] & DESCRIPTOR_BASE == 0 && GDT_ENTRIES[4] & DESCRIPTOR_BASE == 0);
 
 #[repr(C, packed)]
 struct GdtPointer {
@@ -244,6 +242,7 @@ pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
 const OFF_AP_TOKEN: u32 = offset_of!(PerCpu, ap_token) as u32;
 const OFF_ROOT: u32 = offset_of!(PerCpu, root) as u32;
 const OFF_FS_BASE: u32 = offset_of!(PerCpu, fs_base) as u32;
+const OFF_USER_GS_BASE: u32 = offset_of!(PerCpu, user_gs_base) as u32;
 const OFF_FPU_HOLDER: u32 = offset_of!(PerCpu, fpu_holder) as u32;
 /// Where this CPU's interrupt counters start; `irq_census::slot_offset` derives every handler's offset from it.
 pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
@@ -415,6 +414,7 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 // `load_gdt` loads FS with `KERNEL_DS`, whose base is 0, and a
                 // segment load clears the base's upper half (SDM Vol. 3A §3.4.4).
                 fs_base: 0,
+                user_gs_base: u64::MAX,
                 fpu_holder: 0,
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::Source::COUNT],
             },
@@ -586,7 +586,6 @@ pub fn init_bsp(lapic_id: u32) {
 
     // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };
-    clear_user_gs_base();
     super::control_regs::init(0);
     // SAFETY: this CPU's own block, with no IDT of this kernel's loaded yet
     // and the `&mut` above ended.
@@ -611,14 +610,6 @@ pub fn init_bsp(lapic_id: u32) {
     log!("percpu: BSP cpu_id=0 lapic_id={lapic_id}");
 }
 
-/// Gives this CPU the user GS base every thread has: zero. Every descriptor
-/// Ring 3 may load into GS has base 0 and `CR4.FSGSBASE` is off, so no thread
-/// makes another and the switch moves none. Before this CPU's first `swapgs`.
-fn clear_user_gs_base() {
-    // SAFETY: zero is canonical, and nothing on this CPU has swapped GS yet.
-    unsafe { cpu::wrmsr(MSR_KERNEL_GS_BASE, 0) };
-}
-
 /// Allocate percpu for an AP; the trampoline writes the pointer into IA32_GS_BASE.
 pub fn alloc_ap(cpu_id: u32, token: u32) -> *mut PerCpu {
     let ptr = alloc_percpu(cpu_id);
@@ -636,7 +627,6 @@ pub fn init_ap(percpu_ptr: *mut PerCpu) {
     let percpu = unsafe { &mut *percpu_ptr };
     // SAFETY: `load_gdt`'s once-per-CPU contract; this is this AP's call.
     unsafe { percpu.load_gdt(); }
-    clear_user_gs_base();
     super::control_regs::init(percpu.cpu_id);
     super::control_regs::init_performance(percpu.cpu_id);
     super::fpu::init(percpu.cpu_id);
@@ -723,6 +713,15 @@ pub fn fs_base() -> u64 {
 
 pub fn set_fs_base(base: u64) {
     gs::write_u64::<OFF_FS_BASE>(base);
+}
+
+/// `IA32_KERNEL_GS_BASE` as the switch last read or wrote it on this CPU.
+pub fn user_gs_base() -> u64 {
+    gs::read_u64::<OFF_USER_GS_BASE>()
+}
+
+pub fn set_user_gs_base(base: u64) {
+    gs::write_u64::<OFF_USER_GS_BASE>(base);
 }
 
 /// The context whose switch-out last left its user state in this CPU's

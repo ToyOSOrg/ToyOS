@@ -51,6 +51,8 @@ pub struct KernelCtx {
     pub preempt: u32,
     /// Where the switch last left this context's user machine state.
     pub fpu: crate::arch::fpu::Left,
+    /// The user registers besides the thread pointer that the switch carries.
+    pub user_bases: crate::arch::hw::UserBases,
 }
 
 /// What a context runs.

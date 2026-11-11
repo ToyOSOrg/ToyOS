@@ -250,6 +250,18 @@ pub fn declare_vendor(vendor: kernel::cpu::Vendor) {
     SYSRET_KEEPS_SS.store(vendor != kernel::cpu::Vendor::Intel, Relaxed);
 }
 
+/// A thread's GS base, which Ring 3 writes with `WRGSBASE` and the kernel
+/// keeps in `IA32_KERNEL_GS_BASE` while it runs (`arch::entry`).
+#[derive(Clone, Copy)]
+pub struct UserBases {
+    gs: u64,
+}
+
+impl UserBases {
+    /// A thread's before it first runs.
+    pub const INITIAL: Self = Self { gs: 0 };
+}
+
 fn read_ss() -> u16 {
     let ss: u16;
     // SAFETY: reads a segment selector into a scratch register; touches nothing else.
@@ -309,18 +321,22 @@ impl Hw for KernelHw {
         // moves `IF`; the resumed context's own guard puts back what it had.
         #[cfg(feature = "mask-windows")]
         let _masked = crate::arch::IrqGuard::close();
-        // SAFETY: `save`/`restore` are live Box-backed contexts from `SchedPass::finish`, freed only by a later pass; `incoming.thread_pointer` is this kernel's own canonical value for the thread being installed; `area` is the outgoing task's own, saved as it leaves this CPU and restored when it returns into this frame.
+        // SAFETY: `save`/`restore` are live Box-backed contexts from `SchedPass::finish`, freed only by a later pass; `incoming.thread_pointer` and `incoming.user_bases` are canonical values the CPU itself handed the switch out of that thread, or zero; `area` is the outgoing task's own, saved as it leaves this CPU and restored when it returns into this frame.
         unsafe {
             // A thread's user state area lies above its stack's top (`fpu`);
             // the idle context has none, and switches with neither a save nor a
             // restore. The thread resumes in this frame, so the restore below
-            // reads the area its own save wrote. Its FS base is read back, not
-            // kept: Ring 3 moves it with a segment load (SDM Vol. 2B, MOV).
+            // reads the area its own save wrote. Its bases are read back, not
+            // kept: Ring 3 moves them with a segment load (SDM Vol. 2B, MOV),
+            // `WRFSBASE` and `WRGSBASE`.
             let area = match (*save).runs {
                 Runs::User(_) => {
-                    let base = cpu::read_fs_base();
-                    (*save).thread_pointer = base;
-                    percpu::set_fs_base(base);
+                    let fs = cpu::read_fs_base();
+                    (*save).thread_pointer = fs;
+                    percpu::set_fs_base(fs);
+                    let gs = cpu::read_user_gs_base();
+                    (*save).user_bases.gs = gs;
+                    percpu::set_user_gs_base(gs);
                     Some((*save).kernel_stack_top)
                 }
                 Runs::Idle => None,
@@ -352,6 +368,10 @@ impl Hw for KernelHw {
                     if percpu::fs_base() != incoming.thread_pointer {
                         cpu::write_fs_base(incoming.thread_pointer);
                         percpu::set_fs_base(incoming.thread_pointer);
+                    }
+                    if percpu::user_gs_base() != incoming.user_bases.gs {
+                        cpu::write_user_gs_base(incoming.user_bases.gs);
+                        percpu::set_user_gs_base(incoming.user_bases.gs);
                     }
                 }
                 // idle's stack top is per-CPU, unknowable at boot-time init, so

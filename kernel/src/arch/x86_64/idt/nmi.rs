@@ -13,11 +13,11 @@
 use core::arch::naked_asm;
 
 use crate::arch::entry::install_kernel_gs;
-use crate::arch::percpu::{MSR_GS_BASE, OFF_GDT, OFF_NMI_ACTIVE};
+use crate::arch::percpu::{OFF_GDT, OFF_NMI_ACTIVE};
 
-/// The words the entry pushes before it can tell a nested NMI: three
-/// registers and the GS base it found.
-const FIRST_PUSHES: usize = 4;
+/// The words the entry pushes before it can tell a nested NMI: `rax` and the
+/// GS base it found.
+const FIRST_PUSHES: usize = 2;
 
 /// The interrupt frame's `rip` and `rsp`, at the nested check.
 const NESTED_RIP_OFFSET: usize = 8 * FIRST_PUSHES;
@@ -26,7 +26,7 @@ const NESTED_RSP_OFFSET: usize = NESTED_RIP_OFFSET + 24;
 /// Eleven pushes in all place the frame's `rip` at 88, and its `rflags` two
 /// words above. `IF` is what separates a cpu that has stopped taking
 /// interrupts from one that is merely slow.
-const RFLAGS_OFFSET: usize = 8 * (FIRST_PUSHES + 7) + 16;
+const RFLAGS_OFFSET: usize = 8 * (FIRST_PUSHES + 9) + 16;
 
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn nmi_entry() {
@@ -37,17 +37,14 @@ pub(super) extern "sysv64" fn nmi_entry() {
         "clac",
         // Flags are free throughout: iretq restores RFLAGS from the frame.
         "push rax",
-        "push rcx",
-        "push rdx",
-        "mov ecx, {gs_base_msr}",
-        "rdmsr",
-        "shl rdx, 32",
-        "or rax, rdx",
+        "rdgsbase rax",
         "push rax",
         install_kernel_gs!(),
         "cmp dword ptr gs:[{active}], 0",
         "jne 2f",
         "mov dword ptr gs:[{active}], 1",
+        "push rcx",
+        "push rdx",
         "push rsi",
         "push rdi",
         "push r8",
@@ -67,16 +64,13 @@ pub(super) extern "sysv64" fn nmi_entry() {
         "pop r8",
         "pop rdi",
         "pop rsi",
+        "pop rdx",
+        "pop rcx",
         // Cleared before iretq, never after: delivery is blocked until iretq retires, so no second NMI can find it clear while this one is still on the stack.
         "mov dword ptr gs:[{active}], 0",
         // The base this NMI found, back: nothing after it reads GS.
         "pop rax",
-        "mov rdx, rax",
-        "shr rdx, 32",
-        "mov ecx, {gs_base_msr}",
-        "wrmsr",
-        "pop rdx",
-        "pop rcx",
+        "wrgsbase rax",
         "pop rax",
         // No EOI: an NMI isn't delivered through the IRR, and acknowledging one would clear an unrelated interrupt.
         "iretq",
@@ -88,7 +82,6 @@ pub(super) extern "sysv64" fn nmi_entry() {
         "call {nested}",
         "ud2",
         active = const OFF_NMI_ACTIVE,
-        gs_base_msr = const MSR_GS_BASE,
         gdt_in_percpu = const OFF_GDT,
         rflags_offset = const RFLAGS_OFFSET,
         nested_rip = const NESTED_RIP_OFFSET,

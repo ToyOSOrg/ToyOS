@@ -166,8 +166,11 @@ pub const CR0: u64 = cr0::PE | cr0::MP | cr0::ET | cr0::NE | cr0::WP | cr0::PG;
 /// from or touching a user page (SDM Vol. 3A §4.6), which every CPU of this
 /// kernel's range (2020 on) offers, so one without them is refused rather than
 /// run with the user half open to a kernel bug; and every Ring 0 entry's
-/// `clac` (`arch::entry`) is `#UD` without `SMAP`. `FSGSBASE` is
-/// [`CR4_FORBIDDEN`], not here.
+/// `clac` (`arch::entry`) is `#UD` without `SMAP`. `FSGSBASE`, in the same
+/// range, gives Ring 3 its own FS and GS bases and the kernel both without an
+/// MSR, under Intel's condition (Guidance for Enabling FSGSBASE, ID 767615):
+/// the switch carries both bases per thread (`arch::hw`), and no entry trusts
+/// the GS base it finds (`arch::entry`).
 const CR4_REQUIRED: u64 = cr4::DE
     | cr4::PAE
     | cr4::MCE
@@ -176,10 +179,11 @@ const CR4_REQUIRED: u64 = cr4::DE
     | cr4::OSXMMEXCPT
     | cr4::OSXSAVE
     | cr4::SMEP
-    | cr4::SMAP;
+    | cr4::SMAP
+    | cr4::FSGSBASE;
 
 /// [`CR4_REQUIRED`]'s bits by name, for a refusal to say which a CPU lacks.
-const CR4_REQUIRED_NAMES: [(u64, &str); 9] = [
+const CR4_REQUIRED_NAMES: [(u64, &str); 10] = [
     (cr4::DE, "DE"),
     (cr4::PAE, "PAE"),
     (cr4::MCE, "MCE"),
@@ -189,6 +193,7 @@ const CR4_REQUIRED_NAMES: [(u64, &str); 9] = [
     (cr4::OSXSAVE, "OSXSAVE"),
     (cr4::SMEP, "SMEP"),
     (cr4::SMAP, "SMAP"),
+    (cr4::FSGSBASE, "FSGSBASE"),
 ];
 
 const _: () = {
@@ -216,17 +221,6 @@ impl core::fmt::Display for Cr4Names {
 
 /// `CR4` bits this kernel takes when the CPU offers them (checked against CPUID first: an undefined bit is `#GP`).
 const CR4_OPTIONAL: u64 = cr4::PCIDE | cr4::UMIP;
-
-/// The `CR4` bit no shipping CPU may hold: `FSGSBASE` gives Ring 3 `WRGSBASE`,
-/// and the switch moves no thread's GS base, which every Ring 3 GS load
-/// leaves zero (`percpu::clear_user_gs_base`) — one thread's would reach the
-/// next. The kernel's FS base uses `IA32_FS_BASE` (`cpu::write_fs_base`)
-/// instead.
-const CR4_FORBIDDEN: u64 = cr4::FSGSBASE;
-
-// Forbidden in the declaration, and never optional.
-const _: () = assert!(CR4_REQUIRED & CR4_FORBIDDEN == 0);
-const _: () = assert!(CR4_OPTIONAL & CR4_FORBIDDEN == 0);
 
 /// `IA32_EFER` on every CPU: `SCE`, `LME`, `LMA`, `NXE`. `SCE` is declared only
 /// here, never by `arch::syscall::init`, so one register keeps one owner.
