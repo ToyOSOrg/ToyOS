@@ -86,6 +86,7 @@ pub fn resume(tag: u16) {
 pub fn retire(tag: u16) {
     leave_idle_space();
     user_change(Origin::Retire, tag, 0, u64::MAX, true);
+    assert!(!held(tag), "tlb: a CPU still holds the root of a space no thread runs in");
 }
 
 /// Whether any CPU holds the root of the space tagged `tag`.

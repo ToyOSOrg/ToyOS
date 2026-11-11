@@ -231,7 +231,7 @@ unsafe fn save(area: u64) {
 }
 
 /// The CPU whose registers a thread's last switch-out left holding its
-/// state, which is still its own there until another state is loaded.
+/// state.
 #[derive(Clone, Copy)]
 pub struct Left(u32);
 
@@ -241,7 +241,8 @@ impl Left {
 }
 
 /// Saves the outgoing thread's state into its `area`, and records that this
-/// CPU's registers still hold it, for the thread whose context is `ctx`.
+/// CPU's registers, which still hold it, were last left by the thread whose
+/// context is `ctx`.
 /// # Safety
 /// [`save`]'s.
 pub unsafe fn leave(area: u64, ctx: u64, left: &mut Left) {
@@ -252,8 +253,10 @@ pub unsafe fn leave(area: u64, ctx: u64, left: &mut Left) {
 }
 
 /// The thread whose context is `ctx` resumes here: its state is loaded from
-/// its `area` unless this CPU's registers still hold it, which they do only
-/// where it last left them here and nothing has loaded another since.
+/// its `area` unless this CPU's registers still hold it, which they do where
+/// it was the last thread to [`leave`] here and its own last leave was here.
+/// Whatever loads another state here — a restore, or a new thread's
+/// [`load_initial`] — runs a thread that leaves before another resumes.
 /// # Safety
 /// [`restore`]'s, with `left` the record [`leave`] wrote for this thread.
 pub unsafe fn resume(area: u64, ctx: u64, left: Left) {
@@ -262,7 +265,6 @@ pub unsafe fn resume(area: u64, ctx: u64, left: Left) {
     }
     // SAFETY: the caller's.
     unsafe { restore(area) };
-    super::percpu::set_fpu_holder(ctx);
 }
 
 /// Loads this CPU's user machine state from the area at `area`.
@@ -341,8 +343,6 @@ pub fn init(cpu_id: u32) {
 /// the thread's first save follows a restore on its CPU, and from an image
 /// no save writes.
 pub(crate) extern "C" fn load_initial() {
-    // No thread's saved state is in the registers from here.
-    super::percpu::set_fpu_holder(0);
     // SAFETY: both images are 64-byte aligned and name only x87 and SSE, both
     // in every declared `XCR0`, with an `MXCSR` that sets no reserved bit; the
     // standard one is as long as any standard area this machine's `XCR0`

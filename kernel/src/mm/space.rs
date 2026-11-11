@@ -192,9 +192,10 @@ impl Space {
         &self.usage
     }
 
-    /// No thread will load this space's root again — its last thread out is
-    /// past `process::leave_as`: every CPU still holding it has left it before
-    /// this returns, so its drop waits on none.
+    /// Called by the last thread out of its process, which runs on the
+    /// kernel's root from `process::leave_as` on, so no thread will load this
+    /// space's root again: every CPU still holding it has left it before this
+    /// returns, and its drop waits on none.
     pub fn retire(&self) {
         self.lock().tables.retire();
     }

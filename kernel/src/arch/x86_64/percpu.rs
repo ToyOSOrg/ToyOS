@@ -125,8 +125,8 @@ pub struct PerCpu {
     /// `IA32_FS_BASE` as this CPU's switch last read or wrote it: what it
     /// holds while no Ring 3 code has run since; `u64::MAX` before the first.
     fs_base: u64,
-    /// The context whose user state this CPU's registers hold, 0 for none:
-    /// `arch::fpu`'s record.
+    /// The context whose switch-out last left its user state in this CPU's
+    /// registers, 0 before the first: `arch::fpu`'s record.
     fpu_holder: u64,
     /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so a new source moves nothing else.
     pub irq_counts: [AtomicU64; crate::irq_census::Source::COUNT],
@@ -695,7 +695,8 @@ pub fn set_fs_base(base: u64) {
     gs::write_u64::<OFF_FS_BASE>(base);
 }
 
-/// The context whose user state this CPU's registers hold; 0 for none.
+/// The context whose switch-out last left its user state in this CPU's
+/// registers; 0 before the first.
 pub fn fpu_holder() -> u64 {
     gs::read_u64::<OFF_FPU_HOLDER>()
 }
