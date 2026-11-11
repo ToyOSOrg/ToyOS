@@ -59,7 +59,7 @@ fn main() {
         // SAFETY: every pointer names a live buffer for the whole call.
         let answer = unsafe { syscall::spawn(&args) };
         assert_eq!(answer, Err(SyscallError::InvalidArgument), "{what}");
-        println!("abuse_spawn_labels: {what}: refused");
+        println!("abuse_spawn_path_and_name: {what}: refused");
     }
 
     // The bounds are limits: the longest name there is starts a child.
@@ -70,5 +70,5 @@ fn main() {
 
     // SAFETY: the reservation made above, which nothing names any more.
     unsafe { syscall::vm_release(region, BLOB) }.expect("release");
-    println!("abuse_spawn_labels: PASS");
+    println!("abuse_spawn_path_and_name: PASS");
 }

@@ -399,7 +399,7 @@ fn decimal(mut n: u32, buf: &mut [u8; 10]) -> &[u8] {
 /// records (`SpawnArgs::name_ptr`): its last component, cut at a character to
 /// [`MAX_PROCESS_NAME`] bytes, with `_` for a character a name does not hold,
 /// and `?` where that leaves nothing.
-pub fn name(program: &[u8]) -> String {
+fn name(program: &[u8]) -> String {
     let text = String::from_utf8_lossy(program);
     let mut name = String::new();
     for c in text.rsplit('/').next().unwrap_or_default().chars() {

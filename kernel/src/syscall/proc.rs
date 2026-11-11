@@ -105,7 +105,7 @@ pub(super) fn spawn_program(ctx: &crate::user_ptr::SyscallContext<'_>, args: &Sp
 /// Start a program under `parent` and return the handle to it the spawn's commit put in the caller's table.
 pub(super) fn sys_spawn(
     path: &str,
-    name: [u8; toyos_abi::inventory::NAME_BYTES],
+    name: [u8; process::THREAD_NAME_LEN],
     pending: crate::loader::PendingHandles,
     program: crate::loader::Program,
     parent: process::Parent,

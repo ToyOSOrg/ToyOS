@@ -108,7 +108,7 @@ impl KernelMapping {
 pub const KERNEL_STACK_SIZE: usize = 128 * 1024;
 
 /// How much of a process or thread name the table keeps, fixed by the `SYS_SYSINFO` record's name field.
-pub const THREAD_NAME_LEN: usize = 28;
+pub const THREAD_NAME_LEN: usize = toyos_abi::inventory::NAME_BYTES;
 
 /// Per-thread metadata, keyed by its tid in `ProcessEntry::threads`.
 pub struct ThreadEntry {
@@ -192,7 +192,7 @@ impl ProcessEntry {
     pub fn pid(&self) -> Pid { self.pid }
     pub fn name(&self) -> &[u8; THREAD_NAME_LEN] { &self.name }
     pub fn name_str(&self) -> &str {
-        core::str::from_utf8(&self.name).unwrap_or("?").trim_end_matches('\0')
+        core::str::from_utf8(&self.name).expect("a process's name is UTF-8, as `process_name` took it").trim_end_matches('\0')
     }
     pub fn process_data(&self) -> &Arc<Lock<ProcessData>> { &self.process_data }
     pub fn main_tid(&self) -> Tid { self.main_tid }
