@@ -4479,12 +4479,6 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
 
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, &[], &[], options);
-            // Nothing announces the panic here — there is no console for a
-            // marker to arrive on — so the screen is polled until it carries
-            // the report. 30s covers firmware plus the root filesystem read off USB.
-            let dump = qemu.screendump_until("PANIC:", Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
             // The arm line is here and nowhere else: this is the machine whose
             // panel is its only account, so it is the only one whose capture
             // `halt_all_cpus` refreshes to carry it.
@@ -4494,7 +4488,15 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 "panic: rebooting in {} s, timed by ",
                 toyos_tco::PANIC_BOUND_MS / 1_000
             );
-            for want in ["PANIC:", "test-late-panic: on-screen console check", &armed] {
+            const PLAIN: &str = "late_panic::Nest";
+            let wanted = ["PANIC:", "test-late-panic: on-screen console check", PLAIN, &armed];
+            // Nothing announces the panic here — there is no console for a
+            // marker to arrive on — so the screen is polled until it carries
+            // the report. 30s covers firmware plus the root filesystem read off USB.
+            let dump = qemu.screendump_until(&wanted, Duration::from_secs(30));
+            let text = dump.text();
+            print_screen(name, &text);
+            for want in wanted {
                 if !text.contains(want) {
                     return Err(format!(
                         "{want:?} not on screen of a guest with no serial port at all\ndecoded screen:\n{text}"
@@ -4505,7 +4507,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 &dump,
                 FILL_FATAL,
                 &["PANIC:", "test-late-panic: on-screen console check"],
-                "late_panic::Nest",
+                PLAIN,
             )?;
             Ok(())
         }
@@ -4526,7 +4528,9 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     ..Default::default()
                 },
             );
-            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(6));
+            const PLAIN: &str = "ACPI: GTDT timers:";
+            let on_the_panel = ["EARLY PANIC:", "test-early-panic: on-screen console check", PLAIN];
+            let dump = qemu.screendump_until(&on_the_panel, Duration::from_secs(6));
             let rest = qemu.drain_until(Duration::from_secs(6), |l| l.contains(EARLY_PANIC_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             // What stage 3 prints before it panics: every item is a record
@@ -4549,7 +4553,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             }
             let text = dump.text();
             print_screen(name, &text);
-            for want in ["EARLY PANIC:", "test-early-panic: on-screen console check"] {
+            for want in on_the_panel {
                 if !text.contains(want) {
                     return Err(format!("{want:?} not on the ramfb panel\ndecoded screen:\n{text}"));
                 }
@@ -4558,7 +4562,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 &dump,
                 FILL_FATAL,
                 &["EARLY PANIC:", "test-early-panic: on-screen console check"],
-                "ACPI: GTDT timers:",
+                PLAIN,
             )?;
             Ok(())
         }
@@ -4615,7 +4619,8 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     ..Default::default()
                 },
             );
-            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(6));
+            let on_the_panel = ["EARLY PANIC:", "undefined instruction"];
+            let dump = qemu.screendump_until(&on_the_panel, Duration::from_secs(6));
             const FAULT_MESSAGE: &str = "synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction) at 0x";
             let rest = qemu.drain_until(Duration::from_secs(6), |l| l.contains(FAULT_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
@@ -4630,7 +4635,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             }
             let text = dump.text();
             print_screen(name, &text);
-            if !text.contains("EARLY PANIC:") || !text.contains("undefined instruction") {
+            if !on_the_panel.iter().all(|want| text.contains(want)) {
                 return Err(format!("the fault's report is not on the ramfb panel\ndecoded screen:\n{text}"));
             }
             Ok(())
@@ -4726,7 +4731,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     ..Default::default()
                 },
             );
-            let dump = qemu.screendump_until(HELD, Duration::from_secs(30));
+            let dump = qemu.screendump_until(&[HELD], Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
             if !text.contains(HELD) || dump.fill() != FILL_FATAL {
