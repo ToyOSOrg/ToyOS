@@ -1,8 +1,7 @@
 /* A quit reaches a C child as its signal: kill with SIGINT, SIGHUP or SIGTERM
    is a quit of the child, which libc raises in it.
    - SIGHUP handled: sigsuspend returns after it, and a SIGTERM handler ends
-     the child once asked after. Both wait blocked until then, so neither can
-     run before the child waits for it.
+     the child once asked after.
    - SIGINT ignored: the child runs on.
    - SIGINT blocked: it waits pending until sigsuspend unblocks it, and its
      default then ends the child with 130.
@@ -13,7 +12,8 @@
      unblocking it, runs the handler and answers EINTR.
    Each child says "armed" once its disposition is kept; the test asks only
    after that, and asks a second time only after the child said it took the
-   first. */
+   first. "armed" does not say the child is in its call: a child that waits
+   for its signal holds it blocked until the call that unblocks it. */
 #include <poll.h>
 #include <signal.h>
 

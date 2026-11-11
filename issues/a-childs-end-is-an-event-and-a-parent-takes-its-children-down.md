@@ -212,8 +212,8 @@ a signal an event raises (`sdk/libc/src/sigreq.rs`).
      without calling libc, asked with interrupt, ends at once with its output
      gone and code 130; a C child's `read` of an empty pipe, `SIGINT` handled
      without `SA_RESTART`, answers `EINTR` on an interrupt; a C child in
-     `pause` whose `SIGHUP` handler reloads returns from it after a hang-up and
-     exits on a terminate; a C child that only ignores `SIGINT` runs on after
+     `sigsuspend` whose `SIGHUP` handler reloads returns from it after a
+     hang-up and exits on a terminate; a C child that only ignores `SIGINT` runs on after
      an interrupt, and so does one spawned ignoring it, while one spawned
      blocking it, by its caller's mask or `SETSIGMASK`, shows it in
      `sigpending` and ends with 130 on unblocking it, and one whose `SETSIGDEF`
@@ -224,14 +224,21 @@ a signal an event raises (`sdk/libc/src/sigreq.rs`).
      today (killed); a shell that never listens, and one that relays (the held
      child reads killed); a terminal that never listens (the desktop child's
      file unwritten); handlers run only in blocking libc calls (the LLVM child
-     to the hang ceiling); `EINTR` from `poll` alone (`read` and `pause` never
-     return); a quit without its reason (the reload exits); watching only from
+     to the hang ceiling); `EINTR` from `poll` alone (`read` and the reload's wait
+     never return); a quit without its reason (the reload exits); watching only from
      a handler's install (the ignoring child is killed); a spawn carrying no
      ignore, no mask or no `SETSIGDEF` (each spawned child in turn). Oracle:
      POSIX's signal actions (XSH 2.4.3) and `posix_spawn`. *Met by #1011* in
      `libc_children`'s QEMU x86-64 boot (`signal_quit`): the LLVM child, the
-     `read` answering `EINTR`, the reload in `pause` and its terminate, the
-     child that only ignores `SIGINT`, and the quit held over a ready `ppoll`;
+     `read` answering `EINTR`, the reload and its terminate, the
+     child that only ignores `SIGINT`, and the quit held over a ready `ppoll`.
+     *Since #1214* two of those arms are held differently, in the same boot:
+     the reload waits in `sigsuspend` with `SIGHUP` and `SIGTERM` blocked
+     until then, where #1011 had it in `pause`, which no test calls now; and
+     the `read` answering `EINTR` is `libc_read_restarts`'s, a Rust program
+     making libc's calls, whose parent sends the interrupt once the roster
+     shows the child parked in the read, which a C program cannot order.
+     At #1011,
      with the stage's libc reverted whole the cases do not build
      (`sig_atomic_t` is undeclared), so that control runs no case, and the arm
      controls are the mutations: handlers run only in blocking calls, `EINTR`
