@@ -175,10 +175,11 @@ Beside that order, each waiting on something outside it:
         that `PWD` among it, are a startup block its parent lays out below
         its program (`toyos::startup`), which the kernel neither stores nor
         answers (#1200): `SYS_GET_ENV` (73) and `ProcessData::env` are
-        gone. The kernel still keeps two userland texts of each process: the
-        path its parent read the program from (`SpawnArgs::path_ptr`), which
-        the spawn's record and a crash's frames name the file by and
-        `symbolize` opens, its last component the process's name; and its
+        gone. The kernel still keeps three userland texts of each process:
+        its name, 27 bytes its parent chooses (`SpawnArgs::name_ptr`), which
+        is what a bounded process name needs; the path its parent read the
+        program from (`SpawnArgs::path_ptr`), which the spawn's record and a
+        crash's frames name the file by and `symbolize` opens; and its
         endowment labels, kept for its life and answered through
         `SYS_ENDOWMENTS` as the environment was, the next candidate for the
         block. `/tmp` is the

@@ -125,6 +125,14 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Err(refused) => return refused,
             };
             let path = match ctx.user_str(UserAddr::new(args.path_ptr), args.path_len) { Ok(s) => s, Err(e) => return e.to_u64() };
+            // Bounded before it is copied, and one token of a record's line.
+            if args.name_len > toyos_abi::syscall::MAX_PROCESS_NAME as u64 {
+                return SyscallError::InvalidArgument.to_u64();
+            }
+            let name = match ctx.user_vec(UserAddr::new(args.name_ptr), args.name_len) { Ok(bytes) => bytes, Err(e) => return e.to_u64() };
+            let Some(name) = toyos_abi::syscall::process_name(&name) else {
+                return SyscallError::InvalidArgument.to_u64();
+            };
             if args.endow_count as usize > toyos_abi::syscall::MAX_SPAWN_ENDOWMENTS
                 || args.labels_len > toyos_abi::syscall::MAX_SPAWN_LABELS_LEN as u64
             {
@@ -146,7 +154,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };
-            sys_spawn(&path, pending, program, parent)
+            sys_spawn(&path, name, pending, program, parent)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {

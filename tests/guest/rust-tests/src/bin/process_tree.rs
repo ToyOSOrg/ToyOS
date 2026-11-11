@@ -46,6 +46,8 @@ use std::os::toyos::process::ExitStatusExt;
 use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_process_tree";
+/// The name its children go by.
+const NAME: &str = "test_rs_process_tree";
 const INVALID_PATH: &str = "/tmp/process_tree_invalid_elf";
 /// `/system/bin/toybox` under the name of an applet that reads its input until
 /// it ends: a declared program, so a launch, and one that runs until killed
@@ -237,6 +239,8 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,
+        name_ptr: NAME.as_ptr() as u64,
+        name_len: NAME.len() as u64,
         endow_ptr: 0,
         endow_count: 0,
         labels_ptr: 0,
@@ -368,8 +372,7 @@ fn a_detached_program_outlives_its_shell() {
     let input = shell.stdin.take().expect("the input the shell and cat read");
     let status = shell.wait().expect("wait the shell");
     assert!(status.success(), "the shell's detach failed: {status:?}");
-    // A launched process goes by its row's file, which `cat` is a link to.
-    let live = live_named(&["toybox"]);
+    let live = live_named(&["cat"]);
     assert_eq!(live.len(), 1, "the cat the shell detached ended with the shell: {live:?}");
     drop(input);
     println!("  a detached cat outlived its shell");

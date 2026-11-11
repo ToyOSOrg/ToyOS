@@ -14,6 +14,8 @@ use toyos_abi::syscall::{self, SpawnArgs, SpawnMap, SyscallError, VmProt, MAX_SP
 use toyos_abi::RawHandle;
 
 const SELF: &str = "/system/bin/test_rs_abuse_spawn_maps";
+/// The name its children go by.
+const NAME: &str = "test_rs_abuse_spawn_maps";
 const CHILD: &str = "spawned-from-checked-ranges";
 const NONE: u64 = toyos_abi::HANDLE_INVALID.0 as u64;
 
@@ -24,6 +26,8 @@ fn spawn(maps: &[SpawnMap], entry: u64, image_base: u64) -> Result<RawHandle, Sy
         syscall::spawn(&SpawnArgs {
             path_ptr: SELF.as_ptr() as u64,
             path_len: SELF.len() as u64,
+            name_ptr: NAME.as_ptr() as u64,
+            name_len: NAME.len() as u64,
             endow_ptr: 0,
             endow_count: 0,
             labels_ptr: 0,

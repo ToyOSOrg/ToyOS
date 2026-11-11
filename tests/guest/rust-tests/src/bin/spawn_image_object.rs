@@ -19,6 +19,8 @@ use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 use toyos_abi::end::End;
 
 const SELF: &str = "/system/bin/test_rs_spawn_image_object";
+/// The name its children go by.
+const NAME: &str = "test_rs_spawn_image_object";
 const CHILD: &str = "spawned-from-an-object";
 
 /// `path` read whole into a memory object of this process's own, and its bytes.
@@ -38,6 +40,8 @@ fn spawn(image: RawHandle, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
         syscall::spawn(&SpawnArgs {
             path_ptr: SELF.as_ptr() as u64,
             path_len: SELF.len() as u64,
+            name_ptr: NAME.as_ptr() as u64,
+            name_len: NAME.len() as u64,
             endow_ptr: 0,
             endow_count: 0,
             labels_ptr: 0,

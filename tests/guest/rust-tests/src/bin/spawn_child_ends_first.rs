@@ -22,6 +22,8 @@ use toyos_abi::RawHandle;
 use toyos_abi::end::End;
 
 const SELF_PATH: &str = "/system/bin/test_rs_spawn_child_ends_first";
+/// The name its children go by.
+const NAME: &str = "test_rs_spawn_child_ends_fi";
 
 /// What the child exits with.
 const CODE: i32 = 7;
@@ -103,6 +105,8 @@ fn spawn(laid: &image::Laid, stdout: Option<RawHandle>) -> Result<RawHandle, Sys
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,
+        name_ptr: NAME.as_ptr() as u64,
+        name_len: NAME.len() as u64,
         endow_ptr: endow.as_ptr() as u64,
         endow_count: endow.len() as u64,
         labels_ptr: LABEL.as_ptr() as u64,

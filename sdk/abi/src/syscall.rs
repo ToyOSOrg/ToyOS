@@ -393,10 +393,14 @@ crate::user_safe! {
     #[derive(Clone, Copy)]
     pub struct SpawnArgs {
         /// The path the caller read the program from, which names it in the
-        /// spawn's record and a crash's, and whose last component is the name
-        /// the child goes by. Nothing opens it.
+        /// spawn's record and a crash's. Nothing opens it.
         pub path_ptr: u64,
         pub path_len: u64,
+        /// The name the child goes by in the roster, its exit record and a
+        /// crash's: a label of the caller's choosing, which names no
+        /// authority. `InvalidArgument` unless [`process_name`] takes it.
+        pub name_ptr: u64,
+        pub name_len: u64,
         /// `[EndowEntry]`, moved out of the parent's table.
         pub endow_ptr: u64,
         pub endow_count: u64,
@@ -439,6 +443,22 @@ crate::user_safe! {
         /// [`Rights::PAGER`]: crate::handle::Rights::PAGER
         pub pager: u64,
     }
+}
+
+/// The most bytes of a process's name: the roster's field less its NUL.
+pub const MAX_PROCESS_NAME: usize = crate::inventory::NAME_BYTES - 1;
+
+/// `name` as the roster spells a process's, NUL-padded: `None` unless it is 1
+/// to [`MAX_PROCESS_NAME`] bytes of UTF-8 holding no control character and no
+/// white space, so a name is one token of one line wherever a record prints it.
+pub fn process_name(name: &[u8]) -> Option<[u8; crate::inventory::NAME_BYTES]> {
+    let text = core::str::from_utf8(name).ok()?;
+    if text.is_empty() || text.len() > MAX_PROCESS_NAME || text.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    let mut padded = [0; crate::inventory::NAME_BYTES];
+    padded[..name.len()].copy_from_slice(name);
+    Some(padded)
 }
 
 crate::user_safe! {
@@ -2813,6 +2833,20 @@ pub fn process_stats(proc: RawHandle, stats: &mut ProcessStats) -> Result<(), Sy
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name is one token of bounded UTF-8: the bound is a limit, and what
+    /// would break a record's line or its field is refused.
+    #[test]
+    fn a_process_name_is_one_bounded_token() {
+        let longest = [b'n'; MAX_PROCESS_NAME];
+        let named = process_name(&longest).expect("the longest name");
+        assert_eq!((&named[..MAX_PROCESS_NAME], named[MAX_PROCESS_NAME]), (&longest[..], 0));
+        assert_eq!(process_name(b"cat").map(|n| n[..4].to_vec()), Some(b"cat\0".to_vec()));
+        assert!(process_name("h\u{e9}llo".as_bytes()).is_some());
+        for refused in [&b""[..], &[b'n'; MAX_PROCESS_NAME + 1], b"a\nb", b"a b", b"a\0b", b"a\x1b[0m", b"\xff"] {
+            assert_eq!(process_name(refused), None, "{refused:?}");
+        }
+    }
 
     /// The four readers of a `devices` entry share this parser, so what it
     /// accepts is what a config may say; a PCI function is named by its

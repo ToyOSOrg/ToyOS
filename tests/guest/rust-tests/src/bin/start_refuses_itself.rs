@@ -16,6 +16,8 @@ use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
 
 const DIR: &str = "/tmp/start_refuses_itself";
+/// The name its children go by.
+const NAME: &str = "start_refuses_itself";
 
 /// What `toyos::relocate` writes to its stderr, `fd:2`, when it refuses its own program.
 const REFUSED_LINE: &str = "this program's relocations are refused: it cannot start\n";
@@ -60,6 +62,8 @@ fn spawn_endowed_nothing(path: &str, argv: &str) -> Result<RawHandle, SyscallErr
         syscall::spawn(&SpawnArgs {
             path_ptr: path.as_ptr() as u64,
             path_len: path.len() as u64,
+            name_ptr: NAME.as_ptr() as u64,
+            name_len: NAME.len() as u64,
             endow_ptr: 0,
             endow_count: 0,
             labels_ptr: 0,

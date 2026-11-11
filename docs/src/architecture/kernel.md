@@ -17,9 +17,10 @@ It holds no filesystem, no storage, input, network, audio or USB driver, no
 network protocol, no audio mixing, no login and no naming policy, and parses
 nothing one program writes for another. What a parent tells the child it
 starts, its arguments and environment, is memory the parent lays out in the
-child: the kernel keeps none of it and knows a process by a label. The
-firmware's AML is interpreted by a userland ACPI service, which tells the
-kernel the little it needs, such as how to power off.
+child: the kernel keeps none of it. It knows a process by a short name its
+parent gives it, a label that carries no authority. The firmware's AML is
+interpreted by a userland ACPI service, which tells the kernel the little it
+needs, such as how to power off.
 
 ## Interrupts post, threads wait
 

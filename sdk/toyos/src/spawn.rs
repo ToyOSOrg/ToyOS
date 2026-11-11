@@ -19,14 +19,15 @@
 //! it too. The one endowed under [`JOB_LABEL`], or else this process's own.
 
 use toyos_abi::syscall::{
-    self, EndowEntry, SpawnArgs, SyscallError, FD_PREFIX, JOB_LABEL, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN,
-    SVC_LABEL,
+    self, EndowEntry, SpawnArgs, SyscallError, FD_PREFIX, JOB_LABEL, MAX_PROCESS_NAME, MAX_SPAWN_ENDOWMENTS,
+    MAX_SPAWN_LABELS_LEN, SVC_LABEL,
 };
 
 use crate::fd::Kind as FdKind;
 use crate::ipc::IpcError;
 use crate::launch::{self, Launch, LaunchError, Outcome, MAX_LAUNCH_EXTRAS, MAX_LAUNCH_FDS};
 use crate::process::{Image, Process};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::{AsHandle, BorrowedHandle, OwnedHandle, RawHandle};
@@ -205,6 +206,7 @@ impl Helper<'_> {
         let s = self.0;
         let image = image.ok_or(Refused::Invalid("a spawn names the program it runs"))?;
         let path = image_and_name(s.program, s.image).0;
+        let name = name(s.argv.split(|&b| b == 0).find(|arg| !arg.is_empty()).unwrap_or(s.program.as_bytes()));
         let env = crate::files::starting_in(s.env, s.cwd)
             .ok_or(Refused::Invalid("a working directory that is not absolute, is too long or holds a NUL"))?;
         // Held until the spawn answers: the child copies its pages from it.
@@ -273,6 +275,8 @@ impl Helper<'_> {
         let args = SpawnArgs {
             path_ptr: path.as_ptr() as u64,
             path_len: path.len() as u64,
+            name_ptr: name.as_ptr() as u64,
+            name_len: name.len() as u64,
             endow_ptr: entries.as_ptr() as u64,
             endow_count: count as u64,
             labels_ptr: labels.as_ptr() as u64,
@@ -391,6 +395,26 @@ fn decimal(mut n: u32, buf: &mut [u8; 10]) -> &[u8] {
     }
 }
 
+/// The name a child run as `program`, its `argv[0]`, goes by in the kernel's
+/// records (`SpawnArgs::name_ptr`): its last component, cut at a character to
+/// [`MAX_PROCESS_NAME`] bytes, with `_` for a character a name does not hold,
+/// and `?` where that leaves nothing.
+pub fn name(program: &[u8]) -> String {
+    let text = String::from_utf8_lossy(program);
+    let mut name = String::new();
+    for c in text.rsplit('/').next().unwrap_or_default().chars() {
+        let c = if c.is_control() || c.is_whitespace() { '_' } else { c };
+        if name.len() + c.len_utf8() > MAX_PROCESS_NAME {
+            break;
+        }
+        name.push(c);
+    }
+    if name.is_empty() {
+        name.push('?');
+    }
+    name
+}
+
 /// What a helper runs, and the name it runs it under: the image named, else
 /// the program; `argv[0]` is the program's either way.
 pub fn image_and_name<'a>(program: &'a str, image: Option<&'a str>) -> (&'a str, &'a str) {
@@ -438,6 +462,24 @@ mod tests {
             Shape { pager: true, ..LAUNCH },
         ] {
             assert!(kind(shape).is_err(), "{shape:?}");
+        }
+    }
+
+    /// Whatever a program is called, its name is one the kernel takes, and an
+    /// applet's is the applet's.
+    #[test]
+    fn a_name_is_the_program_s_last_component_as_the_kernel_takes_one() {
+        use toyos_abi::syscall::process_name;
+        assert_eq!(name(b"/system/bin/cat"), "cat");
+        assert_eq!(name(b"ls"), "ls");
+        assert_eq!(name(b"/apps/My App/run\tme"), "run_me");
+        assert_eq!(name(b"/system/bin/test_rs_spawn_child_ends_first"), "test_rs_spawn_child_ends_fi");
+        assert_eq!(name("/x/".as_bytes()), "?");
+        assert_eq!(name(b""), "?");
+        let wide = "\u{e9}".repeat(20);
+        assert_eq!(name(wide.as_bytes()), "\u{e9}".repeat(13));
+        for program in [&b"/system/bin/cat"[..], b"", b"a b\n", b"\xff\xfe", wide.as_bytes(), &[b'n'; 100]] {
+            assert!(process_name(name(program).as_bytes()).is_some(), "{program:?}");
         }
     }
 

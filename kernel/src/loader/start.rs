@@ -96,15 +96,6 @@ pub(crate) fn alloc_kernel_stack(job: &Arc<Job>, start: Start) -> Option<(Kernel
     Some((stack, frame))
 }
 
-/// The last path component, truncated to what a process entry can hold.
-pub(crate) fn make_name(path: &str) -> [u8; crate::process::THREAD_NAME_LEN] {
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    let mut name = [0u8; crate::process::THREAD_NAME_LEN];
-    let len = filename.len().min(crate::process::THREAD_NAME_LEN - 1);
-    name[..len].copy_from_slice(&filename.as_bytes()[..len]);
-    name
-}
-
 /// A caller's request for a child's table: `endow` has not left the caller's table yet.
 // The move must be last: an earlier move leaves a failed spawn's caller holding handles that name nothing.
 pub struct PendingHandles {

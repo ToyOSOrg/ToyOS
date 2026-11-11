@@ -122,14 +122,14 @@ fn lay(space: &mut crate::mm::space::AddressSpace, maps: &[Map]) -> Result<(), S
 /// the child's handle table around its handle to itself once nothing is left
 /// to refuse.
 ///
-/// `path` labels the program, and its last component is the name the child
-/// goes by; the kernel resolves no path.
+/// `path` labels the program and `name` the child; the kernel resolves no path.
 ///
 /// `Refusal`, not `-> !`, is the error type: every failure below owns a
 /// partly built process (address space, stack, kernel stack), and nothing
 /// unwinds, so the error must travel out as a value rather than strand it.
 pub fn spawn<C: Commit>(
     path: &str,
+    name: [u8; crate::process::THREAD_NAME_LEN],
     commit: C,
     program: Program,
     parent: Parent,
@@ -212,7 +212,7 @@ pub fn spawn<C: Commit>(
     let ((), retire) = admission.land(guard.as_mut().unwrap(), |table, node| {
         table.insert(ProcessEntry::new(
             Arc::clone(&object),
-            start::make_name(path),
+            name,
             proc_data,
             // Two holders: a crash report on this thread reads it without the process table.
             Some(Arc::clone(&image)),
@@ -253,7 +253,7 @@ pub fn spawn<C: Commit>(
     Ok((pid, held))
 }
 
-/// The name the supervisor runs under: no file, since it runs from its boot image.
+/// The name the supervisor runs under and its label: no file, since it runs from its boot image.
 const SUPERVISOR: &str = "supervisor";
 
 /// Start the supervisor from its boot image as the build laid it out, holding the machine's one
@@ -333,7 +333,8 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects, laid: &toyos_kimage::
     };
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
     let table = SupervisorTable { job, handles, entries, labels };
-    match spawn(SUPERVISOR, table, program, Parent::Root) {
+    let name = toyos_abi::syscall::process_name(SUPERVISOR.as_bytes()).expect("spawn_supervisor: its own name");
+    match spawn(SUPERVISOR, name, table, program, Parent::Root) {
         Ok((pid, ())) => pid,
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_supervisor: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_supervisor: {e}"),

@@ -23,6 +23,8 @@ use toyos_abi::syscall::{
 
 
 const PAGE: u64 = 4096;
+/// The name its children go by.
+const NAME: &str = "echo";
 const STAT_LEN: usize = core::mem::size_of::<Stat>();
 const CANARY: u8 = 0xA5;
 
@@ -93,6 +95,8 @@ fn main() {
     let args = SpawnArgs {
         path_ptr: base,
         path_len: PATH.len() as u64,
+        name_ptr: NAME.as_ptr() as u64,
+        name_len: NAME.len() as u64,
         endow_ptr: 0,
         endow_count: 0,
         labels_ptr: 0,

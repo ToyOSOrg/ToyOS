@@ -17,6 +17,8 @@ use toyos_abi::end::End;
 use toyos_abi::syscall::{self, SpawnArgs};
 
 const SELF: &str = "/system/bin/test_rs_startup_block";
+/// The name its children go by.
+const NAME: &str = "test_rs_startup_block";
 const SAID: &str = "said";
 /// What each child exits with once its checks hold, so neither can pass as the other.
 const SAID_HELD: i32 = 41;
@@ -53,6 +55,8 @@ fn spawn_unsaid() -> End {
     let args = SpawnArgs {
         path_ptr: SELF.as_ptr() as u64,
         path_len: SELF.len() as u64,
+        name_ptr: NAME.as_ptr() as u64,
+        name_len: NAME.len() as u64,
         endow_ptr: 0,
         endow_count: 0,
         labels_ptr: 0,

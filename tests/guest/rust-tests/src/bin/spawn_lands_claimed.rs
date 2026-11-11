@@ -25,6 +25,8 @@ use std::os::toyos::process::ExitStatusExt;
 use toyos_abi::end::End;
 
 const SELF_PATH: &str = "/system/bin/test_rs_spawn_lands_claimed";
+/// The name its children go by.
+const NAME: &str = "test_rs_spawn_lands_claimed";
 
 /// The name the place's namespace carries the port back to the test under.
 const BACK: &str = "back";
@@ -85,6 +87,8 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,
+        name_ptr: NAME.as_ptr() as u64,
+        name_len: NAME.len() as u64,
         endow_ptr: 0,
         endow_count: 0,
         labels_ptr: 0,

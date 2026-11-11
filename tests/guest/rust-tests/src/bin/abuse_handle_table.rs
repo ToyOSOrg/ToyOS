@@ -38,6 +38,8 @@ use toyos_abi::RawHandle;
 use toyos_abi::end::End;
 
 const SELF: &str = "/system/bin/test_rs_abuse_handle_table";
+/// The name its children go by.
+const NAME: &str = "test_rs_abuse_handle_table";
 /// The role a spawned copy of this binary takes: it exits at once.
 const CHILD: &str = "endowed";
 
@@ -87,6 +89,8 @@ fn main() {
         let args = SpawnArgs {
             path_ptr: path as u64,
             path_len: PATH.len() as u64,
+            name_ptr: NAME.as_ptr() as u64,
+            name_len: NAME.len() as u64,
             endow_ptr: (region as u64) + (REGION / 4) as u64,
             endow_count,
             labels_ptr: (region as u64) + (REGION / 8) as u64,
@@ -204,6 +208,8 @@ fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, Sys
         syscall::spawn(&SpawnArgs {
             path_ptr: SELF.as_ptr() as u64,
             path_len: SELF.len() as u64,
+            name_ptr: NAME.as_ptr() as u64,
+            name_len: NAME.len() as u64,
             endow_ptr: entries.as_ptr() as u64,
             endow_count: entries.len() as u64,
             labels_ptr: labels.as_ptr() as u64,
