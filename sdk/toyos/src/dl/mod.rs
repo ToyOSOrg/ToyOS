@@ -397,30 +397,56 @@ unsafe fn construct(inits: &[(usize, usize)]) {
 }
 
 /// Load the libraries the executable at `header` names and bind its symbols
-/// to them, then run their constructors: std's and libc's start call this
-/// once its thread-local storage is laid out, before anything that could
-/// name such a symbol. One whose libraries cannot be had exits 127 with a
-/// line on its stderr naming why, as [`crate::relocate`] does.
+/// to them, take the write away from its `PT_GNU_RELRO` pages, then run the
+/// libraries' constructors: std's and libc's start call this once its
+/// thread-local storage is laid out, before anything that could name such a
+/// symbol. One whose libraries cannot be had exits 127 with a line on its
+/// stderr naming why, as [`crate::relocate`] does.
 ///
 /// # Safety
 /// `header` is the running executable's ELF header, its thread-local storage
 /// is laid out ([`tls::start`]) and this is its main thread, the only one.
 pub unsafe fn start(header: *const u8) {
-    if !crate::relocate::names_a_library() {
-        return;
-    }
-    // SAFETY: the caller's.
-    match unsafe { load_needed(header) } {
-        // SAFETY: each a module just published.
-        Ok(published) => unsafe { construct(&published.inits) },
-        Err(why) => {
-            let line = alloc::format!("this program's libraries could not be loaded: {why}\n");
-            if let Some(stderr) = crate::relocate::stderr() {
-                let _ = syscall::write(stderr, line.as_bytes());
-            }
-            syscall::exit(127)
+    let refuse = |line: String| -> ! {
+        if let Some(stderr) = crate::relocate::stderr() {
+            let _ = syscall::write(stderr, line.as_bytes());
         }
+        syscall::exit(127)
+    };
+    let published = match crate::relocate::names_a_library() {
+        // SAFETY: the caller's.
+        true => match unsafe { load_needed(header) } {
+            Ok(published) => Some(published),
+            Err(why) => refuse(alloc::format!("this program's libraries could not be loaded: {why}\n")),
+        },
+        false => None,
+    };
+    // SAFETY: the caller's, and every relocation of the executable is applied:
+    // its own by `crate::relocate`, the rest by the load above.
+    if let Err(why) = unsafe { seal(header) } {
+        refuse(alloc::format!("this program's PT_GNU_RELRO could not be made read-only: {why}\n"));
     }
+    if let Some(published) = published {
+        // SAFETY: each a module just published.
+        unsafe { construct(&published.inits) };
+    }
+}
+
+/// Make the executable's `PT_GNU_RELRO` pages read-only, as [`protect`] does
+/// a library's: its vtables, `.got` and `.dynamic`, which a stray or hostile
+/// store in the running program could otherwise rewrite. The program does
+/// this to itself; one that skipped it would only be without it.
+///
+/// # Safety
+/// `header` is the running executable's ELF header, and nothing writes its
+/// `PT_GNU_RELRO` again.
+unsafe fn seal(header: *const u8) -> Result<(), Refused> {
+    // SAFETY: the caller's; the page the header begins is mapped.
+    let page = unsafe { core::slice::from_raw_parts(header, HEADER) };
+    let Some((at, len)) = image::executable_relro(page)? else { return Ok(()) };
+    // SAFETY: whole pages of the executable's own image, which the header's
+    // segment begins.
+    unsafe { syscall::vm_protect(header.cast_mut().add(at), len, VmProt::Read) }.map_err(Refused::Memory)
 }
 
 /// # Safety

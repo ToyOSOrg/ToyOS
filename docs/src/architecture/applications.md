@@ -42,6 +42,12 @@ linking and library loading are userland work shared by the Rust and C runtimes.
 A program's image is read by userland through its own view and handed to the
 kernel as memory, never named by a path the kernel resolves.
 
+A program relocates itself as it starts, and once its relocations are applied
+it makes read-only the part of its image that only they write, as the loader
+does for each library. The protection is the program's defence against its own
+stray or hijacked stores: it does this to itself, and one that did not would
+gain nothing over any other process.
+
 ## Desktop apps
 
 A window's pixels reach the compositor through shared memory. The toolkit and
