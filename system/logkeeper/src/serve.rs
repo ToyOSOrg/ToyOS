@@ -3,17 +3,17 @@
 //!
 //! **Every reader gets the boot from its first line**, however late it
 //! connects: the main loop appends each round's lines to one
-//! [`toyos_logstream::Replay`], after the file has them while the file has
-//! all of the replay; a part not open yet, refused or catching up takes them
-//! from the replay later. A reader is a thread with an offset into it. So the
-//! same text reaches `/log` and every reader, in the same order, and nothing
-//! a reader does can reach the file.
+//! [`toyos_logstream::Replay`], which the file (`crate::file`) takes its
+//! batches from. A reader is a thread with an offset into it. So the same
+//! text reaches `/log` and every reader, in the same order, and nothing a
+//! reader does can reach the file.
 //!
 //! A reader that takes none for [`STALLED`] while bytes are owed to it is let
 //! go, and that is a line in the log.
 //!
-//! **A reader that is caught up waits on the replay growing**, and nothing
-//! else wakes it: there is no poll and no timer.
+//! **A reader that is caught up waits on the replay growing or on its reader
+//! leaving**, whichever comes first: a reader that leaves while the log is
+//! quiet gives back its thread and its slot then. There is no timer.
 //!
 //! The console's carriers read the same replay (`crate::carrier`): the hub
 //! keeps the kernel's read positions each round is written through
@@ -28,7 +28,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use toyos::ipc::Connection;
-use toyos::poller::{Poller, WRITABLE};
+use toyos::poller::{Poller, OTHER_END_GONE, READABLE, WRITABLE};
+use toyos::wake::{self, Bell, Waker};
 use toyos::{AsHandle, Pipe};
 use toyos_abi::syscall::SyscallError;
 use toyos::say;
@@ -79,6 +80,9 @@ struct Shared {
     replay: Mutex<Held>,
     grew: Condvar,
     readers: AtomicUsize,
+    /// A wake per reader, rung as the replay grows: a reader waits on its
+    /// own end beside it, which a condition variable cannot.
+    reader_wakes: Mutex<Vec<Waker>>,
     /// The wall clock the boot started at, for a line a reader is owed.
     boot_secs: Option<u64>,
 }
@@ -95,6 +99,7 @@ impl Hub {
             }),
             grew: Condvar::new(),
             readers: AtomicUsize::new(0),
+            reader_wakes: Mutex::new(Vec::new()),
             boot_secs,
         });
         Self { shared }
@@ -104,7 +109,7 @@ impl Hub {
     /// of a pipe of its own, which the log is written into.
     pub fn read(&self, conn: &Connection) {
         let Some(pipe) = self.hand_over(conn) else { return };
-        admit(&self.shared, format!("reader {}", conn.as_handle().raw().0), PipeSink::new(pipe));
+        admit(&self.shared, format!("reader {}", conn.as_handle().raw().0), pipe);
     }
 
     /// The lines the file has just taken, for every reader, and the kernel's
@@ -121,6 +126,7 @@ impl Hub {
         }
         drop(held);
         self.shared.grew.notify_all();
+        self.shared.reader_wakes.lock().expect("logkeeper: a reader's wake is poisoned").retain(|w| w.ring().is_ok());
     }
 
     /// The positions of the last round wholly before `at`: what a channel
@@ -264,16 +270,27 @@ enum Left {
 }
 
 /// A reader thread, where its count allows one.
-fn admit(shared: &Arc<Shared>, who: String, sink: impl Write + Send + 'static) {
+fn admit(shared: &Arc<Shared>, who: String, pipe: Pipe) {
     let count = &shared.readers;
     if count.fetch_add(1, Ordering::SeqCst) >= MAX_READERS {
         count.fetch_sub(1, Ordering::SeqCst);
         say!("logkeeper: refusing {who}: {MAX_READERS} readers on this machine are already served");
         return;
     }
+    let (waker, bell) = match wake::pair() {
+        Ok(ends) => ends,
+        Err(e) => {
+            count.fetch_sub(1, Ordering::SeqCst);
+            say!("logkeeper: no wake for {who}: {e:?}");
+            return;
+        }
+    };
+    // Before the thread reads the replay, so no growth after its first look
+    // goes unrung.
+    shared.reader_wakes.lock().expect("logkeeper: a reader's wake is poisoned").push(waker);
     let theirs = Arc::clone(shared);
     let spawned = std::thread::Builder::new().name("log-reader".into()).spawn(move || {
-        let (sent, left) = feed(&theirs, sink);
+        let (sent, left) = feed(&theirs, PipeSink::new(pipe, bell));
         theirs.readers.fetch_sub(1, Ordering::SeqCst);
         match left {
             Left::Stalled => say!(
@@ -291,11 +308,16 @@ fn admit(shared: &Arc<Shared>, who: String, sink: impl Write + Send + 'static) {
 
 /// Write the boot to `sink` from its first byte, then each round as it lands,
 /// until the reader goes or stalls. Answers the bytes it sent and why it ended.
-fn feed(shared: &Shared, mut sink: impl Write) -> (u64, Left) {
+fn feed(shared: &Shared, mut sink: PipeSink) -> (u64, Left) {
     let mut at = 0u64;
     let mut sent = 0u64;
     loop {
-        let chunk = next(shared, &mut at);
+        let Some(chunk) = next(shared, &mut at) else {
+            if !sink.await_more() {
+                return (sent, Left::Gone);
+            }
+            continue;
+        };
         match sink.write_all(&chunk) {
             Ok(()) => sent += chunk.len() as u64,
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return (sent, Left::Stalled),
@@ -304,23 +326,20 @@ fn feed(shared: &Shared, mut sink: impl Write) -> (u64, Left) {
     }
 }
 
-/// The bytes after `at`, at most [`CHUNK`] of them, once there are any; `at`
-/// moves past them. A reader the replay no longer holds the bytes of is
-/// handed the line that says so instead.
-fn next(shared: &Shared, at: &mut u64) -> Vec<u8> {
-    let mut held = shared.replay.lock().expect("logkeeper: the replay is poisoned");
-    loop {
-        match held.replay.next(*at, CHUNK) {
-            Next::Bytes(bytes) => {
-                *at += bytes.len() as u64;
-                return bytes.to_vec();
-            }
-            Next::Evicted { lost, at: resume } => {
-                *at = resume;
-                return evicted(shared.boot_secs, lost);
-            }
-            Next::CaughtUp => held = shared.grew.wait(held).expect("logkeeper: the replay is poisoned"),
+/// The bytes after `at`, at most [`CHUNK`] of them, or `None` where there are
+/// none yet; `at` moves past them. A reader the replay no longer holds the
+/// bytes of is handed the line that says so instead.
+fn next(shared: &Shared, at: &mut u64) -> Option<Vec<u8>> {
+    match shared.replay.lock().expect("logkeeper: the replay is poisoned").replay.next(*at, CHUNK) {
+        Next::Bytes(bytes) => {
+            *at += bytes.len() as u64;
+            Some(bytes.to_vec())
         }
+        Next::Evicted { lost, at: resume } => {
+            *at = resume;
+            Some(evicted(shared.boot_secs, lost))
+        }
+        Next::CaughtUp => None,
     }
 }
 
@@ -339,33 +358,84 @@ fn own_line(boot_secs: Option<u64>, severity: Severity, text: &str) -> Vec<u8> {
     format!("{line}\n").into_bytes()
 }
 
-/// A pipe as a byte sink: one `write` takes what fits, and a full pipe is
-/// waited on for [`STALLED`] and no longer.
+/// The tokens of a reader's watches: room in its pipe, the replay grown, and
+/// its reader gone.
+const ROOM: u64 = 0;
+const MORE: u64 = 1;
+const GONE: u64 = 2;
+
+/// A reader's pipe as a byte sink: one `write` takes what fits, and a full
+/// pipe is waited on for [`STALLED`] and no longer. Its watches are one-shot,
+/// so each is armed again only once it has answered.
 struct PipeSink {
     pipe: Pipe,
+    /// Rung as the replay grows.
+    more: Bell,
     poller: Poller,
+    armed: [bool; 3],
+    gone: bool,
 }
 
 impl PipeSink {
-    fn new(pipe: Pipe) -> Self {
-        Self { pipe, poller: Poller::new(1) }
+    fn new(pipe: Pipe, more: Bell) -> Self {
+        Self { pipe, more, poller: Poller::new(3), armed: [false; 3], gone: false }
+    }
+
+    fn arm(&mut self, token: u64) {
+        if !std::mem::replace(&mut self.armed[token as usize], true) {
+            match token {
+                ROOM => self.poller.watch(&self.pipe, WRITABLE, ROOM),
+                MORE => self.poller.watch(&self.more, READABLE, MORE),
+                _ => self.poller.watch(&self.pipe, OTHER_END_GONE, GONE),
+            }
+        }
+    }
+
+    /// Wait at most `timeout_nanos` for any armed watch; the tokens answered.
+    fn wait(&mut self, timeout_nanos: u64) -> Vec<u64> {
+        self.arm(GONE);
+        let mut answered = Vec::new();
+        self.poller.wait(1, timeout_nanos, |token| answered.push(token));
+        for &token in &answered {
+            self.armed[token as usize] = false;
+            self.gone |= token == GONE;
+        }
+        answered
+    }
+
+    /// Wait until the replay may have grown: `false` once the reader is gone.
+    fn await_more(&mut self) -> bool {
+        loop {
+            if self.gone {
+                return false;
+            }
+            if self.more.take() {
+                return true;
+            }
+            self.arm(MORE);
+            self.wait(u64::MAX);
+        }
     }
 }
 
 impl Write for PipeSink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let until = std::time::Instant::now() + STALLED;
         loop {
             match self.pipe.write_nonblock(buf) {
                 Ok(n) => return Ok(n),
                 Err(SyscallError::WouldBlock) => {}
                 Err(e) => return Err(std::io::Error::other(format!("{e:?}"))),
             }
-            self.poller.watch(&self.pipe, WRITABLE, 0);
-            let mut room = false;
-            self.poller.wait(1, STALLED.as_nanos() as u64, |_| room = true);
-            if !room {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if self.gone {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            if left.is_zero() {
                 return Err(std::io::ErrorKind::TimedOut.into());
             }
+            self.arm(ROOM);
+            self.wait(left.as_nanos() as u64);
         }
     }
 

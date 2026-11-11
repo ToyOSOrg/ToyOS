@@ -64,8 +64,8 @@ pub const RECORD_BYTES: usize = 1024;
 /// (`log!`) and `Alert` (`alert!`); a program's stdout is `Info` and its stderr
 /// `Error`, and its own lines choose. Every rendered line names one above
 /// `Info` by its [`word`](Self::word), a screen colours the line by it, and
-/// `/system/bin/logkeeper` makes the volume durable at `Alert` rather than on
-/// its interval.
+/// `/system/bin/logkeeper` makes the volume durable at `Error` and above rather
+/// than with its batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Severity {

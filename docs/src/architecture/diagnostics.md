@@ -20,9 +20,13 @@ exports them.
 - The kernel's logging responsibility is its own record ring and its console.
   Userland output never enters the kernel ring. Reading the machine's log
   needs a right on the system capability.
-- The log keeper owns the log files. It holds each program to an allowance,
-  keeps every boot's beginning, and syncs on an alert or an interval. Severity
-  is an ordered ladder.
+- The log keeper owns the log files. It holds each program to an allowance
+  and keeps every boot's beginning. Severity is an ordered ladder.
+- The file is written in batches: at once for an error, an alert or the
+  machine's stop, and otherwise within a second. A machine that dies without
+  stopping loses at most that second from its file, never from its console.
+  No file call holds up the console or a reader, and a stop waits on the file
+  within a bound.
 - A slow sink drops and counts; it never blocks a producer and fails alone.
 - The kernel waits on the log keeper neither at a panic nor at a stop.
 

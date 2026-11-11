@@ -1,9 +1,9 @@
 //! The `log` port: `inspect`'s answer about where this boot's log is going,
 //! and a reader on this machine handed the log itself ([`READ`]).
 //!
-//! **On a thread of its own, so no reader can reach the loop that writes the
-//! file.** The loop publishes what it knows once a round — a few relaxed
-//! stores, and a lock only when the file it writes changes — and this thread
+//! **On a thread of its own, so no reader can reach the loop or the file.**
+//! They publish what they know — a few relaxed stores, and a lock only when
+//! the file changes — and this thread
 //! owns the acceptor, reads each reader's request without ever blocking on it,
 //! answers in one non-blocking write and closes. A reader that connects and
 //! says nothing costs a slot and [`HANDSHAKE_TIMEOUT`], never the log.
@@ -40,11 +40,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// The poll token of the acceptor, clear of every handle's own value.
 const ACCEPT: u64 = u64::MAX;
 
-/// Where the file side of the loop stands.
+/// Where the file stands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum State {
-    /// Every round written, flushed and published.
+    /// Every batch written and synced as it falls due.
     Writing = 0,
     /// The volume answers slower than a log is worth, or refused the part
     /// and is asked again: the replay keeps what the file is owed.
@@ -67,11 +67,11 @@ impl State {
     }
 }
 
-/// The loop's side of the answer. One writer, the loop; one reader, this
-/// module's thread.
+/// The answer's facts: the file's, published by the file's thread, and the
+/// records lost, by the loop; one reader, this module's thread.
 pub struct Published {
     state: AtomicU8,
-    /// The part the loop last published, or 0 for none: the loop's own record
+    /// The part last published, or 0 for none: the file thread's own record
     /// of when `file` changes, and read by nothing else.
     part: AtomicU32,
     /// The part being written and its path, one pair under one lock, so no
@@ -92,24 +92,27 @@ impl Published {
         }
     }
 
-    /// What the loop knows at the top of a round. `lost` is the records the
-    /// kernel overwrote before this reader reached them.
-    pub fn publish(&self, volume: Option<&Volume>, state: State, lost: u64) {
+    /// Where the file stands, from the file's thread.
+    pub fn publish(&self, volume: Option<&Volume>, state: State) {
         self.state.store(state as u8, Ordering::Relaxed);
-        self.lost.store(lost, Ordering::Relaxed);
         let part = volume.map_or(0, Volume::part);
         self.bytes.store(volume.map_or(0, Volume::bytes), Ordering::Relaxed);
-        // The lock is taken when the file changes and at no other round.
+        // The lock is taken when the file changes and at no other batch.
         if self.part.swap(part, Ordering::Relaxed) != part {
             *self.file.lock().expect("the inspect thread does not panic holding this") =
                 volume.map(|v| (v.part(), v.path()));
         }
     }
 
+    /// The records the kernel overwrote before the loop reached them.
+    pub fn publish_lost(&self, lost: u64) {
+        self.lost.store(lost, Ordering::Relaxed);
+    }
+
     fn snapshot(&self) -> Vec<u8> {
         let mut snap = Snapshot::new(toyos_inspect::LOG);
         snap.put("volume.state", State::word(self.state.load(Ordering::Relaxed)));
-        let file = self.file.lock().expect("the loop does not panic holding this").clone();
+        let file = self.file.lock().expect("the file's thread does not panic holding this").clone();
         if let Some((part, path)) = file {
             snap.put("volume.path", path);
             snap.put("volume.part", part);

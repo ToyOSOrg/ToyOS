@@ -460,9 +460,8 @@ mod tests {
         format!("[{lost} bytes let go]\n").into_bytes()
     }
 
-    /// One of the loop's rounds: the file given what it is owed, then the
-    /// round's text written and synced where it is caught up, then the
-    /// replay's.
+    /// A batch: the file given what it is owed, then the text written and
+    /// synced where it is caught up, then the replay's.
     fn round(v: &mut Volume, hub: &Hub, text: &[u8]) {
         let caught = (v.is_open() && v.through() == hub.end())
             || v.catch_up(|at, max| hub.owed(at, max), note, MAX_LOG_BYTES, |_| {}).unwrap_or(false);
