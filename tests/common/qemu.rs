@@ -1734,13 +1734,16 @@ impl QemuInstance {
         dump(&mut qmp, &out)
     }
 
-    /// Screendump until the decoded screen carries `needle`, or the timeout.
+    /// Screendump until the decoded screen carries every one of `needles`, or
+    /// the timeout. A report is painted a row at a time, so a caller passes
+    /// every line it reads off the dump.
     ///
     /// The panic handler's own path paints after the drain that emits the
     /// report, so a marker on serial does not yet prove a paint.
-    pub fn screendump_until(&mut self, needle: &str, timeout: Duration) -> super::screen::Ppm {
+    pub fn screendump_until(&mut self, needles: &[&str], timeout: Duration) -> super::screen::Ppm {
         self.screendump_while(timeout, Duration::from_millis(100), |dump| {
-            dump.text().contains(needle)
+            let text = dump.text();
+            needles.iter().all(|needle| text.contains(needle))
         })
     }
 
