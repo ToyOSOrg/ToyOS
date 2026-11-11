@@ -1,26 +1,16 @@
 //! A connect is an allocation request, and the kernel has to be able to say no.
 //!
 //! Opening a connection hands the server's ends of two pipes to the port's
-//! pending queue. The queue had no depth, and the `bool` `push_connection`
-//! returned to report failure was discarded at the call site — so a process
-//! could queue connections nobody accepted until `pmm::alloc_page` returned
-//! `None` and `pipe::create`'s `.expect` took the kernel down with it.
+//! pending queue, which has a depth: a connect past it is `ResourceExhausted`,
+//! and the machine is still running afterwards.
 //!
-//! Fail-fast is for kernel bugs, not for untrusted input: this has to be a
-//! `ResourceExhausted`, and the machine has to still be running afterwards.
+//! A pending connection's pipes take memory only as they hold bytes: a full
+//! queue must cost under a quarter of what eager 2 MiB rings would, and the
+//! first byte on a live connection must take a frame.
 //!
-//! The other half, which the depth alone does not give: each of those calls
-//! built two 2 MiB rings *eagerly*, so the allowance the kernel grants a
-//! server that has not answered yet cost 128 MiB of physical memory before a
-//! single byte had been sent. A pipe now takes memory only as it holds bytes,
-//! and the memory assertion below is what says so.
-//!
-//! **The attack's "be your own service" clause is dead and this is now a bound
-//! check.** It used to `SYS_LISTEN` on a name of its own, because listening was
-//! ungated and any process could take any name; there is no name registry left,
-//! so the flood is against a port this process created and holds both ends of.
-//! A process given only a connector can still do exactly this to a real
-//! service, which is what the depth is for.
+//! The flood is against a port this process created and holds both ends of. A
+//! process given only a connector can do exactly this to a real service, which
+//! is what the depth is for.
 
 use toyos::port;
 use toyos::AsHandle;

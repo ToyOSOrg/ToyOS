@@ -2,11 +2,11 @@
 //! before `toyos-fat32` writes its files: a boot sector and its backup, an
 //! FSInfo sector, two FATs and a root directory holding the volume label.
 //!
-//! Here and not in `toyos-fat32`, which is the kernel's driver and has no
-//! format path by design. The geometry is fatgen103's with the choices of the
-//! `fatfs` crate this replaced, so every volume is laid out as before:
-//! 512-byte sectors, eight reserved sectors, the cluster size by volume size,
-//! and the FAT sized for the clusters left once the FATs are paid for.
+//! Here and not in `toyos-fat32`, which has no format path by design. The
+//! geometry is fatgen103's with the choices of the `fatfs` crate this
+//! replaced, so every volume is laid out as before: 512-byte sectors, eight
+//! reserved sectors, the cluster size by volume size, and the FAT sized for
+//! the clusters left once the FATs are paid for.
 //! `differs_from_the_fatfs_format_only_in_the_bios_stub` holds that, against
 //! `fatfs` itself.
 //!

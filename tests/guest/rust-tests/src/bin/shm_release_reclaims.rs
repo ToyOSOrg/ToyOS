@@ -1,11 +1,7 @@
 //! Dropping the last handle to a shared region must give the pages back.
 //!
-//! `SYS_RELEASE_SHARED` unmapped the caller and dropped it from the region's
-//! `allowed` list, and stopped there: the "is anyone left?" test lived only in
-//! `cleanup_process`, so nothing freed a region at close time and soundserver's
-//! per-client ring stayed resident until some unrelated process exited. There
-//! is no release call now — a region's life is its handle count, and the
-//! zero-handle hook is where the mappings go.
+//! A region's frames go back once its last handle and its last mapping have
+//! gone.
 //!
 //! Two directions, because a reclaim rule that is too eager is worse than one
 //! that never fires: a region whose maker has dropped its handle but which it

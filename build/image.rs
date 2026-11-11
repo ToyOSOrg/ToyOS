@@ -544,9 +544,9 @@ fn build_time() -> FatTime {
 /// Write `files` onto a formatted volume, creating the directories they name,
 /// and leave the free-cluster count recorded.
 ///
-/// Written with `toyos-fat32`, the driver the kernel appends `kernel.log` with
-/// and the one its own host suite runs the volume checker against, so "the image
-/// we build is clean" is a claim about the writer that is judged.
+/// Written with `toyos-fat32`, the driver whose own host suite runs the volume
+/// checker against it, so "the image we build is clean" is a claim about the
+/// writer that is judged.
 ///
 /// The format leaves FSInfo's free-cluster field 0xFFFFFFFF, which FAT32
 /// defines as "unknown" and every host reports free space from; `free_bytes`
