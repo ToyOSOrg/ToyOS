@@ -39,9 +39,8 @@ pub const SYSCAP_LABEL: &str = "syscap";
 /// directory capability's `fs:<directory>` among them.
 pub const SVC_PREFIX: &str = "svc:";
 /// `provide:<name>`: a connector to a service whoever launched this program
-/// gave it beside its row, which it passes on to what it launches
-/// ([`provided`]). It arrives without the right to connect where the row does
-/// not receive the name.
+/// gave it beside its row, which receives the name, and which it passes on to
+/// what it launches ([`provided`]).
 pub const PROVIDE_PREFIX: &str = "provide:";
 /// `serve:<name>`: the acceptor of a machine-wide port this program serves.
 pub const SERVE_PREFIX: &str = "serve:";
@@ -68,7 +67,8 @@ pub(crate) fn service_of(label: &str) -> Option<&str> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EndowError {
     /// This process was not given the service, or was given its connector
-    /// only to pass on: a fact about this process, not about the machine.
+    /// without the right to connect: a fact about this process, not about the
+    /// machine.
     /// There is no "not yet": every port exists before either end's process
     /// runs.
     NotEndowed,

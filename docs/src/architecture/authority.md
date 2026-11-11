@@ -106,10 +106,9 @@
 
 - A service is a port. Its server holds the acceptor; a client holds a
   connector and connects through it, which takes the right to write on the
-  connector. A connector without that right may only be passed on: a service
-  one program provides to a launch, such as a terminal's surface, reaches a
-  launched program whose row does not receive it that way, for it to pass on
-  to what it launches in turn.
+  connector. A service one program provides to a launch, such as a terminal's
+  surface, reaches the launched program only where its row receives that
+  service.
 - A process finds a service only among the connectors its parent gave it,
   by the name its parent wrote. There is no global registry and no connect by
   name.

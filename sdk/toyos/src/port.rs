@@ -28,7 +28,7 @@ pub struct Connector(pub(crate) OwnedHandle);
 /// of its own.
 ///
 /// [`SyscallError::Gone`] is "the server exited", and `PermissionDenied` a
-/// connector given only to pass on. There is no "not yet". `InvalidArgument`
+/// connector given without `WRITE`. There is no "not yet". `InvalidArgument`
 /// is a handle that is no connector: its type is its giver's word.
 pub fn connect(connector: BorrowedHandle<'_>) -> Result<Connection, SyscallError> {
     syscall::connect(connector.raw()).map(|h| Connection(OwnedHandle(h)))

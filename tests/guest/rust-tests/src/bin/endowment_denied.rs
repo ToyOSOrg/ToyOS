@@ -14,7 +14,7 @@
 //! and `privileged`. The first must connect to `echo` and answer `NotEndowed`
 //! for `privileged`; the second must connect to both. The second arm is the
 //! whole of what stops the first passing because the service was never there.
-//! A connector given only to pass on carries no `WRITE`, and connects nowhere.
+//! A connector without `WRITE` connects nowhere.
 //!
 //! **Capabilities.** Five things are reachable no other way — minting a device
 //! claim, entering the real-time band, turning a pid into a process handle,
@@ -186,14 +186,14 @@ fn only_what_was_given() {
     println!("  names: the narrow child reached one, the wide child reached both");
 }
 
-/// A connector carrying no `WRITE` may be passed on and connects nowhere,
-/// which is a word: a connector is routinely one a peer sent. The same
-/// port's connector carrying it connects, so what was refused is the right.
+/// A connector carrying no `WRITE` connects nowhere, which is a word: a
+/// connector is routinely one a peer sent. The same port's connector
+/// carrying it connects, so what was refused is the right.
 fn a_connector_without_write_connects_nowhere() {
     let (_acceptor, connector) = port::create().expect("a port");
-    let passed_on = connector.as_handle().try_clone_narrowed(Rights::DUP.union(Rights::TRANSFER)).expect("a connector to pass on");
+    let unwritable = connector.as_handle().try_clone_narrowed(Rights::DUP.union(Rights::TRANSFER)).expect("a connector without WRITE");
     assert_eq!(
-        syscall::connect(passed_on.as_handle().raw()).err(),
+        syscall::connect(unwritable.as_handle().raw()).err(),
         Some(SyscallError::PermissionDenied),
         "a connector without WRITE connected",
     );

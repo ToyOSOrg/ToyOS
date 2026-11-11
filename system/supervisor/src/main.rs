@@ -2368,7 +2368,9 @@ impl Supervisor<'_> {
         let job = rest.pop().expect("a launch's batch ends with its job").typed::<toyos::job::Job>();
         let place = rest.pop().map(ipc::ReceivedHandle::typed::<toyos::process::Process>).transpose();
         // A client sends what it likes: what its frame calls a connector, a
-        // place or a job and the kernel does not is a refused launch.
+        // place or a job and the kernel does not is a refused launch, and a
+        // connector without the rights a provided one carries (`PROVIDED`)
+        // refuses it at its spawn.
         let (extras, job, place) = match (extras, job, place) {
             (Ok(extras), Ok(job), Ok(place)) => (extras, job, place),
             (Err(why), ..) | (_, Err(why), _) | (.., Err(why)) => {
@@ -3087,16 +3089,12 @@ fn start<'a>(
     }
 
     // A `provides` name reaches its holder from whoever made the port, never
-    // from the supervisor, and this is where it arrives: moved as the client
-    // sent it, and without `WRITE` to a row that does not receive it, which
-    // may only pass it on to what it launches. A client's handle that cannot
-    // arrive so refuses the launch, never the supervisor.
+    // from the supervisor, and only a row that receives the name: another
+    // could not use it, nor could anything it starts. A client's handle that
+    // does not carry `PROVIDED` refuses the launch, never the supervisor.
     for (name, connector) in extras {
-        let label = service_label(PROVIDE_PREFIX, &name);
         if program.receives.contains(&name) {
-            command.endow(&label, connector.into());
-        } else {
-            command.endow_narrowed(&label, connector.into(), FORWARDED.bits());
+            command.endow_narrowed(&service_label(PROVIDE_PREFIX, &name), connector.into(), PROVIDED.bits());
         }
     }
 
@@ -3322,9 +3320,9 @@ enum LaunchFd {
     Ring,
 }
 
-/// What a provided connector arrives carrying at a row that does not receive
-/// it: enough to hand a copy on to each program it launches, and no connect.
-const FORWARDED: Rights = Rights::DUP.union(Rights::TRANSFER);
+/// What a provided connector arrives carrying: a copy for each helper and
+/// launch of the program, and its connect.
+const PROVIDED: Rights = Rights::DUP.union(Rights::TRANSFER).union(Rights::WRITE);
 
 /// A copy of the connector to each service this program's `receives` names
 /// that the supervisor's own map holds, by name.
