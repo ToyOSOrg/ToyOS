@@ -3031,20 +3031,19 @@ pub const PAGED_RANGE_PAGES: u64 = 512;
 pub enum PagedOp {
     /// Copy `len` bytes from `buf` into fresh pages at `offset`, a whole page
     /// in: clean, or dirty with [`PAGED_DIRTY`], which also grows the size to
-    /// the end of the bytes and is a write ([`PagedOp::Write`]). A page
+    /// the end of the bytes and is a write, made under [`PagedOp::Hold`]. A page
     /// already present is left as it is. Clean supply skips it; dirty supply
     /// stops there, so its installed count describes a copied prefix.
     /// Answers the pages installed;
     /// `ResourceExhausted` where no page could be had, `WouldBlock` at the
     /// dirty ceiling, `InvalidArgument` for a clean page past the size or a
-    /// dirty one past its end.
+    /// dirty one past its end, or one supplied without the hold.
     Supply = 0,
     /// Copy `len` bytes from `buf` into the present pages at `offset`, dirty,
-    /// growing the size to their end as each page's bytes land. Answers the
-    /// bytes written, stopping at the first absent page; `NotFound` when the
-    /// first is absent, `WouldBlock` at the dirty ceiling. A write that
-    /// does not take all it was given stays under way until
-    /// [`PagedOp::EndWrite`].
+    /// growing the size to their end as each page's bytes land, under
+    /// [`PagedOp::Hold`]. Answers the bytes written, stopping at the first
+    /// absent page; `NotFound` when the first is absent, `WouldBlock` at the
+    /// dirty ceiling, `InvalidArgument` without the hold.
     Write = 1,
     /// Remove the clean pages of `len` pages from page `offset` that no
     /// write-back or write holds. Answers how many went.
@@ -3052,7 +3051,7 @@ pub enum PagedOp {
     /// Mark `len` pages from page `offset` failed: each read of one answers
     /// `Io` until it is supplied again.
     Fail = 3,
-    /// Set the size to `offset`. A shrink drops
+    /// Set the size to `offset`, under [`PagedOp::Hold`]. A shrink drops
     /// every page past it, dirty or not, and zeroes the last page's tail; the
     /// new range of a growth reads as the pager supplies it.
     Resize = 4,
@@ -3070,9 +3069,17 @@ pub enum PagedOp {
     /// Let the object go: its pages go, its holders answer `Gone`, and its id
     /// names another object once its last holder has gone.
     Release = 8,
-    /// End the write a short [`PagedOp::Write`] or dirty supply left under
-    /// way; `InvalidArgument` where none is.
-    EndWrite = 9,
+    /// Give back what [`PagedOp::Hold`] held; `InvalidArgument` where the
+    /// pager holds nothing of the object.
+    Unhold = 9,
+    /// Hold the object's writes: until [`PagedOp::Unhold`] no write but the
+    /// pager's lands, and no holder reads half of one, so its writes, its
+    /// truncations and its own reads in between are each one whole to every
+    /// other writer and reader, however many calls and waits they take. It
+    /// waits for a holder's write or a holder's read already holding them,
+    /// which wait on nothing. Answers the size; `InvalidArgument` for a
+    /// second hold.
+    Hold = 10,
     /// Unused slots in the pager's resident-page quota. This advisory
     /// snapshot reserves nothing and promises no physical memory.
     Room = 11,
@@ -3101,6 +3108,11 @@ pub const PAGED_DIRTY: u64 = 1;
 pub const PAGED_WRITTEN: u64 = 1;
 /// [`paged_holder`]'s holder carries `WRITE`.
 pub const PAGED_HOLDER_WRITE: u64 = 1;
+/// [`paged_write`]'s offset that writes at the object's size.
+pub const PAGED_APPEND: u64 = u64::MAX;
+/// The most pages one holder's write takes, and one holder's read copies
+/// under the writes' exclusion.
+pub const PAGED_HOLDER_PAGES: u64 = 64;
 
 /// The bytes of a paged object's record: what its pager says of it beside
 /// its size and modification time, which the kernel keeps and never reads.
@@ -3215,16 +3227,21 @@ pub fn paged_holder(pager: RawHandle, object: u64, writes: bool) -> Result<RawHa
     check(syscall(SYS_PAGED_HOLDER, pager.0 as u64, object, flags, 0)).map(|raw| RawHandle(raw as u32))
 }
 
-/// A holder's write of `bytes` at `offset`, whole: the bytes written, fewer
-/// only where a page went or the object ended part way. Every page is
-/// admitted before the first byte lands, or the write is refused with
-/// nothing written: `WouldBlock` where a page inside the size is not
-/// present, the credit or the pager's dirty ceiling is short, or a fresh
-/// page has no room, and the holder asks the pager instead; `Busy` where
-/// something runs from the object; `Io` for a failed page; `Gone` once the
-/// object or the pager ended. The object's modification time is stamped at
-/// its end. A pager's process is refused, `PermissionDenied`, as is a holder
-/// without `WRITE`; any other kind of handle, `InvalidArgument`.
+/// A holder's write of `bytes` at `offset`, which takes what lies in
+/// [`PAGED_HOLDER_PAGES`] pages from `offset`'s page and leaves the rest for
+/// the next call: the bytes written. With `offset` [`PAGED_APPEND`] it writes
+/// all of `bytes` at the size, refused `WouldBlock` where they would not fit
+/// one page fewer, and answers the size after them. Every write to the object is one
+/// at a time: this one never waits, and is refused `WouldBlock` while
+/// another write is under way or waiting, as it is where a page inside the
+/// size is not present or failed, the credit or the pager's dirty ceiling is
+/// short, or a fresh page has no room; the holder asks the pager to write
+/// instead. Admitted, it is whole, read by no holder half done. `Busy` where
+/// something runs from the object; `BadAddress` for `bytes` the kernel cannot
+/// read, with nothing written; `Gone` once the object or the pager ended. The
+/// object's modification time is stamped. A pager's process is refused,
+/// `PermissionDenied`, as is a holder without `WRITE`; any other kind of
+/// handle, `InvalidArgument`, as is a span past the last page.
 pub fn paged_write(holder: RawHandle, bytes: &[u8], offset: u64) -> Result<usize, SyscallError> {
     check(syscall(SYS_PAGED_WRITE, holder.0 as u64, bytes.as_ptr() as u64, bytes.len() as u64, offset)).map(|n| n as usize)
 }
@@ -3241,10 +3258,11 @@ pub fn paged_stat(holder: RawHandle) -> Result<PagedStat, SyscallError> {
 /// 0 at or past it. It waits for every absent page until its pager supplies
 /// or fails it, the object shrinks or is released, or the pager ends: `Io`
 /// for a failed page before any byte was read (a short count after some),
-/// `Gone` once the object or the pager ended. A read a write of the pager's
-/// met, or that began while one was under way, is `WouldBlock`, and the
-/// holder asks the pager instead; one a holder's write met waits for it to
-/// end and reads again. A pager's process is refused,
+/// `Gone` once the object or the pager ended. A read that meets a write
+/// waits for its end and reads again, so it reads each write whole or not at
+/// all; one that has met three copies the object under the writes' own
+/// exclusion, at most [`PAGED_HOLDER_PAGES`] pages from `offset`'s, and
+/// answers what it copied, all of one moment. A pager's process is refused,
 /// `PermissionDenied`, as is a holder without `READ`; any other kind of
 /// handle, `InvalidArgument`, so a peer's claim that a handle is a holder
 /// can be checked.

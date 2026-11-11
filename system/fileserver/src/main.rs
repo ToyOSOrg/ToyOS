@@ -877,7 +877,7 @@ impl Server {
                 window.read(0, &mut self.scratch[..len]);
                 let end = match op {
                     WRITE => self.write_at(&file, len)?,
-                    _ => self.write_to(&file, r.offset, len)?,
+                    _ => self.write_to(&file, Some(r.offset), len)?,
                 };
                 Ok(Answer::Reply(Reply { value: len as u64, value2: end, ..Reply::ok() }))
             }
@@ -1197,7 +1197,7 @@ impl Server {
             // An open file is answered with a holder of its object, which
             // reads, states and, opened to write, writes it without asking
             // this server.
-            let writes = write && self.clients[&id].writes;
+            let writes = write && self.clients[&id].writes && self.files.holders_write(&*self.volume, identity);
             let minted =
                 self.files.pager().zip(self.files.object(identity)).map(|(pager, object)| pager.holder(object, writes));
             holder = match minted {
@@ -1324,25 +1324,23 @@ impl Server {
     /// Write the scratch's first `len` bytes to `file` at its offset, or at
     /// its end when it appends, and move the offset past them: the offset.
     fn write_at(&mut self, file: &Shared, len: usize) -> Result<u64, Error> {
-        let (node, append, offset, identity) = {
+        let (append, offset) = {
             let f = file.borrow();
-            (f.node()?, f.append, f.offset, f.identity)
+            (f.append, f.offset)
         };
-        let at = if append { self.files.meta(identity, self.volume.node_meta(node)?).size } else { offset };
-        let end = self.write_to(file, at, len)?;
+        let end = self.write_to(file, (!append).then_some(offset), len)?;
         file.borrow_mut().offset = end;
         Ok(end)
     }
 
-    /// Write the scratch's first `len` bytes to `file` at `at`: the offset
-    /// after them.
-    fn write_to(&mut self, file: &Shared, at: u64, len: usize) -> Result<u64, Error> {
+    /// Write the scratch's first `len` bytes to `file` at `at`, or at its end
+    /// where `None`: the offset after them.
+    fn write_to(&mut self, file: &Shared, at: Option<u64>, len: usize) -> Result<u64, Error> {
         let (node, identity) = {
             let f = file.borrow();
             (f.node()?, f.identity)
         };
-        let end = bounds::in_a_file(at, len as u64)?;
-        self.files.write(&mut *self.volume, identity, node, at, &self.scratch[..len])?;
+        let end = self.files.write(&mut *self.volume, identity, node, at, &self.scratch[..len])?;
         self.dirtied();
         Ok(end)
     }

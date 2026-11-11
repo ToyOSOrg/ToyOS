@@ -12,9 +12,10 @@
 //! sake until room is wanted: then a file nobody holds and nothing dirties
 //! goes first, oldest first. Anonymous objects stay while named or held.
 //!
-//! **A write is one write of the object's**, however many calls it takes:
-//! a call that stops short leaves it under way until its end, so no holder
-//! reads the file half written (`toyos::paged::Pager::end_write`).
+//! **One write at a time.** Every write, truncation and read of the server's
+//! runs under the object's hold (`toyos::paged::Pager::hold`), so to holders
+//! and to each other each is one whole, however many calls it takes; a
+//! holder's write that meets one comes here and waits its turn.
 //!
 //! A write reserves on the volume first, so the volume's size runs past the
 //! object's only for the bytes the write then puts in before it returns;
@@ -56,7 +57,8 @@ pub trait Pager {
     fn read(&self, id: u64, out: Bytes<'_>, offset: u64) -> Result<usize, Refused>;
     fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused>;
     fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused>;
-    fn end_write(&self, id: u64) -> Result<(), Refused>;
+    fn hold(&self, id: u64) -> Result<u64, Refused>;
+    fn unhold(&self, id: u64) -> Result<(), Refused>;
     fn withdraw(&self, id: u64, first: u64, count: u64) -> Result<u64, Refused>;
     fn fail(&self, id: u64, first: u64, count: u64) -> Result<(), Refused>;
     fn resize(&self, id: u64, size: u64) -> Result<(), Refused>;
@@ -89,8 +91,11 @@ impl Pager for toyos::paged::Pager {
     fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
         toyos::paged::Pager::write(self, id, offset, bytes)
     }
-    fn end_write(&self, id: u64) -> Result<(), Refused> {
-        toyos::paged::Pager::end_write(self, id)
+    fn hold(&self, id: u64) -> Result<u64, Refused> {
+        toyos::paged::Pager::hold(self, id)
+    }
+    fn unhold(&self, id: u64) -> Result<(), Refused> {
+        toyos::paged::Pager::unhold(self, id)
     }
     fn withdraw(&self, id: u64, first: u64, count: u64) -> Result<u64, Refused> {
         toyos::paged::Pager::withdraw(self, id, first, count)
@@ -172,9 +177,9 @@ impl File {
     }
 
     /// Whether pages may wait for its write-back: ones it knows, or ones a
-    /// holder may have dirtied without a notice yet.
+    /// holder that writes may have dirtied without a notice yet.
     fn may_owe(&self) -> bool {
-        !self.anonymous && (self.dirty.is_some() || self.holder_dirty || self.held)
+        !self.anonymous && (self.dirty.is_some() || self.holder_dirty || self.granting)
     }
 }
 
@@ -220,12 +225,31 @@ impl<P: Pager> Files<P> {
     pub fn held(&mut self, volume: &mut dyn Volume, identity: u64, writes: bool) {
         let Some(f) = self.files.get_mut(&identity) else { return };
         f.held = true;
-        // A holder writes where the object is anonymous or the volume grants it credit.
-        f.moved |= writes && (f.anonymous || volume.grants());
-        if writes && !f.anonymous && !f.granting && volume.grants() {
+        f.moved |= writes;
+        if writes && !f.anonymous && !f.granting {
             f.granting = true;
             self.top_up(volume, identity);
         }
+    }
+
+    /// Whether a holder of `identity`'s object could write it: an anonymous
+    /// object, or one on a volume that holds room for its holders' writes.
+    /// Elsewhere every write comes here.
+    pub fn holders_write(&self, volume: &dyn Volume, identity: u64) -> bool {
+        self.files.get(&identity).is_some_and(|f| f.anonymous || volume.grants())
+    }
+
+    /// `f` with `identity`'s writes held: given the size the other writers
+    /// left, what it does is one write, truncation or read whole to them. The
+    /// hold is given back whatever `f` answers.
+    fn under_hold<R>(&mut self, identity: u64, f: impl FnOnce(&mut Self, u64) -> Result<R, Error>) -> Result<R, Error> {
+        let id = self.files.get(&identity).ok_or(Error::Stale)?.object;
+        let size = self.pg().hold(id).map_err(word)?;
+        let answer = f(self, size);
+        if let Err(why) = self.pg().unhold(id) {
+            println!("fileserver: file {identity}'s writes would not be given back ({why:?})");
+        }
+        answer
     }
 
     /// The credit of `identity`'s holders made up to [`BULK`] again, room
@@ -285,10 +309,15 @@ impl<P: Pager> Files<P> {
     /// so a refused open changed nothing, and nothing writes back between the
     /// two.
     pub fn truncated(&mut self, volume: &mut dyn Volume, identity: u64, node: Node) -> Result<(), Error> {
-        let Some(f) = self.files.get(&identity) else { return Ok(()) };
-        let id = f.object;
-        self.pg().resize(id, 0).map_err(word)?;
-        self.files.get_mut(&identity).expect("found").dirty = None;
+        if !self.files.contains_key(&identity) {
+            return Ok(());
+        }
+        self.under_hold(identity, |files, _| {
+            let f = files.files.get_mut(&identity).expect("found");
+            f.dirty = None;
+            let id = f.object;
+            files.pg().resize(id, 0).map_err(word)
+        })?;
         self.stamp(identity, volume.node_meta(node)?.mtime)
     }
 
@@ -393,12 +422,17 @@ impl<P: Pager> Files<P> {
         }
     }
 
-    /// Up to `out.len()` bytes of `node`'s file at `offset`.
+    /// Up to `out.len()` bytes of `node`'s file at `offset`, read whole
+    /// against every write.
     pub fn read(&mut self, volume: &mut dyn Volume, identity: u64, node: Node, offset: u64, out: Bytes<'_>) -> Result<usize, Error> {
         if self.pager.is_none() || !self.files.contains_key(&identity) {
             return volume.read(node, offset, &mut Window(out));
         }
-        let size = self.meta(identity, volume.node_meta(node)?).size;
+        self.under_hold(identity, |files, size| files.read_held(volume, identity, offset, size, out))
+    }
+
+    /// [`Self::read`] of a file `size` bytes long, its writes held.
+    fn read_held(&mut self, volume: &mut dyn Volume, identity: u64, offset: u64, size: u64, out: Bytes<'_>) -> Result<usize, Error> {
         if offset >= size {
             return Ok(0);
         }
@@ -514,9 +548,10 @@ impl<P: Pager> Files<P> {
         }
     }
 
-    /// Every dirty file written back, for room: whether any page was.
+    /// Every file that may owe a write-back written back, for room, the pages
+    /// holders dirtied among them: whether any page was.
     fn write_back_some(&mut self, volume: &mut dyn Volume) -> bool {
-        let dirty: Vec<u64> = self.files.iter().filter(|(_, f)| f.dirty.is_some()).map(|(id, _)| *id).collect();
+        let dirty: Vec<u64> = self.files.iter().filter(|(_, f)| f.may_owe()).map(|(id, _)| *id).collect();
         let mut cleaned = false;
         for id in dirty {
             match self.write_back(volume, id) {
@@ -527,61 +562,69 @@ impl<P: Pager> Files<P> {
         cleaned
     }
 
-    /// `data` written to `node`'s file at `offset`.
-    pub fn write(&mut self, volume: &mut dyn Volume, identity: u64, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
-        if data.is_empty() { return Ok(()); }
+    /// `data` written to `node`'s file at `at`, or at its end where `None`,
+    /// one write whole to every other writer and reader of it: the offset
+    /// after the bytes.
+    pub fn write(&mut self, volume: &mut dyn Volume, identity: u64, node: Node, at: Option<u64>, data: &[u8]) -> Result<u64, Error> {
         if self.pager.is_none() || !self.files.contains_key(&identity) {
-            return volume.write(node, offset, data);
+            let offset = match at {
+                Some(at) => at,
+                None => volume.node_meta(node)?.size,
+            };
+            let end = crate::bounds::in_a_file(offset, data.len() as u64)?;
+            if !data.is_empty() {
+                volume.write(node, offset, data)?;
+            }
+            return Ok(end);
         }
-        let id = self.files[&identity].object;
-        // The object's size, which holders' writes move past the volume's.
-        let old = self.pg().status(id).map_err(word)?.size;
+        let end = self.under_hold(identity, |files, size| {
+            let offset = at.unwrap_or(size);
+            let end = crate::bounds::in_a_file(offset, data.len() as u64)?;
+            if !data.is_empty() {
+                files.write_held(volume, identity, node, size, offset, data)?;
+            }
+            Ok(end)
+        })?;
+        if !data.is_empty() {
+            self.stamp(identity, volume.node_meta(node)?.mtime)?;
+            // A holder asks this server once its credit is spent.
+            self.top_up(volume, identity);
+        }
+        Ok(end)
+    }
+
+    /// [`Self::write`] of `data` at `offset` into a file `old` bytes long,
+    /// its writes held.
+    fn write_held(&mut self, volume: &mut dyn Volume, identity: u64, node: Node, old: u64, offset: u64, data: &[u8]) -> Result<(), Error> {
         let reserved = volume.reserve(node, offset, data.len() as u64)?;
         self.touch(identity);
-        let mut put = Put { done: 0, held: false };
+        let mut done = 0;
         let writing = Writing { identity, node, reserved, offset, data };
-        let written = self.put(volume, &writing, &mut put);
+        let written = self.put(volume, &writing, &mut done);
         if let Err(e) = &written {
-            // What was reserved and not put would read as the blocks' old bytes.
-            let landed = if put.done > 0 { offset + put.done as u64 } else { 0 };
+            // What was reserved and not put would read as the blocks' old
+            // bytes. No other writer moved the size since the hold, so what
+            // goes is this write's own.
+            let landed = if done > 0 { offset + done as u64 } else { 0 };
             let cut = old.max(landed);
-            let resized = self
-                .pg()
-                .resize(id, cut)
-                .map_err(word)
-                .and(volume.unreserve(node, reserved, landed));
+            let id = self.files.get(&identity).ok_or(Error::Stale)?.object;
+            let resized = self.pg().resize(id, cut).map_err(word).and(volume.unreserve(node, reserved, landed));
             if let Err(again) = resized {
                 println!("fileserver: a refused write of file {identity} was not cut back to {cut} ({again:?}), after {e:?}");
             }
         }
-        if put.held {
-            match self.pg().end_write(id) {
-                Ok(()) | Err(Refused::Gone) => {}
-                Err(why) => println!("fileserver: file {identity}'s write would not end ({why:?}); its holders ask this server"),
-            }
-        }
-        written?;
-        self.stamp(identity, volume.node_meta(node)?.mtime)?;
-        // A holder asks this server once its credit is spent.
-        self.top_up(volume, identity);
-        Ok(())
+        written
     }
 
     /// The bytes of a write into the object, each absent page supplied dirty,
-    /// counting into `put` what landed and whether a call left the write
-    /// under way.
-    fn put(&mut self, volume: &mut dyn Volume, w: &Writing<'_>, put: &mut Put) -> Result<(), Error> {
+    /// counting into `done` what landed.
+    fn put(&mut self, volume: &mut dyn Volume, w: &Writing<'_>, done: &mut usize) -> Result<(), Error> {
         let Writing { identity, node, reserved, offset, data } = *w;
         let end = offset + data.len() as u64;
-        let done = &mut put.done;
         while *done < data.len() {
             let at = offset + *done as u64;
             let id = self.files.get(&identity).ok_or(Error::Stale)?.object;
-            let wrote = self.pg().write(id, at, &data[*done..]);
-            // A first call that takes everything is the whole write; any later
-            // call is under the write a short first one left under way.
-            put.held |= wrote != Ok(data.len() - *done);
-            match wrote {
+            match self.pg().write(id, at, &data[*done..]) {
                 Ok(n) => {
                     self.landed(volume, w, at, n);
                     *done += n;
@@ -642,21 +685,22 @@ impl<P: Pager> Files<P> {
     /// changes nothing, then the object, before anything can write a page
     /// past the size back.
     pub fn truncate(&mut self, volume: &mut dyn Volume, identity: u64, node: Node, size: u64) -> Result<(), Error> {
-        if let Some(f) = self.files.get(&identity) {
-            let status = self.pg().status(f.object).map_err(word)?;
-            volume.adopt(node, status.size, status.mtime);
-        }
-        volume.truncate(node, size)?;
         if !self.files.contains_key(&identity) {
-            return Ok(());
+            return volume.truncate(node, size);
         }
-        let f = self.files.get_mut(&identity).expect("found");
-        if let Some((lo, hi)) = f.dirty {
-            let hi = hi.min(size.div_ceil(PAGE));
-            f.dirty = (lo < hi).then_some((lo, hi));
-        }
-        let id = f.object;
-        self.pg().resize(id, size).map_err(word)?;
+        self.under_hold(identity, |files, now| {
+            let f = files.files.get_mut(&identity).expect("found");
+            let id = f.object;
+            let mtime = files.pg().status(id).map_err(word)?.mtime;
+            volume.adopt(node, now, mtime);
+            volume.truncate(node, size)?;
+            let f = files.files.get_mut(&identity).expect("found");
+            if let Some((lo, hi)) = f.dirty {
+                let hi = hi.min(size.div_ceil(PAGE));
+                f.dirty = (lo < hi).then_some((lo, hi));
+            }
+            files.pg().resize(id, size).map_err(word)
+        })?;
         self.stamp(identity, volume.node_meta(node)?.mtime)
     }
 
@@ -853,13 +897,6 @@ impl<P: Pager> Files<P> {
             }
         }
     }
-}
-
-/// How far a write got: the bytes that landed, and whether a call left the
-/// object's write under way.
-struct Put {
-    done: usize,
-    held: bool,
 }
 
 /// A write under way and the capacity held until its bytes land.

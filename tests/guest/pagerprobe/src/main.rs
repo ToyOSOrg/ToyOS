@@ -55,7 +55,9 @@ fn main() {
     fill(&pager, left);
     println!("pagerprobe: more than 512 MiB in one object withdrawn, released and left for the end");
     let anonymous = pager.anonymous(32 * PAGE).expect("pagerprobe: anonymous memory");
+    assert_eq!(pager.hold(anonymous), Ok(32 * PAGE), "the pager holds its writes, and is told the size");
     assert_eq!(pager.supply(anonymous, 0, &vec![0x37; 16 * PAGE as usize], true), Ok(16));
+    pager.unhold(anonymous).unwrap();
     assert_eq!(pager.room(), Ok(0), "the anonymous pages consumed the remaining quota");
     assert_eq!(pager.withdraw(anonymous, 0, 32), Ok(0), "anonymous bytes cannot be withdrawn");
     assert_eq!(pager.fail(anonymous, 0, 32), Err(Refused::Kernel(SyscallError::InvalidArgument)));
@@ -106,11 +108,13 @@ fn main() {
 fn dirty_supply_prefix(pager: &Pager) {
     let object = pager.anonymous(4 * PAGE).unwrap();
     let old = vec![0x42; PAGE as usize];
+    assert_eq!(pager.supply(object, PAGE, &old, true), Err(Refused::Kernel(SyscallError::InvalidArgument)), "a write without the hold");
+    pager.hold(object).unwrap();
     assert_eq!(pager.supply(object, PAGE, &old, true), Ok(1));
     assert_eq!(pager.supply(object, 3 * PAGE, &old, true), Ok(1));
     let new = vec![0x75; 4 * PAGE as usize];
     assert_eq!(pager.supply(object, 0, &new, true), Ok(1), "dirty supply stops at the first present page");
-    pager.end_write(object).unwrap();
+    pager.unhold(object).unwrap();
     let mut bytes = vec![0; new.len()];
     // SAFETY: the local buffer is borrowed only by this read.
     let out = unsafe { toyos::shm::Bytes::from_raw(bytes.as_mut_ptr(), bytes.len()) };

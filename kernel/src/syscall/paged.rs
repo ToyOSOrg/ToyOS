@@ -6,10 +6,11 @@
 
 use alloc::sync::Arc;
 
-use kernel::paged::within_reach;
+use kernel::paged::{append_fits, holder_span, within_reach};
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{
-    PagedArgs, PagedOp, SyscallError, PAGED_DIRTY, PAGED_HOLDER_WRITE, PAGED_RANGE_PAGES, PAGED_RECORD, PAGED_WRITTEN,
+    PagedArgs, PagedOp, SyscallError, PAGED_APPEND, PAGED_DIRTY, PAGED_HOLDER_WRITE, PAGED_RANGE_PAGES, PAGED_RECORD,
+    PAGED_WRITTEN,
 };
 
 use crate::object::paged::{PagedHolderObject, PagerObject, Unmade};
@@ -17,6 +18,8 @@ use crate::object::{ops, KObjectRef};
 use crate::process::{self, PagerRole};
 use crate::user_ptr::{SyscallContext, UserBytesMut};
 use crate::UserAddr;
+
+const _: () = assert!(kernel::paged::HOLDER_PAGES == toyos_abi::syscall::PAGED_HOLDER_PAGES);
 
 pub(super) fn sys_pager_create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> u64 {
     let claimed = process::with_process_data(|data| match data.pager {
@@ -91,18 +94,23 @@ pub(super) fn sys_paged_read(h: RawHandle, out: &mut UserBytesMut, offset: u64) 
     }
 }
 
-/// A holder's write of at most [`PAGED_RANGE_PAGES`] pages from `offset`:
-/// the bytes past them are left for the next call. Refused as a read is, and
-/// for a span past the last page.
+/// A holder's write at `offset`, of as many bytes as lie in
+/// [`kernel::paged::HOLDER_PAGES`] pages from its page, the rest left for the
+/// next call; or, where `offset` is [`PAGED_APPEND`], of all `len` bytes at
+/// the size, whole or refused `WouldBlock` where they would not fit those
+/// pages. Refused as a read is, and for a span past the last page.
 pub(super) fn sys_paged_write(ctx: &SyscallContext<'_>, h: RawHandle, buf: UserAddr, len: u64, offset: u64) -> u64 {
-    if !within_reach(offset, len) {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    let page = kernel::paged::PAGE;
-    let len = len.min((offset / page + PAGED_RANGE_PAGES) * page - offset);
+    let (at, len) = match offset {
+        PAGED_APPEND if !append_fits(len) => return SyscallError::WouldBlock.to_u64(),
+        PAGED_APPEND => (None, len),
+        _ => match holder_span(offset, len) {
+            Some(len) => (Some(offset), len),
+            None => return SyscallError::InvalidArgument.to_u64(),
+        },
+    };
     let Some(src) = ctx.user_bytes(buf, len) else { return SyscallError::BadAddress.to_u64() };
     match holder(h, Rights::WRITE) {
-        Ok(holder) => holder.write(&src, offset),
+        Ok(holder) => holder.write(&src, at),
         Err(refused) => refused,
     }
 }
@@ -172,7 +180,8 @@ pub(super) fn sys_paged_op(ctx: &SyscallContext<'_>, h: RawHandle, op: u64, args
         x if x == PagedOp::Fail as u64 => pager.fail(id, args.offset, args.len),
         x if x == PagedOp::Resize as u64 => pager.resize(id, args.offset),
         x if x == PagedOp::Release as u64 => pager.release(id),
-        x if x == PagedOp::EndWrite as u64 => pager.end_write(id),
+        x if x == PagedOp::Hold as u64 => pager.hold(id),
+        x if x == PagedOp::Unhold as u64 => pager.unhold(id),
         x if x == PagedOp::Grant as u64 => answered(pager.grant(id, args.len)),
         x if x == PagedOp::TakeBack as u64 => answered(pager.take_back(id)),
         x if x == PagedOp::SetRecord as u64 => {

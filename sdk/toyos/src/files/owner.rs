@@ -121,14 +121,19 @@ impl Position {
         Some(Ok(n))
     }
 
-    /// A write at the local offset through the file's paged object, as
-    /// [`Self::read_held`] reads: `None` where the offset or the end is the
-    /// server's, or the object sends the write to it.
+    /// A write at the local offset, or at the end where the file appends,
+    /// through the file's paged object, as [`Self::read_held`] reads: `None`
+    /// where the offset is the server's, or the object sends the write to it.
     fn write_held(&self, holder: &crate::paged::Paged, data: &[u8]) -> Option<Result<usize, Error>> {
         let mut at = self.at.lock();
         let Offset::Here(offset) = *at else { return None };
         if self.append {
-            return None;
+            let end = match holder.append(data) {
+                Ok(end) => end,
+                Err(e) => return held_write(Err(e)),
+            };
+            *at = Offset::Here(end);
+            return Some(Ok(data.len()));
         }
         let n = held_write(holder.write(data, offset))?;
         if let Ok(n) = n {
