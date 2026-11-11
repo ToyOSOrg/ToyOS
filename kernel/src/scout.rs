@@ -43,9 +43,10 @@ pub fn at(id: u16) {
     unsafe {
         let prev = (*table).prev;
         (*table).prev = now;
-        if prev != 0 {
-            (*table).sum[id as usize] += now.wrapping_sub(prev);
-            (*table).count[id as usize] += 1;
+        // An interrupt's probe between the read and here leaves a later `prev`.
+        if prev != 0 && now >= prev {
+            (*table).sum[id as usize] = (*table).sum[id as usize].wrapping_add(now.wrapping_sub(prev));
+            (*table).count[id as usize] = (*table).count[id as usize].wrapping_add(1);
         }
     }
 }
