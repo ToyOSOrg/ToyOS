@@ -5,10 +5,11 @@
 //! filed in another caller's slot, the receive turn handed on, a connection
 //! that ends under requests in flight, a send that fails beside its own
 //! connection's callers and beside a fresh connection, two connections each
-//! receiving for itself, a slot used again,
-//! and a request too large for a slot holding every slot. The futex the shim
-//! gives wakes only the word woken, and every wire here blocks, so a caller
-//! left waiting with nobody receiving or nobody waking it is loom's deadlock.
+//! receiving for itself and handing its turn on within itself, a slot used
+//! again, and a request too large for a slot holding every slot. The futex
+//! the shim gives wakes only the word woken, and every wire here blocks, so a
+//! caller left waiting with nobody receiving or nobody waking it is loom's
+//! deadlock.
 
 #![cfg(feature = "loom")]
 
@@ -242,6 +243,28 @@ fn a_failed_send_hands_its_turn_on() {
         for caller in callers {
             assert!(caller.join().unwrap().is_ok());
         }
+    });
+}
+
+/// Two callers on one connection beside a caller leading another, whose
+/// server answers only once the first two have returned: the turn the first
+/// hands on goes to the caller waiting on its own connection, never to the
+/// other connection's leader.
+#[test]
+fn a_turn_handed_on_stays_on_its_connection() {
+    model(2, || {
+        let world = World::new();
+        let other = spawn(&world, |w| w.ask(2, false));
+        let callers: Vec<_> = (0..2).map(|_| spawn(&world, |w| w.ask(1, false))).collect();
+        for tag in world.wire(1).take(2) {
+            world.wire(1).answer(tag);
+        }
+        for caller in callers {
+            assert!(caller.join().unwrap().is_ok());
+        }
+        let tag = world.wire(2).take(1)[0];
+        world.wire(2).answer(tag);
+        assert!(other.join().unwrap().is_ok());
     });
 }
 
