@@ -1199,9 +1199,10 @@ impl<X: SchedPayload> RunningTask<X> {
     pub(crate) fn outrun_request(&mut self) -> Option<u64> {
         let task = &mut self.0 .0;
         let burst = task.acct.cpu_ns - task.woke_cpu_ns;
-        (burst > task.request).then(|| {
-            task.request = next_request(task.request, burst);
-            task.request
+        let request = next_request(task.request, burst);
+        (burst > task.request && request != task.request).then(|| {
+            task.request = request;
+            request
         })
     }
 

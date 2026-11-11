@@ -43,7 +43,7 @@ use crate::workload::{
 
 /// How finely a `Run(ns)` op is chopped: a timer due inside a chunk fires at
 /// its end, so the model resolves nothing shorter. The fair band's minimum run
-/// and shortest request are 250 µs, so a latency or a nap below a chunk reads
+/// and shortest request, `MIN_SLICE_NS`, are shorter, so a latency or a nap below a chunk reads
 /// as a whole one here, and a sub-millisecond claim needs a core test.
 pub const RUN_CHUNK_NS: u64 = 1_000_000;
 
