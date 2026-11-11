@@ -14,6 +14,12 @@ console's port (`toyos_build::vmconsole::UartSocket`). Where the 16550 is
 QEMU's stdio, the console exists only in the harness's memory, so a red boot
 of such a profile leaves no file.
 
+A console-port boot's console is not kept either; only its UART is. Its
+console is the virtio-serial port on QEMU's stdio, which the harness also
+holds only in memory (`tests/common/qemu.rs`'s `read_consoles`), and its
+`uart-<seq>.log` holds what the loader said and the lines the port cannot
+carry.
+
 Guest-rows 42010705757 reddened `acpi_press_is_one_sci`
 (`Profile::HeadlessNoConsolePort`) with a STALL, and its `serial` artifact
 held one file: lane-2's `uart-4.log`, a passing console-port boot of
