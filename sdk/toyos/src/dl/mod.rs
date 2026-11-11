@@ -400,8 +400,9 @@ unsafe fn construct(inits: &[(usize, usize)]) {
 /// to them, take the write away from its `PT_GNU_RELRO` pages, then run the
 /// libraries' constructors: std's and libc's start call this once its
 /// thread-local storage is laid out, before anything that could name such a
-/// symbol. One whose libraries cannot be had exits 127 with a line on its
-/// stderr naming why, as [`crate::relocate`] does.
+/// symbol. One whose libraries cannot be had, or whose `PT_GNU_RELRO` cannot
+/// be made read-only, exits 127 with a line on its stderr naming why, as
+/// [`crate::relocate`] does.
 ///
 /// # Safety
 /// `header` is the running executable's ELF header, its thread-local storage
@@ -434,8 +435,7 @@ pub unsafe fn start(header: *const u8) {
 
 /// Make the executable's `PT_GNU_RELRO` pages read-only, as [`protect`] does
 /// a library's: its vtables, `.got` and `.dynamic`, which a stray or hostile
-/// store in the running program could otherwise rewrite. The program does
-/// this to itself; one that skipped it would only be without it.
+/// store in the running program could otherwise rewrite.
 ///
 /// # Safety
 /// `header` is the running executable's ELF header, and nothing writes its

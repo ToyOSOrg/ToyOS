@@ -333,6 +333,17 @@ fn an_executables_relro_pages_are_counted_from_its_header() {
         b[24..32].copy_from_slice(&entry.to_le_bytes());
     });
     assert_eq!(pages(&lifted), Ok(Some((0x1000, 0x1000))));
+    // The header's segment above another: the writable segment at address 0,
+    // the header's at 0x1000.
+    let above = |relro_at: u64| {
+        object(&[], RELA, |b| {
+            relro(relro_at, 0x1000)(b);
+            b[PHDRS + 16..PHDRS + 24].copy_from_slice(&0x1000u64.to_le_bytes());
+            b[PHDRS + 56 + 16..PHDRS + 56 + 24].copy_from_slice(&0u64.to_le_bytes());
+        })
+    };
+    assert_eq!(pages(&above(0x1000)), Ok(Some((0, 0x1000))));
+    assert_eq!(pages(&above(0)), Err("ELF: PT_GNU_RELRO lies below the executable's header".to_string()));
 }
 
 /// A library's segment both writable and executable is refused rather than

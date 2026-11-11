@@ -45,8 +45,8 @@ kernel as memory, never named by a path the kernel resolves.
 A program relocates itself as it starts, and once its relocations are applied
 it makes read-only the part of its image that only they write, as the loader
 does for each library. The protection is the program's defence against its own
-stray or hijacked stores: it does this to itself, and one that did not would
-gain nothing over any other process.
+stray or hijacked stores. The kernel does not enforce it; a program that skipped
+it would weaken only itself.
 
 ## Desktop apps
 
