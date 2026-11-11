@@ -406,8 +406,6 @@ Changes of the design, each inferred and none of them work until resolved:
   `issues/a-namespace-is-a-kernel-object-and-service-lookup-is-kept-out-of-the-kernel.md`.
 - **The stop's sweep of userland threads**:
   `issues/the-kernel-stops-every-userland-thread-at-a-stop-the-supervisor-orders.md`.
-- **The quit's walk**:
-  `issues/the-kernel-decides-who-is-asked-to-quit-and-who-is-killed.md`.
 
 ### The next removals, ranked (a proposal)
 
