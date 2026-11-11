@@ -65,7 +65,7 @@ mod model;
 /// NVMe driver, a command's silence before it resets the controller and the
 /// reset, which it shows fit. A driver whose worst case does not fit cannot
 /// serve a client that keeps to it.
-pub const SILENCE_BOUND_NS: u64 = 355_000_000_000;
+pub const SILENCE_BOUND_NS: u64 = 365_000_000_000;
 
 pub use entry::{Completion, Op, Request, Status};
 pub use toyos::transport::Run;
