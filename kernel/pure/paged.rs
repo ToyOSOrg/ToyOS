@@ -2235,6 +2235,7 @@ mod tests {
                     }
                 }
                 assert!(self.walking || self.o.revoking == 0, "after {step:?}: pages revoking with no walk");
+                assert!(self.futex.is_disjoint(&self.freed), "after {step:?}: a futex waiter keyed on a given-back frame");
             }
         }
     }
@@ -2300,6 +2301,26 @@ mod tests {
             Step::Walk,
         ];
         play(&steps).expect("every step is taken").drain(&steps);
+    }
+
+    /// From a futex wait translated before its page was withdrawn and a walk
+    /// begun, every sequence of six steps arms no waiter on a frame the walk
+    /// gives back, whenever it arms: a visit's clear is counted, so the arm
+    /// looks at the leaf again.
+    #[test]
+    fn a_wait_translated_before_a_removal_never_arms_on_a_frame_given_back() {
+        use mapped::Step;
+        let prefix = [
+            Step::Map(0),
+            Step::Supply(0),
+            Step::Supply(1),
+            Step::Fault(0, 0),
+            Step::Translate(0, 0),
+            Step::Withdraw(0),
+            Step::Walk,
+        ];
+        let played = explore(&prefix, 6);
+        assert!(played > 100_000, "only {played} sequences played");
     }
 
     /// From a futex waiter an unmap left keyed on a frame and a walk begun
