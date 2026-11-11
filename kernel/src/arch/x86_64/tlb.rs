@@ -93,6 +93,7 @@ pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64) -> bool {
     }
     ISSUED[origin as usize].fetch_add(1, Ordering::Relaxed);
     let began = crate::clock::nanos_since_boot();
+    let began_ticks = crate::contention::now();
     let generation = SHOOTDOWN.issue(Reach::Narrow);
     let each = |f: &mut dyn FnMut(u32)| {
         for (w, &word) in targets.iter().enumerate() {
@@ -107,6 +108,7 @@ pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64) -> bool {
     each(&mut |cpu| wait_for(me, cpu, generation));
     let took = crate::clock::nanos_since_boot().saturating_sub(began);
     WAIT_NS.fetch_add(took, Ordering::Relaxed);
+    crate::contention::shot(crate::contention::now().saturating_sub(began_ticks));
     MAX_NS.fetch_max(took, Ordering::Relaxed);
     true
 }
@@ -165,6 +167,7 @@ pub fn shootdown(origin: Origin, half: Half) {
     // Counted before the IPI, so a delivery can never precede its issue's count.
     ISSUED[origin as usize].fetch_add(1, Ordering::Relaxed);
     let began = crate::clock::nanos_since_boot();
+    let began_ticks = crate::contention::now();
     let me = percpu::cpu_id() as usize;
     let generation = SHOOTDOWN.issue(reach);
     // This CPU answers itself locally instead of by self-IPI.
@@ -177,6 +180,7 @@ pub fn shootdown(origin: Origin, half: Half) {
     }
     let took = crate::clock::nanos_since_boot().saturating_sub(began);
     WAIT_NS.fetch_add(took, Ordering::Relaxed);
+    crate::contention::shot(crate::contention::now().saturating_sub(began_ticks));
     MAX_NS.fetch_max(took, Ordering::Relaxed);
 }
 
@@ -271,8 +275,10 @@ fn answer(by: Answerer) -> impl FnOnce(Reach) {
 
 /// Vector 0xFE's whole body: flush this CPU and say which generation it covers.
 pub fn serve_ipi() {
+    let began = crate::contention::now();
     let cpu = percpu::cpu_id() as usize;
     SHOOTDOWN.serve(cpu, answer(Answerer::Asked));
+    crate::contention::served(crate::contention::now().saturating_sub(began));
 }
 
 /// Answers a pending shootdown without taking a lock or allocating, so it is

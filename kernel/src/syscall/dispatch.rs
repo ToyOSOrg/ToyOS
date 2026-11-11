@@ -71,6 +71,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     #[cfg(feature = "boot-actuators")]
     task_probes();
     let entered = crate::arch::cpu::counter();
+    let probe = crate::contention::on().then(|| (crate::sched::driver::probe_current(), crate::contention::here(), crate::clock::nanos_since_boot()));
 
     // SAFETY: current process's page tables remain active for the duration of this call.
     let ctx = unsafe { SyscallContext::new() };
@@ -383,6 +384,11 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         }
         // Feature-gated, not capability-checked: a shipping kernel has no SYS_DEBUG
         // arm, so the number falls to the same default InvalidArgument as any unassigned one.
+        // MEASUREMENT ONLY: `crate::contention`'s dump, in every kernel.
+        SYS_DEBUG if a1 == 900 => {
+            crate::contention::dump(a2);
+            0
+        }
         #[cfg(feature = "test-actuators")]
         SYS_DEBUG => match a1 {
             DA::PANIC => panic!("SYS_DEBUG: kernel panic triggered by userspace"),
@@ -580,6 +586,15 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     // Wall-clock, not CPU time: elapsed includes any preemption.
     let elapsed = crate::arch::cpu::counter().saturating_sub(entered);
     crate::sched::driver::note_syscall(num, elapsed);
+    if let Some((Some((cpu0, since0)), (spin0, shoot0), wall0)) = probe {
+        if let Some((cpu1, since1)) = crate::sched::driver::probe_current() {
+            let (spin1, shoot1) = crate::contention::here();
+            let split = since1 != since0;
+            let (spin, shoot) = if split { (0, 0) } else { (spin1.saturating_sub(spin0), shoot1.saturating_sub(shoot0)) };
+            let wall = crate::clock::nanos_since_boot().saturating_sub(wall0);
+            crate::sched::driver::note_syscall_detail(num, [1, wall, cpu1.saturating_sub(cpu0), spin, shoot, u64::from(split)]);
+        }
+    }
 
     result
 }

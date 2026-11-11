@@ -119,6 +119,10 @@ pub struct SyscallProfile {
     /// preemption inside one is counted.
     ticks: AtomicU64,
     by_number: [AtomicU32; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
+    /// MEASUREMENT ONLY, per number once `crate::contention` is on: calls,
+    /// wall ns, on-CPU ns, lock-spin ticks and shootdown-wait ticks (the last
+    /// two only of calls no scheduler pass split), calls a pass split.
+    detail: [[AtomicU64; 6]; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
 }
 
 impl SyscallProfile {
@@ -127,6 +131,7 @@ impl SyscallProfile {
             calls: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             by_number: [const { AtomicU32::new(0) }; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
+            detail: [const { [const { AtomicU64::new(0) }; 6] }; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
         }
     }
 
@@ -142,6 +147,30 @@ impl SyscallProfile {
 
     pub fn calls(&self) -> u64 {
         self.calls.load(Ordering::Relaxed)
+    }
+
+    /// MEASUREMENT ONLY: one call's split, written only by the thread.
+    pub fn note_detail(&self, num: u64, values: [u64; 6]) {
+        let bin = &self.detail[(num as usize).min(toyos_abi::syscall::SYSCALL_PROFILE_OTHER)];
+        for (slot, v) in bin.iter().zip(values) {
+            slot.store(slot.load(Ordering::Relaxed) + v, Ordering::Relaxed);
+        }
+    }
+
+    /// MEASUREMENT ONLY: ` n=calls/wall_us/cpu_us/spin_us/shoot_us/split` per number with any.
+    pub fn detail_text(&self) -> alloc::string::String {
+        let mut s = alloc::string::String::new();
+        let us = |t: u64| crate::clock::nanos_of_ticks(t) / 1000;
+        for (n, bin) in self.detail.iter().enumerate() {
+            let v: [u64; 6] = core::array::from_fn(|i| bin[i].load(Ordering::Relaxed));
+            if v[0] > 0 {
+                let _ = core::fmt::Write::write_fmt(
+                    &mut s,
+                    format_args!(" {n}={}/{}/{}/{}/{}/{}", v[0], v[1] / 1000, v[2] / 1000, us(v[3]), us(v[4]), v[5]),
+                );
+            }
+        }
+        s
     }
 
     pub fn ns(&self) -> u64 {
@@ -205,6 +234,11 @@ impl TaskHandle {
              swallowed by a caller that waited again instead of returning",
         );
         true
+    }
+
+    /// MEASUREMENT ONLY: the last scheduler pass's stamp, 0 while off CPU.
+    pub fn running_since(&self) -> u64 {
+        self.running_since.load(Ordering::Relaxed)
     }
 
     pub fn cpu_ns(&self) -> u64 {

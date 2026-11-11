@@ -136,6 +136,8 @@ impl<T> Lock<T> {
     fn acquire(&self) -> LockGuard<'_, T> {
         crate::preempt::disable();
         let my_ticket = self.ticket.fetch_advance(Ordering::Relaxed);
+        #[cfg(not(feature = "loom"))]
+        let began = (self.now.load(Ordering::Relaxed) != my_ticket && crate::contention::on()).then(crate::contention::now);
         let mut spins = 0u64;
         let mut next_warn = 50_000_000u64;
         while self.now.load(ACQUIRED) != my_ticket {
@@ -159,6 +161,10 @@ impl<T> Lock<T> {
                 panic!("DEADLOCK at {}: 500M spins, ticket={} now={}",
                     caller, my_ticket.raw(), self.now.load(Ordering::Relaxed).raw());
             }
+        }
+        #[cfg(not(feature = "loom"))]
+        if let Some(began) = began {
+            crate::contention::lock_waited(core::panic::Location::caller(), crate::contention::now().saturating_sub(began));
         }
         LockGuard { lock: self }
     }

@@ -21,6 +21,7 @@ mod cpu_slice;
 mod smp;
 mod smp_roster;
 mod sync;
+mod contention;
 mod hasher;
 
 // No `mod` line below carries an `#[allow(clippy::undocumented_unsafe_blocks)]`.

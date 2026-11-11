@@ -591,6 +591,8 @@ fn build_shaped(dir: &str, jobs: usize, round: usize, print: bool) {
             .collect()
     };
     let before = roster();
+    // The kernel's wait census, started afresh here and logged at the round's end.
+    toyos_abi::syscall::debug_with(900, 0);
     let began = now();
     let (mut spawn_ns, mut image_ns, mut wait_ns) = (0u64, 0u64, 0u64);
     let mut stats = Vec::with_capacity(FILES);
@@ -646,6 +648,7 @@ fn build_shaped(dir: &str, jobs: usize, round: usize, print: bool) {
         finish(p, &mut wait_ns);
     }
     let wall = now() - began;
+    toyos_abi::syscall::debug_with(900, (jobs * 10 + round) as u64);
     let after = roster();
     if !print {
         return;

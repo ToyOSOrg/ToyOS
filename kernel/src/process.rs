@@ -657,6 +657,8 @@ struct Consumed {
     syscall_total: u64,
     syscall_total_ns: u64,
     syscall_counts: [u32; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
+    /// MEASUREMENT ONLY.
+    detail: alloc::string::String,
 }
 
 impl core::fmt::Display for Consumed {
@@ -675,7 +677,7 @@ impl core::fmt::Display for Consumed {
                 write!(f, " {number}={count}")?;
             }
         }
-        Ok(())
+        write!(f, "{}", self.detail)
     }
 }
 
@@ -691,6 +693,7 @@ fn teardown_resources(
     let syscall_total = syscalls.map_or(0, |s| s.calls());
     let syscall_total_ns = syscalls.map_or(0, |s| s.ns());
     let syscall_counts = syscalls.map_or([0; toyos_abi::syscall::SYSCALL_PROFILE_BINS], |s| s.by_number());
+    let mut detail = syscalls.map(|s| s.detail_text()).unwrap_or_default();
     // Before the teardown below: a report spans its process up to here, and the next one this teardown.
     #[cfg(feature = "mask-windows")]
     crate::windows::report();
@@ -701,6 +704,21 @@ fn teardown_resources(
     crate::isa::process_ends(pid);
 
     let usage = data.space.usage();
+    if crate::contention::on() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let us = |t: u64| crate::clock::nanos_of_ticks(t) / 1000;
+        let _ = core::fmt::Write::write_fmt(
+            &mut detail,
+            format_args!(
+                " | faults={} fault_us={} fault_spin_us={} fault_shoot_us={} fault_split={}",
+                usage.faults(),
+                usage.fault_ns() / 1000,
+                us(usage.split[0].load(Relaxed)),
+                us(usage.split[1].load(Relaxed)),
+                usage.split[2].load(Relaxed)
+            ),
+        );
+    }
     Consumed {
         peak_memory: usage.peak_bytes(),
         alloc_count: usage.ranges_made(),
@@ -708,6 +726,7 @@ fn teardown_resources(
         syscall_total,
         syscall_total_ns,
         syscall_counts,
+        detail,
     }
 }
 
@@ -1013,9 +1032,21 @@ pub fn handle_page_fault(fault_addr: u64, access: kernel::vm::Access) -> bool {
     let Some(space) = scheduler::current_address_space() else { return false };
     crate::trace::mark(210);
     let began = crate::clock::nanos_since_boot();
+    let probe = crate::contention::on().then(|| (crate::sched::driver::probe_current().map(|p| p.1), crate::contention::here()));
     let served = space.lock().fault(fault_addr, access);
     if served {
         space.usage().faulted(crate::clock::nanos_since_boot().saturating_sub(began));
+        if let Some((since0, (spin0, shoot0))) = probe {
+            use core::sync::atomic::Ordering::Relaxed;
+            let split = &space.usage().split;
+            if crate::sched::driver::probe_current().map(|p| p.1) == since0 {
+                let (spin1, shoot1) = crate::contention::here();
+                split[0].fetch_add(spin1.saturating_sub(spin0), Relaxed);
+                split[1].fetch_add(shoot1.saturating_sub(shoot0), Relaxed);
+            } else {
+                split[2].fetch_add(1, Relaxed);
+            }
+        }
     }
     crate::trace::mark(211);
     served

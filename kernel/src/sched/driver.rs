@@ -745,6 +745,16 @@ pub fn note_syscall(num: u64, ticks: u64) {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handle.syscalls().note(num, ticks)));
 }
 
+/// MEASUREMENT ONLY: the running thread's (on-CPU ns, last pass stamp).
+pub fn probe_current() -> Option<(u64, u64)> {
+    try_with_cpu(|cpu| cpu.running().map(|t| (t.ext().handle.cpu_ns(), t.ext().handle.running_since()))).flatten()
+}
+
+/// MEASUREMENT ONLY: add one call's split to the running thread's profile.
+pub fn note_syscall_detail(num: u64, values: [u64; 6]) {
+    try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handle.syscalls().note_detail(num, values)));
+}
+
 /// What the running task's marks say it does instead of returning to Ring 3 — one load, no clone, since an `Arc` refcount here is too costly on this path.
 pub fn current_safe_point(stopping: bool) -> Option<kernel::sched::task::SafePoint> {
     try_with_cpu(|cpu| cpu.running().and_then(|t| t.shared().at_safe_point(stopping))).flatten()

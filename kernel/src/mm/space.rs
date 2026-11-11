@@ -94,6 +94,9 @@ pub struct Usage {
     /// Faults served, and the time they took.
     faults: AtomicU64,
     fault_ns: AtomicU64,
+    /// MEASUREMENT ONLY: faults' lock-spin ticks and shootdown-wait ticks
+    /// (of faults no scheduler pass split), and faults a pass split.
+    pub split: [AtomicU64; 3],
     /// Changes to the space's leaves that reached another CPU by interrupt,
     /// for the test kernel's `SYS_DEBUG`.
     #[cfg(feature = "test-actuators")]
