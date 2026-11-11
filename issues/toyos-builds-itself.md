@@ -97,7 +97,7 @@ An owner is an issue under `issues/`, or this track.
 | 25 | The tools a build runs: Perl and Python started by spawn, brush as `sh`, uutils, make, CMake with libuv on spawn, awk, and a script started by its interpreter line | not started | `ninja-runs-every-command-through-a-bin-sh-toyos-does-not-have`, `nothing-launches-a-script-by-its-interpreter-line` | 20 for the C tools |
 | 26 | git in the guest | not started | this track | 22 |
 | 27 | The toolchain as `pkg` packages, none of it in the image. #970 makes the clang package; how the rest splits, and how a self-host test's guest reaches them, is open | in progress | this track | 3, 11 |
-| 28 | Storage durable and fast enough for an LLVM build tree, unmeasured | not started | `storage-is-layers-and-a-role-is-a-filesystem`, `an-fsync-of-a-served-file-syncs-its-whole-volume` | 4 |
+| 28 | Storage durable and fast enough for an LLVM build tree, unmeasured | not started | `storage-is-layers-and-a-role-is-a-filesystem` | 4 |
 | 29 | A build reproduces: an image's GUIDs from the commit, and one checkout building one kernel | not started | `an-images-guids-are-drawn-from-the-hosts-random-source`, `one-checkout-of-one-tree-builds-two-kernels` | — |
 | 30 | **M4 exit**: the guest builds a userland program and then the kernel, and the hashes equal the host build's of the same commit | not started | this track | 12–29 |
 
