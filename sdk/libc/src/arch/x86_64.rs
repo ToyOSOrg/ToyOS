@@ -1,5 +1,7 @@
 //! x86-64: the entry, the copies and the fill, and SSE2's square roots.
 
+use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
+
 /// Entry point for C programs, on an empty stack. The image relocates itself
 /// first, from its own header's address.
 #[cfg(not(feature = "std-runtime"))]
@@ -19,9 +21,14 @@ unsafe extern "C" fn _start() -> ! {
 /// Copy `n` bytes from `src` to `dest`, which may overlap `src` from below.
 #[inline(always)]
 pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
-    if n <= SHORT && !fast_short_rep_movsb() {
-        // SAFETY: the caller's, and `n` is short.
-        return unsafe { copy_short(dest, src, n) };
+    if n <= SHORT {
+        match FSRM.load(Relaxed) {
+            // SAFETY: the caller's, and `n` is short.
+            NO => return unsafe { copy_short(dest, src, n) },
+            // SAFETY: the caller's.
+            UNASKED => return unsafe { first_short_copy(dest, src, n) },
+            _ => {}
+        }
     }
     unsafe {
         core::arch::asm!(
@@ -40,28 +47,22 @@ const SHORT: usize = 256;
 /// Whether the CPU declares fast short `rep movsb`, CPUID.(EAX=7,ECX=0):EDX[4]
 /// (FSRM; Intel SDM vol. 2A and AMD APM vol. 3, `CPUID`): its vendor's
 /// statement that a short `rep movsb` starts fast, so that one is the whole of
-/// every copy. Asked once per process.
-fn fast_short_rep_movsb() -> bool {
-    use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
-    const UNASKED: u8 = 0;
-    const YES: u8 = 1;
-    const NO: u8 = 2;
-    static FSRM: AtomicU8 = AtomicU8::new(UNASKED);
-    #[cold]
-    fn ask() -> u8 {
-        use core::arch::x86_64::{__cpuid, __cpuid_count};
-        if __cpuid(0).eax >= 7 && __cpuid_count(7, 0).edx & (1 << 4) != 0 {
-            YES
-        } else {
-            NO
-        }
-    }
-    let mut fsrm = FSRM.load(Relaxed);
-    if fsrm == UNASKED {
-        fsrm = ask();
-        FSRM.store(fsrm, Relaxed);
-    }
-    fsrm == YES
+/// every copy. Asked at a process's first short copy.
+static FSRM: AtomicU8 = AtomicU8::new(UNASKED);
+const UNASKED: u8 = 0;
+const YES: u8 = 1;
+const NO: u8 = 2;
+
+/// A process's first short copy: out of line, so that no copy after it pays
+/// for the call.
+#[cold]
+#[inline(never)]
+unsafe fn first_short_copy(dest: *mut u8, src: *const u8, n: usize) {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+    let fsrm = __cpuid(0).eax >= 7 && __cpuid_count(7, 0).edx & (1 << 4) != 0;
+    FSRM.store(if fsrm { YES } else { NO }, Relaxed);
+    // SAFETY: the caller's.
+    unsafe { copy_forward(dest, src, n) }
 }
 
 /// `n` bytes, `16 * k <= n <= 32 * k` for the `k` indices given, as `k`
