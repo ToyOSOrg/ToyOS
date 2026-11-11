@@ -23,8 +23,11 @@ for each entry 416 us, sorting and encoding the rest (#1152's evidence,
 
 The inode lookups are gone: a listing reads its inodes in one pass over each
 run of them (`Mount::listing`), held by `lib/bcachefs`'s
-`a_listing_reads_its_inodes_in_a_pass_over_each_run_of_them`. What that
-leaves of the row on the benches is not measured yet.
+`a_listing_reads_its_inodes_in_a_pass_over_each_run_of_them`. On the T14,
+four boots a side (#1236's evidence), that took `readdir.1000` from 2.87 to
+2.91 ms to 2.38 to 2.40 ms, 0.83 times: far less than the host model's
+416 us of 534 promised. Where the remaining 2.4 ms goes is not measured; the
+AMD bench is not measured.
 
 **Exit.** `readdir.1000` within 1.5 times main's on both benches; if the
 single pass does not reach it, the listing kept across a directory's READDIR
