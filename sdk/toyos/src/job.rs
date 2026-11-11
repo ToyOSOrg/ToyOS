@@ -1,6 +1,6 @@
 //! A job: the owner a process's threads, and its children's unless a spawn
-//! names another, share CPU time under. A spawn endows one under
-//! [`JOB_LABEL`] to put its child in it; [`own`] is this process's own, and
+//! names another, share CPU time under. A spawn names one to put its child
+//! in it (`crate::spawn::Spawn::job`); [`own`] is this process's own, and
 //! [`SysCap::new_job`](crate::syscap::SysCap::new_job) makes an independent
 //! one.
 //!
@@ -9,8 +9,6 @@
 //! free for it again: what a launcher waits on before it tries again.
 
 use toyos_abi::syscall::{self, AccountInfo, SyscallError};
-
-pub use toyos_abi::syscall::JOB_LABEL;
 
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
@@ -23,7 +21,7 @@ pub fn own() -> Result<Job, SyscallError> {
 }
 
 impl Job {
-    /// A second handle to the same job, for a spawn to move.
+    /// A second handle to the same job.
     pub fn duplicate(&self) -> Result<Job, SyscallError> {
         self.0.try_clone().map(Job)
     }

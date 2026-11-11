@@ -32,8 +32,9 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 
 use toyos::endow::Endowments;
 use toyos::port::Acceptor;
-use toyos::{namespace, port, AsHandle};
-use toyos_abi::syscall::{self, SyscallError, SVC_LABEL};
+use toyos::endow::{service_label, SVC_PREFIX};
+use toyos::{port, AsHandle};
+use toyos_abi::syscall::{self, SyscallError};
 
 const SELF_PATH: &str = "/system/bin/test_rs_connect_before_serve";
 const SERVICE: &str = "before-serve";
@@ -119,11 +120,12 @@ fn left() {
 /// The `sent` line is the ordering: it is printed after the write, so nothing
 /// below it can be reading a port the client had not yet written to.
 fn start_client(connector: &port::Connector, expect: &str) -> (Child, BufReader<ChildStdout>) {
-    let ns = namespace::build().add(SERVICE, connector).finish().expect("a namespace");
+    let connector = connector.duplicate().expect("a copy of the connector");
     let mut client = Command::new(SELF_PATH)
         .arg("client")
         .arg(expect)
-        .endow(SVC_LABEL, ns.into())
+        .services_only(&[])
+        .endow(&service_label(SVC_PREFIX, SERVICE), connector.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the client");

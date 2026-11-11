@@ -66,6 +66,19 @@ pub(super) fn spawn_place(place: u64) -> Result<process::Parent, u64> {
     .map_err(|refused| refused.refuse())
 }
 
+/// `SpawnArgs::job`: the caller's own, or the job a handle carrying `WRITE` names — a handle a peer sent, as a place is.
+pub(super) fn spawn_job(job: u64) -> Result<alloc::sync::Arc<kernel::sched::job::Job>, u64> {
+    if job == u64::from(toyos_abi::HANDLE_INVALID.0) {
+        return Ok(process::with_process_data(|data| data.job.clone()));
+    }
+    let Ok(raw) = u32::try_from(job) else {
+        return Err(SyscallError::InvalidArgument.to_u64());
+    };
+    process::with_handles(|handles| handles.get_sent::<crate::object::job::JobObject>(RawHandle(raw), Rights::WRITE))
+        .map(|object| object.job().clone())
+        .map_err(|refused| refused.refuse())
+}
+
 /// The program `args` lays out: each range checked as an ordinary mapping,
 /// and each object it names looked up with the rights its range needs before
 /// an endowment could move the handle naming it.
@@ -235,27 +248,6 @@ pub(super) fn sys_job_own() -> u64 {
     match process::with_handles(|handles| crate::object::ops::install(handles, object)) {
         Ok(h) => u64::from(h.0),
         Err(e) => e.to_u64(),
-    }
-}
-
-/// Answer this process's endowment table; an empty buffer asks only for its size.
-pub(super) fn sys_endowments(out: &mut crate::user_ptr::UserBytesMut) -> u64 {
-    let data_arc = process::process_data();
-    let data = data_arc.lock();
-    let needed = data.endowments.encoded_len();
-    if out.is_empty() {
-        return needed as u64;
-    }
-    // Refused rather than truncated: a partial table would look up labels it lacks.
-    if out.len() < needed {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    let mut buf = alloc::vec![0u8; needed];
-    data.endowments.encode(&mut buf);
-    drop(data);
-    match out.write_at(0, &buf) {
-        Ok(()) => needed as u64,
-        Err(faulted) => SyscallError::from(faulted).to_u64(),
     }
 }
 

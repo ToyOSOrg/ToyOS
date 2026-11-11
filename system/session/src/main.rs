@@ -38,9 +38,9 @@ fn main() {
     let endowed = Endowments::get();
     // Connected here, so the link is this job's and not the supervisor's.
     let link: Connection = endowed
-        .take::<toyos::namespace::Namespace>(wire::LINK_LABEL)
+        .take::<toyos::port::Connector>(wire::LINK_LABEL)
         .expect("session: started without its link to the supervisor")
-        .open(wire::LINK)
+        .connect()
         .expect("session: the supervisor's link refused it");
     let launcher: Acceptor =
         endowed.take(wire::LAUNCHER_ACCEPTOR_LABEL).expect("session: started without its launcher's acceptor");

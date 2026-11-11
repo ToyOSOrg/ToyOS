@@ -15,7 +15,7 @@
 use std::io::Write;
 
 use toyos::endow::Endowments;
-use toyos::namespace::Namespace;
+use toyos::port::Connector;
 use toyos_session::{self as wire, SignOut, SignOutSession};
 
 const USAGE: &str = "usage: logout [<session> [--force]]";
@@ -50,10 +50,10 @@ fn request(args: &[String]) -> Result<(u32, Vec<u8>), &'static str> {
 
 /// The supervisor's answer: whether it was done, and its text.
 fn ask(msg: u32, payload: &[u8]) -> (bool, String) {
-    let Some(held) = Endowments::get().take::<Namespace>(wire::ADMIN_PORT) else {
+    let Some(held) = Endowments::get().take::<Connector>(wire::ADMIN_PORT) else {
         return (false, "logout: this process holds no `session-admin` connector; run it with `launch logout`".into());
     };
-    let supervisor = match held.open(wire::ADMIN_PORT) {
+    let supervisor = match held.connect() {
         Ok(conn) => conn,
         Err(e) => return (false, format!("logout: the supervisor's port refused: {e:?}")),
     };

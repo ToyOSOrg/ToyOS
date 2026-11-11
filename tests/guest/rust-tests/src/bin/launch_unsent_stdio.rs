@@ -29,6 +29,8 @@ fn launched(program: &str, argv: &[u8], fds: &[(u32, BorrowedHandle<'_>, Kind)])
         cwd: "/",
         fds,
         endow: Vec::new(),
+        inherit: toyos::spawn::Inherit::All,
+        job: None,
         provided: Vec::new(),
         parent: Parent::Caller,
         independent: true,

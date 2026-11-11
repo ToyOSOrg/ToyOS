@@ -24,8 +24,6 @@ use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 use toyos::ipc::{self, Connection, RxStep};
-use toyos::launch::LAUNCHER;
-use toyos::namespace::{self, Namespace};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor, Connector};
 use toyos::wake::{self, Bell, Waker};
@@ -60,7 +58,7 @@ pub(crate) struct Login {
     /// Held here alone, so the session's end closes it and a launch connected
     /// to it reads its end.
     pub launcher: Acceptor,
-    /// The session's control port, a namespace of which each login
+    /// The session's control port, a connector to which each login
     /// authority is handed to connect its own control connection through.
     controls: Connector,
     /// Whether the screen's row opened it: the desktop's.
@@ -72,8 +70,8 @@ pub(crate) struct Login {
 /// The desktop session's launcher and its controls, minted for one start of
 /// the screen's row.
 pub(crate) struct Desktop {
-    pub launcher: Namespace,
-    pub control: Namespace,
+    pub launcher: Connector,
+    pub control: Connector,
 }
 
 /// A session owner's link: the port the owner connects, until it has, then
@@ -122,11 +120,10 @@ impl Link {
 
 impl Login {
     /// `opener`'s launcher in this session, and its controls to connect to.
-    fn handed_to(&self, opener: &Program) -> Result<(Namespace, Namespace), String> {
+    fn handed_to(&self, opener: &Program) -> Result<(Connector, Connector), String> {
         let badge = Authority { row: opener.name.clone(), session: self.session }.encode();
-        let connector = self.launcher.mint(&badge).map_err(|e| format!("no launcher was minted ({e:?})"))?;
-        let launcher = namespace::build().add(LAUNCHER, &connector).finish().map_err(|e| format!("{e:?}"))?;
-        let controls = namespace::build().add(wire::CONTROL, &self.controls).finish().map_err(|e| format!("{e:?}"))?;
+        let launcher = self.launcher.mint(&badge).map_err(|e| format!("no launcher was minted ({e:?})"))?;
+        let controls = self.controls.duplicate().map_err(|e| format!("no copy of its controls ({e:?})"))?;
         Ok((launcher, controls))
     }
 }
@@ -306,11 +303,10 @@ impl Supervisor<'_> {
         let (launcher, _) = port::create().map_err(|e| format!("no launcher port ({e:?})"))?;
         let (controls_acceptor, controls_connector) = port::create().map_err(|e| format!("no control port ({e:?})"))?;
         let (link_acceptor, link_connector) = port::create().map_err(|e| format!("no link ({e:?})"))?;
-        let link = namespace::build().add(wire::LINK, &link_connector).finish().map_err(|e| format!("{e:?}"))?;
         let accepting = launcher.as_handle().try_clone_to_owned().map_err(|e| format!("no copy of its launcher ({e:?})"))?;
         let extra = Extra {
             endow: vec![
-                (wire::LINK_LABEL, link.into()),
+                (wire::LINK_LABEL, link_connector.into()),
                 (wire::LAUNCHER_ACCEPTOR_LABEL, accepting),
                 (wire::CONTROL_ACCEPTOR_LABEL, controls_acceptor.into()),
             ],
@@ -328,10 +324,10 @@ impl Supervisor<'_> {
             served,
             &self.connectors,
             &self.grants,
-            &[],
+            Vec::new(),
             extra,
             minting,
-            Output::Boot { log: &mut self.log, job },
+            Output::Boot { log: &mut self.log, job: &job },
         )
         .map_err(|e| format!("its owner did not start: {e}"))?;
         say!("supervisor: session {} opened for {}, owned by pid {}", session.share(), opener.name, owner.id());
@@ -406,8 +402,8 @@ impl Supervisor<'_> {
             .map_or_else(|| self.open_session(opener), Ok)
             .and_then(|at| self.logins.open[at].handed_to(opener));
         match answered {
-            Ok((ns, controls)) => {
-                let handles: [OwnedHandle; 2] = [ns.into(), controls.into()];
+            Ok((launcher, controls)) => {
+                let handles: [OwnedHandle; 2] = [launcher.into(), controls.into()];
                 if let Err(e) = conn.try_signal_with(wire::MSG_OPENED, handles) {
                     say!("supervisor: login: {}'s session was opened and not answered ({e:?})", opener.name);
                 }

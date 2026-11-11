@@ -303,7 +303,7 @@ pub(crate) fn mix_thread(
     static CAP: std::sync::OnceLock<SysCap> = std::sync::OnceLock::new();
     let cap = CAP.get_or_init(|| {
         let cap: SysCap = Endowments::get()
-            .take(toyos_abi::syscall::SYSCAP_LABEL)
+            .take(toyos::endow::SYSCAP_LABEL)
             .expect("the manifest declares this program `syscap = [\"rt\", \"wake-latency\"]`");
         cap.enter_rt().expect("an RT capability refused the band it names");
         cap

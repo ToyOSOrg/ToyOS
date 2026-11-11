@@ -105,10 +105,8 @@ fn install(file: &Path, assume_yes: bool) -> Result<(), String> {
 /// Refused where it is read-only, which it is to every row but the
 /// installer's.
 fn writable_apps() -> Result<toyos::fs::Dir, String> {
-    let names = toyos::endow::namespace()
-        .ok_or_else(|| String::from("pkg: this process holds no directory capabilities"))?;
     let name = format!("{}{}", toyos::fs::CAPABILITY_PREFIX, package::DIR);
-    let apps = toyos::fs::Dir::connect(names, &name).map_err(|e| format!("pkg: cannot reach {}: {e:?}", package::DIR))?;
+    let apps = toyos::fs::Dir::named(&name).map_err(|e| format!("pkg: cannot reach {}: {e:?}", package::DIR))?;
     match apps.writable() {
         true => Ok(apps),
         false => Err(format!("pkg: {} is read-only to this process; run it with `launch pkg`", package::DIR)),

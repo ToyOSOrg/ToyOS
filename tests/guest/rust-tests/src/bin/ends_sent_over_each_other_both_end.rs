@@ -5,7 +5,7 @@
 
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
-use toyos::{namespace, port, AsHandle, OwnedHandle};
+use toyos::{port, AsHandle, OwnedHandle};
 use toyos_abi::syscall;
 
 /// A failure ceiling only: an end that never comes is the defect.
@@ -13,9 +13,8 @@ const CEILING_NANOS: u64 = 10_000_000_000;
 
 fn main() {
     let (acceptor, connector) = port::create().expect("a port");
-    let names = namespace::build().add("conn", &connector).finish().expect("a namespace");
     let pair = || {
-        let client = names.open("conn").expect("connect");
+        let client = connector.connect().expect("connect");
         (client, acceptor.accept().expect("accept"))
     };
 

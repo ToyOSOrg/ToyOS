@@ -12,44 +12,40 @@
 //!
 //! **The whole setup is gone.** There is no registry, no `listen` and no name a
 //! process can present: a service is a port, its two ends are two types, and a
-//! client is given a `Connector` inside a namespace its parent built. So the
+//! client is given a `Connector` by its parent. So the
 //! squat is not something to detect at run time — it is not something that can
 //! be written — and what is left to check is the boundary the type system draws
 //! and the kernel enforces underneath it.
 //!
-//! Four arms, each the runtime half of a thing the compiler already refuses to
-//! spell. **They no longer answer the same way, and the split is the design.**
-//! An attenuated handle is a thing a process may legitimately probe, so arms 1,
-//! 2 and 4 come back as words; naming a handle from somebody else's table is a
+//! Three arms, each the runtime half of a thing the compiler already refuses to
+//! spell. **They do not answer the same way, and the split is the design.**
+//! An attenuated handle is a thing a process may legitimately probe, so arms 1
+//! and 2 come back as words; naming a handle from somebody else's table is a
 //! bug no correct program has, so arm 3 ends the caller and is raised in a child
 //! that prints a marker first.
 //!
 //! 1. **A connector cannot accept.** `Connector` has no `accept` method, and
 //!    the handle behind one carries no `READ` — so `SYS_ACCEPT` refuses it with
 //!    a word before it ever looks at the type.
-//! 2. **An acceptor cannot be put in a namespace as a connector.** Two types,
+//! 2. **An acceptor cannot be connected through as a connector.** Two types,
 //!    one wire word, and the kernel checks the type rather than trusting it.
-//!    **It answers `InvalidArgument` rather than ending the caller, and it is
-//!    the only wrong-typed handle in the ABI that does**: an `add` entry's
-//!    connector is routinely one a *peer* transferred — a `provides` name is
-//!    exactly that — so presenting the wrong one may be reporting a peer's bug
-//!    rather than your own. the supervisor's launcher is why.
+//!    **It answers `InvalidArgument` rather than ending the caller**, as a
+//!    spawn's place and job do: a connector is routinely one a *peer*
+//!    transferred — a `provides` name is exactly that — so presenting the
+//!    wrong one may be reporting a peer's bug rather than your own.
 //! 3. **A handle number from another process's table names nothing here.** The
 //!    victim prints the raw number of a live acceptor of its own; the thief
 //!    presenting it is ended, and the victim's port is still serving afterwards.
-//! 4. **A name a namespace does not carry resolves to nothing** — and that is
-//!    `NotFound`, which is a different word from a port that has closed.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
-use toyos::{namespace, port, AsHandle};
+use toyos::{port, AsHandle};
 use toyos_abi::syscall::{self, SyscallError};
 use std::os::toyos::process::ExitStatusExt;
 use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_abuse_listener_hijack";
-const NAME: &str = "abuse-listener-hijack";
 
 /// How the kernel ends a process that names a handle it does not hold.
 const HANDLE_FAULT: End = End::Fault(Fault::Handle);
@@ -76,30 +72,20 @@ fn test() {
         "a connector accepted a connection"
     );
 
-    // 2. And the server's end is not a ticket to hand out: an acceptor in an
-    //    `add` entry is a wrong-typed handle, so nothing can build a namespace
-    //    whose entry hands the *acceptor* to whoever holds it. A word rather
-    //    than a death — see the header — so it is raised here and needs no
-    //    child and no marker.
+    // 2. And the server's end is not a ticket to hand out: an acceptor is a
+    //    wrong-typed handle to connect through, so nothing handed one as a
+    //    connector reaches the port by it. A word rather than a death — see
+    //    the header — so it is raised here and needs no child and no marker.
     let (smuggled, its_connector) = port::create().expect("a second port, to smuggle");
-    // SAFETY: read for its number and nothing else. `ManuallyDrop` is what
-    // stops it being closed as a second owner, and it does not outlive
-    // `smuggled`.
-    let fake = core::mem::ManuallyDrop::new(unsafe {
-        port::Connector::from_raw(smuggled.as_handle().raw())
-    });
     assert_eq!(
-        namespace::build().add(NAME, &fake).finish().err(),
+        syscall::connect(smuggled.as_handle().raw()).err(),
         Some(SyscallError::InvalidArgument),
-        "an acceptor was taken as a namespace's connector",
+        "an acceptor was connected through as a connector",
     );
-    // The *same port's* connector is taken, so the refusal was the type and
+    // The *same port's* connector connects, so the refusal was the type and
     // not the port — which is what stops this arm passing against a
-    // `SYS_NAMESPACE_BUILD` that refuses everything.
-    namespace::build()
-        .add(NAME, &its_connector)
-        .finish()
-        .expect("the same port's connector is a namespace entry");
+    // `SYS_CONNECT` that refuses everything.
+    its_connector.connect().expect("the same port's connector connects");
     drop(smuggled);
 
     // 3. A handle is an index into one process's own table and means nothing
@@ -129,17 +115,6 @@ fn test() {
         said.trim(),
         "port still mine",
         "the victim's port did not survive the number being presented elsewhere",
-    );
-
-    // 4. A name is resolved in a namespace this process holds, and in no other
-    //    place. One that is not in it is `NotFound` — a fact about this
-    //    process — and not `Gone`, which is a server that has left.
-    let ns = namespace::build().add(NAME, &connector).finish().expect("a namespace of our own");
-    assert!(ns.open(NAME).is_ok(), "our own port did not answer");
-    assert_eq!(
-        ns.open("something-we-were-not-given").err(),
-        Some(SyscallError::NotFound),
-        "a name outside the namespace resolved"
     );
 
     println!("a connector cannot accept, an acceptor cannot be a connector, and a handle is one process's");
@@ -193,11 +168,7 @@ fn victim() -> ! {
     // Nobody else ever reached this port, and it is still the victim's to
     // accept from: the number it published named something live for the whole
     // of the attack.
-    let ns = namespace::build()
-        .add(NAME, &connector)
-        .finish()
-        .expect("victim: a namespace over its own port");
-    let _client = ns.open(NAME).expect("victim: connect to its own port");
+    let _client = connector.connect().expect("victim: connect to its own port");
     let _served = acceptor.accept().expect("victim: accept its own connection");
     println!("port still mine");
     std::io::stdout().flush().expect("victim: flush the report");

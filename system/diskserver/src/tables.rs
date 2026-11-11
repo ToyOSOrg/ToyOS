@@ -2,7 +2,7 @@
 //! the block service through a tables or a designation badge
 //! (`toyos_blockring::wire::Badge`).
 
-use toyos::namespace::Namespace;
+use toyos::BorrowedHandle;
 use toyos_blockring::wire::{self, Designated, DiskHead, Refusal, SlotLine};
 
 use crate::session::{answer, connect};
@@ -24,8 +24,8 @@ fn refused(payload: &[u8]) -> Error {
 
 /// What disk `disk` (the service's number, from a listing) holds: its head
 /// and every used entry of its table in force.
-pub fn describe(names: &Namespace, service: &str, disk: u32) -> Result<(DiskHead, Vec<SlotLine>), Error> {
-    let conn = connect(names, service)?;
+pub fn describe(service: BorrowedHandle<'_>, disk: u32) -> Result<(DiskHead, Vec<SlotLine>), Error> {
+    let conn = connect(service)?;
     conn.send_bytes(wire::MSG_DESCRIBE, &disk.to_le_bytes()).map_err(|_| Error::Ended)?;
     let head = match frame(&conn)? {
         (wire::MSG_DISK, payload) => DiskHead::decode(&payload).ok_or(Error::Protocol)?,
@@ -44,8 +44,8 @@ pub fn describe(names: &Namespace, service: &str, disk: u32) -> Result<(DiskHead
 
 /// Carry out the designation the connector `service` names was minted for:
 /// write the stamp when `commit`, judge only otherwise.
-pub fn designate(names: &Namespace, service: &str, commit: bool) -> Result<Designated, Error> {
-    let conn = connect(names, service)?;
+pub fn designate(service: BorrowedHandle<'_>, commit: bool) -> Result<Designated, Error> {
+    let conn = connect(service)?;
     conn.send_bytes(wire::MSG_DESIGNATE, &[u8::from(commit)]).map_err(|_| Error::Ended)?;
     match frame(&conn)? {
         (wire::MSG_DESIGNATED, payload) => Designated::decode(&payload).ok_or(Error::Protocol),

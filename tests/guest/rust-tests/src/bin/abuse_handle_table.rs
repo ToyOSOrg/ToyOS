@@ -20,10 +20,11 @@
 //! checked before the spawn's endowments move: at the cap the spawn is
 //! refused with every handle it named still the caller's.
 //!
-//! **An endowment vector is two entries and two labels short of a table**,
-//! which the kernel's own `self` and `quit` fill. So a caller's entry labelled
-//! either is refused before anything moves, and so is a vector of one entry
-//! more than `MAX_SPAWN_ENDOWMENTS`, while that many start.
+//! **A child's table starts in the order the ABI states**: the kernel's own
+//! two, then the endowments as the spawn listed them, the `i`th at
+//! `RawHandle::endowed(i)`, which is all a child finds them by. A vector of
+//! one entry more than `MAX_SPAWN_ENDOWMENTS` is refused before anything
+//! moves, while that many start.
 //!
 //! **A pipe and a port are two inserts answered as one**: at the cap, and one
 //! slot short of fitting, each is refused with the table as it was.
@@ -31,9 +32,7 @@
 #[path = "../image.rs"]
 mod image;
 
-use toyos_abi::syscall::{
-    self, SpawnEndow, VmAt, VmProt, SpawnArgs, SyscallError, MAX_SPAWN_ENDOWMENTS, QUIT_LABEL, SELF_LABEL,
-};
+use toyos_abi::syscall::{self, VmAt, VmProt, SpawnArgs, SyscallError, MAX_SPAWN_ENDOWMENTS};
 use toyos_abi::handle::TransferEntry;
 use toyos_abi::RawHandle;
 use toyos_abi::end::End;
@@ -41,7 +40,8 @@ use toyos_abi::end::End;
 const SELF: &str = "/system/bin/test_rs_abuse_handle_table";
 /// The name its children go by.
 const NAME: &str = "test_rs_abuse_handle_table";
-/// The role a spawned copy of this binary takes: it exits at once.
+/// The role a spawned copy of this binary takes: it writes its place's
+/// digit into each of the pipe ends it was endowed, and exits.
 const CHILD: &str = "endowed";
 
 
@@ -51,11 +51,6 @@ const MAX_HANDLES: u32 = 4096;
 
 const REGION: usize = 4 * 1024 * 1024;
 
-/// The label blob the endowment arms index into. Its content is never read —
-/// the vector is refused before anything is installed — but the offsets have to
-/// be in range or the refusal would be the label check rather than the repeat.
-const LABELS: &[u8] = b"twice";
-
 /// This binary laid out to start as [`CHILD`], read before the table is
 /// filled: a full table has no slot for the objects a read and a startup
 /// block make.
@@ -64,14 +59,20 @@ fn own() -> &'static image::Laid {
     static OWN: std::sync::OnceLock<(toyos::process::Image, image::Laid)> = std::sync::OnceLock::new();
     let (_, laid) = OWN.get_or_init(|| {
         let image = image::image_of(SELF);
-        let laid = image::laid(&image, &format!("{SELF}\0{CHILD}"));
+        let laid = image::laid(&image, &format!("{SELF}\0{CHILD}\0{PROMISED}"));
         (image, laid)
     });
     laid
 }
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some(CHILD) {
+    if let Some(count) = std::env::args().nth(2).filter(|_| std::env::args().nth(1).as_deref() == Some(CHILD)) {
+        for i in 0..count.parse::<usize>().expect("a count of endowments") {
+            // The `i`th endowment is the `i`th handle after the kernel's own,
+            // whatever the child's own SDK makes of its table.
+            let digit = [b'0' + i as u8];
+            assert_eq!(syscall::write(RawHandle::endowed(i), &digit), Ok(1), "endowment {i} is no pipe's write end");
+        }
         return;
     }
     own();
@@ -94,8 +95,6 @@ fn main() {
             name_len: NAME.len() as u64,
             endow_ptr: (region as u64) + (REGION / 4) as u64,
             endow_count,
-            labels_ptr: (region as u64) + (REGION / 8) as u64,
-            labels_len: LABELS.len() as u64,
             maps_ptr: laid.maps().as_ptr() as u64,
             maps_count: laid.maps().len() as u64,
             entry: laid.entry,
@@ -103,6 +102,7 @@ fn main() {
             build_id_ptr: laid.build_id().as_ptr() as u64,
             build_id_len: laid.build_id().len() as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            job: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         };
         unsafe { syscall::spawn(&args) }
@@ -112,22 +112,17 @@ fn main() {
     // preflight runs against a table nothing has been removed from, so a repeat
     // passed both times; the first removal retired the slot and the second
     // answered `Stale` into an `expect`.
-    let endow = unsafe { region.add(REGION / 4) } as *mut SpawnEndow;
-    let entry = SpawnEndow { label_off: 0, label_len: LABELS.len() as u32, moved: TransferEntry::unchanged(stdout()) };
+    let endow = unsafe { region.add(REGION / 4) } as *mut TransferEntry;
+    let entry = TransferEntry::unchanged(stdout());
     unsafe {
         endow.write(entry);
         endow.add(1).write(entry);
-        core::ptr::copy_nonoverlapping(
-            LABELS.as_ptr(),
-            region.add(REGION / 8),
-            LABELS.len(),
-        );
     }
     let err = spawn_with(2).expect_err("an endowment vector naming one handle twice must be rejected");
     assert_eq!(err, SyscallError::InvalidArgument, "wrong error for a repeated endowment");
 
-    a_caller_endows_no_self();
-    a_spawn_carries_two_entries_fewer_than_a_table();
+    a_child_finds_each_endowment_at_its_place();
+    a_spawn_carries_its_bound();
 
     let mut filled = Vec::new();
     let mut refused = None;
@@ -148,8 +143,7 @@ fn main() {
     a_pair_is_refused_whole(&mut filled);
 
     let last = filled.pop().expect("the fill installed a handle");
-    let entry = SpawnEndow { label_off: 0, label_len: LABELS.len() as u32, moved: TransferEntry::unchanged(last) };
-    let spawned = spawn_endowed(&[entry], LABELS);
+    let spawned = spawn_endowed(&[TransferEntry::unchanged(last)]);
 
     // The cap is a live limit, not a latched failure.
     for handle in filled {
@@ -200,9 +194,8 @@ fn a_pair_is_refused_whole(filled: &mut Vec<RawHandle>) {
     );
 }
 
-/// `SYS_SPAWN` of this binary as a child that exits at once, carrying
-/// `entries` into the blob `labels`.
-fn spawn_endowed(entries: &[SpawnEndow], labels: &[u8]) -> Result<RawHandle, SyscallError> {
+/// `SYS_SPAWN` of this binary as [`CHILD`], carrying `entries`.
+fn spawn_endowed(entries: &[TransferEntry]) -> Result<RawHandle, SyscallError> {
     let laid = own();
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
@@ -213,8 +206,6 @@ fn spawn_endowed(entries: &[SpawnEndow], labels: &[u8]) -> Result<RawHandle, Sys
             name_len: NAME.len() as u64,
             endow_ptr: entries.as_ptr() as u64,
             endow_count: entries.len() as u64,
-            labels_ptr: labels.as_ptr() as u64,
-            labels_len: labels.len() as u64,
             maps_ptr: laid.maps().as_ptr() as u64,
             maps_count: laid.maps().len() as u64,
             entry: laid.entry,
@@ -222,68 +213,62 @@ fn spawn_endowed(entries: &[SpawnEndow], labels: &[u8]) -> Result<RawHandle, Sys
             build_id_ptr: laid.build_id().as_ptr() as u64,
             build_id_len: laid.build_id().len() as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            job: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
 }
 
-/// An entry labelled `self` or `quit` would shadow the kernel's in the
-/// child's lookup: refused before anything moves, so the pipe end it named is
-/// still this process's and still carries a byte.
-fn a_caller_endows_no_self() {
-    for label in [SELF_LABEL, QUIT_LABEL] {
-        let ends = syscall::pipe().expect("a pipe for the self arm");
-        let entry = SpawnEndow { label_off: 0, label_len: label.len() as u32, moved: TransferEntry::unchanged(ends.write) };
-        let err = spawn_endowed(&[entry], label.as_bytes()).expect_err("an endowment labelled as the kernel's must be refused");
-        assert_eq!(err, SyscallError::InvalidArgument, "wrong error for an endowment labelled {label}");
-        assert_eq!(syscall::write(ends.write, b"x"), Ok(1), "the end an endowment labelled {label} named is gone");
+/// How many endowments the laid-out [`CHILD`] writes its digit into.
+const PROMISED: usize = 3;
+
+/// A raw spawn's child finds its `i`th endowment at `RawHandle::endowed(i)`:
+/// three pipe ends, each written by the child at the place the ABI states,
+/// each byte read from its own pipe.
+fn a_child_finds_each_endowment_at_its_place() {
+    let pipes: Vec<_> = (0..PROMISED).map(|_| syscall::pipe().expect("a pipe for the place arm")).collect();
+    let entries: Vec<TransferEntry> = pipes.iter().map(|ends| TransferEntry::unchanged(ends.write)).collect();
+    let child = spawn_endowed(&entries).unwrap_or_else(|e| panic!("a spawn carrying {PROMISED} pipe ends was refused: {e:?}"));
+    assert_eq!(syscall::process_wait(child), Ok(End::Exited(0)), "the child that writes its endowments");
+    for (i, ends) in pipes.iter().enumerate() {
         let mut byte = [0u8; 1];
-        assert_eq!(syscall::read(ends.read, &mut byte), Ok(1), "the byte did not arrive");
+        assert_eq!(syscall::read(ends.read, &mut byte), Ok(1), "endowment {i} carried nothing");
+        assert_eq!(byte[0], b'0' + i as u8, "endowment {i} was found at another place");
         // SAFETY: no type holds this number.
         unsafe { syscall::close(ends.read) };
-        // SAFETY: no type holds this number.
-        unsafe { syscall::close(ends.write) };
     }
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(child) };
 }
 
 /// One entry more than `MAX_SPAWN_ENDOWMENTS`, each naming a distinct
 /// `TRANSFER` handle, so the count is the only refusal: refused, and one fewer
-/// starts.
-fn a_spawn_carries_two_entries_fewer_than_a_table() {
+/// starts, the first [`PROMISED`] pipe write ends.
+fn a_spawn_carries_its_bound() {
     let over = MAX_SPAWN_ENDOWMENTS + 1;
     let mut handles = Vec::with_capacity(over + 1);
     while handles.len() < over {
         let ends = syscall::pipe().expect("a pipe for the count arm");
-        handles.extend([ends.read, ends.write]);
+        handles.extend([ends.write, ends.read]);
     }
-    let mut labels = Vec::new();
-    let entries: Vec<SpawnEndow> = handles
-        .iter()
-        .enumerate()
-        .map(|(i, &handle)| {
-            let label = format!("e{i:02}");
-            let entry =
-                SpawnEndow { label_off: labels.len() as u32, label_len: label.len() as u32, moved: TransferEntry::unchanged(handle) };
-            labels.extend_from_slice(label.as_bytes());
-            entry
-        })
-        .collect();
-    let entries = &entries[..over];
-    let err = spawn_endowed(entries, &labels).expect_err("a spawn carrying an entry past MAX_SPAWN_ENDOWMENTS must be refused");
+    let entries: Vec<TransferEntry> = handles[..over].iter().map(|&handle| TransferEntry::unchanged(handle)).collect();
+    let err = spawn_endowed(&entries).expect_err("a spawn carrying an entry past MAX_SPAWN_ENDOWMENTS must be refused");
     assert_eq!(err, SyscallError::InvalidArgument, "wrong error for {over} entries");
 
+    // The child writes into its first `PROMISED`: write ends, in that order.
     let fewer = MAX_SPAWN_ENDOWMENTS;
-    let used = entries[fewer].label_off as usize;
-    let child = spawn_endowed(&entries[..fewer], &labels[..used])
-        .unwrap_or_else(|e| panic!("a spawn carrying {fewer} entries was refused: {e:?}"));
+    let ordered: Vec<TransferEntry> = handles.iter().step_by(2).chain(handles.iter().skip(1).step_by(2)).take(fewer).map(|&h| TransferEntry::unchanged(h)).collect();
+    let child = spawn_endowed(&ordered).unwrap_or_else(|e| panic!("a spawn carrying {fewer} entries was refused: {e:?}"));
     assert_eq!(syscall::process_wait(child), Ok(End::Exited(0)), "the child carrying {fewer} entries");
     // SAFETY: no type holds this number.
     unsafe { syscall::close(child) };
-    for &handle in &handles[fewer..] {
-        // SAFETY: no type holds this number.
-        unsafe { syscall::close(handle) };
+    for &handle in &handles {
+        if !ordered.iter().any(|moved| moved.handle == handle) {
+            // SAFETY: no type holds this number.
+            unsafe { syscall::close(handle) };
+        }
     }
-    println!("an endowment labelled self or quit and {over} entries are refused, and {fewer} start");
+    println!("{over} entries are refused, {fewer} start, and each lands at the place the ABI states");
 }
 
 /// The kernel handle this process's standard output is, descriptor 1's.

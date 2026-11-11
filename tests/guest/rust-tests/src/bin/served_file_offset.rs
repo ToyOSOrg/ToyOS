@@ -122,7 +122,7 @@ fn refused_spawn_keeps_export(fd: i32) {
     let request = toyos::spawn::Spawn {
         program: "/system/bin/toybox", image: None, image_held: false,
         argv: b"toybox\0", env: &[], cwd: "/", fds: &fds,
-        endow: Vec::new(), provided: Vec::new(), parent: toyos::spawn::Parent::Place(write.as_handle()),
+        endow: Vec::new(), inherit: toyos::spawn::Inherit::All, job: None, provided: Vec::new(), parent: toyos::spawn::Parent::Place(write.as_handle()),
         independent: false, launcher: None, pager: None,
     };
     let toyos::spawn::Start::Helper(helper) = request.start().expect("a helper") else { panic!("a helper became a launch") };

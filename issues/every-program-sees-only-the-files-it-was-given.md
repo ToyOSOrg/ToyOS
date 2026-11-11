@@ -67,9 +67,8 @@ other, with the same per-session isolation (owner, 2026-11-05).
    directory where it keeps state (`service = true` or `state = true`: the
    daemons' own state is built); `/system` is read-only, `/log` and `/apps`
    are read-only to all but one row each, and the rest is read-write. The
-   storage rows are started outside that
-   (`issues/storage-rows-start-holding-the-supervisors-whole-tree.md`),
-   which this stage's exit closes.
+   storage rows hold no directory at all (#ENDOWPR): a service the
+   supervisor adopted for its own files is inherited by no child.
    Only the installer service writes `/apps` (owner ruling, 2026-11-05).
    Built: `/apps` is read-only in every declared row's view but the row
    that declares `installs = true` (`toyos_manifest::Program::installs`),

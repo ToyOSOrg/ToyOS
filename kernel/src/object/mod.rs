@@ -23,7 +23,6 @@ pub mod event;
 pub mod handle;
 pub mod inbox;
 pub mod job;
-pub mod namespace;
 pub mod notice;
 pub mod null;
 pub mod ops;
@@ -278,8 +277,6 @@ kobject! {
     deferred SharedMem => shm::SharedMemObject,
     // A service with no clients right now is not a service that has stopped.
     immediate Connector => port::Connector,
-    // Immutable once built: its `Arc<Connector>`s go with the last reference and nothing observes it.
-    immediate Namespace => namespace::Namespace,
     // The authority is the rights on the handle; a handle going away *is* the whole event.
     immediate SysCap => syscap::SysCap,
     // The last handle's loss is the loss of the *ability to wait*, not proof the process should stop.

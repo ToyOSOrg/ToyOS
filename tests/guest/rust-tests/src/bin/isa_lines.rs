@@ -23,7 +23,8 @@ use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
 use toyos::{AsHandle, Device};
 use toyos_abi::pci::DeviceIrqRecord;
-use toyos_abi::syscall::{self, IsaId, SyscallError, SYSCAP_LABEL};
+use toyos_abi::syscall::{self, IsaId, SyscallError};
+use toyos::endow::SYSCAP_LABEL;
 
 use toyos::ioport;
 

@@ -18,7 +18,7 @@
 //! arg <text>                argv after argv[0]
 //! serve <name>              the supervisor makes one machine-wide port and endows the acceptor
 //! provide <name>            this program makes its own port, once per instance
-//! receive <name>            a connector in this program's namespace
+//! receive <name>            a connector to a service this program is given
 //! device <entry>            a claim the supervisor mints and endows ([`device`])
 //! drive <matcher>           one process of it per PCI function the matcher names
 //! syscap <right>            a right on the SysCap dup the supervisor endows
@@ -118,7 +118,7 @@ pub const STATE: &str = "/state";
 /// One directory a file-server role serves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoleDir {
-    /// What every program's namespace calls it, after `fs:`: `/home`.
+    /// What every program calls it among its services, after `fs:`: `/home`.
     pub dir: &'static str,
     /// Where it is on the role's volume, which a grant on it names
     /// (`toyos::fs::Grant`): DATA keeps its directories side by side, and
@@ -135,6 +135,10 @@ const fn dir(dir: &'static str, root: &'static str) -> RoleDir {
 
 /// The role serving ROOT, which the supervisor starts before it reads a file.
 pub const SYSTEM: &str = "system";
+
+/// What the supervisor calls ROOT's bytes, the memory nobody writes the
+/// kernel handed it, where it endows them to the server of [`SYSTEM`].
+pub const ROOT_IMAGE_LABEL: &str = "boot:root";
 
 /// The file-server roles, and the directories each serves: one port per role,
 /// and one grant on it per directory.
@@ -156,7 +160,7 @@ pub fn role_dirs(role: &str) -> Option<&'static [RoleDir]> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct View {
     pub role: &'static str,
-    /// What the program's namespace calls it, after `fs:`.
+    /// What the program calls it among its services, after `fs:`.
     pub dir: String,
     /// Where it is on the role's volume.
     pub root: String,
@@ -326,7 +330,7 @@ pub struct Program {
     /// Ports this program makes for itself, once per instance. The supervisor creates
     /// nothing and holds nothing for these.
     pub provides: Vec<String>,
-    /// Names in this program's namespace, each a connector.
+    /// The services this program is given, each a connector.
     pub receives: Vec<String>,
     /// Claims the supervisor mints for the one process of this row ([`device::Entry`]).
     pub devices: Vec<String>,

@@ -13,7 +13,7 @@
 use toyos_abi::syscall::{self, SyscallError, MAX_BADGE};
 
 use crate::ipc::Connection;
-use crate::{AsHandle, OwnedHandle, RawHandle};
+use crate::{AsHandle, BorrowedHandle, OwnedHandle, RawHandle};
 
 /// The server's end: connections are accepted from it, and nothing is written
 /// to it.
@@ -22,6 +22,17 @@ pub struct Acceptor(pub(crate) OwnedHandle);
 /// A client's end: connections are opened through it, and its queue cannot be
 /// read.
 pub struct Connector(pub(crate) OwnedHandle);
+
+/// Open a connection through `connector`, a connector this process holds
+/// carrying `WRITE`: one it was endowed ([`crate::endow::connector`]) or one
+/// of its own.
+///
+/// [`SyscallError::Gone`] is "the server exited", and `PermissionDenied` a
+/// connector given only to pass on. There is no "not yet". `InvalidArgument`
+/// is a handle that is no connector: its type is its giver's word.
+pub fn connect(connector: BorrowedHandle<'_>) -> Result<Connection, SyscallError> {
+    syscall::connect(connector.raw()).map(|h| Connection(OwnedHandle(h)))
+}
 
 /// Make a port. Grants nothing on its own — a port with no clients is not
 /// authority.
@@ -80,6 +91,11 @@ impl Acceptor {
 }
 
 impl Connector {
+    /// Open a connection to the port ([`connect`]).
+    pub fn connect(&self) -> Result<Connection, SyscallError> {
+        connect(self.as_handle())
+    }
+
     /// A second connector to the same port, for a holder handing one on while
     /// keeping its own.
     pub fn duplicate(&self) -> Result<Self, SyscallError> {

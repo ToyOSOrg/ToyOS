@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use toyos::poller::{Poller, READABLE};
-use toyos::{namespace, port};
+use toyos::port;
 
 fn main() {
     test_acceptor_isolation_io_uring();
@@ -34,8 +34,7 @@ fn test_acceptor_isolation_io_uring() {
     b_poller.watch(&acc_b, READABLE, 0);
 
     // Open a connection through port A's connector only.
-    let ns = namespace::build().add("a", &con_a).finish().expect("a namespace naming port a");
-    let client = ns.open("a").expect("open a");
+    let client = con_a.connect().expect("open a");
     drop(client);
 
     a.join().expect("port a's watcher panicked");
@@ -52,9 +51,7 @@ fn test_connect_storm() {
     let num_clients = 8;
 
     let (acceptor, connector) = port::create().expect("a port to storm");
-    let ns = Arc::new(
-        namespace::build().add("storm", &connector).finish().expect("a namespace naming it"),
-    );
+    let connector = Arc::new(connector);
 
     let server = thread::spawn(move || {
         for _ in 0..num_clients {
@@ -66,9 +63,9 @@ fn test_connect_storm() {
 
     let mut clients = Vec::new();
     for _ in 0..num_clients {
-        let ns = Arc::clone(&ns);
+        let connector = Arc::clone(&connector);
         clients.push(thread::spawn(move || {
-            drop(ns.open("storm").expect("open failed"));
+            drop(connector.connect().expect("open failed"));
         }));
     }
 

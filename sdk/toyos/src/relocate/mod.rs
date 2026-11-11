@@ -106,30 +106,13 @@ pub unsafe extern "C" fn relocate_self(header: *const u8) {
     }
 }
 
-/// The handle this process was endowed as its stderr, `fd:2`, read off the
-/// kernel's endowment table with nothing but the stack and the code's own
-/// addresses: no word of the image is relocated yet, so no table, `str`
-/// pointer or formatting is reached.
+/// The handle this process was endowed as its stderr, `fd:2`, read off its
+/// startup block with nothing but the stack and the code's own addresses: no
+/// word of the image is relocated yet, so no table, `str` pointer or
+/// formatting is reached. `None` where the block names none, or is no table
+/// up to that name: the exit status is then all this process says.
 pub(crate) fn stderr() -> Option<RawHandle> {
-    use toyos_abi::syscall::{endowments, MAX_ENDOWMENTS, MAX_LABELS_LEN};
-    const ENTRY: usize = 16;
-    let word = |b: &[u8], at: usize| -> Option<usize> {
-        let bytes = b.get(at..at.checked_add(4)?)?;
-        Some(u32::from_ne_bytes([*bytes.first()?, *bytes.get(1)?, *bytes.get(2)?, *bytes.get(3)?]) as usize)
-    };
-    let mut buf = [0u8; 8 + MAX_ENDOWMENTS * ENTRY + MAX_LABELS_LEN];
-    let n = endowments(&mut buf);
-    let table = buf.get(..n)?;
-    let count = word(table, 0)?.min(MAX_ENDOWMENTS);
-    let blob = count.checked_mul(ENTRY)?.checked_add(8)?;
-    for i in 0..count {
-        let at = i.checked_mul(ENTRY)?.checked_add(8)?;
-        let (off, len) = (blob.checked_add(word(table, at)?)?, word(table, at.checked_add(4)?)?);
-        if table.get(off..off.checked_add(len)?) == Some(b"fd:2".as_slice()) {
-            return Some(RawHandle(word(table, at.checked_add(8)?)? as u32));
-        }
-    }
-    None
+    crate::startup::early(b"fd:2").map(RawHandle::endowed)
 }
 
 /// # Safety

@@ -124,14 +124,13 @@ impl State {
         keeper.knock();
     }
 
-    /// Listen to the notice if the signals now ask it: `ENOSYS` when this
-    /// process holds no notice to listen to, so a quit would kill it.
+    /// Listen to the notice if the signals now ask it: `ENOSYS` when the
+    /// kernel refuses the listen, so a quit would kill it.
     fn listen(&mut self) -> Result<(), i32> {
         if self.listening || !self.signals.listens() {
             return Ok(());
         }
-        let notice = toyos::quit::notice().ok_or(ENOSYS)?;
-        notice.listen().map_err(|_| ENOSYS)?;
+        toyos::quit::notice().listen().map_err(|_| ENOSYS)?;
         self.listening = true;
         self.kick();
         Ok(())
@@ -494,8 +493,7 @@ unsafe extern "C" fn keep(_: *mut u8) -> *mut u8 {
         };
         poller.watch(&control, READABLE, CONTROL);
         if listening {
-            let notice = toyos::quit::notice().expect("libc listens only to a notice it holds");
-            poller.watch(notice, READABLE, NOTICE);
+            poller.watch(toyos::quit::notice(), READABLE, NOTICE);
         }
         for (pid, handle) in &children {
             poller.watch(handle, READABLE, *pid as u64);
@@ -513,8 +511,7 @@ unsafe extern "C" fn keep(_: *mut u8) -> *mut u8 {
         }
         let mut raised = alloc::vec::Vec::new();
         if asked {
-            let notice = toyos::quit::notice().expect("libc listens only to a notice it holds");
-            while let Ok(Some(reason)) = notice.try_read() {
+            while let Ok(Some(reason)) = toyos::quit::notice().try_read() {
                 raised.push(signal_of(reason));
             }
         }

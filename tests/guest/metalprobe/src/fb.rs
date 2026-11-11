@@ -13,7 +13,8 @@ use std::time::Instant;
 use toyos::device::FramebufferDev;
 use toyos::endow::Endowments;
 use toyos::syscap::SysCap;
-use toyos_abi::syscall::{DeviceType, SYSCAP_LABEL};
+use toyos_abi::syscall::DeviceType;
+use toyos::endow::SYSCAP_LABEL;
 
 use crate::{span, Measured, Refusal};
 

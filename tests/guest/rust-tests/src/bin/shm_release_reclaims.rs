@@ -14,9 +14,9 @@ use std::process::{Command, Stdio};
 
 use toyos::census::Census;
 use toyos::shm::SharedMemory;
-use toyos::{namespace, port};
+use toyos::endow::{service_label, SVC_PREFIX};
+use toyos::port;
 use toyos_abi::handle::ObjectKind;
-use toyos_abi::syscall::SVC_LABEL;
 
 #[path = "../census_wait.rs"]
 mod census_wait;
@@ -66,13 +66,10 @@ fn main() {
     // its own handle before this process has mapped anything — nobody has the
     // region mapped at that moment, and it is still this process's.
     let (acceptor, connector) = port::create().expect("the kernel refused a port");
-    let ns = namespace::build()
-        .add(SERVICE, &connector)
-        .finish()
-        .expect("the kernel refused a namespace");
     let mut donor = Command::new(SELF_PATH)
         .arg("donor")
-        .endow(SVC_LABEL, ns.into())
+        .services_only(&[])
+        .endow(&service_label(SVC_PREFIX, SERVICE), connector.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

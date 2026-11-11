@@ -835,8 +835,9 @@ mod tests {
             admit(crate::process::Process::KINDS, ObjectKind::PipeRead as u32),
             Err(WrongKind { wanted: &[ObjectKind::Process], got: Some(ObjectKind::PipeRead) })
         );
-        let unknown = ObjectKind::ALL.len() as u32;
-        assert_eq!(admit(Bell::KINDS, unknown), Err(WrongKind { wanted: Bell::KINDS, got: None }));
+        let past_the_last = ObjectKind::ALL[ObjectKind::ALL.len() - 1] as u32 + 1;
+        assert_eq!(admit(Bell::KINDS, past_the_last), Err(WrongKind { wanted: Bell::KINDS, got: None }));
+        assert_eq!(admit(Bell::KINDS, 8), Err(WrongKind { wanted: Bell::KINDS, got: None }), "the namespace's retired word");
         assert_eq!(admit(Bell::KINDS, ReceivedEntry::NONE.kind), Err(WrongKind { wanted: Bell::KINDS, got: None }));
     }
 

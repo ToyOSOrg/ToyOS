@@ -20,9 +20,10 @@ use toyos::endow::Endowments;
 use toyos::ipc::FrameRx;
 use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
-use toyos::{namespace, port, AsHandle, OwnedHandle, PciDev};
+use toyos::{port, AsHandle, OwnedHandle, PciDev};
 use toyos_abi::handle::RawHandle;
-use toyos_abi::syscall::{self, PciId, SyscallError, SYSCAP_LABEL};
+use toyos_abi::syscall::{self, PciId, SyscallError};
+use toyos::endow::SYSCAP_LABEL;
 
 const NIC: PciId = PciId { vendor: 0x1af4, device: 0x1041 };
 
@@ -165,8 +166,7 @@ fn main() {
     // is this process again, maps the BAR afresh.
     let kept = syscall::device_bar_map(nic.as_handle().raw(), bar).expect("bar_map_again: the BAR, asked for");
     let (acceptor, connector) = port::create().expect("bar_map_again: a port");
-    let names = namespace::build().add("conn", &connector).finish().expect("bar_map_again: a namespace");
-    let client = names.open("conn").expect("bar_map_again: a connection");
+    let client = connector.connect().expect("bar_map_again: a connection");
     let server = acceptor.accept().expect("bar_map_again: the connection accepted");
     let claim = nic.as_handle().raw();
     // The claim's handle goes with the frame: nothing may close it here.

@@ -14,13 +14,13 @@ use std::sync::Mutex;
 /// The login session one connection's programs run in.
 #[cfg(target_os = "toyos")]
 pub struct Login {
-    launcher: toyos::namespace::Namespace,
+    launcher: toyos::port::Connector,
     control: toyos::ipc::Connection,
 }
 
 /// What this daemon was endowed to open sessions with, taken once.
 #[cfg(target_os = "toyos")]
-static LOGIN: std::sync::OnceLock<Option<toyos::namespace::Namespace>> = std::sync::OnceLock::new();
+static LOGIN: std::sync::OnceLock<Option<toyos::port::Connector>> = std::sync::OnceLock::new();
 
 #[cfg(target_os = "toyos")]
 impl Login {

@@ -23,12 +23,12 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use toyos::endow::{self, EndowError, Endowments};
+use toyos::endow::{self, EndowError, Endowments, DEV_PREFIX};
 use toyos::admission::{self, Admission, Client, Policy};
 use toyos::ipc::{Connection, TrySendError};
 use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::{AsHandle, PciDev};
-use toyos_abi::syscall::{SyscallError, DEV_PREFIX};
+use toyos_abi::syscall::SyscallError;
 use toyos_blockring::disk::Settled;
 use toyos_blockserve::link::{Handed, Link};
 use toyos_blockserve::sessions::{Owner as Request, MAX_SESSIONS};
@@ -185,7 +185,7 @@ fn main() {
         Err(why) => not_serving(&name, &format!("the controller would not run: {why}"), link, stop),
     };
     println!("{name}: running, {} ports, a {} KiB grant", hc.max_ports, bytes / 1024);
-    let config = Config { input: endow::namespace().is_some(), disks: link.is_some() };
+    let config = Config { input: endow::connector(wire::PORT).is_some(), disks: link.is_some() };
     let usb: Driver = Usb::new(hc, host, config, table::read);
     serve(&name, &dev, &usb, acceptor, link, stop)
 }

@@ -6,7 +6,7 @@
 use std::io::Write;
 
 fn main() {
-    let notice = toyos::quit::notice().expect("hangupholder: every process holds its notice");
+    let notice = toyos::quit::notice();
     notice.listen().expect("hangupholder: its notice listens");
     let _ = writeln!(std::io::stdout(), "hangupholder: holding");
     loop {

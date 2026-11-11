@@ -7,7 +7,8 @@
 //! Each buffer starts in a page the program touched and runs into one it did
 //! not, so the first fault comes mid-copy rather than at its first byte.
 
-use toyos_abi::syscall::{self, NamespaceBuild, SyscallError, VmAt, VmProt, PAGE_SIZE};
+use toyos::AsHandle;
+use toyos_abi::syscall::{self, SyscallError, VmAt, VmProt, MAX_BADGE, PAGE_SIZE};
 
 const PAGE: usize = PAGE_SIZE;
 /// Bytes of each buffer on either side of the page boundary it straddles.
@@ -67,47 +68,41 @@ fn a_fault_served_mid_copy_resumes(len: usize, seed: u8, from: usize, into: usiz
     len
 }
 
-/// `SYS_NAMESPACE_BUILD` reads its names blob whole before anything else, so a
-/// blob that runs off its mapping, or into a page the program may not read,
+/// `SYS_PORT_MINT` copies its badge whole before it looks at a handle, so a
+/// badge that runs off its mapping, or into a page the program may not read,
 /// is refused `BadAddress` mid-copy, and a kernel address before any copy.
 fn a_byte_nothing_serves_ends_the_copy() {
+    /// Bytes of the badge on either side of the boundary it straddles.
+    const HALF: usize = MAX_BADGE / 2;
+    let (acceptor, _connector) = toyos::port::create().expect("a port");
+    let mint = |at: u64, len: usize| {
+        // SAFETY: the address names memory the kernel must refuse; nothing here reads it.
+        let badge = unsafe { core::slice::from_raw_parts(at as *const u8, len) };
+        syscall::port_mint(acceptor.as_handle().raw(), badge)
+    };
     let blob = fresh(2);
     // SAFETY: inside the mapping: the first page is touched and the second given back.
     unsafe {
-        blob.add(PAGE - SIDE).write_volatile(b'a');
+        blob.add(PAGE - HALF).write_volatile(b'a');
         syscall::vm_release(blob.add(PAGE), PAGE).expect("release the second page");
     }
-    let build = |names_ptr: u64, names_len: u64| {
-        let args = NamespaceBuild {
-            base: toyos_abi::handle::HANDLE_INVALID,
-            flags: 0,
-            keep_ptr: 0,
-            keep_n: 0,
-            add_ptr: 0,
-            add_n: 0,
-            names_ptr,
-            names_len,
-        };
-        // SAFETY: the pointers name memory the kernel must refuse; nothing here reads it.
-        unsafe { syscall::namespace_build(&args) }
-    };
-    let across = build(blob as u64 + (PAGE - SIDE) as u64, 2 * SIDE as u64);
-    assert_eq!(across, Err(SyscallError::BadAddress), "a names blob running into a released page");
+    let across = mint(blob as u64 + (PAGE - HALF) as u64, MAX_BADGE);
+    assert_eq!(across.err(), Some(SyscallError::BadAddress), "a badge running into a released page");
 
     let guarded = fresh(2);
     // SAFETY: inside the mapping: the first page is touched, the second made unreadable.
     unsafe {
-        guarded.add(PAGE - SIDE).write_volatile(b'a');
+        guarded.add(PAGE - HALF).write_volatile(b'a');
         syscall::vm_protect(guarded.add(PAGE), PAGE, VmProt::None).expect("protect the second page");
     }
-    let unreadable = build(guarded as u64 + (PAGE - SIDE) as u64, 2 * SIDE as u64);
-    assert_eq!(unreadable, Err(SyscallError::BadAddress), "a names blob running into an unreadable page");
+    let unreadable = mint(guarded as u64 + (PAGE - HALF) as u64, MAX_BADGE);
+    assert_eq!(unreadable.err(), Some(SyscallError::BadAddress), "a badge running into an unreadable page");
 
-    let kernel = build(0xFFFF_8000_0000_0000, 16);
-    assert_eq!(kernel, Err(SyscallError::BadAddress), "a names blob at a kernel address");
+    let kernel = mint(0xFFFF_8000_0000_0000, 16);
+    assert_eq!(kernel.err(), Some(SyscallError::BadAddress), "a badge at a kernel address");
 
-    let past = build(0x0000_7FFF_FFFF_FF00, 0x200);
-    assert_eq!(past, Err(SyscallError::BadAddress), "a names blob running past the user half");
+    let past = mint(0x0000_8000_0000_0000 - HALF as u64, MAX_BADGE);
+    assert_eq!(past.err(), Some(SyscallError::BadAddress), "a badge running past the user half");
     println!("a byte nothing serves ends the copy as BadAddress");
 }
 

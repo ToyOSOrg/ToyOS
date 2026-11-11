@@ -23,7 +23,6 @@ use std::thread;
 use std::time::Duration;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::job::JOB_LABEL;
 use toyos::syscap::SysCap;
 use toyos_abi::syscall::{self, ProcessStats};
 use toyos_abi::RawHandle;
@@ -67,11 +66,10 @@ fn run() {
         let job = cap.new_job().expect("the estate's capability makes a job");
         let children = (0..helpers)
             .map(|_| {
-                let copy = job.duplicate().expect("a second handle to the job");
                 Command::new(ME)
                     .args(["spin", &threads.to_string()])
                     .stdin(Stdio::piped())
-                    .endow(JOB_LABEL, copy.into())
+                    .job(toyos::AsHandle::as_handle(&job).into())
                     .spawn()
                     .expect("spawn a helper into its job")
             })

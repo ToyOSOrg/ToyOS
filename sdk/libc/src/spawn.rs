@@ -342,6 +342,8 @@ fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, toyos::BorrowedHandle
         cwd,
         fds,
         endow: Vec::new(),
+        inherit: toyos::spawn::Inherit::All,
+        job: None,
         provided: Vec::new(),
         parent: Parent::Caller,
         independent: false,

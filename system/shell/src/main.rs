@@ -4,9 +4,8 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::os::toyos::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
-use toyos::port::Connector;
 use toyos::quit::Reason;
 use toyos::surface::Foreground;
 
@@ -52,7 +51,7 @@ fn code_of(reason: Reason) -> i32 {
 /// Listen to this shell's notice, before anything is spawned, on a thread of
 /// its own.
 fn listen() {
-    let Some(notice) = toyos::quit::notice() else { return };
+    let notice = toyos::quit::notice();
     if notice.listen().is_err() {
         return;
     }
@@ -819,24 +818,6 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
     ok
 }
 
-/// The connectors whoever started this shell transferred to it.
-///
-/// **A shell forwards them and holds no opinion about what they are.** The
-/// terminal above gives this shell a `surface`, and `locale` run from here has
-/// `surface` in *its* manifest row — but the supervisor cannot supply a name there is one
-/// port of per terminal, so it travels down the chain instead. Nothing here
-/// knows the name is `surface`, which is what stops a shell from being the
-/// place a second such name has to be added.
-fn provided() -> &'static [(&'static str, Connector)] {
-    static PROVIDED: OnceLock<Vec<(&'static str, Connector)>> = OnceLock::new();
-    PROVIDED.get_or_init(|| {
-        let mut slots: [Option<(&'static str, Connector)>; toyos::launch::MAX_LAUNCH_EXTRAS] =
-            [const { None }; toyos::launch::MAX_LAUNCH_EXTRAS];
-        let n = toyos::endow::provided(&mut slots);
-        slots.into_iter().take(n).flatten().collect()
-    })
-}
-
 /// `detach <program> [args...]`: launch it under the launcher's owner, so it
 /// outlives this shell, and do not wait for it. Nothing this shell was
 /// provided goes with it: that belongs to the session it outlives.
@@ -870,7 +851,7 @@ fn detach(cmd: &SimpleCommand) -> bool {
 }
 
 /// The program a simple command starts: a helper, which inherits this shell's
-/// namespace and so the surface it was provided; or after `launch`, an
+/// services and so the surface it was provided; or after `launch`, an
 /// independent launch of the program's own row, provided what this shell was.
 /// The status, said, for a `launch` this shell cannot make, as `detach`'s.
 fn build_command(cmd: &SimpleCommand) -> Result<Command, i32> {
@@ -890,9 +871,11 @@ fn build_command(cmd: &SimpleCommand) -> Result<Command, i32> {
     command.args(&args[1..]);
     if launched {
         command.independent();
-        for (name, connector) in provided() {
-            // A duplicate per child: this shell keeps its own for the next one.
-            if let Ok(handed) = connector.duplicate() {
+        // What whoever started this shell provided, forwarded without knowing
+        // what it is: the terminal's `surface` reaches `locale` this way. A
+        // duplicate per child, so this shell keeps its own for the next one.
+        for (name, connector) in toyos::endow::provided() {
+            if let Ok(handed) = connector.try_clone_to_owned() {
                 command.provide(name, handed.into());
             }
         }

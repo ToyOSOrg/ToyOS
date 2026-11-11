@@ -1,7 +1,7 @@
 //! A process's notice: what a quit asks it, readable until it is read.
 //!
-//! Each process is started holding its own under `QUIT_LABEL`, and nothing
-//! else holds it. A read takes the reason asked, one byte
+//! Each process is started holding its own at `RawHandle::NOTICE`, and
+//! nothing else holds it. A read takes the reason asked, one byte
 //! (`toyos_abi::quit::Reason::to_byte`), and blocks while none is; a read or
 //! an armed readable watch makes the process a listener, which a quit asks
 //! rather than kills (`toyos_proclife::quit`).

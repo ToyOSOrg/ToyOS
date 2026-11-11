@@ -154,7 +154,7 @@ manifest does not carry with nothing.
 
 **The endowment travels with the spawn, and that closed it.**
 `tests/desktopcase/system.toml`'s `[programs.shell]` receives `compositor`, and
-a child the shell spawns directly inherits the shell's namespace — so the client
+a child the shell spawns directly inherits the shell's services — so the client
 gets its window from the process that started it, which is the whole of "a
 process holds exactly what its parent moved into it". Every probe this test was
 written for now runs.

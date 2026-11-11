@@ -59,8 +59,6 @@ fn spawn_unsaid() -> End {
         name_len: NAME.len() as u64,
         endow_ptr: 0,
         endow_count: 0,
-        labels_ptr: 0,
-        labels_len: 0,
         maps_ptr: laid.maps().as_ptr() as u64,
         maps_count: laid.maps().len() as u64,
         entry: laid.entry,
@@ -68,6 +66,7 @@ fn spawn_unsaid() -> End {
         build_id_ptr: laid.build_id().as_ptr() as u64,
         build_id_len: laid.build_id().len() as u64,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
+        job: u64::from(toyos_abi::HANDLE_INVALID.0),
         pager: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
     // SAFETY: every pointer names a live local for the whole call.

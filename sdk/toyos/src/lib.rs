@@ -32,7 +32,6 @@ pub mod power;
 pub mod wake;
 pub mod ipc;
 pub mod job;
-pub mod namespace;
 pub mod paged;
 pub mod launch;
 pub mod log;
@@ -327,7 +326,6 @@ owned_from! {
     ipc::Connection => |c| c.0;
     port::Acceptor => |a| a.0;
     port::Connector => |c| c.0;
-    namespace::Namespace => |n| n.0;
     syscap::SysCap => |c| c.0;
     job::Job => |j| j.0;
     process::Process => |p| p.0;
@@ -420,7 +418,6 @@ mod std_io {
         super::ipc::Connection,
         super::port::Acceptor,
         super::port::Connector,
-        super::namespace::Namespace,
         super::syscap::SysCap,
         super::job::Job,
         super::process::Process,

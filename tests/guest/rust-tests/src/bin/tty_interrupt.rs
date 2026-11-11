@@ -25,7 +25,7 @@ use std::io::{Read, Write};
 use std::os::toyos::process::CommandExt;
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 
-use toyos::endow::SVC_LABEL;
+use toyos::endow::{service_label, SVC_PREFIX};
 use toyos::poller::{Poller, READABLE};
 use toyos::surface::{self, Host, Notice};
 
@@ -100,7 +100,7 @@ const SELF_PATH: &str = "/system/bin/test_rs_tty_interrupt";
 
 /// Listen, say so, and read three interrupts, saying each.
 fn reader() {
-    let notice = toyos::quit::notice().expect("a notice");
+    let notice = toyos::quit::notice();
     notice.listen().expect("listen");
     println!("reader-armed");
     for n in 1..=3 {
@@ -111,7 +111,7 @@ fn reader() {
 
 /// Listen, say so, and never read.
 fn holder() {
-    toyos::quit::notice().expect("a notice").listen().expect("listen");
+    toyos::quit::notice().listen().expect("listen");
     println!("holder-armed");
     loop {
         std::thread::park();
@@ -134,13 +134,8 @@ fn main() {
     });
     let (acceptor, connector) = toyos::port::create().expect("a port of our own");
     let mut host = Host::serve(acceptor);
-    let mut names = toyos::namespace::build();
-    if let Some(own) = toyos::endow::namespace() {
-        names = names.keep_all(own);
-    }
-    let ns = names.add(surface::SERVICE, &connector).finish().expect("the shell's namespace");
     let mut child = Command::new("/system/bin/shell")
-        .endow(SVC_LABEL, ns.into())
+        .endow(&service_label(SVC_PREFIX, surface::SERVICE), connector.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

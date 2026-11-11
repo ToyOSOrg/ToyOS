@@ -3,7 +3,7 @@
 //!
 //! **What it holds**: the acceptor of its role's one port, endowed by the
 //! supervisor under `serve:fs:<role>`; for its volume, SYSTEM's ROOT image
-//! (`ROOT_IMAGE_LABEL`), MEMORY's anonymous objects, or `block` in its namespace, a
+//! (`ROOT_IMAGE_LABEL`), MEMORY's anonymous objects, or `block` among its services, a
 //! connector to the block service minted for its role's partition alone —
 //! every DATA partition, or the one the loader named, read-only for the boot
 //! volume; and nothing else of the machine. Two DATA partitions are refused by
@@ -71,12 +71,12 @@ use fileserver::writeback::WriteBack;
 use toyos::endow::{self, Endowments};
 use toyos::fs::*;
 use toyos::ipc::{self, Connection, RxStep};
-use toyos::namespace::Namespace;
 use toyos::poller::{Poller, READABLE};
-use toyos::port::{self, Acceptor};
+use toyos::port::{self, Acceptor, Connector};
 use toyos::shm::{Bytes, SharedMemory};
 use toyos::Pipe;
-use toyos_abi::syscall::{SyscallError, MAX_BADGE, PIPE_CAPACITY, SERVE_PREFIX};
+use toyos_abi::syscall::{SyscallError, MAX_BADGE, PIPE_CAPACITY};
+use toyos::endow::SERVE_PREFIX;
 
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
@@ -85,9 +85,6 @@ const STREAM_READ: usize = 64 * 1024;
 /// description: the most a pipe holds, so a writer that keeps writing cannot
 /// hold the loop.
 const STREAM_PRESENT: usize = PIPE_CAPACITY / STREAM_READ;
-
-/// The name the private export port has in this server's own namespace.
-const EXPORT_PORT: &str = "export";
 
 // One wait watches the acceptor, every connection and every stream at once.
 const _: () = assert!(1 + MAX_SERVED + HANDSHAKES.slots + MAX_STREAMS <= Poller::MAX_HANDLES as usize);
@@ -186,27 +183,23 @@ struct Stream {
     armed: bool,
 }
 
-/// The private port exports are made on: its acceptor, and the namespace
-/// holding this server's one connector to it.
+/// The private port exports are made on: its acceptor, and this server's
+/// one connector to it.
 struct Exports {
     acceptor: Acceptor,
-    names: Namespace,
+    connector: Connector,
 }
 
 impl Exports {
     fn new() -> Self {
         let (acceptor, connector) = port::create().unwrap_or_else(|e| panic!("fileserver: no export port ({e:?})"));
-        let names = toyos::namespace::build()
-            .add(EXPORT_PORT, &connector)
-            .finish()
-            .unwrap_or_else(|e| panic!("fileserver: no namespace for the export port ({e:?})"));
-        Self { acceptor, names }
+        Self { acceptor, connector }
     }
 
     /// A connection to this server: the end to hand away and this server's.
     /// The exported end keeps `DUP` for spawning from a borrowed handle.
     fn connect(&self) -> Result<(Connection, Connection), Error> {
-        let theirs = self.names.open(EXPORT_PORT).map_err(|e| Error::kernel("an export's connection", e))?;
+        let theirs = self.connector.connect().map_err(|e| Error::kernel("an export's connection", e))?;
         let ours = self.acceptor.accept().unwrap_or_else(|e| panic!("fileserver: the export port refused an accept ({e:?})"));
         Ok((theirs, ours))
     }
@@ -296,9 +289,8 @@ fn pager(role: Role, anonymous: bool) -> (Option<toyos::paged::Pager>, Option<us
 
 /// A session on the partition diskserver serves under `guid`.
 fn served(guid: [u8; 16]) -> Option<Served> {
-    let names = endow::namespace()?;
-    let own = toyos::namespace::build().keep(names, &[toyos_blockring::PORT]).finish().ok()?;
-    match diskserver::Session::open(own, toyos_blockring::PORT, guid) {
+    let own = diskserver::held(toyos_blockring::PORT).ok()?;
+    match diskserver::Session::open(own, guid) {
         Ok(session) => Some(Served::new(session)),
         Err(why) => {
             println!("fileserver: diskserver would not open the partition: {why:?}");
@@ -310,13 +302,11 @@ fn served(guid: [u8; 16]) -> Option<Served> {
 /// The TOYOS-DATA partitions diskserver serves, or why it would not say: a disk
 /// that failed is not a machine without one, and is never answered with memory.
 fn data_partitions() -> Result<Vec<[u8; 16]>, String> {
-    let Some(names) = endow::namespace() else { return Ok(Vec::new()) };
-    match diskserver::list(names, toyos_blockring::PORT) {
+    let Some(block) = endow::connector(toyos_blockring::PORT) else { return Ok(Vec::new()) };
+    match diskserver::list(block) {
         Ok(listed) => {
             Ok(listed.into_iter().filter(|l| l.kind == toyos_gpt::Guid::TOYOS_DATA.0).map(|l| l.unique).collect())
         }
-        // No block service in this image: the namespace has no `block`.
-        Err(diskserver::Error::NotHeld) => Ok(Vec::new()),
         Err(why) => Err(format!("the block service would not list its partitions ({why:?})")),
     }
 }
@@ -361,7 +351,7 @@ fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> (Box<dyn Volum
 /// life of this process, which is the volume's. Without it there is no
 /// `/system`, and the supervisor that started this server is told by its end.
 fn root() -> (RootVolume, &'static toyos::shm::Immutable) {
-    let label = toyos_abi::syscall::ROOT_IMAGE_LABEL;
+    let label = toyos_manifest::ROOT_IMAGE_LABEL;
     let handle = Endowments::get()
         .take::<toyos::OwnedHandle>(label)
         .unwrap_or_else(|| panic!("fileserver: the system role was started without `{label}`"));

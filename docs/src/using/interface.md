@@ -36,7 +36,7 @@ boundary: protocols between programs define their own.
 ## The native SDK
 
 The SDK is the Rust interface to ToyOS: typed handles and rights, endowments a
-program was started with, namespaces and service connections, framed messages,
+program was started with and what its parent calls each, service connections, framed messages,
 pollers, shared memory, files through the program's view, spawning and
 launching, device claims for drivers, logging, and windows for programs that
 draw. Each service's protocol is a library of its own that owns its message
@@ -59,21 +59,27 @@ userland library over the SDK.
 ## How a program starts
 
 ```text
-   endowments ──> standard streams (descriptors 0, 1, 2 and those named)
-              ──> a namespace of services it may connect to
-              ──> directory capabilities: its view
-              ──> anything else its row or its parent gave it
+   handles    ──> itself and its notice, first
+              ──> its endowments, in the order its spawn listed them:
+                  standard streams (descriptors 0, 1, 2 and those named),
+                  connectors to the services it may connect to,
+                  directory capabilities: its view,
+                  anything else its row or its parent gave it
 
    its memory ──> its program, in the ranges its parent laid out
-              ──> a startup block below it: its arguments and its
-                  environment (HOME, the starting directory, ...)
+              ──> a startup block below it: what its parent calls each
+                  endowment, its arguments and its environment
+                  (HOME, the starting directory, ...)
 ```
 
 A parent reads the child's program and lays out the child's memory, each
 range the pages of a memory object or a private copy of them. What it tells
 the child goes in the startup block, which the kernel copies and never reads;
 the SDK, std and libc read it where it lies. A child whose parent wrote none
-starts with no argument and an empty environment.
+starts with no argument, an empty environment and no name for anything it
+holds. The names are the one part of the block the child checks: one that is
+no list of distinct names ends the child before it looks one up, with the
+reason on its standard error where the list still names one.
 
 A program holds nothing it was not given. It asks for more only by connecting
-to a service in its namespace, whose server decides.
+to a service it was given, whose server decides.

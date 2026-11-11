@@ -18,9 +18,8 @@ endowed a duplicate with `Rights::ROSTER` and a duplicate without it, and its ow
 comment says what that buys: "the manifest's name, the kernel's demand and the
 program are one line rather than three that agree by luck". That is one allowed
 and one forbidden operation for one authority class on one of them. The
-effective-authority side is a shipped syscall too — `SYS_ENDOWMENTS`
-(`sdk/abi/src/syscall.rs:173`, wrapper at `:849`) lets a process read its own
-endowment table back.
+effective-authority side is readable too: a process reads what its parent
+calls each endowment off its own startup block (`toyos::endow::Endowments`).
 
 **The enumeration exists now, and it reds on the image that boots.**
 `endowment_denied`'s `every_applet_holds_only_what_its_policy_names` reads the

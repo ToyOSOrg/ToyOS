@@ -35,7 +35,6 @@ use std::time::{Duration, Instant};
 
 use toyos::endow::{self, Endowments, SYSCAP_LABEL};
 use toyos::ipc::Connection;
-use toyos::job::JOB_LABEL;
 use toyos::poller::{Poller, READABLE};
 use toyos::power::{self, Refused};
 use toyos::syscap::SysCap;
@@ -108,7 +107,7 @@ fn control(input: bool) {
         .arg("greedy")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .endow(JOB_LABEL, job.duplicate().expect("a second handle to its job").into())
+        .job(toyos::AsHandle::as_handle(&job).into())
         .spawn()
         .expect("spawn the greedy job");
     let mut said = BufReader::new(greedy.stdout.take().expect("its stdout"));
@@ -126,7 +125,7 @@ fn control(input: bool) {
     let other = cap.new_job().expect("a job is a few bytes this job's floor holds");
     let refused = Command::new(ME)
         .arg("idle")
-        .endow(JOB_LABEL, other.into())
+        .job(toyos::AsHandle::as_handle(&other).into())
         .spawn()
         .map(|_| ());
     assert!(
@@ -198,12 +197,11 @@ fn directions_are_the_clients(cap: &SysCap) {
         .arg("serve")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .endow(JOB_LABEL, job.duplicate().expect("a second handle to its job").into())
+        .job(toyos::AsHandle::as_handle(&job).into())
         .endow("acceptor", acceptor.into())
         .spawn()
         .expect("spawn the server");
-    let names = toyos::namespace::build().add("served", &connector).finish().expect("a namespace of the port");
-    let conn = names.open("served").expect("connect to the server");
+    let conn = connector.connect().expect("connect to the server");
     let mut said = BufReader::new(server.stdout.take().expect("its stdout"));
     let mut line = String::new();
     said.read_line(&mut line).expect("the server's line");

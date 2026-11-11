@@ -173,7 +173,7 @@ a signal an event raises (`sdk/libc/src/sigreq.rs`).
      as the kill does, and the reason is `toyos_abi::quit::Reason`:
      interrupt, hang-up or terminate. A quit reaches the process's subtree.
      Each process is started holding its notice, the object kind `Notice`
-     under `QUIT_LABEL` (`quit`), `READ` and `WAIT` alone, readable while a
+     at `RawHandle::NOTICE`, `READ` and `WAIT` alone, readable while a
      reason is asked and not yet read, whose read takes it and an empty read
      takes nothing. A process listens from its first read of its notice or
      the first readable watch armed on it. A quit kills a process that never

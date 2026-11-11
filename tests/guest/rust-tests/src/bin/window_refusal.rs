@@ -9,8 +9,8 @@
 //! **This binary plays the compositor, and how it does that is the point.** It
 //! used to squat `services::listen("compositor")` on a boot where no compositor
 //! ran, which worked because any process could take any name. There is no name
-//! to take now. Instead it creates a port, builds a namespace mapping
-//! `"compositor"` to that port's connector, and spawns a child holding it: the
+//! to take now. Instead it creates a port and spawns a child holding its
+//! connector as the service `"compositor"`, and no other service: the
 //! child's `Window::create` reaches this process and nothing else, no other
 //! process can see the service. That is the pattern every hostile-server test
 //! uses from here.
@@ -25,11 +25,10 @@
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use toyos::endow::{self, EndowError};
+use toyos::endow::{self, service_label, EndowError, SVC_PREFIX};
 use toyos::port::Acceptor;
 use toyos::AsHandle;
-use toyos::{ipc, namespace, port};
-use toyos_abi::syscall::SVC_LABEL;
+use toyos::{ipc, port};
 use window::{CreateError, Window};
 
 const SELF_PATH: &str = "/system/bin/test_rs_window_refusal";
@@ -78,15 +77,12 @@ fn main() {
 fn server() {
     let (acceptor, connector) =
         port::create().expect("window_refusal: the kernel refused a port");
-    let child_ns = namespace::build()
-        .add("compositor", &connector)
-        .finish()
-        .expect("window_refusal: the kernel refused a namespace");
 
     // The child is spawned holding exactly one connector, and it points here.
     let mut child = Command::new(SELF_PATH)
         .arg("client")
-        .endow(SVC_LABEL, child_ns.into())
+        .services_only(&[])
+        .endow(&service_label(SVC_PREFIX, "compositor"), connector.into())
         .stdout(Stdio::inherit())
         .spawn()
         .expect("window_refusal: spawn the client");

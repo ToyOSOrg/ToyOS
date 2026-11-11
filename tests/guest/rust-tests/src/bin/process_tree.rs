@@ -33,12 +33,12 @@ use std::io::{BufRead, BufReader};
 use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
-use toyos::endow::{self, Endowments, SVC_LABEL, SYSCAP_LABEL};
+use toyos::endow::{self, service_label, Endowments, SVC_PREFIX, SYSCAP_LABEL};
 use toyos::ipc::Connection;
 use toyos::launch::{self, Launch, Outcome, Parent, LAUNCHER};
 use toyos::process::Process;
 use toyos::syscap::SysCap;
-use toyos::{namespace, port, AsHandle, OwnedHandle};
+use toyos::{port, AsHandle, OwnedHandle};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
@@ -55,7 +55,7 @@ const INVALID_PATH: &str = "/tmp/process_tree_invalid_elf";
 const HELD: &str = "/system/bin/cat";
 const SHELL: &str = "/system/bin/shell";
 
-/// The name B's namespace carries the port back to A under.
+/// The service B is given the port back to A as.
 const BACK: &str = "back";
 
 /// The label a chain's link is endowed this program's image under.
@@ -136,19 +136,13 @@ struct Grown {
     _held: ChildStdin,
 }
 
-/// Start B, holding a port back to A beside this process's own namespace, and
+/// Start B, holding a port back to A beside this process's own services, and
 /// take what it sends once its subtree is grown.
 fn grow() -> Grown {
     let (acceptor, connector) = port::create().expect("a port of our own");
-    let own = endow::namespace().expect("test-runner endows its namespace");
-    let ns = namespace::build()
-        .keep_all(own)
-        .add(BACK, &connector)
-        .finish()
-        .expect("a namespace with the port back beside ours");
     let mut b = Command::new(SELF_PATH)
         .arg("b")
-        .endow(SVC_LABEL, ns.into())
+        .endow(&service_label(SVC_PREFIX, BACK), connector.into())
         .endow(LAUNCHER, launcher_copy().into())
         .stdin(Stdio::piped())
         .spawn()
@@ -248,8 +242,6 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
         name_len: NAME.len() as u64,
         endow_ptr: 0,
         endow_count: 0,
-        labels_ptr: 0,
-        labels_len: 0,
         maps_ptr: laid.maps().as_ptr() as u64,
         maps_count: laid.maps().len() as u64,
         entry: laid.entry,
@@ -257,6 +249,7 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
         build_id_ptr: laid.build_id().as_ptr() as u64,
         build_id_len: laid.build_id().len() as u64,
         place: u64::from(place.0),
+        job: u64::from(toyos_abi::HANDLE_INVALID.0),
         pager: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
     // SAFETY: every pointer names a buffer of this frame that outlives the call.

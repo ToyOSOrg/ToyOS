@@ -47,15 +47,12 @@ use crate::loader::{alloc_kernel_stack, Start};
 pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
 use toyos_abi::end::{End, Fault};
-use toyos_abi::syscall::{EndowEntry, SyscallError};
+use toyos_abi::syscall::SyscallError;
 
 /// The lifecycle's decisions; this file only performs them.
 pub use toyos_proclife::{ThreadLocation, Watch};
 use toyos_proclife::quit::{self, Notice, Reason};
 use toyos_proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, tree, Lifecycle, Node, Processes, Tids};
-
-/// One `EndowEntry` on the wire; [`Endowments::encode`] indexes by it.
-const ENDOW_ENTRY_LEN: usize = core::mem::size_of::<EndowEntry>();
 
 pub use crate::loader::{build_child_handles, spawn, spawn_supervisor};
 
@@ -66,7 +63,7 @@ pub use crate::mm::space::PageTables;
 /// a lookup ([`with_handles`]) takes neither the process table nor
 /// [`ProcessData`]'s lock.
 pub struct Handles {
-    /// Every kernel object it can name; stdio is handles `0`, `1`, `2`.
+    /// Every kernel object it can name.
     table: Lock<HandleTable>,
     /// Started as a pager, which no call changes (`object::paged`): it may
     /// make one pager object, and is refused a holder's read, which would wait
@@ -284,8 +281,6 @@ pub struct ProcessData {
 
     pub spawn_ns: u64,
     pub accounting: ProcessAccounting,
-    /// What this process's parent called each handle it moved in at spawn.
-    pub endowments: Endowments,
     /// The job its threads, and its children unless a spawn names another,
     /// run in.
     pub job: Arc<kernel::sched::job::Job>,
@@ -297,7 +292,7 @@ impl ProcessData {
     /// The heap a process of the program at `path` takes beside what is
     /// charged on its own — its handles, threads, ranges and objects: its
     /// records, its place in the process table and among its parent's
-    /// children, its label, and its endowments at their bound.
+    /// children, and its label.
     pub fn charge(job: &Arc<kernel::sched::job::Job>, path: &str) -> Result<Charge, Exhausted> {
         // The process table doubles, and its control byte beside each.
         let entry = 2 * (core::mem::size_of::<(Pid, ProcessEntry)>() + 1);
@@ -312,40 +307,7 @@ impl ProcessData {
             + threads
             + 2 * core::mem::size_of::<Pid>();
         let label = charge::array::<u8>(path.len());
-        let endowments = charge::array::<EndowEntry>(toyos_abi::syscall::MAX_ENDOWMENTS)
-            + charge::array::<u8>(toyos_abi::syscall::MAX_LABELS_LEN);
-        Charge::new(job, records + label + endowments)
-    }
-}
-
-/// The labels a parent put on the handles it endowed — names, not authority: the handle is in the table whether or not the child ever asks.
-pub struct Endowments {
-    entries: alloc::boxed::Box<[EndowEntry]>,
-    labels: alloc::boxed::Box<[u8]>,
-}
-
-impl Endowments {
-    pub fn new(entries: Vec<EndowEntry>, labels: Vec<u8>) -> Self {
-        Self { entries: entries.into_boxed_slice(), labels: labels.into_boxed_slice() }
-    }
-
-    /// Bytes `SYS_ENDOWMENTS` answers with: a `u64` count, the entries, then the blob their offsets index.
-    pub fn encoded_len(&self) -> usize {
-        8 + self.entries.len() * ENDOW_ENTRY_LEN + self.labels.len()
-    }
-
-    /// Render into `out`, sized at [`Self::encoded_len`]. Field by field, not a slice transmute: `EndowEntry`'s padding word is written as zero here, so nothing of the kernel's reaches a child in it.
-    pub fn encode(&self, out: &mut [u8]) {
-        out[..8].copy_from_slice(&(self.entries.len() as u64).to_ne_bytes());
-        for (i, entry) in self.entries.iter().enumerate() {
-            let at = 8 + i * ENDOW_ENTRY_LEN;
-            out[at..at + 4].copy_from_slice(&entry.label_off.to_ne_bytes());
-            out[at + 4..at + 8].copy_from_slice(&entry.label_len.to_ne_bytes());
-            out[at + 8..at + 12].copy_from_slice(&entry.handle.0.to_ne_bytes());
-            out[at + 12..at + 16].copy_from_slice(&0u32.to_ne_bytes());
-        }
-        let blob = 8 + self.entries.len() * ENDOW_ENTRY_LEN;
-        out[blob..blob + self.labels.len()].copy_from_slice(&self.labels);
+        Charge::new(job, records + label)
     }
 }
 

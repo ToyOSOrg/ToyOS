@@ -179,7 +179,7 @@ struct ProgramConfig {
     /// hands the connector down to its own children. The supervisor creates nothing and
     /// holds nothing for these — `surface` is the whole of this kind.
     provides: Vec<String>,
-    /// Names in this program's namespace, each a *connector*.
+    /// The services this program is given, each a *connector*.
     receives: Vec<String>,
     /// Claims the supervisor mints for this row's one process and endows
     /// (`toyos_manifest::Program::devices`).
@@ -760,7 +760,7 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
             return Err(format!("`{name}` asks for `slots` and is in `[boot] start`, and the slots are granted to a launch alone"));
         }
         // A row any login could start would hand every login what it holds,
-        // and so would a login authority, whose namespace reaches every
+        // and so would a login authority, whose services reach every
         // program a login runs directly: an authorization that changes a
         // disk is the image's to grant, to a row that is neither.
         for word in &program.authorize {
@@ -1155,7 +1155,7 @@ fn symlink_target_name(to: &str) -> &str {
 }
 
 /// The converse of the crate assertion above: a `bin/` entry no name reaches.
-/// A name buys authority — the supervisor builds a `[programs]` row's namespace and
+/// A name buys authority — the supervisor gives a `[programs]` row its services and
 /// device claims — and a harness binary has none, holding only what its spawner
 /// moved in, so it is legal exactly when the config starts something that could
 /// spawn it. **An inventory over the `bin/` namespace, not a reachability
@@ -1183,7 +1183,7 @@ fn unnamed_program(
         }
         return Err(format!(
             "the image carries {name} and no `[programs]` row names it, so the supervisor can build \
-             it no namespace and no device claim; add a row or take the file out"
+             it no service and no device claim; add a row or take the file out"
         ));
     }
     Ok(())

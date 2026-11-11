@@ -18,7 +18,7 @@ mod install;
 use std::time::Instant;
 
 use diskserver::disk::Served;
-use toyos::endow;
+use toyos::AsHandle;
 use toyos_update::sig;
 use toyos_update::slots;
 use install::Partition;
@@ -50,13 +50,12 @@ struct Held {
 /// that name, which reaches one partition and lists it.
 fn held(label: &str) -> Result<Held, String> {
     let none = || format!("this process holds no `{label}`: the supervisor grants the idle slot to one update at a time, and says why where it grants none; run it with `launch update`");
-    let names = endow::namespace().ok_or_else(none)?;
-    let own = toyos::namespace::build().keep(names, &[label]).finish().map_err(|_| none())?;
-    let listed = diskserver::list(&own, label).map_err(|why| format!("`{label}` would not list its partition: {why:?}"))?;
+    let own = diskserver::held(label).map_err(|_| none())?;
+    let listed = diskserver::list(own.as_handle()).map_err(|why| format!("`{label}` would not list its partition: {why:?}"))?;
     let [one] = listed[..] else {
         return Err(format!("`{label}` lists {} partitions, and is minted for one", listed.len()));
     };
-    let session = diskserver::Session::open(own, label, one.unique)
+    let session = diskserver::Session::open(own, one.unique)
         .map_err(|why| format!("`{label}`'s partition would not open: {why:?}"))?;
     Ok(Held { disk: Served::new(session), unique: one.unique })
 }

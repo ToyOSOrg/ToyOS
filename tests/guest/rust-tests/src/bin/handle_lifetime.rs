@@ -8,19 +8,17 @@ use std::os::toyos::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 use toyos::census::Census;
-use toyos::{namespace, port, AsHandle};
+use toyos::{port, AsHandle};
 use toyos_abi::end::{End, Fault};
 use toyos_abi::handle::ObjectKind;
 use toyos_abi::inbox::RingLayout;
-use toyos_abi::syscall::{self, SyscallError, SERVE_PREFIX};
+use toyos_abi::syscall::{self, SyscallError};
+use toyos::endow::SERVE_PREFIX;
 
 #[path = "../census_wait.rs"]
 mod census_wait;
 
 const SELF_PATH: &str = "/system/bin/test_rs_handle_lifetime";
-/// The name this test's own namespaces map to the port under test. Private to
-/// this process and its children, which is the whole of what a namespace is.
-const SERVICE: &str = "handle-lifetime-service";
 const PATH: &str = "/tmp/handle-lifetime.txt";
 const KILLED_PATH: &str = "/tmp/handle-lifetime-killed.txt";
 const PAYLOAD: &[u8] = b"a file outlives the handle that was closed first";
@@ -69,7 +67,6 @@ fn file_survives_one_close() {
 
 fn acceptor_survives_one_close() {
     let (acceptor, connector) = port::create().expect("a port of our own");
-    let ns = namespace::build().add(SERVICE, &connector).finish().expect("a namespace for it");
 
     let a = acceptor.into_raw();
     // SAFETY: nothing relies on being the source's only holder.
@@ -79,20 +76,19 @@ fn acceptor_survives_one_close() {
 
     // The survivor still serves: a client's connection is queued on the port
     // and this handle takes it.
-    let client = syscall::namespace_open(ns.as_handle().raw(), SERVICE)
-        .expect("open through the connector of a live port");
+    let client = syscall::connect(connector.as_handle().raw()).expect("connect through the connector of a live port");
     let accepted = syscall::accept(b).expect("accept on the surviving acceptor handle");
     // SAFETY: no type holds this number.
     unsafe { syscall::close(accepted) };
     // SAFETY: no type holds this number.
     unsafe { syscall::close(client) };
 
-    // And the last close is what closes the port. `Gone` and not `NotFound`:
-    // the name is still in the namespace, and it is the server that has left.
+    // And the last close is what closes the port: `Gone`, the server that
+    // has left, through a connector this process still holds.
     // SAFETY: no type holds this number.
     unsafe { syscall::close(b) };
     assert_eq!(
-        syscall::namespace_open(ns.as_handle().raw(), SERVICE).err(),
+        syscall::connect(connector.as_handle().raw()).err(),
         Some(SyscallError::Gone),
         "the last close of an acceptor did not close the port"
     );
@@ -145,9 +141,8 @@ fn ring_survives_one_close() {
 /// client's side while the holder is killed.
 fn kill_releases_acceptor() {
     let (acceptor, connector) = port::create().expect("a port for the holder");
-    let ns = namespace::build().add(SERVICE, &connector).finish().expect("a namespace for it");
     assert!(
-        syscall::namespace_open(ns.as_handle().raw(), SERVICE).is_ok(),
+        connector.connect().is_ok(),
         "the port was not live before its holder was killed"
     );
 
@@ -155,7 +150,7 @@ fn kill_releases_acceptor() {
     kill_and_reap(&mut child);
 
     assert_eq!(
-        syscall::namespace_open(ns.as_handle().raw(), SERVICE).err(),
+        connector.connect().err(),
         Some(SyscallError::Gone),
         "a killed process did not give its acceptor back"
     );

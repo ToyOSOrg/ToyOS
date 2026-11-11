@@ -1,7 +1,7 @@
 //! What a row may do to the machine's disks beyond its own partitions, which
 //! only the signed image grants: `authorize = [...]` in its row. The
 //! supervisor mints each at every start of the row and puts it in the
-//! row's namespace under [`Authorization::name`]. The build refuses one that
+//! row's services under [`Authorization::name`]. The build refuses one that
 //! changes a disk to a login authority or a row a login can start, and no
 //! `[apps]` row can spell one.
 
@@ -35,7 +35,7 @@ impl Authorization {
         Self::ALL.into_iter().find(|a| a.word() == word)
     }
 
-    /// The name it has in the row's namespace.
+    /// The name it has among the row's services.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Tables => "block-tables",

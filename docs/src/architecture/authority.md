@@ -18,8 +18,8 @@
   nothing.
 - Every system call states the right it needs on each handle it takes.
 - Nothing else grants authority: process and thread ids are identities, object
-  ids for diagnostics reach nothing, and a service name means something only
-  inside a namespace someone handed you.
+  ids for diagnostics reach nothing, and a name means something only in the
+  process whose parent wrote it.
 
 ## Rights only narrow
 
@@ -37,7 +37,7 @@
 ## Kernel objects
 
 - A closed set of kinds, among them pipes, connections, service ports,
-  namespaces, shared memory, paged memory supplied by a userland pager, events,
+  shared memory, paged memory supplied by a userland pager, events,
   inboxes for asynchronous requests, processes, jobs, device claims and the
   system capability.
 - An object crosses a process boundary in exactly two ways: in a message over a
@@ -61,9 +61,13 @@
 
 ## Creating a process
 
-- A child starts by spawn, never by fork, with an empty handle table.
-- It receives exactly one set of endowments, moved out of the parent, all or
-  nothing (see [The program interface](../using/interface.md)).
+- A child starts by spawn, never by fork. Its table starts with its handle to
+  itself, its notice, then exactly one list of endowments moved out of the
+  parent, all or nothing, in the order the spawn listed them
+  (see [The program interface](../using/interface.md)).
+- The kernel keeps no name for any handle. What a parent calls each endowment
+  is bytes it writes into the child's memory, and the child's SDK checks them
+  once before it looks one up.
 - The parent receives a handle to the child's process, with which it waits for
   the child's end and can stop it.
 - Without any handle a process can act only on itself and read machine facts:
@@ -91,17 +95,28 @@
 
 ## The system capability
 
-- One per machine, held by the supervisor.
+- One per machine, held by the supervisor, which the kernel starts holding it
+  and the images it boots from at handles the interface states, since no
+  parent names them.
 - Every privileged right, such as claiming a device, real-time scheduling,
   reading the log, reading counters, listing processes or powering off, is a
   narrowed copy the supervisor hands to the programs its manifest grants.
 
-## Namespaces
+## Services
 
-- A namespace is an immutable kernel object mapping service names to
-  connectors; a narrower one is a new object.
-- A process connects to a service only by looking its name up in a namespace it
-  holds. There is no global registry.
+- A service is a port. Its server holds the acceptor; a client holds a
+  connector and connects through it, which takes the right to write on the
+  connector. A connector without that right may only be passed on: a service
+  one program provides to a launch, such as a terminal's surface, reaches a
+  launched program whose row does not receive it that way, for it to pass on
+  to what it launches in turn.
+- A process finds a service only among the connectors its parent gave it,
+  by the name its parent wrote. There is no global registry and no connect by
+  name.
+- A helper a program spawns is given a copy of every service connector its
+  parent holds, unless the spawn names fewer; a launch is given its row's.
+  What a process gives itself, as the supervisor does for its own files, no
+  child inherits.
 
 ## Files
 

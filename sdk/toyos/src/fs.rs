@@ -1,8 +1,9 @@
 //! Files a file server holds: the wire between a program and the server behind
 //! one of its directory capabilities, and the client end of it.
 //!
-//! **A directory capability is a connector in the program's namespace**, named
-//! [`CAPABILITY_PREFIX`] and the absolute directory it serves (`fs:/home`).
+//! **A directory capability is a connector among the program's services**
+//! (`crate::endow`), named [`CAPABILITY_PREFIX`] and the absolute directory it
+//! serves (`fs:/home`).
 //! Each is a connector to its role's one port, which the supervisor minted with
 //! a [`Grant`]: the directory, whether it may be changed, and whose share of
 //! the server it spends. The kernel stamps that on every connection made through it and answers it to the
@@ -49,15 +50,14 @@
 
 use alloc::vec::Vec;
 
-use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME};
+use toyos_abi::syscall::{SyscallError, MAX_BADGE};
 
 use crate::ipc::{Connection, FrameRx, IpcError};
 use crate::ipc_payload;
-use crate::namespace::Namespace;
 use crate::shm::{Bytes, SharedMemory};
 use crate::Pipe;
 
-/// What a directory capability's namespace name begins with.
+/// What a directory capability's service name begins with.
 pub const CAPABILITY_PREFIX: &str = "fs:";
 
 /// The data window a client lends its server: one shared-memory page, the size
@@ -701,7 +701,7 @@ impl From<Error> for Refused {
 /// Where a [`Dir`]'s connection comes from.
 enum Source {
     /// A directory capability, connected again through the same connector.
-    Named { names: &'static Namespace, name: [u8; MAX_SERVICE_NAME], len: usize },
+    Held(crate::BorrowedHandle<'static>),
     /// A connection another process exported: one connection, never another.
     Exported,
 }
@@ -726,17 +726,18 @@ struct Paths<'a> {
 }
 
 impl Dir {
-    /// Connect to the directory `names` calls `name`: [`Error::NotHeld`] for a
-    /// name this process was not given.
-    pub fn connect(names: &'static Namespace, name: &str) -> Result<Self, Error> {
-        if name.len() > MAX_SERVICE_NAME {
-            return Err(Error::NotHeld);
-        }
-        let mut buf = [0u8; MAX_SERVICE_NAME];
-        buf[..name.len()].copy_from_slice(name.as_bytes());
-        let mut dir = Self::unconnected(Source::Named { names, name: buf, len: name.len() })?;
+    /// Connect to the directory capability `connector`, which this process
+    /// holds for its life: [`Error::NotHeld`] for one it may only pass on.
+    pub fn connect(connector: crate::BorrowedHandle<'static>) -> Result<Self, Error> {
+        let mut dir = Self::unconnected(Source::Held(connector))?;
         dir.reconnect()?;
         Ok(dir)
+    }
+
+    /// Connect to the directory capability among this process's services as
+    /// `name`: [`Error::NotHeld`] for a name it was not given.
+    pub fn named(name: &str) -> Result<Self, Error> {
+        Self::connect(crate::endow::connector(name).ok_or(Error::NotHeld)?)
     }
 
     /// Serve the connection an [`EXPORT`] answered, whose descriptions are ids
@@ -773,11 +774,10 @@ impl Dir {
     /// exported connection has no connector, and stays gone.
     fn reconnect(&mut self) -> Result<(), Error> {
         self.conn = None;
-        let Source::Named { names, name, len } = &self.source else { return Err(Error::Gone) };
-        let name = core::str::from_utf8(&name[..*len]).expect("copied from a str");
-        let conn = match names.open(name) {
+        let Source::Held(connector) = self.source else { return Err(Error::Gone) };
+        let conn = match crate::port::connect(connector) {
             Ok(conn) => conn,
-            Err(SyscallError::NotFound) => return Err(Error::NotHeld),
+            Err(SyscallError::PermissionDenied) => return Err(Error::NotHeld),
             Err(e) => return Err(Error::kernel("a connection", e)),
         };
         self.attach(conn)

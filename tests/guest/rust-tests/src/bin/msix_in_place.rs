@@ -15,7 +15,8 @@ mod function;
 use toyos::endow::Endowments;
 use toyos::syscap::SysCap;
 use toyos::PciDev;
-use toyos_abi::syscall::{PciId, RegWidth, SyscallError, SYSCAP_LABEL};
+use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
+use toyos::endow::SYSCAP_LABEL;
 use toyos_pci::caps::CapWalk;
 use toyos_pci::msix;
 

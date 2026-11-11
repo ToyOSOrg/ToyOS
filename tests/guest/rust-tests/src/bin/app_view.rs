@@ -198,8 +198,7 @@ fn app() {
         other => red.push(format!("std's write into its own package was answered {other:?}")),
     }
 
-    let names = toyos::endow::namespace().expect("an app is endowed a namespace");
-    match Dir::connect(names, &format!("fs:{PACKAGE}")) {
+    match Dir::named(&format!("fs:{PACKAGE}")) {
         Err(e) => red.push(format!("fs:{PACKAGE} would not connect: {e:?}")),
         Ok(mut dir) => {
             if dir.writable() {
@@ -233,7 +232,7 @@ fn app() {
             each("symlink", dir.symlink("manifest.toml", (Base::Root, "link")));
         }
     }
-    match Dir::connect(names, &format!("fs:{HOME}")) {
+    match Dir::named(&format!("fs:{HOME}")) {
         Ok(dir) if dir.writable() => {}
         Ok(_) => red.push(format!("fs:{HOME} says it is read-only")),
         Err(e) => red.push(format!("fs:{HOME} would not connect: {e:?}")),
@@ -251,7 +250,7 @@ fn app() {
         "fs:/log",
         "fs:/boot",
     ] {
-        match names.open(held) {
+        match toyos::endow::service(held) {
             Err(_) => {}
             Ok(_) => red.push(format!("it holds {held}")),
         }

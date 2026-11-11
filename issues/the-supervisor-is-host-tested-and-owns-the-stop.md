@@ -54,7 +54,7 @@ nothing.
    restart is owed, the function a `devices` matcher names and which
    functions a `drives` row has a process on. The supervisor's decisions live in
    `toyos-supervisor`, with host tests; `system/supervisor` keeps only
-   handles, spawns and the loop. The decisions: namespace and claim selection
+   handles, spawns and the loop. The decisions: service and claim selection
    from a manifest row; the claims a restart is owed; `SysCap` narrowing;
    launch resolution and every launcher refusal; the swap ladder and
    probation; restart policy; the stop order derived from the manifest, with a
@@ -63,8 +63,8 @@ nothing.
    `cargo test --workspace --exclude toyos-build`; a host test refuses a
    manifest whose dependencies form an undeclared cycle; each refusal and
    each decision above has a mutation that reds a host test, named in the PR,
-   namespace selection's among them: a row's launcher endowed as an entry of
-   `svc` (`launcher_namespace`), which a child its holder spawns directly
+   service selection's among them: a row's launcher endowed as a service
+   (`svc:`), which a child its holder spawns directly
    would inherit, and no such child holding one is what the `launch_authority`
    metal row, deleted in #889, last asserted; and the stage deletes each
    decision from `system/supervisor`, which calls

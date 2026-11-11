@@ -22,12 +22,11 @@ use std::sync::mpsc;
 
 use toyos::endow::{self, Endowments};
 use toyos::ipc::{self, Connection, RxStep};
-use toyos::job::JOB_LABEL;
-use toyos::namespace::Namespace;
+use toyos::port::Connector;
 use toyos::syscap::SysCap;
 use toyos::wake::{self, Bell, Waker};
 use toyos::AsHandle;
-use toyos_abi::syscall::SYSCAP_LABEL;
+use toyos::endow::SYSCAP_LABEL;
 use toyos_desktop::Opening;
 use toyos_session::{self as wire, Names, SignOut};
 
@@ -68,14 +67,14 @@ impl Desktop {
         let (asks, queue) = mpsc::channel();
         let (sent, opened) = mpsc::channel();
         let (woken, wake) = wake::pair().expect("compositor: no event for its session's opens");
-        let login = endowed.take::<Namespace>(wire::LOGIN_PORT);
+        let login = endowed.take::<Connector>(wire::LOGIN_PORT);
         std::thread::Builder::new()
             .name("launcher".into())
             .spawn(move || launcher(queue, login, sent, woken))
             .expect("compositor: no thread to launch on");
         // Connected here, so the control connection is the compositor's own.
-        let control = endowed.take::<Namespace>(wire::CONTROL_LABEL).and_then(|controls| {
-            controls.open(wire::CONTROL).inspect_err(|why| eprintln!("compositor: its session's controls refused it: {why}")).ok()
+        let control = endowed.take::<Connector>(wire::CONTROL_LABEL).and_then(|controls| {
+            controls.connect().inspect_err(|why| eprintln!("compositor: its session's controls refused it: {why}")).ok()
         });
         let mut desktop = Self {
             control,
@@ -220,10 +219,10 @@ impl Desktop {
 /// **Everything the desktop starts is a job of its own**, made with the
 /// `jobs` right this row's system capability carries: a program started from
 /// the taskbar is no helper of the compositor's, and must not share its CPU.
-fn launcher(queue: mpsc::Receiver<Ask>, login: Option<Namespace>, opened: mpsc::Sender<Result<Connection, String>>, wake: Waker) {
+fn launcher(queue: mpsc::Receiver<Ask>, login: Option<Connector>, opened: mpsc::Sender<Result<Connection, String>>, wake: Waker) {
     let jobs = endow::Endowments::get().take::<SysCap>(SYSCAP_LABEL);
     // A session this thread opened, whose launcher replaces the endowed one.
-    let mut session: Option<Namespace> = None;
+    let mut session: Option<Connector> = None;
     for ask in queue {
         let program = match ask {
             // Answered either way, so the loop asks again after a refusal.
@@ -264,7 +263,7 @@ fn launcher(queue: mpsc::Receiver<Ask>, login: Option<Namespace>, opened: mpsc::
             }
         };
         let mut command = Command::new(&program);
-        command.independent().detached().endow(JOB_LABEL, job.into());
+        command.independent().detached().job(job.as_handle().into());
         if let Some(launcher) = &session {
             command.launcher(launcher.as_handle().into());
         }

@@ -183,7 +183,7 @@ fn a_quit_needs_manage_and_an_ended_process_is_no_refusal() {
 }
 
 fn notice() -> &'static toyos::quit::Notice {
-    toyos::quit::notice().expect("every process is started holding its notice")
+    toyos::quit::notice()
 }
 
 /// Listen by `how`, start a listener `depth - 1` below, say so, then read one

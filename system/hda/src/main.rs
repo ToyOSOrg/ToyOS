@@ -474,7 +474,7 @@ fn soundserver_gone(at: &str, why: impl core::fmt::Debug) -> ! {
 /// a period's end, and what it reports soundserver mixes the next one by.
 fn rt() {
     let rt: SysCap = Endowments::get()
-        .take(toyos_abi::syscall::SYSCAP_LABEL)
+        .take(toyos::endow::SYSCAP_LABEL)
         .expect("the manifest declares this program `syscap = [\"rt\"]`");
     rt.enter_rt().expect("an RT capability refused the band it names");
 }

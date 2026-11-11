@@ -27,6 +27,10 @@ pub struct Command {
     extra_fds: Vec<(u32, Given)>,
     /// Taken by the next spawn: moved to its child, or closed if it is refused.
     endowments: Vec<(String, toyos::Moved)>,
+    /// The services of this process a helper is given, where not every one.
+    services: Option<Vec<String>>,
+    /// A copy of the job the child joins, where it is not this process's.
+    job: Option<io::Result<toyos::OwnedHandle>>,
     provided: Vec<(String, toyos::OwnedHandle)>,
     parent: Parent,
     /// An independent launch, where a plain spawn is a helper.
@@ -67,11 +71,6 @@ enum Parent {
     Caller,
     Place(io::Result<toyos::OwnedHandle>),
     Detached,
-}
-
-/// The job `endowments` puts the child in.
-fn job_of(endowments: &[(String, toyos::Moved)]) -> Option<toyos::BorrowedHandle<'_>> {
-    endowments.iter().find(|(label, _)| label == toyos::job::JOB_LABEL).map(|(_, handle)| toyos::AsHandle::as_handle(handle))
 }
 
 /// A copy of a handle the caller lends, owned by the command until it is
@@ -122,6 +121,8 @@ impl Command {
             stderr: None,
             extra_fds: Vec::new(),
             endowments: Vec::new(),
+            services: None,
+            job: None,
             provided: Vec::new(),
             parent: Parent::Caller,
             independent: false,
@@ -177,7 +178,7 @@ impl Command {
         if !kept {
             self.image = None;
             if self.held_image.is_none() && !self.independent {
-                let image = crate::sys::fs::read_image(Path::new(&source), self.endowed_job())?;
+                let image = crate::sys::fs::read_image(Path::new(&source), self.child_job()?)?;
                 self.image = Some((source, image));
             }
         }
@@ -258,10 +259,25 @@ impl Command {
         self.extra_fds.push((child_fd, given));
     }
 
-    /// The job the child is endowed to run in, which its program image is
-    /// read for: the child keeps the image as long as it runs.
-    fn endowed_job(&self) -> Option<toyos::BorrowedHandle<'_>> {
-        job_of(&self.endowments)
+    /// The job the child is to run in, which its program image is read for:
+    /// the child keeps the image as long as it runs. `None` for this
+    /// process's own.
+    fn child_job(&self) -> io::Result<Option<toyos::BorrowedHandle<'_>>> {
+        match &self.job {
+            None => Ok(None),
+            Some(Ok(job)) => Ok(Some(toyos::AsHandle::as_handle(job))),
+            Some(Err(e)) => Err(io::Error::new(e.kind(), e.to_string())),
+        }
+    }
+
+    /// Run the child in the job a copy of `job` names, which carries `WRITE`.
+    pub fn job(&mut self, job: crate::os::toyos::io::BorrowedHandle<'_>) {
+        self.job = Some(copy(job));
+    }
+
+    /// Give a helper those of this process's services `names` names, and no other.
+    pub fn services_only(&mut self, names: &[&str]) {
+        self.services = Some(names.iter().map(|name| (*name).to_owned()).collect());
     }
 
     /// Give the child `handle` under the name `label`, moved by the next spawn.
@@ -291,9 +307,9 @@ impl Command {
         self.independent = true;
     }
 
-    /// Launch through the launcher `namespace` holds, which this process keeps.
-    pub fn launcher(&mut self, namespace: crate::os::toyos::io::BorrowedHandle<'_>) {
-        self.launcher = Some(copy(namespace));
+    /// Launch through a copy of the launcher's connector `launcher`.
+    pub fn launcher(&mut self, launcher: crate::os::toyos::io::BorrowedHandle<'_>) {
+        self.launcher = Some(copy(launcher));
     }
 
     /// Start the child as a pager, by a copy of `syscap`, which carries
@@ -456,9 +472,10 @@ impl Command {
                     io::const_error!(io::ErrorKind::InvalidInput, "the image is no memory region")
                 }
             })?),
-            (None, None) => Some(crate::sys::fs::read_image(source, job_of(&endowments))?),
+            (None, None) => Some(crate::sys::fs::read_image(source, self.child_job()?)?),
         };
         let (labels, endowed): (Vec<String>, Vec<toyos::Moved>) = endowments.into_iter().unzip();
+        let only: Option<Vec<&str>> = self.services.as_ref().map(|names| names.iter().map(String::as_str).collect());
         let (names, provided): (Vec<String>, Vec<toyos::OwnedHandle>) = provided.into_iter().unzip();
         let request = toyos::spawn::Spawn {
             program: launched.as_deref().unwrap_or(program),
@@ -469,6 +486,11 @@ impl Command {
             cwd: &cwd,
             fds: &fds,
             endow: labels.iter().map(String::as_str).zip(endowed).collect(),
+            inherit: match &only {
+                None => toyos::spawn::Inherit::All,
+                Some(names) => toyos::spawn::Inherit::Only(names),
+            },
+            job: self.child_job()?,
             provided: names.iter().map(String::as_str).zip(provided).collect(),
             parent,
             independent: self.independent,

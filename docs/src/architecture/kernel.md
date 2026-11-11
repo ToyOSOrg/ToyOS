@@ -16,9 +16,10 @@ The kernel is small, fast and safe, and does what userland cannot:
 It holds no filesystem, no storage, input, network, audio or USB driver, no
 network protocol, no audio mixing, no login and no naming policy, and parses
 nothing one program writes for another. What a parent tells the child it
-starts, its arguments and environment, is memory the parent lays out in the
-child: the kernel keeps none of it. It knows a process by a short name its
-parent gives it, a label that carries no authority. The firmware's AML is
+starts, its arguments, its environment and what it calls each handle it
+gives, is memory the parent lays out in the child: the kernel keeps none of
+it. It knows a process by a short name its parent gives it, a label that
+carries no authority. The firmware's AML is
 interpreted by a userland ACPI service, which tells the kernel the little it
 needs, such as how to power off.
 
