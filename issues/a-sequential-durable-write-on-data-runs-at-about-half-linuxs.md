@@ -64,10 +64,33 @@ fsync fell to 19.5 ms and the T14's did not move: there the Flush after
 the burst took what the round trips had, 5.6 to 6.6 ms against 3.3. The
 bytes reach the drive faster than its slow mode writes them.
 
-**Not yet established.** What the bench reads with the transactions
-grouped. About 4 ms of the AMD's fsync at depth that the driver's times do
-not account for; the copies of 2 MiB at a time are suspected and not
-measured. No T14 boot of this work has run in the drive's fast mode.
+**With #1216** (its code at cc718f61f against main, 2026-11-11, four
+boots an arm a bench, interleaved, and Linux three times in the same
+session;
+[evidence](https://github.com/ToyOSOrg/evidence/blob/b4d2fd4264f7e295702dade3a7bafe11ee30fd78/README.md)),
+`persist.seq_write_fsync` and `fs.disk.seq_write.1048576`, MB/s, each
+boot:
+
+| bench | main | #1216 | Linux |
+|---|---|---|---|
+| AMD | 239 to 262; 452 to 460 | 375 to 409; 668 to 681 | 468 to 495; 800 to 806 |
+| T14, slow mode | 156 to 182; 455 to 485 | 202 to 228; 563 to 573 | none this session |
+| T14, fast mode | 245; 368 (one boot) | 349; 498 (one boot) | 579 to 609; 344 to 349 |
+
+Where a round's time goes with #1216 (one boot a bench with stage timers):
+
+- AMD: the fsync about 14 ms against Linux's 9 to 10. Writing the 8 MiB
+  back is 9.7 ms: 5.3 ms in the device's call, with up to 15 commands
+  held and 1.2 ms of it copying the blocks for the session, and 4 ms of
+  the extents' lookups, building and checksums before it and their
+  pointer transactions after it, none of it beside the device's time.
+  The commit is 2.2 to 2.6 ms, two Flushes. Reading the file's pages out
+  is 0.8 ms; about 1.3 ms is not split.
+- T14, slow mode: the fsync 29 to 31 ms. The device took 11 to 13 ms for
+  the 8 MiB and the commit's two Flushes 8.5 to 11.4 ms; the drive's slow
+  mode decides it.
+
+**Not yet established.** The T14's fast mode, with one boot an arm.
 
 **Exit.** `persist.seq_write_fsync` and `fs.disk.seq_write.1048576` at or
 above Linux's on both benches, in every boot of a back-to-back session, or
