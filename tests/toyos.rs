@@ -1280,6 +1280,22 @@ const METAL: &[(&str, metal::Metal)] = &[
         "job_fairness",
         metal::Metal { arms: TESTCASES, judge: |b| job_fairness(b[0]) },
     ),
+    (
+        // MEASUREMENT ONLY: the frame-allocator batch's A/B, read off the log.
+        "batch_ab",
+        metal::Metal {
+            arms: &[metal::Arm {
+                adds_ms: 180_000,
+                named_only: true,
+                ..metal::once("batchabcase", "tests/images/benchcase.toml", &[], &["test_rs_spawn_cost", "osbench_procs", "osbench_work"])
+            }],
+            judge: |b| {
+                b[0].job_passed("test_rs_spawn_cost")?;
+                b[0].log().must_say("spawn_cost: /system/bin/toybox min ")?;
+                osbench_ran(b[0], &["osbench_procs", "osbench_work"])
+            },
+        },
+    ),
     // ---- one image: tests/images/benchcase.toml, `osbench`'s ToyOS half ----
     (
         // The numbers compared with the same program on the bench's own Linux.
