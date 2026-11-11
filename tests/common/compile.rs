@@ -133,8 +133,8 @@ pub fn link_toyos(objects: &[PathBuf], name: &str) -> Result<Vec<u8>, String> {
     for object in objects {
         let _ = fs::remove_file(object);
     }
-    // One line: the harness reads a failed link for the symbol a declared case
-    // stops on, and LLD reports each undefined symbol on a line of its own.
+    // One line, as a failed compile's is: each case's refusal is one line of
+    // the corpus compile's list and of `NOT_RUN`'s report.
     if !output.status.success() {
         return Err(format!(
             "clang could not link {name}: {}",

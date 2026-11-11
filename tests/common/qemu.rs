@@ -1839,9 +1839,11 @@ impl QemuInstance {
         Ok(said)
     }
 
-    /// Everything the guest says until QEMU exits, onto `log`: a job list's
-    /// `reboot`, which `-no-reboot` makes the exit. Or why it did not get
-    /// there, as [`ceiling_verdict`] reads `ceiling` paid out for this guest.
+    /// Everything the guest says until QEMU exits, onto `log`, and `Ok` once
+    /// it has exited 0, which under `-no-reboot` a reset, a power-off and a
+    /// triple fault all do: what stopped the guest is the caller's to ask. Or
+    /// why it did not exit, as [`ceiling_verdict`] reads `ceiling` paid out
+    /// for this guest.
     pub fn await_end(&mut self, log: &mut String, ceiling: Duration) -> Result<(), String> {
         let ceiling = self.budget(ceiling);
         let from = log.len();

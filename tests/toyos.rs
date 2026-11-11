@@ -2836,7 +2836,7 @@ fn compile_c_tests(names: &[String]) -> Vec<(String, Vec<u8>)> {
                 })
             })
             .collect();
-        workers.into_iter().flat_map(|w| w.join().expect("a compile thread")).collect()
+        workers.into_iter().flat_map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
     });
 
     let mut bins = Vec::new();
@@ -2871,8 +2871,6 @@ fn check_not_run() {
     let dir = compile::testcases_dir();
     let mut wrong: Vec<String> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
-
-    compile::c_sysroot();
 
     for entry in NOT_RUN {
         let case = entry.case;
