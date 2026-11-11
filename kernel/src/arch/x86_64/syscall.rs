@@ -95,6 +95,11 @@ extern "sysv64" fn syscall_entry() {
     );
 }
 
+/// Where `SYSCALL` enters, as `LSTAR` holds it.
+pub(crate) fn entry_address() -> u64 {
+    syscall_entry as *const () as u64
+}
+
 /// The syscall bracket: the entry's diagnostic stores stay readable only while [`percpu::in_syscall`] is true.
 extern "sysv64" fn syscall_handler(num: u64, a1: u64, a2: u64, _: u64, a3: u64, a4: u64) -> u64 {
     // `IA32_FMASK` masked interrupts, and the entry raised the preempt count by one.

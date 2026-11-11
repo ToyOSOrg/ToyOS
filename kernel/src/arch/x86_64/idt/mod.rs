@@ -1,9 +1,12 @@
 pub(crate) mod exceptions;
+mod debug;
 mod device_irq;
 mod dma_fault;
 mod isa;
 mod kick;
 mod nmi;
+#[cfg(feature = "boot-actuators")]
+mod nmi_user_gs;
 pub(crate) mod spurious;
 mod timer;
 mod tlb;
@@ -68,6 +71,11 @@ impl IdtEntry {
     /// An interrupt gate onto `entry`.
     fn at(entry: unsafe extern "sysv64" fn()) -> Self {
         Self::at_address(entry as *const () as u64)
+    }
+
+    /// The address this gate enters at.
+    fn target(&self) -> u64 {
+        u64::from(self.offset_low) | u64::from(self.offset_mid) << 16 | u64::from(self.offset_high) << 32
     }
 
     /// An interrupt gate onto the code at `handler`.
@@ -197,6 +205,7 @@ macro_rules! idt_vectors {
             fn from_raw(v: u64) -> Self {
                 match v {
                     $($exnum => Self::$ex,)*
+                    $($dnum => Self::$direct,)*
                     _ => panic!("dispatch on vector {:#x}, which has no dispatched gate", v),
                 }
             }
@@ -225,7 +234,6 @@ macro_rules! idt_vectors {
 idt_vectors! {
     dispatched {
         DivideError        = 0x00, stub_de, no_error_code;
-        Debug              = 0x01, stub_db, no_error_code;
         Breakpoint         = 0x03, stub_bp, no_error_code;
         Overflow           = 0x04, stub_of, no_error_code;
         BoundRange         = 0x05, stub_br, no_error_code;
@@ -245,6 +253,8 @@ idt_vectors! {
         ControlProtection  = 0x15, stub_cp, error_code;
     }
     direct {
+        // From Ring 3 it goes on through `common_entry` as vector 1 (`debug`).
+        Debug        = 0x01, debug::debug_entry, ist 4;
         // ist 2: SYSCALL's brief CPL0-on-user-stack window would fault SMAP without it.
         Nmi          = 0x02, nmi::nmi_entry, ist 2;
         Timer        = 0x20, timer::timer_entry;
@@ -276,6 +286,7 @@ const _: () = {
     assert!(ist_of(0x08) == 1, "#DF must take its frame on IST1");
     assert!(ist_of(0x02) == 2, "an NMI must take its frame on IST2");
     assert!(ist_of(0x12) == 3, "#MC must take its frame on IST3");
+    assert!(ist_of(0x01) == 4, "#DB must take its frame on IST4");
     // No two vectors may share an IST index: it is not re-entrant.
     let mut i = 0;
     while i < IST_VECTORS.len() {
@@ -289,6 +300,13 @@ const _: () = {
         i += 1;
     }
 };
+
+/// Whether `rip` is where some gate of this CPU's table enters.
+fn is_gate_target(rip: u64) -> bool {
+    // SAFETY: the table is written only by `init`, before any gate is taken.
+    let idt = unsafe { &*IDT.data_ptr() };
+    idt.entries.iter().any(|gate| gate.type_attr != 0 && gate.target() == rip)
+}
 
 /// Halt IPI from `halt_all_cpus()`; never returns.
 #[unsafe(naked)]
@@ -517,6 +535,6 @@ pub(crate) fn provoke_double_fault() -> ! {
 
 pub(crate) use unclaimed::census as unclaimed_census;
 #[cfg(feature = "boot-actuators")]
-pub(crate) use nmi::user_gs_selftest as nmi_user_gs_selftest;
+pub(crate) use nmi_user_gs::selftest as nmi_user_gs_selftest;
 /// How much of the double-fault stack the crash report used, once the report is out.
 pub(crate) use super::percpu::ist1_report as report_fault_stack;

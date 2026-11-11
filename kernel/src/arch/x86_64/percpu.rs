@@ -335,9 +335,10 @@ pub(crate) mod gs {
     }
 }
 
-/// The IST stacks this machine has: IST1 `#DF`, IST2 NMI, IST3 `#MC` — vectors
-/// that can arrive with `rsp` not a kernel stack (SDM Vol. 3A §6.14.5); `ist[n-1]` is IST*n*.
-pub(crate) const IST_STACKS: usize = 3;
+/// The IST stacks this machine has: IST1 `#DF`, IST2 NMI, IST3 `#MC`, IST4
+/// `#DB` — vectors that can arrive with `rsp` not a kernel stack (SDM Vol. 3A
+/// §6.14.5); `ist[n-1]` is IST*n*.
+pub(crate) const IST_STACKS: usize = 4;
 
 /// One size for every IST stack; must leave room to double the measured high water.
 const IST_STACK_SIZE: usize = 16384;

@@ -389,7 +389,8 @@ mod checks {
     }
 
     /// `nmi-user-gs`'s judge on its two verdicts and on a boot that never
-    /// reported, held to the words `kernel/src/arch/x86_64/idt/nmi.rs` writes.
+    /// reported, held to the words `kernel/src/arch/x86_64/idt/nmi_user_gs.rs`
+    /// writes.
     #[test]
     fn nmi_user_gs_verdict() -> Result<(), String> {
         const PASSED: &str = "[ 1.204 cpu0 kernel] nmi-user-gs: PASS — vector 2 at CPL 0 under GS base \
@@ -408,7 +409,7 @@ mod checks {
         if faults::nmi_user_gs("[ 1.204 cpu0 kernel] LAPIC: spurious selftest 3/3\n").is_ok() {
             return Err("a boot that never reported was read as a pass".into());
         }
-        let nmi = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernel/src/arch/x86_64/idt/nmi.rs");
+        let nmi = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernel/src/arch/x86_64/idt/nmi_user_gs.rs");
         let source = std::fs::read_to_string(&nmi).map_err(|e| format!("{}: {e}", nmi.display()))?;
         for said in ["\"nmi-user-gs: {verdict} — ", "\"PASS\""] {
             if !source.contains(said) {

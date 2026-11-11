@@ -25,7 +25,8 @@ const ARMS: &[(&str, &str)] = &[
     ("int3", "the INT3 instruction, which reaches #BP through its DPL 3 gate"),
     ("single-step", "RFLAGS.TF, set by an ordinary Ring 3 popfq"),
     ("tf-syscall", "RFLAGS.TF across a syscall, where IA32_FMASK decides who takes the trap"),
-    ("tf-mov-ss-syscall", "RFLAGS.TF across a MOV SS and the syscall after it, whose trap must not reach Ring 0"),
+    ("tf-mov-ss-syscall", "RFLAGS.TF across a MOV SS and the syscall after it, whose trap AMD holds into Ring 0"),
+    ("tf-mov-ss-int3", "RFLAGS.TF across a MOV SS and the INT3 after it, whose trap AMD holds onto the #BP gate"),
 ];
 
 fn main() {
@@ -163,12 +164,18 @@ fn raise(role: &str) -> ! {
             }
             println!("SURVIVED tf-syscall, getpid answered {pid}");
         }
-        // The same, with a `MOV SS` before the syscall: the kernel's entry runs
-        // its first instruction with a user's GS base and stack pointer, so a
-        // trap the `MOV SS` held over the syscall would be taken there.
+        // The same, with a `MOV SS` before the syscall: a trap the `MOV SS`
+        // held over it is taken on the entry's first instruction, at CPL 0 on
+        // the user's stack and GS base.
         "tf-mov-ss-syscall" => {
             let pid = mov_ss::single_step_over_mov_ss_into_syscall(51);
             println!("SURVIVED tf-mov-ss-syscall, getpid answered {pid}");
+        }
+        // And with `INT3` after the `MOV SS`: the held trap is taken on the
+        // `#BP` gate's first instruction, whose frame says Ring 0.
+        "tf-mov-ss-int3" => {
+            mov_ss::single_step_over_mov_ss_into_int3();
+            println!("SURVIVED tf-mov-ss-int3");
         }
         other => panic!("unknown role {other:?}"),
     }

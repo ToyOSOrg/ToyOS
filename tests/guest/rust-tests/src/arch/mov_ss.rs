@@ -1,4 +1,5 @@
-//! A trap a `MOV SS` holds back, with the instruction after it a syscall.
+//! A trap a `MOV SS` holds back, with the instruction after it entering the
+//! kernel.
 
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::*;
@@ -6,10 +7,12 @@ pub use x86_64::*;
 #[cfg(target_arch = "x86_64")]
 mod x86_64 {
     /// Sets `RFLAGS.TF`, loads SS with its own selector, and makes syscall
-    /// `number` with no argument; its answer. The single-step trap the `MOV
-    /// SS` would take is suppressed (SDM Vol. 3A §7.8.3) and `SYSCALL` takes
-    /// none, so the trap comes after the instruction the return lands on, and
-    /// nothing here returns where the kernel is correct.
+    /// `number` with no argument; its answer. Intel suppresses the single-step
+    /// trap the `MOV SS` would take (SDM Vol. 3A §7.8.3), and AMD holds it until
+    /// the `SYSCALL` completes (APM Vol. 2 §8.1.4), on the entry's first
+    /// instruction. Either way the trap the return's `TF` arms ends the thread
+    /// at the instruction after it, so nothing here returns where the kernel
+    /// is correct.
     pub fn single_step_over_mov_ss_into_syscall(number: u64) -> u64 {
         let answer: u64;
         // SAFETY: a balanced `pushfq`/`popfq` around one `or`, SS reloaded with
@@ -31,5 +34,25 @@ mod x86_64 {
             );
         }
         answer
+    }
+
+    /// The same `TF` and `MOV SS`, with `INT3` after them: a trap the `MOV SS`
+    /// held lands on the `#BP` gate's first instruction at CPL 0, with Ring 3's
+    /// GS base live and a Ring 0 frame. The `#BP` ends the thread as a trap;
+    /// nothing here returns.
+    pub fn single_step_over_mov_ss_into_int3() {
+        // SAFETY: as `single_step_over_mov_ss_into_syscall`, with `INT3`, which
+        // reads and writes nothing, in place of the syscall.
+        unsafe {
+            core::arch::asm!(
+                "mov {ss:x}, ss",
+                "pushfq",
+                "or qword ptr [rsp], 0x100",
+                "popfq",
+                "mov ss, {ss:x}",
+                "int3",
+                ss = out(reg) _,
+            );
+        }
     }
 }

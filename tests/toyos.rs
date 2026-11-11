@@ -369,6 +369,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is each bench's verdict;
     // `a_ring3_gs_load_leaves_the_kernel_its_gs` runs it under QEMU.
     "gs_segment_load",
+    // Its shared run is each bench's verdict;
+    // `ring3_debug_traps_end_their_process` runs it under QEMU.
+    "debug_trap",
     "std_alloc",
     // Its shared run asserts what holds of one boot's draws on x86-64;
     // `virt_random_differs` builds it for AArch64, runs it on that
@@ -845,6 +848,12 @@ const MACHINE_TESTS: &[MachineTest] = &[
     // verdict; this is the guest runner's CPU's, and a kernel that addresses
     // its per-CPU block through the user's GS base dies on it.
     ("a_ring3_gs_load_leaves_the_kernel_its_gs", |test_config| a_ring3_gs_load_leaves_the_kernel_its_gs(test_config)),
+    // Every Ring 3 route to `#DB` and `#BP` ends its process as a trap, `TF`
+    // across a `MOV SS` into a syscall and into `INT3` among them: the `#DB`
+    // gate's own stack and its move of a Ring 3 frame to the thread's, which
+    // only a booted kernel has. The shared boot's run is each bench's verdict;
+    // this is the guest runner's CPU's.
+    ("ring3_debug_traps_end_their_process", |test_config| ring3_debug_traps_end_their_process(test_config)),
     // std's CPU count against the CPUs the guest booted with, and an ended
     // thread's stack and table place given back, joined or detached, on the
     // two-CPU q35 guest: std's ToyOS layer, which no host builds.
@@ -5856,6 +5865,28 @@ fn a_ring3_gs_load_leaves_the_kernel_its_gs(test_config: &Path) -> Result<(), St
         return Err(format!("the job never said what it loaded:\n{}", result.stdout));
     };
     eprintln!("  [gs] {}", line.trim());
+    Ok(())
+}
+
+/// [`MACHINE_TESTS`]' `ring3_debug_traps_end_their_process`: the shared
+/// boot's `debug_trap` alone.
+fn ring3_debug_traps_end_their_process(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "debug_trap";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu =
+        QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_debug_trap", Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let Some(line) = result.stdout.lines().find(|l| l.contains("the machine is still here")) else {
+        return Err(format!("the job never said every arm ended:\n{}", result.stdout));
+    };
+    eprintln!("  [debug_trap] {}", line.trim());
     Ok(())
 }
 
