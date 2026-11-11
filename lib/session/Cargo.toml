@@ -11,6 +11,7 @@ doctest = false
 [dependencies]
 # A login authority's open of a session, through its namespace.
 toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
 
 [lints.rust]
 warnings = "deny"

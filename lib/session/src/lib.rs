@@ -270,25 +270,48 @@ impl Listed {
     }
 }
 
+/// How long [`open`] goes on asking for a session whose controls are gone.
+/// The supervisor reads an owner's hang-up in a round of its loop, so one it
+/// still hands out after this long is one it does not read as ended.
+const ENDED_UNREAD: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A session opened on [`LOGIN_PORT`] through `login`, the namespace a
 /// login authority is endowed under that name: its launcher, as a namespace
 /// holding `toyos::launch::LAUNCHER`, and its control connection.
+///
+/// **A session whose controls are gone is asked for again**, at once: its
+/// owner ended, and the supervisor answers from what it has read of that
+/// end, which an ask can outrun more than once. The asking ends with a
+/// session whose controls connect, with the supervisor's refusal, which a
+/// failing owner's budget comes to, or after [`ENDED_UNREAD`] as an error.
 pub fn open(
     login: &toyos::namespace::Namespace,
 ) -> Result<(toyos::namespace::Namespace, toyos::ipc::Connection), String> {
-    let conn = login.open(LOGIN_PORT).map_err(|e| format!("the supervisor's login port refused: {e:?}"))?;
-    conn.signal(MSG_OPEN).map_err(|e| format!("the open was not sent: {e:?}"))?;
     let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
-    let frame = rx.recv(&conn).map_err(|e| format!("the open was not answered: {e:?}"))?;
-    if frame.msg_type != MSG_OPENED {
-        let why = String::from_utf8_lossy(rx.payload(frame.payload_len));
-        return Err(format!("the supervisor refused a session: {why}"));
+    let began = std::time::Instant::now();
+    let mut asks = 0u32;
+    loop {
+        let conn = login.open(LOGIN_PORT).map_err(|e| format!("the supervisor's login port refused: {e:?}"))?;
+        conn.signal(MSG_OPEN).map_err(|e| format!("the open was not sent: {e:?}"))?;
+        let frame = rx.recv(&conn).map_err(|e| format!("the open was not answered: {e:?}"))?;
+        if frame.msg_type != MSG_OPENED {
+            let why = String::from_utf8_lossy(rx.payload(frame.payload_len));
+            return Err(format!("the supervisor refused a session: {why}"));
+        }
+        let [launcher, controls] = rx.take_handles::<2>().ok_or("the session came without its handles")?;
+        asks += 1;
+        match toyos::namespace::Namespace::received(controls).open(CONTROL) {
+            Ok(control) => return Ok((toyos::namespace::Namespace::received(launcher), control)),
+            Err(toyos_abi::syscall::SyscallError::Gone) if began.elapsed() < ENDED_UNREAD => {}
+            Err(toyos_abi::syscall::SyscallError::Gone) => {
+                return Err(format!(
+                    "the supervisor handed over a session whose controls are gone {asks} times in {} s",
+                    ENDED_UNREAD.as_secs()
+                ));
+            }
+            Err(e) => return Err(format!("the session's controls refused its control connection: {e:?}")),
+        }
     }
-    let [launcher, controls] = rx.take_handles::<2>().ok_or("the session came without its handles")?;
-    let control = toyos::namespace::Namespace::received(controls)
-        .open(CONTROL)
-        .map_err(|e| format!("the session's controls refused its control connection: {e:?}"))?;
-    Ok((toyos::namespace::Namespace::received(launcher), control))
 }
 
 #[cfg(test)]

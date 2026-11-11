@@ -76,20 +76,23 @@ pub(crate) struct Desktop {
     pub control: Namespace,
 }
 
-/// A session owner's link: the port the owner connects, until it has, and
-/// then the connection. The owner connects, so the link is counted to its
-/// job.
+/// A session owner's link: the port the owner connects, until it has, then
+/// the connection, until the owner hangs it up. The owner connects, so the
+/// link is counted to its job.
 pub(crate) enum Link {
     Waiting(Acceptor),
     Open(Connection),
+    /// The owner hung up, which only its end does.
+    HungUp,
 }
 
 impl Link {
     /// What the loop watches for the owner's word, or its connect.
-    pub fn handle(&self) -> BorrowedHandle<'_> {
+    pub fn handle(&self) -> Option<BorrowedHandle<'_>> {
         match self {
-            Self::Waiting(acceptor) => acceptor.as_handle(),
-            Self::Open(conn) => conn.as_handle(),
+            Self::Waiting(acceptor) => Some(acceptor.as_handle()),
+            Self::Open(conn) => Some(conn.as_handle()),
+            Self::HungUp => None,
         }
     }
 
@@ -108,11 +111,11 @@ impl Link {
         self.conn()
     }
 
-    /// The connection, once the owner has connected.
+    /// The connection, while the owner holds its end.
     fn conn(&self) -> Option<&Connection> {
         match self {
             Self::Open(conn) => Some(conn),
-            Self::Waiting(_) => None,
+            Self::Waiting(_) | Self::HungUp => None,
         }
     }
 }
@@ -168,7 +171,7 @@ impl Logins {
     pub fn tell_all(&self, msg_type: u32) {
         for login in &self.open {
             let Some(link) = login.link.conn() else {
-                say!("supervisor: session {}'s owner has not connected its link, and is not told {msg_type}", login.session.share());
+                say!("supervisor: session {}'s owner holds no link, and is not told {msg_type}", login.session.share());
                 continue;
             };
             if let Err(e) = link.try_signal(msg_type) {
@@ -354,7 +357,12 @@ impl Supervisor<'_> {
             .logins
             .open
             .iter()
-            .map(|l| decide::Open { desktop: l.desktop, opener: &l.opener.name, running: exit_of(&l.owner).is_none() })
+            .map(|l| decide::Open {
+                desktop: l.desktop,
+                opener: &l.opener.name,
+                hung_up: matches!(l.link, Link::HungUp),
+                exited: exit_of(&l.owner).is_some(),
+            })
             .collect();
         decide::desktop_session(&open, &opener.name)
     }
@@ -419,7 +427,11 @@ impl Supervisor<'_> {
                 let login = &mut self.logins.open[at];
                 let Some(link) = login.link.open() else { break };
                 let (msg_type, payload, batch) = match login.rx.pump(link) {
-                    RxStep::Idle | RxStep::Eof => break,
+                    RxStep::Idle => break,
+                    RxStep::Eof => {
+                        login.link = Link::HungUp;
+                        break;
+                    }
                     // The supervisor's own child broke its protocol: the session
                     // ends with it, as a failure.
                     RxStep::Malformed => {
@@ -485,7 +497,7 @@ impl Supervisor<'_> {
         let started = Started { instance, name: name.to_string() };
         let sent = match login.link.conn() {
             Some(link) => link.try_send_bytes_with(wire::MSG_STARTED, &started.encode(), [managed]).map_err(|e| format!("{e:?}")),
-            None => Err("its link is not connected".to_string()),
+            None => Err("it holds no link".to_string()),
         };
         if let Err(e) = sent {
             say!("supervisor: session {}'s owner was not told of {name} ({e:?})", session.share());
@@ -579,7 +591,7 @@ impl Supervisor<'_> {
                 login
                     .link
                     .conn()
-                    .ok_or_else(|| format!("session {}'s owner has not connected its link", asked.share))?
+                    .ok_or_else(|| format!("session {}'s owner holds no link", asked.share))?
                     .try_send_bytes(wire::MSG_SIGN_OUT, &asked.sign_out.encode())
                     .map_err(|e| format!("session {}'s owner was not asked ({e:?})", asked.share))?;
                 Ok(format!("session {} is asked to sign out{}", asked.share, if force { ", by force" } else { "" }))

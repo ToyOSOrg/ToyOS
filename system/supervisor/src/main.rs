@@ -1672,8 +1672,8 @@ impl<'a> Supervisor<'a> {
             poller.watch(&self.minted.login, READABLE, TOKEN_LOGIN_ACCEPTOR);
             poller.watch(&self.minted.admin, READABLE, TOKEN_ADMIN_ACCEPTOR);
             poller.watch(&self.watch.ended, READABLE, TOKEN_APPS);
-            for login in &self.logins.open {
-                poller.watch(&login.link.handle(), READABLE, TOKEN_LINKS);
+            for link in self.logins.open.iter().filter_map(|login| login.link.handle()) {
+                poller.watch(&link, READABLE, TOKEN_LINKS);
             }
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
             poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
