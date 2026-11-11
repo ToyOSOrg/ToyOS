@@ -21,6 +21,13 @@ A word of the kernel's own for a full table would let libc say `EMFILE`. The
 owner ruled no kernel change for POSIX alone, so this waits on a reason the
 kernel's own callers have to tell the two apart.
 
+- **Owed on metal:** the T14's `testcases` shared boot and its
+  `testcases-watchdog` boot, at main after #1227 (one error table). `main` must
+  show every corpus case and Rust member green, `212_full_table` still printing
+  `kernel handles ran out first with ENOMEM: yes`, `206_libc_refusals` printing
+  `sysconf _SC_ARG_MAX: 2088939`, and `testcases-watchdog` green. No guest row
+  runs the corpus.
+
 **Exit**: a full handle table and no memory are two answers at the kernel
 boundary, the SDK reads the first as `Failure::TooManyDescriptors`, which
 libc already answers `EMFILE`, and `212_full_table` expects it.
