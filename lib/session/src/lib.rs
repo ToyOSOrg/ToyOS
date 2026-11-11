@@ -51,9 +51,8 @@ pub const CONTROL_LABEL: &str = "session-control";
 
 /// On [`LOGIN_PORT`]: open a remote session. No payload.
 pub const MSG_OPEN: u32 = 1;
-/// The answer: the session's launcher, as a namespace holding
-/// `toyos::launch::LAUNCHER`, then its controls, a namespace holding
-/// [`CONTROL`].
+/// The answer: the session's launcher's connector, then its controls'
+/// connector.
 pub const MSG_OPENED: u32 = 2;
 /// The answer to a request refused: the reason, UTF-8.
 pub const MSG_REFUSED: u32 = 3;

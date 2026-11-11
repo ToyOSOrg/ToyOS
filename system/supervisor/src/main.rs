@@ -3469,7 +3469,7 @@ impl Grants<'_> {
     }
 
     /// The directory capabilities `program` is endowed for one start in
-    /// `session`, by namespace name: its row's view (`Program::view`), but
+    /// `session`, by service name: its row's view (`Program::view`), but
     /// that a storage row sees none, since a file server resolving a path of
     /// its own through itself waits for ever.
     fn view(&self, program: &Program, session: Session) -> Vec<(String, Connector)> {
@@ -3503,7 +3503,7 @@ const _: () = assert!(
 );
 
 /// A grant on `acceptor`, `dir`'s role's port, naming `share`, by the
-/// namespace name a program opens it under.
+/// service name a program opens it under.
 fn mint(acceptor: &Acceptor, share: u64, dir: &View) -> (String, Connector) {
     let access = if dir.write { Access::ReadWrite } else { Access::ReadOnly };
     let mut badge = [0u8; MAX_BADGE];

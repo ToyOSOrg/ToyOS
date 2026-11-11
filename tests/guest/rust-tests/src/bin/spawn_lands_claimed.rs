@@ -31,7 +31,7 @@ const NAME: &str = "test_rs_spawn_lands_claimed";
 /// The service the place is given the port back to the test as.
 const BACK: &str = "back";
 
-/// The place to the test: a copy of its own `self`.
+/// The place to the test: a copy of its handle to itself.
 const MSG_SELF: u32 = 1;
 
 const KILLED: End = End::Killed;

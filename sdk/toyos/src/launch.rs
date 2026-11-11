@@ -11,8 +11,8 @@
 //! **The asker's authority is one connector**, and the policy is the manifest.
 //! A launch adds nothing to what the caller could do itself: the stdio handles
 //! and the extra connectors travel from the caller's own table, which is the
-//! same bound `SYS_SPAWN` has. What it *adds* is that the child's namespace is
-//! its own manifest row rather than a narrowing of its parent's.
+//! same bound `SYS_SPAWN` has. What it *adds* is that the child's services are
+//! its own manifest row's rather than a narrowing of its parent's.
 //!
 //! **A launch names the job its program joins**: the caller's own, or one the
 //! caller made with the authority to start an independent job. The supervisor
@@ -20,7 +20,7 @@
 //! its caller holds that authority and says otherwise.
 //!
 //! **A launch names its parent**, by one of two words: a place, which is a
-//! handle to a process carrying `WRITE` — the caller's own `self`, duplicated —
+//! handle to a process carrying `WRITE` — the caller's handle to itself, duplicated —
 //! that the program is spawned under, so the caller's end takes it down; or
 //! detached, under the launcher's owner, the one way for a program to outlive
 //! whoever started it.
@@ -37,8 +37,8 @@ use crate::ipc::{Connection, IpcError};
 use crate::process::Process;
 use crate::OwnedHandle;
 
-/// The label a holder is endowed its launcher under, and the one name in that
-/// namespace. **Never an entry of `svc`**, which std hands every direct spawn:
+/// The label a holder is endowed its launcher under. **Never a service**
+/// (`svc:` or `provide:`), which std hands every direct spawn:
 /// a launcher carries its holder's row and session as a badge, and a program
 /// passes it on only by endowing it ([`crate::endow::launcher`]).
 pub const LAUNCHER: &str = "launcher";
@@ -137,8 +137,8 @@ pub struct Launch<'a, H = OwnedHandle> {
     /// list `/`.
     pub env: &'a [u8],
     pub cwd: &'a str,
-    /// `(name, connector)` the caller transfers into the child's namespace, on
-    /// top of the manifest's. This is how a terminal gives its shell the
+    /// `(name, connector)` the caller transfers to the child as `provide:`
+    /// services, on top of the manifest's. This is how a terminal gives its shell the
     /// `surface` port it made — a name the supervisor cannot know, because there is one
     /// per terminal.
     pub extras: Vec<(&'a str, H)>,

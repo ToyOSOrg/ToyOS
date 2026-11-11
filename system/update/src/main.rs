@@ -8,7 +8,7 @@
 //!
 //! **What it holds is the whole of what it can write** (`slots` in its
 //! `system.toml` row): the slot table's partition and the idle slot's FAT
-//! volume and ROOT, as connectors in its namespace under their labels, each
+//! volume and ROOT, as connectors endowed under their labels, each
 //! minted for its one partition on the block service's port; the
 //! slot this boot runs is never among them (`toyos_update::slots::idle`). What
 //! it writes there, and in what order, is [`install`]'s.

@@ -68,8 +68,8 @@ fn copy(text: &str) {
 
 fn main() {
     // **This terminal's surface is a port it makes, not a name it registers.**
-    // One per instance: the connector goes into the namespace of the shell it
-    // spawns and nowhere else, so nothing outside that subtree can reach this
+    // One per instance: the connector goes to the shell it spawns and
+    // nowhere else, so nothing outside that subtree can reach this
     // terminal's keyboard and nothing inside it can name a service this
     // process was not given. `TOYOS_SURFACE` — an ambient string naming a
     // machine-wide service — is what that replaces.

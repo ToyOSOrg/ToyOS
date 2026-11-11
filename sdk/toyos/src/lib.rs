@@ -1,8 +1,8 @@
 //! ToyOS userland SDK.
 //!
-//! Typed handles, IPC framing, ports and namespaces, shared memory, and
-//! ergonomic wrappers over the kernel ABI defined in `toyos-abi`, and the
-//! [`transport`] client/server sessions run over.
+//! Typed handles, IPC framing, ports and the services a program was given,
+//! shared memory, and ergonomic wrappers over the kernel ABI defined in
+//! `toyos-abi`, and the [`transport`] client/server sessions run over.
 
 // `not(test)` so this crate's own decisions can be unit-tested on the host.
 // [`net::hangup`] is a total function from a kernel word to a [`net::NetError`]

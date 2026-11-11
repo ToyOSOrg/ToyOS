@@ -260,7 +260,7 @@ impl TcpOptions {
 pub struct NetstackConn(Connection);
 
 impl NetstackConn {
-    /// One connection to netstack, through this process's own namespace.
+    /// One connection to netstack, through the connector this process was given.
     ///
     /// **There was a retry loop here and it is gone.** It spun a hundred times
     /// at ten milliseconds waiting for a name to appear in a global registry;
@@ -343,7 +343,7 @@ pub fn adopt_exported(connection: Connection) -> Option<crate::fd::Object> {
 
 /// A netstack that hung up mid-exchange is a netstack that is not there.
 ///
-/// A connector is in the namespace from a program's first instruction, so
+/// A connector is in the table from a program's first instruction, so
 /// connecting to a netstack that has already exited *succeeds*: the
 /// connection queues on a port nobody will accept from, and the hang-up
 /// arrives at the first send or receive instead. The kernel answers a send

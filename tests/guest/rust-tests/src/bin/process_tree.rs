@@ -2,7 +2,7 @@
 //!
 //! **Every end takes the whole subtree.** A starts B; B spawns C, launches D
 //! through the supervisor and asks the supervisor for E; B hands A a handle to each and a copy of
-//! its own `self`. Then B ends — killed by A, and by a CPU fault, one B per
+//! its handle to itself. Then B ends — killed by A, and by a CPU fault, one B per
 //! arm — and the arm asserts, once A's wait on B answers:
 //!
 //! - C and D have ended, as killed;
@@ -61,7 +61,7 @@ const BACK: &str = "back";
 /// The label a chain's link is endowed this program's image under.
 const LINK_IMAGE: &str = "link-image";
 
-/// B to A: the handles to C, D, B's own `self` and E, in that order.
+/// B to A: the handles to C, D, B itself and E, in that order.
 const MSG_GROWN: u32 = 1;
 /// A to B: fault.
 const MSG_FAULT: u32 = 2;

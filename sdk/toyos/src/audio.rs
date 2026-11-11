@@ -344,7 +344,7 @@ impl AudioStream {
         let _ = self.control.signal(MSG_STREAM_CLOSE);
     }
 
-    /// One connection to soundserver, through this process's own namespace.
+    /// One connection to soundserver, through the connector this process was given.
     ///
     /// **There was a retry loop here and it is gone**, along with its twin in
     /// `net`. A `soundserver` connector is live from this process's first
