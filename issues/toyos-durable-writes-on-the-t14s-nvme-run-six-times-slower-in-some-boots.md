@@ -62,7 +62,8 @@ PR #1131's `osbench_disk` boots on the T14 add two readings
 - The drive is not short of host memory. Its HMPRE and HMMIN are 0, and it
   refuses Feature 0Dh as an invalid field, so it uses no Host Memory Buffer.
 
-**What ends the mode: idle under APST, and not idle alone.** `persist`'s
+**The reading, not proved: idle under APST ends the mode, and idle alone
+does not.** `persist`'s
 after-idle row sleeps 10 s before each of eight samples. Of the boots that
 began `persist` in the slow mode, how many ran every durable row after that
 row fast (2026-11-11; evidence `pr-1202` `ab/`, `pr-1131` r10):

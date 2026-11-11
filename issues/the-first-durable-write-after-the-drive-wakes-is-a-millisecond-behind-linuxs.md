@@ -21,9 +21,14 @@ r10):
 On the AMD bench ToyOS's boots lie inside the range of Linux's runs. On the
 T14 they do not, and two of its three boots had a worst sample at 18 ms.
 
-Without APST the same row reads 5.95 ms (T14) and 4.19 ms (AMD): the wake
-itself costs about 8 and 7 ms, which Linux pays too. This record is the
-remainder, not the wake.
+The wake itself Linux pays too, and this record is the remainder, not the
+wake. On the AMD bench the row reads 4.19 ms without APST, so the wake is
+about 7.1 ms. On the T14 the row without APST measures no wake: every boot
+without APST ran in the drive's slow write mode
+(`issues/toyos-durable-writes-on-the-t14s-nvme-run-six-times-slower-in-some-boots.md`).
+Within the fast mode, the boot with APST that ran fast throughout read
+14.20 ms after idle against 1.10 ms back to back, a wake of about 13.1 ms;
+Linux read 13.02 against 0.98 ms, about 12.0 ms.
 
 **What is known of the cause.** Before #1152 the T14's sample was split
 command by command (evidence `pr-1131` r7): the drive's wake, the first

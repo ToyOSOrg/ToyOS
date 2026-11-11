@@ -44,7 +44,7 @@ Ruled out, by measurement:
 
 The two causes, each reproduced on Linux by putting ToyOS's state there:
 
-- **The NVMe without APST** (`issues/diskserver-drives-nvme-apst.md`).
+- **The NVMe without APST**, which ToyOS sets since #1131.
   - With APST off, Linux's idle rises from 1622 to 5127 mW (per-second p50), and its package goes no deeper than PC3.
   - The rise is large when nothing wakes and smaller under a 10 ms sleeper, which is ToyOS's own shape.
   - The link's ASPM, L1 substates and LTR are as firmware left them, the same on both systems.
@@ -58,6 +58,10 @@ r1-r3). These boots ran the benchmark image, which started no display driver
 until #1149, so the display was as the GOP left it.
 - The drive reaches PS4 between I/Os, yet the package stays in PC2 at 6-7 W
   either way, so the display holds it.
+- The drive's own rail is outside the package energy `osbench_energy` reads,
+  so what APST saves at the drive is not measured under ToyOS. It rests on the
+  drive's descriptors, PS4 at most 5 mW, and on ToyOS setting the table Linux
+  sets.
 - Two things remain unexplained, with or without APST:
   - **The baseline.** About 6.3 W at the per-second p25, against Linux
     `nomodeset`'s 2.8 W in the same PC2.
