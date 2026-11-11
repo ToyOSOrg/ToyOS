@@ -41,9 +41,10 @@ use crate::workload::{
     Protocol, Scenario, Script, SurplusShape, WindowShape,
 };
 
-/// How finely a `Run(ns)` op is chopped. Small enough that a 10 ms quantum
-/// expires in the middle of a run — the interesting case — without making
-/// long workloads absurdly many steps.
+/// How finely a `Run(ns)` op is chopped: a timer due inside a chunk fires at
+/// its end, so the model resolves nothing shorter. The fair band's minimum run
+/// and shortest request are 250 µs, so a latency or a nap below a chunk reads
+/// as a whole one here, and a sub-millisecond claim needs a core test.
 pub const RUN_CHUNK_NS: u64 = 1_000_000;
 
 /// How long a targeted IPI may go undelivered. Modelled, not assumed: past

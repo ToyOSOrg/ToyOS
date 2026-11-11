@@ -1055,8 +1055,10 @@ pub fn share_gain(threads: usize, work: u64) -> Scenario {
 /// ns with a short nap between, so its requests follow its bursts down, beside
 /// one hog thread of an equal job that keeps the whole slice; each job does
 /// `work` ns in all. With `rt`, a real-time thread of a third job takes a
-/// sixth of the CPU ahead of both. Each job wants nearly the whole CPU, so
-/// the instant each finishes is the share it was served at.
+/// sixth of the CPU ahead of both. The hog's finish is the split it was
+/// served at; the bursty job's is its work plus the time it was not runnable,
+/// which in this model is a whole run chunk per nap ([`RUN_CHUNK_NS`]), so one
+/// bursty thread is runnable two thirds of the time.
 pub fn request_share(bursty_threads: usize, burst: u64, rt: bool, work: u64) -> Scenario {
     let nap = burst / 20;
     let per_thread = work / bursty_threads as u64;

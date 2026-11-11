@@ -1193,6 +1193,18 @@ impl<X: SchedPayload> RunningTask<X> {
         self.0.ctx_ptr()
     }
 
+    /// A burst that has outrun the request moves the request as a park would,
+    /// so a thread that stops sleeping gets back to the full slice: the new
+    /// request, where it moved.
+    pub(crate) fn outrun_request(&mut self) -> Option<u64> {
+        let task = &mut self.0 .0;
+        let burst = task.acct.cpu_ns - task.woke_cpu_ns;
+        (burst > task.request).then(|| {
+            task.request = next_request(task.request, burst);
+            task.request
+        })
+    }
+
     /// Time consumed since dispatch or since the last charge, folded into the
     /// accounting. The pass charges the run queue with the same number.
     pub(crate) fn charge(&mut self, now: Nanos) -> u64 {

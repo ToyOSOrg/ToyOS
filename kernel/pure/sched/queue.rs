@@ -297,6 +297,16 @@ impl<X: SchedPayload> RunQueue<X> {
         }
     }
 
+    /// The running fair thread asks for `request` from its next request on,
+    /// and its group as its shortest thread then does.
+    pub fn set_running_request(&mut self, request: u64) {
+        if let Some(at) = self.running {
+            let threads = &mut self.group_slots.payload_mut(at.group).threads;
+            threads.set_slice(&mut self.threads, at.thread, request);
+            self.resize(at.group);
+        }
+    }
+
     /// The running task stops running and stays runnable: back to its band,
     /// which may have changed while it ran. A fair thread that `yielded` ends
     /// its own and its group's requests where they stand, so whatever was due

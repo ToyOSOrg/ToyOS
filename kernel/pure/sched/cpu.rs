@@ -1633,6 +1633,9 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             if ns > 0 {
                 cpu.rq.charge_running(ns);
             }
+            if let Some(request) = current.outrun_request() {
+                cpu.rq.set_running_request(request);
+            }
         }
         assert!(!cpu.holding && cpu.held.is_empty(), "the previous pass on cpu{} was never disposed", cpu.id.0);
         // Not standing on any of them now: the pass that took them switched away.
@@ -4374,9 +4377,35 @@ mod tests {
             waits.push(now.since(woke));
         }
         assert!(
-            waits[2..].iter().all(|&wait| wait <= MIN_SLICE_NS),
-            "once its request has followed its bursts, a wake waits at most the minimum run: {waits:?}",
+            waits.iter().all(|&wait| wait <= MIN_SLICE_NS),
+            "every wake, the first owing for its burst included, waits at most the minimum run: {waits:?}",
         );
+        w.abandon();
+    }
+
+    /// **A thread that stops sleeping gets back to the full slice.** Its
+    /// request followed brief bursts down; once it runs on, each request it
+    /// outruns moves it back up as a park would, so within a dozen requests it
+    /// is no longer held to short ones and their timer interrupts.
+    #[test]
+    fn a_thread_that_stops_sleeping_gets_back_to_the_full_slice() {
+        let mut w = World::new(1);
+        let (_, shared) = w.spawn(C0);
+        let mut now = NOW;
+        w.run_a_pass_at(C0, now);
+        for _ in 0..8 {
+            now = now.after(MIN_SLICE_NS);
+            park_at(&mut w, now);
+            wake(&w, C0, &shared);
+            w.run_a_pass_at(C0, now);
+        }
+        let short = w.cpus[0].running().map(|t| t.request_ns()).expect("it runs");
+        assert!(short < 2 * MIN_SLICE_NS, "its bursts brought its request down: {short} ns");
+        for _ in 0..12 {
+            pass_at_decision(&mut w);
+        }
+        let request = w.cpus[0].running().map(|t| t.request_ns()).expect("it runs");
+        assert!(request >= SLICE_NS / 100 * 99, "twelve requests on it is back to the full slice: {request} ns");
         w.abandon();
     }
 

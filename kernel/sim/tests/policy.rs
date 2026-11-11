@@ -346,10 +346,11 @@ fn a_job_per_thread_loses_the_floor() {
 
 /// **A short request buys order, not share.** A job whose threads run in
 /// one-millisecond bursts asks for about a millisecond at a time, against a
-/// hog asking for the whole slice; both want the CPU, so each is owed half of
-/// what the real-time job leaves. The bursty job's work finishes no sooner
-/// than half the fair CPU allows less one request and its chunks, whether it
-/// has one thread or four, and with a real-time job beside it or not.
+/// hog asking for the whole slice; each is owed half of what the real-time
+/// job leaves while both are runnable. The bursty job's work finishes no
+/// sooner than half the fair CPU allows less one request and its chunks,
+/// whether it has one thread or four, and with a real-time job beside it or
+/// not. A shorter request that bought share would finish it sooner.
 #[test]
 fn a_short_request_buys_no_share() {
     let mut table = Vec::new();
@@ -390,9 +391,7 @@ fn a_short_request_buys_no_share() {
 ///
 /// **What it found**, 400 seeds per point: the worst wake is 3 ms at one CPU
 /// and 5 ms at two, and every wake but one per run at one CPU waits 2 ms at
-/// most, the minimum run and the model's two chunks. With every request a
-/// whole slice this sample finds runs at four hogs whose second wake waits out
-/// a whole hog request, which forty seeds did not reach.
+/// most, the minimum run and the model's two chunks.
 ///
 /// So the bound asserted on every wake is one request, and the sharper claim
 /// is asserted at one CPU on the runner-up.
@@ -414,7 +413,7 @@ fn an_interactive_wake_waits_out_at_most_one_request() {
         sweep(&scenario, WAKE_SEEDS, |outcome| {
             let woken = outcome.wait(sleeper, ReadyCause::Woken);
             // Per *run*, because the claim is "every wake but one in a run" and
-            // the union's second-largest across forty runs would be about all of
+            // the union's second-largest across all the runs would be about all of
             // them together — see `Latency::merge`.
             worst_runner_up = worst_runner_up.max(woken.runner_up_ns());
             merged.merge(woken);
