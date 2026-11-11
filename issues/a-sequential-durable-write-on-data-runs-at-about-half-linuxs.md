@@ -36,14 +36,38 @@ of 64 KiB between four Flushes. Each extent is a transaction of its own,
 about 1.5 KiB of journal.
 
 **#1216** sends a reserved write's bytes as one device write for each
-stretch of contiguous sectors, its requests all in flight together: four
-writes of 2 MiB a round, sixteen requests of 128 KiB each. The pointers and
-the commit are as they were.
+stretch of contiguous sectors, its requests all in flight together, and
+points up to eight fresh extents of one bucket in a transaction, as a
+truncation removes up to eight. On the model a round is four writes of
+2 MiB, sixteen requests of 128 KiB each, and its commit one journal entry
+between two Flushes.
 
-**Not yet established.** Where the round's time goes on the benches: the
-share of the device round trips, the three entries' four Flushes, the 128
-transactions, and the copies of the bytes (three on the way into the file's
-pages, four on the way out since #1216). No bench has run #1216.
+**Where a round's time went on main, on the benches** (2026-11-11, main
+ad5db5a65 with stage timers, two boots a bench; a round is about 31 ms on
+the AMD against Linux's 16):
+
+- AMD: the create that truncates the last round's file 4.1 ms (Linux
+  2.4); the eight writes into the file's pages 4.5 ms (Linux 5.5); the
+  fsync 22.8 ms (Linux 8.0). Of the fsync: the 128 device round trips 9.4
+  ms, of which the drive answered in 6.1; the extents' transactions,
+  checksums and buffers 6.1 ms; the commit 5.1 ms, 4.5 of it five Flushes;
+  reading the pages out 0.9 ms.
+- T14, every boot in its drive's slow mode: the fsync 35 to 47 ms, of
+  which the round trips 15 ms and the commit 12 to 23 ms, five Flushes
+  of 2.3 to 3 ms and more. Linux's fsync on the same drive read 11.5 ms
+  in the fast mode and 25 to 27 ms in the slow one.
+- Linux sends the round as 66 writes of at most 128 KiB, the queue's
+  limit on both drives, and one Flush.
+
+With the device writes at depth alone (#1216's first commit) the AMD's
+fsync fell to 19.5 ms and the T14's did not move: there the Flush after
+the burst took what the round trips had, 5.6 to 6.6 ms against 3.3. The
+bytes reach the drive faster than its slow mode writes them.
+
+**Not yet established.** What the bench reads with the transactions
+grouped. About 4 ms of the AMD's fsync at depth that the driver's times do
+not account for; the copies of 2 MiB at a time are suspected and not
+measured. No T14 boot of this work has run in the drive's fast mode.
 
 **Exit.** `persist.seq_write_fsync` and `fs.disk.seq_write.1048576` at or
 above Linux's on both benches, in every boot of a back-to-back session, or

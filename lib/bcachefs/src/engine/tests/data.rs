@@ -869,3 +869,35 @@ fn a_reserved_write_of_several_extents_survives_torn_reordered_writes() {
     block_on_ready(m.unmount()).unwrap();
     assert!(requests.get() > 4);
 }
+
+/// Extents pointed and removed together stay inside one transaction's
+/// journal bound and node footprint with room to spare, on a plain and on
+/// an encrypted volume, whose extent values are the larger: a streaming
+/// write of buckets full of 64 KiB extents, then its truncation.
+#[test]
+fn extents_pointed_and_removed_together_stay_within_a_transaction() {
+    use super::buckets::Sparse;
+    for encryption in [None, Some(Encryption { passphrase: b"test", kdf: MIN_KDF })] {
+        let encrypted = encryption.is_some();
+        let dev = Sparse::new(4 << 30);
+        block_on_ready(mkfs(&dev, &Options { label: b"data", time: NOW as u64, encryption }, &Tree::new(), &mut Seeded(7))).unwrap();
+        let m = if encrypted { block_on_ready(Mount::unlock(&dev, b"test", LIMITS, MEMORY, random())).unwrap() } else { block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap() };
+        let data: Vec<u8> = (0..5 << 20).map(|i| (i * 7) as u8).collect();
+        let ino = block_on_ready(m.create(m.root(), b"f", New::File, OWNER, NOW)).unwrap().ino;
+        let mut token = block_on_ready(m.reserve(ino, 0, data.len())).unwrap();
+        m.test_largest_transaction();
+        assert_eq!(block_on_ready(m.write_reserved(&mut token, 0, &data, NOW)).unwrap(), data.len());
+        let pointed = m.test_largest_transaction();
+        block_on_ready(m.truncate(ino, 0, NOW)).unwrap();
+        let removed = m.test_largest_transaction();
+        eprintln!("encrypted {encrypted}: pointed {pointed:?}, removed {removed:?}");
+        for [u64s, nodes] in [pointed, removed] {
+            assert!(u64s * 4 <= super::super::mount::K_TX * 3, "a transaction of {u64s} u64s leaves under a quarter of its bound");
+            assert!(nodes as usize * 2 <= super::super::mount::FOOTPRINT, "a transaction of {nodes} nodes leaves under half its footprint");
+        }
+        block_on_ready(m.unmount()).unwrap();
+        let v = if encrypted { block_on_ready(Volume::unlock(&dev, b"test", LIMITS)).unwrap() } else { block_on_ready(Volume::open(&dev)).unwrap() };
+        assert_eq!(read_all(&v, ino).unwrap(), []);
+        assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+    }
+}

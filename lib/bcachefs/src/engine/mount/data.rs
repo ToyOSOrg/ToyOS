@@ -3,7 +3,7 @@
 //!
 //! A reserved write's sectors are known before it starts, so its bytes go to
 //! the device first, each stretch of contiguous sectors as one write, and its
-//! extents' pointers follow, a transaction each.
+//! extents' pointers follow, up to [`POINTED`] fresh ones a transaction.
 
 use super::super::crypt::Nonce;
 use super::super::value::{csum_type, Extent};
@@ -34,7 +34,14 @@ struct Piece {
     sector: u64,
     version: Version,
     seal: Seal,
+    /// It replaces no old extent.
+    fresh: bool,
 }
+
+/// The most extents of a reserved write one transaction points at: fresh
+/// ones in one bucket, whose keys beyond the first's are an extent and a
+/// backpointer each, in at most a node of each tree more.
+const POINTED: usize = 8;
 
 /// Contiguous sectors for consecutive blocks of a file, each written once.
 struct Run {
@@ -299,13 +306,13 @@ impl<D: BlockDev> Mount<D> {
             }
             let version = self.data_version().await?;
             let input = &data[planned..(end - offset) as usize];
-            let (first, end, _) = self.span(ino, at, input.len()).await?;
+            let (first, end, old) = self.span(ino, at, input.len()).await?;
             let n = (input.len() as u64).min(end - at) as usize;
             let blocks = buf.len()..buf.len() + (end - first) as usize / BLOCK;
             buf.resize(blocks.end, [0; BLOCK]);
             self.fill(ino, first, end, at, &input[..n], buf[blocks.clone()].as_flattened_mut()).await?;
             let seal = self.seal(&mut buf[blocks.clone()], version)?;
-            pieces.push(Piece { at, n, first, end, blocks, sector, version, seal });
+            pieces.push(Piece { at, n, first, end, blocks, sector, version, seal, fresh: old.is_empty() });
             planned += n;
         }
         let mut next = 0;
@@ -324,15 +331,21 @@ impl<D: BlockDev> Mount<D> {
         }
         drop(buf);
         let mut done = 0;
-        for piece in &pieces {
+        let mut rest = &pieces[..];
+        while let Some(head) = rest.first() {
+            let together = |p: &Piece| p.fresh && head.fresh && p.sector / bucket == head.sector / bucket;
+            let (group, after) = rest.split_at(rest.iter().take(POINTED).take_while(|p| together(p)).count().max(1));
+            rest = after;
             let pointed = self
                 .transact(K_TX, FOOTPRINT, Draw::Reserved(reservation.id), async |txn: &mut Txn| {
                     let mut inode = self.inode_in(txn, ino).await?;
                     regular(&inode)?;
-                    let (first, end, old) = self.span(ino, piece.at, piece.n).await?;
-                    assert_eq!((first, end), (piece.first, piece.end), "a file's extents changed under its reserved write");
-                    self.point_extent(txn, ino, &mut inode, first..end, old, piece.version, piece.sector, piece.seal).await?;
-                    inode.size = inode.size.max(piece.at + piece.n as u64);
+                    for piece in group {
+                        let (first, end, old) = self.span(ino, piece.at, piece.n).await?;
+                        assert_eq!((first, end), (piece.first, piece.end), "a file's extents changed under its reserved write");
+                        self.point_extent(txn, ino, &mut inode, first..end, old, piece.version, piece.sector, piece.seal).await?;
+                        inode.size = inode.size.max(piece.at + piece.n as u64);
+                    }
                     self.touch(&mut inode, now);
                     self.set_inode(txn, ino, &inode).await
                 })
@@ -345,15 +358,17 @@ impl<D: BlockDev> Mount<D> {
             let mut pool = self.reservations.borrow_mut();
             let mut st = self.st.borrow_mut();
             let reserved = pool.active.get_mut(&reservation.id).expect("a reservation being written");
-            let run = reserved.runs.iter_mut().find(|r| (r.first..r.first + u64::from(r.blocks) * block).contains(&piece.at)).expect("the run just written");
-            for b in ((piece.at - run.first) / block) as u32..((piece.at + piece.n as u64 - run.first).div_ceil(block)) as u32 {
-                run.written |= 1 << b;
-                st.alloc.unpin(run.sector / bucket);
+            for piece in group {
+                let run = reserved.runs.iter_mut().find(|r| (r.first..r.first + u64::from(r.blocks) * block).contains(&piece.at)).expect("the run just written");
+                for b in ((piece.at - run.first) / block) as u32..((piece.at + piece.n as u64 - run.first).div_ceil(block)) as u32 {
+                    run.written |= 1 << b;
+                    st.alloc.unpin(run.sector / bucket);
+                }
+                done += piece.n;
             }
             if reserved.unwritten() == 0 {
                 pool.active.remove(&reservation.id);
             }
-            done += piece.n;
         }
         Ok(done)
     }
@@ -480,6 +495,13 @@ impl<D: BlockDev> Mount<D> {
         assert!(st.btree_nodes <= st.alloc.occupied_metadata(st.metadata_buckets));
         assert_eq!(st.sparse_metadata, metadata.sparse);
         assert_eq!(st.sparse_data, metadata.sparse_data);
+    }
+
+    /// The largest transaction applied since the last ask: its journal u64s
+    /// and the nodes it changed.
+    #[cfg(test)]
+    pub(crate) fn test_largest_transaction(&self) -> [u64; 2] {
+        core::mem::take(&mut self.st.borrow_mut().largest)
     }
 
     #[cfg(test)]
@@ -843,18 +865,21 @@ impl<D: BlockDev> Mount<D> {
             .await?;
         }
         loop {
-            let Some((key, value)) = self.extent_after(ino, end).await? else {
+            let gone = self.extents_past(ino, end).await?;
+            let Some((key, value)) = gone.first() else {
                 return Ok(());
             };
-            let first = start(&key)?;
+            let first = start(key)?;
             self.transact(K_TX, FOOTPRINT, Draw::Freeing, async |txn: &mut Txn| {
                 let mut inode = self.inode_in(txn, ino).await?;
                 let mut buckets = BTreeMap::new();
-                self.data_counted(txn, &mut buckets, &key, &value, false).await?;
-                self.set(txn, Btree::Extents, key.pos, None).await?;
-                inode.sectors = inode.sectors.checked_sub(allocated_sectors(&key)).ok_or(Error::Corrupt("inode sectors below its extents"))?;
+                for (key, value) in &gone {
+                    self.data_counted(txn, &mut buckets, key, value, false).await?;
+                    self.set(txn, Btree::Extents, key.pos, None).await?;
+                    inode.sectors = inode.sectors.checked_sub(allocated_sectors(key)).ok_or(Error::Corrupt("inode sectors below its extents"))?;
+                }
                 if first < end {
-                    let (k, v) = slice(&key, &value, first, end)?;
+                    let (k, v) = slice(key, value, first, end)?;
                     self.data_counted(txn, &mut buckets, &k, &v, true).await?;
                     inode.sectors += allocated_sectors(&k);
                     self.set(txn, Btree::Extents, k.pos, Some((k, v))).await?;
@@ -864,6 +889,33 @@ impl<D: BlockDev> Mount<D> {
             })
             .await?;
         }
+    }
+
+    /// The first live extent of `ino` reaching past `end`, and with it, where
+    /// it lies whole past `end`, those that follow it in its bucket, up to
+    /// [`POINTED`]: what one transaction removes.
+    async fn extents_past(&self, ino: u64, end: u64) -> Result<Vec<(Key, Vec<u8>)>> {
+        let bucket = u64::from(self.sb.member.bucket_sectors);
+        let within = |v: &[u8]| checked_extent(v).map(|extent| extent.ptr.sector / bucket);
+        let mut found: Vec<(Key, Vec<u8>)> = Vec::new();
+        Source::walk(self, Btree::Extents, Bpos::new(ino, end / SECTOR as u64 + 1, 0), |k, v| {
+            if k.pos.inode != ino {
+                return Ok(false);
+            }
+            if k.pos.snapshot != ROOT_SNAPSHOT {
+                return Ok(true);
+            }
+            let joins = match found.first() {
+                None => true,
+                Some((head, value)) => head.kind == kind::EXTENT && k.kind == kind::EXTENT && start(head)? >= end && within(value)? == within(v)?,
+            };
+            if joins {
+                found.push((*k, v.to_vec()));
+            }
+            Ok(joins && found.len() < POINTED)
+        })
+        .await?;
+        Ok(found)
     }
 
     pub(super) async fn resume_truncates(&self) -> Result<()> {

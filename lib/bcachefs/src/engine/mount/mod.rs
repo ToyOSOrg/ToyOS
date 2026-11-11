@@ -165,6 +165,9 @@ struct State {
     waits: [usize; 2],
     #[cfg(test)]
     journal_bytes: [usize; 3],
+    /// The largest transaction applied: its journal u64s and its nodes.
+    #[cfg(test)]
+    largest: [u64; 2],
     #[cfg(test)]
     published: Published,
     /// Bytes of keys past which a terminal publication splits a new node,
@@ -502,6 +505,8 @@ impl<D: BlockDev> Mount<D> {
             waits: [0; 2],
             #[cfg(test)]
             journal_bytes: [0; 3],
+            #[cfg(test)]
+            largest: [0; 2],
             #[cfg(test)]
             published: Published::default(),
             #[cfg(test)]
@@ -1333,6 +1338,10 @@ impl<D: BlockDev> Mount<D> {
         let emptied: Vec<u64> = txn.emptied.iter().map(|&(b, _)| b).collect();
         let size = (records(&stamped(&txn, 0), 0, 0).0.len() / 8) as u64;
         assert!(size <= bound, "a transaction of {size} u64s past its bound of {bound}");
+        #[cfg(test)]
+        {
+            st.largest = [st.largest[0].max(size), st.largest[1].max(txn.dirtied.len() as u64)];
+        }
         if !st.journal.fits(size) {
             if st.journal.open.is_some() {
                 self.close(st, false);
