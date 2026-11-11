@@ -31,10 +31,10 @@
 [2026-11-11 07:37:51  4.353 cpu0 kernel] SMP: AP cpu15 lapic=15 online
 [2026-11-11 07:37:51  4.357 cpu0 kernel] paging: 9835 kernel leaves, none writable and executable, none executable outside the text 0xffff8000b0444000..0xffff8000b058e000, none writable over the RELRO 0xffff8000b058e000..0xffff8000b05a3000
 [2026-11-11 07:37:51  4.357 cpu0 kernel] Boot: complete (241ms)
-[2026-11-11 07:37:51  4.365 cpu0 kernel] spawn: /system/bin/logkeeper pid=3 (total=0ms)
-[2026-11-11 07:37:51  4.365 supervisor] supervisor: started logkeeper
+[2026-11-11 07:37:51  4.365 cpu0 kernel] spawn: pid=3 (total=0ms) /system/bin/logkeeper
+[2026-11-11 07:37:51  4.365 supervisor] supervisor: started logkeeper pid=3
 [2026-11-11 07:38:05 18.403 test-runner] ===TEST_START test_rs_pci_reclaim===
-[2026-11-11 07:38:05 18.404 cpu9 kernel] spawn: /system/bin/test_rs_pci_reclaim pid=156 (total=0ms)
+[2026-11-11 07:38:05 18.404 cpu9 kernel] spawn: pid=156 (total=0ms) /system/bin/test_rs_pci_reclaim
 [2026-11-11 07:38:05 18.404 test-runner pid=156] pci_reclaim: claim 1 of 8086:15fc was refused: NotFound
 [2026-11-11 07:38:05 18.404 cpu4 kernel] exit: test_rs_pci_reclaim pid=156 code=1 cpu=0ms peak=0MB allocs=10 frees=1 syscalls=14 syscall_wall=0ms 6=1 14=1 50=1 51=1 63=2 73=2 99=2 106=1 121=2 171=1
 [2026-11-11 07:38:05 18.404 test-runner] ===TEST_END test_rs_pci_reclaim exit=1===

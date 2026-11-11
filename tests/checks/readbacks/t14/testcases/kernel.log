@@ -16,10 +16,10 @@
 [2026-11-11 04:48:09 10.472 cpu0 kernel] SMP: AP cpu7 lapic=7 online
 [2026-11-11 04:48:09 10.476 cpu0 kernel] paging: 9974 kernel leaves, none writable and executable, none executable outside the text 0xffff80005d644000..0xffff80005d78e000, none writable over the RELRO 0xffff80005d78e000..0xffff80005d7a3000
 [2026-11-11 04:48:09 10.476 cpu0 kernel] Boot: complete (135ms)
-[2026-11-11 04:48:09 10.486 cpu0 kernel] spawn: /system/bin/logkeeper pid=3 (total=0ms)
-[2026-11-11 04:48:09 10.486 supervisor] supervisor: started logkeeper
+[2026-11-11 04:48:09 10.486 cpu0 kernel] spawn: pid=3 (total=0ms) /system/bin/logkeeper
+[2026-11-11 04:48:09 10.486 supervisor] supervisor: started logkeeper pid=3
 [2026-11-11 04:48:23 24.540 test-runner] ===TEST_START test_rs_pci_reclaim===
-[2026-11-11 04:48:23 24.541 cpu6 kernel] spawn: /system/bin/test_rs_pci_reclaim pid=115 (total=0ms)
+[2026-11-11 04:48:23 24.541 cpu6 kernel] spawn: pid=115 (total=0ms) /system/bin/test_rs_pci_reclaim
 [2026-11-11 04:48:23 24.541 cpu1 kernel] iommu: domain4 root=0x1a37000 aw=48 mgaw=39 addresses in 3 ranges from 0x200000 to 0x100000000
 [2026-11-11 04:48:23 24.541 cpu1 kernel] iommu: irte3 source=00:1f.6 p=1 sid=0x00fe svt=1 sq=0 vector=0x42 apic=0x0 dst=0x0 trigger=edge
 [2026-11-11 04:48:23 24.541 cpu1 kernel] PCI 00:1f.6: msi address=0xfee00078 data=0x00000000

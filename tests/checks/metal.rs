@@ -848,7 +848,9 @@ pub fn a_judge_names_the_bench_it_judged() {
 }
 
 /// **Each bench's own readback, as its loop wrote it** (its `testcases` boot
-/// of 2026-11-11, cut to the lines read here, its machine masked): it names
+/// of 2026-11-11, cut to the lines read here, its machine masked, its spawn
+/// records and the supervisor's line in the form the kernel and the
+/// supervisor now write them): it names
 /// its bench, the real rows are taken for that bench and judged on it, and
 /// the job that claims the T14's I219, which that boot of the AMD bench still
 /// carried and which exited 1 there, is no row of the AMD bench's.
