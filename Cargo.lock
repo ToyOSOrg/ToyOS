@@ -251,6 +251,7 @@ dependencies = [
  "toyos-abi",
  "toyos-acpi",
  "toyos-bootmap",
+ "toyos-bootnames",
  "toyos-devicepath",
  "toyos-gpt",
  "toyos-kimage",
@@ -1556,7 +1557,6 @@ dependencies = [
  "toyos-acpi",
  "toyos-amdvi",
  "toyos-bootmap",
- "toyos-devicepath",
  "toyos-gicv3",
  "toyos-its",
  "toyos-kimage",
@@ -3245,6 +3245,7 @@ dependencies = [
  "toyos-abi",
  "toyos-blockdev",
  "toyos-blockring",
+ "toyos-bootnames",
  "toyos-gpt",
  "toyos-logstream",
  "toyos-manifest",
@@ -3614,6 +3615,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-bootnames"
+version = "0.1.0"
+dependencies = [
+ "toyos-devicepath",
+]
+
+[[package]]
 name = "toyos-build"
 version = "0.1.0"
 dependencies = [
@@ -3812,7 +3820,6 @@ name = "toyos-inspect"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
- "toyos-gpt",
 ]
 
 [[package]]
@@ -4086,6 +4093,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-blockring",
+ "toyos-bootnames",
  "toyos-devicepath",
  "toyos-gpt",
  "toyos-logstream",

@@ -71,10 +71,8 @@ const MAX_DRIVERS: usize = 16;
 const DRIVER: &str = "--driver";
 const UNDRIVEN: &str = "--undriven";
 /// Argv: a partition the running system is on, by unique GUID, which no
-/// designation changes; or that which they are is unknown, and every
-/// partition is taken for one.
+/// designation changes.
 const ACTIVE: &str = "--active";
-const ACTIVE_UNKNOWN: &str = "--active-unknown";
 
 const TOKEN_ACCEPT: u64 = 0;
 const TOKEN_DRIVERS: u64 = 1;
@@ -110,9 +108,8 @@ struct Known {
     undriven: Vec<String>,
     fates: BTreeMap<DriverBadge, Fate>,
     offered: Vec<Offered>,
-    /// The partitions the running system is on, or `None` where the
-    /// supervisor could not say.
-    active: Option<Vec<[u8; 16]>>,
+    /// The partitions the running system is on.
+    active: Vec<[u8; 16]>,
 }
 
 impl Known {
@@ -239,7 +236,7 @@ impl Known {
         let unique = one.part.unique;
         let carrying = self.offered.iter().filter(|o| o.part.unique == unique).count();
         Some(match (carrying, one.part.blocks) {
-            (1, Some(_)) => Ok((**one, self.active.as_ref().is_none_or(|a| a.contains(&unique)))),
+            (1, Some(_)) => Ok((**one, self.active.contains(&unique))),
             _ => Err(Refusal::Unusable),
         })
     }
@@ -294,22 +291,13 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut known = Known::default();
     let mut at = 1;
-    known.active = Some(Vec::new());
     while at < args.len() {
-        if args[at] == ACTIVE_UNKNOWN {
-            println!("diskserver: which partitions the running system is on is unknown; every designation is refused");
-            known.active = None;
-            at += 1;
-            continue;
-        }
         let value = args.get(at + 1).unwrap_or_else(|| panic!("diskserver: {} takes a value", args[at]));
         match args[at].as_str() {
             DRIVER => known.expected.push(value.parse().unwrap_or_else(|_| panic!("diskserver: {DRIVER} {value}"))),
             ACTIVE => {
                 let guid = toyos_gpt::Guid::parse(value).unwrap_or_else(|| panic!("diskserver: {ACTIVE} {value}"));
-                if let Some(active) = &mut known.active {
-                    active.push(guid.0);
-                }
+                known.active.push(guid.0);
             }
             UNDRIVEN => {
                 println!("diskserver: {value} is on this machine and no driver of it started; what it carries is refused");
@@ -888,7 +876,7 @@ mod tests {
     #[test]
     fn only_its_own_badge_describes_or_designates() {
         let mut known = two_disks();
-        known.active = Some(vec![LOG]);
+        known.active = vec![LOG];
         assert_eq!(known.describe(1, Some(Badge::Tables), false), Some(Ok(1)));
         assert_eq!(known.describe(7, Some(Badge::Tables), false), Some(Err(Refusal::NotFound)));
         for other in [None, data().map(Badge::Partitions), Some(Badge::DesignateData)] {
@@ -903,13 +891,10 @@ mod tests {
         assert_eq!(known.listing(designate, false), Some(Err(Refusal::NotGranted)), "a designation lists nothing");
         assert_eq!(known.listing(Some(Badge::Tables), false).map(|r| r.map(|l| l.len())), Some(Ok(4)));
 
-        known.active = Some(vec![DATA]);
+        known.active = vec![DATA];
         assert_eq!(known.designation(designate, false), Some(Ok((data_disk, true))), "the running system's DATA");
-        known.active = None;
-        assert_eq!(known.designation(designate, false), Some(Ok((data_disk, true))), "nothing known is active");
 
         let mut cloned = two_disks();
-        cloned.active = Some(Vec::new());
         cloned.offered.push(Offered { disk: 0, part: part([7; 16], LOG_KIND) });
         cloned.offered[0].part.unique = DATA;
         assert_eq!(cloned.designation(designate, false), Some(Err(Refusal::Unusable)), "its GUID on two disks");

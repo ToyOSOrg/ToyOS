@@ -6,8 +6,8 @@
 //! `/VVVV:DDDD`, then `@BB:DD.F` or `@boot`, lowercase hex, where `PP` may be
 //! `*` for every programming interface of the subclass. A place tells apart two
 //! functions of one card, as two controllers on one bridge are; `@boot` is the
-//! controller of the device firmware loaded the loader from, wherever that is
-//! ([`toyos_abi::boot::BootSources::loader`]). **Every matcher carries its class**, so whether two entries
+//! controller of the device firmware loaded the loader from, wherever that is.
+//! **Every matcher carries its class**, so whether two entries
 //! can name one function is decided from their text alone ([`Entry::overlaps`]),
 //! and a claim names the function a matcher found by its arrival.
 

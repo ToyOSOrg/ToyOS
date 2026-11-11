@@ -12,6 +12,8 @@ toyos-manifest = { path = "../../lib/manifest" }
 # Its lifecycle decisions: what an end owes, which claims a start mints, and
 # which functions a `drives` row has a process on.
 toyos-supervisor = { path = "lifecycle" }
+# The loader's record of where this boot came from, read once at start.
+toyos-bootnames = { path = "../../lib/bootnames" }
 toyos-osrelease = { path = "../../sdk/osrelease" }
 toyos-wallclock = { path = "../../lib/wallclock" }
 toyos-logstream = { path = "../../lib/logstream" }

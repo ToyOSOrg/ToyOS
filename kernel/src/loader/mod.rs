@@ -294,8 +294,8 @@ pub fn spawn<C: Commit>(
 const SUPERVISOR: &str = "supervisor";
 
 /// Start the supervisor from its boot image as the build laid it out, holding the machine's one
-/// full-rights `SysCap` and the file server's image and ROOT's
-/// (`toyos_abi::syscall::FILESERVER_IMAGE_LABEL`, `ROOT_IMAGE_LABEL`).
+/// full-rights `SysCap`, the file server's image, ROOT's and the loader's boot names
+/// (`toyos_abi::syscall::FILESERVER_IMAGE_LABEL`, `ROOT_IMAGE_LABEL`, `BOOT_NAMES_LABEL`).
 ///
 /// Nothing else can construct one: what the supervisor endows is the entire set of
 /// processes that can ever claim a device, enter the RT band, or power off.
@@ -341,12 +341,13 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects, laid: &toyos_kimage::
     for (label, object) in [
         (toyos_abi::syscall::FILESERVER_IMAGE_LABEL, &images.fileserver),
         (toyos_abi::syscall::ROOT_IMAGE_LABEL, &images.root),
+        (toyos_abi::syscall::BOOT_NAMES_LABEL, &images.names),
     ] {
         let object = KObjectRef::SharedMem(Arc::clone(object));
         let rights = ops::initial_rights(&object);
         let handle = handles
             .install(crate::object::HandleEntry::new(object, rights))
-            .expect("spawn_supervisor: a table of three handles refused a boot image");
+            .expect("spawn_supervisor: a table of four handles refused a boot image");
         entries.push(toyos_abi::syscall::EndowEntry {
             label_off: labels.len() as u32,
             label_len: label.len() as u32,

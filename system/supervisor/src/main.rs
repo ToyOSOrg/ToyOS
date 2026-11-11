@@ -144,10 +144,10 @@ use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
     Registration, Tag, Unanswered, ALIVE, CONSOLE_INPUT, FLUSH, MARK, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
 };
-use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
+use toyos_abi::inventory::{Arrival, Pci, PciAddr};
 use toyos_abi::syscall::{
     DeviceRequest, FileType, SyscallError, DEV_PREFIX, FILESERVER_IMAGE_LABEL, JOB_LABEL, MAX_BADGE, PROVIDE_PREFIX,
-    ROOT_IMAGE_LABEL, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL,
+    BOOT_NAMES_LABEL, ROOT_IMAGE_LABEL, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL,
 };
 
 /// netstack's port, whose every connector the supervisor mints for one row and
@@ -519,12 +519,11 @@ fn main() {
     let mut log = Log::open();
 
     let boot: &'static Boot = Box::leak(Box::new(Boot::take()));
-    let sources = syscap.boot_sources().expect("supervisor: the kernel answers the system capability its boot sources");
-    let booted = toyos_supervisor::boot::read(&sources);
+    let booted = toyos_supervisor::boot::read(&boot.names);
     for line in &booted.lines {
         say!("{line}");
     }
-    BOOT_CONTROLLER.set(booted.controller).expect("supervisor: the boot sources are read once");
+    BOOT_CONTROLLER.set(booted.controller).expect("supervisor: the boot names are read once");
 
     // **Everything the supervisor's own files and the SYSTEM server need is
     // made before a file is read**, since the manifest is a file of `/system`
@@ -949,7 +948,7 @@ impl<'a> Service<'a> {
         boot: &Boot,
         log: &mut Log,
     ) -> Result<u32, StartError> {
-        let mut storage = storage_endowment(self.role, syscap, grants, boot)?;
+        let mut storage = storage_endowment(self.role, grants, boot)?;
         if is_block(self.program) {
             storage.args.extend(block);
         }
@@ -1344,20 +1343,9 @@ impl<'a> Supervisor<'a> {
         for undriven in &self.undriven {
             args.extend(["--undriven".to_string(), undriven.clone()]);
         }
-        match inventory(self.syscap) {
-            Ok(records) => {
-                let named = records.iter().filter_map(|r| match r {
-                    Record::Loaded(l) => Some(l.unique_guid),
-                    _ => None,
-                });
-                for guid in named {
-                    args.extend(["--active".to_string(), guid_text(guid)]);
-                }
-            }
-            Err(why) => {
-                say!("supervisor: the inventory was not read ({why}), so the block service designates nothing");
-                args.push("--active-unknown".to_string());
-            }
+        let names = &self.boot.names;
+        for guid in [names.root, names.slot, names.log].into_iter().chain(names.boot) {
+            args.extend(["--active".to_string(), guid_text(guid)]);
         }
         args
     }
@@ -1569,11 +1557,8 @@ impl<'a> Supervisor<'a> {
     /// `toyos_update::slots::grant` admits them, through connectors to the
     /// block service minted for each.
     fn slot_grant(&mut self) -> Result<Extra, String> {
-        use toyos_abi::inventory::Role;
         use toyos_update::slots::{BOOT_LABEL, ROOT_LABEL, TABLE_LABEL};
-        let records = inventory(self.syscap)?;
-        let running = loaded(&records, Role::Root).ok_or("the loader named no ROOT")?;
-        let volume = loaded(&records, Role::Slot).ok_or("the loader named no slot volume")?;
+        let (running, volume) = (self.boot.names.root, self.boot.names.slot);
         let mint = |grants: &Grants<'_>, grant: BlockGrant| {
             grants
                 .partitions(grant)?
@@ -3674,14 +3659,7 @@ struct Extra {
 static BOOT_CONTROLLER: std::sync::OnceLock<Option<PciAddr>> = std::sync::OnceLock::new();
 
 fn boot_controller() -> Option<PciAddr> {
-    *BOOT_CONTROLLER.get().expect("supervisor: the boot sources are read before any start")
-}
-
-/// Every record the kernel's inventory answers.
-fn inventory(syscap: &SysCap) -> Result<Vec<toyos_abi::inventory::Record>, String> {
-    syscap
-        .records(|n| vec![toyos_abi::inventory::RawRecord::EMPTY; n])
-        .map_err(|why| why.to_string())
+    *BOOT_CONTROLLER.get().expect("supervisor: the boot names are read before any start")
 }
 
 /// Every PCI function in the kernel's device set, read through a handle of
@@ -3700,14 +3678,6 @@ fn claim(syscap: &SysCap, request: DeviceRequest) -> Result<toyos::Device, Sysca
     }
 }
 
-/// The unique GUID the loader named for `role`.
-fn loaded(records: &[toyos_abi::inventory::Record], role: toyos_abi::inventory::Role) -> Option<[u8; 16]> {
-    records.iter().find_map(|r| match r {
-        toyos_abi::inventory::Record::Loaded(l) if l.role == role => Some(l.unique_guid),
-        _ => None,
-    })
-}
-
 fn guid_text(guid: [u8; 16]) -> String {
     toyos_gpt::Guid(guid).to_string()
 }
@@ -3716,10 +3686,10 @@ fn guid_text(guid: [u8; 16]) -> String {
 ///
 /// A file server is told its role. SYSTEM is handed ROOT's image; MEMORY
 /// needs no block grant, and disk roles receive `block` minted with their grant (`toyos_supervisor::storage`), and LOG
-/// and BOOT the GUID of the partition the loader named. A log or boot role the
+/// and BOOT the GUID of the partition the loader named. A boot role the
 /// loader named no partition for, and a block port closed for good, each
 /// refuse the start: the role is then absent, never served from memory.
-fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>, boot: &Boot) -> Result<Extra, StartError> {
+fn storage_endowment(role: Option<&str>, grants: &Grants<'_>, boot: &Boot) -> Result<Extra, StartError> {
     let mut storage = Extra::default();
     let Some(role) = role else {
         return Ok(storage);
@@ -3732,8 +3702,7 @@ fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>, b
         storage.root = Some(root);
         return Ok(storage);
     }
-    let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
-    let served = toyos_supervisor::storage::grant(role, |which| loaded(&records, which)).map_err(StartError::Refused)?;
+    let served = toyos_supervisor::storage::grant(role, boot.names.log, boot.names.boot).map_err(StartError::Refused)?;
     if let Scope::Unique(guid) = served.scope {
         storage.args.push(guid_text(guid));
     }
@@ -3815,28 +3784,40 @@ fn say_last_words_on_panic(syscap: &'static SysCap) {
     }));
 }
 
-/// The images the kernel hands the supervisor beside the system capability:
-/// the file server's executable and ROOT's bytes, which nobody writes
-/// (`toyos_abi::boot::BootImage`). Kept for the machine's life, since SYSTEM
-/// is started again from them.
-///
-/// Handles and not mappings: the supervisor reads neither, it hands them on.
+/// The images the kernel hands the supervisor beside the system capability,
+/// which nobody writes (`toyos_abi::boot::BootImage`): the file server's
+/// executable and ROOT's bytes, kept for the machine's life since SYSTEM is
+/// started again from them, and what the loader named of where this boot came
+/// from.
 struct Boot {
+    /// Handles and not mappings: the supervisor reads neither, it hands them on.
     fileserver: toyos::OwnedHandle,
     root: toyos::OwnedHandle,
+    names: toyos_bootnames::Names<'static>,
 }
 
 impl Boot {
+    /// # Panics
+    /// Where the loader's record is not one this supervisor reads: the two
+    /// are not one build's, and no partition it names can be trusted.
     fn take() -> Self {
-        let image = |label: &str| {
-            let handle: toyos::OwnedHandle = Endowments::get()
+        let handle = |label: &str| -> toyos::OwnedHandle {
+            Endowments::get()
                 .take(label)
-                .unwrap_or_else(|| panic!("supervisor: the kernel spawns this program holding `{label}`"));
+                .unwrap_or_else(|| panic!("supervisor: the kernel spawns this program holding `{label}`"))
+        };
+        let image = |label: &str| {
+            let handle = handle(label);
             let kind = toyos_abi::syscall::fstat(handle.as_handle().raw()).map(|stat| stat.file_type);
             assert_eq!(kind, Ok(FileType::ImmutableMemory), "supervisor: `{label}` is no image nobody writes");
             handle
         };
-        Self { fileserver: image(FILESERVER_IMAGE_LABEL), root: image(ROOT_IMAGE_LABEL) }
+        let record = toyos::shm::Immutable::adopt(handle(BOOT_NAMES_LABEL))
+            .unwrap_or_else(|why| panic!("supervisor: `{BOOT_NAMES_LABEL}` is no image nobody writes: {why}"));
+        let record: &'static toyos::shm::Immutable = Box::leak(Box::new(record));
+        let names = toyos_bootnames::Names::parse(record.as_slice())
+            .unwrap_or_else(|why| panic!("supervisor: the loader's boot names are refused: {why}"));
+        Self { fileserver: image(FILESERVER_IMAGE_LABEL), root: image(ROOT_IMAGE_LABEL), names }
     }
 }
 

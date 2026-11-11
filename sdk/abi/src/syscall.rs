@@ -282,11 +282,6 @@ pub const SYS_PROCESS_QUIT: u64 = 135;
 /// Whether [`SYS_SHUTDOWN`] or [`SYS_REBOOT`] would stop this machine, asked
 /// on the same right and stopping nothing. See [`machine_stops`].
 pub const SYS_MACHINE_STOPS: u64 = 136;
-/// Where firmware loaded this boot from, as the loader handed it. Gated by
-/// [`Rights::INVENTORY`] on a `SysCap`. See [`boot_sources`].
-///
-/// [`Rights::INVENTORY`]: crate::handle::Rights::INVENTORY
-pub const SYS_BOOT_SOURCES: u64 = 137;
 pub const SYS_VM_PROTECT: u64 = 140;
 pub const SYS_VM_DISCARD: u64 = 141;
 pub const SYS_VM_DECOMMIT: u64 = 142;
@@ -511,9 +506,11 @@ pub const SYSCAP_LABEL: &str = "syscap";
 pub const SVC_LABEL: &str = "svc";
 /// The labels the kernel puts on the immutable memory objects it hands the
 /// supervisor beside the system capability: the file server's executable and
-/// ROOT's bytes, both as the loader verified them (`boot::KernelArgs`).
+/// ROOT's bytes, both as the loader verified them, and what the loader wrote
+/// of where it booted from (`boot::KernelArgs`).
 pub const FILESERVER_IMAGE_LABEL: &str = "boot:fileserver";
 pub const ROOT_IMAGE_LABEL: &str = "boot:root";
+pub const BOOT_NAMES_LABEL: &str = "boot:names";
 /// The label every process starts holding a handle to itself under, carrying
 /// `WRITE`, `DUP` and `TRANSFER`: what it hands on for a child to be placed
 /// under it ([`SpawnArgs::place`]). The kernel puts it in every table.
@@ -2304,17 +2301,6 @@ pub fn device_inventory(
         0,
     ))
     .map(|n| n as usize)
-}
-
-/// The [`crate::boot::BootSources`] the loader handed the kernel, unchanged.
-///
-/// `syscap` must carry [`crate::handle::Rights::INVENTORY`]: a capability
-/// without it is refused with a word, and a handle the caller does not hold
-/// ends it.
-pub fn boot_sources(syscap: RawHandle) -> Result<crate::boot::BootSources, SyscallError> {
-    let mut sources = crate::boot::BootSources::NONE;
-    check_unit(syscall(SYS_BOOT_SOURCES, syscap.0 as u64, core::ptr::from_mut(&mut sources) as u64, 0, 0))
-        .map(|()| sources)
 }
 
 /// A handle to the device set ([`crate::devset`]); `syscap` must carry

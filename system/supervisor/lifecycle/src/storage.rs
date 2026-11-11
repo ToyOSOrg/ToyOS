@@ -1,32 +1,33 @@
 //! Which partitions a file-server role's block grant reaches.
 //!
 //! **LOG and BOOT are the loader's word**: the unique GUIDs it read off the
-//! path firmware booted (`toyos_abi::inventory::Role`), so on a machine with
+//! path firmware booted (`toyos_bootnames::Names`), so on a machine with
 //! ToyOS on two disks each role is the volume of the disk it booted from, and
 //! a GUID two disks carry is the block service's to refuse on both. **DATA is
 //! its ToyOS type.** No role is reached by a place on a disk or by another
 //! system's partition type, so a disk ToyOS shares with another system offers
 //! that system's partitions to no role.
 
-use toyos_abi::inventory::Role;
 use toyos_blockring::wire::{Grant, Scope};
+use toyos_bootnames::Guid;
 
-/// The block grant file-server `role` is started with, given the partition
-/// the loader named for each role: `Err` for a log or boot role the loader
-/// named none for.
+/// The block grant file-server `role` is started with, given the log
+/// partition and the boot partition the loader named: `Err` for the boot role
+/// where it named none.
 ///
 /// # Panics
 /// On SYSTEM, which ROOT's image serves and no grant reaches, and on a role
 /// [`toyos_manifest::ROLES`] does not name, which the build refuses.
-pub fn grant(role: &str, loaded: impl Fn(Role) -> Option<[u8; 16]>) -> Result<Grant, String> {
-    let (which, writes) = match role {
-        "data" => return Ok(Grant { scope: Scope::Kind(toyos_gpt::Guid::TOYOS_DATA.0), writes: true }),
-        "log" => (Role::Log, true),
-        "boot" => (Role::Boot, false),
+pub fn grant(role: &str, log: Guid, boot: Option<Guid>) -> Result<Grant, String> {
+    match role {
+        "data" => Ok(Grant { scope: Scope::Kind(toyos_gpt::Guid::TOYOS_DATA.0), writes: true }),
+        "log" => Ok(Grant { scope: Scope::Unique(log), writes: true }),
+        "boot" => {
+            let boot = boot.ok_or("the loader named no `boot` partition")?;
+            Ok(Grant { scope: Scope::Unique(boot), writes: false })
+        }
         other => panic!("supervisor: `{other}` is no block role"),
-    };
-    let guid = loaded(which).ok_or_else(|| format!("the loader named no `{role}` partition"))?;
-    Ok(Grant { scope: Scope::Unique(guid), writes })
+    }
 }
 
 #[cfg(test)]
@@ -75,12 +76,7 @@ mod tests {
 
     /// What each role's grant reaches across both disks, and whether it writes.
     fn reached(role: &str, boot: [u8; 16], log: [u8; 16]) -> (Vec<&'static str>, bool) {
-        let loaded = |which| match which {
-            Role::Boot => Some(boot),
-            Role::Log => Some(log),
-            _ => None,
-        };
-        let grant = grant(role, loaded).expect("the loader named it");
+        let grant = grant(role, log, Some(boot)).expect("the loader named it");
         let all = INTERNAL.iter().chain(&STICK);
         (all.filter(|p| grant.admits(p.unique, p.kind.0)).map(|p| p.name).collect(), grant.writes)
     }
@@ -102,8 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn a_role_the_loader_did_not_name_is_refused() {
-        assert_eq!(grant("log", |_| None), Err("the loader named no `log` partition".to_string()));
-        assert_eq!(grant("boot", |_| None), Err("the loader named no `boot` partition".to_string()));
+    fn a_boot_role_the_loader_named_no_partition_for_is_refused() {
+        assert_eq!(grant("boot", [7; 16], None), Err("the loader named no `boot` partition".to_string()));
     }
 }

@@ -210,9 +210,8 @@ impl Rights {
     /// On a `SysCap`: read what the machine is made of, and who holds each
     /// part of it.
     ///
-    /// [`SYS_DEVICE_INVENTORY`] answers one record per PCI function, bound USB
-    /// device, block device and GPT partition, and one per claim naming the
-    /// process that holds it. That is a census of the machine's hardware and of
+    /// [`SYS_DEVICE_INVENTORY`] answers one record per PCI function and one
+    /// per claim naming the process that holds it. That is a census of the machine's hardware and of
     /// which program drives what, so it rides a bit as the roster does.
     ///
     /// [`SYS_DEVICE_INVENTORY`]: crate::syscall::SYS_DEVICE_INVENTORY

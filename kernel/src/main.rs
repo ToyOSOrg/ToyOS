@@ -41,7 +41,6 @@ mod panic_reboot;
 mod power;
 
 mod inventory;
-mod loaded;
 mod bootimage;
 mod symbols;
 mod process;
@@ -240,7 +239,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     params::init(cmdline);
     deadline::claim(cmdline);
     actuator::init(cmdline);
-    let (boot_images, [supervisor_image, fileserver_image, root_image]) = bootimage::init(&kernel_args, maps);
+    let (boot_images, [supervisor_image, fileserver_image, root_image, boot_names]) = bootimage::init(&kernel_args, maps);
 
     arch::boot::after_console(&kernel_args, maps);
 
@@ -257,7 +256,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         }
     }
 
-    // Split into six records: KernelArgs' derived Debug is the one message that exceeds the log's per-record bound.
     log!(
         "boot: memory map {:#x}+{:#x}, kernel {:#x}+{:#x}, stack image+{:#x}+{:#x}",
         kernel_args.memory_map_addr, kernel_args.memory_map_size,
@@ -275,12 +273,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         kernel_args.gop_width, kernel_args.gop_height,
         kernel_args.gop_stride, kernel_args.gop_pixel_format
     );
-    log!(
-        "boot: boot partition present={} lba {} +{} blocks guid {:02x?}",
-        kernel_args.boot_partition_present, kernel_args.boot_partition_start_lba,
-        kernel_args.boot_partition_blocks, kernel_args.boot_partition_guid
-    );
-    log!("boot: log partition guid {:02x?}", kernel_args.log_partition_guid);
     log!(
         "boot: cmdline {:#x}+{}",
         kernel_args.cmdline_addr, kernel_args.cmdline_len
@@ -322,6 +314,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         supervisor_image,
         fileserver_image,
         root_image,
+        boot_names,
         // Firmware's memory map as the loader copied it, which `mm` keeps
         // (`mm::firmware_map`): `LoaderData` too.
         mm::Region { start: kernel_args.memory_map_addr, end: kernel_args.memory_map_addr + kernel_args.memory_map_size },
@@ -350,8 +343,8 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // name, rather than indexing it, means a region added to `loader` fails
     // to compile here instead of compiling and being silently dropped from
     // what `mm::init` withholds.
-    let [image, elf, supervisor, fileserver, root, map, microcode] = loader;
-    let reserved = [image, elf, supervisor, fileserver, root, map, microcode, arch::boot::reserved()];
+    let [image, elf, supervisor, fileserver, root, names, map, microcode] = loader;
+    let reserved = [image, elf, supervisor, fileserver, root, names, map, microcode, arch::boot::reserved()];
     // A region another one shares is two allocations the loader made of one
     // byte, and whichever writes it second corrupts the first.
     let extents = reserved.map(|r| r.start..r.end);
@@ -412,7 +405,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // Before storage and everything under it: what it covers is the rest of this
     // boot, and a wedge down there is the reason to have one.
     arch::watchdog::init(&pci_devices);
-    loaded::init(kernel_args);
 
     boot_phase!("peripherals ready", t_periph);
 
