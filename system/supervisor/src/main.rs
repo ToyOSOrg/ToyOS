@@ -3089,9 +3089,9 @@ fn start<'a>(
     }
 
     // A `provides` name reaches its holder from whoever made the port, never
-    // from the supervisor, and only a row that receives the name: another
-    // could not use it, nor could anything it starts. A client's handle that
-    // does not carry `PROVIDED` refuses the launch, never the supervisor.
+    // from the supervisor, and only a row that receives the name. A client's
+    // handle that does not carry `PROVIDED` refuses the launch, never the
+    // supervisor.
     for (name, connector) in extras {
         if program.receives.contains(&name) {
             command.endow_narrowed(&service_label(PROVIDE_PREFIX, &name), connector.into(), PROVIDED.bits());

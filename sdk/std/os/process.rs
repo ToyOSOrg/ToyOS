@@ -62,8 +62,8 @@ pub trait CommandExt {
     /// can name it, but the shell's own row is what should decide the rest of
     /// what a shell holds. So the caller supplies this one connector, the
     /// launcher supplies the row, and the child's services are the union. A
-    /// child whose row does not receive `name` is not given it, and a
-    /// connector without `DUP`, `TRANSFER` and `WRITE` refuses the launch.
+    /// child whose row does not receive `name` is not given it; one that is,
+    /// without `DUP`, `TRANSFER` and `WRITE`, refuses the launch.
     ///
     /// The connector is **moved**, like [`endow`](CommandExt::endow). A
     /// command that is not independent is refused `InvalidInput`.

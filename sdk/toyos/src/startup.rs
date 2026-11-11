@@ -203,7 +203,7 @@ impl Malformed {
     pub fn line(self) -> &'static [u8] {
         match self {
             Self::Outside => b"this program cannot start: its endowment table lies outside its startup block\n",
-            Self::Length => b"this program cannot start: its endowment table's length is not its length\n",
+            Self::Length => b"this program cannot start: its endowment table's length word is not its length\n",
             Self::Count => b"this program cannot start: its endowment table names more handles than a spawn endows\n",
             Self::Truncated => b"this program cannot start: a name in its endowment table runs past the table\n",
             Self::Trailing => b"this program cannot start: bytes follow the last name of its endowment table\n",

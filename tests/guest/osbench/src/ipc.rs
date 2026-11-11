@@ -155,7 +155,7 @@ pub fn suite() {
     }
 
     // A connection opened and accepted by this one process, both ends then
-    // closed: ToyOS through a port in a namespace this process built, Linux
+    // closed: ToyOS through the connector of a port this process made, Linux
     // to a listening socket in the abstract namespace. 1,000 after 50.
     match ipc::Rendezvous::new() {
         Ok(rendezvous) => {

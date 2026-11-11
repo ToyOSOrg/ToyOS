@@ -11,8 +11,8 @@
 //! So a metal image is a committed boot config with that one field derived onto
 //! it. The derivation is here, pure, because what it changes about the config
 //! is what the T14 sees and nothing else may drift from it: the one authority a
-//! `reboot` job needs (the `power` connector, which the applet inherits with the
-//! runner's namespace and asks the supervisor through), the applet itself, and the name
+//! `reboot` job needs (the `power` connector, which the applet inherits as one of
+//! the runner's services and asks the supervisor through), the applet itself, and the name
 //! that reaches it.
 
 #![forbid(unsafe_code)]
