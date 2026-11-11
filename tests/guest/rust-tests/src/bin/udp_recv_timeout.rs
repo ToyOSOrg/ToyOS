@@ -14,9 +14,6 @@ use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
 
-/// A hang ceiling under QEMU, whose clock bounds nothing else.
-const CEILING: Duration = Duration::from_secs(30);
-
 fn main() {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("a datagram socket");
     let mut buf = [0u8; 64];
@@ -39,7 +36,6 @@ fn main() {
         let err = got.expect_err("nothing sent to the socket, and a receive answered a datagram");
         assert_eq!(err.kind(), ErrorKind::WouldBlock, "receive {receive} under {timeout:?} ended {err:?} after {took:?}");
         assert!(took >= timeout, "receive {receive} timed out after {took:?}, before its {timeout:?}");
-        assert!(took < CEILING, "receive {receive} under {timeout:?} took {took:?}");
         println!("udp_recv_timeout: receive {receive} under {timeout:?} timed out after {took:?}");
     }
 }

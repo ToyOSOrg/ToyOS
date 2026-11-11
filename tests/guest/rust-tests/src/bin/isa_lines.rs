@@ -52,7 +52,7 @@ const ACK: u8 = 0xFA;
 /// milliseconds; this is the liveness ceiling on one that does not, and it
 /// panics by name.
 const CONTROLLER: Duration = Duration::from_secs(1);
-/// The ceiling on the record behind an acknowledgement.
+/// The hang ceiling on the record behind an acknowledgement, never a timing.
 const RECORD: Duration = Duration::from_secs(5);
 /// More records than the holder's own setup can raise before it asks the
 /// keyboard anything: one byte answers the configuration read.

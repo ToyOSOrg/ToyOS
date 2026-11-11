@@ -34,7 +34,8 @@ const STATUS: u16 = 0x64;
 /// The port just past the data port, which no row names.
 const PAST: u16 = 0x61;
 
-/// The ceiling on a watch being answered once its claim has ended.
+/// The hang ceiling on a watch being answered once its claim has ended,
+/// never a timing.
 const ANSWER: Duration = Duration::from_secs(5);
 /// More records than a controller nothing here asks anything of raises.
 const STALE_RECORDS: usize = 8;

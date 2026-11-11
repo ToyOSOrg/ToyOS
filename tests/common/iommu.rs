@@ -59,23 +59,12 @@ pub fn iommu_virtio_platform() -> Result<(), String> {
         }
 
         // `netcase`: the NIC's driver is a process, and this is the one config
-        // that runs it. The kernel's records of a claim are waited for on the
-        // stream: the boot log ends at test-runner's `===READY===`, its first
-        // act, and nothing orders that against the claims of the programs the
-        // supervisor started before it.
+        // that runs it. Every line an arm reads of the claims is waited for on
+        // the stream, with no order leaned on: the boot log ends at
+        // test-runner's `===READY===`, and the supervisor starts its non-disk
+        // `drives` rows after test-runner.
         let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
-        let said: Vec<String> = if behind_unit {
-            vec![bar_handed(), msix_armed()]
-        } else {
-            // The NIC's driver is a `drives` row, which the supervisor
-            // starts after every service: its refusal is the boot's last.
-            vec![
-                not_handed_over(CLAIMED_AT, NOT_REMAPPED),
-                not_handed_over(NVME_AT, NOT_REMAPPED),
-                not_handed_over(SOUND_AT, NOT_REMAPPED),
-                not_handed_to_its_driver(NIC_CLAIMS),
-            ]
-        };
+        let said: Vec<String> = if behind_unit { vec![bar_handed(), msix_armed()] } else { no_unit_refusals() };
         let mut text = qemu.boot_log().to_string();
         qemu::await_guest(&mut qemu, &mut text, &format!("{name}: {said:?}"), |t| {
             said.iter().all(|line| t.contains(line))
@@ -152,25 +141,33 @@ fn not_handed_over(at: &str, why: &str) -> String {
 /// the same.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     refused_claim(log, NIC_CLAIMS, NOT_REMAPPED, &[XHCI_AT, NVME_AT, SOUND_AT, AGENT_AT])?;
-    log.must_say(&not_handed_over(XHCI_AT, NOT_REMAPPED))?;
-    log.must_say(&format!(
-        "supervisor: usbd was not started on PCI {XHCI_AT}: pci:0c:03:30/1033:0194 is on this machine and could not be handed over"
-    ))?;
-    log.must_say(&not_handed_over(SOUND_AT, NOT_REMAPPED))?;
-    log.must_say("supervisor: soundserver: pci:04:01:00/1af4:1059 is on this machine and could not be handed over")?;
-    log.must_say(&not_handed_over(NVME_AT, NOT_REMAPPED))?;
-    log.must_say(&format!(
-        "supervisor: nvme was not started on PCI {NVME_AT}: pci:01:08:02 is on this machine and could not be handed over"
-    ))?;
-    log.must_say(&not_handed_over(AGENT_AT, NOT_REMAPPED))?;
-    log.must_say(&format!(
-        "supervisor: virtio-console was not started on PCI {AGENT_AT}: pci:07:80:00/1af4:1043 is on this machine and could not be handed over"
-    ))?;
+    for line in no_unit_refusals() {
+        log.must_say(&line)?;
+    }
     // And this machine handed *nothing* over, which is more than the claim's
     // own refusal says: with no unit there is no function any process could be
     // given an address space for.
     log.must_not_say("] handed over, ")?;
     Ok(())
+}
+
+/// What a machine with no unit says of each function it refuses: the
+/// kernel's refusal and the supervisor's, every one of which the arm waits
+/// for before it judges.
+fn no_unit_refusals() -> Vec<String> {
+    let supervisor = |what: &str| format!("supervisor: {what} is on this machine and could not be handed over");
+    vec![
+        not_handed_over(XHCI_AT, NOT_REMAPPED),
+        supervisor(&format!("usbd was not started on PCI {XHCI_AT}: pci:0c:03:30/1033:0194")),
+        not_handed_over(NVME_AT, NOT_REMAPPED),
+        supervisor(&format!("nvme was not started on PCI {NVME_AT}: pci:01:08:02")),
+        not_handed_over(CLAIMED_AT, NOT_REMAPPED),
+        not_handed_to_its_driver(NIC_CLAIMS),
+        not_handed_over(SOUND_AT, NOT_REMAPPED),
+        supervisor("soundserver: pci:04:01:00/1af4:1059"),
+        not_handed_over(AGENT_AT, NOT_REMAPPED),
+        supervisor(&format!("virtio-console was not started on PCI {AGENT_AT}: pci:07:80:00/1af4:1043")),
+    ]
 }
 
 /// The slot QEMU's `-device` order puts the function virtio-net drives on, and

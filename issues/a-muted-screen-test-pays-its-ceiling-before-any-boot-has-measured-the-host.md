@@ -10,19 +10,25 @@ opened: 2026-10-04
 once, at its start, through `budget_smp`, whose host factor is the run's
 fastest boot so far (`host_scale`). A muted guest reaches no ready marker, so
 its own boot never feeds that factor, and a muted test that starts before any
-other guest of the run has booted pays its ceiling at 1×, however loaded the
+other guest of the run has booted pays its ceiling at 1×, however slow the
 host is.
 
-Seen once, on the dev host at load averages 80.26, 74.24 and 66.53 (14
-cores), in a whole `cargo test --test toyos-build` run at `7c550fa1f` on
-`wt/toyos-irqon`: `screen_panic_muted` was one of the twelve tests the run
-started at 07:17:52, its kernel built at 07:18:20, and it was red at 07:18:51,
-before any test of the run had passed, with `"PANIC:" not on
-screen of a guest with no serial port at all`. The decoded screen held only
+A loaded host is no longer the case: a run that other work shared ends `HOST
+NOT QUIET`, neither red nor green. What remains is a quiet host slower than
+the reference at the start of a run, such as nightly's GitHub-hosted lanes
+(the 2026-11-01 KVM lane read 1.07×), where a muted test that runs first
+has its ceiling at 1× and every later test its ceiling scaled.
+
+Seen once, before `HOST NOT QUIET` existed, on the dev host at load averages
+80.26, 74.24 and 66.53 (14 cores), in a whole `cargo test --test toyos-build`
+run at `7c550fa1f` on `wt/toyos-irqon`: `screen_panic_muted` was one of the
+twelve tests the run started at 07:17:52, its kernel built at 07:18:20, and it
+was red at 07:18:51, before any test of the run had passed, with `"PANIC:" not
+on screen of a guest with no serial port at all`. The decoded screen held only
 the kernel's first three lines, all stamped 0.000. The same run ended with
 `fastest boot 2162 ms against the reference 1424 ms — liveness ceilings paid
 at 1.52x`. The whole run at `2b9697284`, at 1.01x, had it green.
 
 **Exit**: a muted screen test's wait is bounded by the guest's progress or by a
 host factor measured before its deadline is fixed, and a muted test run first
-on a loaded host is green.
+on a quiet host slower than the reference is green.

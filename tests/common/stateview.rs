@@ -13,6 +13,7 @@ use super::{compile, qemu};
 use qemu::{BootOptions, QemuInstance};
 
 const JOB: &str = "state_view";
+/// A hang ceiling on the job, never a timing.
 const BOUND: Duration = Duration::from_secs(60);
 
 pub fn a_row_reaches_its_own_state_and_no_other() -> Result<(), String> {
