@@ -61,6 +61,11 @@ actuators! {
     /// Send one NMI from the idle loop, and return from its handler via `iretq` with a second NMI already pending.
     nmi_nested = "nmi-nested";
 
+    /// Enter vector 2 at CPL 0 once, with a decoy block live as the user's
+    /// GS base. Judged by `nmi_finds_the_kernels_gs` and
+    /// `nmi_under_a_user_gs_base`.
+    nmi_user_gs = "nmi-user-gs";
+
     /// Walk the PCI capability list, window check and parse over crafted config-space layouts at init.
     pci_cap_selftest = "pci-cap-selftest";
 

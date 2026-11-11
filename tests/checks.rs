@@ -388,6 +388,36 @@ mod checks {
         Ok(())
     }
 
+    /// `nmi-user-gs`'s judge on its two verdicts and on a boot that never
+    /// reported, held to the words `kernel/src/arch/x86_64/idt/nmi.rs` writes.
+    #[test]
+    fn nmi_user_gs_verdict() -> Result<(), String> {
+        const PASSED: &str = "[ 1.204 cpu0 kernel] nmi-user-gs: PASS — vector 2 at CPL 0 under GS base \
+             0xffff80000a3c1000: cpu0's own count 0 -> 1, 0 decoy words written, returned to GS base \
+             0xffff80000a3c1000\n";
+        const FAILED: &str = "[ 1.204 cpu0 kernel] nmi-user-gs: FAIL — vector 2 at CPL 0 under GS base \
+             0xffff80000a3c1000: cpu0's own count 0 -> 0, 2 decoy words written, returned to GS base \
+             0xffff80000a3c1000\n";
+        let verdict = faults::nmi_user_gs(PASSED)?;
+        if verdict != PASSED.trim_end() {
+            return Err(format!("a passing boot's verdict was read as {verdict:?}"));
+        }
+        if faults::nmi_user_gs(FAILED).is_ok() {
+            return Err("a failing verdict was read as a pass".into());
+        }
+        if faults::nmi_user_gs("[ 1.204 cpu0 kernel] LAPIC: spurious selftest 3/3\n").is_ok() {
+            return Err("a boot that never reported was read as a pass".into());
+        }
+        let nmi = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernel/src/arch/x86_64/idt/nmi.rs");
+        let source = std::fs::read_to_string(&nmi).map_err(|e| format!("{}: {e}", nmi.display()))?;
+        for said in ["\"nmi-user-gs: {verdict} — ", "\"PASS\""] {
+            if !source.contains(said) {
+                return Err(format!("{} writes no {said}, so the judge reads words nothing says", nmi.display()));
+            }
+        }
+        Ok(())
+    }
+
     /// [`idle_second_lines`] on lines as the benches' readbacks carry them: the
     /// T14's two first queries, the kernel's first fixed-hardware interrupt, its
     /// TSC refinement and the AMD's TSC step report pass, reported;

@@ -393,4 +393,5 @@ pub fn interrupt_selftests() {
         !crate::actuator::lapic_spurious_selftest() && !crate::actuator::unclaimed_vector_selftest(),
         "the local APIC's selftests are x86-64's, and this machine has a GIC"
     );
+    assert!(!crate::actuator::nmi_user_gs(), "nmi-user-gs stages x86-64's GS, which this machine does not have");
 }

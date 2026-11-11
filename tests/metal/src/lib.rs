@@ -777,6 +777,11 @@ pub const FLASHABLE: &[&str] = &[
     // A probe rather than staged inputs, and a read: it runs inside the first
     // syscall's own context switch.
     "sysret-ss-probe",
+    // One `int 2` on the boot CPU with a heap block staged as the user's GS
+    // base, which it puts back. It reaches no device and writes no register
+    // a reset does not; the boot goes on to userland and ends the way an
+    // unarmed one does.
+    "nmi-user-gs",
     // It enters one port in the kernel's table of declared ports at boot. No
     // kernel path reads or writes a port for that entry, so it reaches no
     // device; what it changes is that a claim on the i8042's row is refused.

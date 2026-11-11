@@ -484,5 +484,7 @@ pub(crate) fn provoke_double_fault() -> ! {
 }
 
 pub(crate) use unclaimed::census as unclaimed_census;
+#[cfg(feature = "boot-actuators")]
+pub(crate) use nmi::user_gs_selftest as nmi_user_gs_selftest;
 /// How much of the double-fault stack the crash report used, once the report is out.
 pub(crate) use super::percpu::ist1_report as report_fault_stack;
