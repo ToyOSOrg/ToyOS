@@ -187,7 +187,7 @@ const _: () = {
     assert!(size_of::<KernelArgs>() == 440);
     assert!(size_of::<BootImage>() == 16);
     // A partition aligned to 1 MiB starts at a multiple of 256 blocks.
-    assert!(LAYOUT % 256 != 0);
+    assert!(!LAYOUT.is_multiple_of(256));
     assert!(align_of::<KernelArgs>() == 8);
 };
 

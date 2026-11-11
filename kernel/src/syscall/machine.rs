@@ -357,7 +357,6 @@ pub(super) fn sys_counters(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     }
 }
 
-
 /// The most records one `SYS_DEVICE_INVENTORY` buffer may be declared to hold,
 /// 64 KiB of them: a declared length past it is refused before it becomes a
 /// window, and a machine with more records than this is refused by name rather
