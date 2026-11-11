@@ -40,6 +40,15 @@ refuses, and is cut to what that needs. Before that, its creation costs what
 its region's first-touch draw makes it
 (`issues/a-shared-memory-region-draws-and-zeroes-every-frame-when-it-is-made.md`).
 
+- **Owed on metal:** the first-touch region (a window's frames drawn at its
+  pages' first touch). An A/B of main before and after it on the T14 and the
+  AMD bench, of `osbench work` (`work.build_shaped.j1`, and `.j8` on the T14
+  and `.j16` on the AMD bench), `spawn_cost`, `osbench procs` and `osbench
+  files`. Main after must show `work.build_shaped.j1` and `.j<cpus>` faster on
+  both benches, and no `proc` or `fs` row slower beyond the before run's
+  spread: `proc.spawn_wait.large`, whose 32 MiB image region is written whole
+  and now draws a frame a page as it is written, most of all.
+
 **Exit**: the resident memory of a desktop boot's processes with and without
 their windows, measured, and the window's size justified from it or cut once
 the file-call work carries reads and writes on the paged object.
