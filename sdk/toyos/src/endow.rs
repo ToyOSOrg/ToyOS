@@ -359,9 +359,8 @@ pub fn isa<T: FromHandle>(set: toyos_abi::syscall::IsaId) -> Option<T> {
     claim(DeviceRequest::Isa(set).write_name(&mut buf)?)
 }
 
-/// Compose `<prefix><name>` on the stack. Nothing in the SDK allocates, and a
-/// name past the label bound matches nothing rather than being truncated into
-/// a label that happens to exist.
+/// Compose `<prefix><name>` on the stack: a name too long for it matches
+/// nothing rather than being truncated into a label that happens to exist.
 fn with_prefixed<T>(prefix: &str, name: &str, f: impl FnOnce(&str) -> Option<T>) -> Option<T> {
     let mut buf = [0u8; 128];
     let total = prefix.len() + name.len();
