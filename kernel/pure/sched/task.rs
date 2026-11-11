@@ -14,7 +14,7 @@ use crate::sched::hw::{CpuId, Nanos};
 use crate::sched::job::Job;
 use crate::sched::mailbox::MailboxNode;
 use crate::sched::msg::Msg;
-use crate::sched::affinity::{affinity_fence, CpuMask, SharedMask};
+use crate::sched::affinity::{affinity_fence, CpuMask, Reach, SharedMask};
 use crate::sched::sync::{Arc, AtomicBool, AtomicU64, Ordering};
 use crate::sched::park::CommittedTicket;
 
@@ -736,9 +736,10 @@ struct TaskInner<X: SchedPayload> {
     ctx: X::Ctx,
     rt: RtState,
     acct: TaskAccounting,
-    /// The owner CPU's copy of [`TaskShared::mask`] and the version it was
-    /// loaded at. Changed only by [`Task::refresh_affinity`].
+    /// The owner CPU's copy of [`TaskShared::mask`], its reach and the
+    /// version it was loaded at. Changed only by [`Task::refresh_affinity`].
     affinity: CpuMask,
+    reach: Reach,
     affinity_version: u64,
     /// When the current residency began: enqueue time while ready, dispatch
     /// time while running, park time while blocked. One field, because a task
@@ -793,6 +794,10 @@ impl<X: SchedPayload> Task<X> {
         self.0.affinity
     }
 
+    pub fn reach(&self) -> Reach {
+        self.0.reach
+    }
+
     /// Take the published mask if a setter has moved it since the last
     /// refresh, and answer whether it did.
     pub(crate) fn refresh_affinity(&mut self) -> bool {
@@ -800,6 +805,7 @@ impl<X: SchedPayload> Task<X> {
             return false;
         }
         (self.0.affinity, self.0.affinity_version) = self.0.shared.mask().load();
+        self.0.reach = self.0.affinity.reach();
         true
     }
 
@@ -900,6 +906,10 @@ macro_rules! linear_state {
             pub fn affinity(&self) -> CpuMask {
                 self.0.affinity()
             }
+
+            pub fn reach(&self) -> Reach {
+                self.0.reach()
+            }
         }
     };
 }
@@ -957,6 +967,7 @@ impl<X: SchedPayload> TaskBuilder<X> {
             rt: self.rt,
             acct: TaskAccounting::default(),
             affinity: self.mask,
+            reach: self.mask.reach(),
             affinity_version: 0,
             since: now,
             adopt_node: MailboxNode::new(),
