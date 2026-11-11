@@ -328,8 +328,8 @@ pub(crate) fn export_held(object: fd::Lent<'_>) -> Result<OwnedHandle, Error> {
 }
 
 #[cfg(all(feature = "fd-table", not(test)))]
-pub(crate) fn adopt_exported(handle: OwnedHandle) -> Result<fd::Object, Error> {
-    owner::adopt_exported(handle)
+pub(crate) fn adopt_exported(connection: crate::ipc::Connection) -> Result<fd::Object, Error> {
+    owner::adopt_exported(connection)
 }
 
 pub fn mkdir(at: At, path: &[u8]) -> Result<(), Error> {

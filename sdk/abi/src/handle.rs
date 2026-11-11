@@ -72,8 +72,9 @@ pub const HANDLE_INVALID: RawHandle = RawHandle(u32::MAX);
 /// beside each handle it installs ([`ReceivedEntry`]) and
 /// [`CENSUS_KIND`](crate::syscall::debug_action::CENSUS_KIND) takes.
 ///
-/// A kind's word never changes and is never given to another kind: a new
-/// kind takes the next word, and a receiver refuses a word it does not know.
+/// **A kind's word is ABI: it is never renumbered and never given to another
+/// kind.** A new kind takes the next word, a kind that goes leaves its word
+/// unused for good, and a receiver refuses a word it does not know.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ObjectKind {

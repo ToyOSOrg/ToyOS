@@ -471,15 +471,20 @@ mod owner {
                 }
                 continue;
             }
+            /// A descriptor endowed as a file's or a socket's export, which
+            /// is a connection's end.
+            fn exported(handle: OwnedHandle) -> crate::ipc::Connection {
+                // SAFETY: what this process was endowed is its parent's to say,
+                // as every endowment's kind is.
+                unsafe { <crate::ipc::Connection as crate::endow::FromHandle>::from_handle(handle) }
+            }
             let object = match kind {
                 Kind::Handle => Object::handle(handle),
-                Kind::File => match crate::files::adopt_exported(handle) {
+                Kind::File => match crate::files::adopt_exported(exported(handle)) {
                     Ok(object) => object,
                     Err(_) => { refused += 1; continue; }
                 },
-                // SAFETY: a descriptor this process was endowed as an exported
-                // end, which is its parent's to say.
-                Kind::Exported => match unsafe { crate::net::adopt_exported(handle) } {
+                Kind::Exported => match crate::net::adopt_exported(exported(handle)) {
                     Some(object) => object,
                     None => {
                         refused += 1;

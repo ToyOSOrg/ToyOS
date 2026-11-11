@@ -8,7 +8,7 @@
 use toyos_abi::handle::{ObjectKind, ReceivedEntry, TransferEntry};
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, Received, SyscallError};
-use crate::endow::FromHandle;
+use crate::endow::OfKind;
 use crate::{AsHandle, BorrowedHandle, Moved, OwnedHandle};
 
 /// A type that may cross an IPC boundary as a payload.
@@ -635,16 +635,12 @@ pub struct ReceivedHandle {
 }
 
 impl ReceivedHandle {
-    /// What the handle names; `None` for a kind this SDK does not know.
-    pub fn kind(&self) -> Option<ObjectKind> {
-        ObjectKind::from_word(self.kind)
-    }
-
     /// The handle as a `T`, refused and closed unless the kernel said it
-    /// names what a `T` is.
-    pub fn typed<T: FromHandle>(self) -> Result<T, WrongKind> {
+    /// names one of `T`'s kinds.
+    pub fn typed<T: OfKind>(self) -> Result<T, WrongKind> {
         admit(T::KINDS, self.kind)?;
-        // SAFETY: the kernel answered one of `T`'s kinds for this handle.
+        // SAFETY: the kernel answered one of `T`'s kinds for this handle, and
+        // any object of those takes every call of `T`'s.
         Ok(unsafe { T::from_handle(self.handle) })
     }
 }

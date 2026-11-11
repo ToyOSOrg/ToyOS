@@ -10,7 +10,7 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
-use crate::endow::FromHandle;
+use crate::endow::OfKind;
 use crate::ipc::ReceivedHandle;
 use crate::{AsHandle, BorrowedHandle, OwnedHandle};
 
@@ -33,7 +33,7 @@ pub(super) fn narrowed(handle: OwnedHandle, rights: Rights) -> Result<RawHandle,
 
 /// [`narrowed`] for a handle netstack sent, which an end makes a `T`'s calls
 /// on by number: refused, and closed, unless the kernel said it names one.
-pub(super) fn narrowed_as<T: FromHandle + Into<OwnedHandle>>(handle: ReceivedHandle, rights: Rights) -> Result<RawHandle, NetError> {
+pub(super) fn narrowed_as<T: OfKind + Into<OwnedHandle>>(handle: ReceivedHandle, rights: Rights) -> Result<RawHandle, NetError> {
     narrowed(handle.typed::<T>().map_err(|_| NetError::Io)?.into(), rights)
 }
 

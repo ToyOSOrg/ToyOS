@@ -1,7 +1,7 @@
 //! The PCI function a job claims, found in the inventory by what identifies
 //! its card: a claim names a function by its arrival.
 
-use toyos::endow::FromHandle;
+use toyos::endow::ClaimType;
 use toyos::syscap::SysCap;
 use toyos_abi::inventory::{Pci, RawRecord, Record};
 use toyos_abi::syscall::{PciId, SyscallError};
@@ -22,6 +22,6 @@ pub fn of(cap: &SysCap, id: PciId) -> Option<Pci> {
 
 /// The claim on the one function of card `id`: `NotFound` where the machine
 /// has none.
-pub fn claim<T: FromHandle>(cap: &SysCap, id: PciId) -> Result<T, SyscallError> {
+pub fn claim<T: ClaimType>(cap: &SysCap, id: PciId) -> Result<T, SyscallError> {
     of(cap, id).map_or(Err(SyscallError::NotFound), |pci| cap.claim_function(pci.arrival))
 }

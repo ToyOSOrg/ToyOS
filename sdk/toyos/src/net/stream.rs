@@ -972,7 +972,9 @@ pub(super) fn ask_export(connection: BorrowedHandle<'_>, rung: Option<BorrowedHa
     let frame = rx.recv(&connection).map_err(hangup)?;
     match frame.msg_type {
         EXPORTED => match rx.take_handles::<1>() {
-            Some([end]) if frame.payload_len == 0 => Ok(end.into()),
+            Some([end]) if frame.payload_len == 0 => {
+                end.typed::<Connection>().map(Connection::into_owned).map_err(|_| NetError::Protocol(EXPORTED))
+            }
             _ => Err(NetError::Protocol(EXPORTED)),
         },
         REFUSED => {

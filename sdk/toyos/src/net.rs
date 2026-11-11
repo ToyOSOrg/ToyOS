@@ -323,12 +323,7 @@ const MAX_ADOPT: usize = {
 /// is read without waiting: netstack queued it before it answered the export,
 /// so it is there or never sent. `None`, with everything closed, where the
 /// process takes up no holder of it.
-///
-/// # Safety
-/// `end` names a connection, as [`FromHandle::from_handle`](crate::endow::FromHandle::from_handle)
-/// asks.
-pub unsafe fn adopt_exported(end: OwnedHandle) -> Option<crate::fd::Object> {
-    let connection = Connection(end);
+pub fn adopt_exported(connection: Connection) -> Option<crate::fd::Object> {
     let mut frames: FrameRx<MAX_ADOPT> = FrameRx::new();
     let first = match frames.pump(&connection) {
         crate::ipc::RxStep::Frame { msg_type, payload_len, .. } => {
