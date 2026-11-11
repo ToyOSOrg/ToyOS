@@ -1,13 +1,13 @@
 /// The counter the clock page's line describes: the generic timer's
-/// virtual count, which EL0 may read, read after every earlier instruction and
-/// before any later one, as the x86-64 one is.
+/// virtual count, which EL0 may read, read after every earlier instruction, as
+/// the x86-64 one is.
 #[inline]
 pub fn counter() -> u64 {
     let now: u64;
-    // SAFETY: two `isb`s and a read of `CNTVCT_EL0` into a register; none
-    // touches memory. Not `nomem`, which would let the compiler move memory
-    // accesses, the clock page's loads among them, across the read.
-    unsafe { core::arch::asm!("isb", "mrs {now}, cntvct_el0", "isb", now = out(reg) now, options(nostack, preserves_flags)) };
+    // SAFETY: an `isb` and a read of `CNTVCT_EL0` into a register; neither
+    // touches memory. Not `nomem`, which would let the compiler move the clock
+    // page's loads across the read.
+    unsafe { core::arch::asm!("isb", "mrs {now}, cntvct_el0", now = out(reg) now, options(nostack, preserves_flags)) };
     now
 }
 

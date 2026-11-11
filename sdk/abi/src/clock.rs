@@ -20,6 +20,10 @@
 //! **A reading takes the counter inside the latch's read section**, and the
 //! page's demoted word after the counter, so a line replaced or a demotion
 //! made while the reader was preempted sends it round again or to the kernel.
+//! One that was not preempted may pair a line with a counter read just after
+//! the line was replaced, which carries the old line a little past the
+//! counter reading the new one starts at, as any reading between that counter
+//! reading and the publication does.
 //!
 //! **Every word of the page is atomic.** The kernel writes it while processes
 //! read it, so it is reached as atomics and never as plain memory.
@@ -188,6 +192,7 @@ impl ClockPage {
 ///
 /// # Panics
 /// As [`page`].
+#[inline]
 pub fn nanos_since_boot() -> u64 {
     let (clock, now, demoted) = read_now();
     if demoted {
@@ -210,10 +215,15 @@ pub fn stamp_ns() -> u64 {
     clock.stamp_of(now)
 }
 
+#[inline]
 fn read_now() -> (Clock, u64, bool) {
-    mapped()
-        .read_now(crate::arch::counter)
-        .unwrap_or_else(|| panic!("the clock page at {CLOCK_PAGE:#x} carries no clock"))
+    mapped().read_now(crate::arch::counter).unwrap_or_else(|| no_clock())
+}
+
+#[cold]
+#[inline(never)]
+fn no_clock() -> ! {
+    panic!("the clock page at {CLOCK_PAGE:#x} carries no clock")
 }
 
 /// The clock, off this process's page: its line, for a counter reading.
@@ -233,7 +243,7 @@ fn mapped() -> &'static ClockPage {
 }
 
 fn read(page: &ClockPage) -> Clock {
-    page.read().unwrap_or_else(|| panic!("the clock page at {CLOCK_PAGE:#x} carries no clock"))
+    page.read().unwrap_or_else(|| no_clock())
 }
 
 #[cfg(test)]
