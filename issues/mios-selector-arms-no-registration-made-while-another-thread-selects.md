@@ -28,3 +28,9 @@ registration waking the selector so that it arms the watch again; a test
 registers a source from a second thread while the first is parked in a
 `select` with no timeout, makes the source ready, and the `select` returns its
 event.
+
+- **Owed on metal:** the selector's generation drop (#1261, fork `4108eff`) in
+  a ToyOS binary.
+  - Row: `mio_waker_coalesces`, a member of the `testcases` boot of main.
+  - Bench: the T14.
+  - Main must show it passing, built from mio `4108eff`.

@@ -42,3 +42,23 @@ arm's value is `()`; it was not measured.
 - A claimed function leaves the device set under a watch. The test reads the
   poll answered `-NotFound`, and reds with `tear_down_departed`'s
   `cancel_polls()` deleted.
+
+- **Owed on metal:** a poll belonging to the handle it was made through, and a
+  ring to its one submitter (#1261), end to end. These are shared-boot
+  members, which no guest row runs.
+  - Rows: the `testcases`, `testcases-watchdog` and `shared-debug` boots of
+    main, whole.
+  - Bench: the T14.
+  - Main must show `poll_belongs_to_its_handle`'s four progress lines and
+    `poll_belongs_to_its_handle: ok`, `pipe_other_end_gone` passing, and every
+    other shared member that polls passing.
+- **Owed on metal:** the cost of #1261 on the poll path. It is not measured.
+  - Comparison: osbench's `benchcase` boot of main from before #1261 against
+    main from after it, two boots a side in the order B, H, H, B, over every
+    `wake.*`, `pingpong.pipe.*` and `ipc.*` row.
+  - Bench: the T14.
+  - Main must show no such row slower. A row is slower only if all its head
+    p50s lie above all its base p50s over four boots a side; the first two a
+    side are a screen, and a flagged row gets a second round. Each row is
+    reported as its after/before median ratio beside both sides' boot-to-boot
+    ranges, and a row with no flag as "no difference resolved".

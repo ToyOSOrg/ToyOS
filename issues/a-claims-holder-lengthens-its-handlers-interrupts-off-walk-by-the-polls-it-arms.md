@@ -27,3 +27,10 @@ How long it is has not been read.
 does not grow with the polls armed on a claim: read at two sizes on one
 kernel, each size the median of at least five boots, each boot from the
 load's own report, with the tail reported beside it.
+
+- **Owed on metal:** `mask_windows`' load, as #1261 reshaped it.
+  - Row: `mask_windows`, the `windowscase` boot of main.
+  - Bench: the T14.
+  - Main must show `mask_windows` passing and `test_rs_ring_park_herd` passed
+    (`256 threads parked in submit, each on its own ring, woken 64 times`),
+    which also shows the job admits the 256 rings.
