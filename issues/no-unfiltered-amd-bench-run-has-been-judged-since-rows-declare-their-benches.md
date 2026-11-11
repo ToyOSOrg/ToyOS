@@ -24,6 +24,6 @@ Owner: the metal harness (`tests/common/metal.rs`, the `METAL` table in
 
 ## Exit condition
 
-One unfiltered `cargo test --test toyos-build -- --metal --metal-bench amd
---metal-host <the AMD bench>` run, judged: each red is a defect of ToyOS with
-its own record, or a row or member the AMD bench cannot run, declared so.
+One unfiltered `cargo test --test toyos-build -- --metal --metal-bench amd`
+run, judged: each red is a defect of ToyOS with its own record, or a row or
+member the AMD bench cannot run, declared so.

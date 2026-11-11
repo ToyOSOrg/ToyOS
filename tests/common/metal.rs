@@ -811,10 +811,9 @@ fn fingerprint(text: &str) -> u64 {
     h.finish()
 }
 
-/// `cargo`'s words for one `toyos-metal` run, on the bench `host` names or the
-/// T14.
-pub fn invocation(image: &Path, home: &Path, host: Option<&str>) -> Vec<String> {
-    let mut words = vec![
+/// `cargo`'s words for one `toyos-metal` run on the machine `host` names.
+pub fn invocation(image: &Path, home: &Path, host: &str) -> Vec<String> {
+    vec![
         "run".to_string(),
         "-p".to_string(),
         "toyos-metal".to_string(),
@@ -828,11 +827,9 @@ pub fn invocation(image: &Path, home: &Path, host: Option<&str>) -> Vec<String> 
         // `/log` has no reader of those bytes that is not the family of code
         // that wrote them.
         "--fat32-check".to_string(),
-    ];
-    if let Some(host) = host {
-        words.extend(["--host".to_string(), host.to_string()]);
-    }
-    words
+        "--host".to_string(),
+        host.to_string(),
+    ]
 }
 
 /// One `toyos-metal` run. Its stderr is echoed here as it comes and kept, so a
@@ -885,12 +882,30 @@ pub fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
     Readback::new(label, loader, log, &boot)
 }
 
-/// The bench a run's rows are taken for. Readbacks under `mode`'s directory
-/// say it themselves, and a `named` bench that is not theirs is refused; with
-/// none there it is `named`, or the T14 where the line names no `host` either.
-/// A run that boots a bench other than the T14, which `toyos-metal` reaches
-/// unless told otherwise, names its `host`.
-pub fn bench_of(mode: &MetalMode, named: Option<Bench>, host: Option<&str>) -> Result<Bench, String> {
+/// The bench a run's rows are taken for, and the machine its boots go to.
+/// Readbacks under `mode`'s directory say the bench themselves, and a `named`
+/// bench that is not theirs is refused; with none there it is `named`, or the
+/// T14. The machine is the bench's own ([`Bench::host`]) unless `host` names
+/// another, and one that is another bench's is refused: its boots would carry
+/// this bench's rows.
+pub fn target_of(mode: &MetalMode, named: Option<Bench>, host: Option<&str>) -> Result<(Bench, String), String> {
+    let bench = bench_of(mode, named)?;
+    let Some(host) = host else { return Ok((bench, bench.host().to_string())) };
+    let machine = |host: &str| toyos_metal::host_of(host).map(|(_, machine)| machine.to_string()).map_err(|e| e.to_string());
+    let asked = machine(host)?;
+    for other in Bench::ALL.into_iter().filter(|other| *other != bench) {
+        if machine(other.host())? == asked {
+            return Err(format!(
+                "--metal-host names {asked}, {other}'s machine, and the run takes {bench}'s rows; a boot carries \
+                 its own bench's rows alone"
+            ));
+        }
+    }
+    Ok((bench, host.to_string()))
+}
+
+/// The bench a run's rows are taken for, as [`target_of`] says it.
+fn bench_of(mode: &MetalMode, named: Option<Bench>) -> Result<Bench, String> {
     let mut read: Option<(Bench, String)> = None;
     if let MetalMode::Offline(dir) = mode {
         let mut labels: Vec<PathBuf> =
@@ -919,19 +934,7 @@ pub fn bench_of(mode: &MetalMode, named: Option<Bench>, host: Option<&str>) -> R
              it is from, so judging one needs no --metal-bench"
         )),
         (Some((bench, _)), _) => Ok(bench),
-        (None, Some(named)) if named != Bench::T14 && host.is_none() && !matches!(mode, MetalMode::List) => {
-            Err(format!(
-                "--metal-bench names {named} and no --metal-host its machine, so toyos-metal would boot the \
-                 T14; add --metal-host <user>@<machine>"
-            ))
-        }
-        (None, Some(named)) => Ok(named),
-        (None, None) if host.is_some() => Err(format!(
-            "--metal-host names a machine and not which bench it is, and a boot carries its bench's rows \
-             alone; add --metal-bench <{}>",
-            Bench::ALL.map(Bench::word).join("|")
-        )),
-        (None, None) => Ok(Bench::T14),
+        (None, named) => Ok(named.unwrap_or(Bench::T14)),
     }
 }
 
@@ -970,7 +973,7 @@ pub enum Verdict {
 pub fn run(
     mode: MetalMode,
     bench: Bench,
-    host: Option<&str>,
+    host: &str,
     taken: &Taken,
     rust_bins: &[(String, Vec<u8>)],
     quiet: bool,

@@ -11,8 +11,9 @@ machine anywhere, whether the owner's, a friend's or a community member's,
 could boot ToyOS for the suite with no one standing next to it.
 
 **What exists.**
-- `--metal-host` reaches any machine, but a run takes one of the two
-  benches' rows, and a readback is judged only as a bench its boot names.
+- A run takes one of the two benches' rows and boots that bench's own
+  machine, or the one `--metal-host` names if it is no other bench's; a
+  readback is judged only as the bench its boot names.
 - `toyos-metal --record` captures a machine into the host store
   (`timings::dir()`), never into the tree.
 - The loop writes the image to the machine's internal install area over

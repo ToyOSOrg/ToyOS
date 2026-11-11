@@ -549,9 +549,10 @@ impl Target {
     /// The T14 bench, with the runner key this host holds.
     fn bench_t14() -> Result<Self, Refusal> {
         let home = std::env::var_os("HOME").ok_or(Refusal::NoHome)?;
+        let (user, host) = host_of(bench::Bench::T14.host()).expect("a bench's host reads as one");
         Ok(Self {
-            user: "toyos".to_string(),
-            host: "bench-t14".to_string(),
+            user: user.to_string(),
+            host: host.to_string(),
             key: PathBuf::from(home).join(".ssh/id_ed25519_toyos_runner"),
             internal: Node::Nvme { controller: b'0', namespace: b'1' },
         })

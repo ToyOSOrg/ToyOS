@@ -25,11 +25,11 @@ declare_flags!(pub SUITE = {
     /// to run on them, or judges readbacks a driver already left there.
     pub METAL_READBACK = "--metal-readback", Next;
     /// The machine those images boot on, as `<user>@<machine>`: `toyos-metal`'s
-    /// own `--host`, handed to every run of it. The T14 without it.
+    /// own `--host`, handed to every run of it. The bench's own machine
+    /// ([`Bench::host`]) without it, and never another bench's.
     pub METAL_HOST = "--metal-host", Next;
     /// The bench whose rows the run takes, by [`Bench::word`]. The T14 without
-    /// it and without [`METAL_HOST`], which a run booting another bench needs
-    /// beside it; a run judging readbacks reads it off them.
+    /// it; a run judging readbacks reads it off them.
     pub METAL_BENCH = "--metal-bench", Next;
 });
 

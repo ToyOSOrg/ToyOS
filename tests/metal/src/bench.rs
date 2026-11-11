@@ -61,6 +61,16 @@ impl Bench {
         }
     }
 
+    /// The bench's machine as `ssh` reaches it, `<user>@<machine>`: the
+    /// `--host` a run of the bench hands `toyos-metal`, and for the T14 the
+    /// machine `toyos-metal` reaches without one.
+    pub const fn host(self) -> &'static str {
+        match self {
+            Self::T14 => "toyos@bench-t14",
+            Self::Amd => "toyos@bench-amd",
+        }
+    }
+
     /// The bench [`Self::word`] names.
     pub fn parse(word: &str) -> Result<Self, String> {
         Self::ALL.into_iter().find(|bench| bench.word() == word).ok_or_else(|| {
@@ -145,11 +155,14 @@ mod tests {
     }
 
     #[test]
-    fn a_bench_is_named_by_one_word_and_one_signature() {
+    fn a_bench_is_named_by_one_word_one_signature_and_one_machine() {
+        let machine = |bench: Bench| crate::host_of(bench.host()).expect("a host `ssh` reads").1;
         for bench in Bench::ALL {
             assert_eq!(Bench::parse(bench.word()), Ok(bench));
             let same = Bench::ALL.iter().filter(|other| other.signature() == bench.signature()).count();
             assert_eq!(same, 1, "{bench} shares its signature");
+            let same = Bench::ALL.iter().filter(|other| machine(**other) == machine(bench)).count();
+            assert_eq!(same, 1, "{bench} shares its machine");
         }
         assert!(Bench::parse("T14").unwrap_err().contains("t14 and amd"));
     }

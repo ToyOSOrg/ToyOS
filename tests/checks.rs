@@ -1202,7 +1202,7 @@ mod checks {
             .map(|(name, decl)| vec![(*name, decl)])
             .ok_or_else(|| "memory_overwrite_requested is not registered".to_string())?;
         let taken = metal::Taken { rows: selected, shared: Vec::new(), left: Vec::new() };
-        let verdict = metal::run(mode, Bench::T14, None, &taken, &[], true);
+        let verdict = metal::run(mode, Bench::T14, Bench::T14.host(), &taken, &[], true);
         if verdict != metal::Verdict::Green {
             return Err(format!("--metal --list produced {verdict:?}, not Green"));
         }

@@ -7495,18 +7495,18 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
         return Err(format!("the server died: {fired}"));
     }
-    let bench = match back.bench {
+    let tables = match back.bench {
         Bench::T14 => T14,
         Bench::Amd => AMD,
     };
-    kernel.must_say(bench.row)?;
+    kernel.must_say(tables.row)?;
     let said: Vec<&str> = lines.iter().filter_map(|l| l.split_once("acpiserver: table ").map(|(_, said)| said.trim())).filter(|said| said.contains(" of ")).collect();
-    let expected: Vec<String> = (1..=bench.blocks)
+    let expected: Vec<String> = (1..=tables.blocks)
         .map(|place| {
             let name = if place == 1 { "DSDT" } else { "SSDT" };
-            match bench.refused.iter().find(|(at, _)| *at == place) {
-                Some((_, kind)) => format!("{place} of {} ({name}) refused: {kind}", bench.blocks),
-                None => format!("{place} of {} ({name}) loaded", bench.blocks),
+            match tables.refused.iter().find(|(at, _)| *at == place) {
+                Some((_, kind)) => format!("{place} of {} ({name}) refused: {kind}", tables.blocks),
+                None => format!("{place} of {} ({name}) loaded", tables.blocks),
             }
         })
         .collect();
@@ -7515,8 +7515,8 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     let handed = log.must_say("acpiserver: \\_S5 handed to the kernel: ")?;
     let kept = kernel.must_say("power: S5 is PM1a ")?;
-    if !kept.contains(bench.s5) {
-        return Err(format!("the kernel keeps {kept:?}, where this bench's \\_S5 is {:?}", bench.s5));
+    if !kept.contains(tables.s5) {
+        return Err(format!("the kernel keeps {kept:?}, where this bench's \\_S5 is {:?}", tables.s5));
     }
     eprintln!("  [acpi] {}; {}", handed.trim(), kept.trim());
     // The root bridges' memory declared out of the loaded namespace, and what
@@ -7545,11 +7545,11 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     let kept = said_writes(&lines, acpiserver_api::KEPT_WRITE)?;
     let unmatched = |expected: &[At], said: &[u64]| expected.iter().copied().filter(|at| !said.iter().any(|&address| at.holds(address))).collect::<Vec<At>>();
-    if kept.len() != bench.kept.len() || !unmatched(bench.kept, &kept).is_empty() {
-        return Err(format!("the server said the kernel kept writes to {kept:#x?}, where this bench's AML writes {:x?}", bench.kept));
+    if kept.len() != tables.kept.len() || !unmatched(tables.kept, &kept).is_empty() {
+        return Err(format!("the server said the kernel kept writes to {kept:#x?}, where this bench's AML writes {:x?}", tables.kept));
     }
     let pages: Vec<u64> = said_writes(&lines, acpiserver_api::FIRST_WRITE_IN_PAGE)?.iter().map(|address| address & !0xFFF).collect();
-    let missing = unmatched(bench.first_written, &pages);
+    let missing = unmatched(tables.first_written, &pages);
     if !missing.is_empty() {
         return Err(format!("the server said no first write into {missing:x?}; it said {pages:#x?}"));
     }
@@ -7567,7 +7567,7 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
         return Err(format!("a battery reading names the adapter neither online nor offline: {readings:#?}"));
     }
     log.must_say("acpiserver: \\_SB._OSC negotiated: ")?;
-    if bench.loaded.is_empty() {
+    if tables.loaded.is_empty() {
         if let Some(processors) = lines.iter().find(|l| l.contains("processors' _OSC")) {
             return Err(format!("this bench's processors name no _OSC: {processors}"));
         }
@@ -7579,16 +7579,16 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
         eprintln!("  [acpi] {}", processors.trim());
     }
     let idle = log.must_say(acpiserver_api::IDLE_CENSUS)?;
-    if !idle.contains(" 0 refused by the kernel;") || !idle.trim_end().ends_with(bench.idle) {
+    if !idle.contains(" 0 refused by the kernel;") || !idle.trim_end().ends_with(tables.idle) {
         return Err(format!("the processors' idle states are not this bench's, or the kernel refused one: {idle}"));
     }
     eprintln!("  [acpi] {}", idle.trim());
     let loads: Vec<&str> = lines.iter().filter_map(|l| l.split_once("acpiserver: a table loaded at run time: ").map(|(_, said)| said.trim())).collect();
-    if loads != bench.loaded {
-        return Err(format!("the tables loaded at run time are {loads:?}, where this bench's claims load {:?}", bench.loaded));
+    if loads != tables.loaded {
+        return Err(format!("the tables loaded at run time are {loads:?}, where this bench's claims load {:?}", tables.loaded));
     }
-    let blocks = bench.blocks - bench.refused.len();
-    let took = log.must_say(&format!("acpiserver: {blocks} of {} tables loaded in ", bench.blocks))?;
+    let blocks = tables.blocks - tables.refused.len();
+    let took = log.must_say(&format!("acpiserver: {blocks} of {} tables loaded in ", tables.blocks))?;
     let bytes = log.must_say("acpiserver: the tables' bytes took ")?;
     let aml = log.must_say("acpiserver: the tables' AML read SystemMemory ")?;
     let memory = number_between(aml, "AML read SystemMemory ", " times, SystemIO ")?;
@@ -8941,8 +8941,8 @@ fn main() {
 
     if let Some(mode) = parsed.metal {
         // Before the shared binaries' build, which a refusal would waste.
-        let bench = match metal::bench_of(&mode, parsed.metal_bench, parsed.metal_host) {
-            Ok(bench) => bench,
+        let (bench, host) = match metal::target_of(&mode, parsed.metal_bench, parsed.metal_host) {
+            Ok(target) => target,
             Err(refusal) => {
                 eprintln!("[toyos] {refusal}");
                 run.exit(1);
@@ -8962,7 +8962,7 @@ fn main() {
         // and "measured nothing" — a run that staged images and never reached
         // the machine has no claim to make.
         run.exit(
-            match metal::run(mode, bench, parsed.metal_host, &taken, &rust_bins, !nocapture && !debug_mode) {
+            match metal::run(mode, bench, &host, &taken, &rust_bins, !nocapture && !debug_mode) {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,
                 metal::Verdict::Staged => 2,

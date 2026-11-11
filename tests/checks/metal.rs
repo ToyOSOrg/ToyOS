@@ -50,22 +50,26 @@ pub fn readbacks_of_a_machine_with_no_record_are_red_and_record_nothing() {
     assert!(!metal::judge_readbacks(&recorded(), Bench::T14, &read(&dir, &["passing"]), &runs, &[]));
 }
 
-/// **`--metal-host` reaches `toyos-metal` as its own `--host`**, in the words
+/// **A run's machine reaches `toyos-metal` as its own `--host`**, in the words
 /// a driven run spawns and a staged run's `request.txt` lists, and the loop's
-/// own parser takes them; without it the words name no host, which is the T14.
+/// own parser takes them: `--metal-host`'s where the line names one, and else
+/// the bench's own.
 pub fn the_bench_reaches_the_loop_as_its_host() {
     let suite: Vec<String> =
         ["--metal", "--metal-host", "dev@box"].iter().map(ToString::to_string).collect();
-    let host = toyos_metal::testargs::parse(&suite).expect("a suite line").metal_host;
+    let named = toyos_metal::testargs::parse(&suite).expect("a suite line").metal_host;
     let (image, home) = (Path::new("/i.img"), Path::new("/h"));
-    let words = metal::invocation(image, home, host);
-    let after = words.iter().position(|w| w == "--").expect("cargo's own words end") + 1;
-    let tail = &words[after..];
-    let at = tail.iter().position(|w| w == "--host").expect("--host forwarded");
-    assert_eq!(tail[at + 1], "dev@box", "{words:?}");
-    toyos_metal::Args::parse(tail).expect("toyos-metal takes the words it is handed");
-    let t14 = metal::invocation(image, home, None);
-    assert!(!t14.iter().any(|w| w == "--host"), "{t14:?}");
+    for (bench, named, host) in
+        [(Bench::T14, named, "dev@box"), (Bench::T14, None, "toyos@bench-t14"), (Bench::Amd, None, "toyos@bench-amd")]
+    {
+        let (_, target) = metal::target_of(&MetalMode::Drive, Some(bench), named).expect("a machine for the bench");
+        let words = metal::invocation(image, home, &target);
+        let after = words.iter().position(|w| w == "--").expect("cargo's own words end") + 1;
+        let tail = &words[after..];
+        let at = tail.iter().position(|w| w == "--host").expect("--host forwarded");
+        assert_eq!(tail[at + 1], host, "{words:?}");
+        toyos_metal::Args::parse(tail).expect("toyos-metal takes the words it is handed");
+    }
 }
 
 /// A `loader.log` that handed its boot a kernel.
@@ -769,39 +773,48 @@ pub fn the_profile_gives_each_bench_its_own_jobs() {
 }
 
 /// **A run's bench is its readbacks' where it has any**, whatever the line
-/// names beside them but another bench; with none it is the line's, and a
-/// line naming a machine and no bench, or a bench but the T14 and no machine,
-/// is refused.
+/// names beside them but another bench, and the line's or the T14 with none;
+/// **its machine is the bench's own** unless the line names one, and never
+/// another bench's. So a directory one boot of two has answered, which is
+/// staged again, is staged for its readback's bench and that bench's machine,
+/// and the line cannot send a bench's boots to the other's machine.
 pub fn a_runs_bench_is_its_readbacks_and_else_the_lines() {
+    let (t14, amd) = (|| (Bench::T14, "toyos@bench-t14".to_string()), || (Bench::Amd, "toyos@bench-amd".to_string()));
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let offline = MetalMode::Offline(dir.to_path_buf());
-    let host = Some("dev@box");
-    assert_eq!(metal::bench_of(&offline, None, None), Ok(Bench::T14));
-    assert_eq!(metal::bench_of(&offline, Some(Bench::T14), None), Ok(Bench::T14));
-    assert_eq!(metal::bench_of(&offline, Some(Bench::Amd), host), Ok(Bench::Amd));
-    assert_eq!(metal::bench_of(&MetalMode::List, Some(Bench::Amd), None), Ok(Bench::Amd));
-    let why = metal::bench_of(&offline, None, host).expect_err("a machine and no bench");
-    assert!(why.contains("add --metal-bench <t14|amd>"), "{why}");
-    for mode in [&offline, &MetalMode::Drive] {
-        let why = metal::bench_of(mode, Some(Bench::Amd), None).expect_err("the AMD bench and no machine");
-        assert!(why.contains("toyos-metal would boot the T14; add --metal-host"), "{why}");
-    }
+    let dev = Some("dev@box");
+    assert_eq!(metal::target_of(&offline, None, None), Ok(t14()));
+    assert_eq!(metal::target_of(&offline, Some(Bench::Amd), None), Ok(amd()));
+    assert_eq!(metal::target_of(&offline, None, dev), Ok((Bench::T14, "dev@box".to_string())));
+    assert_eq!(metal::target_of(&offline, Some(Bench::Amd), dev), Ok((Bench::Amd, "dev@box".to_string())));
+    assert_eq!(metal::target_of(&MetalMode::List, Some(Bench::Amd), None), Ok(amd()));
+    assert_eq!(metal::target_of(&MetalMode::Drive, None, None), Ok(t14()));
+    let why = metal::target_of(&offline, None, Some("toyos@bench-amd")).expect_err("the T14's rows on the AMD bench");
+    assert!(why.contains("names bench-amd, the AMD bench's machine, and the run takes the T14's rows"), "{why}");
 
-    plant_on(ON_AMD, &dir, "one", BOOTED, None);
+    // The AMD bench's `testcases` came back and its watchdog boot did not.
+    plant_on(ON_AMD, &dir, "testcases", BOOTED, None);
     // A log that names no bench decides nothing here.
     fs::create_dir_all(dir.join("unnamed")).expect("a directory");
     fs::write(dir.join("unnamed").join(READBACK_KERNEL), BOOTED).expect("a planted log");
-    for (named, host) in [(None, None), (None, host), (Some(Bench::Amd), host), (Some(Bench::Amd), None)] {
-        assert_eq!(metal::bench_of(&offline, named, host), Ok(Bench::Amd), "{named:?} {host:?}");
-    }
-    let why = metal::bench_of(&offline, Some(Bench::T14), None).expect_err("another bench than the readback's");
-    assert!(why.contains("--metal-bench names the T14 and one's readback is from the AMD bench"), "{why}");
-    // A driven run reads no directory.
-    assert_eq!(metal::bench_of(&MetalMode::Drive, None, None), Ok(Bench::T14));
+    assert_eq!(metal::target_of(&offline, None, None), Ok(amd()));
+    assert_eq!(metal::target_of(&offline, Some(Bench::Amd), None), Ok(amd()));
+    let why = metal::target_of(&offline, None, Some("toyos@bench-t14")).expect_err("the AMD bench's rows on the T14");
+    assert!(why.contains("names bench-t14, the T14's machine, and the run takes the AMD bench's rows"), "{why}");
+    let why = metal::target_of(&offline, Some(Bench::T14), None).expect_err("another bench than the readback's");
+    assert!(why.contains("--metal-bench names the T14 and testcases's readback is from the AMD bench"), "{why}");
+
+    // The mirror: the T14's readback, and the line naming the AMD bench's machine.
+    let t14_dir = toyos_tmpdir::TempDir::new("metal-readbacks");
+    plant(&t14_dir, "testcases", BOOTED, None);
+    let t14_offline = MetalMode::Offline(t14_dir.to_path_buf());
+    assert_eq!(metal::target_of(&t14_offline, None, None), Ok(t14()));
+    let why = metal::target_of(&t14_offline, None, Some("toyos@bench-amd")).expect_err("the T14's rows on the AMD bench");
+    assert!(why.contains("names bench-amd, the AMD bench's machine, and the run takes the T14's rows"), "{why}");
 
     plant(&dir, "two", BOOTED, None);
-    let why = metal::bench_of(&offline, None, None).expect_err("two benches in one run");
-    assert!(why.contains("one's readback from the AMD bench and two's from the T14"), "{why}");
+    let why = metal::target_of(&offline, None, None).expect_err("two benches in one run");
+    assert!(why.contains("testcases's readback from the AMD bench and two's from the T14"), "{why}");
 }
 
 /// **A judge names the bench its readback came from**, and a boot that ran on
@@ -843,7 +856,7 @@ pub fn each_benchs_own_readback_is_judged_as_that_bench() {
     let masked = Machine { vendor: "masked".into(), product: "masked".into(), bios: "masked".into() };
     let judged = |bench: Bench, names: &[&str]| {
         let dir = compile::repo_root().join("tests/checks/readbacks").join(bench.word());
-        assert_eq!(metal::bench_of(&MetalMode::Offline(dir.clone()), None, None), Ok(bench));
+        assert_eq!(metal::target_of(&MetalMode::Offline(dir.clone()), None, None), Ok((bench, bench.host().to_string())));
         let taken = metal::select(names, &[], bench, METAL, &[])?;
         let root = toyos_tmpdir::TempDir::new("metal-records");
         Record::new(&masked).save(&root).expect("a recorded machine");
