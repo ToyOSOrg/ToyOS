@@ -787,13 +787,17 @@ fn teardown(pid: Pid, tid: Tid, end: End, mark: i32, process_data: &Arc<Lock<Pro
         let main = proc.threads.get(&proc.main_tid).expect("teardown: a claimed process gives up no thread");
         ((Arc::clone(&main.thread_data), main.sched().cloned()), proc.node.parent().is_none())
     };
+    crate::trace::mark(320);
     let releases = crate::object::Releases::open();
     let consumed = teardown_resources(process_data, &main_thread, pid);
+    crate::trace::mark(321);
     let released = releases.run();
+    crate::trace::mark(322);
     let cpu_ns = {
         let mut guard = PROCESS_TABLE.lock();
         teardown_bookkeeping(guard.as_mut().unwrap(), pid, end, &consumed)
     };
+    crate::trace::mark(323);
     let stats = stats_from(&process_data.lock(), pid, cpu_ns, consumed.syscall_total, consumed.syscall_total_ns);
     let ready = {
         let mut guard = PROCESS_TABLE.lock();
@@ -805,7 +809,9 @@ fn teardown(pid: Pid, tid: Tid, end: End, mark: i32, process_data: &Arc<Lock<Pro
     };
     // The table says zombie now, which a sweep counts as nothing left to stop.
     crate::quiesce::note_progress();
+    crate::trace::mark(324);
     publish_climb(ready);
+    crate::trace::mark(325);
     if supervisor {
         panic!("the supervisor ended, {end}, and nothing starts it again");
     }
@@ -833,6 +839,7 @@ fn leave_as(leaving: Leaving) {
     crate::mm::paging::activate_kernel();
     let process_data = process_data();
     scheduler::flush_current_stats(&mut process_data.lock().accounting);
+    crate::trace::mark(310);
     let out = {
         let mut guard = PROCESS_TABLE.lock();
         let table = guard.as_mut().unwrap();
@@ -885,13 +892,16 @@ fn walk(mut owed: Vec<Pid>) {
 
 /// End the calling thread's process as `end` says, and everything below it.
 pub fn exit(end: End) -> ! {
+    crate::trace::mark(300);
     let tid = current_tid();
     let mut owed = Vec::new();
     for sched in claim(current_process(), end, Some(tid), &mut owed) {
         scheduler::post_retire(&sched);
     }
     walk(owed);
+    crate::trace::mark(301);
     leave();
+    crate::trace::mark(330);
     scheduler::exit_current();
 }
 
@@ -1001,11 +1011,13 @@ pub fn ask_join(join: &join::Join, tid: Tid, parent_pid: Pid) -> Option<Result<i
 /// Takes the space's lock and nothing else.
 pub fn handle_page_fault(fault_addr: u64, access: kernel::vm::Access) -> bool {
     let Some(space) = scheduler::current_address_space() else { return false };
+    crate::trace::mark(210);
     let began = crate::clock::nanos_since_boot();
     let served = space.lock().fault(fault_addr, access);
     if served {
         space.usage().faulted(crate::clock::nanos_since_boot().saturating_sub(began));
     }
+    crate::trace::mark(211);
     served
 }
 

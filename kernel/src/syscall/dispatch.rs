@@ -108,6 +108,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_MACHINE_STOPS => sys_machine_stops(RawHandle(a1 as u32), a2),
         SYS_PIPE => sys_pipe(),
         SYS_SPAWN => {
+            crate::trace::mark(100);
             let Ok(args) = ctx.copy_in::<SpawnArgs>(UserAddr::new(a1)) else { return bad_addr };
             // First: each range's object is the caller's, and an endowment
             // below may move the caller's own handle to it.
@@ -115,6 +116,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(program) => program,
                 Err(refused) => return refused,
             };
+            crate::trace::mark(101);
             // Before an endowment can move the handle that names it.
             let parent = match spawn_place(args.place) {
                 Ok(parent) => parent,
@@ -150,11 +152,15 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(bytes) => bytes,
                 Err(e) => return e.to_u64(),
             };
+            crate::trace::mark(102);
             let pending = match process::build_child_handles(&endow, &labels, pager) {
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };
-            sys_spawn(&path, name, pending, program, parent)
+            crate::trace::mark(103);
+            let answer = sys_spawn(&path, name, pending, program, parent);
+            crate::trace::mark(104);
+            answer
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {

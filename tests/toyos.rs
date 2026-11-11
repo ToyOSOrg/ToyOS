@@ -113,6 +113,8 @@ const RUST_SKIP: &[&str] = &[
     // Its product is how long a spawn of `toybox` takes to its exit, which a
     // guest's host sets: the `spawn_cost` metal row runs it.
     "spawn_cost",
+    // MEASUREMENT ONLY: the `spawn_stages` metal row runs it.
+    "spawn_stages",
     // Its verdict is a duration: whether a shootdown waits for every other CPU
     // is read off the clock around the syscall. The `tlb_shootdown_waits`
     // metal row runs it on the T14.
@@ -1272,6 +1274,22 @@ const METAL: &[(&str, metal::Metal)] = &[
         // the benches', eight CPUs and sixteen.
         "job_fairness",
         metal::Metal { arms: TESTCASES, judge: |b| job_fairness(b[0]) },
+    ),
+    (
+        // MEASUREMENT ONLY: a spawn's stages, read off the log.
+        "spawn_stages",
+        metal::Metal {
+            arms: &[metal::Arm {
+                adds_ms: 120_000,
+                named_only: true,
+                ..metal::once("spawnstagescase", "tests/images/benchcase.toml", &[], &["test_rs_spawn_stages", "osbench_procs"])
+            }],
+            judge: |b| {
+                b[0].job_passed("test_rs_spawn_stages")?;
+                b[0].log().must_say("spawn_stages: done")?;
+                Ok(())
+            },
+        },
     ),
     // ---- one image: tests/images/benchcase.toml, `osbench`'s ToyOS half ----
     (

@@ -61,6 +61,12 @@ pub fn trace(kind: Kind, data: u32) {
     push(kind, None, data);
 }
 
+/// MEASUREMENT ONLY: a stage boundary of a spawn, an exit or a fault.
+#[inline]
+pub fn mark(id: u32) {
+    push(Kind::Mark, None, id);
+}
+
 /// Reserve, stamp and publish under one guard, on the ring of the CPU the guard holds us to.
 #[inline]
 fn push(kind: Kind, task: Option<(u32, u32)>, data: u32) {
