@@ -253,11 +253,9 @@ fn clocksource() -> String {
 /// per-operation timing would carry (`README.md`, "The clock").
 pub fn unfit_clock() -> Option<String> {
     let clocksource = clocksource();
-    (clocksource != crate::arch::VDSO_CLOCKSOURCE).then(|| {
-        format!(
-            "this boot keeps time on {clocksource}, not {}: every timestamp would cost a syscall, so it is not              measured. Boot Linux again and check current_clocksource",
-            crate::arch::VDSO_CLOCKSOURCE
-        )
+    let vdso = crate::arch::VDSO_CLOCKSOURCE;
+    (clocksource != vdso).then(|| {
+        format!("this boot keeps time on {clocksource}, not {vdso}, so every timestamp would cost a syscall: boot again until current_clocksource is {vdso}")
     })
 }
 

@@ -35,8 +35,8 @@ and the C library beneath it are each system's own.
   ToyOS job list runs them. It starts `nvme` through `sudo -n` where that
   asks no password, since the raw namespace takes root, and exits 3 before
   any group on a boot whose clocksource the vDSO cannot read ("The clock",
-  below). A run's value is its p50, compared by the exact
-  two-sided Mann-Whitney test at 0.05. With four runs each the only p under
+  below). A run's value is its p50, compared by the exact two-sided
+  Mann-Whitney test at 0.05. With four runs each the only p under
   0.05 is 2/70, so a resolved row is one whose every run of one system beat
   every run of the other. Fewer runs of either system than four cannot reach
   that, except against more of the other: three against five can (2/56).
@@ -52,9 +52,10 @@ and the C library beneath it are each system's own.
 - **Compare** every run of the bench in one call:
   `cargo run -p osbench-compare -- <linux runs> <toyos kernel.logs>`. It
   refuses runs of one system that disagree on their setup (`SETUP`, the
-  clocksource among it) and states each system's. Each row's verdict says whether the runs resolve a
-  difference. Each p is its row's alone: with no difference anywhere, about
-  2.9% of rows resolve by chance, a few in a table this size.
+  clocksource among it) and states each system's. Each row's verdict says
+  whether the runs resolve a difference. Each p is its row's alone: with no
+  difference anywhere, about 2.9% of rows resolve by chance, a few in a table
+  this size.
 - **The clocks are told beside each verdict.** No program reads the
   package's limit state or temperature on ToyOS, so the clock is what both
   systems report. A clock reading is the difference between a short add
