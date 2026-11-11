@@ -1,8 +1,9 @@
 //! User memory, copied in and out through the running process's own mapping
 //! (`arch::uaccess`): a copy reaches only what a load or store the process
 //! made itself could reach, and a byte it cannot reach ends the copy as
-//! [`Faulted`], which a syscall answers as `BadAddress`. Values are copied
-//! out, never referenced.
+//! [`Faulted`], which a syscall answers as `BadAddress`, or as `Io` where it
+//! is a mapped file's page its server failed or lost. Values are copied out,
+//! never referenced.
 //!
 //! **A window is a range of the user half**, checked for its end, overflow
 //! included, when it is made, and by nothing else: whether its pages are
@@ -13,10 +14,12 @@
 //! only the accesses the process could make through that mapping itself
 //! (`arch::uaccess`).
 //!
-//! **A copy holds no kernel lock**: its fault takes its space's lock, and in
-//! 7b will wait on a pager. Every spin lock raises the preemption count, so
-//! each copy refuses to run above the depth its syscall's entry runs at
-//! ([`gate`]), whether or not a page faults.
+//! **A copy holds no kernel lock**: its fault takes its space's lock and may
+//! wait on a pager. Every spin lock raises the preemption count, so each copy
+//! refuses to run above the depth its syscall's entry runs at ([`gate`]),
+//! whether or not a page faults. **Nor does it wait holding a page pin**: a
+//! copy made holding one goes through [`Pinned`], which stops where a page
+//! would be waited for.
 //!
 //! Every single-word user read is `read_volatile`, including the futex word
 //! and the crash dump's walk, both outside this module.
@@ -24,6 +27,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use kernel::vm::Access as Asked;
 use toyos_abi::syscall::SyscallError;
@@ -41,9 +45,24 @@ fn asked(access: Access) -> Asked {
     }
 }
 
-/// The frame behind a user virtual address, populating its page if needed.
-pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<u64> {
-    unlocked_space().lock().reach(addr.raw(), asked(access))
+/// Why a user address has no frame.
+pub(crate) enum Untranslated {
+    /// Nothing the access may reach is there.
+    Unreachable,
+    /// A mapped file's page that is absent or lost.
+    Away,
+}
+
+/// The frame behind a user virtual address, populating its page if needed,
+/// but waiting for no mapped file's page.
+pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Result<u64, Untranslated> {
+    use crate::mm::space::Populated;
+    let reached = unlocked_space().lock().reach(addr.raw(), asked(access));
+    match reached {
+        Populated::At(phys) => Ok(phys),
+        Populated::Unreachable => Err(Untranslated::Unreachable),
+        Populated::Lost(_) | Populated::Wait(_) => Err(Untranslated::Away),
+    }
 }
 
 /// This thread's futex wait in its space.
@@ -67,13 +86,129 @@ fn gate() {
     assert!(crate::arch::cpu::interrupts_enabled(), "user_ptr: a user copy with interrupts masked");
 }
 
-/// A copy met a user byte its process could not reach.
-#[derive(Debug)]
-pub struct Faulted;
+/// A copy met a user byte its process could not have.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Faulted {
+    /// Nothing the access may reach is there.
+    Unreachable,
+    /// A mapped file's page its server failed, or can no longer supply.
+    Lost,
+}
 
 impl From<Faulted> for SyscallError {
-    fn from(_: Faulted) -> Self {
-        SyscallError::BadAddress
+    fn from(faulted: Faulted) -> Self {
+        match faulted {
+            Faulted::Unreachable => SyscallError::BadAddress,
+            Faulted::Lost => SyscallError::Io,
+        }
+    }
+}
+
+/// What stopped a copy made through [`Pinned`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stopped {
+    Faulted(Faulted),
+    /// A mapped file's page that is absent: the copy did not wait for it.
+    Absent,
+}
+
+/// What stopped a thread's last copy short, as its fault left it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stop {
+    Unreachable,
+    Lost,
+    /// Only under [`Pinned`].
+    Absent,
+}
+
+/// A thread's user copies: whether it holds page pins across them, and what
+/// stopped its last one short. Written only by the thread itself, by its
+/// copies and their faults.
+pub struct Copies {
+    pinned: AtomicBool,
+    stop: AtomicU8,
+}
+
+impl Copies {
+    pub const fn new() -> Self {
+        Self { pinned: AtomicBool::new(false), stop: AtomicU8::new(Stop::Unreachable as u8) }
+    }
+}
+
+/// Whether the running thread's copies hold page pins ([`Pinned`]), so its
+/// copy's fault must not wait.
+pub fn pinned() -> bool {
+    crate::sched::driver::with_current_copies(|c| c.pinned.load(Ordering::Relaxed)).unwrap_or(false)
+}
+
+/// A copy's fault could not serve its page, for `why`: the copy resumes at
+/// its fixup, and [`last_stop`] reads this.
+pub fn stopped(why: Stop) {
+    crate::sched::driver::with_current_copies(|c| c.stop.store(why as u8, Ordering::Relaxed));
+}
+
+/// What stopped the running thread's last copy short, as its fault left it:
+/// what a copy routine answers where it left bytes behind (`arch::uaccess`).
+pub fn last_stop() -> Stopped {
+    match crate::sched::driver::with_current_copies(|c| c.stop.load(Ordering::Relaxed)) {
+        Some(x) if x == Stop::Lost as u8 => Stopped::Faulted(Faulted::Lost),
+        Some(x) if x == Stop::Absent as u8 => Stopped::Absent,
+        _ => Stopped::Faulted(Faulted::Unreachable),
+    }
+}
+
+/// A copy holding no pin: what stopped it is a fault.
+fn faulted(copied: Result<(), Stopped>) -> Result<(), Faulted> {
+    copied.map_err(|why| match why {
+        Stopped::Faulted(faulted) => faulted,
+        Stopped::Absent => panic!("user_ptr: a copy holding no pin stopped short of an absent page"),
+    })
+}
+
+/// The running thread's copies while it holds page pins, which no wait may
+/// hold: a fault on a mapped file's absent page stops the copy
+/// ([`Stopped::Absent`]) instead of waiting. The holder lets its pins go,
+/// waits for the window's pages holding nothing (`wait_in`), and copies
+/// again. Not `Send`: it marks the thread that made it.
+pub struct Pinned(PhantomData<*const ()>);
+
+impl Pinned {
+    pub fn begin() -> Self {
+        crate::sched::driver::with_current_copies(|c| c.pinned.store(true, Ordering::Relaxed));
+        Self(PhantomData)
+    }
+
+    /// [`UserBytesMut::write_raw`], stopping at an absent page.
+    ///
+    /// # Safety
+    /// As [`UserBytesMut::write_raw`].
+    pub unsafe fn write(&self, out: &mut UserBytesMut, off: usize, src: *const u8, len: usize) -> Result<(), Stopped> {
+        let user = out.0.at("UserBytesMut::write", off, len);
+        // SAFETY: as `View::write_raw`.
+        unsafe { uaccess::copy_to_user(user, src, len) }
+    }
+
+    /// [`UserBytesMut::fill_zero`], stopping at an absent page.
+    pub fn zero(&self, out: &mut UserBytesMut, off: usize, len: usize) -> Result<(), Stopped> {
+        let user = out.0.at("UserBytesMut::fill_zero", off, len);
+        // SAFETY: as `View::fill_zero`.
+        unsafe { uaccess::clear_user(user, len) }
+    }
+
+    /// [`UserBytes::read_raw`], stopping at an absent page.
+    ///
+    /// # Safety
+    /// As [`UserBytes::read_raw`].
+    pub unsafe fn read(&self, from: &UserBytes, off: usize, dst: *mut u8, len: usize) -> Result<(), Stopped> {
+        let user = from.0.at("UserBytes::read", off, len);
+        // SAFETY: as `View::read_raw`.
+        unsafe { uaccess::copy_from_user(dst, user, len) }
+    }
+}
+
+impl Drop for Pinned {
+    fn drop(&mut self) {
+        crate::sched::driver::with_current_copies(|c| c.pinned.store(false, Ordering::Relaxed));
     }
 }
 
@@ -176,7 +311,7 @@ impl View {
         let user = self.at("UserBytes::read", off, len);
         // SAFETY: the caller's `dst`; `at` keeps the user range in the half,
         // and `gate` holds no lock across the copy.
-        unsafe { uaccess::copy_from_user(dst, user, len) }
+        faulted(unsafe { uaccess::copy_from_user(dst, user, len) })
     }
 
     /// # Safety
@@ -184,13 +319,13 @@ impl View {
     unsafe fn write_raw(&self, off: usize, src: *const u8, len: usize) -> Result<(), Faulted> {
         let user = self.at("UserBytesMut::write", off, len);
         // SAFETY: as `read_raw`.
-        unsafe { uaccess::copy_to_user(user, src, len) }
+        faulted(unsafe { uaccess::copy_to_user(user, src, len) })
     }
 
     fn fill_zero(&self, off: usize, len: usize) -> Result<(), Faulted> {
         let user = self.at("UserBytesMut::fill_zero", off, len);
         // SAFETY: as `read_raw`, with no kernel memory touched.
-        unsafe { uaccess::clear_user(user, len) }
+        faulted(unsafe { uaccess::clear_user(user, len) })
     }
 }
 
@@ -200,6 +335,14 @@ pub struct UserBytes<'a>(View, PhantomData<&'a ()>);
 impl UserBytes<'_> {
     pub fn len(&self) -> usize {
         self.0.len
+    }
+
+    /// Populate the window's pages under `[off, off + len)` for reading,
+    /// waiting for a mapped file's absent page holding nothing: what a copy
+    /// [`Pinned`] stopped at needs before it copies again.
+    pub fn wait_in(&self, off: usize, len: usize) -> Result<(), Faulted> {
+        let start = self.0.at("UserBytes::wait_in", off, len);
+        crate::process::wait_in(start, start + len as u64, Asked::Read)
     }
 
     /// Copy `dst.len()` bytes out of the window at `off`; panics if out of bounds — the kernel's own arithmetic, never user input.
@@ -248,5 +391,11 @@ impl UserBytesMut<'_> {
     /// Zero `len` bytes of the window at `off`.
     pub fn fill_zero(&mut self, off: usize, len: usize) -> Result<(), Faulted> {
         self.0.fill_zero(off, len)
+    }
+
+    /// As [`UserBytes::wait_in`], for writing.
+    pub fn wait_in(&mut self, off: usize, len: usize) -> Result<(), Faulted> {
+        let start = self.0.at("UserBytesMut::wait_in", off, len);
+        crate::process::wait_in(start, start + len as u64, Asked::Write)
     }
 }

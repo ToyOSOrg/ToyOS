@@ -175,6 +175,7 @@ fn each_end_reads_as_its_wait_status() {
         (End::Fault(Fault::Memory), "SIGSEGV"),
         (End::Fault(Fault::Handle), "SIGSEGV"),
         (End::Fault(Fault::Alignment), "SIGBUS"),
+        (End::Fault(Fault::Mapping), "SIGBUS"),
         (End::Fault(Fault::Instruction), "SIGILL"),
         (End::Fault(Fault::Arithmetic), "SIGFPE"),
         (End::Fault(Fault::Trap), "SIGTRAP"),

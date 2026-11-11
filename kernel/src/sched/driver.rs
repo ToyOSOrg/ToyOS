@@ -753,6 +753,11 @@ pub fn pass_on_every_other_cpu() {
     }
 }
 
+/// `f` over the running thread's user copies; `None` off-task.
+pub fn with_current_copies<R>(f: impl FnOnce(&crate::user_ptr::Copies) -> R) -> Option<R> {
+    try_with_cpu(|cpu| cpu.running().map(|t| f(t.ext().handle.copies()))).flatten()
+}
+
 /// Count the running thread's syscall `num`, which took `ticks` of the counter.
 pub fn note_syscall(num: u64, ticks: u64) {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handle.syscalls().note(num, ticks)));

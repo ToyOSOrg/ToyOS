@@ -151,6 +151,7 @@ fn user_copy_abort(frame: &mut Frame) -> bool {
     if frame.esr >> 26 != EC_DABT_SAME || !far_valid || !toyos_userbound::is_user_addr(frame.far) {
         return false;
     }
+    let mut faulted = crate::process::Faulted::Unreachable;
     if is_translation_fault(frame.esr) {
         let prev = percpu::swap_fault_state(CpuFaultState::PageFault);
         if prev != CpuFaultState::Normal {
@@ -161,13 +162,14 @@ fn user_copy_abort(frame: &mut Frame) -> bool {
         cpu::enable_interrupts();
         // `WnR`, bit 6: the access was a write.
         let access = if frame.esr & (1 << 6) != 0 { kernel::vm::Access::Write } else { kernel::vm::Access::Read };
-        let served = crate::process::handle_page_fault(frame.far, access);
+        faulted = crate::process::handle_page_fault(frame.far, access);
         cpu::disable_interrupts();
         percpu::set_fault_state(CpuFaultState::Normal);
-        if served == crate::process::Faulted::Served {
+        if faulted == crate::process::Faulted::Served {
             return true;
         }
     }
+    crate::user_ptr::stopped(faulted.stop());
     frame.elr = fixup;
     true
 }
@@ -354,13 +356,21 @@ fn user_abort(frame: &mut Frame) {
             (false, true) => kernel::vm::Access::Write,
             (false, false) => kernel::vm::Access::Read,
         };
-        let served = crate::process::handle_page_fault(frame.far, access);
+        let faulted = crate::process::handle_page_fault(frame.far, access);
         cpu::disable_interrupts();
-        // A kill that ended a wait is acted on as the thread returns to EL0.
-        if served != crate::process::Faulted::Refused {
-            percpu::set_fault_state(CpuFaultState::Normal);
-            percpu::preempt_count_down();
-            return;
+        match faulted {
+            crate::process::Faulted::Unreachable => {}
+            crate::process::Faulted::Lost(lost) => {
+                percpu::set_fault_state(CpuFaultState::Normal);
+                crate::process::lost(frame.far, lost);
+            }
+            crate::process::Faulted::Absent => unreachable!("an EL0 fault while its thread's copies hold pins"),
+            // A kill that ended a wait is acted on as the thread returns to EL0.
+            crate::process::Faulted::Served | crate::process::Faulted::Killed => {
+                percpu::set_fault_state(CpuFaultState::Normal);
+                percpu::preempt_count_down();
+                return;
+            }
         }
         log!(
             "#PF UNHANDLED: far={:#x} pc={:#x} esr={:#x} tid={:?}",

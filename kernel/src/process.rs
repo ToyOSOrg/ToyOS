@@ -924,9 +924,14 @@ pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
     };
 
     let wait = crate::user_ptr::begin_futex_wait();
-    // Physical, so a futex in shared memory works across processes.
-    let Some(word) = futex_word(addr).and_then(|addr| wait.translate(addr)) else {
-        return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
+    // Physical, so a futex in shared memory works across processes. A word
+    // of a mapped file's page that is absent or lost is a spurious wake, as
+    // swapped memory's is.
+    let unaligned = crate::user_ptr::Untranslated::Unreachable;
+    let word = match futex_word(addr).ok_or(unaligned).and_then(|addr| wait.translate(addr)) {
+        Ok(word) => word,
+        Err(crate::user_ptr::Untranslated::Away) => return 0,
+        Err(crate::user_ptr::Untranslated::Unreachable) => return toyos_abi::syscall::SyscallError::BadAddress.to_u64(),
     };
 
     // 0 covers both woken and never-blocked (the caller re-checks the word either way); 1 means only the caller's own deadline ended it.
@@ -938,8 +943,12 @@ pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
 
 /// Wake up to `count` threads blocked on the same physical address as `addr`.
 pub fn futex_wake(addr: UserAddr, count: u64) -> u64 {
-    let Some(phys) = futex_word(addr).and_then(|addr| crate::user_ptr::translate_user(addr, crate::user_ptr::Access::Read)) else {
-        return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
+    // No wait is keyed on a page that is not there.
+    let unaligned = crate::user_ptr::Untranslated::Unreachable;
+    let phys = match futex_word(addr).ok_or(unaligned).and_then(|addr| crate::user_ptr::translate_user(addr, crate::user_ptr::Access::Read)) {
+        Ok(phys) => phys,
+        Err(crate::user_ptr::Untranslated::Away) => return 0,
+        Err(crate::user_ptr::Untranslated::Unreachable) => return toyos_abi::syscall::SyscallError::BadAddress.to_u64(),
     };
     scheduler::futex_wake(phys, count as usize)
 }
@@ -964,41 +973,102 @@ pub fn ask_join(join: &join::Join, tid: Tid, parent_pid: Pid) -> Option<Result<i
 pub enum Faulted {
     /// The page is populated, or already held a leaf allowing the access.
     Served,
-    /// No range allows the access, or its paged page cannot be had.
-    Refused,
+    /// No range allows the access there.
+    Unreachable,
+    /// A mapped file's page its pager cannot let the process have.
+    Lost(crate::object::paged::Lost),
+    /// A mapped file's page that is absent, met by a copy holding page pins
+    /// (`user_ptr::Pinned`), which does not wait for it.
+    Absent,
     /// A kill ended a wait for a paged page: the thread never runs its user
     /// code again, and a copy stops where it is.
     Killed,
 }
 
+impl Faulted {
+    /// What a copy this fault stopped short answers.
+    pub fn stop(self) -> crate::user_ptr::Stop {
+        match self {
+            Faulted::Lost(_) => crate::user_ptr::Stop::Lost,
+            Faulted::Absent => crate::user_ptr::Stop::Absent,
+            Faulted::Served | Faulted::Unreachable | Faulted::Killed => crate::user_ptr::Stop::Unreachable,
+        }
+    }
+}
+
 /// Serve a fault at `fault_addr` for `access` in the running thread's space,
 /// at its trap's depth with interrupts on: its page populated under the
 /// space's lock, or, for a paged page that is absent, waited for holding no
-/// lock and touched again. While it waits the CPU's fault mark is down, so
-/// another fault on this CPU meanwhile is no recursion; it is up again on
-/// whichever CPU the thread wakes on.
+/// lock and touched again, unless the fault is a copy's that holds page pins.
+/// While it waits the CPU's fault mark is down, so another fault on this CPU
+/// meanwhile is no recursion; it is up again on whichever CPU the thread
+/// wakes on.
 pub fn handle_page_fault(fault_addr: u64, access: kernel::vm::Access) -> Faulted {
     use crate::arch::percpu::{self, CpuFaultState};
-    let Some(space) = scheduler::current_address_space() else { return Faulted::Refused };
+    touch(fault_addr, access, |page| {
+        if crate::user_ptr::pinned() {
+            return Faulted::Absent;
+        }
+        percpu::set_fault_state(CpuFaultState::Normal);
+        let woken = page.wait();
+        let prev = percpu::swap_fault_state(CpuFaultState::PageFault);
+        assert_eq!(prev, CpuFaultState::Normal, "a fault woke on a CPU marked {prev:?}");
+        if woken { Faulted::Served } else { Faulted::Killed }
+    })
+}
+
+/// The page at `va` populated for `access`, a paged page that is absent left
+/// to `wait`, which answers `Served` to touch it again.
+fn touch(va: u64, access: kernel::vm::Access, mut wait: impl FnMut(crate::mm::space::PageWait) -> Faulted) -> Faulted {
+    use crate::mm::space::Populated;
+    let Some(space) = scheduler::current_address_space() else { return Faulted::Unreachable };
     let began = crate::clock::nanos_since_boot();
     loop {
-        let populated = space.lock().fault(fault_addr, access);
+        let populated = space.lock().fault(va, access);
         match populated {
-            crate::mm::space::Populated::At(_) => break,
-            crate::mm::space::Populated::Refused => return Faulted::Refused,
-            crate::mm::space::Populated::Wait(page) => {
-                percpu::set_fault_state(CpuFaultState::Normal);
-                let woken = page.wait();
-                let prev = percpu::swap_fault_state(CpuFaultState::PageFault);
-                assert_eq!(prev, CpuFaultState::Normal, "a fault woke on a CPU marked {prev:?}");
-                if !woken {
-                    return Faulted::Killed;
-                }
-            }
+            Populated::At(_) => break,
+            Populated::Unreachable => return Faulted::Unreachable,
+            Populated::Lost(lost) => return Faulted::Lost(lost),
+            Populated::Wait(page) => match wait(page) {
+                Faulted::Served => {}
+                stopped => return stopped,
+            },
         }
     }
     space.usage().faulted(crate::clock::nanos_since_boot().saturating_sub(began));
     Faulted::Served
+}
+
+/// Populate the running thread's pages over `[start, end)` for `access` from
+/// a syscall holding no lock and no pin, waiting for a mapped file's absent
+/// page as a fault does.
+pub fn wait_in(start: u64, end: u64, access: kernel::vm::Access) -> Result<(), crate::user_ptr::Faulted> {
+    let mut page = start & !(crate::mm::PAGE_SIZE - 1);
+    while page < end {
+        let touched = touch(page, access, |page| if page.wait() { Faulted::Served } else { Faulted::Killed });
+        match touched {
+            Faulted::Served => {}
+            Faulted::Lost(_) => return Err(crate::user_ptr::Faulted::Lost),
+            Faulted::Unreachable | Faulted::Absent | Faulted::Killed => return Err(crate::user_ptr::Faulted::Unreachable),
+        }
+        page += crate::mm::PAGE_SIZE;
+    }
+    Ok(())
+}
+
+/// A Ring 3 touch at `fault_addr` of a mapped file's page its pager cannot
+/// let the process have ends the process as `SIGBUS`, with one record of what
+/// was lost. The caller has put the CPU's fault mark down.
+pub fn lost(fault_addr: u64, lost: crate::object::paged::Lost) -> ! {
+    log!(
+        "fault: pid {} touched {fault_addr:#x}, page {} of pid {}'s object {}: {}",
+        current_process(),
+        lost.page,
+        lost.pager,
+        lost.object,
+        lost.why.name()
+    );
+    exit(End::Fault(Fault::Mapping))
 }
 
 /// Dump memory around `fault_addr` and the instruction pointer for the
