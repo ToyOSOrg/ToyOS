@@ -20,7 +20,7 @@ use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Once;
 use std::time::{Duration, Instant};
@@ -226,8 +226,8 @@ fn cargo(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// How long a step's cargo may say nothing: a build prints a line as each
-/// crate starts, libtest one as each test ends, and the guest harness ends a
-/// silent guest long before this. A hang ceiling and no measure of a step.
+/// crate starts, libtest one as each test ends, and the guest harness one a
+/// minute for a job it waits on. A hang ceiling and no measure of a step.
 /// Shortened under `cfg(test)` to what a loaded host starts a built binary
 /// in, so the gate on it costs seconds.
 #[cfg(not(test))]
@@ -250,6 +250,9 @@ const STARTING: i32 = -1;
 
 /// The last interrupt [`interrupted`] took, for [`started`]; 0 for none.
 static PENDING: AtomicI32 = AtomicI32::new(0);
+
+/// Whether [`heard`] ended a group, for [`nothing_left`].
+static ENDED_A_GROUP: AtomicBool = AtomicBool::new(false);
 
 /// The driver's own interrupt, handed to the group it started and then taken:
 /// a group of its own is out of a terminal's reach, and a step left running
@@ -413,6 +416,7 @@ fn heard(mut cmd: Command) -> Result<(ExitStatus, String), String> {
         }
     };
     let ended = hung.map(|last| {
+        ENDED_A_GROUP.store(true, Ordering::SeqCst);
         // SAFETY: the group the child leads, which no other process can name until it is reaped.
         unsafe { libc::killpg(group, libc::SIGQUIT) };
         let mut by = "SIGQUIT";
@@ -968,7 +972,7 @@ fn host(root: &Path, scope: Result<(Scope, String), String>, part: Option<Part>)
             steps.push(licences());
         }
         let owed = runs(Part::Tests);
-        steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before, owed)));
+        steps.push(step("nothing left in $TMPDIR or /tmp", || nothing_left(&tmp, short, &before, owed)));
         return steps;
     }
     if runs(Part::Tests) {
@@ -1075,7 +1079,7 @@ fn host(root: &Path, scope: Result<(Scope, String), String>, part: Option<Part>)
     // The build system's tests and userland's make a `toyos_tmpdir::TempDir`;
     // the lint and models parts make none, so they are owed no lock.
     let owed = runs(Part::Tests) || runs(Part::Userland);
-    steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before, owed)));
+    steps.push(step("nothing left in $TMPDIR or /tmp", || nothing_left(&tmp, short, &before, owed)));
     steps
 }
 
@@ -1174,6 +1178,29 @@ fn attempted(programs: &[Program], os: Os) -> (Vec<&Program>, Vec<&str>) {
     (attempted, declared)
 }
 
+/// [`left_behind`], once what a group [`heard`] ended left is removed: no
+/// process of it unwound, the step that hung is the red that says so, and its
+/// scratch goes now rather than at some later process's sweep. Whether the
+/// steps wrote to `tmp` at all is read before that removal, which makes the
+/// lock it is read from.
+fn nothing_left(tmp: &Path, short: &Path, before: &[PathBuf], owed: bool) -> Result<String, String> {
+    if !ENDED_A_GROUP.load(Ordering::SeqCst) {
+        return left_behind(tmp, short, before, owed);
+    }
+    if let Some(why) = never_written(tmp).filter(|_| owed) {
+        return Err(why);
+    }
+    let removed = reclaim_ended(tmp, short, before);
+    left_behind(tmp, short, before, owed)
+        .map(|said| format!("{said}, once {removed} root(s) of gone processes were removed"))
+}
+
+/// Remove every root under `tmp` whose process is gone, and every such root
+/// under `short` that `before` does not name; how many went.
+fn reclaim_ended(tmp: &Path, short: &Path, before: &[PathBuf]) -> usize {
+    toyos_tmpdir::reclaim_gone(tmp, |_| true) + toyos_tmpdir::reclaim_gone(short, |root| !before.iter().any(|b| b == root))
+}
+
 /// What `tmp` holds but this user's [`toyos_tmpdir::private`] directory and
 /// the lock `toyos_tmpdir` keeps in it, and every root under `short` whose
 /// process is gone that `before` does not name.
@@ -1191,16 +1218,11 @@ fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf], owed: bool) -> Resu
             .collect::<Result<_, _>>()
             .map_err(|e| format!("read {}: {e}", dir.display()))
     };
+    if let Some(why) = never_written(tmp).filter(|_| owed) {
+        return Err(why);
+    }
     let mine = toyos_tmpdir::private(tmp);
     let mut left = names(&mine)?;
-    if owed && !left.iter().any(|name| name == toyos_tmpdir::GLOBAL) {
-        return Err(format!(
-            "{} holds no {}: every step above makes a `toyos_tmpdir::TempDir`, so its absence \
-             means this $TMPDIR was never the one the steps actually wrote to",
-            mine.display(),
-            toyos_tmpdir::GLOBAL
-        ));
-    }
     let private = mine.file_name().expect("a private directory has a name").to_string_lossy();
     left.retain(|name| name != toyos_tmpdir::GLOBAL);
     for name in &mut left {
@@ -1230,6 +1252,20 @@ fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf], owed: bool) -> Resu
         return Ok("every test took its scratch with it".into());
     }
     Err(said.join("; "))
+}
+
+/// Why `tmp`'s [`toyos_tmpdir::private`] directory shows the steps never
+/// wrote there, if it holds no [`toyos_tmpdir::GLOBAL`].
+fn never_written(tmp: &Path) -> Option<String> {
+    let mine = toyos_tmpdir::private(tmp);
+    (!mine.join(toyos_tmpdir::GLOBAL).exists()).then(|| {
+        format!(
+            "{} holds no {}: every step above makes a `toyos_tmpdir::TempDir`, so its absence \
+             means this $TMPDIR was never the one the steps actually wrote to",
+            mine.display(),
+            toyos_tmpdir::GLOBAL
+        )
+    })
 }
 
 // --- The change's scope --------------------------------------------------------
@@ -1372,7 +1408,7 @@ fn guest(root: &Path, suite: &[String], install: bool) -> Vec<Step> {
     }
     // Unconditional: whatever stopped earlier, this $TMPDIR is still this
     // process's own to judge, and a leak past a failing suite is still a leak.
-    steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before, true)));
+    steps.push(step("nothing left in $TMPDIR or /tmp", || nothing_left(&tmp, short, &before, true)));
     steps
 }
 
@@ -1607,6 +1643,34 @@ mod tests {
         std::fs::create_dir(short_mine.join(&died)).unwrap();
         let refusal = left_behind(&tmp, &short, &before, true).expect_err("a dead step's root is a red");
         assert!(refusal.contains(&died) && !refusal.contains(&earlier), "{refusal}");
+    }
+
+    /// What the processes of a group the driver ended left under both bases is
+    /// removed, and a root already dead before the steps is not the driver's.
+    #[test]
+    fn what_an_ended_group_left_is_removed_and_an_earlier_root_stays() {
+        let tmp = toyos_tmpdir::TempDir::new("ended-group");
+        let short = toyos_tmpdir::TempDir::new("ended-group-short");
+        let (mine, short_mine) = (toyos_tmpdir::private(&tmp), toyos_tmpdir::private(&short));
+        std::fs::write(mine.join(toyos_tmpdir::GLOBAL), b"").unwrap();
+        let earlier = short_mine.join(format!("{}1-0", toyos_tmpdir::ROOT_PREFIX));
+        std::fs::create_dir(&earlier).unwrap();
+        let before = toyos_tmpdir::gone_roots(&short);
+        let ended = [mine.join(format!("{}2-0", toyos_tmpdir::ROOT_PREFIX)), short_mine.join(format!("{}2-0", toyos_tmpdir::ROOT_PREFIX))];
+        for root in &ended {
+            std::fs::create_dir_all(root.join("run-0")).unwrap();
+            std::fs::write(root.join("run-0/boot.img"), b"a guest's disk").unwrap();
+        }
+        let refusal =
+            left_behind(&tmp, &short, &before, true).expect_err("the ended group's roots are a red while they stand");
+        // One clause for what is left in `tmp`, one for a dead process's root under `short`.
+        let (left_in_tmp, died) = refusal.split_once("; ").unwrap_or_else(|| panic!("one root is not named: {refusal}"));
+        let private = mine.file_name().unwrap().to_string_lossy();
+        assert!(left_in_tmp.contains(&format!("{private}/{}2-0", toyos_tmpdir::ROOT_PREFIX)), "{refusal}");
+        assert!(died.contains(&ended[1].display().to_string()), "{refusal}");
+        assert_eq!(reclaim_ended(&tmp, &short, &before), 2);
+        assert!(ended.iter().all(|root| !root.exists()) && earlier.exists(), "{ended:?} {earlier:?}");
+        left_behind(&tmp, &short, &before, true).expect("nothing of the ended group is left");
     }
 
     /// The crate [`a_carried_jobs_step`] builds; unset, it is not a test.

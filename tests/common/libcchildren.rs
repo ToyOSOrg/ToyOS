@@ -23,7 +23,7 @@ use std::fs;
 use std::time::Duration;
 
 use super::{compile, qemu};
-use qemu::{BootOptions, QemuInstance};
+use qemu::{BootOptions, QemuInstance, TestResult};
 
 /// The Rust programs, binaries of `tests/guest/rust-tests`.
 const RUST_PROBES: [&str; 5] = ["stdio_named", "libc_recv_beside_close", "quit_tree", "libc_read_restarts", "tty_interrupt"];
@@ -47,20 +47,40 @@ pub fn libc_children() -> Result<(), String> {
     let probes: Vec<(String, Vec<u8>)> =
         RUST_PROBES.iter().map(|name| (name.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &rust_tests, name))).collect();
     let mut qemu = QemuInstance::boot_with_options(&case, &bins, &probes, BootOptions::default());
-    let mut failed = Vec::new();
-    let jobs = names
+    let jobs: Vec<(&str, String)> = names
         .iter()
         .map(|name| (name.as_str(), format!("test_c_{name}")))
-        .chain(RUST_PROBES.iter().map(|name| (*name, format!("test_rs_{name}"))));
-    for (name, job) in jobs {
-        let result = qemu.run_test(&job, BOUND);
-        match (&result.error, result.exit_code) {
-            (None, Some(0)) => {
+        .chain(RUST_PROBES.iter().map(|name| (*name, format!("test_rs_{name}"))))
+        .collect();
+    judge(&jobs, |job| qemu.run_test(job, BOUND))
+}
+
+/// Each program `run` in turn, its verdict said as it ends. Any that ends with
+/// no exit code ends the row, as a failing job ends every other row's: one
+/// that never ended leaves the guest's runner, which takes one job at a time,
+/// running nothing after it.
+pub fn judge(jobs: &[(&str, String)], mut run: impl FnMut(&str) -> TestResult) -> Result<(), String> {
+    let mut failed = Vec::new();
+    for (at, (name, job)) in jobs.iter().enumerate() {
+        let result = run(job);
+        match result.exit_code {
+            Some(0) => {
                 for said in result.stdout.lines().filter(|l| l.contains(&format!("{name}: "))) {
                     eprintln!("  [libc_children] {}", said.trim());
                 }
             }
-            (why, code) => failed.push(format!("{name} ended {code:?} {why:?}:\n{}", result.stdout)),
+            Some(code) => {
+                eprintln!("  [libc_children] {name}: FAILED, it exited {code}");
+                failed.push(format!("{name} exited {code}:\n{}", result.stdout));
+            }
+            None => {
+                let why = result.error.map_or("its end named no exit code".to_string(), |why| why.to_string());
+                let after: Vec<&str> = jobs[at + 1..].iter().map(|(name, _)| *name).collect();
+                let not_run = format!("{} program(s) after it were not run: {}", after.len(), after.join(", "));
+                eprintln!("  [libc_children] {name}: FAILED, it ended with no exit code; {not_run}");
+                failed.push(format!("{name} ended with no exit code, and {not_run}\n{why}\n{}", result.serial));
+                break;
+            }
         }
     }
     match failed.is_empty() {

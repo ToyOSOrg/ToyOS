@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use toyos_tmpdir::{private, TempDir, GLOBAL, OWNER, PRIVATE_PREFIX, ROOT_PREFIX, SHORT_BASE};
+use toyos_tmpdir::{private, reclaim_gone, TempDir, GLOBAL, OWNER, PRIVATE_PREFIX, ROOT_PREFIX, SHORT_BASE};
 
 const HOLD: &str = "TOYOS_TMPDIR_TEST_HOLD";
 const HOLDING: &str = "holding ";
@@ -286,48 +286,27 @@ fn removing_a_root_waits_for_global() {
     assert!(!root.exists(), "{} survived once GLOBAL was released", root.display());
 }
 
-/// A killed process's root goes into the directory that adopts its pid, and
-/// goes when that does; a live root, and a gone one of a pid that merely
-/// starts with the same digits, stay.
+/// A caller that ended a process removes what it held at once: the gone roots
+/// it asks for go with everything in them, and a gone root it does not ask
+/// for, a live one and the lock stay.
 #[test]
-fn an_adopted_root_goes_with_its_adopter() {
+fn a_gone_root_is_reclaimed_when_asked_and_a_live_one_never() {
     let _spawning = spawning();
-    let tmp = TempDir::new("adopt");
+    let tmp = TempDir::new("reclaim-gone");
     let live = Holder::start(&tmp);
     let killed = Holder::start(&tmp);
-    let (pid, root, held) = (killed.child.id(), killed.root(), killed.dir.clone());
+    let root = killed.root();
     killed.kill();
-    let mine = private(&tmp);
-    let other = mine.join(format!("{ROOT_PREFIX}{pid}0-0"));
-    std::fs::create_dir(&other).unwrap();
+    let earlier = private(&tmp).join(format!("{ROOT_PREFIX}1-0"));
+    std::fs::create_dir(&earlier).unwrap();
 
-    // The adopted pid reused, so its name matches the prefix `adopt` filters
-    // on; only its owner's lock says it is live, and that must still hold.
-    let reused = mine.join(format!("{ROOT_PREFIX}{pid}-9"));
-    std::fs::create_dir(&reused).unwrap();
-    let reused_owner = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(reused.join(OWNER))
-        .unwrap();
-    reused_owner.lock().unwrap();
-
-    let adopter = TempDir::new("adopter");
-    adopter.adopt(&tmp, pid);
-    assert!(!root.exists(), "{} was not adopted", root.display());
-    let moved = adopter
-        .join(format!("reap-{}", root.file_name().unwrap().to_string_lossy()))
-        .join(held.file_name().unwrap())
-        .join("image.img");
-    assert!(moved.exists(), "{} holds no {}", adopter.display(), moved.display());
-    assert!(other.exists(), "another pid's root was adopted");
-    assert!(live.dir.join("image.img").exists(), "a live root was adopted");
-    assert!(reused.exists(), "a live root of a reused pid was adopted");
-
-    drop(reused_owner);
-    let adopted = adopter.to_path_buf();
-    drop(adopter);
-    assert!(!adopted.exists(), "{} outlived its TempDir", adopted.display());
+    assert_eq!(reclaim_gone(&tmp, |gone| gone != earlier), 1);
+    assert!(!root.exists(), "{} was not reclaimed", root.display());
+    assert!(earlier.exists(), "a root that was not asked for was reclaimed");
+    assert!(live.dir.join("image.img").exists(), "a live root was reclaimed");
+    let live_root = live.root().file_name().unwrap().to_string_lossy().into_owned();
+    let mut left = vec![GLOBAL.to_string(), live_root, format!("{ROOT_PREFIX}1-0")];
+    left.sort();
+    assert_eq!(entries(&private(&tmp)), left, "the reclaiming root stayed, or something else went");
     live.finish();
 }

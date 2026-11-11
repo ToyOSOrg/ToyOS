@@ -118,19 +118,6 @@ impl TempDir {
     pub fn path(&self) -> &Path {
         &self.path
     }
-
-    /// Move every root in `base`'s [`private`] directory that process `pid`
-    /// made and is gone from into this directory, so it goes when this does:
-    /// for a caller that `SIGKILL`ed `pid` after this process's one sweep of
-    /// `base`. A live root is left alone, whatever its name.
-    pub fn adopt(&self, base: &Path, pid: u32) {
-        let prefix = format!("{ROOT_PREFIX}{pid}-");
-        let base = private(base);
-        let _global = global(&base);
-        reap_into(&base, &self.path, |root| {
-            root.file_name().expect("a root has a name").to_string_lossy().starts_with(&prefix)
-        });
-    }
 }
 
 impl Deref for TempDir {
@@ -326,6 +313,23 @@ pub fn gone_roots(base: &Path) -> Vec<PathBuf> {
     let base = private(base);
     let _global = global(&base);
     gone_under(&base)
+}
+
+/// Remove every root in `base`'s [`private`] directory whose process is gone
+/// and that `take` passes, and answer how many: for a caller that ended those
+/// processes itself, rather than leave them to the next process's sweep. They
+/// go as a sweep's do, through a root of this process's there.
+pub fn reclaim_gone(base: &Path, take: impl Fn(&Path) -> bool) -> usize {
+    let tmp = private(base);
+    let root = Root::make(&tmp, &mut 0);
+    let reap = {
+        let _global = global(&tmp);
+        reap_into(&tmp, &root.dir, |path| path != root.dir && take(path))
+    };
+    let reclaimed = reap.len();
+    reclaim(&tmp, reap, |dir| fs::remove_dir_all(dir));
+    root.remove();
+    reclaimed
 }
 
 /// This user's directory of `base`, which any user may share: made if absent,

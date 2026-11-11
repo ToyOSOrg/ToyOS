@@ -478,6 +478,11 @@ impl std::fmt::Display for WaitVerdict {
 /// has said nothing since it last asked.
 pub const VERDICT_POLL: Duration = Duration::from_millis(100);
 
+/// How often [`QemuInstance::run_test`] says which job it waits for: a job
+/// that stalls is named while it stalls, and the driver's silence guard
+/// (`build/ci.rs`'s `QUIET`), far past this, hears a harness at a bounded wait.
+const WAIT_SAID: Duration = Duration::from_secs(60);
+
 /// What a test's ceiling caught — the panic, the stall, or the slow test.
 ///
 /// `dying` is the line on which the kernel said it was dying, if it ever did,
@@ -1924,8 +1929,18 @@ impl QemuInstance {
         // matched nothing here, the machine halted, and the whole guard expired
         // onto a verdict that said the guest had stopped answering.
         let mut dying: Option<String> = None;
+        let mut said_waiting = start;
 
         loop {
+            if said_waiting.elapsed() >= WAIT_SAID {
+                said_waiting = Instant::now();
+                eprintln!(
+                    "  [qemu] {want} has run {}s of its {}s guard, the guest last heard {}s ago",
+                    start.elapsed().as_secs(),
+                    timeout.as_secs(),
+                    last_line.elapsed().as_secs()
+                );
+            }
             if let Some(error) = ceiling_verdict(
                 dying.as_deref(),
                 start.elapsed(),
