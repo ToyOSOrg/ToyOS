@@ -8,8 +8,9 @@
 //! a free frame, or was split, which keeps 4 KiB traffic in few superframes.
 //!
 //! **A pinned frame is never reissued.** [`Pins`] counts, per frame and
-//! without the allocator's lock, the user copies reading or writing it through
-//! the direct map. A frame freed while pinned is deferred: the allocator does
+//! without the allocator's lock, the kernel's copies reading or writing a
+//! paged object's frame through the direct map; a page's frame is never
+//! pinned. A frame freed while pinned is deferred: the allocator does
 //! not take it back until its last pin goes, and [`Pins::unpin`] says when
 //! that is.
 //!
@@ -117,15 +118,6 @@ impl List {
 enum Which {
     Whole,
     Partial,
-}
-
-/// What [`Frames::discard`] did with a frame.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Discarded {
-    /// Freed, and its page promised a frame again.
-    Freed,
-    /// Pinned by a copy, so kept for its page.
-    Kept,
 }
 
 /// One account's memory: what it holds, and the floor held back for it.
@@ -733,22 +725,13 @@ impl<'m> Frames<'m> {
     }
 
     /// Free the frame at `phys` of a page that stays committed, promising
-    /// the page a frame again — or, where a user copy pins the frame, keep it
-    /// for the page: the caller zeroes it in place and leaves it in the
-    /// page's leaf, not present, for the next touch to map again.
-    ///
-    /// Sound only where no pin can be taken meanwhile: a copy pins a frame
-    /// under the lock of the space that maps it, which the caller holds, so a
-    /// frame read unpinned here stays unpinned. Then every promise is backed
-    /// by a frame that is free now, never by one deferred to a later unpin.
-    pub fn discard(&mut self, phys: u64, pins: &Pins) -> Discarded {
-        if pins.pinned(phys) {
-            return Discarded::Kept;
-        }
+    /// the page a frame again, which the frame backs at once: nothing pins a
+    /// page's frame, so it is free now and never deferred to a later unpin.
+    pub fn discard(&mut self, phys: u64, pins: &Pins) {
+        assert!(!pins.pinned(phys), "frames: {phys:#x} discarded pinned, and nothing pins a page's frame");
         self.give_back(phys, pins);
         self.repromise(1);
         self.refill();
-        Discarded::Freed
     }
 
     /// Promise `frames` again, which a commitment still holds and whose
@@ -1378,7 +1361,7 @@ mod tests {
 
         // A frame a commitment still holds, given back, is promised to it
         // again; one given back by none is anyone's.
-        assert_eq!(m.frames.discard(drawn[0], &m.pins), Discarded::Freed);
+        m.frames.discard(drawn[0], &m.pins);
         assert_eq!(m.frames.promised(), 1);
         assert_eq!(held(&mut m.frames, &m.l), None, "a frame promised again went to another");
         m.frames.free_drawn(&m.l, [drawn[1]], &m.pins);
@@ -1478,23 +1461,17 @@ mod tests {
         assert_eq!((m.frames.charges(), m.frames.held_back()), ((0, 0), (1, 0)));
     }
 
-    /// A frame a copy pins is kept by a discard rather than freed: freed, it
-    /// would come back only at its last unpin, and the promise made for it
-    /// meanwhile would be backed by no free frame, so a touch of the page, or
-    /// any other promised page, could find none.
+    /// A discarded frame is promised to its page again, backed by itself: a
+    /// pinned one would come back only at its last unpin, leaving the promise
+    /// backed by no free frame, and nothing pins a page's frame.
     #[test]
-    fn a_discard_keeps_a_pinned_frame_and_promises_only_what_came_back() {
+    #[should_panic(expected = "discarded pinned")]
+    fn a_pinned_frame_discarded_is_a_panic() {
         let mut m = whole(1);
-        let all = PER_SUPER as u64;
-        assert!(m.frames.promise(&m.l, all));
-        let drawn: Vec<u64> = (0..all).map(|_| m.frames.alloc_promised()).collect();
-        assert!(m.pins.pin(drawn[0]));
-        assert_eq!(m.frames.discard(drawn[0], &m.pins), Discarded::Kept, "a pinned frame was freed");
-        assert_eq!(m.frames.discard(drawn[1], &m.pins), Discarded::Freed);
-        assert_eq!((m.frames.promised(), m.frames.free_frames()), (1, 1));
-        // The touch of the page whose frame went finds its frame.
-        assert_eq!(m.frames.alloc_promised(), drawn[1]);
-        assert_eq!(m.pins.unpin(drawn[0]), Unpinned::Kept, "a kept frame was deferred");
+        assert!(m.frames.promise(&m.l, 1));
+        let frame = m.frames.alloc_promised();
+        assert!(m.pins.pin(frame));
+        m.frames.discard(frame, &m.pins);
     }
 
     #[test]
@@ -2131,7 +2108,7 @@ mod tests {
                 3 if !drawn.is_empty() => {
                     // A discard keeps the page committed: its frame is promised again.
                     let f = drawn.swap_remove(next() as usize % drawn.len());
-                    assert_eq!(m.frames.discard(f, &m.pins), Discarded::Freed);
+                    m.frames.discard(f, &m.pins);
                     promised += 1;
                 }
                 4 if !drawn.is_empty() => {

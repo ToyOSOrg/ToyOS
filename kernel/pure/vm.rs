@@ -35,11 +35,18 @@ pub fn around(start: u64, end: u64, page: u64, populated: impl Fn(u64) -> bool) 
     (run.max(start), (run + AROUND).min(end))
 }
 
-/// Make `frame`, which holds what its last owner left, a copied range's page:
-/// its first `n` bytes as `read` writes them, and zeros after.
-pub fn copied_page(frame: &mut [u8], n: usize, read: impl FnOnce(&mut [u8])) {
+/// Make `frame`, which holds what its last owner left, the page `at` bytes
+/// into a range that copies `copied` bytes of a `size`-byte source from
+/// `offset`: as many of the source's bytes as both go, which `read` writes
+/// from the source offset it is given, and zeros after them. A page that
+/// takes none, such as one wholly past the source's end, reads nothing.
+pub fn copied_page(frame: &mut [u8], at: u64, offset: u64, copied: u64, size: u64, read: impl FnOnce(u64, &mut [u8])) {
+    let from = offset.saturating_add(at);
+    let n = copied.saturating_sub(at).min(frame.len() as u64).min(size.saturating_sub(from)) as usize;
     let (bytes, rest) = frame.split_at_mut(n);
-    read(bytes);
+    if n > 0 {
+        read(from, bytes);
+    }
     rest.fill(0);
 }
 
@@ -367,22 +374,51 @@ impl<O: Object, S: Object> Inventory<O, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::format;
     use std::vec;
     use std::vec::Vec;
 
-    /// A copied page holds its bytes and zeros after them, whatever the
-    /// frame held: none of them, some and all.
+    /// The page `at` of a range copying `copied` bytes of a `size`-byte
+    /// source from `offset`, from a frame that held other bytes: what it
+    /// asked the source for, and the page.
+    fn copy_page(at: u64, offset: u64, copied: u64, size: u64) -> (Option<(u64, usize)>, Vec<u8>) {
+        let mut frame = vec![0xa5u8; PAGE as usize];
+        let mut asked = None;
+        copied_page(&mut frame, at, offset, copied, size, |from, bytes| {
+            asked = Some((from, bytes.len()));
+            bytes.fill(7);
+        });
+        (asked, frame)
+    }
+
+    /// A copied page holds the source's bytes as far as the range's copy and
+    /// the source both go, and zeros after them, whatever the frame held.
     #[test]
     fn a_copied_page_keeps_nothing_its_frame_held() {
-        for n in [0, 100, PAGE as usize] {
-            let mut frame = vec![0xa5u8; PAGE as usize];
-            copied_page(&mut frame, n, |bytes| {
-                assert_eq!(bytes.len(), n);
-                bytes.fill(7);
-            });
-            assert!(frame[..n].iter().all(|&b| b == 7), "{n} bytes copied");
-            assert!(frame[n..].iter().all(|&b| b == 0), "zeros past {n} bytes");
+        for (at, offset, copied, size, n) in [
+            (PAGE, 0, 3 * PAGE, 4 * PAGE, PAGE),
+            (0, PAGE, 100, 2 * PAGE, 100),
+            (PAGE, 0, 3 * PAGE, PAGE + 50, 50),
+            (PAGE, 0, 100, 4 * PAGE, 0),
+            (0, 0, 0, PAGE, 0),
+        ] {
+            let (asked, frame) = copy_page(at, offset, copied, size);
+            let n = n as usize;
+            let what = format!("page {at:#x} of {copied:#x} bytes copied from {offset:#x} of {size:#x}");
+            assert_eq!(asked, (n > 0).then_some((offset + at, n)), "{what}: what it read");
+            assert!(frame[..n].iter().all(|&b| b == 7), "{what}: its {n} bytes");
+            assert!(frame[n..].iter().all(|&b| b == 0), "{what}: zeros past {n} bytes");
         }
+    }
+
+    /// A page wholly past its source's end, which a range longer than its
+    /// object reaches, reads zeros and asks the source for nothing: a read
+    /// there is past the object, which no read may be.
+    #[test]
+    fn a_page_wholly_past_its_source_reads_nothing_from_it() {
+        let (asked, frame) = copy_page(2 * PAGE, 0, 3 * PAGE, PAGE);
+        assert_eq!(asked, None, "a read past the source's end");
+        assert!(frame.iter().all(|&b| b == 0));
     }
 
     /// An object by number.
