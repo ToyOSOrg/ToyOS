@@ -1160,10 +1160,14 @@ impl<X: SchedPayload> CpuSched<X> {
             // provably about a task that is no longer waiting — a benign no-op.
             return;
         };
+        crate::scout::at(111);
         let mut task = entry.task.wake(self.id, cause, entry.class, now);
+        crate::scout::at(112);
         self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
+        crate::scout::at(113);
         task.refresh_affinity();
         self.place(task, env, now);
+        crate::scout::at(114);
     }
 
     fn handle_adopt<H: Hw<Payload = X>, P: PreemptGuard>(
@@ -1268,12 +1272,14 @@ impl<X: SchedPayload> CpuSched<X> {
     /// RT task is in the RT band *before* the pick.
     fn drain<H: Hw<Payload = X>, P: PreemptGuard>(&mut self, env: Env<'_, H, P>, now: Nanos) {
         while let Some(msg) = self.mailbox.pop(env.preempt) {
+            crate::scout::at(110);
             match msg {
                 Msg::Wake { key, cause } => self.handle_wake(key, cause, env, now),
                 Msg::Adopt { task } => self.handle_adopt(task, env, now),
                 Msg::Retire { shared } => self.handle_retire(&shared, env, now),
             }
         }
+        crate::scout::at(115);
         // Behind the mailbox, under the same `begin_pass`: an ask's ring is
         // what owes this pass, so the bit it set is visible here. Each thief
         // asks at the weight its last pass published, zero for an idle one.
@@ -1632,11 +1638,13 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
     /// see is already visible.
     pub fn begin(cpu: &'c mut CpuSched<H::Payload>, env: Env<'e, H, P>, now: Nanos) -> Self {
         env.cpus.get(cpu.id).doorbell().begin_pass();
+        crate::scout::at(140);
         if let Some(zombie) = cpu.zombie.take() {
             cpu.release(zombie, env);
         }
         if let Some(current) = cpu.running.as_mut() {
             let ns = current.charge(now);
+            crate::scout::at(141);
             if ns > 0 {
                 cpu.rq.charge_running(ns);
             }
@@ -1731,6 +1739,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             #[cfg(feature = "protocol-port")]
             self.cpu.park_keeps_lapsed_lend,
         );
+        crate::scout::at(125);
         self.cpu.parked.insert(
             key,
             ParkedEntry {
@@ -1742,6 +1751,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         crate::scout::at(44);
         self.cpu
             .trace(self.env, self.now, TraceKind::ParkCommit { task: key, name });
+        crate::scout::at(126);
         self.settle();
         crate::scout::at(45);
         self.dispose()
@@ -1851,7 +1861,9 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             let takers = if surplus >= PUSH_THRESHOLD { self.cpu.rq.takers() } else { CpuMask::NONE };
             handle.publish_load((self.cpu.rq.len() + self.cpu.dying.len()) as u32);
             self.env.cpus.publish_surplus(self.cpu.id, surplus, takers);
+            crate::scout::at(155);
             self.cpu.rq.refresh();
+            crate::scout::at(156);
             handle.publish_weight(self.cpu.rq.weight());
             // The stamp goes with them: it is what says they are about now.
             handle.publish_pass(self.now);
@@ -2042,7 +2054,9 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             if self.cpu.loaded != Loaded::Task(key) {
                 self.cpu.dispatched_at = self.now;
             }
+            crate::scout::at(153);
             self.cpu.running = Some(task.dispatch(self.cpu.id, self.now));
+            crate::scout::at(154);
             self.cpu.aged_grant = false;
             self.cpu.cut = None;
             // A real-time task's turn; a fair thread's decision is the run

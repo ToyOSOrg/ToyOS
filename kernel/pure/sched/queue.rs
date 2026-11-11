@@ -128,8 +128,10 @@ impl<X: SchedPayload> RunQueue<X> {
         let key = task.key();
         let job = task.job().clone();
         let jk = job.key();
+        crate::scout::at(129);
         job.enter();
         self.count_in(task.affinity());
+        crate::scout::at(130);
         let standing = task.standing_mut();
         let carried = core::mem::take(&mut standing.group_lag);
         let left = standing.left.take();
@@ -155,17 +157,22 @@ impl<X: SchedPayload> RunQueue<X> {
                     carried,
                     Group { job, threads: Queue::new() },
                 );
+                crate::scout::at(132);
                 self.members.insert(jk, group);
+                crate::scout::at(133);
                 group
             }
         };
+        crate::scout::at(131);
         let threads = &mut self.group_slots.payload_mut(group).threads;
         match left {
             Some(left) => threads.rejoin(&mut self.threads, key, THREAD_WEIGHT, SLICE_NS, left, Some(task)),
             None => threads.join(&mut self.threads, key, THREAD_WEIGHT, SLICE_NS, Lag::ZERO, Some(task)),
         };
+        crate::scout::at(135);
         self.ready_fair += 1;
         self.reweigh(group);
+        crate::scout::at(136);
     }
 
     /// Take the entity of a fair thread out, writing what it takes with it
@@ -174,15 +181,21 @@ impl<X: SchedPayload> RunQueue<X> {
         let group = self.group_slots.payload_mut(at.group);
         let (mut left, value) = group.threads.leave(&mut self.threads, at.thread);
         assert!(value.is_none(), "a thread left its queue holding its value");
+        crate::scout::at(120);
         left.lag = left.lag.clamp_ns(LAG_BOUND_NS);
         standing.left = Some(left);
         group.job.leave();
+        crate::scout::at(121);
         if group.threads.is_empty() {
             let (left, group) = self.groups.leave(&mut self.group_slots, at.group);
+            crate::scout::at(122);
             self.members.remove(&group.job.key());
             standing.group_lag = left.lag.clamp_ns(LAG_BOUND_NS);
+            drop(group);
+            crate::scout::at(123);
         } else {
             self.reweigh(at.group);
+            crate::scout::at(124);
         }
     }
 
@@ -205,8 +218,11 @@ impl<X: SchedPayload> RunQueue<X> {
 
     /// The fair band's pick: a group, then one of its threads.
     fn pick_fair(&mut self) -> Option<Place> {
+        crate::scout::at(149);
         self.refresh();
+        crate::scout::at(150);
         let group = self.groups.pick(&self.group_slots)?;
+        crate::scout::at(151);
         let threads = &self.group_slots.payload(group).threads;
         #[cfg(feature = "protocol-port")]
         if self.lowest_key_within_group {
@@ -217,6 +233,7 @@ impl<X: SchedPayload> RunQueue<X> {
             return Some(Place { group, thread });
         }
         let thread = threads.pick(&self.threads).expect("a queued group has a thread");
+        crate::scout::at(152);
         Some(Place { group, thread })
     }
 
@@ -250,11 +267,13 @@ impl<X: SchedPayload> RunQueue<X> {
     pub fn charge_running(&mut self, ns: u64) {
         if let Some(at) = self.running {
             self.groups.charge(&mut self.group_slots, at.group, ns);
+            crate::scout::at(142);
             #[cfg(feature = "protocol-port")]
             if self.double_charge == Some(self.group_slots.key(at.group)) {
                 self.groups.charge(&mut self.group_slots, at.group, ns);
             }
             self.group_slots.payload_mut(at.group).threads.charge(&mut self.threads, at.thread, ns);
+            crate::scout::at(143);
         }
     }
 
@@ -270,9 +289,12 @@ impl<X: SchedPayload> RunQueue<X> {
                     self.leave(at, task.standing_mut());
                     self.rt.push_back(task);
                 } else {
+                    crate::scout::at(159);
                     if yielded {
                         self.groups.end_request(&mut self.group_slots, at.group);
+                        crate::scout::at(160);
                         self.group_slots.payload_mut(at.group).threads.end_request(&mut self.threads, at.thread);
+                        crate::scout::at(161);
                     }
                     self.count_in(task.affinity());
                     *self.threads.payload_mut(at.thread) = Some(task);
