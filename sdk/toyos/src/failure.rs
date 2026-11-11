@@ -154,6 +154,7 @@ impl From<fs::Error> for Failure {
             Error::Unsupported => Self::Unsupported,
             Error::OutOfResources => Self::OutOfMemory,
             Error::Malformed => Self::Protocol,
+            Error::Unanswered => Self::TimedOut,
         }
     }
 }
