@@ -487,8 +487,10 @@ crate::user_safe! {
     /// user half, `prot` is a [`VmProt`], `backing` a [`SpawnBacking`] and
     /// `offset` on a page boundary of an `object` of ordinary memory, which
     /// holds `[offset, offset + copied)` for a copy, `copied <= len`, and
-    /// `[offset, offset + len)` for a share, whose `copied` is 0. No page is
-    /// both writable and executable, since no `VmProt` is.
+    /// `[offset, offset + len)` for a share, whose `copied` is 0;
+    /// `PermissionDenied` for an `object` handle without `MAP`, or without
+    /// `WRITE` beside it for a writable share. No page is both writable and
+    /// executable, since no `VmProt` is.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct SpawnMap {
         pub addr: u64,

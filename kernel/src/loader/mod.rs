@@ -70,8 +70,9 @@ pub enum Backing {
 }
 
 impl Map {
-    /// What the handle `raw` names its object by carries: `InvalidArgument`
-    /// for a word that names no protection or backing.
+    /// The rights the handle naming `raw`'s object must carry: `MAP`, and
+    /// `WRITE` beside it for a writable share. `InvalidArgument` for a word
+    /// that names no protection or backing.
     pub fn rights(raw: &SpawnMap) -> Result<Rights, SyscallError> {
         let prot = crate::syscall::vm::vm_prot(raw.prot)?;
         match SpawnBacking::from_u64(raw.backing).ok_or(SyscallError::InvalidArgument)? {

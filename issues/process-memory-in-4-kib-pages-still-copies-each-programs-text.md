@@ -95,9 +95,12 @@ live split of a user leaf.
    at its first touch. A program anywhere else is still read whole into
    memory of the spawner's and copied a page at a time, until 7b's step 3.
    A shared segment's mapping is never widened, so a program can no longer
-   make its own read-only segment writable (`mprotect`); a page shared until
-   its first write is owed with 7b's write faults (step 5). Exit: two
-   processes of one binary hold its text once, wherever it is served from.
+   make its own read-only segment writable (`mprotect`). Exit for that: 7b's
+   step 2 converts on protect, so a protect that adds write to such a range
+   commits its pages and makes it a copy range of the same object; only a
+   page shared until its first write waits for step 5's write faults. Exit:
+   two processes of one binary hold its text once, wherever it is served
+   from.
 6. **`/apps` image sharing.** Decided by the orchestrator under the owner's
    delegation of technical decisions (2026-11-11): 7b's step 3 maps images
    from every pager-backed volume, `/apps`, `/tmp` and `/home` alike, sealed
@@ -121,6 +124,9 @@ writes in place while it runs; (4) the
 storage track's attributes and names without a request; (5) writable shared
 mappings and write-back; (6) the #1077 retry
 (`issues/a-tcp-connect-zeroes-twelve-mebibytes.md`).
+Until step 2's revocation exists, an object a space maps must keep its frames
+for the object's life: ROOT's pages stay non-reclaimable, and ROOT is not
+served through a pager, until then.
 
 **Paged objects** (memory design §7, `issues/toyos-builds-itself.md` item 13)
 are split in two. **7a**, delivered by the storage track's file-server work:
