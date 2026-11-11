@@ -496,6 +496,7 @@ fn stop_timer_hardware() {
 /// This CPU's timer, armed to fire `nanos` from now, or after [`MIN_ONE_SHOT`] if that is longer.
 pub fn arm_one_shot(nanos: u64) {
     arm_ticks(crate::clock::counter_ticks(nanos));
+    percpu::set_timer_pending(true);
     crate::trace::trace(crate::trace::Kind::TimerArm, nanos as u32);
 }
 
@@ -534,8 +535,16 @@ pub fn rearmed_a_quantum(armed: u64) -> bool {
     comparator() >= armed + crate::clock::counter_ticks(kernel::sched::task::QUANTUM_NS)
 }
 
+/// Whether the one-shot [`arm_one_shot`] last armed is still to fire: both
+/// of the timer's entry paths clear it, and [`arm_within`] leaves it, since
+/// what it arms is never later than what it found.
+pub fn timer_pending() -> bool {
+    percpu::timer_pending()
+}
+
 /// Stop the timer: no interrupt until it is armed again.
 pub fn stop_timer() {
+    percpu::set_timer_pending(false);
     percpu::set_armed_ticks(0);
     stop_timer_hardware();
     crate::trace::trace(crate::trace::Kind::TimerStop, 0);
@@ -544,6 +553,7 @@ pub fn stop_timer() {
 /// A timer interrupt taken from EL0: armed again for what it was last armed
 /// for, or stopped if it was stopped — the one thing that deasserts it.
 pub(super) fn rearm() {
+    percpu::set_timer_pending(false);
     match percpu::armed_ticks() {
         0 => stop_timer_hardware(),
         ticks => {
@@ -555,6 +565,7 @@ pub(super) fn rearm() {
 /// A timer interrupt taken at EL1: one quantum on, or stopped if it was
 /// stopped, leaving what the scheduler armed for its next pass to re-arm.
 pub(super) fn rearm_in_kernel() {
+    percpu::set_timer_pending(false);
     match percpu::armed_ticks() {
         0 => stop_timer_hardware(),
         _ => compare_at(cpu::counter() + crate::clock::counter_ticks(kernel::sched::task::QUANTUM_NS)),

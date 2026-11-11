@@ -46,7 +46,7 @@ and contention).
 - A TSC deadline: before #1061 cut the arm to one register write, the
   re-arm was at most 11.7 to 12.1 % of a pass's pick and switch on the T14,
   and at the AMD bench's TSC floor; it is to be read again
-  (`issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`).
+  (`issues/the-timer-is-a-lapic-count-never-a-tsc-deadline.md`).
 - Deep idle: on the T14 `hlt` holds a one-thread load to the turbo ratio
   for three or more active cores, 38 of `MSR_TURBO_RATIO_LIMIT`'s
   `0x2626262626262a2a` against 42 for one or two (#866's dump,
@@ -88,7 +88,7 @@ yet measured.
 - `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`
 - `issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`
 - `issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`
-- `issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`
+- `issues/the-timer-is-a-lapic-count-never-a-tsc-deadline.md`
 - `issues/no-gate-decodes-kernel-elfs-instructions.md`
 - `issues/kernel-forward-copies-and-fills-are-one-rep-movsb-or-stosb-on-every-cpu.md`
 - `issues/the-direct-map-uses-1-gib-leaves-where-the-cpu-has-them.md`

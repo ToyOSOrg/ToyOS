@@ -109,7 +109,9 @@ pub struct PerCpu {
     pub ring0_timer_fires: AtomicU32,
     pub last_seen_ring0_fires: u32,
     fault_state: u8,
-    _pad_after_fault_state: [u8; 3],
+    /// Non-zero while the scheduler's last one-shot is armed and its interrupt not yet taken.
+    timer_pending: u8,
+    _pad_after_timer_pending: [u8; 2],
     /// Ticks the Ring 3 timer branch re-arms with, and zero when stopped, which the Ring 0 branch leaves stopped.
     pub last_armed_ticks: AtomicU32,
     /// This CPU's [`log::Shard`]; never null on a live CPU ([`alloc_percpu`] fills it first).
@@ -209,6 +211,7 @@ pub(crate) const OFF_PREEMPT_COUNT: u32 = offset_of!(PerCpu, preempt_count) as u
 pub(crate) const OFF_NEED_RESCHED: u32 = offset_of!(PerCpu, need_resched) as u32;
 /// Read by `preempt::enable`'s slow path to decline rescheduling a faulting CPU.
 pub(crate) const OFF_FAULT_STATE: u32 = offset_of!(PerCpu, fault_state) as u32;
+const OFF_TIMER_PENDING: u32 = offset_of!(PerCpu, timer_pending) as u32;
 /// Set/cleared only by `arch::idt::nmi`'s naked entry, via this constant.
 pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
 /// The AP's bring-up token, read by `ap_entry` to answer for its own attempt.
@@ -371,7 +374,8 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 ring0_timer_fires: AtomicU32::new(0),
                 last_seen_ring0_fires: 0,
                 fault_state: CpuFaultState::Normal as u8,
-                _pad_after_fault_state: [0; 3],
+                timer_pending: 0,
+                _pad_after_timer_pending: [0; 2],
                 last_armed_ticks: AtomicU32::new(0),
                 log_shard: log::shard_for(cpu_id) as *const log::Shard as u64,
                 nmi_active: 0,
@@ -682,6 +686,15 @@ pub fn set_last_armed_ticks(ticks: u32) {
 /// The one-shot count this CPU last armed; zero is a stopped timer.
 pub fn last_armed_ticks() -> u32 {
     gs::read_u32::<OFF_LAST_ARMED_TICKS>()
+}
+
+/// Whether the scheduler's one-shot is armed and its interrupt not yet taken; `arch::apic` is the only writer.
+pub fn set_timer_pending(pending: bool) {
+    gs::write_u8::<OFF_TIMER_PENDING>(u8::from(pending));
+}
+
+pub fn timer_pending() -> bool {
+    gs::read_u8::<OFF_TIMER_PENDING>() != 0
 }
 
 /// The last byte of this CPU's idle guard page — the first byte an overflow reaches.
