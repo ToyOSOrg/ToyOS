@@ -46,7 +46,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel::chunked::{Chunked, Stack};
-use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, Version, PAGE};
+use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, Version, Want, PAGE};
 use kernel::sched::task::WaitClass;
 use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
 
@@ -80,9 +80,7 @@ const NOTICE_BATCH: usize = 32;
 /// linked on its pager's list.
 struct Request {
     slot: u32,
-    first: u64,
-    count: u64,
-    reported: bool,
+    want: Want,
     prev: *mut Request,
     next: *mut Request,
 }
@@ -272,7 +270,7 @@ impl PagerObject {
     pub fn has_notices(&self) -> bool {
         let state = self.state.lock();
         // SAFETY: every node on the list is live while linked, under this lock.
-        let unreported = requests(&state).any(|r| unsafe { !(*r).reported });
+        let unreported = requests(&state).any(|r| unsafe { (*r).want.unreported() });
         unreported || state.no_holders > 0
     }
 
@@ -394,11 +392,10 @@ impl PagerObject {
                     // SAFETY: linked, so live, under the lock; its waiter
                     // writes it only under the lock too, and nothing forms a
                     // reference to it.
-                    let (slot, first, count, reported, next) =
-                        unsafe { ((*at).slot, (*at).first, (*at).count, (*at).reported, (*at).next) };
-                    if !reported {
+                    let (slot, mut want, next) = unsafe { ((*at).slot, (*at).want, (*at).next) };
+                    if let Some((first, count)) = want.report() {
                         // SAFETY: as above.
-                        unsafe { (*at).reported = true };
+                        unsafe { (*at).want = want };
                         batch[n] = PagedNotice { object: u64::from(slot), kind: NOTICE_REQUESTED, first, count };
                         n += 1;
                     }
@@ -872,10 +869,41 @@ impl PagerObject {
         done as u64
     }
 
+    /// Its pages end absent, so every reader waiting on one is named in a
+    /// notice again (`Want::withdrawn`).
     pub fn withdraw(&self, id: u64, first: u64, count: u64) -> u64 {
-        match self.removing(id, |pages, object, out| pages.withdraw(object, first, count, &mut |f| out(f))) {
-            Ok(n) => n as u64,
+        let withdrawn = self.removing(id, |pages, object, out| pages.withdraw(object, first, count, &mut |f| out(f)));
+        match withdrawn {
+            Ok(n) => {
+                self.ask_again(id, first, count);
+                n as u64
+            }
             Err(e) => e.to_u64(),
+        }
+    }
+
+    /// Every request of object `id` that `count` pages from `first` meet,
+    /// named in a notice again.
+    fn ask_again(&self, id: u64, first: u64, count: u64) {
+        let news = {
+            let state = self.state.lock();
+            let Ok(slot) = state.live(id) else { return };
+            let mut news = false;
+            for at in requests(&state) {
+                // SAFETY: linked, so live, under the lock; its waiter writes it
+                // only under the lock too, and nothing forms a reference to it.
+                unsafe {
+                    let mut want = (*at).want;
+                    if (*at).slot == slot && want.withdrawn(first, count) {
+                        (*at).want = want;
+                        news = true;
+                    }
+                }
+            }
+            news
+        };
+        if news {
+            self.watch.post();
         }
     }
 
@@ -993,23 +1021,22 @@ struct Waiting<'a> {
 
 impl<'a> Waiting<'a> {
     fn new(pager: &'a PagerObject, slot: u32) -> Self {
-        let node = Request { slot, first: 0, count: 0, reported: false, prev: ptr::null_mut(), next: ptr::null_mut() };
+        let node = Request { slot, want: Want::NONE, prev: ptr::null_mut(), next: ptr::null_mut() };
         Self { pager, node: UnsafeCell::new(node), linked: Cell::new(false), _pinned: PhantomPinned }
     }
 
     /// Under the pager's lock, `state`: want `count` pages from `first`, on the
-    /// list once, and named again in a notice where the range moved.
+    /// list once, and named again in a notice where it is news (`Want::ask`).
     fn request(self: Pin<&Self>, state: &mut State, first: u64, count: u64) {
         let at = self.node.get();
         // SAFETY: the node is this frame's and pinned; under the lock, nothing
         // else reaches it, and no reference to it is formed.
         unsafe {
-            if self.linked.get() && (*at).first == first && (*at).count == count {
+            let mut want = (*at).want;
+            if !want.ask(first, count) {
                 return;
             }
-            (*at).first = first;
-            (*at).count = count;
-            (*at).reported = false;
+            (*at).want = want;
             if !self.linked.get() {
                 (*at).prev = ptr::null_mut();
                 (*at).next = state.requests;
@@ -1026,7 +1053,7 @@ impl<'a> Waiting<'a> {
     /// Under the pager's lock, `_state`: the range last requested.
     fn range(&self, _state: &State) -> (u64, u64) {
         // SAFETY: as in `request`.
-        unsafe { ((*self.node.get()).first, (*self.node.get()).count) }
+        unsafe { (*self.node.get()).want.range() }
     }
 }
 

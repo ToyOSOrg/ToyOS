@@ -51,6 +51,60 @@ pub const OPEN_RANGES: usize = 64;
 
 const NONE: u32 = u32::MAX;
 
+/// A waiting reader's want of an object's pages, as its pager hears of it: a
+/// range is named in one notice and not again while the reader waits for it,
+/// unless a withdraw takes back a page of it. The pager answered the first
+/// notice, and a reader that woke for the page and came back after the
+/// withdraw would otherwise wait for a page nobody is asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Want {
+    first: u64,
+    count: u64,
+    reported: bool,
+}
+
+impl Want {
+    /// No pages wanted yet.
+    pub const NONE: Self = Self { first: 0, count: 0, reported: true };
+
+    /// The reader wants `count` pages from `first`: whether that is news its
+    /// pager must hear.
+    pub fn ask(&mut self, first: u64, count: u64) -> bool {
+        if self.first == first && self.count == count {
+            return false;
+        }
+        *self = Self { first, count, reported: false };
+        true
+    }
+
+    /// `count` pages from `first` were withdrawn: whether that makes the
+    /// range news again.
+    pub fn withdrawn(&mut self, first: u64, count: u64) -> bool {
+        let meets = first < self.first.saturating_add(self.count) && self.first < first.saturating_add(count);
+        let news = meets && self.reported;
+        self.reported &= !news;
+        news
+    }
+
+    /// The range to name in a notice, once per ask or withdraw.
+    pub fn report(&mut self) -> Option<(u64, u64)> {
+        (!self.reported).then(|| {
+            self.reported = true;
+            (self.first, self.count)
+        })
+    }
+
+    /// Whether a notice is owed.
+    pub fn unreported(&self) -> bool {
+        !self.reported
+    }
+
+    /// The range last asked for.
+    pub fn range(&self) -> (u64, u64) {
+        (self.first, self.count)
+    }
+}
+
 /// A pager's core commitment: `core` frames committed at its making and kept
 /// for its life, each promised, in the index, out on a supply or held aside
 /// for the next one. A frame leaving the index while the core would hold
@@ -760,6 +814,30 @@ mod tests {
 
     fn sink(freed: &mut Vec<u64>) -> impl FnMut(u64) + '_ {
         |f| freed.push(f)
+    }
+
+    /// A range is named once while its reader waits, again where it moved,
+    /// and again where a withdraw takes back a page of it after its notice:
+    /// the pager answered that notice, and the reader, back after the
+    /// withdraw, would otherwise wait for a page nobody is asked for.
+    #[test]
+    fn a_want_is_named_once_while_waited_and_again_after_a_withdraw() {
+        let mut w = Want::NONE;
+        assert_eq!(w.report(), None, "nothing asked");
+        assert!(w.ask(4, 16));
+        assert!(!w.withdrawn(4, 1), "a withdraw before its notice is no news");
+        assert_eq!(w.report(), Some((4, 16)));
+        assert!(!w.ask(4, 16), "asked again while it waits");
+        assert_eq!(w.report(), None, "named twice while it waits");
+        assert!(!w.withdrawn(0, 4), "a withdraw before the range");
+        assert!(!w.withdrawn(20, 1), "a withdraw past the range");
+        assert!(w.withdrawn(19, 8), "a withdraw of the range's last page goes unheard");
+        assert!(w.unreported());
+        assert!(!w.ask(4, 16), "asked again after the withdraw");
+        assert_eq!(w.report(), Some((4, 16)));
+        assert!(w.ask(5, 15), "a range that moved");
+        assert_eq!(w.report(), Some((5, 15)));
+        assert_eq!(w.range(), (5, 15));
     }
 
     /// XSH 2.9.7: a read that began before a write, or while one was under
