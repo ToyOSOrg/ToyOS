@@ -28,7 +28,7 @@ CPUID reference has CPUID.01H:ECX[24] reserved (APM 24594 rev. 3.36, Vol. 3,
 `CPUID_Fn00000001_ECX`), so the AMD bench keeps the count, its calibration
 and its spin.
 
-**A running CPU re-arms once a request, since #PRNUM.** A pass on a CPU
+**A running CPU re-arms once a request, since #1263.** A pass on a CPU
 that keeps running leaves a one-shot that is still to fire and due no later
 than it needs, so the timer is written once a request, after a fire, or when
 something is owed sooner; a CPU going idle still arms exactly at every sleep
