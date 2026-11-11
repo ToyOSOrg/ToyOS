@@ -37,24 +37,33 @@ pub const RANGE: u64 = 0xFFFF_FF00_0000_0000;
 /// 4 KiB leaves, so no slot crosses one.
 const SLOT: u64 = 256 * 1024;
 
-/// Which slots are in use, clean or waiting on a flush (`kernel::stackslots`).
-static SLOTS: Lock<Slots> = Lock::new(Slots::new());
+/// Which slots are in use, clean or waiting on a flush.
+static IN_USE: Lock<Slots> = Lock::new(Slots::new());
+
+/// Held by the one taker flushing, across its flush. A taker that finds no
+/// clean slot beside it waits here, for no longer than that shootdown takes:
+/// the shootdown ends or panics on a CPU that does not answer, and a spinner
+/// on this lock answers it.
+static FLUSH_GATE: Lock<()> = Lock::new(());
 
 /// A slot no CPU holds a translation of, or `None` where every slot the
 /// range holds is in use: a refused spawn.
 fn take_slot() -> Option<u32> {
     loop {
-        // Bound to a name so the lock is let go before the flush.
-        let take = SLOTS.lock().take();
+        // Bound to a name so the lock is let go before the gate is taken.
+        let take = IN_USE.lock().take();
         match take {
             Take::Slot(slot) => return Some(slot),
             Take::Spent => return None,
             Take::Flush => {
-                // Every CPU drops every translation of the kernel half.
-                // AArch64's unmap already broadcast each page's, and this
-                // does nothing there.
-                crate::arch::tlb::shootdown(Origin::Stack, Half::Kernel);
-                SLOTS.lock().flushed();
+                let _gate = FLUSH_GATE.lock();
+                if IN_USE.lock().begin_flush() {
+                    // Every CPU drops every translation of the kernel half.
+                    // AArch64's unmap already broadcast each page's, and
+                    // this does nothing there.
+                    crate::arch::tlb::shootdown(Origin::Stack, Half::Kernel);
+                    IN_USE.lock().flushed();
+                }
             }
         }
     }
@@ -97,7 +106,7 @@ impl Stack {
                 // SAFETY: no table names the frames.
                 unsafe { super::pmm::free_held(job, frames) };
                 if let Some(slot) = unmapped {
-                    SLOTS.lock().unused(slot);
+                    IN_USE.lock().unused(slot);
                 }
                 None
             }
@@ -123,7 +132,7 @@ impl Drop for Stack {
         // holds is the module's stated exposure, and the slot is not reused
         // until it is flushed.
         unsafe { super::pmm::free_held(&self.job, frames[..count].iter().copied()) };
-        SLOTS.lock().retire(self.slot);
+        IN_USE.lock().retire(self.slot);
     }
 }
 

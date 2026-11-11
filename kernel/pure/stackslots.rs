@@ -5,9 +5,12 @@
 //! may still hold a translation of it. It is handed out again only after a
 //! flush of every CPU that began after it retired, which makes it *clean*. A
 //! slot at or above `fresh` was never used, so no CPU has a translation of
-//! it. Fixed in size, so nothing here allocates: the range holds [`SLOTS`]
-//! stacks at once and a take past that is refused. Pure: the kernel supplies
-//! the lock and the flush.
+//! it, and one is drawn only where fewer than [`FLUSH_BATCH`] retired slots
+//! wait and no flush is under way: so the slots ever used are at most the
+//! most in use at once and [`FLUSH_BATCH`] more. Fixed in size, so nothing
+//! here allocates: the range holds [`SLOTS`] stacks at once and a take past
+//! that is refused. Pure: the kernel supplies the lock, the flush and the
+//! gate that lets one taker flush at a time.
 
 #![forbid(unsafe_code)]
 
@@ -16,10 +19,10 @@
 pub const SLOTS: u32 = 1 << 18;
 
 /// Retired slots a take passes over for a never-used one before it asks for a
-/// flush instead. A flush interrupts every CPU, so a take asks for one at
-/// most once in this many; and a take that passes over fewer costs at most
-/// that many slots' addresses, eight tables' worth, beyond what a flush every
-/// time would use.
+/// flush instead. A flush interrupts every CPU, so while never-used slots
+/// remain a flush follows at least this many drops; and a take that passes
+/// over fewer costs at most that many slots' addresses, eight tables' worth,
+/// beyond what a flush every time would use.
 pub const FLUSH_BATCH: u32 = 64;
 
 const WORDS: usize = (SLOTS / u64::BITS) as usize;
@@ -65,10 +68,10 @@ impl Set {
 pub enum Take {
     /// A slot no CPU holds a translation of.
     Slot(u32),
-    /// None is clean: flush every CPU, call [`Slots::flushed`] and take again.
+    /// None is clean and retired ones wait, or a flush is under way: pass the
+    /// flush gate, [`Slots::begin_flush`] there, and take again.
     Flush,
-    /// Every slot is in use, or the only ones that are not wait on a flush
-    /// another taker is making.
+    /// Every slot is in use.
     Spent,
 }
 
@@ -94,14 +97,20 @@ impl Slots {
         Self { fresh: 0, clean: Set::EMPTY, retired: Set::EMPTY, flushing: Set::EMPTY, in_flush: false }
     }
 
+    /// Whether the retired slots are owed a flush: a batch of them, or any
+    /// where no slot was never used.
+    fn owed(&self) -> bool {
+        self.retired.count >= FLUSH_BATCH || (self.fresh == SLOTS && self.retired.count > 0)
+    }
+
+    /// Changes nothing where it answers [`Take::Flush`]. A take beside a
+    /// flush waits at the gate for the slots it cleans and draws no
+    /// never-used one, which would add to the slots ever used for good.
     pub fn take(&mut self) -> Take {
         if let Some(slot) = self.clean.pop() {
             return Take::Slot(slot);
         }
-        let waiting = self.retired.count;
-        if !self.in_flush && (waiting >= FLUSH_BATCH || (self.fresh == SLOTS && waiting > 0)) {
-            self.in_flush = true;
-            self.flushing.absorb(&mut self.retired);
+        if self.in_flush || self.owed() {
             return Take::Flush;
         }
         if self.fresh == SLOTS {
@@ -111,7 +120,21 @@ impl Slots {
         Take::Slot(self.fresh - 1)
     }
 
-    /// The flush [`Take::Flush`] asked for reached every CPU.
+    /// Called through the flush gate, so by one taker at a time: whether to
+    /// flush every CPU and then call [`Slots::flushed`]. `false` where a
+    /// flush that ended while this taker waited at the gate left clean slots,
+    /// or took the retired ones that were owed one.
+    pub fn begin_flush(&mut self) -> bool {
+        assert!(!self.in_flush, "stack slots: two flushes at once");
+        if self.clean.count > 0 || !self.owed() {
+            return false;
+        }
+        self.in_flush = true;
+        self.flushing.absorb(&mut self.retired);
+        true
+    }
+
+    /// The flush [`Slots::begin_flush`] asked for reached every CPU.
     pub fn flushed(&mut self) {
         assert!(self.in_flush, "stack slots: a flush nobody was asked for");
         self.in_flush = false;
@@ -142,7 +165,6 @@ mod tests {
         Box::new(Slots::new())
     }
 
-
     #[test]
     fn fresh_slots_come_in_order_and_nothing_flushes_below_the_batch() {
         let mut slots = slots();
@@ -152,13 +174,15 @@ mod tests {
         for slot in 0..FLUSH_BATCH - 1 {
             slots.retire(slot);
         }
+        assert!(!slots.begin_flush(), "fewer retired slots than the batch are owed no flush");
         assert_eq!(slots.take(), Take::Slot(FLUSH_BATCH), "a take passes over fewer retired slots than the batch");
         slots.retire(FLUSH_BATCH - 1);
         assert_eq!(slots.take(), Take::Flush);
+        assert!(slots.begin_flush());
     }
 
     #[test]
-    fn a_slot_retired_during_a_flush_waits_for_the_next() {
+    fn a_take_beside_a_flush_waits_for_it_and_a_slot_retired_during_it_waits_for_the_next() {
         let mut slots = slots();
         for _ in 0..=FLUSH_BATCH {
             slots.take();
@@ -167,18 +191,21 @@ mod tests {
             slots.retire(slot);
         }
         assert_eq!(slots.take(), Take::Flush);
+        assert!(slots.begin_flush());
         // Retired after the flush began: its translation may outlive it.
         slots.retire(FLUSH_BATCH);
-        // Another taker meanwhile neither flushes again nor gets a retired slot.
-        assert_eq!(slots.take(), Take::Slot(FLUSH_BATCH + 1));
+        // Another taker meanwhile gets neither a retired slot nor a never-used one.
+        assert_eq!(slots.take(), Take::Flush);
         slots.flushed();
+        // At the gate after it, that taker finds the slots it cleaned.
+        assert!(!slots.begin_flush());
         let mut handed = BTreeSet::new();
         for _ in 0..FLUSH_BATCH {
             let Take::Slot(slot) = slots.take() else { panic!("a flushed slot is clean") };
             handed.insert(slot);
         }
         assert_eq!(handed, (0..FLUSH_BATCH).collect());
-        assert_eq!(slots.take(), Take::Slot(FLUSH_BATCH + 2), "the slot retired during the flush is not clean");
+        assert_eq!(slots.take(), Take::Slot(FLUSH_BATCH + 1), "the slot retired during the flush is not clean");
     }
 
     #[test]
@@ -190,7 +217,8 @@ mod tests {
         assert_eq!(slots.take(), Take::Spent);
         slots.retire(7);
         assert_eq!(slots.take(), Take::Flush);
-        assert_eq!(slots.take(), Take::Spent, "the one slot not in use waits on the flush");
+        assert!(slots.begin_flush());
+        assert_eq!(slots.take(), Take::Flush, "the one slot not in use waits on the flush");
         slots.flushed();
         assert_eq!(slots.take(), Take::Slot(7));
         assert_eq!(slots.take(), Take::Spent);
@@ -207,14 +235,14 @@ mod tests {
     /// Over a long run of takes and drops in an order a generator picks, with
     /// another take and another drop landing inside every flush: no slot is
     /// handed out while live, none that retired since the last flush began,
-    /// and never more than the batch and those racing takes beyond what was
-    /// live at once is used.
+    /// and the slots ever used are never more than the batch beyond the most
+    /// live at once, however many takes met a flush.
     #[test]
-    fn no_slot_retired_since_the_last_flush_is_handed_out() {
+    fn no_slot_retired_since_the_last_flush_is_handed_out_and_none_is_drawn_beside_a_flush() {
         let mut slots = slots();
         let mut live: Vec<u32> = Vec::new();
         let mut stale = BTreeSet::new();
-        let (mut peak, mut raced) = (0, 0);
+        let (mut peak, mut flushes) = (0, 0);
         let mut state = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = || {
             state ^= state << 13;
@@ -224,30 +252,29 @@ mod tests {
         };
         for _ in 0..200_000 {
             if live.is_empty() || next() % 3 != 0 {
-                let check = |slot: u32, live: &Vec<u32>, stale: &BTreeSet<u32>| {
-                    assert!(!live.contains(&slot), "slot {slot} handed out while live");
-                    assert!(!stale.contains(&slot), "slot {slot} handed out with no flush since it retired");
-                };
-                let slot = match slots.take() {
-                    Take::Slot(slot) => slot,
-                    Take::Spent => panic!("the range is nowhere near spent"),
-                    Take::Flush => {
-                        // The flush is under way: it covers what retired before it.
-                        let covered = stale.clone();
-                        let Take::Slot(racing) = slots.take() else { panic!("a take beside a flush takes a fresh slot") };
-                        check(racing, &live, &stale);
-                        live.push(racing);
-                        raced += 1;
-                        let dropped = live.swap_remove(0);
-                        slots.retire(dropped);
-                        stale.insert(dropped);
-                        slots.flushed();
-                        stale.retain(|slot| !covered.contains(slot));
-                        let Take::Slot(slot) = slots.take() else { panic!("a flushed slot is clean") };
-                        slot
+                let slot = loop {
+                    match slots.take() {
+                        Take::Slot(slot) => break slot,
+                        Take::Spent => panic!("the range is nowhere near spent"),
+                        Take::Flush => {
+                            if !slots.begin_flush() {
+                                continue;
+                            }
+                            // The flush is under way: it covers what retired before it.
+                            let covered = stale.clone();
+                            assert_eq!(slots.take(), Take::Flush, "a take beside a flush drew a slot");
+                            if let Some(dropped) = live.pop() {
+                                slots.retire(dropped);
+                                stale.insert(dropped);
+                            }
+                            slots.flushed();
+                            stale.retain(|slot| !covered.contains(slot));
+                            flushes += 1;
+                        }
                     }
                 };
-                check(slot, &live, &stale);
+                assert!(!live.contains(&slot), "slot {slot} handed out while live");
+                assert!(!stale.contains(&slot), "slot {slot} handed out with no flush since it retired");
                 live.push(slot);
                 peak = peak.max(live.len() as u32);
             } else {
@@ -255,7 +282,8 @@ mod tests {
                 slots.retire(slot);
                 stale.insert(slot);
             }
-            assert!(slots.fresh <= peak + FLUSH_BATCH + raced, "{} slots used for a peak of {peak}", slots.fresh);
+            assert!(slots.fresh <= peak + FLUSH_BATCH, "{} slots used for a peak of {peak}", slots.fresh);
         }
+        assert!(flushes > 100, "the run flushed {flushes} times, too few to say anything");
     }
 }
