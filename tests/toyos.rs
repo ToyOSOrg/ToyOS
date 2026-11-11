@@ -607,6 +607,7 @@ const MACHINE_TESTS: &[&str] = &[
     // endowments a job gets is the image's and the supervisor's, which no
     // host build has, and the benches run osbench only nightly.
     "osbench_capability_groups_exit_0",
+    "memprobe_smoke",
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the
     // firmware's tables, to COM1, to `PM1a_CNT`, to a function's configuration
@@ -3197,6 +3198,33 @@ fn osbench_capability_groups_exit_0() -> Result<(), String> {
     Ok(())
 }
 
+/// MEASUREMENT ONLY, never lands: the probe kernel's readings reach the log.
+fn memprobe_smoke() -> Result<(), String> {
+    const JOBS: [&str; 1] = ["osbench_memprobe"];
+    let committed = compile::repo_root().join("tests/images/benchcase.toml");
+    let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
+    let derived = toyos_metal::image::derive(&text, 600_000, &JOBS, &[]).map_err(|why| why.to_string())?;
+    let config = common::lane::dir().join("memprobe-smoke.toml");
+    fs::write(&config, derived).map_err(|e| format!("{}: {e}", config.display()))?;
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        &[],
+        &[],
+        BootOptions { ready_marker: bootlog::COMPLETE, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    // The mapping rows' readings only: the copies after them are hours under TCG.
+    let last = "mprobe row=mem.munmap_touched_remote.4k end";
+    await_guest(&mut qemu, &mut console, "the mapping rows' readings", |said| said.contains(last))?;
+    for line in console.lines().filter(|l| l.contains("mprobe ") || l.contains("memprobe.") || l.contains("bench=mem.")) {
+        println!("{line}");
+    }
+    let said = serial::Serial::named("memprobe boot", console);
+    said.must_say("mprobe row=mem.map_unmap_4k end")?;
+    said.must_say("mprobe row=mem.munmap_touched_remote.4k end")?;
+    Ok(())
+}
+
 /// Boot the image `--console-boot` builds, on the machine shape with a panel
 /// for `/system/bin/console` to claim, and wait for what that image owes at
 /// boot: the console up on its panel, having read the log and the keyboard,
@@ -4946,6 +4974,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "acpi_holder_is_refused_a_held_functions_configuration" => acpi_holder_is_refused_a_held_functions_configuration(),
         "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),
+        "memprobe_smoke" => memprobe_smoke(),
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
