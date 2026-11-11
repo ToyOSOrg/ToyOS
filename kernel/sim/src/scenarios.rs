@@ -1051,6 +1051,43 @@ pub fn share_gain(threads: usize, work: u64) -> Scenario {
     scenario
 }
 
+/// The request-share workload: a job whose threads run in bursts of `burst`
+/// ns with a short nap between, so its requests follow its bursts down, beside
+/// one hog thread of an equal job that keeps the whole slice; each job does
+/// `work` ns in all. With `rt`, a real-time thread of a third job takes a
+/// sixth of the CPU ahead of both. The hog's finish is the split it was
+/// served at. In this model a nap beside a running thread lasts a whole run
+/// chunk ([`RUN_CHUNK_NS`]), so one bursty thread is runnable two thirds of
+/// the time.
+pub fn request_share(bursty_threads: usize, burst: u64, rt: bool, work: u64) -> Scenario {
+    let nap = burst / 20;
+    let per_thread = work / bursty_threads as u64;
+    let bursty = Script::looping(
+        vec![Op::Run(burst), Op::Block { queue: 0, deadline: Some(nap) }],
+        (per_thread / burst) as usize,
+    );
+    let mut procs = vec![
+        process("bursty", vec![0; bursty_threads], vec![bursty]),
+        process("hog", vec![0], vec![Script::new(vec![Op::Run(work)])]),
+    ];
+    if rt {
+        let rounds = (3 * work / (5 * MS / 2)) as usize;
+        let mut rt = process(
+            "rt",
+            vec![0],
+            vec![Script::looping(vec![Op::Run(MS / 2), Op::Block { queue: 0, deadline: Some(5 * MS / 2) }], rounds)],
+        );
+        rt.rt = true;
+        procs.push(rt);
+    }
+    let mut scenario = scenario("request_share", 1, vec![queue(WaitClass::Io)], procs);
+    scenario.max_tasks = bursty_threads + 3;
+    // Every burst is a block, a deadline and two passes on top of its chunks:
+    // a generous multiple of the chunks and the bursts both jobs run.
+    scenario.max_steps = 20_000 + 8 * ((2 * work / RUN_CHUNK_NS) + (work / burst)) as usize;
+    scenario
+}
+
 /// The interactive workload: one thread that sleeps, wakes on a device
 /// interrupt, runs briefly and sleeps again, against `hogs` threads of pure CPU
 /// that never yield.
