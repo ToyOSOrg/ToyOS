@@ -48,8 +48,10 @@ pub fn before_panel() {
 
 /// Once the console and the boot parameter exist.
 pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
-    // The IDT loads inside `interrupts`, much later: a fault here would reach
-    // firmware's handlers, so the actuator is refused by name instead.
+    // The IDT loads inside `interrupts`, much later: a fault here would vector
+    // through firmware's table to handlers the boot map does not hold
+    // executable, and reset the machine, so the actuator is refused by name
+    // instead.
     if crate::actuator::test_early_fault() {
         panic!("test-early-fault: x86-64 has no vectors of its own this early");
     }
@@ -82,7 +84,7 @@ pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
 /// Physical memory only this architecture's boot uses, kept from the
 /// allocator: the AP trampoline page.
 pub fn reserved() -> Region {
-    Region { start: 0x8000, end: 0x9000 }
+    Region { start: toyos_bootmap::x86_64::AP_TRAMPOLINE, end: toyos_bootmap::x86_64::AP_TRAMPOLINE + toyos_bootmap::PAGE_4K }
 }
 
 /// What the boot learns bringing interrupts up and hands later steps.
@@ -95,8 +97,8 @@ pub struct Platform {
 /// Interrupt delivery, this CPU's per-CPU block and the syscall gate.
 pub fn interrupts(rsdp_addr: u64) -> Platform {
     // `init_bsp` loads the IDT partway through, as early as this CPU's `gs:`
-    // allows: a fault in any later phase then diagnoses instead of stopping in
-    // a handler the firmware left behind.
+    // allows: a fault in any later phase then diagnoses instead of resetting
+    // the machine through the table the firmware left behind.
     let madt = acpi::parse_madt(rsdp_addr).expect("ACPI: MADT not found");
     super::idle::note_uids(&madt.processor_uids);
     // Off the same tables as the MADT, and before the IDT below makes a panic

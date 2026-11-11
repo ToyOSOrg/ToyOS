@@ -24,15 +24,20 @@ const RW: u64 = 1 << 1;
 const PWT: u64 = 1 << 3;
 const PCD: u64 = 1 << 4;
 const PS: u64 = 1 << 7;
+/// Execute-disable, under `IA32_EFER.NXE` (Table 4-15 onwards).
+const XD: u64 = 1 << 63;
 
 /// What a linear address translates to: the physical address, the PAT entry
-/// its type comes from (§11.12.3: PAT·4 + PCD·2 + PWT), and whether a
-/// supervisor write is allowed (R/W set at every level, §4.6.1).
+/// its type comes from (§11.12.3: PAT·4 + PCD·2 + PWT), whether a
+/// supervisor write is allowed (R/W set at every level, §4.6.1, with `CR0.WP`
+/// set), and whether a fetch is (XD clear at every level, §4.6.1, with
+/// `IA32_EFER.NXE` set).
 #[derive(Debug, PartialEq, Eq)]
 struct Translation {
     phys: u64,
     pat: u64,
     writable: bool,
+    executable: bool,
 }
 
 /// The pool as physical memory: the 8 bytes at `phys`, which must lie in it.
@@ -60,21 +65,23 @@ fn walk(pool: &[Table; MAX_PAGES], cr3: u64, linear: u64) -> Option<Translation>
         return None;
     }
     let mut writable = pml4e & pdpte & RW != 0;
+    let mut executable = (pml4e | pdpte) & XD == 0;
     if pdpte & PS != 0 {
         // Table 4-16: a 1 GiB page, bits 51:30, its PAT bit 12.
         let phys = (pdpte & ADDRESS & !(GIB - 1)) | (linear & (GIB - 1));
-        return Some(Translation { phys, pat: pat(pdpte, pdpte >> 12 & 1), writable });
+        return Some(Translation { phys, pat: pat(pdpte, pdpte >> 12 & 1), writable, executable });
     }
     let pde = read(pool, (pdpte & ADDRESS) | index(21) << 3);
     if pde & P == 0 {
         return None;
     }
     writable &= pde & RW != 0;
+    executable &= pde & XD == 0;
     if pde & PS != 0 {
         // Table 4-17: a 2 MiB page, bits 51:21; bits 20:13 are reserved.
         assert_eq!(pde & 0x1F_E000, 0, "PDE {pde:#x} sets a reserved bit");
         let phys = (pde & ADDRESS & !(PAGE_2M - 1)) | (linear & (PAGE_2M - 1));
-        return Some(Translation { phys, pat: pat(pde, pde >> 12 & 1), writable });
+        return Some(Translation { phys, pat: pat(pde, pde >> 12 & 1), writable, executable });
     }
     let pte = read(pool, (pde & ADDRESS) | index(12) << 3);
     if pte & P == 0 {
@@ -82,7 +89,12 @@ fn walk(pool: &[Table; MAX_PAGES], cr3: u64, linear: u64) -> Option<Translation>
     }
     // Table 4-20: a 4 KiB page, bits 51:12, its PAT bit 7.
     let phys = (pte & ADDRESS) | (linear & (PAGE_4K - 1));
-    Some(Translation { phys, pat: pat(pte, pte >> 7 & 1), writable: writable && pte & RW != 0 })
+    Some(Translation {
+        phys,
+        pat: pat(pte, pte >> 7 & 1),
+        writable: writable && pte & RW != 0,
+        executable: executable && pte & XD == 0,
+    })
 }
 
 fn pat(entry: u64, pat_bit: u64) -> u64 {
@@ -109,8 +121,8 @@ fn expected_pat(cache: Cache) -> u64 {
 }
 
 /// Every leaf the plan names translates, at identity and at `PHYS_OFFSET`, its
-/// first byte and its last, to itself, of its kind's type, and writable unless
-/// it is the text's.
+/// first byte and its last, to itself, of its kind's type, and either
+/// writable or, where it is code, executable: never both.
 fn every_leaf_translates_in_both_views(plan: &Plan, pool: &[Table; MAX_PAGES], root: u64) {
     for entry in plan.entries() {
         let size = match entry.slot {
@@ -118,7 +130,8 @@ fn every_leaf_translates_in_both_views(plan: &Plan, pool: &[Table; MAX_PAGES], r
             toyos_bootmap::Slot::Fine { .. } => PAGE_4K,
         };
         for phys in [entry.phys, entry.phys + size - 1] {
-            let want = Translation { phys, pat: expected_pat(entry.cache), writable: entry.access == Access::Data };
+            let code = entry.access == Access::Text;
+            let want = Translation { phys, pat: expected_pat(entry.cache), writable: !code, executable: code };
             assert_eq!(walk(pool, root, phys).as_ref(), Some(&want), "{entry:?} at identity");
             assert_eq!(walk(pool, root, PHYS_OFFSET + phys).as_ref(), Some(&want), "{entry:?} at PHYS_OFFSET");
         }
@@ -131,12 +144,12 @@ fn every_leaf_translates_in_both_views(plan: &Plan, pool: &[Table; MAX_PAGES], r
 #[test]
 fn the_laptops_scanout_at_1010_gib_translates_in_both_views() {
     let (base, len) = LAPTOP;
-    let plan = Plan::new(Some(LAPTOP), LOADER, TEXT, Typing::Firmware).expect("the laptop's plan");
+    let plan = Plan::new(Some(LAPTOP), LOADER, TEXT, &[], Typing::Firmware).expect("the laptop's plan");
     let (pool, root) = written(&plan);
     assert_eq!(root, AT, "the root is the pool's first page");
 
-    let scanout = |phys: u64| Some(Translation { phys, pat: 3, writable: true });
-    let memory = |phys: u64| Some(Translation { phys, pat: 0, writable: true });
+    let scanout = |phys: u64| Some(Translation { phys, pat: 3, writable: true, executable: false });
+    let memory = |phys: u64| Some(Translation { phys, pat: 0, writable: true, executable: false });
     for phys in [base, base + len - 1] {
         assert_eq!(walk(&pool, root, phys), scanout(phys), "identity {phys:#x}");
         assert_eq!(walk(&pool, root, PHYS_OFFSET + phys), scanout(phys), "PHYS_OFFSET + {phys:#x}");
@@ -159,7 +172,7 @@ fn the_laptops_scanout_at_1010_gib_translates_in_both_views() {
 /// second-level tables: each directory under its own 512 GiB's table.
 #[test]
 fn every_second_level_table_is_reached_from_its_own_root_slots() {
-    let across = Plan::new(Some((512 * GIB - PAGE_2M, 4 * PAGE_2M)), (520 * GIB, 0x3_4a00), TEXT, Typing::Firmware)
+    let across = Plan::new(Some((512 * GIB - PAGE_2M, 4 * PAGE_2M)), (520 * GIB, 0x3_4a00), TEXT, &[], Typing::Firmware)
         .expect("across 512 GiB");
     let (pool, root) = written(&across);
     every_leaf_translates_in_both_views(&across, &pool, root);
@@ -168,6 +181,7 @@ fn every_second_level_table_is_reached_from_its_own_root_slots() {
         Some((1024 * GIB - PAGE_2M, 4 * PAGE_2M)),
         (toyos_bootmap::DIRECT_MAP_WINDOW - 512 * GIB - 0x1000, 0x3_4a00),
         TEXT,
+        &[],
         Typing::Firmware,
     )
     .expect("both straddling");
@@ -182,21 +196,22 @@ fn every_second_level_table_is_reached_from_its_own_root_slots() {
 fn a_split_page_translates_through_its_table_of_small_leaves() {
     let ram = [(0x4000_0000, 0x8000_0000)];
     let (base, len) = (0xbc7a_0000, 0x30_0000);
-    let plan = Plan::new(Some((base, len)), LOADER, TEXT, Typing::ByMap(&ram)).expect("ramfb");
+    let plan = Plan::new(Some((base, len)), LOADER, TEXT, &[], Typing::ByMap(&ram)).expect("ramfb");
     let (pool, root) = written(&plan);
-    assert_eq!(walk(&pool, root, base - 1), Some(Translation { phys: base - 1, pat: 0, writable: true }));
-    assert_eq!(walk(&pool, root, base), Some(Translation { phys: base, pat: 3, writable: true }));
+    let data = |phys: u64, pat: u64| Some(Translation { phys, pat, writable: true, executable: false });
+    assert_eq!(walk(&pool, root, base - 1), data(base - 1, 0));
+    assert_eq!(walk(&pool, root, base), data(base, 3));
     every_leaf_translates_in_both_views(&plan, &pool, root);
 }
 
-/// The kernel's text read-only in both views, over the pages it shares split,
-/// and the bytes on either side of it still writable.
+/// The kernel's text read-only and executable in both views, over the pages
+/// it shares split, and the bytes on either side of it writable and not.
 #[test]
 fn the_text_is_read_only_and_its_neighbours_are_writable() {
     let text = (0x7c04_1000, 0x13_1000);
-    let plan = Plan::new(None, LOADER, text, Typing::Firmware).expect("the text");
+    let plan = Plan::new(None, LOADER, text, &[], Typing::Firmware).expect("the text");
     let (pool, root) = written(&plan);
-    let at = |phys: u64, writable: bool| Some(Translation { phys, pat: 0, writable });
+    let at = |phys: u64, writable: bool| Some(Translation { phys, pat: 0, writable, executable: !writable });
     for (phys, writable) in [
         (text.0 - 1, true),
         (text.0, false),
@@ -205,6 +220,55 @@ fn the_text_is_read_only_and_its_neighbours_are_writable() {
     ] {
         assert_eq!(walk(&pool, root, phys), at(phys, writable), "identity {phys:#x}");
         assert_eq!(walk(&pool, root, PHYS_OFFSET + phys), at(phys, writable), "PHYS_OFFSET + {phys:#x}");
+    }
+    every_leaf_translates_in_both_views(&plan, &pool, root);
+}
+
+/// The whole map a q35 guest boots on, walked as its CPUs walk it: the page
+/// the loader's switch runs from and the page an AP starts in are executable
+/// and read-only at identity, their neighbours are data, and no address the
+/// map translates is both writable and executable.
+#[test]
+fn nothing_is_writable_and_executable_and_the_code_pages_run() {
+    let text = (0x7c04_1000, 0x13_1000);
+    let switch = LOADER.0 + 0x1_2000;
+    let code = [x86_64::AP_TRAMPOLINE, switch];
+    let plan = Plan::new(None, LOADER, text, &code, Typing::Firmware).expect("the plan");
+    let (pool, root) = written(&plan);
+    for page in code {
+        let run = Some(Translation { phys: page, pat: 0, writable: false, executable: true });
+        assert_eq!(walk(&pool, root, page), run, "{page:#x}");
+        for beside in [page - PAGE_4K, page + PAGE_4K] {
+            let data = Some(Translation { phys: beside, pat: 0, writable: true, executable: false });
+            assert_eq!(walk(&pool, root, beside), data, "{beside:#x}");
+        }
+    }
+    let mut executable = 0;
+    for base in [0, PHYS_OFFSET] {
+        for page in 0..BOOT_MAP_BYTES / PAGE_4K {
+            let at = walk(&pool, root, base + page * PAGE_4K).expect("the low map holds every page");
+            assert!(!(at.writable && at.executable), "{:#x} is writable and executable", base + page * PAGE_4K);
+            executable += u64::from(at.executable);
+        }
+    }
+    assert_eq!(executable, 2 * (text.1 / PAGE_4K + code.len() as u64));
+    every_leaf_translates_in_both_views(&plan, &pool, root);
+}
+
+/// A loader firmware put above the low map, as a bench may: the page its
+/// switch runs from is reached at identity through its own directory, read-only
+/// and executable, between data.
+#[test]
+fn a_switch_page_above_the_low_map_runs_and_its_neighbours_do_not() {
+    let loader = (5 * GIB, 0x7_8000);
+    let switch = loader.0 + 0x2000;
+    let code = [x86_64::AP_TRAMPOLINE, switch];
+    let plan = Plan::new(None, loader, TEXT, &code, Typing::Firmware).expect("the plan");
+    let (pool, root) = written(&plan);
+    assert_eq!(walk(&pool, root, switch), Some(Translation { phys: switch, pat: 0, writable: false, executable: true }));
+    for beside in [switch - PAGE_4K, switch + PAGE_4K, loader.0 + PAGE_2M - PAGE_4K] {
+        let data = Some(Translation { phys: beside, pat: 0, writable: true, executable: false });
+        assert_eq!(walk(&pool, root, beside), data, "{beside:#x}");
     }
     every_leaf_translates_in_both_views(&plan, &pool, root);
 }

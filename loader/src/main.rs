@@ -498,10 +498,12 @@ fn start_kernel(kernel: LoadedKernel, kernel_section: vec::Vec<u8>, cmdline: vec
     let kernel_phys = kernel.memory.as_ptr() as u64;
     report_reach("Kernel image", kernel_phys, kernel.memory.len() as u64);
     let text = (kernel_phys + kernel.text.0 as u64, kernel.text.1 as u64);
+    let code = arch::code_pages();
     let planned = Plan::new(
         gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)),
         loader,
         text,
+        &code,
         arch::typing(&write_back),
     );
     match &planned {
@@ -518,6 +520,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_section: vec::Vec<u8>, cmdline: vec
             let (at, len) = plan.loader();
             println!("Loader image: {:#x}+{:#x}, mapped at identity as {at:#x}+{len:#x}", loader.0, loader.1);
             println!("Kernel text: {:#x}+{:#x}, mapped read-only", text.0, text.1);
+            println!("Code pages beside it, mapped read-only: {code:x?}; every other page is never executed");
         }
         Err(why) => println!("Boot map: NO MAP HOLDS THIS MACHINE, {why}"),
     }
@@ -666,9 +669,10 @@ fn start_kernel(kernel: LoadedKernel, kernel_section: vec::Vec<u8>, cmdline: vec
     mem::forget(cmdline);
 
     let image = (kernel_phys, kernel_args.kernel_memory_size);
-    // SAFETY: `kernel_args.boot_pml4_addr` is the table built above,
-    // identity-mapping low memory and this loader's own image (so the code and
-    // stack a switch to it runs from stay mapped across it; the stack
+    // SAFETY: `kernel_args.boot_pml4_addr` is the table built above from a
+    // plan given `arch::code_pages()`, so it holds the switch's page
+    // executable at identity, and it identity-maps low memory (so the
+    // stack a switch to it runs from stays mapped across it; the stack
     // `kernel_args` lives on was proved inside the low map before the exit) and
     // mapping the same at `PHYS_OFFSET`;
     // the assert before the exit proved the whole kernel image is inside that

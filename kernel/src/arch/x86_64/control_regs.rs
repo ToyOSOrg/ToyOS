@@ -3,7 +3,7 @@
 //! machine. One declaration, applied by the BSP and every AP and checked on
 //! each; nothing else may write any of them but [`flush_global`], which puts
 //! back the `CR4` it read, and an AP's trampoline, which enters long mode
-//! under [`EFER_BEFORE_LONG_MODE`]. Each register is written whole: `CR0` and
+//! under [`EFER_BEFORE_LONG_MODE`] and [`CR0_ENTERING_PAGING`]. Each register is written whole: `CR0` and
 //! `EFER` are constants, `CR4` is required bits plus whatever optional bits this CPU
 //! offers, `XCR0` and the save form are what `kernel::xsave` makes of this
 //! CPU's CPUID, `IA32_XSS` is zero wherever it exists (no supervisor component
@@ -11,7 +11,8 @@
 //! mode CPUID offers — x2APIC where it exists, xAPIC where it does not.
 //! `EFER.NXE` lets bit 63 of a paging entry mean *not executable*
 //! ([`Prot`](crate::mm::policy::Prot)), and `CR0.WP` makes a read-only one
-//! read-only at CPL 0: both are set before a CPU loads the kernel's tables.
+//! read-only at CPL 0: both are set before a CPU runs under any tables of
+//! ToyOS's, the boot map's by the loader and the trampoline, the kernel's here.
 //!
 //! The performance request is HWP's: `IA32_HWP_INTERRUPT` where it exists,
 //! `IA32_PM_ENABLE`, `IA32_HWP_REQUEST` as `kernel::cpu::hwp_request` derives
@@ -217,6 +218,12 @@ pub const EFER: u64 = efer::SCE | efer::LME | efer::LMA | efer::NXE;
 /// long mode (SDM Vol. 3A, "Initializing IA-32e Mode"): what an AP writes
 /// before it does.
 pub const EFER_BEFORE_LONG_MODE: u64 = EFER & !efer::LMA;
+
+/// The bits of [`CR0`] an AP sets as it turns paging on: `WP` with `PG`, so a
+/// read-only leaf of the map it starts under is read-only at CPL 0 from its
+/// first instruction there. The rest wait for [`init_paging`], whose change
+/// of the cache bits has a sequence of its own.
+pub const CR0_ENTERING_PAGING: u64 = CR0 & (cr0::WP | cr0::PG);
 
 /// The declaration as the BSP computed it. Zero means not yet declared — also [`pcid_active`]'s correct answer before then.
 static DECLARED_CR4: AtomicU64 = AtomicU64::new(0);
