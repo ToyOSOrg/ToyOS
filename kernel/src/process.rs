@@ -520,7 +520,7 @@ pub enum Parent {
 pub struct Admission(Option<tree::Admitted>);
 
 impl Admission {
-    /// The question at the top of a spawn, before anything is built: `Gone` for a parent being torn down, and `ResourceExhausted`, which the log names, for a child more than `MAX_DEPTH` below the supervisor or no pid left to issue.
+    /// The question at the top of a spawn, before anything is built: `Gone` for a parent being torn down, and `ResourceExhausted` for a child more than `MAX_DEPTH` below the supervisor or no pid left to issue.
     pub fn ask(parent: Parent) -> Result<Self, SyscallError> {
         let place = match parent {
             Parent::Root => None,
