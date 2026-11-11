@@ -19,6 +19,8 @@ use toyos::endow::SERVE_PREFIX;
 mod census_wait;
 
 const SELF_PATH: &str = "/system/bin/test_rs_handle_lifetime";
+/// What this test endows its holder the acceptor under, as `serve:<name>`.
+const SERVICE: &str = "handle-lifetime-service";
 const PATH: &str = "/tmp/handle-lifetime.txt";
 const KILLED_PATH: &str = "/tmp/handle-lifetime-killed.txt";
 const PAYLOAD: &[u8] = b"a file outlives the handle that was closed first";

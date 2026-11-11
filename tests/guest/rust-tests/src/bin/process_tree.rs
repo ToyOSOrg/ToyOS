@@ -220,7 +220,7 @@ fn under_b_is_gone(grown: &Grown) {
 fn launcher() -> Connection {
     endow::launcher()
         .expect("test-runner endows every job its launcher")
-        .open(LAUNCHER)
+        .connect()
         .expect("the launcher answers")
 }
 

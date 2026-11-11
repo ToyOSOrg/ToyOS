@@ -72,12 +72,12 @@ fn main() {
         copy
     };
     let (first, second) = (made_and_closed(), made_and_closed());
-    let before = made_and_closed();
+    let before_refusal = made_and_closed();
     assert_eq!(syscall::connect(connector.as_handle().raw()), Err(SyscallError::ResourceExhausted), "a connect past the depth");
-    let after = made_and_closed();
+    let after_refusal = made_and_closed();
     assert_eq!(
-        (after.slot(), after.generation().wrapping_sub(before.generation())),
-        (before.slot(), second.generation().wrapping_sub(first.generation())),
+        (after_refusal.slot(), after_refusal.generation().wrapping_sub(before_refusal.generation())),
+        (before_refusal.slot(), second.generation().wrapping_sub(first.generation())),
         "a refused connect changed the caller's table",
     );
     println!("  a refused connect left the caller's table as it was");
