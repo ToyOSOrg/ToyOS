@@ -76,6 +76,24 @@ and `seq_read.1048576` are behind, and no 4 KiB or 8-byte read is. `persist.seq_
 64 MiB DATA file, is behind on both benches and had no record. `seek`, which
 the client answers itself, is 246 ns against Linux's 117 ns on the T14.
 
+**#1258, an open file written and stated through its paged object**, is
+not yet measured on metal, its speed-up included; its rows are owed:
+
+- **Owed on metal:** the T14's whole `testcases` shared boot on main after
+  #1258. Main must show every member passing, among them
+  `a_served_files_read_never_tears_against_its_write`,
+  `a_served_files_writes_land_whole` and
+  `a_pager_s_end_answers_its_waiting_holders_gone`; no paged overdue report;
+  and `--fat32-check` clean.
+- **Owed on metal:** `osbench_disk` (`diskbenchcase`) on the T14, main from
+  before #1258 and after, two boots a side in A, B, B, A order. Main after
+  must show `fs.disk.fstat` at about 1 µs or below (from 9,532 ns),
+  `fs.disk.write_4k_at` at a few µs (from 22,421 ns) and
+  `fs.disk.seq_write.4096` above main before's. `fs.disk.seq_write.1048576`,
+  `readdir.1000`, `stat`, `open_close`, `rename`, `mkdir_rmdir` and
+  `create_write_unlink` must lie within main before's spread, and no row may
+  be beyond twice main before's.
+
 **Exit**: the cached `fs.disk.*` rows within Linux's on both benches, or
 each row's remaining difference measured to its parts and justified, in a
 labelled current-state comparison.

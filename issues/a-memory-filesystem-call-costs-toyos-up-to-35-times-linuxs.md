@@ -78,6 +78,15 @@ sequential reads and 1 MiB writes ahead, and the 4 KiB and 8-byte reads
 unresolved against Linux's HPET-widened spread. `seek`, which the client
 answers itself, is 248 ns against Linux's 116 ns on the T14.
 
+- **Owed on metal:** #1258's `fs.mem` rows, from the same T14 `osbench_disk`
+  A/B as `issues/a-file-server-request-costs-three-to-twelve-times-a-kernel-file-call.md`
+  owes: main before #1258 and after, two boots a side in A, B, B, A order.
+  Main after must show `fs.mem.fstat` at about 1 µs or below (from 7,560 ns),
+  `fs.mem.write_4k_at` at a few µs (from 9,033 ns) and `fs.mem.seq_write.4096`
+  well above 438 MB/s. `fs.mem.seq_write.1048576` must lie within main
+  before's spread, and no row may be beyond twice main before's. The speed-up
+  is not yet measured on metal.
+
 **Exit**: every `fs.mem` row of the second table within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured to its parts
 and justified.

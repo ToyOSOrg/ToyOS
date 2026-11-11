@@ -24,6 +24,14 @@ file open to write, whether it writes or not, until its last holder goes and
 its pages are written back. Many files open to write at once, as a build
 holds, take that much free space each before they write a byte.
 
+- **Owed on metal:** the measurement behind `BULK`. `osbench_disk` on the
+  T14 at main after #1258, with a bulk of 64, and on main with the bulk set to
+  16 and to 256 pages, one boot each. Those two are scratch builds that never
+  land, and a second boot each is owed where two boots differ by more than
+  their spread. This is a measurement, not a bar. Main must show where
+  `fs.disk.write_4k_at` and `fs.disk.seq_write.4096` stand at each bulk, so
+  that 64 is kept or changed on that evidence.
+
 **Evidence.** On QEMU's 128 MiB DATA, osbench's 16 MiB setup file is refused
 for space (#1152's QEMU run of the `fs.disk` rows). The benches' DATA
 partitions are large enough that no row reaches it.
