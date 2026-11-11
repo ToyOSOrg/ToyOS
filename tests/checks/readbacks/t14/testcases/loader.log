@@ -1,0 +1,4 @@
+[ 9.670 cpu0 loader] ToyOS Bootloader 1.0
+[ 9.680 cpu0 loader] Loader clock: each line opens with the seconds since the counter's zero, at the counter's stated 2419200000 Hz
+[10.102 cpu0 loader] Microcode: /system/share/microcode/intel/06-8c-01/80, 112640 bytes at 0x62131000, handed over
+[10.275 cpu0 loader] Loader log: the kernel handoff begins, so this file ends here

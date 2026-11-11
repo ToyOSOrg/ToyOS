@@ -80,8 +80,8 @@ and owns each one this list gives no other owner.
   reference reaches the writer only as a reader's revision of the
   specification.
 - **The S and P stages** are no part of the driver and need neither role.
-- **Metal rows.** Every stage with a row on the T14 or the AMD bench first
-  needs `issues/a-metal-row-names-no-hardware-and-a-bench-without-it-reds.md`.
+- **Metal rows.** Every stage's row declares its bench and the radio it
+  needs (`metal::On`); a radio row adds its `toyos_metal::bench::Device`.
 
 **S1, the T14's read-out and the compatibility-format A/B: done, both exits
 met.** The orchestrator's scout, never landing, on `ToyOSOrg/evidence`

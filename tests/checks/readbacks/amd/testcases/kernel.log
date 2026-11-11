@@ -1,0 +1,40 @@
+[---------- -------- --.--- cpu0 kernel] microcode: cpu0 Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.195 cpu1 kernel] microcode: cpu1 Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.196 cpu0 kernel] SMP: AP cpu1 lapic=1 online
+[2026-11-11 07:37:51  4.206 cpu2 kernel] microcode: cpu2 Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.207 cpu0 kernel] SMP: AP cpu2 lapic=2 online
+[2026-11-11 07:37:51  4.218 cpu3 kernel] microcode: cpu3 Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.218 cpu0 kernel] SMP: AP cpu3 lapic=3 online
+[2026-11-11 07:37:51  4.229 cpu4 kernel] microcode: cpu4 Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.230 cpu0 kernel] SMP: AP cpu4 lapic=4 online
+[2026-11-11 07:37:51  4.240 cpu5 kernel] microcode: cpu5 Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.241 cpu0 kernel] SMP: AP cpu5 lapic=5 online
+[2026-11-11 07:37:51  4.251 cpu6 kernel] microcode: cpu6 Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.252 cpu0 kernel] SMP: AP cpu6 lapic=6 online
+[2026-11-11 07:37:51  4.262 cpu7 kernel] microcode: cpu7 Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.263 cpu0 kernel] SMP: AP cpu7 lapic=7 online
+[2026-11-11 07:37:51  4.273 cpu8 kernel] microcode: cpu8 Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.274 cpu0 kernel] SMP: AP cpu8 lapic=8 online
+[2026-11-11 07:37:51  4.285 cpu9 kernel] microcode: cpu9 Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.286 cpu0 kernel] SMP: AP cpu9 lapic=9 online
+[2026-11-11 07:37:51  4.296 cpu10 kernel] microcode: cpu10 Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.297 cpu0 kernel] SMP: AP cpu10 lapic=10 online
+[2026-11-11 07:37:51  4.307 cpu11 kernel] microcode: cpu11 Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.308 cpu0 kernel] SMP: AP cpu11 lapic=11 online
+[2026-11-11 07:37:51  4.318 cpu12 kernel] microcode: cpu12 Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.319 cpu0 kernel] SMP: AP cpu12 lapic=12 online
+[2026-11-11 07:37:51  4.329 cpu13 kernel] microcode: cpu13 Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.330 cpu0 kernel] SMP: AP cpu13 lapic=13 online
+[2026-11-11 07:37:51  4.341 cpu14 kernel] microcode: cpu14 Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.342 cpu0 kernel] SMP: AP cpu14 lapic=14 online
+[2026-11-11 07:37:51  4.352 cpu15 kernel] microcode: cpu15 Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d
+[2026-11-11 07:37:51  4.353 cpu0 kernel] SMP: AP cpu15 lapic=15 online
+[2026-11-11 07:37:51  4.357 cpu0 kernel] paging: 9835 kernel leaves, none writable and executable, none executable outside the text 0xffff8000b0444000..0xffff8000b058e000, none writable over the RELRO 0xffff8000b058e000..0xffff8000b05a3000
+[2026-11-11 07:37:51  4.357 cpu0 kernel] Boot: complete (241ms)
+[2026-11-11 07:37:51  4.365 cpu0 kernel] spawn: pid=3 (total=0ms) /system/bin/logkeeper
+[2026-11-11 07:37:51  4.365 supervisor] supervisor: started logkeeper pid=3
+[2026-11-11 07:38:05 18.403 test-runner] ===TEST_START test_rs_pci_reclaim===
+[2026-11-11 07:38:05 18.404 cpu9 kernel] spawn: pid=156 (total=0ms) /system/bin/test_rs_pci_reclaim
+[2026-11-11 07:38:05 18.404 test-runner pid=156] pci_reclaim: claim 1 of 8086:15fc was refused: NotFound
+[2026-11-11 07:38:05 18.404 cpu4 kernel] exit: test_rs_pci_reclaim pid=156 code=1 cpu=0ms peak=0MB allocs=10 frees=1 syscalls=14 syscall_wall=0ms 6=1 14=1 50=1 51=1 63=2 73=2 99=2 106=1 121=2 171=1
+[2026-11-11 07:38:05 18.404 test-runner] ===TEST_END test_rs_pci_reclaim exit=1===

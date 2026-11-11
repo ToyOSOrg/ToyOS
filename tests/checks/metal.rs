@@ -3,11 +3,17 @@
 
 use super::*;
 use metal::{Metal, Readback};
+use toyos_metal::testargs::MetalMode;
 use toyos_metal::{
     verdict_file, BootFile, Phases, Refusal, READBACK_BOOT, READBACK_KERNEL, READBACK_LOADER,
     READBACK_VERDICT,
 };
 use toyos_metal::timings::{Machine, Record};
+
+/// Each bench's first kernel record, as its own boots write it: the AMD
+/// bench's before the log's clock is set, which the T14's is given here too.
+pub(super) const ON_T14: &str = "[---------- -------- --.--- cpu0 kernel] microcode: cpu0 Intel signature 0x806c1 platform 7 found 0xbe current 0xbe running 0xbe\n";
+const ON_AMD: &str = "[---------- -------- --.--- cpu0 kernel] microcode: cpu0 Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d\n";
 
 const BOOTED: &str = "[2026-09-29 18:22:39  1.165 cpu0 kernel] Boot: complete (1165ms)\n";
 
@@ -36,30 +42,34 @@ pub fn readbacks_of_a_machine_with_no_record_are_red_and_record_nothing() {
     let tests = [("passes", &PASSING)];
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
     assert!(
-        metal::judge_readbacks(&root, &read(&dir, &["passing"]), &runs, &[]),
+        metal::judge_readbacks(&root, Bench::T14, &read(&dir, &["passing"]), &runs, &[]),
         "readbacks of an unrecorded machine judged green"
     );
     assert_eq!(Record::load(&root, &t14()), Ok(None));
     // The same readbacks against the record the loop needed are green.
-    assert!(!metal::judge_readbacks(&recorded(), &read(&dir, &["passing"]), &runs, &[]));
+    assert!(!metal::judge_readbacks(&recorded(), Bench::T14, &read(&dir, &["passing"]), &runs, &[]));
 }
 
-/// **`--metal-host` reaches `toyos-metal` as its own `--host`**, in the words
+/// **A run's machine reaches `toyos-metal` as its own `--host`**, in the words
 /// a driven run spawns and a staged run's `request.txt` lists, and the loop's
-/// own parser takes them; without it the words name no host, which is the T14.
+/// own parser takes them: `--metal-host`'s where the line names one, and else
+/// the bench's own.
 pub fn the_bench_reaches_the_loop_as_its_host() {
     let suite: Vec<String> =
         ["--metal", "--metal-host", "dev@box"].iter().map(ToString::to_string).collect();
-    let host = toyos_metal::testargs::parse(&suite).expect("a suite line").metal_host;
+    let named = toyos_metal::testargs::parse(&suite).expect("a suite line").metal_host;
     let (image, home) = (Path::new("/i.img"), Path::new("/h"));
-    let words = metal::invocation(image, home, host);
-    let after = words.iter().position(|w| w == "--").expect("cargo's own words end") + 1;
-    let tail = &words[after..];
-    let at = tail.iter().position(|w| w == "--host").expect("--host forwarded");
-    assert_eq!(tail[at + 1], "dev@box", "{words:?}");
-    toyos_metal::Args::parse(tail).expect("toyos-metal takes the words it is handed");
-    let t14 = metal::invocation(image, home, None);
-    assert!(!t14.iter().any(|w| w == "--host"), "{t14:?}");
+    for (bench, named, host) in
+        [(Bench::T14, named, "dev@box"), (Bench::T14, None, "toyos@bench-t14"), (Bench::Amd, None, "toyos@bench-amd")]
+    {
+        let (_, target) = metal::target_of(&MetalMode::Drive, Some(bench), named).expect("a machine for the bench");
+        let words = metal::invocation(image, home, &target);
+        let after = words.iter().position(|w| w == "--").expect("cargo's own words end") + 1;
+        let tail = &words[after..];
+        let at = tail.iter().position(|w| w == "--host").expect("--host forwarded");
+        assert_eq!(tail[at + 1], host, "{words:?}");
+        toyos_metal::Args::parse(tail).expect("toyos-metal takes the words it is handed");
+    }
 }
 
 /// A `loader.log` that handed its boot a kernel.
@@ -89,13 +99,18 @@ pub(super) fn boot_file() -> String {
     BootFile { back: 40, back_at: BACK_AT, machine: t14(), phases }.text()
 }
 
-/// One boot's readback as the loop writes it.
+/// One T14 boot's readback as the loop writes it.
 pub(super) fn plant(dir: &Path, label: &str, kernel: &str, verdict: Option<&Refusal>) {
+    plant_on(ON_T14, dir, label, kernel, verdict);
+}
+
+/// The same of the bench whose first record `on` is.
+fn plant_on(on: &str, dir: &Path, label: &str, kernel: &str, verdict: Option<&Refusal>) {
     let home = metal::at(dir, label);
     fs::create_dir_all(&home).expect("a readback directory");
     for (name, text) in [
         (READBACK_LOADER, loader()),
-        (READBACK_KERNEL, format!("{STARTED}{kernel}")),
+        (READBACK_KERNEL, format!("{on}{STARTED}{kernel}")),
         (READBACK_BOOT, boot_file()),
         (READBACK_VERDICT, verdict_file(verdict)),
     ] {
@@ -140,27 +155,30 @@ fn unqualified_and_fail(b: &[&Readback]) -> Result<(), String> {
 }
 
 static PASSING: Metal =
-    Metal { arms: &[metal::once("passing", "tests/images/jobcase.toml", &[], &[])], judge: span };
+    Metal { on: On::Every, arms: &[metal::once("passing", "tests/images/jobcase.toml", &[], &[])], judge: span };
 static FAILING: Metal = Metal {
+    on: On::Every,
     arms: &[metal::once("failing", "tests/images/jobcase.toml", &[], &[])],
     judge: span_and_fail,
 };
 static BESIDE: Metal = Metal {
+    on: On::Every,
     arms: &[metal::once("failing", "tests/images/jobcase.toml", &[], &[])],
     judge: |b| b[0].measured("beside.failing.us", 9),
 };
 static REFUSED: Metal =
-    Metal { arms: &[metal::once("refused", "tests/images/jobcase.toml", &[], &[])], judge: span };
+    Metal { on: On::Every, arms: &[metal::once("refused", "tests/images/jobcase.toml", &[], &[])], judge: span };
 static SKEWED: Metal =
-    Metal { arms: &[metal::once("skewed", "tests/images/jobcase.toml", &[], &[])], judge: span };
+    Metal { on: On::Every, arms: &[metal::once("skewed", "tests/images/jobcase.toml", &[], &[])], judge: span };
 static ONE: Metal =
-    Metal { arms: &[metal::once("one", "tests/images/jobcase.toml", &[], &[])], judge: unqualified };
+    Metal { on: On::Every, arms: &[metal::once("one", "tests/images/jobcase.toml", &[], &[])], judge: unqualified };
 static ONE_FAILS: Metal = Metal {
+    on: On::Every,
     arms: &[metal::once("one", "tests/images/jobcase.toml", &[], &[])],
     judge: unqualified_and_fail,
 };
 static TWO: Metal =
-    Metal { arms: &[metal::once("two", "tests/images/jobcase.toml", &[], &[])], judge: unqualified };
+    Metal { on: On::Every, arms: &[metal::once("two", "tests/images/jobcase.toml", &[], &[])], judge: unqualified };
 
 /// **A number is recorded off its owner's verdict and nobody else's.** A row
 /// that fails keeps its own number out of the record, and neither its boot's
@@ -192,7 +210,7 @@ pub fn a_number_fails_with_its_owner_alone() {
         ("skewed", &SKEWED),
     ];
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
-    assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "four failures judged green");
+    assert!(metal::judge_readbacks(&root, Bench::T14, &readbacks, &runs, &[]), "four failures judged green");
     let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
     let names: Vec<&str> = record.measured.keys().map(String::as_str).collect();
     assert_eq!(
@@ -211,13 +229,13 @@ pub fn a_number_fails_with_its_owner_alone() {
     let runs: Vec<&(&str, &'static Metal)> = alone.iter().collect();
     let root = recorded();
     assert!(
-        metal::judge_readbacks(&root, &read(&dir, &["failing"]), &runs, &[]),
+        metal::judge_readbacks(&root, Bench::T14, &read(&dir, &["failing"]), &runs, &[]),
         "a failing row judged green"
     );
 }
 
 static HOLED: Metal =
-    Metal { arms: &[metal::once("holed", "tests/images/jobcase.toml", &[], &[])], judge: span };
+    Metal { on: On::Every, arms: &[metal::once("holed", "tests/images/jobcase.toml", &[], &[])], judge: span };
 
 /// **A boot whose log is missing parts of itself is refused by name, and no
 /// row is judged on what is left**: `span` asserts no line, so it would pass
@@ -247,7 +265,7 @@ pub fn a_boot_that_lost_parts_of_its_log_judges_no_row() {
 
     let tests = [("holed", &HOLED), ("passes", &PASSING)];
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
-    assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "a boot with a hole in its log judged green");
+    assert!(metal::judge_readbacks(&root, Bench::T14, &readbacks, &runs, &[]), "a boot with a hole in its log judged green");
     let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
     assert!(record.measured.contains_key("span.passing.us"), "{:?}", record.measured);
     assert!(!record.measured.keys().any(|name| name.contains("holed")), "{:?}", record.measured);
@@ -264,7 +282,7 @@ pub fn a_name_two_owners_measured_is_refused() {
         let root = recorded();
         let tests = [("one", first), ("two", &TWO)];
         let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
-        assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "one name twice judged green");
+        assert!(metal::judge_readbacks(&root, Bench::T14, &readbacks, &runs, &[]), "one name twice judged green");
         let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
         assert!(!record.measured.contains_key("latency.p99_us"), "{:?}", record.measured);
         assert_eq!(record.measured.len(), 4, "{:?}", record.measured);
@@ -304,7 +322,7 @@ fn judged_against(record: &Record) -> (bool, Record) {
     record.save(&root).expect("a saved record");
     let tests = [("passes", &PASSING)];
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
-    let red = metal::judge_readbacks(&root, &read(&dir, &["passing"]), &runs, &[]);
+    let red = metal::judge_readbacks(&root, Bench::T14, &read(&dir, &["passing"]), &runs, &[]);
     (red, Record::load(&root, &t14()).expect("a readable record").expect("a record"))
 }
 
@@ -369,7 +387,7 @@ pub fn a_failing_shared_member_fails_itself_alone() {
     };
     let readbacks = read(&dir, &["passing", "failing"]);
     assert!(
-        metal::judge_readbacks(&root, &readbacks, &[], &[shared("passing"), shared("failing")]),
+        metal::judge_readbacks(&root, Bench::T14, &readbacks, &[], &[shared("passing"), shared("failing")]),
         "a failing member judged green"
     );
     let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
@@ -385,10 +403,11 @@ pub fn a_failing_shared_member_fails_itself_alone() {
 /// two rows ending one boot on different jobs are refused by both names.
 pub fn a_boots_last_job_is_behind_every_other() {
     const HELD: metal::Arm = metal::Arm { last: Some("hold"), ..metal::once("own", "tests/images/testcases.toml", &[], &["early"]) };
-    static ENDS: Metal = Metal { arms: &[HELD], judge: |_| Ok(()) };
+    static ENDS: Metal = Metal { on: On::Every, arms: &[HELD], judge: |_| Ok(()) };
     static LATER: Metal =
-        Metal { arms: &[metal::once("own", "tests/images/testcases.toml", &[], &["hold", "later"])], judge: |_| Ok(()) };
+        Metal { on: On::Every, arms: &[metal::once("own", "tests/images/testcases.toml", &[], &["hold", "later"])], judge: |_| Ok(()) };
     static OTHER: Metal = Metal {
+        on: On::Every,
         arms: &[metal::Arm { last: Some("later"), ..metal::once("own", "tests/images/testcases.toml", &[], &[]) }],
         judge: |_| Ok(()),
     };
@@ -409,8 +428,9 @@ pub fn a_boots_last_job_is_behind_every_other() {
 /// one name.
 pub fn rows_run_before_members_under_a_bound_the_members_widen() {
     static EARLY: Metal =
-        Metal { arms: &[metal::once("shared", "tests/images/testcases.toml", &[], &["tone", "cost"])], judge: |_| Ok(()) };
+        Metal { on: On::Every, arms: &[metal::once("shared", "tests/images/testcases.toml", &[], &["tone", "cost"])], judge: |_| Ok(()) };
     static HELD: Metal = Metal {
+        on: On::Every,
         arms: &[
             metal::Arm { last: Some("hold"), ..metal::once("shared", "tests/images/testcases.toml", &[], &["late"]) },
             metal::once("own", "tests/images/testcases.toml", &[], &["alone"]),
@@ -470,10 +490,11 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
 /// refused.
 pub fn words_take_rows_members_and_whole_boots() {
     static ROWS: [(&str, Metal); 2] = [
-        ("alpha_row", Metal { arms: &[metal::once("own", "tests/images/testcases.toml", &[], &[])], judge: |_| Ok(()) }),
+        ("alpha_row", Metal { on: On::Every, arms: &[metal::once("own", "tests/images/testcases.toml", &[], &[])], judge: |_| Ok(()) }),
         (
             "beta_row",
             Metal {
+                on: On::Every,
                 arms: &[metal::Arm { named_only: true, ..metal::once("shared", "tests/images/testcases.toml", &[], &[]) }],
                 judge: |_| Ok(()),
             },
@@ -494,10 +515,11 @@ pub fn words_take_rows_members_and_whole_boots() {
     let profile = [boot("shared", &["test_rs_a1", "test_rs_a2", "test_rs_b1"]), boot("ccorpus", &["c1", "c2"])];
     let jobs_of = |boot: &metal::SharedBoot| boot.members.iter().map(|m| m.job.clone()).collect::<Vec<_>>();
     let taken = |names: &[&str], boots: &[&str]| {
-        metal::select(names, boots, &ROWS, &profile).map(|(rows, shared)| {
-            let rows: Vec<&str> = rows.iter().map(|(name, _)| *name).collect();
+        metal::select(names, boots, Bench::T14, &ROWS, &profile).map(|taken| {
+            assert!(taken.left.is_empty(), "{:?}", taken.left);
+            let rows: Vec<&str> = taken.rows.iter().map(|(name, _)| *name).collect();
             let shared: Vec<String> =
-                shared.iter().map(|boot| format!("{}={}", boot.boot, jobs_of(boot).join("+"))).collect();
+                taken.shared.iter().map(|boot| format!("{}={}", boot.boot, jobs_of(boot).join("+"))).collect();
             (rows.join(","), shared.join(","))
         })
     };
@@ -515,7 +537,7 @@ pub fn words_take_rows_members_and_whole_boots() {
     assert_eq!(taken(&["alpha"], &["ccorpus"]), took("alpha_row", "ccorpus=c1+c2"));
     assert_eq!(taken(&[], &["own"]), took("alpha_row", ""));
     // A member taken by name brings its own files and links and no other's.
-    let (_, shared) = metal::select(&["c2"], &[], &ROWS, &profile).expect("a member's name");
+    let shared = metal::select(&["c2"], &[], Bench::T14, &ROWS, &profile).expect("a member's name").shared;
     let paths: Vec<&str> = shared[0].files.iter().map(|(path, _)| path.as_str()).collect();
     assert_eq!(paths, ["expect/c2", "bin/test_c_c2"]);
     assert_eq!(shared[0].links, [("bin/c2".to_string(), "/system/bin/test_rs_ccheck".to_string())]);
@@ -541,7 +563,7 @@ pub fn the_loader_the_kernel_and_a_program_count_from_one_zero() {
     let read = |clock: &str, loader_ms: &str, kernel_ms: &str, said: &str| {
         let dir = toyos_tmpdir::TempDir::new("metal-one-clock");
         let kernel = format!(
-            "[2026-10-04 09:30:00 {kernel_ms} cpu0 kernel] panic console: armed\n\
+            "{ON_T14}[2026-10-04 09:30:00 {kernel_ms} cpu0 kernel] panic console: armed\n\
              [2026-10-04 09:30:00 11.900 cpu0 kernel] spawn: pid=5 (total=0ms) /system/bin/logkeeper\n\
              [2026-10-04 09:30:00 12.000 cpu0 kernel] spawn: pid=6 (total=0ms) /system/bin/logkeeper\n\
              {said}\
@@ -639,4 +661,225 @@ pub fn the_bench_disk_judge_admits_data_and_the_loaders_volumes_alone() {
     let why = common::hostdisk::left_alone(&host, &ours).unwrap_err();
     assert!(why.contains(&host_esp.to_string()), "{why}");
     assert!(common::hostdisk::loader_named(&serial::Serial::named("loader.log", "Loading kernel elf...\n")).is_err());
+}
+
+fn passes(_: &[&Readback]) -> Result<(), String> {
+    Ok(())
+}
+
+/// Four rows of one profile: one every bench runs, one for each bench's own
+/// hardware on the boot the first rides, and one written for the AMD bench on
+/// a boot of its own.
+static BENCH_ROWS: [(&str, Metal); 4] = [
+    (
+        "every_row",
+        Metal { on: On::Every, arms: &[metal::once("own", "tests/images/testcases.toml", &[], &["common"])], judge: passes },
+    ),
+    (
+        "wired_row",
+        Metal {
+            on: On::Having(&[Device::I219]),
+            arms: &[metal::once("own", "tests/images/testcases.toml", &[], &["wired"])],
+            judge: passes,
+        },
+    ),
+    (
+        "amdvi_row",
+        Metal {
+            on: On::Having(&[Device::AmdVi]),
+            arms: &[metal::once("own", "tests/images/testcases.toml", &[], &["remapped"])],
+            judge: passes,
+        },
+    ),
+    (
+        "amd_row",
+        Metal {
+            on: On::Only(Bench::Amd),
+            arms: &[metal::once("amd-own", "tests/images/testcases.toml", &[], &["idle"])],
+            judge: passes,
+        },
+    ),
+];
+
+/// **A bench's boot carries its own rows' jobs and no other's**: a row the
+/// bench does not run is left by name with why, whether no word, a name or a
+/// boot would have taken it, its jobs are in no list, and a run that takes
+/// only such rows is refused.
+pub fn a_bench_takes_its_own_rows_and_names_the_rest() {
+    let taken = |names: &[&str], boots: &[&str], bench| {
+        let taken = metal::select(names, boots, bench, &BENCH_ROWS, &[])?;
+        let rows: Vec<&str> = taken.rows.iter().map(|(name, _)| *name).collect();
+        let left: Vec<String> = taken.left.iter().map(|(name, why)| format!("{name} {why}")).collect();
+        let boots = metal::batches(&taken.rows, &taken.shared)?;
+        let jobs: Vec<String> = boots.iter().map(|(boot, batch)| format!("{boot}={}", batch.jobs.join("+"))).collect();
+        Ok::<_, String>((rows.join(","), jobs.join(","), left.join("; ")))
+    };
+    let took = |rows: &str, jobs: &str, left: &str| Ok((rows.to_string(), jobs.to_string(), left.to_string()));
+    let no_amdvi = "amdvi_row needs an AMD-Vi unit, which the T14 has not";
+    let not_amd = "amd_row is written for the AMD bench alone";
+    let no_i219 = "wired_row needs an I219, which the AMD bench has not";
+    assert_eq!(
+        taken(&[], &[], Bench::T14),
+        took("every_row,wired_row", "own=common+wired", &format!("{no_amdvi}; {not_amd}"))
+    );
+    assert_eq!(
+        taken(&[], &[], Bench::Amd),
+        took("every_row,amdvi_row,amd_row", "amd-own=idle,own=common+remapped", no_i219)
+    );
+    assert_eq!(taken(&[], &["own"], Bench::Amd), took("every_row,amdvi_row", "own=common+remapped", no_i219));
+    assert_eq!(taken(&["_row"], &[], Bench::T14), taken(&[], &[], Bench::T14));
+    assert_eq!(taken(&["amd"], &[], Bench::Amd), took("amdvi_row,amd_row", "amd-own=idle,own=remapped", ""));
+    assert_eq!(taken(&["every", "amd_row"], &[], Bench::T14), took("every_row", "own=common", not_amd));
+    let refused: [(&[&str], &[&str], Bench, String); 3] = [
+        (&["wired"], &[], Bench::Amd, format!("the run takes nothing on the AMD bench: {no_i219}")),
+        (&["amd"], &[], Bench::T14, format!("the run takes nothing on the T14: {no_amdvi}; {not_amd}")),
+        (&[], &["amd-own"], Bench::T14, format!("the run takes nothing on the T14: {not_amd}")),
+    ];
+    for (names, boots, bench, refusal) in refused {
+        assert_eq!(taken(names, boots, bench), Err(refusal));
+    }
+}
+
+/// The profile's own rows, by bench: the jobs that drive one bench's hardware
+/// ride no boot of the other, and every row is some bench's.
+pub fn the_profile_gives_each_bench_its_own_jobs() {
+    let jobs_of = |boots: &[&str], bench| {
+        let taken = metal::select(&[], boots, bench, METAL, &[]).expect("a selection");
+        let rows: BTreeSet<&str> = taken.rows.iter().map(|(name, _)| *name).collect();
+        let left: BTreeSet<&str> = taken.left.iter().map(|(name, _)| *name).collect();
+        let boots = metal::batches(&taken.rows, &taken.shared).expect("one image a boot");
+        (rows, left, boots)
+    };
+    let (t14_rows, t14_left, t14) = jobs_of(&[], Bench::T14);
+    let (amd_rows, amd_left, amd) = jobs_of(&[], Bench::Amd);
+    let has = |boots: &BTreeMap<String, metal::Batch>, boot: &str, job: &str| boots[boot].jobs.iter().any(|j| j == job);
+    // The I219's, the T14's alone.
+    for job in [claims::RECLAIM, claims::MSI, "test_rs_counters_metal", "test_rs_acpi_counted"] {
+        assert!(has(&t14, "testcases", job) && !has(&amd, "testcases", job), "{job}");
+    }
+    assert!(has(&t14, "benchcase", "test_rs_lan_lease") && !has(&amd, "benchcase", "test_rs_lan_lease"));
+    // The AMD bench's alone: its DMA fault, and its idle states.
+    for job in ["test_rs_usbd_spare_fault", "test_rs_usbd_spare_vector", "test_rs_idle_entered"] {
+        assert!(has(&amd, "testcases", job) && !has(&t14, "testcases", job), "{job}");
+    }
+    assert!(t14_left.contains("amdvi_usbd_drives_its_own_entry") && amd_rows.contains("amdvi_usbd_drives_its_own_entry"));
+    assert!(amd_left.contains("i219_carries_netstacks_link") && t14_rows.contains("i219_carries_netstacks_link"));
+    assert!(t14_rows.is_disjoint(&t14_left) && amd_rows.is_disjoint(&amd_left));
+    assert!(t14_left.is_subset(&amd_rows) && amd_left.is_subset(&t14_rows), "a row no bench runs");
+    // A boot named whole takes its bench's rows of it.
+    let (rows, left, _) = jobs_of(&["benchcase"], Bench::Amd);
+    assert!(rows.contains("osbench") && !rows.iter().any(|row| row.starts_with("i219_")), "{rows:?}");
+    assert_eq!(left, BTreeSet::from(["i219_carries_netstacks_link", "i219_leaves_ulp_unarmed"]));
+}
+
+/// **A run's bench is its readbacks' where it has any**, whatever the line
+/// names beside them but another bench, and the line's or the T14 with none;
+/// **its machine is the bench's own** unless the line names one, and never
+/// another bench's. So a directory one boot of two has answered, which is
+/// staged again, is staged for its readback's bench and that bench's machine,
+/// and the line cannot send a bench's boots to the other's machine.
+pub fn a_runs_bench_is_its_readbacks_and_else_the_lines() {
+    let (t14, amd) = (|| (Bench::T14, "toyos@bench-t14".to_string()), || (Bench::Amd, "toyos@bench-amd".to_string()));
+    let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
+    let offline = MetalMode::Offline(dir.to_path_buf());
+    let dev = Some("dev@box");
+    assert_eq!(metal::target_of(&offline, None, None), Ok(t14()));
+    assert_eq!(metal::target_of(&offline, Some(Bench::Amd), None), Ok(amd()));
+    assert_eq!(metal::target_of(&offline, None, dev), Ok((Bench::T14, "dev@box".to_string())));
+    assert_eq!(metal::target_of(&offline, Some(Bench::Amd), dev), Ok((Bench::Amd, "dev@box".to_string())));
+    assert_eq!(metal::target_of(&MetalMode::List, Some(Bench::Amd), None), Ok(amd()));
+    assert_eq!(metal::target_of(&MetalMode::Drive, None, None), Ok(t14()));
+    let why = metal::target_of(&offline, None, Some("toyos@bench-amd")).expect_err("the T14's rows on the AMD bench");
+    assert!(why.contains("names bench-amd, the AMD bench's machine, and the run takes the T14's rows"), "{why}");
+
+    // The AMD bench's `testcases` came back and its watchdog boot did not.
+    plant_on(ON_AMD, &dir, "testcases", BOOTED, None);
+    // A log that names no bench decides nothing here.
+    fs::create_dir_all(dir.join("unnamed")).expect("a directory");
+    fs::write(dir.join("unnamed").join(READBACK_KERNEL), BOOTED).expect("a planted log");
+    assert_eq!(metal::target_of(&offline, None, None), Ok(amd()));
+    assert_eq!(metal::target_of(&offline, Some(Bench::Amd), None), Ok(amd()));
+    let why = metal::target_of(&offline, None, Some("toyos@bench-t14")).expect_err("the AMD bench's rows on the T14");
+    assert!(why.contains("names bench-t14, the T14's machine, and the run takes the AMD bench's rows"), "{why}");
+    let why = metal::target_of(&offline, Some(Bench::T14), None).expect_err("another bench than the readback's");
+    assert!(why.contains("--metal-bench names the T14 and testcases's readback is from the AMD bench"), "{why}");
+
+    // The mirror: the T14's readback, and the line naming the AMD bench's machine.
+    let t14_dir = toyos_tmpdir::TempDir::new("metal-readbacks");
+    plant(&t14_dir, "testcases", BOOTED, None);
+    let t14_offline = MetalMode::Offline(t14_dir.to_path_buf());
+    assert_eq!(metal::target_of(&t14_offline, None, None), Ok(t14()));
+    let why = metal::target_of(&t14_offline, None, Some("toyos@bench-amd")).expect_err("the T14's rows on the AMD bench");
+    assert!(why.contains("names bench-amd, the AMD bench's machine, and the run takes the T14's rows"), "{why}");
+
+    plant(&dir, "two", BOOTED, None);
+    let why = metal::target_of(&offline, None, None).expect_err("two benches in one run");
+    assert!(why.contains("testcases's readback from the AMD bench and two's from the T14"), "{why}");
+}
+
+/// **A judge names the bench its readback came from**, and a boot that ran on
+/// another bench than the run's rows are for is red with every row on it.
+pub fn a_judge_names_the_bench_it_judged() {
+    let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
+    let failed = format!("{BOOTED}[2026-09-29 18:22:41  2.310 cpu3 kernel] exit: test_rs_a_job pid=12 code=101 cpu=4ms\n");
+    plant_on(ON_AMD, &dir, "passing", &failed, None);
+    plant(&dir, "failing", &failed, None);
+    let readbacks = read(&dir, &["passing", "failing"]);
+    let said = |label: &str| readbacks[label].as_ref().expect("a readback").job_passed("test_rs_a_job").unwrap_err();
+    assert!(said("passing").starts_with("test_rs_a_job exited 101 on the AMD bench;"), "{}", said("passing"));
+    assert!(said("failing").starts_with("test_rs_a_job exited 101 on the T14;"), "{}", said("failing"));
+    assert!(read(&dir, &["passing"])["passing"].as_ref().is_ok_and(|back| back.bench == Bench::Amd));
+
+    let tests = [("passes", &PASSING)];
+    let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
+    assert!(!metal::judge_readbacks(&recorded(), Bench::Amd, &read(&dir, &["passing"]), &runs, &[]));
+    let root = recorded();
+    assert!(
+        metal::judge_readbacks(&root, Bench::T14, &read(&dir, &["passing"]), &runs, &[]),
+        "the AMD bench's boot judged green for the T14's rows"
+    );
+    let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
+    assert!(record.measured.is_empty(), "a boot of another bench recorded {:?}", record.measured);
+
+    // A log that names no bench is no readback.
+    fs::write(metal::at(&dir, "failing").join(READBACK_KERNEL), format!("{STARTED}{BOOTED}")).expect("a planted log");
+    let why = metal::read_readback(&dir, "failing").err().expect("a log naming no bench");
+    assert_eq!(why, "failing's log names no bench: the kernel wrote no `microcode: cpu` record");
+}
+
+/// **Each bench's own readback, as its loop wrote it** (its `testcases` boot
+/// of 2026-11-11, cut to the lines read here, its machine masked, its spawn
+/// records and the supervisor's line in the form the kernel and the
+/// supervisor now write them): it names
+/// its bench, the real rows are taken for that bench and judged on it, and
+/// the job that claims the T14's I219, which that boot of the AMD bench still
+/// carried and which exited 1 there, is no row of the AMD bench's.
+pub fn each_benchs_own_readback_is_judged_as_that_bench() {
+    let masked = Machine { vendor: "masked".into(), product: "masked".into(), bios: "masked".into() };
+    let judged = |bench: Bench, names: &[&str]| {
+        let dir = compile::repo_root().join("tests/checks/readbacks").join(bench.word());
+        assert_eq!(metal::target_of(&MetalMode::Offline(dir.clone()), None, None), Ok((bench, bench.host().to_string())));
+        let taken = metal::select(names, &[], bench, METAL, &[])?;
+        let root = toyos_tmpdir::TempDir::new("metal-records");
+        Record::new(&masked).save(&root).expect("a recorded machine");
+        let runs: Vec<&(&str, &'static Metal)> = taken.rows.iter().collect();
+        let red = |as_bench| metal::judge_readbacks(&root, as_bench, &read(&dir, &["testcases"]), &runs, &[]);
+        let other = if bench == Bench::T14 { Bench::Amd } else { Bench::T14 };
+        assert!(red(other), "{bench}'s readback judged green as {other}'s");
+        let rows: Vec<&str> = taken.rows.iter().map(|(name, _)| *name).collect();
+        Ok::<_, String>((red(bench), rows.join(","), taken.left))
+    };
+    let reclaim = "claim_reuses_its_remapping_entry";
+    assert_eq!(judged(Bench::T14, &["kernel_wx", reclaim]), Ok((false, format!("{reclaim},kernel_wx"), Vec::new())));
+    assert_eq!(
+        judged(Bench::Amd, &["kernel_wx", reclaim]),
+        Ok((false, "kernel_wx".to_string(), vec![(reclaim, "needs an I219, which the AMD bench has not".to_string())]))
+    );
+    assert_eq!(
+        judged(Bench::Amd, &[reclaim]).unwrap_err(),
+        format!("the run takes nothing on the AMD bench: {reclaim} needs an I219, which the AMD bench has not")
+    );
+    let amd = metal::read_readback(&compile::repo_root().join("tests/checks/readbacks/amd"), "testcases").expect("a readback");
+    let why = amd.job_passed(claims::RECLAIM).unwrap_err();
+    assert!(why.starts_with("test_rs_pci_reclaim exited 1 on the AMD bench;"), "{why}");
 }

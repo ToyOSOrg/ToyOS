@@ -19,8 +19,9 @@
 //! hands the next boot to Ubuntu.
 //!
 //! Beside the loop: [`testargs`], the suite's command line, which carries the
-//! metal profile's flags; [`image`], the config a metal boot derives; and
-//! [`timings`], each bench's record.
+//! metal profile's flags; [`bench`], the benches and how a boot names its own;
+//! [`image`], the config a metal boot derives; and [`timings`], each bench's
+//! record.
 
 use std::fmt;
 use std::io::{Read, Seek};
@@ -35,6 +36,7 @@ use toyos_gpt::Guid;
 use crate::internal::Owned;
 use crate::timings::{Machine, Record};
 
+pub mod bench;
 pub mod image;
 pub mod internal;
 pub mod testargs;
@@ -603,9 +605,10 @@ impl Target {
     /// The T14 bench, with the runner key this host holds.
     fn bench_t14() -> Result<Self, Refusal> {
         let home = std::env::var_os("HOME").ok_or(Refusal::NoHome)?;
+        let (user, host) = host_of(bench::Bench::T14.host()).expect("a bench's host reads as one");
         Ok(Self {
-            user: "toyos".to_string(),
-            host: "bench-t14".to_string(),
+            user: user.to_string(),
+            host: host.to_string(),
             key: PathBuf::from(home).join(".ssh/id_ed25519_toyos_runner"),
             internal: Node::Nvme { controller: b'0', namespace: b'1' },
         })

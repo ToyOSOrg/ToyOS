@@ -1,0 +1,12 @@
+back_secs 49
+back_unix_secs 1794372533
+machine_vendor masked
+machine_product masked
+machine_bios masked
+preamble_secs 4.687
+flash_secs 441.832
+dd_secs 419.337
+entry_secs 7.537
+down_secs 10.024
+read_log_secs 26.824
+raw_log_secs 214.311
