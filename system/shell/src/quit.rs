@@ -14,6 +14,7 @@
 use toyos_abi::quit::Reason;
 
 /// What a quit asked this shell.
+#[derive(Default)]
 pub struct Asked {
     /// It runs one `-c` command and ends, which an interrupt of its line ends
     /// once the line has.
@@ -27,6 +28,7 @@ pub struct Asked {
 }
 
 impl Asked {
+    /// [`Default`]'s, for a static.
     pub const fn new() -> Self {
         Self { one_command: false, waiting: false, interrupted: false, ended_by: None }
     }
