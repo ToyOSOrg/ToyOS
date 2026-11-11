@@ -27,7 +27,9 @@ Seen in guest run 43092179151 (#1252 at 041f1b81e):
 
 The row passed at 2bbd17005 and 8f5cfaf65 of the same branch. Its result
 depends on whether logkeeper's write lands before the commit, which the test
-leaves to timing. Control: the same row at main e10b6fd49, run 43102568233.
+leaves to timing. The control, the same row at main e10b6fd49 in run
+43102568233, passed. One green run cannot tell an intermittent race on main
+from a defect of #1252: the case for the race rests on reading the test.
 
 Owner: the guest test.
 
