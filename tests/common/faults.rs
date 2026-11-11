@@ -151,23 +151,24 @@ const REPORT_FAULTED: &str = "DOUBLE FAULT inside the double fault report above"
 /// the fault is a `#DF` whose report names that stack's guard. A stack with
 /// nothing unmapped under it writes on into its neighbour and says neither
 /// line. The last boot runs the report itself off IST1: the `#DF` that makes
-/// restarts the handler on the same stack, which ends the report on one line
-/// instead of making it again.
+/// restarts the handler on the same stack, which ends the report on one raw
+/// line instead of making it again; the first report's records reach the
+/// console after that line, when the halt drains them.
 pub fn a_kernel_stack_overflow_names_its_stack(test_config: &Path) -> Result<(), String> {
-    const ARMS: [(&[&str], &str, &str); 5] = [
-        (&["stack-overflow-task"], " under the kernel stack of pid=", " under the kernel stack of pid="),
-        (&["stack-overflow-idle"], "'s idle stack", "'s idle stack"),
-        (&["stack-overflow-nmi"], "'s IST2 stack", "'s IST2 stack"),
-        (&["stack-overflow-boot"], " under the boot stack", " under the boot stack"),
-        (&["stack-overflow-report"], "'s idle stack", REPORT_FAULTED),
+    const ARMS: [(&[&str], &str, Option<&str>); 5] = [
+        (&["stack-overflow-task"], " under the kernel stack of pid=", None),
+        (&["stack-overflow-idle"], "'s idle stack", None),
+        (&["stack-overflow-nmi"], "'s IST2 stack", None),
+        (&["stack-overflow-boot"], " under the boot stack", None),
+        (&["stack-overflow-report"], "'s idle stack", Some(REPORT_FAULTED)),
     ];
-    for (kernel_params, stack, ready_marker) in ARMS {
+    for (kernel_params, stack, also) in ARMS {
         let param = kernel_params[0];
         let qemu = QemuInstance::boot_with_options(
             test_config,
             &[],
             &[],
-            BootOptions { profile: qemu::Profile::Metal, kernel_params, ready_marker, ..Default::default() },
+            BootOptions { profile: qemu::Profile::Metal, kernel_params, ready_marker: stack, ..Default::default() },
         );
         let serial = qemu.boot_log();
         let report = serial
@@ -178,6 +179,9 @@ pub fn a_kernel_stack_overflow_names_its_stack(test_config: &Path) -> Result<(),
             .lines()
             .find(|line| line.contains(STACK_OVERFLOW) && line.contains(stack))
             .ok_or_else(|| format!("{param}: the double fault's report names no guard{stack}\n{serial}"))?;
+        if let Some(also) = also.filter(|also| !serial.contains(also)) {
+            return Err(format!("{param}: no {also:?} line\n{serial}"));
+        }
         if report.matches(DOUBLE_FAULT).count() != 1 {
             return Err(format!("{param}: the double fault was reported more than once\n{serial}"));
         }
