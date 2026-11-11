@@ -95,6 +95,21 @@ transport-no-resume = []
 # A look without the gate is believed when it names a violation, so a cursor
 # another holder moved under it ends the call.
 transport-ungated-violation = []
+# The descriptor table's controls (`src/fd/table.rs`), declared and run as the
+# transport's are; `src/fd/table/model.rs` holds a call beside the writer.
+#
+# A call counts itself onto a slot whose count is 0, so it holds an object
+# the close already let go.
+fd-hold-revives = []
+# A call keeps its reference without looking at the descriptor again, so it
+# holds whatever took the slot its descriptor named.
+fd-hold-unchecked = []
+# The writer stores a new object's count `Relaxed`, so a call that counts
+# itself on need not see the object written.
+fd-publish-relaxed = []
+# The writer finds a slot free by a `Relaxed` load, so its write of a new
+# object need not follow the last call's read of the old one.
+fd-reuse-relaxed = []
 
 [lints.rust]
 # The guest's target: its stream sinks are compiled only for it.

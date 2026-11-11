@@ -389,48 +389,70 @@ fn file_group(label: &str) -> Option<Fd> {
 /// The table itself, in the copy that owns it.
 #[cfg(all(feature = "fd-table", not(test)))]
 mod owner {
-    use super::table::{Fault, Table};
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    use super::table::{Fault, ObjectCell, Table, Writer};
     use super::*;
     use crate::endow::Endowments;
     use crate::sync::Lock;
     use crate::OwnedHandle;
 
-    /// The table, and whether its endowed descriptors were installed yet.
-    static TABLE: Lock<(bool, Table<MAX_FDS>)> = Lock::new((false, Table::new()));
+    type Descriptors = Table<AtomicU32, ObjectCell<Record>, MAX_FDS>;
+    type TableWriter<'a> = Writer<'a, AtomicU32, ObjectCell<Record>, MAX_FDS>;
 
-    /// `f` on the table, whose first use installs every descriptor the
-    /// process was endowed at its number. Nothing panics under the lock: a
-    /// panic writes to stderr, a descriptor, which would wait on it forever.
-    fn table<R>(f: impl FnOnce(&mut Table<MAX_FDS>) -> Result<R, Fault>) -> Result<R, Error> {
+    static TABLE: Descriptors = Table::new();
+    /// Held by whoever changes what a descriptor names.
+    static WRITING: Lock<()> = Lock::new(());
+    /// Whether the endowed descriptors were installed yet.
+    static ENDOWED: AtomicBool = AtomicBool::new(false);
+
+    fn refusal(fault: Fault) -> Error {
+        match fault {
+            Fault::Refused(e) => e,
+            Fault::Broken => panic!("toyos::fd: the descriptor table is inconsistent"),
+        }
+    }
+
+    /// `f` on the table's writer, whose first use installs every descriptor
+    /// the process was endowed at its number. Nothing panics under the lock.
+    fn change<R>(f: impl FnOnce(&mut TableWriter<'_>) -> Result<R, Fault>) -> Result<R, Error> {
         let endowed = Endowments::get();
         let mut refused = 0;
         let answer = {
-            let mut held = TABLE.lock();
-            let (ready, table) = &mut *held;
-            let installed = match *ready {
+            let _held = WRITING.lock();
+            // SAFETY: the one writer while `WRITING` is held.
+            let mut writer = unsafe { TABLE.writer() };
+            let installed = match ENDOWED.load(Ordering::Relaxed) {
                 true => Ok(()),
                 false => {
-                    *ready = true;
-                    endow(table, endowed).map(|n| refused = n)
+                    let installed = endow(&mut writer, endowed).map(|n| refused = n);
+                    ENDOWED.store(true, Ordering::Release);
+                    installed
                 }
             };
-            installed.and_then(|()| f(table))
+            installed.and_then(|()| f(&mut writer))
         };
-        // Said once the lock is let go, since stderr is a descriptor.
+        // Said once the lock is let go: the write may block.
         for _ in 0..refused {
             let _ = crate::files::write(2, b"toyos::fd: an fd: endowment whose number was taken was refused\n");
         }
-        answer.map_err(|fault| match fault {
-            Fault::Refused(e) => e,
-            Fault::Broken => panic!("toyos::fd: the descriptor table is inconsistent"),
-        })
+        answer.map_err(refusal)
+    }
+
+    /// The table for a call, which takes no lock once the endowed
+    /// descriptors are installed.
+    fn table() -> Result<&'static Descriptors, Error> {
+        if !ENDOWED.load(Ordering::Acquire) {
+            change(|_| Ok(()))?;
+        }
+        Ok(&TABLE)
     }
 
     /// Install each `fd:` endowment at its number, a socket's taken up as
     /// this process's holder first. One whose number another already took,
     /// or whose socket this process holds no room for, is refused, its handle
     /// closed: how many were.
-    fn endow(table: &mut Table<MAX_FDS>, endowed: &Endowments) -> Result<usize, Fault> {
+    fn endow(table: &mut TableWriter<'_>, endowed: &Endowments) -> Result<usize, Fault> {
         let mut refused = 0;
         let mut files = alloc::collections::BTreeMap::new();
         for label in endowed.labels() {
@@ -485,16 +507,29 @@ mod owner {
 
     #[no_mangle]
     extern "C" fn toyos_fd_install(record: Record, inheritable: bool, floor: Fd) -> i32 {
-        table(|t| t.install(record, inheritable, floor)).unwrap_or_else(|e| {
+        change(|t| t.install(record, inheritable, floor)).unwrap_or_else(|e| {
             // SAFETY: refused, so the record is still the caller's, given here.
             unsafe { record.release() };
             encode(e)
         })
     }
 
+    /// A call whose descriptor named a free slot, held under the writer's
+    /// lock, where that is a finished close or a broken table.
+    #[cold]
+    #[inline(never)]
+    fn settled(fd: Fd) -> Result<(usize, Record), Error> {
+        change(|t| t.acquire(fd))
+    }
+
     #[no_mangle]
     unsafe extern "C" fn toyos_fd_acquire(fd: Fd, out: *mut Record) -> i32 {
-        match table(|t| t.acquire(fd)) {
+        let held = table().and_then(|t| match t.acquire(fd, |record| released(Some(record))) {
+            Ok(Some(held)) => Ok(held),
+            Ok(None) => settled(fd),
+            Err(fault) => Err(refusal(fault)),
+        });
+        match held {
             Ok((token, object)) => {
                 // SAFETY: the caller's live place.
                 unsafe { out.write(object) };
@@ -505,14 +540,16 @@ mod owner {
     }
 
     #[no_mangle]
-    extern "C" fn toyos_fd_unuse(token: i32) {
+    unsafe extern "C" fn toyos_fd_unuse(token: i32) {
         let token = usize::try_from(token).expect("toyos::fd: a token no acquire answered");
-        released(table(|t| t.unuse(token)).expect("toyos::fd: a token no acquire answered"));
+        // SAFETY: the caller's: a token `toyos_fd_acquire` answered, given
+        // back once.
+        released(unsafe { TABLE.unuse(token) }.expect("toyos::fd: a token no acquire answered"));
     }
 
     #[no_mangle]
     extern "C" fn toyos_fd_close(fd: Fd) -> i32 {
-        match table(|t| t.close(fd)) {
+        match change(|t| t.close(fd)) {
             Ok(object) => {
                 released(object);
                 0
@@ -523,12 +560,12 @@ mod owner {
 
     #[no_mangle]
     extern "C" fn toyos_fd_dup(fd: Fd, floor: Fd, inheritable: bool) -> i32 {
-        table(|t| t.dup(fd, floor, inheritable)).unwrap_or_else(encode)
+        change(|t| t.dup(fd, floor, inheritable)).unwrap_or_else(encode)
     }
 
     #[no_mangle]
     extern "C" fn toyos_fd_dup2(old: Fd, new: Fd, inheritable: bool) -> i32 {
-        match table(|t| t.dup2(old, new, inheritable)) {
+        match change(|t| t.dup2(old, new, inheritable)) {
             Ok(displaced) => {
                 released(displaced);
                 new
@@ -539,7 +576,7 @@ mod owner {
 
     #[no_mangle]
     extern "C" fn toyos_fd_replace(fd: Fd, record: Record) -> i32 {
-        match table(|t| t.replace(fd, record)) {
+        match change(|t| t.replace(fd, record)) {
             Ok(old) => {
                 released(old);
                 0
@@ -554,12 +591,12 @@ mod owner {
 
     #[no_mangle]
     extern "C" fn toyos_fd_inheritable(fd: Fd) -> i32 {
-        table(|t| t.inheritable(fd)).map_or_else(encode, i32::from)
+        table().and_then(|t| t.inheritable(fd).map_err(refusal)).map_or_else(encode, i32::from)
     }
 
     #[no_mangle]
     extern "C" fn toyos_fd_set_inheritable(fd: Fd, inheritable: bool) -> i32 {
-        table(|t| t.set_inheritable(fd, inheritable)).map_or_else(encode, |()| 0)
+        change(|t| t.set_inheritable(fd, inheritable)).map_or_else(encode, |()| 0)
     }
 }
 
