@@ -257,9 +257,7 @@ mod tests {
                         Take::Slot(slot) => break slot,
                         Take::Spent => panic!("the range is nowhere near spent"),
                         Take::Flush => {
-                            if !slots.begin_flush() {
-                                continue;
-                            }
+                            assert!(slots.begin_flush(), "a lone taker was sent to flush where none is owed");
                             // The flush is under way: it covers what retired before it.
                             let covered = stale.clone();
                             assert_eq!(slots.take(), Take::Flush, "a take beside a flush drew a slot");

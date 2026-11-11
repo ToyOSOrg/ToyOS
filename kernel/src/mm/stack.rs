@@ -10,8 +10,8 @@
 //! stack would, the exposure every frame already has through the direct map.
 //! The range's page tables are the kernel's own and are never freed, since a
 //! CPU's paging-structure cache may still name one: a table for each 8 slots
-//! ever in use at once and a directory for each 4096. The range holds
-//! `kernel::stackslots::SLOTS` stacks at once.
+//! ever used and a directory for each 4096, `kernel::stackslots` bounding the
+//! slots ever used and the stacks the range holds at once.
 //!
 //! **A CPU's own** (idle, x86-64's IST) is [`permanent`]: carved at bring-up
 //! out of the direct map, above a page taken out of it, because an x86-64 AP
@@ -41,9 +41,9 @@ const SLOT: u64 = 256 * 1024;
 static IN_USE: Lock<Slots> = Lock::new(Slots::new());
 
 /// Held by the one taker flushing, across its flush. A taker that finds no
-/// clean slot beside it waits here, for no longer than that shootdown takes:
-/// the shootdown ends or panics on a CPU that does not answer, and a spinner
-/// on this lock answers it.
+/// clean slot beside it waits here behind those ahead of it: each hold is
+/// one shootdown, which ends or panics on a CPU that does not answer, and a
+/// spinner on this lock answers it.
 static FLUSH_GATE: Lock<()> = Lock::new(());
 
 /// A slot no CPU holds a translation of, or `None` where every slot the
