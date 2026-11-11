@@ -4,7 +4,7 @@
 //! free memory as soon as it returns; every `IF`-clear spin able to block one
 //! answers it directly instead of waiting on the interrupt vector. A stale
 //! memory-type translation surviving an early return is undefined per SDM
-//! Vol. 3A §11.12.4.
+//! Vol. 3A §14.12.4. SDM sections here are numbered as in order 325384-093US.
 //!
 //! **A change to one user space's leaves reaches only the CPUs running it**
 //! ([`user_change`], over `crate::tlb_tags`): a CPU that ran it before flushes
@@ -20,7 +20,7 @@
 //!
 //! **A user-half change keeps global translations**: its flush is `INVPCID`
 //! type 3 or a `CR3` reload, and only a kernel-half change, whose leaves are
-//! global, asks the flush that drops them (SDM Vol. 3A §4.10.4.1, APM Vol. 2
+//! global, asks the flush that drops them (SDM Vol. 3A §5.10.4.1, APM Vol. 2
 //! §5.5.2). An answer covering both is the wider.
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -115,8 +115,8 @@ const BY_PAGE: u64 = 64;
 ///
 /// A CPU idle on the space may still read those frames speculatively through
 /// its stale translations (SDM Vol. 3A §5.10.4.4). That is sound while SMAP
-/// faults every other Ring 0 access to a user page, a freed user frame is only
-/// ever mapped write-back again (§14.12.4), and a user mapping that is not
+/// faults every other access it makes to a user page, a freed user frame is
+/// only ever mapped write-back again (§14.12.4), and a user mapping that is not
 /// write-back is a device window: UC, never read speculatively (§14.3), or the
 /// WC scanout, which a read does not disturb.
 pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64, tables: bool) -> bool {
