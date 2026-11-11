@@ -1478,16 +1478,16 @@ fn hello(conn: &Connection, window: &SharedMemory) -> Result<Reply, Error> {
 ///
 /// A reply waits on the server's block requests and on its turns behind its
 /// other connections. A block server may stay silent for the block protocol's
-/// bound, 365 s (`toyos_blockring::SILENCE_BOUND_NS`, which this crate cannot
-/// name, as that crate depends on this one, and which holds itself under this
-/// bound); this one is that and 60 s of room for the server's own work and
-/// turns. A file server's reply has no derived worst case: one request may
-/// wait on several block requests in turn, and nothing sums them or the turns
+/// bound ([`BLOCK_SILENCE_NS`]); this one is that and 60 s of room for the
+/// server's own work and turns. A file server's reply has no derived worst
+/// case: one request may wait on several block requests in turn, and nothing
+/// sums them or the turns
 /// (`issues/a-file-server-reply-has-no-derived-worst-case.md`).
 pub const REPLY_BOUND_NS: u64 = BLOCK_SILENCE_NS + 60_000_000_000;
 
-/// The block protocol's bound on a block server's silence.
-const BLOCK_SILENCE_NS: u64 = 365_000_000_000;
+/// The block protocol's bound on a block server's silence: the block crate's,
+/// which depends on this one, and which the file server holds this equal to.
+pub const BLOCK_SILENCE_NS: u64 = 365_000_000_000;
 
 /// The next reply frame on `conn`, into `rx`: its frame type and words,
 /// [`Error::Unanswered`] for none within [`REPLY_BOUND_NS`].

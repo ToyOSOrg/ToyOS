@@ -68,10 +68,6 @@ mod model;
 /// `issues/a-usb-disk-session-can-wait-past-the-block-silence-bound-behind-other-sessions.md`.
 pub const SILENCE_BOUND_NS: u64 = 365_000_000_000;
 
-// A file server's client waits for a reply at least as long as one block
-// request may stay silent.
-const _: () = assert!(toyos::fs::REPLY_BOUND_NS > SILENCE_BOUND_NS);
-
 pub use entry::{Completion, Op, Request, Status};
 pub use toyos::transport::Run;
 pub use layout::{BLOCK_BYTES, DEPTH, MAX_REQUEST_BLOCKS, SESSION_BYTES};
