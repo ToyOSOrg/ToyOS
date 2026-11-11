@@ -60,11 +60,9 @@ impl<const N: usize> Latch<N> {
     /// that publication was in force: a publication that lands between the
     /// value's loads and the recheck after `inside` sends the read round
     /// again. `inside` orders whatever it reads that is not memory, such as a
-    /// counter, after the loads before it. Nothing orders the recheck after
-    /// `inside`'s read but an interrupt between them, which throws away a
-    /// recheck answered early: a reader preempted there reads again, and one
-    /// that was not may pair its reading with a value replaced within its
-    /// out-of-order window.
+    /// counter, after the loads before it. Whether the recheck may be answered
+    /// before that read is `inside`'s to decide: the latch orders nothing
+    /// there.
     pub fn read_with<T>(&self, mut inside: impl FnMut() -> T) -> ([u64; N], T) {
         loop {
             let seq = self.seq.load(Ordering::Acquire);

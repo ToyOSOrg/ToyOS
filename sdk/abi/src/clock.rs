@@ -20,10 +20,11 @@
 //! **A reading takes the counter inside the latch's read section**, and the
 //! page's demoted word after the counter, so a line replaced or a demotion
 //! made while the reader was preempted sends it round again or to the kernel.
-//! One that was not preempted may pair a line with a counter read just after
-//! the line was replaced, which carries the old line a little past the
-//! counter reading the new one starts at, as any reading between that counter
-//! reading and the publication does.
+//! A reading whose counter holds no later instruction back
+//! ([`crate::arch::counter`] on x86-64) and that was not preempted may pair a
+//! line with a counter read just after the line was replaced, which carries
+//! the old line a little past the counter reading the new one starts at, as
+//! any reading between that counter reading and the publication does.
 //!
 //! **Every word of the page is atomic.** The kernel writes it while processes
 //! read it, so it is reached as atomics and never as plain memory.
