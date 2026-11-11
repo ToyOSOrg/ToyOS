@@ -174,7 +174,7 @@ Beside that order, each waiting on something outside it:
         its program (`toyos::startup`), which the kernel neither stores nor
         answers (#1200): `SYS_GET_ENV` (73) and `ProcessData::env` are
         gone. What a parent calls each endowment is in the block too
-        (#ENDOWPR): `SYS_ENDOWMENTS` (99) and the kernel's namespaces are
+        (#1252): `SYS_ENDOWMENTS` (99) and the kernel's namespaces are
         gone, and a child's handles follow its own two in the order its
         spawn listed them. The kernel still keeps two userland texts of each
         process: its name, 27 bytes its parent chooses
@@ -385,7 +385,7 @@ the first.
 | What | Size | Dependents | Owner in the design, and what blocks it |
 |---|---|---|---|
 | **Done** (#1200): the parent lays them out in a startup block. A child's arguments and environment | about 140 | std, libc, `toyos::startup` | the parent's startup block |
-| **Done** (#ENDOWPR): the parent names them in the startup block, the child's handles follow its own two in order, and a job is a spawn's field. Endowment labels, and the namespaces with them | about 420 | `toyos::endow`, `toyos::spawn`, the supervisor | the parent's startup block |
+| **Done** (#1252): the parent names them in the startup block, the child's handles follow its own two in order, and a job is a spawn's field. Endowment labels, and the namespaces with them | about 420 | `toyos::endow`, `toyos::spawn`, the supervisor | the parent's startup block |
 | The TTY mark on a pipe end (`SYS_MARK_TTY`, `FileType::Tty`) | ~40 | std's spawn, libc's `isatty` and stdio, std's stdio | a fact about a stream that only libc and std read; a label or the block could carry it (inferred); after the labels |
 | The main thread's stack: 8 MiB and a guard the kernel chooses and reserves | ~30 | `SYS_STACK_INFO`, which only a guest test calls | its creator's, since the design gives a thread's stack a caller-chosen size; a child's stack starts empty since #1200 |
 | **Done** (#1210): the loader writes one record, the kernel hands it to the supervisor as a read-only boot image, and the supervisor parses it. What the loader named: partition GUIDs by role, in the inventory, and the boot sources `SYS_BOOT_SOURCES` answers, whose device paths `loaded.rs` parses (`toyos-devicepath`) only to refuse the loader's own bytes | ~95, and the kernel's link to a 324-line parser | the supervisor, `toyos::syscap`, the manifest's inventory reader | the design gives the kernel a typed description of what was loaded and keeps a partition GUID out of it; passing the description on unread, as a read-only boot image as ROOT is, fits both (inferred) and waits on no other change |
@@ -407,7 +407,7 @@ By mechanisms eliminated:
 1. #1200: `SYS_GET_ENV`, the environment kept per process, the kernel's
    write onto a child's stack. **Done** (#1200).
 2. Endowment labels, after #1200: `SYS_ENDOWMENTS`, the per-process blob
-   and its charge, and label text the kernel compares. **Done** (#ENDOWPR),
+   and its charge, and label text the kernel compares. **Done** (#1252),
    with the namespaces.
 3. What the loader named, independent of the others: `SYS_BOOT_SOURCES`,
    the inventory's partition records, the device-path parser. **Done**

@@ -67,7 +67,7 @@ other, with the same per-session isolation (owner, 2026-11-05).
    directory where it keeps state (`service = true` or `state = true`: the
    daemons' own state is built); `/system` is read-only, `/log` and `/apps`
    are read-only to all but one row each, and the rest is read-write. The
-   storage rows hold no directory at all (#ENDOWPR): a service the
+   storage rows hold no directory at all (#1252): a service the
    supervisor adopted for its own files is inherited by no child.
    Only the installer service writes `/apps` (owner ruling, 2026-11-05).
    Built: `/apps` is read-only in every declared row's view but the row
