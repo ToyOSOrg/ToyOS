@@ -13,6 +13,10 @@
 //! affected families only, so an AMD family none of its documents names is
 //! unaffected unless it is newer than the ones they do.
 //!
+//! One policy is ToyOS's own: a protection between programs that a vendor
+//! prescribes for every program is applied for a program that asks, and its
+//! verdict marks it as policy.
+//!
 //! A vulnerability Intel's advisory describes for Intel's processors has no
 //! AMD rule, and AMD's none for Intel. No other vendor's guidance is read.
 
@@ -33,7 +37,7 @@ pub struct Facts {
     pub signature: u32,
     /// CPUID.01H:ECX[31]: a hypervisor's guest.
     pub hypervisor: bool,
-    /// More than one logical processor shares this CPU's core.
+    /// Another CPU the kernel brought up shares this CPU's core.
     pub smt: bool,
     pub microcode: Revision,
     pub cpuid_7_0_ebx: u32,
@@ -136,8 +140,6 @@ pub enum Mitigation {
     /// Intel "Retpoline: A Branch Target Injection Mitigation"; AMD 70586
     /// V2-1, the generic form AMD-SB-1036 asks for.
     Retpoline,
-    /// AMD 70586 V2-3: calls that fill the return address predictor.
-    ReturnPredictorFill,
     /// `PRED_CMD.IBPB` between two programs one of which asks.
     Ibpb,
     /// `SPEC_CTRL.STIBP` for a program that asks, against its core's other
@@ -184,7 +186,7 @@ pub enum Mitigation {
 }
 
 impl Mitigation {
-    const ALL: [Self; 26] = [
+    const ALL: [Self; 25] = [
         Self::UserPointerClamp,
         Self::LfenceDispatchSerializing,
         Self::Smep,
@@ -193,7 +195,6 @@ impl Mitigation {
         Self::IbrsAlwaysOn,
         Self::IbrsOnEntry,
         Self::Retpoline,
-        Self::ReturnPredictorFill,
         Self::Ibpb,
         Self::Stibp,
         Self::BhiDisS,
@@ -223,7 +224,6 @@ impl Mitigation {
             Self::IbrsAlwaysOn => "IBRS always on",
             Self::IbrsOnEntry => "IBRS on entry",
             Self::Retpoline => "retpoline",
-            Self::ReturnPredictorFill => "return predictor fill",
             Self::Ibpb => "IBPB between programs that ask",
             Self::Stibp => "STIBP for programs that ask",
             Self::BhiDisS => "BHI_DIS_S",
@@ -280,20 +280,6 @@ impl Mitigations {
 
     const fn without(self, other: Self) -> Self {
         Self(self.0 & !other.0)
-    }
-}
-
-impl fmt::Display for Mitigations {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut first = true;
-        for one in Mitigation::ALL.into_iter().filter(|&one| self.has(one)) {
-            if !first {
-                f.write_str(", ")?;
-            }
-            f.write_str(one.name())?;
-            first = false;
-        }
-        Ok(())
     }
 }
 
@@ -373,6 +359,9 @@ pub enum Verdict {
         /// Those of `needs` this CPU does not enumerate, so nothing can
         /// apply them.
         lacks: Mitigations,
+        /// Those of `needs` the vendor prescribes for every program and
+        /// ToyOS applies only for a program that asks: its policy.
+        by_policy: Mitigations,
         /// No vendor row names this CPU; see the module's rule.
         assumed: bool,
     },
@@ -398,6 +387,58 @@ impl Decision {
     pub const fn line(&self, of: Vulnerability, applied: Mitigations) -> Line {
         Line { verdict: self.verdict(of), applied }
     }
+
+    /// What is in force on a CPU whose registers read `registers`: [`ALWAYS`]
+    /// and each control a register shows on. Intel's two bits opt out of a
+    /// mitigation its microcode turns on; AMD's two turn one on.
+    pub fn in_force(&self, registers: &Registers) -> Mitigations {
+        let mut on = ALWAYS;
+        if let Some(opt) = registers.mcu_opt_ctrl {
+            if self.enumerates(Mitigation::SrbdsMicrocode) && opt & msr::RNGDS_MITG_DIS == 0 {
+                on = on.with(Mitigation::SrbdsMicrocode);
+            }
+            if self.enumerates(Mitigation::GdsMicrocode) && opt & msr::GDS_MITG_DIS == 0 {
+                on = on.with(Mitigation::GdsMicrocode);
+            }
+        }
+        if registers.de_cfg2.is_some_and(|value| value & msr::SUPPRESS_BP_ON_NON_BR != 0) {
+            on = on.with(Mitigation::SuppressBpOnNonBr);
+        }
+        if registers.c001_1029.is_some_and(|value| value & C001_1029_LFENCE_SERIALIZES_DISPATCH != 0) {
+            on = on.with(Mitigation::LfenceDispatchSerializing);
+        }
+        on
+    }
+}
+
+/// What the kernel does on every CPU: it clamps every user pointer, refuses a
+/// CPU without `CR4.SMEP`, and enters no VMX or SVM operation.
+pub const ALWAYS: Mitigations = Mitigations::of(&[Mitigation::UserPointerClamp, Mitigation::Smep, Mitigation::NoGuest]);
+
+/// The registers that show which of a CPU's controls are on, each read only
+/// where the decision found its control enumerated (an absent MSR is `#GP`)
+/// and `None` elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Registers {
+    /// `IA32_MCU_OPT_CTRL` (123H).
+    pub mcu_opt_ctrl: Option<u64>,
+    /// AMD's `DE_CFG2` (C001_10E3H).
+    pub de_cfg2: Option<u64>,
+    /// AMD's MSR C001_1029, once the kernel has set what it sets there.
+    pub c001_1029: Option<u64>,
+}
+
+/// MSR C001_1029[1]: LFENCE is dispatch serializing (AMD 70586 G-2).
+pub const C001_1029_LFENCE_SERIALIZES_DISPATCH: u64 = 1 << 1;
+
+/// The bits [`Decision::in_force`] reads: `IA32_MCU_OPT_CTRL`'s two
+/// opt-outs ("CPUID Enumeration and Architectural MSRs", Table 6) and
+/// `DE_CFG2[SuppressBPOnNonBr]` ("Technical Guidance for Mitigating Branch
+/// Type Confusion" §6.2.1).
+mod msr {
+    pub const RNGDS_MITG_DIS: u64 = 1 << 0;
+    pub const GDS_MITG_DIS: u64 = 1 << 4;
+    pub const SUPPRESS_BP_ON_NON_BR: u64 = 1 << 1;
 }
 
 /// One vulnerability's line: `not affected`, `mitigated: ` and what by, or
@@ -410,26 +451,50 @@ pub struct Line {
 
 impl fmt::Display for Line {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (needs, lacks, assumed) = match self.verdict {
+        let (needs, lacks, by_policy, assumed) = match self.verdict {
             Verdict::NotAffected => return f.write_str("not affected"),
             Verdict::Unknown => return f.write_str("unknown: no guidance is read for this CPU's vendor"),
-            Verdict::Affected { needs, lacks, assumed } => (needs, lacks, assumed),
+            Verdict::Affected { needs, lacks, by_policy, assumed } => (needs, lacks, by_policy, assumed),
         };
+        let named = |set| Named { set, by_policy };
         let missing = needs.without(self.applied);
         if missing.is_empty() {
-            write!(f, "mitigated: {needs}")?;
+            write!(f, "mitigated: {}", named(needs))?;
         } else {
-            write!(f, "vulnerable: needs {missing}")?;
+            write!(f, "vulnerable: needs {}", named(missing))?;
             let has = needs.and(self.applied);
             if !has.is_empty() {
-                write!(f, "; has {has}")?;
+                write!(f, "; has {}", named(has))?;
             }
             if !lacks.is_empty() {
-                write!(f, "; this CPU enumerates no {lacks}")?;
+                write!(f, "; this CPU enumerates no {}", named(lacks))?;
             }
         }
         if assumed {
             f.write_str(" (no vendor row names this CPU: assumed affected)")?;
+        }
+        Ok(())
+    }
+}
+
+/// A set's names, each marked where ToyOS's policy is what applies it.
+struct Named {
+    set: Mitigations,
+    by_policy: Mitigations,
+}
+
+impl fmt::Display for Named {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for one in Mitigation::ALL.into_iter().filter(|&one| self.set.has(one)) {
+            if !first {
+                f.write_str(", ")?;
+            }
+            f.write_str(one.name())?;
+            if self.by_policy.has(one) {
+                f.write_str(" (policy)")?;
+            }
+            first = false;
         }
         Ok(())
     }
@@ -440,15 +505,33 @@ impl fmt::Display for Line {
 struct Asks {
     needs: Mitigations,
     lacks: Mitigations,
+    by_policy: Mitigations,
 }
 
 impl Asks {
+    const NOTHING: Self = Self { needs: Mitigations::NONE, lacks: Mitigations::NONE, by_policy: Mitigations::NONE };
+
     const fn of(one: Mitigation, enumerated: bool) -> Self {
-        Self { needs: Mitigations::NONE, lacks: Mitigations::NONE }.and(one, enumerated)
+        Self::NOTHING.and(one, enumerated)
     }
 
     const fn and(self, one: Mitigation, enumerated: bool) -> Self {
-        Self { needs: self.needs.with(one), lacks: if enumerated { self.lacks } else { self.lacks.with(one) } }
+        Self {
+            needs: self.needs.with(one),
+            lacks: if enumerated { self.lacks } else { self.lacks.with(one) },
+            by_policy: self.by_policy,
+        }
+    }
+
+    /// `one`, which the vendor prescribes for every program, as ToyOS's
+    /// policy applies it: for a program that asks.
+    const fn by_policy(self, asked: bool, one: Mitigation, enumerated: bool) -> Self {
+        if asked {
+            let and = self.and(one, enumerated);
+            Self { by_policy: and.by_policy.with(one), ..and }
+        } else {
+            self
+        }
     }
 
     const fn and_if(self, asked: bool, one: Mitigation, enumerated: bool) -> Self {
@@ -460,11 +543,11 @@ impl Asks {
     }
 
     const fn affected(self) -> Verdict {
-        Verdict::Affected { needs: self.needs, lacks: self.lacks, assumed: false }
+        self.assumed(false)
     }
 
     const fn assumed(self, assumed: bool) -> Verdict {
-        Verdict::Affected { needs: self.needs, lacks: self.lacks, assumed }
+        Verdict::Affected { needs: self.needs, lacks: self.lacks, by_policy: self.by_policy, assumed }
     }
 }
 
@@ -526,9 +609,13 @@ fn intel(f: &Facts, of: Vulnerability) -> Verdict {
         // "Speculative Execution Side Channel Mitigations": enhanced IBRS
         // where enumerated, with SMEP for the RSB. "Return Stack Buffer
         // Underflow": IBRS, not retpoline, where RSBA. Else retpoline, with
-        // SMEP in place of an RSB overwrite on entry from user mode.
+        // SMEP in place of an RSB overwrite on entry from user mode. STIBP is
+        // for a process that wants its branches kept from its core's other
+        // thread (§2.4.2), and enhanced IBRS keeps them already: "there is
+        // no need to use STIBP when IBRS is set" (§2.4.1.3).
         Vulnerability::SpectreV2 => {
-            let branches = if f.cap(cap::IBRS_ALL) {
+            let enhanced = f.cap(cap::IBRS_ALL);
+            let branches = if enhanced {
                 Asks::of(Mitigation::EnhancedIbrs, true)
             } else if f.intel_rsba() {
                 Asks::of(Mitigation::IbrsOnEntry, ibrs)
@@ -538,7 +625,7 @@ fn intel(f: &Facts, of: Vulnerability) -> Verdict {
             branches
                 .and(Mitigation::Smep, true)
                 .and(Mitigation::Ibpb, ibrs)
-                .and_if(f.smt, Mitigation::Stibp, edx & STIBP != 0)
+                .and_if(f.smt && !enhanced, Mitigation::Stibp, edx & STIBP != 0)
                 .affected()
         }
         // "Branch History Injection and Intra-mode Branch Target Injection",
@@ -699,8 +786,12 @@ fn amd(f: &Facts, of: Vulnerability) -> Verdict {
                 !f.hypervisor,
             )
             .affected(),
-        // 70586 V2-1 to V2-4 and G-3, with the CPUID words' own preference
-        // for IBRS (APM Vol. 3 Fn8000_0008_EBX, Fn8000_0021_EAX).
+        // 70586 V2-1, V2-4 and G-3, with the CPUID words' own preference
+        // for IBRS (APM Vol. 3 Fn8000_0008_EBX, Fn8000_0021_EAX). Branch
+        // Type Confusion §5 keeps the return address predictor safe with "a
+        // RAP stuffing sequence (mitigation V2-3 …) and/or SMEP": SMEP, which
+        // the kernel holds on every CPU, keeps Ring 0 from fetching the user
+        // addresses user code's calls leave there (G-3).
         Vulnerability::SpectreV2 => {
             let branches = if eax & amd::AUTOMATIC_IBRS != 0 {
                 Mitigation::AutomaticIbrs
@@ -711,7 +802,6 @@ fn amd(f: &Facts, of: Vulnerability) -> Verdict {
             };
             Asks::of(branches, true)
                 .and(Mitigation::Smep, true)
-                .and(Mitigation::ReturnPredictorFill, true)
                 .and(Mitigation::Ibpb, ibpb)
                 .and_if(f.smt, Mitigation::Stibp, stibp)
                 .affected()
@@ -719,6 +809,9 @@ fn amd(f: &Facts, of: Vulnerability) -> Verdict {
         // "Technical Guidance for Mitigating Branch Type Confusion":
         // `BTC_NO`; Family 19h is unaffected without it; Families 15h and
         // 17h are its table's, and it makes no statement on an older one.
+        // Its §6.1.1 asks STIBP of every program: "If the code on the
+        // sibling thread cannot be trusted, software should set STIBP to 1
+        // or disable SMT to ensure SMT safety when using Jmp2Ret."
         Vulnerability::Retbleed => {
             if ebx & amd::BTC_NO != 0 || id.family == 0x19 {
                 return Verdict::NotAffected;
@@ -726,18 +819,21 @@ fn amd(f: &Facts, of: Vulnerability) -> Verdict {
             Asks::of(Mitigation::Jmp2Ret, true)
                 // A guest cannot write its host's DE_CFG2.
                 .and_if(zen2(&id) && !f.hypervisor, Mitigation::SuppressBpOnNonBr, true)
-                .and_if(f.smt, Mitigation::Stibp, stibp)
+                .by_policy(f.smt, Mitigation::Stibp, stibp)
                 .assumed(!matches!(id.family, 0x15 | 0x17))
         }
         // "Technical Update Regarding Speculative Return Stack Overflow":
-        // `SRSO_NO`; across user and kernel `SRSO_USER_KERNEL_NO`; between
-        // programs IBPB. AMD-SB-7005 names Zen to Zen 4, Families 17h and
-        // 19h; 70608 describes Safe-RET.
+        // `SRSO_NO`; across user and kernel `SRSO_USER_KERNEL_NO`. Between
+        // every two programs, its §3: "Mitigation of SRSO across user/user …
+        // boundaries requires the use of IBPB unless SRSO_NO is 1".
+        // AMD-SB-7005 names Zen to Zen 4, Families 17h and 19h; 70608
+        // describes Safe-RET.
         Vulnerability::SpecRstackOverflow => {
             if eax & amd::SRSO_NO != 0 || id.family < 0x17 {
                 return Verdict::NotAffected;
             }
-            Asks::of(Mitigation::Ibpb, ibpb)
+            Asks::NOTHING
+                .by_policy(true, Mitigation::Ibpb, ibpb)
                 .and_if(eax & amd::SRSO_USER_KERNEL_NO == 0, Mitigation::SafeRet, true)
                 .assumed(id.family > 0x19)
         }
@@ -929,16 +1025,26 @@ mod tests {
     use super::*;
 
     const fn needs(all: &[Mitigation]) -> Verdict {
-        Verdict::Affected { needs: Mitigations::of(all), lacks: Mitigations::NONE, assumed: false }
+        lacking(all, &[])
     }
 
     const fn lacking(all: &[Mitigation], lacks: &[Mitigation]) -> Verdict {
-        Verdict::Affected { needs: Mitigations::of(all), lacks: Mitigations::of(lacks), assumed: false }
+        Verdict::Affected { needs: Mitigations::of(all), lacks: Mitigations::of(lacks), by_policy: Mitigations::NONE, assumed: false }
     }
 
     fn assumed(verdict: Verdict) -> Verdict {
         match verdict {
-            Verdict::Affected { needs, lacks, .. } => Verdict::Affected { needs, lacks, assumed: true },
+            Verdict::Affected { needs, lacks, by_policy, .. } => Verdict::Affected { needs, lacks, by_policy, assumed: true },
+            other => other,
+        }
+    }
+
+    /// `verdict` with `by_policy` of its needs ToyOS's policy.
+    fn policy(verdict: Verdict, by_policy: &[Mitigation]) -> Verdict {
+        match verdict {
+            Verdict::Affected { needs, lacks, assumed, .. } => {
+                Verdict::Affected { needs, lacks, by_policy: Mitigations::of(by_policy), assumed }
+            }
             other => other,
         }
     }
@@ -993,7 +1099,7 @@ mod tests {
             &INTEL_806C1,
             &[
                 (SpectreV1, needs(&[UserPointerClamp])),
-                (SpectreV2, needs(&[EnhancedIbrs, Smep, Ibpb, Stibp])),
+                (SpectreV2, needs(&[EnhancedIbrs, Smep, Ibpb])),
                 (BranchHistoryInjection, needs(&[BhbClear])),
                 (IndirectTargetSelection, needs(&[BranchesInUpperHalf])),
                 (SpecStoreBypass, needs(&[Ssbd])),
@@ -1001,6 +1107,10 @@ mod tests {
                 (GatherDataSampling, needs(&[GdsMicrocode])),
             ],
         );
+        // Without enhanced IBRS its core's other thread can steer a
+        // program's branches, which STIBP keeps from a program that asks.
+        let legacy = Facts { arch_capabilities: INTEL_806C1.arch_capabilities & !cap::IBRS_ALL, ..INTEL_806C1 };
+        assert_eq!(decide(&legacy).verdict(SpectreV2), needs(&[Retpoline, Smep, Ibpb, Stibp]));
     }
 
     /// AMD's Family 17h Model 60h, "Zen 2", sixteen threads on eight cores:
@@ -1021,9 +1131,9 @@ mod tests {
             &AMD_17H_60H,
             &[
                 (SpectreV1, needs(&[UserPointerClamp, LfenceDispatchSerializing])),
-                (SpectreV2, needs(&[Retpoline, Smep, ReturnPredictorFill, Ibpb, Stibp])),
-                (Retbleed, needs(&[Jmp2Ret, SuppressBpOnNonBr, Stibp])),
-                (SpecRstackOverflow, needs(&[SafeRet, Ibpb])),
+                (SpectreV2, needs(&[Retpoline, Smep, Ibpb, Stibp])),
+                (Retbleed, policy(needs(&[Jmp2Ret, SuppressBpOnNonBr, Stibp]), &[Stibp])),
+                (SpecRstackOverflow, policy(needs(&[SafeRet, Ibpb]), &[Ibpb])),
                 (SpecStoreBypass, needs(&[Ssbd])),
             ],
         );
@@ -1035,7 +1145,7 @@ mod tests {
             guest.verdict(SpectreV1),
             lacking(&[UserPointerClamp, LfenceDispatchSerializing], &[LfenceDispatchSerializing])
         );
-        assert_eq!(guest.verdict(SpectreV2), needs(&[Retpoline, Smep, ReturnPredictorFill, Ibpb]));
+        assert_eq!(guest.verdict(SpectreV2), needs(&[Retpoline, Smep, Ibpb]));
     }
 
     /// CPUID 506E3 as it came, before any microcode gave it
@@ -1100,7 +1210,7 @@ mod tests {
             &facts,
             &[
                 (SpectreV1, needs(&[UserPointerClamp])),
-                (SpectreV2, needs(&[EnhancedIbrs, Smep, Ibpb, Stibp])),
+                (SpectreV2, needs(&[EnhancedIbrs, Smep, Ibpb])),
                 (BranchHistoryInjection, needs(&[BhiDisS])),
                 (SpecStoreBypass, needs(&[Ssbd])),
             ],
@@ -1193,8 +1303,8 @@ mod tests {
             &old,
             &[
                 (SpectreV1, needs(&[UserPointerClamp, LfenceDispatchSerializing])),
-                (SpectreV2, needs(&[IbrsAlwaysOn, Smep, ReturnPredictorFill, Ibpb, Stibp])),
-                (SpecRstackOverflow, needs(&[SafeRet, Ibpb])),
+                (SpectreV2, needs(&[IbrsAlwaysOn, Smep, Ibpb, Stibp])),
+                (SpecRstackOverflow, policy(needs(&[SafeRet, Ibpb]), &[Ibpb])),
                 (SpecStoreBypass, needs(&[Ssbd])),
                 (Tsa, lacking(&[Verw], &[Verw])),
             ],
@@ -1225,14 +1335,14 @@ mod tests {
             &facts,
             &[
                 (SpectreV1, needs(&[UserPointerClamp, LfenceDispatchSerializing])),
-                (SpectreV2, needs(&[AutomaticIbrs, Smep, ReturnPredictorFill, Ibpb])),
-                (SpecRstackOverflow, assumed(needs(&[Ibpb]))),
+                (SpectreV2, needs(&[AutomaticIbrs, Smep, Ibpb])),
+                (SpecRstackOverflow, assumed(policy(needs(&[Ibpb]), &[Ibpb]))),
                 (SpecStoreBypass, needs(&[Ssbd])),
             ],
         );
         let bare = decide(&Facts { cpuid_8000_0008_ebx: 0, cpuid_8000_0021_eax: 0, cpuid_8000_0021_ecx: 0, ..facts });
         assert_eq!(bare.verdict(Retbleed), assumed(needs(&[Jmp2Ret])));
-        assert_eq!(bare.verdict(SpecRstackOverflow), assumed(lacking(&[SafeRet, Ibpb], &[Ibpb])));
+        assert_eq!(bare.verdict(SpecRstackOverflow), assumed(policy(lacking(&[SafeRet, Ibpb], &[Ibpb]), &[Ibpb])));
         assert_eq!(bare.verdict(Tsa), assumed(lacking(&[Verw], &[Verw])));
         assert_eq!(bare.verdict(SpecStoreBypass), lacking(&[Ssbd], &[Ssbd]));
     }
@@ -1285,7 +1395,13 @@ mod tests {
         );
         assert_eq!(
             line(Retbleed, &[SuppressBpOnNonBr]),
-            "vulnerable: needs STIBP for programs that ask, Jmp2Ret; has DE_CFG2[SuppressBPOnNonBr]"
+            "vulnerable: needs STIBP for programs that ask (policy), Jmp2Ret; has DE_CFG2[SuppressBPOnNonBr]"
+        );
+        assert_eq!(line(SpecRstackOverflow, &[]), "vulnerable: needs IBPB between programs that ask (policy), Safe-RET");
+        // The vendor's own choice is not marked.
+        assert_eq!(
+            line(SpectreV2, &[Smep]),
+            "vulnerable: needs retpoline, IBPB between programs that ask, STIBP for programs that ask; has SMEP"
         );
         let bare = decide(&Facts { cpuid_8000_0008_ebx: 0, ..AMD_17H_60H });
         assert_eq!(
@@ -1302,6 +1418,21 @@ mod tests {
             std::format!("{}", unknown.line(SpectreV2, Mitigations::NONE)),
             "unknown: no guidance is read for this CPU's vendor"
         );
+    }
+
+    /// What every CPU has, and each control its register shows on: a
+    /// register the CPU was not read for shows nothing.
+    #[test]
+    fn what_is_in_force_is_what_the_registers_show() {
+        let unread = Registers { mcu_opt_ctrl: None, de_cfg2: None, c001_1029: None };
+        let intel = decide(&INTEL_806C1);
+        assert_eq!(intel.in_force(&unread), ALWAYS);
+        assert_eq!(intel.in_force(&Registers { mcu_opt_ctrl: Some(0), ..unread }), ALWAYS.with(GdsMicrocode));
+        assert_eq!(intel.in_force(&Registers { mcu_opt_ctrl: Some(msr::GDS_MITG_DIS), ..unread }), ALWAYS);
+        let amd = decide(&AMD_17H_60H);
+        let both = Registers { de_cfg2: Some(msr::SUPPRESS_BP_ON_NON_BR), c001_1029: Some(C001_1029_LFENCE_SERIALIZES_DISPATCH), ..unread };
+        assert_eq!(amd.in_force(&both), ALWAYS.with(SuppressBpOnNonBr).with(LfenceDispatchSerializing));
+        assert_eq!(amd.in_force(&Registers { de_cfg2: Some(0), c001_1029: Some(0), ..unread }), ALWAYS);
     }
 
     /// The set's bits are the enum's discriminants, so a mitigation left

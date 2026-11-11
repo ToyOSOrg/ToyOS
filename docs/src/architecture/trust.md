@@ -44,6 +44,18 @@ DMA stays behind the IOMMU.
   microcode loading is privileged kernel work. Neither payload need be embedded
   in the kernel binary.
 
+## Speculative execution between programs
+
+- The barrier between two programs that run in turn on a CPU, and the
+  isolation from a program on the core's other thread, are applied for a
+  program that asks for them. Applied at every switch they would cost every
+  program, most of which have nothing to keep from the others; a program
+  that asks gets them.
+- Where a vendor prescribes either for every program, the policy still
+  applies it on request, and each boot's report marks it as policy. On AMD's
+  Zen 2 that includes the isolation AMD asks for the kernel's own return
+  thunk against untrusted code on the core's other thread.
+
 ## Checks inside the trusted base
 
 - A check there is a bug fence: kept where it is cheap and catches ToyOS's own

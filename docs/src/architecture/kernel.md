@@ -53,14 +53,15 @@ every CPU.
 - One decision per CPU says which speculative-execution vulnerabilities it has
   and what its vendor prescribes against each, from the CPU's identity and
   what it enumerates of itself after its microcode has loaded.
-- The vendor's published guidance is the only authority: what the CPU
-  enumerates where the guidance lets enumeration decide, the vendor's list of
-  affected processors where it does not, and a CPU that list omits is treated
-  as affected and reported as assumed so.
+- The vendor's published guidance is the only authority on what a CPU has
+  and needs: what the CPU enumerates where the guidance lets enumeration
+  decide, the vendor's list of affected processors where it does not, and a
+  CPU that list omits is treated as affected and reported as assumed so. How
+  far protection between programs goes is ToyOS's policy (Trust).
 - Every mitigation the kernel applies is one that decision names for the CPU
   it runs on. None is chosen where it is used.
-- Each boot states, for each vulnerability, whether the CPU is unaffected,
-  mitigated and by what, or vulnerable and what is missing.
+- Each boot states, for each CPU and vulnerability, whether the CPU is
+  unaffected, mitigated and by what, or vulnerable and what is missing.
 
 ## Failure
 

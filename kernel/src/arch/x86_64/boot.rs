@@ -65,8 +65,8 @@ pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     // RDSEED, and `control_regs::init`'s CPUID.
     microcode::init(args);
     microcode::load(0);
-    mitigation::apply();
-    mitigation::report(0);
+    let c001_1029_found = mitigation::apply();
+    mitigation::record(0, c001_1029_found);
 
     let rule = match cpu::vendor() {
         _ if crate::actuator::copies_go_down() => copy::Rule { window: 4096 },

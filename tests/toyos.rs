@@ -1491,11 +1491,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // The words the first CPU read of itself and its line for each
-        // vulnerability: the lines are `kernel::mitigation::decide`'s verdict
-        // on those words. Metal alone: a guest's words are its hypervisor's,
-        // and what a CPU of given words needs is held to the vendors'
-        // guidance by that function's host tests. The T14 and the AMD bench.
+        // The words each CPU read of itself, which are its bench's pinned
+        // words, and its line for each vulnerability: the lines are
+        // `kernel::mitigation::decide`'s verdict on those words. Metal alone:
+        // a guest's words are its hypervisor's, and what a bench's words
+        // decide is held to its vendor's row by a host test. The T14 and the
+        // AMD bench.
         "mitigations",
         metal::Metal { arms: METALCASE, judge: |b| mitigations_on_metal(b[0].kernel().text()) },
     ),
@@ -6868,36 +6869,39 @@ fn microcode_on_metal(bench: Bench, loader: &str, log: &str, cpus: u32) -> Resul
     Ok(())
 }
 
-/// The first CPU's `mitigations:` lines in `log`: its words, which name a
-/// vendor whose guidance is read, and after them one line per vulnerability,
-/// each what [`kernel::mitigation::decide`] says of those words under one
-/// reading of the three registers the kernel only reads, with what it sets
-/// itself in force.
-fn mitigations_on_metal(log: &str) -> Result<(), String> {
-    use kernel::mitigation::{decide, Facts, Mitigation, Mitigations, Verdict, Vulnerability};
-    const FIRST: &str = "mitigations: cpu0 ";
-    let said: Vec<&str> = log.lines().filter_map(|line| line.split_once(FIRST).map(|(_, said)| said)).collect();
-    let words = said.iter().find_map(|said| said.strip_prefix("words ")).ok_or("cpu0 wrote no `mitigations:` words line")?;
+/// Each bench's words as its boot of 3b07ea1dd logged them, but its microcode
+/// revision, which the `microcode` row holds: a boot of that machine reads
+/// these again, and `checks::the_benches_words_decide_as_their_vendors_rows`
+/// holds what they decide to each vendor's row for that CPU.
+const MITIGATION_BENCHES: [(&str, &str); 1] = [(
+    "the AMD bench",
+    "Amd signature=0x860f01 hypervisor=false smt=true cpuid.7.0.ebx=0x219c91a9 cpuid.7.0.edx=0x0 cpuid.7.2.edx=0x0 \
+     arch_capabilities=0x0 cpuid.80000008.ebx=0x90cf757 cpuid.80000021.eax=0x0 cpuid.80000021.ecx=0x0",
+)];
+
+/// A `mitigations:` words line: the facts it gives, its microcode revision
+/// aside, and its other `name=value` fields.
+fn mitigation_words(words: &str) -> Result<(kernel::mitigation::Facts, BTreeMap<&str, &str>), String> {
     let mut fields = words.split_whitespace();
     let vendor = match fields.next() {
         Some("Intel") => kernel::cpu::Vendor::Intel,
         Some("Amd") => kernel::cpu::Vendor::Amd,
-        other => return Err(format!("cpu0's words name the vendor {other:?}, whose guidance nothing reads")),
+        other => return Err(format!("the words name the vendor {other:?}, whose guidance nothing reads")),
     };
     let fields: BTreeMap<&str, &str> = fields.filter_map(|field| field.split_once('=')).collect();
-    let field = |name: &str| fields.get(name).copied().ok_or_else(|| format!("cpu0's words carry no {name}: {words:?}"));
+    let field = |name: &str| fields.get(name).copied().ok_or_else(|| format!("the words carry no {name}: {words:?}"));
     let hex = |name: &str| -> Result<u64, String> {
         let digits = field(name)?;
         u64::from_str_radix(digits.trim_start_matches("0x"), 16).map_err(|e| format!("{name}={digits}: {e}"))
     };
     let word = |name: &str| hex(name).and_then(|value| u32::try_from(value).map_err(|e| format!("{name}: {e}")));
     let flag = |name: &str| field(name)?.parse::<bool>().map_err(|e| format!("{name}: {e}"));
-    let facts = Facts {
+    let facts = kernel::mitigation::Facts {
         vendor,
         signature: word("signature")?,
         hypervisor: flag("hypervisor")?,
         smt: flag("smt")?,
-        microcode: kernel::microcode::Revision(word("microcode")?),
+        microcode: kernel::microcode::Revision(0),
         cpuid_7_0_ebx: word("cpuid.7.0.ebx")?,
         cpuid_7_0_edx: word("cpuid.7.0.edx")?,
         cpuid_7_2_edx: word("cpuid.7.2.edx")?,
@@ -6906,40 +6910,90 @@ fn mitigations_on_metal(log: &str) -> Result<(), String> {
         cpuid_8000_0021_eax: word("cpuid.80000021.eax")?,
         cpuid_8000_0021_ecx: word("cpuid.80000021.ecx")?,
     };
-    if facts.hypervisor {
-        return Err(format!("cpu0's words are a hypervisor's guest's, and this row judges a machine's: {words:?}"));
+    Ok((facts, fields))
+}
+
+/// Every CPU's `mitigations:` lines in `log`, cpu0's and those of each later
+/// CPU that differed from it: [`mitigations_of_a_cpu`] on each.
+fn mitigations_on_metal(log: &str) -> Result<(), String> {
+    let mut said: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+    for line in log.lines() {
+        let Some((_, rest)) = line.split_once("mitigations: cpu") else { continue };
+        let (cpu, rest) = rest.split_once(' ').ok_or_else(|| format!("a `mitigations:` line names no CPU: {line:?}"))?;
+        let cpu = cpu.parse::<u32>().map_err(|e| format!("{line:?}: {e}"))?;
+        said.entry(cpu).or_default().push(rest);
     }
+    if !said.contains_key(&0) {
+        return Err("cpu0 wrote no `mitigations:` lines".to_string());
+    }
+    for (cpu, lines) in &said {
+        mitigations_of_a_cpu(*cpu, lines)?;
+    }
+    Ok(())
+}
+
+/// One CPU's words and its line for each vulnerability: the words name a
+/// vendor whose guidance is read, are no guest's, and are its bench's pinned
+/// words; each line is what [`kernel::mitigation::decide`] says of the words
+/// with what the registers they give show in force; and what the kernel sets
+/// itself is in force wherever the decision names it.
+fn mitigations_of_a_cpu(cpu: u32, said: &[&str]) -> Result<(), String> {
+    use kernel::mitigation::{decide, Facts, Mitigation, Registers, Verdict, Vulnerability};
+    let mut words = said.iter().filter_map(|said| said.strip_prefix("words "));
+    let words = match (words.next(), words.next()) {
+        (Some(words), None) => words,
+        _ => return Err(format!("cpu{cpu} wrote no one `mitigations:` words line: {said:?}")),
+    };
+    let (facts, fields) = mitigation_words(words).map_err(|e| format!("cpu{cpu}: {e}"))?;
+    if facts.hypervisor {
+        return Err(format!("cpu{cpu}'s words are a hypervisor's guest's, and this row judges a machine's: {words:?}"));
+    }
+    let field = |name: &str| fields.get(name).copied().ok_or_else(|| format!("cpu{cpu}'s words carry no {name}: {words:?}"));
+    let hex = |name: &str, digits: &str| {
+        u64::from_str_radix(digits.trim_start_matches("0x"), 16).map_err(|e| format!("cpu{cpu}'s {name}={digits}: {e}"))
+    };
+    let msr = |name: &str| match field(name)? {
+        "-" => Ok(None),
+        digits => hex(name, digits).map(Some),
+    };
+    let microcode = field("microcode").and_then(|digits| hex("microcode", digits))?;
+    let microcode = kernel::microcode::Revision(u32::try_from(microcode).map_err(|e| format!("cpu{cpu}'s microcode: {e}"))?);
+    let pinned = MITIGATION_BENCHES
+        .iter()
+        .map(|&(bench, pinned)| mitigation_words(pinned).map(|(pinned, _)| (bench, pinned)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(&(bench, pinned)) = pinned.iter().find(|(_, pinned)| pinned.signature == facts.signature) else {
+        return Err(format!("cpu{cpu}'s signature {:#x} is no bench's whose words are pinned: {words:?}", facts.signature));
+    };
+    if facts != pinned {
+        return Err(format!("cpu{cpu}'s words are not {bench}'s pinned words: {words:?} against {pinned:?}"));
+    }
+    let facts = Facts { microcode, ..facts };
+    let registers = Registers { mcu_opt_ctrl: msr("mcu_opt_ctrl")?, de_cfg2: msr("de_cfg2")?, c001_1029: msr("c001_1029")? };
     let decision = decide(&facts);
-    let mut lines = Vec::new();
+    let in_force = decision.in_force(&registers);
+    let lfence = Mitigation::LfenceDispatchSerializing;
+    if decision.enumerates(lfence) && !in_force.has(lfence) {
+        return Err(format!("cpu{cpu}'s C001_1029 reads {:?}: the LFENCE bit the kernel sets is clear", registers.c001_1029));
+    }
     for of in Vulnerability::ALL {
         let prefix = format!("{}: ", of.name());
         let mut named = said.iter().filter_map(|said| said.strip_prefix(prefix.as_str()));
+        let decided = decision.line(of, in_force).to_string();
         match (named.next(), named.next()) {
-            (Some(line), None) => lines.push((of, line)),
-            _ => return Err(format!("expected one `{FIRST}{prefix}` line, got {said:?}")),
+            (Some(line), None) if line == decided => {}
+            (Some(line), None) => {
+                return Err(format!("cpu{cpu}'s {prefix}line is not the decision on its words: said {line:?}, decided {decided:?}"))
+            }
+            _ => return Err(format!("cpu{cpu}: expected one `{prefix}` line, got {said:?}")),
         }
     }
-    let read = [Mitigation::SrbdsMicrocode, Mitigation::GdsMicrocode, Mitigation::SuppressBpOnNonBr];
-    let in_force = |reading: u32| {
-        let always = Mitigations::of(&[
-            Mitigation::UserPointerClamp,
-            Mitigation::Smep,
-            Mitigation::NoGuest,
-            Mitigation::LfenceDispatchSerializing,
-        ]);
-        read.iter().enumerate().filter(|(bit, _)| reading & 1 << bit != 0).fold(always, |all, (_, one)| all.with(*one))
-    };
-    let fits = |reading| lines.iter().all(|(of, line)| decision.line(*of, in_force(reading)).to_string() == *line);
-    if !(0..1 << read.len()).any(fits) {
-        let decided: Vec<String> =
-            Vulnerability::ALL.iter().map(|&of| format!("{}: {}", of.name(), decision.line(of, in_force(0)))).collect();
-        return Err(format!(
-            "cpu0's lines are not the decision on its words under any reading of its registers.\nwords: {words}\nsaid: \
-             {lines:?}\ndecided, with none of the three read as in force: {decided:#?}"
-        ));
-    }
     let affected = Vulnerability::ALL.iter().filter(|&&of| decision.verdict(of) != Verdict::NotAffected).count();
-    eprintln!("  [mitigations] cpu0's {} lines are the decision on its words; {affected} name a vulnerability it has", lines.len());
+    eprintln!(
+        "  [mitigations] cpu{cpu}, {bench}: its lines are the decision on its pinned words, {affected} naming a vulnerability; \
+         C001_1029 found {}",
+        field("c001_1029_found")?,
+    );
     Ok(())
 }
 

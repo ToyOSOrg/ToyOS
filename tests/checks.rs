@@ -526,59 +526,114 @@ mod checks {
         Ok(())
     }
 
+    /// The AMD bench's lines with DE_CFG2[SuppressBPOnNonBr], which its
+    /// microcode sets, and C001_1029[1], which the kernel sets.
+    const AMD_BENCH_LINES: [&str; 17] = [
+        "spectre_v1: mitigated: user pointers clamped without a branch, LFENCE dispatch-serializing",
+        "spectre_v2: vulnerable: needs retpoline, IBPB between programs that ask, STIBP for programs that ask; has SMEP",
+        "branch_history_injection: not affected",
+        "retbleed: vulnerable: needs STIBP for programs that ask (policy), Jmp2Ret; has DE_CFG2[SuppressBPOnNonBr]",
+        "spec_rstack_overflow: vulnerable: needs IBPB between programs that ask (policy), Safe-RET",
+        "indirect_target_selection: not affected",
+        "spec_store_bypass: vulnerable: needs SSBD for programs that ask",
+        "meltdown: not affected",
+        "l1tf: not affected",
+        "mds: not affected",
+        "tsx_async_abort: not affected",
+        "mmio_stale_data: not affected",
+        "reg_file_data_sampling: not affected",
+        "srbds: not affected",
+        "gather_data_sampling: not affected",
+        "tsa: not affected",
+        "itlb_multihit: not affected",
+    ];
+
+    /// A bench's pinned words.
+    fn bench_words(bench: &str) -> Result<&'static str, String> {
+        MITIGATION_BENCHES.iter().find(|(named, _)| *named == bench).map(|(_, words)| *words).ok_or(format!("{bench} has no pinned words"))
+    }
+
+    /// Each bench's pinned words decide, with the registers its boot must
+    /// read, the lines its vendor's documents give that CPU: for the AMD
+    /// bench, Family 17h Model 60h, "Zen 2", in the Branch Type Confusion
+    /// guidance's table, AMD-SB-7005 and 70586.
+    #[test]
+    fn the_benches_words_decide_as_their_vendors_rows() -> Result<(), String> {
+        use kernel::mitigation::{decide, Facts, Registers, Vulnerability};
+        let held = |bench: &str, registers: Registers, lines: &[&str; 17]| -> Result<(), String> {
+            let (facts, _) = mitigation_words(bench_words(bench)?)?;
+            let decision = decide(&Facts { microcode: kernel::microcode::Revision(0x0860_010d), ..facts });
+            let in_force = decision.in_force(&registers);
+            for (of, want) in Vulnerability::ALL.into_iter().zip(lines) {
+                let line = format!("{}: {}", of.name(), decision.line(of, in_force));
+                if line != *want {
+                    return Err(format!("{bench}'s words decide {line:?}, and its vendor's row {want:?}"));
+                }
+            }
+            Ok(())
+        };
+        held("the AMD bench", Registers { mcu_opt_ctrl: None, de_cfg2: Some(1 << 1), c001_1029: Some(1 << 1) }, &AMD_BENCH_LINES)
+    }
+
     /// [`mitigations_on_metal`] against a boot's lines as the kernel writes
     /// them and the ways a boot could fall short of them, with no guest.
     #[test]
     fn mitigations_verdict() -> Result<(), String> {
-        const WORDS: &str = "words Amd signature=0x860f01 microcode=0x860010d hypervisor=false smt=true cpuid.7.0.ebx=0x219c91a9 \
-                             cpuid.7.0.edx=0x0 cpuid.7.2.edx=0x0 arch_capabilities=0x0 cpuid.80000008.ebx=0x1109100 \
-                             cpuid.80000021.eax=0x0 cpuid.80000021.ecx=0x0";
-        const LINES: [&str; 17] = [
-            "spectre_v1: mitigated: user pointers clamped without a branch, LFENCE dispatch-serializing",
-            "spectre_v2: vulnerable: needs retpoline, return predictor fill, IBPB between programs that ask, STIBP for programs that ask; has SMEP",
-            "branch_history_injection: not affected",
-            "retbleed: vulnerable: needs STIBP for programs that ask, Jmp2Ret; has DE_CFG2[SuppressBPOnNonBr]",
-            "spec_rstack_overflow: vulnerable: needs IBPB between programs that ask, Safe-RET",
-            "indirect_target_selection: not affected",
-            "spec_store_bypass: vulnerable: needs SSBD for programs that ask",
-            "meltdown: not affected",
-            "l1tf: not affected",
-            "mds: not affected",
-            "tsx_async_abort: not affected",
-            "mmio_stale_data: not affected",
-            "reg_file_data_sampling: not affected",
-            "srbds: not affected",
-            "gather_data_sampling: not affected",
-            "tsa: not affected",
-            "itlb_multihit: not affected",
-        ];
-        let log = |words: &str, lines: &[&str]| -> String {
-            core::iter::once(words).chain(lines.iter().copied()).map(|said| format!("[ 0.050 cpu0 kernel] mitigations: cpu0 {said}\n")).collect()
+        let amd = bench_words("the AMD bench")?.split_whitespace().collect::<Vec<_>>().join(" ");
+        let words = |extra: &str| format!("words {amd} microcode=0x860010d {extra}");
+        const READ: &str = "mcu_opt_ctrl=- de_cfg2=0x2 c001_1029=0x2 c001_1029_found=0x0";
+        let lines = |cpu: u32, words: &str, lines: &[&str]| -> String {
+            std::iter::once(words)
+                .chain(lines.iter().copied())
+                .map(|said| format!("[ 0.050 cpu{cpu} kernel] mitigations: cpu{cpu} {said}\n"))
+                .collect()
         };
-        mitigations_on_metal(&log(WORDS, &LINES)).map_err(|e| format!("a boot's own lines were refused: {e}"))?;
-        // The register read the other way is another boot's lines, and as good.
-        let mut unset = LINES;
-        unset[3] = "retbleed: vulnerable: needs STIBP for programs that ask, Jmp2Ret, DE_CFG2[SuppressBPOnNonBr]";
-        mitigations_on_metal(&log(WORDS, &unset)).map_err(|e| format!("the register read clear was refused: {e}"))?;
+        let boot = lines(0, &words(READ), &AMD_BENCH_LINES);
+        mitigations_on_metal(&boot).map_err(|e| format!("a boot's own lines were refused: {e}"))?;
+        // A later CPU says its lines where it differs: here, firmware had set
+        // the bit before the kernel did.
+        let firmware_set = lines(5, &words("mcu_opt_ctrl=- de_cfg2=0x2 c001_1029=0x2 c001_1029_found=0x2"), &AMD_BENCH_LINES);
+        mitigations_on_metal(&(boot.clone() + &firmware_set)).map_err(|e| format!("a later CPU's own lines were refused: {e}"))?;
+        // A register the kernel only reads, read clear, is another boot's lines and as good.
+        let mut unset = AMD_BENCH_LINES;
+        unset[3] = "retbleed: vulnerable: needs STIBP for programs that ask (policy), Jmp2Ret, DE_CFG2[SuppressBPOnNonBr]";
+        mitigations_on_metal(&lines(0, &words("mcu_opt_ctrl=- de_cfg2=0x0 c001_1029=0x2 c001_1029_found=0x0"), &unset))
+            .map_err(|e| format!("DE_CFG2 read clear was refused: {e}"))?;
 
         let refused = |what: &str, log: String, says: &str| match mitigations_on_metal(&log) {
             Ok(()) => Err(format!("{what} was accepted")),
             Err(e) if e.contains(says) => Ok(()),
             Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
         };
-        refused("a boot with no lines", String::new(), "no `mitigations:` words line")?;
-        refused("sixteen lines", log(WORDS, &LINES[..16]), "expected one `mitigations: cpu0 itlb_multihit: ` line")?;
-        let mut wrong = LINES;
+        refused("a boot with no lines", String::new(), "cpu0 wrote no `mitigations:` lines")?;
+        refused("sixteen lines", lines(0, &words(READ), &AMD_BENCH_LINES[..16]), "expected one `itlb_multihit: ` line")?;
+        let mut wrong = AMD_BENCH_LINES;
         wrong[7] = "meltdown: vulnerable: needs kernel unmapped in user mode";
-        refused("a line the words do not decide", log(WORDS, &wrong), "not the decision on its words")?;
-        let mut lfence = LINES;
+        refused("a line the words do not decide", lines(0, &words(READ), &wrong), "line is not the decision on its words")?;
+        // The bit the kernel sets, read clear, with lines that say so.
+        let mut lfence = AMD_BENCH_LINES;
         lfence[0] = "spectre_v1: vulnerable: needs LFENCE dispatch-serializing; has user pointers clamped without a branch";
-        refused("the bit the kernel sets read clear", log(WORDS, &lfence), "not the decision on its words")?;
-        // Lines of another CPU's words: the same lines under words without SSBD.
-        refused("words the lines were not decided from", log(&WORDS.replace("0x1109100", "0x109100"), &LINES), "not the decision on its words")?;
-        refused("a guest's words", log(&WORDS.replace("hypervisor=false", "hypervisor=true"), &LINES), "a hypervisor's guest's")?;
-        refused("another vendor's words", log(&WORDS.replace("words Amd", "words Other(\"HygonGenuine\")"), &LINES), "whose guidance nothing reads")?;
-        refused("words without a field", log(&WORDS.replace(" smt=true", ""), &LINES), "carry no smt")?;
+        let clear = words("mcu_opt_ctrl=- de_cfg2=0x2 c001_1029=0x0 c001_1029_found=0x0");
+        refused("cpu0's LFENCE bit read clear", lines(0, &clear, &lfence), "the LFENCE bit the kernel sets is clear")?;
+        refused("a later CPU's LFENCE bit read clear", boot.clone() + &lines(7, &clear, &lfence), "cpu7's C001_1029")?;
+        refused("a later CPU's wrong line", boot.clone() + &lines(7, &words(READ), &wrong), "cpu7's meltdown: line")?;
+        refused("a later CPU's lines without words", boot + &lines(7, &words(READ), &AMD_BENCH_LINES).lines().skip(1).map(|l| format!("{l}\n")).collect::<String>(), "cpu7 wrote no one")?;
+        // A misread whose lines agree with it, which only the pin tells from
+        // the bench's: SSBD read clear, and lines decided from that.
+        let agreeing = |said: &str| -> Result<String, String> {
+            use kernel::mitigation::{decide, Facts, Registers, Vulnerability};
+            let (facts, _) = mitigation_words(said.trim_start_matches("words "))?;
+            let decision = decide(&Facts { microcode: kernel::microcode::Revision(0x0860_010d), ..facts });
+            let in_force = decision.in_force(&Registers { mcu_opt_ctrl: None, de_cfg2: Some(1 << 1), c001_1029: Some(1 << 1) });
+            let decided: Vec<String> = Vulnerability::ALL.iter().map(|&of| format!("{}: {}", of.name(), decision.line(of, in_force))).collect();
+            Ok(lines(0, said, &decided.iter().map(String::as_str).collect::<Vec<_>>()))
+        };
+        refused("a misread the lines agree with", agreeing(&words(READ).replace("0x90cf757", "0x80cf757"))?, "not the AMD bench's pinned words")?;
+        refused("a machine no bench is", agreeing(&words(READ).replace("0x860f01", "0x870f10"))?, "no bench's whose words are pinned")?;
+        refused("a guest's words", lines(0, &words(READ).replace("hypervisor=false", "hypervisor=true"), &AMD_BENCH_LINES), "a hypervisor's guest's")?;
+        refused("another vendor's words", lines(0, &words(READ).replace("words Amd", "words Other(\"HygonGenuine\")"), &AMD_BENCH_LINES), "whose guidance nothing reads")?;
+        refused("words without a field", lines(0, &words(READ).replace(" smt=true", ""), &AMD_BENCH_LINES), "carry no smt")?;
+        refused("words without a register", lines(0, &words(READ).replace(" de_cfg2=0x2", ""), &AMD_BENCH_LINES), "carry no de_cfg2")?;
         Ok(())
     }
 
