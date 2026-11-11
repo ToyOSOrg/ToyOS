@@ -791,6 +791,32 @@ mod tests {
         }
     }
 
+    /// An `i128` of a random width, either sign.
+    fn wide(rng: &mut Lcg) -> i128 {
+        let bits = (0..5).fold(0i128, |acc, _| (acc << 31) ^ i128::from(rng.next()));
+        bits >> rng.below(127)
+    }
+
+    /// The shift and mask are the floor division they stand in for, at every
+    /// numerator and at both kinds of positive divisor.
+    #[test]
+    fn div_and_div_rem_are_floor_division() {
+        let mut rng = Lcg(31);
+        let extremes = [i128::MIN, i128::MIN + 1, -(1 << 64), -1, 0, 1, 1 << 64, i128::MAX - 1, i128::MAX];
+        let mut divisors: Vec<i128> = (0..127).map(|k| 1i128 << k).collect();
+        divisors.extend([3, 5, 21_845, 65_537, (1 << 40) - 3, i128::MAX]);
+        for _ in 0..200 {
+            divisors.push(((wide(&mut rng) & i128::MAX) >> rng.below(120)) | 3);
+        }
+        for &d in &divisors {
+            let numerators = extremes.into_iter().chain((0..200).map(|_| wide(&mut rng)));
+            for n in numerators {
+                assert_eq!(div(n, d), n.div_euclid(d), "{n} / {d}");
+                assert_eq!(div_rem(n, d), (n.div_euclid(d), n.rem_euclid(d)), "{n} / {d}");
+            }
+        }
+    }
+
     /// Run the queue's choice for `ns`, to the end of its request or `step`,
     /// whichever comes first. Returns the entity and the service it got.
     fn run(q: &mut Eevdf<u32>, step: u64) -> (u32, u64) {

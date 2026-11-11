@@ -6,8 +6,9 @@ opened: 2026-11-11
 
 # The guest profile keeps its checks, which cost under five percent
 
-**Declined on 2026-11-11** in the wakeperf assignment: the kernel and
-userland keep `[profile.toyos]`'s debug assertions and overflow checks.
+**Declined by the orchestrator on 2026-11-11**, in the wakeperf assignment's
+brief: the kernel and userland keep `[profile.toyos]`'s debug assertions and
+overflow checks.
 
 **What was measured.** One boot a bench of the osbench `system`, `sched`,
 `ipc` and `time` groups, on main 422915e2c's shipping kernel and on the same
