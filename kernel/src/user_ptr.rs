@@ -45,12 +45,10 @@ fn asked(access: Access) -> Asked {
     }
 }
 
-/// Translate a user virtual address to its direct-map address, populating its
-/// page if needed; `pub(crate)` because the futex word outlives its syscall.
-pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm::DirectMap> {
-    let space = unlocked_space();
-    let phys = space.lock().reach(addr.raw(), asked(access))?;
-    Some(crate::mm::DirectMap::from_phys(phys))
+/// Translate a user virtual address to its frame, populating its page if
+/// needed; `pub(crate)` because the futex word outlives its syscall.
+pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm::space::Translation> {
+    crate::mm::space::Space::translate(unlocked_space(), addr.raw(), asked(access))
 }
 
 /// The current space, for a reach made holding no lock.

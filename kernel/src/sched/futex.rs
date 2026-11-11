@@ -2,15 +2,14 @@
 //! address so every process mapping a word shares it.
 
 use crate::watch::Watch;
-use crate::DirectMap;
 
 // A collision only lengthens the walk: a futex wake is bounded by the waiter's token, not by which bucket it landed in.
 const FUTEX_BUCKETS: usize = 64;
 static FUTEX_WATCH: [Watch; FUTEX_BUCKETS] = [const { Watch::new() }; FUTEX_BUCKETS];
 
-/// The watch for a futex word.
-pub fn watch_of(addr: DirectMap) -> &'static Watch {
-    &FUTEX_WATCH[(addr.phys() >> 2) as usize % FUTEX_BUCKETS]
+/// The watch for the futex word at `phys`.
+pub fn watch_of(phys: u64) -> &'static Watch {
+    &FUTEX_WATCH[(phys >> 2) as usize % FUTEX_BUCKETS]
 }
 
 /// End every futex wait on a word in one of `frames`, ascending 4 KiB frames

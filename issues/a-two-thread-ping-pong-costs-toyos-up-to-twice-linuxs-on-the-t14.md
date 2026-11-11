@@ -68,6 +68,25 @@ where the row measured what it means, it is behind as before. That neither
 thread slept in the short rounds is an inference from the timings; the row
 counts no parks, so a run's p50 is not this row's value.
 
+#1253 translates a futex wait's word once per call and checks it with one
+load of its space's change count, where every check took the space's lock
+and walked its tables again (wakeperf: 60 to 63 ns a translation, two to four
+times a round trip). Its speed-up is not yet measured on metal.
+
+- **Owed on metal:** the T14's whole `testcases`, `testcases-watchdog` and
+  `shared-debug` boots of main after #1253. Main must pass every member,
+  among them `futex_wake_counts` (whose `orphaned_by_unmap` arm is a wait on
+  a frame an unmap frees), `kill_ends_every_wait`, `exit_wait_storm`,
+  `std_threading`, `std_threads`, `shm_release_reclaims` and
+  `tlb_shootdown_waits`.
+- **Owed on metal:** an A/B of main before and after #1253, on the T14 and
+  the AMD bench: `osbench sched`, `time`, `files` and `ipc`, four boots a
+  side in rotated order, each boot's p50, compared by an exact two-sided
+  Mann-Whitney test; and Linux's `osbench sched` on each bench. Main after
+  must read `pingpong.futex.same_cpu` and `pingpong.futex.cross_core` lower
+  or not separated, the latter only from boots whose round trips parked, and
+  no other row 5% or more worse unless the code #1253 changed explains it.
+
 **Exit**: `pingpong.*` within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured to its parts
 and justified; and `pingpong.futex.*` reports the parks of each round, so a

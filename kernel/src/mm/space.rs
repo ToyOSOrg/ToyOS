@@ -21,7 +21,8 @@
 //! waits on the lock, whose spin answers the shootdown, and finds it gone.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::cell::Cell;
+use core::sync::atomic::{fence, AtomicU64, Ordering::{Acquire, Relaxed}};
 
 use kernel::vm::{self, Access, Entry, Kind, Prot};
 use toyos_abi::syscall::SyscallError;
@@ -82,7 +83,8 @@ impl At {
 }
 
 /// What a space holds, read without its lock: by `SYS_SYSINFO`, by a
-/// process's statistics, and by its end's record.
+/// process's statistics, and by its end's record; and how often its leaves
+/// changed, by a futex wait ([`Translation`]).
 #[derive(Default)]
 pub struct Usage {
     /// Private frames populated now.
@@ -94,6 +96,10 @@ pub struct Usage {
     /// Faults served, and the time they took.
     faults: AtomicU64,
     fault_ns: AtomicU64,
+    /// Changes to a leaf a CPU may have cached: every one is shot down, and
+    /// counted under the lock before its shootdown, so before a frame it
+    /// gave up is freed.
+    shot_down: AtomicU64,
     /// Changes to the space's leaves that reached another CPU by interrupt,
     /// for the test kernel's `SYS_DEBUG`.
     #[cfg(feature = "test-actuators")]
@@ -189,6 +195,52 @@ impl Space {
     /// Take `[at, at + len)` away if it still maps `object` and nothing else.
     pub fn release_object(&self, at: UserAddr, len: u64, object: &SharedMemObject) {
         self.lock().release_object(at, len, object);
+    }
+
+    /// The frame behind `va`, populated where its range allows `access`
+    /// ([`AddressSpace::reach`]), as a translation a holder can ask about
+    /// later without the lock.
+    pub fn translate(space: PageTables, va: u64, access: Access) -> Option<Translation> {
+        let (phys, at) = {
+            let mut held = space.lock();
+            let phys = held.reach(va, access)?;
+            // Counted under this hold: a change made before it is in `at`,
+            // and one after it moves the count.
+            (phys, space.usage.shot_down.load(Relaxed))
+        };
+        Some(Translation { space, va, phys, at: Cell::new(at) })
+    }
+}
+
+/// A user address's frame as a hold of its space's lock found it.
+pub struct Translation {
+    space: PageTables,
+    va: u64,
+    phys: u64,
+    /// The space's count of changes when `va` was last found mapping `phys`.
+    at: Cell<u64>,
+}
+
+impl Translation {
+    pub fn phys(&self) -> u64 {
+        self.phys
+    }
+
+    /// Whether the address still maps the frame, which is then not freed: no
+    /// leaf of the space has changed since it was last found there, or a hold
+    /// of the lock finds it there again. A load before this one is ordered
+    /// before it, so a value read from the frame was read while this held.
+    pub fn holds(&self) -> bool {
+        fence(Acquire);
+        if self.space.usage.shot_down.load(Relaxed) == self.at.get() {
+            return true;
+        }
+        let held = self.space.lock();
+        let found = held.get(self.va).is_some_and(|(phys, _)| phys == self.phys);
+        if found {
+            self.at.set(self.space.usage.shot_down.load(Relaxed));
+        }
+        found
     }
 }
 
@@ -379,7 +431,7 @@ impl AddressSpace {
         let inventory = &self.inventory;
         let unlinked = self.tables.unlink(start, end, |s, e| inventory.backed(s, e));
         if !unlinked.is_empty() {
-            self.tables.shoot_down(start, end, &unlinked);
+            self.shoot_down(start, end, &unlinked);
         }
         self.tables.free(unlinked);
         Err(SyscallError::ResourceExhausted)
@@ -526,7 +578,7 @@ impl AddressSpace {
             Leaf::Held(_) | Leaf::Empty => None,
         });
         if present {
-            self.tables.shoot_down(start, end, &Unlinked::none());
+            self.shoot_down(start, end, &Unlinked::none());
         }
         let mut freed = 0;
         let inventory = &self.inventory;
@@ -684,6 +736,7 @@ impl AddressSpace {
     /// Every CPU has dropped what it cached of `[start, end)` and of the
     /// tables `unlinked` took out.
     fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) {
+        self.usage.shot_down.fetch_add(1, Relaxed);
         let _reached = self.tables.shoot_down(start, end, unlinked);
         #[cfg(feature = "test-actuators")]
         if _reached {

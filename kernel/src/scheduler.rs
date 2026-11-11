@@ -256,43 +256,26 @@ pub fn set_current_rt(enable: bool) {
 /// Block on a futex word unless it already changed, and answer which of the
 /// two things the ABI names ended the wait.
 #[track_caller]
-pub fn futex_wait(
-    addr: crate::UserAddr,
-    phys_addr: DirectMap,
-    expected: u32,
-    deadline: Deadline,
-) -> FutexEnd {
+pub fn futex_wait(word: &crate::mm::space::Translation, expected: u32, deadline: Deadline) -> FutexEnd {
     let parkable = Parkable::at_entry();
-    // Re-translated rather than trusted: `munmap` clears the entry before
-    // walking futex buckets, so a changed translation means this arm is stale.
-    let read = || {
-        let Some(pt) = current_address_space() else {
-            return true;
-        };
-        let same_frame = pt.lock().get(addr.raw()).is_some_and(|(now, _)| now == phys_addr.phys());
-        if !same_frame {
-            return true;
-        }
-        // SAFETY: `same_frame` re-translated `addr` and found it still names
-        // `phys_addr`'s frame, so this is a live, mapped, syscall-checked
-        // 4-byte-aligned word; volatile because this predicate may run more
-        // than once.
-        let word = unsafe { phys_addr.as_ptr::<u32>().read_volatile() };
-        word != expected
+    let phys = word.phys();
+    let changed = || {
+        // SAFETY: a frame the user's checked, 4-byte-aligned word translated
+        // to, read through the direct map, which maps every frame a user page
+        // can hold; volatile because this predicate may run more than once.
+        // Whether the frame was still the word's when read is `holds`, after
+        // the read.
+        let now = unsafe { DirectMap::from_phys(phys).as_ptr::<u32>().read_volatile() };
+        // An address that no longer maps the frame is a wait the unmap's
+        // revoke may have missed: the word moved, and the caller re-checks it.
+        now != expected || !word.holds()
     };
-    let _ = watch::wait_until(
-        &parkable,
-        futex::watch_of(phys_addr),
-        phys_addr.phys(),
-        WaitClass::Futex,
-        deadline,
-        read,
-    );
+    let _ = watch::wait_until(&parkable, futex::watch_of(phys), phys, WaitClass::Futex, deadline, changed);
     // `wait_until` answers `Ok(())` for a satisfied predicate and an expired
     // deadline alike, so the word itself is what tells them apart. With no
     // deadline the word or its frame changed, or a kill ended it, whose answer
     // never reaches Ring 3.
-    if deadline.is_never() || read() {
+    if deadline.is_never() || changed() {
         FutexEnd::Changed
     } else {
         FutexEnd::Timeout
@@ -308,9 +291,9 @@ pub enum FutexEnd {
     Timeout,
 }
 
-/// Wake up to `count` waiters on this futex word, and answer how many.
-pub fn futex_wake(phys_addr: DirectMap, count: usize) -> u64 {
-    futex::watch_of(phys_addr).post_n(phys_addr.phys(), count) as u64
+/// Wake up to `count` waiters on the futex word at `phys`, and answer how many.
+pub fn futex_wake(phys: u64, count: usize) -> u64 {
+    futex::watch_of(phys).post_n(phys, count) as u64
 }
 
 /// Set a thread's kill bit and ask its CPU for a safe point; returns at once.
