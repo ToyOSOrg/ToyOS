@@ -9,9 +9,11 @@ opened: 2026-11-05
 `osbench`'s `proc.spawn_wait.large` spawns a 32 MiB program from a served
 file. The spawner reads the image through `SYS_PAGED_READ` into fresh shared
 memory. #1150 copies it a frame at a time through the reader's own mapping
-(`arch::uaccess`), after faulting each chunk of 16 frames in
-(`PagerObject::read`, `UserBytesMut::fault_in`). Main copied it through the
-kernel's direct map, reaching and pinning each page as it went.
+(`arch::uaccess`, `PagerObject::read`). Main copied it through the kernel's
+direct map, reaching and pinning each page as it went. The copy's fault on
+the shared memory maps its 64 KiB run (`kernel::vm::around`); the figures
+below were read when a pass of its own faulted each chunk of 16 frames in
+first.
 
 On the AMD bench (metal round 8; evidence `ToyOSOrg/evidence`, branch
 `pr-1150`, r15):
@@ -19,8 +21,7 @@ On the AMD bench (metal round 8; evidence `ToyOSOrg/evidence`, branch
   both pairs.
 - **The copy:** 760 ns per page against 685 for main's whole reach, pin and
   copy; with 8192 pages a spawn, that is 0.6 ms.
-- **The populate:** `fault_in` adds 48 ns per page in a pass of its own,
-  0.4 ms a spawn.
+- **The populate:** that pass added 48 ns per page, 0.4 ms a spawn.
 - **Unaccounted:** about 0.5 ms of the 1.5 ms.
 
 Before #1150's accessed-and-dirty change to x86-64 user leaves the copy cost

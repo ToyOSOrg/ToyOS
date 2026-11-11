@@ -10,11 +10,11 @@ User memory moved from 2 MiB pages filled when mapped to 4 KiB pages filled
 at first touch (`kernel/src/mm/space.rs`). Each of these costs more than it
 did; the T14's numbers are below:
 
-- **Faults.** A touch beside a populated page of a private range fills its
-  aligned 64 KiB run (`kernel::vm::around`), so memory touched in order takes
-  a fault per 16 pages; a lone touch is still one fault per page. Each fault
-  takes the space's lock, an inventory lookup, one table walk and, per frame,
-  the frame allocator's one lock
+- **Faults.** A touch beside a populated page fills its aligned 64 KiB run
+  (`kernel::vm::around`), or maps it in a range of a memory object, so memory
+  touched in order takes a fault per 16 pages; a lone touch is still one fault
+  per page. Each fault takes the space's lock, an inventory lookup, one table
+  walk and, per frame, the frame allocator's one lock
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`)
   and a 4 KiB zeroing. Probed on the T14 at `b48c7dd9d` (scratch probe, one
   frame per fault): about 345 ns from the trap handler's entry to its return —
@@ -46,8 +46,9 @@ did; the T14's numbers are below:
   held an owned frame (at most 512 frames each), whether or not anything waits.
 - **Commits.** A committed range's tables are built when it is made, under the
   space's lock: 1/512 of the range.
-- **Copies.** One round trip of the space's lock per 16 pages, plus an
-  inventory lookup and a table walk per page.
+- **Copies.** A copy into memory nothing has touched takes the faults a touch
+  would, one per 64 KiB run, each an exception's delivery and return on top
+  of a touch's. Into present pages it takes none.
 - **Spawn.** A segment is copied a page at a time at first touch, so while a
   child lives the image is held twice: once by the spawner's object or the
   `/tmp` file's snapshot, which the child's ranges keep alive, and once

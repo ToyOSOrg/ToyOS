@@ -265,12 +265,4 @@ impl UserBytesMut<'_> {
     pub fn fill_zero(&mut self, off: usize, len: usize) -> Result<(), Faulted> {
         self.0.fill_zero(off, len)
     }
-
-    /// Populate the window's pages under `[off, off + len)` for writing, in
-    /// one hold of the space's lock, up to the first its process may not
-    /// write; the copy faults on any left out. `len` bounds the hold.
-    pub fn fault_in(&mut self, off: usize, len: usize) {
-        let start = self.0.at("UserBytesMut::fault_in", off, len);
-        crate::process::fault_in(start, start + len as u64, kernel::vm::Access::Write);
-    }
 }
