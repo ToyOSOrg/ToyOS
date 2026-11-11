@@ -5008,7 +5008,7 @@ mod tests {
         assert_eq!(w.hw.state().timers.len(), 2, "a fired one-shot is armed again");
 
         // A sleeper due before the request's end is owed sooner.
-        let (_, sleeper) = w.spawn(C0);
+        w.spawn(C0);
         let (cpus, env) = w.split();
         let pass = SchedPass::begin(&mut cpus[0], env, NOW.after(3_000));
         let _ = pass.dispose_yield().finish();
@@ -5024,7 +5024,6 @@ mod tests {
         assert!(w.cpus[0].running().is_some(), "the other thread runs");
         assert_eq!(w.cpus[0].armed(), Some(due), "a deadline before the armed one-shot is written");
         assert_eq!(*w.hw.state().timers.last().unwrap(), Some(due));
-        let _ = sleeper;
         w.abandon();
     }
 
