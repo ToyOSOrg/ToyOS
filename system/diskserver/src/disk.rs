@@ -176,19 +176,39 @@ impl<L: Link> Served<L> {
     }
 
     /// `blocks` written at `lba`, shared: the session keeps them until a
-    /// flush covers the write, rather than a copy of them.
+    /// flush covers the write, rather than a copy of them. Its requests are
+    /// all asked at once, and it ends when the last is answered: the first
+    /// failure, in block order, if any failed.
     pub async fn write_shared(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
         within(lba, blocks.len(), self.blocks)?;
         let per = MAX_REQUEST_BLOCKS as usize;
-        for (i, chunk) in blocks.chunks(per).enumerate() {
-            let at = lba + (i * per) as u64;
-            match self.ask(|link| link.submit_write(at, chunk)).await.map_err(|Gone| Error::Gone)?.outcome {
-                Outcome::Done => {}
-                Outcome::ReadOnly => return Err(Error::ReadOnly),
-                _ => return Err(Error::Device),
+        let mut requests: Vec<_> = blocks
+            .chunks(per)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let at = lba + (i * per) as u64;
+                Box::pin(async move {
+                    match self.ask(|link| link.submit_write(at, chunk)).await.map_err(|Gone| Error::Gone)?.outcome {
+                        Outcome::Done => Ok(()),
+                        Outcome::ReadOnly => Err(Error::ReadOnly),
+                        _ => Err(Error::Device),
+                    }
+                })
+            })
+            .collect();
+        let mut answers: Vec<Option<Result<(), Error>>> = vec![None; requests.len()];
+        poll_fn(|cx| {
+            for (request, answer) in requests.iter_mut().zip(&mut answers) {
+                if answer.is_none()
+                    && let Poll::Ready(done) = request.as_mut().poll(cx)
+                {
+                    *answer = Some(done);
+                }
             }
-        }
-        Ok(())
+            if answers.iter().all(Option::is_some) { Poll::Ready(()) } else { Poll::Pending }
+        })
+        .await;
+        answers.into_iter().flatten().collect()
     }
 }
 
