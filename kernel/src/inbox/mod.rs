@@ -388,7 +388,9 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
     let charge = Charge::current(heap())?;
     let space = process::current_address_space();
     let bytes = SUBMISSIONS_OFF + u64::from(MAX_SUBMISSION_DEPTH) * core::mem::size_of::<Submission>() as u64;
-    let ring = SharedMemObject::create(&crate::mm::charge::current(), bytes)?;
+    // Drawn whole: the kernel writes a ring's words in interrupt context,
+    // where no first touch may draw a frame.
+    let ring = SharedMemObject::create_whole(&crate::mm::charge::current(), bytes)?;
     // Laid out before mapped: mapping first lets a sibling thread write the
     // rings while the kernel initializes them.
     ring.write(0, &ring_layout(submission_size, completion_size));

@@ -102,6 +102,10 @@ roster-commit-relaxed = []
 # second store back, so a shootdown can see the machine released while it is not
 # yet answering, and `kernel/loom/tests/smp_bringup.rs` reds.
 smp-ready-split = []
+# The same for a region page's first touch: `src/object/shm/slot.rs`'s install
+# and loads go `Relaxed`, so a toucher handed another's frame need not see the
+# zeros its drawer wrote, and `kernel/loom/tests/shm_slot.rs` reds.
+slot-install-relaxed = []
 # The scheduler core's loom controls: `kernel-loom` compiles `pure/sched/`
 # into its own crate and turns each on, one at a time; declared here only so
 # `cfg` checking knows the names.

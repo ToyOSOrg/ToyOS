@@ -210,6 +210,11 @@ pub mod reap_gate;
 #[path = "../../src/pcidev/record.rs"]
 pub mod device_irq;
 
+/// A region page's frame, which the first touch installs and every other
+/// touch is handed. It names atomics and nothing else.
+#[path = "../../src/object/shm/slot.rs"]
+pub mod shm_slot;
+
 extern crate alloc;
 
 /// The panic snapshot's owner and access state, driven together by

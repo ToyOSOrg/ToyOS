@@ -13,9 +13,7 @@
 //! keeps. A job refused memory can wait for it to come back: [`ready`]
 //! answers whether it has, and [`returned`] is posted once it has.
 
-use alloc::boxed::Box;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use kernel::frames::{self, Frames, Pins, PoolSplit, Super, Unpinned, FRAME, SUPER};
@@ -142,18 +140,6 @@ pub unsafe fn free_drawn(job: &Job, frames: &[u64]) {
     with(|f| f.free_drawn(job.memory(), frames.iter().copied(), &pins));
 }
 
-/// Give back every frame of `frames`, drawn for pages `job` committed, under
-/// one hold of the allocator's lock.
-pub fn free_all(job: &Job, frames: Box<[Frame]>) {
-    let pins = pins();
-    with(|f| f.free_drawn(job.memory(), frames.iter().map(|frame| frame.phys), &pins));
-    // Given up only once the allocator's lock is let go: the list goes back
-    // to the heap, which may give a page back through it.
-    for frame in frames.into_vec() {
-        let _ = frame.into_raw();
-    }
-}
-
 /// The pin counters, published once by [`init`]: where they are, how many,
 /// and the physical address the first one counts for.
 static PINS: (AtomicPtr<AtomicU32>, AtomicUsize, AtomicU64) =
@@ -263,8 +249,7 @@ fn kept_supers(frames: &Frames) -> u64 {
 }
 
 /// Promise `frames` to a commitment of `job`'s, which draws each with
-/// [`alloc_promised`], [`alloc_promised_many`] or [`alloc_promised_into`]
-/// when it is first touched; `false`, and nothing promised, where that would
+/// [`alloc_promised`] or [`alloc_promised_into`] when it is first touched; `false`, and nothing promised, where that would
 /// take what is held back.
 pub fn promise(job: &Job, frames: u64) -> bool {
     frames == 0 || with(|f| f.promise(job.memory(), frames))
@@ -294,7 +279,8 @@ pub fn unpromise(job: &Job, frames: u64) {
 /// the page a frame again ([`Frames::discard`]).
 ///
 /// # Safety
-/// `phys` is an owned leaf's frame, which no leaf on any CPU maps any more.
+/// `phys` is a frame drawn for a committed page, which nothing maps or
+/// reaches any more and nothing else frees.
 pub unsafe fn discard(phys: u64) {
     let pins = pins();
     with(|f| f.discard(phys, &pins));
@@ -309,24 +295,8 @@ pub fn alloc_promised() -> Frame {
 }
 
 /// The most frames a batch draws under one hold of the allocator's lock, a
-/// superframe's: a large region lets other CPUs' draws in between its holds.
+/// superframe's: a large batch lets other CPUs' draws in between its holds.
 const DRAWS_A_HOLD: usize = frames::PER_SUPER;
-
-/// `count` zeroed frames promises held, drawn [`DRAWS_A_HOLD`] to a hold of
-/// the allocator's lock.
-pub fn alloc_promised_many(count: usize) -> Box<[Frame]> {
-    let mut frames = Vec::with_capacity(count);
-    while frames.len() < count {
-        let n = (count - frames.len()).min(DRAWS_A_HOLD);
-        // Inside the capacity reserved above: nothing allocates under the lock.
-        with(|f| f.alloc_promised_each(n as u64, |phys| frames.push(Frame { phys })));
-    }
-    for frame in &frames {
-        // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
-        unsafe { core::ptr::write_bytes(frame.direct_map().as_mut_ptr::<u8>(), 0, FRAME as usize) };
-    }
-    frames.into_boxed_slice()
-}
 
 /// `out.len()` frames promises held, drawn [`DRAWS_A_HOLD`] to a hold of the
 /// allocator's lock, each holding what its last owner left: its caller
