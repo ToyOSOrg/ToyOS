@@ -1495,10 +1495,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         // words, and its line for each vulnerability: the lines are
         // `kernel::mitigation::decide`'s verdict on those words. Metal alone:
         // a guest's words are its hypervisor's, and what a bench's words
-        // decide is held to its vendor's row by a host test. The T14 and the
-        // AMD bench.
+        // decide is held to its vendor's row by a host test.
         "mitigations",
-        metal::Metal { arms: METALCASE, judge: |b| mitigations_on_metal(b[0].kernel().text()) },
+        metal::Metal { on: On::Every, arms: METALCASE, judge: |b| mitigations_on_metal(b[0].kernel().text()) },
     ),
     (
         // The machine came back to Ubuntu's ssh server, which is what tells a reset from the
