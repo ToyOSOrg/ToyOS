@@ -108,7 +108,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_MACHINE_STOPS => sys_machine_stops(RawHandle(a1 as u32), a2),
         SYS_PIPE => sys_pipe(),
         SYS_SPAWN => {
-            let Ok(args) = ctx.copy_in::<SpawnArgs>(UserAddr::new(a1)) else { return bad_addr };
+            let args = match ctx.copy_in::<SpawnArgs>(UserAddr::new(a1)) { Ok(args) => args, Err(e) => return e.to_u64() };
             // First: each range's object is the caller's, and an endowment
             // below may move the caller's own handle to it.
             let program = match spawn_program(&ctx, &args) {
@@ -304,13 +304,13 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         }
         SYS_ACCEPT => sys_accept(RawHandle(a1 as u32), a2),
         SYS_MESSAGE_SEND => {
-            let Ok(args) = ctx.copy_in::<MessageSend>(UserAddr::new(a2)) else { return bad_addr };
+            let args = match ctx.copy_in::<MessageSend>(UserAddr::new(a2)) { Ok(args) => args, Err(e) => return e.to_u64() };
             let Ok(out) = outgoing(&ctx, &args) else { return SyscallError::InvalidArgument.to_u64() };
             let Some(out) = out else { return bad_addr };
             sys_message_send(RawHandle(a1 as u32), &out, args.flags & MESSAGE_NONBLOCK != 0)
         }
         SYS_MESSAGE_RECV => {
-            let Ok(args) = ctx.copy_in::<MessageRecv>(UserAddr::new(a2)) else { return bad_addr };
+            let args = match ctx.copy_in::<MessageRecv>(UserAddr::new(a2)) { Ok(args) => args, Err(e) => return e.to_u64() };
             let Ok(into) = incoming(&ctx, &args) else { return SyscallError::InvalidArgument.to_u64() };
             let Some(mut into) = into else { return bad_addr };
             sys_message_recv(RawHandle(a1 as u32), &mut into, args.flags & MESSAGE_NONBLOCK != 0)
@@ -334,8 +334,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             let Some(bytes) = ctx.user_bytes(UserAddr::new(a2), len) else { return bad_addr };
             let mut badge = [0u8; MAX_BADGE];
-            if bytes.read_at(0, &mut badge[..len as usize]).is_err() {
-                return bad_addr;
+            if let Err(faulted) = bytes.read_at(0, &mut badge[..len as usize]) {
+                return SyscallError::from(faulted).to_u64();
             }
             sys_port_mint(RawHandle(a1 as u32), &badge[..len as usize])
         }
@@ -481,8 +481,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 return bad_addr;
             };
             let mut raw = [0u8; CPU_MASK_WORDS * 8];
-            if bytes.read_at(0, &mut raw[..a3 as usize * 8]).is_err() {
-                return bad_addr;
+            if let Err(faulted) = bytes.read_at(0, &mut raw[..a3 as usize * 8]) {
+                return SyscallError::from(faulted).to_u64();
             }
             let words: [u64; CPU_MASK_WORDS] =
                 core::array::from_fn(|i| u64::from_le_bytes(raw[i * 8..][..8].try_into().unwrap()));
@@ -498,7 +498,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             match sys_thread_get_affinity(a1) {
                 Ok(words) => {
                     let wrote = words.iter().enumerate().try_for_each(|(i, word)| out.write_at(i * 8, &word.to_le_bytes()));
-                    wrote.map_or(bad_addr, |()| 0)
+                    wrote.map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| 0)
                 }
                 Err(e) => e.to_u64(),
             }
@@ -515,8 +515,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 return bad_addr;
             };
             let mut name = [0u8; process::THREAD_NAME_LEN];
-            if bytes.read_at(0, &mut name[..len]).is_err() {
-                return bad_addr;
+            if let Err(faulted) = bytes.read_at(0, &mut name[..len]) {
+                return SyscallError::from(faulted).to_u64();
             }
             process::set_current_thread_name(&name[..len]);
             0

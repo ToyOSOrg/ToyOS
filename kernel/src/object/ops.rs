@@ -541,8 +541,10 @@ fn write_device(claim: &DeviceClaim, buf: &UserBytes) -> u64 {
         return SyscallError::PermissionDenied.to_u64();
     }
     let mut word = [0u8; 4];
-    if buf.len() == word.len() && buf.read_at(0, &mut word).is_err() {
-        return SyscallError::BadAddress.to_u64();
+    if buf.len() == word.len() {
+        if let Err(faulted) = buf.read_at(0, &mut word) {
+            return SyscallError::from(faulted).to_u64();
+        }
     }
     let acknowledges = buf.len() == word.len() && u32::from_ne_bytes(word) == ack;
     let pid = crate::process::current_process();

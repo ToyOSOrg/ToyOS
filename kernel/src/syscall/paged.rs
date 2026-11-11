@@ -104,7 +104,7 @@ fn readable_holder(
 }
 
 pub(super) fn sys_paged_op(ctx: &SyscallContext<'_>, h: RawHandle, op: u64, args: UserAddr) -> u64 {
-    let Ok(args) = ctx.copy_in::<PagedArgs>(args) else { return SyscallError::BadAddress.to_u64() };
+    let args = match ctx.copy_in::<PagedArgs>(args) { Ok(args) => args, Err(e) => return e.to_u64() };
     let pager = match pager(h, Rights::WRITE) {
         Ok(pager) => pager,
         Err(refused) => return refused,

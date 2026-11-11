@@ -81,7 +81,7 @@ pub(crate) fn map_rights(prot: Prot) -> Rights {
 
 /// `toyos_abi::syscall::vm_map`: a memory object's own pages.
 pub(super) fn sys_vm_map(ctx: &SyscallContext<'_>, h: RawHandle, args: UserAddr) -> u64 {
-    let Ok(args) = ctx.copy_in::<VmMapArgs>(args) else { return SyscallError::BadAddress.to_u64() };
+    let args = match ctx.copy_in::<VmMapArgs>(args) { Ok(args) => args, Err(e) => return e.to_u64() };
     let asked = (|| {
         let prot = vm_prot(args.prot)?;
         let len = whole_pages(args.len).ok_or(SyscallError::InvalidArgument)?;

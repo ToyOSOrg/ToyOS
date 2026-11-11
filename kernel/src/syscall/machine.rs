@@ -99,7 +99,7 @@ fn read_on_cursor(
     let words = |bytes: &[u8]| -> Vec<u64> {
         bytes.as_chunks::<8>().0.iter().map(|word| u64::from_le_bytes(*word)).collect()
     };
-    let Ok(head) = ctx.user_vec(at, HEAD as u64) else { return SyscallError::BadAddress.to_u64() };
+    let head = match ctx.user_vec(at, HEAD as u64) { Ok(head) => head, Err(e) => return e.to_u64() };
     let mut head = CursorHead::from_words(words(&head).try_into().expect("the head's words"));
     head.shards = u32::try_from(rings).expect("`smp::size` bounds the CPUs below a u32");
     let put = |head: CursorHead, positions: &[u64]| -> Result<(), SyscallError> {
@@ -112,9 +112,12 @@ fn read_on_cursor(
     if head.slots as usize != rings {
         return put(head, &[]).err().unwrap_or(SyscallError::InvalidArgument).to_u64();
     }
-    let Some(positions) = at.raw().checked_add(HEAD as u64).and_then(|p| ctx.user_vec(UserAddr::new(p), (8 * rings) as u64).ok())
-    else {
+    let Some(after) = at.raw().checked_add(HEAD as u64) else {
         return SyscallError::BadAddress.to_u64();
+    };
+    let positions = match ctx.user_vec(UserAddr::new(after), (8 * rings) as u64) {
+        Ok(positions) => positions,
+        Err(e) => return e.to_u64(),
     };
     let (count, walk) = match read(&words(&positions)) {
         Ok(read) => read,
