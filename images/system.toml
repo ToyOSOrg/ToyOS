@@ -54,8 +54,8 @@ folder = "read-write"
 [programs]
 # The installer: `installs = true` makes `/apps` read-write in its view, and
 # it is read-only in every other row's, so `launch pkg install <file>` installs
-# and a shell, or a `pkg` it spawns as a helper, changes no package. Who may
-# install is the `starts` that list it.
+# and a shell's own writes and its helpers' are refused, a `pkg` it spawns as
+# one among them. Who may install is the `starts` that list it.
 # `/state/pkg` is where the machine's copy of the repository metadata it last
 # accepted belongs (`toyos_update::repo::Holder::Machine`).
 pkg = { state = true, installs = true }

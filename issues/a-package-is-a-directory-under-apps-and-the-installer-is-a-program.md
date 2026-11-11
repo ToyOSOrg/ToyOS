@@ -41,7 +41,9 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
   `/apps` read-write (owner ruling, 2026-11-05; stage 2 of
   `issues/every-program-sees-only-the-files-it-was-given.md`): it installs
   and removes launched, `launch pkg install <file>`, and a `pkg` spawned as
-  a helper lists and refuses the rest by name. `pkg`
+  a helper lists and refuses the rest by name. A caller that can launch
+  `pkg` answers its question itself, by `--yes` or the stdin it supplies, so
+  who decides an install is the `starts` that list `pkg`. `pkg`
   fetches, verifies, unpacks and commits, and it asks the user
   before it installs — at install, the moment the user typed the command,
   never at first run, so a refusal leaves nothing on disk and no answer has

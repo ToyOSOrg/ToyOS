@@ -3345,8 +3345,8 @@ mod tests {
     }
 
     /// **Only the installer's view holds `/apps` read-write**: `pkg` in the
-    /// shipped image, and in no config a shell or a row a shell spawns. A
-    /// test image's writer is the row its job installs through.
+    /// shipped image, and in no config a shell. A test image's writer is the
+    /// row its job installs through.
     #[test]
     fn only_the_installer_s_view_writes_apps() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));

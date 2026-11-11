@@ -63,9 +63,13 @@ other, with the same per-session isolation (owner, 2026-11-05).
    `/system` read-only, its own `/tmp` (`toyos_manifest::app_temporary`, a
    directory of the machine's), and nothing else a file server serves
    (`toyos_manifest::Program::view`). Every row the image declares still sees
-   the whole tree, `/system` read-only and the rest read-write but `/state`,
-   of which each row holds only its own directory where it keeps state
-   (`service = true` or `state = true`: the daemons' own state is built).
+   the whole tree but `/state`, of which each row holds only its own
+   directory where it keeps state (`service = true` or `state = true`: the
+   daemons' own state is built); `/system` is read-only, `/log` and `/apps`
+   are read-only to all but one row each, and the rest is read-write. The
+   storage rows are started outside that
+   (`issues/storage-rows-start-holding-the-supervisors-whole-tree.md`),
+   which this stage's exit closes.
    Only the installer service writes `/apps` (owner ruling, 2026-11-05).
    Built: `/apps` is read-only in every declared row's view but the row
    that declares `installs = true` (`toyos_manifest::Program::installs`),
@@ -74,13 +78,20 @@ other, with the same per-session isolation (owner, 2026-11-05).
    the `starts` that list it, so the authority is `images/system.toml`'s
    alone and no port, protocol or daemon was added. `launch pkg install
    <file>` installs; a `pkg` a shell spawns as a helper holds the shell's
-   view and refuses by name. Judged on the host, red with the shell's row
-   granted `installs`: `toyos_manifest`'s `only_the_installer_writes_apps`
-   and the build's `only_the_installer_s_view_writes_apps`, over every
-   committed config. **Its exit**: a shell's write under `/apps` is refused
-   by the file server, and an install through the installer service still
-   commits. Owed on a machine: the first is the metal `app_view` row's
-   shell arm; the second is `pkg_install_gbae`'s
+   view and refuses by name. Judged on the host:
+   `toyos_manifest`'s `only_the_installer_writes_apps`, red with the view
+   ignoring `installs`, and the build's
+   `only_the_installer_s_view_writes_apps` over every committed config, red
+   with that and with the shell's row granted `installs`. **Its exit**: a
+   shell's write under `/apps` is refused by the file server, and an install
+   through the installer service still commits. The first's check is the
+   metal `app_view` row's shell arm, in place of a boot with the shell's row
+   granted `/apps` read-write (orchestrator, 2026-11-11): the shell's
+   redirect into `/apps` is refused with the file server's read-only reason
+   while the same redirect into `/home` writes, and the two are one volume
+   and one server differing only in the grant, so the grant is what
+   refused. Owed on a machine: that row, and the second, which is
+   `pkg_install_gbae`'s
    (`issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`,
    stage D), whose client launches `pkg`.
    `/dev/null` is a name only libc's `open` knows, answered with a kernel
