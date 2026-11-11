@@ -51,7 +51,7 @@ fn said() -> ! {
 /// This program started from its ranges alone, as `lay_out` leaves them.
 fn spawn_unsaid() -> End {
     let own = image::image_of(SELF);
-    let laid = lay_out(own.bytes(), Machine::RUNNING, own.handle()).expect("this program lays out");
+    let laid = lay_out(own.bytes(), Machine::RUNNING, own.source()).expect("this program lays out");
     let args = SpawnArgs {
         path_ptr: SELF.as_ptr() as u64,
         path_len: SELF.len() as u64,
