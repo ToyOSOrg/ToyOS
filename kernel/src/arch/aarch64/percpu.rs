@@ -8,7 +8,7 @@
 //! an exception on this CPU cannot split (Arm ARM K.a, B2.17.5: taking an
 //! exception clears the monitor).
 
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
 
 use alloc::boxed::Box;
 
@@ -41,6 +41,9 @@ pub struct PerCpu {
     /// Counter ticks the timer was last armed for: what a timer interrupt
     /// taken at EL0 re-arms it with, and zero when it is stopped.
     armed_ticks: AtomicU64,
+    /// Whether the scheduler's last one-shot is armed and its interrupt not
+    /// yet taken.
+    timer_pending: AtomicBool,
     /// The kernel stack a switch last installed, for the stack witness: on
     /// AArch64 an entry from EL0 lands on `SP_EL1` as the last `ERET` left it,
     /// and nothing here points it anywhere.
@@ -86,6 +89,7 @@ pub fn alloc(cpu_id: u32) -> &'static PerCpu {
         kernel_timer_fires: AtomicU32::new(0),
         last_seen_kernel_timer_fires: AtomicU32::new(0),
         armed_ticks: AtomicU64::new(0),
+        timer_pending: AtomicBool::new(false),
         kernel_stack: AtomicU64::new(0),
         // The same size as a task's kernel stack: a `deferred` [`kobject!`]
         // object may own an `immediate` one, whose destructor then runs here.
@@ -337,4 +341,12 @@ pub(super) fn armed_ticks() -> u64 {
 
 pub(super) fn set_armed_ticks(ticks: u64) {
     this().armed_ticks.store(ticks, Relaxed);
+}
+
+pub(super) fn timer_pending() -> bool {
+    this().timer_pending.load(Relaxed)
+}
+
+pub(super) fn set_timer_pending(pending: bool) {
+    this().timer_pending.store(pending, Relaxed);
 }

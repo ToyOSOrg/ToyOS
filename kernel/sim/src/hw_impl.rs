@@ -179,6 +179,12 @@ impl Machine for SimHw {
         });
     }
 
+    /// A fire disarms the modelled one-shot (`Step::FireTimer`), so one still
+    /// armed is one whose pass is still owed.
+    fn timer_pending(&self) -> bool {
+        self.with(|s| s.armed[Self::cpu(s)].is_some())
+    }
+
     fn halt(&self) {
         self.with(|s| {
             let cpu = Self::cpu(s);

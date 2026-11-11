@@ -62,6 +62,10 @@ impl Machine for KernelHw {
         irqchip::stop_timer();
     }
 
+    fn timer_pending(&self) -> bool {
+        irqchip::timer_pending()
+    }
+
     fn idle_plan(&self, deadline: Option<Nanos>, now: Nanos) -> kernel::sched::idle::Plan {
         crate::idle::plan(deadline, now)
     }

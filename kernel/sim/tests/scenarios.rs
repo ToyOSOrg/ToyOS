@@ -592,6 +592,14 @@ fn corpus_traces_still_do_what_they_were_committed_for() {
             },
             outcome.report(),
         );
+        if let Some(invariant) = &entry.expect_violation {
+            assert!(
+                outcome.violations.iter().any(|v| v.starts_with(&format!("{invariant}:"))),
+                "{}: expected {invariant}, got {}",
+                path.display(),
+                outcome.report(),
+            );
+        }
         checked += 1;
     }
     assert!(
