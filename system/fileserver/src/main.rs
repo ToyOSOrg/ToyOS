@@ -76,7 +76,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor};
 use toyos::shm::{Bytes, SharedMemory};
 use toyos::Pipe;
-use toyos_abi::syscall::{SyscallError, MAX_BADGE, PIPE_CAPACITY, SERVE_PREFIX};
+use toyos_abi::syscall::{SyscallError, MAX_BADGE, PAGER_MAX_OBJECTS, PIPE_CAPACITY, SERVE_PREFIX};
 
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
@@ -280,9 +280,15 @@ fn pager(role: Role, anonymous: bool) -> Option<toyos::paged::Pager> {
         Role::Data | Role::Memory => {
             let share = toyos::system::memory_total() / PAGES_SHARE / toyos::paged::PAGE;
             let capacity = (share.saturating_sub(2 * SMALL_PAGES) / 2).max(SMALL_PAGES);
-            // A file held for every 16 pages, the table's own cost a small
-            // part of the pages': at most 65,536.
-            (capacity, DATA_DIRTY.min(capacity / 2), (capacity / 16).clamp(1024, 64 * 1024))
+            // A volume on a disk keeps a file for every 16 pages, at most
+            // 65,536, and lets the oldest nobody holds go past that. A memory
+            // volume's objects are its files, which nothing can let go: they
+            // are bounded by what each is charged as it is made.
+            let objects = match anonymous {
+                true => PAGER_MAX_OBJECTS,
+                false => (capacity / 16).clamp(1024, 64 * 1024),
+            };
+            (capacity, DATA_DIRTY.min(capacity / 2), objects)
         }
         Role::Log => (SMALL_PAGES, 512, 1024),
         Role::Boot => (SMALL_PAGES, 0, 1024),

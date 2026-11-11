@@ -383,6 +383,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is each bench's verdict on its own CPU's fault path;
     // `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` runs it under QEMU.
     "user_copy_faults",
+    // Its shared run is each bench's verdict;
+    // `tmp_holds_empty_files_by_what_each_costs` runs it on a 4 GiB guest.
+    "tmp_empty_files",
     // Its shared run is ring's known answers in a guest; the crypto boot runs it
     // first on each bench, and `crypto_instrument_prints_its_table` before the
     // instrument under QEMU.
@@ -714,6 +717,12 @@ const MACHINE_TESTS: &[MachineTest] = &[
     ("a_user_copy_highest_first_faults_or_ends_as_bad_address", |test_config| {
         a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &["copies-go-down"])
     }),
+    // `/tmp` holds more empty files than its guest has MiB of memory: the
+    // memory file server's objects as the kernel makes and charges them,
+    // which no host build has. One boot of QEMU's x86-64 machine, whose
+    // 4 GiB is what the count is held against; the shared boots run it on
+    // each bench.
+    ("tmp_holds_empty_files_by_what_each_costs", |test_config| tmp_holds_empty_files_by_what_each_costs(test_config)),
     // The boot's log written through usbd onto the stick it booted from, and
     // still there once the machine has stopped: the path every metal boot's
     // `/log` takes, which no other QEMU row reads, because their console is
@@ -5914,6 +5923,27 @@ fn ring3_debug_traps_end_their_process(test_config: &Path) -> Result<(), String>
         return Err(format!("the job never said every arm ended:\n{}", result.stdout));
     };
     eprintln!("  [debug_trap] {}", line.trim());
+    Ok(())
+}
+
+/// `tmp_empty_files` alone: ten thousand empty files made in `/tmp` and
+/// removed, on a guest of 4 GiB.
+fn tmp_holds_empty_files_by_what_each_costs(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "tmp_empty_files";
+    const SAID: &str = "tmp_empty_files: 10000 empty files made and removed";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_tmp_empty_files", Duration::from_secs(300));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with(SAID)) {
+        return Err(format!("the job never said {SAID:?}:\n{}", result.stdout));
+    }
     Ok(())
 }
 

@@ -25,7 +25,8 @@ pub const PAGE: u64 = syscall::PAGE_SIZE as u64;
 pub enum Refused {
     /// The first page is absent: supply it.
     Absent,
-    /// Every page, or every object, the pager may hold is held: let one go first.
+    /// Every page, or every object, the pager may hold is held, or its job
+    /// cannot be charged another: let one go first.
     NoRoom,
     /// The pager's dirty ceiling is reached: write back first.
     DirtyFull,
@@ -62,8 +63,8 @@ pub struct Pager(OwnedHandle);
 
 impl Pager {
     /// `capacity` pages for every object, `dirty` of them dirty at once, at
-    /// most `objects` objects; a reader waiting past `report` is reported
-    /// overdue, and waits on.
+    /// most `objects` objects, each charged as it is made; a reader waiting
+    /// past `report` is reported overdue, and waits on.
     pub fn create(capacity: u64, dirty: u64, objects: u64, report: Duration) -> Result<Self, SyscallError> {
         let report = u64::try_from(report.as_nanos()).unwrap_or(u64::MAX);
         let raw = syscall::pager_create(capacity, dirty, objects, report)?;
