@@ -151,7 +151,7 @@ So the sentence below is no longer the whole of it: this is a *semantic* event
 riding a release the caller cannot wait for, which is what
 `kernel/src/object/mod.rs`'s own header says must never happen — *"every
 userland-visible lifecycle event rides `handle_count`"* — and the same shape
-reaches soundd, whose cpal clients spend their lives parked in a signal-pipe
+reaches soundserver, whose cpal clients spend their lives parked in a signal-pipe
 read.
 
 ## Why it matters beyond a test
@@ -278,9 +278,9 @@ live process's `close` of its last handle, and `SYS_PROCESS_KILL` returning
 before its victim's teardown (`kill_while_blocked`'s writes), both still
 released on `ZERO_QUEUE`.
 
-## A fourth witness: a device claim, and init waiting it out
+## A fourth witness: a device claim, and the supervisor waiting it out
 
-A service swap (`toyos-swap`, `/system/bin/init`) kills a service, `wait`s for
+A service swap (`toyos-swap`, `/system/bin/supervisor`) kills a service, `wait`s for
 it, and mints the service's device claims again for the binary that replaces
 it. `Device` is a `deferred` row, so the `wait` returning is not the claim
 being back. Measured on `wt/toyos-swap`, `tests/swapcase` (virtio-net, two
@@ -294,8 +294,8 @@ init: netd: pci:1af4:1041 is already claimed
 ```
 
 The claim was asked for, and refused as held, before the release record — and
-the release ran on the other CPU. The replacement netd started with no NIC and
-exited, which init's probation caught and answered by restarting the old
+the release ran on the other CPU. The replacement netstack started with no NIC and
+exited, which the supervisor's probation caught and answered by restarting the old
 binary five seconds later, when the claim was long back.
 
 The supervisor's `CLAIM_RETURN`, `isa_row.rs`'s `claim_after` and

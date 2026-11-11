@@ -7,7 +7,7 @@ opened: 2026-10-02
 # Nothing reopens a diskserver session over a used page
 
 A nightly went red on `blockd_io: FAIL /AFTER.BIN after the restart: Io` (run
-36753172688, guest 7). blockd answered an open and only then made its ends of
+36753172688, guest 7). diskserver answered an open and only then made its ends of
 the session page. A client that reconnects sends the page its last server
 wrote, and one that looks before the new server's ends are made hears the dead
 session's completion. The server's half is a type now: `wire::Opened::over`

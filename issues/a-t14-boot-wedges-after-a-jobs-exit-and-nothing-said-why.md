@@ -33,9 +33,9 @@ No `PANIC:`, no `SEGFAULT`, no fault record, no `LOCK CONTENTION`, no
 flushed`. Every one of those tripwires would have fired inside 40 s and the
 machine was down for six minutes. The spawning CPU is `cpu6` in all three.
 
-## The evidence is bounded by logd, and that is the whole difficulty
+## The evidence is bounded by logkeeper, and that is the whole difficulty
 
-**The stick's file is what `logd` flushed, not what the kernel emitted.** So a hang anywhere from that spawn through the reset register write
+**The stick's file is what `logkeeper` flushed, not what the kernel emitted.** So a hang anywhere from that spawn through the reset register write
 leaves exactly this tail, with everything after it still in the record ring and
 never on the stick. The window is **[the reboot binary's spawn → the reset
 register write]**, and the candidates in it are all consistent with what the
@@ -50,7 +50,7 @@ file shows:
   program, through the same block path. A wedge in that path stays a candidate;
   the 2 MiB read that matched the healthy 46–100 ms gap does not.
 - `quiesce`'s `flush_disks` and `hand_back`, which landed at `88841f56` a few
-  minutes before the first hang; `hand_back` takes `XHCI` while `logd`'s own
+  minutes before the first hang; `hand_back` takes `XHCI` while `logkeeper`'s own
   write to the same stick may still be in flight.
 
 Nothing on the stick can separate them, and the black-box page was lost to the

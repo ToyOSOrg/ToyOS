@@ -9,14 +9,14 @@ opened: 2026-09-08
 Run 22's hung mkdir image left the stick holding `attempts` and `loader.log` and
 **no kernel log file at all** — where every earlier hung boot (run 19's three)
 left a 325-line file ending at a spawn. `loader.log` shows an ordinary handoff,
-so that kernel started; `logd` either never created its file or its first write
+so that kernel started; `logkeeper` either never created its file or its first write
 never completed. The stick after the power cut is
 `t14-run22/stick-after-cycle.log`, outside the tree.
 
 `tests/metal/src/lib.rs` reads that back as the absence of `Boot: complete`, which is the
 same verdict it gives a boot that ran and stopped late. They are not the same
 machine: a boot with no kernel log wedged before its
-first durable record, which places the failure before `logd`'s first `SYS_FSYNC`
+first durable record, which places the failure before `logkeeper`'s first `SYS_FSYNC`
 returned rather than anywhere in the job list — the single most useful thing the
 readback could say about the run-22 class of hang.
 

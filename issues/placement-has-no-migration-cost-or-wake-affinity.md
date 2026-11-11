@@ -33,8 +33,7 @@ lacks:
     - A run shorter than 8 makes a server with a client in each LLC bounce (simulator, 4 in one run).
     - A partner moved onto its waker's SMT sibling reads as slow as split.
     - Leaving threads must name no waker.
-  - **Measuring it:** where a split pipe pair lands decides `pipe.throughput`
-    (`issues/a-spawned-thread-starts-in-any-llc-not-its-spawners.md`). Several rows are bimodal per boot on this bench,
+  - **Measuring it:** where a split pipe pair lands decides `pipe.throughput`. Several rows are bimodal per boot on this bench,
     so an A/B there needs per-row mode accounting.
 - **An idle-state input**: see `issues/the-scheduler-and-the-clocks-never-talk.md`.
 - **Bounded scans.** Each choice walks the rings it needs whole. A steal

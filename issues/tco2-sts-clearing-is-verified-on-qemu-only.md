@@ -24,4 +24,4 @@ answered this register's clearing cannot be exercised on the machine at all.
 
 **Exit condition**: a T14 boot that resets itself on an armed timer, and the
 kernel's own `watchdog:` line off the log partition on the boot *after* it — so
-it needs a metal run whose boot reaches `logd`, which no run's has.
+it needs a metal run whose boot reaches `logkeeper`, which no run's has.

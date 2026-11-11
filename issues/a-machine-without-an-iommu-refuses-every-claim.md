@@ -64,8 +64,8 @@ Exit, in both arms of `iommu_virtio_platform` (`tests/common/iommu.rs`):
   `faults::refused_claim` reads, so a refusal for any other reason (no
   MSI-X, no BAR window) fails the arm. Deleting the identity check so that
   every claim goes through reds it. The non-image claimant is a
-  `tests/guest/rust-tests` binary, to be added, that init hands the NIC
-  function under `netcase`; netd is the in-image claimant.
+  `tests/guest/rust-tests` binary, to be added, that the supervisor hands the NIC
+  function under `netcase`; netstack is the in-image claimant.
 - The kernel says "no isolation on this machine" at boot on
   `Profile::HeadlessNoIommu` and never on `Profile::Headless`. Printing it on
   every profile reds the `Headless` arm; printing it on none reds the other.

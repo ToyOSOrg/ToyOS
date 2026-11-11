@@ -333,7 +333,7 @@ changes.
   bytes)`), and green alone three times on each tree, alternating;
   `swap_crash_rolls_back` in one of the six, and `swap_netd` in a run at
   `0f27b73d`, both on `the stream's redial was turned away 64 time(s)` with
-  init's words on netd ending at `accepted`; and in the further run
+  the supervisor's words on netstack ending at `accepted`; and in the further run
   `metal_job_reboot` reddened, `quiesce_wakes_on_the_last_park`, on a kernel
   panic at
   `arch/tlb.rs:171` (`issues/a-shootdown-panicked-on-a-cpu-the-host-starved.md`).
@@ -429,7 +429,7 @@ more refused launches left more live objects behind: [("PipeWrite", 0, 1),
 both times, in 4 s and 5 s — nowhere near the 192 s ceiling the paragraph above
 describes. `ALONE: GREEN` both times, and green again when re-run alone by hand
 (3 s, 2 s). So the name flakes for two different reasons and only one of them
-is the ceiling this section corrects; what a contended host does to `/system/bin/init`'s
+is the ceiling this section corrects; what a contended host does to `/system/bin/supervisor`'s
 handle accounting on a *refused* launch is not explained here, and nobody has a
 mechanism for it.
 

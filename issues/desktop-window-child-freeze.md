@@ -149,7 +149,7 @@ above is the measured one and not the whole of it.
 The test stopped at its **first** probe: the windowed child asked for a window,
 was answered `NotEndowed`, and printed `WINDOW-CHILD-REFUSED this program was
 given no compositor`. The client is a harness
-binary, no `[programs]` row can name one, and `/system/bin/init` endows a name the
+binary, no `[programs]` row can name one, and `/system/bin/supervisor` endows a name the
 manifest does not carry with nothing.
 
 **The endowment travels with the spawn, and that closed it.**

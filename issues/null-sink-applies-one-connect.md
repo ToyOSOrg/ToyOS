@@ -16,7 +16,7 @@ and its `IO_URINGS` are gone (`232f69bb6`), and
 Read off two T14 boots (`boot7-usba-doom.log`, `boot5-doom-wedge.log`). The
 shape is the same in both and it is narrow:
 
-- soundd finds no device and presents the null sink; `null sink idle` prints.
+- soundserver finds no device and presents the null sink; `null sink idle` prints.
 - The first client connects. The control thread prints `opening stream`, the
   **mix loop** prints `client 0 connected (id=0)` — so it woke, drained the
   command pipe (an event since #1108) and applied the command.
@@ -40,12 +40,12 @@ with a terminal opened afterwards.
 
 **Eliminated, each with a run behind it.** CPU count. The cpal client path
 (`null_sink_shipped_client`, adopted from `wt/toyos-hdaprobe` `fa47241`, two
-`/system/bin/tone` in series at 1.16 s and 1.15 s). soundd blocking on a client
+`/system/bin/tone` in series at 1.16 s and 1.15 s). soundserver blocking on a client
 (`signal_clients` used `write_nonblock`, and an event's signal never blocks;
 there is no blocking write in the mix loop). The accept path being held by a
 stuck client (accept and mix are separate threads and the control thread ran
 for 14 s afterwards). A CQ overflow (`Poller::wait`'s `dropped` assertion
-would have killed soundd, and soundd is alive). A panic anywhere in soundd, for
+would have killed soundserver, and soundserver is alive). A panic anywhere in soundserver, for
 the same reason.
 
 **Eliminated by reading, and recorded so it is not re-derived.** The mix loop
@@ -58,8 +58,8 @@ closed `io_uring::cancel_by_source` lost wake is *not* this: the mix loop's only
 registration is on the command pipe, now an event, which soundd owns both
 sides of and nobody closes.
 
-**What settles it is where soundd's mix thread is parked and on what
-deadline, and nothing in the tree reads the deadline off a running T14.** soundd's mix thread parked with a sane
+**What settles it is where soundserver's mix thread is parked and on what
+deadline, and nothing in the tree reads the deadline off a running T14.** soundserver's mix thread parked with a sane
 deadline says the timer did not fire; parked with an absurd one says the
 timeout was computed wrong; held by no CPU says nothing ever held it, which
 would move this into #142's family rather than audio's. The kernel's trace

@@ -15,7 +15,7 @@ Which wait left it set was never established.
 
 ## The sightings, all on paths since removed
 
-- Once in logd's `io_uring_enter` on a KVM shard (nightly dispatch
+- Once in logkeeper's `io_uring_enter` on a KVM shard (nightly dispatch
   `31900050723`, job `95049280131`, 2026-08-15), 4.7 s after the boot stick
   was pulled and the kernel's usb-storage gave the disk up. The same tree was
   green on the same name minutes earlier; one guest per machine, so host

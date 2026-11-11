@@ -14,7 +14,7 @@ userland spinlock around each stream's partial line, taken by every
 
 - **A thread that runs at a real-time priority spins on a preempted holder.**
   At smp 1 the holder cannot run until the spinner yields, and the spinner
-  never does. soundd's mix thread is clear of it (it writes a lane of its own,
+  never does. soundserver's mix thread is clear of it (it writes a lane of its own,
   `claim_lane`); any other real-time thread that prints is not.
 - **A panic raised inside `Held::with` re-enters it.** The panic's message is
   a write to stderr, which takes the stream's `Held` again on the same thread

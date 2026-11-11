@@ -13,7 +13,7 @@ build for the host with the stable toolchain, and stable's clippy lints them
 there. They are not clean:
 `cargo clippy --manifest-path userland/<crate>/Cargo.toml --target
 aarch64-apple-darwin --all-targets -- -D warnings` exits 101 with 8 findings
-in soundd and 10 in netd. The compositor stops on 1 finding in its dependency
+in soundserver and 10 in netstack. The compositor stops on 1 finding in its dependency
 `sdk/window`.
 
 **Exit:** a shape in `build/clippy.rs`, which `--clippy` and `--ci host` both

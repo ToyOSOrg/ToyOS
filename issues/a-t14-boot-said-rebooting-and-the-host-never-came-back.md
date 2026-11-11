@@ -21,7 +21,7 @@ So the kernel ran the whole quiesce and made its last word durable; what
 follows `Rebooting.` — `xhci::seal_shut`, the reset register — writes
 nothing the stick keeps. Whether the reset was
 written, whether firmware came back, and whether the host's Linux came up
-without its network (the host is reached over the same I219 this boot's netd
+without its network (the host is reached over the same I219 this boot's netstack
 left faulted) are not separable from anything on the stick. A 454-line copy of
 the same file that ends at 35.585 s was taken for the whole log; it is a
 truncated read, not the file.

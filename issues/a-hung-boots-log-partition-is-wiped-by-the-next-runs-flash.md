@@ -46,7 +46,7 @@ and run 56's transcript opens, at 21:29:39Z, with
 — a copy of `/dev/sda3` taken from outside the loop at 21:15Z, 35651584 bytes,
 which is the log partition's 69632 sectors (`log p3 at 151552+69632`, the
 loop's own line about the image) whole. Run 56's `flash` then overwrote it.
-The copy held two files, `loader.log` and `attempts`, and no file `logd`
+The copy held two files, `loader.log` and `attempts`, and no file `logkeeper`
 wrote. Its `loader.log` is the loader's first pass alone, 105 lines ending in
 `Loader log: the kernel handoff begins, so this file ends here`, and its line
 20 reads
@@ -56,7 +56,7 @@ wrote. Its `loader.log` is the loader's first pass alone, 105 lines ending in
 — the boot whose `WEDGED` record run 56's loader pass then printed
 (`issues/a-120000-ms-boot-deadline-fired-132859-ms-late-on-the-t14.md`).
 So for the one hung boot whose partition was captured, the flash would have
-destroyed nothing `logd` wrote, because `logd` wrote nothing: that boot's ring
+destroyed nothing `logkeeper` wrote, because `logkeeper` (then `logd`) wrote nothing: that boot's ring
 tail carries `exit: logd pid=4 code=-1 cpu=2143ms` at 3.471 s. What the other
 four partitions held is unknown, and the sequence above is why.
 

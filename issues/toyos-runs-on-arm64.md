@@ -369,7 +369,7 @@ Each stage names its exit; "measured" means a number from a run.
    generator is keyed from it and RNDR (`kernel/src/random.rs`); SMCCC TRNG
    is absent from QEMU 11.1.1's `virt` under HVF and TCG alike
    (`TRNG_VERSION` answers -1 through HVC). SMMUv3 is on `virt` (`-M virt,iommu=smmuv3`), decoded from
-   IORT. **Exit**: netd claims its NIC through an SMMUv3 domain; a
+   IORT. **Exit**: netstack claims its NIC through an SMMUv3 domain; a
    foreign-DMA test faults into a `DMA FAULT` record, not a crash.
    Stage 0's three DMA-ordering fixes (NVMe's phase before its body, xHCI
    `TrbRing::put`'s body before its cycle bit, and the event ring's cycle bit
@@ -398,7 +398,7 @@ Each stage names its exit; "measured" means a number from a run.
    a release does, has it write event 0 to `GITS_TRANSLATER`, and is red
    when that LPI is raised.
 
-7. **Userland boots.** `init`, `logd`, the compositor, netd, soundd and sshd,
+7. **Userland boots.** `supervisor`, `logkeeper`, the compositor, netstack, soundserver and sshserver,
    built for `aarch64-unknown-toyos`. Every program of `system.toml` builds
    for it; no windowed one has run there, `calc`, `snake` and `doom` among
    them, and no C program has until this stage runs one, `doom` the first:

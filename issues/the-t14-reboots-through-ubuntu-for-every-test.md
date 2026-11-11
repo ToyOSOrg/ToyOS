@@ -44,7 +44,7 @@ blocked on `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`.
 **Next: two sessions in place of three boots.** `testcases`, which every
 shipping-kernel member rides, `testcases-refused` and `testcases-readdir` share
 a config, a parameter line and the shipping kernel. The session image is `tests/images/testcases.toml`
-with the netd, sshd and streaming `logd` of `tests/lantalkcase`, which is
+with the netstack, sshserver and streaming `logkeeper` of `tests/lantalkcase`, which is
 deleted (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`),
 under a `boot-deadline=` derived as a metal boot's is: twice its list's bound
 (`toyos_tco::wedge_bound_ms`), which is `toyos_tco::JOB_BOUND_MS` and
@@ -55,8 +55,8 @@ A session's bound owes, beside its members, a lease as late as 19.1 s
 bound. Every judge reads the stick as today but `syscall_cost`, which
 reads the window. `loader_watchdog_arms`' control arm rides a session,
 `kernel_objects_refused` and `readdir_bound` remove what they made, and `audio_idle_suspend`
-waits for soundd's `inspect` to read `suspended`
-(`userland/soundd/src/inspect.rs:21-33`), not for a boot no client has reached.
+waits for soundserver's `inspect` to read `suspended`
+(`system/soundserver/src/inspect.rs`), not for a boot no client has reached.
 
 **Exit**, on the T14: every registration those boots carried gives the
 per-boot verdict at the same head, each window's judgement agrees, and the

@@ -11,17 +11,17 @@ works" that means a program written against `std::net`, `rustls` and an HTTP
 crate such as `ureq` builds for ToyOS unchanged and behaves as it does on any
 other OS. TLS and HTTP are not written here: the crates are used as published.
 What this track owns is the layer under them that only ToyOS can supply —
-netd, `toyos::net` and std's ToyOS networking in the `rust/` fork.
+netstack, `toyos::net` and std's ToyOS networking in the `rust/` fork.
 
 ## Stages
 
-1. **Names resolve.** netd's own resolver behind `std::net::ToSocketAddrs`.
+1. **Names resolve.** netstack's own resolver behind `std::net::ToSocketAddrs`.
    Landed (#511). Whether its wire decoding should be `hickory-proto` rather
    than `toyos-dns`'s own reader is
    `issues/toyos-dns-decodes-what-a-published-crate-decodes.md`.
 2. **TCP holds up.** Bounded connect, resets surfaced, half-close, large and
    lossy transfers byte-exact, timeouts honoured, a departed client freeing
-   everything in netd. **Exit**: each is a guest test against the host's own
+   everything in netstack. **Exit**: each is a guest test against the host's own
    TCP stack, with a hash over every byte moved.
 3. **TLS.** `rustls` with the `ring` provider (owner, 2026-10-02; `graviola`
    is an option for later) and the Mozilla root set as a pinned data file in

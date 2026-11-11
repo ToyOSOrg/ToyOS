@@ -107,7 +107,7 @@ and NVMe. Exit: as stage A.
 
 - host `fsync_failed_commit`: an fsync keeps refusing while the device refuses its flush.
 - host `file_mtime_undated`: a file written with no wall clock is stamped as undated.
-- host `blockd_serves_partitions`, `blockd_survives_its_death`, `blockd_serves_nothing`: blockd's
+- host `blockd_serves_partitions`, `blockd_survives_its_death`, `blockd_serves_nothing`: diskserver's
   protocol, its restart, and its refusals with no controller.
 - host `nvme_large_device`, `nvme_wide_sector`: a device past 2 TiB and an 8 KiB namespace.
 - host `fsd_two_data`: two DATA partitions are refused by name.
@@ -176,8 +176,8 @@ Host: `toyos-desktop`, the console's grid. Metal: the T14's desktop. Exit: as st
 Host: `toyos-net-tcp`, `toyos-dns`, `toyos-mdns`, `toyos-swap`, `toyos-inspect`,
 `toyos-logstream`. Metal: the cable. Exit: as stage C.
 
-- host `lan_mdns_answer`, `lan_no_lease`: netd answers for its name, and announces with no lease.
-- host `netd_connection_caps`, `netd_listener_forgery`, `netd_hostile_peer`: netd refuses forged
+- host `lan_mdns_answer`, `lan_no_lease`: netstack answers for its name, and announces with no lease.
+- host `netd_connection_caps`, `netd_listener_forgery`, `netd_hostile_peer`: netstack refuses forged
   flags, hostile peers and excess connections.
 - host `netd_slow_reader`, `netd_refused_pipes`, `netd_held_open`: a slow, refused or silent
   client costs only itself.
@@ -193,7 +193,7 @@ Host: `toyos-net-tcp`, `toyos-dns`, `toyos-mdns`, `toyos-swap`, `toyos-inspect`,
   (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`). Held on a host by the node's `a_link_that_returns_keeps_a_held_lease_and_announces_it` and
   `a_link_that_returns_with_no_lease_starts_discovery_over_at_once` (`system/netstack/node/tests/lease.rs`).
 - metal `sshd_exec`, the arms `lan_talk`'s one command did not reach, each a step of that row's
-  exchange red when its arm in `userland/sshd/src/main.rs` is reverted; the row and its exchange
+  exchange red when its arm in `system/sshserver/src/main.rs` is reverted; the row and its exchange
   are deleted, and this waits on `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`:
   - a program that is not there ends 127, the shell saying `<name>: not found`;
   - an unquotable line is the shell's to refuse, its `-c` line read as the shell reads any;
