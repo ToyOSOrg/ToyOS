@@ -13,9 +13,10 @@
 //! affected families only, so an AMD family none of its documents names is
 //! unaffected unless it is newer than the ones they do.
 //!
-//! One policy is ToyOS's own: a protection between programs that a vendor
-//! prescribes for every program is applied for a program that asks, and its
-//! verdict marks it as policy.
+//! One policy is ToyOS's own: a protection a vendor prescribes for every
+//! program is applied only for a program that asks. Where it stands between
+//! programs its verdict marks it as policy; where it protects the kernel from
+//! code on the core's other thread, the line names the exposure that leaves.
 //!
 //! A vulnerability Intel's advisory describes for Intel's processors has no
 //! AMD rule, and AMD's none for Intel. No other vendor's guidance is read.
@@ -54,7 +55,9 @@ pub struct Facts {
 pub const CPUID_7_0_EDX_ARCH_CAPABILITIES: u32 = 1 << 29;
 
 // CPUID.(07H,0) and (07H,2), "CPUID Enumeration and Architectural MSRs"
-// Table 1; RTM is SDM Vol. 2A's CPUID.(07H,0):EBX[11].
+// Table 1; HLE and RTM, Intel TSX, are CPUID.(07H,0):EBX[4] and [11] (SDM
+// Vol. 1, Chapter 21).
+const HLE: u32 = 1 << 4;
 const RTM: u32 = 1 << 11;
 const SRBDS_CTRL: u32 = 1 << 9;
 const MD_CLEAR: u32 = 1 << 10;
@@ -163,6 +166,10 @@ pub enum Mitigation {
     /// `VERW m16` before returning to user mode, where the CPU enumerates
     /// that it overwrites the affected buffers.
     Verw,
+    /// After reading a secret over MMIO, a read of non-secret data at the
+    /// same cache-line offset on the primary bus (Intel "Processor MMIO
+    /// Stale Data Vulnerabilities", "Mitigating PSDP Propagation").
+    ReadAfterSecret,
     /// `IA32_TSX_CTRL.RTM_DISABLE` (Intel "TSX Asynchronous Abort").
     RtmDisabled,
     /// The vulnerability needs a guest, and ToyOS runs none.
@@ -186,7 +193,7 @@ pub enum Mitigation {
 }
 
 impl Mitigation {
-    const ALL: [Self; 25] = [
+    const ALL: [Self; 26] = [
         Self::UserPointerClamp,
         Self::LfenceDispatchSerializing,
         Self::Smep,
@@ -204,6 +211,7 @@ impl Mitigation {
         Self::VirtSsbd,
         Self::TerminalEntriesNameNoSecret,
         Self::Verw,
+        Self::ReadAfterSecret,
         Self::RtmDisabled,
         Self::NoGuest,
         Self::SrbdsMicrocode,
@@ -233,6 +241,7 @@ impl Mitigation {
             Self::VirtSsbd => "VIRT_SPEC_CTRL SSBD for programs that ask",
             Self::TerminalEntriesNameNoSecret => "no faulting entry names a secret's frame",
             Self::Verw => "VERW on return to user mode",
+            Self::ReadAfterSecret => "a non-secret MMIO read after each secret one",
             Self::RtmDisabled => "RTM disabled",
             Self::NoGuest => "no guest runs",
             Self::SrbdsMicrocode => "microcode's RDRAND and RDSEED mitigation",
@@ -362,11 +371,26 @@ pub enum Verdict {
         /// Those of `needs` the vendor prescribes for every program and
         /// ToyOS applies only for a program that asks: its policy.
         by_policy: Mitigations,
+        /// What the kernel stays exposed to on the core's other thread,
+        /// which no mitigation in `needs` covers.
+        smt: SmtExposure,
         /// No vendor row names this CPU; see the module's rule.
         assumed: bool,
     },
     /// A vendor whose guidance is not read.
     Unknown,
+}
+
+/// Code on a core's other thread against the kernel, where the vendor asks
+/// `STIBP` of every program or SMT off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmtExposure {
+    None,
+    /// ToyOS's policy sets `STIBP` only for a program that asks, so while a
+    /// CPU runs one that has not, the kernel is exposed.
+    StibpOnRequest,
+    /// The CPU has no `STIBP`: exposed whenever SMT is on.
+    NoStibp,
 }
 
 /// [`decide`]'s verdict on each [`Vulnerability`].
@@ -442,7 +466,8 @@ mod msr {
 }
 
 /// One vulnerability's line: `not affected`, `mitigated: ` and what by, or
-/// `vulnerable: needs ` and what is missing.
+/// `vulnerable: needs ` and what is missing; then `; SMT vulnerable: ` where
+/// the kernel stays exposed to the core's other thread.
 #[derive(Clone, Copy, Debug)]
 pub struct Line {
     verdict: Verdict,
@@ -451,10 +476,10 @@ pub struct Line {
 
 impl fmt::Display for Line {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (needs, lacks, by_policy, assumed) = match self.verdict {
+        let (needs, lacks, by_policy, smt, assumed) = match self.verdict {
             Verdict::NotAffected => return f.write_str("not affected"),
             Verdict::Unknown => return f.write_str("unknown: no guidance is read for this CPU's vendor"),
-            Verdict::Affected { needs, lacks, by_policy, assumed } => (needs, lacks, by_policy, assumed),
+            Verdict::Affected { needs, lacks, by_policy, smt, assumed } => (needs, lacks, by_policy, smt, assumed),
         };
         let named = |set| Named { set, by_policy };
         let missing = needs.without(self.applied);
@@ -469,6 +494,11 @@ impl fmt::Display for Line {
             if !lacks.is_empty() {
                 write!(f, "; this CPU enumerates no {}", named(lacks))?;
             }
+        }
+        match smt {
+            SmtExposure::None => {}
+            SmtExposure::StibpOnRequest => f.write_str("; SMT vulnerable: STIBP only for programs that ask (policy)")?,
+            SmtExposure::NoStibp => f.write_str("; SMT vulnerable: this CPU has no STIBP")?,
         }
         if assumed {
             f.write_str(" (no vendor row names this CPU: assumed affected)")?;
@@ -506,10 +536,16 @@ struct Asks {
     needs: Mitigations,
     lacks: Mitigations,
     by_policy: Mitigations,
+    smt: SmtExposure,
 }
 
 impl Asks {
-    const NOTHING: Self = Self { needs: Mitigations::NONE, lacks: Mitigations::NONE, by_policy: Mitigations::NONE };
+    const NOTHING: Self = Self {
+        needs: Mitigations::NONE,
+        lacks: Mitigations::NONE,
+        by_policy: Mitigations::NONE,
+        smt: SmtExposure::None,
+    };
 
     const fn of(one: Mitigation, enumerated: bool) -> Self {
         Self::NOTHING.and(one, enumerated)
@@ -519,8 +555,20 @@ impl Asks {
         Self {
             needs: self.needs.with(one),
             lacks: if enumerated { self.lacks } else { self.lacks.with(one) },
-            by_policy: self.by_policy,
+            ..self
         }
+    }
+
+    /// The kernel against the core's other thread, where SMT is on: the
+    /// vendor asks `STIBP` of every program, and ToyOS's policy sets it only
+    /// for a program that asks.
+    const fn exposed_to_smt(self, smt: bool, stibp: bool) -> Self {
+        let smt = match (smt, stibp) {
+            (false, _) => SmtExposure::None,
+            (true, true) => SmtExposure::StibpOnRequest,
+            (true, false) => SmtExposure::NoStibp,
+        };
+        Self { smt, ..self }
     }
 
     /// `one`, which the vendor prescribes for every program, as ToyOS's
@@ -547,7 +595,7 @@ impl Asks {
     }
 
     const fn assumed(self, assumed: bool) -> Verdict {
-        Verdict::Affected { needs: self.needs, lacks: self.lacks, by_policy: self.by_policy, assumed }
+        Verdict::Affected { needs: self.needs, lacks: self.lacks, by_policy: self.by_policy, smt: self.smt, assumed }
     }
 }
 
@@ -716,22 +764,33 @@ fn intel(f: &Facts, of: Vulnerability) -> Verdict {
             }
         }
         // "Processor MMIO Stale Data Vulnerabilities": the three `_NO`
-        // bits, else the table. VERW's fill-buffer overwrite blocks the fill
-        // buffer stale data propagator, where `FB_CLEAR` enumerates it or MDS
-        // affects the part and it has `MD_CLEAR` and `L1D_FLUSH`. Against
-        // Shared Buffers Data Read and the sideband propagator, the microcode
-        // that has RDRAND, RDSEED and EGETKEY overwrite the uncore buffers
-        // "is also relevant", under the control `SRBDS_CTRL` enumerates. What
-        // the primary propagator alone leaves reaches only a fill buffer,
-        // which only MDS's sampling reads.
+        // bits, else the table. Each propagator the part has asks its own:
+        // - the fill buffer propagator, VERW's fill-buffer overwrite, where
+        //   `FB_CLEAR` enumerates it or MDS affects the part and it has
+        //   `MD_CLEAR` and `L1D_FLUSH`. The article's selection pseudocode
+        //   asks a microcode update of every affected part without
+        //   `FB_CLEAR`; its "Fill Buffer Clearing Operations" gives `FB_CLEAR`
+        //   only to "processors affected by FBSDP", which this follows.
+        // - Shared Buffers Data Read and the sideband propagator, the
+        //   microcode that has RDRAND, RDSEED and EGETKEY overwrite the
+        //   uncore buffers, which "is also relevant", under the control
+        //   `SRBDS_CTRL` enumerates.
+        // - the primary propagator, a read after each secret one, unless
+        //   nothing can read the fill buffers it fills: `PSDP_NO`'s paragraph
+        //   spares parts that "enumerate MDS_NO, FBSDP_NO, and either
+        //   enumerate TAA_NO or do not support Intel TSX".
         Vulnerability::MmioStaleData => {
             if f.cap(cap::SBDR_SSDP_NO) && f.cap(cap::FBSDP_NO) && f.cap(cap::PSDP_NO) {
                 return Verdict::NotAffected;
             }
             let implicit = f.intel_mds() != Verdict::NotAffected && edx & MD_CLEAR != 0 && edx & L1D_FLUSH != 0;
+            let tsx = f.cpuid_7_0_ebx & (HLE | RTM) != 0;
+            let fill_buffers_unread = f.cap(cap::MDS_NO) && f.cap(cap::FBSDP_NO) && (f.cap(cap::TAA_NO) || !tsx);
             let asks = Asks::NOTHING
                 .and_if(!f.cap(cap::FBSDP_NO), Mitigation::Verw, f.cap(cap::FB_CLEAR) || implicit)
-                .and_if(!f.cap(cap::SBDR_SSDP_NO), Mitigation::SrbdsMicrocode, edx & SRBDS_CTRL != 0);
+                .and_if(!f.cap(cap::SBDR_SSDP_NO), Mitigation::SrbdsMicrocode, edx & SRBDS_CTRL != 0)
+                .and_if(!f.cap(cap::PSDP_NO) && !fill_buffers_unread, Mitigation::ReadAfterSecret, true);
+            // Only the primary propagator, and nothing reads what it leaves.
             if asks.needs.is_empty() {
                 return Verdict::NotAffected;
             }
@@ -820,9 +879,11 @@ fn amd(f: &Facts, of: Vulnerability) -> Verdict {
         // "Technical Guidance for Mitigating Branch Type Confusion":
         // `BTC_NO`; Family 19h is unaffected without it; Families 15h and
         // 17h are its table's, and it makes no statement on an older one.
-        // Its §6.1.1 asks STIBP of every program: "If the code on the
-        // sibling thread cannot be trusted, software should set STIBP to 1
-        // or disable SMT to ensure SMT safety when using Jmp2Ret."
+        // Its §6.1.1 asks STIBP of every program for the kernel's sake: "If
+        // the code on the sibling thread cannot be trusted, software should
+        // set STIBP to 1 or disable SMT to ensure SMT safety when using
+        // Jmp2Ret." Its appendix's footnotes 5 and 6: "Bulldozer", "Zen" and
+        // "Zen+" have no STIBP.
         Vulnerability::Retbleed => {
             if ebx & amd::BTC_NO != 0 || id.family == 0x19 {
                 return Verdict::NotAffected;
@@ -830,7 +891,7 @@ fn amd(f: &Facts, of: Vulnerability) -> Verdict {
             Asks::of(Mitigation::Jmp2Ret, true)
                 // A guest cannot write its host's DE_CFG2.
                 .and_if(zen2(&id) && !f.hypervisor, Mitigation::SuppressBpOnNonBr, true)
-                .by_policy(f.smt, Mitigation::Stibp, stibp)
+                .exposed_to_smt(f.smt, stibp)
                 .assumed(!matches!(id.family, 0x15 | 0x17))
         }
         // "Technical Update Regarding Speculative Return Stack Overflow":
@@ -1040,12 +1101,18 @@ mod tests {
     }
 
     const fn lacking(all: &[Mitigation], lacks: &[Mitigation]) -> Verdict {
-        Verdict::Affected { needs: Mitigations::of(all), lacks: Mitigations::of(lacks), by_policy: Mitigations::NONE, assumed: false }
+        Verdict::Affected {
+            needs: Mitigations::of(all),
+            lacks: Mitigations::of(lacks),
+            by_policy: Mitigations::NONE,
+            smt: SmtExposure::None,
+            assumed: false,
+        }
     }
 
     fn assumed(verdict: Verdict) -> Verdict {
         match verdict {
-            Verdict::Affected { needs, lacks, by_policy, .. } => Verdict::Affected { needs, lacks, by_policy, assumed: true },
+            Verdict::Affected { needs, lacks, by_policy, smt, .. } => Verdict::Affected { needs, lacks, by_policy, smt, assumed: true },
             other => other,
         }
     }
@@ -1053,9 +1120,17 @@ mod tests {
     /// `verdict` with `by_policy` of its needs ToyOS's policy.
     fn policy(verdict: Verdict, by_policy: &[Mitigation]) -> Verdict {
         match verdict {
-            Verdict::Affected { needs, lacks, assumed, .. } => {
-                Verdict::Affected { needs, lacks, by_policy: Mitigations::of(by_policy), assumed }
+            Verdict::Affected { needs, lacks, smt, assumed, .. } => {
+                Verdict::Affected { needs, lacks, by_policy: Mitigations::of(by_policy), smt, assumed }
             }
+            other => other,
+        }
+    }
+
+    /// `verdict` leaving the kernel exposed to the core's other thread.
+    fn exposed(verdict: Verdict, smt: SmtExposure) -> Verdict {
+        match verdict {
+            Verdict::Affected { needs, lacks, by_policy, assumed, .. } => Verdict::Affected { needs, lacks, by_policy, smt, assumed },
             other => other,
         }
     }
@@ -1123,9 +1198,9 @@ mod tests {
         // A part with the fill buffer propagator asks VERW as well, which
         // only `FB_CLEAR` enumerates where MDS does not affect it.
         let propagating = Facts { arch_capabilities: INTEL_806C1.arch_capabilities & !cap::FBSDP_NO, ..INTEL_806C1 };
-        assert_eq!(decide(&propagating).verdict(MmioStaleData), lacking(&[Verw, SrbdsMicrocode], &[Verw]));
+        assert_eq!(decide(&propagating).verdict(MmioStaleData), lacking(&[Verw, SrbdsMicrocode, ReadAfterSecret], &[Verw]));
         let cleared = Facts { arch_capabilities: propagating.arch_capabilities | cap::FB_CLEAR, ..propagating };
-        assert_eq!(decide(&cleared).verdict(MmioStaleData), needs(&[Verw, SrbdsMicrocode]));
+        assert_eq!(decide(&cleared).verdict(MmioStaleData), needs(&[Verw, SrbdsMicrocode, ReadAfterSecret]));
         // Without enhanced IBRS its core's other thread can steer a
         // program's branches, which STIBP keeps from a program that asks.
         let legacy = Facts { arch_capabilities: INTEL_806C1.arch_capabilities & !cap::IBRS_ALL, ..INTEL_806C1 };
@@ -1151,13 +1226,17 @@ mod tests {
             &[
                 (SpectreV1, needs(&[UserPointerClamp, LfenceDispatchSerializing])),
                 (SpectreV2, needs(&[Retpoline, Smep, Ibpb, Stibp])),
-                (Retbleed, policy(needs(&[Jmp2Ret, SuppressBpOnNonBr, Stibp]), &[Stibp])),
+                (Retbleed, exposed(needs(&[Jmp2Ret, SuppressBpOnNonBr]), SmtExposure::StibpOnRequest)),
                 (SpecRstackOverflow, policy(needs(&[SafeRet, Ibpb]), &[Ibpb])),
                 (SpecStoreBypass, needs(&[Ssbd])),
             ],
         );
-        // Its guest cannot write DE_CFG2, and a core with one thread asks
-        // for no STIBP.
+        // "Zen+", Family 17h Model 08h, has no STIBP and no DE_CFG2[1]:
+        // only SMT off keeps Jmp2Ret from the core's other thread.
+        let zen_plus = Facts { signature: 0x0080_0f82, cpuid_8000_0008_ebx: amd::IBPB | amd::SSBD, ..AMD_17H_60H };
+        assert_eq!(decide(&zen_plus).verdict(Retbleed), exposed(needs(&[Jmp2Ret]), SmtExposure::NoStibp));
+        // Its guest cannot write DE_CFG2, and a core with one thread is
+        // exposed to no other.
         let guest = decide(&Facts { hypervisor: true, smt: false, ..AMD_17H_60H });
         assert_eq!(guest.verdict(Retbleed), needs(&[Jmp2Ret]));
         assert_eq!(
@@ -1184,7 +1263,7 @@ mod tests {
                 (L1tf, needs(&[TerminalEntriesNameNoSecret])),
                 (Mds, needs(&[Verw])),
                 (TsxAsyncAbort, needs(&[Verw])),
-                (MmioStaleData, needs(&[Verw, SrbdsMicrocode])),
+                (MmioStaleData, needs(&[Verw, SrbdsMicrocode, ReadAfterSecret])),
                 (Srbds, needs(&[SrbdsMicrocode])),
                 (GatherDataSampling, lacking(&[GdsMicrocode], &[GdsMicrocode])),
                 (ItlbMultihit, needs(&[NoGuest])),
@@ -1199,7 +1278,7 @@ mod tests {
         assert_eq!(decision.verdict(SpectreV2), lacking(&[IbrsOnEntry, Smep, Ibpb, Stibp], &[IbrsOnEntry, Ibpb, Stibp]));
         assert_eq!(decision.verdict(SpecStoreBypass), lacking(&[Ssbd], &[Ssbd]));
         assert_eq!(decision.verdict(Mds), lacking(&[Verw], &[Verw]));
-        assert_eq!(decision.verdict(MmioStaleData), lacking(&[Verw, SrbdsMicrocode], &[Verw, SrbdsMicrocode]));
+        assert_eq!(decision.verdict(MmioStaleData), lacking(&[Verw, SrbdsMicrocode, ReadAfterSecret], &[Verw, SrbdsMicrocode]));
         assert_eq!(decision.verdict(Srbds), lacking(&[SrbdsMicrocode], &[SrbdsMicrocode]));
     }
 
@@ -1255,6 +1334,25 @@ mod tests {
         assert_eq!(decide(&INTEL_806C1).verdict(RegFileDataSampling), Verdict::NotAffected);
     }
 
+    /// A part whose only MMIO propagator is the primary one: unaffected
+    /// where nothing reads the fill buffers it fills, as `PSDP_NO`'s
+    /// paragraph says, and asked the read after a secret one where TSX
+    /// without `TAA_NO` could.
+    #[test]
+    fn the_primary_propagator_alone_matters_where_fill_buffers_can_be_read() {
+        let mmio = |facts: &Facts| decide(facts).verdict(MmioStaleData);
+        let primary = Facts {
+            arch_capabilities: cap::RDCL_NO | cap::IBRS_ALL | cap::MDS_NO | cap::SBDR_SSDP_NO | cap::FBSDP_NO,
+            ..INTEL_806C1
+        };
+        assert_eq!(mmio(&primary), Verdict::NotAffected);
+        let tsx = Facts { cpuid_7_0_ebx: RTM, ..primary };
+        assert_eq!(mmio(&tsx), needs(&[ReadAfterSecret]));
+        assert_eq!(mmio(&Facts { cpuid_7_0_ebx: HLE, ..primary }), needs(&[ReadAfterSecret]));
+        assert_eq!(mmio(&Facts { arch_capabilities: tsx.arch_capabilities | cap::TAA_NO, ..tsx }), Verdict::NotAffected);
+        assert_eq!(mmio(&Facts { arch_capabilities: tsx.arch_capabilities | cap::PSDP_NO, ..tsx }), Verdict::NotAffected);
+    }
+
     /// TAA is decided by enumeration alone: RTM without `TAA_NO`. Where MDS
     /// does not affect the part, RTM goes if `TSX_CTRL` can turn it off.
     #[test]
@@ -1282,7 +1380,7 @@ mod tests {
                 (Meltdown, assumed(needs(&[KernelUnmappedInUserMode]))),
                 (L1tf, assumed(needs(&[TerminalEntriesNameNoSecret]))),
                 (Mds, assumed(needs(&[Verw]))),
-                (MmioStaleData, assumed(lacking(&[Verw, SrbdsMicrocode], &[SrbdsMicrocode]))),
+                (MmioStaleData, assumed(lacking(&[Verw, SrbdsMicrocode, ReadAfterSecret], &[SrbdsMicrocode]))),
                 (RegFileDataSampling, assumed(lacking(&[Verw], &[Verw]))),
                 (Srbds, assumed(lacking(&[SrbdsMicrocode], &[SrbdsMicrocode]))),
                 (GatherDataSampling, assumed(lacking(&[GdsMicrocode], &[GdsMicrocode]))),
@@ -1414,7 +1512,12 @@ mod tests {
         );
         assert_eq!(
             line(Retbleed, &[SuppressBpOnNonBr]),
-            "vulnerable: needs STIBP for programs that ask (policy), Jmp2Ret; has DE_CFG2[SuppressBPOnNonBr]"
+            "vulnerable: needs Jmp2Ret; has DE_CFG2[SuppressBPOnNonBr]; SMT vulnerable: STIBP only for programs that ask (policy)"
+        );
+        // What the policy leaves exposed stays named once all else is in force.
+        assert_eq!(
+            line(Retbleed, &[Jmp2Ret, SuppressBpOnNonBr]),
+            "mitigated: Jmp2Ret, DE_CFG2[SuppressBPOnNonBr]; SMT vulnerable: STIBP only for programs that ask (policy)"
         );
         assert_eq!(line(SpecRstackOverflow, &[]), "vulnerable: needs IBPB between programs that ask (policy), Safe-RET");
         // The vendor's own choice is not marked.

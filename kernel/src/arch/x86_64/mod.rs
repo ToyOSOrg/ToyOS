@@ -149,4 +149,5 @@ pub fn size(cpus: usize) {
     tlb::size(cpus);
     smi_cmd::size(cpus);
     clocksource::size(cpus);
+    mitigation::size(cpus);
 }

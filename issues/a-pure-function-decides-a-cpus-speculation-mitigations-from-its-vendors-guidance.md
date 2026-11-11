@@ -14,9 +14,10 @@ vulnerability: unaffected, or the mitigations Intel's or AMD's published
 guidance prescribes and which of them the CPU does not enumerate. Each rule
 cites its document. Intel's affected-processor table is in it as its
 machine-readable list gave it on 2026-09-04. Where a vendor prescribes a
-protection between programs for every program (AMD's STIBP for Jmp2Ret, and
-its IBPB for SRSO), the verdict applies ToyOS's policy, for a program that
-asks, and marks it. Each CPU reads its words at bring-up; once every CPU is
+protection for every program, the verdict follows ToyOS's policy, which sets
+it for a program that asks: SRSO's IBPB between programs is marked as
+policy, and Branch Type Confusion's STIBP for Jmp2Ret, which protects the
+kernel from the core's other thread, is named as an SMT exposure. Each CPU reads its words at bring-up; once every CPU is
 up the boot logs cpu0's words, the registers that show what is in force and a
 line per vulnerability, and a later CPU's where they differ
 (`arch/x86_64/mitigation.rs`). Each CPU sets AMD's LFENCE
@@ -29,12 +30,21 @@ what they decide to each vendor's row for that CPU. No other mitigation the deci
 names is applied: each is its own record's.
 
 **Left**:
+- Under the policy, an AMD CPU affected by Branch Type Confusion leaves the
+  kernel's returns exposed to the core's other thread while it runs a
+  program that has not asked, and always where it has no STIBP (Family 15h,
+  Zen, Zen+). The lines say SMT vulnerable; the Trust page states it.
 - Shared Buffers Data Read lets a program with MMIO access read the stale
-  data other cores' MMIO left in the shared uncore buffers. Intel's
-  "Processor MMIO Stale Data Vulnerabilities" answers it by keeping MMIO
-  from untrusted software, and ToyOS's drivers hold MMIO; the decision names
-  only the microcode's overwrite of what RDRAND, RDSEED and EGETKEY leave.
-  The T14 is affected.
+  data other cores' MMIO left in the shared uncore buffers, and the decision
+  names only the microcode's overwrite of what RDRAND, RDSEED and EGETKEY
+  leave there. Intel's "Processor MMIO Stale Data Vulnerabilities" spares
+  parts that enumerate `FBSDP_NO`, `MDS_NO` and `TAA_NO` its "Preventing
+  Untrusted Software from Using Processor MMIO Stale Data Vulnerabilities to
+  Extract Data", since nothing can read their fill buffers. The T14
+  enumerates no `TAA_NO`, and this read takes the uncore's transaction
+  buffers rather than fill buffers, so the item stays: Intel's remaining
+  answer is to keep MMIO from untrusted software, and ToyOS's drivers hold
+  MMIO.
 - An AMD guest whose CPUID does not say LFENCE always serializes cannot set
   the bit and reports it lacking; the kernel's ordered TSC read is then not
   dispatch-ordered there. No proving machine is a guest.

@@ -57,7 +57,8 @@ every CPU.
   and needs: what the CPU enumerates where the guidance lets enumeration
   decide, the vendor's list of affected processors where it does not, and a
   CPU that list omits is treated as affected and reported as assumed so. How
-  far protection between programs goes is ToyOS's policy (Trust).
+  far protection between programs, and the kernel's own against a core's
+  other thread, goes is ToyOS's policy (Trust).
 - Every mitigation the kernel applies is one that decision names for the CPU
   it runs on. None is chosen where it is used.
 - Each boot states, for each CPU and vulnerability, whether the CPU is

@@ -554,7 +554,7 @@ mod checks {
         "spectre_v1: mitigated: user pointers clamped without a branch, LFENCE dispatch-serializing",
         "spectre_v2: vulnerable: needs retpoline, IBPB between programs that ask, STIBP for programs that ask; has SMEP",
         "branch_history_injection: not affected",
-        "retbleed: vulnerable: needs STIBP for programs that ask (policy), Jmp2Ret; has DE_CFG2[SuppressBPOnNonBr]",
+        "retbleed: vulnerable: needs Jmp2Ret; has DE_CFG2[SuppressBPOnNonBr]; SMT vulnerable: STIBP only for programs that ask (policy)",
         "spec_rstack_overflow: vulnerable: needs IBPB between programs that ask (policy), Safe-RET",
         "indirect_target_selection: not affected",
         "spec_store_bypass: vulnerable: needs SSBD for programs that ask",
@@ -622,7 +622,7 @@ mod checks {
         mitigations_on_metal(&(boot.clone() + &firmware_set)).map_err(|e| format!("a later CPU's own lines were refused: {e}"))?;
         // A register the kernel only reads, read clear, is another boot's lines and as good.
         let mut unset = AMD_BENCH_LINES;
-        unset[3] = "retbleed: vulnerable: needs STIBP for programs that ask (policy), Jmp2Ret, DE_CFG2[SuppressBPOnNonBr]";
+        unset[3] = "retbleed: vulnerable: needs Jmp2Ret, DE_CFG2[SuppressBPOnNonBr]; SMT vulnerable: STIBP only for programs that ask (policy)";
         mitigations_on_metal(&lines(0, &words("mcu_opt_ctrl=- de_cfg2=0x0 c001_1029=0x2 c001_1029_found=0x0"), &unset))
             .map_err(|e| format!("DE_CFG2 read clear was refused: {e}"))?;
 
