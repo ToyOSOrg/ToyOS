@@ -38,8 +38,8 @@
   idle-state selection account for wake cost and known upcoming work.
 - Ordinary load never starves audio.
 - An idle disk rests in the low-power states its controller has. The
-  controller moves itself, by a table its driver builds from what the drive
-  states of its own states, and only into a state whose stated entry and
+  controller moves itself, by a table its driver builds from the power
+  states the drive describes, and only into a state whose stated entry and
   exit latencies together are within a bound. There is no table of drives.
 - The kernel declares the CPU's performance and power bounds as part of its
   one CPU declaration and reports them back; the CPU chooses frequencies within

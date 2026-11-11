@@ -261,7 +261,6 @@ mod tests {
         assert_eq!(plan(&s), [two, two, None]);
     }
 
-    /// The mutation the track names: a state past the bound is never a target.
     #[test]
     fn a_state_whose_round_trip_exceeds_the_bound_is_never_a_target() {
         let mut d = client();
@@ -316,9 +315,9 @@ mod tests {
 
     /// The T14's SK hynix BC501, as the driver logs its descriptors: every
     /// state goes straight to PS4 after 100 ms, past PS3, both within the
-    /// first tier. The table Linux sets on it too.
+    /// first tier.
     #[test]
-    fn the_t14s_drive_gets_the_table_linux_sets() {
+    fn the_t14s_drive_sends_every_state_to_ps4_after_100_ms() {
         let d = [
             descriptor(350, false, 5, 5, 0),
             descriptor(240, false, 30, 30, 0),
@@ -333,9 +332,9 @@ mod tests {
 
     /// The AMD bench's drive, as the driver logs its descriptors: PS3 a
     /// 1.41 ms round trip and PS4 10 ms, both within the first tier, so every
-    /// state goes to PS4 after 100 ms. The table Linux sets on it too.
+    /// state goes to PS4 after 100 ms.
     #[test]
-    fn the_amd_benchs_drive_gets_the_table_linux_sets() {
+    fn the_amd_benchs_drive_sends_every_state_to_ps4_after_100_ms() {
         let d = [
             descriptor(800, false, 0, 0, 0),
             descriptor(630, false, 0, 0, 0),
