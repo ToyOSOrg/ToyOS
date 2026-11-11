@@ -13,7 +13,9 @@
 //! **A quit's interrupt, the same way**: a child of this program handles
 //! `SIGINT` without `SA_RESTART` and reads its empty standard input, and the
 //! parent sends the interrupt once the roster shows that child's main thread
-//! parked, which after its `armed` is the read. The read answers `EINTR`.
+//! parked, which after its `armed` is the read. The read answers `EINTR`. The
+//! parent writes the child a byte once its handler has said it ran, so a read
+//! the interrupt did not end answers that byte and fails by name.
 
 use std::fs::File;
 use std::io::Read;
@@ -109,10 +111,13 @@ static TAKEN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0
 
 extern "C" fn on_interrupt(_: i32) {
     TAKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: a byte of a constant, to this process's standard output.
+    unsafe { write(1, b"h".as_ptr(), 1) };
 }
 
 /// The child: `SIGINT` handled without `SA_RESTART`, [`ARMED`] said, then a
-/// read of its empty standard input, which the interrupt ends with `EINTR`.
+/// read of its standard input, empty until its handler has said it ran,
+/// which the interrupt ends with `EINTR`.
 fn interrupted() {
     let action = SigAction { handler: on_interrupt as extern "C" fn(i32) as usize, flags: 0, restorer: 0, mask: 0 };
     // SAFETY: a `struct sigaction` as `<signal.h>` lays it out.
@@ -125,12 +130,16 @@ fn interrupted() {
     // SAFETY: the calling thread's own `errno`.
     let errno = unsafe { *__errno_location() };
     let taken = TAKEN.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(got == -1 && errno == EINTR && taken == 1, "the read answered {got} (errno {errno}), the handler run {taken} times");
+    assert!(
+        got == -1 && errno == EINTR && taken == 1,
+        "libc_read_restarts: an interrupt did not end the child's read with EINTR: it answered {got} (errno {errno}), the handler run {taken} times"
+    );
 }
 
 /// The interrupted child, sent `SIGINT` once it has said [`ARMED`] and the
 /// roster shows its main thread parked: it ends 0, its read having answered
-/// `EINTR`.
+/// `EINTR`. A byte follows the handler's word, which only a read still
+/// parked takes.
 fn read_across_an_interrupt() {
     // The default again: the child's end interrupts no call of this parent's.
     let default = SigAction { handler: 0, flags: 0, restorer: 0, mask: 0 };
@@ -154,10 +163,17 @@ fn read_across_an_interrupt() {
     roster::await_true(|| roster::threads_of(cap(), child as u32).iter().any(|&(is_thread, state)| !is_thread && state == roster::BLOCKED));
     // SAFETY: a child of this process, by the pid its spawn answered.
     assert_eq!(unsafe { kill(child, SIGINT) }, 0, "kill(SIGINT)");
+    let mut ran = [0u8];
+    // SAFETY: a one-byte buffer of this frame.
+    let got = unsafe { read(said[0], ran.as_mut_ptr(), 1) };
+    assert!(got == 1 && ran == *b"h", "the child's SIGINT handler never said it ran (read answered {got})");
+    // Refused once the child has ended, which an interrupted read lets it.
+    // SAFETY: the child's stdin's write end, open until this test closes it.
+    unsafe { write(stdin[1], b"b".as_ptr(), 1) };
     let mut status = 0;
     // SAFETY: a status word of this frame.
     assert_eq!(unsafe { waitpid(child, &mut status, 0) }, child, "waitpid");
-    assert_eq!(status, 0, "the interrupted child's status {status:#x}");
+    assert_eq!(status, 0, "the interrupted child ended {status:#x}: its read was not ended by the interrupt");
     for fd in [stdin[1], said[0]] {
         // SAFETY: this program's descriptors, not used again.
         unsafe { close(fd) };
