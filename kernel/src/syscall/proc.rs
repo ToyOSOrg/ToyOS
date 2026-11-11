@@ -140,6 +140,7 @@ pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
         Ok(object) => object,
         Err(e) => return e.refuse(),
     };
+    crate::trace::mark(400);
     if flags & WNOHANG == 0 {
         let parkable = crate::scheduler::Parkable::at_entry();
         if watch::wait_until(
@@ -155,6 +156,7 @@ pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
             return cancelled();
         }
     }
+    crate::trace::mark(401);
     match object.end() {
         Some(end) => end.to_word(),
         // Reachable from userland (WNOHANG raced the exit), so this refuses rather than asserts.
