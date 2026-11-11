@@ -7,7 +7,8 @@ opened: 2026-09-29
 # Kernel forward copies and fills are one `rep movsb` or `rep stosb` on every CPU
 
 The kernel's `memcpy` is its own (`kernel/src/arch/x86_64/copy.rs`): one
-`rep movsb` on every CPU, but for a copy it sends highest first. It replaced
+`rep movsb` on every CPU, but for a copy it sends highest first, and its
+user copies go by the same rule (`arch::x86_64::uaccess`). It replaced
 `compiler_builtins`' `rep movsb; rep movsq; rep movsb`, so every forward copy
 changed with it, on Zen 2 without ERMS too: a kernel tmpfs read of 4 or 8 KiB
 took 0.92-0.96 times as long on both benches, at every distance outside the

@@ -79,11 +79,6 @@ impl From<Faulted> for SyscallError {
     }
 }
 
-/// `Ok` where a copy left no byte behind.
-fn whole(left: usize) -> Result<(), Faulted> {
-    if left == 0 { Ok(()) } else { Err(Faulted) }
-}
-
 /// The backtrace names the copy's caller.
 #[cold]
 #[inline(never)]
@@ -192,7 +187,7 @@ impl View {
         let user = self.at("UserBytes::read", off, len);
         // SAFETY: the caller's `dst`; `at` keeps the user range in the half,
         // and `gate` holds no lock across the copy.
-        whole(unsafe { uaccess::copy_from_user(dst, user, len) })
+        unsafe { uaccess::copy_from_user(dst, user, len) }
     }
 
     /// # Safety
@@ -200,13 +195,13 @@ impl View {
     unsafe fn write_raw(&self, off: usize, src: *const u8, len: usize) -> Result<(), Faulted> {
         let user = self.at("UserBytesMut::write", off, len);
         // SAFETY: as `read_raw`.
-        whole(unsafe { uaccess::copy_to_user(user, src, len) })
+        unsafe { uaccess::copy_to_user(user, src, len) }
     }
 
     fn fill_zero(&self, off: usize, len: usize) -> Result<(), Faulted> {
         let user = self.at("UserBytesMut::fill_zero", off, len);
         // SAFETY: as `read_raw`, with no kernel memory touched.
-        whole(unsafe { uaccess::clear_user(user, len) })
+        unsafe { uaccess::clear_user(user, len) }
     }
 }
 
