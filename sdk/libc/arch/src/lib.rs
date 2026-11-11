@@ -235,7 +235,7 @@ mod tests {
                         if backward {
                             arch::copy_backward(d, s, n);
                         } else {
-                            arch::copy_forward(d, s, n);
+                            assert_eq!(arch::copy_forward(d, s, n), d, "a forward copy answers its destination");
                         }
                     }
                     let mut want = vec![0xAAu8; n + OFFSETS];
