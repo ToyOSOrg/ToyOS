@@ -85,8 +85,9 @@ pub struct DirEntry {
 }
 
 /// How far apart two inode numbers may be for the second to be read by
-/// stepping over the keys between them: far fewer keys than a leaf holds, so
-/// the steps cost less than finding the second from the root.
+/// stepping over the keys between them: far fewer keys than a leaf holds,
+/// which should cost less than finding the second from the root. Reasoned,
+/// not measured.
 const NEAR: u64 = 32;
 
 /// Entries [`Volume::names`] asks of one directory at a time.

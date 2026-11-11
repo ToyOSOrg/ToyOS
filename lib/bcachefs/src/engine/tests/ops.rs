@@ -297,8 +297,8 @@ fn a_rename_across_many_leaves_dirties_no_more_nodes_than_its_grant() {
     assert!(names_of(&v, b).contains(&name) && !names_of(&v, a).contains(&name));
 }
 
-/// A source that counts the walks asked of it: each is one search of a
-/// btree from its root.
+/// A source that counts the walks asked of it, each of which starts from a
+/// btree's root.
 struct Walks<'a, S: read::Source> {
     of: &'a S,
     walks: std::cell::Cell<usize>,
