@@ -6609,8 +6609,13 @@ const SYSRET_SS_UNARMED: &str = "sysret-ss: probe could not arm";
 const SYSRET_SS_RELOADED: &str = "sysret-ss: reloaded";
 /// The probe, when SS stayed null across a switch.
 const SYSRET_SS_NOT_RELOADED: &str = "sysret-ss: NOT reloaded";
+/// The probe, on a part whose `SYSRET` writes SS whole.
+const SYSRET_SS_NOT_NEEDED: &str = "sysret-ss: not needed";
 
-/// The context switch reloads SS from null before a `sysretq` can see it.
+/// The context switch reloads SS from null before a `sysretq` can see it on an
+/// AMD part, whose `SYSRET` keeps SS's hidden descriptor, and leaves it alone on
+/// an Intel one, whose `SYSRET` writes it whole. Which the boot ran on is its
+/// PCI host bridge's vendor, not the kernel's own reading of CPUID.
 fn sysret_ss(log: &str) -> Result<(), String> {
         if log.contains(SYSRET_SS_UNARMED) {
             return Err(format!("the SS-reload probe could not arm, so it measured nothing:\n{log}"));
@@ -6621,12 +6626,20 @@ fn sysret_ss(log: &str) -> Result<(), String> {
                  unusable one:\n{log}"
             ));
         }
-        if !log.contains(SYSRET_SS_RELOADED) {
-            return Err(format!(
-                "the SS-reload probe never reported — the first syscall may not have run it:\n{log}"
-            ));
+        let host = log
+            .lines()
+            .find_map(|line| line.split_once("PCI 00:00.0 [0600] vendor=").map(|(_, rest)| rest.get(..4)))
+            .flatten()
+            .ok_or_else(|| format!("the boot named no host bridge at 00:00.0:\n{log}"))?;
+        let (wanted, what) = match host {
+            "1022" => (SYSRET_SS_RELOADED, "reloads SS from null before a sysretq can see it"),
+            "8086" => (SYSRET_SS_NOT_NEEDED, "leaves SS alone, which an Intel SYSRET writes whole"),
+            other => return Err(format!("the host bridge's vendor {other} is neither AMD's nor Intel's")),
+        };
+        if !log.contains(wanted) {
+            return Err(format!("on host bridge vendor {host} the probe owed \"{wanted}\" and never said it:\n{log}"));
         }
-        eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
+        eprintln!("  [sysret-ss] the switch {what}");
         Ok(())
 }
 

@@ -13,3 +13,12 @@ pub const STATE_BYTES: usize = 32 * 16 + 16;
 pub fn area_bytes() -> usize {
     0
 }
+
+/// What a context keeps of where its state was left: nothing, since it
+/// travels in the switch frame.
+#[derive(Clone, Copy)]
+pub struct Left;
+
+impl Left {
+    pub const NOWHERE: Self = Self;
+}

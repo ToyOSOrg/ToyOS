@@ -67,13 +67,15 @@ pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     microcode::load(0);
     mitigation::record_boot_cpu(mitigation::apply());
 
-    let rule = match cpu::vendor() {
+    let vendor = cpu::vendor();
+    let rule = match vendor {
         _ if crate::actuator::copies_go_down() => copy::Rule { window: 4096 },
         kernel::cpu::Vendor::Amd => copy::Rule::AMD,
         kernel::cpu::Vendor::Intel | kernel::cpu::Vendor::Other(_) => copy::Rule::NEVER,
     };
     copy::set_rule(rule);
     log!("memcpy: highest first {rule:?}");
+    super::hw::declare_vendor(vendor);
 
     // The read-back `pat::init` owes, on a boot that now has three channels to
     // carry a refusal.

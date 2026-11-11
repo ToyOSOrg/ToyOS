@@ -11,24 +11,29 @@ that space (`kernel/src/arch/x86_64/tlb.rs`, `user_change`, over
 `kernel/src/tlb_tags.rs`). A CPU that switched away keeps the space's entries
 under PCID, since every CR3 load sets NOFLUSH, so it is not reached; it
 flushes every user translation before it next enters a space that changed
-since its own last such flush. A change no other CPU runs sends no IPI.
-Each CPU reached is asked the change's range, from the initiator's own
-mailbox, and answers that initiator alone: it flushes the range by page, up
-to 64 pages, or every user translation when the range is longer or it was
-asked by more than one initiator at once. So a CPU no change asks owes no
-flush, and the initiator owes itself none: it sends its IPIs first and then
-flushes its own entries by page while they fly. Only a flush of every user
-translation counts as the CPU's last such flush. AArch64 broadcasts its
-invalidations in hardware and needs none of this. Every other shootdown, a
-kernel-half change and a PCID reclaim among them, still reaches every CPU,
-which answers with a flush of every user translation.
+since its own last such flush. A CPU whose idle context kept the space's root
+still runs it, but a change that frees no table passes it by and it flushes
+when a thread of the space resumes there; one that frees a table, or the
+space's end, reaches it, and its answer loads the kernel's root. A change no
+other CPU runs sends no IPI. Each CPU reached is asked the change's range,
+from the initiator's own mailbox, and answers that initiator alone: it
+flushes the range by page, up to 64 pages, or every user translation when
+the range is longer or it was asked by more than one initiator at once. So a
+CPU no change asks owes no flush, and the initiator owes itself none: it
+sends its IPIs first and then flushes its own entries by page while they fly.
+Only a flush of every user translation counts as the CPU's last such flush.
+AArch64 broadcasts its invalidations in hardware and needs none of this.
+Every other shootdown, a kernel-half change and a PCID reclaim among them,
+still reaches every CPU, which answers with a flush of every user
+translation.
 
 What holds it: `kernel/loom/tests/tlb_tags.rs` checks the pairing a CPU
-entering a space and a change reading who runs it rest on, and reds with the
-pairing's fence removed; `kernel/loom/tests/tlb_shootdown.rs` checks that an
-answered ask flushed its range after the write, alone or with a second
-initiator's, and that a mailbox reused waits for its new answer, each red
-under its mutation; `tlb_shootdown_waits` shows on the test kernel that
+entering a space, or resuming one its idle context kept, and a change reading
+who runs it rest on, and reds with either pairing's fence removed;
+`kernel/loom/tests/tlb_shootdown.rs` checks that an answered ask flushed its
+range after the write, alone or with a second initiator's, and that a mailbox
+reused waits for its new answer, each red under its mutation;
+`tlb_shootdown_waits` shows on the test kernel that
 a change waits for a CPU running a thread of the space and for none when no
 other CPU runs one, each half red under its mutation.
 

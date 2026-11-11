@@ -192,6 +192,13 @@ impl Space {
         &self.usage
     }
 
+    /// No thread will load this space's root again — its last thread out is
+    /// past `process::leave_as`: every CPU still holding it has left it before
+    /// this returns, so its drop waits on none.
+    pub fn retire(&self) {
+        self.lock().tables.retire();
+    }
+
     /// Take `[at, at + len)` away if it still maps `object` and nothing else.
     pub fn release_object(&self, at: UserAddr, len: u64, object: &SharedMemObject) {
         self.lock().release_object(at, len, object);
@@ -915,8 +922,9 @@ fn copy_in(source: &dyn CopySource, offset: u64, len: u64, phys: u64) {
 /// Every frame the space owns goes back; its tables go with `UserTables`.
 ///
 /// Not through [`AddressSpace::clear`]: no thread runs in a space that drops,
-/// and a private frame is mapped in no other, so no CPU caches its leaves, no
-/// futex waiter is keyed on its frames and no copy pins them.
+/// no CPU holds its root ([`Space::retire`]), and a private frame is mapped in
+/// no other, so no CPU caches its leaves, no futex waiter is keyed on its
+/// frames and no copy pins them.
 impl Drop for AddressSpace {
     fn drop(&mut self) {
         let committed = self.committed_pages(FLOOR, TOP);

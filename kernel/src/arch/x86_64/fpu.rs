@@ -4,11 +4,13 @@
 //! It stays in the registers for as long as its thread runs, across every
 //! entry from Ring 3, because the kernel executes no instruction that touches
 //! it but [`save`], [`restore`] and [`load_initial`] (`build/fpgate.rs`
-//! refuses an image that does). A switch [`save`]s the outgoing thread's
+//! refuses an image that does). Every switch away from a thread saves its
 //! registers by the machine's [`FORM`] into the [`area_bytes`] above its
-//! kernel stack's top, the same switch [`restore`]s them when it returns into
-//! that thread, and a thread that has never run starts from the declared state
-//! [`load_initial`] puts. The area is compacted under `XSAVES` and `XSAVEC`,
+//! kernel stack's top ([`leave`]); the switch that returns into the thread
+//! restores them only where the CPU's registers no longer hold them
+//! ([`resume`]), and a thread that has never run starts from the declared state
+//! [`load_initial`] puts. Nothing is deferred to a trap: whatever runs in Ring 3
+//! holds only its own state. The area is compacted under `XSAVES` and `XSAVEC`,
 //! standard under `XSAVEOPT`; its header starts zero, as a fresh kernel stack
 //! is zeroed, and is written by nothing but the saves after it. A kernel
 //! thread never enters Ring 3, so it has no area and its switches neither save
@@ -18,8 +20,10 @@
 //! component unmodified since the last `XRSTOR` or `XRSTORS` a CPU ran from the
 //! same address (SDM Vol. 1 §13.6), so nothing may write a thread's area from
 //! its restore on a CPU to its next save there. Its saves are its area's only
-//! writer: no frame reaches above the stack's top, and every way a thread
-//! starts or resumes on a CPU restores before anything that can switch.
+//! writer: no frame reaches above the stack's top, a thread starts on a CPU
+//! from [`load_initial`] before anything that can switch, and it resumes on
+//! one without a restore only where its last save was on that CPU, so no save
+//! elsewhere falls between.
 //!
 //! **Ordering.** A save's stores are ordinary write-back stores, which SDM
 //! Vol. 3A §11.2.2 orders before every later store of the same CPU; its
@@ -195,7 +199,7 @@ pub fn area_bytes() -> usize {
 /// `area` is the area above the kernel stack top of the thread running on
 /// this CPU, which is switching away from it.
 #[inline(never)]
-pub unsafe fn save(area: u64) {
+unsafe fn save(area: u64) {
     // SAFETY: the caller's area is `AREA_BYTES` long and 64-byte aligned (a
     // stack top is a page boundary), its header zero or as the last save by
     // this form left it; `XSAVES` runs only under the form that found it.
@@ -226,6 +230,41 @@ pub unsafe fn save(area: u64) {
     }
 }
 
+/// The CPU whose registers a thread's last switch-out left holding its
+/// state, which is still its own there until another state is loaded.
+#[derive(Clone, Copy)]
+pub struct Left(u32);
+
+impl Left {
+    /// A thread that has never been switched out.
+    pub const NOWHERE: Self = Self(u32::MAX);
+}
+
+/// Saves the outgoing thread's state into its `area`, and records that this
+/// CPU's registers still hold it, for the thread whose context is `ctx`.
+/// # Safety
+/// [`save`]'s.
+pub unsafe fn leave(area: u64, ctx: u64, left: &mut Left) {
+    // SAFETY: the caller's.
+    unsafe { save(area) };
+    super::percpu::set_fpu_holder(ctx);
+    *left = Left(super::percpu::cpu_id());
+}
+
+/// The thread whose context is `ctx` resumes here: its state is loaded from
+/// its `area` unless this CPU's registers still hold it, which they do only
+/// where it last left them here and nothing has loaded another since.
+/// # Safety
+/// [`restore`]'s, with `left` the record [`leave`] wrote for this thread.
+pub unsafe fn resume(area: u64, ctx: u64, left: Left) {
+    if super::percpu::fpu_holder() == ctx && left.0 == super::percpu::cpu_id() {
+        return;
+    }
+    // SAFETY: the caller's.
+    unsafe { restore(area) };
+    super::percpu::set_fpu_holder(ctx);
+}
+
 /// Loads this CPU's user machine state from the area at `area`.
 ///
 /// Not inlined, for [`save`]'s reason.
@@ -233,7 +272,7 @@ pub unsafe fn save(area: u64) {
 /// `area` is the area [`save`] last wrote for the thread now resuming on this
 /// CPU, the one whose switch called that save.
 #[inline(never)]
-pub unsafe fn restore(area: u64) {
+unsafe fn restore(area: u64) {
     // SAFETY: the area holds what this form's save wrote, so its header names
     // only components `XCR0` enables; `XRSTORS` runs only under `XSAVES`.
     unsafe {
@@ -302,6 +341,8 @@ pub fn init(cpu_id: u32) {
 /// the thread's first save follows a restore on its CPU, and from an image
 /// no save writes.
 pub(crate) extern "C" fn load_initial() {
+    // No thread's saved state is in the registers from here.
+    super::percpu::set_fpu_holder(0);
     // SAFETY: both images are 64-byte aligned and name only x87 and SSE, both
     // in every declared `XCR0`, with an `MXCSR` that sets no reserved bit; the
     // standard one is as long as any standard area this machine's `XCR0`

@@ -374,6 +374,7 @@ fn idle_ctx() -> KernelCtx {
         // Never read: the idle loop is entered by jump, not switch, and
         // a switch away from idle always writes the real depth first.
         preempt: 0,
+        fpu: crate::arch::fpu::Left::NOWHERE,
     }
 }
 
@@ -418,6 +419,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
         runs: Runs::User(new.id),
         // The one level `trampoline_entry` discharges before the first `iretq`.
         preempt: 1,
+        fpu: crate::arch::fpu::Left::NOWHERE,
     };
     // One clock read for the placement and the build: `HW.now` is a divide.
     let now = HW.now();
