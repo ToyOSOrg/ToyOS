@@ -2,19 +2,23 @@
 status: open
 kind: defect
 opened: 2026-11-11
+severity: [security]
 ---
 
 # `/tmp` holds one file per megabyte of RAM, whatever the files hold
 
 The file server's MEMORY role (`/tmp`) sizes its pager as DATA's is sized:
 `pager` in `system/fileserver/src/main.rs` gives it capacity/16 objects,
-clamped to between 1,024 and 65,536. Its capacity is half of an eighth of
-RAM, less LOG's and BOOT's pages. Each file is one anonymous object
-(`system/fileserver/src/pages.rs`). Unlike a DATA file nobody holds, an
-anonymous object is never dropped to make room. So the object count is a hard
-cap on how many files `/tmp` holds, and it does not depend on what the files
-contain. Past the cap, every create is refused `NoSpace`
-(`fileserver: a paged object refused: NoRoom`), empty files included.
+clamped to between 1,024 and 65,536. Its capacity is an eighth of RAM, less
+LOG's and BOOT's pages, then halved between DATA and MEMORY. Each file is one
+anonymous object (`system/fileserver/src/pages.rs`). Unlike a DATA file nobody
+holds, an anonymous object is never dropped to make room. So the object count
+is a hard cap on how many files `/tmp` holds, and it does not depend on what
+the files contain. Past the cap, every create is refused `NoSpace`
+(`fileserver: a paged object refused: NoRoom`), empty files included. Any
+client can therefore take every `/tmp` file every other client needs: in the
+guest row's run, one member's leftovers failed the 14 members after it that
+write `/tmp`.
 
 On a 4 GiB guest the kernel manages 3,905,302,528 bytes (953,443 frames), and
 the arithmetic gives:
@@ -36,11 +40,14 @@ neither.
 records the pages' interim. This issue is the object count's effect on a volume
 whose objects cannot be dropped.
 
-Owner: the file server's MEMORY volume and its pager sizing
-(`system/fileserver/src/main.rs`, `pager`). Whatever the kernel charges a
-pager per object (`kernel/src/object/paged.rs`) bounds the fix.
+**Owner**: the process-memory track. The sizing is the file server's (`pager`
+in `system/fileserver/src/main.rs`); what the kernel charges a pager per
+object (`kernel/src/object/paged.rs`) bounds the fix.
 
 **Exit**: an empty `/tmp` file costs a bounded few hundred bytes, charged to
 whoever made it, and the number of `/tmp` files is bounded by that charge
-rather than by a share of RAM fixed when the pager is made. A guest test makes
-more than 3,468 empty files in `/tmp` on a 4 GiB guest and removes them.
+rather than by a share of RAM fixed when the pager is made. The cheapest proof
+is a host module test of the file server over its `Pager` trait, whose fake
+(`system/fileserver/src/pages/tests.rs`) stands for the kernel: more than 3,468
+empty files are made and removed on a memory volume sized as a 4 GiB machine's. A guest test is needed only for whatever the kernel's per-object
+charge must show.
