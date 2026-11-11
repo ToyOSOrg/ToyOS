@@ -139,6 +139,25 @@ mappings and write-back; (6) the #1077 retry
   against main after, four boots a side. Main after must be no slower than
   before; a spawn no longer copies a `/system` program's text, and whether
   that makes it faster is not measured on metal.
+- **Owed on metal:** step 2 (#1269), on the T14 and the AMD bench: the whole
+  `testcases` boot, whose `mapped_file` member maps a paged object from a
+  second process (faults that wait, revocation, refusals, kills), and the
+  `shared-debug` and `proctreecase` boots. Main must show every job of each
+  boot exit 0.
+- **Owed on metal:** step 2 (#1269), on the T14 and the AMD bench: osbench's
+  `fs`, `pipe`, `ipc`, `mem` and `proc` groups, main before #1269 against
+  main after, four boots a side. Main after must be no slower, since the
+  fault and copy paths changed under all of them.
+- **Owed on metal:** step 2 (#1269), on the T14 and the AMD bench: osbench's
+  `fs.*.map_touch_16m` and `fs.*.map_read_4k` (a cached file's pages faulted
+  through a mapping, and 4 KiB read through one) on main, beside Linux's
+  `mmap` of the same file. Main must show both rows on every file target;
+  how a mapping compares with Linux's is not measured on metal.
+
+Rows step 2 did not write, owed by map7b: a cold DATA page's miss in stages,
+one object mapped by 255 children and withdrawn (a revocation's cost grows
+with its mappers), and many threads cold-faulting one large file; each exits
+as an osbench row judged against Linux on metal.
 
 Step 2 measures a cached page's fault and a 4 KiB read through a mapping
 against Linux (osbench `fs.*.map_touch_16m`, `fs.*.map_read_4k`). Owed, by
