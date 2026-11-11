@@ -41,7 +41,7 @@ pub const MIN_SLICE_NS: u64 = 250_000;
 /// does not weigh in it (Stoica and Abdel-Wahab, ODU TR-95-22): a shorter one
 /// is served sooner and no more.
 pub(crate) fn next_request(request: u64, burst: u64) -> u64 {
-    (request + burst.clamp(MIN_SLICE_NS, SLICE_NS)) / 2
+    u64::midpoint(request, burst.clamp(MIN_SLICE_NS, SLICE_NS))
 }
 
 /// The most lag a thread or a group keeps while it is out of every queue, in
