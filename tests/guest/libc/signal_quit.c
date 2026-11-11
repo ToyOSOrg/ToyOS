@@ -1,8 +1,7 @@
 /* A quit reaches a C child as its signal: kill with SIGINT, SIGHUP or SIGTERM
    is a quit of the child, which libc raises in it.
-   - SIGINT handled without SA_RESTART: a read of an empty pipe answers EINTR.
-   - SIGHUP handled: pause returns after it, and a SIGTERM handler ends the
-     child once asked after.
+   - SIGHUP handled: sigsuspend returns after it, and a SIGTERM handler ends
+     the child once asked after.
    - SIGINT ignored: the child runs on.
    - SIGINT blocked: it waits pending until sigsuspend unblocks it, and its
      default then ends the child with 130.
@@ -13,7 +12,8 @@
      unblocking it, runs the handler and answers EINTR.
    Each child says "armed" once its disposition is kept; the test asks only
    after that, and asks a second time only after the child said it took the
-   first. */
+   first. "armed" does not say the child is in its call: a child that waits
+   for its signal holds it blocked until the call that unblocks it. */
 #include <poll.h>
 #include <signal.h>
 
@@ -39,16 +39,6 @@ static void keep(int sig, void (*handler)(int), int flags) {
     CHECK(sigaction(sig, &action, NULL) == 0, "sigaction(%d)", sig);
 }
 
-static int reads_eintr(void) {
-    keep(SIGINT, take, 0);
-    armed();
-    char byte;
-    errno = 0;
-    ssize_t got = read(0, &byte, 1);
-    CHECK(got == -1 && errno == EINTR && taken == 1, "the read answered %zd, the handler run %d times", got, (int)taken);
-    return 0;
-}
-
 static volatile sig_atomic_t ended;
 
 static void end(int sig) {
@@ -59,13 +49,19 @@ static void end(int sig) {
 static int reloads(void) {
     keep(SIGHUP, take, 0);
     keep(SIGTERM, end, 0);
+    sigset_t quits, none;
+    sigemptyset(&quits);
+    sigaddset(&quits, SIGHUP);
+    sigaddset(&quits, SIGTERM);
+    sigemptyset(&none);
+    CHECK(sigprocmask(SIG_BLOCK, &quits, NULL) == 0, "sigprocmask");
     armed();
     errno = 0;
-    CHECK(pause() == -1 && errno == EINTR && taken == 1, "pause across the hang-up");
+    CHECK(sigsuspend(&none) == -1 && errno == EINTR && taken == 1, "sigsuspend across the hang-up");
     printf("reloaded\n");
     fflush(stdout);
     while (!ended)
-        pause();
+        sigsuspend(&none);
     return 0;
 }
 
@@ -161,8 +157,6 @@ static int ppolls(void) {
 int main(int argc, char **argv) {
     if (argc == 3) {
         const char *role = argv[1];
-        if (strcmp(role, "reads") == 0)
-            return reads_eintr();
         if (strcmp(role, "reloads") == 0)
             return reloads();
         if (strcmp(role, "ignores") == 0)
@@ -181,12 +175,7 @@ int main(int argc, char **argv) {
     alarm(120);
     int out, in, status;
 
-    pid_t pid = start("reads", &out, &in);
-    CHECK(kill(pid, SIGINT) == 0, "kill(SIGINT)");
-    status = waited(pid);
-    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the reading child's status %#x", status);
-
-    pid = start("reloads", &out, &in);
+    pid_t pid = start("reloads", &out, &in);
     CHECK(kill(pid, SIGHUP) == 0, "kill(SIGHUP)");
     expect_line(out, "reloaded");
     CHECK(kill(pid, SIGTERM) == 0, "kill(SIGTERM)");
@@ -214,6 +203,6 @@ int main(int argc, char **argv) {
     status = waited(pid);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the ppolling child's status %#x", status);
 
-    printf("signal_quit: a quit reached each child as its signal: EINTR, a reload then an end, an ignore, a pending default, a handler beside a busy child, and one held over a ready ppoll\n");
+    printf("signal_quit: a quit reached each child as its signal: a reload then an end, an ignore, a pending default, a handler beside a busy child, and one held over a ready ppoll\n");
     return 0;
 }

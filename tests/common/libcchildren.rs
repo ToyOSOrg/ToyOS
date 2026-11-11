@@ -11,7 +11,8 @@
 //! `close` of its descriptor on another thread, its own netstack serving it;
 //! `quit_tree`, where a quit asks every process below it that listens and
 //! kills the rest; `libc_read_restarts`, where libc's `read` across a
-//! `SIGCHLD` handler restarts or answers `EINTR` as `SA_RESTART` says; and
+//! `SIGCHLD` handler restarts or answers `EINTR` as `SA_RESTART` says, and a
+//! child's across an interrupt answers `EINTR`; and
 //! `tty_interrupt`, where a shell's Ctrl+C ends its foreground line.
 //!
 //! On QEMU x86-64 (`tests/images/libccase.toml`), every program in one boot:
