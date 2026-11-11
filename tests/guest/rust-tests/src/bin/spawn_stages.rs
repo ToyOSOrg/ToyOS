@@ -517,6 +517,172 @@ fn image_parts(t: &Target) {
     );
 }
 
+/// osbench's `work::source`, byte for byte.
+fn source(seed: u64) -> Vec<u8> {
+    const FILE_BYTES: usize = 32 << 10;
+    const WORDS: [&str; 24] = [
+        "int", "return", "if", "else", "for", "while", "struct", "static", "const", "char", "void", "size_t",
+        "(", ")", "{", "}", ";", "=", "+", "*", "->", "0", "1", "\n",
+    ];
+    let mut x = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+    let mut out = Vec::with_capacity(FILE_BYTES);
+    while out.len() < FILE_BYTES {
+        x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        let word = WORDS[(x >> 33) as usize % WORDS.len()];
+        out.extend_from_slice(word.as_bytes());
+        out.push(b' ');
+    }
+    out.truncate(FILE_BYTES);
+    out
+}
+
+/// Every live thread's process, name and CPU nanoseconds, by `(pid, tid)`.
+fn roster() -> BTreeMap<(u32, u32), (String, u64)> {
+    use toyos_abi::syscall::{SYSINFO_ENTRY_SIZE, SYSINFO_HEADER_SIZE};
+    let mut buf = vec![0u8; SYSINFO_HEADER_SIZE + SYSINFO_ENTRY_SIZE * 2048];
+    let n = cap().roster(&mut buf).min(buf.len());
+    let mut rows = BTreeMap::new();
+    let mut pos = SYSINFO_HEADER_SIZE;
+    while pos + SYSINFO_ENTRY_SIZE <= n {
+        let u32_at = |at: usize| u32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
+        let name = &buf[pos + 32..pos + 60];
+        let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+        let cpu_ns = u64::from_le_bytes(buf[pos + 24..pos + 32].try_into().unwrap());
+        rows.insert((u32_at(pos), u32_at(pos + 4)), (String::from_utf8_lossy(&name[..len]).into_owned(), cpu_ns));
+        pos += SYSINFO_ENTRY_SIZE;
+    }
+    rows
+}
+
+/// osbench's `work.build_shaped`: 256 children of `osbench cc <in> <out>`,
+/// `jobs` at once, through the SDK's spawn so each child's accounting is
+/// read, with every other process's CPU time over the round off the roster.
+fn build_shaped(dir: &str, jobs: usize, round: usize, print: bool) {
+    const FILES: usize = 256;
+    let exe = "/system/bin/osbench";
+    let own = std::process::id();
+    let argv = |i: usize| -> Vec<u8> {
+        [exe.to_string(), "cc".into(), format!("{dir}/src{i:03}.c"), format!("{dir}/obj{i:03}.o")]
+            .iter()
+            .flat_map(|p| p.bytes().chain([0]))
+            .collect()
+    };
+    let before = roster();
+    let began = now();
+    let (mut spawn_ns, mut image_ns, mut wait_ns) = (0u64, 0u64, 0u64);
+    let mut stats = Vec::with_capacity(FILES);
+    let mut running: std::collections::VecDeque<toyos::process::Process> = Default::default();
+    let mut finish = |p: toyos::process::Process, wait_ns: &mut u64| {
+        let a = now();
+        let end = p.wait().expect("wait");
+        *wait_ns += now() - a;
+        assert!(matches!(end, toyos_abi::end::End::Exited(0)), "a compile ended {end:?}");
+        stats.push(p.stats().expect("stats"));
+    };
+    for i in 0..FILES {
+        if running.len() == jobs {
+            let p = running.pop_front().unwrap();
+            finish(p, &mut wait_ns);
+        }
+        let null = |rights: Rights| toyos::null(rights.union(Rights::DUP).union(Rights::TRANSFER).union(Rights::WAIT)).expect("null");
+        let a = now();
+        let (n0, n1, n2) = (null(Rights::READ), null(Rights::WRITE), null(Rights::WRITE));
+        let image = files::read_image(exe.as_bytes()).expect("read_image");
+        let b = now();
+        let args = argv(i);
+        let fds = [
+            (0u32, n0.as_handle(), toyos::fd::Kind::Handle),
+            (1u32, n1.as_handle(), toyos::fd::Kind::Handle),
+            (2u32, n2.as_handle(), toyos::fd::Kind::Handle),
+        ];
+        let request = Spawn {
+            program: exe,
+            image: None,
+            image_held: false,
+            launcher: None,
+            pager: None,
+            argv: &args,
+            env: b"",
+            cwd: "/",
+            fds: &fds,
+            endow: Vec::new(),
+            provided: Vec::new(),
+            parent: Parent::Caller,
+            independent: false,
+        };
+        let Start::Helper(helper) = request.start().expect("start") else { unreachable!() };
+        let process = helper.spawn(Some(&image)).expect("spawn");
+        drop(image);
+        drop((n0, n1, n2));
+        let c = now();
+        image_ns += b - a;
+        spawn_ns += c - b;
+        running.push_back(process);
+    }
+    while let Some(p) = running.pop_front() {
+        finish(p, &mut wait_ns);
+    }
+    let wall = now() - began;
+    let after = roster();
+    if !print {
+        return;
+    }
+    let sum = |f: fn(&toyos_abi::syscall::ProcessStats) -> u64| stats.iter().map(f).sum::<u64>() / 1000;
+    println!(
+        "build j{jobs} round {round}: wall_us={} parent: nulls_and_read_image_us={} spawn_and_drops_us={} waiting_us={} | children summed: wall_us={} cpu_us={} blocked_ipc_us={} blocked_other_us={} blocked_futex_us={} blocked_io_us={} blocked_pipe_us={} runqueue_wait_us={} fault_us={} faults={} syscalls={} syscall_us={}",
+        wall / 1000,
+        image_ns / 1000,
+        spawn_ns / 1000,
+        wait_ns / 1000,
+        sum(|s| s.wall_ns),
+        sum(|s| s.cpu_ns),
+        sum(|s| s.blocked_ipc_ns),
+        sum(|s| s.blocked_other_ns),
+        sum(|s| s.blocked_futex_ns),
+        sum(|s| s.blocked_io_ns),
+        sum(|s| s.blocked_pipe_ns),
+        sum(|s| s.runqueue_wait_ns),
+        sum(|s| s.fault_ns),
+        stats.iter().map(|s| s.faults).sum::<u64>(),
+        stats.iter().map(|s| s.syscall_total).sum::<u64>(),
+        sum(|s| s.syscall_total_ns),
+    );
+    // Every process alive at both readings, by thread: its CPU time over the
+    // round and that as a share of the round's wall time.
+    for (&(pid, tid), (name, ns)) in &after {
+        let was = before.get(&(pid, tid)).map_or(0, |(_, ns)| *ns);
+        let ran = ns.saturating_sub(was);
+        if ran < 200_000 {
+            continue;
+        }
+        let who = if pid == own { "this job" } else { name.as_str() };
+        println!("build j{jobs} round {round}: ran {who} pid={pid} tid={tid} cpu_us={} permille_of_wall={}", ran / 1000, ran * 1000 / wall);
+    }
+}
+
+/// std's `Command`, as osbench's row runs the set: the wall time alone.
+fn build_shaped_command(dir: &str, jobs: usize) -> u64 {
+    let began = now();
+    let mut running: std::collections::VecDeque<std::process::Child> = Default::default();
+    let mut finish = |mut c: std::process::Child| assert!(c.wait().expect("wait").success());
+    for i in 0..256 {
+        if running.len() == jobs {
+            finish(running.pop_front().unwrap());
+        }
+        let child = Command::new("/system/bin/osbench")
+            .arg("cc")
+            .arg(format!("{dir}/src{i:03}.c"))
+            .arg(format!("{dir}/obj{i:03}.o"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn a compile");
+        running.push_back(child);
+    }
+    running.into_iter().for_each(&mut finish);
+    now() - began
+}
+
 fn main() {
     let dir = "/tmp/spawn-stages";
     let _ = std::fs::create_dir_all(dir);
@@ -543,6 +709,22 @@ fn main() {
         cmd.sort_unstable();
         report(t, &reps, &mut cmd, &mut cmd_after);
         image_parts(t);
+    }
+    // The build-shaped workload, where the image has osbench to run.
+    if std_path == "/system/bin/osbench" {
+        for i in 0..256 {
+            std::fs::write(format!("{dir}/src{i:03}.c"), source(i as u64)).expect("write a source");
+        }
+        let cpus = toyos_abi::syscall::cpu_count() as usize;
+        for jobs in [1, cpus] {
+            build_shaped(dir, jobs, 0, false);
+            for round in 1..=3 {
+                build_shaped(dir, jobs, round, true);
+            }
+            let mut cmd: Vec<u64> = (0..3).map(|_| build_shaped_command(dir, jobs)).collect();
+            cmd.sort_unstable();
+            println!("build j{jobs}: std Command rounds wall_us={:?}", cmd.iter().map(|n| n / 1000).collect::<Vec<_>>());
+        }
     }
     let _ = std::fs::remove_dir_all(dir);
     println!("spawn_stages: done");
