@@ -130,8 +130,8 @@ impl Hub {
         held.rounds.iter().rev().find(|(end, _)| *end <= at).map(|(_, positions)| Arc::clone(positions))
     }
 
-    /// The console UART's carrier starts at `at`, past every kernel record the
-    /// kernel put on the UART itself, owing `owed` of the rounds before. Once.
+    /// The console UART's carrier starts at `at`, owing `owed` of the rounds
+    /// before. Once.
     pub fn set_wire_from(&self, at: u64, owed: Vec<u8>) {
         let mut held = self.lock();
         assert!(held.wire_from.is_none(), "logkeeper: where the UART's carrier starts is said twice");

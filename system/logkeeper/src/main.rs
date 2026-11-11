@@ -193,6 +193,7 @@ fn main() {
     let shards = words - toyos_abi::log::CURSOR_HEAD_WORDS;
     let spoken =
         toyos::log::spoken(&cap, &vec![0; shards]).unwrap_or_else(|e| panic!("logkeeper: SYS_LOG_SPOKEN refused ({e:?})"));
+    let handover = Handover { spoken, owed: String::new(), by: Instant::now() + WIRE_START };
     let (port, wire) = (endow::acceptor(CARRIER), endow::acceptor(WIRE));
     let carriers =
         (port.is_some() || wire.is_some()).then(|| Carriers::serve(port, wire, Arc::clone(&hub), Arc::clone(&cap)));
@@ -203,8 +204,7 @@ fn main() {
         from_supervisor,
         supervisor_rx: ipc::FrameRx::new(),
         carriers,
-        spoken: Some(spoken),
-        owed_wire: String::new(),
+        handover: Some(handover),
         origins: Vec::new(),
         tail,
         records: vec![Record::EMPTY; BATCH],
@@ -227,12 +227,8 @@ struct Log {
     from_supervisor: Connection,
     supervisor_rx: ipc::FrameRx<{ 4 + MAX_TAG }>,
     carriers: Option<Arc<Carriers>>,
-    /// What the kernel put on the UART itself, a read position per shard,
-    /// until the rounds have read past it and said where the UART's carrier
-    /// starts.
-    spoken: Option<Vec<u64>>,
-    /// Those rounds' lines but the kernel's records the UART carried.
-    owed_wire: String,
+    /// Until the rounds have said where the UART's carrier starts.
+    handover: Option<Handover>,
     origins: Vec<Origin>,
     tail: LogTail<Vec<u64>>,
     records: Vec<Record>,
@@ -252,6 +248,39 @@ struct Log {
     /// The supervisor's flush was answered and the machine stops: the file's text held
     /// back since, which a refused stop writes, to [`STOPPING_BYTES`].
     stopping: Option<Stopping>,
+}
+
+/// What the kernel put on the UART itself, which the rounds read past before
+/// the UART's carrier starts.
+struct Handover {
+    /// A read position per shard.
+    spoken: Vec<u64>,
+    /// The rounds' lines so far but the kernel's records the UART carried.
+    owed: String,
+    /// When the carrier starts wherever the rounds have read to.
+    by: Instant,
+}
+
+/// How long the UART's carrier waits for the rounds to read past what the
+/// kernel put on the UART. Those records are in the kernel's ring before the
+/// first round, which reads the ring whole, so only a kernel answer its ring
+/// never reaches outlasts a round. Policy, short because the costs are
+/// lopsided: a false expiry repeats lines on the UART, and a missed one
+/// leaves it silent.
+const WIRE_START: Duration = Duration::from_secs(5);
+
+impl Handover {
+    /// Whether the rounds, written `through`, have read past what the kernel
+    /// put on the UART.
+    fn read_past(&self, through: &[u64]) -> bool {
+        through.iter().zip(&self.spoken).all(|(read, spoken)| read >= spoken)
+    }
+
+    /// Whether the UART's carrier starts at `now`: the rounds have read past
+    /// what the kernel put on the UART, or [`WIRE_START`] is up.
+    fn over(&self, through: &[u64], now: Instant) -> bool {
+        self.read_past(through) || now >= self.by
+    }
 }
 
 /// The file's text held back after a flush, the lines past the bound, and
@@ -496,7 +525,8 @@ impl Log {
             lines.into_iter().partition(|line| all || line.at_ns <= cut);
         let through = written_through(self.tail.positions(), &later);
         self.waiting = later;
-        self.write(now, all, through);
+        self.write(now, all, Arc::clone(&through));
+        self.start_wire(&through);
         oldest
     }
 
@@ -553,7 +583,7 @@ impl Log {
             match &line.kind {
                 Kind::Kernel(record) => {
                     let text = format!("{}\n", record.dated(&stamp(self.boot_secs, record.at_ns())));
-                    if !self.spoken.as_ref().is_some_and(|spoken| on_the_uart(record, spoken)) {
+                    if !self.handover.as_ref().is_some_and(|handover| on_the_uart(record, &handover.spoken)) {
                         wire.push_str(&text);
                     }
                     file.push_str(&text);
@@ -595,14 +625,27 @@ impl Log {
         // only what /log already holds, whenever the machine stops between the
         // two. A part refused or catching up takes this text from the replay.
         self.to_volume(file.as_bytes(), !flushing);
-        self.hub.append(file.as_bytes(), Some(Arc::clone(&through)));
-        if let Some(spoken) = &self.spoken {
-            self.owed_wire.push_str(&wire);
-            if through.iter().zip(spoken).all(|(read, spoken)| read >= spoken) {
-                self.hub.set_wire_from(self.hub.end(), std::mem::take(&mut self.owed_wire).into_bytes());
-                self.spoken = None;
-            }
+        self.hub.append(file.as_bytes(), Some(through));
+        if let Some(handover) = &mut self.handover {
+            handover.owed.push_str(&wire);
         }
+    }
+
+    /// Say where the UART's carrier starts once the rounds, written
+    /// `through`, have read past what the kernel put on the UART, or by
+    /// [`WIRE_START`] wherever they have read to, which is said.
+    fn start_wire(&mut self, through: &[u64]) {
+        let now = Instant::now();
+        let Some(handover) = self.handover.take_if(|handover| handover.over(through, now)) else { return };
+        if !handover.read_past(through) {
+            toyos::warn!(
+                "logkeeper: the kernel's records are read through {through:?} and not the {:?} it put on the UART \
+                 after {} s; the UART's carrier starts here, and what is read of them later repeats on the UART",
+                handover.spoken,
+                WIRE_START.as_secs()
+            );
+        }
+        self.hub.set_wire_from(self.hub.end(), handover.owed.into_bytes());
     }
 
     /// Write a round to the volume, and make it durable unless it is one of a
@@ -949,6 +992,20 @@ mod tests {
         let waiting = [kernel(1, 7), kernel(1, 9)];
         assert_eq!(&*super::written_through(&[5, 12, 3], &waiting), &[5, 7, 3]);
         assert_eq!(&*super::written_through(&[5, 12], &[]), &[5, 12]);
+    }
+
+    /// **The UART's carrier starts once the rounds have read past what the
+    /// kernel put on the UART, or at the bound wherever they have read to**:
+    /// a position the rounds never reach delays the start and never ends it.
+    #[test]
+    fn the_wire_starts_at_its_bound_whatever_the_rounds_have_read() {
+        let began = std::time::Instant::now();
+        let by = began + super::WIRE_START;
+        let handover = super::Handover { spoken: vec![4, 2], owed: String::new(), by };
+        assert!(!handover.over(&[4, 1], began));
+        assert!(!handover.over(&[9, 1], by - std::time::Duration::from_nanos(1)), "one shard short is not read past");
+        assert!(handover.over(&[4, 1], by) && !handover.read_past(&[4, 1]), "started unread at the bound");
+        assert!(handover.over(&[4, 2], began) && handover.read_past(&[4, 2]));
     }
 
     /// The kernel's records the UART carried before the hand-over are those
