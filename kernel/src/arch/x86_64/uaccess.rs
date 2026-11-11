@@ -198,7 +198,7 @@ pub fn fixup(rip: u64) -> Option<u64> {
     ];
     if strings.contains(&rip) {
         Some(rip + REP_STRING_LEN)
-    } else if descending.iter().any(|copy| copy.contains(&rip)) {
+    } else if false && descending.iter().any(|copy| copy.contains(&rip)) {
         Some(&raw const toyos_copy_down_fault as u64)
     } else {
         None
