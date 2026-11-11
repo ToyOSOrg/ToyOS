@@ -9,7 +9,8 @@
 //!   the line is left.
 //! - A shell nested on the line is not ended: Ctrl+C reaches the line it runs
 //!   while it runs one, and, at its prompt, the nested shell itself, which
-//!   reads it and runs on.
+//!   reads it and runs on. Its first line is typed with the line that starts
+//!   it, before it exists: what follows a line is the input of what it runs.
 //! - Under the nested shell, a program that reads each interrupt survives
 //!   three Ctrl+C, each pressed once it has read the one before, and one that
 //!   listens and never reads dies on the second: each Ctrl+C is one quit of
@@ -63,29 +64,27 @@ fn hear(mut stdout: ChildStdout) {
     }
 }
 
-/// Serve the surface until `lines` clients hold a foreground line.
+/// Serve the surface until `lines` clients hold a foreground line, counted a
+/// notice at a time, so a line handed and ended is seen held in between.
 fn until_lines(host: &mut Host, held: &mut usize, lines: usize) {
     let poller = Poller::new(Host::POLL_HANDLES);
     while *held != lines {
-        while let Some(notice) = host.poll() {
-            match notice {
-                Notice::Foreground { held: true, .. } => *held += 1,
-                Notice::Foreground { held: false, .. } => *held -= 1,
-                Notice::Dropped { client, why } => panic!("the surface dropped client {client}: {why}"),
-                Notice::LayoutChanged | Notice::Grabbed { .. } | Notice::Released { .. } => {}
+        match host.poll() {
+            Some(Notice::Foreground { held: true, .. }) => *held += 1,
+            Some(Notice::Foreground { held: false, .. }) => *held -= 1,
+            Some(Notice::Dropped { client, why }) => panic!("the surface dropped client {client}: {why}"),
+            Some(Notice::LayoutChanged | Notice::Grabbed { .. } | Notice::Released { .. }) => {}
+            None => {
+                poller.watch(&host.acceptor_handle(), READABLE, 0);
+                for client in host.client_handles() {
+                    poller.watch(&client, READABLE, 1);
+                }
+                let mut accept = false;
+                poller.wait(1, u64::MAX, |token| accept |= token == 0);
+                if accept {
+                    host.accept();
+                }
             }
-        }
-        if *held == lines {
-            return;
-        }
-        poller.watch(&host.acceptor_handle(), READABLE, 0);
-        for client in host.client_handles() {
-            poller.watch(&client, READABLE, 1);
-        }
-        let mut accept = false;
-        poller.wait(1, u64::MAX, |token| accept |= token == 0);
-        if accept {
-            host.accept();
         }
     }
 }
@@ -160,14 +159,16 @@ fn main() {
     step("the prompt back");
     shell.type_line("echo pipeline-ended");
     shell.until_said("pipeline-ended");
+    // `echo`'s line, handed and ended: its notices are not the next line's.
+    until_lines(&mut host, &mut held, 1);
     until_lines(&mut host, &mut held, 0);
     println!("tty_interrupt: one Ctrl+C ended a pipeline whose stage started a child, and the prompt came back");
 
     step("the nested shell held");
-    shell.type_line("shell");
+    // One write: `cat` is in the pipe before the nested shell exists to read it.
+    shell.type_line("shell\rcat");
     until_lines(&mut host, &mut held, 1);
     step("the nested line held");
-    shell.type_line("cat");
     until_lines(&mut host, &mut held, 2);
     step("the nested line ended");
     assert!(host.interrupt(), "the nested shell's line was not the foreground");
@@ -176,6 +177,7 @@ fn main() {
     step("the nested shell alive");
     shell.type_line("echo nested-alive");
     shell.until_said("nested-alive");
+    until_lines(&mut host, &mut held, 2);
     until_lines(&mut host, &mut held, 1);
 
     step("the reader armed");
