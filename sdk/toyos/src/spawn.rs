@@ -459,7 +459,7 @@ fn path_label(path: &str) -> String {
 /// The bytes of the block a helper's child starts with ([`crate::startup`]):
 /// `argv`, `env` stating `cwd` as its starting directory
 /// ([`crate::files::starting_in`]), and the child's names for its endowments.
-fn starting_block(argv: &[u8], env: &[u8], cwd: &str, names: &[&str]) -> Result<Vec<u8>, Refused> {
+fn starting_block(argv: &[u8], env: &[u8], cwd: &str, names: &[&str]) -> Result<crate::startup::Said, Refused> {
     let env = crate::files::starting_in(env, cwd)
         .ok_or(Refused::Invalid("a working directory that is not absolute, is too long or holds a NUL"))?;
     crate::startup::bytes(argv, &env, names)

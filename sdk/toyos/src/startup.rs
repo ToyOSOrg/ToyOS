@@ -76,10 +76,16 @@ fn table(names: &[&str]) -> Option<Vec<u8>> {
     Some(table)
 }
 
+/// A block's bytes as [`bytes`] lays them out: at most [`MAX_BLOCK`], each
+/// pointer the address its string or its names lie at once the block is at
+/// [`AT`]. Only [`bytes`] makes one, so a [`Block`] holds nothing else.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Said(Vec<u8>);
+
 /// The bytes of the block that says `args` and `env`, each a run of strings a
 /// NUL separates, an empty one skipped, and calls the spawn's `i`th endowment
 /// `names[i]`. `None` past [`MAX_BLOCK`], or for names [`table`] makes none of.
-pub fn bytes(args: &[u8], env: &[u8], names: &[&str]) -> Option<Vec<u8>> {
+pub fn bytes(args: &[u8], env: &[u8], names: &[&str]) -> Option<Said> {
     let table = if names.is_empty() { Vec::new() } else { table(names)? };
     let argc = strings(args).count();
     let words = argc + strings(env).count() + 4;
@@ -107,7 +113,7 @@ pub fn bytes(args: &[u8], env: &[u8], names: &[&str]) -> Option<Vec<u8>> {
         block[..WORD].copy_from_slice(&at.to_ne_bytes());
         block.extend_from_slice(&table);
     }
-    Some(block)
+    Some(Said(block))
 }
 
 /// A block in a memory object, which a spawn names as the pages its child
@@ -119,10 +125,11 @@ pub struct Block {
 }
 
 impl Block {
-    /// A block holding `bytes` ([`bytes`]), in memory counted to the job
-    /// `job` is a handle to carrying `WRITE`, the one the child runs in, or
-    /// else to this process's own.
-    pub fn new(bytes: &[u8], job: Option<BorrowedHandle<'_>>) -> Result<Block, SyscallError> {
+    /// A block holding `said`, in memory counted to the job `job` is a
+    /// handle to carrying `WRITE`, the one the child runs in, or else to this
+    /// process's own.
+    pub fn new(said: &Said, job: Option<BorrowedHandle<'_>>) -> Result<Block, SyscallError> {
+        let Said(bytes) = said;
         let memory = match job {
             Some(job) => SharedMemory::create_for(job, bytes.len()),
             None => SharedMemory::create(bytes.len()),
@@ -328,7 +335,7 @@ mod tests {
     /// once the block is at `AT`.
     #[test]
     fn a_block_s_pointers_name_its_strings_in_order() {
-        let block = bytes(b"/bin/echo\0-n\0hello world", b"HOME=/home/toy\0PWD=/\0", &[]).unwrap();
+        let Said(block) = bytes(b"/bin/echo\0-n\0hello world", b"HOME=/home/toy\0PWD=/\0", &[]).unwrap();
         assert_eq!(u64::from_ne_bytes(block[..8].try_into().unwrap()), 0);
         assert_eq!(u64::from_ne_bytes(block[8..16].try_into().unwrap()), 3);
         let words: Vec<_> = (2..9).map(|word| string(&block, word)).collect();
@@ -343,20 +350,20 @@ mod tests {
     /// of zeros reads as.
     #[test]
     fn a_block_that_says_nothing_is_zeros() {
-        assert_eq!(bytes(b"", b"\0\0", &[]).unwrap(), [0u8; 32]);
+        assert_eq!(bytes(b"", b"\0\0", &[]).unwrap().0, [0u8; 32]);
     }
 
     /// A block ends below the program with a page to spare, and one byte more is refused.
     #[test]
     fn a_block_past_its_reservation_is_refused() {
         let fits = alloc::vec![b'a'; MAX_BLOCK - 5 * WORD - 1];
-        assert_eq!(bytes(&fits, b"", &[]).map(|block| block.len()), Some(MAX_BLOCK));
+        assert_eq!(bytes(&fits, b"", &[]).map(|Said(block)| block.len()), Some(MAX_BLOCK));
         let mut past = fits;
         past.push(b'a');
         assert_eq!(bytes(&past, b"", &[]), None);
         // The names count against the same reservation.
-        let fits = alloc::vec![b'a'; MAX_BLOCK - 5 * 8 - 1 - TABLE_HEADER - 2 - 1];
-        assert_eq!(bytes(&fits, b"", &["n"]).map(|block| block.len()), Some(MAX_BLOCK));
+        let fits = alloc::vec![b'a'; MAX_BLOCK - 5 * WORD - 1 - TABLE_HEADER - 2 - 1];
+        assert_eq!(bytes(&fits, b"", &["n"]).map(|Said(block)| block.len()), Some(MAX_BLOCK));
         assert_eq!(bytes(&fits, b"", &["nn"]), None);
     }
 
@@ -366,7 +373,7 @@ mod tests {
     #[test]
     fn a_block_s_names_read_back_in_the_order_endowed() {
         let given = ["fd:0", "svc:fs:/home/toy", "dev:pci:0c:03:30", "na\u{ef}ve name"];
-        let block = bytes(b"prog", b"", &given).unwrap();
+        let Said(block) = bytes(b"prog", b"", &given).unwrap();
         let at = (u64::from_ne_bytes(block[..8].try_into().unwrap()) - AT) as usize;
         assert_eq!(at, 5 * 8 + 5);
         assert_eq!(read(&block[at..]), Ok(given.map(Into::into).to_vec()));
