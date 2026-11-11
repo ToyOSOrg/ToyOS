@@ -136,7 +136,13 @@ starts before taking them; it now keeps them once, by length
 ([evidence](https://github.com/ToyOSOrg/evidence/tree/fffbc92ad7894c5c3c3867be65a655899a6f1e5b/memperf/inventory)).
 On the host, under load, one page's insert went from 116-176 to 50-82 ns and
 its removal from 148-177 to 105-145, with one allocation where there were
-two. Not yet measured on metal.
+two.
+
+- **Owed on metal:** an A/B on both benches of `osbench_system` and
+  `osbench_mem`, main from before and after the single free index. Main after
+  must read `mem.map_unmap_4k` and `mem.munmap_part.4k` faster, and no other
+  row of the two groups slower; rows that map and unmap may improve. Until
+  then the gain on metal is unmeasured.
 
 Owner: the memory track. Exit: each path above measured on the T14 at a
 change and at its base, and against Linux; a regression is fixed or its cost
