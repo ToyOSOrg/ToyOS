@@ -112,8 +112,9 @@ impl Hub {
         admit(&self.shared, format!("reader {}", conn.as_handle().raw().0), pipe);
     }
 
-    /// The lines the file has just taken, for every reader, and the kernel's
-    /// read positions they are written through where they are a round's.
+    /// Lines for every reader and the console's carriers, and for the file,
+    /// which takes them from here in its next batch; with the kernel's read
+    /// positions they are written through where they are a round's.
     pub fn append(&self, lines: &[u8], through: Option<Positions>) {
         let mut held = self.lock();
         held.replay.append(lines);

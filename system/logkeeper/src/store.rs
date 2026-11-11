@@ -54,24 +54,6 @@ pub const MAX_LOG_PARTS: u32 = 9999;
 /// what `/system/bin/console` reads off USB before it paints anything.
 pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
 
-/// Say on the volume that this boot stopped cleanly
-/// ([`toyos_logstream::STOPPED`]), durably.
-pub fn mark_stopped() -> std::io::Result<()> {
-    File::create(stopped_path())?.sync_all()
-}
-
-/// Take back [`mark_stopped`]: the stop it was written for was refused.
-pub fn unmark_stopped() -> std::io::Result<()> {
-    match fs::remove_file(stopped_path()) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        done => done,
-    }
-}
-
-fn stopped_path() -> String {
-    format!("{DIR}/{}", toyos_logstream::STOPPED)
-}
-
 /// Where one file of this boot's sequence is: `toyos_wallclock::Part` is its
 /// name.
 pub fn path(dir: &str, stem: &str, part: u32) -> String {
@@ -262,6 +244,25 @@ impl Volume {
     /// Where this boot's log is being written.
     pub fn path(&self) -> String {
         path(&self.dir, &self.stem, self.part)
+    }
+
+    /// Say on this volume that the boot stopped cleanly
+    /// ([`toyos_logstream::STOPPED`]), durably.
+    pub fn mark_stopped(&self) -> std::io::Result<()> {
+        File::create(self.stopped_path())?.sync_all()
+    }
+
+    /// Take back [`Self::mark_stopped`]: the stop it was written for was
+    /// refused. A mark that is not there is taken back already.
+    pub fn unmark_stopped(&self) -> std::io::Result<()> {
+        match fs::remove_file(self.stopped_path()) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            done => done,
+        }
+    }
+
+    fn stopped_path(&self) -> String {
+        format!("{}/{}", self.dir, toyos_logstream::STOPPED)
     }
 
     /// Whether the part is open: false once the volume refused it, until

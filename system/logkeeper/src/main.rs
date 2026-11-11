@@ -131,8 +131,8 @@ const MAX_ORIGINS: usize = Poller::MAX_HANDLES as usize - ORIGIN_BASE as usize;
 
 /// How soon the rings are read again after a round that read any, and the
 /// longest the cadence backs off to while none has anything: the latency of a
-/// program's line to the file and the console, against wakes on an idle
-/// machine.
+/// program's line to the replay, and so to the console and the readers,
+/// against wakes on an idle machine. The file's is its batch's.
 const POLL_QUICK: Duration = Duration::from_millis(10);
 const POLL_SLOW: Duration = Duration::from_millis(250);
 
@@ -252,12 +252,10 @@ impl Handover {
     }
 }
 
-/// The file's text held back after a flush, the lines past the bound, and
-/// whether the flush wrote the stop mark.
+/// The file's text held back after a flush, and the lines past the bound.
 struct Stopping {
     text: String,
     unwritten: u64,
-    marked: bool,
 }
 
 /// How long the stop's flush may spend giving the file what it is owed: half
@@ -540,7 +538,7 @@ impl Log {
             return;
         }
         lines.sort_by_key(|line| line.at_ns);
-        let mut file = String::new();
+        let mut rendered = String::new();
         // What the UART is owed of these lines, while the kernel's own on it
         // are yet to be read past.
         let mut wire = String::new();
@@ -554,7 +552,7 @@ impl Log {
                     if !self.handover.as_ref().is_some_and(|handover| on_the_uart(record, &handover.spoken)) {
                         wire.push_str(&text);
                     }
-                    file.push_str(&text);
+                    rendered.push_str(&text);
                 }
                 Kind::Program { tag, owner, said } => {
                     urgent |= file::urgent(said.severity);
@@ -571,7 +569,7 @@ impl Log {
                         text: &said.text,
                     };
                     let line = format!("{line}\n");
-                    file.push_str(&line);
+                    rendered.push_str(&line);
                     wire.push_str(&line);
                     if self.stopping.is_some() {
                         programs.push_str(&line);
@@ -583,14 +581,14 @@ impl Log {
             // The kernel's records from the flush on are the stop's to put on
             // the UART; a program's reach it only through its carrier.
             self.hub.append_stopping(programs.as_bytes());
-            if held.text.len() + file.len() > STOPPING_BYTES {
+            if held.text.len() + rendered.len() > STOPPING_BYTES {
                 held.unwritten += lines.len() as u64;
             } else {
-                held.text.push_str(&file);
+                held.text.push_str(&rendered);
             }
             return;
         }
-        self.hub.append(file.as_bytes(), Some(through));
+        self.hub.append(rendered.as_bytes(), Some(through));
         self.file.grew(urgent);
         if let Some(handover) = &mut self.handover {
             handover.owed.push_str(&wire);
@@ -630,7 +628,7 @@ impl Log {
         if let Some(carriers) = &self.carriers {
             carriers.stop(self.hub.end());
         }
-        self.stopping = Some(Stopping { text: String::new(), unwritten: 0, marked: false });
+        self.stopping = Some(Stopping { text: String::new(), unwritten: 0 });
         if let Err(e) = self.from_supervisor.signal(FLUSHED) {
             panic!("logkeeper: the supervisor could not be told the flush is done: {e:?}");
         }
@@ -640,16 +638,15 @@ impl Log {
     /// drivers: the file writes the stop mark over a durable log, within
     /// [`STOP_FILE`], and the supervisor is told.
     fn mark(&mut self) {
-        let Some(stopping) = self.stopping.as_mut() else {
+        if self.stopping.is_none() {
             panic!("logkeeper: the supervisor asked for the stop mark, and no stop was flushed for");
-        };
-        stopping.marked = self.file.mark(Instant::now() + STOP_FILE).unwrap_or_else(|| {
+        }
+        if !self.file.mark(Instant::now() + STOP_FILE) {
             toyos::error!(
-                "logkeeper: {DIR} had not answered the stop mark in {} ms - the next boot will not count this one as clean",
+                "logkeeper: {DIR} had not answered the stop mark in {} ms - the stop goes on without knowing whether it is written",
                 STOP_FILE.as_millis()
             );
-            false
-        });
+        }
         if let Err(e) = self.from_supervisor.signal(MARKED) {
             panic!("logkeeper: the supervisor could not be told the stop is marked: {e:?}");
         }
@@ -670,7 +667,7 @@ impl Log {
             );
         }
         self.hub.resume(held.text.as_bytes());
-        self.file.resume(held.marked);
+        self.file.resume();
         if let Some(carriers) = &self.carriers {
             carriers.resume();
         }

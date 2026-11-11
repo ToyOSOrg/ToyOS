@@ -30,7 +30,7 @@ use toyos_logstream::{Severity, LOG_OPENED};
 use crate::inspect::{Published, State};
 use crate::policy::{Retry, LOG_WRITE_BUDGET};
 use crate::serve::Hub;
-use crate::store::{self, Volume, DIR, MAX_LOG_BYTES, MAX_LOG_PARTS};
+use crate::store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_PARTS};
 
 /// How long a line below `Error` may wait for the file. Policy, against two
 /// costs: each write and sync costs the volume's server, its driver and this
@@ -72,11 +72,11 @@ enum Ask {
     /// The stop: reach the replay's end and sync, stopping the catch-up at
     /// `by`, and answer.
     Finish { by: Instant, answer: SyncSender<()> },
-    /// Write the stop mark, unless `by` has passed, and answer whether it is.
-    Mark { by: Instant, answer: SyncSender<bool> },
-    /// The stop was refused: take back the mark where it was written, and
-    /// write what the replay was given since at once.
-    Resume { marked: bool },
+    /// Write the stop mark, unless `by` has passed, and answer.
+    Mark { by: Instant, answer: SyncSender<()> },
+    /// The stop was refused: take back any mark it asked for, and write what
+    /// the replay was given since at once.
+    Resume,
 }
 
 /// The loop's handle on the file's thread.
@@ -109,6 +109,7 @@ impl File {
                     urgent: false,
                     finished: false,
                     stopped: false,
+                    marked: false,
                 };
                 writer.run(asked);
             })
@@ -133,17 +134,17 @@ impl File {
         answered.recv_timeout(until.saturating_duration_since(Instant::now())).is_ok()
     }
 
-    /// The stop mark, written by `by`: whether it is, or `None` where the
-    /// file did not answer by then.
-    pub fn mark(&self, by: Instant) -> Option<bool> {
+    /// The stop mark, written by `by`: whether the file answered by then.
+    /// Whether the mark is on the volume is the file thread's record.
+    pub fn mark(&self, by: Instant) -> bool {
         let (answer, answered) = mpsc::sync_channel(1);
         self.ask(Ask::Mark { by, answer });
-        answered.recv_timeout(by.saturating_duration_since(Instant::now())).ok()
+        answered.recv_timeout(by.saturating_duration_since(Instant::now())).is_ok()
     }
 
-    /// The stop was refused, after the mark was written where `marked`.
-    pub fn resume(&self, marked: bool) {
-        self.ask(Ask::Resume { marked });
+    /// The stop was refused.
+    pub fn resume(&self) {
+        self.ask(Ask::Resume);
     }
 
     fn ask(&self, ask: Ask) {
@@ -184,6 +185,9 @@ struct Writer {
     finished: bool,
     /// From the stop's flush until it is refused: no call on `/log` but the mark.
     stopped: bool,
+    /// The stop mark may be on the volume: this stop asked for it, whatever
+    /// the volume answered, and whether or not the loop still waited.
+    marked: bool,
 }
 
 impl Writer {
@@ -202,9 +206,10 @@ impl Writer {
                     let _ = answer.send(());
                 }
                 Ok(Ask::Mark { by, answer }) => {
-                    let _ = answer.send(self.mark(by));
+                    self.mark(by);
+                    let _ = answer.send(());
                 }
-                Ok(Ask::Resume { marked }) => self.resume(marked),
+                Ok(Ask::Resume) => self.resume(),
                 Err(RecvTimeoutError::Timeout) => {}
                 // The loop never lets go of its handle while the program runs.
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -218,7 +223,19 @@ impl Writer {
     /// The replay's growth since the last [`Ask::Grew`], taken whole: a round
     /// after this one asks again.
     fn took_growth(&mut self) {
-        self.urgent |= self.growth.swap(0, Ordering::AcqRel) & URGENT != 0;
+        let urgent = self.growth.swap(0, Ordering::AcqRel) & URGENT != 0;
+        self.owe(urgent);
+    }
+
+    /// The file is owed what the replay holds past it, at once where
+    /// `urgent`: the batch's age counts from now. A growth a write has taken
+    /// already, with the round before it, is owed nothing, so no wait starts
+    /// that no batch would end.
+    fn owe(&mut self, urgent: bool) {
+        if self.volume.as_ref().is_none_or(|v| self.hub.end() == v.through()) {
+            return;
+        }
+        self.urgent |= urgent;
         self.owed_since.get_or_insert_with(Instant::now);
     }
 
@@ -348,30 +365,34 @@ impl Writer {
     /// `by`. Withheld, and no call made, unless the flush reached the file:
     /// `/log`'s server may never have answered, and a part the volume refused
     /// is not this boot's log, so the mark would call a stop clean whose log
-    /// is not on the volume.
-    fn mark(&mut self, by: Instant) -> bool {
-        if !self.finished {
+    /// is not on the volume. Once asked for, the mark is taken to be there,
+    /// whatever the volume answered, until a refused stop takes it back.
+    fn mark(&mut self, by: Instant) {
+        let Some(v) = self.volume.as_ref().filter(|_| self.finished) else {
             toyos::warn!("logkeeper: {DIR} does not hold this boot's log, so the stop is not marked - the next boot will not count this one as clean");
-            return false;
-        }
+            return;
+        };
         if Instant::now() >= by {
             toyos::error!("logkeeper: the stop mark was asked of {DIR} after its time - the next boot will not count this one as clean");
-            return false;
+            return;
         }
-        store::mark_stopped()
-            .inspect_err(|e| {
-                toyos::error!("logkeeper: {DIR} would not take the stop mark ({e}) - the next boot will not count this one as clean")
-            })
-            .is_ok()
+        self.marked = true;
+        if let Err(e) = v.mark_stopped() {
+            toyos::error!("logkeeper: {DIR} would not take the stop mark ({e}) - the next boot will not count this one as clean");
+        }
     }
 
-    fn resume(&mut self, marked: bool) {
-        if marked && let Err(e) = store::unmark_stopped() {
-            toyos::error!("logkeeper: {DIR} would not give back the stop mark ({e}) - a later death of this boot will read as clean");
+    /// The stop was refused: any mark it asked for is taken back, and what
+    /// the replay was given since is written at once.
+    fn resume(&mut self) {
+        if std::mem::take(&mut self.marked) {
+            let v = self.volume.as_ref().expect("a stop's volume stays until the stop is refused");
+            if let Err(e) = v.unmark_stopped() {
+                toyos::error!("logkeeper: {DIR} would not give back the stop mark ({e}) - a later death of this boot will read as clean");
+            }
         }
         (self.stopped, self.finished) = (false, false);
-        self.owed_since.get_or_insert_with(Instant::now);
-        self.urgent = true;
+        self.owe(true);
     }
 }
 
@@ -406,6 +427,7 @@ mod tests {
             urgent: false,
             finished: false,
             stopped: false,
+            marked: false,
         }
     }
 
@@ -448,6 +470,7 @@ mod tests {
         let mut w = writer(tmp.path().to_str().unwrap());
         let (asks, asked) = mpsc::channel();
         let file = File { asks, growth: Arc::clone(&w.growth) };
+        w.hub.append(b"line\n", None);
         for round in 0..100 {
             file.grew(round == 50);
         }
@@ -466,7 +489,8 @@ mod tests {
         let tmp = toyos_tmpdir::TempDir::new("logkeeper-file");
         let mut w = writer(tmp.path().to_str().unwrap());
         let t = Instant::now();
-        assert!(!w.mark(t + BATCH_AGE), "no flush, no mark");
+        w.mark(t + BATCH_AGE);
+        assert!(!w.marked, "no flush, no mark");
         grew(&mut w, b"before\n", false, t);
         w.finish(Instant::now() + BATCH_AGE);
         assert!(w.finished);
@@ -475,11 +499,53 @@ mod tests {
         w.volume.as_mut().unwrap().lost();
         w.retry = Some(Retry::after(t));
         assert!(!w.due(t + Duration::from_secs(3600)) && w.next_due().is_none(), "a stopped file is written nothing");
-        w.resume(false);
+        w.resume();
         let retry = w.retry.unwrap().at();
         assert_eq!(w.next_due(), Some(retry), "a refused part is asked again at its retry");
         assert!(w.due(retry));
         w.write();
         assert_eq!(on_disk(&w), b"before\nafter\n");
+    }
+
+    /// **A growth a write has taken already starts no wait**: a round
+    /// appended while a write catches up is written by it, and the ask that
+    /// round sent, taken after, owes nothing, so the thread parks rather than
+    /// waking at once until the next line. A refused stop that held nothing
+    /// owes nothing either.
+    #[test]
+    fn a_growth_already_written_starts_no_wait() {
+        let tmp = toyos_tmpdir::TempDir::new("logkeeper-file");
+        let mut w = writer(tmp.path().to_str().unwrap());
+        let (asks, _asked) = mpsc::channel();
+        let file = File { asks, growth: Arc::clone(&w.growth) };
+        w.hub.append(b"one\n", None);
+        file.grew(false);
+        w.took_growth();
+        w.hub.append(b"two\n", None);
+        file.grew(true);
+        w.write();
+        assert_eq!(on_disk(&w), b"one\ntwo\n");
+        w.took_growth();
+        assert!(w.next_due().is_none() && !w.urgent, "a file with everything waits on nothing");
+        w.finish(Instant::now() + BATCH_AGE);
+        w.resume();
+        assert!(w.next_due().is_none(), "a refused stop that held nothing owes nothing");
+    }
+
+    /// **A refused stop takes back the mark it asked for, whatever the loop
+    /// heard of it**: the file's thread keeps the record, so a mark that lands
+    /// after the loop stopped waiting is not left for a later death to read as
+    /// a clean stop.
+    #[test]
+    fn a_refused_stop_takes_back_the_mark_it_asked_for() {
+        let tmp = toyos_tmpdir::TempDir::new("logkeeper-file");
+        let mut w = writer(tmp.path().to_str().unwrap());
+        let mark = tmp.join(toyos_logstream::STOPPED);
+        grew(&mut w, b"before\n", false, Instant::now());
+        w.finish(Instant::now() + BATCH_AGE);
+        w.mark(Instant::now() + BATCH_AGE);
+        assert!(mark.exists(), "the mark goes over the flushed file");
+        w.resume();
+        assert!(!mark.exists(), "a refused stop leaves no mark");
     }
 }
