@@ -33,13 +33,32 @@ use super::charge::{self, Charge};
 use super::paging::{Leaf, Mapping, Root, Unlinked, UserTables};
 use super::policy::{self, CachePolicy};
 use super::{pmm, PAGE_2M, PAGE_SIZE};
+use crate::object::paged::{MapNode, PagedHolderObject, PagedRange};
 use crate::object::shm::SharedMemObject;
 use crate::sync::{Lock, LockGuard};
 use crate::UserAddr;
 
-type Inventory = vm::Inventory<Arc<SharedMemObject>, Arc<dyn CopySource>>;
-type SpaceEntry = Entry<Arc<SharedMemObject>, Arc<dyn CopySource>>;
-type SpaceKind = Kind<Arc<SharedMemObject>, Arc<dyn CopySource>>;
+type Inventory = vm::Inventory<Mapped, Arc<dyn CopySource>>;
+type SpaceEntry = Entry<Mapped, Arc<dyn CopySource>>;
+type SpaceKind = Kind<Mapped, Arc<dyn CopySource>>;
+
+/// What an object range maps: a memory object's pages, fixed for its life,
+/// or a paged object's, which its pager's index holds and revokes.
+#[derive(Clone)]
+pub enum Mapped {
+    Memory(Arc<SharedMemObject>),
+    Paged(PagedRange),
+}
+
+impl vm::Object for Mapped {
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Mapped::Memory(a), Mapped::Memory(b)) => Arc::ptr_eq(a, b),
+            (Mapped::Paged(a), Mapped::Paged(b)) => core::ptr::eq(a.node(), b.node()),
+            _ => false,
+        }
+    }
+}
 
 /// The bytes a copied range's pages start as. A read runs under the space
 /// lock, from a fault or a user copy, so it may take no lock a user copy can
@@ -502,8 +521,71 @@ impl AddressSpace {
         self.room_at(len, at)?;
         let start = self.place(len, at)?;
         self.build(start, start + len)?;
-        self.put(start, Entry { end: start + len, prot, kind: Kind::Object { object, offset, max: prot } });
+        self.put(start, Entry { end: start + len, prot, kind: Kind::Object { object: Mapped::Memory(object), offset, max: prot } });
         Ok(UserAddr::new(start))
+    }
+
+    /// `len` bytes of `holder`'s object from `offset`, as `prot` allows,
+    /// sharing the index's frames: one node per object in a space, so a
+    /// second range of the object holds the first's. `space` is this space,
+    /// whose lock the caller holds. All or nothing, as
+    /// [`reserve`](Self::reserve).
+    pub fn map_paged(&mut self, space: &Arc<Space>, holder: &PagedHolderObject, offset: u64, len: u64, prot: Prot, at: At) -> Result<UserAddr, SyscallError> {
+        if !offset.is_multiple_of(PAGE_SIZE) || offset.checked_add(len).is_none_or(|end| end > kernel::paged::LAST_END) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        self.room_at(len, at)?;
+        let start = self.place(len, at)?;
+        let held = self.inventory.meeting(FLOOR, TOP).find_map(|(_, entry)| match &entry.kind {
+            Kind::Object { object: Mapped::Paged(range), .. } if holder.maps(range) => Some(range.clone()),
+            _ => None,
+        });
+        let range = match held {
+            Some(range) => range,
+            None => holder.link(Arc::downgrade(space), &self.job)?,
+        };
+        self.build(start, start + len)?;
+        self.put(start, Entry { end: start + len, prot, kind: Kind::Object { object: Mapped::Paged(range), offset, max: prot } });
+        Ok(UserAddr::new(start))
+    }
+
+    /// The visit of a walk of `node`'s object: every leaf of this space's
+    /// ranges of it that the index no longer holds present as that frame is
+    /// cleared, every futex wait on its frame ends, and every CPU drops what
+    /// it cached of them. A fault meanwhile waits on this space's lock and
+    /// then finds the page as the index has it.
+    pub fn revoke_paged(&mut self, node: &MapNode) {
+        let tables = &mut self.tables;
+        let mut cleared = [0u64; 64];
+        let mut n = 0;
+        node.with_present(|present| {
+            for (start, entry) in self.inventory.meeting(FLOOR, TOP) {
+                let Kind::Object { object: Mapped::Paged(range), offset, .. } = &entry.kind else { continue };
+                if !core::ptr::eq(range.node(), node) {
+                    continue;
+                }
+                let mut stale = false;
+                tables.edit(start, entry.end, |va, leaf| match leaf {
+                    Leaf::Mapped(m) if present((offset + (va - start)) / PAGE_SIZE) != Some(m.phys) => {
+                        stale = true;
+                        if n == cleared.len() {
+                            cleared.sort_unstable();
+                            crate::sched::futex::revoke_sorted(&cleared, |&phys| phys);
+                            n = 0;
+                        }
+                        cleared[n] = m.phys;
+                        n += 1;
+                        Some(Leaf::Empty)
+                    }
+                    _ => None,
+                });
+                if stale {
+                    let _reached = tables.shoot_down(start, entry.end, &Unlinked::none());
+                }
+            }
+        });
+        cleared[..n].sort_unstable();
+        crate::sched::futex::revoke_sorted(&cleared[..n], |&phys| phys);
     }
 
     /// Take every page of `[start, start + len)` away, whatever holds it: the
@@ -790,7 +872,7 @@ impl AddressSpace {
         let mut at = start;
         while at < end {
             let next = self.inventory.meeting(at, end).find_map(|(s, entry)| match &entry.kind {
-                Kind::Object { object: held, offset, .. }
+                Kind::Object { object: Mapped::Memory(held), offset, .. }
                     if core::ptr::eq(Arc::as_ptr(held), object) && *offset + at.saturating_sub(s) == at.max(s) - start =>
                 {
                     Some((at.max(s), entry.end.min(end)))
@@ -886,10 +968,27 @@ impl AddressSpace {
                 let (lo, hi) = vm::around(start, entry.end, page, |at| leaves.covers(at) && leaves.get(at) != Leaf::Empty);
                 match &entry.kind {
                     Kind::Private { committed: false } => unreachable!("space: a reservation at {page:#x} allows an access"),
-                    Kind::Object { object, offset, .. } => {
+                    Kind::Object { object: Mapped::Memory(object), offset, .. } => {
                         let phys = |at: u64| object.page(offset + (at - start));
                         leaves.fill(lo, hi, |at| Leaf::Mapped(Mapping { phys: phys(at), prot, owned: false, cache: object.cache() }));
                         phys(page)
+                    }
+                    // The index's own frames, written under its lock: a
+                    // revoking page reads absent, so no leaf maps a frame on
+                    // its way out.
+                    Kind::Object { object: Mapped::Paged(range), offset, .. } => {
+                        let of = |at: u64| (offset + (at - start)) / PAGE_SIZE;
+                        range.node().with_present(|present| {
+                            let own = present(of(page))?;
+                            let mut at = lo;
+                            while at < hi {
+                                if let (Leaf::Empty, Some(phys)) = (leaves.get(at), present(of(at))) {
+                                    leaves.set(at, Leaf::Mapped(Mapping { phys, prot, owned: false, cache: CachePolicy::Normal }));
+                                }
+                                at += PAGE_SIZE;
+                            }
+                            Some(own)
+                        })?
                     }
                     Kind::Private { committed: true } | Kind::Copy { .. } => {
                         let (mut filled, mut own) = (0, 0);
@@ -924,7 +1023,8 @@ impl AddressSpace {
 /// Whether a range's pages are memory the direct map reaches.
 fn copyable(entry: &SpaceEntry) -> bool {
     match &entry.kind {
-        Kind::Object { object, .. } => object.is_ordinary(),
+        Kind::Object { object: Mapped::Memory(object), .. } => object.is_ordinary(),
+        Kind::Object { object: Mapped::Paged(_), .. } => true,
         Kind::Private { .. } | Kind::Copy { .. } => true,
     }
 }

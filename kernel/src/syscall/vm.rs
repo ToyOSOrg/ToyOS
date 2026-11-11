@@ -11,6 +11,7 @@ use toyos_abi::handle::{RawHandle, Rights};
 
 use crate::mm::space::At;
 use crate::object::shm::SharedMemObject;
+use crate::object::KObjectRef;
 use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
 use crate::process;
@@ -90,11 +91,16 @@ pub(super) fn sys_vm_map(ctx: &SyscallContext<'_>, h: RawHandle, args: UserAddr)
         Ok(asked) => asked,
         Err(e) => return SyscallError::to_u64(e),
     };
+    let space = process::current_address_space();
+    match process::with_handles(|handles| handles.get_ref(h, Rights::NONE).map(|o| matches!(o, KObjectRef::Paged(_)))) {
+        Ok(true) => return map_paged(h, &space, args.offset, len, prot, at),
+        Ok(false) => {}
+        Err(e) => return e.refuse(),
+    }
     let object = match process::with_handles(|handles| handles.get::<SharedMemObject>(h, map_rights(prot))) {
         Ok(object) => object,
         Err(e) => return e.refuse(),
     };
-    let space = process::current_address_space();
     let mapped = space.lock().map(alloc::sync::Arc::clone(&object), args.offset, len, prot, at);
     let at = match mapped {
         Ok(at) => at,
@@ -107,6 +113,21 @@ pub(super) fn sys_vm_map(ctx: &SyscallContext<'_>, h: RawHandle, args: UserAddr)
         return e.to_u64();
     }
     at.raw()
+}
+
+/// A paged object's holder `h`: its pages shared, read-only, as `READ`
+/// allows, and refused a pager's process as its reads are
+/// (`syscall::paged`).
+fn map_paged(h: RawHandle, space: &alloc::sync::Arc<crate::mm::space::Space>, offset: u64, len: u64, prot: Prot, at: At) -> u64 {
+    if prot != Prot::Read {
+        return SyscallError::InvalidArgument.to_u64();
+    }
+    let holder = match super::paged::holder(h) {
+        Ok(holder) => holder,
+        Err(refused) => return refused,
+    };
+    let mapped = space.lock().map_paged(space, &holder, offset, len, prot, at);
+    mapped.map_or_else(SyscallError::to_u64, UserAddr::raw)
 }
 
 /// Take every page of `[addr, addr + len)` away, as POSIX `munmap` does.

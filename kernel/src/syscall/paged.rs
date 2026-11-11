@@ -77,7 +77,7 @@ pub(super) fn sys_paged_read(h: RawHandle, out: &mut UserBytesMut, offset: u64) 
     }
 }
 
-fn holder(h: RawHandle) -> Result<Arc<PagedHolderObject>, u64> {
+pub(super) fn holder(h: RawHandle) -> Result<Arc<PagedHolderObject>, u64> {
     let handles = process::handles();
     let resolved = readable_holder(&handles.lock(), h, handles.is_pager());
     match resolved {

@@ -42,7 +42,7 @@
 //! life (`issues/one-client-can-fill-the-tmp-servers-memory-and-deny-every-other-client.md`),
 //! so making an object is the one call that allocates.
 
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use core::cell::{Cell, UnsafeCell};
 use core::marker::PhantomPinned;
 use core::pin::Pin;
@@ -55,10 +55,11 @@ use kernel::sched::task::WaitClass;
 use kernel::slots::Slots;
 use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
 
-use crate::mm::charge::Charge;
+use crate::mm::charge::{self, Charge};
 use crate::mm::pmm;
+use crate::mm::space::Space;
 use crate::process::Pid;
-use crate::sync::Lock;
+use crate::sync::{Lock, LockGuard};
 use crate::time::{Deadline, Duration};
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::watch::{self, Watch};
@@ -104,6 +105,14 @@ struct Entry {
     holders: u32,
     /// Not released: owner calls reach it.
     owned: bool,
+    /// The spaces mapping it, one node each ([`MapNode`]).
+    mappers: Ends,
+}
+
+/// The ends of an object's list of mappers.
+struct Ends {
+    head: *const MapNode,
+    tail: *const MapNode,
 }
 
 struct State {
@@ -306,7 +315,8 @@ impl PagerObject {
         let State { pages, entries, .. } = &mut *state;
         let made = entries.insert_with(|slot| {
             let object = if anonymous { pages.anonymous(slot, size) } else { pages.object(slot, size) };
-            Entry { object, refs: 1, holders: 0, owned: true }
+            let mappers = Ends { head: ptr::null(), tail: ptr::null() };
+            Entry { object, refs: 1, holders: 0, owned: true, mappers }
         });
         u64::from(made.expect("paged: a slot was made free"))
     }
@@ -319,61 +329,97 @@ impl PagerObject {
         let mut waiters = Linked { head: state.requests, slot };
         let (pages, object) = state.split(slot);
         let answer = f(pages, object, &mut waiters);
-        self.revoked(&mut state, slot);
+        let (mut state, queued) = self.revoked(state, slot);
+        let Some(epoch) = queued else {
+            drop(state);
+            self.changed.post();
+            return Ok(answer);
+        };
+        // A walk runs: its next pass takes these pages, and the call returns
+        // once it has, with the slot held meanwhile.
+        state.entry_mut(slot).refs += 1;
         drop(state);
         self.changed.post();
+        let _held = Ref { pager: self, slot };
+        let parkable = crate::scheduler::Parkable::at_entry();
+        let over = || self.state.lock().entry(slot).object.finished(epoch);
+        // A kill ends either wait, and its thread never reads the answer. A
+        // walk takes no wait of its own, so one past the report time is a
+        // kernel fault worth a line, and the wait goes on.
+        let report = Deadline::at(crate::clock::now() + self.report);
+        if watch::wait_until(&parkable, &self.changed, 0, WaitClass::Io, report, over).is_ok() && !over() {
+            log!("paged: pid {}'s removal waits past {} ms on another's walk", self.pid, self.report.nanos() / 1_000_000);
+            let _ = watch::wait_until(&parkable, &self.changed, 0, WaitClass::Io, Deadline::never(), over);
+        }
         Ok(answer)
     }
 
-    /// Under the lock, `state`: the pages of the object at `slot` just marked
-    /// revoking leave once no mapping reaches them, each frame given back,
-    /// and every waiter's want a page that ends absent meets is named again
-    /// in a notice (`Pages::walk`).
-    fn revoked(&self, state: &mut State, slot: u32) {
-        let job = self.core.job();
-        let mut waiters = Linked { head: state.requests, slot };
-        let State { pages, entries, held, gone, .. } = &mut *state;
-        let object = &mut entries.get_mut(slot).expect("paged: a slot an object names is held").object;
-        match object.revoke() {
-            Revoke::Done => return,
+    /// The pages of the object at `slot` just marked revoking leave once no
+    /// mapping reaches them: this walks the object's mappers, the lock dropped
+    /// for each space's visit and the slot held meanwhile, gives each frame
+    /// back, and names again every waiter's want a page that ends absent meets
+    /// (`Pages::walk`). Answers the lock and, where another's walk runs and
+    /// takes the pages in its next pass, that pass's epoch.
+    fn revoked<'a>(&'a self, mut state: LockGuard<'a, State>, slot: u32) -> (LockGuard<'a, State>, Option<u64>) {
+        match state.entry_mut(slot).object.revoke() {
+            Revoke::Done => return (state, None),
+            Revoke::Queued(epoch) => return (state, Some(epoch)),
             Revoke::Walk => {}
-            Revoke::Queued(_) => unreachable!("paged: a walk outlived the hold of the lock that began it"),
         }
+        let job = self.core.job();
+        state.entry_mut(slot).refs += 1;
         let mut absent = false;
-        let next = pages.walk(object, &mut Unmapped, &mut waiters, &mut |phys, _, becomes| {
-            held.give_back(job, *gone, phys, true);
-            absent |= becomes == Revoked::Absent;
-        });
-        debug_assert!(next.is_none());
+        loop {
+            let mut waiters = Linked { head: state.requests, slot };
+            let State { pages, entries, held, gone, .. } = &mut *state;
+            let Entry { object, mappers, .. } = entries.get_mut(slot).expect("paged: a walked slot is held");
+            let next = pages.walk(object, &mut Ring(mappers), &mut waiters, &mut |phys, _, becomes| {
+                held.give_back(job, *gone, phys, true);
+                absent |= becomes == Revoked::Absent;
+            });
+            let Some(node) = next else { break };
+            // SAFETY: linked, so live, under the lock; a range holds it, so
+            // it upgrades, and the count kept holds it past its unlinking
+            // while the lock is dropped.
+            let node = unsafe { (*node).this.upgrade() }.expect("paged: a linked mapper is held by a range");
+            drop(state);
+            if let Some(space) = node.space.upgrade() {
+                space.lock().revoke_paged(&node);
+            }
+            state = self.state.lock();
+        }
+        self.unref_locked(&mut state, slot);
         if absent {
             self.watch.post();
         }
+        (state, None)
     }
 
     /// The pager lets object `id` go, in one hold of the lock: it answers
     /// `Gone` from now on, its pages go, and its slot with its last holder. A
     /// second release, or one racing the pager's end, finds it released.
     pub fn release(&self, id: u64) -> u64 {
-        let mut state = self.state.lock();
+        let state = self.state.lock();
         let slot = match state.live(id) {
             Ok(slot) => slot,
             Err(e) => return e.to_u64(),
         };
-        self.let_go(&mut state, slot);
-        drop(state);
+        drop(self.let_go(state, slot));
         self.changed.post();
         0
     }
 
     /// Under the lock, `state`: the unreleased object at `slot` released.
-    fn let_go(&self, state: &mut State, slot: u32) {
+    fn let_go<'a>(&'a self, mut state: LockGuard<'a, State>, slot: u32) -> LockGuard<'a, State> {
         let State { pages, entries, .. } = &mut *state;
         let entry = entries.get_mut(slot).expect("paged: a slot an object names is held");
         pages.invalidate(&mut entry.object);
         assert!(core::mem::take(&mut entry.owned), "paged: an object released twice");
         entries.unmark(slot);
-        self.revoked(state, slot);
-        self.unref_locked(state, slot);
+        // A walk already running takes the pages; nothing here waits.
+        let (mut state, _) = self.revoked(state, slot);
+        self.unref_locked(&mut state, slot);
+        state
     }
 
     /// A holder of object `id`, which counts as one once its handle is
@@ -1147,7 +1193,7 @@ impl ZeroHandles for PagerObject {
         state.gone = true;
         for slot in 0..state.entries.len() as u32 {
             if state.entries.get(slot).is_some_and(|e| e.owned) {
-                self.let_go(&mut state, slot);
+                state = self.let_go(state, slot);
             }
         }
         let job = self.core.job();
@@ -1172,18 +1218,172 @@ impl Drop for PagerObject {
     }
 }
 
-/// No space maps a paged object yet: every walk ends at its first step.
-struct Unmapped;
+/// One space's mappings of one paged object, on the object's list from its
+/// space's first range of the object until its last, which unlinks it only
+/// once that range's leaves are cleared and shot down: the space drops a
+/// removed range after its shootdown. It holds a reference on the object's
+/// slot, so a mapped object outlives its release, and is charged to the
+/// mapper's job.
+pub struct MapNode {
+    pager: Arc<PagerObject>,
+    slot: u32,
+    space: Weak<Space>,
+    /// The ranges holding it ([`PagedRange`]), each under its space's lock.
+    ranges: AtomicU32,
+    /// Under the pager's lock.
+    link: UnsafeCell<Link>,
+    /// Itself, for a walk to hold while it visits.
+    this: Weak<MapNode>,
+    _charge: Charge,
+}
 
-impl Mappers for Unmapped {
-    type Node = ();
-    fn head(&self) -> Option<()> {
-        None
+struct Link {
+    /// The epoch of the walk that last visited it, or the one current at
+    /// its linking ([`kernel::paged::Mappers`]).
+    seen: u64,
+    prev: *const MapNode,
+    next: *const MapNode,
+}
+
+// SAFETY: `link` is reached only under its pager's lock, and the rest is
+// immutable or atomic.
+unsafe impl Send for MapNode {}
+// SAFETY: as for `Send`.
+unsafe impl Sync for MapNode {}
+
+impl MapNode {
+    /// Under the pager's lock, through `present`, which answers the frame the
+    /// index holds present for a page of the object, or `None`: `f`'s answer.
+    pub fn with_present<R>(&self, f: impl FnOnce(&dyn Fn(u64) -> Option<u64>) -> R) -> R {
+        let state = self.pager.state.lock();
+        let object = &state.entry(self.slot).object;
+        let present = |page: u64| match state.pages.lookup(object, page) {
+            Lookup::Present(phys) => Some(phys),
+            _ => None,
+        };
+        f(&present)
     }
-    fn seen(&self, (): ()) -> u64 {
-        0
+}
+
+/// A range's hold on its space's [`MapNode`]: a clone is another range of
+/// the same object in the space, and the last one dropped unlinks the node.
+pub struct PagedRange(Arc<MapNode>);
+
+impl PagedRange {
+    pub fn node(&self) -> &MapNode {
+        &self.0
     }
-    fn visited(&mut self, (): (), _: u64) {}
+}
+
+impl Clone for PagedRange {
+    fn clone(&self) -> Self {
+        self.0.ranges.fetch_add(1, Ordering::Relaxed);
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl Drop for PagedRange {
+    fn drop(&mut self) {
+        if self.0.ranges.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.0.pager.unlink(&self.0);
+        }
+    }
+}
+
+impl PagerObject {
+    /// The first range of object `slot` in `space`, whose memory is counted
+    /// to `job`: its node linked, seen at the object's epoch now, under
+    /// the space's lock the caller holds. `Gone` where the object or its
+    /// pager is.
+    pub fn link(self: &Arc<Self>, slot: u32, space: Weak<Space>, job: &Arc<kernel::sched::job::Job>) -> Result<PagedRange, SyscallError> {
+        let charge = Charge::new(job, charge::arc::<MapNode>()).map_err(|_| SyscallError::ResourceExhausted)?;
+        let link = UnsafeCell::new(Link { seen: 0, prev: ptr::null(), next: ptr::null() });
+        let node = Arc::new_cyclic(|this| MapNode {
+            pager: Arc::clone(self),
+            slot,
+            space,
+            ranges: AtomicU32::new(1),
+            link,
+            this: this.clone(),
+            _charge: charge,
+        });
+        let mut state = self.state.lock();
+        let entry = state.entry_mut(slot);
+        if entry.object.gone() {
+            return Err(SyscallError::Gone);
+        }
+        let at = Arc::as_ptr(&node);
+        // SAFETY: a fresh node no list holds yet, and the tail's, linked,
+        // under the lock.
+        unsafe {
+            *(*at).link.get() = Link { seen: entry.object.epoch(), prev: entry.mappers.tail, next: ptr::null() };
+            match entry.mappers.tail.is_null() {
+                true => entry.mappers.head = at,
+                false => (*(*entry.mappers.tail).link.get()).next = at,
+            }
+        }
+        entry.mappers.tail = at;
+        entry.refs += 1;
+        Ok(PagedRange(node))
+    }
+
+    /// The last range of `node`'s space went, its leaves cleared and shot
+    /// down: the node leaves the list, and its reference on the slot goes.
+    fn unlink(&self, node: &MapNode) {
+        let mut state = self.state.lock();
+        let entry = state.entry_mut(node.slot);
+        // SAFETY: linked, as are its neighbours, under the lock.
+        unsafe {
+            let Link { prev, next, .. } = *node.link.get();
+            match prev.is_null() {
+                true => entry.mappers.head = next,
+                false => (*(*prev).link.get()).next = next,
+            }
+            match next.is_null() {
+                true => entry.mappers.tail = prev,
+                false => (*(*next).link.get()).prev = prev,
+            }
+        }
+        self.unref_locked(&mut state, node.slot);
+    }
+}
+
+/// An object's list of mappers, as its walk visits them, under the pager's
+/// lock.
+struct Ring<'a>(&'a mut Ends);
+
+impl Mappers for Ring<'_> {
+    type Node = *const MapNode;
+
+    fn head(&self) -> Option<*const MapNode> {
+        (!self.0.head.is_null()).then_some(self.0.head)
+    }
+
+    fn seen(&self, node: *const MapNode) -> u64 {
+        // SAFETY: linked, so live, under the lock.
+        unsafe { (*(*node).link.get()).seen }
+    }
+
+    fn visited(&mut self, node: *const MapNode, epoch: u64) {
+        // SAFETY: linked, as are its neighbours, under the lock; it moves to
+        // the tail.
+        unsafe {
+            let link = &mut *(*node).link.get();
+            link.seen = epoch;
+            if self.0.tail == node {
+                return;
+            }
+            match link.prev.is_null() {
+                true => self.0.head = link.next,
+                false => (*(*link.prev).link.get()).next = link.next,
+            }
+            (*(*link.next).link.get()).prev = link.prev;
+            (*(*self.0.tail).link.get()).next = node;
+            link.prev = self.0.tail;
+            link.next = ptr::null();
+            self.0.tail = node;
+        }
+    }
 }
 
 /// One call's reference to its pager's object.
@@ -1226,6 +1426,17 @@ impl PagedHolderObject {
 
     pub fn read(&self, out: &mut UserBytesMut, offset: u64) -> u64 {
         self.named.pager.read(self.named.slot, out, offset, true)
+    }
+
+    /// Whether `range` maps this holder's object.
+    pub fn maps(&self, range: &PagedRange) -> bool {
+        ptr::eq(Arc::as_ptr(&range.0.pager), Arc::as_ptr(&self.named.pager)) && range.0.slot == self.named.slot
+    }
+
+    /// The first range of its object in `space`, whose memory is counted to
+    /// `job` ([`PagerObject::link`]).
+    pub fn link(&self, space: Weak<Space>, job: &Arc<kernel::sched::job::Job>) -> Result<PagedRange, SyscallError> {
+        self.named.pager.link(self.named.slot, space, job)
     }
 }
 
