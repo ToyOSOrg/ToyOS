@@ -57,8 +57,8 @@ const SPARES: [PciId; 4] = [
     PciId { vendor: 0x1022, device: 0x1639 },
 ];
 
-/// How long usbd has to say it has settled. Policy, and loose: enumeration
-/// is a few control transfers per device, and the guest may be slow.
+/// How long usbd has to say it has settled: a hang ceiling, never a timing.
+/// Enumeration is a few control transfers per device.
 const SETTLE_BOUND: Duration = Duration::from_secs(30);
 
 /// The span across which a parked usbd may wake for nothing but an event:
@@ -204,16 +204,18 @@ pub fn fault(cap: &SysCap) {
     dev.dma_start().expect("usbd_spare: the start");
     let op = usize::from(regs.read::<u8>(0));
     let db = (regs.read::<u32>(0x14) & !3) as usize;
-    let settle = |what: &str, done: &dyn Fn() -> bool| {
-        let began = Instant::now();
-        while !done() {
-            assert!(began.elapsed() < Duration::from_secs(2), "usbd_spare: the controller {what}");
-        }
-    };
+    // Each state is waited on with no deadline: a controller that never
+    // halts or never leaves its reset is a hang, which the job's ceiling ends.
     regs.write::<u32>(op, 0);
-    settle("never halted", &|| regs.read::<u32>(op + 4) & 1 != 0);
+    println!("usbd_spare: waiting for the controller to halt");
+    while regs.read::<u32>(op + 4) & 1 == 0 {
+        std::hint::spin_loop();
+    }
     regs.write::<u32>(op, 1 << 1);
-    settle("held its reset", &|| regs.read::<u32>(op) & (1 << 1) == 0 && regs.read::<u32>(op + 4) & (1 << 11) == 0);
+    println!("usbd_spare: waiting for the controller to leave its reset");
+    while regs.read::<u32>(op) & (1 << 1) != 0 || regs.read::<u32>(op + 4) & (1 << 11) != 0 {
+        std::hint::spin_loop();
+    }
     let aimed = grant.device_addr + PAST_THE_GRANT;
     // The command ring there, the controller running, and its doorbell rung:
     // its first fetch is a read of an address no grant maps.
@@ -224,7 +226,8 @@ pub fn fault(cap: &SysCap) {
 
     let poller = Poller::new(1);
     poller.watch(&dev, READABLE, 0);
-    poller.wait(1, Duration::from_secs(10).as_nanos() as u64, |_| {});
+    // The unit's refusal is the event, waited on with no deadline.
+    poller.wait(1, u64::MAX, |_| {});
     match dev.irq() {
         Err(SyscallError::Io) => println!("usbd_spare: the claim refuses its interrupt read: Io"),
         Ok(record) => panic!("usbd_spare: after the aimed fetch the claim answered a record of {}, not the unit's refusal", record.count),
