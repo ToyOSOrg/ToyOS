@@ -377,11 +377,10 @@ impl Log {
         let copy = ring.as_handle().try_clone_to_owned().expect("supervisor: its ring would not duplicate");
         let held = toyos::fd::install(toyos::fd::Object::handle(copy), false, 0)
             .expect("supervisor: no descriptor for its own ring");
-        for (fd, stream) in [(1, toyos::log::stdio::Stream::Out), (2, toyos::log::stdio::Stream::Err)] {
+        for fd in [1, 2] {
             // SAFETY: std's stdio descriptors, which the kernel starts this
-            // process with none of: std names them by number and asks again.
+            // process with none of.
             unsafe { toyos::fd::dup2(held, fd, false) }.expect("supervisor: its ring would not take its own descriptor");
-            toyos::log::stdio::forget(stream);
         }
         // SAFETY: the descriptor installed above, named nowhere else.
         unsafe { toyos::fd::close(held) }.expect("supervisor: the ring's descriptor it just made");
