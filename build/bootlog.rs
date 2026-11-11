@@ -82,9 +82,8 @@ pub fn kernel_records(log: &str) -> String {
 /// trailing ` online` as a separate word: the same head carries the failure.
 pub const AP_BRINGUP: &str = "SMP: AP cpu";
 
-/// `toyos_abi::inventory::NAME_BYTES`, one byte of which is the name's
-/// terminator.
-const NAME_LEN: usize = 28;
+/// The roster's name field, one byte of which is the name's terminator.
+const NAME_LEN: usize = toyos_abi::inventory::NAME_BYTES;
 
 /// The name the kernel records a process run as `binary` under: what its
 /// parent's SDK states at the spawn (`toyos::spawn::name` in
@@ -503,16 +502,14 @@ mod tests {
         assert_eq!(stop_marked(""), Err(Unfit::NoStopMark));
     }
 
-    /// The two kernel spellings a metal readback is judged on, and the length
-    /// it truncates a name to — held to the kernel's own source, because
-    /// nothing links this crate to it either.
+    /// The kernel spellings a metal readback is judged on, held to the
+    /// kernel's own source, because nothing links this crate to it.
     #[test]
     fn the_kernel_writes_the_records_the_host_reads() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         for (file, needle) in [
             ("kernel/src/process.rs", format!("log!(\"{EXIT}{{name}} pid=")),
             ("kernel/src/arch/x86_64/smp.rs", format!("log!(\"{AP_BRINGUP}")),
-            ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
             ("kernel/src/deadline.rs", format!("\"{DEADLINE_ARMED}{{ms}} ms")),
         ] {
             let at = root.join(file);
