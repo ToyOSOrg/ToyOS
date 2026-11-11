@@ -53,7 +53,8 @@ impl<const W: usize, const N: usize> Rings<W, N> for [Option<&'static Ring<W, N>
     }
 }
 
-/// A walk's position in each ring, and what it counted lost.
+/// A walk's position in each ring, and what it counted lost. Every position
+/// is at or past `FIRST_SEQ`, which a walk counts its loss from.
 pub trait Positions {
     fn count(&self) -> usize;
     fn next(&self, ring: usize) -> u64;
@@ -72,12 +73,13 @@ pub struct Cursor {
 
 impl Cursor {
     /// A caller's positions as a walk, or `None` for a position past the number its ring issues next; the walk
-    /// counts this read's loss alone.
+    /// counts this read's loss alone. Each position starts at its ring's first number, an unpublished ring's
+    /// too: a zeroed cursor has missed nothing, and is answered where [`Published`] starts.
     pub fn from_reader<const W: usize, const N: usize>(next: &[u64], rings: &(impl Rings<W, N> + ?Sized)) -> Option<Self> {
         // An unpublished ring is held to the head it is published with, so no cursor is ahead of one that appears mid-walk.
         let issued = |cpu: usize| rings.ring(cpu).map_or(FIRST_SEQ, Ring::head);
         let ahead = next.iter().enumerate().any(|(cpu, &next)| next > issued(cpu));
-        (!ahead).then(|| Self { next: next.to_vec(), lost: 0 })
+        (!ahead).then(|| Self { next: next.iter().map(|&next| next.max(FIRST_SEQ)).collect(), lost: 0 })
     }
 
     pub fn next(&self) -> &[u64] {
@@ -173,8 +175,7 @@ impl Positions for &Published {
 fn open<const W: usize, const N: usize>(at: &mut impl Positions, i: usize, ring: Option<&'static Ring<W, N>>) -> Option<u64> {
     let ring = ring?;
     let oldest = ring.oldest_readable();
-    // Clamped to `FIRST_SEQ`: a zeroed cursor from the syscall boundary must not read as having missed everything.
-    let want = at.next(i).max(FIRST_SEQ);
+    let want = at.next(i);
     at.lose(oldest.saturating_sub(want));
     let want = want.max(oldest);
     at.set_next(i, want);
