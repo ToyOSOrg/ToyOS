@@ -39,6 +39,7 @@ use crate::sched::cpu::CpuHandles;
 use crate::sched::hw::Kicker;
 use crate::sched::mailbox::{PreemptGuard, SchedMsg};
 use crate::sched::park::{notify, revoke, Deferred};
+use crate::sched::poll::Via;
 use crate::sched::sync::{Arc, CellLock};
 use crate::sched::task::{TaskShared, WakeCause};
 
@@ -63,6 +64,9 @@ pub trait Ring {
     fn fire(&self, how: Fire);
     /// Whether a fire would still do anything. `false` is permanent.
     fn live(&self) -> bool;
+    /// The handle this poll was made through, which [`Watch::end_rings`]
+    /// finds it by.
+    fn via(&self) -> Via;
 }
 
 /// Everything a watch holds.
@@ -297,6 +301,23 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
         }
     }
 
+    /// Fire as [`Fire::Gone`], and let go of, every ring entry made through
+    /// `via`: that handle left its table. Every other entry stays. Taken out
+    /// [`FEW`] at a time and fired and dropped with the lock let go, so a
+    /// thread's.
+    pub fn end_rings(&self, via: Via) {
+        loop {
+            let mut ended: [Option<R>; FEW] = [const { None }; FEW];
+            let taken = self.list.with(|w| take_matching(&mut w.rings, &mut ended, |ring| ring.via() == via));
+            for ring in ended.iter().flatten() {
+                ring.fire(Fire::Gone);
+            }
+            if taken < FEW {
+                return;
+            }
+        }
+    }
+
     /// Run `f` holding the list lock, where a registration holds it, touching
     /// nothing on the list: an actuator's way to raise an interrupt there.
     pub fn holding<U>(&self, f: impl FnOnce() -> U) -> U {
@@ -317,14 +338,20 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
 /// Take up to [`FEW`] entries that can no longer fire out of `rings` into
 /// `dead`, and answer how many.
 fn take_dead<R: Ring>(rings: &mut Vec<R>, dead: &mut [Option<R>; FEW]) -> usize {
+    take_matching(rings, dead, |ring| !ring.live())
+}
+
+/// Take up to [`FEW`] entries `takes` answers for out of `rings` into `out`,
+/// and answer how many.
+fn take_matching<R: Ring>(rings: &mut Vec<R>, out: &mut [Option<R>; FEW], takes: impl Fn(&R) -> bool) -> usize {
     let (mut at, mut taken) = (0, 0);
     // Order is nothing to a ring entry: every post fires them all.
     while at < rings.len() && taken < FEW {
-        if rings[at].live() {
-            at += 1;
-        } else {
-            dead[taken] = Some(rings.swap_remove(at));
+        if takes(&rings[at]) {
+            out[taken] = Some(rings.swap_remove(at));
             taken += 1;
+        } else {
+            at += 1;
         }
     }
     taken
@@ -356,6 +383,10 @@ mod tests {
     use alloc::vec;
     use core::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
+
+    /// The handle a test's entry was made through, where nothing ends it by
+    /// its handle.
+    const NOWHERE: Via = Via { table: 0, handle: toyos_abi::handle::RawHandle(0) };
 
     #[derive(Debug, PartialEq, Eq)]
     enum Msg {
@@ -413,6 +444,9 @@ mod tests {
         }
         fn live(&self) -> bool {
             self.state.load(Ordering::Acquire) == 0
+        }
+        fn via(&self) -> Via {
+            NOWHERE
         }
     }
 
@@ -651,6 +685,9 @@ mod tests {
         fn fire(&self, _how: Fire) {}
         fn live(&self) -> bool {
             false
+        }
+        fn via(&self) -> Via {
+            NOWHERE
         }
     }
 

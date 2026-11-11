@@ -662,7 +662,26 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("a_poll_registered_racing_a_post_completes_exactly_once"),
         Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
         Fails("a_poll_on_two_watches_racing_both_posts_completes_exactly_once"),
+        Says {
+            test: "a_close_racing_a_post_answers_a_poll_once",
+            message: "a post and a close both took the poll",
+        },
     ]),
+    // A poll's entries added after the hold that read its handle there.
+    red(KERNEL_LOOM, "register-outside-table", Some("loom_watch"), &[Says {
+        test: "a_close_racing_a_registration_leaves_nothing_through_the_handle",
+        message: "an entry made through a closed handle is live",
+    }]),
+    // A watch that leaves the poll it replaces kept.
+    red(KERNEL_LOOM, "admit-keeps-the-replaced", Some("loom_watch"), &[Says {
+        test: "a_replacing_watch_racing_a_post_answers_once_under_the_newest_token",
+        message: "one handle's one arrival",
+    }]),
+    // A teardown that wakes nobody.
+    red(KERNEL_LOOM, "teardown-posts-nothing", Some("loom_watch"), &[Says {
+        test: "a_teardown_racing_a_park_returns_the_submit",
+        message: "parked on a ring torn down and no wake owed",
+    }]),
     // The ring models' lost-completion half: the producer posts before it
     // stores the readiness its registrant rechecks.
     red(KERNEL_LOOM, "fault-posted-before-it-is-set", Some("loom_watch"), &[

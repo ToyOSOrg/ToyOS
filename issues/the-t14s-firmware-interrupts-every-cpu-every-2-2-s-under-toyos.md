@@ -78,8 +78,7 @@ at `idle0`, and `8 cpus, SMI flat on each over 12218 ms` from `idle0` to
 
 The `mask-windows` kernel prints such a window as its CPU's own: cpu4's
 4,720,498 ns in the sixth of #649's `mask_windows` boots at `72f16e39a`, and cpu0's 4,725,822 in `649-r6/3-idle-halt-counted`
-(`issues/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`),
-are this by reading, those kernels not reading the count.
+(`windowscase/kernel.log:416`), are this by reading, those kernels not reading the count.
 
 **An image that starts no `/system/bin/acpiserver` stays in legacy mode**, by
 design: the kernel enables ACPI mode only for the `acpi` claim's holder. The

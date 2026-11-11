@@ -28,12 +28,19 @@
 //! models must red with a poll completed by neither.
 //!
 //! **The ring entry is the kernel's [`Once`], compiled from
-//! `kernel/src/inbox/once.rs`**, the decision a `PollEntry` makes, and the last
-//! two models' ring is the kernel's `kernel/src/inbox/polls.rs` whole: its
-//! polls, the submitter's `deliver`, its park predicate and the wake an answer
-//! owes. What else a ring is — its
-//! page, the objects its looks read — names half the kernel and cannot be
-//! compiled here, so the models count answers instead of writing them.
+//! `kernel/pure/sched/poll.rs`**, the decision a `PollEntry` makes, and the
+//! ring models' ring is that file whole: its polls, the submitter's `deliver`,
+//! its park predicate, a registration through a handle's table and a ring's
+//! teardown. What else a ring is — its page, the objects its looks read, the
+//! handle table itself — names half the kernel and cannot be compiled here, so
+//! the models keep answers instead of writing them, and a table is a lock over
+//! whether its one handle is there.
+//!
+//! The ring models' controls: `register-outside-table` must red
+//! `a_close_racing_a_registration_leaves_nothing_through_the_handle`,
+//! `admit-keeps-the-replaced`
+//! `a_replacing_watch_racing_a_post_answers_once_under_the_newest_token`, and
+//! `teardown-posts-nothing` `a_teardown_racing_a_park_returns_the_submit`.
 //!
 //! [`TaskShared::notify`]: kernel_loom::sched::task::TaskShared::notify
 //! [`Once`]: once::Once
@@ -41,8 +48,6 @@
 //! [`Ring::fire`]: kernel_loom::sched::watch::Ring::fire
 
 #![cfg(feature = "loom")]
-
-extern crate alloc;
 
 use loom::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use loom::sync::Arc;
@@ -52,7 +57,7 @@ use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched::hw::CpuId;
 use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer};
 use kernel_loom::sched_model::{
-    model, model_bounded, watch_list, Kicks, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0, CPU1,
+    model, watch_list, Kicks, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0, CPU1,
 };
 use kernel_loom::sched::park::{prepare, Cancel, Commit, CurrentTask};
 use kernel_loom::sched::task::{
@@ -61,13 +66,13 @@ use kernel_loom::sched::task::{
 use kernel_loom::sched::sync::CellLock;
 use kernel_loom::sched::watch::{Fire, Poster, Ring, Waiters, Watch};
 
-use kernel_loom::{inbox_polls as polls, poll_once as once};
+use kernel_loom::sched::poll::{self as polls, Once, Via};
+use toyos_abi::syscall::SyscallError;
 
 /// One poll, as the kernel's is: its answer taken once, by the kernel's own
-/// [`once::Once`], across everything that may fire it; it counts what it
-/// posted.
+/// [`Once`], across everything that may fire it; it counts what it posted.
 struct Poll {
-    state: once::Once,
+    state: Once,
     posts: AtomicU32,
     /// Whether the end of its source is what took it.
     ended: AtomicBool,
@@ -79,7 +84,7 @@ struct Entry(Arc<Poll>);
 impl Entry {
     fn new() -> Self {
         Self(Arc::new(Poll {
-            state: once::Once::new(),
+            state: Once::new(),
             posts: AtomicU32::new(0),
             ended: AtomicBool::new(false),
         }))
@@ -106,6 +111,15 @@ impl Ring for Entry {
     fn live(&self) -> bool {
         self.0.state.armed()
     }
+
+    fn via(&self) -> Via {
+        via(0)
+    }
+}
+
+/// A handle of the one table these models' process holds.
+fn via(handle: u32) -> Via {
+    Via { table: 1, handle: toyos_abi::handle::RawHandle(handle) }
 }
 
 type ModelWatch = Watch<Msg, Entry, LoomLock<Waiters<Msg, Entry>>>;
@@ -593,38 +607,48 @@ fn a_poll_on_two_watches_racing_both_posts_completes_exactly_once() {
     });
 }
 
-/// A poll ring as its fires and its submitter see it: the kernel's polls, the
-/// answers its submitter wrote, and the watch that submitter parks on, which
-/// holds threads and no ring.
+/// A poll ring as its fires and its submitter see it: the kernel's polls,
+/// which its teardown takes, the answers its submitter wrote, how many fires
+/// took a poll, and the watch that submitter parks on, which holds threads and
+/// no ring.
 struct PollRing {
     cpus: CpuHandles<Msg>,
     kicks: Kicks,
-    polls: LoomLock<polls::Polls<RingRef>>,
-    answers: LoomLock<u32>,
+    polls: LoomLock<Option<polls::Polls<RingRef>>>,
+    answers: LoomLock<Vec<(u64, i32)>>,
+    wakes: AtomicU32,
     parked: RingWatch,
 }
 
 #[derive(Clone)]
 struct RingRef(Arc<PollRing>);
 
-type RingPoll = alloc::sync::Arc<polls::Poll<RingRef>>;
+type RingPoll = Arc<polls::Poll<RingRef>>;
+
+impl RingRef {
+    fn answered(&self) -> u32 {
+        self.0.answers.with(|answers| answers.len() as u32)
+    }
+}
 
 impl polls::Wake for RingRef {
     fn wake(&self) {
         let ring = &self.0;
+        ring.wakes.fetch_add(1, Ordering::AcqRel);
         let env = Poster { cpus: &ring.cpus, kicker: &ring.kicks, preempt: &RemoteGuard };
         ring.parked.post_in_place(WakeCause::new(WakeReason::Woken), &env);
     }
 }
 
-/// Every look finds its object ready: each device posts once, for good.
+/// The ring's one submitter. Every look finds its object ready: each device
+/// posts once, for good.
 impl polls::Submitter<RingRef> for RingRef {
     fn room(&self) -> bool {
         true
     }
 
-    fn answer(&self, _user_data: u64, _result: i32) {
-        self.0.answers.with(|n| *n += 1);
+    fn answer(&self, user_data: u64, result: i32) {
+        self.0.answers.with(|answers| answers.push((user_data, result)));
     }
 
     fn look(&self, poll: &RingPoll) -> polls::Look {
@@ -632,7 +656,7 @@ impl polls::Submitter<RingRef> for RingRef {
     }
 
     fn polls<R>(&self, f: impl FnOnce(&mut polls::Polls<RingRef>) -> R) -> Option<R> {
-        Some(self.0.polls.with(f))
+        self.0.polls.with(|polls| polls.as_mut().map(f))
     }
 }
 
@@ -653,26 +677,24 @@ impl Ring for RingEntry {
     fn live(&self) -> bool {
         self.0.armed()
     }
+
+    fn via(&self) -> Via {
+        self.0.via
+    }
 }
 
 /// `inbox::submit`'s wait for `want` answers on `cpu`, as far as its first
 /// park: whether it parked. A park leaves the submitter registered, as a
-/// thread blocked in `watch::wait_until` is. `siblings` is how many other
-/// submitters answer into the ring.
-fn submit_parks(
-    ring: &RingRef,
-    submitter: &Arc<TaskShared<Msg>>,
-    cpu: CpuId,
-    want: u32,
-    siblings: u32,
-) -> bool {
-    let enough = || ring.0.answers.with(|n| *n) >= want;
-    // A fire ends at most one iteration short of the last, and so does a
-    // sibling's look at a poll this one saw fired.
-    let rounds = want + siblings;
-    for _ in 0..=rounds {
+/// thread blocked in `watch::wait_until` is. A ring torn down returns it, as
+/// `submit` returns `NotFound`.
+fn submit_parks(ring: &RingRef, submitter: &Arc<TaskShared<Msg>>, cpu: CpuId, want: u32) -> bool {
+    let enough = || ring.answered() >= want;
+    let gone = || ring.0.polls.with(|polls| polls.is_none());
+    // A fire ends at most one iteration short of the last, and so does the
+    // teardown.
+    for _ in 0..=want + 1 {
         polls::deliver(ring);
-        if enough() {
+        if enough() || gone() {
             return false;
         }
         // `watch::wait_until` over `submit`'s predicate.
@@ -694,7 +716,7 @@ fn submit_parks(
         }
         ring.0.parked.unregister(submitter);
     }
-    unreachable!("{rounds} fires and looks ended more than {rounds} iterations")
+    unreachable!("{want} fires and a teardown ended more than {} iterations", want + 1)
 }
 
 /// A ring nobody waits on yet, and the mailbox of each CPU a submitter of it
@@ -710,8 +732,9 @@ fn poll_ring<const CPUS: usize>(cpus: [CpuId; CPUS]) -> (RingRef, [MailboxConsum
     let ring = RingRef(Arc::new(PollRing {
         cpus: { let count = handles.len() as u32; CpuHandles::new(handles, Topology::flat(count)) },
         kicks: Kicks::new(),
-        polls: LoomLock::new(polls::Polls::new()),
-        answers: LoomLock::new(0),
+        polls: LoomLock::new(Some(polls::Polls::new())),
+        answers: LoomLock::new(Vec::new()),
+        wakes: AtomicU32::new(0),
         parked: Watch::new(watch_list()),
     }));
     let Ok(mailboxes) = mailboxes.try_into() else {
@@ -720,22 +743,34 @@ fn poll_ring<const CPUS: usize>(cpus: [CpuId; CPUS]) -> (RingRef, [MailboxConsum
     (ring, mailboxes)
 }
 
+/// A poll of `ring` through `handle`, answered under `token`, kept as that
+/// handle's one poll.
+fn kept(ring: &RingRef, handle: u32, token: u64) -> RingPoll {
+    let poll = Arc::new(polls::Poll::new(ring.clone(), token, via(handle), toyos_abi::inbox::READABLE));
+    assert!(polls_of(ring, |polls| polls.admit(poll.clone(), 8)));
+    poll
+}
+
+fn polls_of<R>(ring: &RingRef, f: impl FnOnce(&mut polls::Polls<RingRef>) -> R) -> R {
+    ring.0.polls.with(|polls| f(polls.as_mut().expect("a ring not torn down")))
+}
+
 /// `devices` watches, each holding one armed poll of `ring`.
 fn devices_polled(ring: &RingRef, devices: usize) -> Vec<Arc<RingWatch>> {
     (0..devices)
         .map(|handle| {
-            let poll = alloc::sync::Arc::new(polls::Poll::new(
-                ring.clone(),
-                handle as u64,
-                toyos_abi::handle::RawHandle(handle as u32),
-                toyos_abi::inbox::READABLE,
-            ));
-            assert!(ring.0.polls.with(|polls| polls.admit(poll.clone(), devices)));
+            let poll = kept(ring, handle as u32, handle as u64);
             let device = Arc::new(Watch::new(watch_list()));
             device.add_ring(RingEntry(poll));
             device
         })
         .collect()
+}
+
+/// A thread's post of `device`.
+fn posted(ring: &RingRef, device: &RingWatch) {
+    let env = Poster { cpus: &ring.0.cpus, kicker: &ring.0.kicks, preempt: &RemoteGuard };
+    device.post(WakeCause::new(WakeReason::Woken), &env);
 }
 
 /// An interrupt handler's post of `device`, on its own thread.
@@ -764,7 +799,7 @@ fn a_fire_racing_a_submitters_park_is_never_lost() {
         let waiting = {
             let ring = ring.clone();
             let submitter = submitter.clone();
-            loom::thread::spawn(move || submit_parks(&ring, &submitter, CPU0, 2, 0))
+            loom::thread::spawn(move || submit_parks(&ring, &submitter, CPU0, 2))
         };
         let posters: Vec<_> = devices.iter().map(|device| posted_in_place(&ring, device)).collect();
 
@@ -782,62 +817,189 @@ fn a_fire_racing_a_submitters_park_is_never_lost() {
                 "parked over a fired poll and no wake owed: a fire was lost",
             );
         } else {
-            assert_eq!(ring.0.answers.with(|n| *n), 2, "the wait ended short of its answers");
+            assert_eq!(ring.answered(), 2, "the wait ended short of its answers");
             assert!(msgs.is_empty(), "a submitter that never parked is owed nothing: {msgs:?}");
         }
         ring.0.parked.unregister(&submitter);
         // The ring's teardown: its polls hold it.
-        ring.0.polls.with(polls::Polls::withdraw_all);
+        polls_of(&ring, polls::Polls::withdraw_all);
     });
 }
 
-/// **A submitter parked over a poll its sibling is looking at is owed the
-/// answer's wake.** One device's post fires the one poll of a ring two
-/// submitters wait on, each for one answer. A look hides its poll from the
-/// other submitter, which reads nothing owed and parks, the fire's wake spent
-/// before it registered; the looker's answer then posts the watch both park
-/// on. A submitter parked with the answer written and no wake owed was lost
-/// to that look. Four threads: an answer that wakes nobody is red at one
-/// preemption, so the bound is two.
+/// **A poll is answered once, whichever of a post and its handle's close
+/// reaches it first.** One poll made through a handle stands on two watches,
+/// its read and its write direction, as a connection's does; a post of the
+/// read watch and that handle's close, which ends its entries on both, race.
+/// One watch's list lock lets only one of the two take that watch's entry, so
+/// the race is the other watch's: exactly one of the post and the close takes
+/// the poll and wakes the ring, and the submitter's answer is the readiness or
+/// `NotFound`, once.
 #[test]
-fn an_answer_wakes_the_submitter_its_look_hid_the_poll_from() {
-    model_bounded(2, || {
-        let (ring, mut mailboxes) = poll_ring([CPU0, CPU1]);
-        let devices = devices_polled(&ring, 1);
-        let submitters = [
-            (task(1), CPU0),
-            (Arc::new(TaskShared::new(TaskKey(2), TaskState::Running(CPU1), CpuMask::ANY)), CPU1),
-        ];
+fn a_close_racing_a_post_answers_a_poll_once() {
+    model(|| {
+        let (ring, _mailboxes) = poll_ring([CPU0]);
+        let poll = kept(&ring, 1, 7);
+        let read: Arc<RingWatch> = Arc::new(Watch::new(watch_list()));
+        let write: Arc<RingWatch> = Arc::new(Watch::new(watch_list()));
+        read.add_ring(RingEntry(poll.clone()));
+        write.add_ring(RingEntry(poll));
 
-        let waiting: Vec<_> = submitters
-            .iter()
-            .map(|(submitter, cpu)| {
-                let (ring, submitter, cpu) = (ring.clone(), submitter.clone(), *cpu);
-                loom::thread::spawn(move || submit_parks(&ring, &submitter, cpu, 1, 1))
-            })
-            .collect();
-        let poster = posted_in_place(&ring, &devices[0]);
-
-        let parked: Vec<bool> = waiting.into_iter().map(|wait| wait.join().unwrap()).collect();
+        let poster = {
+            let (ring, read) = (ring.clone(), read.clone());
+            loom::thread::spawn(move || posted(&ring, &read))
+        };
+        // `ops::end_polls`: every watch the object has.
+        let closer = loom::thread::spawn(move || {
+            read.end_rings(via(1));
+            write.end_rings(via(1));
+        });
         poster.join().unwrap();
-        let guard = PreemptModel::new();
+        closer.join().unwrap();
 
-        let answers = ring.0.answers.with(|n| *n);
-        for (((submitter, _), rx), parked) in submitters.iter().zip(&mut mailboxes).zip(parked) {
-            let msgs = drain(rx, &guard);
-            if parked {
-                assert_eq!(
-                    msgs,
-                    [Msg::Wake(submitter.key(), WakeReason::Woken)],
-                    "parked with {answers} answer(s) written and no wake owed: the answer woke nobody",
-                );
-            } else {
-                assert_eq!(answers, 1, "the wait ended short of its answer");
-                assert!(msgs.is_empty(), "a submitter that never parked is owed nothing: {msgs:?}");
+        assert_eq!(ring.0.wakes.load(Ordering::Acquire), 1, "a post and a close both took the poll");
+        polls::deliver(&ring);
+        let answers = ring.0.answers.with(core::mem::take);
+        let gone = -(SyscallError::NotFound as i32);
+        assert!(
+            answers == [(7, toyos_abi::inbox::READABLE as i32)] || answers == [(7, gone)],
+            "a poll answered other than once: {answers:?}",
+        );
+    });
+}
+
+/// A table holding its one handle, and whether a poll was made through it;
+/// `None` once the handle left.
+struct OneHandle(LoomLock<Option<bool>>);
+
+impl polls::Table for OneHandle {
+    fn while_held(&self, _handle: toyos_abi::handle::RawHandle, add: impl FnOnce()) -> bool {
+        self.0.with(|held| match held {
+            Some(polled) => {
+                *polled = true;
+                add();
+                true
             }
-            ring.0.parked.unregister(submitter);
+            None => false,
+        })
+    }
+}
+
+/// **A close racing a registration leaves nothing made through the closed
+/// handle.** A poll's registration and its handle's close race: the
+/// registration adds the entry in the table's hold that reads the handle still
+/// there, and the close, in its own hold, takes the handle out and ends the
+/// entries made through it. Either the close finds the entry, or the
+/// registration finds no handle; the poll ends either way, and no live entry
+/// is left for a later post to fire.
+#[test]
+fn a_close_racing_a_registration_leaves_nothing_through_the_handle() {
+    model(|| {
+        let (ring, _mailboxes) = poll_ring([CPU0]);
+        let device: Arc<RingWatch> = Arc::new(Watch::new(watch_list()));
+        let table = Arc::new(OneHandle(LoomLock::new(Some(false))));
+        let poll = kept(&ring, 1, 7);
+
+        let registrant = {
+            let (device, table, poll) = (device.clone(), table.clone(), poll.clone());
+            loom::thread::spawn(move || polls::register(&poll, &*table, || device.add_ring(RingEntry(poll.clone()))))
+        };
+        let closer = {
+            let (device, table) = (device.clone(), table);
+            // `HandleTable::remove`, in the caller's hold of its table.
+            loom::thread::spawn(move || {
+                table.0.with(|held| {
+                    if held.take() == Some(true) {
+                        device.end_rings(via(1));
+                    }
+                })
+            })
+        };
+        registrant.join().unwrap();
+        closer.join().unwrap();
+
+        assert_eq!(device.live_rings(), 0, "an entry made through a closed handle is live");
+        assert!(poll.ended(), "the poll through a closed handle was not ended");
+        polls_of(&ring, polls::Polls::withdraw_all);
+    });
+}
+
+/// **A watch that replaces its handle's poll while a post fires it is
+/// answered once, under the newest token.** One watch holds a handle's poll;
+/// the object becomes ready and posts while the submitter replaces that poll
+/// with a newer watch on the same handle, registers it and rechecks. Whatever
+/// the order, the answer is one, the newer watch's.
+#[test]
+fn a_replacing_watch_racing_a_post_answers_once_under_the_newest_token() {
+    model(|| {
+        let (ring, _mailboxes) = poll_ring([CPU0]);
+        let device: Arc<RingWatch> = Arc::new(Watch::new(watch_list()));
+        device.add_ring(RingEntry(kept(&ring, 1, 1)));
+        let ready = Arc::new(AtomicBool::new(false));
+
+        let poster = {
+            let (ring, device, ready) = (ring.clone(), device.clone(), ready.clone());
+            loom::thread::spawn(move || {
+                ready.store(true, Ordering::Release);
+                posted(&ring, &device);
+            })
+        };
+        let replacer = {
+            let ring = ring.clone();
+            loom::thread::spawn(move || {
+                let newer = kept(&ring, 1, 2);
+                device.add_ring(RingEntry(newer.clone()));
+                if ready.load(Ordering::Acquire) {
+                    newer.fire(0);
+                }
+            })
+        };
+        poster.join().unwrap();
+        replacer.join().unwrap();
+
+        polls::deliver(&ring);
+        let answers = ring.0.answers.with(core::mem::take);
+        assert_eq!(answers, [(2, toyos_abi::inbox::READABLE as i32)], "one handle's one arrival");
+        polls_of(&ring, polls::Polls::withdraw_all);
+    });
+}
+
+/// **A ring torn down under a parked submitter returns its submit.** The
+/// ring's one poll never fires; its submitter waits for one answer while the
+/// ring's last handle closes and the teardown takes its polls. A submitter
+/// parked with the ring gone and no wake owed would wait for good.
+#[test]
+fn a_teardown_racing_a_park_returns_the_submit() {
+    model(|| {
+        let (ring, [mut rx]) = poll_ring([CPU0]);
+        let _device = devices_polled(&ring, 1);
+        let submitter = task(1);
+
+        let waiting = {
+            let (ring, submitter) = (ring.clone(), submitter.clone());
+            loom::thread::spawn(move || submit_parks(&ring, &submitter, CPU0, 1))
+        };
+        let teardown = {
+            let ring = ring.clone();
+            loom::thread::spawn(move || {
+                let taken = ring.0.polls.with(Option::take).expect("torn down once");
+                polls::torn_down(taken, &ring);
+            })
+        };
+        let parked = waiting.join().unwrap();
+        teardown.join().unwrap();
+        let guard = PreemptModel::new();
+        let msgs = drain(&mut rx, &guard);
+
+        if parked {
+            assert_eq!(
+                msgs,
+                [Msg::Wake(TaskKey(1), WakeReason::Woken)],
+                "parked on a ring torn down and no wake owed",
+            );
+        } else {
+            assert!(msgs.is_empty(), "a submitter that never parked is owed nothing: {msgs:?}");
         }
-        // The ring's teardown: its polls hold it.
-        ring.0.polls.with(polls::Polls::withdraw_all);
+        assert_eq!(ring.answered(), 0, "a ring torn down answered");
+        ring.0.parked.unregister(&submitter);
     });
 }

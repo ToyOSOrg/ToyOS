@@ -1,7 +1,7 @@
 //! **A post is not an answer**: a poll ring's answer is what the object held
 //! when the ring's submitter looked, never what a post once announced.
 //!
-//! `kernel/src/inbox/polls.rs` against fake objects, standing in for
+//! `kernel/pure/sched/poll.rs` against fake objects, standing in for
 //! `inbox::submit`'s: a watch is the handle's one poll, a post fires every poll
 //! armed on its object, and a submit looks at every fired poll's object again.
 //! A reader that takes an answer for bytes and then reads blocking parks for
@@ -9,11 +9,9 @@
 //! sequence and its assertion the answers it is handed.
 //!
 //! In `loom::model`, because the one-shot under each poll is built from
-//! loom's atomics in this crate; every model here is one thread, and a watch
-//! another thread submits during a look is staged inside the look. A fire
-//! racing the submitter's park is `loom_watch.rs`'s
-//! `a_fire_racing_a_submitters_park_is_never_lost`, and two submitters of one
-//! ring its `an_answer_wakes_the_submitter_its_look_hid_the_poll_from`.
+//! loom's atomics in this crate; every model here is one thread, the ring's
+//! one submitter. A fire racing the submitter's park is `loom_watch.rs`'s
+//! `a_fire_racing_a_submitters_park_is_never_lost`.
 //!
 //! The negative case is a cargo feature:
 //!
@@ -27,9 +25,9 @@
 #![cfg(feature = "loom")]
 
 use std::cell::{Cell, RefCell};
-use std::sync::Arc;
 
-use kernel_loom::inbox_polls::{awake, deliver, Look, Poll, Polls, Submitter, Wake};
+use kernel_loom::sched::poll::{awake, deliver, Look, Poll, Polls, Submitter, Via, Wake};
+use kernel_loom::sched::sync::Arc;
 use toyos_abi::handle::RawHandle;
 use toyos_abi::inbox::READABLE;
 use toyos_abi::syscall::SyscallError;
@@ -38,6 +36,11 @@ const H: RawHandle = RawHandle(5);
 const G: RawHandle = RawHandle(6);
 /// The log: what it holds for a reader is the reader's cursor's to say.
 const L: RawHandle = RawHandle(7);
+
+/// A handle of the one table this ring's process holds.
+fn via(handle: RawHandle) -> Via {
+    Via { table: 1, handle }
+}
 
 /// The answer for bytes.
 const BYTES: i32 = READABLE as i32;
@@ -72,8 +75,6 @@ struct Kernel {
     l: Object,
     /// The handle the process has closed since it watched it.
     closed: Cell<Option<RawHandle>>,
-    /// A watch another thread submits while the next look runs.
-    lands_during_look: Cell<Option<(RawHandle, u64)>>,
     /// How many more renewals a peer's post follows at once.
     posts_after_renewal: Cell<u32>,
     /// How many looks the submitter has made.
@@ -93,7 +94,6 @@ impl Kernel {
             g: Object::default(),
             l: Object { posts_are_readiness: true, ..Object::default() },
             closed: Cell::new(None),
-            lands_during_look: Cell::new(None),
             posts_after_renewal: Cell::new(0),
             looks: Cell::new(0),
             answers: RefCell::new(Vec::new()),
@@ -118,7 +118,7 @@ impl Kernel {
 
     /// The same, answering whether the ring kept the poll.
     fn admit(&self, handle: RawHandle, token: u64) -> bool {
-        let poll = Arc::new(Poll::new(self.ring.clone(), token, handle, READABLE));
+        let poll = Arc::new(Poll::new(self.ring.clone(), token, via(handle), READABLE));
         let kept = self.polls.borrow_mut().admit(poll.clone(), self.cap);
         if kept {
             self.arm(poll);
@@ -128,7 +128,7 @@ impl Kernel {
 
     /// Fired now if its object holds bytes, armed on its watch if not.
     fn arm(&self, poll: Arc<Poll<Ring>>) {
-        let object = self.object(poll.handle);
+        let object = self.object(poll.via.handle);
         if object.bytes.get() {
             poll.fire(0);
         } else {
@@ -160,8 +160,8 @@ impl Kernel {
         }
     }
 
-    /// The process closes `handle`, whose watch other handles share: no close
-    /// ends its polls.
+    /// The process closes `handle` once a post has taken its poll: the look
+    /// finds it gone.
     fn close(&self, handle: RawHandle) {
         self.closed.set(Some(handle));
     }
@@ -188,11 +188,6 @@ impl Kernel {
     }
 }
 
-/// An answer's wake, which has no waiter either.
-impl Wake for Kernel {
-    fn wake(&self) {}
-}
-
 impl Submitter<Ring> for Kernel {
     fn room(&self) -> bool {
         self.answers.borrow().len() < self.size
@@ -208,23 +203,19 @@ impl Submitter<Ring> for Kernel {
 
     fn look(&self, poll: &Arc<Poll<Ring>>) -> Look {
         self.looks.set(self.looks.get() + 1);
-        if let Some((handle, token)) = self.lands_during_look.take() {
-            self.watch(handle, token);
-        }
-        if self.closed.get() == Some(poll.handle) {
+        if self.closed.get() == Some(poll.via.handle) {
             return Look::Refused(SyscallError::NotFound);
         }
-        let object = self.object(poll.handle);
+        let object = self.object(poll.via.handle);
         if object.bytes.get() || (object.posts_are_readiness && poll.posted() & READABLE != 0) {
             return Look::Ready(READABLE);
         }
-        let again = Arc::new(Poll::new(self.ring.clone(), poll.user_data, poll.handle, poll.flags));
-        if self.polls.borrow_mut().renew(poll, again.clone()) {
-            self.arm(again);
-        }
+        let again = Arc::new(Poll::new(self.ring.clone(), poll.user_data, poll.via, poll.flags));
+        self.polls.borrow_mut().renew(poll, again.clone());
+        self.arm(again);
         if let Some(left) = self.posts_after_renewal.get().checked_sub(1) {
             self.posts_after_renewal.set(left);
-            self.post(poll.handle);
+            self.post(poll.via.handle);
         }
         Look::Waits
     }
@@ -436,49 +427,6 @@ fn a_ring_keeps_its_cap_of_polls_and_no_more() {
         assert!(kernel.admit(G, 2), "a ring under its cap refused a poll");
         assert!(!kernel.admit(L, 3), "a ring at its cap kept one more poll");
         assert!(kernel.admit(H, 4), "a ring at its cap refused a watch that replaces a poll");
-    });
-}
-
-/// A second thread's watch lands while the look at the handle's fired poll
-/// finds nothing: the newer watch holds the handle's place, and the look arms
-/// nothing beside it.
-#[test]
-fn a_watch_during_a_look_that_finds_nothing_is_the_handles_one_poll() {
-    loom::model(|| {
-        let kernel = Kernel::new(4);
-        kernel.watch(H, 1);
-        kernel.submit();
-
-        kernel.post(H);
-        kernel.lands_during_look.set(Some((H, 2)));
-        kernel.submit();
-        assert_eq!(kernel.drain(), NOTHING);
-        assert_eq!(kernel.live(H), 1, "the look armed the older watch again beside the newer");
-
-        kernel.fill(H);
-        kernel.post(H);
-        kernel.submit();
-        assert_eq!(kernel.drain(), [(2, BYTES)]);
-    });
-}
-
-/// The same while the look finds bytes: one arrival, answered once, under the
-/// newer watch's token, by the pass after the one it landed in.
-#[test]
-fn a_watch_during_a_look_that_finds_bytes_answers_alone() {
-    loom::model(|| {
-        let kernel = Kernel::new(4);
-        kernel.watch(H, 1);
-        kernel.submit();
-
-        kernel.fill(H);
-        kernel.post(H);
-        kernel.lands_during_look.set(Some((H, 2)));
-        kernel.submit();
-        assert_eq!(kernel.drain(), NOTHING, "the look answered under the watch it was replaced by");
-        assert!(kernel.awake(), "the newer watch's fire is owed the next look");
-        kernel.submit();
-        assert_eq!(kernel.drain(), [(2, BYTES)]);
     });
 }
 

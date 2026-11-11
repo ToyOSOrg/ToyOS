@@ -25,15 +25,25 @@ seqlock-writer-fence-off = []
 # releases the holder's lock, and `kernel/loom/tests/serial_lock.rs` must red.
 serial-try-lock-then-some = []
 # The same arrangement for a poll ring's one-shot answer: `kernel-loom` turns it
-# on to split `inbox/once.rs`'s exchange into a load and a store, and
+# on to split `pure/sched/poll.rs`'s exchange into a load and a store, and
 # `kernel/loom/tests/poll_once.rs` must red when it does — a poll two posts
 # both answer.
 poll-fire-load-store = []
 # The same for a poll ring's answer: `kernel-loom` turns it on so
-# `inbox/polls.rs` answers a fired poll without looking at its object again,
-# and `kernel/loom/tests/inbox_answer.rs` must red — a post with nothing to
-# read, answered.
+# `pure/sched/poll.rs` answers a fired poll without looking at its object
+# again, and `kernel/loom/tests/inbox_answer.rs` must red — a post with nothing
+# to read, answered.
 post-is-an-answer = []
+# `pure/sched/poll.rs`'s `register` reads the handle in one hold of its table
+# and adds the entries after it, and `loom_watch`'s close racing a
+# registration reds: an entry outlives its handle.
+register-outside-table = []
+# `pure/sched/poll.rs`'s `admit` leaves the poll it replaces kept, and
+# `loom_watch`'s replacing watch racing a post reds: one handle answered twice.
+admit-keeps-the-replaced = []
+# `pure/sched/poll.rs`'s `torn_down` posts nothing, and `loom_watch`'s
+# teardown racing a park reds: a submitter parked on a ring gone.
+teardown-posts-nothing = []
 # The same arrangement, four more times, one per `kernel-loom` model that had
 # no control of its own until 2026-08-17. Each is declared here and never
 # enabled here; `kernel-loom` turns exactly one on at a time and the named

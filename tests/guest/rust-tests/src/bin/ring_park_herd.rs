@@ -1,24 +1,24 @@
-//! **One process parks 256 threads in `submit` on one ring, and a sibling
-//! thread completes into it.**
+//! **One process parks 256 threads in `submit`, each its own ring's one
+//! submitter, and a sibling thread wakes them all every round.**
 //!
-//! A ring's own watch sits behind a lock that masks interrupts, so every
-//! completion notifies all 256 registrations with interrupts masked, and each
-//! woken thread re-registers under that lock and parks again: the load
-//! `issues/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`
-//! names, which `mask_windows` reads the windows under.
+//! A ring's own watch sits behind a lock that masks interrupts, and a ring has
+//! one submitter, so a thread's park and its wake are a walk over one
+//! registration however many threads the process parks. This is the load
+//! `mask_windows` reads the windows under.
 //!
-//! The sibling is this program's main thread. Each round it completes one
-//! `OP_NOP` and takes the completion back, so the count the parked threads
-//! wait for never reaches two, and it posts the next only once the kernel's
-//! roster shows every one of them parked again. Two completions left standing
-//! end the run.
+//! Each parked thread watches an event of its own on its own ring. The sibling
+//! is this program's main thread: each round it signals every thread's event
+//! once the kernel's roster shows all of them parked, and each thread takes its
+//! event and parks again.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
-use toyos_abi::inbox::{RingHeader, Submission, COMPLETION_RING_OFF, OP_NOP, SUBMISSIONS_OFF, SUBMISSION_RING_OFF};
+use toyos::wake::{Bell, Waker};
+use toyos::AsHandle;
+use toyos_abi::inbox::{RingHeader, Submission, COMPLETION_RING_OFF, OP_WATCH, READABLE, SUBMISSIONS_OFF, SUBMISSION_RING_OFF};
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
@@ -27,51 +27,50 @@ mod roster;
 
 const PARKED: usize = 256;
 
-/// Completions each parked thread is woken by and parks again after.
+/// Wakes each parked thread takes and parks again after.
 const ROUNDS: u64 = 64;
 
-/// The fewest the ring takes: the sibling never has more than two in it.
-const DEPTH: u32 = 2;
+/// A ring of one submission: the one watch its thread makes at a time.
+const DEPTH: u32 = 1;
 
-/// What every parked thread waits for, and what the sibling leaves only at the end.
-const ENDING: u32 = 2;
-
-/// The ring's page, as `toyos::poller` reaches it: one atomic word or one
+/// One thread's ring, as `toyos::poller` reaches it: one atomic word or one
 /// whole entry at a time, since the kernel writes it too.
 struct Ring {
     handle: RawHandle,
     base: *mut u8,
 }
 
-// SAFETY: the page stays mapped until the handle closes, after every thread is joined.
-unsafe impl Sync for Ring {}
-
 impl Ring {
+    fn new() -> Self {
+        // SAFETY: the page is read only through `Ring`, and its thread closes
+        // the handle when it is done with both.
+        let (handle, base) = unsafe { syscall::inbox_setup(DEPTH) }.expect("a ring");
+        Self { handle, base }
+    }
+
     fn word(&self, ring_off: u64, field_off: usize) -> &AtomicU32 {
         // SAFETY: inside the inbox page, 4-aligned; an atomic is sound over memory the kernel also writes.
         unsafe { AtomicU32::from_ptr(self.base.add(ring_off as usize + field_off) as *mut u32) }
     }
 
-    /// One `OP_NOP`, handed to the kernel, which completes it at once.
-    fn complete_one(&self, token: u64) {
+    /// Watch `bell` and park until it is answered, then take the answer back.
+    fn park_on(&self, bell: &Bell, round: u64) {
         let tail = self.word(SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, tail));
         let at = tail.load(Ordering::Relaxed);
-        let entry = Submission { op: OP_NOP, token, ..Submission::default() };
-        // SAFETY: the slot `at` masks to is inside the page's submission array, which only this thread writes.
-        unsafe {
-            (self.base.add(
-                SUBMISSIONS_OFF as usize + (at & (DEPTH - 1)) as usize * core::mem::size_of::<Submission>(),
-            ) as *mut Submission)
-                .write(entry);
-        }
+        let entry = Submission { op: OP_WATCH, handle: bell.as_handle().raw(), op_flags: READABLE, token: round, ..Submission::default() };
+        // SAFETY: the one slot of the page's submission array, which only this thread writes.
+        unsafe { (self.base.add(SUBMISSIONS_OFF as usize) as *mut Submission).write(entry) };
         tail.store(at.wrapping_add(1), Ordering::Release);
-        syscall::inbox_submit(self.handle, 1, 0, 0).expect("the sibling's submit");
+        let answered = syscall::inbox_submit(self.handle, 1, 1, u64::MAX).expect("a parked thread's submit");
+        assert_eq!(answered, 1, "a parked thread returned with {answered} completions");
+        self.word(COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, head)).fetch_add(1, Ordering::Release);
     }
+}
 
-    /// Take the oldest completion back, so the count falls.
-    fn consume_one(&self) {
-        let head = self.word(COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, head));
-        head.fetch_add(1, Ordering::Release);
+impl Drop for Ring {
+    fn drop(&mut self) {
+        // SAFETY: no type but this holds the number.
+        unsafe { syscall::close(self.handle) };
     }
 }
 
@@ -79,9 +78,7 @@ fn main() {
     let cap: SysCap = Endowments::get()
         .take(SYSCAP_LABEL)
         .expect("test-runner endows every binary it spawns a system capability");
-    // SAFETY: the page is read only through `Ring`, and the handle closes after every thread is joined.
-    let (handle, base) = unsafe { syscall::inbox_setup(DEPTH) }.expect("the ring");
-    let ring = Ring { handle, base };
+    let events: Vec<(Waker, Bell)> = (0..PARKED).map(|_| toyos::wake::pair().expect("an event")).collect();
 
     let parked_all = || {
         roster::my_threads(&cap)
@@ -92,24 +89,21 @@ fn main() {
     };
 
     thread::scope(|s| {
-        for _ in 0..PARKED {
-            s.spawn(|| {
-                let answered = syscall::inbox_submit(ring.handle, 0, ENDING, u64::MAX)
-                    .expect("a parked thread's submit");
-                assert!(answered >= ENDING, "a parked thread returned with {answered} completions");
+        for (_, bell) in &events {
+            s.spawn(move || {
+                let ring = Ring::new();
+                for round in 0..ROUNDS {
+                    ring.park_on(bell, round);
+                    assert!(bell.take(), "a thread was answered with no wake raised");
+                }
             });
         }
-        roster::await_true(parked_all);
-        for round in 0..ROUNDS {
-            ring.complete_one(round);
-            ring.consume_one();
+        for _ in 0..ROUNDS {
             roster::await_true(parked_all);
-        }
-        for token in 0..u64::from(ENDING) {
-            ring.complete_one(ROUNDS + token);
+            for (waker, _) in &events {
+                waker.wake();
+            }
         }
     });
-    // SAFETY: no type holds this number.
-    unsafe { syscall::close(handle) };
-    println!("ring_park_herd: {PARKED} threads parked in submit on one ring, woken by {ROUNDS} completions");
+    println!("ring_park_herd: {PARKED} threads parked in submit, each on its own ring, woken {ROUNDS} times");
 }

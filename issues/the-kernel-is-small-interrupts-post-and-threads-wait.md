@@ -286,11 +286,12 @@ Beside that order, each waiting on something outside it:
       load starts, against a tolerance stated before measuring, the reverted
       arm's own spread, with the tail reported beside it, under a load in
       which a handler step 1 changed posts into a watch that reaches a ring
-      with parked threads
-      (`issues/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`'s
-      second bullet). `ring_park_herd` is not that load: its walks start in
-      `SYS_INBOX_SUBMIT`, which runs with interrupts masked on both arms, and
-      it reaches no handler step 1 changed.
+      with a parked thread
+      (`issues/a-claims-holder-lengthens-its-handlers-interrupts-off-walk-by-the-polls-it-arms.md`). `ring_park_herd` is not that load: each of its threads parks on
+      a ring of its own and is woken by a sibling's signal, which reaches no
+      handler step 1 changed. It was 256 threads parked on one ring until a
+      ring got one submitter, and is still the load `mask_windows` reads the
+      windows under.
    3. **The i8042's thread is ps2server's** (stage 7 step 2): `irq_ring`'s
       `I8042`, `keyboard_controller::service` and the idle loop's
       `verdict_due` go with the kernel's driver. **Exit**: that step's.

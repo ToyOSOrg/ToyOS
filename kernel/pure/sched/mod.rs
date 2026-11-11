@@ -23,6 +23,7 @@ pub mod job_sched;
 pub mod mailbox;
 pub mod msg;
 pub mod park;
+pub mod poll;
 pub mod queue;
 pub mod retire;
 pub mod rt;

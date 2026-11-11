@@ -5,7 +5,7 @@
 //! watch and nothing else, and the other end's last holder goes: a reader is
 //! told of its writer and a writer of its reader, with the ring empty and with
 //! bytes left in it, and when the last holder was a process that ended. The
-//! leaving waits for the park, as `inbox_cancel_wakes`'s close does, and a
+//! leaving waits for the park, as `poll_belongs_to_its_handle`'s closes do, and a
 //! waiter left parked is a hang the runner's ceiling reds. A watch made after
 //! the leaving is answered by the submit that makes it.
 //!

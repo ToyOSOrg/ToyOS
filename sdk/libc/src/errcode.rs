@@ -68,6 +68,7 @@ pub(crate) fn of(e: SyscallError) -> i32 {
         // The kernel's word for a full handle table and for no memory alike.
         SyscallError::ResourceExhausted => ENOMEM,
         SyscallError::NotSupported => EOPNOTSUPP,
+        SyscallError::Busy => EBUSY,
         _ => EINVAL,
     }
 }

@@ -6,6 +6,8 @@
 
 use alloc::sync::Arc;
 
+use kernel::sched::poll::Via;
+
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{FileType, SyscallError, MAX_WHOLE_PIPE_WRITE};
 
@@ -74,23 +76,21 @@ pub fn install(table: &mut HandleTable, object: KObjectRef) -> Result<RawHandle,
         .map_err(|_| SyscallError::ResourceExhausted)
 }
 
-/// Release one handle.
+/// Release one handle, and the polls made through it ([`HandleTable::remove`]).
 ///
-/// What the object holds is released by its own zero-handle hook; `close` releases only what is the process's, not the object's: polls on a watch it ends.
+/// What the object holds is released by its own zero-handle hook.
 pub fn close(table: &mut HandleTable, h: RawHandle) -> Result<(), super::HandleError> {
-    let entry = table.remove(h)?;
-    let object = entry.object().clone();
-    // The decrement, and any deferred hook it enqueues, run with the table's borrow already released.
-    drop(entry);
-    // Only a watch this handle's object ends is answered: one it shares cannot cancel another's poll.
-    if close_ends_polls(&object) {
-        for watch in [read_watch(&object), write_watch(&object), pipe_end_watch(&object)].into_iter().flatten() {
-            watch.cancel_polls();
-        }
-    }
+    drop(table.remove(h)?);
     Ok(())
 }
 
+/// End the polls made through `via` on `object`'s watches: that handle left
+/// its table.
+pub fn end_polls(object: &KObjectRef, via: Via) {
+    for watch in [read_watch(object), write_watch(object), pipe_end_watch(object)].into_iter().flatten() {
+        watch.end_polls(via);
+    }
+}
 
 /// Release every handle a process holds; runs on the kill path too, which
 /// does not unwind, and allocates nothing.
@@ -148,13 +148,12 @@ impl WatchRef {
         }
     }
 
-    pub fn cancel_polls(&self) {
+    fn end_polls(&self, via: Via) {
         match self {
-            Self::Static(watch) => watch.cancel_polls(),
-            Self::InPlace(watch) => watch.cancel_polls(),
-            Self::Shared(watch) => watch.cancel_polls(),
-            // Its release answers them, and its close ends none (`close_ends_polls`).
-            Self::Claim(_) => unreachable!("a claim's polls are cancelled by its release alone"),
+            Self::Static(watch) => watch.end_polls(via),
+            Self::InPlace(watch) => watch.end_polls(via),
+            Self::Shared(watch) => watch.end_polls(via),
+            Self::Claim(claim) => claim.end_polls(via),
         }
     }
 }
@@ -238,33 +237,6 @@ pub fn other_end_gone(object: &KObjectRef) -> bool {
         | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
         | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => false,
-    }
-}
-
-/// Whether closing one handle to this object ends what its watches watch, so
-/// every poll on them — in any ring — is answered as gone. `false` for the log
-/// and a console, which the machine ends on its own and which other handles
-/// share. `false` for a process, which only its own end ends: closing one handle to it ends no
-/// other's watch. `false` for a claim on a function or a row: its one handle's
-/// close is its release, which answers every poll on the watch before the slot
-/// or the row can be held again (`pcidev`'s and `isa::Row`'s release).
-fn close_ends_polls(object: &KObjectRef) -> bool {
-    match object {
-        KObjectRef::SysCap(_) => false,
-        KObjectRef::Process(_) | KObjectRef::Job(_) => false,
-        // The set's watch is every handle's: one handle's close ends none.
-        KObjectRef::DeviceSet(_) => false,
-        KObjectRef::Device(d) => match d.class() {
-            device_registry::DeviceType::PciFunction
-            | device_registry::DeviceType::Isa
-            | device_registry::DeviceType::Acpi
-            | device_registry::DeviceType::Uart => false,
-            device_registry::DeviceType::Framebuffer => true,
-        },
-        KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
-        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
-        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::Notice(_) => true,
     }
 }
 

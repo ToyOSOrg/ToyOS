@@ -43,6 +43,12 @@ Every object that can become ready reports readiness the same way, and a thread
 waits for any mix of them through one mechanism. A wait never holds a lock on
 the object it waits for.
 
+- A watch belongs to the handle it was made through. Closing that handle, or
+  moving it to another process, ends the watch; closing another handle to the
+  same object does not.
+- An inbox has one submitter at a time: a second is refused, and closing the
+  inbox returns the submitter waiting on it.
+
 ## One declaration of CPU state
 
 The CPU's control registers come from one declaration, applied and asserted on

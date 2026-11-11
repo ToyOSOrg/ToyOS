@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use kernel::sched::mailbox::PreemptGuard;
 use kernel::sched::sync::CellLock;
 use kernel::sched::task::{SchedPayload, TaskKey};
+use kernel::sched::poll::Via;
 use kernel::sched::watch::{Fire, Ring, Waiters};
 
 use crate::msg::SimMsg;
@@ -45,6 +46,9 @@ impl Ring for NoRing {
         match *self {}
     }
     fn live(&self) -> bool {
+        match *self {}
+    }
+    fn via(&self) -> Via {
         match *self {}
     }
 }

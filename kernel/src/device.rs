@@ -95,6 +95,16 @@ impl Claim {
             Claimed::Class(_) => unreachable!("a poll registered through a claim on no function or row"),
         }
     }
+
+    /// End the polls made through `via` on that watch.
+    pub(crate) fn end_polls(&self, via: kernel::sched::poll::Via) {
+        match &self.what {
+            Claimed::PciFunction(binding) => crate::pcidev::end_polls(binding, via),
+            Claimed::Isa(row) | Claimed::Acpi(row) | Claimed::Uart(row) => crate::isa::end_polls(row, via),
+            // A claim no poll can be made through.
+            Claimed::Class(_) => {}
+        }
+    }
 }
 
 impl Drop for Claim {

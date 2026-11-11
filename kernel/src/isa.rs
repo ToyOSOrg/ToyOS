@@ -271,6 +271,11 @@ pub(crate) fn add_poll(row: &Row, entry: PollEntry) {
     WATCHES[row.0].add_poll(entry);
 }
 
+/// End the polls made through `via` on that watch.
+pub(crate) fn end_polls(row: &Row, via: kernel::sched::poll::Via) {
+    WATCHES[row.0].end_polls(via);
+}
+
 /// The function a filled row raises `wire` with too, if one does: a second
 /// row on one line would take the other's interrupts.
 pub fn line_holder(wire: pio::Wire) -> Option<&'static str> {
