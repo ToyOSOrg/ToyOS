@@ -753,13 +753,15 @@ fn a_reserved_write_inside_a_large_block_lands_on_that_block() {
 
 /// A pool's blocks are placed where each write lands, anywhere in the file
 /// and in any order, a write across two blocks taking two; spent, it refuses,
-/// grows again, and gives back what it holds unwritten.
+/// grows again, gives back what it holds unwritten, and writes of a write
+/// what its last block fits.
 #[test]
 fn a_pool_places_each_block_where_it_is_written() {
     let dev = formatted(64 << 20, None);
     let mut want = vec![0u8; 41 * 4096];
     want[..10].fill(0xc3);
     want[2 * 4096 + 100..2 * 4096 + 5100].fill(0xb2);
+    want[20 * 4096..21 * 4096].fill(0xd4);
     want[40 * 4096..].fill(0xa1);
     let ino = mounted(&dev, async |m: &Mount<&Image>| {
         let ino = m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap().ino;
@@ -772,9 +774,10 @@ fn a_pool_places_each_block_where_it_is_written() {
         m.extend_blocks(&mut pool, 4).await.unwrap();
         assert_eq!(m.write_placed(&mut pool, 0, &[0xc3; 10], NOW).await.unwrap(), 10);
         let room = m.space().1;
-        assert_eq!(m.cut_blocks(&mut pool, 5), 3, "all it held unwritten");
-        assert_eq!(m.unwritten_blocks(&pool), 0);
+        assert_eq!(m.cut_blocks(&mut pool, 2), 2, "the highest it held unwritten");
         assert!(m.space().1 > room, "the blocks cut are room again");
+        assert_eq!(m.write_placed(&mut pool, 20 * 4096, &[0xd4; 2 * 4096], NOW).await.unwrap(), 4096, "one block left of two");
+        assert_eq!(m.cut_blocks(&mut pool, 5), 0, "nothing left unwritten");
         m.commit().await.unwrap();
         ino
     });
