@@ -30,10 +30,17 @@ better than main's.
 
 **Hypothesis, unmeasured:** the remaining copy cost is translating each
 destination page through the 4 KiB user mapping, where main's direct map uses
-huge pages. The separate populate pass touches each page's leaf a second time.
-No performance counter has been read.
+huge pages. No performance counter has been read.
 
 **Exit:** the row within main's run-to-run range on the AMD bench, or the
 per-page difference measured by counter (TLB misses and walk cycles, against
 main) and recorded here as the cost of copying through the user mapping that
 #1150's design accepts.
+
+- **Owed on metal:** #1245 copies the image through faults that map 64 KiB
+  runs of the shared memory, where a populate pass ran first. In the A/B of
+  main from before and after #1245
+  (`issues/user-memory-hot-paths-are-slower-than-2-mib-pages.md`), on both
+  benches, `proc.spawn_wait.large` and `ab.fs.memory.shm.16777216`, the same
+  copy without the spawn, must not regress: no rise in all four paired boots
+  with a median ratio above 1.03.

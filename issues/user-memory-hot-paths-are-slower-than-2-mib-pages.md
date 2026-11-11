@@ -131,3 +131,16 @@ accepted by the owner, or by the coordinator for an implementation tradeoff,
 which the owner delegated on 2026-10-23. Cheap remedies when measurement asks: a
 per-CPU frame cache, a count of armed futex waiters that lets a clear
 with none skip the buckets, and tables built at the first touch of their span.
+
+- **Owed on metal:** #1245, which drops the paged read's pass that faulted its
+  destination in and its third pass of the pager's lock, is not measured on
+  metal; its speed-up is a prediction. Owed: one A/B of main from before and
+  after it on both benches, four boots a side, each running `osbench pipeab`
+  (the measurement-only commit on `pipeperf-ab-base`). A row changes where all
+  four paired boots move one way and their median ratio is beyond 1 ± 3%.
+  Main after must show `ab.fs.memory.pread.8.d0` and
+  `ab.fs.memory.pread.1048576.d0` lower (predicted: about 45 ns of 470 to 520,
+  and 5 to 9%); `ab.fs.memory.fresh.*` and `ab.fs.memory.shm.*`, reads into
+  memory nothing has touched and the price of the change, unchanged or their
+  loss recorded here against the gain; and main's `testcases` and
+  `shared-debug` boots passing on both benches.
