@@ -1888,23 +1888,23 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let rt_due = self.cpu.rq.has_rt() && !current.serves_rt_band() && !self.cpu.aged_grant;
         // The kill arm makes `handle_retire`'s `need_resched` mean what it says, not a
         // kill bounded by the quantum. Guarded by `aged_grant` like the RT arm (a corpse
-        // keeps its chunk) and the running word — `preempt`'s precondition, never mid-commit.
-        let kill_due = current.shared().kill_pending()
-            && !self.cpu.aged_grant
-            && matches!(current.shared().state(), TaskState::Running(_));
+        // keeps its chunk).
+        let kill_due = current.shared().kill_pending() && !self.cpu.aged_grant;
         // Both instants count: `begin`'s charge has already issued the next
         // request, so a recomputed decision alone would never reach the end of
         // the one the last pass armed. A stale armed instant at worst decides
         // early, and the pick keeps `dispatched_at` if it picks this thread again.
         // Leaving is the pick's: the task goes back to its queue, and the pick
         // sends it on.
-        let outside = !current.affinity().contains(self.cpu.id)
-            && matches!(current.shared().state(), TaskState::Running(_));
-        let due = self.now >= self.cpu.decide_at
-            || self.now >= self.cpu.settle_decision(self.now)
-            || rt_due
-            || kill_due
-            || outside;
+        let outside = !current.affinity().contains(self.cpu.id);
+        // Every arm waits for the running word, `preempt`'s precondition: never
+        // mid-commit.
+        let due = matches!(current.shared().state(), TaskState::Running(_))
+            && (self.now >= self.cpu.decide_at
+                || self.now >= self.cpu.settle_decision(self.now)
+                || rt_due
+                || kill_due
+                || outside);
         if !due {
             return;
         }
@@ -4376,9 +4376,9 @@ mod tests {
         let _ = pass.dispose_block(committed, None).finish();
     }
 
-    /// The pass a running request's end owes, at the instant it is armed for.
-    fn pass_at_armed(w: &mut World) -> Nanos {
-        let at = w.cpus[0].armed().expect("a running request is armed");
+    /// The pass the running thread's next decision owes, at that instant.
+    fn pass_at_decision(w: &mut World) -> Nanos {
+        let at = w.cpus[0].decide_at();
         w.run_a_pass_at(C0, at);
         at
     }
@@ -4408,7 +4408,7 @@ mod tests {
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
 
         wake(&w, C0, &sleeper_shared);
-        let end = pass_at_armed(&mut w);
+        let end = pass_at_decision(&mut w);
         assert_eq!(end, now.after(SLICE_NS), "the hog's whole request ran");
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(sleeper), "the wake runs in the pass that ends it");
         w.abandon();
@@ -4433,10 +4433,10 @@ mod tests {
             park_at(&mut w, now);
             assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
             wake(&w, C0, &sleeper_shared);
-            let woke = pass_at_armed(&mut w);
+            let woke = pass_at_decision(&mut w);
             now = woke;
             while w.cpus[0].running().map(|t| t.key()) != Some(sleeper) {
-                now = pass_at_armed(&mut w);
+                now = pass_at_decision(&mut w);
             }
             waits.push(now.since(woke));
         }
