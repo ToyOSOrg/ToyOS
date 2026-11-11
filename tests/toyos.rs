@@ -2411,20 +2411,43 @@ fn shared_members(label: &str) -> Result<(), String> {
         &[],
         &[],
         BootOptions {
+            qmp: true,
             kernel_params: boot.params,
             kernel_features: boot.features,
             extra_root_files: staged.files,
             ..Default::default()
         },
     );
+    // Opened at once: QMP delivers no event emitted before its client
+    // connected, and the list's reboot is that event.
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
     let mut console = format!("{}\n", qemu.boot_log());
-    let ended = qemu.await_end(&mut console, Duration::from_millis(batch.bound_ms()));
-    let verdicts = member_verdicts(&console, &batch.jobs);
-    let death = serial::kernel_death(&console);
-    let red: Vec<(&str, &String)> = verdicts.iter().filter_map(|(job, verdict)| Some((*job, verdict.as_ref().err()?))).collect();
-    if red.is_empty() && ended.is_ok() && death.is_none() {
-        eprintln!("  [shared] {label}: {} member(s) exited 0", verdicts.len());
-        return Ok(());
+    let ended = qemu.await_end(&mut console, Duration::from_millis(batch.bound_ms())).map(|()| stop.reason());
+    let passed = judge_shared(label, &console, &batch.jobs, ended)?;
+    eprintln!("  [shared] {label}: {passed} member(s) exited 0, and the list's reboot ended the boot");
+    Ok(())
+}
+
+/// A shared boot's verdict on what it left: `console`, and how QEMU ended,
+/// with the reason its `SHUTDOWN` event named. Each of `jobs` by its own
+/// exit ([`member_verdicts`]), and the boot by its list's `reboot`: the
+/// kernel's `Rebooting.` and a `guest-reset`, since a reset, a power-off and
+/// a triple fault all end a `-no-reboot` QEMU with status 0. A kernel death
+/// anywhere reds it too. Answers how many members passed.
+fn judge_shared(label: &str, console: &str, jobs: &[String], ended: Result<Option<String>, String>) -> Result<usize, String> {
+    let rebooted = match ended {
+        Err(why) => Err(why.lines().next().unwrap_or_default().to_string()),
+        Ok(reason) if reason.as_deref() != Some("guest-reset") => Err(format!("QEMU stopped it for {reason:?}, not guest-reset")),
+        Ok(_) if !console.lines().filter_map(toyos_logstream::parse).any(|said| {
+            said.source == toyos_logstream::Source::Kernel && said.text == bootlog::REBOOTING
+        }) => Err(format!("the kernel never said {:?}", bootlog::REBOOTING)),
+        Ok(_) => Ok(()),
+    };
+    let verdicts = member_verdicts(console, jobs);
+    let death = serial::kernel_death(console);
+    let red: Vec<(&str, &Member)> = verdicts.iter().filter(|(_, member)| *member != Member::Passed).map(|(job, member)| (*job, member)).collect();
+    if red.is_empty() && rebooted.is_ok() && death.is_none() {
+        return Ok(verdicts.len());
     }
     let mut said = if red.is_empty() {
         format!("each of {label}'s {} member(s) exited 0, and its boot did not end cleanly", verdicts.len())
@@ -2434,31 +2457,41 @@ fn shared_members(label: &str) -> Result<(), String> {
         let more = if more > 0 { format!(" and {more} more") } else { String::new() };
         format!("{} of {label}'s {} member(s) did not exit 0: {}{more}", red.len(), verdicts.len(), names.join(", "))
     };
-    if let Err(why) = &ended {
-        said.push_str(&format!("\nthe boot did not end by its list's reboot: {}", why.lines().next().unwrap_or_default()));
+    if let Err(why) = &rebooted {
+        said.push_str(&format!("\nthe boot did not end by its list's reboot: {why}"));
     }
     if let Some(line) = death {
         said.push_str(&format!("\nthe kernel died: {}", line.trim()));
     }
-    let (unreached, judged): (Vec<_>, Vec<_>) = red.iter().partition(|(_, why)| why.as_str() == UNREACHED);
-    for (job, why) in judged {
-        said.push_str(&format!("\n--- {job}: {why}"));
+    let mut unreached: Vec<&str> = Vec::new();
+    for (job, member) in red {
+        match member {
+            Member::Failed(why) => said.push_str(&format!("\n--- {job}: {why}")),
+            Member::Unreached => unreached.push(job),
+            Member::Passed => unreachable!("only reds are listed"),
+        }
     }
     if !unreached.is_empty() {
-        let names: Vec<&str> = unreached.iter().map(|(job, _)| *job).collect();
-        said.push_str(&format!("\n--- {UNREACHED}: {}", names.join(", ")));
+        said.push_str(&format!("\n--- the list never reached: {}", unreached.join(", ")));
     }
-    Err(qemu::WaitVerdict::new(said, &[&console]).to_string())
+    Err(qemu::WaitVerdict::new(said, &[console]).to_string())
 }
 
-/// A job the list never got to.
-const UNREACHED: &str = "the list never reached it";
+/// What a job list's console says of one of its jobs.
+#[derive(Debug, PartialEq)]
+enum Member {
+    Passed,
+    /// Why not, over its own lines.
+    Failed(String),
+    /// The list never got to it.
+    Unreached,
+}
 
 /// What the runner said of each of `jobs` on a job list's `console`, in their
-/// order: `Ok` for its `exit=0`, and otherwise why not, over its own lines.
-/// A marker is the runner's only under the head the supervisor registered for
-/// it, with no `pid=`, which a job's line in the runner's ring carries.
-fn member_verdicts<'a>(console: &str, jobs: &'a [String]) -> Vec<(&'a str, Result<(), String>)> {
+/// order. A marker is the runner's only under the head the supervisor
+/// registered for it, with no `pid=`, which a job's line in the runner's ring
+/// carries.
+fn member_verdicts<'a>(console: &str, jobs: &'a [String]) -> Vec<(&'a str, Member)> {
     use toyos_logstream::{parse, Source};
     let lines: Vec<&str> = console.lines().collect();
     let mut started: BTreeMap<&str, usize> = BTreeMap::new();
@@ -2479,20 +2512,20 @@ fn member_verdicts<'a>(console: &str, jobs: &'a [String]) -> Vec<(&'a str, Resul
     let own = |from: usize, to: usize| qemu::window(&lines[from..to].join("\n"));
     jobs.iter()
         .map(|job| {
-            let verdict = match (started.get(job.as_str()), ended.get(job.as_str())) {
-                (_, Some((_, "exit=0"))) => Ok(()),
+            let member = match (started.get(job.as_str()), ended.get(job.as_str())) {
+                (_, Some((_, "exit=0"))) => Member::Passed,
                 (from, Some(&(to, said))) => {
                     let said = match (said.strip_prefix("exit="), said.strip_prefix("error=")) {
                         (Some(code), _) => format!("exited {code}"),
                         (_, Some(why)) => format!("did not run: {why}"),
                         _ => format!("ended saying {said:?}"),
                     };
-                    Err(format!("{said}\n{}", own(from.copied().unwrap_or(to), to + 1)))
+                    Member::Failed(format!("{said}\n{}", own(from.copied().unwrap_or(to), to + 1)))
                 }
-                (Some(&from), None) => Err(format!("started and never ended\n{}", own(from, lines.len()))),
-                (None, None) => Err(UNREACHED.to_string()),
+                (Some(&from), None) => Member::Failed(format!("started and never ended\n{}", own(from, lines.len()))),
+                (None, None) => Member::Unreached,
             };
-            (job.as_str(), verdict)
+            (job.as_str(), member)
         })
         .collect()
 }
