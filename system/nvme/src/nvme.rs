@@ -103,7 +103,10 @@ pub enum Power {
     /// APSTA's bit 0 is clear: the controller makes no autonomous transition.
     Unsupported,
     /// The table set, and the states it was built from.
-    Autonomous { states: Vec<nvme_apst::PowerState>, plan: [Option<nvme_apst::Transition>; nvme_apst::STATES] },
+    Autonomous {
+        states: Vec<nvme_apst::PowerState>,
+        plan: Box<[Option<nvme_apst::Transition>; nvme_apst::STATES]>,
+    },
     /// The controller refused the Set Features, with this status.
     Refused(u16),
 }
@@ -461,7 +464,7 @@ impl Controller {
             ..Command::default()
         };
         match self.admin_command("Set Features (Autonomous Power State Transition)", cmd) {
-            Ok(_) => Ok(Power::Autonomous { states, plan }),
+            Ok(_) => Ok(Power::Autonomous { states, plan: Box::new(plan) }),
             Err(Refusal::Admin(_, status)) => Ok(Power::Refused(status)),
             Err(why) => Err(why),
         }
