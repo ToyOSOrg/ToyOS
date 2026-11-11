@@ -50,7 +50,7 @@ impl fmt::Display for Malformed {
 }
 
 /// A single-instance device path, End of Entire node included.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Path<'a>(&'a [u8]);
 
 impl<'a> Path<'a> {

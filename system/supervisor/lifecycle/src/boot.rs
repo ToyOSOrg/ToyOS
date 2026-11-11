@@ -1,50 +1,50 @@
-//! What the supervisor reads of where firmware loaded this boot from
-//! ([`toyos_abi::boot::BootSources`], the kernel's copy of the loader's): a
-//! line for each source, and the controller a `@boot` entry names.
+//! What the supervisor reads of where this boot came from
+//! ([`toyos_bootnames::Names`], the loader's record as the kernel handed it
+//! on): a line for the partitions, one for each source, and the controller a
+//! `@boot` entry names.
 //!
 //! **`@boot` is the controller of the loader's own source**, the device
-//! firmware booted, and only where the loader placed one on a path that
-//! parses; otherwise it names nothing and the line says why. The slot volume's
-//! source is said beside it, so a boot whose payload came off another device
-//! than its loader shows both. Neither is authority over the device it names.
+//! firmware booted, and only where the loader placed one; otherwise it names
+//! nothing and the line says why. The slot volume's source is said beside it,
+//! so a boot whose payload came off another device than its loader shows both.
+//! Neither is authority over the device it names.
 
-use toyos_abi::boot::{BootSource, BootSources};
 use toyos_abi::inventory::PciAddr;
-use toyos_devicepath::Path;
+use toyos_bootnames::{Names, Source};
+use toyos_gpt::Guid;
 use toyos_manifest::device::BOOT_SAID;
 
 /// The lines to say, and the controller `@boot` names.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Read {
-    pub lines: [String; 3],
+    pub lines: [String; 4],
     pub controller: Option<PciAddr>,
 }
 
-pub fn read(sources: &BootSources) -> Read {
-    let (loader, controller) = source("loader", &sources.loader);
-    let (slot, _) = source("slot volume", &sources.slot);
+pub fn read(names: &Names<'_>) -> Read {
+    let partitions = format!(
+        "supervisor: the loader named ROOT {}, the slot volume {}, the log {} and {}",
+        Guid(names.root),
+        Guid(names.slot),
+        Guid(names.log),
+        names.boot.map_or("no boot partition".to_string(), |boot| format!("the boot partition {}", Guid(boot)))
+    );
+    let (loader, controller) = source("loader", names.loader_source);
+    let (slot, _) = source("slot volume", names.slot_source);
     let boot = match controller {
         Some(at) => format!("{BOOT_SAID}{} (segment {})", pci_at(at), at.segment),
         None => "supervisor: `@boot` names no function: the loader placed its own source on none".to_string(),
     };
-    Read { lines: [loader, slot, boot], controller }
+    Read { lines: [partitions, loader, slot, boot], controller }
 }
 
-fn source(name: &str, source: &BootSource) -> (String, Option<PciAddr>) {
-    let refused = |why: &dyn std::fmt::Display| (format!("supervisor: the {name}'s source is refused: {why}"), None);
-    let bytes = match source.path() {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return (format!("supervisor: the {name}'s source names no device path"), None),
-        Err(why) => return refused(&why),
+fn source(name: &str, source: Option<Source<'_>>) -> (String, Option<PciAddr>) {
+    let Some(Source { path, controller }) = source else {
+        return (format!("supervisor: the {name}'s source names no device path"), None);
     };
-    let path = match Path::parse(bytes) {
-        Ok(path) => path,
-        Err(why) => return refused(&why),
-    };
-    match source.controller.at() {
-        Ok(Some(at)) => (format!("supervisor: the {name} came off {path}, on PCI {}", pci_at(at)), Some(at)),
-        Ok(None) => (format!("supervisor: the {name} came off {path}, on no PCI function the loader placed"), None),
-        Err(why) => refused(&why),
+    match controller.map(|c| PciAddr { segment: c.segment, bus: c.bus, dev: c.dev, func: c.func }) {
+        Some(at) => (format!("supervisor: the {name} came off {path}, on PCI {}", pci_at(at)), Some(at)),
+        None => (format!("supervisor: the {name} came off {path}, on no PCI function the loader placed"), None),
     }
 }
 
@@ -55,7 +55,8 @@ fn pci_at(at: PciAddr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use toyos_abi::boot::Controller;
+    use toyos_bootnames::Function;
+    use toyos_devicepath::Path;
 
     /// The AMD bench's ESP on a stick in its USB-C port, 03:00.4: the nodes as
     /// that firmware named them on a bench run, then a HARDDRIVE node whose
@@ -74,21 +75,24 @@ mod tests {
     const SAID: &str = "PciRoot(0x0)/Pci(0x8,0x1)/Pci(0x0,0x4)/USB(0x4,0x0)/HD(1,GPT,04030201-0605-0807-090A-0B0C0D0E0F10,0x800,0x1000)";
     const AT: PciAddr = PciAddr { segment: 0, bus: 3, dev: 0, func: 4 };
 
-    fn on_stick(controller: Controller) -> BootSource {
-        let mut source = BootSource { path_len: STICK.len() as u16, controller, ..BootSource::NONE };
-        source.path[..STICK.len()].copy_from_slice(&STICK);
-        source
+    fn on_stick(placed: bool) -> Option<Source<'static>> {
+        let controller = placed.then_some(Function { segment: 0, bus: 3, dev: 0, func: 4 });
+        Some(Source { path: Path::parse(&STICK).unwrap(), controller })
     }
 
-    fn placed() -> Controller {
-        Controller { present: 1, bus: 3, dev: 0, func: 4, ..Controller::NONE }
+    fn named(loader_source: Option<Source<'static>>, slot_source: Option<Source<'static>>) -> Names<'static> {
+        Names { root: [0x10; 16], slot: [0x20; 16], log: [0x30; 16], boot: Some([0x40; 16]), loader_source, slot_source }
     }
 
     #[test]
     fn the_loaders_controller_is_the_one_boot_names() {
-        let read = read(&BootSources { loader: on_stick(placed()), slot: on_stick(placed()) });
+        let read = read(&named(on_stick(true), on_stick(true)));
         assert_eq!(read.controller, Some(AT));
         assert_eq!(read.lines, [
+            "supervisor: the loader named ROOT 10101010-1010-1010-1010-101010101010, the slot volume \
+             20202020-2020-2020-2020-202020202020, the log 30303030-3030-3030-3030-303030303030 and the boot partition \
+             40404040-4040-4040-4040-404040404040"
+                .to_string(),
             format!("supervisor: the loader came off {SAID}, on PCI 03:00.4"),
             format!("supervisor: the slot volume came off {SAID}, on PCI 03:00.4"),
             "supervisor: `@boot` is PCI 03:00.4 (segment 0)".to_string(),
@@ -98,34 +102,19 @@ mod tests {
     /// The slot volume's controller is said, never taken for `@boot`.
     #[test]
     fn a_payload_off_another_device_is_said_and_names_nothing() {
-        let read = read(&BootSources { loader: on_stick(Controller::NONE), slot: on_stick(placed()) });
+        let read = read(&named(on_stick(false), on_stick(true)));
         assert_eq!(read.controller, None);
-        assert!(read.lines[0].ends_with("on no PCI function the loader placed"), "{}", read.lines[0]);
-        assert!(read.lines[1].ends_with("on PCI 03:00.4"), "{}", read.lines[1]);
-        assert_eq!(read.lines[2], "supervisor: `@boot` names no function: the loader placed its own source on none");
+        assert!(read.lines[1].ends_with("on no PCI function the loader placed"), "{}", read.lines[1]);
+        assert!(read.lines[2].ends_with("on PCI 03:00.4"), "{}", read.lines[2]);
+        assert_eq!(read.lines[3], "supervisor: `@boot` names no function: the loader placed its own source on none");
     }
 
-    /// Every way a source the kernel answers can be wrong names nothing and
-    /// says why: a length past the array, a path that does not parse, a
-    /// controller neither present nor absent, and no path at all.
     #[test]
-    fn a_hostile_source_is_refused_and_names_no_controller() {
-        let mut unterminated = on_stick(placed());
-        unterminated.path[STICK.len() - 4..STICK.len()].fill(0);
-        unterminated.path_len = STICK.len() as u16 - 2;
-        let mut zero_node = on_stick(placed());
-        zero_node.path[2] = 0;
-        let cases: [(BootSource, &str); 5] = [
-            (BootSource { path_len: 513, ..on_stick(placed()) }, "supervisor: the loader's source is refused: its path is 513 bytes, past 512"),
-            (unterminated, "supervisor: the loader's source is refused: the path ends at byte 72 with no End node"),
-            (zero_node, "supervisor: the loader's source is refused: the node at byte 0 claims 0 bytes, short of its header"),
-            (on_stick(Controller { present: 2, ..placed() }), "supervisor: the loader's source is refused: its controller's present is 2"),
-            (BootSource { controller: placed(), ..BootSource::NONE }, "supervisor: the loader's source names no device path"),
-        ];
-        for (loader, said) in cases {
-            let read = read(&BootSources { loader, slot: BootSource::NONE });
-            assert_eq!((read.controller, read.lines[0].as_str()), (None, said));
-            assert_eq!(read.lines[1], "supervisor: the slot volume's source names no device path");
-        }
+    fn a_boot_firmware_named_nothing_of_says_so() {
+        let read = read(&Names { boot: None, ..named(None, None) });
+        assert_eq!(read.controller, None);
+        assert!(read.lines[0].ends_with("and no boot partition"), "{}", read.lines[0]);
+        assert_eq!(read.lines[1], "supervisor: the loader's source names no device path");
+        assert_eq!(read.lines[2], "supervisor: the slot volume's source names no device path");
     }
 }

@@ -7,7 +7,6 @@
 //! ```text
 //! dev.cpus, dev.memory.{total,used}_bytes
 //! dev.pci.<addr>.{vendor,device,class,driver}
-//! dev.loaded.<role>
 //! dev.class.<class>
 //! ... and under a claimed device, holder.<pid> = <process name>
 //! ```
@@ -30,7 +29,7 @@ use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use toyos_abi::inventory::{Claimed, Driven, Holder, PciAddr, Record, Role};
+use toyos_abi::inventory::{Claimed, Driven, Holder, PciAddr, Record};
 use toyos_abi::syscall::SYSINFO_HEADER_SIZE;
 
 use crate::wire::Value;
@@ -66,10 +65,6 @@ impl core::fmt::Display for Repeated {
 
 fn addr(at: PciAddr) -> String {
     format!("{:04x}:{:02x}:{:02x}:{:x}", at.segment, at.bus, at.dev, at.func)
-}
-
-fn guid(bytes: [u8; 16]) -> String {
-    toyos_gpt::Guid(bytes).to_string().to_ascii_lowercase()
 }
 
 /// A holder's name as a value: its bytes up to the first NUL, or `pid<n>` for
@@ -120,15 +115,6 @@ pub fn render(machine: &Machine, records: &[Record]) -> Result<BTreeMap<String, 
                 out.put(format!("{at}.driver"), driver.into())?;
             }
             Record::Claim(_) => {}
-            Record::Loaded(l) => {
-                let role = match l.role {
-                    Role::Root => "root",
-                    Role::Boot => "boot",
-                    Role::Log => "log",
-                    Role::Slot => "slot",
-                };
-                out.put(format!("loaded.{role}"), guid(l.unique_guid).into())?;
-            }
         }
     }
 
@@ -153,7 +139,7 @@ mod tests {
     use crate::path::check_path;
     use crate::Selector;
     use alloc::vec::Vec;
-    use toyos_abi::inventory::{Arrival, Claim, Loaded, Pci, NAME_BYTES};
+    use toyos_abi::inventory::{Arrival, Claim, Pci, NAME_BYTES};
     use toyos_abi::syscall::DeviceType;
 
     fn holder(pid: u32, s: &str) -> Holder {
@@ -176,7 +162,6 @@ mod tests {
             pci(NIC, Driven::Claimed),
             pci(XHCI, Driven::Kernel),
             pci(PciAddr { segment: 1, bus: 0x80, dev: 5, func: 0 }, Driven::Claimed),
-            Record::Loaded(Loaded { role: Role::Log, unique_guid: [0xcd; 16] }),
             Record::Claim(Claim { on: Claimed::Pci(NIC), holder: netstack }),
             // The same claim through a second handle in the same table.
             Record::Claim(Claim { on: Claimed::Pci(NIC), holder: netstack }),
@@ -204,15 +189,11 @@ mod tests {
         // Claimed, and its handle was in no table the kernel walked.
         assert_eq!(text("dev.pci.0001:80:05:0.driver").as_deref(), Some("claimed"));
         assert!(!got.keys().any(|p| p.starts_with("dev.pci.0001:80:05:0.holder")));
-        assert_eq!(text("dev.loaded.log").as_deref(), Some("cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd"));
         assert_eq!(text("dev.class.framebuffer.holder.7").as_deref(), Some("compositor"));
     }
 
     #[test]
     fn a_path_two_records_render_to_is_refused_by_name() {
-        let mut twice = records();
-        twice.push(Record::Loaded(Loaded { role: Role::Log, unique_guid: [0x99; 16] }));
-        assert_eq!(render(&MACHINE, &twice), Err(Repeated("dev.loaded.log".into())));
         let mut twice = records();
         twice.push(pci(NIC, Driven::Free));
         assert_eq!(

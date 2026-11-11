@@ -1,15 +1,16 @@
 //! The payloads the loader hands the kernel beside its own image: the
-//! supervisor's executable, the file server's and ROOT's bytes
-//! (`toyos_abi::boot::BootImage`). The kernel parses none of them: it spawns
-//! the supervisor from the ranges the build laid out of its executable
-//! (`toyos_kimage::Supervisor`), and hands the other two to the supervisor,
-//! whose file server serves `/system` out of ROOT.
+//! supervisor's executable, the file server's, ROOT's bytes and what the
+//! loader names of where it booted from (`toyos_abi::boot::BootImage`). The
+//! kernel parses none of them: it spawns the supervisor from the ranges the
+//! build laid out of its executable (`toyos_kimage::Supervisor`), and hands
+//! the other three to the supervisor, whose file server serves `/system` out
+//! of ROOT.
 //!
 //! [`init`] runs before `mm::init` and refuses the boot by name unless each
 //! image is non-empty, page-aligned and whole pages inside one `LoaderData`
 //! descriptor; `kernel_main` then refuses any two reserved regions that share
-//! a byte. The loader is trusted and verified each image's hash, so a refusal
-//! here is its bug, not an input to survive. The regions it returns are kept
+//! a byte. The loader is trusted, so a refusal here is its bug, not an input
+//! to survive. The regions it returns are kept
 //! out of the allocator and charged to no process, for the machine's life.
 //!
 //! [`objects`] makes each one a [`SharedMemObject`] over its pages
@@ -25,17 +26,18 @@ use toyos_rootimage::handoff::{held, Descriptor};
 use crate::mm::{Region, PAGE_SIZE};
 use crate::object::shm::SharedMemObject;
 
-/// The three images, as the loader handed them and [`init`] judged them.
+/// The images, as the loader handed them and [`init`] judged them.
 #[derive(Clone, Copy)]
 pub struct Handed {
     supervisor: BootImage,
     fileserver: BootImage,
     root: BootImage,
+    names: BootImage,
 }
 
 /// Every image in the order [`init`] returns their regions, by name.
-fn named(handed: &Handed) -> [(&'static str, BootImage); 3] {
-    [("supervisor", handed.supervisor), ("fileserver", handed.fileserver), ("ROOT", handed.root)]
+fn named(handed: &Handed) -> [(&'static str, BootImage); 4] {
+    [("supervisor", handed.supervisor), ("fileserver", handed.fileserver), ("ROOT", handed.root), ("boot names", handed.names)]
 }
 
 /// The pages `image` occupies.
@@ -46,8 +48,13 @@ fn pages(image: BootImage) -> Region {
 /// Take the images out of the handoff, refusing the boot by name on one the
 /// kernel may not keep, and answer them with their regions for `mm::init` to
 /// withhold. Runs before `mm::init`, so it neither allocates nor logs.
-pub fn init(args: &KernelArgs, map: &[MemoryMapEntry]) -> (Handed, [Region; 3]) {
-    let handed = Handed { supervisor: args.supervisor_image, fileserver: args.fileserver_image, root: args.root_image };
+pub fn init(args: &KernelArgs, map: &[MemoryMapEntry]) -> (Handed, [Region; 4]) {
+    let handed = Handed {
+        supervisor: args.supervisor_image,
+        fileserver: args.fileserver_image,
+        root: args.root_image,
+        names: args.boot_names,
+    };
     for (what, image) in named(&handed) {
         assert!(image.len != 0, "boot: the loader handed no {what} image");
         let rounded = image.len.checked_next_multiple_of(PAGE_SIZE);
@@ -76,6 +83,7 @@ pub struct Objects {
     pub supervisor: Arc<SharedMemObject>,
     pub fileserver: Arc<SharedMemObject>,
     pub root: Arc<SharedMemObject>,
+    pub names: Arc<SharedMemObject>,
 }
 
 /// One object over each image, once `mm::init` has run, for the supervisor's
@@ -85,5 +93,10 @@ pub fn objects(handed: Handed) -> Objects {
     for (what, image) in named(&handed) {
         log!("boot: {what} image {:#x}+{:#x}, kept read-only for the machine's life", image.addr, image.len);
     }
-    Objects { supervisor: object(handed.supervisor), fileserver: object(handed.fileserver), root: object(handed.root) }
+    Objects {
+        supervisor: object(handed.supervisor),
+        fileserver: object(handed.fileserver),
+        root: object(handed.root),
+        names: object(handed.names),
+    }
 }

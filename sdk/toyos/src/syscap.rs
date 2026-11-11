@@ -165,14 +165,6 @@ impl SysCap {
         syscall::device_inventory(self.0.raw(), buf)
     }
 
-    /// Where firmware loaded this boot from, as the loader handed it: see
-    /// [`toyos_abi::boot::BootSources`].
-    ///
-    /// Needs [`Rights::INVENTORY`].
-    pub fn boot_sources(&self) -> Result<toyos_abi::boot::BootSources, SyscallError> {
-        syscall::boot_sources(self.0.raw())
-    }
-
     /// One `toyos_abi::counters` record per online CPU, into `buf`; answers
     /// how many. An empty `buf` asks how many CPUs there are — see
     /// [`syscall::counters`].
@@ -314,10 +306,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use toyos_abi::inventory::{Loaded, Role};
+    use toyos_abi::inventory::{Claim, Claimed, Holder, NAME_BYTES};
+    use toyos_abi::syscall::DeviceType;
 
-    fn loaded(role: Role) -> Record {
-        Record::Loaded(Loaded { role, unique_guid: [7; 16] })
+    /// A record unlike any of another `pid`.
+    fn held(pid: u32) -> Record {
+        Record::Claim(Claim { on: Claimed::Class(DeviceType::Framebuffer), holder: Holder { pid, name: [0; NAME_BYTES] } })
     }
 
     fn read(ask: impl FnMut(&mut [RawRecord]) -> Result<usize, SyscallError>) -> Result<Vec<Record>, Unread> {
@@ -338,15 +332,15 @@ mod tests {
 
     #[test]
     fn every_record_is_read() {
-        let records = [loaded(Role::Root), loaded(Role::Log)];
+        let records = [held(1), held(2)];
         let raw: Vec<RawRecord> = records.iter().map(Record::encode).collect();
         assert_eq!(read(|buf| answer(&raw, buf)), Ok(records.to_vec()));
     }
 
     #[test]
     fn a_machine_that_grew_once_is_read_grown() {
-        let before = [loaded(Role::Root)];
-        let after = [loaded(Role::Root), loaded(Role::Log)];
+        let before = [held(1)];
+        let after = [held(1), held(2)];
         let (before_raw, after_raw): (Vec<RawRecord>, Vec<RawRecord>) =
             (before.iter().map(Record::encode).collect(), after.iter().map(Record::encode).collect());
         let mut counted = false;
@@ -360,12 +354,12 @@ mod tests {
 
     #[test]
     fn a_machine_that_grows_every_round_is_refused_by_name() {
-        let mut machine = vec![loaded(Role::Root).encode()];
+        let mut machine = vec![held(1).encode()];
         let mut asks = 0;
         let grows_after_every_count = |buf: &mut [RawRecord]| {
             let answered = answer(&machine, buf);
             if buf.is_empty() {
-                machine.push(loaded(Role::Boot).encode());
+                machine.push(held(3).encode());
             }
             asks += 1;
             answered
@@ -379,7 +373,7 @@ mod tests {
         let mut asks = 0;
         let empty_then_grown = |buf: &mut [RawRecord]| {
             asks += 1;
-            answer(&vec![loaded(Role::Root).encode(); asks - 1], buf)
+            answer(&vec![held(1).encode(); asks - 1], buf)
         };
         assert_eq!(read(empty_then_grown), Ok(Vec::new()));
         assert_eq!(asks, 1, "the count was the whole answer");
@@ -401,7 +395,7 @@ mod tests {
 
     #[test]
     fn a_record_that_does_not_decode_is_refused_and_not_dropped() {
-        let raw = [loaded(Role::Root).encode(), RawRecord::EMPTY, loaded(Role::Boot).encode()];
+        let raw = [held(1).encode(), RawRecord::EMPTY, held(3).encode()];
         assert_eq!(read(|buf| answer(&raw, buf)), Err(Unread::Record { index: 1, why: Undecodable::Kind(0) }));
     }
 }

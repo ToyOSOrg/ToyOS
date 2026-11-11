@@ -42,3 +42,5 @@ toyos-microcode = { path = "../lib/microcode" }
 # Every handle's device path this loader reads, held to one bounded check, and
 # the HARDDRIVE node.
 toyos-devicepath = { path = "../lib/devicepath" }
+# What this boot was loaded from, as the record the supervisor reads.
+toyos-bootnames = { path = "../lib/bootnames" }

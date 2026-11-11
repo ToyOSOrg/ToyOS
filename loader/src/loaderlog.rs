@@ -3,8 +3,8 @@
 //! Every line [`crate::println`] puts on the firmware's console is appended
 //! here too, written and flushed before the loader goes on.
 //!
-//! The file is `loader.log` at the root of the partition
-//! `KernelArgs::log_partition_guid` names, truncated at each boot. One file
+//! The file is `loader.log` at the root of the log partition
+//! (`\toyos\log.guid`), truncated at each boot. One file
 //! under a fixed name and never one of `logkeeper`'s timestamped ones, so a reader
 //! looking for the kernel's log on this volume never picks this up.
 //!

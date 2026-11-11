@@ -106,33 +106,11 @@ pub struct Claim {
     pub holder: Holder,
 }
 
-/// Which of the machine's partitions the loader named for a role.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Role {
-    /// The ROOT this boot runs, read whole by the loader.
-    Root,
-    /// The partition firmware loaded the loader from.
-    Boot,
-    /// The log partition.
-    Log,
-    /// The booted slot's volume: the kernel and its parameter.
-    Slot,
-}
-
-/// A partition the loader named, by its unique GUID: what a file server for
-/// that role serves, wherever the disk it is on is driven.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Loaded {
-    pub role: Role,
-    pub unique_guid: [u8; 16],
-}
-
 /// One record.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Record {
     Pci(Pci),
     Claim(Claim),
-    Loaded(Loaded),
 }
 
 /// Why a record did not decode.
@@ -158,7 +136,6 @@ impl core::fmt::Display for Undecodable {
 
 const KIND_PCI: u8 = 1;
 const KIND_CLAIM: u8 = 5;
-const KIND_LOADED: u8 = 6;
 
 /// Little-endian writes at fixed offsets.
 struct Out([u8; RECORD_BYTES]);
@@ -257,19 +234,6 @@ impl Record {
                 }
                 holder_out(&mut o, 28, &c.holder);
             }
-            Self::Loaded(l) => {
-                o.u8(0, KIND_LOADED);
-                o.u8(
-                    1,
-                    match l.role {
-                        Role::Root => 0,
-                        Role::Boot => 1,
-                        Role::Log => 2,
-                        Role::Slot => 3,
-                    },
-                );
-                o.bytes(8, &l.unique_guid);
-            }
         }
         RawRecord(o.0)
     }
@@ -305,16 +269,6 @@ impl Record {
                 },
                 holder: holder_in(&r, 28),
             }),
-            KIND_LOADED => Self::Loaded(Loaded {
-                role: r.variant(1, |b| match b {
-                    0 => Some(Role::Root),
-                    1 => Some(Role::Boot),
-                    2 => Some(Role::Log),
-                    3 => Some(Role::Slot),
-                    _ => None,
-                })?,
-                unique_guid: r.array(8),
-            }),
             kind => return Err(Undecodable::Kind(kind)),
         })
     }
@@ -330,7 +284,7 @@ mod tests {
         n
     }
 
-    fn every_kind() -> [Record; 4] {
+    fn every_kind() -> [Record; 3] {
         let at = PciAddr { segment: 0x1234, bus: 0, dev: 0x1f, func: 6 };
         let holder = Holder { pid: 7, name: name("netstack") };
         [
@@ -346,7 +300,6 @@ mod tests {
             }),
             Record::Claim(Claim { on: Claimed::Pci(at), holder }),
             Record::Claim(Claim { on: Claimed::Class(DeviceType::Framebuffer), holder }),
-            Record::Loaded(Loaded { role: Role::Log, unique_guid: [0x22; 16] }),
         ]
     }
 
@@ -364,7 +317,7 @@ mod tests {
         let mut raw = RawRecord::EMPTY;
         raw.0[0] = 99;
         assert_eq!(Record::decode(&raw), Err(Undecodable::Kind(99)));
-        for (kind, at) in [(KIND_PCI, 13), (KIND_CLAIM, 1), (KIND_LOADED, 1)] {
+        for (kind, at) in [(KIND_PCI, 13), (KIND_CLAIM, 1)] {
             let mut raw = RawRecord::EMPTY;
             raw.0[0] = kind;
             raw.0[at] = 9;

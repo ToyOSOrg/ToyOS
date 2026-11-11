@@ -7,7 +7,6 @@ use core::ptr::{self, NonNull};
 
 use alloc::vec;
 
-use toyos_abi::boot::DEVICE_PATH_BYTES;
 use toyos_devicepath::{Malformed, Path};
 
 use super::boot::{Exclusive, Protocol};
@@ -104,6 +103,9 @@ const NODE_HEADER: usize = 4;
 
 /// End of Entire Device Path (§10.3.1).
 const END_ENTIRE: (u8, u8) = (0x7f, 0xff);
+
+/// The most bytes of firmware's memory a path is walked through.
+const DEVICE_PATH_BYTES: usize = 512;
 
 impl DevicePath {
     /// The path, walked no further than [`DEVICE_PATH_BYTES`] and held to

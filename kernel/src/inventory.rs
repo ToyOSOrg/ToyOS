@@ -2,8 +2,7 @@
 //! `SYS_DEVICE_INVENTORY` answers.
 //!
 //! **Assembled from what each subsystem already keeps**: the PCI functions and
-//! their identities are `pcidev`'s from enumeration, and the partitions the
-//! loader named are `loaded`'s.
+//! their identities are `pcidev`'s from enumeration.
 //!
 //! **A holder is found where its handle is**: every process's table is walked
 //! for device claims, one table at a time and with the process table dropped
@@ -12,17 +11,15 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use toyos_abi::inventory::{Claim, Claimed, Holder, Loaded, Record, NAME_BYTES};
+use toyos_abi::inventory::{Claim, Claimed, Holder, Record, NAME_BYTES};
 
 use crate::object::KObjectRef;
 use crate::process;
 
-/// Every record, in a fixed order: PCI, claims, and the partitions the loader
-/// named.
+/// Every record, in a fixed order: PCI, then claims.
 pub fn collect() -> Vec<Record> {
     let mut out: Vec<Record> = crate::pcidev::inventory().into_iter().map(Record::Pci).collect();
     out.extend(claims().into_iter().map(Record::Claim));
-    out.extend(crate::loaded::loaded().into_iter().map(|(role, unique_guid)| Record::Loaded(Loaded { role, unique_guid })));
     out
 }
 

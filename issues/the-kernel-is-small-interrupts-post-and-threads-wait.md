@@ -20,6 +20,9 @@ kernel's part of a restart, and named module tests hold each program's
    step 2's rule. Its lines are measured: `kernel/src` held 230 files and
    59,012 lines before #1152 and 223 and 56,800 after #1182, and 218 and
    55,286 once the loader left it (#1189).
+   What the loader named has left since (#1210): 214 files and 55,303 lines,
+   75 fewer than the inventory below counts, and no link to the device-path
+   parser.
 2. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
    where firmware put it, handed over in 4 KiB pages with its MSI-X table's
    page, under the owner's Q2 ruling. The orchestrator ruled on #900 that
@@ -364,8 +367,8 @@ kernel links.
 Observed: no filesystem, storage, input, network, audio or USB driver, no
 ELF or AML parser and no virtio is left in `kernel/src`. What it parses is
 firmware's static tables (`toyos-acpi`), the build's own table
-(`toyos-kimage`), the vendor's microcode container, and, below, a UEFI
-device path.
+(`toyos-kimage`), the vendor's microcode container, and, until #1210, a
+UEFI device path.
 
 ### Userland's, by the design, and still here
 
@@ -378,7 +381,7 @@ the first.
 | Endowment labels: a blob per process for its life, answered by `SYS_ENDOWMENTS`, of which the kernel compares three (`JOB_LABEL`, `SELF_LABEL`, `QUIT_LABEL`) and writes three more for the supervisor | ~130 | `toyos::endow`, the supervisor's table | the startup block (inferred); needs the child's handle numbers known to its parent and the three compared labels as typed spawn fields; after #1200 |
 | The TTY mark on a pipe end (`SYS_MARK_TTY`, `FileType::Tty`) | ~40 | std's spawn, libc's `isatty` and stdio, std's stdio | a fact about a stream that only libc and std read; a label or the block could carry it (inferred); after the labels |
 | The main thread's stack: 8 MiB and a guard the kernel chooses and reserves | ~30 | `SYS_STACK_INFO`, which only a guest test calls | its creator's, since the design gives a thread's stack a caller-chosen size; after #1200, when a child's stack starts empty |
-| What the loader named: partition GUIDs by role, in the inventory, and the boot sources `SYS_BOOT_SOURCES` answers, whose device paths `loaded.rs` parses (`toyos-devicepath`) only to refuse the loader's own bytes | ~95, and the kernel's link to a 324-line parser | the supervisor, `toyos::syscap`, the manifest's inventory reader | the design gives the kernel a typed description of what was loaded and keeps a partition GUID out of it; passing the description on unread, as a read-only boot image as ROOT is, fits both (inferred) and waits on no other change |
+| **Done** (#1210): the loader writes one record, the kernel hands it to the supervisor as a read-only boot image, and the supervisor parses it. What the loader named: partition GUIDs by role, in the inventory, and the boot sources `SYS_BOOT_SOURCES` answers, whose device paths `loaded.rs` parses (`toyos-devicepath`) only to refuse the loader's own bytes | ~95, and the kernel's link to a 324-line parser | the supervisor, `toyos::syscap`, the manifest's inventory reader | the design gives the kernel a typed description of what was loaded and keeps a partition GUID out of it; passing the description on unread, as a read-only boot image as ROOT is, fits both (inferred) and waits on no other change |
 | The IGD OpRegion's lookup: a firmware window is a granted privilege the design keeps, but `SYS_DEVICE_FIRMWARE_WINDOW` finds it by reading Intel graphics' `ASLS` | ~90 and ~30 of `pcidev` | tgl-display, the supervisor, the manifest | the lookup is device knowledge; a window the ACPI service names for a claim would be generic (inferred); needs a design |
 | The supervisor's last words, userland text written into the kernel's ring (`SYS_LOG_LAST_WORDS`) | ~20 | the supervisor | the design keeps userland output out of the kernel's ring and names no exception; this is one |
 
@@ -408,7 +411,8 @@ By mechanisms eliminated:
 2. Endowment labels, after #1200: `SYS_ENDOWMENTS`, the per-process blob
    and its charge, and label text the kernel compares.
 3. What the loader named, independent of the others: `SYS_BOOT_SOURCES`,
-   the inventory's partition records, the device-path parser.
+   the inventory's partition records, the device-path parser. **Done**
+   (#1210).
 4. The TTY mark, with or after 2: `SYS_MARK_TTY`. It meets
    `issues/a-received-handle-has-no-knowable-type.md`, which wants
    `SYS_FSTAT` to answer more, so the two are designed together.
@@ -425,9 +429,9 @@ out, and a larger number needs one of the design changes above.
 - `SYS_STACK_INFO` is called by `tests/guest/rust-tests/src/bin/std_threads.rs`
   alone, and `SYS_VM_DECOMMIT` by two guest tests alone (`mmap_stress`,
   `starveling`).
-- `KernelArgs::boot_partition_start_lba` and `boot_partition_blocks` are
-  read by one log line (`kernel/src/main.rs`), and `wall_clock_*` by no
-  x86-64 code.
+- `KernelArgs::wall_clock_*` is read by no x86-64 code. (Its
+  `boot_partition_start_lba` and `boot_partition_blocks`, read by one log
+  line, went with #1210.)
 - `KernelStack::heap` (`kernel/src/loader/start.rs`) charges every thread
   two strings at 64 KiB and a page, "as a rename's paths". No rename is
   left: a spawn's path and arguments are the two strings today. After #1200
@@ -445,8 +449,7 @@ out, and a larger number needs one of the design changes above.
   `quiesce.rs`'s header speaks of the block layer and a USB stop, neither
   of which the kernel has; `UserImage`'s doc comment
   (`kernel/src/process.rs`) says "the file the kernel opened", and the
-  kernel opens none; `loaded.rs`'s header says it "interprets no path"
-  above a function that parses one.
+  kernel opens none.
 
 ## Standing
 

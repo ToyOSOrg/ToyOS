@@ -154,13 +154,13 @@ struct BootPartition {
 /// `LoadedImage->DeviceHandle` is the handle the image came off, and the
 /// HARDDRIVE node of that handle's device path carries the partition's
 /// **unique** GUID — a name for one partition on one disk, which is what the
-/// kernel needs and what neither a type GUID nor a disk GUID can give it. It
-/// has to be read here, because the device path protocol dies with Boot
-/// Services and there is no way to ask afterwards.
+/// BOOT file server is granted and what neither a type GUID nor a disk GUID
+/// can give. It has to be read here, because the device path protocol dies
+/// with Boot Services and there is no way to ask afterwards.
 ///
 /// `None` is a machine, not a failure: PXE, an unpartitioned device, and a
-/// signature type firmware chose not to fill in all land here, and the kernel
-/// is expected to boot on all of them knowing it has no partition of its own.
+/// signature type firmware chose not to fill in all land here, and the system
+/// is expected to boot on all of them with no BOOT role.
 /// Every early-return below is one of those, so none of them panics.
 fn boot_partition(handle: Handle, system_table: &SystemTable) -> Option<BootPartition> {
     let bs = system_table.boot_services();
@@ -177,7 +177,7 @@ fn boot_partition(handle: Handle, system_table: &SystemTable) -> Option<BootPart
 
     // Exactly one, not the last one. A path with two HARDDRIVE nodes describes
     // a partition inside a partition, and picking either is guessing which of
-    // the two the kernel's block device will be looking at.
+    // the two a disk driver will be looking at.
     let mut nodes = path.nodes().filter(|node| node.kind() == HardDrive::TYPE);
     let node = nodes.next()?;
     if nodes.next().is_some() {
@@ -201,18 +201,17 @@ fn boot_partition(handle: Handle, system_table: &SystemTable) -> Option<BootPart
     })
 }
 
-/// Name the partition the kernel's log goes on, without reading it.
+/// Name the partition the system's log goes on, without reading it.
 ///
 /// Written beside this loader by `build/image.rs`, which draws the GUID and
 /// stamps the same sixteen bytes into the GPT entry. Read here because this is
-/// the volume firmware designated and because the kernel has no filesystem yet:
-/// the identity is *given* all the way down, and nothing at any level scans for
-/// a partition of the right type or format.
+/// the volume firmware designated: the identity is *given* all the way down,
+/// and nothing at any level scans for a partition of the right type or format.
 ///
 /// A missing or short file panics, like every other check in this file. The
 /// same function writes the loader and this file, so a volume with one of them
 /// was assembled by something that is not this project — and booting it anyway
-/// would mean a kernel that quietly has nowhere to write its log, on the
+/// would mean a system that quietly has nowhere to write its log, on the
 /// machine that has no other channel.
 fn log_partition_guid(handle: Handle, system_table: &SystemTable) -> [u8; 16] {
     let bytes = load_file_bytes(handle, system_table, cstr16!("\\toyos\\log.guid"));
@@ -463,7 +462,19 @@ fn start_kernel(kernel: LoadedKernel, kernel_section: vec::Vec<u8>, cmdline: vec
         }
     }
 
-    let boot_sources = bootsource::sources(&system_table, &slot_volume_guid);
+    let boot_names = {
+        let record = bootsource::record(
+            &system_table,
+            handed.root.partition,
+            slot_volume_guid,
+            log_partition_guid,
+            boot_part.map(|p| p.guid),
+        );
+        let mut pages = payload::Payload::allocate(system_table.boot_services(), record.len() as u64)
+            .unwrap_or_else(|why| panic!("no pages for the boot names: {why}"));
+        pages.bytes_mut().copy_from_slice(&record);
+        pages.handoff()
+    };
 
     // Allocated before exiting boot services, which takes the allocator away.
     let pt_layout = Layout::new::<[Table; MAX_PAGES]>();
@@ -533,14 +544,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_section: vec::Vec<u8>, cmdline: vec
             None => (0, 0, 0, 0, 0, 0),
         };
 
-    let (boot_partition_guid, boot_partition_start_lba, boot_partition_blocks, boot_partition_present) =
-        match &boot_part {
-            Some(p) => (p.guid, p.start_lba, p.blocks, 1),
-            None => ([0u8; 16], 0, 0, 0),
-        };
-
     let root_image = handed.root.pages.handoff();
-    let (root_partition_guid, root_read_ticks) = (handed.root.partition, handed.root.ticks);
+    let root_read_ticks = handed.root.ticks;
     let (supervisor_image, fileserver_image) = (handed.supervisor.handoff(), handed.fileserver.handoff());
 
     // The BSP loads it before `mm::init`, through the boot map.
@@ -570,16 +575,10 @@ fn start_kernel(kernel: LoadedKernel, kernel_section: vec::Vec<u8>, cmdline: vec
         gop_stride,
         gop_pixel_format,
         boot_pml4_addr: pml4_phys,
-        boot_partition_start_lba,
-        boot_partition_blocks,
-        boot_partition_guid,
-        boot_partition_present,
-        log_partition_guid,
         layout: toyos_abi::boot::LAYOUT,
         cmdline_addr: cmdline.as_ptr() as u64,
         cmdline_len: cmdline.len() as u64,
         root_image,
-        root_partition_guid,
         loader_entry_counter: entry_counter,
         loader_handoff_counter: 0,
         root_read_ticks,
@@ -593,10 +592,9 @@ fn start_kernel(kernel: LoadedKernel, kernel_section: vec::Vec<u8>, cmdline: vec
         gop_edid_len: 0,
         microcode_addr,
         microcode_len,
-        slot_volume_guid,
         supervisor_image,
         fileserver_image,
-        boot_sources,
+        boot_names,
     };
     if let Some(edid) = gop.as_ref().and_then(|g| g.edid) {
         kernel_args.gop_edid = edid;

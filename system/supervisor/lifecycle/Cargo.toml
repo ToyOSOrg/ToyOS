@@ -18,7 +18,10 @@ toyos = { path = "../../../sdk/toyos" }
 # The grant a role's block connector is minted with, and the type that names DATA.
 toyos-blockring = { path = "../../../lib/blockring" }
 toyos-gpt = { path = "../../../lib/gpt" }
-# The boot sources' paths, refused when malformed and said in their text form.
+# What the loader named of where this boot came from.
+toyos-bootnames = { path = "../../../lib/bootnames" }
+
+[dev-dependencies]
 toyos-devicepath = { path = "../../../lib/devicepath" }
 
 [lints.rust]

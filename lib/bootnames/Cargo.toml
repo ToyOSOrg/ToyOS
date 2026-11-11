@@ -1,0 +1,17 @@
+[package]
+name = "toyos-bootnames"
+description = "What the loader names of where a boot came from, as the record it writes for the supervisor: the partitions by role and each source's firmware device path, refused whole when malformed (no_std)."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+# Each source's path, held to its one check.
+toyos-devicepath = { path = "../devicepath" }
+
+[lints.rust]
+unsafe_code = "forbid"

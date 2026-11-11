@@ -1,10 +1,10 @@
-//! A section of the slot's signed image in pages of its own, which the kernel
-//! keeps out of its allocator by the address it is handed
-//! (`toyos_abi::boot::BootImage`).
+//! Bytes in pages of their own, which the kernel keeps out of its allocator by
+//! the address it is handed (`toyos_abi::boot::BootImage`): a section of the
+//! slot's signed image, or the loader's own record of where it booted from.
 //!
 //! **The contract with the kernel**: the pages are `LoaderData`, whole and
 //! page-aligned, the bytes past `len` in the last one are zero, and nothing
-//! writes them between the read the slot's hash is checked over and the jump.
+//! writes them between the read a section's hash is checked over and the jump.
 //! A check over [`Payload::bytes`] is therefore a check over exactly what the
 //! kernel is handed.
 
