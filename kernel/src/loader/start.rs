@@ -26,7 +26,7 @@ use toyos_abi::syscall::{
 
 /// Where a new context first runs.
 pub(crate) enum Start {
-    /// A program's first instruction, on the stack its loader wrote.
+    /// A program's first instruction, on its empty stack.
     Process { entry: toyos_userbound::Entry, sp: u64 },
     /// A thread's, on a stack its process chose, with its argument.
     Thread { entry: toyos_userbound::Entry, sp: u64, arg: u64 },
@@ -47,8 +47,7 @@ impl KernelStack {
     /// on the one watch it may wait on, whose list doubles, its place in its
     /// process's thread table, its own data, and what one of its calls copies
     /// in and may hold while it is preempted — two strings at their bound, as
-    /// a rename's paths, and a page besides, as a namespace's names. A spawn
-    /// charges what it copies past that.
+    /// a rename's paths, and a page besides, as a namespace's names.
     fn heap() -> usize {
         let waiter = 2 * core::mem::size_of::<(usize, u64)>();
         let call = 2 * crate::user_ptr::MAX_USER_STR as usize + crate::mm::PAGE_BYTES;
@@ -95,15 +94,6 @@ pub(crate) fn alloc_kernel_stack(job: &Arc<Job>, start: Start) -> Option<(Kernel
     // SAFETY: `stack` is fresh and exclusively owned, and its `top` ends the stack.
     let frame = unsafe { crate::arch::entry::initial_frame(stack.top(), trampoline, user_entry, user_sp, arg) };
     Some((stack, frame))
-}
-
-/// The last path component, truncated to what a process entry can hold.
-pub(crate) fn make_name(path: &str) -> [u8; crate::process::THREAD_NAME_LEN] {
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    let mut name = [0u8; crate::process::THREAD_NAME_LEN];
-    let len = filename.len().min(crate::process::THREAD_NAME_LEN - 1);
-    name[..len].copy_from_slice(&filename.as_bytes()[..len]);
-    name
 }
 
 /// A caller's request for a child's table: `endow` has not left the caller's table yet.

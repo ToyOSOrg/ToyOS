@@ -86,7 +86,7 @@ struct Prepared {
     cwd: String,
 }
 
-/// `KEY=VALUE\0` for each variable: the blob `SYS_SPAWN` and a launch both take.
+/// `KEY=VALUE\0` for each variable: the blob a spawn and a launch both take.
 fn env_blob(env: &BTreeMap<EnvKey, OsString>) -> Vec<u8> {
     let mut blob = Vec::new();
     for (key, value) in env {

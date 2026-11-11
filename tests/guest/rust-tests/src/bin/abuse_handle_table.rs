@@ -38,6 +38,8 @@ use toyos_abi::RawHandle;
 use toyos_abi::end::End;
 
 const SELF: &str = "/system/bin/test_rs_abuse_handle_table";
+/// The name its children go by.
+const NAME: &str = "test_rs_abuse_handle_table";
 /// The role a spawned copy of this binary takes: it exits at once.
 const CHILD: &str = "endowed";
 
@@ -53,11 +55,18 @@ const REGION: usize = 4 * 1024 * 1024;
 /// be in range or the refusal would be the label check rather than the repeat.
 const LABELS: &[u8] = b"twice";
 
-/// This binary as an image, read before the table is filled: a full table has
-/// no slot for the object a read makes.
-fn own() -> &'static toyos::process::Image {
-    static OWN: std::sync::OnceLock<toyos::process::Image> = std::sync::OnceLock::new();
-    OWN.get_or_init(|| image::image_of(SELF))
+/// This binary laid out to start as [`CHILD`], read before the table is
+/// filled: a full table has no slot for the objects a read and a startup
+/// block make.
+fn own() -> &'static image::Laid {
+    // The image is kept: the ranges name its object.
+    static OWN: std::sync::OnceLock<(toyos::process::Image, image::Laid)> = std::sync::OnceLock::new();
+    let (_, laid) = OWN.get_or_init(|| {
+        let image = image::image_of(SELF);
+        let laid = image::laid(&image, &format!("{SELF}\0{CHILD}"));
+        (image, laid)
+    });
+    laid
 }
 
 fn main() {
@@ -70,20 +79,18 @@ fn main() {
     };
     assert!(!region.is_null(), "mmap failed");
 
-    let argv = unsafe { region.add(REGION / 2) };
-    const ARGV0: &[u8] = b"/system/bin/echo\0";
-    unsafe { core::ptr::copy_nonoverlapping(ARGV0.as_ptr(), argv, ARGV0.len()) };
+    let path = unsafe { region.add(REGION / 2) };
+    const PATH: &str = "/system/bin/echo";
+    unsafe { core::ptr::copy_nonoverlapping(PATH.as_ptr(), path, PATH.len()) };
 
     let echo = image::image_of("/system/bin/echo");
-    let laid = image::laid(&echo);
+    let laid = image::laid(&echo, PATH);
     let spawn_with = |endow_count: u64| {
         let args = SpawnArgs {
-            path_ptr: argv as u64,
-            path_len: (ARGV0.len() - 1) as u64,
-            argv_ptr: argv as u64,
-            argv_len: ARGV0.len() as u64,
-            env_ptr: 0,
-            env_len: 0,
+            path_ptr: path as u64,
+            path_len: PATH.len() as u64,
+            name_ptr: NAME.as_ptr() as u64,
+            name_len: NAME.len() as u64,
             endow_ptr: (region as u64) + (REGION / 4) as u64,
             endow_count,
             labels_ptr: (region as u64) + (REGION / 8) as u64,
@@ -195,17 +202,14 @@ fn a_pair_is_refused_whole(filled: &mut Vec<RawHandle>) {
 /// `SYS_SPAWN` of this binary as a child that exits at once, carrying
 /// `entries` into the blob `labels`.
 fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, SyscallError> {
-    let argv = format!("{SELF}\0{CHILD}");
-    let laid = image::laid(&own());
+    let laid = own();
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {
             path_ptr: SELF.as_ptr() as u64,
             path_len: SELF.len() as u64,
-            argv_ptr: argv.as_ptr() as u64,
-            argv_len: argv.len() as u64,
-            env_ptr: 0,
-            env_len: 0,
+            name_ptr: NAME.as_ptr() as u64,
+            name_len: NAME.len() as u64,
             endow_ptr: entries.as_ptr() as u64,
             endow_count: entries.len() as u64,
             labels_ptr: labels.as_ptr() as u64,

@@ -301,10 +301,10 @@ impl Readback {
     /// What the kernel recorded about the process the *runner* spawned as
     /// `binary`, or why there is no such record.
     ///
-    /// **The name is the file's, truncated the way the kernel truncates it.**
-    /// `ProcessEntry`'s name is `THREAD_NAME_LEN` bytes and the loader fills it
-    /// from the path's last component, so a binary whose name is longer than
-    /// that is recorded under a prefix: the staged `lent_device_memory_refused`
+    /// **The name is the file's, cut the way its parent's SDK cuts it**
+    /// (`bootlog::recorded_name`, which agrees with `toyos::spawn::name`): a
+    /// process's name is at most 27 bytes, so a binary whose name is longer
+    /// is recorded under a prefix: the staged `lent_device_memory_refused`
     /// ends `…_device_memory_` on the wire, and a predicate looking for the whole
     /// name would find nothing on a perfectly good boot.
     ///

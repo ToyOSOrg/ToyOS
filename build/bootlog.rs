@@ -82,12 +82,15 @@ pub fn kernel_records(log: &str) -> String {
 /// trailing ` online` as a separate word: the same head carries the failure.
 pub const AP_BRINGUP: &str = "SMP: AP cpu";
 
-/// `kernel/src/process.rs`'s `THREAD_NAME_LEN`, one byte of which is the
-/// terminator `make_name` leaves.
-const NAME_LEN: usize = 28;
+/// The roster's name field, one byte of which is the name's terminator.
+const NAME_LEN: usize = toyos_abi::inventory::NAME_BYTES;
 
-/// A process's name as the kernel records it: the path's last component,
-/// truncated to what [`NAME_LEN`] holds.
+/// The name the kernel records a process run as `binary` under: what its
+/// parent's SDK states at the spawn (`toyos::spawn::name` in
+/// `sdk/toyos/src/spawn.rs`), which this agrees with for every name of
+/// ASCII letters, digits and punctuation: the last component, cut to what
+/// [`NAME_LEN`] holds. That function cuts at a character and writes `_` for
+/// white space and a control character, which this does not.
 ///
 /// **A predicate looking for the whole name finds nothing on a good boot**:
 /// `test_rs_lent_device_memory_refused` is `test_rs_lent_device_memory_` on the wire.
@@ -499,16 +502,14 @@ mod tests {
         assert_eq!(stop_marked(""), Err(Unfit::NoStopMark));
     }
 
-    /// The two kernel spellings a metal readback is judged on, and the length
-    /// it truncates a name to — held to the kernel's own source, because
-    /// nothing links this crate to it either.
+    /// The kernel spellings a metal readback is judged on, held to the
+    /// kernel's own source, because nothing links this crate to it.
     #[test]
     fn the_kernel_writes_the_records_the_host_reads() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         for (file, needle) in [
             ("kernel/src/process.rs", format!("log!(\"{EXIT}{{name}} pid=")),
             ("kernel/src/arch/x86_64/smp.rs", format!("log!(\"{AP_BRINGUP}")),
-            ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
             ("kernel/src/deadline.rs", format!("\"{DEADLINE_ARMED}{{ms}} ms")),
         ] {
             let at = root.join(file);

@@ -105,14 +105,13 @@ pub(super) fn spawn_program(ctx: &crate::user_ptr::SyscallContext<'_>, args: &Sp
 /// Start a program under `parent` and return the handle to it the spawn's commit put in the caller's table.
 pub(super) fn sys_spawn(
     path: &str,
-    args: &[&str],
+    name: [u8; process::THREAD_NAME_LEN],
     pending: crate::loader::PendingHandles,
-    env: Vec<u8>,
     program: crate::loader::Program,
     parent: process::Parent,
 ) -> u64 {
     // Nothing to clean up: spawn's frame owns the child's resources on error.
-    match process::spawn(path, args, pending, env, program, parent) {
+    match process::spawn(path, name, pending, program, parent) {
         Ok((_, handle)) => u64::from(handle.0),
         Err(e) => e.refuse(),
     }

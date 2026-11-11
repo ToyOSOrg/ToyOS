@@ -645,11 +645,6 @@ pub fn guard_4k(phys: u64) {
     KERNEL.lock().guard_4k(phys);
 }
 
-/// The kernel wrote instructions into the frame at `phys` that a user leaf
-/// executes: nothing to do, as the instruction and data caches are coherent
-/// (SDM Vol. 3A §11.6).
-pub fn wrote_code(_phys: u64) {}
-
 /// Marks a user leaf whose frame the space owns: one of the bits a PTE leaves
 /// to software (SDM Vol. 3A §4.5, Table 4-19). Kept on a leaf that is not
 /// present, so a frame no access may reach is still recorded.

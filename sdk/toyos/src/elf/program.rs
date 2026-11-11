@@ -1,19 +1,23 @@
 //! A program laid out for a spawn: the ranges of the child's memory its
 //! `PT_LOAD`s are, as `toyos_abi::syscall::SpawnMap`s, its entry and its
 //! build-id. The kernel parses no program; it checks each range as an
-//! ordinary mapping and builds the child from them. The build lays the
-//! supervisor out with the same function, ahead of the boot.
+//! ordinary mapping and builds the child from them. Below the program lies
+//! what its parent tells it (`crate::startup`), zeros until a spawn names a
+//! block. The build lays the supervisor out with the same function, ahead of
+//! the boot.
 
 use toyos_abi::syscall::{SpawnMap, VmProt, MAX_BUILD_ID, MAX_SPAWN_MAPS};
 use toyos_abi::HANDLE_INVALID;
 
 use crate::elf::{note, Layout, Machine};
+use crate::startup::{self, Block};
 
 /// The page the ranges are whole ones of.
 const PAGE: u64 = 4096;
 
 /// Where a spawned program's lowest page goes in its child: above the clock
-/// page (`toyos_abi::clock::CLOCK_PAGE`), in a space nothing else holds yet.
+/// page (`toyos_abi::clock::CLOCK_PAGE`) and the startup block, in a space
+/// nothing else holds yet.
 pub const BASE: u64 = 0x2_0000_0000;
 
 /// What a program asks of a spawn: its ranges, its entry, where its address 0
@@ -29,8 +33,9 @@ pub struct Program {
 }
 
 impl Program {
-    /// The ranges, each a `PT_LOAD` copied from the object or a hole between
-    /// two, reserved, in address order.
+    /// The ranges in address order, none apart from the next: the startup
+    /// block's pages and the reserved ones above them, then each `PT_LOAD`
+    /// copied from the object or a hole between two, reserved.
     pub fn maps(&self) -> &[SpawnMap] {
         &self.maps[..self.count]
     }
@@ -38,15 +43,29 @@ impl Program {
     pub fn build_id(&self) -> &[u8] {
         &self.build_id[..self.build_id_len]
     }
+
+    /// The program, its child starting with `block` in place of zeros.
+    pub fn starting_with(mut self, block: &Block) -> Program {
+        let pages = (block.len() as u64).next_multiple_of(PAGE).max(PAGE);
+        self.maps[0] = SpawnMap { addr: startup::AT, len: pages, object: block.object(), offset: 0, copied: block.len() as u64, prot: VmProt::ReadWrite as u64 };
+        self.maps[1] = reserved(startup::AT + pages, BASE);
+        self
+    }
+}
+
+/// `[lo, hi)` reserved: no page of it is mapped.
+fn reserved(lo: u64, hi: u64) -> SpawnMap {
+    SpawnMap { addr: lo, len: hi - lo, object: u64::from(HANDLE_INVALID.0), ..SpawnMap::default() }
 }
 
 /// The program `file`, an image for `machine`, laid out with its lowest page
-/// at `at`, each `PT_LOAD` copied from `object`, the memory object holding
-/// `file`. Refused by name where the kernel would refuse a range, or the
-/// program could not start: no `PT_LOAD` maps its program header table, which
-/// it reads to relocate itself, or a segment asks to be written and executed,
-/// which no page is, as the loader refuses a library's (`crate::dl`).
-pub fn lay_out(file: &[u8], machine: Machine, object: u64, at: u64) -> Result<Program, &'static str> {
+/// at [`BASE`], each `PT_LOAD` copied from `object`, the memory object holding
+/// `file`, below it a startup block that says nothing. Refused by name where
+/// the kernel would refuse a range, or the program could not start: no
+/// `PT_LOAD` maps its program header table, which it reads to relocate itself,
+/// or a segment asks to be written and executed, which no page is, as the
+/// loader refuses a library's (`crate::dl`).
+pub fn lay_out(file: &[u8], machine: Machine, object: u64) -> Result<Program, &'static str> {
     let layout = Layout::parse(file, machine).map_err(|e| e.as_str())?;
     if layout.program_headers().is_none() {
         return Err("ELF: no PT_LOAD maps the program header table");
@@ -54,14 +73,14 @@ pub fn lay_out(file: &[u8], machine: Machine, object: u64, at: u64) -> Result<Pr
     if layout.overlapping_load_pages(PAGE).is_some() {
         return Err("ELF: two PT_LOAD segments share a page");
     }
-    if !at.is_multiple_of(PAGE) {
-        return Err("a program's base is a page boundary");
-    }
-    let image_base = at.checked_sub(layout.extent().min()).ok_or("ELF: an image below its own base")?;
+    let image_base = BASE.checked_sub(layout.extent().min()).ok_or("ELF: an image below its own base")?;
+    let mut maps = [SpawnMap::default(); MAX_SPAWN_MAPS];
+    maps[0] = SpawnMap { addr: startup::AT, len: PAGE, object: u64::from(HANDLE_INVALID.0), prot: VmProt::ReadWrite as u64, ..SpawnMap::default() };
+    maps[1] = reserved(startup::AT + PAGE, BASE);
     let mut program = Program {
-        maps: [SpawnMap::default(); MAX_SPAWN_MAPS],
-        count: 0,
-        entry: at.checked_add(layout.entry().get()).ok_or("ELF: an entry past the address space")?,
+        maps,
+        count: 2,
+        entry: BASE.checked_add(layout.entry().get()).ok_or("ELF: an entry past the address space")?,
         image_base,
         build_id: [0; MAX_BUILD_ID],
         build_id_len: 0,
@@ -98,12 +117,11 @@ pub fn lay_out(file: &[u8], machine: Machine, object: u64, at: u64) -> Result<Pr
         program.count += 1;
         Ok(())
     };
-    let address = |offset: u64| at.checked_add(offset).ok_or("ELF: an image past the address space");
+    let address = |offset: u64| BASE.checked_add(offset).ok_or("ELF: an image past the address space");
     let mut covered = segments.first().map_or(0, |&(lo, ..)| lo);
     for &(lo, hi, offset, copied, prot) in segments.iter() {
         if lo > covered {
-            let hole = SpawnMap { addr: address(covered)?, len: lo - covered, object: u64::from(HANDLE_INVALID.0), ..SpawnMap::default() };
-            push(hole)?;
+            push(reserved(address(covered)?, address(lo)?))?;
         }
         let len = hi.checked_sub(lo).filter(|_| hi != u64::MAX).ok_or("ELF: a segment past the address space")?;
         push(SpawnMap { addr: address(lo)?, len, object, offset, copied, prot: prot as u64 })?;

@@ -124,21 +124,15 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(pager) => pager,
                 Err(refused) => return refused,
             };
-            // What is copied below past what a thread is charged for one
-            // call's copies, and the list of argv's strings, a pointer pair
-            // for every two bytes at most, held until the call returns; each
-            // length is refused past its bound below, so this charges no more
-            // than that.
-            let copies = [args.path_len, args.argv_len, args.labels_len, args.env_len]
-                .map(|len| len.min(crate::user_ptr::MAX_USER_STR) as usize);
-            let argv = crate::mm::charge::array::<&str>(copies[1] / 2 + 1);
-            let past = (copies.iter().sum::<usize>() + argv).saturating_sub(2 * crate::user_ptr::MAX_USER_STR as usize);
-            let _copies = match crate::mm::charge::Charge::current(past) {
-                Ok(charge) => charge,
-                Err(e) => return SyscallError::from(e).to_u64(),
-            };
             let path = match ctx.user_str(UserAddr::new(args.path_ptr), args.path_len) { Ok(s) => s, Err(e) => return e.to_u64() };
-            let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
+            // Bounded before it is copied, and one token of a record's line.
+            if args.name_len > toyos_abi::syscall::MAX_PROCESS_NAME as u64 {
+                return SyscallError::InvalidArgument.to_u64();
+            }
+            let name = match ctx.user_vec(UserAddr::new(args.name_ptr), args.name_len) { Ok(bytes) => bytes, Err(e) => return e.to_u64() };
+            let Some(name) = toyos_abi::syscall::process_name(&name) else {
+                return SyscallError::InvalidArgument.to_u64();
+            };
             if args.endow_count as usize > toyos_abi::syscall::MAX_SPAWN_ENDOWMENTS
                 || args.labels_len > toyos_abi::syscall::MAX_SPAWN_LABELS_LEN as u64
             {
@@ -160,21 +154,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };
-            // Copied and bounded like argv: env is kept for the child's whole life,
-            // and `user_vec` is the one accessor that puts a userland size on the allocator.
-            let env = if args.env_len > 0 {
-                if args.env_len > crate::user_ptr::MAX_USER_STR {
-                    return SyscallError::InvalidArgument.to_u64();
-                }
-                match ctx.user_vec(UserAddr::new(args.env_ptr), args.env_len) {
-                    Ok(bytes) => bytes,
-                    Err(e) => return e.to_u64(),
-                }
-            } else {
-                alloc::vec::Vec::new()
-            };
-            let argv: alloc::vec::Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
-            sys_spawn(&path, &argv, pending, env, program, parent)
+            sys_spawn(&path, name, pending, program, parent)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {
@@ -280,16 +260,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_write_nonblock(RawHandle(a1 as u32), &buf)
         }
         SYS_EXIT => sys_exit(a1 as i32),
-        SYS_GET_ENV => {
-            let env = process::with_process_data(|d| d.env.clone());
-            if a2 == 0 {
-                env.len() as u64
-            } else {
-                let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
-                let copy_len = env.len().min(buf.len());
-                buf.write_at(0, &env[..copy_len]).map_or(bad_addr, |()| copy_len as u64)
-            }
-        }
         // What a claimed PCI function's driver is built out of. Each is
         // gated by the claim handle alone: nothing here takes a bus/device/
         // function, so a process cannot name a device it was not given.

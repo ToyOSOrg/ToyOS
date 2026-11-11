@@ -23,6 +23,8 @@ kernel's part of a restart, and named module tests hold each program's
    What the loader named has left since (#1210): 214 files and 55,303 lines,
    75 fewer than the inventory below counts, and no link to the device-path
    parser.
+   A child's arguments and environment have left since (#1200): 214 files and
+   55,163 lines.
 2. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
    where firmware put it, handed over in 4 KiB pages with its MSI-X table's
    page, under the owner's Q2 ruling. The orchestrator ruled on #900 that
@@ -170,10 +172,18 @@ Beside that order, each waiting on something outside it:
         its windows** (#1152, #1182; item 1 above). The kernel keeps no
         working directory: a spawn states its child's in the child's `PWD`,
         which the SDK writes and the child's SDK starts from
-        (`toyos::files::starting_in`). The kernel still holds userland data
-        it never reads, path text among it: the environment
-        (`ProcessData::env`, answered by `SYS_GET_ENV`), whose likely exit
-        is a startup memory object the parent fills for the child. `/tmp` is the
+        (`toyos::files::starting_in`). A child's arguments and environment,
+        that `PWD` among it, are a startup block its parent lays out below
+        its program (`toyos::startup`), which the kernel neither stores nor
+        answers (#1200): `SYS_GET_ENV` (73) and `ProcessData::env` are
+        gone. The kernel still keeps three userland texts of each process:
+        its name, 27 bytes its parent chooses (`SpawnArgs::name_ptr`), which
+        is what a bounded process name needs; the path its parent read the
+        program from (`SpawnArgs::path_ptr`), which the spawn's record and a
+        crash's frames name the file by and `symbolize` opens; and its
+        endowment labels, kept for its life and answered through
+        `SYS_ENDOWMENTS` as the environment was, the next candidate for the
+        block. `/tmp` is the
         MEMORY file server's, one for the machine, of which each installed
         package's `/tmp` is its own directory (#1181); per session, as the owner
         ruled ("Per session", 2026-10-03), is the isolation track's stage 3.
@@ -377,10 +387,10 @@ the first.
 
 | What | Size | Dependents | Owner in the design, and what blocks it |
 |---|---|---|---|
-| A child's arguments and environment | about 140, by #1200's count | std, libc, `toyos::startup` | the parent's startup block: #1200 |
+| **Done** (#1200): the parent lays them out in a startup block. A child's arguments and environment | about 140 | std, libc, `toyos::startup` | the parent's startup block |
 | Endowment labels: a blob per process for its life, answered by `SYS_ENDOWMENTS`, of which the kernel compares three (`JOB_LABEL`, `SELF_LABEL`, `QUIT_LABEL`) and writes three more for the supervisor | ~130 | `toyos::endow`, the supervisor's table | the startup block (inferred); needs the child's handle numbers known to its parent and the three compared labels as typed spawn fields; after #1200 |
 | The TTY mark on a pipe end (`SYS_MARK_TTY`, `FileType::Tty`) | ~40 | std's spawn, libc's `isatty` and stdio, std's stdio | a fact about a stream that only libc and std read; a label or the block could carry it (inferred); after the labels |
-| The main thread's stack: 8 MiB and a guard the kernel chooses and reserves | ~30 | `SYS_STACK_INFO`, which only a guest test calls | its creator's, since the design gives a thread's stack a caller-chosen size; after #1200, when a child's stack starts empty |
+| The main thread's stack: 8 MiB and a guard the kernel chooses and reserves | ~30 | `SYS_STACK_INFO`, which only a guest test calls | its creator's, since the design gives a thread's stack a caller-chosen size; a child's stack starts empty since #1200 |
 | **Done** (#1210): the loader writes one record, the kernel hands it to the supervisor as a read-only boot image, and the supervisor parses it. What the loader named: partition GUIDs by role, in the inventory, and the boot sources `SYS_BOOT_SOURCES` answers, whose device paths `loaded.rs` parses (`toyos-devicepath`) only to refuse the loader's own bytes | ~95, and the kernel's link to a 324-line parser | the supervisor, `toyos::syscap`, the manifest's inventory reader | the design gives the kernel a typed description of what was loaded and keeps a partition GUID out of it; passing the description on unread, as a read-only boot image as ROOT is, fits both (inferred) and waits on no other change |
 | The IGD OpRegion's lookup: a firmware window is a granted privilege the design keeps, but `SYS_DEVICE_FIRMWARE_WINDOW` finds it by reading Intel graphics' `ASLS` | ~90 and ~30 of `pcidev` | tgl-display, the supervisor, the manifest | the lookup is device knowledge; a window the ACPI service names for a claim would be generic (inferred); needs a design |
 | The supervisor's last words, userland text written into the kernel's ring (`SYS_LOG_LAST_WORDS`) | ~20 | the supervisor | the design keeps userland output out of the kernel's ring and names no exception; this is one |
@@ -407,7 +417,7 @@ lines), `issues/x86-64-reads-the-cmos-for-a-wall-clock-the-loader-already-hands-
 By mechanisms eliminated:
 
 1. #1200: `SYS_GET_ENV`, the environment kept per process, the kernel's
-   write onto a child's stack.
+   write onto a child's stack. **Done** (#1200).
 2. Endowment labels, after #1200: `SYS_ENDOWMENTS`, the per-process blob
    and its charge, and label text the kernel compares.
 3. What the loader named, independent of the others: `SYS_BOOT_SOURCES`,
@@ -434,7 +444,7 @@ out, and a larger number needs one of the design changes above.
   line, went with #1210.)
 - `KernelStack::heap` (`kernel/src/loader/start.rs`) charges every thread
   two strings at 64 KiB and a page, "as a rename's paths". No rename is
-  left: a spawn's path and arguments are the two strings today. After #1200
+  left: a spawn's path and arguments were the two strings. Since #1200
   no call copies two, and one string of that bound remains for as long as
   a spawn's path or `SYS_NAMESPACE_OPEN`'s name, which nothing bounds below
   64 KiB, is copied; the page is the namespace names'.

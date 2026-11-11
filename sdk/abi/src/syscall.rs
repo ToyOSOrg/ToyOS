@@ -86,7 +86,6 @@ pub const SYS_VM_RELEASE: u64 = 64;
 pub const SYS_READ_NONBLOCK: u64 = 66;
 pub const SYS_WRITE_NONBLOCK: u64 = 67;
 pub const SYS_EXIT: u64 = 72;
-pub const SYS_GET_ENV: u64 = 73;
 pub const SYS_CLOCK_EPOCH: u64 = 75;
 /// Accept a queued connection from an [`Acceptor`] handle.
 ///
@@ -394,14 +393,14 @@ crate::user_safe! {
     #[derive(Clone, Copy)]
     pub struct SpawnArgs {
         /// The path the caller read the program from, which names it in the
-        /// spawn's record. **Never `argv[0]`**, which is the child's first
-        /// argument and the name it goes by. Nothing opens it.
+        /// spawn's record and a crash's. Nothing opens it.
         pub path_ptr: u64,
         pub path_len: u64,
-        pub argv_ptr: u64,
-        pub argv_len: u64,
-        pub env_ptr: u64,
-        pub env_len: u64,
+        /// The name the child goes by in the roster, its exit record and a
+        /// crash's: a label of the caller's choosing, which names no
+        /// authority. `InvalidArgument` unless [`process_name`] takes it.
+        pub name_ptr: u64,
+        pub name_len: u64,
         /// `[EndowEntry]`, moved out of the parent's table.
         pub endow_ptr: u64,
         pub endow_count: u64,
@@ -411,7 +410,9 @@ crate::user_safe! {
         /// The child's memory, `[SpawnMap]`, as the caller laid out its program:
         /// 1 to [`MAX_SPAWN_MAPS`] ranges, none meeting another or the clock
         /// page, each checked as an ordinary mapping (`SpawnMap`). Everything
-        /// else of the space is empty until the child maps it, but its stack.
+        /// else of the space is empty until the child maps it, but its stack,
+        /// which starts empty: what a parent tells its child, its arguments
+        /// and environment among it, is bytes of a range.
         pub maps_ptr: u64,
         pub maps_count: u64,
         /// Where the child's main thread starts: inside a [`VmProt::ReadExec`]
@@ -442,6 +443,22 @@ crate::user_safe! {
         /// [`Rights::PAGER`]: crate::handle::Rights::PAGER
         pub pager: u64,
     }
+}
+
+/// The most bytes of a process's name: the roster's field less its NUL.
+pub const MAX_PROCESS_NAME: usize = crate::inventory::NAME_BYTES - 1;
+
+/// `name` as the roster spells a process's, NUL-padded: `None` unless it is 1
+/// to [`MAX_PROCESS_NAME`] bytes of UTF-8 holding no control character and no
+/// white space, so a name is one token of one line wherever a record prints it.
+pub fn process_name(name: &[u8]) -> Option<[u8; crate::inventory::NAME_BYTES]> {
+    let text = core::str::from_utf8(name).ok()?;
+    if text.is_empty() || text.len() > MAX_PROCESS_NAME || text.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    let mut padded = [0; crate::inventory::NAME_BYTES];
+    padded[..name.len()].copy_from_slice(name);
+    Some(padded)
 }
 
 crate::user_safe! {
@@ -1080,12 +1097,6 @@ pub fn event_take(wait: RawHandle) -> Result<(), SyscallError> {
 /// such condition, or a device claim, is `NotSupported`.
 pub fn handle_wait(handle: RawHandle, interest: u32, timeout_nanos: u64) -> Result<u32, SyscallError> {
     check(syscall(SYS_HANDLE_WAIT, handle.0 as u64, interest as u64, timeout_nanos, 0)).map(|bit| bit as u32)
-}
-
-/// Read the inherited environment variables into `buf`.
-/// Returns the number of bytes written, or the required size if buf is too small.
-pub fn get_env(buf: &mut [u8]) -> usize {
-    syscall(SYS_GET_ENV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) as usize
 }
 
 /// Spawn a new process.
@@ -2822,6 +2833,20 @@ pub fn process_stats(proc: RawHandle, stats: &mut ProcessStats) -> Result<(), Sy
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name is one token of bounded UTF-8: the bound is a limit, and what
+    /// would break a record's line or its field is refused.
+    #[test]
+    fn a_process_name_is_one_bounded_token() {
+        let longest = [b'n'; MAX_PROCESS_NAME];
+        let named = process_name(&longest).expect("the longest name");
+        assert_eq!((&named[..MAX_PROCESS_NAME], named[MAX_PROCESS_NAME]), (&longest[..], 0));
+        assert_eq!(process_name(b"cat").map(|n| n[..4].to_vec()), Some(b"cat\0".to_vec()));
+        assert!(process_name("h\u{e9}llo".as_bytes()).is_some());
+        for refused in [&b""[..], &[b'n'; MAX_PROCESS_NAME + 1], b"a\nb", b"a b", b"a\0b", b"a\x1b[0m", b"\xff"] {
+            assert_eq!(process_name(refused), None, "{refused:?}");
+        }
+    }
 
     /// The four readers of a `devices` entry share this parser, so what it
     /// accepts is what a config may say; a PCI function is named by its

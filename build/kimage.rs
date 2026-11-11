@@ -4,7 +4,7 @@
 //! The kernel is ours and linked by this build, so anything here that it
 //! could not be is this build's bug, and panics naming it.
 
-use toyos::elf::program::{lay_out, BASE};
+use toyos::elf::program::lay_out;
 use toyos::elf::rela::{self, Op, RelaTable, Rules};
 use toyos::elf::section::{symbol_tables, SectionTable};
 use toyos::elf::sym::{SymTab, STT_FUNC};
@@ -80,7 +80,7 @@ pub fn section(kernel: &[u8], supervisor: &[u8], arch: Arch) -> Vec<u8> {
         }
     }
 
-    let program = lay_out(supervisor, machine, SUPERVISOR_OBJECT, BASE).unwrap_or_else(|why| panic!("supervisor: {why}"));
+    let program = lay_out(supervisor, machine, SUPERVISOR_OBJECT).unwrap_or_else(|why| panic!("supervisor: {why}"));
     Input {
         machine: e_machine,
         entry: min + layout.entry().get(),

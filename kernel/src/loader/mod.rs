@@ -2,9 +2,10 @@
 //!
 //! The kernel parses no program. A parent reads its child's program and names
 //! the child's memory as ranges ([`Program`], `toyos_abi::syscall::SpawnMap`),
-//! each checked as an ordinary mapping is, the entry point and the stack's
-//! arguments; the kernel builds the space, places the stack and starts the
-//! main thread. Everything else is the program's: it relocates itself
+//! each checked as an ordinary mapping is, and the entry point; the kernel
+//! builds the space, places an empty stack and starts the main thread. What
+//! the parent tells the child is bytes of a range, which the kernel never
+//! reads. Everything else is the program's: it relocates itself
 //! (`toyos::relocate`), lays out its own thread-local storage (`toyos::tls`)
 //! and loads its own libraries (`toyos::dl`).
 //!
@@ -115,61 +116,29 @@ fn lay(space: &mut crate::mm::space::AddressSpace, maps: &[Map]) -> Result<(), S
     Ok(())
 }
 
-/// The bytes a program's stack starts with below `top`, and where its stack
-/// pointer starts: argc, the argv pointers and a null, 16-aligned, then the
-/// strings they point at.
-fn argv_block(top: u64, args: &[&str]) -> (u64, Vec<u8>) {
-    let strings: usize = args.iter().map(|a| a.len() + 1).sum();
-    let words = args.len() + 2;
-    let sp = (top - strings as u64 - words as u64 * 8) & !15;
-    let mut block = alloc::vec![0u8; (top - sp) as usize];
-    let mut word = |i: usize, value: u64| block[i * 8..i * 8 + 8].copy_from_slice(&value.to_ne_bytes());
-    word(0, args.len() as u64);
-    let mut at = top - strings as u64;
-    let mut pointers = Vec::with_capacity(args.len());
-    for arg in args {
-        pointers.push(at);
-        at += arg.len() as u64 + 1;
-    }
-    for (i, pointer) in pointers.iter().enumerate() {
-        word(1 + i, *pointer);
-    }
-    for (arg, pointer) in args.iter().zip(&pointers) {
-        let off = (pointer - sp) as usize;
-        block[off..off + arg.len()].copy_from_slice(arg.as_bytes());
-    }
-    (sp, block)
-}
-
 /// Build the process `program` describes and place its main thread under `parent`, answering its pid
 /// and what `commit` left its caller holding of it. Everything built for the
 /// child is counted to [`Commit::job`], which it runs in, and `commit` builds
 /// the child's handle table around its handle to itself once nothing is left
 /// to refuse.
 ///
-/// `path` labels the program; the kernel resolves no path. `argv[0]` is the
-/// name the child goes by.
+/// `path` labels the program and `name` the child; the kernel resolves no path.
 ///
 /// `Refusal`, not `-> !`, is the error type: every failure below owns a
 /// partly built process (address space, stack, kernel stack), and nothing
 /// unwinds, so the error must travel out as a value rather than strand it.
 pub fn spawn<C: Commit>(
     path: &str,
-    argv: &[&str],
+    name: [u8; crate::process::THREAD_NAME_LEN],
     commit: C,
-    env: Vec<u8>,
     program: Program,
     parent: Parent,
 ) -> Result<(Pid, C::Held), crate::object::Refusal> {
     let job = Arc::clone(commit.job());
     let pager = if commit.pager() { crate::process::PagerRole::May } else { crate::process::PagerRole::None };
-    // An argv of only separators survives sys_spawn's split as an empty slice.
-    let Some(&name) = argv.first() else {
-        return Err(SyscallError::InvalidArgument.into());
-    };
     // Before anything is built; dropped on every way out below but the insert.
     let admission = Admission::ask(parent)?;
-    let charge = ProcessData::charge(&job, path, &env).map_err(SyscallError::from)?;
+    let charge = ProcessData::charge(&job, path).map_err(SyscallError::from)?;
     let t0 = crate::clock::nanos_since_boot();
 
     let Program { maps, entry, image_base, build_id } = program;
@@ -200,12 +169,7 @@ pub fn spawn<C: Commit>(
         let stack = space.reserve(STACK_GUARD + USER_STACK_SIZE as u64, At::ANYWHERE, Prot::None)?;
         let stack_base = stack + STACK_GUARD;
         space.reserve(USER_STACK_SIZE as u64, At::Fixed(stack_base), Prot::ReadWrite)?;
-        let (sp, block) = argv_block(stack_base.raw() + USER_STACK_SIZE as u64, argv);
-        if block.len() > USER_STACK_SIZE {
-            return Err(SyscallError::InvalidArgument.into());
-        }
-        space.fill(sp, &block);
-        (stack_base, sp)
+        (stack_base, stack_base.raw() + USER_STACK_SIZE as u64)
     };
 
     // What a crash record names a frame by.
@@ -227,7 +191,6 @@ pub fn spawn<C: Commit>(
     let (handles, endowments, held) = commit.commit(start::Own::new(&object, &notice))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
-        env,
         space: Arc::clone(&child_pt),
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
@@ -249,7 +212,7 @@ pub fn spawn<C: Commit>(
     let ((), retire) = admission.land(guard.as_mut().unwrap(), |table, node| {
         table.insert(ProcessEntry::new(
             Arc::clone(&object),
-            start::make_name(name),
+            name,
             proc_data,
             // Two holders: a crash report on this thread reads it without the process table.
             Some(Arc::clone(&image)),
@@ -290,7 +253,7 @@ pub fn spawn<C: Commit>(
     Ok((pid, held))
 }
 
-/// The name the supervisor runs under: no file, since it runs from its boot image.
+/// The name the supervisor runs under and its label: no file, since it runs from its boot image.
 const SUPERVISOR: &str = "supervisor";
 
 /// Start the supervisor from its boot image as the build laid it out, holding the machine's one
@@ -370,7 +333,8 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects, laid: &toyos_kimage::
     };
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
     let table = SupervisorTable { job, handles, entries, labels };
-    match spawn(SUPERVISOR, &[SUPERVISOR], table, Vec::new(), program, Parent::Root) {
+    let name = toyos_abi::syscall::process_name(SUPERVISOR.as_bytes()).expect("spawn_supervisor: its own name");
+    match spawn(SUPERVISOR, name, table, program, Parent::Root) {
         Ok((pid, ())) => pid,
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_supervisor: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_supervisor: {e}"),

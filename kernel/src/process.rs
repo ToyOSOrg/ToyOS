@@ -108,7 +108,7 @@ impl KernelMapping {
 pub const KERNEL_STACK_SIZE: usize = 128 * 1024;
 
 /// How much of a process or thread name the table keeps, fixed by the `SYS_SYSINFO` record's name field.
-pub const THREAD_NAME_LEN: usize = 28;
+pub const THREAD_NAME_LEN: usize = toyos_abi::inventory::NAME_BYTES;
 
 /// Per-thread metadata, keyed by its tid in `ProcessEntry::threads`.
 pub struct ThreadEntry {
@@ -192,7 +192,7 @@ impl ProcessEntry {
     pub fn pid(&self) -> Pid { self.pid }
     pub fn name(&self) -> &[u8; THREAD_NAME_LEN] { &self.name }
     pub fn name_str(&self) -> &str {
-        core::str::from_utf8(&self.name).unwrap_or("?").trim_end_matches('\0')
+        core::str::from_utf8(&self.name).expect("a process's name is UTF-8, as `process_name` took it").trim_end_matches('\0')
     }
     pub fn process_data(&self) -> &Arc<Lock<ProcessData>> { &self.process_data }
     pub fn main_tid(&self) -> Tid { self.main_tid }
@@ -262,9 +262,6 @@ impl Processes for ProcessTable {
 pub struct ProcessData {
     /// Every kernel object this process can name; stdio is handles `0`, `1`, `2`.
     pub handles: HandleTable,
-    /// Inherited environment variables (KEY=VALUE\0KEY2=VALUE2\0...)
-    pub env: Vec<u8>,
-
     /// The space every thread of it runs in.
     pub space: PageTables,
 
@@ -302,8 +299,8 @@ impl ProcessData {
     /// The heap a process of the program at `path` takes beside what is
     /// charged on its own — its handles, threads, ranges and objects: its
     /// records, its place in the process table and among its parent's
-    /// children, its strings at their bound, and its endowments at theirs.
-    pub fn charge(job: &Arc<kernel::sched::job::Job>, path: &str, env: &[u8]) -> Result<Charge, Exhausted> {
+    /// children, its label, and its endowments at their bound.
+    pub fn charge(job: &Arc<kernel::sched::job::Job>, path: &str) -> Result<Charge, Exhausted> {
         // The process table doubles, and its control byte beside each.
         let entry = 2 * (core::mem::size_of::<(Pid, ProcessEntry)>() + 1);
         // A thread table of one thread is a whole leaf.
@@ -315,12 +312,10 @@ impl ProcessData {
             + entry
             + threads
             + 2 * core::mem::size_of::<Pid>();
-        let strings = charge::array::<u8>(path.len())
-            + charge::array::<u8>(toyos_abi::syscall::MAX_PATH)
-            + charge::array::<u8>(env.len());
+        let label = charge::array::<u8>(path.len());
         let endowments = charge::array::<EndowEntry>(toyos_abi::syscall::MAX_ENDOWMENTS)
             + charge::array::<u8>(toyos_abi::syscall::MAX_LABELS_LEN);
-        Charge::new(job, records + strings + endowments)
+        Charge::new(job, records + label + endowments)
     }
 }
 

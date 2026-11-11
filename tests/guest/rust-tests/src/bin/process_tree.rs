@@ -9,9 +9,9 @@
 //! - E, which the supervisor started under its session's owner, runs on: detached is the one way to outlive a starter;
 //! - after the kill, a spawn and a launch under B's `self` answer `Gone`.
 //!
-//! B's first act is a spawn the loader refuses once it is admitted under B: its
-//! hold on B goes with it, or B is never published and the arm's wait never
-//! answers.
+//! B's first act is a spawn of 64 zero bytes, which lay out as no program: it
+//! is refused in B, before the kernel hears of it, and B asserts that nothing
+//! started.
 //!
 //! **The other arms.** A `MANAGE`-only handle is no place, and the supervisor refuses a
 //! launch whose place is a pipe and answers the launches after it. A chain —
@@ -46,6 +46,8 @@ use std::os::toyos::process::ExitStatusExt;
 use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_process_tree";
+/// The name its children go by.
+const NAME: &str = "test_rs_process_tree";
 const INVALID_PATH: &str = "/tmp/process_tree_invalid_elf";
 /// `/system/bin/toybox` under the name of an applet that reads its input until
 /// it ends: a declared program, so a launch, and one that runs until killed
@@ -233,14 +235,12 @@ fn launcher_copy() -> OwnedHandle {
 fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
     let argv = format!("{SELF_PATH}\0c");
     let own = image::image_of(SELF_PATH);
-    let laid = image::laid(&own);
+    let laid = image::laid(&own, &argv);
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,
-        argv_ptr: argv.as_ptr() as u64,
-        argv_len: argv.len() as u64,
-        env_ptr: 0,
-        env_len: 0,
+        name_ptr: NAME.as_ptr() as u64,
+        name_len: NAME.len() as u64,
         endow_ptr: 0,
         endow_count: 0,
         labels_ptr: 0,
@@ -408,7 +408,7 @@ fn park() -> ! {
 
 fn b() -> ! {
     let conn = endow::service(BACK).expect("A endowed a port back");
-    // The supplied image reaches ELF validation after admission under B.
+    // No program: the spawn lays it out here and is refused before the kernel hears of it.
     assert!(Command::new(INVALID_PATH).spawn().is_err(), "an invalid executable started");
     let c = Command::new(SELF_PATH).arg("c").stdin(Stdio::null()).spawn().expect("B spawns C");
     let d = Command::new(HELD).independent().spawn().expect("B launches D");

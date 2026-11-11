@@ -64,15 +64,16 @@ mod runtime {
     // goes through libc's `exit` rather than the syscall: the atexit table and
     // `fflush(NULL)` are what stand between a program's last unterminated line
     // and the fd.
-    pub(crate) extern "C" fn start_c(argc: i32, argv: *const *const u8) -> ! {
+    pub(crate) extern "C" fn start_c() -> ! {
         unsafe extern "C" {
             fn main(argc: i32, argv: *const *const u8) -> i32;
             static __ehdr_start: u8;
         }
+        let (argc, argv) = toyos::startup::args();
         // The program goes by its `argv[0]`.
         let name = match argc {
             0 => &[][..],
-            // SAFETY: the kernel's argument block, NUL-terminated strings.
+            // SAFETY: the startup block's first argument, a NUL-terminated string.
             _ => unsafe { crate::posix_io::c_str_to_bytes(*argv) },
         };
         // SAFETY: the executable's own header, and this is its main thread.
@@ -89,7 +90,7 @@ mod runtime {
                 hook();
             }
         }
-        let code = unsafe { main(argc, argv) };
+        let code = unsafe { main(argc as i32, argv) };
         unsafe { crate::misc::exit(code) }
     }
 

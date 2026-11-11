@@ -43,6 +43,7 @@ pub mod relocate;
 pub mod surface;
 pub mod shm;
 pub mod spawn;
+pub mod startup;
 pub mod syscap;
 pub mod sync;
 pub mod system;

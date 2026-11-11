@@ -22,7 +22,7 @@ Every system call is one of these families:
 | Own address space | Reserve, commit, map, protect and release memory |
 | Handles | Duplicate with narrower rights, close, move |
 | Waiting | Watch any set of objects for readiness, and wait |
-| Processes | Spawn from an image with endowments; wait for and stop a child |
+| Processes | Spawn from memory ranges the parent lays out, with endowments; wait for and stop a child |
 | Communication | Pipes, service ports, connections carrying bytes and handles, inboxes |
 | Shared and paged memory | Create, map and lend memory; supply pages as a pager |
 | Devices | Claim through the system capability, map device memory, grant DMA, wait for interrupts |
@@ -62,9 +62,18 @@ userland library over the SDK.
    endowments ──> standard streams (descriptors 0, 1, 2 and those named)
               ──> a namespace of services it may connect to
               ──> directory capabilities: its view
-              ──> environment: HOME, the starting directory, ...
               ──> anything else its row or its parent gave it
+
+   its memory ──> its program, in the ranges its parent laid out
+              ──> a startup block below it: its arguments and its
+                  environment (HOME, the starting directory, ...)
 ```
+
+A parent reads the child's program and lays out the child's memory. What it
+tells the child goes in the startup block, which the kernel copies as it
+copies the program and never reads; the SDK, std and libc read it where it
+lies. A child whose parent wrote none starts with no argument and an empty
+environment.
 
 A program holds nothing it was not given. It asks for more only by connecting
 to a service in its namespace, whose server decides.

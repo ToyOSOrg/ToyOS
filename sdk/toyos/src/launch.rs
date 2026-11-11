@@ -114,8 +114,9 @@ pub enum Parent<H> {
 
 /// What a caller asks the supervisor to start.
 ///
-/// `argv` and `env` are exactly the blobs `SYS_SPAWN` takes, so the launcher
-/// path and the direct path build one thing rather than two.
+/// `argv` and `env` are exactly the blobs a spawn takes
+/// (`crate::spawn::Spawn`), so the launcher path and the direct path build one
+/// thing rather than two.
 ///
 /// **It owns every handle it names** (`H`, an [`OwnedHandle`] but where a
 /// test encodes one), and [`launch`] consumes them: each is moved to the

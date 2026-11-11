@@ -20,9 +20,10 @@ mod image;
 use toyos_abi::syscall::{self, debug_action, EndowEntry, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
 use toyos_abi::end::End;
-use toyos::process::Image;
 
 const SELF_PATH: &str = "/system/bin/test_rs_spawn_child_ends_first";
+/// The name its children go by.
+const NAME: &str = "test_rs_spawn_child_ends_fi";
 
 /// What the child exits with.
 const CODE: i32 = 7;
@@ -40,10 +41,12 @@ fn main() {
 }
 
 fn test() {
-    // Read once, before the table is filled: reading it takes handles.
+    // Laid out once, before the table is filled: an image and a startup block take handles.
     let own = image::image_of(SELF_PATH);
+    let laid = |role: &str| image::laid(&own, &format!("{SELF_PATH}\0{role}"));
+    let (exit, speak) = (laid("exit"), laid("speak"));
     hold_the_next_spawn();
-    let child = spawn(&own, "exit", None).expect("a spawn whose child ended inside it");
+    let child = spawn(&exit, None).expect("a spawn whose child ended inside it");
     assert_eq!(
         syscall::process_wait_nonblock(child),
         Ok(End::Exited(CODE)),
@@ -51,14 +54,14 @@ fn test() {
     );
     // SAFETY: no type holds this number.
     unsafe { syscall::close(child) };
-    a_spawn_from_a_full_table_starts_no_child(&own);
+    a_spawn_from_a_full_table_starts_no_child(&speak);
     println!("spawn_child_ends_first: the spawn answered a child that had already ended, and a refused one started none");
 }
 
 /// A spawn whose caller's table has no slot for its answer is refused with
 /// nothing of the child started: the pipe its child would have spoken into
 /// ends empty. The mark is left standing, since the spawn never lands.
-fn a_spawn_from_a_full_table_starts_no_child(own: &Image) {
+fn a_spawn_from_a_full_table_starts_no_child(speak: &image::Laid) {
     let ends = syscall::pipe().expect("a pipe for the child to speak into");
     let mut filled = Vec::new();
     let full = loop {
@@ -70,7 +73,7 @@ fn a_spawn_from_a_full_table_starts_no_child(own: &Image) {
     };
     assert_eq!(full, SyscallError::ResourceExhausted, "the table did not fill");
     hold_the_next_spawn();
-    let spawned = spawn(own, "speak", Some(ends.write));
+    let spawned = spawn(speak, Some(ends.write));
     for handle in filled {
         // SAFETY: no type holds this number.
         unsafe { syscall::close(handle) };
@@ -93,21 +96,17 @@ fn hold_the_next_spawn() {
     );
 }
 
-/// `SYS_SPAWN` of `own`, this binary, in `role`, endowed `stdout` as its
+/// `SYS_SPAWN` of `laid`, this binary in one role, endowed `stdout` as its
 /// descriptor 1, which moves only on a spawn that happens.
-fn spawn(own: &Image, role: &str, stdout: Option<RawHandle>) -> Result<RawHandle, SyscallError> {
-    let argv = format!("{SELF_PATH}\0{role}");
+fn spawn(laid: &image::Laid, stdout: Option<RawHandle>) -> Result<RawHandle, SyscallError> {
     const LABEL: &str = "fd:1";
     let endow: Vec<EndowEntry> =
         stdout.into_iter().map(|handle| EndowEntry { label_off: 0, label_len: LABEL.len() as u32, handle, _pad: 0 }).collect();
-    let laid = image::laid(&own);
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,
-        argv_ptr: argv.as_ptr() as u64,
-        argv_len: argv.len() as u64,
-        env_ptr: 0,
-        env_len: 0,
+        name_ptr: NAME.as_ptr() as u64,
+        name_len: NAME.len() as u64,
         endow_ptr: endow.as_ptr() as u64,
         endow_count: endow.len() as u64,
         labels_ptr: LABEL.as_ptr() as u64,

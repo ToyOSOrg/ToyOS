@@ -1,9 +1,7 @@
 //! x86-64: the entry, the string instructions, and SSE2's square roots.
 
-/// Entry point for C programs. Stack layout at entry (set up by kernel):
-///   [RSP]   = argc
-///   [RSP+8] = argv[0], argv[1], ..., NULL
-/// The image relocates itself first, from its own header's address.
+/// Entry point for C programs, on an empty stack. The image relocates itself
+/// first, from its own header's address.
 #[cfg(not(feature = "std-runtime"))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
@@ -11,8 +9,6 @@ unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
         "lea rdi, [rip + __ehdr_start]",
         "call {relocate}",
-        "mov rdi, [rsp]",      // argc
-        "lea rsi, [rsp + 8]",  // argv
         "call {start_c}",
         "ud2",
         relocate = sym toyos::relocate::relocate_self,
