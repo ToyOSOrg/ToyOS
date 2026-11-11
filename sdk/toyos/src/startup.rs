@@ -76,9 +76,10 @@ fn table(names: &[&str]) -> Option<Vec<u8>> {
     Some(table)
 }
 
-/// The bytes of the block that says `args`, `env` and `names`. `None` past
-/// [`MAX_BLOCK`], or for names [`table`] makes none of.
-pub(crate) fn bytes(args: &[u8], env: &[u8], names: &[&str]) -> Option<Vec<u8>> {
+/// The bytes of the block that says `args` and `env`, each a run of strings a
+/// NUL separates, an empty one skipped, and calls the spawn's `i`th endowment
+/// `names[i]`. `None` past [`MAX_BLOCK`], or for names [`table`] makes none of.
+pub fn bytes(args: &[u8], env: &[u8], names: &[&str]) -> Option<Vec<u8>> {
     let table = if names.is_empty() { Vec::new() } else { table(names)? };
     let argc = strings(args).count();
     let words = argc + strings(env).count() + 4;
@@ -109,16 +110,6 @@ pub(crate) fn bytes(args: &[u8], env: &[u8], names: &[&str]) -> Option<Vec<u8>> 
     Some(block)
 }
 
-/// Why no block was made.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Refused {
-    /// The arguments, environment and names are past [`MAX_BLOCK`], or the
-    /// names more than a spawn endows.
-    TooLarge,
-    /// The kernel made no memory for it.
-    Memory(SyscallError),
-}
-
 /// A block in a memory object, which a spawn names as the pages its child
 /// starts with at [`AT`] (`Program::starting_with`) and may drop once the
 /// spawn has answered.
@@ -128,18 +119,15 @@ pub struct Block {
 }
 
 impl Block {
-    /// The block that says `args` and `env`, each a run of strings a NUL
-    /// separates, an empty one skipped, and calls the spawn's `i`th endowment
-    /// `names[i]`, in memory counted to the job `job` is a handle to carrying
-    /// `WRITE`, the one the child runs in, or else to this process's own.
-    pub fn new(args: &[u8], env: &[u8], names: &[&str], job: Option<BorrowedHandle<'_>>) -> Result<Block, Refused> {
-        let bytes = bytes(args, env, names).ok_or(Refused::TooLarge)?;
+    /// A block holding `bytes` ([`bytes`]), in memory counted to the job
+    /// `job` is a handle to carrying `WRITE`, the one the child runs in, or
+    /// else to this process's own.
+    pub fn new(bytes: &[u8], job: Option<BorrowedHandle<'_>>) -> Result<Block, SyscallError> {
         let memory = match job {
             Some(job) => SharedMemory::create_for(job, bytes.len()),
             None => SharedMemory::create(bytes.len()),
-        }
-        .map_err(Refused::Memory)?;
-        memory.bytes().write(0, &bytes);
+        }?;
+        memory.bytes().write(0, bytes);
         Ok(Block { memory, len: bytes.len() })
     }
 

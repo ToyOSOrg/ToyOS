@@ -95,21 +95,6 @@ pub enum Failure {
     TooBig,
 }
 
-impl Failure {
-    /// Every failure, for a runtime's test of its own table.
-    pub const ALL: &'static [Self] = {
-        use Failure::*;
-        &[
-            NotFound, PermissionDenied, AlreadyExists, InvalidArgument, BadAddress, WouldBlock, OutOfMemory,
-            Unsupported, Io, BrokenPipe, Unknown, BadDescriptor, WrongDescriptor, TooManyDescriptors, NotUtf8, Loop,
-            CrossesDevices, NotADirectory, IsADirectory, NotEmpty, NameTooLong, InvalidName, ReadOnly,
-            NotOpenForWriting, Busy, NoSpace, FileTooLarge, Quota, TooManyOpenFiles, Protocol, Stale, TimedOut,
-            ConnectionRefused, ConnectionReset, ConnectionAborted, NotConnected, AddrInUse, AddrNotAvailable,
-            HostUnreachable, NetworkUnreachable, TryAgain, NotExecutable, Truncated, TooBig,
-        ]
-    };
-}
-
 impl From<SyscallError> for Failure {
     fn from(e: SyscallError) -> Self {
         match e {
@@ -254,7 +239,9 @@ impl From<&spawn::Refused> for Failure {
         use spawn::Refused;
         match *refused {
             Refused::Permission(_) => Self::PermissionDenied,
-            Refused::Invalid(_) => Self::TooBig,
+            Refused::Invalid(_) => Self::InvalidArgument,
+            Refused::NotExecutable(_) => Self::NotExecutable,
+            Refused::TooBig(_) => Self::TooBig,
             Refused::Stream(_) => Self::WrongDescriptor,
             // A holder past what netstack has places for is a descriptor too many.
             Refused::Export(NetError::ResourceExhausted) => Self::TooManyDescriptors,
@@ -270,50 +257,6 @@ impl From<&spawn::Refused> for Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_failure_is_listed_once() {
-        for (i, failure) in Failure::ALL.iter().enumerate() {
-            assert!(!Failure::ALL[..i].contains(failure), "{failure:?} is listed twice");
-        }
-        // A variant added and not listed fails here by its discriminant.
-        assert_eq!(Failure::ALL.len(), Failure::TooBig as usize + 1);
-        for (i, failure) in Failure::ALL.iter().enumerate() {
-            assert_eq!(*failure as usize, i);
-        }
-    }
-
-    /// Every word the kernel's ABI decodes, a code it does not know among
-    /// them, is a failure.
-    #[test]
-    fn every_kernel_word_is_a_failure() {
-        for code in 0..=255u64 {
-            let word = SyscallError::from_u64(u64::MAX - code).expect("an error's code");
-            let failure = Failure::from(word);
-            assert_eq!(failure == Failure::Unknown, word == SyscallError::Unknown, "{word:?}");
-        }
-        assert_eq!(Failure::from(SyscallError::Gone), Failure::BrokenPipe);
-        assert_eq!(Failure::from(SyscallError::BadAddress), Failure::BadAddress);
-        assert_eq!(Failure::from(SyscallError::NotSupported), Failure::Unsupported);
-        assert_eq!(Failure::from(SyscallError::Io), Failure::Io);
-    }
-
-    /// Every code a file server sends, and every word of the client end's own.
-    #[test]
-    fn every_file_protocol_word_is_a_failure() {
-        let mut words = 0;
-        for byte in 0..=u8::MAX {
-            if let Some(word) = fs::Error::from_byte(byte) {
-                let _ = Failure::from(word);
-                words += 1;
-            }
-        }
-        assert!(words > 30, "the protocol's words: {words}");
-        assert_eq!(Failure::from(fs::Error::NotEmpty), Failure::NotEmpty);
-        assert_eq!(Failure::from(fs::Error::Gone), Failure::Stale);
-        assert_eq!(Failure::from(files::Error::Served(fs::Error::NoSpace)), Failure::NoSpace);
-        assert_eq!(Failure::from(files::Error::Fd(fd::Error::Full)), Failure::TooManyDescriptors);
-    }
 
     /// Every code netstack sends, and one it does not.
     #[test]

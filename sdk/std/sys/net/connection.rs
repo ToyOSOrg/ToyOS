@@ -8,7 +8,7 @@ use crate::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, ToSocke
 use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use crate::sync::atomic::Ordering::Relaxed;
 use crate::sync::atomic::{AtomicBool, AtomicU32};
-use crate::sys::failed;
+use crate::sys::{failed, stream_failed};
 use crate::time::Duration;
 
 // --- Helpers ---
@@ -140,7 +140,7 @@ impl TcpStream {
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         let wait = wait(self.nonblocking.load(Relaxed), self.read_timeout_ms.load(Relaxed));
-        stream::read(self.handle(), buf, wait).map_err(failed)
+        stream::read(self.handle(), buf, wait).map_err(stream_failed)
     }
 
     pub fn read_buf(&self, mut cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
@@ -159,7 +159,7 @@ impl TcpStream {
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         let wait = wait(self.nonblocking.load(Relaxed), self.write_timeout_ms.load(Relaxed));
-        stream::write(self.handle(), buf, wait).map_err(failed)
+        stream::write(self.handle(), buf, wait).map_err(stream_failed)
     }
 
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -171,21 +171,21 @@ impl TcpStream {
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        let ((addr, port), _) = stream::endpoints(self.handle()).map_err(failed)?;
+        let ((addr, port), _) = stream::endpoints(self.handle()).map_err(stream_failed)?;
         Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(addr), port)))
     }
 
     pub fn socket_addr(&self) -> io::Result<SocketAddr> {
-        let (_, (addr, port)) = stream::endpoints(self.handle()).map_err(failed)?;
+        let (_, (addr, port)) = stream::endpoints(self.handle()).map_err(stream_failed)?;
         Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(addr), port)))
     }
 
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         if matches!(how, Shutdown::Read | Shutdown::Both) {
-            stream::shutdown_read(self.handle()).map_err(failed)?;
+            stream::shutdown_read(self.handle()).map_err(stream_failed)?;
         }
         if matches!(how, Shutdown::Write | Shutdown::Both) {
-            stream::shutdown_write(self.handle()).map_err(failed)?;
+            stream::shutdown_write(self.handle()).map_err(stream_failed)?;
         }
         Ok(())
     }
@@ -210,11 +210,11 @@ impl TcpStream {
     }
 
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
-        stream::set_nodelay(self.handle(), nodelay).map_err(failed)
+        stream::set_nodelay(self.handle(), nodelay).map_err(stream_failed)
     }
 
     pub fn nodelay(&self) -> io::Result<bool> {
-        stream::nodelay(self.handle()).map_err(failed)
+        stream::nodelay(self.handle()).map_err(stream_failed)
     }
 
     pub fn set_keepalive(&self, _keepalive: bool) -> io::Result<()> {
@@ -235,8 +235,8 @@ impl TcpStream {
 
     /// The failure that ended the stream: the receive ring's `end`.
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
-        let failure = stream::failure(self.handle()).map_err(failed)?;
-        Ok(failure.map(failed))
+        let failure = stream::failure(self.handle()).map_err(stream_failed)?;
+        Ok(failure.map(stream_failed))
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
@@ -255,21 +255,21 @@ impl TcpStream {
     /// The stream's send bell: the handle a watch for room is made on, for
     /// reading.
     pub fn bell(&self) -> io::Result<u32> {
-        let bell = stream::doorbell(self.handle(), stream::Way::Send).map_err(failed)?;
+        let bell = stream::doorbell(self.handle(), stream::Way::Send).map_err(stream_failed)?;
         Ok(bell.raw().0)
     }
 
     /// The stream's receive bell: the handle a watch for bytes is made on,
     /// for reading.
     pub fn receive_bell(&self) -> io::Result<u32> {
-        let bell = stream::doorbell(self.handle(), stream::Way::Receive).map_err(failed)?;
+        let bell = stream::doorbell(self.handle(), stream::Way::Receive).map_err(stream_failed)?;
         Ok(bell.raw().0)
     }
 
     /// Registered for readiness: each named way's want armed, and netstack rung
     /// where one is ready, so the first event comes.
     pub fn register(&self, readable: bool, writable: bool) -> io::Result<()> {
-        stream::register(self.handle(), readable, writable).map_err(failed)
+        stream::register(self.handle(), readable, writable).map_err(stream_failed)
     }
 }
 

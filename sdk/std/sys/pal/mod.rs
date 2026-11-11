@@ -96,11 +96,28 @@ pub fn refused(refused: toyos::spawn::Refused) -> crate::io::Error {
 
     let error = failed(&refused);
     match refused {
-        Refused::Permission(why) | Refused::Invalid(why) => crate::io::Error::new(error.kind(), why),
+        Refused::Permission(why) | Refused::Invalid(why) | Refused::NotExecutable(why) | Refused::TooBig(why) => {
+            crate::io::Error::new(error.kind(), why)
+        }
         Refused::NotStarted => {
             crate::io::Error::new(error.kind(), "the launcher started nothing it permits, or its answer was lost")
         }
-        Refused::Stream(_) | Refused::Export(_) | Refused::File(_) | Refused::Syscall(_) => error,
+        Refused::Stream(handle) => {
+            crate::io::Error::new(error.kind(), toyos::net::stream::Misuse::Moved(handle).to_string())
+        }
+        Refused::Export(_) | Refused::File(_) | Refused::Syscall(_) => error,
+    }
+}
+
+/// A stream's refusal, as [`failed`] says it but naming the handle where this
+/// process holds no end of that stream.
+pub fn stream_failed(refused: toyos::net::stream::Refused) -> crate::io::Error {
+    match refused {
+        toyos::net::stream::Refused::NotThisProcess(handle) => crate::io::Error::new(
+            failed(refused).kind(),
+            toyos::net::stream::Misuse::NotThisProcess(handle).to_string(),
+        ),
+        other => failed(other),
     }
 }
 

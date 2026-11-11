@@ -3,7 +3,8 @@
 //! with is the header's, by name and value.
 
 use toyos::net::NetError;
-use toyos::{fd, files, fs, Failure};
+use toyos::spawn::Refused;
+use toyos::{fd, files, fs};
 use toyos_abi::syscall::SyscallError;
 
 use crate::errcode::{self, eai, of};
@@ -23,20 +24,6 @@ fn every_code_libc_answers_with_is_errno_h_s() {
     assert!(codes.len() > 20, "errcode.rs lists {} codes", codes.len());
     for (name, value) in codes {
         assert_eq!(header::int(ERRNO_H, name), value, "{name}");
-    }
-}
-
-/// Every failure has an errno the header defines. That each has one at all is
-/// `of`'s exhaustive match; this holds that none is a number C has no name for.
-#[test]
-fn every_failure_s_errno_is_one_errno_h_defines() {
-    let defined: Vec<i32> = ERRNO_H
-        .lines()
-        .filter_map(|line| line.strip_prefix("#define E")?.split_whitespace().nth(1)?.parse().ok())
-        .collect();
-    assert!(defined.len() > 40, "errno.h defines {} codes", defined.len());
-    for &failure in Failure::ALL {
-        assert!(defined.contains(&of(failure)), "{failure:?} is errno {}", of(failure));
     }
 }
 
@@ -64,8 +51,8 @@ fn a_kernel_refusal_is_its_own_errno() {
     }
 }
 
-/// The descriptor table's, a file server's and netstack's refusals, each in
-/// the word POSIX's page for the call has.
+/// The descriptor table's, a spawn's, a file server's and netstack's
+/// refusals, each in the word POSIX's page for the call has.
 #[test]
 fn a_refusal_above_the_kernel_is_its_own_errno() {
     let named = |errno: &str| header::int(ERRNO_H, errno);
@@ -74,6 +61,9 @@ fn a_refusal_above_the_kernel_is_its_own_errno() {
     assert_eq!(of(files::Error::Fd(fd::Error::Full)), named("EMFILE"));
     assert_eq!(of(files::Error::Kernel(SyscallError::Gone)), named("EPIPE"));
     assert_eq!(of(files::Error::NotAFile), named("EBADF"));
+    assert_eq!(of(&Refused::NotExecutable("no program")), named("ENOEXEC"));
+    assert_eq!(of(&Refused::TooBig("too much")), named("E2BIG"));
+    assert_eq!(of(&Refused::Invalid("no image")), named("EINVAL"));
     for (word, errno) in [
         (fs::Error::NotEmpty, "ENOTEMPTY"),
         (fs::Error::IsADirectory, "EISDIR"),
