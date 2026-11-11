@@ -124,6 +124,20 @@ The faults and `mem.anon.total` are now ahead of Linux on both benches. Behind:
 `issues/many-osbench-rows-on-the-amd-bench-are-bimodal-per-boot.md` says
 what its modes are.
 
+**Where `mem.map_unmap_4k` goes, 2026-11-11** ([evidence](https://github.com/ToyOSOrg/evidence/tree/cf6a882c04a646a8998e3bf0ad66e9f699b8e8aa/memperf/diagnosis)):
+stage probes at 31eb5416b, one boot a bench. Of the T14's 2,070 ns the
+inventory's insert took 735 and its removal 720 (`kernel/pure/vm.rs`; 515
+and 504 on the AMD bench), and the two calls' entry, dispatch, lock and exit
+about 300. No table is built or unlinked and nothing is flushed: best fit
+places the page in a span that already has tables. `mem.munmap_part.4k`'s
+removal took 665 of its 1,398 ns. The inventory kept its free ranges twice,
+by start and by length, rewrote both on every change, and listed a removal's
+starts before taking them; it now keeps them once, by length
+([evidence](https://github.com/ToyOSOrg/evidence/tree/fffbc92ad7894c5c3c3867be65a655899a6f1e5b/memperf/inventory)).
+On the host, under load, one page's insert went from 116-176 to 50-82 ns and
+its removal from 148-177 to 105-145, with one allocation where there were
+two. Not yet measured on metal.
+
 Owner: the memory track. Exit: each path above measured on the T14 at a
 change and at its base, and against Linux; a regression is fixed or its cost
 accepted by the owner, or by the coordinator for an implementation tradeoff,

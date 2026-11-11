@@ -622,6 +622,9 @@ mod tests {
                     (None, _) => gaps.push((p as u64, 1)),
                 }
             }
+            let by_len: BTreeSet<(u64, u64)> =
+                gaps.iter().map(|&(s, len)| (len * PAGE, FLOOR + s * PAGE)).collect();
+            assert_eq!(v.free, by_len, "round {round}: the free index is not the gaps");
             let longest = gaps.iter().map(|&(_, len)| len).max().unwrap_or(0);
             for (n, align) in [(1, 1), (2, 1), (3, 4), (8, 1), (5, 16), (longest, 1), (longest + 1, 1)] {
                 if n == 0 {

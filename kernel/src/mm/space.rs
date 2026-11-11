@@ -206,13 +206,13 @@ pub struct AddressSpace {
 /// rarely charges anything.
 const RANGE_GRAIN: usize = 32;
 
-/// The heap one range takes, at most: its entry, the free range beside it and
-/// that one's place by length, and its place in the lists a removal gathers.
+/// The heap one range takes, at most: its entry, the free range beside it by
+/// length, and its place in the list a removal gathers, which holds up to three
+/// times its length while it doubles.
 fn range_heap() -> usize {
     charge::map_entry::<u64, SpaceEntry>()
-        + charge::map_entry::<u64, u64>()
         + charge::map_entry::<(u64, u64), ()>()
-        + 2 * core::mem::size_of::<(u64, u64, SpaceEntry)>()
+        + 3 * core::mem::size_of::<(u64, SpaceEntry)>()
 }
 
 /// What a leaf of a range with protection `prot` says, `None` for one that
