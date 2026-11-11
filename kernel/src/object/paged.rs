@@ -58,7 +58,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel::chunked::Stack;
-use kernel::paged::{Core, Cursor, Draw, Leave, Lookup, Mappers, Object, Pages, Refused, Revoke, Revoked, Supplied, Version, Waiters, Want, PAGE};
+use kernel::paged::{Core, Cursor, Draw, Leave, Lookup, Mappers, Next, Object, Pages, Refused, Revoke, Revoked, Supplied, Version, Waiters, Want, PAGE};
 use kernel::sched::task::WaitClass;
 use kernel::slots::Slots;
 use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
@@ -366,11 +366,13 @@ impl PagerObject {
     }
 
     /// The pages of the object at `slot` just marked revoking leave once no
-    /// mapping reaches them: this walks the object's mappers, the lock dropped
-    /// for each space's visit and the slot held meanwhile, gives each frame
-    /// back, and names again every waiter's want a page that ends absent meets
-    /// (`Pages::walk`). Answers the lock and, where another's walk runs and
-    /// takes the pages in its next pass, that pass's epoch.
+    /// mapping reaches them and no futex wait is keyed on their frames: this
+    /// walks the object's mappers, sweeps the waits on the walk's set after
+    /// every pass ([`Pages::next_visit`]), the lock dropped for each visit and
+    /// sweep and the slot held meanwhile, then gives each frame back and names
+    /// again every waiter's want a page that ends absent meets
+    /// ([`Pages::finish`]). Answers the lock and, where another's walk runs
+    /// and takes the pages in its next pass, that pass's epoch.
     fn revoked<'a>(&'a self, mut state: LockGuard<'a, State>, slot: u32) -> (LockGuard<'a, State>, Option<u64>) {
         match state.entry_mut(slot).object.revoke() {
             Revoke::Done => return (state, None),
@@ -379,30 +381,23 @@ impl PagerObject {
         }
         let job = self.core.job();
         state.entry_mut(slot).refs += 1;
-        // Whether every futex wait on a revoking frame was ended since the
-        // last pass began: owed before any frame goes back.
-        let mut swept = false;
         loop {
             let State { pages, entries, .. } = &mut *state;
             let Entry { object, mappers, .. } = entries.get_mut(slot).expect("paged: a walked slot is held");
             match pages.next_visit(object, &mut Ring(mappers)) {
-                Some(node) => {
-                    swept = false;
+                Next::Visit(node) => {
                     // SAFETY: linked, so live, under the lock; a range holds
                     // it, so it upgrades, and the count kept holds it past
                     // its unlinking while the lock is dropped.
                     let node = unsafe { (*node).this.upgrade() }.expect("paged: a linked mapper is held by a range");
                     state = self.visit(state, slot, &node);
                 }
-                None if !swept => {
-                    state = self.end_futex_waits(state, slot);
-                    swept = true;
-                }
-                None => break,
+                Next::Sweep => state = self.end_futex_waits(state, slot),
+                Next::Finish => break,
             }
         }
-        // Every mapper visited and every wait ended, in this hold since
-        // `next_visit` said so: the frames go back.
+        // Every mapper visited and every wait swept since the last pass
+        // began, in this hold since `next_visit` said so: the frames go back.
         let mut absent = false;
         let mut waiters = Linked { head: state.requests, slot };
         let State { pages, entries, held, gone, .. } = &mut *state;
@@ -439,14 +434,15 @@ impl PagerObject {
         }
     }
 
-    /// Every futex wait on a revoking frame of the object at `slot` ends,
-    /// read a batch at a time under the pager's lock and ended outside it:
-    /// after every mapper's visit, so no leaf maps one any more and none is
-    /// waited on afresh, and before any frame goes back, so no waiter keyed
-    /// on one meets the frame reissued (`sched::futex::revoke_frames`). This
-    /// covers a leaf an unmap, `discard`, `protect` to none or a space's end
-    /// cleared before the frame was removed, whose clearing revokes no
-    /// frame it does not own.
+    /// Every futex wait on a frame of the walk's set at `slot` ends, read a
+    /// batch at a time under the pager's lock and ended outside it
+    /// ([`Next::Sweep`]): after a pass's visits, so no leaf of a page marked
+    /// before it maps its frame and none is waited on afresh, and again after
+    /// any pass a page marked meanwhile began, before any frame goes back, so
+    /// no waiter keyed on one meets the frame reissued
+    /// (`sched::futex::revoke_frames`). This covers a leaf an unmap,
+    /// `discard`, `protect` to none or a space's end cleared before the frame
+    /// was removed, whose clearing revokes no frame it does not own.
     fn end_futex_waits<'a>(&'a self, mut state: LockGuard<'a, State>, slot: u32) -> LockGuard<'a, State> {
         let mut at = Cursor::Start;
         loop {
@@ -1485,6 +1481,9 @@ impl Index<'_> {
 }
 
 /// The revoking pages a walk reads under its pager's lock at once.
+/// `tests/guest/mapprobe`'s `shrunk` case revokes 79 pages so that its
+/// revocation takes two batches; at 79 or more it would take one, and that
+/// case would no longer reach a second.
 const REVOKE_BATCH: usize = 64;
 
 /// The pages a fault's request names: the aligned run around its page.

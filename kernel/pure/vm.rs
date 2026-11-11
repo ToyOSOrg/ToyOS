@@ -398,6 +398,8 @@ impl<O: Object, S: Object> Inventory<O, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::vec;
+    use std::vec::Vec;
 
     /// A page a range maps lands at its place; one before the range's
     /// offset, at or past its end, or so high its byte offset overflows is
@@ -412,8 +414,6 @@ mod tests {
         assert_eq!(page_at(start, end, 0, (1 << 52) - 2), None, "a page near the last a pager may name");
         assert_eq!(page_at(start, end, 0, u64::MAX), None, "a byte offset past u64");
     }
-    use std::vec;
-    use std::vec::Vec;
 
     /// Shared memory is executed only where nobody can write it and
     /// written only where somebody can; a range is whole pages inside the
