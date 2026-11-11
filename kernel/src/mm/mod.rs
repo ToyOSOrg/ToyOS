@@ -185,6 +185,11 @@ pub fn init(memory_map: &'static [MemoryMapEntry], reserved: &[Region], image: &
     alloc::init_early();
     pmm::init(memory_map, reserved);
     DIRECT_MAP_END.set(paging::init(memory_map, crate::drivers::panic_console::scanout(), image));
+    assert!(
+        PHYS_OFFSET + DIRECT_MAP_END.get().get() <= stack::RANGE,
+        "mm: the direct map ends at {:#x}, inside the kernel stacks' range",
+        PHYS_OFFSET + DIRECT_MAP_END.get().get(),
+    );
     BOOT_STACK_GUARD.store(image.stack_guard().start, core::sync::atomic::Ordering::Relaxed);
     alloc::init();
     charge::init();

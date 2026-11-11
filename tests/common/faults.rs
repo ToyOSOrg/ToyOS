@@ -139,30 +139,35 @@ pub fn kernel_wx_leaf_is_refused(test_config: &Path, profile: qemu::Profile) -> 
     }
 }
 
-/// The first line of a `#DF` report, and the line in it that names the stack
-/// whose guard page the fault was on (`kernel/src/arch/x86_64/idt/exceptions.rs`).
+/// The first line of a `#DF` report, the line in it that names the stack
+/// whose guard the fault was on, and the raw line a second `#DF` on the
+/// reporting CPU ends it with (`kernel/src/arch/x86_64/idt/exceptions.rs`).
 const DOUBLE_FAULT: &str = "DOUBLE FAULT on CPU ";
 const STACK_OVERFLOW: &str = "KERNEL STACK OVERFLOW: ";
+const REPORT_FAULTED: &str = "DOUBLE FAULT inside the double fault report above";
 
 /// Each kind of stack the kernel runs on, run off its bottom by its
 /// `stack-overflow-*` actuator, one boot each since each ends the machine:
-/// the fault is a `#DF` whose report names that stack's guard page. A stack
-/// with no unmapped page under it writes on into its neighbour and says
-/// neither line.
+/// the fault is a `#DF` whose report names that stack's guard. A stack with
+/// nothing unmapped under it writes on into its neighbour and says neither
+/// line. The last boot runs the report itself off IST1: the `#DF` that makes
+/// restarts the handler on the same stack, which ends the report on one line
+/// instead of making it again.
 pub fn a_kernel_stack_overflow_names_its_stack(test_config: &Path) -> Result<(), String> {
-    const ARMS: [(&[&str], &str); 4] = [
-        (&["stack-overflow-task"], " under the kernel stack of pid="),
-        (&["stack-overflow-idle"], "'s idle stack"),
-        (&["stack-overflow-nmi"], "'s IST2 stack"),
-        (&["stack-overflow-boot"], " under the boot stack"),
+    const ARMS: [(&[&str], &str, &str); 5] = [
+        (&["stack-overflow-task"], " under the kernel stack of pid=", " under the kernel stack of pid="),
+        (&["stack-overflow-idle"], "'s idle stack", "'s idle stack"),
+        (&["stack-overflow-nmi"], "'s IST2 stack", "'s IST2 stack"),
+        (&["stack-overflow-boot"], " under the boot stack", " under the boot stack"),
+        (&["stack-overflow-report"], "'s idle stack", REPORT_FAULTED),
     ];
-    for (kernel_params, stack) in ARMS {
+    for (kernel_params, stack, ready_marker) in ARMS {
         let param = kernel_params[0];
         let qemu = QemuInstance::boot_with_options(
             test_config,
             &[],
             &[],
-            BootOptions { profile: qemu::Profile::Metal, kernel_params, ready_marker: stack, ..Default::default() },
+            BootOptions { profile: qemu::Profile::Metal, kernel_params, ready_marker, ..Default::default() },
         );
         let serial = qemu.boot_log();
         let report = serial
@@ -172,7 +177,10 @@ pub fn a_kernel_stack_overflow_names_its_stack(test_config: &Path) -> Result<(),
         let line = report
             .lines()
             .find(|line| line.contains(STACK_OVERFLOW) && line.contains(stack))
-            .ok_or_else(|| format!("{param}: the double fault's report names no guard page{stack}\n{serial}"))?;
+            .ok_or_else(|| format!("{param}: the double fault's report names no guard{stack}\n{serial}"))?;
+        if report.matches(DOUBLE_FAULT).count() != 1 {
+            return Err(format!("{param}: the double fault was reported more than once\n{serial}"));
+        }
         eprintln!("  [stack_overflow] {param}: {}", line.trim());
     }
     Ok(())

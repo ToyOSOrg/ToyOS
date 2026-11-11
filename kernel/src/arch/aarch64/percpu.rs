@@ -89,7 +89,7 @@ pub fn alloc(cpu_id: u32) -> &'static PerCpu {
         kernel_stack: AtomicU64::new(0),
         // The same size as a task's kernel stack: a `deferred` [`kobject!`]
         // object may own an `immediate` one, whose destructor then runs here.
-        idle_stack_top: crate::mm::stack::Stack::permanent(crate::process::KERNEL_STACK_SIZE),
+        idle_stack_top: crate::mm::stack::permanent(crate::process::KERNEL_STACK_SIZE),
         syscall_pc: AtomicU64::new(0),
         syscall_num: AtomicU64::new(0),
         syscall_fp: AtomicU64::new(0),

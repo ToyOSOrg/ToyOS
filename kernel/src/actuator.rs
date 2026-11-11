@@ -99,7 +99,7 @@ actuators! {
     kernel_wx_leaf = "kernel-wx-leaf";
 
     /// Run the first task to start off the bottom of its kernel stack. Judged,
-    /// with the three below, by `a_kernel_stack_overflow_names_its_stack`.
+    /// with the four below, by `a_kernel_stack_overflow_names_its_stack`.
     stack_overflow_task = "stack-overflow-task";
 
     /// Run the first CPU to idle off the bottom of its idle stack.
@@ -112,6 +112,12 @@ actuators! {
     /// Run the boot CPU off the bottom of the boot stack once boot phases are
     /// done.
     stack_overflow_boot = "stack-overflow-boot";
+
+    /// Run the `#DF` report of `stack-overflow-idle` off the bottom of IST1,
+    /// the stack it is written on.
+    // The double fault is x86-64's alone, so AArch64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    stack_overflow_report = "stack-overflow-report";
 
     /// Read the TSC 10 ms ahead in the clock's samples once it has held for
     /// a second, and 10 ms further once that step is slewed away, as steps
@@ -207,6 +213,7 @@ pub fn overflow_stack(depth: u64) -> u64 {
 #[cfg(feature = "boot-actuators")]
 const IMPLIES: &[(&str, &[&str])] = &[
     ("metal-panic-probe", &["diag-tick"]),
+    ("stack-overflow-report", &["stack-overflow-idle"]),
 ];
 
 #[cfg(feature = "boot-actuators")]

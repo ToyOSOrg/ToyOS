@@ -363,11 +363,11 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
 }
 
 
-/// Name the stack of this CPU's that `addr` is in the guard page of, if it is
-/// in one: the fault is that stack's overflow.
+/// Name the stack of this CPU's that `addr` is in the guard of, if it is in
+/// one: the fault is that stack's overflow.
 fn report_stack_guard(addr: u64) {
     if let Some((stack, guard)) = percpu::stack_guard_at(addr) {
-        log!("  KERNEL STACK OVERFLOW: {:#x} is in the guard page {:#x}..{:#x} under {}", addr, guard.start, guard.end, stack);
+        log!("  KERNEL STACK OVERFLOW: {:#x} is in the guard {:#x}..{:#x} under {}", addr, guard.start, guard.end, stack);
     }
 }
 
@@ -400,6 +400,10 @@ pub(super) fn double_fault_handler(frame: &TrapFrame) -> ! {
     log!("DOUBLE FAULT on CPU {} (pid={:?} tid={:?})", cpu_id, pid, tid);
     log!("  cr2={:#018x} (address that caused the fault chain)", cr2);
     report_stack_guard(cr2);
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::stack_overflow_report() {
+        crate::actuator::overflow_stack(0);
+    }
     log!("  rip={:#018x}  rsp={:#018x}  rbp={:#018x}", frame.rip, frame.rsp, frame.rbp);
     crate::mm::paging::debug_page_walk(cr2);
 

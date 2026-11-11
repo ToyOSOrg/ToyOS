@@ -42,7 +42,7 @@ pub(crate) struct KernelStack {
 }
 
 impl KernelStack {
-    /// The heap a thread takes: its stack, its scheduler records, its place
+    /// The heap a thread takes beside its stack's frames: its scheduler records, its place
     /// on the one watch it may wait on, whose list doubles, its place in its
     /// process's thread table, its own data, and what one of its calls copies
     /// in and may hold while it is preempted — two strings at their bound, as
@@ -56,7 +56,7 @@ impl KernelStack {
         let process = charge::map_entry::<toyos_abi::Tid, crate::process::ThreadEntry>()
             + charge::arc::<crate::sync::Lock<crate::process::ThreadData>>()
             + call;
-        crate::mm::stack::GUARD + Self::bytes() + records + process
+        records + process
     }
 
     /// The stack and the area above it, in whole pages.
@@ -76,7 +76,7 @@ impl KernelStack {
     }
 }
 
-/// Allocate a kernel stack, charged to the job its task runs in, and lay out
+/// Allocate a kernel stack, its frames held by the job its task runs in, and lay out
 /// the frame `context_switch` will restore.
 pub(crate) fn alloc_kernel_stack(job: &Arc<Job>, start: Start) -> Option<(KernelStack, u64)> {
     use crate::arch::entry::{process_start, thread_start};
@@ -85,7 +85,7 @@ pub(crate) fn alloc_kernel_stack(job: &Arc<Job>, start: Start) -> Option<(Kernel
         Start::Thread { entry, sp, arg } => (thread_start, entry.addr(), sp, arg),
     };
     let charge = Charge::new(job, KernelStack::heap()).ok()?;
-    let stack = KernelStack { stack: crate::mm::stack::Stack::new(KernelStack::bytes())?, _charge: charge };
+    let stack = KernelStack { stack: crate::mm::stack::Stack::new(job, KernelStack::bytes())?, _charge: charge };
     #[cfg(feature = "heap-tripwire")]
     crate::scheduler::paint_stack(&stack);
     // SAFETY: `stack` is fresh and exclusively owned, and its `top` ends the stack.

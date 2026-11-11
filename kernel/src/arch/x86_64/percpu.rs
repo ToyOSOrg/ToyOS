@@ -8,7 +8,7 @@ use toyos_userbound::IoBitmap;
 
 use super::cpu;
 use crate::log;
-use crate::mm::stack::Stack;
+use crate::mm::stack;
 use crate::process::KERNEL_STACK_SIZE;
 
 const MSR_GS_BASE: u32 = 0xC000_0101;
@@ -427,8 +427,8 @@ pub fn reserve_log_slot(
 /// task's kernel stack, since a `deferred` [`kobject!`] object may own an
 /// `immediate` one, whose destructor then runs there; and one stack per
 /// [`IST_STACKS`] row, since an `ist[n-1]` left zero faults to address 0
-/// unchecked. Called once this CPU's `gs:` is valid, which a guard page's
-/// flush reads.
+/// unchecked. Called on a CPU whose own `gs:` is valid, the boot CPU for
+/// every block: a guard page's flush reads the caller's.
 ///
 /// A fault on an IST stack's guard page is a `#DF`, since its frame cannot be
 /// pushed, and a `#DF` loads IST1's top whatever stack it interrupted (SDM
@@ -438,11 +438,11 @@ pub fn reserve_log_slot(
 /// `percpu` is a live block whose CPU takes no exception meanwhile, and no
 /// reference to it is held.
 unsafe fn alloc_stacks(percpu: *mut PerCpu) {
-    let idle = Stack::permanent(KERNEL_STACK_SIZE);
+    let idle = stack::permanent(KERNEL_STACK_SIZE);
     // SAFETY: the caller's contract.
     unsafe { (*percpu).idle_stack_top = idle };
     for slot in 0..IST_STACKS {
-        let top = Stack::permanent(IST_STACK_SIZE);
+        let top = stack::permanent(IST_STACK_SIZE);
         // SAFETY: the fresh stack's own bytes, which nothing runs on yet.
         unsafe { core::ptr::write_bytes((top - IST_STACK_SIZE as u64) as *mut u8, STACK_FILL, IST_STACK_SIZE) };
         // SAFETY: the caller's contract; `Tss` is `repr(C, packed)` (possibly unaligned); `slot < IST_STACKS <= 7 == Tss::ist.len()`.
@@ -507,10 +507,10 @@ impl core::fmt::Display for OwnStack {
     }
 }
 
-/// The stack of this CPU's whose guard page holds `addr`, and that page: an
+/// The stack of this CPU's whose guard holds `addr`, and that guard: an
 /// access there ran off the stack's bottom.
 pub fn stack_guard_at(addr: u64) -> Option<(OwnStack, core::ops::Range<u64>)> {
-    use crate::mm::stack::guard_below;
+    let guard_below = |top: u64, bytes: usize| stack::guard_under(top.wrapping_sub(bytes as u64));
     let cpu = cpu_id();
     let percpu = gs::read_u64::<OFF_SELF_PTR>() as *const PerCpu;
     // SAFETY: this CPU's own block, as `ist1_top` reads it; unaligned since `Tss` is packed.

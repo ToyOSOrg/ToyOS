@@ -19,9 +19,17 @@
 
 ## The kernel's own memory
 
-- Every stack the kernel runs on sits above a page that is not mapped, so
+- Every stack the kernel runs on sits above memory that is not mapped, so
   running off one stops the machine with a report naming the stack instead of
   writing memory another owner holds.
+- A thread's kernel stack is frames its job holds, mapped in a kernel address
+  range of its own whose gaps are never mapped. The frames go back when the
+  thread ends; the address is reused only once no CPU can still translate it.
+- That range's page tables are the kernel's own and are kept: one for each
+  eight stacks ever in use at once, about 2 MiB for a process at its thread
+  limit. A thread that cannot get one is refused.
+- A CPU's own stacks are set aside when it is brought up and kept for the
+  machine's life.
 
 ## Who owns what
 

@@ -551,6 +551,28 @@ impl KernelTables {
         pt.write(idx, virt, 0).discharge(target);
     }
 
+    /// The table of 4 KiB leaves over the 2 MiB at `va` in the kernel stacks'
+    /// range, made with the directory above it where absent, or `None` with
+    /// no frame for one. Both are the kernel's and stay for good: a CPU's
+    /// paging-structure cache may name one long after its leaves are clear.
+    fn stack_table(&mut self, va: u64) -> Option<&mut PageTablePage> {
+        let (pml4_idx, pdpt_idx, pd_idx) = indices(va);
+        let mut at = self.root_table()[pml4_idx];
+        assert!(at & PAGE_PRESENT != 0, "stack_table: no table under the root slot of {va:#x}");
+        for index in [pdpt_idx, pd_idx] {
+            // SAFETY: `at` names a table this space linked, which lives
+            // forever; `&mut self` gives the exclusivity.
+            let table = unsafe { PageTablePage::from_phys_mut(at & ADDR_MASK) };
+            if table[index] & PAGE_PRESENT == 0 {
+                let frame = crate::mm::pmm::alloc_frame()?.into_raw();
+                table.write(index, va, frame | KERNEL_TABLE).expect_install("stack_table");
+            }
+            at = table[index];
+        }
+        // SAFETY: as in the loop.
+        Some(unsafe { PageTablePage::from_phys_mut(at & ADDR_MASK) })
+    }
+
     /// Replaces whatever is there; a page `guard_4k` already split must not
     /// reach here.
     fn map_2m(&mut self, phys: u64, flags: u64) {
@@ -641,6 +663,36 @@ pub fn direct_map_policy(phys: u64) -> Option<CachePolicy> {
 /// shootdown before it relies on the hole.
 pub fn guard_4k(phys: u64) {
     KERNEL.lock().guard_4k(phys);
+}
+
+/// Map `frames` at consecutive 4 KiB pages from `va`, inside one 2 MiB page
+/// of the kernel stacks' range (`mm::stack`) that maps nothing there, as
+/// kernel data. `false`, with nothing mapped, where no frame can be had for a
+/// table. A leaf that was not present owes no invalidation.
+pub fn map_stack(va: u64, frames: &[u64]) -> bool {
+    let mut kernel = KERNEL.lock();
+    let Some(table) = kernel.stack_table(va) else { return false };
+    let first = ((va >> 12) & 0x1FF) as usize;
+    for (i, &frame) in frames.iter().enumerate() {
+        let leaf = frame | kernel_leaf(CachePolicy::Normal, Prot::ReadWrite);
+        table.write(first + i, va + i as u64 * PAGE_4K, leaf).expect_install("map_stack");
+    }
+    true
+}
+
+/// Clear the `pages` leaves [`map_stack`] wrote from `va`, handing each
+/// frame to `each`. Nothing is invalidated here: the caller keeps the
+/// addresses unused until a kernel-half shootdown.
+pub fn unmap_stack(va: u64, pages: usize, mut each: impl FnMut(u64)) {
+    let mut kernel = KERNEL.lock();
+    let table = kernel.stack_table(va).expect("unmap_stack: a mapped stack has its table");
+    let first = ((va >> 12) & 0x1FF) as usize;
+    for index in first..first + pages {
+        let leaf = table[index];
+        assert!(leaf & PAGE_PRESENT != 0, "unmap_stack: nothing mapped at {:#x}", va + ((index - first) as u64) * PAGE_4K);
+        table.store(index, 0);
+        each(leaf & ADDR_MASK);
+    }
 }
 
 /// Marks a user leaf whose frame the space owns: one of the bits a PTE leaves

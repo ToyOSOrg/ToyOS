@@ -395,6 +395,56 @@ pub fn guard_4k(phys: u64) {
     tlb::kernel_page(va);
 }
 
+/// The table of 4 KiB pages over the 2 MiB at `va` in the kernel stacks'
+/// range, made with the tables above it where absent, or `None` with no
+/// frame for one. They are the kernel's and stay for good.
+fn stack_table(high: &mut Tables, va: u64) -> Option<&mut Table> {
+    let mut table: *mut Table = high.root_mut();
+    for level in 0..3 {
+        // SAFETY: the root or a table it linked, and `high` is the only reference.
+        let current = unsafe { &mut *table };
+        let i = index(va, level);
+        if current.0[i] & VALID == 0 {
+            current.set(i, crate::mm::pmm::alloc_frame()?.into_raw() | TABLE | VALID);
+        }
+        // SAFETY: valid, and only tables are linked over this range.
+        table = unsafe { Table::at_mut(current.0[i] & ADDR) };
+    }
+    // SAFETY: as in the loop.
+    Some(unsafe { &mut *table })
+}
+
+/// Map `frames` at consecutive 4 KiB pages from `va`, inside one 2 MiB page
+/// of the kernel stacks' range (`mm::stack`) that maps nothing there, as
+/// kernel data. `false`, with nothing mapped, where no frame can be had for a
+/// table. An invalid descriptor made valid owes no invalidation.
+pub fn map_stack(va: u64, frames: &[u64]) -> bool {
+    let mut high = high();
+    let high = high.as_mut().expect("map_stack: before the kernel's tables exist");
+    let Some(pages) = stack_table(high, va) else { return false };
+    for (j, &frame) in frames.iter().enumerate() {
+        pages.set(index(va, 3) + j, frame | kernel_leaf(CachePolicy::Normal, Prot::ReadWrite) | TABLE);
+    }
+    published();
+    true
+}
+
+/// Clear the `pages` descriptors [`map_stack`] wrote from `va`, handing each
+/// frame to `each`, and drop their translations on every CPU before
+/// returning: the broadcast needs no other CPU's answer.
+pub fn unmap_stack(va: u64, pages: usize, mut each: impl FnMut(u64)) {
+    let mut high = high();
+    let high = high.as_mut().expect("unmap_stack: before the kernel's tables exist");
+    let table = stack_table(high, va).expect("unmap_stack: a mapped stack has its table");
+    for j in index(va, 3)..index(va, 3) + pages {
+        let leaf = table.0[j];
+        assert!(leaf & VALID != 0, "unmap_stack: nothing mapped in {va:#x}'s table at {j}");
+        table.set(j, 0);
+        each(leaf & ADDR);
+    }
+    tlb::kernel_pages(va, pages);
+}
+
 /// The direct map's type for `phys`, read off the kernel's tables, which
 /// every space shares.
 pub fn direct_map_policy(phys: u64) -> Option<CachePolicy> {
