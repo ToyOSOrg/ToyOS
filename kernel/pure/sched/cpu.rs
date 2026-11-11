@@ -4273,11 +4273,12 @@ mod tests {
         w.abandon();
     }
 
-    /// **A wake of an equal job with no standing waits for the running
-    /// request**: its deadline is a whole request after the queue's virtual
-    /// time, and the running thread's is due first.
+    /// **A wake of an equal job with no standing and a shorter request takes
+    /// the CPU once the running thread has had its minimum run.** It parked
+    /// after running nothing, so it asks for less than the running thread's
+    /// whole request and is due first.
     #[test]
-    fn a_wake_with_no_claim_ahead_waits_for_the_running_request() {
+    fn a_brief_sleepers_wake_runs_after_the_minimum_run() {
         let mut w = World::new(1);
         let (sleeper, sleeper_shared) = w.spawn(C0);
         w.run_a_pass(C0);
@@ -4287,12 +4288,95 @@ mod tests {
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
 
         wake(&w, C0, &sleeper_shared);
-        w.run_a_pass_at(C0, NOW.after(2 * MIN_SLICE_NS));
-        assert_eq!(w.cpus[0].decide_at(), NOW.after(SLICE_NS), "the hog keeps its whole request");
+        w.run_a_pass_at(C0, NOW.after(MIN_SLICE_NS / 2));
+        assert_eq!(w.cpus[0].decide_at(), NOW.after(MIN_SLICE_NS), "the hog keeps its minimum run");
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
 
-        w.run_a_pass_at(C0, NOW.after(SLICE_NS));
+        w.run_a_pass_at(C0, NOW.after(MIN_SLICE_NS));
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(sleeper), "and the wake runs at its end");
+        w.abandon();
+    }
+
+    /// Park the running task at `at`, as `World::park_running` does at `NOW`.
+    fn park_at(w: &mut World, at: Nanos) {
+        let (cpus, env) = w.split();
+        let sched = &mut cpus[0];
+        let current = CurrentTask::new(sched.running().expect("a task to park").shared(), C0);
+        let ticket = crate::sched::park::prepare(&current, crate::sched::park::Cancel::Answers, WaitClass::Other)
+            .expect("nothing notified this task");
+        let crate::sched::park::Commit::Parked(committed) = ticket.commit() else { panic!("an uncontended park") };
+        let pass = SchedPass::begin(sched, env, at);
+        let _ = pass.dispose_block(committed, None).finish();
+    }
+
+    /// The pass a running request's end owes, at the instant it is armed for.
+    fn pass_at_armed(w: &mut World) -> Nanos {
+        let at = w.cpus[0].armed().expect("a running request is armed");
+        w.run_a_pass_at(C0, at);
+        at
+    }
+
+    /// **A brief sleeper's wake in the pass that ends the running request
+    /// runs in that pass, with no lag of its own.** It ran alone in quarter
+    /// milliseconds, so its request followed down and it carries no lag; the
+    /// hog's request the pass reissues is a whole slice and is due later.
+    #[test]
+    fn a_brief_sleeper_waking_as_the_running_request_ends_runs_at_once() {
+        let mut w = World::new(1);
+        let (sleeper, sleeper_shared) = w.spawn(C0);
+        let mut now = NOW;
+        w.run_a_pass_at(C0, now);
+        for _ in 0..8 {
+            now = now.after(MIN_SLICE_NS);
+            park_at(&mut w, now);
+            wake(&w, C0, &sleeper_shared);
+            w.run_a_pass_at(C0, now);
+        }
+        let request = w.cpus[0].running().map(|t| t.request_ns()).expect("it runs");
+        assert!(request < 2 * MIN_SLICE_NS, "its request followed its bursts down: {request} ns");
+        now = now.after(MIN_SLICE_NS);
+        park_at(&mut w, now);
+        let (hog, _) = w.spawn(C0);
+        w.run_a_pass_at(C0, now);
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
+
+        wake(&w, C0, &sleeper_shared);
+        let end = pass_at_armed(&mut w);
+        assert_eq!(end, now.after(SLICE_NS), "the hog's whole request ran");
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(sleeper), "the wake runs in the pass that ends it");
+        w.abandon();
+    }
+
+    /// **A brief sleeper owing for its last burst runs within the minimum run
+    /// of its wake, though the running request was just reissued.** It ran a
+    /// quarter millisecond while the hog waited, so it comes back owing for it;
+    /// its short request is still due before the hog's whole one, and it runs
+    /// once the hog has served what it owes.
+    #[test]
+    fn a_brief_sleeper_owing_its_last_burst_runs_within_the_minimum_run() {
+        let mut w = World::new(1);
+        let (sleeper, sleeper_shared) = w.spawn(C0);
+        let (hog, _) = w.spawn(C0);
+        let mut now = NOW;
+        w.run_a_pass_at(C0, now);
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(sleeper));
+            now = now.after(MIN_SLICE_NS);
+            park_at(&mut w, now);
+            assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
+            wake(&w, C0, &sleeper_shared);
+            let woke = pass_at_armed(&mut w);
+            now = woke;
+            while w.cpus[0].running().map(|t| t.key()) != Some(sleeper) {
+                now = pass_at_armed(&mut w);
+            }
+            waits.push(now.since(woke));
+        }
+        assert!(
+            waits[2..].iter().all(|&wait| wait <= MIN_SLICE_NS),
+            "once its request has followed its bursts, a wake waits at most the minimum run: {waits:?}",
+        );
         w.abandon();
     }
 
