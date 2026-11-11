@@ -18,11 +18,11 @@
 //! copy into the object's frames is the kernel's own. The pager holds the
 //! side from its hold to its unhold, its waits included, and a holder states
 //! the size and time of the moment it took them. A holder's read that met
-//! [`kernel::paged::READ_RESTARTS`] writes asks the pager, whose read holds
-//! them off. So the pager waits for the side only on a holder's copy inside
-//! the kernel, never on what the holder controls. A holder's write stamps the
-//! modification time; the pager sets it for its own changes, and its record
-//! of the rest is bytes the kernel keeps and never reads.
+//! [`kernel::paged::WRITES_A_READ_MEETS`] writes asks the pager, whose read
+//! holds them off. So the pager waits for the side only on a holder's copy
+//! inside the kernel, never on what the holder controls. A holder's write
+//! stamps the modification time; the pager sets it for its own changes, and
+//! its record of the rest is bytes the kernel keeps and never reads.
 //!
 //! **Supply copies into fresh frames**, so no frame the pager still maps
 //! enters an object. A frame leaves at withdrawal, failure, shrink or the
@@ -58,7 +58,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::chunked::{Chunked, Stack};
 use kernel::paged::{
     holder_span, Core, Draw, Leave, Lookup, Object, Pages, Refused, Side, Supplied, Version, Waiters, Want, Writer,
-    HOLDER_PAGES, PAGE, READ_RESTARTS,
+    HOLDER_PAGES, PAGE, WRITES_A_READ_MEETS,
 };
 use kernel::sched::task::WaitClass;
 use toyos_abi::syscall::{
@@ -521,9 +521,9 @@ impl PagerObject {
 
     /// Read `out.len()` bytes of the object at `slot` from `offset`; a holder
     /// waits for absent pages and for a write under way, and its bytes count
-    /// only where no write began meanwhile; one that meets [`READ_RESTARTS`]
-    /// writes is answered `WouldBlock`, and asks the pager, whose read holds
-    /// the writes off. An owner is answered `WouldBlock` for an absent first
+    /// only where no write began meanwhile; one that meets
+    /// [`WRITES_A_READ_MEETS`] writes is answered `WouldBlock`, and asks the
+    /// pager, whose read holds the writes off. An owner is answered `WouldBlock` for an absent first
     /// page, and orders its read against writes by holding them. The caller
     /// holds a reference on `slot` for the call.
     fn read(&self, slot: u32, out: &mut UserBytesMut, offset: u64, waits: bool) -> u64 {
@@ -533,11 +533,8 @@ impl PagerObject {
         let mut pieces = [Piece::default(); CHUNK];
         // A holder's: what its bytes count against, and the writes it met.
         let mut since: Option<Version> = None;
-        let mut restarts = 0;
+        let mut met = 0;
         loop {
-            if restarts >= READ_RESTARTS {
-                return SyscallError::WouldBlock.to_u64();
-            }
             let at = offset.saturating_add(done as u64);
             let step = {
                 let mut state = self.state.lock();
@@ -592,35 +589,17 @@ impl PagerObject {
                     if gone {
                         return SyscallError::Io.to_u64();
                     }
-                    // What was copied may be a write in part: read again.
-                    if written {
-                        restarts += 1;
-                        done = 0;
-                        since = None;
-                        waiting.as_ref().anew(&mut self.state.lock());
+                    if !written {
+                        // After the checks: bytes copied before the fault
+                        // count only as every copied chunk's do.
+                        if faulted {
+                            return if done > 0 { done as u64 } else { SyscallError::BadAddress.to_u64() };
+                        }
                         continue;
                     }
-                    // After the checks: bytes copied before the fault count only
-                    // as every copied chunk's do.
-                    if faulted {
-                        return if done > 0 { done as u64 } else { SyscallError::BadAddress.to_u64() };
-                    }
+                    // What was copied may be a write in part.
                 }
-                Step::Written => {
-                    // A write is under way: wait for its end, and read again.
-                    restarts += 1;
-                    let ready = || {
-                        let state = self.state.lock();
-                        let object = &state.entry(slot).object;
-                        state.gone || object.gone() || object.read_begin().is_some()
-                    };
-                    if let Err(e) = self.wait_changed(slot, offset / PAGE, (want as u64).div_ceil(PAGE), ready) {
-                        return e.to_u64();
-                    }
-                    done = 0;
-                    since = None;
-                    waiting.as_ref().anew(&mut self.state.lock());
-                }
+                Step::Written => {}
                 Step::Done => return done as u64,
                 Step::Gone if done > 0 => return done as u64,
                 Step::Gone => return SyscallError::Gone.to_u64(),
@@ -633,8 +612,26 @@ impl PagerObject {
                     if let Err(e) = self.wait_supplied(slot, page, since, waiting.as_ref()) {
                         return e.to_u64();
                     }
+                    continue;
                 }
             }
+            // A write met the read: it asks the pager, or waits for the
+            // write's end and reads again, asking anew.
+            met += 1;
+            if met >= WRITES_A_READ_MEETS {
+                return SyscallError::WouldBlock.to_u64();
+            }
+            let ready = || {
+                let state = self.state.lock();
+                let object = &state.entry(slot).object;
+                state.gone || object.gone() || object.read_begin().is_some()
+            };
+            if let Err(e) = self.wait_changed(slot, offset / PAGE, (want as u64).div_ceil(PAGE), ready) {
+                return e.to_u64();
+            }
+            done = 0;
+            since = None;
+            waiting.as_ref().anew(&mut self.state.lock());
         }
     }
 

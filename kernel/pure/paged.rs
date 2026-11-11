@@ -32,9 +32,9 @@
 //! pager's, from its hold to its unhold, its truncations and its own reads
 //! among them. A holder's read begins only while no write is under way
 //! ([`Object::read_begin`]), and its bytes count only where none has begun
-//! since ([`Object::unchanged`]); one that met [`READ_RESTARTS`] writes asks the
-//! pager, whose read holds the writes off. While the pager holds them, a
-//! holder states the size and time of the moment it took them
+//! since ([`Object::unchanged`]); one that met [`WRITES_A_READ_MEETS`]
+//! writes asks the pager, whose read holds the writes off. While the pager
+//! holds them, a holder states the size and time of the moment it took them
 //! ([`Object::stat`]).
 //!
 //! **A holder's dirtying is told once** ([`Object::take_tell`]): the first page
@@ -503,8 +503,9 @@ pub enum Side {
     Pager,
 }
 
-/// The writes a holder's read meets before it asks the pager instead.
-pub const READ_RESTARTS: u32 = 3;
+/// The writes a holder's read meets, each waited out but the last, which
+/// sends it to the pager.
+pub const WRITES_A_READ_MEETS: u32 = 3;
 
 /// The most pages one holder's write takes, whole.
 pub const HOLDER_PAGES: u64 = 64;
@@ -1760,13 +1761,13 @@ mod tests {
     /// two pages, two holders' writes (one of them twice) and a write the
     /// pager makes, each step an atomic action on the object under its
     /// pager's lock, driven through every interleaving. They follow
-    /// `kernel/src/object/paged.rs` and the file server: a read restarts where
-    /// a write began, waits where one is under way, and after
-    /// [`READ_RESTARTS`] asks the pager, which reads under its hold; a holder's
-    /// write that cannot take the side asks the pager, which writes it after
-    /// what it was asked before. Every read is one write's generation, no two
-    /// writes are under way at once, nothing deadlocks, and no holder's write
-    /// takes the side while the pager waits for it.
+    /// `kernel/src/object/paged.rs` and the file server: a read that meets a
+    /// write, begun or under way, waits for its end and reads again, and at
+    /// the [`WRITES_A_READ_MEETS`]th asks the pager, which reads under its
+    /// hold; a holder's write that cannot take the side asks the pager, which
+    /// writes it after what it was asked before. Every read is one write's
+    /// generation, no two writes are under way at once, nothing deadlocks,
+    /// and no holder's write takes the side while the pager waits for it.
     #[test]
     fn every_interleaving_reads_whole_writes_one_at_a_time_and_the_pager_is_not_overtaken() {
         use std::collections::HashSet;
@@ -1779,9 +1780,9 @@ mod tests {
         }
         #[derive(Clone, PartialEq, Eq, Hash)]
         enum Reader {
-            Begin { restarts: u32 },
-            Waiting { restarts: u32 },
-            Copy { v: Version, at: usize, got: [u64; 2], restarts: u32 },
+            Begin { met: u32 },
+            Waiting { met: u32 },
+            Copy { v: Version, at: usize, got: [u64; 2], met: u32 },
             Asked,
             Done,
         }
@@ -1808,37 +1809,43 @@ mod tests {
             asked: Vec<Ask>,
         }
 
+        /// The read met one more write, once: it waits for its end, or asks
+        /// the pager.
+        fn meets(asked: &mut Vec<Ask>, met: u32) -> Reader {
+            if met + 1 >= WRITES_A_READ_MEETS {
+                asked.push(Ask::Read);
+                Reader::Asked
+            } else {
+                Reader::Waiting { met: met + 1 }
+            }
+        }
+
         fn steps(w: &World) -> Vec<World> {
             let mut next = Vec::new();
             let mut r = w.clone();
             match w.reader.clone() {
-                Reader::Begin { restarts } if restarts >= READ_RESTARTS => {
-                    r.asked.push(Ask::Read);
-                    r.reader = Reader::Asked;
-                    next.push(r);
-                }
-                Reader::Begin { restarts } => {
+                Reader::Begin { met } => {
                     r.reader = match r.o.read_begin() {
-                        Some(v) => Reader::Copy { v, at: 0, got: [0; 2], restarts },
-                        None => Reader::Waiting { restarts: restarts + 1 },
+                        Some(v) => Reader::Copy { v, at: 0, got: [0; 2], met },
+                        None => meets(&mut r.asked, met),
                     };
                     next.push(r);
                 }
-                Reader::Waiting { restarts } if w.o.read_begin().is_some() => {
-                    r.reader = Reader::Begin { restarts };
+                Reader::Waiting { met } if w.o.read_begin().is_some() => {
+                    r.reader = Reader::Begin { met };
                     next.push(r);
                 }
-                Reader::Copy { v, at, mut got, restarts } if at < 2 => {
+                Reader::Copy { v, at, mut got, met } if at < 2 => {
                     got[at] = w.page[at];
-                    r.reader = Reader::Copy { v, at: at + 1, got, restarts };
+                    r.reader = Reader::Copy { v, at: at + 1, got, met };
                     next.push(r);
                 }
-                Reader::Copy { v, got, restarts, .. } => {
+                Reader::Copy { v, got, met, .. } => {
                     if r.o.unchanged(v) {
                         assert_eq!(got[0], got[1], "a read met half a write");
                         r.reader = Reader::Done;
                     } else {
-                        r.reader = Reader::Begin { restarts: restarts + 1 };
+                        r.reader = meets(&mut r.asked, met);
                     }
                     next.push(r);
                 }
@@ -1925,7 +1932,7 @@ mod tests {
         let start = World {
             o: p.object(1, 2 * PAGE),
             page: [0; 2],
-            reader: Reader::Begin { restarts: 0 },
+            reader: Reader::Begin { met: 0 },
             writers: [Writer::Take(vec![1, 2]), Writer::Take(vec![3])],
             pager: Pager::Idle,
             asked: vec![Ask::Write(4)],
@@ -2031,7 +2038,7 @@ mod tests {
             /// The read waits; `false` once it answered.
             waits: bool,
             /// The writes the read met.
-            restarts: u32,
+            met: u32,
             asked: bool,
             next: u64,
         }
@@ -2044,7 +2051,7 @@ mod tests {
                 let since = o.read_begin().unwrap();
                 let mut want = Want::NONE;
                 want.ask(0, 1);
-                World { p, o, since, want, waits: true, restarts: 0, asked: false, next: 10 }
+                World { p, o, since, want, waits: true, met: 0, asked: false, next: 10 }
             }
 
             pub(super) fn step(&mut self, step: Step) -> bool {
@@ -2082,11 +2089,12 @@ mod tests {
                     }
                     Step::Look if self.waits && self.p.wait_over(&self.o, 0, self.since) => {
                         // As the read loop: a moved version begins the read
-                        // again, asking anew, until it met `READ_RESTARTS`
-                        // writes and asks the pager; else the page decides.
+                        // again, asking anew, until it met
+                        // `WRITES_A_READ_MEETS` writes and asks the pager;
+                        // else the page decides.
                         if !self.o.unchanged(self.since) {
-                            self.restarts += 1;
-                            if self.restarts >= READ_RESTARTS {
+                            self.met += 1;
+                            if self.met >= WRITES_A_READ_MEETS {
                                 self.waits = false;
                                 return true;
                             }
