@@ -336,6 +336,7 @@ pub(crate) fn reap_finished() {
     if !REAP_GATE.take() {
         return;
     }
+    crate::trace::mark(500);
     // Dropped after the guard: an entry's drop releases what it held.
     let reaped = {
         let mut guard = process::PROCESS_TABLE.lock();
@@ -344,7 +345,9 @@ pub(crate) fn reap_finished() {
         // runs on the per-CPU idle stack, which is what `IdleProof` requires.
         process::reap_finished(table, unsafe { process::IdleProof::new_unchecked() })
     };
+    crate::trace::mark(501);
     drop(reaped);
+    crate::trace::mark(502);
 }
 
 /// Cumulative CPU time; a running thread's live slice is added by the reader.

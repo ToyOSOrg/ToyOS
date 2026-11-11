@@ -140,6 +140,7 @@ pub fn spawn<C: Commit>(
     let admission = Admission::ask(parent)?;
     let charge = ProcessData::charge(&job, path).map_err(SyscallError::from)?;
     let t0 = crate::clock::nanos_since_boot();
+    crate::trace::mark(110);
 
     let Program { maps, entry, image_base, build_id } = program;
     // Inside a range the child may execute, which `spawn_program` placed in the user half.
@@ -155,6 +156,7 @@ pub fn spawn<C: Commit>(
         log!("spawn: {}: no address space: every user PCID is held, or no frame is left for its root", path);
         return Err(SyscallError::ResourceExhausted.into());
     };
+    crate::trace::mark(111);
     let (stack_base, sp) = {
         use kernel::vm::Prot;
         let mut space = child_pt.lock();
@@ -163,12 +165,14 @@ pub fn spawn<C: Commit>(
             log!("spawn: {}: a range meets another or the clock page, or is refused: {:?}", path, e);
             return Err(e.into());
         }
+        crate::trace::mark(112);
         // Never executable, and a reserved guard below it, so running off the
         // stack's bottom faults instead of writing what lies there.
         let stack_base = space.reserve_above_guard(STACK_GUARD, USER_STACK_SIZE as u64, Prot::ReadWrite)?;
         (stack_base, stack_base.raw() + USER_STACK_SIZE as u64)
     };
 
+    crate::trace::mark(113);
     // What a crash record names a frame by.
     let image = Arc::new(UserImage { name: String::from(path), build_id, start, end, bias: image_base });
 
@@ -180,12 +184,15 @@ pub fn spawn<C: Commit>(
         }
     };
 
+    crate::trace::mark(114);
     let pid = admission.pid();
     let object = crate::object::process::ProcessObject::new(pid).map_err(SyscallError::from)?;
     let notice = crate::object::notice::NoticeObject::new().map_err(SyscallError::from)?;
+    crate::trace::mark(115);
     // The point of no return: every failure above answers the caller with its
     // table untouched.
     let (handles, endowments, held) = commit.commit(start::Own::new(&object, &notice))?;
+    crate::trace::mark(116);
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         space: Arc::clone(&child_pt),
@@ -205,6 +212,7 @@ pub fn spawn<C: Commit>(
     #[cfg(feature = "test-actuators")]
     crate::process::debug_kill_marked_place(parent);
 
+    crate::trace::mark(117);
     let mut guard = PROCESS_TABLE.lock();
     let ((), retire) = admission.land(guard.as_mut().unwrap(), |table, node| {
         table.insert(ProcessEntry::new(
@@ -244,8 +252,10 @@ pub fn spawn<C: Commit>(
     #[cfg(feature = "test-actuators")]
     crate::process::debug_hold_marked_spawn(parent, &object);
 
+    crate::trace::mark(118);
     let t3 = crate::clock::nanos_since_boot();
     log!("spawn: {} pid={} (total={}ms)", path, pid, (t3 - t0) / 1_000_000);
+    crate::trace::mark(119);
 
     Ok((pid, held))
 }

@@ -874,6 +874,7 @@ fn owned_frame(start: u64, entry: &SpaceEntry, page: u64) -> u64 {
 /// futex waiter is keyed on its frames and no copy pins them.
 impl Drop for AddressSpace {
     fn drop(&mut self) {
+        crate::trace::mark(510);
         let committed = self.committed_pages(FLOOR, TOP);
         self.tables.edit(FLOOR, TOP, |_, leaf| matches!(leaf, Leaf::Mapped(Mapping { owned: false, .. })).then_some(Leaf::Empty));
         let mut freed = 0;
@@ -884,5 +885,6 @@ impl Drop for AddressSpace {
         });
         self.usage.freed(freed);
         pmm::unpromise(&self.job, committed - freed);
+        crate::trace::mark(511);
     }
 }
