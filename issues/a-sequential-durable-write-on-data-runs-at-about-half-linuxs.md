@@ -90,7 +90,17 @@ Where a round's time goes with #1216 (one boot a bench with stage timers):
   the 8 MiB and the commit's two Flushes 8.5 to 11.4 ms; the drive's slow
   mode decides it.
 
-**Not yet established.** The T14's fast mode, with one boot an arm.
+**Not yet established.**
+
+- #1216's code after its review on the benches: a group of fresh extents
+  now changes its bucket once (one LRU move) rather than once an extent.
+  The figures above are of cc718f61f.
+- The T14's fast mode, with one boot an arm.
+- On the T14 the free figure DATA's mount prints fell by 512 KiB after one
+  boot of cc718f61f, and after no other boot of either bench: one more
+  occupied bucket or one more btree node. Every mount's figure across the
+  next boots settles it: back up means transient metadata, steady means a
+  one-time change, a further drop after a boot of #1216 means a leak.
 
 **Exit.** `persist.seq_write_fsync` and `fs.disk.seq_write.1048576` at or
 above Linux's on both benches, in every boot of a back-to-back session, or
