@@ -1,6 +1,7 @@
 //! Processes and threads in more depth than `system`'s: what a program's
 //! size costs its spawn, C's `posix_spawn` beside std's `Command`, a
-//! spawn-and-wait loop, and a thread's stack size.
+//! spawn-and-wait loop, a console program's launch to its first output, and
+//! a thread's stack size.
 //!
 //! **The tiny and large programs are written here**, the same bytes on both
 //! systems but the exit call each kernel takes: a position-independent ELF of
@@ -11,14 +12,16 @@
 
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
+use std::time::Instant;
 
 use crate::files::Scratch;
 use crate::measure::{each, io};
-use crate::report::refuse;
-use crate::sys;
+use crate::report::{refuse, result};
+use crate::{ns_since, sys};
 
 /// The large program's untouched data: 32 MiB.
 const LARGE: usize = 32 << 20;
@@ -144,6 +147,36 @@ fn c_spawn_wait(path: &CString, argv: &[&CString]) -> Result<(), sys::Refused> {
     if status != 0 { Err(sys::Refused::Failed(format!("the child's wait status was {status:#x}"))) } else { Ok(()) }
 }
 
+/// `exe hello` from its spawn to the first byte it writes, ns. The child's
+/// end and the wait for it are outside the time.
+fn first_output(exe: &Path) -> Result<u64, String> {
+    let t = Instant::now();
+    let mut child = io("spawn", Command::new(exe).arg("hello").stdin(Stdio::null()).stdout(Stdio::piped()).spawn())?;
+    let said = child.stdout.take().expect("a piped stdout").read_exact(&mut [0]);
+    let took = ns_since(t);
+    let status = io("wait", child.wait())?;
+    io("the child's first byte", said)?;
+    if status.success() { Ok(took) } else { Err(format!("the child ended {status}")) }
+}
+
+/// This program, std and all, launched warm to its first line of output,
+/// which is where a console program is usable: 100 after 10, which leave its
+/// file in memory on both systems.
+fn launch(exe: &Path, file_bytes: String) {
+    const BENCH: &str = "proc.launch.first_output";
+    let run = || -> Result<Vec<u64>, String> {
+        for _ in 0..10 {
+            first_output(exe)?;
+        }
+        crate::clock::settle();
+        (0..100).map(|_| first_output(exe)).collect()
+    };
+    match run() {
+        Ok(mut ns) => result(BENCH, "ns", &mut ns, &[("file_bytes", file_bytes)]),
+        Err(why) => refuse(BENCH, why),
+    }
+}
+
 pub fn suite() {
     let memory = crate::files::memory().dir;
     let dir = match Scratch::new(&memory) {
@@ -193,6 +226,7 @@ pub fn suite() {
                 }),
                 Err(refused) => refused.report("proc.posix_spawn_wait.std"),
             }
+            launch(&exe, size(&exe));
         }
         Err(e) => refuse("proc.posix_spawn_wait.std", e),
     }
