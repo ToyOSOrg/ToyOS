@@ -17,7 +17,8 @@
 #[path = "../image.rs"]
 mod image;
 
-use toyos_abi::syscall::{self, debug_action, EndowEntry, SpawnArgs, SyscallError};
+use toyos_abi::syscall::{self, debug_action, SpawnEndow, SpawnArgs, SyscallError};
+use toyos_abi::handle::TransferEntry;
 use toyos_abi::RawHandle;
 use toyos_abi::end::End;
 
@@ -100,8 +101,8 @@ fn hold_the_next_spawn() {
 /// descriptor 1, which moves only on a spawn that happens.
 fn spawn(laid: &image::Laid, stdout: Option<RawHandle>) -> Result<RawHandle, SyscallError> {
     const LABEL: &str = "fd:1";
-    let endow: Vec<EndowEntry> =
-        stdout.into_iter().map(|handle| EndowEntry { label_off: 0, label_len: LABEL.len() as u32, handle, _pad: 0 }).collect();
+    let endow: Vec<SpawnEndow> =
+        stdout.into_iter().map(|handle| SpawnEndow { label_off: 0, label_len: LABEL.len() as u32, moved: TransferEntry::unchanged(handle) }).collect();
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,

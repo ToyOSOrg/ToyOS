@@ -21,6 +21,7 @@ use toyos_abi::syscall::{
     self, Received, SyscallError, MAX_MESSAGE_LEN, MAX_QUEUED_HANDLES, MAX_QUEUED_MESSAGES, MAX_TRANSFER_HANDLES,
     PIPE_CAPACITY,
 };
+use toyos_abi::handle::TransferEntry;
 use toyos_abi::RawHandle;
 
 /// A failure ceiling only: an answer that never comes is the defect.
@@ -47,7 +48,7 @@ fn main() {
 }
 
 fn send(conn: &Connection, bytes: &[u8], handles: Vec<OwnedHandle>, nonblock: bool) -> Result<(), SyscallError> {
-    let raw: Vec<RawHandle> = handles.iter().map(|h| h.as_handle().raw()).collect();
+    let raw: Vec<TransferEntry> = handles.iter().map(|h| TransferEntry::unchanged(h.as_handle().raw())).collect();
     // SAFETY: the handles are this process's; on success they are the peer's
     // and forgotten here, and on a refusal they are still here and close as
     // they drop.

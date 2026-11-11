@@ -301,13 +301,14 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects, laid: &toyos_kimage::
         _pad: 0,
     });
     labels.extend_from_slice(label.as_bytes());
-    for (label, object) in [
-        (toyos_abi::syscall::FILESERVER_IMAGE_LABEL, &images.fileserver),
-        (toyos_abi::syscall::ROOT_IMAGE_LABEL, &images.root),
-        (toyos_abi::syscall::BOOT_NAMES_LABEL, &images.names),
+    // The two images go on to the file server; the names are the supervisor's to read.
+    for (label, object, keeps) in [
+        (toyos_abi::syscall::FILESERVER_IMAGE_LABEL, &images.fileserver, None),
+        (toyos_abi::syscall::ROOT_IMAGE_LABEL, &images.root, None),
+        (toyos_abi::syscall::BOOT_NAMES_LABEL, &images.names, Some(toyos_abi::handle::Rights::MAP)),
     ] {
         let object = KObjectRef::SharedMem(Arc::clone(object));
-        let rights = ops::initial_rights(&object);
+        let rights = keeps.unwrap_or_else(|| ops::initial_rights(&object));
         let handle = handles
             .install(crate::object::HandleEntry::new(object, rights))
             .expect("spawn_supervisor: a table of four handles refused a boot image");

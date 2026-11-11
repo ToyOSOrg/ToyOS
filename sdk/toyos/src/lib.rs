@@ -146,6 +146,36 @@ pub fn null(rights: toyos_abi::handle::Rights) -> Result<OwnedHandle, toyos_abi:
 /// travels, the currency of [`Connection::send_with`].
 pub struct OwnedHandle(pub(crate) RawHandle);
 
+/// A handle a move takes ([`Connection::send_moved`], a spawn's endowment),
+/// and what it carries where it arrives: its own rights, as any
+/// [`OwnedHandle`] converts, or fewer ([`OwnedHandle::arriving_with`]).
+pub struct Moved {
+    pub(crate) handle: OwnedHandle,
+    pub(crate) rights: Option<toyos_abi::handle::Rights>,
+}
+
+impl Moved {
+    /// What the kernel is asked to move this by.
+    pub(crate) fn entry(&self) -> toyos_abi::handle::TransferEntry {
+        let handle = self.handle.raw();
+        self.rights.map_or(toyos_abi::handle::TransferEntry::unchanged(handle), |rights| {
+            toyos_abi::handle::TransferEntry::narrowed(handle, rights)
+        })
+    }
+}
+
+impl AsHandle for Moved {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        self.handle.as_handle()
+    }
+}
+
+impl From<OwnedHandle> for Moved {
+    fn from(handle: OwnedHandle) -> Self {
+        Self { handle, rights: None }
+    }
+}
+
 impl OwnedHandle {
     /// Take ownership of a handle this process holds.
     ///
@@ -160,6 +190,13 @@ impl OwnedHandle {
     }
 
     pub(crate) fn raw(&self) -> RawHandle { self.0 }
+
+    /// This handle as a move takes it, carrying only `rights` where it
+    /// arrives: the move is refused `PermissionDenied` for any this one does
+    /// not carry. Without `TRANSFER`, its receiver cannot pass it on.
+    pub fn arriving_with(self, rights: toyos_abi::handle::Rights) -> Moved {
+        Moved { handle: self, rights: Some(rights) }
+    }
 
     /// [`BorrowedHandle::try_clone_to_owned`].
     pub fn try_clone(&self) -> Result<OwnedHandle, toyos_abi::syscall::SyscallError> {

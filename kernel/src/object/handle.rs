@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
 use toyos_abi::handle::{RawHandle, Rights};
-use toyos_abi::syscall::SyscallError;
+use toyos_abi::syscall::{SyscallError, MAX_TRANSFER_HANDLES};
 
 use crate::mm::charge::{self, Charge};
 
@@ -134,6 +134,13 @@ impl HandleEntry {
             return Err(HandleError::Rights { held: self.rights, needed: rights });
         }
         Ok(Self::new(self.object.clone(), rights))
+    }
+
+    /// This handle as a move delivers it: `rights` is [`HandleTable::rights_to_move`]'s answer.
+    pub fn arriving_with(mut self, rights: Rights) -> Self {
+        assert!(rights.subset_of(self.rights), "a move widened {:?} to {rights:?}", self.rights);
+        self.rights = rights;
+        self
     }
 }
 
@@ -298,6 +305,19 @@ impl HandleTable {
         Ok(self.entry_of(h)?.rights)
     }
 
+    /// What a move of `h` delivers: `want`, or the handle's own set. Refused
+    /// without `TRANSFER`, and for a `want` the handle does not carry.
+    pub fn rights_to_move(&self, h: RawHandle, want: Option<Rights>) -> Result<Rights, HandleError> {
+        let held = self.rights_of(h)?;
+        if !held.contains(Rights::TRANSFER) {
+            return Err(HandleError::Rights { held, needed: Rights::TRANSFER });
+        }
+        match want {
+            Some(want) if !want.subset_of(held) => Err(HandleError::Rights { held, needed: want }),
+            want => Ok(want.unwrap_or(held)),
+        }
+    }
+
     /// Take a handle out of the table and retire its slot.
     #[must_use = "the removed entry must be dropped by the caller"]
     pub fn remove(&mut self, h: RawHandle) -> Result<HandleEntry, HandleError> {
@@ -353,28 +373,33 @@ impl HandleTable {
         *vacancy = Some(entry);
     }
 
-    /// Move `handles` into `sink`; if `sink` refuses, every handle is restored to its own slot.
+    /// Move `handles` into `sink`, each arriving with the rights beside it
+    /// ([`rights_to_move`](Self::rights_to_move)); if `sink` refuses, every
+    /// handle is restored to its own slot with the rights it had.
     // A refused transfer must not drop the entries: the caller was told nothing happened.
     pub fn transfer<E>(
         &mut self,
-        handles: &[RawHandle],
+        handles: &[(RawHandle, Rights)],
         sink: impl FnOnce(Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, E)>,
     ) -> Result<(), E> {
         let mut batch = Vec::with_capacity(handles.len());
-        for h in handles {
-            batch.push(
-                self.take_for_transfer(*h).expect("a handle verified under this same hold"),
-            );
+        let mut held = [Rights::NONE; MAX_TRANSFER_HANDLES];
+        let held = &mut held[..handles.len()];
+        for ((h, rights), held) in handles.iter().zip(held.iter_mut()) {
+            let entry = self.take_for_transfer(*h).expect("a handle verified under this same hold");
+            *held = entry.rights;
+            batch.push(entry.arriving_with(*rights));
         }
         match sink(batch) {
             Ok(()) => {
-                for h in handles {
+                for (h, _) in handles {
                     self.retire(*h);
                 }
                 Ok(())
             }
             Err((batch, e)) => {
-                for (h, entry) in handles.iter().zip(batch) {
+                for (((h, _), mut entry), held) in handles.iter().zip(batch).zip(held.iter()) {
+                    entry.rights = *held;
                     self.give_back(*h, entry);
                 }
                 Err(e)

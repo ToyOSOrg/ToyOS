@@ -45,6 +45,16 @@ pub trait CommandExt {
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn endow(&mut self, label: &str, handle: crate::os::toyos::io::OwnedHandle) -> &mut Self;
 
+    /// [`endow`](CommandExt::endow), the child's handle carrying only the
+    /// rights whose bits `rights` holds: without the right to be moved, the
+    /// child cannot pass it on. The spawn is refused `PermissionDenied` for a
+    /// right `handle` does not carry.
+    ///
+    /// # Panics
+    /// If `rights` has a bit no right uses.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn endow_narrowed(&mut self, label: &str, handle: crate::os::toyos::io::OwnedHandle, rights: u32) -> &mut Self;
+
     /// Put `connector` in an [`independent`](CommandExt::independent)
     /// child's namespace under `name`, on top of what its manifest row holds.
     ///
@@ -162,6 +172,12 @@ impl CommandExt for crate::process::Command {
 
     fn endow(&mut self, label: &str, handle: crate::os::toyos::io::OwnedHandle) -> &mut Self {
         self.as_inner_mut().endow(label, handle);
+        self
+    }
+
+    fn endow_narrowed(&mut self, label: &str, handle: crate::os::toyos::io::OwnedHandle, rights: u32) -> &mut Self {
+        let rights = toyos_abi::handle::Rights::from_bits(rights).expect("a rights word with a bit no right uses");
+        self.as_inner_mut().endow_narrowed(label, handle, rights);
         self
     }
 

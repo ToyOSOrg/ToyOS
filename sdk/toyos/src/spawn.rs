@@ -18,8 +18,9 @@
 //! **The job the child joins is no endowment of that kind**: a launch carries
 //! it too. The one endowed under [`JOB_LABEL`], or else this process's own.
 
+use toyos_abi::handle::TransferEntry;
 use toyos_abi::syscall::{
-    self, EndowEntry, SpawnArgs, SyscallError, FD_PREFIX, JOB_LABEL, MAX_PROCESS_NAME, MAX_SPAWN_ENDOWMENTS,
+    self, SpawnArgs, SpawnEndow, SyscallError, FD_PREFIX, JOB_LABEL, MAX_PROCESS_NAME, MAX_SPAWN_ENDOWMENTS,
     MAX_SPAWN_LABELS_LEN, SVC_LABEL,
 };
 
@@ -30,7 +31,7 @@ use crate::process::{Image, Process};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{AsHandle, BorrowedHandle, OwnedHandle, RawHandle};
+use crate::{AsHandle, BorrowedHandle, Moved, OwnedHandle, RawHandle};
 
 /// Whom a child is placed under, whose end takes it down.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -69,11 +70,12 @@ pub struct Spawn<'a> {
     /// end the caller exported for this child (`net::Exporter`), which no
     /// other child is given. A launch carries 0 to 2 alone.
     pub fds: &'a [(u32, BorrowedHandle<'a>, FdKind)],
-    /// `(label, handle)` the child is endowed, each moved: by a spawn that
+    /// `(label, handle)` the child is endowed, each moved, with the rights
+    /// its [`Moved`] names: by a spawn that
     /// happens to the child, and closed by one refused. One under
     /// [`JOB_LABEL`] is the job the child joins, which a launch carries too;
     /// any other only a helper takes.
-    pub endow: Vec<(&'a str, OwnedHandle)>,
+    pub endow: Vec<(&'a str, Moved)>,
     /// `(name, connector)` put in a launched child's namespace beside its
     /// row's, each moved as `endow`'s are.
     pub provided: Vec<(&'a str, OwnedHandle)>,
@@ -224,21 +226,21 @@ impl Helper<'_> {
         if s.endow.len() + s.fds.len() + usize::from(!names_svc) > MAX_SPAWN_ENDOWMENTS {
             return Err(Refused::Invalid("more endowments and descriptors than a spawn carries"));
         }
-        let mut entries = [EndowEntry { label_off: 0, label_len: 0, handle: RawHandle(0), _pad: 0 }; MAX_SPAWN_ENDOWMENTS];
+        let mut entries = [SpawnEndow { label_off: 0, label_len: 0, moved: TransferEntry::unchanged(RawHandle(0)) }; MAX_SPAWN_ENDOWMENTS];
         let mut labels = [0u8; MAX_SPAWN_LABELS_LEN];
         let (mut count, mut used) = (0, 0);
         // Duplicates rather than the handles themselves: an endowment is a
         // move, and a parent that gave its namespace or its stdout away could
         // not spawn a second child. Every handle the spawn moves is held here
         // until it has: closed by a refusal, given up by a spawn.
-        let mut moved: Vec<OwnedHandle> = Vec::new();
+        let mut moved: Vec<Moved> = Vec::new();
         let svc = match crate::endow::namespace().filter(|_| !names_svc) {
             Some(ns) => Some(ns.as_handle().try_clone_to_owned().map_err(Refused::Syscall)?),
             None => None,
         };
         let mut number = [0u8; 10];
         let mut group_number = [0u8; 10];
-        let mut put = |label: &[&[u8]], handle: RawHandle, count: &mut usize, used: &mut usize| {
+        let mut put = |label: &[&[u8]], moved: TransferEntry, count: &mut usize, used: &mut usize| {
             let len: usize = label.iter().map(|part| part.len()).sum();
             let room = labels.get_mut(*used..*used + len).ok_or(Refused::Invalid("endowment labels past what a spawn carries"))?;
             let mut at = 0;
@@ -246,29 +248,30 @@ impl Helper<'_> {
                 room[at..at + part.len()].copy_from_slice(part);
                 at += part.len();
             }
-            entries[*count] = EndowEntry { label_off: *used as u32, label_len: len as u32, handle, _pad: 0 };
+            entries[*count] = SpawnEndow { label_off: *used as u32, label_len: len as u32, moved };
             (*count, *used) = (*count + 1, *used + len);
             Ok(())
         };
         for (label, handle) in s.endow {
-            put(&[label.as_bytes()], handle.as_handle().raw(), &mut count, &mut used)?;
+            put(&[label.as_bytes()], handle.entry(), &mut count, &mut used)?;
             moved.push(handle);
         }
         if let Some(svc) = svc {
-            put(&[SVC_LABEL.as_bytes()], svc.as_handle().raw(), &mut count, &mut used)?;
+            let svc = Moved::from(svc);
+            put(&[SVC_LABEL.as_bytes()], svc.entry(), &mut count, &mut used)?;
             moved.push(svc);
         }
         for &(fd, handle, kind) in s.fds {
-            let copy = handle.try_clone_to_owned().map_err(Refused::Syscall)?;
+            let copy = Moved::from(handle.try_clone_to_owned().map_err(Refused::Syscall)?);
             let digits = decimal(fd, &mut number);
             if kind == FdKind::File {
                 // Duplicated file actions may name one exported connection
                 // several times. The child adopts it once and aliases its fd.
                 let group = s.fds.iter().find(|(_, h, k)| *k == FdKind::File && h.raw() == handle.raw())
                     .expect("this descriptor is in the spawn").0;
-                put(&[FD_PREFIX.as_bytes(), digits, b":file:", decimal(group, &mut group_number)], copy.as_handle().raw(), &mut count, &mut used)?;
+                put(&[FD_PREFIX.as_bytes(), digits, b":file:", decimal(group, &mut group_number)], copy.entry(), &mut count, &mut used)?;
             } else {
-                put(&[FD_PREFIX.as_bytes(), digits, kind.suffix().as_bytes()], copy.as_handle().raw(), &mut count, &mut used)?;
+                put(&[FD_PREFIX.as_bytes(), digits, kind.suffix().as_bytes()], copy.entry(), &mut count, &mut used)?;
             }
             moved.push(copy);
         }
@@ -299,7 +302,7 @@ impl Helper<'_> {
         match unsafe { syscall::spawn(&args) } {
             Ok(handle) => {
                 // The spawn moved them into the child.
-                moved.into_iter().for_each(|handle| { handle.into_raw(); });
+                moved.into_iter().for_each(|moved| { moved.handle.into_raw(); });
                 // SAFETY: the kernel installed this handle for this call and no other.
                 Ok(unsafe { Process::from_raw(handle) })
             }
@@ -345,7 +348,10 @@ impl Independent<'_> {
             return Err(Refused::Invalid("a launch carries descriptors 0 to 2 alone"));
         }
         let job = match s.endow.iter().position(|(label, _)| *label == JOB_LABEL) {
-            Some(at) => s.endow.swap_remove(at).1,
+            Some(at) => match s.endow.swap_remove(at).1 {
+                Moved { handle, rights: None } => handle,
+                Moved { rights: Some(_), .. } => return Err(Refused::Invalid("a launch's job goes with the rights it has")),
+            },
             None => crate::job::own().map_err(Refused::Syscall)?.0,
         };
         let parent = match place {

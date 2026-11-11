@@ -74,4 +74,24 @@ the next reader will ask why a class this wide was left open.
 So it stays open, and what it is waiting on is a decision rather than an
 instrument.
 
+## Taken up as (1), 2026-11-11
+
+Staged as its own change, after the one that gave both moves a rights word:
+`SYS_MESSAGE_RECV` writes `(RawHandle, ObjectKind)`, read in the hold that
+installs the handle, and the SDK makes a typed wrapper of a received handle
+only through a checked conversion. Its review set three constraints:
+
+- `ObjectKind` becomes a contract and not a census detail: its values are
+  never renumbered, and the SDK refuses a kind it does not know.
+- It does not replace `fstat` for a region: `SharedMemory::lent` also needs
+  whether it is RAM, and its size.
+- The pair carries the kind alone. A missing right already answers
+  `PermissionDenied` and ends nobody, so reporting rights has no caller.
+
+**Its reach is wider than `toyos::launch`.** Both event sides are typed
+(`sys_event_signal`, `sys_event_take`) and answer `Unknown`, and a client
+takes bells from its server and uses them typed in `sdk/toyos/src/audio.rs`,
+`sdk/toyos/src/net/stream.rs`, `sdk/toyos/src/net/socket.rs` and
+`lib/link/src/driver.rs`. Read from the code, not exercised.
+
 `launcher_refusals` is deleted; `issues/parallel-tests-red-under-other-suites.md` records the commit that restores it.

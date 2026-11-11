@@ -19,12 +19,12 @@ use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
 use crate::{message, pipe, process};
 
-use toyos_abi::handle::{RawHandle, Rights};
+use toyos_abi::handle::{NotRights, RawHandle, Rights, TransferEntry};
 use toyos_abi::syscall::*;
 use kernel::sched::task::WaitClass;
 use kernel::vm::Prot;
 
-use super::{cancelled, HANDLE_LEN};
+use super::{cancelled, HANDLE_LEN, TRANSFER_ENTRY_LEN};
 use super::handles::handle_result;
 
 pub(super) fn sys_pipe() -> u64 {
@@ -447,8 +447,8 @@ pub(super) struct Incoming<'a> {
 }
 
 /// Queue a whole message on a connection and move its handles to the peer,
-/// together or not at all ([`toyos_abi::syscall::message_send`]). Rights,
-/// `TRANSFER` included, travel unchanged. Waits for room unless `nonblock`.
+/// together or not at all ([`toyos_abi::syscall::message_send`]), each with
+/// the rights its [`TransferEntry`] names. Waits for room unless `nonblock`.
 pub(super) fn sys_message_send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> u64 {
     send(conn_h, out, nonblock).map_or_else(|word| word, |()| 0)
 }
@@ -460,30 +460,30 @@ pub(super) fn sys_message_recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonbl
 
 /// [`sys_message_send`]'s work, or the word its refusal answers.
 fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64> {
-    let mut wanted = [RawHandle(0); MAX_TRANSFER_HANDLES];
+    let mut wanted = [(RawHandle(0), None); MAX_TRANSFER_HANDLES];
     for (i, slot) in wanted.iter_mut().enumerate().take(out.count) {
-        let mut raw = [0u8; HANDLE_LEN];
-        out.handles.read_at(i * HANDLE_LEN, &mut raw).map_err(|faulted| SyscallError::from(faulted).to_u64())?;
-        *slot = RawHandle(u32::from_ne_bytes(raw));
+        let mut entry: TransferEntry = toyos_abi::usersafe::zeroed();
+        out.handles
+            .read_at(i * TRANSFER_ENTRY_LEN, toyos_abi::usersafe::bytes_mut(&mut entry))
+            .map_err(|faulted| SyscallError::from(faulted).to_u64())?;
+        *slot = (entry.handle, entry.rights().map_err(|NotRights| SyscallError::InvalidArgument.to_u64())?);
     }
     let wanted = &wanted[..out.count];
     // `TRANSFER` on the connection only when it carries handles: bytes alone
     // are a write, which `WRITE` already allows.
     let need = if out.count == 0 { Rights::WRITE } else { Rights::WRITE.union(Rights::TRANSFER) };
     // Every handle is checked before anything is queued or moved, and again
-    // under the hold that moves them.
+    // under the hold that moves them: the answer is what each arrives with.
     let checked = |data: &process::ProcessData| {
         let conn = data.handles.get::<ConnectionEnd>(conn_h, need)?;
-        for (i, h) in wanted.iter().enumerate() {
-            if *h == conn_h || wanted[..i].contains(h) {
+        let mut moving = [(RawHandle(0), Rights::NONE); MAX_TRANSFER_HANDLES];
+        for (i, (h, want)) in wanted.iter().enumerate() {
+            if *h == conn_h || wanted[..i].iter().any(|(seen, _)| seen == h) {
                 return Err(SyscallError::InvalidArgument.into());
             }
-            let rights = data.handles.rights_of(*h)?;
-            if !rights.contains(Rights::TRANSFER) {
-                return Err(SyscallError::PermissionDenied.into());
-            }
+            moving[i] = (*h, data.handles.rights_to_move(*h, *want)?);
         }
-        Ok::<_, crate::object::Refusal>(conn.tx().clone())
+        Ok::<_, crate::object::Refusal>((conn.tx().clone(), moving))
     };
 
     // The message's bytes, copied in once before any lock.
@@ -492,8 +492,8 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
     let parkable = crate::scheduler::Parkable::at_entry();
     loop {
         let moved = process::with_process_data(|data| {
-            let tx = checked(data)?;
-            let (moved, handed) = move_handles(data, wanted, |batch| tx.send_now(src, batch));
+            let (tx, moving) = checked(data)?;
+            let (moved, handed) = move_handles(data, &moving[..out.count], |batch| tx.send_now(src, batch));
             Ok::<_, crate::object::Refusal>((tx, moved, handed))
         });
         let (tx, refused) = match moved {
@@ -507,8 +507,8 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
                 let refused = match tx.claim_send(&parkable, src, out.count) {
                     Ok(mut claim) => {
                         let moved = process::with_process_data(|data| {
-                            checked(data)?;
-                            Ok::<_, crate::object::Refusal>(move_handles(data, wanted, |batch| claim.commit(batch)))
+                            let (_, moving) = checked(data)?;
+                            Ok::<_, crate::object::Refusal>(move_handles(data, &moving[..out.count], |batch| claim.commit(batch)))
                         });
                         drop(claim);
                         match moved {
@@ -542,7 +542,8 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
     }
 }
 
-/// Move `wanted`'s handles, checked under this same hold, through `sink`,
+/// Move `wanted`'s handles, checked under this same hold and each arriving
+/// with the rights beside it, through `sink`,
 /// which queues them with their message or refuses and hands them back. A
 /// device claim that moves takes back every mapping made through it: what it
 /// handed out is taken off it here, before the send shows it to a receiver
@@ -551,12 +552,12 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
 /// so it is invisible.
 fn move_handles<E>(
     data: &mut process::ProcessData,
-    wanted: &[RawHandle],
+    wanted: &[(RawHandle, Rights)],
     sink: impl FnOnce(Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, E)>,
 ) -> (Result<(), E>, Vec<crate::pcidev::Handed>) {
     let claims: Vec<_> = wanted
         .iter()
-        .filter_map(|h| data.handles.get::<crate::object::device::DeviceClaim>(*h, Rights::TRANSFER).ok())
+        .filter_map(|(h, _)| data.handles.get::<crate::object::device::DeviceClaim>(*h, Rights::TRANSFER).ok())
         .filter_map(|claim| claim.take_mappings().map(|handed| (claim, handed)))
         .collect();
     let moved = data.handles.transfer(wanted, sink);

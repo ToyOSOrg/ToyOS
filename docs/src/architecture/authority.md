@@ -25,9 +25,14 @@
 
 - A holder can duplicate a handle with the same or fewer rights, if the handle
   allows duplication, never with more.
-- A move carries the rights unchanged.
+- A move, in a message or to a new child, carries the rights unchanged or the
+  fewer its mover names, if the handle allows moving.
+- Moving on is itself a right: a handle given without it stays with the
+  process it was given to.
 - Some handles, such as a device claim, cannot be duplicated, so passing one on
-  means giving it away.
+  means giving it away. Some, such as an inbox, cannot be moved at all.
+- Nothing takes a handle back from a running process: what it was given it
+  holds until it gives it up or ends.
 
 ## Kernel objects
 

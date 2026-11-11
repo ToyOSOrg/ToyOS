@@ -18,7 +18,7 @@ use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::debug_action as DA;
 use toyos_abi::syscall::*;
 
-use super::HANDLE_LEN;
+use super::{HANDLE_LEN, TRANSFER_ENTRY_LEN};
 #[cfg(feature = "test-actuators")]
 use super::debug::{canary, debug_heap_alloc, ring0_timer_in_syscall, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
 use super::device::{
@@ -141,7 +141,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // endow stays a window, not a copy: its count is userland's and each entry
             // is read once. labels is copied because the child keeps it.
             let Some(endow) = (args.endow_count as usize)
-                .checked_mul(core::mem::size_of::<toyos_abi::syscall::EndowEntry>())
+                .checked_mul(core::mem::size_of::<toyos_abi::syscall::SpawnEndow>())
                 .and_then(|len| ctx.user_bytes(UserAddr::new(args.endow_ptr), len as u64))
             else {
                 return bad_addr;
@@ -588,7 +588,7 @@ fn outgoing<'a>(ctx: &SyscallContext<'a>, args: &MessageSend) -> Result<Option<O
     Ok((|| {
         Some(Outgoing {
             bytes: ctx.user_bytes(UserAddr::new(args.bytes), args.len)?,
-            handles: ctx.user_bytes(UserAddr::new(args.handles), (count * HANDLE_LEN) as u64)?,
+            handles: ctx.user_bytes(UserAddr::new(args.handles), (count * TRANSFER_ENTRY_LEN) as u64)?,
             count,
         })
     })())

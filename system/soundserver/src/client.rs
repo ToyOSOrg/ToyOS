@@ -19,6 +19,7 @@ use toyos::audio::{
 };
 use toyos::shm::SharedMemory;
 use toyos::Connection;
+use toyos_abi::handle::Rights;
 use toyos_abi::audio::AudioSlotHeader;
 use toyos_mixer::{
     accumulate, append_planar, client_period_frames, decode_i16_to_f32, interleave,
@@ -177,7 +178,8 @@ pub(crate) fn open_stream(
             return None;
         }
     };
-    let client_shm = match shm.share() {
+    // The client's alone: it maps the ring and cannot hand it to anyone.
+    let client_shm = match shm.lend() {
         Ok(h) => h,
         Err(e) => {
             say!("soundserver: cannot share the ring with client {client_id} ({e:?})");
@@ -193,7 +195,8 @@ pub(crate) fn open_stream(
 
     // **soundserver makes the event and keeps the signal side.** That is what
     // makes a dead client detectable without bookkeeping: the wait side it is
-    // sent goes when its table does, and the next ring answers `Hungup`.
+    // sent can be neither duplicated nor passed on, so it goes when the
+    // client's table does, and the next ring answers `Hungup`.
     let (signal, signal_bell) = match toyos::wake::pair() {
         Ok(ends) => ends,
         Err(e) => {
@@ -213,7 +216,7 @@ pub(crate) fn open_stream(
         slot_count: slot_count as u16,
         fade_frames: ramp_frames,
     };
-    if control.send_with(MSG_STREAM_OPENED, &opened, [client_shm, signal_bell.into()]).is_err() {
+    if control.send_moved(MSG_STREAM_OPENED, &opened, [client_shm, toyos::OwnedHandle::from(signal_bell).arriving_with(Rights::READ.union(Rights::WAIT))]).is_err() {
         // Client died mid-open; the dropped control connection removes it.
         say!("soundserver: client {client_id} vanished during stream open");
     }

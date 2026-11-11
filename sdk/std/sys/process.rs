@@ -26,7 +26,7 @@ pub struct Command {
     /// The child's descriptors past its stdio.
     extra_fds: Vec<(u32, Given)>,
     /// Taken by the next spawn: moved to its child, or closed if it is refused.
-    endowments: Vec<(String, toyos::OwnedHandle)>,
+    endowments: Vec<(String, toyos::Moved)>,
     provided: Vec<(String, toyos::OwnedHandle)>,
     parent: Parent,
     /// An independent launch, where a plain spawn is a helper.
@@ -70,7 +70,7 @@ enum Parent {
 }
 
 /// The job `endowments` puts the child in.
-fn job_of(endowments: &[(String, toyos::OwnedHandle)]) -> Option<toyos::BorrowedHandle<'_>> {
+fn job_of(endowments: &[(String, toyos::Moved)]) -> Option<toyos::BorrowedHandle<'_>> {
     endowments.iter().find(|(label, _)| label == toyos::job::JOB_LABEL).map(|(_, handle)| toyos::AsHandle::as_handle(handle))
 }
 
@@ -266,7 +266,12 @@ impl Command {
 
     /// Give the child `handle` under the name `label`, moved by the next spawn.
     pub fn endow(&mut self, label: &str, handle: crate::os::toyos::io::OwnedHandle) {
-        self.endowments.push((label.to_owned(), handle.into_inner()));
+        self.endowments.push((label.to_owned(), handle.into_inner().into()));
+    }
+
+    /// [`endow`](Self::endow), the child's handle carrying `rights` alone.
+    pub fn endow_narrowed(&mut self, label: &str, handle: crate::os::toyos::io::OwnedHandle, rights: toyos_abi::handle::Rights) {
+        self.endowments.push((label.to_owned(), handle.into_inner().arriving_with(rights)));
     }
 
     /// Give the child `connector` under `name`, on top of its manifest row:
@@ -453,7 +458,7 @@ impl Command {
             })?),
             (None, None) => Some(crate::sys::fs::read_image(source, job_of(&endowments))?),
         };
-        let (labels, endowed): (Vec<String>, Vec<toyos::OwnedHandle>) = endowments.into_iter().unzip();
+        let (labels, endowed): (Vec<String>, Vec<toyos::Moved>) = endowments.into_iter().unzip();
         let (names, provided): (Vec<String>, Vec<toyos::OwnedHandle>) = provided.into_iter().unzip();
         let request = toyos::spawn::Spawn {
             program: launched.as_deref().unwrap_or(program),

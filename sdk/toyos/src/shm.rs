@@ -35,7 +35,7 @@ use core::marker::PhantomData;
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, FileType, Stat, SyscallError, VmProt, PAGE_SIZE, SHM_DEVICE};
 
-use crate::{AsHandle, OwnedHandle, RawHandle};
+use crate::{AsHandle, Moved, OwnedHandle, RawHandle};
 
 pub struct SharedMemory {
     handle: OwnedHandle,
@@ -109,6 +109,12 @@ impl SharedMemory {
     /// region duplicates first — which is the same rule spawn endowment has.
     pub fn share(&self) -> Result<OwnedHandle, SyscallError> {
         self.handle.try_clone()
+    }
+
+    /// [`Self::share`] for one peer alone: it maps the region, writable, and
+    /// can neither duplicate its handle nor pass it on.
+    pub fn lend(&self) -> Result<Moved, SyscallError> {
+        Ok(self.handle.try_clone()?.arriving_with(Rights::MAP.union(Rights::WRITE)))
     }
 
     /// [`Self::share`], without `WRITE`: a peer's [`ReadOnly::lent`] maps it,

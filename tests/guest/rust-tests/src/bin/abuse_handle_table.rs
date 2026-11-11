@@ -32,8 +32,9 @@
 mod image;
 
 use toyos_abi::syscall::{
-    self, EndowEntry, VmAt, VmProt, SpawnArgs, SyscallError, MAX_SPAWN_ENDOWMENTS, QUIT_LABEL, SELF_LABEL,
+    self, SpawnEndow, VmAt, VmProt, SpawnArgs, SyscallError, MAX_SPAWN_ENDOWMENTS, QUIT_LABEL, SELF_LABEL,
 };
+use toyos_abi::handle::TransferEntry;
 use toyos_abi::RawHandle;
 use toyos_abi::end::End;
 
@@ -111,8 +112,8 @@ fn main() {
     // preflight runs against a table nothing has been removed from, so a repeat
     // passed both times; the first removal retired the slot and the second
     // answered `Stale` into an `expect`.
-    let endow = unsafe { region.add(REGION / 4) } as *mut EndowEntry;
-    let entry = EndowEntry { label_off: 0, label_len: LABELS.len() as u32, handle: stdout(), _pad: 0 };
+    let endow = unsafe { region.add(REGION / 4) } as *mut SpawnEndow;
+    let entry = SpawnEndow { label_off: 0, label_len: LABELS.len() as u32, moved: TransferEntry::unchanged(stdout()) };
     unsafe {
         endow.write(entry);
         endow.add(1).write(entry);
@@ -147,7 +148,7 @@ fn main() {
     a_pair_is_refused_whole(&mut filled);
 
     let last = filled.pop().expect("the fill installed a handle");
-    let entry = EndowEntry { label_off: 0, label_len: LABELS.len() as u32, handle: last, _pad: 0 };
+    let entry = SpawnEndow { label_off: 0, label_len: LABELS.len() as u32, moved: TransferEntry::unchanged(last) };
     let spawned = spawn_endowed(&[entry], LABELS);
 
     // The cap is a live limit, not a latched failure.
@@ -201,7 +202,7 @@ fn a_pair_is_refused_whole(filled: &mut Vec<RawHandle>) {
 
 /// `SYS_SPAWN` of this binary as a child that exits at once, carrying
 /// `entries` into the blob `labels`.
-fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, SyscallError> {
+fn spawn_endowed(entries: &[SpawnEndow], labels: &[u8]) -> Result<RawHandle, SyscallError> {
     let laid = own();
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
@@ -232,7 +233,7 @@ fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, Sys
 fn a_caller_endows_no_self() {
     for label in [SELF_LABEL, QUIT_LABEL] {
         let ends = syscall::pipe().expect("a pipe for the self arm");
-        let entry = EndowEntry { label_off: 0, label_len: label.len() as u32, handle: ends.write, _pad: 0 };
+        let entry = SpawnEndow { label_off: 0, label_len: label.len() as u32, moved: TransferEntry::unchanged(ends.write) };
         let err = spawn_endowed(&[entry], label.as_bytes()).expect_err("an endowment labelled as the kernel's must be refused");
         assert_eq!(err, SyscallError::InvalidArgument, "wrong error for an endowment labelled {label}");
         assert_eq!(syscall::write(ends.write, b"x"), Ok(1), "the end an endowment labelled {label} named is gone");
@@ -256,13 +257,13 @@ fn a_spawn_carries_two_entries_fewer_than_a_table() {
         handles.extend([ends.read, ends.write]);
     }
     let mut labels = Vec::new();
-    let entries: Vec<EndowEntry> = handles
+    let entries: Vec<SpawnEndow> = handles
         .iter()
         .enumerate()
         .map(|(i, &handle)| {
             let label = format!("e{i:02}");
             let entry =
-                EndowEntry { label_off: labels.len() as u32, label_len: label.len() as u32, handle, _pad: 0 };
+                SpawnEndow { label_off: labels.len() as u32, label_len: label.len() as u32, moved: TransferEntry::unchanged(handle) };
             labels.extend_from_slice(label.as_bytes());
             entry
         })

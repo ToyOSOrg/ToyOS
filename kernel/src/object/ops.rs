@@ -34,8 +34,10 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
             Rights::TRANSFER.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE)
         }
         KObjectRef::Acceptor(_) => BASE.union(Rights::READ),
+        // No `TRANSFER`: a ring's page is its creator's alone, and its
+        // watches name handles in the table of whoever submits.
         KObjectRef::Inbox(_) => {
-            BASE.union(Rights::READ).union(Rights::WRITE).union(Rights::MAP)
+            Rights::DUP.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE).union(Rights::MAP)
         }
         // Every `SysCap` bit is authority the supervisor decides per program: no default, the creator states it.
         KObjectRef::SysCap(_) => Rights::NONE,
