@@ -46,7 +46,9 @@ type SpaceKind = Kind<Arc<SharedMemObject>, Arc<dyn CopySource>>;
 /// hold, and it cannot fail: what it reads was fixed when the range was made.
 pub trait CopySource: Send + Sync {
     fn size(&self) -> u64;
-    /// `out.len()` bytes from `offset`, all inside [`size`](Self::size).
+    /// Write every byte of `out` from `offset`, all inside
+    /// [`size`](Self::size): `out` is a frame that holds what its last owner
+    /// left.
     fn read(&self, offset: u64, out: &mut [u8]);
 }
 
