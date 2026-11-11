@@ -21,7 +21,9 @@ restart = true
 pager = true
 roles = ["memory"]
 
-# Four minutes from boot: the job runs on an emulated CPU, and a job past the
-# bound reboots the guest with the job named.
+# Four minutes from boot: the job runs on an emulated CPU. `power` because a
+# job list's bound is a reboot, which the runner refuses to start without: a
+# job past it reboots the guest with the job named.
 [programs.test-runner]
+receives = ["power"]
 args = ["--bound-ms=240000", "test_rs_tmp_empty_files"]
