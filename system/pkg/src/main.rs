@@ -72,7 +72,7 @@ fn install(file: &Path, assume_yes: bool) -> Result<(), String> {
         .map_err(|e| format!("pkg: cannot read {}: {e}", beside.display()))?;
     let want = sums::digest_for(&sums_text, &name)?;
 
-    let mut apps = writable_apps()?;
+    let apps = writable_apps()?;
     let room = apps.room().map_err(|e| format!("pkg: {} answers no room: {e:?}", package::DIR))?;
     let (planner, got) = survey(file, Planner::new(&name, room.free, room.unit))?;
     if got != want {

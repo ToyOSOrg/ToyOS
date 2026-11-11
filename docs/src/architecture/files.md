@@ -18,6 +18,11 @@ prefix. An empty view names nothing.
   directory moved elsewhere never reach outside it. An absolute link is
   resolved again in the client's own view, so it reaches nothing the client
   does not hold.
+- **A process's threads share its connection.** Each directory capability is
+  one connection per process, on which its threads' requests are in flight at
+  once, each in its own share of the window the client lends; none waits for
+  another's round trip. The server answers connections in turn, so a process's
+  share of the server does not grow with its threads.
 - **Sharing is granted, never reached.** A file outside a program's view
   reaches it only through the file picker, which hands over that one file.
 - **No special cases.** The boot partition is in the updater's view and nobody

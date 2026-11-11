@@ -22,13 +22,13 @@ const STREAMED: &str = "an-export-shares-its-descriptions-streamed";
 const STREAM_BYTES: usize = 1 << 20;
 
 fn main() {
-    let mut parent = Dir::named(DIR).expect("the home directory");
+    let parent = Dir::named(DIR).expect("the home directory");
     let fid = parent.open(Base::Root, FILE, O_READ | O_WRITE | O_CREATE | O_TRUNCATE).expect("open").fid;
     let written = parent.write(fid, b"abcdef").expect("write");
     assert_eq!((written.len, written.offset), (6, 6));
 
     let end = parent.export(&[fid]).expect("export");
-    let mut child = Dir::adopt(end).expect("the exported connection says hello");
+    let child = Dir::adopt(end).expect("the exported connection says hello");
     let theirs = Fid { id: 1, generation: child.generation() };
     assert_eq!(child.seek(theirs, SEEK_CURRENT, 0), Ok(6), "the export's id 1 has an offset of its own");
     assert_eq!(child.seek(theirs, SEEK_START, 2), Ok(2));

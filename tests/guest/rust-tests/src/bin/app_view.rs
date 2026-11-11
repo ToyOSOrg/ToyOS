@@ -200,7 +200,7 @@ fn app() {
 
     match Dir::named(&format!("fs:{PACKAGE}")) {
         Err(e) => red.push(format!("fs:{PACKAGE} would not connect: {e:?}")),
-        Ok(mut dir) => {
+        Ok(dir) => {
             if dir.writable() {
                 red.push(format!("fs:{PACKAGE} says it is writable"));
             }

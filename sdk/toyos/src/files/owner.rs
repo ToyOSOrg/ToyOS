@@ -12,24 +12,19 @@ use super::routing::Routed;
 use super::{encode, At, Error, Open, Stat, MAX_LINKS, SEEK_CURRENT, SEEK_END, SEEK_START};
 use crate::fd::{self, Fd, Object, SERVED_FILE};
 use crate::fs::{self, Base, Change, Dir, Fid, Refused};
-use crate::sync::{Lock, Turnstile};
+use crate::sync::Lock;
 
-/// One directory capability this process holds, connected: threads sharing
-/// it are served in turn.
-struct Capability {
-    dir: Turnstile<Dir>,
-}
-
-/// Every capability of the view this process has connected: bounded by the
-/// view, as only a held directory is asked for.
-static CAPABILITIES: Lock<BTreeMap<String, Arc<Capability>>> = Lock::new(BTreeMap::new());
+/// Every directory capability of the view this process has connected, which
+/// its threads share: bounded by the view, as only a held directory is asked
+/// for.
+static CAPABILITIES: Lock<BTreeMap<String, Arc<Dir>>> = Lock::new(BTreeMap::new());
 
 /// A path's capability, starting directory and relative name.
-enum Place { Served(Arc<Capability>, Base, String), Directory(String) }
+enum Place { Served(Arc<Dir>, Base, String), Directory(String) }
 
 /// A file or directory held open by its server, with a paged holder where supplied.
 struct Served {
-    cap: Arc<Capability>,
+    cap: Arc<Dir>,
     fid: Fid,
     position: Position,
     holder: Option<crate::paged::Paged>,
@@ -42,7 +37,7 @@ enum Held {
 
 impl Drop for Served {
     fn drop(&mut self) {
-        self.cap.dir.lock().close(self.fid);
+        self.cap.close(self.fid);
     }
 }
 
@@ -93,7 +88,7 @@ impl Position {
         Self { append, at: Lock::new(at) }
     }
 
-    fn read(&self, dir: &mut Dir, fid: Fid, out: &mut [u8]) -> Result<usize, fs::Error> {
+    fn read(&self, dir: &Dir, fid: Fid, out: &mut [u8]) -> Result<usize, fs::Error> {
         let mut at = self.at.lock();
         match *at {
             Offset::Here(offset) => {
@@ -105,9 +100,9 @@ impl Position {
         }
     }
 
-    /// A read at the local offset through the file's paged object, which
-    /// takes no turn on the capability: `None` where the offset is the
-    /// server's or the object would not answer, and the server is asked.
+    /// A read at the local offset through the file's paged object: `None`
+    /// where the offset is the server's or the object would not answer, and
+    /// the server is asked.
     fn read_held(&self, holder: &crate::paged::Paged, out: &mut [u8]) -> Option<Result<usize, Error>> {
         let mut at = self.at.lock();
         let Offset::Here(offset) = *at else { return None };
@@ -137,7 +132,7 @@ impl Position {
         Some(n)
     }
 
-    fn write(&self, dir: &mut Dir, fid: Fid, data: &[u8]) -> Result<usize, fs::Error> {
+    fn write(&self, dir: &Dir, fid: Fid, data: &[u8]) -> Result<usize, fs::Error> {
         let mut at = self.at.lock();
         match *at {
             Offset::Here(offset) if !self.append => {
@@ -157,7 +152,7 @@ impl Position {
     /// Where a seek lands, by the rule the server keeps for its own offsets:
     /// at or below [`fs::MAX_FILE_BYTES`] and not before the start. From the
     /// end, the server is asked: it reads the end as of the writes it orders.
-    fn seek(&self, dir: &mut Dir, fid: Fid, whence: u64, delta: i64) -> Result<u64, fs::Error> {
+    fn seek(&self, dir: &Dir, fid: Fid, whence: u64, delta: i64) -> Result<u64, fs::Error> {
         let mut at = self.at.lock();
         let Offset::Here(offset) = *at else { return dir.seek(fid, whence, delta) };
         let landed = match whence {
@@ -172,7 +167,7 @@ impl Position {
 
     /// Share this description with another process. Once handed over, every
     /// read, write and seek uses the server's one offset.
-    fn export(&self, dir: &mut Dir, fid: Fid) -> Result<crate::ipc::Connection, fs::Error> {
+    fn export(&self, dir: &Dir, fid: Fid) -> Result<crate::ipc::Connection, fs::Error> {
         let mut at = self.at.lock();
         if let Offset::Here(offset) = *at {
             dir.seek(fid, fs::SEEK_START, offset as i64)?;
@@ -184,7 +179,7 @@ impl Position {
     /// A stream the server writes at the description's offset for another
     /// process ([`Dir::stream`]): the offset is handed to the server first,
     /// and is its from then on.
-    fn stream(&self, dir: &mut Dir, fid: Fid) -> Result<crate::Pipe, fs::Error> {
+    fn stream(&self, dir: &Dir, fid: Fid) -> Result<crate::Pipe, fs::Error> {
         let mut at = self.at.lock();
         if let Offset::Here(offset) = *at {
             dir.seek(fid, fs::SEEK_START, offset as i64)?;
@@ -240,14 +235,13 @@ fn utf8(path: &[u8]) -> Result<&str, Error> {
 /// refused connect is the caller's error. The connect waits for the server's
 /// hello, so it is made outside the lock: of two threads that connect at once
 /// the first connection kept is the one used.
-fn capability(prefix: &str) -> Result<Arc<Capability>, Error> {
+fn capability(prefix: &str) -> Result<Arc<Dir>, Error> {
     if let Some(found) = CAPABILITIES.lock().get(prefix) {
         return Ok(Arc::clone(found));
     }
     let name = alloc::format!("{}{prefix}", fs::CAPABILITY_PREFIX);
     let dir = Dir::named(&name).map_err(Error::Served)?;
-    let found = Arc::new(Capability { dir: Turnstile::new(dir) });
-    Ok(Arc::clone(CAPABILITIES.lock().entry(String::from(prefix)).or_insert(found)))
+    Ok(Arc::clone(CAPABILITIES.lock().entry(String::from(prefix)).or_insert(Arc::new(dir))))
 }
 
 /// Which server the absolute, lexically clean `abs` is on, and the path there.
@@ -287,14 +281,12 @@ fn from_dir(fd: Fd, path: &str) -> Result<Place, Error> {
 }
 
 /// Ask whoever serves `path` from `at`, following an absolute link a server
-/// meets to wherever it lands in this process's own table. `served` runs on
-/// the capability's turn, so nothing it does may reach the descriptor table,
-/// whose release of an open file takes that turn again.
+/// meets to wherever it lands in this process's own table.
 fn on_path<T>(
     at: At,
     path: &[u8],
     mut synthetic: impl FnMut(&str) -> Result<T, Error>,
-    mut served: impl FnMut(&Arc<Capability>, &mut Dir, Base, &str) -> Result<T, Refused>,
+    mut served: impl FnMut(&Arc<Dir>, Base, &str) -> Result<T, Refused>,
 ) -> Result<T, Error> {
     let mut place = place(at, path)?;
     for _ in 0..MAX_LINKS {
@@ -302,17 +294,10 @@ fn on_path<T>(
             Place::Served(cap, base, rel) => (cap, base, rel),
             Place::Directory(path) => return synthetic(&path),
         };
-        let mut dir = cap.dir.lock();
-        match served(&cap, &mut dir, base, &rel) {
+        match served(&cap, base, &rel) {
             Ok(answer) => return Ok(answer),
             Err(Refused::Error(e)) => return Err(Error::Served(e)),
-            Err(Refused::Follow(len)) => {
-                let mut buf = [0u8; fs::MAX_PATH];
-                let target = dir.follow_target(len, &mut buf);
-                let target = super::absolute("/", utf8(target)?);
-                drop(dir);
-                place = route(&target)?;
-            }
+            Err(Refused::Follow(target)) => place = route(&super::absolute("/", utf8(&target)?))?,
         }
     }
     Err(Error::Loop)
@@ -324,7 +309,7 @@ fn on_fd<T>(
     fd: Fd,
     kernel: impl FnOnce(crate::BorrowedHandle<'_>) -> Result<T, SyscallError>,
     synthetic: impl FnOnce(&str) -> Result<T, Error>,
-    served: impl FnOnce(&mut Dir, Fid, &Position) -> Result<T, fs::Error>,
+    served: impl FnOnce(&Dir, Fid, &Position) -> Result<T, fs::Error>,
 ) -> Result<T, Error> {
     on_fd_held(fd, kernel, synthetic, |_, _| None, served)
 }
@@ -341,15 +326,13 @@ fn held_write(written: Result<usize, SyscallError>) -> Option<Result<usize, Erro
 }
 
 /// [`on_fd`], trying `holding` first on a served file whose paged object
-/// this descriptor holds, without the capability's turn, so a reader waiting
-/// for a page holds up no request of another thread's; `None` from it, and
-/// the server is asked.
+/// this descriptor holds; `None` from it, and the server is asked.
 fn on_fd_held<T>(
     fd: Fd,
     kernel: impl FnOnce(crate::BorrowedHandle<'_>) -> Result<T, SyscallError>,
     synthetic: impl FnOnce(&str) -> Result<T, Error>,
     holding: impl FnOnce(&crate::paged::Paged, &Position) -> Option<Result<T, Error>>,
-    served: impl FnOnce(&mut Dir, Fid, &Position) -> Result<T, fs::Error>,
+    served: impl FnOnce(&Dir, Fid, &Position) -> Result<T, fs::Error>,
 ) -> Result<T, Error> {
     // A kernel call is made while the descriptor's object is held; an object
     // of this module's is taken out of it, counted, and asked after.
@@ -366,14 +349,13 @@ fn on_fd_held<T>(
             Held::Directory(path) => synthetic(path),
             Held::Served(held) => match held.holder.as_ref().and_then(|h| holding(h, &held.position)) {
                 Some(answer) => answer,
-                None => served(&mut held.cap.dir.lock(), held.fid, &held.position).map_err(Error::Served),
+                None => served(&held.cap, held.fid, &held.position).map_err(Error::Served),
             },
         },
     }
 }
 
-/// A descriptor for `held`; on a full table it is let go again, which takes
-/// its capability's turn, so no turn may be held here.
+/// A descriptor for `held`; on a full table it is let go again.
 fn install(held: Held, cloexec: bool) -> Result<Fd, fd::Error> {
     fd::install(object(held), !cloexec, 0)
 }
@@ -399,11 +381,11 @@ fn object(held: Held) -> Object {
 /// Take up the one description exported for an endowed file descriptor.
 /// This constructs an object without entering the descriptor table again.
 pub(super) fn adopt_exported(connection: crate::ipc::Connection) -> Result<Object, Error> {
-    let mut dir = Dir::adopt(connection).map_err(Error::Served)?;
+    let dir = Dir::adopt(connection).map_err(Error::Served)?;
     let fid = Fid { id: 1, generation: dir.generation() };
     dir.fstat(fid).map_err(Error::Served)?;
     Ok(object(Held::Served(Served {
-        cap: Arc::new(Capability { dir: Turnstile::new(dir) }),
+        cap: Arc::new(dir),
         fid,
         position: Position { append: false, at: Lock::new(Offset::Server) },
         holder: None,
@@ -414,7 +396,7 @@ pub(super) fn adopt_exported(connection: crate::ipc::Connection) -> Result<Objec
 extern "C" fn toyos_fs_export(word: u64) -> i64 {
     let held = held(word).expect("a held descriptor names this file object");
     let exported = match &*held {
-        Held::Served(file) => file.position.export(&mut file.cap.dir.lock(), file.fid).map_err(Error::Served),
+        Held::Served(file) => file.position.export(&file.cap, file.fid).map_err(Error::Served),
         Held::Directory(_) => Err(Error::Served(fs::Error::Unsupported)),
     };
     answer(exported.map(|conn| u64::from(conn.into_raw().0)))
@@ -469,7 +451,7 @@ unsafe extern "C" fn toyos_fs_open(at: Fd, path: *const u8, len: usize, how: Ope
             }
             Ok(Held::Directory(String::from(path)))
         },
-        |cap, dir, base, rel| {
+        |cap, base, rel| {
             let mut flags = 0;
             if how.read { flags |= fs::O_READ; }
             if how.write { flags |= fs::O_WRITE; }
@@ -479,8 +461,8 @@ unsafe extern "C" fn toyos_fs_open(at: Fd, path: *const u8, len: usize, how: Ope
             if how.truncate { flags |= fs::O_TRUNCATE; }
             if how.directory { flags |= fs::O_DIRECTORY; }
             let opened = match how.unnamed {
-                true => dir.create_unnamed(base, rel, flags)?,
-                false => dir.open(base, rel, flags)?,
+                true => cap.create_unnamed(base, rel, flags)?,
+                false => cap.open(base, rel, flags)?,
             };
             let position = Position::new(how.append, opened.stat.kind == fs::KIND_DIR);
             // What a reply carries is a holder only as the kernel answers for
@@ -489,14 +471,14 @@ unsafe extern "C" fn toyos_fs_open(at: Fd, path: *const u8, len: usize, how: Ope
                 None | Some(Err(crate::paged::NotAHolder::Refused | crate::paged::NotAHolder::Ended)) => None,
                 Some(Ok(paged)) => Some(paged),
                 Some(Err(crate::paged::NotAHolder::Other)) => {
-                    dir.close(opened.fid);
+                    cap.close(opened.fid);
                     return Err(Refused::Error(fs::Error::Malformed));
                 }
             };
             Ok(Held::Served(Served { cap: Arc::clone(cap), fid: opened.fid, position, holder }))
         },
     );
-    // Install outside the capability turn: refusal closes the opened fid.
+    // A refused install closes the opened fid.
     let installed = opened.and_then(|held| install(held, how.cloexec).map_err(Error::Fd));
     answer(installed.map(|fd| fd as u64))
 }
@@ -518,7 +500,7 @@ unsafe extern "C" fn toyos_fs_stat(at: Fd, path: *const u8, len: usize, follow: 
             at,
             path,
             directory_stat,
-            |_, dir, base, rel| dir.stat(base, rel, follow).map(stat_of),
+            |dir, base, rel| dir.stat(base, rel, follow).map(stat_of),
         ),
     };
     answer(stat.map(|stat| {
@@ -645,7 +627,7 @@ extern "C" fn toyos_fs_image(fd: Fd) -> i64 {
 unsafe extern "C" fn toyos_fs_mkdir(at: Fd, path: *const u8, len: usize) -> i64 {
     // SAFETY: the caller's.
     let path = unsafe { bytes(path, len) };
-    let made = on_path(At::of(at), path, read_only, |_, dir, base, rel| dir.mkdir(base, rel));
+    let made = on_path(At::of(at), path, read_only, |dir, base, rel| dir.mkdir(base, rel));
     answer(made.map(|()| 0))
 }
 
@@ -657,7 +639,7 @@ unsafe extern "C" fn toyos_fs_unlink(at: Fd, path: *const u8, len: usize, is_dir
         At::of(at),
         path,
         read_only,
-        |_, dir, base, rel| dir.unlink(base, rel, is_dir),
+        |dir, base, rel| dir.unlink(base, rel, is_dir),
     );
     answer(removed.map(|()| 0))
 }
@@ -671,7 +653,7 @@ unsafe extern "C" fn toyos_fs_chdir(path: *const u8, len: usize) -> i64 {
         if abs.len() > fs::MAX_PATH {
             return Err(Error::Served(fs::Error::NameTooLong));
         }
-        let stat = on_path(At::Cwd, abs.as_bytes(), directory_stat, |_, dir, base, rel| dir.stat(base, rel, true).map(stat_of))?;
+        let stat = on_path(At::Cwd, abs.as_bytes(), directory_stat, |dir, base, rel| dir.stat(base, rel, true).map(stat_of))?;
         if stat.file_type != FileType::Directory {
             return Err(Error::NotADirectory);
         }
@@ -682,7 +664,7 @@ unsafe extern "C" fn toyos_fs_chdir(path: *const u8, len: usize) -> i64 {
 }
 
 /// Two paths on one capability, with their starting directories.
-struct Pair(Arc<Capability>, (Base, String), (Base, String));
+struct Pair(Arc<Dir>, (Base, String), (Base, String));
 
 fn pair(from: (At, &[u8]), to: (At, &[u8])) -> Result<Pair, Error> {
     pair_of(place(from.0, from.1)?, place(to.0, to.1)?)
@@ -709,7 +691,7 @@ unsafe extern "C" fn toyos_fs_rename(from_at: Fd, from: *const u8, from_len: usi
     // SAFETY: the caller's.
     let (from, to) = unsafe { (bytes(from, from_len), bytes(to, to_len)) };
     let renamed = pair((At::of(from_at), from), (At::of(to_at), to)).and_then(|pair| match pair {
-        Pair(cap, (ba, a), (bb, b)) => cap.dir.lock().rename((ba, &a), (bb, &b)).map_err(crossing),
+        Pair(cap, (ba, a), (bb, b)) => cap.rename((ba, &a), (bb, &b)).map_err(crossing),
     });
     answer(renamed.map(|()| 0))
 }
@@ -732,7 +714,7 @@ unsafe extern "C" fn toyos_fs_link(
         (at, _) => place(at, from),
     };
     let linked = from_place.and_then(|from| pair_of(from, place(At::of(to_at), to)?)).and_then(|pair| match pair {
-        Pair(cap, (ba, a), (bb, b)) => cap.dir.lock().link((ba, &a), follow, (bb, &b), None).map_err(crossing),
+        Pair(cap, (ba, a), (bb, b)) => cap.link((ba, &a), follow, (bb, &b), None).map_err(crossing),
     });
     answer(linked.map(|()| 0))
 }
@@ -742,7 +724,7 @@ unsafe extern "C" fn toyos_fs_symlink(target: *const u8, target_len: usize, at: 
     // SAFETY: the caller's.
     let (target, link) = unsafe { (bytes(target, target_len), bytes(link, link_len)) };
     let made = utf8(target).and_then(|target| {
-        on_path(At::of(at), link, read_only, |_, dir, base, rel| {
+        on_path(At::of(at), link, read_only, |dir, base, rel| {
             dir.symlink(target, (base, rel))
         })
     });
@@ -756,7 +738,7 @@ unsafe extern "C" fn toyos_fs_readlink(at: Fd, path: *const u8, len: usize, out:
     // SAFETY: the caller lends `cap` writable bytes for the call, and each
     // closure makes the slice only for its own run.
     let target = || unsafe { core::slice::from_raw_parts_mut(out, cap) };
-    let n = on_path(At::of(at), path, |_| Err(Error::Served(fs::Error::NotALink)), |_, dir, base, rel| {
+    let n = on_path(At::of(at), path, |_| Err(Error::Served(fs::Error::NotALink)), |dir, base, rel| {
         let mut buf = [0u8; fs::MAX_PATH];
         let n = dir.read_link(base, rel, &mut buf)?;
         let out = target();
@@ -777,10 +759,10 @@ unsafe extern "C" fn toyos_fs_set_times(at: Fd, path: *const u8, len: usize, fol
     };
     let set = match (At::of(at), path.is_empty()) {
         (At::Fd(fd), true) => from_dir(fd, "").and_then(|place| match place {
-            Place::Served(cap, base, rel) => cap.dir.lock().set_attr(base, &rel, follow, &change).map_err(crossing),
+            Place::Served(cap, base, rel) => cap.set_attr(base, &rel, follow, &change).map_err(crossing),
             Place::Directory(_) => Err(Error::Served(fs::Error::ReadOnly)),
         }),
-        (at, _) => on_path(at, path, read_only, |_, dir, base, rel| dir.set_attr(base, rel, follow, &change)),
+        (at, _) => on_path(at, path, read_only, |dir, base, rel| dir.set_attr(base, rel, follow, &change)),
     };
     answer(set.map(|()| 0))
 }
