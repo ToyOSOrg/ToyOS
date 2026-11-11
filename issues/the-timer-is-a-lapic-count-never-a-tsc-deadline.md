@@ -81,6 +81,8 @@ lower and the two spreads do not overlap; where they overlap, the count, the
 path every CPU has, is kept. The split is reported. The twin is a measurement
 arm, deleted once it has answered.
 
+**Owed on metal:** one A/B of main from before and after #1263 (a pass skips the timer write and the ask swaps it does not owe), on the T14 and the AMD bench, of osbench's `system`, `sched`, `ipc` and `time` groups, with a Linux reference timed through the TSC and its `.slack1ns` rows. Main must read `time.yield`, `pingpong.*` and `ipc.reqrep.*` faster by more than 3% on both benches, `time.sleep_late.*`, `time.timer_1ms.late` and `wake.periodic.*` within 3%, and no scheduler, IPC, wake, yield, spawn or timer row slower. The speed-up is not yet measured on metal.
+
 **Exit**: a boot line printing CPUID.01H:ECX, and a T14 boot carrying it
 cited for bit 24; the twin's reading, posted, and the twin deleted. Where the
 deadline's lateness measures better, a deadline is armed on every CPU that
