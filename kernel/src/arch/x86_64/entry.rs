@@ -20,9 +20,9 @@
 //! take the kernel's base from `GDTR` whatever GS holds
 //! ([`install_kernel_gs`]).
 
-/// `cld`, which every Ring 0 entry runs first: no gate clears `DF`, and this
-/// kernel's forward-only `memmove`/`memcpy` write backward if a tick
-/// interrupts a copy with `DF` set.
+/// `cld`, which every Ring 0 entry runs before it calls anything: no gate
+/// clears `DF`, and this kernel's forward-only `memmove`/`memcpy` write
+/// backward if a tick interrupts a copy with `DF` set.
 #[cfg(not(feature = "entry-df-unclean"))]
 macro_rules! cld {
     () => {
