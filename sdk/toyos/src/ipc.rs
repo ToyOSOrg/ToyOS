@@ -528,6 +528,14 @@ impl<const MAX: usize> FrameRx<MAX> {
         self.take(conn.as_handle(), false).map_err(Refused::blocking)
     }
 
+    /// A frame as a test's peer sent it, in hand as [`Self::pump`] leaves one.
+    #[cfg(test)]
+    pub(crate) fn load(&mut self, msg_type: u32, payload: &[u8]) -> RxStep {
+        self.held = Batch::EMPTY;
+        self.payload[..payload.len()].copy_from_slice(payload);
+        RxStep::Frame { msg_type, payload_len: payload.len(), handles: 0 }
+    }
+
     fn take(&mut self, conn: BorrowedHandle<'_>, nonblock: bool) -> Result<Frame, Refused> {
         self.held = Batch::EMPTY;
         let (frame, batch) = receive(conn, &mut self.msg_type, &mut self.payload, nonblock)?;

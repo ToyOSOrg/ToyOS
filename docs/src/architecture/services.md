@@ -19,6 +19,26 @@
 The other services are the components in the [Overview](overview.md). Each is
 an ordinary process holding only what its row grants.
 
+## Admission
+
+Every server admits its clients the same way, through one shared mechanism:
+
+- **A connection waits for its first whole request in a bounded table**, for a
+  bounded time. It is read once more before it is let go for its silence, so a
+  request that arrived whole is served however late the server came to it; a
+  connection let go is closed unanswered.
+- **A request is read only from an admitted client**, whole and without
+  waiting, and answered by one send that never waits.
+- **One client holds at most a share of the table.** A client is what the
+  badge on its connection says, written by whoever minted its connector. Past
+  its share its next connection is refused by name while another client's is
+  taken; a port whose connector carries no badge that names its holder has one
+  share for all its holders.
+- **A full table accepts no more.** The port's queue holds the next
+  connection, and the kernel refuses the one past that queue by name.
+- **The size of a table and of a share are the server's**; the mechanism and
+  its limit are the same for all.
+
 ## Failure
 
 ```text

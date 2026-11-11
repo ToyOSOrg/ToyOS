@@ -2,12 +2,11 @@
 //! decided before the server does anything for it.
 //!
 //! **One share cannot take the server.** Beneath each machine-wide bound —
-//! connections waiting on their hello, connections served, streams — each
-//! share a grant names has a quarter of its own, so one holding all it may
-//! leaves the rest of each bound to three more. Past a bound a hello is
-//! answered `TooManyConnections` and a stream `TooManyStreams`, and a
-//! connection taken past its share's part of the handshakes is answered
-//! `TooManyConnections` and let go.
+//! connections waiting on their hello ([`HANDSHAKES`], which
+//! `toyos::admission` keeps), connections served, streams — each share a
+//! grant names has a quarter of its own, so one holding all it may leaves the
+//! rest of each bound to three more. Past a bound a hello is answered
+//! `TooManyConnections` and a stream `TooManyStreams`.
 //!
 //! **An export takes its served slot when it is made**, of the share of the
 //! connection that asked, and is refused there: a connection made for a
@@ -25,6 +24,7 @@
 //! resolver's to bound. A link's target is stored as it was written, never
 //! resolved here, so it is held to UTF-8 alone.
 
+use toyos::admission::Policy;
 use toyos::fs::{Error, MAX_FILE_BYTES, MAX_PATH, WINDOW_BYTES};
 
 use crate::descriptions::MAX_IDS;
@@ -34,16 +34,15 @@ use toyos::shm::Lent;
 /// process.
 pub const MAX_SERVED: usize = 128;
 
-/// Connections taken and not yet answered at their hello. While this many
-/// wait, the next waits in the port's queue.
-pub const MAX_HANDSHAKES: usize = 32;
+/// Connections taken and not yet answered at their hello, a quarter of them
+/// one share's. While the table is full, the next waits in the port's queue.
+pub const HANDSHAKES: Policy = Policy::quartered(32);
 
 /// Streams served at once, machine-wide.
 pub const MAX_STREAMS: usize = 64;
 
-/// One share's parts of [`MAX_SERVED`], [`MAX_HANDSHAKES`] and [`MAX_STREAMS`].
+/// One share's parts of [`MAX_SERVED`] and [`MAX_STREAMS`].
 pub const SERVED_SHARE: usize = MAX_SERVED / 4;
-pub const HANDSHAKE_SHARE: usize = MAX_HANDSHAKES / 4;
 pub const STREAM_SHARE: usize = MAX_STREAMS / 4;
 
 /// How a hello is answered.
@@ -55,16 +54,6 @@ pub enum Hello<W> {
     Refused(String),
     /// Let go unanswered, for this reason.
     Dropped(&'static str),
-}
-
-/// A connection just taken, while `waiting` of its share's are not yet
-/// answered at their hello: `Err` is why it is answered `TooManyConnections`
-/// and let go.
-pub fn handshake(share: u64, waiting: usize) -> Result<(), String> {
-    match waiting >= HANDSHAKE_SHARE {
-        true => Err(format!("share {share} has {HANDSHAKE_SHARE} waiting on their hello")),
-        false => Ok(()),
-    }
 }
 
 /// Whether a connection's served slot is still to be taken at its hello, or
@@ -189,12 +178,6 @@ mod tests {
     /// A hello whose window nothing asks for: the bounds alone answer it.
     fn unasked() -> Option<Result<(), Lent>> {
         panic!("a hello past a bound was asked for its window")
-    }
-
-    #[test]
-    fn a_share_at_its_part_of_the_handshakes_is_refused_and_one_below_is_taken() {
-        assert_eq!(handshake(7, HANDSHAKE_SHARE - 1), Ok(()));
-        assert_eq!(handshake(7, HANDSHAKE_SHARE), Err(format!("share 7 has {HANDSHAKE_SHARE} waiting on their hello")));
     }
 
     #[test]

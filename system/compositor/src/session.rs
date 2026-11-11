@@ -37,10 +37,10 @@ use window::{Framebuffer, Screen};
 
 use crate::client::{
     announce, deliver, deliver_signal, deliver_with_handle, mark_dead, note_closed, note_opened,
-    Buffer, Client, ClientFrame, ClientRx, CopyRegion, Dead, DropReason, PendingConn, Watcher, Win,
-    HANDSHAKE_TIMEOUT, MAX_PENDING_CONNS,
+    Buffer, Client, ClientFrame, ClientRx, CopyRegion, Dead, DropReason, Watcher, Win, CLIENTS, OWNERS,
 };
 use crate::display::Display;
+use toyos::admission::{self, Admission, Event, Left};
 use crate::render::{self, Assets, SystemStats, TitleBarIcons};
 use crate::stats::FrameTotals;
 use crate::{
@@ -48,6 +48,44 @@ use crate::{
     FIXED_POLL_HANDLES, FRAME_INTERVAL, INPUT_POLL_HANDLES, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
     VOLUME_POLL_HANDLES,
 };
+
+/// Connections waiting on a frame, keyed by `K` and carrying `C`.
+type Waiting<K, C> = Admission<K, C, Instant, { window::MAX_INLINE_PAYLOAD }>;
+
+/// A waiting connection's token: its table's base and its slot, above every
+/// handle's own value, which every other watch's token is.
+const TOKEN_CLIENTS: u64 = 1 << 32;
+const TOKEN_OWNERS: u64 = TOKEN_CLIENTS + CLIENTS.slots as u64;
+
+/// What a pass found of one waiting connection: its frame, off the
+/// connection and in memory, or why it is let go. `came` says which port it
+/// came in on and the region its copy holds.
+fn first_frame<K, C>(
+    event: Event<K, C, { window::MAX_INLINE_PAYLOAD }>,
+    dead: &mut Vec<Dead>,
+    out: &mut Vec<ClientFrame>,
+    came: impl FnOnce(K, C) -> (Port, Option<CopyRegion>),
+) {
+    match event {
+        Event::Admitted(client) => {
+            let mut frame = ClientFrame::new(client.as_handle().raw(), client.msg_type());
+            frame.set_payload(client.payload());
+            let (conn, key, context) = client.into_parts();
+            (frame.port, frame.copy) = came(key, context);
+            frame.conn = Some(conn);
+            out.push(frame);
+        }
+        Event::Left { conn, key, context, why } => {
+            let reason = match (why, came(key, context).1) {
+                (Left::HungUp, _) => DropReason::Gone,
+                (Left::Malformed, _) => DropReason::OutOfProtocol,
+                (Left::Silent(_), Some(_)) => DropReason::CopyTimeout,
+                (Left::Silent(_), None) => DropReason::HandshakeTimeout,
+            };
+            mark_dead(dead, conn.as_handle().raw(), reason);
+        }
+    }
+}
 
 /// The most frames one source's turn takes before the others are served.
 const SOURCE_FRAMES: usize = 64;
@@ -270,7 +308,14 @@ pub struct Session {
 
     desk: Desk,
     stack: Stack<Client>,
-    pending: Vec<PendingConn>,
+    /// `compositor`'s connections waiting on a first frame or a copy's
+    /// commit, the region with it.
+    clients: Waiting<(), Option<CopyRegion>>,
+    /// The other ports' connections waiting on a first frame, one each.
+    owners: Waiting<Port, ()>,
+    /// `compositor`'s acceptor fired while [`Self::clients`] was full: it is
+    /// watched again once a slot is free, and its queue holds the next.
+    accept_parked: bool,
     damage: Damage,
     cursor: Point,
     prev_buttons: u8,
@@ -371,7 +416,7 @@ impl Session {
         let poller = Poller::new(
             FIXED_POLL_HANDLES
                 + MAX_WINDOW_SLOTS
-                + MAX_PENDING_CONNS
+                + CLIENTS.slots as u32
                 + PROMPT_POLL_HANDLES
                 + CLIPBOARD_POLL_HANDLES
                 + DISPLAY_PORT_POLL_HANDLES
@@ -434,7 +479,9 @@ impl Session {
             wallpaper,
             desk,
             stack: Stack::default(),
-            pending: Vec::new(),
+            clients: Admission::new(CLIENTS),
+            owners: Admission::new(OWNERS),
+            accept_parked: false,
             damage,
             cursor,
             prev_buttons: 0,
@@ -512,25 +559,21 @@ impl Session {
         let display_ready = self.display.handle().is_some_and(|handle| self.is_ready(handle.raw()));
         let session_ready = self.desktop.conn().is_some_and(|c| self.is_ready(c.as_handle().raw()));
         let opened_ready = self.is_ready(self.desktop.wake().as_handle().raw());
+        // A waiting connection is read when its watch fired, and when its
+        // limit has passed whether or not anything fired.
+        let now = Instant::now();
+        let waiting_ready = self.ready.iter().any(|token| *token >= TOKEN_CLIENTS)
+            || [self.clients.left(now), self.owners.left(now)].contains(&Some(Duration::ZERO));
+        if self.accept_parked && self.clients.has_room() {
+            self.accept_parked = false;
+            self.poller.watch(&self.acceptor, READABLE, self.acceptor.as_handle().raw().0 as u64);
+        }
         let client_ready = self.stack.iter().any(|w| self.is_ready(w.client.conn.as_handle().raw()))
-            || self.pending.iter().any(|p| self.is_ready(p.conn.as_handle().raw()))
+            || waiting_ready
             || self.watcher.as_ref().is_some_and(|w| self.is_ready(w.conn.as_handle().raw()));
 
-        // A handshake that never completes is the reason this deadline exists,
-        // and the sweep has to happen on a pass that found nothing ready too —
-        // otherwise a silent client is only ever timed out by some *other*
-        // client's traffic.
-        let now = Instant::now();
-        for p in self.pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
-            let reason = match p.copy {
-                Some(_) => DropReason::CopyTimeout,
-                None => DropReason::HandshakeTimeout,
-            };
-            eprintln!("compositor: dropping client {} — {}", p.conn.as_handle().raw().0, reason);
-        }
-        self.pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
         if self.output.as_ref().is_some_and(|d| d.overdue()) {
-            self.drop_output(format!("its hello did not come within {HANDSHAKE_TIMEOUT:?}"));
+            self.drop_output(format!("its hello did not come within {:?}", admission::LIMIT));
         }
         // After the sweep: a driver it dropped is not read.
         let output_ready = self.output.as_ref().is_some_and(|d| self.is_ready(d.conn().as_handle().raw()));
@@ -1100,40 +1143,25 @@ impl Session {
             Port::Clipboard => &self.clipboards,
             Port::Display => &self.settings,
         };
+        if port == Port::Compositor && !self.clients.has_room() {
+            self.accept_parked = true;
+            return;
+        }
+        let now = Instant::now();
         match acceptor.accept() {
             Err(e) => eprintln!("compositor: a connection could not be accepted ({e:?})"),
             Ok(_) if port == Port::Clipboard && self.watcher.is_some() => {
                 eprintln!("compositor: refusing a clipboard watcher's connection — one is watching");
             }
-            Ok(conn)
-                if !toyos_desktop::pending_admits(
-                    port,
-                    self.pending.iter().map(|p| p.port),
-                    MAX_PENDING_CONNS as usize,
-                ) =>
-            {
-                match port {
-                    Port::Prompt => eprintln!("compositor: refusing a prompt's connection — another is waiting"),
-                    Port::Clipboard => {
-                        eprintln!("compositor: refusing a clipboard watcher's connection — another is waiting")
-                    }
-                    Port::Display => eprintln!("compositor: refusing a display request — another is waiting"),
-                    Port::Compositor => eprintln!(
-                        "compositor: refusing client {} — {MAX_PENDING_CONNS} connections are already \
-                         waiting to say what they want",
-                        conn.as_handle().raw().0
-                    ),
+            Ok(conn) if port == Port::Compositor => {
+                if let Err(refused) = self.clients.admit(conn, (), None, now) {
+                    eprintln!("compositor: letting a connection go: {}", refused.why);
                 }
             }
             Ok(conn) => {
-                self.poller.watch(&conn, READABLE, conn.as_handle().raw().0 as u64);
-                self.pending.push(PendingConn {
-                    conn,
-                    rx: ClientRx::new(),
-                    since: Instant::now(),
-                    copy: None,
-                    port,
-                });
+                if self.owners.admit(conn, port, (), now).is_err() {
+                    eprintln!("compositor: refusing a connection off {port:?} — another is waiting");
+                }
             }
         }
     }
@@ -1146,41 +1174,22 @@ impl Session {
     fn take_frames(&mut self) -> Vec<ClientFrame> {
         let mut out: Vec<ClientFrame> = Vec::new();
 
-        for i in 0..self.pending.len() {
-            if !self.is_ready(self.pending[i].conn.as_handle().raw()) {
-                continue;
+        // A connection is identified by its first frame and by nothing else.
+        // `MSG_CREATE_WINDOW` promotes it to a window; `MSG_COPY_BEGIN` puts
+        // it back to wait for its commit; anything else is a one-shot request,
+        // answered and closed.
+        let now = Instant::now();
+        for &token in self.ready.iter().filter(|token| **token >= TOKEN_CLIENTS) {
+            match token < TOKEN_OWNERS {
+                true => self.clients.woke(token - TOKEN_CLIENTS),
+                false => self.owners.woke(token - TOKEN_OWNERS),
             }
-            let step = {
-                let p = &mut self.pending[i];
-                p.rx.pump(&p.conn)
-            };
-            let handle = self.pending[i].conn.as_handle();
-            match step {
-                RxStep::Idle => {}
-                RxStep::Eof => mark_dead(&mut self.dead, handle.raw(), DropReason::Gone),
-                RxStep::Malformed => {
-                    mark_dead(&mut self.dead, handle.raw(), DropReason::OutOfProtocol)
-                }
-                RxStep::Frame { msg_type, payload_len, .. } => {
-                    let mut frame = ClientFrame::new(handle.raw(), msg_type);
-                    frame.set_payload(self.pending[i].rx.payload(payload_len));
-                    // A connection is identified by its first frame and by
-                    // nothing else. `MSG_CREATE_WINDOW` promotes it to a
-                    // window; `MSG_COPY_BEGIN` puts it back to wait for its
-                    // commit; anything else is a one-shot request, answered and
-                    // closed.
-                    //
-                    // One promotion per pass keeps `i` meaningful across the
-                    // `remove`; the rest are re-armed below and served next
-                    // pass.
-                    let p = self.pending.remove(i);
-                    frame.conn = Some(p.conn);
-                    frame.copy = p.copy;
-                    frame.port = p.port;
-                    out.push(frame);
-                    break;
-                }
-            }
+        }
+        while let Some(event) = self.clients.next(now) {
+            first_frame(event, &mut self.dead, &mut out, |(), copy| (Port::Compositor, copy));
+        }
+        while let Some(event) = self.owners.next(now) {
+            first_frame(event, &mut self.dead, &mut out, |port, ()| (port, None));
         }
 
         for i in 0..self.stack.len() {
@@ -1497,13 +1506,10 @@ impl Session {
             mark_dead(&mut self.dead, handle, e.into());
             return;
         }
-        self.pending.push(PendingConn {
-            conn,
-            rx: ClientRx::new(),
-            since: Instant::now(),
-            copy: Some(CopyRegion::new(region)),
-            port: Port::Compositor,
-        });
+        // Its commit is owed as a first frame is: within the limit.
+        if let Err(refused) = self.clients.admit(conn, (), Some(CopyRegion::new(region)), Instant::now()) {
+            eprintln!("compositor: client {} gets no copy: {}", handle.0, refused.why);
+        }
     }
 
     /// `MSG_COPY_COMMIT` on a connection holding `region`: take the text out
@@ -1877,7 +1883,6 @@ impl Session {
             .collect();
         let dead = std::mem::take(&mut self.dead);
         self.stack.retain(|w| !dead.iter().any(|(handle, _)| *handle == w.client.conn.as_handle().raw()));
-        self.pending.retain(|p| !dead.iter().any(|(handle, _)| *handle == p.conn.as_handle().raw()));
         if self.watcher.as_ref().is_some_and(|w| dead.iter().any(|(handle, _)| *handle == w.conn.as_handle().raw())) {
             self.watcher = None;
             self.watch.leave();
@@ -1938,7 +1943,7 @@ impl Session {
                 self.poller.watch(&w.conn, READABLE, handle.0 as u64);
             }
         }
-        if acceptor {
+        if acceptor && !self.accept_parked {
             let h = self.acceptor.as_handle().raw();
             self.poller.watch(&self.acceptor, READABLE, h.0 as u64);
         }
@@ -1948,12 +1953,9 @@ impl Session {
                 self.poller.watch(&win.client.conn, READABLE, handle.0 as u64);
             }
         }
-        for p in self.pending.iter() {
-            let handle = p.conn.as_handle().raw();
-            if self.is_ready(handle) {
-                self.poller.watch(&p.conn, READABLE, handle.0 as u64);
-            }
-        }
+        let poller = &self.poller;
+        self.clients.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_CLIENTS + slot));
+        self.owners.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_OWNERS + slot));
     }
 
     fn tick_taskbar(&mut self) {

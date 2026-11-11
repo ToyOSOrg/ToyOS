@@ -7,7 +7,8 @@
 //! not at all, displayed as the driver wrote them. A [`Fault`] ends the link,
 //! as a hang-up does, and the stack keeps every connection it carries.
 
-use toyos::ipc::{Connection, FrameRx, RxStep};
+use toyos::admission::Client;
+use toyos::ipc::Connection;
 use toyos::poller::READABLE;
 use toyos::say;
 use toyos::wake::{Bell, Waker};
@@ -25,57 +26,27 @@ use crate::watches::Watches;
 
 const _: () = assert!(toyos_net_ip::FRAME <= SLOT_BYTES, "every frame the stack sends fits a link's slot");
 
-/// A driver's connection that has not said hello yet.
-pub struct Pending {
-    conn: Connection,
-    rx: FrameRx<{ Hello::MAX_BYTES }>,
-    pub since: std::time::Instant,
-}
+/// A driver's connection with its first frame.
+pub type Greeter = Client<(), (), { Hello::MAX_BYTES }>;
 
-/// What a pending connection's hello came to.
-pub enum Heard {
-    Nothing,
-    /// The driver went, or said what no driver says: it was refused, or let go.
-    Gone,
-    /// The driver said who it is, its address as the node takes one, with
-    /// its region: its connection is [`Pending::into_conn`].
-    Hello(Hello, IndividualMac, Region),
-}
-
-impl Pending {
-    pub fn new(conn: Connection) -> Self {
-        Self { conn, rx: FrameRx::new(), since: std::time::Instant::now() }
+/// The hello `greeter`'s first frame is: who the driver says it is, its
+/// address as the node takes one, its region and its connection. `None` for
+/// what no driver says first, refused where it has an answer and let go.
+pub fn hello(mut greeter: Greeter) -> Option<(Hello, IndividualMac, Region, Connection)> {
+    if greeter.msg_type() != wire::MSG_HELLO {
+        say!("netstack: a NIC driver's connection sent a frame no driver sends first");
+        return None;
     }
-
-    pub fn watch(&self, poller: &mut Watches, token: u64) {
-        poller.watch(&self.conn, READABLE, token);
-    }
-
-    pub fn into_conn(self) -> Connection {
-        self.conn
-    }
-
-    pub fn hear(&mut self) -> Heard {
-        match self.rx.pump(&self.conn) {
-            RxStep::Idle => Heard::Nothing,
-            RxStep::Eof => Heard::Gone,
-            RxStep::Frame { msg_type: wire::MSG_HELLO, payload_len, handles: 1 } => {
-                let hello = Hello::decode(self.rx.payload(payload_len));
-                let mac = hello.as_ref().and_then(|hello| IndividualMac::new(MacAddr(hello.mac.bytes())));
-                let [region] = self.rx.take_handles::<1>().expect("counted above");
-                match (hello, mac, Region::lent(region).ok()) {
-                    (Some(hello), Some(mac), Some(region)) => Heard::Hello(hello, mac, region),
-                    _ => {
-                        say!("netstack: a NIC driver's hello is not one this protocol makes, or its region is none");
-                        refuse(&self.conn, Refusal::Malformed);
-                        Heard::Gone
-                    }
-                }
-            }
-            RxStep::Frame { .. } | RxStep::Malformed => {
-                say!("netstack: a NIC driver's connection sent a frame no driver sends first");
-                Heard::Gone
-            }
+    let hello = Hello::decode(greeter.payload());
+    let mac = hello.as_ref().and_then(|hello| IndividualMac::new(MacAddr(hello.mac.bytes())));
+    let region = greeter.take_handles::<1>().and_then(|[region]| Region::lent(region).ok());
+    let conn = greeter.into_connection();
+    match (hello, mac, region) {
+        (Some(hello), Some(mac), Some(region)) => Some((hello, mac, region, conn)),
+        _ => {
+            say!("netstack: a NIC driver's hello is not one this protocol makes, or its region is none");
+            refuse(&conn, Refusal::Malformed);
+            None
         }
     }
 }

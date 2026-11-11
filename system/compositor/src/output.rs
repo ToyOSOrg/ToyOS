@@ -3,7 +3,7 @@
 //!
 //! The compositor never waits on it. Each present is one `try_send`. A
 //! refusal, a frame out of protocol or a hello that does not come within
-//! [`HANDSHAKE_TIMEOUT`] drops the driver by name, and the desktop goes on
+//! [`LIMIT`] drops the driver by name, and the desktop goes on
 //! without it.
 
 use std::time::Instant;
@@ -13,7 +13,7 @@ use toyos::Connection;
 use toyos_desktop::{Mode, Rect};
 use toyos_display_output::{Ended, Output, Present, Received, Size, MAX_FRAME, MSG_PRESENT};
 
-use crate::client::HANDSHAKE_TIMEOUT;
+use toyos::admission::LIMIT;
 
 /// The most frames one turn reads off the driver; it sends one per present.
 const TURN_FRAMES: usize = 4;
@@ -27,7 +27,7 @@ pub struct Driver {
 
 impl Driver {
     pub fn new(conn: Connection, epoch: Instant) -> Self {
-        let deadline = (Instant::now() + HANDSHAKE_TIMEOUT).duration_since(epoch).as_nanos() as u64;
+        let deadline = (Instant::now() + LIMIT).duration_since(epoch).as_nanos() as u64;
         Self { conn, rx: FrameRx::new(), epoch, output: Output::new(deadline) }
     }
 
@@ -97,7 +97,7 @@ impl Driver {
 
 fn said(ended: Ended) -> String {
     match ended {
-        Ended::Late => format!("its hello did not come within {HANDSHAKE_TIMEOUT:?}"),
+        Ended::Late => format!("its hello did not come within {LIMIT:?}"),
         Ended::Size { offered, drawn } => {
             format!("it offers {}x{}, and the desktop is drawn at {}x{}", offered.width, offered.height, drawn.width, drawn.height)
         }

@@ -41,10 +41,11 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use toyos::admission::{self, Admission, Client, Event, Left, Policy};
 use toyos::endow;
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::poller::{Poller, READABLE};
-use toyos::{AsHandle, OwnedHandle};
+use toyos::OwnedHandle;
 use toyos_abi::syscall::{SyscallError, MAX_BADGE};
 use toyos_blockring::disk::{self, Offer, Part, Settled};
 use toyos_blockring::wire::{self, Badge, Grant, Listed, Refusal};
@@ -57,13 +58,15 @@ use toyos_blockserve::guid_text;
 /// answer (`wire::ANSWER_BOUND_NS`), which leaves the driver room for its own.
 const DRIVER_BOUND: Duration = Duration::from_nanos(wire::DRIVER_BOUND_NS);
 
-/// Connections accepted and not yet asked, and how long one may stay so.
-const MAX_PENDING: usize = 16;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Connections accepted and not yet asking, a quarter of them one grant's:
+/// the badge names what its holder reaches, and two holders of one grant
+/// spend one share.
+const ASKING: Policy = Policy::quartered(16);
 /// Requests that wait for a driver at once.
 const MAX_WAITING: usize = 16;
-/// Disk drivers connected at once.
+/// Disk drivers connected at once, each one connection, named or not yet.
 const MAX_DRIVERS: usize = 16;
+const NAMING: Policy = Policy { slots: MAX_DRIVERS, share: 1, limit: admission::LIMIT };
 
 /// Argv: each disk driver the supervisor started before this service, by the
 /// badge of its `disk` connector, and each disk controller it started none
@@ -76,7 +79,8 @@ const ACTIVE: &str = "--active";
 
 const TOKEN_ACCEPT: u64 = 0;
 const TOKEN_DRIVERS: u64 = 1;
-const TOKEN_PENDING: u64 = 0x1_0000;
+const TOKEN_ASKING: u64 = 0x1_0000;
+const TOKEN_NAMING: u64 = 0x1_8000;
 const TOKEN_DRIVER: u64 = 0x2_0000;
 
 /// One partition a driver offered, on the disk the service numbered.
@@ -242,12 +246,14 @@ impl Known {
     }
 }
 
-/// A connection that has not asked anything yet.
-struct Pending {
-    conn: Connection,
-    rx: ipc::FrameRx<{ wire::GUID_BYTES }>,
-    since: Instant,
-}
+/// A client with its first frame, keyed by its badge's bytes.
+type Asker = Client<Option<admission::Badge>, (), { wire::GUID_BYTES }>;
+
+/// The widest frame a driver sends.
+const DRIVER_FRAME: usize = 4 + disk::MAX_PARTS * Part::BYTES;
+
+/// A driver's connection, keyed by who the supervisor says it is.
+type DriverLine = Client<DriverBadge, (), DRIVER_FRAME>;
 
 /// What a waiting client asked.
 enum Ask {
@@ -266,14 +272,18 @@ struct Waiting {
 
 /// One disk driver's connection.
 struct Driver {
-    badge: DriverBadge,
-    conn: Connection,
-    rx: ipc::FrameRx<{ 4 + disk::MAX_PARTS * Part::BYTES }>,
-    label: Option<String>,
+    line: DriverLine,
+    /// What it calls itself, its first frame.
+    label: String,
     settled: bool,
     /// The driver's number for each disk it offers, and the service's.
     disks: BTreeMap<u32, u32>,
-    since: Instant,
+}
+
+impl Driver {
+    fn badge(&self) -> DriverBadge {
+        *self.line.key()
+    }
 }
 
 struct Service {
@@ -323,87 +333,84 @@ fn main() {
 
 impl Service {
     fn serve(&mut self, clients: &toyos::port::Acceptor, drivers: &toyos::port::Acceptor) -> ! {
-        let poller = Poller::new(2 + MAX_PENDING as u32 + MAX_DRIVERS as u32);
-        let mut pending: Vec<Pending> = Vec::new();
+        let poller = Poller::new(2 + ASKING.slots as u32 + 2 * MAX_DRIVERS as u32);
+        let mut asking: Admission<Option<admission::Badge>, (), Instant, { wire::GUID_BYTES }> = Admission::new(ASKING);
+        let mut naming: Admission<DriverBadge, (), Instant, DRIVER_FRAME> = Admission::new(NAMING);
         let mut ready: Vec<u64> = Vec::new();
         let mut was_settled = false;
         loop {
-            if pending.len() < MAX_PENDING && self.waiting.len() < MAX_WAITING {
+            if asking.has_room() && self.waiting.len() < MAX_WAITING {
                 poller.watch(clients, READABLE, TOKEN_ACCEPT);
             }
-            if self.drivers.len() < MAX_DRIVERS {
+            if self.drivers.len() < MAX_DRIVERS && naming.has_room() {
                 poller.watch(drivers, READABLE, TOKEN_DRIVERS);
             }
-            for p in &pending {
-                poller.watch(&p.conn, READABLE, TOKEN_PENDING + u64::from(p.conn.as_handle().raw().0));
-            }
+            asking.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_ASKING + slot));
+            naming.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_NAMING + slot));
             for (id, d) in &self.drivers {
-                poller.watch(&d.conn, READABLE, TOKEN_DRIVER + id);
+                poller.watch(&d.line, READABLE, TOKEN_DRIVER + id);
             }
             let now = Instant::now();
-            let deadlines = pending.iter().map(|p| p.since + HANDSHAKE_TIMEOUT);
-            let deadlines = deadlines.chain((!self.waiting.is_empty()).then_some(self.awaited_since + DRIVER_BOUND));
-            let deadlines = deadlines.chain(self.drivers.values().filter(|d| d.label.is_none()).map(|d| d.since + HANDSHAKE_TIMEOUT));
-            let timeout = deadlines.min().map_or(u64::MAX, |at| at.saturating_duration_since(now).as_nanos() as u64);
+            let left = [asking.left(now), naming.left(now)].into_iter().flatten();
+            let left = left.chain((!self.waiting.is_empty()).then(|| (self.awaited_since + DRIVER_BOUND).saturating_duration_since(now)));
+            let timeout = left.min().map_or(u64::MAX, |left| left.as_nanos() as u64);
             ready.clear();
             poller.wait(1, timeout, |token| ready.push(token));
 
             let now = Instant::now();
+            for &token in &ready {
+                match token {
+                    TOKEN_ASKING..TOKEN_NAMING => asking.woke(token - TOKEN_ASKING),
+                    TOKEN_NAMING..TOKEN_DRIVER => naming.woke(token - TOKEN_NAMING),
+                    _ => {}
+                }
+            }
             if ready.contains(&TOKEN_DRIVERS) {
                 match drivers.accept() {
                     Ok(conn) => match driver_badge(drivers, &conn) {
                         None => println!("diskserver: a `disk` connection with no badge the supervisor mints is let go"),
-                        Some(badge) if self.drivers.values().any(|d| d.badge == badge) => {
+                        Some(badge) if self.drivers.values().any(|d| d.badge() == badge) => {
                             println!("diskserver: a second connection of disk driver {badge} is let go")
                         }
                         Some(badge) => {
-                            let id = self.next_driver;
-                            self.next_driver += 1;
-                            let rx = ipc::FrameRx::new();
-                            let d = Driver { badge, conn, rx, label: None, settled: false, disks: BTreeMap::new(), since: now };
-                            self.drivers.insert(id, d);
+                            if let Err(refused) = naming.admit(conn, badge, (), now) {
+                                println!("diskserver: a connection of disk driver {badge} is let go: {}", refused.why)
+                            }
                         }
                     },
                     Err(why) => println!("diskserver: the kernel refused a driver's connection: {why:?}"),
                 }
             }
+            while let Some(event) = naming.next(now) {
+                match event {
+                    Event::Admitted(line) => self.named(line),
+                    Event::Left { key, why, .. } => self.unnamed(key, &why.to_string()),
+                }
+            }
             let ids: Vec<u64> = self.drivers.keys().copied().collect();
             for id in ids {
-                let unnamed = self.drivers[&id].label.is_none() && now >= self.drivers[&id].since + HANDSHAKE_TIMEOUT;
-                if unnamed {
-                    self.drop_driver(id, "it never said its name");
-                } else if ready.contains(&(TOKEN_DRIVER + id)) {
+                if ready.contains(&(TOKEN_DRIVER + id)) {
                     self.hear_driver(id);
                 }
             }
 
-            pending.retain(|p| now < p.since + HANDSHAKE_TIMEOUT);
             if ready.contains(&TOKEN_ACCEPT) {
                 match clients.accept() {
-                    Ok(conn) => pending.push(Pending { conn, rx: ipc::FrameRx::new(), since: now }),
+                    Ok(conn) => {
+                        let key = admission::Badge::of(clients, &conn);
+                        if let Err(refused) = asking.admit(conn, key, (), now) {
+                            refuse(&refused.conn, Refusal::Exhausted);
+                            println!("diskserver: letting a connection of {:?} go: {}", refused.key, refused.why);
+                        }
+                    }
                     Err(why) => panic!("diskserver: its own acceptor refused an accept: {why:?}"),
                 }
             }
-            let mut i = 0;
-            while i < pending.len() {
-                let token = TOKEN_PENDING + u64::from(pending[i].conn.as_handle().raw().0);
-                if !ready.contains(&token) {
-                    i += 1;
-                    continue;
-                }
-                let step = {
-                    let p = &mut pending[i];
-                    p.rx.pump(&p.conn)
-                };
-                match step {
-                    RxStep::Idle => i += 1,
-                    RxStep::Eof | RxStep::Malformed => {
-                        pending.remove(i);
-                    }
-                    RxStep::Frame { msg_type, payload_len, .. } => {
-                        let p = pending.remove(i);
-                        self.asked(clients, p, msg_type, payload_len);
-                    }
+            while let Some(event) = asking.next(now) {
+                match event {
+                    Event::Admitted(asker) => self.asked(asker),
+                    Event::Left { why: Left::HungUp, .. } => {}
+                    Event::Left { key, why, .. } => println!("diskserver: letting a connection of {key:?} go: {why}"),
                 }
             }
 
@@ -420,11 +427,11 @@ impl Service {
     fn hear_driver(&mut self, id: u64) {
         loop {
             let d = self.drivers.get_mut(&id).expect("a live driver");
-            let (msg_type, payload) = match d.rx.pump(&d.conn) {
+            let (msg_type, payload) = match d.line.next_request() {
                 RxStep::Idle => return,
                 RxStep::Eof => return self.drop_driver(id, "its connection ended"),
                 RxStep::Malformed => return self.drop_driver(id, "a frame this protocol does not make"),
-                RxStep::Frame { msg_type, payload_len, .. } => (msg_type, d.rx.payload(payload_len).to_vec()),
+                RxStep::Frame { msg_type, .. } => (msg_type, d.line.payload().to_vec()),
             };
             if let Err(why) = self.heard(id, msg_type, &payload) {
                 return self.drop_driver(id, why);
@@ -435,15 +442,7 @@ impl Service {
     /// One frame of driver `id`'s, or why it ends the driver.
     fn heard(&mut self, id: u64, msg_type: u32, payload: &[u8]) -> Result<(), &'static str> {
         let d = self.drivers.get_mut(&id).expect("a live driver");
-        let Some(label) = d.label.clone() else {
-            if msg_type != disk::MSG_DRIVER {
-                return Err("a frame before its name");
-            }
-            let label = disk::label(payload).ok_or("a name that is not one")?;
-            println!("diskserver: disk driver {} ({label}) connected", d.badge);
-            d.label = Some(label);
-            return Ok(());
-        };
+        let (badge, label) = (d.badge(), d.label.clone());
         match msg_type {
             disk::MSG_OFFER => {
                 let offer = Offer::decode(payload).ok_or("an offer that is not one")?;
@@ -464,8 +463,8 @@ impl Service {
                         Fate::Unusable
                     }
                 };
-                println!("diskserver: disk driver {} ({label}) settled with {} disk(s)", d.badge, d.disks.len());
-                self.known.fates.insert(d.badge, fate);
+                println!("diskserver: disk driver {badge} ({label}) settled with {} disk(s)", d.disks.len());
+                self.known.fates.insert(badge, fate);
             }
             disk::MSG_GONE => {
                 let ours = disk::disk(payload).and_then(|theirs| d.disks.remove(&theirs));
@@ -486,7 +485,7 @@ impl Service {
         d.disks.insert(offer.disk, ours);
         println!(
             "diskserver: disk {ours}, {}'s disk {}, offers {} partition(s)",
-            d.label.as_deref().unwrap_or("?"),
+            d.label,
             offer.disk,
             offer.parts.len()
         );
@@ -501,22 +500,49 @@ impl Service {
     /// Driver `id` is gone, and every disk it offered with it ([`Known::ended`]).
     fn drop_driver(&mut self, id: u64, why: &str) {
         let d = self.drivers.remove(&id).expect("a live driver");
-        let label = d.label.unwrap_or_else(|| "unnamed".into());
-        println!("diskserver: dropping disk driver {} ({label}) — {why}; its {} disk(s) leave", d.badge, d.disks.len());
+        println!("diskserver: dropping disk driver {} ({}) — {why}; its {} disk(s) leave", d.badge(), d.label, d.disks.len());
         let gone: Vec<u32> = d.disks.values().copied().collect();
         self.known.offered.retain(|o| !gone.contains(&o.disk));
-        if self.known.ended(d.badge) {
+        self.driver_ended(d.badge());
+    }
+
+    fn driver_ended(&mut self, badge: DriverBadge) {
+        if self.known.ended(badge) {
             self.awaited_since = Instant::now();
         } else {
-            println!("diskserver: disk driver {} ended before it settled; its controller is unusable", d.badge);
+            println!("diskserver: disk driver {badge} ended before it settled; its controller is unusable");
         }
+    }
+
+    /// A driver's first frame, its name: it is a driver from here.
+    fn named(&mut self, line: DriverLine) {
+        let badge = *line.key();
+        let label = match line.msg_type() {
+            disk::MSG_DRIVER => disk::label(line.payload()).ok_or("a name that is not one"),
+            _ => Err("a frame before its name"),
+        };
+        match label {
+            Ok(label) => {
+                println!("diskserver: disk driver {badge} ({label}) connected");
+                let id = self.next_driver;
+                self.next_driver += 1;
+                self.drivers.insert(id, Driver { line, label, settled: false, disks: BTreeMap::new() });
+            }
+            Err(why) => self.unnamed(badge, why),
+        }
+    }
+
+    /// Driver `badge`'s connection is let go before it said its name.
+    fn unnamed(&mut self, badge: DriverBadge, why: &str) {
+        println!("diskserver: dropping disk driver {badge} (unnamed) — {why}");
+        self.driver_ended(badge);
     }
 
     /// One client's first frame: a listing, an open, a description or a
     /// designation.
-    fn asked(&mut self, clients: &toyos::port::Acceptor, mut p: Pending, msg_type: u32, payload_len: usize) {
-        let badge = badge(clients, &p.conn);
-        let payload = p.rx.payload(payload_len);
+    fn asked(&mut self, mut asker: Asker) {
+        let badge = asker.key().and_then(|badge| Badge::decode(badge.bytes()));
+        let (msg_type, payload) = (asker.msg_type(), asker.payload());
         let ask = match (msg_type, payload) {
             (wire::MSG_LIST, []) => Some(Ask::List),
             (wire::MSG_DESCRIBE, _) => disk::disk(payload).map(|disk| Ask::Describe { disk }),
@@ -525,14 +551,15 @@ impl Service {
             _ => None,
         };
         if let Some(ask) = ask {
-            return self.waiting.push(Waiting { conn: p.conn, badge, ask });
+            return self.waiting.push(Waiting { conn: asker.into_connection(), badge, ask });
         }
-        let guid = wire::guid(p.rx.payload(payload_len));
-        let handles = p.rx.take_handles::<1>();
+        let guid = wire::guid(payload);
+        let handles = asker.take_handles::<1>();
+        let conn = asker.into_connection();
         let (Some(guid), Some([region]), wire::MSG_OPEN) = (guid, handles, msg_type) else {
-            return refuse(&p.conn, Refusal::Malformed);
+            return refuse(&conn, Refusal::Malformed);
         };
-        self.waiting.push(Waiting { conn: p.conn, badge, ask: Ask::Open { guid, region: region.into() } });
+        self.waiting.push(Waiting { conn, badge, ask: Ask::Open { guid, region: region.into() } });
     }
 
     /// Answer every waiting question the drivers have now answered, or whose
@@ -604,10 +631,10 @@ impl Service {
         let session = disk::Session { disk: theirs, unique: guid, writes };
         // The client hears nothing from here: its open is the driver's to
         // answer, and a refused send closes the client's connection.
-        match d.conn.try_send_bytes_with(disk::MSG_SESSION, &session.encode(), [conn.into_owned(), region]) {
+        match d.line.try_send_bytes_with(disk::MSG_SESSION, &session.encode(), [conn.into_owned(), region]) {
             Ok(()) => {}
             Err(ipc::TrySendError::Full) => self.drop_driver(id, "it would not take a session"),
-            Err(why) => println!("diskserver: the kernel would not move a session to disk driver {}: {why:?}", d.badge),
+            Err(why) => println!("diskserver: the kernel would not move a session to disk driver {}: {why:?}", d.badge()),
         }
     }
 }
@@ -620,10 +647,10 @@ impl Service {
             unreachable!("diskserver: disk {ours} is offered and no driver has it")
         };
         let theirs = *d.disks.iter().find(|(_, o)| **o == ours).expect("just found").0;
-        match d.conn.try_send_bytes_with(msg_type, &payload(theirs), [conn.into_owned()]) {
+        match d.line.try_send_bytes_with(msg_type, &payload(theirs), [conn.into_owned()]) {
             Ok(()) => {}
             Err(ipc::TrySendError::Full) => self.drop_driver(id, "it would not take a client's work"),
-            Err(why) => println!("diskserver: the kernel would not move a client to disk driver {}: {why:?}", d.badge),
+            Err(why) => println!("diskserver: the kernel would not move a client to disk driver {}: {why:?}", d.badge()),
         }
     }
 }
@@ -660,17 +687,6 @@ fn driver_badge(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<D
     let mut badge = [0u8; MAX_BADGE];
     match acceptor.badge(conn, &mut badge) {
         Ok(bytes) => disk::identity(bytes),
-        Err(SyscallError::NotFound) => None,
-        Err(why) => panic!("diskserver: its own acceptor would not say a connection's badge: {why:?}"),
-    }
-}
-
-/// The badge `conn`, accepted from `acceptor`, was minted with; `None` for a
-/// connection through an unbadged connector or with bytes no minter stamps.
-fn badge(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<Badge> {
-    let mut badge = [0u8; MAX_BADGE];
-    match acceptor.badge(conn, &mut badge) {
-        Ok(bytes) => Badge::decode(bytes),
         Err(SyscallError::NotFound) => None,
         Err(why) => panic!("diskserver: its own acceptor would not say a connection's badge: {why:?}"),
     }

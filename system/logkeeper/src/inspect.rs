@@ -6,16 +6,17 @@
 //! the file changes — and this thread
 //! owns the acceptor, reads each reader's request without ever blocking on it,
 //! answers in one non-blocking write and closes. A reader that connects and
-//! says nothing costs a slot and [`HANDSHAKE_TIMEOUT`], never the log.
+//! says nothing costs a slot of [`READERS`] for its limit, never the log.
 
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use toyos::ipc::{self, FrameRx, RxStep};
+use toyos::admission::{Admission, Event, Left, Policy};
+use toyos::ipc;
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
-use toyos::{AsHandle, Connection};
+use toyos::say;
 use toyos_inspect::Snapshot;
 
 use toyos_logstream::READ;
@@ -28,14 +29,9 @@ const _: () = assert!(
     "a snapshot is one frame"
 );
 
-/// Readers accepted and not yet answered.
-///
-/// Policy: a reader asks once and goes, so this is how many may be mid-request
-/// at once. Past it a connection is refused by name rather than queued.
-const MAX_PENDING: usize = 8;
-
-/// How long an accepted reader may take to send its request.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Readers accepted and not yet asking: a reader asks once and goes. Any
+/// holder of `log` may hold them all, since its connector names no holder.
+const READERS: Policy = Policy::unshared(8);
 
 /// The poll token of the acceptor, clear of every handle's own value.
 const ACCEPT: u64 = u64::MAX;
@@ -123,13 +119,6 @@ impl Published {
     }
 }
 
-/// A reader accepted and not yet answered.
-struct Pending {
-    conn: Connection,
-    rx: FrameRx<0>,
-    since: Instant,
-}
-
 /// Serve `inspect` and this machine's readers on `acceptor` for the life of
 /// the process.
 pub fn serve(acceptor: Acceptor, published: Arc<Published>, hub: Arc<Hub>) {
@@ -140,49 +129,48 @@ pub fn serve(acceptor: Acceptor, published: Arc<Published>, hub: Arc<Hub>) {
 }
 
 fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
-    let poller = Poller::new(1 + MAX_PENDING as u32);
-    let mut pending: Vec<Pending> = Vec::new();
+    let poller = Poller::new(1 + READERS.slots as u32);
+    let mut readers: Admission<(), (), Instant, 0> = Admission::new(READERS);
+    let mut accept_armed = false;
+    let mut ready: Vec<u64> = Vec::new();
     loop {
-        poller.watch(acceptor, READABLE, ACCEPT);
-        for p in &pending {
-            poller.watch(&p.conn, READABLE, u64::from(p.conn.as_handle().raw().0));
+        if !accept_armed && readers.has_room() {
+            poller.watch(acceptor, READABLE, ACCEPT);
+            accept_armed = true;
         }
-        let timeout =
-            if pending.is_empty() { u64::MAX } else { HANDSHAKE_TIMEOUT.as_nanos() as u64 };
-        let mut ready: Vec<u64> = Vec::new();
+        readers.watch(|conn, slot| poller.watch(conn, READABLE, slot));
+        let timeout = readers.left(Instant::now()).map_or(u64::MAX, |left| left.as_nanos() as u64);
+        ready.clear();
         poller.wait(1, timeout, |token| ready.push(token));
 
-        // No line for any reader dropped, refused or unanswered below: each is
-        // the reader's doing, a line apiece would let every holder of `log`
-        // write into the log at its own rate, and the reader is told by its
-        // connection closing.
         let now = Instant::now();
-        pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
-
-        if ready.contains(&ACCEPT) {
+        for &token in &ready {
+            if token != ACCEPT {
+                readers.woke(token);
+                continue;
+            }
+            accept_armed = false;
+            // A reader the kernel would not hand over, or one past the table,
+            // is told by its connection closing.
             if let Ok(conn) = acceptor.accept() {
-                if pending.len() < MAX_PENDING {
-                    pending.push(Pending { conn, rx: FrameRx::new(), since: now });
-                }
+                let _ = readers.admit(conn, (), (), now);
             }
         }
-
-        pending.retain_mut(|p| {
-            if !ready.contains(&u64::from(p.conn.as_handle().raw().0)) {
-                return true;
+        while let Some(event) = readers.next(now) {
+            match event {
+                Event::Admitted(reader) => match reader.msg_type() {
+                    toyos_inspect::MSG_INSPECT => {
+                        let _ = reader.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot());
+                    }
+                    READ => hub.read(&reader.into_connection()),
+                    _ => {}
+                },
+                // The table lets go at most its own size each limit, so this
+                // line is no reader's to write at its own rate. A reader that
+                // hung up or spoke another protocol is told by its closing.
+                Event::Left { why: why @ Left::Silent(_), .. } => say!("logkeeper: letting a reader go: {why}"),
+                Event::Left { .. } => {}
             }
-            match p.rx.pump(&p.conn) {
-                RxStep::Idle => true,
-                RxStep::Frame { msg_type: toyos_inspect::MSG_INSPECT, .. } => {
-                    let _ = p.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot());
-                    false
-                }
-                RxStep::Frame { msg_type: READ, .. } => {
-                    hub.read(&p.conn);
-                    false
-                }
-                RxStep::Eof | RxStep::Frame { .. } | RxStep::Malformed => false,
-            }
-        });
+        }
     }
 }

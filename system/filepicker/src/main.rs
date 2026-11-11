@@ -5,10 +5,9 @@ use filepicker_api::{
 };
 use font::Font;
 use std::fs;
-use std::time::{Duration, Instant};
-use toyos::ipc::{self, RxStep};
+use std::time::Instant;
+use toyos::admission::{self, Admission, Left, Policy};
 use toyos::poller::{Poller, READABLE};
-use toyos::AsHandle;
 use toyos::Connection;
 use toyos::endow;
 use std::path::{Path, PathBuf};
@@ -512,31 +511,22 @@ fn run_picker(mode: PickerMode, start_dir: &str, client: &Connection, ttf: &[u8]
 
 // --- Main daemon loop ---
 
-/// How many connections may be waiting to say what they want. The kernel's own
-/// per-port queue depth (`listener::MAX_PENDING_CONNECTIONS`) one step further
-/// along; past it the picker refuses by name rather than growing.
-const MAX_PENDING_REQUESTS: usize = 32;
+/// Connections accepted and not yet asking, from either port: half are the
+/// supervisor's questions' and half the picker's callers', so neither holds
+/// the other out.
+const ASKING: Policy = Policy { slots: 32, share: 16, limit: admission::LIMIT };
 
-/// How long an accepted connection may go without completing its request.
-/// Every caller sends its frame in the statement after `connect`, so what this
-/// bounds is the one that never sends it, and it is what drains the table.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// One caller's inbound framing.
-type RequestRx = ipc::FrameRx<MAX_REQUEST_BYTES>;
-
-/// A connection that has been accepted and has not yet said what it wants.
-struct Pending {
-    conn: Connection,
-    rx: RequestRx,
-    since: Instant,
-    /// It came in on `consent`, so it is the supervisor's question.
-    consent: bool,
+/// Which port a connection came in on, which is whose share it spends.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Port {
+    Picker,
+    /// `consent`: the supervisor's question.
+    Consent,
 }
 
 const TOKEN_ACCEPTOR: u64 = 0;
 const TOKEN_CONSENT_ACCEPTOR: u64 = 1;
-const TOKEN_PENDING_BASE: u64 = 2;
+const TOKEN_ASKING: u64 = 2;
 
 /// Serve `filepicker`, and the supervisor's questions on `consent`
 /// ([`consent`]), for the rest of the machine's life.
@@ -557,104 +547,73 @@ fn main() {
         .expect("the manifest declares this program serves `consent`");
     let ttf = fs::read(FONT).unwrap_or_else(|e| panic!("filepicker: {FONT}: {e}"));
 
-    let poller = Poller::new(2 + MAX_PENDING_REQUESTS as u32);
-    let mut pending: Vec<Pending> = Vec::new();
+    let poller = Poller::new(2 + ASKING.slots as u32);
+    let mut asking: Admission<Port, (), Instant, MAX_REQUEST_BYTES> = Admission::new(ASKING);
     let mut ready: Vec<u64> = Vec::new();
     loop {
-        poller.watch(&acceptor, READABLE, TOKEN_ACCEPTOR);
-        poller.watch(&questions, READABLE, TOKEN_CONSENT_ACCEPTOR);
-        for p in &pending {
-            poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().raw().0 as u64);
+        if asking.has_room() {
+            poller.watch(&acceptor, READABLE, TOKEN_ACCEPTOR);
+            poller.watch(&questions, READABLE, TOKEN_CONSENT_ACCEPTOR);
         }
-        // A client that says nothing wakes nothing, so the wait is what is left
-        // of the oldest deadline rather than a fresh one.
-        let now = Instant::now();
-        let timeout = pending
-            .iter()
-            .map(|p| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(p.since)))
-            .min()
-            .map_or(u64::MAX, |left| left.as_nanos() as u64);
+        asking.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_ASKING + slot));
+        let timeout = asking.left(Instant::now()).map_or(u64::MAX, |left| left.as_nanos() as u64);
         ready.clear();
         poller.wait(1, timeout, |token| ready.push(token));
 
-        let now = Instant::now();
-        for p in pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
-            eprintln!(
-                "filepicker: dropping client {} — it never finished its request",
-                p.conn.as_handle().raw().0
-            );
-        }
-        pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
-
-        for (token, question) in [(TOKEN_ACCEPTOR, false), (TOKEN_CONSENT_ACCEPTOR, true)] {
-            if !ready.contains(&token) {
-                continue;
-            }
-            let acceptor = if question { &questions } else { &acceptor };
+        for &token in &ready {
+            let (acceptor, port) = match token {
+                TOKEN_ACCEPTOR => (&acceptor, Port::Picker),
+                TOKEN_CONSENT_ACCEPTOR => (&questions, Port::Consent),
+                slot => {
+                    asking.woke(slot - TOKEN_ASKING);
+                    continue;
+                }
+            };
             // An accept that fails costs one connection and never the picker.
             match acceptor.accept() {
                 Err(e) => eprintln!("filepicker: a connection could not be accepted ({e:?})"),
-                Ok(conn) if pending.len() >= MAX_PENDING_REQUESTS => eprintln!(
-                    "filepicker: refusing client {} — {MAX_PENDING_REQUESTS} connections are \
-                     already waiting to say what they want",
-                    conn.as_handle().raw().0
-                ),
-                Ok(conn) => pending.push(Pending { conn, rx: RequestRx::new(), since: Instant::now(), consent: question }),
+                Ok(conn) => {
+                    if let Err(refused) = asking.admit(conn, port, (), Instant::now()) {
+                        eprintln!("filepicker: letting a connection go: {}", refused.why);
+                    }
+                }
             }
         }
 
-        // `remove` rather than `swap_remove`: the entries after `i` shift down,
-        // so leaving `i` alone visits each connection exactly once.
-        let mut i = 0;
-        while i < pending.len() {
-            let handle = pending[i].conn.as_handle().raw();
-            if !ready.contains(&(TOKEN_PENDING_BASE + handle.0 as u64)) {
-                i += 1;
-                continue;
-            }
-            let step = {
-                let p = &mut pending[i];
-                p.rx.pump(&p.conn)
-            };
-            match step {
-                RxStep::Idle => i += 1,
+        // The clock is read for each: a session is modal and holds the loop,
+        // and a request that came whole meanwhile is served after it.
+        while let Some(event) = asking.next(Instant::now()) {
+            let asker = match event {
+                admission::Event::Admitted(asker) => asker,
                 // Unlogged: a caller may connect to find out whether it holds a
                 // picker at all and hang up, which is its business.
-                RxStep::Eof => {
-                    pending.remove(i);
+                admission::Event::Left { why: Left::HungUp, .. } => continue,
+                admission::Event::Left { why, .. } => {
+                    eprintln!("filepicker: letting a connection go: {why}");
+                    continue;
                 }
-                RxStep::Malformed => {
-                    eprintln!(
-                        "filepicker: dropping client {} — it sent a frame this protocol cannot \
-                         describe",
-                        handle.0
-                    );
-                    pending.remove(i);
+            };
+            match *asker.key() {
+                Port::Consent => match consent::question(asker.payload(), asker.msg_type()) {
+                    Ok(ask) => consent::ask(ask, &asker.into_connection(), &ttf),
+                    Err(why) => eprintln!("filepicker: dropping the supervisor's question — {why}"),
+                },
+                Port::Picker if asker.msg_type() == MSG_FILEPICKER_REQUEST => {
+                    let data = asker.payload();
+                    let mode = if data.first() == Some(&(PickerMode::Save as u8)) {
+                        PickerMode::Save
+                    } else {
+                        PickerMode::Open
+                    };
+                    let start_dir = data
+                        .get(1..)
+                        .and_then(|d| core::str::from_utf8(d).ok())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("/")
+                        .to_string();
+                    run_picker(mode, &start_dir, &asker.into_connection(), &ttf);
                 }
-                RxStep::Frame { msg_type, payload_len, .. } => {
-                    let p = pending.remove(i);
-                    if p.consent {
-                        match consent::question(p.rx.payload(payload_len), msg_type) {
-                            Ok(ask) => consent::ask(ask, &p.conn, &ttf),
-                            Err(why) => eprintln!("filepicker: dropping the supervisor's question — {why}"),
-                        }
-                    } else if msg_type == MSG_FILEPICKER_REQUEST {
-                        let data = p.rx.payload(payload_len);
-                        let mode = if data.first() == Some(&(PickerMode::Save as u8)) {
-                            PickerMode::Save
-                        } else {
-                            PickerMode::Open
-                        };
-                        let start_dir = data
-                            .get(1..)
-                            .and_then(|d| core::str::from_utf8(d).ok())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("/");
-                        run_picker(mode, start_dir, &p.conn, &ttf);
-                    }
-                    // The session held the loop, so deadlines are re-read.
-                    break;
-                }
+                Port::Picker => {}
             }
         }
     }
