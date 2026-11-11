@@ -1,0 +1,10 @@
+[package]
+name = "nvme-apst"
+version = "0.1.0"
+edition = "2024"
+description = "An NVMe controller's power state descriptors read off Identify Controller, and the Autonomous Power State Transition table built from them under a latency bound (NVM Express Base 2.1 §5.1.25.1.6, §8.1.17)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+doctest = false

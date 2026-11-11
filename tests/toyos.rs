@@ -1316,13 +1316,13 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // `osbench persist` without the rest of the suite, for a change to
-        // the disk's path: it alone writes the bench's NVMe, the durable rows
-        // and `fs.disk.*`. `files` rides along as their memory-filesystem
-        // counterpart, `fs.mem.*`, and `nvme` for its place in the list: it
-        // only reads, and on ToyOS reports its rows unsupported. Evidence and
-        // not a verdict, as `osbench` is, whose boot measures the same
-        // groups: only a pass that names it runs it. The T14 and the AMD
-        // bench.
+        // the disk's path or its power states: it alone writes the bench's
+        // NVMe, the durable rows and `fs.disk.*`. `files` rides along as
+        // their memory-filesystem counterpart, `fs.mem.*`, and `nvme` for
+        // its place in the list: it only reads, and on ToyOS reports its
+        // rows unsupported. Evidence and not a verdict, as `osbench` is,
+        // whose boot measures the same groups: only a pass that names it
+        // runs it. The T14 and the AMD bench.
         "osbench_disk",
         metal::Metal {
             arms: OSBENCH_DISK,
@@ -1903,9 +1903,10 @@ const OSBENCH_GROUPS: [&str; 16] = [
 /// under 30 s of memcpy sizes, pipe sizes and 1 ms timers. Each of the some
 /// ninety benchmarks that settle the clock settles it before and after
 /// itself, 50 ms where the clock holds and 0.5 s at most (`clock::settle`):
-/// under 95 s. So a list bound of 525 s leaves that stall 136 s.
+/// under 95 s. `persist`'s after-idle row adds its 80 s of idle. So a list
+/// bound of 605 s leaves that stall 136 s.
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 465_000,
+    adds_ms: 545_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
 }];
 
@@ -1923,7 +1924,7 @@ const OSBENCH_DISK_GROUPS: [&str; 3] = ["osbench_files", "osbench_nvme", "osbenc
 
 /// The whole suite's bound, [`BENCHCASE`]'s, reused as a ceiling.
 const OSBENCH_DISK: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 465_000,
+    adds_ms: 545_000,
     named_only: true,
     ..metal::once("diskbenchcase", "tests/images/benchcase.toml", &[], &OSBENCH_DISK_GROUPS)
 }];
