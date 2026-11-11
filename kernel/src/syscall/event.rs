@@ -25,7 +25,7 @@ pub(super) fn sys_event_create() -> u64 {
 }
 
 pub(super) fn sys_event_signal(h: RawHandle) -> u64 {
-    match process::with_process_data(|data| data.handles.get::<EventSignal>(h, Rights::WRITE)) {
+    match process::with_handles(|handles| handles.get::<EventSignal>(h, Rights::WRITE)) {
         Ok(event) if event.signal() => 0,
         Ok(_) => SyscallError::Gone.to_u64(),
         Err(e) => e.refuse(),
@@ -35,7 +35,7 @@ pub(super) fn sys_event_signal(h: RawHandle) -> u64 {
 /// `1` for a signal taken, `WouldBlock` for none pending, `Gone` for none
 /// pending and no signaler left. Never blocks: a wait is `SYS_HANDLE_WAIT`.
 pub(super) fn sys_event_take(h: RawHandle) -> u64 {
-    match process::with_process_data(|data| data.handles.get::<EventWait>(h, Rights::READ)) {
+    match process::with_handles(|handles| handles.get::<EventWait>(h, Rights::READ)) {
         Ok(event) => match event.take() {
             Taken::Signal => 1,
             Taken::Empty => SyscallError::WouldBlock.to_u64(),
@@ -55,7 +55,7 @@ pub(super) fn sys_handle_wait(h: RawHandle, interest: u64, timeout_nanos: u64) -
         Ok(bit @ (READABLE | WRITABLE | OTHER_END_GONE)) => bit,
         _ => return SyscallError::InvalidArgument.to_u64(),
     };
-    let object = match process::with_process_data(|data| data.handles.get_ref(h, Rights::WAIT).cloned()) {
+    let object = match process::with_handles(|handles| handles.get_ref(h, Rights::WAIT).cloned()) {
         Ok(object) => object,
         Err(e) => return e.refuse(),
     };

@@ -366,8 +366,8 @@ pub(super) fn sys_device_set(syscap: RawHandle) -> u64 {
         Ok(set) => set,
         Err(e) => return SyscallError::from(e).to_u64(),
     };
-    process::with_process_data(|data| {
-        super::handles::handle_result(crate::object::ops::install(&mut data.handles, crate::object::KObjectRef::DeviceSet(set)))
+    process::with_handles(|handles| {
+        super::handles::handle_result(crate::object::ops::install(handles, crate::object::KObjectRef::DeviceSet(set)))
     })
 }
 
@@ -377,11 +377,11 @@ pub(super) fn sys_device_set(syscap: RawHandle) -> u64 {
 /// seen its generation.
 ///
 /// **What a slot is owed is acted on here, on the reader's thread**
-/// (`pcidev::snapshot`), outside every process lock.
+/// (`pcidev::snapshot`), outside every handle-table lock.
 pub(super) fn sys_device_set_read(set: RawHandle, out: &mut UserBytesMut) -> u64 {
     use toyos_abi::devset::{self, Header};
     use toyos_abi::inventory::RECORD_BYTES;
-    let set = match process::with_process_data(|data| data.handles.get::<crate::object::devset::DeviceSet>(set, Rights::READ)) {
+    let set = match process::with_handles(|handles| handles.get::<crate::object::devset::DeviceSet>(set, Rights::READ)) {
         Ok(set) => set,
         Err(e) => return e.refuse(),
     };

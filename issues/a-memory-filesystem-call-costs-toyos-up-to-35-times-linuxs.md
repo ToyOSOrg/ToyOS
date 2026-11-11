@@ -78,6 +78,33 @@ sequential reads and 1 MiB writes ahead, and the 4 KiB and 8-byte reads
 unresolved against Linux's HPET-widened spread. `seek`, which the client
 answers itself, is 248 ns against Linux's 116 ns on the T14.
 
+#1246 takes the process table and the process's data lock off every
+handle-taking call: a served file's read (`SYS_PAGED_READ`) looks its holder
+up under the handle table's own lock, read off the calling thread, where
+pipeperf had measured the lookup at 60 ns on the T14 and 33 ns on the AMD
+bench. Its speed-up is not yet measured on metal.
+
+- **Owed on metal:** the T14's whole `testcases`, `testcases-watchdog` and
+  `shared-debug` boots of main after #1246. Main must pass every member,
+  among them `handle_lifetime`, `abuse_handle_table`, `abuse_thread_table`,
+  `messages_are_whole`, `stream_handles`, `spawn_lands_claimed`,
+  `spawn_child_ends_first`, `spawn_returns_the_census`, `endowment_denied`,
+  `a_served_file_reads_through_its_paged_object`,
+  `a_pager_s_end_answers_its_waiting_holders_gone`, `std_threads`,
+  `inbox_cancel_wakes` and `port_badge`.
+- **Owed on metal:** an A/B of main before and after #1246, on the T14 and
+  the AMD bench: `osbench files`, `ipc`, `time` and `sched`, four boots a
+  side in rotated order, each boot's p50, compared by an exact two-sided
+  Mann-Whitney test; and Linux's `osbench files` and `ipc` on each bench.
+  The claimed rows are `fs.mem.pread_8`, `fs.mem.pread_4k`,
+  `fs.mem.direct.pread_4k`, `fs.mem.read_4k`, `fs.mem.read_4k_at`,
+  `fs.mem.direct.read_4k_at`, `ipc.reqrep.8` and `ipc.reqrep_handle.8`:
+  main after reads each lower or not separated, with how far each moved set
+  against the 60 ns (T14) and 33 ns (AMD) lookup, and no other row 5% or
+  more worse unless the code #1246 changed explains it. A missing gain does
+  not reject the change; it decides whether a lock-free handle read is worth
+  building.
+
 **Exit**: every `fs.mem` row of the second table within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured to its parts
 and justified.

@@ -15,7 +15,7 @@ use kernel::sched::park::WaitTicket;
 use crate::watch::Watch;
 use crate::mm::paging::Root;
 use crate::loader::KernelStack;
-use crate::process::{PageTables, ProcessAccounting, TaskId, UserImage};
+use crate::process::{Handles, PageTables, ProcessAccounting, TaskId, UserImage};
 use crate::sync::Lock;
 
 /// The environment's leaf lock; holding it raises the preempt count, making a wake path a legal mailbox producer.
@@ -82,6 +82,8 @@ pub struct KernelPayload {
     pub handle: Arc<TaskHandle>,
     /// This task's process's image, as a crash report records a frame in it; kept here, not looked up via the process table, so a crash report never takes that lock.
     pub image: Arc<UserImage>,
+    /// This task's process's handles, kept here for the same reason: a lookup takes no lock but the table's.
+    pub handles: Arc<Handles>,
 }
 
 impl SchedPayload for KernelPayload {

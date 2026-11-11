@@ -330,7 +330,7 @@ impl PipeRef {
     }
 
     /// Write `src`, already copied in, whole in one hold of the pipe's lock,
-    /// for a caller holding its process's lock: `None` where that cannot answer
+    /// for a caller holding its handle-table lock: `None` where that cannot answer
     /// it without a wait or frames taken, which [`Self::write`] does.
     pub fn put_now(&self, src: &[u8]) -> Option<PipeWrite> {
         let mut pipe = self.0.state.lock();
@@ -347,7 +347,7 @@ impl PipeRef {
     }
 
     /// Take at most `max` bytes, up to [`BOUNCE`], into `into` whole in one
-    /// hold of the pipe's lock, for a caller holding its process's lock:
+    /// hold of the pipe's lock, for a caller holding its handle-table lock:
     /// `None` where the pipe holds nothing or more than a bounce would take,
     /// or another read holds its claim, which [`Self::read`] answers.
     pub fn take_now(&self, max: usize, into: &mut PipeBounce) -> Option<Taken> {

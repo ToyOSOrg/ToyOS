@@ -59,8 +59,8 @@ pub(super) fn spawn_place(place: u64) -> Result<process::Parent, u64> {
     let Ok(raw) = u32::try_from(place) else {
         return Err(SyscallError::InvalidArgument.to_u64());
     };
-    process::with_process_data(|data| {
-        data.handles.get_sent::<crate::object::process::ProcessObject>(RawHandle(raw), Rights::WRITE)
+    process::with_handles(|handles| {
+        handles.get_sent::<crate::object::process::ProcessObject>(RawHandle(raw), Rights::WRITE)
     })
     .map(|object| process::Parent::Under(object.pid()))
     .map_err(|refused| refused.refuse())
@@ -84,8 +84,8 @@ pub(super) fn spawn_program(ctx: &crate::user_ptr::SyscallContext<'_>, args: &Sp
             handle if handle == u64::from(toyos_abi::HANDLE_INVALID.0) => None,
             handle => {
                 let raw_handle = u32::try_from(handle).map_err(|_| invalid())?;
-                let object = process::with_process_data(|data| {
-                    data.handles.get::<crate::object::shm::SharedMemObject>(RawHandle(raw_handle), Rights::MAP)
+                let object = process::with_handles(|handles| {
+                    handles.get::<crate::object::shm::SharedMemObject>(RawHandle(raw_handle), Rights::MAP)
                 });
                 Some(object.map_err(|refused| refused.refuse())?)
             }
@@ -134,8 +134,8 @@ pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
     if flags & !PROCESS_WAIT_FLAGS_KNOWN != 0 {
         return SyscallError::InvalidArgument.to_u64();
     }
-    let object = match process::with_process_data(|data| {
-        data.handles.get::<crate::object::process::ProcessObject>(h, Rights::WAIT)
+    let object = match process::with_handles(|handles| {
+        handles.get::<crate::object::process::ProcessObject>(h, Rights::WAIT)
     }) {
         Ok(object) => object,
         Err(e) => return e.refuse(),
@@ -169,8 +169,8 @@ pub(super) fn sys_process_quit(h: RawHandle, reason: u64) -> u64 {
     let Some(reason) = u8::try_from(reason).ok().and_then(toyos_abi::quit::Reason::from_byte) else {
         return SyscallError::InvalidArgument.to_u64();
     };
-    match process::with_process_data(|data| {
-        data.handles.get::<crate::object::process::ProcessObject>(h, Rights::MANAGE)
+    match process::with_handles(|handles| {
+        handles.get::<crate::object::process::ProcessObject>(h, Rights::MANAGE)
     }) {
         Ok(object) => {
             process::quit_process(&object, reason);
@@ -203,7 +203,7 @@ pub(super) fn sys_wake_latency_hold(syscap: RawHandle, bound_ns: u64) -> u64 {
         Ok(object) => crate::object::KObjectRef::WakeLatency(object),
         Err(e) => return SyscallError::from(e).to_u64(),
     };
-    match process::with_process_data(|data| crate::object::ops::install(&mut data.handles, object)) {
+    match process::with_handles(|handles| crate::object::ops::install(handles, object)) {
         Ok(h) => u64::from(h.0),
         Err(e) => e.to_u64(),
     }
@@ -218,7 +218,7 @@ pub(super) fn sys_job_create(syscap: RawHandle) -> u64 {
         Ok(object) => crate::object::KObjectRef::Job(object),
         Err(e) => return SyscallError::from(e).to_u64(),
     };
-    match process::with_process_data(|data| crate::object::ops::install(&mut data.handles, object)) {
+    match process::with_handles(|handles| crate::object::ops::install(handles, object)) {
         Ok(h) => u64::from(h.0),
         Err(e) => e.to_u64(),
     }
@@ -226,11 +226,12 @@ pub(super) fn sys_job_create(syscap: RawHandle) -> u64 {
 
 /// Install a handle to the job the caller runs in.
 pub(super) fn sys_job_own() -> u64 {
-    let installed = process::with_process_data(|data| {
-        let object = crate::object::KObjectRef::Job(crate::object::job::JobObject::new(data.job.clone())?);
-        crate::object::ops::install(&mut data.handles, object)
-    });
-    match installed {
+    let job = process::with_process_data(|data| data.job.clone());
+    let object = match crate::object::job::JobObject::new(job) {
+        Ok(object) => crate::object::KObjectRef::Job(object),
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
+    match process::with_handles(|handles| crate::object::ops::install(handles, object)) {
         Ok(h) => u64::from(h.0),
         Err(e) => e.to_u64(),
     }
@@ -372,8 +373,8 @@ pub(super) fn sys_process_stats(
     h: RawHandle,
     out: UserAddr,
 ) -> u64 {
-    let object = match process::with_process_data(|data| {
-        data.handles.get::<crate::object::process::ProcessObject>(h, Rights::READ)
+    let object = match process::with_handles(|handles| {
+        handles.get::<crate::object::process::ProcessObject>(h, Rights::READ)
     }) {
         Ok(object) => object,
         Err(e) => return e.refuse(),
@@ -393,7 +394,7 @@ pub(super) fn sys_job_floor(syscap: RawHandle, job: RawHandle, bytes: u64) -> u6
     if let Err(e) = demand_syscap(syscap, Rights::FLOOR) {
         return e.refuse();
     }
-    let object = match process::with_process_data(|data| data.handles.get::<crate::object::job::JobObject>(job, Rights::WRITE)) {
+    let object = match process::with_handles(|handles| handles.get::<crate::object::job::JobObject>(job, Rights::WRITE)) {
         Ok(object) => object,
         Err(e) => return e.refuse(),
     };
@@ -405,7 +406,7 @@ pub(super) fn sys_job_floor(syscap: RawHandle, job: RawHandle, bytes: u64) -> u6
 
 /// Copy out what the account of the job a handle names holds, gated on its `READ`.
 pub(super) fn sys_account_info(ctx: &crate::user_ptr::SyscallContext, job: RawHandle, out: UserAddr) -> u64 {
-    let object = match process::with_process_data(|data| data.handles.get::<crate::object::job::JobObject>(job, Rights::READ)) {
+    let object = match process::with_handles(|handles| handles.get::<crate::object::job::JobObject>(job, Rights::READ)) {
         Ok(object) => object,
         Err(e) => return e.refuse(),
     };

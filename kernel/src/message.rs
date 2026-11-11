@@ -255,7 +255,7 @@ impl QueueRef {
     }
 
     /// Queue `src`, already copied in, and `batch`, its handles, whole in
-    /// this hold, called under the sender's process lock as its handles move;
+    /// this hold, called under the sender's handle-table lock as its handles move;
     /// a refusal hands the batch back and queues nothing. No copy waits on it.
     pub fn send_now(&self, src: &[u8], mut batch: Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, Unsent)> {
         let mut state = self.0.state.lock();
@@ -280,7 +280,7 @@ impl QueueRef {
 
     /// Take the front message whole into `into` and install its handles in
     /// `table`, in this hold, where a reader holding `buf` bytes and `cap`
-    /// handles can take it, called under the receiver's process lock. A table
+    /// handles can take it, called under the receiver's handle-table lock. A table
     /// that must grow first answers [`Unclaimed::Room`], taking nothing.
     pub fn recv_now(&self, table: &mut HandleTable, buf: usize, cap: usize, into: &mut MessageBounce) -> Result<Received, Unclaimed> {
         let mut state = self.0.state.lock();

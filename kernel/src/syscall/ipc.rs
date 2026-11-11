@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use crate::watch;
 use crate::object::{ops, port, KObjectRef};
 use crate::message::{MessageBounce, QueueRef, SendRefused, Unclaimed, Unsent};
-use crate::object::handle::HandleEntry;
+use crate::object::handle::{HandleEntry, HandleTable};
 use crate::object::service::ConnectionEnd;
 use crate::time::Deadline;
 use crate::user_ptr::SyscallContext;
@@ -40,13 +40,13 @@ pub(super) fn sys_pipe() -> u64 {
 
 /// Install two objects or neither; the two handles come back packed into one word, which cannot be read as an error.
 pub(super) fn install_pair(first: KObjectRef, second: KObjectRef) -> u64 {
-    let installed = process::with_process_data(|data| {
+    let installed = process::with_handles(|handles| {
         // Room for both before either: a refused pair installs nothing, so nothing is taken back.
-        if !data.handles.make_room(2) {
+        if !handles.make_room(2) {
             return Err((first, second));
         }
         let mut install =
-            |object| ops::install(&mut data.handles, object).expect("room was asked for first");
+            |object| ops::install(handles, object).expect("room was asked for first");
         let first = install(first);
         let second = install(second);
         Ok(((first.0 as u64) << 32) | second.0 as u64)
@@ -97,8 +97,8 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
         Vec::new();
 
     if keep_all {
-        let base = match process::with_process_data(|data| {
-            data.handles.get::<crate::object::namespace::Namespace>(args.base, Rights::READ)
+        let base = match process::with_handles(|handles| {
+            handles.get::<crate::object::namespace::Namespace>(args.base, Rights::READ)
         }) {
             Ok(base) => base,
             Err(e) => return e.refuse(),
@@ -115,8 +115,8 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
         else {
             return SyscallError::BadAddress.to_u64();
         };
-        let base = match process::with_process_data(|data| {
-            data.handles.get::<crate::object::namespace::Namespace>(args.base, Rights::READ)
+        let base = match process::with_handles(|handles| {
+            handles.get::<crate::object::namespace::Namespace>(args.base, Rights::READ)
         }) {
             Ok(base) => base,
             Err(e) => return e.refuse(),
@@ -156,8 +156,8 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
             let Some(name) = name_at(off, len) else {
                 return SyscallError::InvalidArgument.to_u64();
             };
-            let connector = match process::with_process_data(|data| {
-                data.handles.get_sent::<port::Connector>(handle, Rights::TRANSFER)
+            let connector = match process::with_handles(|handles| {
+                handles.get_sent::<port::Connector>(handle, Rights::TRANSFER)
             }) {
                 Ok(c) => c,
                 Err(e) => return e.refuse(),
@@ -178,17 +178,15 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
             return SyscallError::ResourceExhausted.to_u64()
         }
     };
-    process::with_process_data(|data| {
-        handle_result(ops::install(&mut data.handles, KObjectRef::Namespace(namespace)))
+    process::with_handles(|handles| {
+        handle_result(ops::install(handles, KObjectRef::Namespace(namespace)))
     })
 }
 
 /// Open a connection to `name` in the namespace `ns_h` holds; `NotFound` means the namespace lacks the name, `Gone` means its port has closed.
 pub(super) fn sys_namespace_open(ns_h: RawHandle, name: &str) -> u64 {
-    let connector = match process::with_process_data(|data| {
-        let ns = data
-            .handles
-            .get::<crate::object::namespace::Namespace>(ns_h, Rights::READ)?;
+    let connector = match process::with_handles(|handles| {
+        let ns = handles.get::<crate::object::namespace::Namespace>(ns_h, Rights::READ)?;
         Ok::<_, crate::object::HandleError>(ns.lookup(name).cloned())
     }) {
         Ok(Some(c)) => c,
@@ -200,10 +198,10 @@ pub(super) fn sys_namespace_open(ns_h: RawHandle, name: &str) -> u64 {
 
 /// Inspect only the names this namespace already holds. The Arc keeps the
 /// immutable entries alive after the handle-table lock is released; copying
-/// into user memory therefore holds no object or process lock.
+/// into user memory therefore holds no object or handle-table lock.
 pub(super) fn sys_namespace_names(ns_h: RawHandle, out: &mut crate::user_ptr::UserBytesMut) -> u64 {
-    let namespace = match process::with_process_data(|data| {
-        data.handles.get::<crate::object::namespace::Namespace>(ns_h, Rights::READ)
+    let namespace = match process::with_handles(|handles| {
+        handles.get::<crate::object::namespace::Namespace>(ns_h, Rights::READ)
     }) {
         Ok(namespace) => namespace,
         Err(e) => return e.refuse(),
@@ -240,12 +238,12 @@ fn connect_through(connector: &port::Connector) -> u64 {
         Err(e) => return SyscallError::from(e).to_u64(),
     };
     // One hold from the room to the install: the port can still refuse, and the client's end is in the table only once it has not.
-    let installed = process::with_process_data(|data| {
-        if !data.handles.make_room(1) {
+    let installed = process::with_handles(|handles| {
+        if !handles.make_room(1) {
             return Err((SyscallError::ResourceExhausted, object, pending));
         }
         match connector.push(pending) {
-            Ok(()) => Ok(ops::install(&mut data.handles, object).expect("room was asked for first")),
+            Ok(()) => Ok(ops::install(handles, object).expect("room was asked for first")),
             Err((pending, port::PushError::Closed)) => Err((SyscallError::Gone, object, pending)),
             Err((pending, port::PushError::QueueFull)) => {
                 Err((SyscallError::ResourceExhausted, object, pending))
@@ -268,8 +266,8 @@ pub(super) fn sys_accept(h: RawHandle, flags: u64) -> u64 {
         ACCEPT_NONBLOCK => false,
         _ => return SyscallError::InvalidArgument.to_u64(),
     };
-    let acceptor = match process::with_process_data(|data| {
-        data.handles.get::<port::Acceptor>(h, Rights::READ)
+    let acceptor = match process::with_handles(|handles| {
+        handles.get::<port::Acceptor>(h, Rights::READ)
     }) {
         Ok(a) => a,
         Err(e) => return e.refuse(),
@@ -284,8 +282,8 @@ pub(super) fn sys_accept(h: RawHandle, flags: u64) -> u64 {
         if let Some(conn) = acceptor.pop() {
             // The ends move from the port's queue into the connection: ownership transfers, no count changes.
             let object = KObjectRef::Connection(ConnectionEnd::accepted(core, conn));
-            let installed = process::with_process_data(|data| {
-                ops::install(&mut data.handles, object)
+            let installed = process::with_handles(|handles| {
+                ops::install(handles, object)
             });
             return handle_result(installed);
         }
@@ -314,8 +312,8 @@ pub(super) fn sys_accept(h: RawHandle, flags: u64) -> u64 {
 
 /// A connector to the caller's own port stamping every connection with `badge`, which the dispatch has copied in and bounded. `READ` on the acceptor, the right accepting takes, is the authority: whoever answers every connection on a port grants nothing by labelling them.
 pub(super) fn sys_port_mint(h: RawHandle, badge: &[u8]) -> u64 {
-    let acceptor = match process::with_process_data(|data| {
-        data.handles.get::<port::Acceptor>(h, Rights::READ)
+    let acceptor = match process::with_handles(|handles| {
+        handles.get::<port::Acceptor>(h, Rights::READ)
     }) {
         Ok(a) => a,
         Err(e) => return e.refuse(),
@@ -324,7 +322,7 @@ pub(super) fn sys_port_mint(h: RawHandle, badge: &[u8]) -> u64 {
         Ok(connector) => KObjectRef::Connector(connector),
         Err(e) => return SyscallError::from(e).to_u64(),
     };
-    process::with_process_data(|data| handle_result(ops::install(&mut data.handles, connector)))
+    process::with_handles(|handles| handle_result(ops::install(handles, connector)))
 }
 
 /// The badge a connection accepted from `acceptor_h`'s port was stamped with, written to `out`; answers its length.
@@ -335,9 +333,9 @@ pub(super) fn sys_port_badge(
     conn_h: RawHandle,
     out: &mut crate::user_ptr::UserBytesMut,
 ) -> u64 {
-    let found = process::with_process_data(|data| {
-        let acceptor = data.handles.get::<port::Acceptor>(acceptor_h, Rights::READ)?;
-        let conn = data.handles.get::<ConnectionEnd>(conn_h, Rights::READ)?;
+    let found = process::with_handles(|handles| {
+        let acceptor = handles.get::<port::Acceptor>(acceptor_h, Rights::READ)?;
+        let conn = handles.get::<ConnectionEnd>(conn_h, Rights::READ)?;
         Ok::<_, crate::object::HandleError>((acceptor.port_id(), conn.stamp().cloned()))
     });
     let (port, stamp) = match found {
@@ -359,7 +357,7 @@ pub(super) fn sys_port_badge(
 pub(super) fn sys_shm_create(size: u64, flags: u64, job: RawHandle) -> u64 {
     let charged = match flags & SHM_FOR_JOB {
         0 => crate::mm::charge::current(),
-        _ => match process::with_process_data(|data| data.handles.get::<crate::object::job::JobObject>(job, Rights::WRITE)) {
+        _ => match process::with_handles(|handles| handles.get::<crate::object::job::JobObject>(job, Rights::WRITE)) {
             Ok(object) => alloc::sync::Arc::clone(object.job()),
             Err(e) => return e.refuse(),
         },
@@ -373,15 +371,15 @@ pub(super) fn sys_shm_create(size: u64, flags: u64, job: RawHandle) -> u64 {
         Ok(shm) => KObjectRef::SharedMem(shm),
         Err(e) => return e.to_u64(),
     };
-    process::with_process_data(|data| handle_result(ops::install(&mut data.handles, object)))
+    process::with_handles(|handles| handle_result(ops::install(handles, object)))
 }
 
 /// `toyos_abi::syscall::shm_sub`: the new object's handle carries `h`'s rights.
 pub(super) fn sys_shm_sub(h: RawHandle, offset: u64, len: u64) -> u64 {
     // A refusal is made with nothing held: a bad handle's ends the process.
-    let held = process::with_process_data(|data| {
-        let whole = data.handles.get::<crate::object::shm::SharedMemObject>(h, Rights::MAP)?;
-        Ok::<_, crate::object::handle::HandleError>((whole, data.handles.rights_of(h)?))
+    let held = process::with_handles(|handles| {
+        let whole = handles.get::<crate::object::shm::SharedMemObject>(h, Rights::MAP)?;
+        Ok::<_, crate::object::handle::HandleError>((whole, handles.rights_of(h)?))
     });
     let (whole, rights) = match held {
         Ok(held) => held,
@@ -392,8 +390,8 @@ pub(super) fn sys_shm_sub(h: RawHandle, offset: u64, len: u64) -> u64 {
         Err(e) => return e.to_u64(),
     };
     let entry = crate::object::handle::HandleEntry::new(KObjectRef::SharedMem(sub), rights);
-    process::with_process_data(|data| {
-        handle_result(data.handles.install(entry).map_err(|_| SyscallError::ResourceExhausted))
+    process::with_handles(|handles| {
+        handle_result(handles.install(entry).map_err(|_| SyscallError::ResourceExhausted))
     })
 }
 
@@ -404,8 +402,8 @@ pub(super) fn sys_shm_map(h: RawHandle, prot: u64) -> u64 {
         Some(VmProt::ReadWrite) => (Prot::ReadWrite, Rights::MAP.union(Rights::WRITE)),
         Some(VmProt::None | VmProt::ReadExec) | None => return SyscallError::InvalidArgument.to_u64(),
     };
-    let shm = match process::with_process_data(|data| {
-        data.handles.get::<crate::object::shm::SharedMemObject>(h, need)
+    let shm = match process::with_handles(|handles| {
+        handles.get::<crate::object::shm::SharedMemObject>(h, need)
     }) {
         Ok(shm) => shm,
         Err(e) => return e.refuse(),
@@ -474,14 +472,14 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
     let need = if out.count == 0 { Rights::WRITE } else { Rights::WRITE.union(Rights::TRANSFER) };
     // Every handle is checked before anything is queued or moved, and again
     // under the hold that moves them: the answer is what each arrives with.
-    let checked = |data: &process::ProcessData| {
-        let conn = data.handles.get::<ConnectionEnd>(conn_h, need)?;
+    let checked = |handles: &HandleTable| {
+        let conn = handles.get::<ConnectionEnd>(conn_h, need)?;
         let mut moving = [(RawHandle(0), Rights::NONE); MAX_TRANSFER_HANDLES];
         for (i, (h, want)) in wanted.iter().enumerate() {
             if *h == conn_h || wanted[..i].iter().any(|(seen, _)| seen == h) {
                 return Err(SyscallError::InvalidArgument.into());
             }
-            moving[i] = (*h, data.handles.rights_to_move(*h, *want)?);
+            moving[i] = (*h, handles.rights_to_move(*h, *want)?);
         }
         Ok::<_, crate::object::Refusal>((conn.tx().clone(), moving))
     };
@@ -491,9 +489,9 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
     let src = bounce.read(&out.bytes).map_err(|faulted| SyscallError::from(faulted).to_u64())?.bytes();
     let parkable = crate::scheduler::Parkable::at_entry();
     loop {
-        let moved = process::with_process_data(|data| {
-            let (tx, moving) = checked(data)?;
-            let (moved, handed) = move_handles(data, &moving[..out.count], |batch| tx.send_now(src, batch));
+        let moved = process::with_handles(|handles| {
+            let (tx, moving) = checked(handles)?;
+            let (moved, handed) = move_handles(handles, &moving[..out.count], |batch| tx.send_now(src, batch));
             Ok::<_, crate::object::Refusal>((tx, moved, handed))
         });
         let (tx, refused) = match moved {
@@ -506,9 +504,9 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
             Ok((tx, Err(Unsent::Claim), _)) => {
                 let refused = match tx.claim_send(&parkable, src, out.count) {
                     Ok(mut claim) => {
-                        let moved = process::with_process_data(|data| {
-                            let (_, moving) = checked(data)?;
-                            Ok::<_, crate::object::Refusal>(move_handles(data, &moving[..out.count], |batch| claim.commit(batch)))
+                        let moved = process::with_handles(|handles| {
+                            let (_, moving) = checked(handles)?;
+                            Ok::<_, crate::object::Refusal>(move_handles(handles, &moving[..out.count], |batch| claim.commit(batch)))
                         });
                         drop(claim);
                         match moved {
@@ -551,16 +549,16 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
 /// go. A refusal restores every handle at its own number, and every mapping,
 /// so it is invisible.
 fn move_handles<E>(
-    data: &mut process::ProcessData,
+    handles: &mut HandleTable,
     wanted: &[(RawHandle, Rights)],
     sink: impl FnOnce(Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, E)>,
 ) -> (Result<(), E>, Vec<crate::pcidev::Handed>) {
     let claims: Vec<_> = wanted
         .iter()
-        .filter_map(|(h, _)| data.handles.get::<crate::object::device::DeviceClaim>(*h, Rights::TRANSFER).ok())
+        .filter_map(|(h, _)| handles.get::<crate::object::device::DeviceClaim>(*h, Rights::TRANSFER).ok())
         .filter_map(|claim| claim.take_mappings().map(|handed| (claim, handed)))
         .collect();
-    let moved = data.handles.transfer(wanted, sink);
+    let moved = handles.transfer(wanted, sink);
     let handed = match moved {
         Ok(()) => claims.into_iter().map(|(_, handed)| handed).collect(),
         Err(_) => {
@@ -589,12 +587,12 @@ fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
     loop {
         // Taken, and its handles installed, in the hold that looks the
         // connection up; its bytes are copied out after.
-        let looked = process::with_process_data(|data| {
-            let rx = data.handles.get::<ConnectionEnd>(conn_h, Rights::READ)?.rx().clone();
+        let looked = process::with_handles(|handles| {
+            let rx = handles.get::<ConnectionEnd>(conn_h, Rights::READ)?.rx().clone();
             let taken = loop {
-                match rx.recv_now(&mut data.handles, buf, cap, &mut bounce) {
+                match rx.recv_now(handles, buf, cap, &mut bounce) {
                     // Grown with the queue's lock let go, then asked again.
-                    Err(Unclaimed::Room(n)) if data.handles.make_room(n) => {}
+                    Err(Unclaimed::Room(n)) if handles.make_room(n) => {}
                     Err(Unclaimed::Room(_)) => break Err(Unclaimed::Untaken(kernel::message::Untaken::NoRoom)),
                     taken => break taken,
                 }
@@ -643,12 +641,12 @@ fn delivered(rx: &QueueRef, into: &mut Incoming<'_>, head: kernel::message::Head
 /// A message taken whose reader's buffers faulted: its bytes are lost, and
 /// its handles, installed at numbers the reader was never told, are closed.
 fn undelivered(rx: &QueueRef, installed: &[RawHandle], faulted: crate::user_ptr::Faulted) -> u64 {
-    process::with_process_data(|data| {
+    process::with_handles(|handles| {
         for &h in installed {
             // A sibling may have closed the number since, or reused it for a
             // handle of its own, which this then closes: the race is the
             // misbehaving process's own, and stays inside it.
-            let _ = ops::close(&mut data.handles, h);
+            let _ = ops::close(handles, h);
         }
     });
     rx.write_watch().post();
@@ -666,14 +664,14 @@ pub(super) fn sys_inbox_setup(depth: u32, out: &mut crate::user_ptr::UserBytesMu
         Ok(object) => KObjectRef::Inbox(object),
         Err(e) => return SyscallError::from(e).to_u64(),
     };
-    let installed = process::with_process_data(|data| ops::install(&mut data.handles, object));
+    let installed = process::with_handles(|handles| ops::install(handles, object));
     let handle = match installed {
         Ok(h) => h,
         Err(e) => return e.to_u64(),
     };
     // A caller that cannot be told its handle does not keep it.
     if let Err(faulted) = out.write_at(0, toyos_abi::usersafe::bytes(&InboxSetup { handle, _pad: 0, vaddr })) {
-        let _ = process::with_process_data(|data| ops::close(&mut data.handles, handle));
+        let _ = process::with_handles(|handles| ops::close(handles, handle));
         return SyscallError::from(faulted).to_u64();
     }
     0
@@ -686,8 +684,8 @@ pub(super) fn sys_inbox_submit(
     timeout_nanos: u64,
 ) -> u64 {
     // NotFound and PermissionDenied are the table's own words for gone/wrong-type, not collapsed into InvalidArgument.
-    let object = process::with_process_data(|data| {
-        data.handles.get::<crate::object::inbox::InboxObject>(
+    let object = process::with_handles(|handles| {
+        handles.get::<crate::object::inbox::InboxObject>(
             inbox_h,
             Rights::READ.union(Rights::WRITE),
         )

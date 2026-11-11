@@ -30,10 +30,11 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::percpu;
 use crate::mm::charge::{self, Charge, Exhausted};
 use crate::object::{ops, HandleTable};
-use crate::sync::Lock;
+use crate::sync::{Lock, LockGuard};
 use crate::sched::driver;
 use crate::sched::payload::ThreadSched;
 use kernel::sched::cpu::{homes, Near};
@@ -60,6 +61,51 @@ pub use crate::loader::{build_child_handles, spawn, spawn_supervisor};
 
 /// A process's space, which every thread of it runs in.
 pub use crate::mm::space::PageTables;
+
+/// What a process names kernel objects by. Each of its threads carries it, so
+/// a lookup ([`with_handles`]) takes neither the process table nor
+/// [`ProcessData`]'s lock.
+pub struct Handles {
+    /// Every kernel object it can name; stdio is handles `0`, `1`, `2`.
+    table: Lock<HandleTable>,
+    /// Started as a pager, which no call changes (`object::paged`): it may
+    /// make one pager object, and is refused a holder's read, which would wait
+    /// on itself or on another pager.
+    pager: bool,
+    /// It made that pager object.
+    made_pager: AtomicBool,
+}
+
+impl Handles {
+    pub fn new(table: HandleTable, pager: bool) -> Arc<Self> {
+        Arc::new(Self { table: Lock::new(table), pager, made_pager: AtomicBool::new(false) })
+    }
+
+    pub fn lock(&self) -> LockGuard<'_, HandleTable> {
+        self.table.lock()
+    }
+
+    pub fn is_pager(&self) -> bool {
+        self.pager
+    }
+
+    /// Claim the one pager object a pager may make: `PermissionDenied` for a
+    /// process started as none, `AlreadyExists` once claimed.
+    pub fn claim_pager(&self) -> Result<(), SyscallError> {
+        if !self.pager {
+            return Err(SyscallError::PermissionDenied);
+        }
+        if self.made_pager.swap(true, Ordering::Relaxed) {
+            return Err(SyscallError::AlreadyExists);
+        }
+        Ok(())
+    }
+
+    /// Give the claim back: its pager object was never installed.
+    pub fn unclaim_pager(&self) {
+        self.made_pager.store(false, Ordering::Relaxed);
+    }
+}
 
 /// An object the kernel mapped into a process for it and takes back itself: an
 /// inbox's rings. The kernel writes what it owes the process into the object.
@@ -230,8 +276,9 @@ impl Processes for ProcessTable {
 
 /// Process-level data shared across all threads via `Arc<Lock<ProcessData>>`.
 pub struct ProcessData {
-    /// Every kernel object this process can name; stdio is handles `0`, `1`, `2`.
-    pub handles: HandleTable,
+    /// What its threads carry, under a lock of its own; here for a reader that
+    /// is not one of them.
+    pub handles: Arc<Handles>,
     /// The space every thread of it runs in.
     pub space: PageTables,
 
@@ -244,25 +291,6 @@ pub struct ProcessData {
     pub job: Arc<kernel::sched::job::Job>,
     /// What [`ProcessData::charge`] charged.
     pub _charge: Charge,
-    /// Whether it was started as a pager, which no call changes, and whether
-    /// it made its one pager object.
-    pub pager: PagerRole,
-}
-
-/// A process's part in paged objects (`object::paged`): set at its spawn.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PagerRole {
-    None,
-    /// Started as a pager; it has not made its pager object.
-    May,
-    /// It made it.
-    Made,
-}
-
-impl PagerRole {
-    pub fn is_pager(self) -> bool {
-        self != PagerRole::None
-    }
 }
 
 impl ProcessData {
@@ -276,6 +304,7 @@ impl ProcessData {
         // A thread table of one thread is a whole leaf.
         let threads = charge::heap(Layout::array::<(Tid, ThreadEntry)>(11).expect("process: a leaf's layout"));
         let records = charge::arc::<Lock<ProcessData>>()
+            + charge::arc::<Handles>()
             + charge::arc::<UserImage>()
             + charge::arc::<crate::mm::space::Space>()
             + charge::arc::<crate::mm::space::Usage>()
@@ -476,6 +505,17 @@ pub fn with_process_data<R>(f: impl FnOnce(&mut ProcessData) -> R) -> R {
     f(&mut guard)
 }
 
+/// The running thread's process's handles, off the thread itself.
+pub fn handles() -> Arc<Handles> {
+    scheduler::current_handles().expect("handles: no thread is running")
+}
+
+/// `f` over the running thread's process's handle table, under the table's
+/// own lock: the lookup every handle-taking call makes.
+pub fn with_handles<R>(f: impl FnOnce(&mut HandleTable) -> R) -> R {
+    f(&mut handles().lock())
+}
+
 /// Whom a new process is placed under.
 #[derive(Clone, Copy)]
 pub enum Parent {
@@ -566,6 +606,7 @@ pub fn spawn_thread(
         (addr_space, Arc::clone(&proc.process_data))
     };
     let job = process_data_arc.lock().job.clone();
+    let handles = handles();
 
     // Phase 2: the kernel stack, outside any lock.
     let (ks_alloc, ks_sp) = alloc_kernel_stack(&job, Start::Thread { entry, sp: stack_ptr, arg })?;
@@ -602,6 +643,7 @@ pub fn spawn_thread(
         thread_pointer: 0,
         job,
         image,
+        handles,
         mask,
         near: Some(Near { spawner: driver::current_cpu(), homes }),
     });
@@ -657,11 +699,12 @@ fn teardown_resources(
     #[cfg(feature = "mask-windows")]
     crate::windows::report();
 
-    let mut data = process_data_arc.lock();
-    ops::close_all(&mut data.handles);
+    let handles = Arc::clone(&process_data_arc.lock().handles);
+    ops::close_all(&mut handles.lock());
     // Every thread has left, and none returns to Ring 3 to use them.
     crate::isa::process_ends(pid);
 
+    let data = process_data_arc.lock();
     let usage = data.space.usage();
     Consumed {
         peak_memory: usage.peak_bytes(),

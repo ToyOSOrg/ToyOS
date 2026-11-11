@@ -19,8 +19,8 @@ use super::{KObjectVariant, ObjectCore};
 
 pub struct NoticeObject {
     pub(super) core: ObjectCore,
-    /// A leaf: a quit takes it under `PROCESS_TABLE`, a read under the
-    /// reader's `ProcessData`, and nothing is taken under it.
+    /// A leaf: a quit takes it under `PROCESS_TABLE`, and nothing is taken
+    /// under it.
     state: Lock<Notice>,
     /// Posted when a reason is put in it.
     watch: Arc<Watch>,
