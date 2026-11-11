@@ -16,8 +16,9 @@
 //! **The port's carrier is handed the boot from its first line, and the
 //! UART's from where the UART's last carrier left off, or else from the
 //! hand-over with every line before it but the records the kernel put on the
-//! UART itself** ([`Hub::wire_start`]). A slow channel is never let go. What a
-//! channel has taken is told the kernel as the read positions of the rounds it
+//! UART itself** ([`Hub::wire_start`]); the rounds say where that is within a
+//! bound, read past those records or not. A slow channel is never let go. What
+//! a channel has taken is told the kernel as the read positions of the rounds it
 //! has taken whole (`toyos::log::spoken`), so a fatal path and the stop put on
 //! the UART exactly the kernel's records no channel has delivered; a channel
 //! handed a gap in the replay speaks for nothing after it.
