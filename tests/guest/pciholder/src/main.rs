@@ -7,7 +7,7 @@
 
 use toyos::endow::{Endowments, DEV_PREFIX};
 use toyos::poller::{Poller, READABLE};
-use toyos_abi::syscall::{self, RegWidth, SyscallError, VmProt};
+use toyos_abi::syscall::{self, RegWidth, SyscallError, VmAt, VmProt};
 use toyos::{AsHandle, PciDev};
 
 /// What it says once it holds its function, followed by the function's
@@ -29,8 +29,9 @@ fn main() {
     // Made before the function leaves, and kept past it: its departure is
     // what revokes them.
     let kept = syscall::device_bar_map(claim.as_handle().raw(), 0).expect("pciholder: its function's BAR 0");
+    let window = syscall::fstat(kept).expect("pciholder: its BAR 0's size").size as usize;
     // SAFETY: a mapping made only to be held, never read or written.
-    unsafe { syscall::shm_map(kept, VmProt::ReadWrite) }.expect("pciholder: its BAR 0 mapped");
+    unsafe { syscall::vm_map(kept, 0, window, VmProt::ReadWrite, VmAt::ANYWHERE) }.expect("pciholder: its BAR 0 mapped");
     println!("{HOLDING}{at}");
     let poller = Poller::new(1);
     let read = loop {
@@ -45,6 +46,6 @@ fn main() {
     let bar = claim.map_bar(0, 1).err();
     let grant = claim.dma_alloc(4096).err();
     // SAFETY: a refused map makes no mapping, and one made is never touched.
-    let remapped = unsafe { syscall::shm_map(kept, VmProt::ReadWrite) }.err();
+    let remapped = unsafe { syscall::vm_map(kept, 0, window, VmProt::ReadWrite, VmAt::ANYWHERE) }.err();
     println!("{GONE}{at}: irq={read:?} config={config:?} bar={bar:?} dma={grant:?} kept={remapped:?}");
 }

@@ -16,7 +16,7 @@
 //! [`objects`] makes each one a [`SharedMemObject`] over its pages
 //! ([`SharedMemObject::boot`]), whose handles never carry `WRITE`
 //! (`ops::initial_rights`, and every part of one inherits its source's
-//! rights), so every mapping of it is read-only; `sys_shm_map` asserts it.
+//! rights), and no mapping of it is writable (`SharedMemObject::mappable`).
 
 use alloc::sync::Arc;
 

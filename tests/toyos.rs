@@ -385,6 +385,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // `virt_wall_clock_utc` builds it for AArch64 and judges what it read
     // against the instant the job case stages in the RTC.
     "wall_clock_now",
+    // Its shared run is the x86-64 verdict; `virt_vm_map_shares` builds it
+    // for AArch64 and runs it on that architecture's job case.
+    "vm_map_shares",
 ];
 
 /// What the boot's audit of the kernel's tables says when every leaf passed
@@ -436,6 +439,7 @@ const SCREEN_TESTS: &[ScreenTest] = &[
     // `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` on AArch64:
     // the unprivileged copies and their EL1 fixup (`arch::uaccess`).
     ("virt_user_copy_faults", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_USER_COPY}"))),
+    ("virt_vm_map_shares", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_VM_MAP}"))),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_RING0_TIMER}"))),
     // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and
     // `virt_reboot`: under HVF a woken thread can go undispatched for seconds
@@ -2900,6 +2904,11 @@ const VIRT_WALL_CLOCK: &str = "wall_clock_now";
 /// `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` on x86-64.
 const VIRT_USER_COPY: &str = "user_copy_faults";
 
+/// The AArch64 guest's mappings of a memory object's own pages: the same
+/// binary and claims as the x86-64 row `vm_map_shares`, among them a shared
+/// page mapped executable, which no other AArch64 row reaches.
+const VIRT_VM_MAP: &str = "vm_map_shares";
+
 /// The instant `tests/images/virtjobcase.toml`'s RTC starts at, and the same in Unix
 /// seconds: years from any host's own, so a reading on it came from the RTC.
 const VIRT_RTC_BASE: &str = "2033-03-07T09:14:25";
@@ -2920,6 +2929,7 @@ const VIRT_JOBS: &[(&str, &str)] = &[
     ("test_rs_random_draws", RANDOM_DRAWS_SAID),
     ("test_rs_wall_clock_now", WALL_CLOCK_SAID),
     ("test_rs_user_copy_faults", "user copies: all checks passed"),
+    ("test_rs_vm_map_shares", "vm_map_shares: an object's pages are mapped where asked"),
     ("test_rs_abuse_readonly_copyout", "a syscall writes only where its caller could store"),
 ];
 
@@ -2944,7 +2954,7 @@ fn boot_virt_jobs(profile: qemu::Profile) -> QemuInstance {
             smp: 1,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: [VIRT_COPYOUT, VIRT_RING0_TIMER, VIRT_RANDOM, VIRT_WALL_CLOCK, VIRT_USER_COPY]
+            extra_root_files: [VIRT_COPYOUT, VIRT_RING0_TIMER, VIRT_RANDOM, VIRT_WALL_CLOCK, VIRT_USER_COPY, VIRT_VM_MAP]
                 .map(|name| suite_bin(profile.arch(), name))
                 .to_vec(),
             rtc_base: Some(VIRT_RTC_BASE),

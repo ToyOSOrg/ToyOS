@@ -11,7 +11,7 @@ use toyos::shm::{Lent, ReadOnly, SharedMemory};
 use toyos::{AsHandle, OwnedHandle};
 use toyos_abi::end::{End, Fault};
 use toyos_abi::handle::Rights;
-use toyos_abi::syscall::{self, SyscallError, VmProt};
+use toyos_abi::syscall::{self, SyscallError, VmAt, VmProt};
 
 const SELF_PATH: &str = "/system/bin/test_rs_shm_read_only";
 const STORES: &str = "stores";
@@ -38,11 +38,11 @@ fn holder() {
     // SAFETY: nothing relies on being the source's only holder.
     let narrowed = unsafe { syscall::dup_narrowed(writer.as_handle().raw(), READ_ONLY) }.expect("shm_read_only: a read-only handle");
     // SAFETY: the mapping is never reached, and is the process's to the end.
-    let writable = unsafe { syscall::shm_map(narrowed, VmProt::ReadWrite) }.map(|_| ());
+    let writable = unsafe { syscall::vm_map(narrowed, 0, REGION, VmProt::ReadWrite, VmAt::ANYWHERE) }.map(|_| ());
     assert_eq!(writable, Err(SyscallError::PermissionDenied), "shm_read_only: a handle without WRITE mapped writable");
 
     // SAFETY: as above.
-    let at = unsafe { syscall::shm_map(narrowed, VmProt::Read) }.expect("shm_read_only: a read-only mapping");
+    let at = unsafe { syscall::vm_map(narrowed, 0, REGION, VmProt::Read, VmAt::ANYWHERE) }.expect("shm_read_only: a read-only mapping");
     // SAFETY: `at` is a mapping of its own this process never takes away.
     let widened = unsafe { syscall::vm_protect(at, REGION, VmProt::ReadWrite) };
     assert_eq!(widened, Err(SyscallError::PermissionDenied), "shm_read_only: vm_protect made a read-only mapping writable");
@@ -50,7 +50,7 @@ fn holder() {
     // SAFETY: nothing relies on being the source's only holder.
     let part = unsafe { syscall::shm_sub(narrowed, 0, REGION as u64) }.expect("shm_read_only: part of the region");
     // SAFETY: as above.
-    let part_writable = unsafe { syscall::shm_map(part, VmProt::ReadWrite) }.map(|_| ());
+    let part_writable = unsafe { syscall::vm_map(part, 0, REGION, VmProt::ReadWrite, VmAt::ANYWHERE) }.map(|_| ());
     assert_eq!(part_writable, Err(SyscallError::PermissionDenied), "shm_read_only: part of a read-only region mapped writable");
 
     // SAFETY: nothing relies on being the source's only holder.
@@ -78,7 +78,7 @@ fn stores() -> ! {
     // SAFETY: nothing relies on being the source's only holder.
     let narrowed = unsafe { syscall::dup_narrowed(writer, READ_ONLY) }.expect("shm_read_only: a read-only handle");
     // SAFETY: the mapping is this process's to the end, which the store below is.
-    let at = unsafe { syscall::shm_map(narrowed, VmProt::Read) }.expect("shm_read_only: a read-only mapping");
+    let at = unsafe { syscall::vm_map(narrowed, 0, REGION, VmProt::Read, VmAt::ANYWHERE) }.expect("shm_read_only: a read-only mapping");
     println!("reached {STORES}");
     std::io::stdout().flush().expect("shm_read_only: flush the marker");
     // SAFETY: none is owed: the store is the fault this role exists to take.

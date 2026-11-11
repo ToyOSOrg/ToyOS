@@ -455,14 +455,12 @@ impl AddressSpace {
             .sum()
     }
 
-    /// `len` bytes of `object` from `offset`, as `prot` allows; the caller
+    /// `len` bytes of `object` from `offset`, its own pages, as `prot`
+    /// allows and the object gives (`SharedMemObject::mappable`); the caller
     /// bounds `prot` by what its handle grants. All or nothing, as
     /// [`reserve`](Self::reserve).
     pub fn map(&mut self, object: Arc<SharedMemObject>, offset: u64, len: u64, prot: Prot, at: At) -> Result<UserAddr, SyscallError> {
-        let within = pages(offset, len).is_some_and(|end| end <= object.size());
-        if !within {
-            return Err(SyscallError::InvalidArgument);
-        }
+        object.mappable(prot, offset, len)?;
         self.room_at(len, at)?;
         let start = self.place(len, at)?;
         self.build(start, start + len)?;

@@ -39,7 +39,7 @@ use crate::sync::Lock;
 use crate::{scheduler, UserAddr};
 use toyos_abi::handle::Rights;
 use crate::object::shm::SharedMemObject;
-use toyos_abi::syscall::{SpawnMap, SyscallError};
+use toyos_abi::syscall::{SpawnBacking, SpawnMap, SyscallError};
 use toyos_symbols::frame::BuildId;
 
 /// The main thread's stack: committed whole, populated as it is touched.
@@ -49,46 +49,72 @@ const USER_STACK_SIZE: usize = 8 * 1024 * 1024;
 const STACK_GUARD: u64 = 1024 * 1024;
 
 /// One range of a child's memory, its numbers checked where the request was
-/// read (`syscall::proc::spawn_program`): whole pages, and a copy's bytes inside
-/// an object of ordinary memory.
+/// read (`syscall::proc::spawn_program`): whole pages, of ordinary memory
+/// where an object backs it. What a shared range's object gives is checked as
+/// it is mapped (`SharedMemObject::mappable`).
 pub struct Map {
     pub at: UserAddr,
     pub len: u64,
     pub prot: kernel::vm::Prot,
-    /// The object its pages start as a copy of, from which page boundary, and
-    /// how many bytes; zeros past them, and `None` for zeros alone.
-    pub copy: Option<(Arc<dyn CopySource>, u64, u64)>,
+    pub backing: Backing,
+}
+
+/// What a range's pages are.
+pub enum Backing {
+    Zeros,
+    /// Private, each starting as a copy of the object's from this page
+    /// boundary for this many bytes, and zeros past them.
+    Copy(Arc<dyn CopySource>, u64, u64),
+    /// The object's own, from this page boundary.
+    Share(Arc<SharedMemObject>, u64),
 }
 
 impl Map {
+    /// What the handle `raw` names its object by carries: `InvalidArgument`
+    /// for a word that names no protection or backing.
+    pub fn rights(raw: &SpawnMap) -> Result<Rights, SyscallError> {
+        let prot = crate::syscall::vm::vm_prot(raw.prot)?;
+        match SpawnBacking::from_u64(raw.backing).ok_or(SyscallError::InvalidArgument)? {
+            SpawnBacking::Copy => Ok(Rights::MAP),
+            SpawnBacking::Share => Ok(crate::syscall::vm::map_rights(prot)),
+        }
+    }
+
     /// `raw`, checked as an ordinary mapping is: whole pages of the user half,
-    /// a protection, and a copy only of ordinary memory `object` holds from a
-    /// page boundary, `object` being `None` for zeros.
+    /// a protection, and an object of ordinary memory from a page boundary,
+    /// `None` for zeros.
     pub fn checked(raw: &SpawnMap, object: Option<Arc<SharedMemObject>>) -> Result<Map, SyscallError> {
         let page = crate::mm::PAGE_SIZE;
         let prot = crate::syscall::vm::vm_prot(raw.prot)?;
+        let backing = SpawnBacking::from_u64(raw.backing).ok_or(SyscallError::InvalidArgument)?;
         let at = UserAddr::checked(raw.addr).filter(|at| at.raw().is_multiple_of(page));
         let ends = raw.addr.checked_add(raw.len).is_some_and(|end| end <= toyos_userbound::USER_TOP);
         let (Some(at), true) = (at, ends && raw.len != 0 && raw.len.is_multiple_of(page) && raw.copied <= raw.len) else {
             return Err(SyscallError::InvalidArgument);
         };
-        let copy = match object {
-            None if raw.copied == 0 => None,
-            None => return Err(SyscallError::InvalidArgument),
-            Some(_) if !raw.offset.is_multiple_of(page) => return Err(SyscallError::InvalidArgument),
-            // Ordinary memory alone: a device aperture is no program, and a
-            // read of one is a device access. Each page is copied once, at
-            // its first touch, so a holder that writes the object later
-            // changes only pages not yet read: its own child's.
-            Some(object) => {
+        let backing = match (object, backing) {
+            (None, SpawnBacking::Copy) if raw.copied == 0 => Backing::Zeros,
+            (None, _) => return Err(SyscallError::InvalidArgument),
+            // Ordinary memory alone: a device aperture is no program, a read
+            // of one is a device access, and its last handle takes it back
+            // only from where its mapper said it is.
+            (Some(object), _) if !raw.offset.is_multiple_of(page) || !object.is_ordinary() => {
+                return Err(SyscallError::InvalidArgument);
+            }
+            // Each page is copied once, at its first touch, so a holder that
+            // writes the object later changes only pages not yet read: its
+            // own child's.
+            (Some(object), SpawnBacking::Copy) => {
                 let held = raw.offset.checked_add(raw.copied).ok_or(SyscallError::InvalidArgument)?;
-                if held > object.size() || !object.is_ordinary() {
+                if held > object.size() {
                     return Err(SyscallError::InvalidArgument);
                 }
-                Some((object as Arc<dyn CopySource>, raw.offset, raw.copied))
+                Backing::Copy(object as Arc<dyn CopySource>, raw.offset, raw.copied)
             }
+            (Some(_), SpawnBacking::Share) if raw.copied != 0 => return Err(SyscallError::InvalidArgument),
+            (Some(object), SpawnBacking::Share) => Backing::Share(object, raw.offset),
         };
-        Ok(Map { at, len: raw.len, prot, copy })
+        Ok(Map { at, len: raw.len, prot, backing })
     }
 }
 
@@ -112,9 +138,10 @@ fn lay(space: &mut crate::mm::space::AddressSpace, maps: &[Map]) -> Result<(), S
             return Err(SyscallError::InvalidArgument);
         }
         let at = At::Fixed(map.at);
-        match &map.copy {
-            Some((source, offset, copied)) => space.copy(map.len, at, map.prot, Arc::clone(source), *offset, *copied)?,
-            None => space.reserve(map.len, at, map.prot)?,
+        match &map.backing {
+            Backing::Zeros => space.reserve(map.len, at, map.prot)?,
+            Backing::Copy(source, offset, copied) => space.copy(map.len, at, map.prot, Arc::clone(source), *offset, *copied)?,
+            Backing::Share(object, offset) => space.map(Arc::clone(object), *offset, map.len, map.prot, at)?,
         };
     }
     Ok(())

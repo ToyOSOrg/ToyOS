@@ -454,7 +454,7 @@ pub(crate) mod owner {
         }
         // SAFETY: the descriptor's handle, held for this call; the mapping is
         // never taken away.
-        let at = unsafe { syscall::shm_map(handle.raw(), syscall::VmProt::ReadWrite) }.map_err(Why::Map)?;
+        let at = unsafe { syscall::vm_map(handle.raw(), 0, stat.size as usize, syscall::VmProt::ReadWrite, syscall::VmAt::ANYWHERE) }.map_err(Why::Map)?;
         let at = NonNull::new(at).ok_or(Why::Null)?;
         // SAFETY: a fresh mapping of a region at least `RING_BYTES` long.
         if !unsafe { Ring::at(at) }.is_laid_out() {

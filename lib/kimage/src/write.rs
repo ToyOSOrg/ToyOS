@@ -82,7 +82,7 @@ impl Input {
         out.extend((self.supervisor_maps.len() as u64).to_le_bytes());
         out.extend(self.supervisor_len.to_le_bytes());
         for map in &self.supervisor_maps {
-            for word in [map.addr, map.len, map.object, map.offset, map.copied, map.prot] {
+            for word in [map.addr, map.len, map.object, map.offset, map.copied, map.prot, map.backing] {
                 out.extend(word.to_le_bytes());
             }
         }

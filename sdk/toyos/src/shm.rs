@@ -33,7 +33,7 @@ use core::fmt;
 use core::marker::PhantomData;
 
 use toyos_abi::handle::Rights;
-use toyos_abi::syscall::{self, FileType, Stat, SyscallError, VmProt, PAGE_SIZE, SHM_DEVICE};
+use toyos_abi::syscall::{self, FileType, Stat, SyscallError, VmAt, VmProt, PAGE_SIZE, SHM_DEVICE};
 
 use crate::{AsHandle, Moved, OwnedHandle, RawHandle};
 
@@ -88,7 +88,7 @@ impl SharedMemory {
             return Err(SyscallError::InvalidArgument);
         }
         // A region the kernel maps is within the address space, so its length is a `usize`.
-        Ok(Self { ptr: map(&handle, VmProt::ReadWrite)?, handle, len, mapped: stat.size as usize })
+        Ok(Self { ptr: map(&handle, stat.size as usize, VmProt::ReadWrite)?, handle, len, mapped: stat.size as usize })
     }
 
     /// Map a region a peer lent, whose protocol says it is `bytes` long, and
@@ -99,7 +99,7 @@ impl SharedMemory {
     pub fn lent(handle: OwnedHandle, bytes: usize) -> Result<Self, Lent> {
         let stat = syscall::fstat(handle.raw()).map_err(Lent::Kernel)?;
         judge(&stat, bytes)?;
-        let ptr = map(&handle, VmProt::ReadWrite).map_err(Lent::Kernel)?;
+        let ptr = map(&handle, stat.size as usize, VmProt::ReadWrite).map_err(Lent::Kernel)?;
         Ok(Self { ptr, handle, len: bytes, mapped: stat.size as usize })
     }
 
@@ -298,10 +298,13 @@ impl<'a> core::ops::Deref for Bytes<'a> {
 /// What a region's writable handle carries, but `WRITE`.
 const READ_ONLY: Rights = Rights::MAP.union(Rights::DUP).union(Rights::TRANSFER);
 
-fn map(handle: &OwnedHandle, prot: VmProt) -> Result<*mut u8, SyscallError> {
-    // SAFETY: the mapping lives as long as what holds it, which takes it away.
-    let ptr = unsafe { syscall::shm_map(handle.raw(), prot) }?;
-    assert!(!ptr.is_null(), "shm_map answered null");
+/// The whole of the region `handle` names, `len` bytes as the kernel
+/// answered them, mapped wherever there is room.
+fn map(handle: &OwnedHandle, len: usize, prot: VmProt) -> Result<*mut u8, SyscallError> {
+    // SAFETY: the mapping lives as long as what holds it, which takes it
+    // away, and replaces nothing.
+    let ptr = unsafe { syscall::vm_map(handle.raw(), 0, len, prot, VmAt::ANYWHERE) }?;
+    assert!(!ptr.is_null(), "vm_map answered null");
     Ok(ptr)
 }
 
@@ -365,16 +368,17 @@ impl ReadOnly {
     pub fn create(len: usize) -> Result<(Self, OwnedHandle), SyscallError> {
         let writer = OwnedHandle(syscall::shm_create(len)?);
         let handle = writer.as_handle().try_clone_narrowed(READ_ONLY)?;
-        let ptr = map(&handle, VmProt::Read)?;
         // `shm_create` refused any `len` whose pages overflow.
-        Ok((Self { handle, ptr, len, mapped: len.next_multiple_of(PAGE_SIZE) }, writer))
+        let mapped = len.next_multiple_of(PAGE_SIZE);
+        let ptr = map(&handle, mapped, VmProt::Read)?;
+        Ok((Self { handle, ptr, len, mapped }, writer))
     }
 
     /// [`SharedMemory::lent`], mapped read-only, whatever the handle allows.
     pub fn lent(handle: OwnedHandle, bytes: usize) -> Result<Self, Lent> {
         let stat = syscall::fstat(handle.raw()).map_err(Lent::Kernel)?;
         judge(&stat, bytes)?;
-        let ptr = map(&handle, VmProt::Read).map_err(Lent::Kernel)?;
+        let ptr = map(&handle, stat.size as usize, VmProt::Read).map_err(Lent::Kernel)?;
         Ok(Self { handle, ptr, len: bytes, mapped: stat.size as usize })
     }
 
@@ -428,7 +432,7 @@ impl Immutable {
             return Err(NotImmutable::Writable);
         }
         // A region the kernel maps is within the address space, so its length is a `usize`.
-        Ok(Self { ptr: map(&handle, VmProt::Read).map_err(NotImmutable::Kernel)?, handle, len: stat.size as usize })
+        Ok(Self { ptr: map(&handle, stat.size as usize, VmProt::Read).map_err(NotImmutable::Kernel)?, handle, len: stat.size as usize })
     }
 
     /// `len` of its bytes from `offset`, a whole page in, as a region of

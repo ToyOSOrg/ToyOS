@@ -1,13 +1,17 @@
 //! The caller's own address space: `vm_*` reserve, commit, protect, discard,
-//! resize and take away private memory. Exhausting address space is an error return, never an `.expect`.
+//! resize and take away private memory, and map a memory object's.
+//! Exhausting address space is an error return, never an `.expect`.
 //!
 //! **A length from userland is refused before any arithmetic touches it**:
 //! rounding it to pages is the checked sum, and one no page count holds is
 //! `InvalidArgument`.
 
 use kernel::vm::Prot;
+use toyos_abi::handle::{RawHandle, Rights};
 
 use crate::mm::space::At;
+use crate::object::shm::SharedMemObject;
+use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
 use crate::process;
 
@@ -42,21 +46,67 @@ fn answer(done: Result<(), SyscallError>) -> u64 {
     done.map_or_else(SyscallError::to_u64, |()| 0)
 }
 
+/// Where a range of `len` bytes goes: anywhere at a multiple of `place` or,
+/// for `VM_AT_FIXED`, exactly at `place` in place of whatever those pages held.
+fn placed(place: u64, kind: u64, len: u64) -> Result<At, SyscallError> {
+    match kind {
+        VM_AT_ANYWHERE => Ok(At::Anywhere(place)),
+        VM_AT_FIXED => Ok(At::Fixed(range(place, len)?.0)),
+        _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
 /// Private memory, committed unless `prot` is `None` and populated as it is
-/// touched, placed anywhere at a multiple of `place` or, for `VM_AT_FIXED`,
-/// exactly at `place` in place of whatever those pages held.
+/// touched.
 pub(super) fn sys_vm_reserve(len: u64, prot: u64, place: u64, kind: u64) -> u64 {
     let reserved = (|| {
         let prot = vm_prot(prot)?;
         let len = whole_pages(len).ok_or(SyscallError::InvalidArgument)?;
-        let at = match kind {
-            VM_AT_ANYWHERE => At::Anywhere(place),
-            VM_AT_FIXED => At::Fixed(range(place, len)?.0),
-            _ => return Err(SyscallError::InvalidArgument),
-        };
+        let at = placed(place, kind, len)?;
         process::current_address_space().lock().reserve(len, at, prot)
     })();
     reserved.map_or_else(SyscallError::to_u64, UserAddr::raw)
+}
+
+/// What a handle carries to map its object as `prot`: `MAP`, and `WRITE` for
+/// a mapping that writes. What the object gives is its own to say
+/// (`SharedMemObject::mappable`).
+pub(crate) fn map_rights(prot: Prot) -> Rights {
+    match prot {
+        Prot::ReadWrite => Rights::MAP.union(Rights::WRITE),
+        Prot::None | Prot::Read | Prot::ReadExec => Rights::MAP,
+    }
+}
+
+/// `toyos_abi::syscall::vm_map`: a memory object's own pages.
+pub(super) fn sys_vm_map(ctx: &SyscallContext<'_>, h: RawHandle, args: UserAddr) -> u64 {
+    let Ok(args) = ctx.copy_in::<VmMapArgs>(args) else { return SyscallError::BadAddress.to_u64() };
+    let asked = (|| {
+        let prot = vm_prot(args.prot)?;
+        let len = whole_pages(args.len).ok_or(SyscallError::InvalidArgument)?;
+        Ok((prot, len, placed(args.place, args.at, len)?))
+    })();
+    let (prot, len, at) = match asked {
+        Ok(asked) => asked,
+        Err(e) => return SyscallError::to_u64(e),
+    };
+    let object = match process::with_handles(|handles| handles.get::<SharedMemObject>(h, map_rights(prot))) {
+        Ok(object) => object,
+        Err(e) => return e.refuse(),
+    };
+    let space = process::current_address_space();
+    let mapped = space.lock().map(alloc::sync::Arc::clone(&object), args.offset, len, prot, at);
+    let at = match mapped {
+        Ok(at) => at,
+        Err(e) => return e.to_u64(),
+    };
+    // A device's window is taken back with its last handle, so it says
+    // where it is mapped; one whose last handle went meanwhile is refused.
+    if let Err(e) = object.mapped_at(&space, at, len) {
+        space.lock().release_object(at, len, &object);
+        return e.to_u64();
+    }
+    at.raw()
 }
 
 /// Take every page of `[addr, addr + len)` away, as POSIX `munmap` does.
