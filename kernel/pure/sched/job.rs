@@ -73,6 +73,9 @@ impl Job {
     pub fn group_weight(&self, here: u32) -> u64 {
         let all = self.runnable();
         assert!(here <= all, "job {:?}: {here} threads queued here of {all} runnable", self.key);
+        if here == all {
+            return JOB_WEIGHT;
+        }
         (JOB_WEIGHT * u64::from(here) / u64::from(all)).max(1)
     }
 

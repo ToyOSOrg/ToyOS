@@ -127,6 +127,25 @@ fn add(a: i128, b: i128) -> i128 {
     a.checked_add(b).expect("eevdf: arithmetic beyond i128")
 }
 
+/// `n / d` rounded down, for `d > 0`: a shift where `d` is a power of two, as
+/// every thread's weight and most groups' are, sparing the wide division.
+fn div(n: i128, d: i128) -> i128 {
+    if d & (d - 1) == 0 {
+        n >> d.trailing_zeros()
+    } else {
+        n.div_euclid(d)
+    }
+}
+
+/// [`div`] and its remainder.
+fn div_rem(n: i128, d: i128) -> (i128, i128) {
+    if d & (d - 1) == 0 {
+        (n >> d.trailing_zeros(), n & (d - 1))
+    } else {
+        (n.div_euclid(d), n.rem_euclid(d))
+    }
+}
+
 /// `ns` of service as fine units.
 fn fine(ns: u64) -> i128 {
     (ns as i128) << VSHIFT
@@ -354,7 +373,7 @@ impl Queue {
     fn rebase(&mut self) {
         // `0 ≤ sum < total` is `⌊V⌋ = base` already, and the division is spared.
         if self.total > 0 && !(0..self.total).contains(&self.sum) {
-            let q = self.sum.div_euclid(self.total);
+            let q = div(self.sum, self.total);
             self.base = add(self.base, q);
             self.sum -= mul(q, self.total);
         }
@@ -365,7 +384,7 @@ impl Queue {
         self.seq += 1;
         let seq = self.seq;
         let e = arena.node_mut(i);
-        e.vd = add(e.v, request.div_euclid(e.weight as i128).max(1));
+        e.vd = add(e.v, div(request, e.weight as i128).max(1));
         e.seq = seq;
     }
 
@@ -433,7 +452,7 @@ impl Queue {
             // v = V − l/W − l/w makes w·(V' − v) = l once V' includes v.
             let l = lag.0;
             let num = mul(w, self.sum - l) - mul(l, self.total);
-            num.div_euclid(mul(self.total, w))
+            div(num, mul(self.total, w))
         };
         let e = arena.node_mut(i);
         e.v = add(self.base, v_rel);
@@ -448,6 +467,15 @@ impl Queue {
     /// Detach node `i` from the tree and the sums, answering what it takes
     /// away; the node stays in its arena.
     fn exit<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, i: u32) -> Left {
+        if self.len == 1 {
+            // Alone it is the whole of `sum`, `w·(v − base)`: it takes no lag,
+            // and leaves `V` at its `v`, where the general path rebases to.
+            assert_eq!(self.root, i, "eevdf: a queued entity is missing from the tree");
+            let e = arena.node(i);
+            let request_left = mul(e.vd - e.v, e.weight as i128);
+            *self = Queue { root: NIL, len: 0, total: 0, base: e.v, sum: 0, seq: self.seq };
+            return Left { lag: Lag::ZERO, request_left };
+        }
         self.rebase();
         let lag = self.lag_of(arena, i);
         let at = arena.order_of(i);
@@ -488,7 +516,7 @@ impl Queue {
             return Lag::ZERO;
         }
         let w = e.weight as i128;
-        let lag = mul(w, self.sum - mul(self.total, e.v - self.base)).div_euclid(self.total);
+        let lag = div(mul(w, self.sum - mul(self.total, e.v - self.base)), self.total);
         Lag(lag)
     }
 
@@ -504,8 +532,8 @@ impl Queue {
         let e = arena.node_mut(i);
         let total = fine(ns) + e.rem as i128;
         let w = e.weight as i128;
-        let dv = total / w;
-        e.rem = (total % w) as u64;
+        let (dv, rem) = div_rem(total, w);
+        e.rem = rem as u64;
         e.v = add(e.v, dv);
         let (v, vd, slice) = (e.v, e.vd, e.slice);
         self.sum = add(self.sum, mul(dv, w));
@@ -760,6 +788,32 @@ mod tests {
         }
         fn below(&mut self, n: u64) -> u64 {
             self.next() % n
+        }
+    }
+
+    /// An `i128` of a random width, either sign.
+    fn wide(rng: &mut Lcg) -> i128 {
+        let bits = (0..5).fold(0i128, |acc, _| (acc << 31) ^ i128::from(rng.next()));
+        bits >> rng.below(127)
+    }
+
+    /// The shift and mask are the floor division they stand in for, at every
+    /// numerator and at both kinds of positive divisor.
+    #[test]
+    fn div_and_div_rem_are_floor_division() {
+        let mut rng = Lcg(31);
+        let extremes = [i128::MIN, i128::MIN + 1, -(1 << 64), -1, 0, 1, 1 << 64, i128::MAX - 1, i128::MAX];
+        let mut divisors: Vec<i128> = (0..127).map(|k| 1i128 << k).collect();
+        divisors.extend([3, 5, 21_845, 65_537, (1 << 40) - 3, i128::MAX]);
+        for _ in 0..200 {
+            divisors.push(((wide(&mut rng) & i128::MAX) >> rng.below(120)) | 3);
+        }
+        for &d in &divisors {
+            let numerators = extremes.into_iter().chain((0..200).map(|_| wide(&mut rng)));
+            for n in numerators {
+                assert_eq!(div(n, d), n.div_euclid(d), "{n} / {d}");
+                assert_eq!(div_rem(n, d), (n.div_euclid(d), n.rem_euclid(d)), "{n} / {d}");
+            }
         }
     }
 
