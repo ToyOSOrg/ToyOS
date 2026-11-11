@@ -20,9 +20,9 @@ struct Capability {
     dir: Turnstile<Dir>,
 }
 
-/// Every capability of the view this process has looked for, found or not:
-/// bounded by the view, as only a held directory is looked for.
-static CAPABILITIES: Lock<BTreeMap<String, Option<Arc<Capability>>>> = Lock::new(BTreeMap::new());
+/// Every capability of the view this process has connected: bounded by the
+/// view, as only a held directory is asked for.
+static CAPABILITIES: Lock<BTreeMap<String, Arc<Capability>>> = Lock::new(BTreeMap::new());
 
 /// A path's capability, starting directory and relative name.
 enum Place { Served(Arc<Capability>, Base, String), Directory(String) }
@@ -221,21 +221,19 @@ fn utf8(path: &[u8]) -> Result<&str, Error> {
     core::str::from_utf8(path).map_err(|_| Error::NotUtf8)
 }
 
-/// The capability named `fs:<prefix>`, remembering the answer either way.
-/// The connect waits for the server's hello, so it is made outside the lock:
-/// of two threads that connect at once the first answer kept is the one used.
-fn capability(prefix: &str) -> Result<Option<Arc<Capability>>, Error> {
+/// The held capability named `fs:<prefix>`, connected once and kept; a
+/// refused connect is the caller's error. The connect waits for the server's
+/// hello, so it is made outside the lock: of two threads that connect at once
+/// the first connection kept is the one used.
+fn capability(prefix: &str) -> Result<Arc<Capability>, Error> {
     if let Some(found) = CAPABILITIES.lock().get(prefix) {
-        return Ok(found.clone());
+        return Ok(Arc::clone(found));
     }
-    let Some(names) = crate::endow::namespace() else { return Ok(None) };
+    let names = crate::endow::namespace().ok_or(Error::Served(fs::Error::NotHeld))?;
     let name = alloc::format!("{}{prefix}", fs::CAPABILITY_PREFIX);
-    let found = match Dir::connect(names, &name) {
-        Ok(dir) => Some(Arc::new(Capability { dir: Turnstile::new(dir) })),
-        Err(fs::Error::NotHeld) => None,
-        Err(e) => return Err(Error::Served(e)),
-    };
-    Ok(CAPABILITIES.lock().entry(String::from(prefix)).or_insert(found).clone())
+    let dir = Dir::connect(names, &name).map_err(Error::Served)?;
+    let found = Arc::new(Capability { dir: Turnstile::new(dir) });
+    Ok(Arc::clone(CAPABILITIES.lock().entry(String::from(prefix)).or_insert(found)))
 }
 
 /// Which server the absolute, lexically clean `abs` is on, and the path there.

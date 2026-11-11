@@ -18,19 +18,17 @@ pub(super) enum Routed<C> {
     Directory,
 }
 
-/// Route `abs` through `held`, which answers the capability a held directory
-/// names: the longest held directory `abs` lies in first. Only a directory
-/// the view holds is asked for, so a path costs the kernel nothing.
+/// Route `abs` to the deepest held directory it lies in, whose capability
+/// `held` answers: its refusal is the call's. No capability the view does
+/// not hold is asked for.
 pub(super) fn route<C>(
     abs: &str,
     dirs: &Directories,
-    mut held: impl FnMut(&str) -> Result<Option<C>, Error>,
+    held: impl FnOnce(&str) -> Result<C, Error>,
 ) -> Result<Routed<C>, Error> {
-    for root in dirs.holding(abs) {
-        if let Some(cap) = held(root)? {
-            let beneath = abs[root.len()..].trim_start_matches('/');
-            return Ok(Routed::Served(cap, String::from(beneath)));
-        }
+    if let Some(root) = dirs.holding(abs) {
+        let beneath = abs[root.len()..].trim_start_matches('/');
+        return Ok(Routed::Served(held(root)?, String::from(beneath)));
     }
     match dirs.node(abs) {
         Some(_) => Ok(Routed::Directory),
@@ -64,9 +62,9 @@ impl Directories {
         Self { paths: paths.into_iter().collect(), held: held.into_iter().collect() }
     }
 
-    /// The held directories the absolute, lexically clean `abs` is or lies
-    /// in, deepest first.
-    fn holding<'a>(&'a self, abs: &'a str) -> impl Iterator<Item = &'a str> {
+    /// The deepest held directory the absolute, lexically clean `abs` is or
+    /// lies in.
+    fn holding<'a>(&'a self, abs: &'a str) -> Option<&'a str> {
         let ends = abs.match_indices('/').skip(1).map(|(at, _)| at).chain([abs.len()]).take(MAX_CAPABILITY_DEPTH);
         let mut prefixes = [""; MAX_CAPABILITY_DEPTH];
         let mut count = 0;
@@ -76,7 +74,7 @@ impl Directories {
         }
         let root = (abs != "/").then_some("/");
         let held = |prefix: &&str| self.held.binary_search_by(|held| held.as_str().cmp(prefix)).is_ok();
-        prefixes.into_iter().take(count).rev().chain(root).filter(held)
+        prefixes.into_iter().take(count).rev().chain(root).find(held)
     }
 
     pub(super) fn node(&self, path: &str) -> Option<u64> {
@@ -120,7 +118,7 @@ mod tests {
         route(abs, &dirs, |prefix| {
             let name = alloc::format!("{}{prefix}", fs::CAPABILITY_PREFIX);
             assert!(names.contains(&name.as_str()), "asked for {name}, which the view does not hold");
-            Ok(Some(String::from(prefix)))
+            Ok(String::from(prefix))
         })
     }
 
@@ -151,15 +149,6 @@ mod tests {
         assert_eq!(routed(&view, "/home/toy/Apps"), Ok(Routed::Served("/home".into(), "toy/Apps".into())));
         assert_eq!(routed(&view, "/home/toy/Apps/doom/a/b/c"), Ok(Routed::Served("/home/toy/Apps/doom".into(), "a/b/c".into())));
         assert_eq!(routed(&view, "/homestead"), Ok(Routed::Served("/".into(), "homestead".into())));
-    }
-
-    /// A held directory that will not connect leaves the path to the next
-    /// one out.
-    #[test]
-    fn a_directory_that_answers_nothing_leaves_the_path_to_the_one_above() {
-        let dirs = Directories::new(["fs:/home", "fs:/home/toy"].map(String::from));
-        let routed = route("/home/toy/x", &dirs, |prefix| Ok((prefix == "/home").then(|| String::from(prefix))));
-        assert_eq!(routed, Ok(Routed::Served("/home".into(), "toy/x".into())));
     }
 
     /// A view holding `/tmp` and a package's folder names what is beneath
