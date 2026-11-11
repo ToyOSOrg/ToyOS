@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use toyos::admission::{Admission, Event, Left, Policy};
+use toyos::admission::{Admission, Event, Policy};
 use toyos::ipc;
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
@@ -166,12 +166,7 @@ fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
                     READ => hub.read(&reader.into_connection()),
                     _ => {}
                 },
-                // A reader that hung up or spoke another protocol is told by
-                // its closing, and said of nowhere: every holder of `log`
-                // would write into it at its own rate.
-                Event::Left { why: why @ Left::Silent, say: Some(unsaid), .. } => {
-                    say!("logkeeper: letting a reader go: {why}{unsaid}")
-                }
+                Event::Left { why, say: Some(unsaid), .. } => say!("logkeeper: letting a reader go: {why}{unsaid}"),
                 Event::Left { .. } => {}
             }
         }

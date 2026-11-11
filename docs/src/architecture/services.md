@@ -39,9 +39,12 @@ Every server admits its clients the same way, through one shared mechanism:
   queue by name.
 - **No client writes its server's log at its own rate.** Of a client's
   refusals and of connections let go for what they sent or did not, its
-  server says one line a client a limit, carrying a count of the rest. A
-  hang-up is not said: a client may connect only to learn that its server is
-  there.
+  server says one line a client a limit for as many clients as its table has
+  slots, and one more line a limit for all clients past those. Every line not
+  said is counted into the next one said, so however many clients arrive a
+  table says at most one line a slot and one more a limit, and accounts for
+  every refusal. A hang-up is not said: a client may connect only to learn
+  that its server is there.
 - **The size of a table and of a share are the server's**; the mechanism and
   its limit are the same for all.
 
