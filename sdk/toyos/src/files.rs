@@ -1,6 +1,6 @@
 //! Files and directories through the capabilities a process holds, named
 //! `fs:<directory>` in its namespace. Absolute paths and paths from the
-//! working directory use the longest matching prefix, at most
+//! working directory go to the deepest held directory they lie in, at most
 //! [`MAX_CAPABILITY_DEPTH`] components deep. A relative path from a
 //! descriptor stays on that directory's server. Absolute symlinks return
 //! here for routing through the same capabilities.
