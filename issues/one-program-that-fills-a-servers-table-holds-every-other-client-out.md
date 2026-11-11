@@ -47,6 +47,14 @@ and move its connector only into the shell they spawn. A program that holds
 several sessions, or that launches other rows, holds as many keys:
 `issues/four-shares-take-a-file-server.md`.
 
+- **Owed on metal:** the boots `boot:testcases` (its `testcases` and
+  `testcases-watchdog` images) and `boot:shared-debug`, on the T14; the
+  servers' admission through `toyos::admission` has run on no metal yet. Main
+  must show every job of those boots passing within twice its recorded time;
+  no line from the supervisor, the file server, diskserver, logkeeper or usbd
+  refusing a share, a full table or a silence to a client of the boot's own;
+  and diskserver's `disk driver … (label) connected` for each driver.
+
 **Owner**: the orchestrator. Badging every connector with its holder is a
 change to what a badge says (the manual: what was granted, never who
 connects), which is the owner's to decide.
