@@ -22,9 +22,9 @@
 //!   meet a second completion for one tag ([`Law::Answers`]);
 //! - a flush answered durable left on the medium, for every block, the last
 //!   write acknowledged before the flush was asked for, or one asked for after
-//!   it; and a flush ends answered durable unless the run spent more failures
-//!   than [`MAX_ATTEMPTS`], which is the fewest that can make the client give
-//!   a write or a flush up ([`Law::Durable`]).
+//!   it; and a flush ends answered durable unless the run's failures can cost
+//!   one flush or one write more attempts than [`MAX_ATTEMPTS`], the fewest
+//!   that make the client give it up ([`Law::Durable`], [`Failures::attempts`]).
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
@@ -58,8 +58,12 @@ pub struct Failures {
 }
 
 impl Failures {
-    fn total(self) -> u32 {
-        u32::from(self.resets) + u32::from(self.crashes) + u32::from(self.errors)
+    /// The most attempts at one flush or one write these can cost: a reset
+    /// two (the request it fails, and the loss the next flush is told of), a
+    /// server's death one (the request its session's end took), a device
+    /// error one.
+    fn attempts(self) -> u32 {
+        2 * u32::from(self.resets) + u32::from(self.crashes) + u32::from(self.errors)
     }
 }
 
@@ -264,7 +268,7 @@ pub fn explore(script: &[Step], failures: Failures) -> Explored {
         ends: 0,
         given_up: 0,
         filled: [false; 2],
-        may_give_up: failures.total() > MAX_ATTEMPTS,
+        may_give_up: failures.attempts() > MAX_ATTEMPTS,
         path: Vec::new(),
     };
     dfs(&mut run, start(failures, LIMIT));
@@ -720,10 +724,12 @@ mod tests {
     /// given up in.
     const GIVE_UP: [Step; 2] = [Step::Write { block: 0, value: 1 }, Step::Flush];
 
-    /// What it is held under: two deaths and resets, and a death followed by
-    /// more device errors than [`MAX_ATTEMPTS`] — what makes the client give
-    /// an acknowledged write up.
-    const GIVE_UP_BOUNDS: [Failures; 3] = [
+    /// What it is held under: a reset and two deaths, the most failures of
+    /// those kinds that never give a flush up; two deaths and resets, and a
+    /// death followed by more device errors than [`MAX_ATTEMPTS`] — what makes
+    /// the client give an acknowledged write up.
+    const GIVE_UP_BOUNDS: [Failures; 4] = [
+        at_most(1, 2, 0),
         at_most(2, 2, 0),
         at_most(0, 1, MAX_ATTEMPTS as u8 + 1),
         at_most(1, 1, MAX_ATTEMPTS as u8),
@@ -796,9 +802,9 @@ mod tests {
         assert_eq!(explored.filled, [true, true], "a ring never held its depth");
     }
 
-    /// Nor is the give-up path out of its reach: past [`MAX_ATTEMPTS`] failures
-    /// some run ends with a flush answered the device's refusal, and the laws
-    /// above were held on it.
+    /// Nor is the give-up path out of its reach: with failures that cost more
+    /// than [`MAX_ATTEMPTS`] attempts some run ends with a flush answered the
+    /// device's refusal, and the laws above were held on it.
     #[test]
     fn the_model_reaches_a_write_given_up() {
         let explored = verdict(&GIVE_UP, at_most(0, 1, MAX_ATTEMPTS as u8 + 1));

@@ -1,13 +1,16 @@
 //! A client's two ends of a session page: its requests onto the request ring
-//! and the server's completions off the other.
+//! and the server's completions off the other, and what the client does next.
 //!
 //! **What the server writes ends the session or is a completion the client
 //! takes**: a cursor no server writes, words that are no completion, and a
-//! completion [`Client::complete`] refuses are each a [`Violation`], at the
-//! call that met it. **So does its silence**: [`ClientEnds::patience`] runs
-//! out once the client has waited [`SILENCE_BOUND_NS`] for a completion.
-//! Either way the caller ends the session, and [`Client::session_ended`]
-//! answers what was on the wire.
+//! completion [`Client::complete`] refuses are each a [`Violation`]. **So does
+//! its silence**, once the client has waited [`SILENCE_BOUND_NS`] for a
+//! completion. Either way [`ClientEnds::exchange`] answers [`Next::End`], the
+//! caller ends the session, and [`Client::session_ended`] answers what was on
+//! the wire.
+//!
+//! **A wait is only ever for the server**: [`Next::Wait`] is answered only
+//! once every request that can go has gone and no answer is decided.
 
 use toyos::transport::{Run, Violation, Word};
 
@@ -16,10 +19,41 @@ use crate::entry::Completion;
 use crate::layout::{self, ClientRings, RING_WORDS};
 
 /// How long a client that is owed a completion goes without one before it
-/// takes the server for wedged. Policy: a driver takes back a command its
-/// device leaves unanswered and answers it itself (NVMe's after 10 s), so a
-/// server silent for several times that is not waiting on a device.
+/// ends the session. Policy, and below the longest a server may be silent
+/// while it works: the NVMe driver resets its controller after 10 s of a
+/// command's silence and answers nothing until the reset is done, and each
+/// of the reset's steps may take the controller's `CAP.TO`, up to 127.5 s
+/// (NVMe Base 2.0 §3.1.4.1).
 pub const SILENCE_BOUND_NS: u64 = 60_000_000_000;
+
+/// What a client does after an exchange with its server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Next {
+    /// End the session.
+    End(Ending),
+    /// Answers are decided, for [`Client::take_answers`].
+    Answered,
+    /// Nothing is decided; the server has this long to post a completion.
+    Wait(u64),
+    /// Nothing is owed and nothing decided.
+    Idle,
+}
+
+/// Why a session is ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    Violation(Violation),
+    /// No completion in [`SILENCE_BOUND_NS`] while one was owed.
+    Silence,
+}
+
+/// An exchange's outcome, and whether it published requests the server's
+/// doorbell is owed for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Exchange {
+    pub next: Next,
+    pub published: bool,
+}
 
 pub struct ClientEnds {
     rings: ClientRings,
@@ -35,9 +69,36 @@ impl ClientEnds {
         Self { rings: layout::client(page), owed_since: None }
     }
 
+    /// At `now`: send what can go, take every completion posted, send what
+    /// those let go (a flush waiting on writes going out again), and say what
+    /// next. Requests go out through `place`, as [`Client::next_request`]'s.
+    pub fn exchange<W: Word, P: Clone>(
+        &mut self,
+        page: &[W; RING_WORDS],
+        client: &mut Client<P>,
+        now: u64,
+        mut place: impl FnMut(Placing<'_, P>) -> Option<Run>,
+    ) -> Exchange {
+        let mut published = false;
+        let mut trade = || -> Result<(), Violation> {
+            published |= self.send(page, client, now, &mut place)?;
+            self.receive(page, client, now)?;
+            published |= self.send(page, client, now, &mut place)?;
+            Ok(())
+        };
+        let next = match (trade(), self.patience(now)) {
+            (Err(violation), _) => Next::End(Ending::Violation(violation)),
+            (Ok(()), Some(0)) => Next::End(Ending::Silence),
+            (Ok(()), _) if client.answered() => Next::Answered,
+            (Ok(()), Some(left)) => Next::Wait(left),
+            (Ok(()), None) => Next::Idle,
+        };
+        Exchange { next, published }
+    }
+
     /// Put every request `client` will send on the ring, at `now`; `true` if
     /// any went, which the server's doorbell is owed for.
-    pub fn send<W: Word, P: Clone>(
+    fn send<W: Word, P: Clone>(
         &mut self,
         page: &[W; RING_WORDS],
         client: &mut Client<P>,
@@ -74,7 +135,7 @@ impl ClientEnds {
 
     /// How long from `now` the server still has to post a completion; `None`
     /// while the client is owed none, and `Some(0)` for a server to give up.
-    pub fn patience(&self, now: u64) -> Option<u64> {
+    fn patience(&self, now: u64) -> Option<u64> {
         self.owed_since.map(|since| SILENCE_BOUND_NS.saturating_sub(now.saturating_sub(since)))
     }
 
@@ -92,8 +153,8 @@ mod tests {
     use core::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
-    use crate::client::{Ask, Outcome, Ticket};
-    use crate::entry::{Request, Status};
+    use crate::client::{Ask, Outcome, Ticket, MAX_ATTEMPTS};
+    use crate::entry::{Op, Request, Status};
     use crate::layout::{ServerRings, ARENA, CQ_TAIL, DEPTH, SQ_HEAD};
 
     type Page = [AtomicU32; RING_WORDS];
@@ -117,12 +178,32 @@ mod tests {
 
     impl Session {
         fn open() -> Self {
+            Self::keeping(1 << 20)
+        }
+
+        /// A client that keeps at most `limit` blocks of acknowledged writes.
+        fn keeping(limit: u64) -> Self {
             let page: Page = core::array::from_fn(|_| AtomicU32::new(0));
             let ends = ClientEnds::new(&page);
             let server = layout::server(&page);
-            let mut client = Client::new(1 << 20);
+            let mut client = Client::new(limit);
             client.session_started();
             Self { page, client, ends, server }
+        }
+
+        /// The session ended, and the next opened over a fresh page: what the
+        /// caller was told at the end.
+        fn reopened(&mut self) -> Vec<(Ticket, Outcome)> {
+            let told = self.ended();
+            self.page = core::array::from_fn(|_| AtomicU32::new(0));
+            self.ends = ClientEnds::new(&self.page);
+            self.server = layout::server(&self.page);
+            self.client.session_started();
+            told
+        }
+
+        fn exchange(&mut self, now: u64) -> Next {
+            self.ends.exchange(&self.page, &mut self.client, now, place).next
         }
 
         fn send(&mut self, now: u64) -> Result<bool, Violation> {
@@ -153,6 +234,15 @@ mod tests {
             self.client.session_ended();
             self.client.take_answers().collect()
         }
+
+        /// Every request the server finds published answered `status`.
+        fn answer_all(&mut self, status: Status) -> Vec<Request> {
+            let taken = self.taken();
+            for request in &taken {
+                self.post(request.tag, status);
+            }
+            taken
+        }
     }
 
     #[test]
@@ -170,6 +260,36 @@ mod tests {
         assert_eq!(s.ends.patience(0), None, "owed nothing");
     }
 
+    /// The client's own flush fails past its attempts while a caller's write
+    /// waits behind the limit, and the writes it kept go out again. When the
+    /// server answers those, the send after it answers the waiting write
+    /// `Device` unsent, and nothing is owed: the exchange answers `Answered`,
+    /// not a wait with an answer decided and untaken.
+    #[test]
+    fn an_answer_the_last_send_decides_is_never_waited_past() {
+        let mut s = Session::keeping(1);
+        s.client.submit(1, Ask::Write { lba: 0, blocks: 1, payload: 1 });
+        assert_eq!(s.exchange(0), Next::Wait(SILENCE_BOUND_NS));
+        s.answer_all(Status::Ok);
+        assert_eq!(s.exchange(0), Next::Answered);
+        assert_eq!(s.client.take_answers().collect::<Vec<_>>(), [(1, Outcome::Done)]);
+        s.client.submit(2, Ask::Write { lba: 4, blocks: 1, payload: 2 });
+        assert_eq!(s.exchange(0), Next::Wait(SILENCE_BOUND_NS), "the client's own flush goes, and the write waits");
+        for attempt in 0..=MAX_ATTEMPTS {
+            assert_eq!(s.answer_all(Status::Device).len(), 1, "the client's own flush");
+            assert!(matches!(s.exchange(0), Next::Wait(_)), "the kept write goes out again");
+            assert_eq!(s.answer_all(Status::Ok).len(), 1, "the kept write");
+            let next = s.exchange(0);
+            if attempt < MAX_ATTEMPTS {
+                assert!(matches!(next, Next::Wait(_)), "the client's own flush goes again");
+            } else {
+                assert_eq!(next, Next::Answered, "the send after the last completion answered the waiting write");
+            }
+        }
+        assert_eq!(s.client.take_answers().collect::<Vec<_>>(), [(2, Outcome::Device)]);
+        assert_eq!(s.exchange(0), Next::Idle);
+    }
+
     /// A server whose cursor on the request ring is past what the client
     /// published: the send that meets it says so, and the session's end
     /// answers the request that was out.
@@ -182,6 +302,44 @@ mod tests {
         s.client.submit(2, Ask::Read { lba: 1, blocks: 1 });
         assert_eq!(s.send(0), Err(Violation::HeadPastTail));
         assert_eq!(s.ended(), [(1, Outcome::Refused)]);
+    }
+
+    /// The same before anything went: the session ended over the first
+    /// request waiting, which its end answers; the one behind it waits.
+    #[test]
+    fn a_server_past_the_request_ring_before_anything_went_ends_over_what_waited() {
+        let mut s = Session::open();
+        s.page[SQ_HEAD].store(1, Ordering::Release);
+        s.client.submit(1, Ask::Read { lba: 0, blocks: 1 });
+        s.client.submit(2, Ask::Read { lba: 1, blocks: 1 });
+        assert_eq!(s.exchange(0), Next::End(Ending::Violation(Violation::HeadPastTail)));
+        assert_eq!(s.reopened(), [(1, Outcome::Refused)]);
+        assert_eq!(s.exchange(0), Next::Wait(SILENCE_BOUND_NS));
+        assert_eq!(s.taken().iter().map(|r| r.op).collect::<Vec<_>>(), [Op::Read { run: ARENA.run(2, 1).unwrap(), lba: 1 }]);
+    }
+
+    /// A server that answers a write issued again with a word no server says
+    /// of it, at every session: each end counts against the write, which is
+    /// given up past its attempts, and the request behind it goes out.
+    #[test]
+    fn a_server_that_ends_every_session_over_one_write_holds_nothing_for_good() {
+        let mut s = Session::open();
+        s.client.submit(1, Ask::Write { lba: 0, blocks: 1, payload: 1 });
+        s.exchange(0);
+        s.answer_all(Status::Ok);
+        assert_eq!(s.exchange(0), Next::Answered);
+        assert_eq!(s.reopened(), [(1, Outcome::Done)]);
+        s.client.submit(2, Ask::Read { lba: 4, blocks: 1 });
+        for _ in 0..=MAX_ATTEMPTS {
+            assert!(matches!(s.exchange(0), Next::Wait(_)));
+            let sent: Vec<Op> = s.answer_all(Status::Lost).iter().map(|r| r.op).collect();
+            assert_eq!(sent, [Op::Write { run: ARENA.run(1, 1).unwrap(), lba: 0 }], "the write alone, again");
+            assert_eq!(s.exchange(0), Next::End(Ending::Violation(Violation::Entry)));
+            assert_eq!(s.reopened(), []);
+        }
+        assert_eq!(s.client.kept(), 0, "given up");
+        assert!(matches!(s.exchange(0), Next::Wait(_)));
+        assert_eq!(s.taken().iter().map(|r| r.op).collect::<Vec<_>>(), [Op::Read { run: ARENA.run(2, 1).unwrap(), lba: 4 }]);
     }
 
     #[test]
