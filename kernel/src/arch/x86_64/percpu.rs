@@ -423,24 +423,30 @@ pub fn reserve_log_slot(
     (shard as *const log::Shard, seq, cpu, tid, pid)
 }
 
-/// The same size as a task's kernel stack: a `deferred` [`kobject!`] object
-/// may own an `immediate` one, whose destructor then runs here instead.
-fn alloc_idle_stack(percpu: &mut PerCpu) {
-    percpu.idle_stack_top = Stack::permanent(KERNEL_STACK_SIZE);
-}
-
-/// One stack per [`IST_STACKS`] row; an `ist[n-1]` left zero faults to address 0 unchecked.
+/// The stacks of the CPU `percpu` is: its idle stack, the same size as a
+/// task's kernel stack, since a `deferred` [`kobject!`] object may own an
+/// `immediate` one, whose destructor then runs there; and one stack per
+/// [`IST_STACKS`] row, since an `ist[n-1]` left zero faults to address 0
+/// unchecked. Called once this CPU's `gs:` is valid, which a guard page's
+/// flush reads.
 ///
 /// A fault on an IST stack's guard page is a `#DF`, since its frame cannot be
 /// pushed, and a `#DF` loads IST1's top whatever stack it interrupted (SDM
 /// Vol. 3A §6.14.5), so even IST1's own overflow reaches the handler.
-fn alloc_ist_stacks(percpu: &mut PerCpu) {
+///
+/// # Safety
+/// `percpu` is a live block whose CPU takes no exception meanwhile, and no
+/// reference to it is held.
+unsafe fn alloc_stacks(percpu: *mut PerCpu) {
+    let idle = Stack::permanent(KERNEL_STACK_SIZE);
+    // SAFETY: the caller's contract.
+    unsafe { (*percpu).idle_stack_top = idle };
     for slot in 0..IST_STACKS {
         let top = Stack::permanent(IST_STACK_SIZE);
         // SAFETY: the fresh stack's own bytes, which nothing runs on yet.
         unsafe { core::ptr::write_bytes((top - IST_STACK_SIZE as u64) as *mut u8, STACK_FILL, IST_STACK_SIZE) };
-        // SAFETY: `Tss` is `repr(C, packed)` (possibly unaligned); `slot < IST_STACKS <= 7 == Tss::ist.len()`.
-        unsafe { core::ptr::write_unaligned(&raw mut percpu.tss.ist[slot], top); }
+        // SAFETY: the caller's contract; `Tss` is `repr(C, packed)` (possibly unaligned); `slot < IST_STACKS <= 7 == Tss::ist.len()`.
+        unsafe { core::ptr::write_unaligned(&raw mut (*percpu).tss.ist[slot], top) };
     }
 }
 
@@ -534,8 +540,6 @@ pub fn init_bsp(lapic_id: u32) {
     percpu.kernel_rsp = cpu::stack_pointer();
     // SAFETY: `Tss` is `repr(C, packed)`; `rsp0` may be unaligned.
     unsafe { core::ptr::write_unaligned(&raw mut percpu.tss.rsp0, cpu::stack_pointer()); }
-    alloc_idle_stack(percpu);
-    alloc_ist_stacks(percpu);
 
     // SAFETY: `load_gdt`'s once-per-CPU contract — this is the BSP's call; `init_ap` is every AP's.
     unsafe { percpu.load_gdt(); }
@@ -543,6 +547,9 @@ pub fn init_bsp(lapic_id: u32) {
     // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };
     super::control_regs::init(0);
+    // SAFETY: this CPU's own block, with no IDT of this kernel's loaded yet
+    // and the `&mut` above ended.
+    unsafe { alloc_stacks(ptr) };
     // Then the IDT, before the first step that can fault. Until `lidt` runs the
     // loaded table is the one firmware left across `ExitBootServices`, whose
     // handlers report on no channel of this kernel's — so a fault in `fpu`
@@ -569,8 +576,8 @@ pub fn alloc_ap(cpu_id: u32, token: u32) -> *mut PerCpu {
     // SAFETY: `init_bsp`'s argument; this AP hasn't been sent its INIT-SIPI yet, so it ran no instruction.
     let percpu = unsafe { &mut *ptr };
     percpu.ap_token = token;
-    alloc_idle_stack(percpu);
-    alloc_ist_stacks(percpu);
+    // SAFETY: the AP has run no instruction, and `percpu` is not used again.
+    unsafe { alloc_stacks(ptr) };
     ptr
 }
 
