@@ -57,7 +57,7 @@ use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched::hw::CpuId;
 use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer};
 use kernel_loom::sched_model::{
-    model, watch_list, Kicks, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0, CPU1,
+    model, watch_list, Kicks, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0,
 };
 use kernel_loom::sched::park::{prepare, Cancel, Commit, CurrentTask};
 use kernel_loom::sched::task::{
