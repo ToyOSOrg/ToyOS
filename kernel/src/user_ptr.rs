@@ -45,10 +45,14 @@ fn asked(access: Access) -> Asked {
     }
 }
 
-/// Translate a user virtual address to its frame, populating its page if
-/// needed; `pub(crate)` because the futex word outlives its syscall.
-pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm::space::Translation> {
-    crate::mm::space::Space::translate(unlocked_space(), addr.raw(), asked(access))
+/// The frame behind a user virtual address, populating its page if needed.
+pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<u64> {
+    unlocked_space().lock().reach(addr.raw(), asked(access))
+}
+
+/// This thread's futex wait in its space.
+pub(crate) fn begin_futex_wait() -> crate::mm::space::FutexWait {
+    crate::mm::space::FutexWait::begin(unlocked_space())
 }
 
 /// The current space, for a reach made holding no lock.

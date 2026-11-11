@@ -157,6 +157,7 @@ impl Usage {
 pub struct Space {
     inner: Lock<AddressSpace>,
     usage: Arc<Usage>,
+    futex: Arc<crate::sched::futex::Waits>,
 }
 
 /// How every thread of a process, and the scheduler, names its space.
@@ -168,14 +169,16 @@ impl Space {
     /// live space or no frame is left for its root.
     pub fn new_user(job: &Arc<Job>) -> Option<PageTables> {
         let usage = Arc::new(Usage::default());
+        let futex = Arc::default();
         let space = AddressSpace {
             inventory: Inventory::new(FLOOR, TOP),
             tables: UserTables::new(job)?,
             usage: Arc::clone(&usage),
+            futex: Arc::clone(&futex),
             ranges: Charge::none(job),
             job: Arc::clone(job),
         };
-        Some(Arc::new(Self { inner: Lock::new(space), usage }))
+        Some(Arc::new(Self { inner: Lock::new(space), usage, futex }))
     }
 
     #[track_caller]
@@ -196,32 +199,57 @@ impl Space {
     pub fn release_object(&self, at: UserAddr, len: u64, object: &SharedMemObject) {
         self.lock().release_object(at, len, object);
     }
+}
 
-    /// The frame behind `va`, populated where its range allows `access`
-    /// ([`AddressSpace::reach`]), as a translation a holder can ask about
-    /// later without the lock.
-    pub fn translate(space: PageTables, va: u64, access: Access) -> Option<Translation> {
+/// One thread's futex wait in its space, counted from its making until it
+/// drops: while any is counted, an unmap of the space's own frames ends the
+/// waits on them (`sched::futex::revoke_frames`). The wait's word has no
+/// translation but [`translate`](Self::translate)'s, which borrows this. So
+/// the count comes before that translation's hold of the space's lock, and
+/// falls only once the wait, which checks the translation until it has
+/// unregistered, is done with it.
+pub struct FutexWait(PageTables);
+
+impl FutexWait {
+    pub fn begin(space: PageTables) -> Self {
+        space.futex.raise();
+        Self(space)
+    }
+
+    /// The frame behind the futex word at `addr`, populated where its range
+    /// allows a read ([`AddressSpace::reach`]), as a translation the wait can
+    /// ask about later without the lock.
+    pub fn translate(&self, addr: crate::UserAddr) -> Option<Translation<'_>> {
+        let space: &Space = &self.0;
         let (phys, at) = {
             let mut held = space.lock();
-            let phys = held.reach(va, access)?;
+            let phys = held.reach(addr.raw(), Access::Read)?;
             // Counted under this hold: a change made before it is in `at`,
             // and one after it moves the count.
             (phys, space.usage.shot_down.load(Relaxed))
         };
-        Some(Translation { space, va, phys, at: Cell::new(at) })
+        Some(Translation { space, va: addr.raw(), phys, at: Cell::new(at) })
     }
 }
 
-/// A user address's frame as a hold of its space's lock found it.
-pub struct Translation {
-    space: PageTables,
+impl Drop for FutexWait {
+    fn drop(&mut self) {
+        self.0.futex.lower();
+    }
+}
+
+/// A futex word's frame as a hold of its space's lock found it, borrowed from
+/// the wait that counts it. Not a lease: nothing pins the frame, and a
+/// sibling's `munmap` can free it under a parked wait.
+pub struct Translation<'w> {
+    space: &'w Space,
     va: u64,
     phys: u64,
     /// The space's count of changes when `va` was last found mapping `phys`.
     at: Cell<u64>,
 }
 
-impl Translation {
+impl Translation<'_> {
     pub fn phys(&self) -> u64 {
         self.phys
     }
@@ -248,6 +276,8 @@ pub struct AddressSpace {
     inventory: Inventory,
     tables: UserTables,
     usage: Arc<Usage>,
+    /// Its threads' futex waits, which gate the end of waits on its frames.
+    futex: Arc<crate::sched::futex::Waits>,
     /// What its ranges take of the heap, in grains of [`RANGE_GRAIN`].
     ranges: Charge,
     /// The job its memory is counted to: its process's.
@@ -585,7 +615,7 @@ impl AddressSpace {
             let sorted = &mut sorted[..frames.len()];
             sorted.copy_from_slice(frames);
             sorted.sort_unstable();
-            crate::sched::futex::revoke_frames(sorted);
+            crate::sched::futex::revoke_frames(&self.futex, sorted);
             for ((&phys, &va), kept) in frames.iter().zip(vas).zip(kept.iter_mut()) {
                 // SAFETY: a frame an owned leaf held, which no leaf on any CPU
                 // maps now and no waiter is keyed on; one kept is the page's.
@@ -771,9 +801,11 @@ impl AddressSpace {
     /// needs. Answers the frames freed.
     ///
     /// Nothing is allocated: the frames go one table of leaves at a time, at
-    /// most 512, each batch sorted in place and its futex waits ended by one
-    /// walk of the 64 buckets, so a clear costs one walk per table of leaves
-    /// that held an owned frame and one shootdown, two where tables go too.
+    /// most 512, each batch sorted in place and its futex waits ended
+    /// (`sched::futex::revoke_frames`), so a clear costs a walk of the 64
+    /// futex buckets per table of leaves that held an owned frame while a
+    /// thread of the space waits, none otherwise, and one shootdown, two where
+    /// tables go too.
     fn clear(&mut self, start: u64, end: u64) -> u64 {
         let mut present = false;
         self.tables.edit(start, end, |_, leaf| match leaf {
@@ -793,7 +825,7 @@ impl AddressSpace {
         let mut freed = 0;
         self.tables.take_owned(start, end, |frames| {
             frames.sort_unstable();
-            crate::sched::futex::revoke_frames(frames);
+            crate::sched::futex::revoke_frames(&self.futex, frames);
             // SAFETY: frames owned leaves gave up, which no leaf maps on any
             // CPU now and no waiter is keyed on.
             unsafe { pmm::free_drawn(&self.job, frames) };
