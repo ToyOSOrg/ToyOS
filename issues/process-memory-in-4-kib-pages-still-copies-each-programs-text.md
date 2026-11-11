@@ -95,10 +95,12 @@ live split of a user leaf.
    at its first touch. A program anywhere else is still read whole into
    memory of the spawner's and copied a page at a time, until 7b's step 3.
    A shared segment's mapping is never widened, so a program can no longer
-   make its own read-only segment writable (`mprotect`). Exit for that: 7b's
-   step 2 converts on protect, so a protect that adds write to such a range
-   commits its pages and makes it a copy range of the same object; only a
-   page shared until its first write waits for step 5's write faults. Exit:
+   make its own read-only segment writable (`mprotect`). Exit for that: a
+   protect that adds write to such a range commits its pages and makes it a
+   copy range of the same object (7b's R4, which step 2 did not build: it
+   maps a paged object read-only only, and its range refuses a protect past
+   that); only a page shared until its first write waits for step 5's write
+   faults. Exit:
    two processes of one binary hold its text once, wherever it is served
    from.
 6. **`/apps` image sharing.** Decided by the orchestrator under the owner's
@@ -118,7 +120,8 @@ live split of a user leaf.
 **7b lands in steps**, each a pull request: (1) a range of a memory object
 mapped where the caller says, an immutable one shared and executable, which
 is stage 5 for `/system`: built; (2) a paged object mapped read-only and
-shared: faults that park on the pager, reverse records, revocation; (3) a
+shared: faults that park on the pager, reverse records, revocation: built,
+but for R4's copy ranges of a paged object, which item 5 owes; (3) a
 spawn maps its image from any pager-backed volume (stage 6), sealed against
 writes in place while it runs; (4) the
 storage track's attributes and names without a request; (5) writable shared
@@ -137,9 +140,16 @@ mappings and write-back; (6) the #1077 retry
   before; a spawn no longer copies a `/system` program's text, and whether
   that makes it faster is not measured on metal.
 
-Until step 2's revocation exists, an object a space maps must keep its frames
-for the object's life: ROOT's pages stay non-reclaimable, and ROOT is not
-served through a pager, until then.
+Step 2 measures a cached page's fault and a 4 KiB read through a mapping
+against Linux (osbench `fs.*.map_touch_16m`, `fs.*.map_read_4k`). Owed, by
+map7b, with step 3's metal: a cold DATA page's miss in stages, one object
+mapped by 255 children and withdrawn (a revocation's cost grows with its
+mappers), and many threads cold-faulting one large file; each exits as an
+osbench row judged against Linux.
+
+A memory object a space maps keeps its frames for the object's life, since
+only a pager's pages are revoked: ROOT's pages stay non-reclaimable until ROOT
+is served through a pager.
 
 **Paged objects** (memory design §7, `issues/toyos-builds-itself.md` item 13)
 are split in two. **7a**, delivered by the storage track's file-server work:

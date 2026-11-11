@@ -18,7 +18,11 @@ These answer failure in their POSIX form and do nothing
   the failure and reads the `rlimit` it did not get.
 - `gethostname`, `ENOSYS`: no host name is published to a process.
 - `msync`, `ENOSYS`: no mapping is of a file, so there is nothing to write back.
-- `mmap` of a file, `ENODEV`: the kernel maps no file.
+- `mmap` of a file other than `PROT_READ`, `ENODEV`: the kernel maps a file's
+  pages read-only and shared, and a private one shares them until it is written,
+  which waits for 7b's write faults (step 5); a private copy range of a file
+  (`PROT_WRITE` or `PROT_EXEC` with `MAP_PRIVATE`, 7b's R4) is not built either.
+  A file whose server maps no pages answers `ENODEV` too.
 - `fcntl` (`sdk/libc/src/fdreq.rs`): a record lock, `EINVAL`, POSIX's answer
   for a file that supports no locking; `F_GETFL`, `F_SETFL`, `F_GETOWN` and
   `F_SETOWN`, `ENOSYS`.
