@@ -1003,7 +1003,8 @@ mod tests {
         let by = began + super::WIRE_START;
         let handover = super::Handover { spoken: vec![4, 2], owed: String::new(), by };
         assert!(!handover.over(&[4, 1], began));
-        assert!(!handover.over(&[9, 1], by - std::time::Duration::from_nanos(1)), "one shard short is not read past");
+        let short = by.checked_sub(std::time::Duration::from_nanos(1)).expect("a nanosecond after `began`");
+        assert!(!handover.over(&[9, 1], short), "one shard short is not read past");
         assert!(handover.over(&[4, 1], by) && !handover.read_past(&[4, 1]), "started unread at the bound");
         assert!(handover.over(&[4, 2], began) && handover.read_past(&[4, 2]));
     }
