@@ -122,10 +122,11 @@ pub const REGISTER: u32 = 1;
 pub const SERVED: u32 = 2;
 
 /// The supervisor → `logkeeper`: the machine is about to be stopped. `logkeeper` reads every ring
-/// and the kernel's records, writes them, makes the volume durable — or says,
-/// in the file and on the console, what of the boot it could not — and
-/// answers [`FLUSHED`]; the supervisor asks for the stop once it has, or once its bound
-/// is spent.
+/// and the kernel's records, writes them, makes the volume durable — or says
+/// what of the boot it could not, in the file where the volume answers and on
+/// the console, and gives up on a volume that does not answer within its own
+/// bound — and answers [`FLUSHED`]; the supervisor asks for the stop once it
+/// has, or once its bound is spent.
 pub const FLUSH: u32 = 5;
 pub const FLUSHED: u32 = 6;
 

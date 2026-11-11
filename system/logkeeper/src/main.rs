@@ -40,19 +40,17 @@
 //!
 //! # Three sinks, and only one of them is the sink of record
 //!
-//! The file is. [`serve`]'s readers are the second: the same lines, in the same
-//! order, to whoever asks, from the boot's first line however late they ask.
-//! The console's carriers are the third ([`carrier`]): the console UART's
-//! driver, and a VM's console channel, which the UART goes quiet for while it
-//! carries the log. Neither of the two can slow the file: each is a thread
-//! with an offset into the replay. The replay follows the file while the file
-//! has all of it, and leads it while the part is refused or catching up.
+//! The file is ([`file`]). [`serve`]'s readers are the second: the same
+//! lines, in the same order, to whoever asks, from the boot's first line
+//! however late they ask. The console's carriers are the third ([`carrier`]):
+//! the console UART's driver, and a VM's console channel, which the UART goes
+//! quiet for while it carries the log. Each of the three is a thread with an
+//! offset into the replay the loop appends each round to, so none can slow
+//! the loop or another.
 //!
-//! **The volume is opened on a thread of its own**: /log's file server may
-//! start late. Only the stop's flush waits for it, within [`STOP_CATCH_UP`].
-//! Until it opens, the readers and the console have each round as it is read;
-//! once it opens, the file takes the boot so far from the replay, a part's
-//! worth a round.
+//! **The file is opened and written on its thread**: /log's file server may
+//! start late, and may take a call and never answer. Only the stop waits for
+//! the file, within [`STOP_FILE`].
 //!
 //! # Its whole authority
 //!
@@ -69,31 +67,31 @@
 //!
 //! # Durability, which is a contract and not a hope
 //!
-//! **A round's lines are written and the volume made durable before the next
-//! round**, and again when the supervisor asks before the machine stops
+//! **The file is written and made durable in batches** ([`file`]): within
+//! [`file::BATCH_AGE`] of a line, at once for a line at `Error` or above, and
+//! when the supervisor asks before the machine stops
 //! ([`toyos_logstream::FLUSH`]); once the stop has synced its files it asks
-//! for the stop mark ([`toyos_logstream::MARK`]). The kernel waits on none of it, so
-//! what it says after the flush, at a panic or in the stop, reaches only its
-//! console and panel.
+//! for the stop mark ([`toyos_logstream::MARK`]). The kernel waits on none of
+//! it, so what it says after the flush, at a panic or in the stop, reaches
+//! only its console and panel.
 //! **A program's line after that flush reaches the UART and is held back from
-//! the file**, to a bound ([`STOPPING_BYTES`]): the stop syncs no file still open,
-//! so the file ends where the flush made it durable, and a reader of the
-//! served log is handed what the file holds and no more. A stop the kernel
-//! refused is the supervisor's [`toyos_logstream::RESUME`], and what was held is written
-//! then.
+//! the replay**, to a bound ([`STOPPING_BYTES`]): the stop syncs no file still
+//! open, so the file ends where the flush made it durable and the mark is its
+//! last write. A stop the kernel refused is the supervisor's
+//! [`toyos_logstream::RESUME`], and what was held is written then.
 //!
 //! **A volume that refuses, or whose server ends, is asked again**
 //! ([`policy::Retry`], and at the stop's flush whatever the wait), and its
 //! file given back what it missed ([`store::Volume`]).
 
 mod carrier;
+mod file;
 mod inspect;
 mod origin;
 mod policy;
 mod serve;
 mod store;
 
-use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -106,7 +104,7 @@ use toyos::say;
 use toyos::syscap::SysCap;
 use toyos::wake::Bell;
 use toyos_logstream::{
-    ProgramLine, Registration, Severity, Tag, CARRIER, FLUSH, FLUSHED, LOG_OPENED, MARK, MARKED, MAX_TAG, ORIGINS, REGISTER, RESUME,
+    ProgramLine, Registration, Tag, CARRIER, FLUSH, FLUSHED, MARK, MARKED, MAX_TAG, ORIGINS, REGISTER, RESUME,
     SERVICE, WIRE,
 };
 use toyos_wallclock::Civil;
@@ -114,8 +112,8 @@ use toyos_wallclock::Civil;
 use carrier::Carriers;
 use serve::Positions;
 use origin::{Origin, Said};
-use policy::{Retry, Step, LOG_WRITE_BUDGET};
-use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES, MAX_LOG_PARTS};
+use file::File;
+use store::{DIR, MAX_LOG_BYTES, MAX_LOG_FILES};
 
 /// Records asked of `SYS_LOG_READ` at once: large enough that an ordinary
 /// boot's burst is a handful of syscalls rather than one per line.
@@ -133,8 +131,8 @@ const MAX_ORIGINS: usize = Poller::MAX_HANDLES as usize - ORIGIN_BASE as usize;
 
 /// How soon the rings are read again after a round that read any, and the
 /// longest the cadence backs off to while none has anything: the latency of a
-/// program's line to the file and the console, against wakes on an idle
-/// machine.
+/// program's line to the replay, and so to the console and the readers,
+/// against wakes on an idle machine. The file's is its batch's.
 const POLL_QUICK: Duration = Duration::from_millis(10);
 const POLL_SLOW: Duration = Duration::from_millis(250);
 
@@ -157,31 +155,11 @@ fn main() {
     // this program nothing new.
     let (stem, boot_secs, dated) = boot_stamp();
 
-    // Opened off the loop: a request on /log waits for its file server, which
-    // the supervisor starts only with storage.
-    let (opened, opening) = mpsc::sync_channel(1);
-    std::thread::Builder::new()
-        .name("log-volume".into())
-        .spawn(move || {
-            let volume = Volume::open(DIR, stem, MAX_LOG_BYTES, |line| say!("{line}"));
-            match &volume {
-                // This program's half of the startup report, in one line: the
-                // kernel says whether it has a console, this program whether it
-                // has a volume and what the name it chose was decided by.
-                Some(v) if v.is_open() => say!("{LOG_OPENED}{} ({dated})", v.path()),
-                Some(v) => say!(
-                    "logkeeper: {} is asked again - this boot's lines are kept until {DIR} takes them ({dated})",
-                    v.path()
-                ),
-                // `Volume::open` has said why.
-                None => say!("logkeeper: this boot's kernel log is on the console only ({dated})"),
-            }
-            opened.send(volume).expect("logkeeper: the loop holds the volume's receiver for good");
-        })
-        .expect("logkeeper: the volume's thread could not be started");
-
     let hub = Arc::new(serve::Hub::start(REPLAY_BYTES, boot_secs));
     let published = Arc::new(inspect::Published::new());
+    // A request on /log waits for its file server, which the supervisor
+    // starts only with storage: the file is opened and written off the loop.
+    let file = File::start(stem, dated, Arc::clone(&hub), Arc::clone(&published));
     if let Some(acceptor) = endow::acceptor(SERVICE) {
         inspect::serve(acceptor, Arc::clone(&published), Arc::clone(&hub));
     }
@@ -210,10 +188,7 @@ fn main() {
         records: vec![Record::EMPTY; BATCH],
         lost: 0,
         waiting: Vec::new(),
-        volume: None,
-        opening: Some(opening),
-        retry: None,
-        degraded: false,
+        file,
         boot_secs,
         hub,
         stopping: None,
@@ -236,13 +211,7 @@ struct Log {
     /// Lines stamped after the round they were read in began, which the next
     /// round merges.
     waiting: Vec<Line>,
-    volume: Option<Volume>,
-    /// The volume's opener, until it answers.
-    opening: Option<mpsc::Receiver<Option<Volume>>>,
-    /// When a part the volume refused is next opened again.
-    retry: Option<Retry>,
-    /// Whether the volume answers, slower than `LOG_WRITE_BUDGET` a round.
-    degraded: bool,
+    file: File,
     boot_secs: Option<u64>,
     hub: Arc<serve::Hub>,
     /// The supervisor's flush was answered and the machine stops: the file's text held
@@ -283,12 +252,10 @@ impl Handover {
     }
 }
 
-/// The file's text held back after a flush, the lines past the bound, and
-/// whether the flush wrote the stop mark.
+/// The file's text held back after a flush, and the lines past the bound.
 struct Stopping {
     text: String,
     unwritten: u64,
-    marked: bool,
 }
 
 /// How long the stop's flush may spend giving the file what it is owed: half
@@ -297,7 +264,12 @@ struct Stopping {
 /// it does not reach is said, in the file and on the console.
 const STOP_CATCH_UP: Duration = Duration::from_millis(toyos_quiesce::FLUSH_MS / 2);
 
-const OPENER_ENDED: &str = "logkeeper: the volume's thread ended without answering";
+/// How long the loop waits for the file to answer the stop's flush or its
+/// mark, each of which the supervisor bounds by [`toyos_quiesce::FLUSH_MS`]:
+/// past [`STOP_CATCH_UP`] by the final sync's time, and short of the bound by
+/// the answer's. A file that has not answered by then is given up on and
+/// said, and the stop goes on.
+const STOP_FILE: Duration = Duration::from_millis(toyos_quiesce::FLUSH_MS * 3 / 4);
 
 /// Text a stop may hold back from the file: a refused stop writes it, and
 /// what is past it is counted and said then.
@@ -323,15 +295,7 @@ impl Log {
         // Programs whose end a watch reported, until a round has swept them.
         let mut ended: Vec<usize> = Vec::new();
         loop {
-            self.adopt();
-            let state = match (&self.volume, self.degraded) {
-                (None, _) if self.opening.is_some() => inspect::State::Opening,
-                (None, _) => inspect::State::ConsoleOnly,
-                (Some(v), _) if !v.is_open() => inspect::State::Degraded,
-                (Some(_), true) => inspect::State::Degraded,
-                (Some(_), false) => inspect::State::Writing,
-            };
-            published.publish(self.volume.as_ref(), state, self.tail.lost());
+            published.publish_lost(self.tail.lost());
 
             // **Armed before anything is read**, in the shape every reader of
             // an edge needs: what arrives after a read and before the park has
@@ -525,7 +489,7 @@ impl Log {
             lines.into_iter().partition(|line| all || line.at_ns <= cut);
         let through = written_through(self.tail.positions(), &later);
         self.waiting = later;
-        self.write(now, all, Arc::clone(&through));
+        self.write(now, Arc::clone(&through));
         self.start_wire(&through);
         oldest
     }
@@ -565,30 +529,33 @@ impl Log {
         out
     }
 
-    /// The lines, in stamp order, into the file, the readers and the console's
-    /// carriers, which are the kernel's log through the read positions
-    /// `through`; while the machine stops, held back from the file, and each
-    /// program's line to the UART's carrier.
-    fn write(&mut self, mut lines: Vec<Line>, flushing: bool, through: Positions) {
+    /// The lines, in stamp order, into the replay the file, the readers and
+    /// the console's carriers take them from, which are the kernel's log
+    /// through the read positions `through`; while the machine stops, held
+    /// back from the replay, and each program's line to the UART's carrier.
+    fn write(&mut self, mut lines: Vec<Line>, through: Positions) {
         if lines.is_empty() {
             return;
         }
         lines.sort_by_key(|line| line.at_ns);
-        let mut file = String::new();
+        let mut rendered = String::new();
         // What the UART is owed of these lines, while the kernel's own on it
         // are yet to be read past.
         let mut wire = String::new();
         let mut programs = String::new();
+        let mut urgent = false;
         for line in &lines {
             match &line.kind {
                 Kind::Kernel(record) => {
+                    urgent |= record.severity().is_some_and(file::urgent);
                     let text = format!("{}\n", record.dated(&stamp(self.boot_secs, record.at_ns())));
                     if !self.handover.as_ref().is_some_and(|handover| on_the_uart(record, &handover.spoken)) {
                         wire.push_str(&text);
                     }
-                    file.push_str(&text);
+                    rendered.push_str(&text);
                 }
                 Kind::Program { tag, owner, said } => {
+                    urgent |= file::urgent(said.severity);
                     let tag = Tag::new(tag).expect("an origin's name is a tag");
                     let pid = (said.pid != *owner).then_some(said.pid);
                     let at = stamp(self.boot_secs, Some(said.at_ns));
@@ -602,7 +569,7 @@ impl Log {
                         text: &said.text,
                     };
                     let line = format!("{line}\n");
-                    file.push_str(&line);
+                    rendered.push_str(&line);
                     wire.push_str(&line);
                     if self.stopping.is_some() {
                         programs.push_str(&line);
@@ -614,18 +581,15 @@ impl Log {
             // The kernel's records from the flush on are the stop's to put on
             // the UART; a program's reach it only through its carrier.
             self.hub.append_stopping(programs.as_bytes());
-            if held.text.len() + file.len() > STOPPING_BYTES {
+            if held.text.len() + rendered.len() > STOPPING_BYTES {
                 held.unwritten += lines.len() as u64;
             } else {
-                held.text.push_str(&file);
+                held.text.push_str(&rendered);
             }
             return;
         }
-        // The file first: while it has all of the replay, a reader is served
-        // only what /log already holds, whenever the machine stops between the
-        // two. A part refused or catching up takes this text from the replay.
-        self.to_volume(file.as_bytes(), !flushing);
-        self.hub.append(file.as_bytes(), Some(through));
+        self.hub.append(rendered.as_bytes(), Some(through));
+        self.file.grew(urgent);
         if let Some(handover) = &mut self.handover {
             handover.owed.push_str(&wire);
         }
@@ -648,243 +612,41 @@ impl Log {
         self.hub.set_wire_from(self.hub.end(), handover.owed.into_bytes());
     }
 
-    /// Write a round to the volume, and make it durable unless it is one of a
-    /// flush's rounds, which `flushed` makes durable together: a stop's flush
-    /// is bounded by the supervisor, and a sync per round of it is what outruns that.
-    fn to_volume(&mut self, text: &[u8], sync: bool) {
-        if !self.caught_up() {
-            return;
-        }
-        let Some(v) = self.volume.as_mut() else { return };
-        let began = Instant::now();
-        let mut refused = v.write(text).err().map(|e| (Step::Append, e.to_string()));
-        if refused.is_none() && sync {
-            refused = self.sync().err();
-        }
-        // A volume that answered, and took longer than a log is worth doing it.
-        if refused.is_none() && began.elapsed() > LOG_WRITE_BUDGET {
-            refused = Some((Step::TooSlow, format!("it took {:?}", began.elapsed())));
-        }
-        self.answered(refused);
-    }
-
-    /// The volume, once its opener answers outside a stop. Its file stands
-    /// at the replay's start and is given the boot so far, a part's worth
-    /// here and a part's worth each round after.
-    fn adopt(&mut self) {
-        if self.stopping.is_some() {
-            return;
-        }
-        let Some(opening) = &self.opening else { return };
-        match opening.try_recv() {
-            Ok(volume) => {
-                self.took(volume);
-                self.caught_up();
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => panic!("{OPENER_ENDED}"),
-        }
-    }
-
-    /// The opener's answer.
-    fn took(&mut self, volume: Option<Volume>) {
-        self.opening = None;
-        self.volume = volume;
-    }
-
-    /// Whether the file has every byte the replay has, so a round's text
-    /// goes after them. A part the volume refused is opened again once the
-    /// retry is due, and the file is given what it is owed, a part's worth a
-    /// round.
-    fn caught_up(&mut self) -> bool {
-        let now = Instant::now();
-        let Some(v) = self.volume.as_mut() else { return false };
-        let was_open = v.is_open();
-        if was_open && v.through() == self.hub.end() {
-            return true;
-        }
-        if !was_open && !self.retry.get_or_insert(Retry::after(now)).due(now) {
-            return false;
-        }
-        let hub = &self.hub;
-        let caught = v.catch_up(
-            |at, max| hub.owed(at, max),
-            |lost| hub.own_line(Severity::Warn, &format!("logkeeper: {lost} bytes of this boot were let go before {DIR} took them")),
-            MAX_LOG_BYTES,
-            |line| say!("{line}"),
-        );
-        match caught {
-            Ok(caught) => {
-                if !was_open {
-                    self.retry = None;
-                    say!("logkeeper: {DIR} answers again - {} holds this boot's lines", v.path());
-                }
-                if !v.is_open() {
-                    // A continuation's create was refused.
-                    self.retry = Some(Retry::after(now));
-                }
-                caught && v.is_open()
-            }
-            Err(e) if v.part() >= MAX_LOG_PARTS => {
-                toyos::error!("logkeeper: {DIR} would not take a continuation ({e}) - {}", v.path());
-                self.volume = None;
-                false
-            }
-            Err(e) => {
-                v.lost();
-                match self.retry.as_mut() {
-                    Some(retry) if !was_open => retry.again(now),
-                    _ => {
-                        toyos::error!("logkeeper: {DIR} has not answered ({e}) - {} is asked again", v.path());
-                        self.retry = Some(Retry::after(now));
-                    }
-                }
-                false
-            }
-        }
-    }
-
-    /// Make the volume durable now.
-    fn sync(&mut self) -> Result<(), (Step, String)> {
-        let Some(v) = self.volume.as_mut() else { return Ok(()) };
-        v.sync().map_err(|e| (Step::Flush, e.to_string()))
-    }
-
-    /// What a round's write came to: rotation after a clean one, and the
-    /// give-up policy after a refused one.
-    fn answered(&mut self, refused: Option<(Step, String)>) {
-        let Some(path) = self.volume.as_ref().map(Volume::path) else { return };
-        let Some((step, why)) = refused else {
-            if self.degraded {
-                self.degraded = false;
-                say!("logkeeper: {DIR} answers at pace again - {path}");
-            }
-            self.rotate_if_full();
-            return;
-        };
-        match step {
-            // Say so once, keep the lines in the replay, and ask again.
-            Step::Append | Step::Flush => {
-                toyos::error!(
-                    "logkeeper: {DIR} has not answered ({}: {why}) - {path} is asked again, and this \
-                     boot's lines are kept until it answers",
-                    step.as_str()
-                );
-                self.lost();
-            }
-            // Every call answered, slowly: the round is durable.
-            Step::TooSlow => {
-                if !self.degraded {
-                    self.degraded = true;
-                    toyos::warn!(
-                        "logkeeper: {DIR} answers but slowly ({}: {why}) - degraded, nothing lost, \
-                         {path} is still this boot's log",
-                        step.as_str()
-                    );
-                }
-                self.rotate_if_full();
-            }
-        }
-    }
-
-    fn rotate_if_full(&mut self) {
-        let Some(v) = self.volume.as_mut() else { return };
-        if !v.full() {
-            return;
-        }
-        match v.rotate(|line| say!("{line}")) {
-            Ok(()) if v.is_open() => {}
-            Ok(()) => self.lost(),
-            Err(e) if v.part() >= MAX_LOG_PARTS => {
-                toyos::error!("logkeeper: {DIR} would not take a continuation ({e}) - {}", v.path());
-                self.volume = None;
-            }
-            Err(e) => {
-                toyos::error!("logkeeper: {DIR} has not answered ({e}) - {} is asked again", v.path());
-                self.lost();
-            }
-        }
-    }
-
-    /// The volume refused the part: it is asked again once the retry is due.
-    fn lost(&mut self) {
-        if let Some(v) = self.volume.as_mut() {
-            v.lost();
-        }
-        self.retry = Some(Retry::after(Instant::now()));
-    }
-
-    /// The supervisor asked for the log whole before the machine stops: every line is
-    /// written by now, so the volume is made durable, and the supervisor is told.
+    /// The supervisor asked for the log whole before the machine stops: every
+    /// line is in the replay by now, so the file is given the rest and made
+    /// durable, within [`STOP_FILE`], and the supervisor is told.
     fn flushed(&mut self) {
-        let deadline = Instant::now() + STOP_CATCH_UP;
-        // An opener that has answered since the loop last asked, or answers
-        // in the stop's own time: the file takes the boot in `finish` below,
-        // inside the deadline.
-        if let Some(opening) = &self.opening {
-            match opening.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(volume) => self.took(volume),
-                Err(RecvTimeoutError::Timeout) => {
-                    toyos::error!("logkeeper: {DIR} had not opened by the stop - this boot's log is on the console only")
-                }
-                Err(RecvTimeoutError::Disconnected) => panic!("{OPENER_ENDED}"),
-            }
-        }
-        if let Some(v) = self.volume.as_mut() {
-            let hub = &self.hub;
-            let finished = v.finish(
-                |at, max| hub.owed(at, max),
-                |lost| hub.own_line(Severity::Warn, &format!("logkeeper: {lost} bytes of this boot were let go before {DIR} took them")),
-                hub.end(),
-                MAX_LOG_BYTES,
-                || Instant::now() < deadline,
-                |short| {
-                    let text = format!("logkeeper: this file ends {short} bytes short of the boot: the stop came before {DIR} took them");
-                    hub.own_line(Severity::Error, &text)
-                },
-                |line| say!("{line}"),
+        let began = Instant::now();
+        if !self.file.finish(began + STOP_CATCH_UP, began + STOP_FILE) {
+            toyos::error!(
+                "logkeeper: {DIR} had not answered the stop's flush in {} ms - this boot's end may be on the console only",
+                STOP_FILE.as_millis()
             );
-            let short = hub.end() - v.through();
-            match finished {
-                Ok(_) if short == 0 => {}
-                Ok(_) => toyos::error!("logkeeper: {} ends {short} bytes short of the boot at the stop", v.path()),
-                Err(e) => toyos::error!(
-                    "logkeeper: {DIR} refused the stop's flush ({e}) - {} ends {short} bytes short of the boot",
-                    v.path()
-                ),
-            }
         }
         // The console's carriers take the log up to here, and the UART what
         // the machine says from here as it stops.
         if let Some(carriers) = &self.carriers {
             carriers.stop(self.hub.end());
         }
-        self.stopping = Some(Stopping { text: String::new(), unwritten: 0, marked: false });
+        self.stopping = Some(Stopping { text: String::new(), unwritten: 0 });
         if let Err(e) = self.from_supervisor.signal(FLUSHED) {
             panic!("logkeeper: the supervisor could not be told the flush is done: {e:?}");
         }
     }
 
     /// The supervisor's stop has synced its files and is about to stop its
-    /// drivers: write the stop mark over a durable log, and say so. The mark
-    /// is withheld, and no call made, unless the part is open: `/log`'s
-    /// server may never have answered, and a part the volume refused is not
-    /// this boot's log, so the mark would call a stop clean whose log is not
-    /// on the volume.
+    /// drivers: the file writes the stop mark over a durable log, within
+    /// [`STOP_FILE`], and the supervisor is told.
     fn mark(&mut self) {
-        let Some(stopping) = self.stopping.as_mut() else {
+        if self.stopping.is_none() {
             panic!("logkeeper: the supervisor asked for the stop mark, and no stop was flushed for");
-        };
-        let open = self.volume.as_ref().is_some_and(Volume::is_open);
-        if !open {
-            toyos::warn!("logkeeper: {DIR} does not hold this boot's log, so the stop is not marked - the next boot will not count this one as clean");
         }
-        stopping.marked = open
-            && store::mark_stopped()
-                .inspect_err(|e| {
-                    toyos::error!("logkeeper: {DIR} would not take the stop mark ({e}) - the next boot will not count this one as clean")
-                })
-                .is_ok();
+        if !self.file.mark(Instant::now() + STOP_FILE) {
+            toyos::error!(
+                "logkeeper: {DIR} had not answered the stop mark in {} ms - the stop goes on without knowing whether it is written",
+                STOP_FILE.as_millis()
+            );
+        }
         if let Err(e) = self.from_supervisor.signal(MARKED) {
             panic!("logkeeper: the supervisor could not be told the stop is marked: {e:?}");
         }
@@ -897,11 +659,6 @@ impl Log {
             panic!("logkeeper: the supervisor said the machine runs on, and no stop was flushed for");
         };
         toyos::warn!("logkeeper: the stop was refused, so {DIR} takes this boot's lines again");
-        if held.marked
-            && let Err(e) = store::unmark_stopped()
-        {
-            toyos::error!("logkeeper: {DIR} would not give back the stop mark ({e}) - a later death of this boot will read as clean");
-        }
         if held.unwritten > 0 {
             toyos::warn!(
                 "logkeeper: {} line(s) said while the machine stopped were past {STOPPING_BYTES} bytes \
@@ -909,8 +666,8 @@ impl Log {
                 held.unwritten
             );
         }
-        self.to_volume(held.text.as_bytes(), true);
         self.hub.resume(held.text.as_bytes());
+        self.file.resume();
         if let Some(carriers) = &self.carriers {
             carriers.resume();
         }
