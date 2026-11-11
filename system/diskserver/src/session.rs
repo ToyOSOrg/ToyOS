@@ -13,9 +13,22 @@
 //! reads every completion the server posted before it hung up, answers what
 //! was still on the wire [`Outcome::Refused`], and says the session ended; the
 //! caller decides when to [`Session::reconnect`], which reaches the service
-//! through the same name, opens the same partition over the same region, and
-//! issues every acknowledged write no flush had covered again before anything
-//! else. Nothing here restarts a service: whoever holds its claim does.
+//! through the same name, opens the same partition, and issues every
+//! acknowledged write no flush had covered again before anything else.
+//! Nothing here restarts a service: whoever holds its claim does.
+//!
+//! **No wait is on the server's word alone.** A server that breaks the
+//! protocol, or leaves the session unanswered past the bound every server
+//! keeps ([`SILENCE_BOUND_NS`]), is ended as one that hung up is
+//! (`toyos_blockring::ends`). That server is still running, and the
+//! reconnect reaches it again. One that still holds a request of the ended
+//! session refuses the open [`Refusal::Held`] until the request is answered,
+//! which is the reconnect failing: the caller's disk is gone and nothing is
+//! issued again.
+//!
+//! **Every session is opened over a region no server has held**, so nothing a
+//! server writes to an earlier session's page reaches this one, whether or not
+//! that server has let the page go.
 
 use std::collections::BTreeMap;
 
@@ -26,10 +39,10 @@ use toyos::wake::{Bell, Waker};
 use toyos_abi::syscall::SyscallError;
 use toyos_blockdev::SharedBlock;
 use toyos_blockring::client::{Ask, Client, Outcome, Placing, Ticket};
-use toyos_blockring::entry::Completion;
-use toyos_blockring::layout::{self, ClientRings, ARENA, MAX_REQUEST_BLOCKS};
+use toyos_blockring::ends::{ClientEnds, Ending, Exchange, Next};
+use toyos_blockring::layout::{ARENA, MAX_REQUEST_BLOCKS};
 use toyos_blockring::wire::{self, Opened, Refusal};
-use toyos_blockring::{Run, BLOCK_BYTES};
+use toyos_blockring::{Run, BLOCK_BYTES, SILENCE_BOUND_NS};
 
 use toyos_blockserve::region::Region;
 
@@ -129,7 +142,7 @@ pub struct Session {
     region: Region,
     /// The open session's doorbells, `None` once it ended.
     bells: Option<Bells>,
-    rings: ClientRings,
+    ends: ClientEnds,
     client: Client<Vec<SharedBlock>>,
     opened: Opened,
     arena: Arena,
@@ -137,8 +150,6 @@ pub struct Session {
     pending: BTreeMap<Ticket, Pending>,
     /// Each read on the wire's arena blocks.
     reads: BTreeMap<Ticket, Run>,
-    /// The most requests this session has had on the wire at once.
-    peak: usize,
 }
 
 impl Session {
@@ -146,7 +157,7 @@ impl Session {
     /// `names` calls `service`.
     pub fn open(names: Namespace, service: &str, guid: [u8; wire::GUID_BYTES]) -> Result<Self, Error> {
         let region = Region::create().map_err(Error::Kernel)?;
-        let rings = layout::client(region.words());
+        let ends = ClientEnds::new(region.words());
         let (bells, opened) = handshake(&names, service, guid, &region)?;
         let mut client = Client::new(KEPT_BLOCKS);
         client.session_started();
@@ -156,25 +167,19 @@ impl Session {
             guid,
             region,
             bells: Some(bells),
-            rings,
+            ends,
             client,
             opened,
             arena: Arena::new(),
             next_ticket: 0,
             pending: BTreeMap::new(),
             reads: BTreeMap::new(),
-            peak: 0,
         })
     }
 
     /// The partition's length in blocks.
     pub fn blocks(&self) -> u64 {
         self.opened.blocks()
-    }
-
-    /// The most requests this session has had on the wire at once.
-    pub fn peak_on_the_wire(&self) -> usize {
-        self.peak
     }
 
     /// How many acknowledged writes have gone out again after a loss.
@@ -225,13 +230,13 @@ impl Session {
         Ok(ticket)
     }
 
-    /// Put what the client will send on the ring, and ring the doorbell once
-    /// for all of it.
-    fn pump(&mut self) {
-        let Self { bells, region, rings, client, arena, reads, .. } = self;
-        let Some(bells) = bells else { return };
-        let page = region.words();
-        let mut place = |p: Placing<'_, Vec<SharedBlock>>| match p {
+    /// Exchange requests and completions with the server at `now`
+    /// ([`ClientEnds::exchange`]), ring its doorbell once for what went, and
+    /// take every answer decided into `answers`.
+    fn exchange(&mut self, now: u64, answers: &mut Vec<Answer>) -> Next {
+        let Self { bells, region, ends, client, arena, reads, .. } = self;
+        let bells = bells.as_ref().expect("diskserver: an exchange over a session that ended");
+        let place = |p: Placing<'_, Vec<SharedBlock>>| match p {
             Placing::Read { ticket, blocks } => {
                 let run = arena.alloc(blocks)?;
                 reads.insert(ticket, run);
@@ -246,28 +251,18 @@ impl Session {
                 Some(run)
             }
         };
-        loop {
-            match rings.0.space(page) {
-                Ok(0) => break,
-                Ok(_) => {}
-                // The server wrote an index no server writes: the session is
-                // over, and the next drain is where that is acted on.
-                Err(_) => break,
-            }
-            let Some(request) = client.next_request(&mut place) else { break };
-            let pushed = rings.0.push(page, request.encode());
-            assert_eq!(pushed, Ok(true), "diskserver: a request past the room just counted");
-        }
-        let on_the_wire = client.on_the_wire().count();
-        if rings.0.publish(page) {
+        let Exchange { next, published } = ends.exchange(region.words(), client, now, place);
+        if published {
             // A server that has ended is found by the wait.
             bells.ring.wake();
         }
-        self.peak = self.peak.max(on_the_wire);
+        self.collect(answers);
+        next
     }
 
     /// Every answer there is; with `block`, wait until there is at least one
-    /// or the service has ended.
+    /// or the session has ended, which it has within [`SILENCE_BOUND_NS`] of
+    /// the server's last completion.
     pub fn wait(&mut self, block: bool) -> Waited {
         let mut waited = Waited::default();
         if self.bells.is_none() {
@@ -275,57 +270,29 @@ impl Session {
             return waited;
         }
         loop {
-            self.pump();
-            let violated = self.drain();
-            self.collect(&mut waited.answers);
-            if violated {
-                self.end(&mut waited);
-                return waited;
-            }
-            // Again after every completion: one can make a request sendable
-            // that was not — a flush waiting on writes going out again — and
-            // a wait with it unsent would wait for an answer nobody asked for.
-            self.pump();
-            if !waited.answers.is_empty() || !block {
-                return waited;
-            }
-            let Some(bells) = &self.bells else {
-                waited.ended = true;
-                return waited;
-            };
-            if bells.answered.wait_for(u64::MAX).is_err() {
-                // What the server posted before it went is real: read it
-                // before the rest is answered refused.
-                self.drain();
-                self.collect(&mut waited.answers);
-                self.end(&mut waited);
-                return waited;
-            }
-        }
-    }
-
-    /// Read every completion posted; `true` if the server broke the protocol.
-    fn drain(&mut self) -> bool {
-        let page = self.region.words();
-        let mut violated = false;
-        loop {
-            match self.rings.1.pop(page) {
-                Ok(Some(words)) => match Completion::decode(words) {
-                    Some(c) if self.client.complete(c).is_ok() => {}
-                    _ => {
-                        violated = true;
-                        break;
-                    }
-                },
-                Ok(None) => break,
-                Err(_) => {
-                    violated = true;
-                    break;
+            let now = toyos_abi::clock::nanos_since_boot();
+            match self.exchange(now, &mut waited.answers) {
+                Next::End(Ending::Violation(violation)) => {
+                    println!("{}: the session's server broke the protocol ({violation:?})", self.service);
                 }
+                Next::End(Ending::Silence) => {
+                    println!("{}: the session's server answered nothing in {} s", self.service, SILENCE_BOUND_NS / 1_000_000_000);
+                }
+                Next::Wait(patience) if block => {
+                    let bells = self.bells.as_ref().expect("diskserver: the session is open");
+                    if bells.answered.wait_for(patience).is_ok() {
+                        continue;
+                    }
+                    // What the server posted before it went is real: read it
+                    // before the rest is answered refused.
+                    let _ = self.ends.receive(self.region.words(), &mut self.client, now);
+                }
+                Next::Idle if block => panic!("diskserver: a wait with nothing asked would never end"),
+                Next::Answered | Next::Wait(_) | Next::Idle => return waited,
             }
+            self.end(&mut waited);
+            return waited;
         }
-        self.rings.1.release(page);
-        violated
     }
 
     fn collect(&mut self, answers: &mut Vec<Answer>) {
@@ -361,24 +328,24 @@ impl Session {
         waited.ended = true;
     }
 
-    /// Open the same partition over the same region through the same name,
-    /// after the service ended; writes the client holds go out again first.
+    /// Open the same partition through the same name over a fresh region,
+    /// after the session ended; at the next [`Self::wait`] the writes the
+    /// client holds go out again, first. Refused [`Refusal::Held`] while the
+    /// server still holds a request of the session that ended.
     ///
     /// Blocks until the service answers, within [`wire::ANSWER_BOUND_NS`]: a
     /// name whose server is being restarted queues the connection until the
     /// new one accepts it.
     pub fn reconnect(&mut self) -> Result<(), Error> {
         assert!(self.bells.is_none(), "diskserver: reconnect while a session is open");
-        // Before the region goes to the new server: it must find this end's
-        // two indices at zero, as it will set its own.
-        self.rings = layout::client(self.region.words());
-        let (bells, opened) = handshake(&self.names, &self.service, self.guid, &self.region)?;
+        let region = Region::create().map_err(Error::Kernel)?;
+        let ends = ClientEnds::new(region.words());
+        let (bells, opened) = handshake(&self.names, &self.service, self.guid, &region)?;
         if opened != self.opened {
             return Err(Error::Protocol);
         }
-        self.bells = Some(bells);
+        (self.region, self.ends, self.bells) = (region, ends, Some(bells));
         self.client.session_started();
-        self.pump();
         Ok(())
     }
 }

@@ -23,6 +23,12 @@ All four layers run in userland.
   block service.
 - A partition has one holder at a time, every request is bounded to it before
   the device sees it, and a flush answers for its own writer's writes.
+- A driver answers every request a session publishes, or ends the session,
+  within one bound the block protocol states, counted from the request's
+  publication: the wait to be taken from the session is inside it, as are a
+  device's silence before the driver takes a command back and taking it back.
+  A driver shows that its worst case fits under the bound. A client that has
+  waited longer ends the session; it never waits on a driver's word alone.
 - Caching belongs to file servers, never to the block layer.
 - Partition editing and storage initialisation are userland operations shared
   by disk tools and the installer. Editing the table, reading payloads and

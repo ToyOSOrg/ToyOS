@@ -54,10 +54,20 @@ impl<T, const D: usize> Inflight<T, D> {
     /// What the peer's `tag` answers; a tag nothing is in flight under is a
     /// violation.
     pub fn answer(&mut self, tag: u32) -> Result<T, Violation> {
+        self.answer_admitted(tag, |_| true)
+    }
+
+    /// [`Self::answer`], for a reply `admits` judges by what it answers: one
+    /// it refuses is [`Violation::Entry`] and leaves the request in flight,
+    /// for [`Self::end`].
+    pub fn answer_admitted(&mut self, tag: u32, admits: impl FnOnce(&T) -> bool) -> Result<T, Violation> {
         let index = usize::try_from(tag & Self::INDEX_MASK).map_err(|_| Violation::Tag)?;
         let slot = self.slots.get_mut(index).ok_or(Violation::Tag)?;
         if tag.wrapping_shr(Self::INDEX_BITS) != slot.seq {
             return Err(Violation::Tag);
+        }
+        if !admits(slot.value.as_ref().ok_or(Violation::Tag)?) {
+            return Err(Violation::Entry);
         }
         slot.value.take().ok_or(Violation::Tag)
     }
@@ -123,6 +133,16 @@ mod tests {
         assert_eq!(inflight.answer(b), Ok("b"));
         assert_eq!(inflight.answer(c), Ok("c"));
         assert!(inflight.insert("d").is_ok() && inflight.insert("e").is_ok(), "every slot is free again");
+    }
+
+    #[test]
+    fn a_reply_refused_leaves_its_request_in_flight() {
+        let mut inflight = Inflight::<&str, 2>::new();
+        let a = inflight.insert("a").unwrap();
+        assert_eq!(inflight.answer_admitted(a, |_| false), Err(Violation::Entry));
+        let mut ended = Vec::new();
+        inflight.end(|tag, value| ended.push((tag, value)));
+        assert_eq!(ended, [(a, "a")]);
     }
 
     /// A slot filled 2^16 times over still refuses its first tag: the index

@@ -13,8 +13,8 @@
 //! and a connection with no grant reaches nothing.
 //!
 //! **The answer comes with the server's ends of the page.** A client looks at
-//! the page the moment it hears, and one that opens the same region again
-//! sends the cursors its last server left on it. So [`Opened::over`] makes a
+//! the page the moment it hears, and a region it sends may carry the cursors
+//! another server left on it. So [`Opened::over`] makes a
 //! server's ends and its answer together: nothing else makes the ends, and an
 //! answer is otherwise only read off the wire ([`Opened::decode`]).
 

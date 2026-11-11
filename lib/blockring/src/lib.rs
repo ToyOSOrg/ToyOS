@@ -8,7 +8,7 @@
 //! data into and out of directly. Nothing on the page is a pointer and nothing on it
 //! is trusted by the end that did not write it: a consumer bounds every index
 //! and every field before it acts ([`entry::Request::decode`], the
-//! transport's cursor bounds).
+//! transport's cursor bounds, and for a client [`ends::ClientEnds`]).
 //!
 //! **A doorbell is an event each way**, rung after the entries it announces
 //! are published. The server makes both and hands the client its sides with
@@ -29,6 +29,12 @@
 //! **Requests in flight at once are unordered**, as on the device: a client
 //! that needs one to follow another waits for the first's answer.
 //!
+//! **A server is never silent past [`SILENCE_BOUND_NS`] while it owes an
+//! answer**: from a request it has not answered, or from its last completion,
+//! it posts the next completion or ends the session within it. A client that
+//! has waited longer ends the session ([`ends`]); a driver shows its own worst
+//! case fits under the bound.
+//!
 //! **One service, many disks.** The block service serves [`PORT`] to clients
 //! and [`disk::PORT`] to disk drivers, each of which offers its disks and is
 //! handed the sessions opened on them ([`disk`]); data moves between a
@@ -46,6 +52,7 @@ extern crate alloc;
 
 pub mod client;
 pub mod disk;
+pub mod ends;
 pub mod entry;
 pub mod layout;
 pub mod server;
@@ -53,6 +60,13 @@ pub mod wire;
 
 #[cfg(test)]
 mod model;
+
+/// The protocol's bound on a server's silence. It is set from the NVMe
+/// driver's figure, counted from a command's submission to the device: the
+/// command's silence before the driver resets the controller, and the reset.
+/// What that figure leaves out, and usbd's worst case, which does not fit, are
+/// `issues/a-usb-disk-session-can-wait-past-the-block-silence-bound-behind-other-sessions.md`.
+pub const SILENCE_BOUND_NS: u64 = 365_000_000_000;
 
 pub use entry::{Completion, Op, Request, Status};
 pub use toyos::transport::Run;
