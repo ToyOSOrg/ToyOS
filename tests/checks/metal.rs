@@ -68,8 +68,8 @@ fn loader() -> String {
 }
 
 /// What every boot that reaches `Boot: complete` owes `one_clock`.
-const STARTED: &str = "[2026-09-29 18:22:38  0.050 cpu0 kernel] spawn: /system/bin/logkeeper pid=6\n\
-                       [2026-09-29 18:22:38  0.050 supervisor] supervisor: started logkeeper\n";
+const STARTED: &str = "[2026-09-29 18:22:38  0.050 cpu0 kernel] spawn: pid=6 (total=0ms) /system/bin/logkeeper\n\
+                       [2026-09-29 18:22:38  0.050 supervisor] supervisor: started logkeeper pid=6\n";
 
 /// When [`boot_file`]'s boot came back, by its host's clock: 2026-09-29
 /// 18:23:19 UTC, 40 s after [`BOOTED`]'s date.
@@ -542,7 +542,8 @@ pub fn the_loader_the_kernel_and_a_program_count_from_one_zero() {
         let dir = toyos_tmpdir::TempDir::new("metal-one-clock");
         let kernel = format!(
             "[2026-10-04 09:30:00 {kernel_ms} cpu0 kernel] panic console: armed\n\
-             [2026-10-04 09:30:00 12.000 cpu0 kernel] spawn: /system/bin/logkeeper pid=6\n\
+             [2026-10-04 09:30:00 11.900 cpu0 kernel] spawn: pid=5 (total=0ms) /system/bin/logkeeper\n\
+             [2026-10-04 09:30:00 12.000 cpu0 kernel] spawn: pid=6 (total=0ms) /system/bin/logkeeper\n\
              {said}\
              [2026-10-04 09:30:00 15.000 cpu0 kernel] Boot: complete (3335ms)\n"
         );
@@ -558,7 +559,7 @@ pub fn the_loader_the_kernel_and_a_program_count_from_one_zero() {
         metal::read_readback(&dir, "planted").expect("a planted readback").one_clock()
     };
     let (stated, none) = (STATED, bootlog::LOADER_CLOCK_NONE);
-    let said = |ms: &str| format!("[2026-10-04 09:30:00 {ms} supervisor] {}\n", bootlog::LOGKEEPER_STARTED);
+    let said = |ms: &str| format!("[2026-10-04 09:30:00 {ms} supervisor] {}6\n", bootlog::LOGKEEPER_STARTED);
     assert_eq!(read(stated, " 9.876", "11.665", &said("13.064")), Ok(()));
     assert_eq!(read(none, "--.---", " 0.050", &said("13.064")), Ok(()));
     let why = read(stated, " 9.876", " 0.050", &said("13.064")).expect_err("a kernel that counts from its own start");

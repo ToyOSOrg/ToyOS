@@ -9,9 +9,13 @@
 //! (`toyos::relocate`), lays out its own thread-local storage (`toyos::tls`)
 //! and loads its own libraries (`toyos::dl`).
 //!
-//! A spawn that lands writes one record, `spawn: <path> pid=N (…ms)`, once
-//! the process is in the table and placed; a spawn that is refused writes
-//! one, naming why. Nothing is said on the way (`crate::process`'s header).
+//! A spawn that lands writes one record, `spawn: pid=N (total=Nms) <path>`,
+//! once the process is in the table and placed, and nothing on the way
+//! (`crate::process`'s header). The path is its caller's word, held to one
+//! line (`toyos_abi::syscall::spawn_path`) and last, so neither what it says
+//! nor a record's bound cutting it reaches the kernel's fields. A spawn that
+//! is refused writes none: its error is the answer, and a caller chooses how
+//! often it is refused.
 
 // `warn`, not `deny`: the rest of the kernel is not yet swept for undocumented unsafe blocks.
 #![warn(clippy::undocumented_unsafe_blocks)]
@@ -145,14 +149,12 @@ pub fn spawn<C: Commit>(
     // Inside a range the child may execute, which `spawn_program` placed in the user half.
     let executes = |map: &Map| map.prot == kernel::vm::Prot::ReadExec && (map.at.raw()..map.at.raw() + map.len).contains(&entry);
     let Some(entry) = maps.iter().any(executes).then(|| toyos_userbound::Entry::new(entry)).flatten() else {
-        log!("spawn: {}: the entry {:#x} is in no executable range", path, entry);
         return Err(SyscallError::InvalidArgument.into());
     };
     let start = maps.iter().map(|map| map.at.raw()).min().ok_or(SyscallError::InvalidArgument)?;
     let end = maps.iter().map(|map| map.at.raw() + map.len).max().ok_or(SyscallError::InvalidArgument)?;
 
     let Some(child_pt) = crate::mm::space::Space::new_user(&job) else {
-        log!("spawn: {}: no address space: every user PCID is held, or no frame is left for its root", path);
         return Err(SyscallError::ResourceExhausted.into());
     };
     let (stack_base, sp) = {
@@ -160,10 +162,7 @@ pub fn spawn<C: Commit>(
         use kernel::vm::Prot;
         let mut space = child_pt.lock();
         crate::clock::map_page(&mut space);
-        if let Err(e) = lay(&mut space, &maps) {
-            log!("spawn: {}: a range meets another or the clock page, or is refused: {:?}", path, e);
-            return Err(e.into());
-        }
+        lay(&mut space, &maps)?;
         // Never executable, and a reserved guard below it, so running off the
         // stack's bottom faults instead of writing what lies there.
         let stack = space.reserve(STACK_GUARD + USER_STACK_SIZE as u64, At::ANYWHERE, Prot::None)?;
@@ -177,10 +176,7 @@ pub fn spawn<C: Commit>(
 
     let (ks_alloc, ks_sp) = match alloc_kernel_stack(&job, Start::Process { entry, sp }) {
         Some(ks) => ks,
-        None => {
-            log!("spawn: {}: failed to allocate kernel stack", path);
-            return Err(SyscallError::ResourceExhausted.into());
-        }
+        None => return Err(SyscallError::ResourceExhausted.into()),
     };
 
     let pid = admission.pid();
@@ -248,7 +244,7 @@ pub fn spawn<C: Commit>(
     crate::process::debug_hold_marked_spawn(parent, &object);
 
     let t3 = crate::clock::nanos_since_boot();
-    log!("spawn: {} pid={} (total={}ms)", path, pid, (t3 - t0) / 1_000_000);
+    log!("spawn: pid={} (total={}ms) {}", pid, (t3 - t0) / 1_000_000, path);
 
     Ok((pid, held))
 }

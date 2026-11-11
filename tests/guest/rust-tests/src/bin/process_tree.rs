@@ -17,9 +17,9 @@
 //! launch whose place is a pipe and answers the launches after it. A chain —
 //! each link spawns the next directly, from this program's immutable image it
 //! is endowed, so no link asks a file server for anything — stops where the
-//! kernel refuses a process more than `MAX_DEPTH` below the supervisor, and
-//! dies whole with its first link. And a `cat` a shell `detach`es outlives the
-//! shell.
+//! kernel refuses a process more than `MAX_DEPTH` below the supervisor, at
+//! link `MAX_DEPTH - 2` since this program runs two below it, and dies whole
+//! with its first link. And a `cat` a shell `detach`es outlives the shell.
 //!
 //! This process holds the launcher test-runner endows every job, and hands a
 //! duplicate to each child that launches: a direct spawn inherits none.
@@ -73,9 +73,13 @@ const CPU_FAULT: End = End::Fault(Fault::Memory);
 /// `toyos_proclife::MAX_DEPTH`, which the kernel refuses a process past.
 const MAX_DEPTH: u32 = 64;
 
-/// The links a chain may grow before a refusal must have stopped it: each
-/// adds a level, so from any start below the supervisor the refusal comes sooner.
-const LINK_BOUND: u32 = MAX_DEPTH + 1;
+/// How far below the supervisor this program runs: test-runner is one of the
+/// programs the supervisor starts, and spawns each job itself.
+const JOB_DEPTH: u32 = 2;
+
+/// The chain's last link the kernel admits: link `k` is `JOB_DEPTH + k` below
+/// the supervisor.
+const LAST_LINK: u32 = MAX_DEPTH - JOB_DEPTH;
 
 /// `sched::payload`'s state for a thread whose entry is a zombie, which
 /// `sys_sysinfo` also answers for an exited one.
@@ -302,9 +306,10 @@ fn a_pipe_is_no_place() {
     println!("  a pipe is no place: the supervisor refused the launch");
 }
 
-/// Each link spawns the next: until a spawn is refused for its depth, which
-/// the link says on the chain's one output. Killing the first link then ends
-/// every one.
+/// Each link spawns the next: until a spawn is refused, which the link says on
+/// the chain's one output. Every refusal is `ResourceExhausted`, so the link
+/// it stops at is what says it was the depth's. Killing the first link then
+/// ends every one.
 fn a_chain_stops_at_max_depth_and_dies_whole() {
     let read = toyos::files::read_image(SELF_PATH.as_bytes()).expect("read this program's image");
     let image = read.as_immutable().expect("the system share holds this program as an immutable region");
@@ -322,12 +327,12 @@ fn a_chain_stops_at_max_depth_and_dies_whole() {
         if line.contains("refused") {
             break line;
         } else if line.starts_with("unbounded") {
-            panic!("the chain passed link {LINK_BOUND} with no depth refusal: {line}");
+            panic!("the chain passed link {LAST_LINK} with no depth refusal: {line}");
         } else if let Some(k) = line.strip_prefix("link ") {
             started = k.parse().expect("a link's index");
         }
     };
-    assert!(started >= 2, "the chain stopped at link {started}: {stop}");
+    assert_eq!(started, LAST_LINK, "the chain stopped at link {started}, not at the depth bound: {stop}");
 
     first.kill().expect("kill the first link");
     assert_eq!(End::from_word(first.wait().expect("wait the first link").into_raw()), Some(KILLED));
@@ -340,7 +345,7 @@ fn a_chain_stops_at_max_depth_and_dies_whole() {
 
 fn link(k: u32) -> ! {
     println!("link {k}");
-    if k > LINK_BOUND {
+    if k > LAST_LINK {
         println!("unbounded at link {k}");
         park();
     }

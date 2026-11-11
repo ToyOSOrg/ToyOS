@@ -11,7 +11,8 @@
 //! lands (`crate::loader`) and one where it ends, `exit: <name> pid=N
 //! code=N|killed|fault=<kind> cpu=Nms …`, the verdict first and then what that process itself consumed.
 //! Each is written every time and charged to the process it names: nothing
-//! here is rate-limited, and a thread's end writes nothing. A reading of the
+//! here is rate-limited, and a thread's end and a refused spawn write
+//! nothing. A reading of the
 //! whole machine is `crate::census`'s, taken once, where the machine ends, by
 //! its stop or by its death, and no process's start or end repeats one: the
 //! log's volume is then a function of what ran, never of how many CPUs
@@ -488,7 +489,7 @@ pub enum Parent {
 pub struct Admission(Option<tree::Admitted>);
 
 impl Admission {
-    /// The question at the top of a spawn, before anything is built: `Gone` for a parent being torn down, and `ResourceExhausted`, which the log names, for a child more than `MAX_DEPTH` below the supervisor or no pid left to issue.
+    /// The question at the top of a spawn, before anything is built: `Gone` for a parent being torn down, and `ResourceExhausted` for a child more than `MAX_DEPTH` below the supervisor or no pid left to issue.
     pub fn ask(parent: Parent) -> Result<Self, SyscallError> {
         let place = match parent {
             Parent::Root => None,
@@ -501,15 +502,7 @@ impl Admission {
         match admit {
             tree::Admit::Yes(admitted) => Ok(Self(Some(admitted))),
             tree::Admit::Gone => Err(SyscallError::Gone),
-            tree::Admit::TooDeep { depth } => {
-                log!("spawn: refused under pid {} at depth {depth}, more than {} below the supervisor",
-                    place.expect("spawn: the supervisor is admitted at depth 0"), toyos_proclife::MAX_DEPTH);
-                Err(SyscallError::ResourceExhausted)
-            }
-            tree::Admit::NoPid => {
-                log!("spawn: refused, every pid below {} is issued", Pid::MAX);
-                Err(SyscallError::ResourceExhausted)
-            }
+            tree::Admit::TooDeep { .. } | tree::Admit::NoPid => Err(SyscallError::ResourceExhausted),
         }
     }
 

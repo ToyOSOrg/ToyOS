@@ -246,17 +246,59 @@ pub const LOADER_CLOCK_STATED: &str =
 pub const LOADER_CLOCK_NONE: &str =
     "Loader clock: this CPU states no counter rate, so no line carries the time it was said";
 
-/// The kernel's record of starting `logkeeper`, which every boot does, and the
-/// supervisor's line once that spawn has returned to it.
-pub const LOGKEEPER_SPAWN: &str = "spawn: /system/bin/logkeeper ";
-pub const LOGKEEPER_STARTED: &str = "supervisor: started logkeeper";
+/// The kernel's record of a spawn that landed, in `kernel/src/loader/mod.rs`:
+/// `spawn: pid=N (total=Nms) <path>`. A refused spawn writes none.
+pub const SPAWN: &str = "spawn: ";
+
+/// The pid the kernel gave the child, off its record of a spawn that landed.
+///
+/// **Read from the record's head, which is the kernel's.** The path after it
+/// is the word of whoever asked for the spawn and may say anything a line
+/// holds, another program's path and a record's fields among it, so no judge
+/// decides by it: a child is found by its pid, which its starter's own line
+/// or the kernel's record of its end names.
+pub fn spawned_pid(message: &str) -> Option<u32> {
+    let (pid, said) = message.strip_prefix(SPAWN)?.strip_prefix("pid=")?.split_once(" (total=")?;
+    let (ms, path) = said.split_once("ms)")?;
+    ms.parse::<u64>().ok()?;
+    if !path.is_empty() && !path.starts_with(' ') {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// The pids of the spawns `log` records as landed, in its order. The first is
+/// the supervisor's, which the kernel starts itself; each after it is a
+/// `SYS_SPAWN` the kernel answered a program.
+pub fn spawned_pids(log: &str) -> impl Iterator<Item = u32> + '_ {
+    log.lines().filter_map(message).filter_map(spawned_pid)
+}
+
+/// The supervisor's line once it has started `logkeeper`, which every boot
+/// does: the pid of the child follows.
+pub const LOGKEEPER_STARTED: &str = "supervisor: started logkeeper pid=";
+
+/// The pid [`LOGKEEPER_STARTED`] names and the time its line carries.
+fn logkeeper_started(log: &str) -> Option<(u32, Option<u64>)> {
+    use toyos_logstream::{parse, Source};
+    log.lines().filter_map(parse).filter(|p| p.source == Source::Program("supervisor")).find_map(|p| {
+        Some((p.text.strip_prefix(LOGKEEPER_STARTED)?.parse().ok()?, p.ms))
+    })
+}
+
+/// The line of the kernel's record of the spawn [`LOGKEEPER_STARTED`] names.
+pub fn logkeeper_spawn(log: &str) -> Option<&str> {
+    let (pid, _) = logkeeper_started(log)?;
+    log.lines().find(|l| message(l).and_then(spawned_pid) == Some(pid))
+}
 
 /// Whether the loader's lines, the kernel's records and a program's lines
 /// count from one zero: no timed kernel record is earlier than the loader's
 /// last timed line before the handoff, and the supervisor's
-/// [`LOGKEEPER_STARTED`] is no earlier than the kernel's [`LOGKEEPER_SPAWN`],
-/// which the same spawn call writes milliseconds before. A clock that kept
-/// another zero puts one of them before what caused it.
+/// [`LOGKEEPER_STARTED`] is no earlier than the kernel's record of that spawn
+/// ([`logkeeper_spawn`]), which the same spawn call writes milliseconds
+/// before. A clock that kept another zero puts one of them before what
+/// caused it.
 ///
 /// `loader` holds the pass that handed the machine to the kernel; `log` holds
 /// the kernel's records and the programs' lines, and may hold the loader's
@@ -293,12 +335,8 @@ pub fn one_clock(loader: &str, log: &str) -> Result<(), String> {
             ));
         }
     }
-    let spawned = log.lines().find(|l| message(l).is_some_and(|m| m.starts_with(LOGKEEPER_SPAWN))).and_then(record_millis);
-    let said = log
-        .lines()
-        .filter_map(parse)
-        .find(|p| p.source == Source::Program("supervisor") && p.text == LOGKEEPER_STARTED)
-        .and_then(|p| p.ms);
+    let spawned = logkeeper_spawn(log).and_then(record_millis);
+    let said = logkeeper_started(log).and_then(|(_, ms)| ms);
     let complete = log.lines().any(|l| message(l).is_some_and(|m| m.starts_with(COMPLETE)));
     match (spawned, said) {
         (Some(spawned), Some(said)) if said < spawned => Err(format!(
@@ -307,7 +345,7 @@ pub fn one_clock(loader: &str, log: &str) -> Result<(), String> {
         (Some(_), Some(_)) => Ok(()),
         (spawned, said) if complete => Err(format!(
             "the boot reached {COMPLETE:?} with {} and {}",
-            if spawned.is_some() { "a timed spawn record of logkeeper" } else { "no timed spawn record of logkeeper" },
+            if spawned.is_some() { "a timed spawn record of logkeeper's pid" } else { "no timed spawn record of logkeeper's pid" },
             if said.is_some() { "a timed supervisor line saying so" } else { "no timed supervisor line saying so" },
         )),
         _ => Ok(()),
@@ -502,18 +540,49 @@ mod tests {
         assert_eq!(stop_marked(""), Err(Unfit::NoStopMark));
     }
 
-    /// The kernel spellings a metal readback is judged on, held to the
-    /// kernel's own source, because nothing links this crate to it.
+    /// A spawn's pid is the first field of the record, the kernel's: what the
+    /// path after it says, a record's fields among them, names no pid.
     #[test]
-    fn the_kernel_writes_the_records_the_host_reads() {
+    fn a_spawns_pid_is_read_from_the_records_head() {
+        assert_eq!(spawned_pid("spawn: pid=7 (total=0ms) /system/bin/echo"), Some(7));
+        assert_eq!(spawned_pid("spawn: pid=1 (total=12ms) supervisor"), Some(1));
+        assert_eq!(spawned_pid("spawn: pid=3 (total=0ms) /a b/echo pid=9 (total=1ms)"), Some(3));
+        assert_eq!(spawned_pid("spawn: pid=4 (total=0ms)"), Some(4));
+        for none in [
+            "spawn: /system/bin/echo pid=7 (total=0ms)",
+            "spawn: pid 7 (total=0ms) /system/bin/echo",
+            "spawn: pid=x (total=0ms) /system/bin/echo",
+            "spawn: pid=7 (total=ms) /system/bin/echo",
+            "spawn: pid=7 (total=0ms)/system/bin/echo",
+            "spawn: refused under pid 7",
+            "exit: echo pid=7 code=0 cpu=0ms",
+        ] {
+            assert_eq!(spawned_pid(none), None, "{none:?}");
+        }
+        let log = "[ 0.900 cpu0 kernel] spawn: pid=1 (total=3ms) supervisor\n\
+                   [ 1.000 cpu0 kernel] spawn: pid=2 (total=1ms) /system/bin/logkeeper pid=5 (total=0ms)\n\
+                   [ 1.001 supervisor] supervisor: started logkeeper pid=2\n\
+                   [ 1.002 echo] supervisor: started logkeeper pid=1\n\
+                   [ 1.100 cpu0 kernel] spawn: pid=5 (total=0ms) /system/bin/logkeeper\n";
+        assert_eq!(spawned_pids(log).collect::<Vec<_>>(), [1, 2, 5]);
+        assert_eq!(logkeeper_spawn(log), log.lines().nth(1));
+    }
+
+    /// The spellings a metal readback is judged on, held to their writers'
+    /// own source, because nothing links this crate to it.
+    #[test]
+    fn the_writers_write_the_lines_the_host_reads() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let started = LOGKEEPER_STARTED.replacen("logkeeper", "{}", 1);
         for (file, needle) in [
             ("kernel/src/process.rs", format!("log!(\"{EXIT}{{name}} pid=")),
+            ("kernel/src/loader/mod.rs", format!("log!(\"{SPAWN}pid={{}} (total={{}}ms) {{}}\"")),
+            ("system/supervisor/src/main.rs", format!("say!(\"{started}{{}}\"")),
             ("kernel/src/arch/x86_64/smp.rs", format!("log!(\"{AP_BRINGUP}")),
             ("kernel/src/deadline.rs", format!("\"{DEADLINE_ARMED}{{ms}} ms")),
         ] {
             let at = root.join(file);
-            let source = std::fs::read_to_string(&at).expect("a kernel module");
+            let source = std::fs::read_to_string(&at).expect("a writer's source");
             assert!(source.contains(&needle), "{} does not write {needle:?}", at.display());
         }
     }

@@ -84,7 +84,7 @@ the memory-overwrite request, and a record surviving a reset is
 `issues/a-crash-record-survives-a-reset-outside-ram.md`.
 
 **The two records these boots stopped at are no longer written.** A spawn
-writes one record, the `spawn: <path> pid=…` that only the boots that came
+writes one record, the `spawn: pid=… <path>` that only the boots that came
 back carry, so the next occurrence's landmark is that record's absence after
 the job's `exit:`: the window opens at the job's exit and takes in the whole
 spawn, the VFS-lock sites this file eliminated for run 19 among them.

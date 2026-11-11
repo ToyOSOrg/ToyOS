@@ -1366,7 +1366,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     // ---- one image: tests/images/proctreecase.toml ----
     (
         // A parent's end takes its children down. The guest carries every
-        // verdict but two the kernel speaks.
+        // verdict but the kernel's silence on a refused spawn.
         "process_tree",
         metal::Metal { arms: PROCTREECASE, judge: |b| process_tree(b[0]) },
     ),
@@ -2902,7 +2902,9 @@ fn virt_job(profile: qemu::Profile, job: &str) -> Result<(), String> {
     judge_virt_job(&mut qemu, &mut serial, job, said)?;
     // The kernel's record `one_clock` reads beside the supervisor's line: it
     // reaches the PL011 by the kernel's road, and the job's end by `logkeeper`'s.
-    await_marker(&mut qemu, &mut serial, bootlog::LOGKEEPER_SPAWN, "the kernel's record of logkeeper's spawn")?;
+    await_guest(&mut qemu, &mut serial, "the kernel's record of logkeeper's spawn", |said| {
+        bootlog::logkeeper_spawn(said).is_some()
+    })?;
     // The one console that carries the loader's, the kernel's and a program's
     // lines on a CPU that states its counter's rate: the T14's metal rows
     // judge the same on x86-64, and no machine of this architecture has one.
@@ -3467,8 +3469,8 @@ fn a_usb_key_reaches_the_console() -> Result<(), String> {
         }
     }
     await_guest(&mut qemu, &mut console, "the shell to run what was typed", |c| {
-        // A bare `ls` is the shell's helper, spawned by the name it was typed as.
-        c.lines().any(|l| l.contains("spawn: /system/bin/ls "))
+        // A bare `ls` is the shell's helper, which ends under the name it was typed as.
+        c.lines().filter_map(bootlog::message).any(|m| m.starts_with("exit: ls pid=") && m.contains(" code=0 "))
     })?;
     serial::Serial::named("the typed-on console boot", console).must_be_clean()
 }
@@ -3695,13 +3697,27 @@ fn virt_pan_refuses_el1_a_user_page(profile: qemu::Profile) -> Result<(), String
     Ok(())
 }
 
+/// A boot's console up to the kernel's record of the first spawn it answered a
+/// program: the second spawn record after the ready marker, whatever path it
+/// quotes, since the first is of the supervisor, which the kernel starts itself.
+fn until_a_program_spawns(qemu: &mut QemuInstance) -> Result<String, String> {
+    let spawns = std::cell::Cell::new(0);
+    let rest = qemu.drain_until(Duration::from_secs(30), |l| {
+        bootlog::message(l).and_then(bootlog::spawned_pid).is_some() && spawns.replace(spawns.get() + 1) == 1
+    });
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    if bootlog::spawned_pids(&serial).nth(1).is_none() {
+        return Err(format!("no record of a spawn the kernel answered a program on the PL011\nserial:\n{serial}"));
+    }
+    Ok(serial)
+}
+
 /// A machine whose MCFG decodes sixteen buses, with RAM past them: the kernel
 /// maps those sixteen buses' megabytes and no more, and enumerates the
 /// functions QEMU put there and nothing else, and the boot goes on.
 fn virt_low_ecam(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
     const WINDOW: &str = "ACPI: ECAM window: segment 0 buses 0x00..=0x0f, bus 0 at 0x3f000000";
     const MAPPED: &str = "mmio: 0x3f000000+0x1000000 ";
-    const SPAWNED: &str = "spawn: /system/bin/logkeeper pid=";
     /// What QEMU puts on bus 0 of this profile: the host bridge, the xHCI and
     /// the virtio-rng, as `vendor=… device=…`.
     const FUNCTIONS: &[&str] = &[
@@ -3715,8 +3731,7 @@ fn virt_low_ecam(profile: qemu::Profile, test_config: &Path) -> Result<(), Strin
         return Err(format!("the machine keeps its ECAM high: {argv:?}"));
     }
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-    let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(SPAWNED));
-    let serial = format!("{}\n{rest}", qemu.boot_log());
+    let serial = until_a_program_spawns(&mut qemu)?;
     // What was read and what was mapped before what was said about it.
     pci_inventory(&serial).map_err(|why| format!("{why}\nserial:\n{serial}"))?;
     let rows: Vec<&str> = serial.lines().filter_map(|l| l.split("  PCI ").nth(1)).collect();
@@ -3727,7 +3742,7 @@ fn virt_low_ecam(profile: qemu::Profile, test_config: &Path) -> Result<(), Strin
     if let Some(wider) = serial.lines().find(|l| l.contains("mmio: 0x3f000000+") && !l.contains(MAPPED)) {
         return Err(format!("the window was mapped wider than its buses: {wider:?}\nserial:\n{serial}"));
     }
-    for want in [MAPPED, WINDOW, SPAWNED] {
+    for want in [MAPPED, WINDOW] {
         if !serial.contains(want) {
             return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
         }
@@ -4645,8 +4660,8 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             // The port's stage 4: the generator keyed from the seed the loader
             // read from firmware's virtio-rng, the kernel's own tables, the GIC
             // and the timer, and a process at EL0 — the supervisor, whose every
-            // page arrives by a demand fault and whose spawn of `logkeeper` is
-            // a syscall the kernel answered.
+            // page arrives by a demand fault and whose first spawn is a syscall
+            // the kernel answered.
             let options =
                 BootOptions { profile, ready_marker: "control registers: SCTLR_EL1=", ..Default::default() };
             let argv = qemu::profile_argv(&options);
@@ -4654,9 +4669,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 return Err(format!("`virt` has no virtio-rng for firmware's EFI_RNG_PROTOCOL: {argv:?}"));
             }
             let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-            const SPAWNED: &str = "spawn: /system/bin/logkeeper pid=";
-            let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(SPAWNED));
-            let serial = format!("{}\n{rest}", qemu.boot_log());
+            let serial = until_a_program_spawns(&mut qemu)?;
             for want in [
                 LOADER_SEED_MIXED,
                 "random: the generator is keyed from",
@@ -4665,7 +4678,6 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 "GIC: v",
                 "clock: the generic timer counts at",
                 "spawned the supervisor pid=",
-                SPAWNED,
             ] {
                 if !serial.contains(want) {
                     return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
@@ -5468,7 +5480,7 @@ fn a_claim_before_the_declaration_is_refused_at_once() -> Result<(), String> {
     eprintln!("  [undeclared] {}", said.must_say(NONE)?.trim());
     said.must_not_say(" [1234:11e8] handed over")?;
     said.must_not_say("pcidev: the acpi claim declared")?;
-    said.must_not_say("spawn: /system/bin/pciholder")?;
+    said.must_not_say("pciholder: holding PCI ")?;
     Ok(())
 }
 
@@ -6557,15 +6569,20 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// `process_tree` passed, and the kernel said what the guest cannot see: the
-/// chain's one depth refusal names `MAX_DEPTH` + 1.
+/// `process_tree` passed, and the spawn its chain was refused for its depth
+/// left no record: every `spawn:` record of the boot is of one that landed. A
+/// refusal is its caller's answer, and a caller chooses how often it is given.
 fn process_tree(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_process_tree")?;
     let kernel = back.kernel();
-    let log = kernel.text();
-    let refused: Vec<&str> = log.lines().filter(|l| l.contains("spawn: refused under pid ")).collect();
-    if refused.len() != 1 || !refused[0].contains("at depth 65, more than 64 below the supervisor") {
-        return Err(format!("the kernel's depth refusals were {refused:?}, not one naming depth 65"));
+    let unlanded: Vec<&str> = kernel
+        .text()
+        .lines()
+        .filter_map(bootlog::message)
+        .filter(|m| m.starts_with(bootlog::SPAWN) && bootlog::spawned_pid(m).is_none())
+        .collect();
+    if !unlanded.is_empty() {
+        return Err(format!("the kernel recorded spawns that did not land: {unlanded:?}"));
     }
     Ok(())
 }
