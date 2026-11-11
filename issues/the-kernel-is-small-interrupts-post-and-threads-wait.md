@@ -72,17 +72,14 @@ Beside that order, each waiting on something outside it:
    `what_a_flush_calls_durable_is_on_the_medium` and
    `what_was_on_the_wire_at_the_end_is_refused_and_what_was_not_waits` for
    the transport, for diskserver's part by `wire::Opened::over`, whose type
-   makes a server's ends before its answer, and by the client test
-   `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md` owes, a
-   session reopened over the page a killed server left, by fileserver's
+   makes a server's ends before its answer, and by a client that opens each
+   session over a region no server has held, by fileserver's
    `a_directory_rename_is_whole_under_one_name_wherever_the_server_is_killed`
    for DATA, and for LOG by the FAT test step 10 owes. **Partly done**
    (#525, #536, #971): NVMe and the stick are driven from userland, and the
    kernel's NVMe driver, USB storage, block layer and refusal chain are gone;
    the `nvme` driver and usbd offer their disks to diskserver, the block
-   service. **Left**: the page cache, with step 9's file half, and the client
-   test `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md`
-   owes.
+   service. **Left**: the page cache, with step 9's file half.
 4. **Where the data filesystem lives** — owner ruling, 2026-09-26, from the
    roasted proposal: userland file servers, the VFS a client library, and a
    program's view a set of directory capabilities the supervisor hands it,
@@ -257,9 +254,7 @@ Beside that order, each waiting on something outside it:
        same under a write to the NVMe. #971's first metal boots
        came back with no `logkeeper` file on the stick, which every metal
        row reads; QEMU's stick boot (`the_log_lands_on_the_boot_stick`) has
-       it. And the client test
-       `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md`
-       owes, which `/log`'s evidence names.
+       it.
 
 5. **USB by userland**, with discovery and recovery written once as
    straight-line code: step 10, and this exit. **Exit**: step 10's, and no

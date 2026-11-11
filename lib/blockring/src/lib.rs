@@ -8,7 +8,7 @@
 //! data into and out of directly. Nothing on the page is a pointer and nothing on it
 //! is trusted by the end that did not write it: a consumer bounds every index
 //! and every field before it acts ([`entry::Request::decode`], the
-//! transport's cursor bounds).
+//! transport's cursor bounds, and for a client [`ends::ClientEnds`]).
 //!
 //! **A doorbell is an event each way**, rung after the entries it announces
 //! are published. The server makes both and hands the client its sides with
@@ -46,6 +46,7 @@ extern crate alloc;
 
 pub mod client;
 pub mod disk;
+pub mod ends;
 pub mod entry;
 pub mod layout;
 pub mod server;

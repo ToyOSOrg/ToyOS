@@ -5,7 +5,9 @@
 //! **Every request asked for is answered exactly once**, by [`Client::complete`]
 //! or by [`Client::session_ended`], and never twice: a completion for a tag
 //! that is not on the wire is the server breaking the session
-//! ([`Violation::Tag`]), not a second answer.
+//! ([`Violation::Tag`]), not a second answer, and one whose word no server
+//! says of that request ([`Violation::Entry`]) leaves it on the wire, for the
+//! session's end to answer.
 //!
 //! **The arena holds only what is on the wire.** A read or a write is given
 //! its arena blocks as it goes out ([`Client::next_request`]'s `place`) and
@@ -174,6 +176,17 @@ impl<P> Sent<P> {
             Op::Flush => None,
         }
     }
+
+    /// Whether a server says `status` of this request. `Lost` is a flush's
+    /// word, and one a reissue is sent after; `ReadOnly` is the word for a
+    /// write the session's grant never took, which a reissue is not.
+    fn admits(&self, status: Status) -> bool {
+        match (self.queued.kind, self.op, status) {
+            (Kind::User(_), Op::Write { .. }, Status::ReadOnly) => true,
+            (_, _, Status::ReadOnly) | (Kind::User(_), _, Status::Lost) => false,
+            (_, _, Status::Ok | Status::Invalid | Status::Device | Status::Lost) => true,
+        }
+    }
 }
 
 /// The client's own flush.
@@ -316,17 +329,18 @@ impl<P: Clone, const D: usize> Client<P, D> {
         Some(Request { op, tag })
     }
 
-    /// What the server answered.
+    /// What the server answered. A completion refused answers nothing: the
+    /// session is over, and [`Self::session_ended`] answers what it named.
     pub fn complete(&mut self, completion: Completion) -> Result<(), Violation> {
-        let sent = self.wire.answer(completion.tag)?;
+        let sent = self.wire.answer_admitted(completion.tag, |sent| sent.admits(completion.status))?;
         // Answered, whatever the word: its arena blocks are free once a read's
         // data has been taken, which the caller does before it releases them.
         self.released.extend(sent.run());
         let Sent { queued, op, covers, losses } = sent;
         match (queued.kind, completion.status) {
             (Kind::User(ticket), Status::Ok) => {
-                match (queued.ask, op) {
-                    (Ask::Write { lba, blocks, payload }, Op::Write { .. }) => {
+                match queued.ask {
+                    Ask::Write { lba, blocks, payload } => {
                         let seq = self.bump();
                         self.kept += u64::from(blocks);
                         let acked = Acked { lba, blocks, payload, first: seq, seq, attempts: 0 };
@@ -340,8 +354,8 @@ impl<P: Clone, const D: usize> Client<P, D> {
                             self.acked.push_back(acked);
                         }
                     }
-                    (Ask::Read { .. }, Op::Read { .. }) => {}
-                    _ => return Err(Violation::Entry),
+                    Ask::Read { .. } => {}
+                    Ask::Flush => unreachable!("blockring: a caller's flush is not sent as its read or write"),
                 }
                 self.answers.push_back((ticket, Outcome::Done));
             }
@@ -349,18 +363,14 @@ impl<P: Clone, const D: usize> Client<P, D> {
                 let outcome = match status {
                     Status::Invalid => Outcome::Invalid,
                     Status::Device => Outcome::Device,
-                    Status::ReadOnly if matches!(op, Op::Write { .. }) => Outcome::ReadOnly,
-                    // A read or a write answered `Lost`, or a read answered
-                    // `ReadOnly`, is a server that does not know which op it
-                    // was.
-                    Status::ReadOnly | Status::Lost | Status::Ok => return Err(Violation::Entry),
+                    Status::ReadOnly => Outcome::ReadOnly,
+                    Status::Lost | Status::Ok => unreachable!("blockring: {status:?} admitted for a caller's {op:?}"),
                 };
                 self.answers.push_back((ticket, outcome));
             }
-            // A write the session took once, refused by the same grant on its
-            // way again, or a flush refused as a write: a server that does
-            // not know what it granted.
-            (Kind::Reissue { .. } | Kind::Flush(_) | Kind::Pushback, Status::ReadOnly) => return Err(Violation::Entry),
+            (Kind::Reissue { .. } | Kind::Flush(_) | Kind::Pushback, Status::ReadOnly) => {
+                unreachable!("blockring: ReadOnly admitted for {:?}", queued.kind)
+            }
             (Kind::Reissue { .. }, Status::Ok) => {
                 let seq = self.bump();
                 let acked = queued.acked(seq);
@@ -472,6 +482,12 @@ impl<P: Clone, const D: usize> Client<P, D> {
     /// Arena runs nothing will read or write again.
     pub fn take_released(&mut self) -> impl Iterator<Item = Run> + '_ {
         self.released.drain(..)
+    }
+
+    /// Something asked for is waiting or on the wire: a completion is owed
+    /// before the caller hears of it.
+    pub fn owed(&self) -> bool {
+        !self.outbox.is_empty() || self.wire.values().next().is_some()
     }
 
     /// Nothing is waiting, on the wire, or held for a flush.
@@ -746,11 +762,32 @@ mod tests {
         assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::ReadOnly)]);
         assert_eq!(client.take_released().collect::<Vec<_>>(), [run_of(1, 1)]);
         assert_eq!(client.kept(), 0);
-        for ask in [Ask::Read { lba: 0, blocks: 1 }, Ask::Flush] {
-            client.submit(2, ask);
+        for (ticket, ask) in [(2, Ask::Read { lba: 0, blocks: 1 }), (3, Ask::Flush)] {
+            client.submit(ticket, ask);
             let r = next(&mut client).unwrap();
             assert_eq!(client.complete(Completion { tag: r.tag, status: Status::ReadOnly }), Err(Violation::Entry));
         }
+        assert_eq!(client.take_answers().count(), 0);
+        client.session_ended();
+        assert_eq!(client.take_answers().collect::<Vec<_>>(), [(2, Outcome::Refused)], "the flush is asked again");
+    }
+
+    /// A write issued again and answered `ReadOnly` is refused on the wire,
+    /// so the session's end keeps it to issue again: it is the only copy.
+    #[test]
+    fn a_reissue_refused_read_only_is_kept() {
+        let mut client = up(ROOMY);
+        client.submit(1, write(1, 0, 1));
+        let w = next(&mut client).unwrap();
+        answer(&mut client, w, Status::Ok);
+        client.session_ended();
+        client.session_started();
+        let again = next(&mut client).unwrap();
+        assert_eq!(client.complete(Completion { tag: again.tag, status: Status::ReadOnly }), Err(Violation::Entry));
+        client.session_ended();
+        client.session_started();
+        assert_eq!(next(&mut client).unwrap().op, Op::Write { run: run_of(1, 1), lba: 0 });
+        assert_eq!(client.kept(), 1);
     }
 
     #[test]
