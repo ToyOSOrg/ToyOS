@@ -259,9 +259,10 @@ pub fn futex_wait(word: &crate::mm::space::Translation, expected: u32, deadline:
     let phys = word.phys();
     let changed = || {
         // SAFETY: a frame the user's checked, 4-byte-aligned word translated
-        // to, read through the direct map, which maps every frame; volatile
-        // because this predicate may run more than once. Whether the frame
-        // was still the word's when read is `holds`, after the read.
+        // to, read through the direct map, which maps every frame a user page
+        // can hold; volatile because this predicate may run more than once.
+        // Whether the frame was still the word's when read is `holds`, after
+        // the read.
         let now = unsafe { DirectMap::from_phys(phys).as_ptr::<u32>().read_volatile() };
         // An address that no longer maps the frame is a wait the unmap's
         // revoke may have missed: the word moved, and the caller re-checks it.
