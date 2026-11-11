@@ -8,7 +8,7 @@
 //! What must hold, from every interleaving loom can build:
 //!
 //! * **One draw a page.** However the touches and runs interleave, each page
-//!   draws one frame, against its own promise, and every toucher is handed it.
+//!   draws one frame, and every toucher is handed it.
 //! * **A frame comes with its zeros.** A toucher that takes a frame off the one
 //!   load reads what its drawer wrote into it before installing it. On x86
 //!   every store is a release and every load an acquire, so no guest test can
@@ -22,7 +22,8 @@
 //! ```
 //!
 //! makes the install and the one load `Relaxed`, and
-//! [`a_frame_is_handed_over_with_what_its_drawer_wrote`] must red.
+//! [`a_frame_is_handed_over_with_what_its_drawer_wrote`] and
+//! [`two_touches_draw_once_and_are_handed_one_frame`] must red.
 
 #![cfg(feature = "loom")]
 

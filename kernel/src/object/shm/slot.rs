@@ -59,10 +59,10 @@ pub fn frames<G>(slots: &[&Slot], out: &mut [u64], drawn: &mut [u64], first_touc
     }
     let drawn = &mut drawn[..holes];
     draw(drawn);
-    let mut drawn = drawn.iter();
-    for (slot, frame) in slots.iter().zip(out.iter_mut()).filter(|(_, frame)| **frame == HOLE) {
-        *frame = *drawn.next().expect("slot: fewer frames drawn than holes");
-        slot.0.store(*frame, INSTALL);
+    let holes = slots.iter().zip(out.iter_mut()).filter(|(_, frame)| **frame == HOLE);
+    for ((slot, frame), &fresh) in holes.zip(drawn.iter()) {
+        *frame = fresh;
+        slot.0.store(fresh, INSTALL);
     }
 }
 
