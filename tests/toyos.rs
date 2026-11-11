@@ -7969,8 +7969,8 @@ fn unix_secs_at(text: &str) -> Option<u64> {
 /// A line stamped `ms` is dated the reading plus the seconds between, less up
 /// to three and plus up to one: the kernel's anchor, `SYS_CLOCK_EPOCH`, and
 /// `logkeeper`'s two divisions each drop a part of a second, three one way and
-/// one the other. A tenth of a second more either side is the rate the clock
-/// retunes to and a step it slews, far under what they move a boot's stamps.
+/// one the other. A tenth of a second more either side is for the rate the
+/// clock retunes to and a step it slews, which move a boot's stamps far less.
 /// No host's clock is read.
 fn dates_carry_the_loaders_reading(loader: &str, kernel: &str, log: &str) -> Result<u64, String> {
     const READ: &str = "Wall clock: firmware's GetTime reads ";

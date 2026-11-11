@@ -4,7 +4,7 @@ use toyos_wallclock::Civil;
 ///
 /// This crate never reads a clock. Every call that stamps an entry takes one
 /// of these, so the only time that reaches the disk is time the caller chose —
-/// the kernel's RTC in production, a fixed value in a test that wants a
+/// the kernel's wall clock in production, a fixed value in a test that wants a
 /// reproducible image.
 ///
 /// FAT's encoding is lossy in three ways that no wrapper can hide, so they are

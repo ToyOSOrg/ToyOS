@@ -226,7 +226,8 @@ pub fn a_stalled_hpet_is_left_out(test_config: &Path) -> Result<(), String> {
 /// stall put on the HPET and not on the TSC; and the clock reported again
 /// after it. A step the machine's own TSC took is no part of it, in another
 /// span or in this one, where every counter then disagrees and the PM timer
-/// still stands the 10 ms from the HPET.
+/// still stands the 10 ms from the HPET, to within a millisecond: the two
+/// counters' allowances over a second, about half a millisecond each.
 pub fn stalled_hpet_left_out(log: &str) -> Result<(), String> {
     const ALL_DISAGREE: &str = "all disagree, so this span is left out: ";
     const DISAGREED: [&str; 4] = [HPET_MOVED, ALL_DISAGREE, kernel::clock::TSC_STEP, TSC_DEMOTED];

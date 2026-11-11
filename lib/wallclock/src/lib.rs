@@ -37,8 +37,8 @@ impl Civil {
     ///
     /// The Unix epoch is the floor because everything downstream counts
     /// unsigned seconds from it. A leap second lands on 60 and is rejected: the
-    /// RTC does not report one, and a clock that does is not one this kernel
-    /// understands.
+    /// firmware's clock does not report one, and a clock that does is not one
+    /// this kernel understands.
     pub fn is_valid(&self) -> bool {
         (1970..=9999).contains(&self.year)
             && (1..=12).contains(&self.month)
@@ -59,8 +59,8 @@ impl Civil {
     /// needs: a timestamp is not load-bearing enough to fail a volume read
     /// over, and its `every_bit_pattern_decodes` asserts it over all 65,536
     /// date encodings. [`Self::is_valid`] is the *other* caller's answer — the
-    /// RTC's — and refusing there is what keeps an impossible instant out of
-    /// the wall clock.
+    /// loader's, of firmware's reading — and refusing there is what keeps an
+    /// impossible instant out of the wall clock.
     pub fn to_unix_secs(&self) -> u64 {
         days_from_civil(self.year, self.month, self.day) * DAY
             + self.hour * 3_600

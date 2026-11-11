@@ -6,8 +6,8 @@
 //! a create with truncation, a create of a missing file, a truncation — and a
 //! later write's stamp is later, which a clock of whole seconds cannot say.
 //! `write <path>` makes the first judgement on `path` and `read <path>` only
-//! prints what it finds there. `undated` runs on a machine whose RTC never
-//! answered and never asks the time: a file written there, on `/tmp` or on
+//! prints what it finds there. `undated` runs on a machine whose firmware
+//! gave no time and never asks the time: a file written there, on `/tmp` or on
 //! `/home`, is undated, which std reports as an error and not as 1970.
 
 use std::fs::{self, OpenOptions};
