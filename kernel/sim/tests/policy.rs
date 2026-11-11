@@ -344,27 +344,64 @@ fn a_job_per_thread_loses_the_floor() {
     );
 }
 
+/// **A short request buys order, not share.** A job whose threads run in
+/// one-millisecond bursts asks for about a millisecond at a time, against a
+/// hog asking for the whole slice; both want the CPU, so each is owed half of
+/// what the real-time job leaves. The bursty job's work finishes no sooner
+/// than half the fair CPU allows less one request and its chunks, whether it
+/// has one thread or four, and with a real-time job beside it or not.
+#[test]
+fn a_short_request_buys_no_share() {
+    let mut table = Vec::new();
+    for (threads, rt) in [(1usize, false), (4, false), (1, true), (4, true)] {
+        let scenario = scenarios::request_share(threads, MS, rt, WORK);
+        let bursty = scenario.process_index("bursty").expect("request_share has a bursty job");
+        let hog = scenario.process_index("hog").expect("request_share has a hog");
+        // The fair CPU's half, stretched by the real-time job's sixth.
+        let fair = if rt { 2 * WORK * 6 / 5 } else { 2 * WORK };
+        let floor = fair - DISPATCH_NS;
+        let (mut earliest, mut hog_latest) = (u64::MAX, 0);
+        sweep(&scenario, SEEDS, |outcome| {
+            let finish = |p: usize| outcome.process_finish_ns[p].expect("both jobs finish inside the run");
+            earliest = earliest.min(finish(bursty));
+            hog_latest = hog_latest.max(finish(hog));
+        });
+        table.push((threads, rt, earliest, hog_latest));
+        assert!(
+            earliest >= floor,
+            "a bursty job of {threads} thread(s){} finished its {WORK} ns at {earliest} ns, inside \
+             the {floor} ns half the fair CPU allows less one request: its short requests bought \
+             it share",
+            if rt { " beside a real-time job" } else { "" },
+        );
+    }
+    for (threads, rt, bursty, hog) in table {
+        println!("request_share threads={threads} rt={rt}: bursty earliest finish {bursty} ns, hog latest {hog} ns");
+    }
+}
+
 /// **Mixed interactive and background**: how long a thread that sleeps, wakes and
 /// runs briefly waits for a CPU held by threads that never yield.
 ///
-/// The sleeper uses a quarter of a millisecond every three, so it is far under
-/// its share and carries that back in with it: its group joins with no debt
-/// and outweighs the hogs' group there, so its request is due first and it
-/// takes the CPU once the running hog has had its minimum run.
+/// The sleeper uses a quarter of a millisecond every three, so its request
+/// follows its bursts down to the minimum slice: even when it comes back owing
+/// for its last burst, its request is due before the hogs' and it takes the
+/// CPU once the running hog has had its minimum run.
 ///
-/// **What it found**, 40 seeds per point: the worst wake is 5 ms at every hog
-/// count from 1 to 64 and at both widths — at most the hog request running
-/// ahead of it — and every wake but one per run at one CPU waits 2 ms at most,
-/// the minimum run and the model's two chunks.
+/// **What it found**, 400 seeds per point: the worst wake is 3 ms at one CPU
+/// and 5 ms at two, and every wake but one per run at one CPU waits 2 ms at
+/// most, the minimum run and the model's two chunks. With every request a
+/// whole slice this sample finds runs at four hogs whose second wake waits out
+/// a whole hog request, which forty seeds did not reach.
 ///
 /// So the bound asserted on every wake is one request, and the sharper claim
 /// is asserted at one CPU on the runner-up.
 #[test]
 fn an_interactive_wake_waits_out_at_most_one_request() {
-    /// Enough runs that the distribution has a few hundred wakes in it; the
-    /// device interrupt's position among the enabled steps is the freedom the
-    /// seeds explore.
-    const WAKE_SEEDS: u64 = 40;
+    /// Enough runs to reach a wake landing as a hog's request ends after the
+    /// sleeper's burst; the device interrupt's position among the enabled
+    /// steps is the freedom the seeds explore.
+    const WAKE_SEEDS: u64 = 400;
     for (cpus, hogs) in [(1usize, 1usize), (1, 4), (1, 16), (1, 64), (2, 4), (2, 16)] {
         let scenario = scenarios::interactive_mix(cpus, hogs);
         let sleeper = scenario

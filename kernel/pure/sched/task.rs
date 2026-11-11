@@ -17,6 +17,7 @@ use crate::sched::msg::Msg;
 use crate::sched::affinity::{affinity_fence, CpuMask, Reach, SharedMask};
 use crate::sched::sync::{Arc, AtomicBool, AtomicU64, Ordering};
 use crate::sched::park::CommittedTicket;
+use crate::sched::queue::{next_request, SLICE_NS};
 
 /// Monotonic, never reused. Stale messages keyed by `TaskKey` are provably
 /// about a dead task and are benign no-ops.
@@ -798,6 +799,11 @@ struct TaskInner<X: SchedPayload> {
     affinity: CpuMask,
     reach: Reach,
     affinity_version: u64,
+    /// What it asks of a queue at a time, in ns: [`next_request`] of its
+    /// bursts, each the CPU time from a wake to the next park.
+    request: u64,
+    /// `acct.cpu_ns` when it last woke, where its current burst began.
+    woke_cpu_ns: u64,
     /// When the current residency began: enqueue time while ready, dispatch
     /// time while running, park time while blocked. One field, because a task
     /// is in exactly one state.
@@ -853,6 +859,10 @@ impl<X: SchedPayload> Task<X> {
 
     pub fn reach(&self) -> Reach {
         self.0.reach
+    }
+
+    pub fn request_ns(&self) -> u64 {
+        self.0.request
     }
 
     /// Take the published mask if a setter has moved it since the last
@@ -967,6 +977,10 @@ macro_rules! linear_state {
             pub fn reach(&self) -> Reach {
                 self.0.reach()
             }
+
+            pub fn request_ns(&self) -> u64 {
+                self.0.request_ns()
+            }
         }
     };
 }
@@ -1026,6 +1040,8 @@ impl<X: SchedPayload> TaskBuilder<X> {
             affinity: self.mask,
             reach: self.mask.reach(),
             affinity_version: 0,
+            request: SLICE_NS,
+            woke_cpu_ns: 0,
             since: now,
             adopt_node: MailboxNode::new(),
             ext: Some(self.ext),
@@ -1180,6 +1196,7 @@ impl<X: SchedPayload> RunningTask<X> {
         );
         assert_eq!(ticket.cpu(), cpu, "park with a ticket from another CPU");
         task.charge_residency(now, Residency::Running);
+        task.0.request = next_request(task.0.request, task.0.acct.cpu_ns - task.0.woke_cpu_ns);
         #[cfg(not(feature = "protocol-port"))]
         task.0.rt.release();
         #[cfg(feature = "protocol-port")]
@@ -1254,6 +1271,7 @@ impl<X: SchedPayload> BlockedTask<X> {
     ) -> ReadyTask<X> {
         let mut task = self.0;
         task.charge_residency(now, Residency::Blocked(class));
+        task.0.woke_cpu_ns = task.0.acct.cpu_ns;
         if let Some(window) = cause.boost {
             task.boost(window.until);
         }

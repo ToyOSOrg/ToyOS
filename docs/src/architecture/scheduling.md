@@ -18,6 +18,11 @@
   group's threads. A thread that sleeps and runs briefly gets the next slice
   without more total time, so an editor answers a key while a compiler keeps
   its share of the hour.
+- A thread's request, the service it asks for before its CPU decides again,
+  follows the length of its recent runs between sleeps, never below a minimum
+  slice and never above the full one; a group asks for its shortest thread's.
+  A shorter request is due sooner, so it changes the order in which threads
+  run and never their share of the CPU.
 - Placement balances group weight across CPUs and steals work for idle CPUs.
   There is no cross-CPU service accounting; aggregate fairness is as close as
   placement makes it.
