@@ -18,6 +18,11 @@ use toyos_abi::syscall::{self, SyscallError, VmAt, VmProt, PAGE_SIZE};
 
 const SELF_PATH: &str = "/system/bin/test_rs_vm_map_shares";
 const STORES: &str = "stores";
+/// The roles whose peaks are compared: reading no table, the read-only one,
+/// the writable one.
+const READS_NONE: &str = "reads-none";
+const READS_SHARED: &str = "reads-shared";
+const READS_PRIVATE: &str = "reads-private";
 
 /// Words of each table: 64 pages.
 const WORDS: usize = 64 * PAGE_SIZE / 8;
@@ -40,11 +45,18 @@ static mut WRITABLE: [u64; WORDS] = table();
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some(STORES) => stores(),
+        Some(READS_NONE) => return,
+        Some(READS_SHARED) => {
+            assert_eq!(sum(READ_ONLY.as_ptr()), want(), "vm_map_shares: the read-only table is not the file's bytes");
+            return;
+        }
+        Some(READS_PRIVATE) => {
+            assert_eq!(sum(&raw const WRITABLE as *const u64), want(), "vm_map_shares: the writable table is not the file's bytes");
+            return;
+        }
         Some(other) => panic!("vm_map_shares: unknown role {other:?}"),
         None => {}
     }
-    // First: it reads this process's private memory at its most, which
-    // nothing has yet given back.
     read_only_segments_are_the_files_pages();
     a_range_lands_at_its_place();
     a_writable_region_is_never_executed();
@@ -52,9 +64,42 @@ fn main() {
     println!("vm_map_shares: an object's pages are mapped where asked, and a program's read-only segments are its file's own");
 }
 
-/// The private memory this process holds at most, in bytes.
-fn peak() -> u64 {
-    toyos::endow::this_process().stats().expect("vm_map_shares: its own statistics").peak_memory
+/// The most private memory a run of this program in `role` held, in bytes,
+/// read off its end through the handle its spawn answers: a process's own
+/// handle carries no `READ`, so none reads its own.
+fn peak_of(role: &str) -> u64 {
+    let image = toyos::files::read_image(SELF_PATH.as_bytes()).expect("vm_map_shares: its own image");
+    let argv = format!("{SELF_PATH}\0{role}\0");
+    let request = toyos::spawn::Spawn {
+        program: SELF_PATH,
+        image: None,
+        image_held: true,
+        argv: argv.as_bytes(),
+        env: b"",
+        cwd: "/",
+        fds: &[],
+        endow: Vec::new(),
+        provided: Vec::new(),
+        parent: toyos::spawn::Parent::Caller,
+        independent: false,
+        launcher: None,
+        pager: None,
+    };
+    let Ok(toyos::spawn::Start::Helper(helper)) = request.start() else { panic!("vm_map_shares: a spawn of its own image is no helper") };
+    let reader = helper.spawn(Some(&image)).expect("vm_map_shares: a reader starts");
+    assert_eq!(reader.wait(), Ok(End::Exited(0)), "vm_map_shares: the {role} reader");
+    reader.stats().expect("vm_map_shares: a reader's statistics").peak_memory
+}
+
+/// One word of each page of a table of this program's.
+fn sum(words: *const u64) -> u64 {
+    // SAFETY: `WORDS` words of a table of this program's.
+    (0..WORDS).step_by(PAGE_SIZE / 8).fold(0u64, |sum, i| sum.wrapping_add(unsafe { words.add(i).read_volatile() }))
+}
+
+/// What [`sum`] reads of either table: the file's bytes.
+fn want() -> u64 {
+    (0..WORDS).step_by(PAGE_SIZE / 8).fold(0u64, |sum, i| sum.wrapping_add((i as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)))
 }
 
 /// The middle two pages of a four-page region replace the middle two of a
@@ -119,16 +164,11 @@ fn an_image_is_executed_and_never_written() {
 /// process's own, and no call makes a page of it writable; reading the
 /// writable table, the same bytes in the file, takes a frame a page.
 fn read_only_segments_are_the_files_pages() {
-    let sum = |words: *const u64| -> u64 {
-        // SAFETY: `WORDS` words of a table of this program's.
-        (0..WORDS).step_by(PAGE_SIZE / 8).fold(0u64, |sum, i| sum.wrapping_add(unsafe { words.add(i).read_volatile() }))
-    };
-    let want = (0..WORDS).step_by(PAGE_SIZE / 8).fold(0u64, |sum, i| sum.wrapping_add((i as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
+    let want = want();
     let table_bytes = (WORDS * 8) as u64;
 
-    let before = peak();
-    assert_eq!(sum(READ_ONLY.as_ptr()), want, "vm_map_shares: the read-only table is not the file's bytes");
-    let shared = peak() - before;
+    let none = peak_of(READS_NONE);
+    let shared = peak_of(READS_SHARED).saturating_sub(none);
     assert!(shared < table_bytes / 8, "vm_map_shares: reading {table_bytes} read-only bytes took {shared} bytes of private memory");
 
     let page = (READ_ONLY.as_ptr() as usize).next_multiple_of(PAGE_SIZE) as *mut u8;
@@ -138,9 +178,7 @@ fn read_only_segments_are_the_files_pages() {
         assert_eq!(widened, Err(SyscallError::PermissionDenied), "vm_map_shares: vm_protect gave a shared page {prot:?}");
     }
 
-    let before = peak();
-    assert_eq!(sum(&raw const WRITABLE as *const u64), want, "vm_map_shares: the writable table is not the file's bytes");
-    let private = peak() - before;
+    let private = peak_of(READS_PRIVATE).saturating_sub(none);
     assert!(private >= table_bytes * 3 / 4, "vm_map_shares: reading {table_bytes} writable bytes took {private} bytes of private memory");
 
     let child = Command::new(SELF_PATH).arg(STORES).stdout(Stdio::piped()).spawn().expect("vm_map_shares: spawn the storer");
