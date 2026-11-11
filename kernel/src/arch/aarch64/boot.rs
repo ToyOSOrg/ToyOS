@@ -327,11 +327,9 @@ fn survey(rsdp_addr: u64) {
     }
 }
 
-/// Physical memory only this architecture's boot uses: none. No CPU loads
-/// the loader's tables after `mm::init`: the others start on
-/// `paging::bringup_root`.
-pub fn reserved(_args: &KernelArgs) -> [Region; 2] {
-    [Region { start: 0, end: 0 }; 2]
+/// Physical memory only this architecture's boot uses: none.
+pub fn reserved() -> Region {
+    Region { start: 0, end: 0 }
 }
 
 /// What the boot learns bringing interrupts up and hands later steps: the

@@ -32,8 +32,8 @@ const PWT: u64 = 1 << 3;
 const PCD: u64 = 1 << 4;
 /// A page directory entry that maps 2 MiB rather than naming a table, bit 7.
 const PAGE_SIZE: u64 = 1 << 7;
-/// Execute-disable, bit 63 of each entry's table: reserved unless
-/// `IA32_EFER.NXE` is set.
+/// Execute-disable, bit 63 of an entry: reserved unless `IA32_EFER.NXE` is
+/// set.
 const EXECUTE_DISABLE: u64 = 1 << 63;
 
 /// The page every AP starts in: the kernel copies its trampoline there and

@@ -321,6 +321,13 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         // The microcode patch every AP loads after `mm::init`, `LoaderData`
         // like the others. Empty where the loader handed none.
         mm::Region { start: kernel_args.microcode_addr, end: kernel_args.microcode_addr + kernel_args.microcode_len },
+        // The boot map's tables, which this CPU runs under until `mm::init`
+        // has built the kernel's and an x86-64 AP loads as its first `CR3`
+        // long after: `LoaderData`, for the machine's life.
+        mm::Region {
+            start: kernel_args.boot_pml4_addr,
+            end: kernel_args.boot_pml4_addr + toyos_bootmap::MAX_PAGES as u64 * toyos_bootmap::PAGE_4K,
+        },
     ];
     // A region the loader did not allocate withholds memory nothing uses, so one the firmware map does not hold as `LoaderData` is refused.
     // Block 1: the section's region (`kernel_image_addr`+`kernel_image_size`) is not page-aligned.
@@ -338,15 +345,13 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
             region.start, region.end
         );
     }
-    // The architecture's own regions are named apart from the loader's
-    // allocations, so they are added
+    // The architecture's own page is not a loader allocation, so it is named
     // here rather than folded into `loader` above. Destructuring `loader` by
     // name, rather than indexing it, means a region added to `loader` fails
     // to compile here instead of compiling and being silently dropped from
     // what `mm::init` withholds.
-    let [image, elf, supervisor, fileserver, root, names, map, microcode] = loader;
-    let [own, tables] = arch::boot::reserved(kernel_args);
-    let reserved = [image, elf, supervisor, fileserver, root, names, map, microcode, own, tables];
+    let [image, elf, supervisor, fileserver, root, names, map, microcode, boot_map] = loader;
+    let reserved = [image, elf, supervisor, fileserver, root, names, map, microcode, boot_map, arch::boot::reserved()];
     // A region another one shares is two allocations the loader made of one
     // byte, and whichever writes it second corrupts the first.
     let extents = reserved.map(|r| r.start..r.end);
