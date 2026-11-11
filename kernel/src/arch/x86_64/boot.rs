@@ -38,7 +38,7 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
 /// logs nothing: the read-back is `pat::check`, in [`after_console`], where a
 /// refusal has a channel to reach.
 /// The ACPI tables this architecture decodes: the MADT for its CPUs and I/O
-/// APICs, the FADT for reset, the PM1a control block and the century register, the HPET for
+/// APICs, the FADT for reset and the PM1a control block, the HPET for
 /// the clock, the MCFG for ECAM and the DMAR or IVRS for the IOMMU.
 pub const ACPI_TABLES: &[&[u8; 4]] = &[b"APIC", b"FACP", b"HPET", b"MCFG", b"DMAR", b"IVRS"];
 
@@ -114,18 +114,10 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     Platform { madt, facs }
 }
 
-/// The clock: the TSC, held to the HPET, and the CMOS wall clock.
-pub fn clock(args: &KernelArgs) {
-    let hpet_base = acpi::find_hpet_base(args.rsdp_addr).expect("ACPI: HPET not found");
-    super::clocksource::start(hpet_base, acpi::pm_timer(args.rsdp_addr));
-    let century_reg = match acpi::rtc_century_register(args.rsdp_addr) {
-        Ok(reg) => reg,
-        Err(e) => {
-            log!("ACPI: the FADT is unreadable ({e:?}), so where the RTC keeps its century is unknown too");
-            None
-        }
-    };
-    crate::clock::init_wall(super::rtc::read(century_reg).map(|civil| (civil, super::cpu::counter())));
+/// The clock: the TSC, held to the HPET.
+pub fn clock(rsdp_addr: u64) {
+    let hpet_base = acpi::find_hpet_base(rsdp_addr).expect("ACPI: HPET not found");
+    super::clocksource::start(hpet_base, acpi::pm_timer(rsdp_addr));
 }
 
 /// Where the TSC counts from: `IA32_TSC_ADJUST`, where CPUID says the CPU has
@@ -149,9 +141,6 @@ pub fn platform_devices(platform: &Platform, rsdp_addr: u64) {
     super::pio::fill_i8042_row();
     super::pio::fill_uart_row();
     super::acpi_mode::init(rsdp_addr, platform.facs);
-    if let Err(why) = super::rtc::arm_update_edges() {
-        log!("clock: no RTC edges time the TSC: {why}");
-    }
 }
 
 /// Every other CPU, running.

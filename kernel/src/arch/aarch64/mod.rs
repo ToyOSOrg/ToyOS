@@ -11,15 +11,6 @@ macro_rules! owed {
     };
 }
 
-/// The interrupt sources only this architecture counts: none past the
-/// census's own (`irq_census`).
-macro_rules! census_sources {
-    ($list:ident) => {
-        $list! {}
-    };
-}
-pub(crate) use census_sources;
-
 pub mod acpi_mode;
 pub mod barrier;
 pub mod boot;
@@ -42,7 +33,6 @@ pub mod pio;
 pub mod pmu;
 pub mod power;
 pub mod psci;
-pub mod rtc;
 pub mod smmu;
 pub mod smp;
 pub mod switch;

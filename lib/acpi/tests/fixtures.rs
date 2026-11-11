@@ -6,9 +6,9 @@ mod common;
 use common::Machine;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    century_of, definition_blocks, dsdt_address, ecam_allocations, find_table, fixed_hardware, hpet_base,
-    isa_line, madt_entries, pm1a_control, pm_timer, psci, reset_register, rtc_century, sci_line, PmTimer,
-    Century, FixedHardware, IoApicEntry, Line, MadtEntry, Polarity, PowerButton, Psci, Reset, SmiCmd,
+    definition_blocks, dsdt_address, ecam_allocations, find_table, fixed_hardware, hpet_base,
+    isa_line, madt_entries, pm1a_control, pm_timer, psci, reset_register, sci_line, PmTimer,
+    FixedHardware, IoApicEntry, Line, MadtEntry, Polarity, PowerButton, Psci, Reset, SmiCmd,
     SourceOverride, TableError, Trigger, FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
     MADT_ENTRIES,
 };
@@ -95,14 +95,6 @@ fn the_mcfg_names_the_ecam_window_the_pci_walk_used() {
 #[test]
 fn the_hpet_table_names_the_window_the_timer_driver_mapped() {
     assert_eq!(hpet_base(machine(), RSDP), Ok(0xfed0_0000));
-}
-
-/// `ACPI: the FADT puts the RTC century register at CMOS 0x32`.
-#[test]
-fn the_fadt_names_the_century_register_the_wall_clock_read() {
-    assert_eq!(rtc_century(machine(), RSDP), Ok(Century::At(0x32)));
-    // The actuator's override is applied to the raw byte, not to the verdict.
-    assert_eq!(century_of(0), Century::Absent);
 }
 
 /// `ACPI: PM1a=0x604`, and the DSDT this boot found `\_S5_` in.

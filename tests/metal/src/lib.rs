@@ -704,6 +704,10 @@ pub const FLASHABLE: &[&str] = &[
     // kernel path reads or writes a port for that entry, so it reaches no
     // device; what it changes is that a claim on the i8042's row is refused.
     "isa-port-declared",
+    // From the clock's first report on, the sampler's readings of the HPET are
+    // 10 ms behind what the counter read. It writes no register; the clock
+    // leaves one span out and the boot goes on.
+    "hpet-stall",
     // Three nested `scheduler::Operation`s with known deadlines, in both homes,
     // each printing what it asked for and what it observed. It establishes and
     // drops them and reaches nothing else.
@@ -1690,6 +1694,10 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     }
 
     let (down, back) = driver.ride_the_reboot(wait_secs)?;
+    let back_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("this host's clock reads after 1970")
+        .as_secs();
     println!("the machine answered ssh again after {back} s");
     let began = std::time::Instant::now();
     let (loader, log_text, stopped) = driver.read_log()?;
@@ -1716,7 +1724,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let raw_log = args.fat32_check.then(|| began.elapsed().as_secs_f64());
     let phases = Phases { preamble, flash, dd_secs: installed.dd, entry, down, read_log, raw_log };
     println!("phases: {phases}");
-    let boot = BootFile { back, machine, phases }.text();
+    let boot = BootFile { back, back_at, machine, phases }.text();
     let verdict = judge_and_write_readback(&armed, &loader, &log_text, stopped, args.readback.as_deref(), &boot);
     // After the readback, so a boot that moved the order is still judged; the
     // order's refusal is the louder answer, since the next failure loops.
@@ -1950,6 +1958,9 @@ pub const READBACK_VOLUME: &str = "log-partition.img";
 
 /// The keys [`READBACK_BOOT`] carries, one `<key> <value>` per line.
 pub const BACK_SECS: &str = "back_secs";
+/// This host's clock as the machine answered `ssh` again, in Unix seconds:
+/// the boot ran in the [`BACK_SECS`] and the going down before it.
+pub const BACK_UNIX_SECS: &str = "back_unix_secs";
 
 /// The machine the boot ran on, as [`Machine::QUERY`] answered before the flash.
 pub const VENDOR_KEY: &str = "machine_vendor";
@@ -2014,16 +2025,18 @@ impl fmt::Display for Phases {
 /// machine it ran on.
 pub struct BootFile {
     pub back: u64,
+    pub back_at: u64,
     pub machine: Machine,
     pub phases: Phases,
 }
 
 impl BootFile {
     pub fn text(&self) -> String {
-        let Self { back, machine, phases } = self;
+        let Self { back, back_at, machine, phases } = self;
         let secs = |s: f64| format!("{s:.3}");
         let rows = [
             (BACK_SECS, back.to_string()),
+            (BACK_UNIX_SECS, back_at.to_string()),
             (VENDOR_KEY, machine.vendor.clone()),
             (PRODUCT_KEY, machine.product.clone()),
             (BIOS_KEY, machine.bios.clone()),
@@ -2117,6 +2130,10 @@ fn write_readback(
 /// What the host measured about a boot, out of [`READBACK_BOOT`].
 pub fn back_secs(text: &str) -> Option<u64> {
     key(text, BACK_SECS)
+}
+
+pub fn back_unix_secs(text: &str) -> Option<u64> {
+    key(text, BACK_UNIX_SECS)
 }
 
 /// The machine a readback names, or why it names none.
@@ -2363,9 +2380,10 @@ mod tests {
 
     #[test]
     fn the_machine_crosses_in_the_boot_file() {
-        let boot = BootFile { back: 47, machine: t14(), phases: phased(None) }.text();
+        let boot = BootFile { back: 47, back_at: 1_993_799_665, machine: t14(), phases: phased(None) }.text();
         assert_eq!(machine(&boot), Ok(t14()));
         assert_eq!(back_secs(&boot), Some(47));
+        assert_eq!(back_unix_secs(&boot), Some(1_993_799_665));
         assert!(machine("back_secs 47\nmachine_vendor LENOVO\n").is_err());
     }
 
@@ -2374,11 +2392,11 @@ mod tests {
     #[test]
     fn the_phases_cross_in_the_boot_file() {
         for raw_log in [Some(9.875), None] {
-            let boot = BootFile { back: 141, machine: t14(), phases: phased(raw_log) }.text();
+            let boot = BootFile { back: 141, back_at: 0, machine: t14(), phases: phased(raw_log) }.text();
             assert_eq!(phases(&boot), Ok(phased(raw_log)), "{boot}");
             assert_eq!(back_secs(&boot), Some(141));
             for line in boot.lines().filter(|line| line.contains("_secs ")) {
-                if line.starts_with(BACK_SECS) {
+                if line.starts_with(BACK_SECS) || line.starts_with(BACK_UNIX_SECS) {
                     continue;
                 }
                 let short = boot.replace(&format!("{line}\n"), "");
@@ -2386,7 +2404,7 @@ mod tests {
             }
         }
         assert!(phases("back_secs 47\n").is_err());
-        let garbled = BootFile { back: 1, machine: t14(), phases: phased(None) }
+        let garbled = BootFile { back: 1, back_at: 0, machine: t14(), phases: phased(None) }
             .text()
             .replace("flash_secs 121.500", "flash_secs later");
         assert!(phases(&garbled).is_err());

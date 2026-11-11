@@ -1,4 +1,4 @@
-//! A duration is typed by what its expiry means: [`Bound`], [`Cadence`],
+//! A duration is typed by what its expiry means: [`Cadence`],
 //! [`Tripwire`], [`Deadline`], [`Floor`], [`Budget`], [`Delay`]. No kind is
 //! constructible from a bare magnitude; every constructor takes a
 //! `&'static str` justification beside the number.
@@ -116,36 +116,6 @@ impl Deadline {
     }
 }
 
-/// The contract that says the thing will happen: sourced from a device
-/// register or a cited spec section, and its expiry means the device broke —
-/// a named error, never a retry.
-#[derive(Clone, Copy)]
-pub struct Bound {
-    limit: Duration,
-    cite: &'static str,
-}
-
-impl Bound {
-    /// A bound a specification states. `cite` is the section.
-    pub const fn from_spec(limit: Duration, cite: &'static str) -> Self {
-        Self { limit, cite }
-    }
-
-    pub const fn duration(self) -> Duration {
-        self.limit
-    }
-
-    pub const fn nanos(self) -> u64 {
-        self.limit.nanos()
-    }
-}
-
-impl fmt::Display for Bound {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.limit, self.cite)
-    }
-}
-
 /// How often a thing may be re-done, and what makes that rate affordable.
 /// Nothing expires; a `Cadence` is a rate, not a register-poll limit.
 #[derive(Clone, Copy)]
@@ -171,9 +141,9 @@ impl fmt::Display for Cadence {
 }
 
 /// A duration whose expiry is a **panic**: the machine is broken, fail fast.
-/// The argument is how long is absurd, not where the number came from — a
-/// tripwire that could be cited would be a [`Bound`]. A tripwire smaller than
-/// the largest [`Bound`] on the path it covers panics a healthy machine.
+/// The argument is how long is absurd, not where the number came from. A
+/// tripwire smaller than the longest wait a specification allows on the path
+/// it covers panics a healthy machine.
 #[derive(Clone, Copy)]
 pub struct Tripwire {
     limit: Duration,

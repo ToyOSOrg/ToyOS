@@ -2,13 +2,12 @@
 
 use core::num::NonZeroU8;
 
-use crate::{find_table, Phys, Table, TableError, SDT_REVISION};
+use crate::{Phys, Table, SDT_REVISION};
 
 /// Table 5.9 offsets, from the start of the table.
 pub(crate) const FADT_FIRMWARE_CTRL: usize = 36;
 pub const FADT_DSDT: usize = 40;
 pub const FADT_PM1A_CNT_BLK: usize = 64;
-const FADT_CENTURY: usize = 108;
 const FADT_FLAGS: usize = 112;
 /// A Generic Address Structure (§5.2.3.2): space at +0, bit width at +1, bit offset at +2, address at +4.
 const FADT_RESET_REG: usize = 116;
@@ -27,37 +26,6 @@ const RESET_REG_SUP: u32 = 1 << 10;
 const SPACE_SYSTEM_MEMORY: u8 = 0;
 const SPACE_SYSTEM_IO: u8 = 1;
 const SPACE_PCI_CONFIG: u8 = 2;
-
-/// What the FADT says about the RTC's century register.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Century {
-    /// The century field is zero: this firmware names no register.
-    Absent,
-    /// Outside CMOS RAM, so it is not a century register whatever it is.
-    OutOfRange(u8),
-    At(u8),
-}
-
-/// 0x80+ selects with NMI-mask bit 7 set; below 0x0E is the RTC's own clock/status regs, not a century register.
-pub const CMOS_RAM: core::ops::RangeInclusive<u8> = 0x0E..=0x7F;
-
-/// Which CMOS register holds the RTC's century, as the FADT names it.
-pub fn rtc_century<P: Phys>(phys: P, rsdp_addr: u64) -> Result<Century, TableError> {
-    const NEEDED: usize = FADT_CENTURY + 1;
-    let fadt = find_table(phys, rsdp_addr, b"FACP", NEEDED)?;
-    let declared = fadt
-        .byte(FADT_CENTURY)
-        .ok_or(TableError::Length { declared: fadt.len() as u32, needed: NEEDED })?;
-    Ok(century_of(declared))
-}
-
-pub fn century_of(index: u8) -> Century {
-    match index {
-        0 => Century::Absent,
-        i if CMOS_RAM.contains(&i) => Century::At(i),
-        i => Century::OutOfRange(i),
-    }
-}
 
 /// The 8-bit System I/O port the FADT names and the byte to write there, or the
 /// field that refused one — the alternative being a guessed port, and a guess

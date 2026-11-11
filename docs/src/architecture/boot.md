@@ -27,7 +27,9 @@
   (the TCG memory-overwrite request), so on firmware that defines and honours
   the request a reset leaves nothing of this boot in RAM for whoever boots
   next.
-- The hardware clock keeps UTC.
+- It reads the firmware's time once, and the kernel's wall clock counts on
+  from that reading: the kernel drives no real-time clock. The hardware clock
+  keeps UTC.
 
 ## Signed images
 

@@ -368,7 +368,7 @@ mod checks {
         const PROGRAM: &str = "[2026-11-03 22:34:24 13.800 test-runner pid=7] counters_metal settle: the log holds this first line";
         const BEFORE: &str = "[2026-11-03 22:34:23 12.094 cpu2 kernel] isa: a line before the second";
         const REFINED: &str = "[2026-11-04 06:25:59 13.700 cpu5 kernel] clock: over 1 s the TSC counted 2419185510351 mHz against the HPET, within 11437 ppb; the clock keeps CPUID 15H's 2419200000000 mHz";
-        const STEP: &str = "[2026-11-04 06:26:03 13.750 cpu12 kernel] clock: the TSC reads 1718866 ns from the chipset's counters over the last span; the RTC's edges after it will say which moved";
+        const STEP: &str = "[2026-11-04 06:26:03 13.750 cpu12 kernel] clock: TSC STEP: the TSC stepped 1718866 ns forward against the HPET and the PM timer; the clock slews it away at most 500 ppm, most of it in about 3437 ms";
         const SLEWED: &str = "[2026-11-04 06:26:03 13.760 cpu12 kernel] clock: the TSC's step is slewed away, 601 ns left";
         let log = |lines: &[&str]| lines.join("\n");
 
@@ -644,6 +644,25 @@ mod checks {
         )?;
         refused("a report that skips a CPU", &good.replace(&windows(0, (3_000_000, 1_100_000)), ""), "names cpu1 at place 0")?;
         Ok(())
+    }
+
+    /// The wall clock's row passes a boot dated in the span its host saw it
+    /// run in, and fails one the kernel anchored off the loader's reading, or
+    /// dated two hours east or a quarter of an hour west of that span.
+    #[test]
+    fn a_wall_clock_off_the_hosts_fails_its_row() {
+        const LOADER: &str = "Wall clock: firmware's GetTime reads 2026-09-29 18:22:37 UTC at counter 5000\n";
+        let boot = |anchored: &str, dated: &str| {
+            let log = format!(
+                "[{dated}  0.400 cpu0 kernel] clock: firmware's clock read {anchored} UTC\n\
+                 [{dated}  1.165 cpu0 kernel] Boot: complete (1165ms)\n"
+            );
+            metal::Readback::new("boot", LOADER.into(), log, &metal_checks::boot_file()).expect("a readback")
+        };
+        assert_eq!(wall_clock_is_firmwares(&boot("2026-09-29 18:22:37", "2026-09-29 18:22:39")), Ok(()));
+        assert!(wall_clock_is_firmwares(&boot("2026-09-29 18:22:38", "2026-09-29 18:22:39")).is_err());
+        assert!(wall_clock_is_firmwares(&boot("2026-09-29 18:22:37", "2026-09-29 20:22:39")).is_err());
+        assert!(wall_clock_is_firmwares(&boot("2026-09-29 18:22:37", "2026-09-29 18:07:39")).is_err());
     }
 
     /// A slewed step passes the clock's rows and a demotion fails them.

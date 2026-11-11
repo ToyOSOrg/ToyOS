@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 /// and [`census_sources`] refuses a line whose fields are not exactly these, so
 /// a source added on one side and not the other is a red rather than a silently
 /// dropped column.
-pub const SOURCES: [&str; 9] = ["timer", "kick", "userdev", "dmafault", "rtc", "tlb", "nmi", "spurious", "unclaimed"];
+pub const SOURCES: [&str; 8] = ["timer", "kick", "userdev", "dmafault", "tlb", "nmi", "spurious", "unclaimed"];
 
 /// Whether one line is a census line whose sources are exactly [`SOURCES`],
 /// or `None` for a line that is no census.

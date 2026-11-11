@@ -152,7 +152,7 @@ fn main() {
     // The supervisor connected before it started anything, so this is already queued.
     let from_supervisor: Connection = acceptor.accept().expect("logkeeper: the supervisor's origins connection");
 
-    // The wall clock, read once. The kernel reads the RTC once too, so a second
+    // The wall clock, read once. The kernel anchors it once too, so a second
     // reading later in the boot would answer out of the same anchor and tell
     // this program nothing new.
     let (stem, boot_secs, dated) = boot_stamp();

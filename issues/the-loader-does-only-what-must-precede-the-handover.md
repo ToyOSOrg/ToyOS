@@ -356,7 +356,7 @@ Each stage lands on its own, in this order.
 8. **The kernel arms the TCO before anything unbounded.** The loader's arm is
    the only bound today from `ExitBootServices` to `deadline::start` on
    `boot-deadline=` boots, and to `arch::watchdog::init` on the others:
-   through `mm::init`, ACPI, interrupts, HPET calibration, the RTC read, PCI
+   through `mm::init`, ACPI, interrupts, HPET calibration, PCI
    enumeration, `pcidev::publish` and `iommu::init`.
    - The kernel arms as its first act, before `mm::init`: `toyos_acpi::ecam_base`
      and the bus-0 scan `loader/src/watchdog.rs` does, through a boot map

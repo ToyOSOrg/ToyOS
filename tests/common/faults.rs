@@ -150,9 +150,9 @@ const TSC_DEMOTED: &str = "clock: DEMOTED: ";
 const DEMOTED_READS: &str = "clock: a process's reading of now asked the kernel since the TSC was demoted";
 
 /// A TSC `tsc-step` reads 10 ms ahead, and 10 ms further once the clock has
-/// slewed the first step away: the clock reports the first
-/// ([`kernel::clock::TSC_STEP_READ`]) and slews it, the second demotes the
-/// TSC, and processes' readings of now reach the kernel after it.
+/// slewed the first step away: the clock reports the first and slews it, the
+/// second demotes the TSC, and processes' readings of now reach the kernel
+/// after it.
 pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
@@ -161,13 +161,12 @@ pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), St
         BootOptions { profile: qemu::Profile::Metal, kernel_params: &["tsc-step"], ready_marker: TSC_STEP_SLEWED, ..Default::default() },
     );
     let mut serial = qemu.boot_log().to_string();
-    // A 10 ms step at 500 ppm is 20 s of slewing; the rest is the RTC's edges either side of each step.
+    // A 10 ms step at 500 ppm is 20 s of slewing.
     serial.push_str(&qemu.drain_until(std::time::Duration::from_secs(120), |l| l.contains(DEMOTED_READS) || l.contains("PANIC")));
     let lines: Vec<&str> = serial.lines().collect();
     let at = |marker: &str| lines.iter().position(|l| l.contains(marker)).ok_or_else(|| format!("no {marker:?} line\n{serial}"));
     let order = [
         at(TSC_STEP_STAGED)?,
-        at(kernel::clock::TSC_STEP_READ)?,
         at(TSC_STEP_SLEWED)?,
         at(TSC_SLEWED_AWAY)?,
         at(TSC_STEP_AGAIN)?,
@@ -177,11 +176,11 @@ pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), St
     if !order.is_sorted() || serial.contains("PANIC") {
         return Err(format!("the steps, the slew and the demotion are out of order: {order:?}\n{serial}"));
     }
-    let stepped: Option<i64> = lines[order[2]].split(TSC_STEP_SLEWED).nth(1).and_then(|r| r.split(" ns").next()).and_then(|n| n.parse().ok());
+    let stepped: Option<i64> = lines[order[1]].split(TSC_STEP_SLEWED).nth(1).and_then(|r| r.split(" ns").next()).and_then(|n| n.parse().ok());
     if !stepped.is_some_and(|ns| (9_000_000..=11_000_000).contains(&ns)) {
-        return Err(format!("the slewed step is not the staged 10 ms: {}\n{serial}", lines[order[2]].trim()));
+        return Err(format!("the slewed step is not the staged 10 ms: {}\n{serial}", lines[order[1]].trim()));
     }
-    for i in [1, 2, 5, 6] {
+    for i in [1, 4, 5] {
         eprintln!("  [tsc_step] {}", lines[order[i]].trim());
     }
     Ok(())
@@ -217,5 +216,24 @@ pub fn a_stalled_hpet_is_left_out(test_config: &Path) -> Result<(), String> {
         return Err(format!("the clock did not report again after it left the span out\n{after}"));
     }
     eprintln!("  [hpet_stall] {}", staged_then_moved.trim());
+    Ok(())
+}
+
+/// The same of a boot's whole kernel log, on a machine: the stall staged, the
+/// span left out as the HPET's, a report after it, and the TSC neither
+/// stepped nor demoted, which is what a PM timer that did not tell the two
+/// apart would leave.
+pub fn stalled_hpet_left_out(log: &str) -> Result<(), String> {
+    let staged = log
+        .find(HPET_STALL_STAGED)
+        .ok_or_else(|| format!("no {HPET_STALL_STAGED:?}: the boot was not armed, or ended before the clock's first report staged it"))?;
+    let moved = log[staged..].find(HPET_MOVED).map(|at| staged + at).ok_or_else(|| format!("no {HPET_MOVED:?} after the stall"))?;
+    if !log[moved..].contains(CLOCK_REPORT) {
+        return Err("the clock did not report again after it left the span out".to_string());
+    }
+    if let Some(line) = log.lines().find(|line| line.contains(TSC_STEP_SLEWED) || line.contains(TSC_DEMOTED)) {
+        return Err(format!("the stall was read as the TSC's: {}", line.trim()));
+    }
+    eprintln!("  [hpet_stall] {}", log[moved..].lines().next().unwrap_or_default().trim());
     Ok(())
 }

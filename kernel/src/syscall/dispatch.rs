@@ -193,8 +193,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_SET_THREAD_POINTER => sys_set_thread_pointer(a1),
         SYS_THREAD_JOIN => sys_thread_join(a1),
         SYS_YIELD => sys_yield(),
-        // Answers from the boot-time anchor, never the CMOS: NotSupported beats a
-        // 1970-epoch number a caller cannot tell from real time.
+        // NotSupported beats a 1970-epoch number a caller cannot tell from real time.
         SYS_CLOCK_EPOCH => {
             crate::clock::utc_secs().unwrap_or(SyscallError::NotSupported.to_u64())
         }

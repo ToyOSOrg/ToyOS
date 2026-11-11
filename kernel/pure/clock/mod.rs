@@ -13,16 +13,15 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 /// by the first scheduler pass after each doubling span.
 pub const TSC_REFINED: &str = "clock: over ";
 
-/// What opens the kernel's report of a span in which the TSC moved apart from
-/// the chipset's counters (`clock: the TSC reads <n> ns from the chipset's
-/// counters ...`): the clock's word on a step the machine made, written as
-/// the sampler finds it.
-pub const TSC_STEP_READ: &str = "clock: the TSC reads ";
+/// What opens the kernel's report of a span in which the TSC stepped against
+/// the chipset's counters (`clock: TSC STEP: the TSC stepped <n> ns ...`),
+/// written as the sampler finds it.
+pub const TSC_STEP: &str = "clock: TSC STEP: ";
 
 /// Unix seconds at boot, from a reading of `secs` true when the clock read
-/// `at`, which is after boot where the kernel read the wall clock and before
-/// it where the loader did; both are stamps, nanoseconds since the counter's
-/// zero. Only the whole seconds between the two move the answer.
+/// `at`, which is before boot where the loader took it; both are stamps,
+/// nanoseconds since the counter's zero. Only the whole seconds between the
+/// two move the answer.
 pub const fn anchor(secs: u64, at: u64, boot: u64) -> u64 {
     if at >= boot {
         secs.saturating_sub((at - boot) / NANOS_PER_SEC)

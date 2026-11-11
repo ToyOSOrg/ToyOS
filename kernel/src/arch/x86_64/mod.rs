@@ -5,21 +5,9 @@
 //! [`percpu`] owns every `gs:` access; nothing outside this directory writes one.
 //!
 //! The PC platform's own devices live here too, because no other architecture
-//! has them: the I/O APIC, the CMOS RTC, the chipset's watchdog, VT-d and
+//! has them: the I/O APIC, the chipset's watchdog, VT-d and
 //! AMD-Vi. Generic code reaches each through the concept it serves
 //! (`watchdog`, `iommu_unit`, …), never by its name.
-
-/// The interrupt sources only this architecture counts, handed to the
-/// census's list (`irq_census`).
-macro_rules! census_sources {
-    ($list:ident) => {
-        $list! {
-            /// Vector 0x26, the RTC's update-ended interrupt, once a second.
-            Rtc => "rtc",
-        }
-    };
-}
-pub(crate) use census_sources;
 
 pub mod acpi_mode;
 pub mod amdvi;
@@ -50,7 +38,6 @@ pub mod percpu;
 pub mod pio;
 pub mod pmu;
 pub mod power;
-pub mod rtc;
 pub mod smi_cmd;
 pub mod smp;
 pub mod switch;
