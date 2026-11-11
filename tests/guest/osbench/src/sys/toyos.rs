@@ -102,9 +102,6 @@ pub fn huge_backing() -> String {
     "0KiB".into()
 }
 
-/// # Safety
-/// `ptr` and `len` are one whole mapping from [`map_anon`], and nothing
-/// reaches it afterwards.
 /// `len` bytes of the file at `path` from its start, mapped read-only and
 /// shared: its file server's own cached pages.
 pub fn map_file(path: &std::path::Path, len: usize) -> Result<*mut u8, String> {
@@ -120,6 +117,9 @@ pub fn map_file(path: &std::path::Path, len: usize) -> Result<*mut u8, String> {
     mapped.map_err(|e| format!("map: {e:?}"))
 }
 
+/// # Safety
+/// `ptr` and `len` are one whole mapping from [`map_anon`] or
+/// [`map_file`], and nothing reaches it afterwards.
 pub unsafe fn unmap(ptr: *mut u8, len: usize) {
     // SAFETY: as the caller promises.
     unsafe { syscall::vm_release(ptr, len) }.expect("vm_release of a whole mapping");

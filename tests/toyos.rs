@@ -665,6 +665,12 @@ const MACHINE_TESTS: &[MachineTest] = &[
     // endowments a job gets is the image's and the supervisor's, which no
     // host build has, and the benches run osbench only nightly.
     ("osbench_capability_groups_exit_0", |_| osbench_capability_groups_exit_0()),
+    // `osbench map` on tests/images/benchcase.toml with only that job: its
+    // rows over a mapped file, eight threads faulting one mapping and 255
+    // processes holding one while it is truncated, each measured or refused
+    // by name. Whether they measure correctly is a guest's to say; what they
+    // measure is owed on metal (the memory track record).
+    ("osbench_map_group_exits_0", |_| osbench_map_group_exits_0()),
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the
     // firmware's tables, to COM1, to `PM1a_CNT`, to a function's configuration
@@ -3460,6 +3466,32 @@ fn osbench_capability_groups_exit_0() -> Result<(), String> {
     Ok(())
 }
 
+/// `osbench map` on tests/images/benchcase.toml alone: it exits 0, which it
+/// does only once every row it ran measured, and says each row's name.
+fn osbench_map_group_exits_0() -> Result<(), String> {
+    const JOB: &str = "osbench_map";
+    let committed = compile::repo_root().join("tests/images/benchcase.toml");
+    let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
+    let derived = toyos_metal::image::derive(&text, 600_000, &[JOB], &[]).map_err(|why| why.to_string())?;
+    let config = common::lane::dir().join("osbench-map-group.toml");
+    fs::write(&config, derived).map_err(|e| format!("{}: {e}", config.display()))?;
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        &[],
+        &[],
+        BootOptions { ready_marker: bootlog::COMPLETE, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    let end = format!("===TEST_END {JOB} ");
+    await_guest(&mut qemu, &mut console, "osbench's map group to end", |said| said.contains(&end))?;
+    let said = serial::Serial::named("osbench map", console);
+    said.must_say(&format!("===TEST_END {JOB} exit=0==="))?;
+    for row in ["touch_16m", "threads_touch_16m", "read_4k", "truncate_255"] {
+        said.must_say(&format!(".{row} unit="))?;
+    }
+    Ok(())
+}
+
 /// Boot the image `--console-boot` builds, on the machine shape with a panel
 /// for `/system/bin/console` to claim, and wait for what that image owes at
 /// boot: the console up on its panel, having read the log and the keyboard,
@@ -3600,7 +3632,7 @@ const MAPPED_FILE_SAID: &[&str] = &[
     "mapprobe: a range taken away under a parked thread is nothing when its page comes",
     "mapprobe: a kill ends a thread parked in its fault or in a copy, and the copy's write wrote nothing",
     "mapprobe: a touched hole is a zeroed page of the pager's, and none where it has no room",
-    "mapprobe: a page the object shrank past is nothing to its mapper",
+    "mapprobe: a touch of a page the object shrank past ends its mapper as SIGBUS",
     "mapprobe: a pager's end answers a write from its page Io, and ends its mapper at the next touch",
     "mapped_file: a mapped paged object follows its pager",
 ];
@@ -3623,10 +3655,13 @@ fn a_mapped_file_follows_its_pager(test_config: &Path) -> Result<(), String> {
     if let Some(claim) = MAPPED_FILE_SAID.iter().find(|claim| !result.stdout.contains(*claim)) {
         return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
     }
-    for report in ["'s pager has a read overdue: object ", "'s pager has no read overdue"] {
-        if !result.serial.contains(report) {
-            return Err(format!("the kernel never said {report:?}:\n{}", result.serial));
-        }
+    // The probe's own stalled run, pages 16 to 32, not any pager's slow read.
+    let overdue = |line: &str| line.contains("'s pager has a read overdue: object ") && line.contains(" pages 16+16, ");
+    if !result.serial.lines().any(overdue) {
+        return Err(format!("the kernel never said the probe's run was overdue:\n{}", result.serial));
+    }
+    if !result.serial.contains("'s pager has no read overdue") {
+        return Err(format!("the kernel never said the overdue wait ended:\n{}", result.serial));
     }
     Ok(())
 }
