@@ -273,7 +273,10 @@ impl Drop for FutexWait {
 
 /// A futex word's frame as a hold of its space's lock found it, borrowed from
 /// the wait that counts it. Not a lease: nothing pins the frame, and a
-/// sibling's `munmap` can free it under a parked wait.
+/// sibling's `munmap` can free it under a parked wait. A mapped file's frame
+/// goes back only after its pager's walk: each visit counts its clear, so
+/// [`holds`](Self::holds) looks at the leaf again, and the walk's sweep ends
+/// the waits keyed on the frame before it is reissued.
 pub struct Translation<'w> {
     space: &'w Space,
     va: u64,
@@ -558,9 +561,12 @@ impl AddressSpace {
     /// One batch of a walk's visit of `node`'s object ([`MapNode`]): every
     /// leaf of this space's ranges of it that maps one of `revoking`'s
     /// `(page, frame)` is cleared, and the span shot down, under this space's
-    /// lock alone. The walk ends the futex waits on those frames once every
-    /// mapper is visited, before any goes back. A fault meanwhile waits on
-    /// this space's lock and then finds the page as the index has it.
+    /// lock alone. The shootdown is counted ([`Translation::holds`]), so a
+    /// futex wait that translated before the clear looks at its leaf again
+    /// and does not arm on a frame the walk goes on to give back; the walk
+    /// ends the waits already keyed on those frames once every mapper is
+    /// visited. A fault meanwhile waits on this space's lock and then finds
+    /// the page as the index has it.
     pub fn clear_paged(&mut self, node: &MapNode, revoking: &[(u64, u64)]) {
         let (mut lo, mut hi) = (u64::MAX, 0);
         let tables = &mut self.tables;
@@ -581,7 +587,7 @@ impl AddressSpace {
             }
         }
         if lo < hi {
-            let _reached = tables.shoot_down(lo, hi, &Unlinked::none());
+            self.shoot_down(lo, hi, &Unlinked::none());
         }
     }
 

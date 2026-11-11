@@ -1108,8 +1108,7 @@ mod tests {
 
     use super::*;
 
-
-    /// No space maps anything: a walk ends at its first step.
+    /// No space maps anything.
     struct Unmapped;
 
     impl Mappers for Unmapped {
@@ -1944,14 +1943,18 @@ mod tests {
             Answer,
             /// Every parked fault looks at its page again.
             Retry,
-            /// A thread of space `s` waits on a futex word in `page`, keyed on
-            /// the frame its leaf maps; only a sweep ends the wait, since a
-            /// visit or an unmap clears a leaf and revokes no frame it does
-            /// not own.
-            Wait(u32, u64),
+            /// A thread of space `s` begins a futex wait on a word in `page`:
+            /// it translates the word to the frame its leaf maps, under the
+            /// space's lock, and notes the space's count of changes.
+            Translate(u32, u64),
+            /// That thread arms its wait, keyed on the frame: where the count
+            /// has not moved it trusts the translation, and otherwise looks
+            /// at the leaf again. Only a sweep ends the wait, since a visit or
+            /// an unmap clears a leaf and revokes no frame it does not own.
+            Arm,
         }
 
-        pub(super) const STEPS: [Step; 24] = [
+        pub(super) const STEPS: [Step; 25] = [
             Step::Map(0),
             Step::Map(1),
             Step::Unmap(0),
@@ -1974,8 +1977,9 @@ mod tests {
             Step::Report,
             Step::Answer,
             Step::Retry,
-            Step::Wait(0, 0),
-            Step::Wait(1, 1),
+            Step::Translate(0, 0),
+            Step::Translate(1, 1),
+            Step::Arm,
         ];
 
         pub(super) struct World {
@@ -1994,6 +1998,11 @@ mod tests {
             sweeping: Option<Cursor>,
             /// The frames a futex waiter is keyed on.
             futex: BTreeSet<u64>,
+            /// Each space's count of the leaf changes it shot down.
+            counted: [u64; 2],
+            /// A futex wait translated and not yet armed: its space, page,
+            /// frame and the count it read.
+            translated: Option<(u32, u64, u64, u64)>,
             /// Faults parked on an absent page: the space, the page, and the
             /// request as the pager hears of it.
             parked: std::vec::Vec<(u32, u64, Want, Version)>,
@@ -2028,6 +2037,8 @@ mod tests {
                     visiting: None,
                     sweeping: None,
                     futex: BTreeSet::new(),
+                    counted: [0; 2],
+                    translated: None,
                     parked: std::vec::Vec::new(),
                     asked: std::collections::VecDeque::new(),
                 }
@@ -2042,6 +2053,7 @@ mod tests {
                     }
                     Step::Unmap(s) if self.mapped[s as usize] => {
                         self.leaves[s as usize] = [None; 2];
+                        self.counted[s as usize] += 1;
                         let at = self.ring.0.iter().position(|&(n, _)| n == s).expect("linked while mapped");
                         self.ring.0.remove(at);
                         self.mapped[s as usize] = false;
@@ -2101,8 +2113,16 @@ mod tests {
                             self.sweeping = Some(at);
                         }
                     }
-                    Step::Wait(s, page) if self.mapped[s as usize] && self.leaves[s as usize][page as usize].is_some() => {
-                        self.futex.insert(self.leaves[s as usize][page as usize].unwrap());
+                    Step::Translate(s, page) if self.translated.is_none() && self.mapped[s as usize] && self.leaves[s as usize][page as usize].is_some() => {
+                        let f = self.leaves[s as usize][page as usize].unwrap();
+                        self.translated = Some((s, page, f, self.counted[s as usize]));
+                    }
+                    Step::Arm if self.translated.is_some() => {
+                        let (s, page, f, at) = self.translated.take().unwrap();
+                        let holds = self.counted[s as usize] == at || self.leaves[s as usize][page as usize] == Some(f);
+                        if holds {
+                            self.futex.insert(f);
+                        }
                     }
                     Step::Report => {
                         let before = self.asked.len();
@@ -2155,6 +2175,9 @@ mod tests {
                             let (page, f) = batch[0];
                             if self.leaves[s as usize][page as usize] == Some(f) {
                                 self.leaves[s as usize][page as usize] = None;
+                                // The visit's shootdown is counted, as an
+                                // unmap's is.
+                                self.counted[s as usize] += 1;
                             }
                             self.visiting = Some((s, at));
                         }
@@ -2253,6 +2276,32 @@ mod tests {
         assert!(played > 20_000, "only {played} sequences played");
     }
 
+    /// A futex wait that translated its word before a walk's visit cleared
+    /// the leaf, and arms only after the walk's sweep, does not arm on the
+    /// frame the walk then gives back: the visit's shootdown is counted, so
+    /// the arm looks at the leaf again.
+    #[test]
+    fn a_wait_translated_before_a_visit_does_not_arm_on_a_frame_given_back() {
+        use mapped::Step;
+        let steps = [
+            Step::Map(0),
+            Step::Supply(0),
+            Step::Supply(1),
+            Step::Fault(0, 0),
+            Step::Translate(0, 0),
+            Step::Withdraw(0),
+            Step::Walk,
+            Step::Visit,
+            Step::Visit,
+            Step::Walk,
+            Step::Sweep,
+            Step::Sweep,
+            Step::Arm,
+            Step::Walk,
+        ];
+        play(&steps).expect("every step is taken").drain(&steps);
+    }
+
     /// From a futex waiter an unmap left keyed on a frame and a walk begun
     /// with no mapper left, every sequence of five steps gives back no frame
     /// a waiter is keyed on: a page marked while the sweep has its lock
@@ -2265,7 +2314,8 @@ mod tests {
             Step::Supply(0),
             Step::Supply(1),
             Step::Fault(0, 0),
-            Step::Wait(0, 0),
+            Step::Translate(0, 0),
+            Step::Arm,
             Step::Unmap(0),
             Step::Withdraw(1),
             Step::Walk,
