@@ -366,10 +366,12 @@ pub(crate) mod owner {
     static PENDING: [Held; 2] = [Held::new(Stream::Out), Held::new(Stream::Err)];
     /// Held by the one thread asking a descriptor or forgetting an answer.
     static ASKING: Lock<()> = Lock::new(());
-    /// The thread asking, 0 for none: its own write meanwhile, the message of
-    /// a panic under the ask, goes to the descriptor rather than waiting on
-    /// itself.
-    static ASKER: AtomicU32 = AtomicU32::new(0);
+    /// The thread asking, [`NO_ASKER`] for none: its own write meanwhile, the
+    /// message of a panic under the ask, goes to the descriptor rather than
+    /// waiting on itself.
+    static ASKER: AtomicU32 = AtomicU32::new(NO_ASKER);
+    /// The one tid the kernel never issues; a main thread's is 0.
+    const NO_ASKER: u32 = toyos_abi::Tid::MAX.0;
     /// This process's pid, asked once with the first ring: a record carries
     /// it and a write makes no syscall.
     static PID: AtomicU32 = AtomicU32::new(0);
@@ -405,7 +407,7 @@ pub(crate) mod owner {
                 struct Asker;
                 impl Drop for Asker {
                     fn drop(&mut self) {
-                        ASKER.store(0, Ordering::Relaxed);
+                        ASKER.store(NO_ASKER, Ordering::Relaxed);
                     }
                 }
                 ASKER.store(tid, Ordering::Relaxed);
