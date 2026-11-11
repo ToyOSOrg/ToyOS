@@ -689,7 +689,7 @@ pub fn last_armed_ticks() -> u32 {
 }
 
 /// Whether the scheduler's one-shot is armed and its interrupt not yet taken; `arch::apic` is the only writer.
-pub fn set_timer_pending(pending: bool) {
+pub(super) fn set_timer_pending(pending: bool) {
     gs::write_u8::<OFF_TIMER_PENDING>(u8::from(pending));
 }
 

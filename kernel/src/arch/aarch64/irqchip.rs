@@ -495,8 +495,12 @@ fn stop_timer_hardware() {
 
 /// This CPU's timer, armed to fire `nanos` from now, or after [`MIN_ONE_SHOT`] if that is longer.
 pub fn arm_one_shot(nanos: u64) {
-    arm_ticks(crate::clock::counter_ticks(nanos));
+    // Before the write, and held there against the `nomem` comparator write: a
+    // fire taken between the two then clears it, and the next pass writes again
+    // rather than trusting a quantum's re-arm.
     percpu::set_timer_pending(true);
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    arm_ticks(crate::clock::counter_ticks(nanos));
     crate::trace::trace(crate::trace::Kind::TimerArm, nanos as u32);
 }
 

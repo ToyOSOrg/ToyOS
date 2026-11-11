@@ -379,8 +379,10 @@ impl OneShot {
 
 /// Arm a one-shot timer to fire after `nanos` nanoseconds, or after [`MIN_ONE_SHOT`] if that is longer.
 pub fn arm_one_shot(nanos: u64) {
-    OneShot::after(nanos).arm();
+    // Before the write: a fire taken between the two then clears it, and the
+    // next pass writes again rather than trusting a quantum's re-arm.
     percpu::set_timer_pending(true);
+    OneShot::after(nanos).arm();
     crate::trace::trace(crate::trace::Kind::TimerArm, nanos as u32);
 }
 
