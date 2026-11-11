@@ -221,6 +221,7 @@ fn main() {
     match command {
         "all" => return all(),
         "nop" => return,
+        "hello" => return println!("hello"),
         "spin" => return wake::spin(),
         "fair-job" => return fair::job(rest),
         "fair-helper" => return fair::helper(rest),
