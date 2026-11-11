@@ -5028,6 +5028,20 @@ mod tests {
         w.abandon();
     }
 
+    /// A pass takes an ask once: the word it found set is left empty, and the
+    /// next take finds nothing.
+    #[test]
+    fn a_taken_ask_is_gone() {
+        let w = World::new(2);
+        let victim = w.handles.get(C0);
+        let _ = victim.ask(C1);
+        victim.doorbell().begin_pass();
+        assert_eq!(victim.take_asks()[0], 1 << C1.0, "the ask is taken");
+        assert!(!victim.asked_by(C1));
+        assert_eq!(victim.take_asks(), [0; MASK_WORDS], "and taken once");
+        w.abandon();
+    }
+
     /// **An idle CPU arms exactly**: a pending one-shot due before the
     /// deadline it parks with is not left to wake it early.
     #[test]
