@@ -1297,6 +1297,8 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // Measurement only, never lands: the wakeperf request A/B's groups, base and head alike.
+    ("wakeperf_ab3", metal::Metal { arms: WAKEPERF_AB3, judge: |b| osbench_ran(b[0], &WAKEPERF_GROUPS3) }),
     (
         // `osbench energy`: the package's power, idle and under defined loads,
         // compared with the same program as root under the bench's Linux. A
@@ -1907,6 +1909,13 @@ const OSBENCH_GROUPS: [&str; 16] = [
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
     adds_ms: 465_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
+}];
+
+const WAKEPERF_GROUPS3: [&str; 3] = ["osbench_sched", "osbench_fair", "osbench_time"];
+const WAKEPERF_AB3: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 240_000,
+    named_only: true,
+    ..metal::once("wakeperfab3", "tests/images/benchcase.toml", &[], &WAKEPERF_GROUPS3)
 }];
 
 /// `energy` waits up to 120 s for the machine to go quiet, then measures 60 s
