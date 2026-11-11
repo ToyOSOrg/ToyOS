@@ -42,11 +42,13 @@
 //! the copy.
 //!
 //! **A server that ends is survivable and not invisible.** [`Dir`] connects
-//! again through the same connector — the supervisor keeps a file server's ports open
-//! across its restart — and counts its connections in a generation. A file id
-//! from an earlier generation names nothing on the new connection. Nothing
-//! here keeps a write the server acknowledged and never made durable: that is
-//! what `Fsync` is for.
+//! again through the same connector — the supervisor keeps a file server's
+//! ports open across its restart — lends the new connection a window of its
+//! own, and counts its connections in a generation. A file id from an earlier
+//! generation names nothing on the new connection. A server that answers
+//! nothing for [`REPLY_BOUND_NS`] while a reply is owed is let go as one that
+//! ended. Nothing here keeps a write the server acknowledged and never made
+//! durable: that is what `Fsync` is for.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -67,22 +69,9 @@ use flight::{Flight, Taken};
 /// What [`flight`] is built on: the SDK's futex and lock, which `kernel-loom`
 /// swaps for loom's.
 mod flight_prim {
-    pub use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    pub use core::sync::atomic::{AtomicU32, Ordering};
 
     pub(crate) use crate::sync::{wait, wake_all, wake_one, Lock};
-
-    /// A cell its users reach through a raw pointer, as loom's is reached.
-    pub struct Cell<T>(core::cell::UnsafeCell<T>);
-
-    impl<T> Cell<T> {
-        pub fn new(value: T) -> Self {
-            Self(core::cell::UnsafeCell::new(value))
-        }
-
-        pub fn with_mut<R>(&self, f: impl FnOnce(*mut T) -> R) -> R {
-            f(self.0.get())
-        }
-    }
 }
 
 /// What a directory capability's service name begins with.
@@ -390,6 +379,9 @@ errors! {
         NotHeld = 0x81,
         /// The server answered something this protocol does not say.
         Malformed = 0x82,
+        /// The server answered nothing within [`REPLY_BOUND_NS`] while a reply
+        /// was owed: the connection is let go, as one that ended.
+        Unanswered = 0x83,
     }
 }
 
@@ -793,7 +785,6 @@ type Answered = (u32, Reply, crate::ipc::Batch);
 /// own share of the window ([`flight`]).
 pub struct Dir {
     source: Source,
-    window: SharedMemory,
     /// The connection requests go out on: `None` once it ended, until the
     /// next request connects again.
     link: Lock<Option<Arc<Link>>>,
@@ -804,10 +795,12 @@ pub struct Dir {
     flight: Flight<Answered, Error>,
 }
 
-/// One connection, which requests in flight on it keep open after a newer
-/// one replaced it.
+/// One connection and the window it was lent, which requests in flight on it
+/// keep after a newer one replaced it: a server still writing a request it was
+/// let go with writes this window, never a newer connection's.
 struct Link {
     conn: Connection,
+    window: SharedMemory,
     generation: u64,
     /// Whether its grant lets this process change what it names.
     writable: bool,
@@ -842,7 +835,7 @@ impl Dir {
     /// Connect to the directory capability `connector`, which this process
     /// holds for its life: [`Error::NotHeld`] for one it may only pass on.
     pub fn connect(connector: crate::BorrowedHandle<'static>) -> Result<Self, Error> {
-        let dir = Self::unconnected(Source::Held(connector))?;
+        let dir = Self::unconnected(Source::Held(connector));
         dir.connection()?;
         Ok(dir)
     }
@@ -857,22 +850,14 @@ impl Dir {
     /// 1.. in the order exported. It names no path, and is not connected again
     /// once it has ended.
     pub fn adopt(conn: Connection) -> Result<Self, Error> {
-        let dir = Self::unconnected(Source::Exported)?;
+        let dir = Self::unconnected(Source::Exported);
         let link = dir.attach(conn)?;
         *dir.link.lock() = Some(Arc::new(link));
         Ok(dir)
     }
 
-    fn unconnected(source: Source) -> Result<Self, Error> {
-        let window = SharedMemory::create(WINDOW_BYTES).map_err(|e| Error::kernel("a window", e))?;
-        Ok(Self {
-            source,
-            window,
-            link: Lock::new(None),
-            connecting: Lock::new(()),
-            generation: AtomicU64::new(0),
-            flight: Flight::new(),
-        })
+    fn unconnected(source: Source) -> Self {
+        Self { source, link: Lock::new(None), connecting: Lock::new(()), generation: AtomicU64::new(0), flight: Flight::new() }
     }
 
     /// Counts this directory's connections; a file id is good only on the one
@@ -914,11 +899,12 @@ impl Dir {
         self.attach(conn)
     }
 
-    /// Lend `conn` the window: the connection to serve on.
+    /// Lend `conn` a window of its own: the connection to serve on.
     fn attach(&self, conn: Connection) -> Result<Link, Error> {
-        let reply = hello(&conn, &self.window)?;
+        let window = SharedMemory::create(WINDOW_BYTES).map_err(|e| Error::kernel("a window", e))?;
+        let reply = hello(&conn, &window)?;
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        Ok(Link { conn, generation, writable: reply.value & RIGHT_WRITE != 0 })
+        Ok(Link { conn, window, generation, writable: reply.value & RIGHT_WRITE != 0 })
     }
 
     /// No request goes out on `link` again: one that ended, or whose server
@@ -1260,7 +1246,7 @@ impl Ticket<'_> {
     /// This request's share of the window.
     fn window(&self) -> Bytes<'_> {
         let at = self.taken.first() * SLOT_BYTES;
-        self.dir.window.bytes().sub(at, self.taken.count() * SLOT_BYTES)
+        self.link.window.bytes().sub(at, self.taken.count() * SLOT_BYTES)
     }
 
     /// `fid`'s id on this request's connection, or [`Error::Stale`] for one
@@ -1292,9 +1278,8 @@ impl Ticket<'_> {
         let answered = conn.send(op, &request).map_err(transport).and_then(|()| {
             let receive = || {
                 let mut rx = FrameRx::<{ core::mem::size_of::<Reply>() }>::new();
-                let frame = rx.recv(conn).map_err(transport)?;
-                let reply: Reply = crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(transport)?;
-                Ok((reply.tag, (frame.msg_type, reply, rx.take_batch())))
+                let (msg_type, reply) = next_reply(conn, &mut rx)?;
+                Ok((reply.tag, (msg_type, reply, rx.take_batch())))
             };
             self.dir.flight.answer(self.taken, receive, Error::Malformed)
         });
@@ -1475,9 +1460,27 @@ fn hello(conn: &Connection, window: &SharedMemory) -> Result<Reply, Error> {
         Err(e) => return Err(e),
     }
     let mut rx = FrameRx::<{ core::mem::size_of::<Reply>() }>::new();
+    let (msg_type, reply) = next_reply(conn, &mut rx)?;
+    answer(msg_type, reply)
+}
+
+/// How long a client waits for the next reply it is owed before it takes its
+/// server for hung: a hang's bound, never an answer's expected time. A
+/// request's own work ends in the server's disk requests, each answered or
+/// refused within the disk service's minute, and in its turns behind every
+/// other connection's one request; five minutes is past any such sum on a
+/// machine whose server still answers.
+pub const REPLY_BOUND_NS: u64 = 300_000_000_000;
+
+/// The next reply frame on `conn`, into `rx`: its frame type and words,
+/// [`Error::Unanswered`] for none within [`REPLY_BOUND_NS`].
+fn next_reply<const MAX: usize>(conn: &Connection, rx: &mut FrameRx<MAX>) -> Result<(u32, Reply), Error> {
+    if !crate::poller::wait_one(conn, crate::poller::READABLE, REPLY_BOUND_NS).map_err(|e| Error::kernel("a reply's wait", e))? {
+        return Err(Error::Unanswered);
+    }
     let frame = rx.recv(conn).map_err(transport)?;
     let reply = crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(transport)?;
-    answer(frame.msg_type, reply)
+    Ok((frame.msg_type, reply))
 }
 
 /// A connection's transport refused, as the protocol names it.

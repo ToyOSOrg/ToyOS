@@ -101,6 +101,7 @@ pub fn served_error(e: toyos::fs::Error) -> crate::io::Error {
         Error::Gone => io::const_error!(Kind::StaleNetworkFileHandle, "the file server is gone"),
         Error::NotHeld => io::const_error!(Kind::NotFound, "this process holds no such directory"),
         Error::Malformed => io::const_error!(Kind::InvalidData, "the file server answered outside its protocol"),
+        Error::Unanswered => io::const_error!(Kind::TimedOut, "the file server answered nothing while a reply was owed"),
     }
 }
 

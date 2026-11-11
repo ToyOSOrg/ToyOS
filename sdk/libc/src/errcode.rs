@@ -144,5 +144,6 @@ fn of_served(e: toyos::fs::Error) -> i32 {
         Error::Stale | Error::Gone => ESTALE,
         Error::Unsupported => EOPNOTSUPP,
         Error::OutOfResources => ENOMEM,
+        Error::Unanswered => ETIMEDOUT,
     }
 }

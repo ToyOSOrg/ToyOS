@@ -268,28 +268,17 @@ pub mod sched;
 pub mod sched_model;
 
 /// What a file server connection's requests in flight are built on, as loom's:
-/// its atomics, cells and lock, and the futex. A wait sleeps, as the kernel's
-/// does, only while its word still says what the waiter saw, checked under
-/// the lock a wake takes after its store; every wake wakes every sleeper,
-/// which a futex allows as spurious returns. A waiter nobody wakes is then
-/// loom's deadlock, not a spin.
+/// its atomics and lock, and the futex. A wait sleeps only while its word
+/// still says what the waiter saw, checked under the lock a wake takes after
+/// its store, and returns only once that word is woken, as the kernel's futex
+/// wakes only a waiter of the word posted to: a wake the protocol leaves out
+/// is loom's deadlock.
 #[cfg(feature = "loom")]
 pub mod flight_prim {
-    pub use loom::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::collections::HashMap;
+
+    pub use loom::sync::atomic::{AtomicU32, Ordering};
     use loom::sync::{Condvar, Mutex};
-
-    /// Loom's cell, reached as the SDK's is.
-    pub struct Cell<T>(loom::cell::UnsafeCell<T>);
-
-    impl<T> Cell<T> {
-        pub fn new(value: T) -> Self {
-            Self(loom::cell::UnsafeCell::new(value))
-        }
-
-        pub fn with_mut<R>(&self, f: impl FnOnce(*mut T) -> R) -> R {
-            self.0.with_mut(f)
-        }
-    }
 
     pub struct Lock<T>(Mutex<T>);
 
@@ -303,19 +292,28 @@ pub mod flight_prim {
         }
     }
 
+    /// Wakes counted by the word's address.
     struct Futex {
-        lock: Mutex<()>,
+        wakes: Mutex<HashMap<usize, u64>>,
         woken: Condvar,
     }
 
     loom::lazy_static! {
-        static ref FUTEX: Futex = Futex { lock: Mutex::new(()), woken: Condvar::new() };
+        static ref FUTEX: Futex = Futex { wakes: Mutex::new(HashMap::new()), woken: Condvar::new() };
+    }
+
+    fn address(word: &AtomicU32) -> usize {
+        word as *const AtomicU32 as usize
     }
 
     pub fn wait(word: &AtomicU32, expected: u32) {
-        let held = FUTEX.lock.lock().unwrap();
-        if word.load(Ordering::SeqCst) == expected {
-            drop(FUTEX.woken.wait(held).unwrap());
+        let mut wakes = FUTEX.wakes.lock().unwrap();
+        if word.load(Ordering::SeqCst) != expected {
+            return;
+        }
+        let seen = wakes.get(&address(word)).copied().unwrap_or(0);
+        while wakes.get(&address(word)).copied().unwrap_or(0) == seen {
+            wakes = FUTEX.woken.wait(wakes).unwrap();
         }
     }
 
@@ -323,8 +321,8 @@ pub mod flight_prim {
         wake_all(word);
     }
 
-    pub fn wake_all(_: &AtomicU32) {
-        let _held = FUTEX.lock.lock().unwrap();
+    pub fn wake_all(word: &AtomicU32) {
+        *FUTEX.wakes.lock().unwrap().entry(address(word)).or_insert(0) += 1;
         FUTEX.woken.notify_all();
     }
 }
