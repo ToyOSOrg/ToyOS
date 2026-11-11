@@ -4,7 +4,7 @@ use toyos::log::stdio::{self as log_stdio, Stream};
 use toyos_abi::syscall::{self, FileType};
 
 use crate::io::{self, IoSlice, IoSliceMut};
-use crate::sys::{files_error, on_fd};
+use crate::sys::{failed, on_fd};
 
 /// Standard input's descriptor.
 const STDIN: i32 = 0;
@@ -40,7 +40,7 @@ static mut LINE_BUF: LineBuf = LineBuf { buf: [0; LINE_BUF_CAP], len: 0, pos: 0 
 fn read_stdin(buf: &mut [u8]) -> io::Result<usize> {
     match toyos::files::read(STDIN, buf) {
         Err(toyos::files::Error::Fd(toyos::fd::Error::BadFd)) => Ok(0),
-        read => read.map_err(files_error),
+        read => read.map_err(failed),
     }
 }
 
@@ -166,7 +166,7 @@ impl Stdout {
 
 impl io::Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        log_stdio::write(Stream::Out, buf).map_err(files_error)
+        log_stdio::write(Stream::Out, buf).map_err(failed)
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -195,7 +195,7 @@ impl Stderr {
 
 impl io::Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        log_stdio::write(Stream::Err, buf).map_err(files_error)
+        log_stdio::write(Stream::Err, buf).map_err(failed)
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {

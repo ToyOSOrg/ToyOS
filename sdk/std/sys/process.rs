@@ -453,7 +453,7 @@ impl Command {
         };
         let held_image = match &self.held_image {
             None => None,
-            Some(Ok(image)) => Some(image.try_clone().map_err(crate::sys::to_io_error)?),
+            Some(Ok(image)) => Some(image.try_clone().map_err(crate::sys::failed)?),
             Some(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
         };
         let image_held = prepared_image.is_some() || held_image.is_some();
@@ -467,7 +467,7 @@ impl Command {
             _ if self.independent => None,
             (Some(image), _) => Some(image),
             (None, Some(handle)) => Some(toyos::process::Image::held(handle).map_err(|why| match why {
-                toyos::process::NotHeld::Kernel(e) => crate::sys::to_io_error(e),
+                toyos::process::NotHeld::Kernel(e) => crate::sys::failed(e),
                 toyos::process::NotHeld::NotMemory => {
                     io::const_error!(io::ErrorKind::InvalidInput, "the image is no memory region")
                 }
@@ -522,7 +522,7 @@ impl Command {
         // What this process's own descriptor names, if it is open: one it
         // closed is closed in the child too.
         let inherit = |from: i32| toyos::fd::copy(from).map_err(refused);
-        let copy = |pipe: &Pipe| pipe.with_handle(|h| h.try_clone_to_owned())?.map_err(crate::sys::to_io_error);
+        let copy = |pipe: &Pipe| pipe.with_handle(|h| h.try_clone_to_owned())?.map_err(crate::sys::failed);
         let handle = |handle| Some((handle, toyos::fd::Kind::Handle));
         Ok(match stdio {
             Stdio::Inherit => inherit(fd as i32)?,
@@ -544,7 +544,7 @@ impl Command {
                 use toyos_abi::handle::Rights;
                 let direction = if is_input { Rights::READ } else { Rights::WRITE };
                 let null = toyos::null(direction.union(Rights::DUP).union(Rights::TRANSFER).union(Rights::WAIT))
-                    .map_err(crate::sys::to_io_error)?;
+                    .map_err(crate::sys::failed)?;
                 handle(null)
             }
         })
@@ -735,11 +735,11 @@ impl Process {
     }
 
     pub fn kill(&mut self) -> io::Result<()> {
-        self.handle.kill().map_err(|_| io::Error::from(io::ErrorKind::Other))
+        self.handle.kill().map_err(crate::sys::failed)
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        self.handle.wait().map(ExitStatus).map_err(|_| io::Error::from(io::ErrorKind::Other))
+        self.handle.wait().map(ExitStatus).map_err(crate::sys::failed)
     }
 
     pub fn handle(&self) -> toyos::BorrowedHandle<'_> {
@@ -754,7 +754,7 @@ impl Process {
         match self.handle.try_wait() {
             Ok(end) => Ok(Some(ExitStatus(end))),
             Err(toyos_abi::syscall::SyscallError::WouldBlock) => Ok(None),
-            Err(_) => Err(io::Error::from(io::ErrorKind::Other)),
+            Err(e) => Err(crate::sys::failed(e)),
         }
     }
 }

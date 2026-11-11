@@ -27,7 +27,7 @@ use toyos::process::{End, Process};
 use toyos::spawn::{Parent, Refused, Spawn, Start};
 use toyos_abi::syscall;
 
-use crate::errcode::{E2BIG, EACCES, EAGAIN, EBADF, ECHILD, EINTR, EINVAL, ENOENT, EPERM, ESRCH};
+use crate::errcode::{EAGAIN, EBADF, ECHILD, EINTR, EINVAL, ENOENT, EPERM, ESRCH};
 use crate::pthread::Lock;
 use crate::spawnreq::{self, Action, Turn};
 
@@ -351,21 +351,13 @@ fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, toyos::BorrowedHandle
     let Start::Helper(helper) = request.start().map_err(errno_of)? else {
         unreachable!("a spawn that is not independent is a helper or refused")
     };
-    let image = toyos::files::read_image(path.as_bytes()).map_err(crate::errcode::of_image)?;
+    let image = toyos::files::read_image(path.as_bytes()).map_err(crate::errcode::of)?;
     helper.spawn(Some(&image)).map_err(errno_of)
 }
 
+/// The errno a spawn's refusal sets.
 fn errno_of(refused: Refused) -> i32 {
-    match refused {
-        Refused::Permission(_) | Refused::NotStarted => EACCES,
-        Refused::Invalid(_) => E2BIG,
-        Refused::Stream(_) => EBADF,
-        // A holder past what netstack has places for is a descriptor too many.
-        Refused::Export(toyos::net::NetError::ResourceExhausted) => crate::errcode::EMFILE,
-        Refused::Export(_) => crate::errcode::EIO,
-        Refused::File(e) => crate::errcode::of_files(e),
-        Refused::Syscall(e) => crate::errcode::of(e),
-    }
+    crate::errcode::of(&refused)
 }
 
 /// This process's group: its pid, which the children it spawns share unless

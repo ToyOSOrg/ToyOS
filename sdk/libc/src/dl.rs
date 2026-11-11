@@ -6,16 +6,7 @@ use core::cell::Cell;
 use core::fmt::Write;
 use core::ptr;
 
-use toyos::dl::{self, Refused};
-
-/// The errno a refusal sets.
-fn errno_of(refused: Refused) -> i32 {
-    match refused {
-        Refused::Read(_, why) => crate::errcode::of_image(why),
-        Refused::Memory(e) => crate::errcode::of(e),
-        Refused::Elf(_) | Refused::Relocation(_) | Refused::Undefined(_) => crate::errcode::ENOEXEC,
-    }
-}
+use toyos::dl;
 
 #[no_mangle]
 pub unsafe extern "C" fn dlopen(path: *const u8, _flags: i32) -> *mut u8 {
@@ -30,7 +21,7 @@ pub unsafe extern "C" fn dlopen(path: *const u8, _flags: i32) -> *mut u8 {
         Ok(module) => module.id() as *mut u8,
         Err(refused) => {
             refuse(format_args!("dlopen: {refused}"));
-            crate::errno::set(errno_of(refused));
+            crate::errno::set(crate::errcode::of(refused));
             ptr::null_mut()
         }
     }

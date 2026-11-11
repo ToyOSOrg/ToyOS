@@ -65,7 +65,8 @@ use toyos_net_node::{
     Node, NotStarted, Refused, Resolving, StreamEvent, StreamId,
 };
 use toyos_net_shard::ConnectError;
-use toyos_net_tcp::{Endpoint, Failure};
+use toyos_net_tcp::{Endpoint, Failure, SoftError};
+use toyos_net_wire::icmp::UnreachableCode;
 use toyos_net_wire::{Instant, Port};
 
 use crate::client::{Client, Request};
@@ -240,8 +241,7 @@ fn refused(refusal: Refused) -> u32 {
         Refused::PermissionDenied => ERR_PERMISSION_DENIED,
         Refused::ResourceExhausted => ERR_RESOURCE_EXHAUSTED,
         Refused::ConnectionRefused => ERR_CONNECTION_REFUSED,
-        // No finer word exists yet, as for a connect's (`connect_failed`).
-        Refused::Unreachable => ERR_OTHER,
+        Refused::Unreachable => ERR_HOST_UNREACHABLE,
     }
 }
 
@@ -264,10 +264,7 @@ fn connect_refused(refusal: ConnectRefused) -> u32 {
     }
 }
 
-/// A handshake that ended without a connection. The pipe ABI has a word for a
-/// peer's refusal, its reset and its silence, and none for an ICMP error's:
-/// those are named in the log and answered `ERR_OTHER`
-/// (`issues/the-pipe-abi-has-no-word-for-an-unreachable-host-or-a-lookup-to-try-again.md`).
+/// A handshake that ended without a connection.
 fn connect_failed(failure: Failure) -> u32 {
     match failure {
         Failure::Refused => ERR_CONNECTION_REFUSED,
@@ -275,10 +272,27 @@ fn connect_failed(failure: Failure) -> u32 {
         Failure::TimedOut => ERR_TIMED_OUT,
         // The address it was made from went under it: as no address at all.
         Failure::AddressGone => ERR_NOT_CONNECTED,
-        Failure::Unreachable(_) | Failure::Prohibited => {
+        Failure::Unreachable(SoftError::Unreachable(code)) => unreachable_word(code),
+        // A router on the way gave the segment up, or filtered it.
+        Failure::Unreachable(SoftError::TimeExceeded) | Failure::Prohibited => ERR_HOST_UNREACHABLE,
+        Failure::Unreachable(SoftError::ParameterProblem) => {
             say!("netstack: a connect ended {failure:?}");
             ERR_OTHER
         }
+    }
+}
+
+/// The pipe ABI's word for an ICMP destination unreachable that ended a
+/// connect, by what its code says could not be reached (RFC 792): the
+/// network, the port, which is the peer's refusal, or else the host.
+fn unreachable_word(code: UnreachableCode) -> u32 {
+    use UnreachableCode::*;
+    match code {
+        Net | NetUnknown | NetProhibited | NetUnreachableForTos => ERR_NETWORK_UNREACHABLE,
+        Port => ERR_CONNECTION_REFUSED,
+        Host | Protocol | FragmentationNeeded | SourceRouteFailed | HostUnknown | SourceHostIsolated | HostProhibited
+        | HostUnreachableForTos | CommunicationProhibited | HostPrecedenceViolation | PrecedenceCutoff
+        | Unassigned(_) => ERR_HOST_UNREACHABLE,
     }
 }
 
@@ -328,10 +342,10 @@ fn answer_resolved(client: &Client, result: Result<Vec<[u8; 4]>, Ended>) {
         // name or only its address is missing.
         Err(Ended::Failed(Dns::NoSuchName | Dns::NoAddress)) => answer_lookup(client, &[]),
         Err(Ended::Failed(Dns::TimedOut)) => client.error(ERR_TIMED_OUT),
-        // No query found a way out, or the lease the lookup asked under went:
-        // this machine is on no network that answers the name, which a lease
-        // clears. Neither is that word's (see `connect_failed`).
-        Err(Ended::Failed(Dns::Unreachable) | Ended::LeaseChanged) => client.error(ERR_NOT_CONNECTED),
+        // No query found a way out.
+        Err(Ended::Failed(Dns::Unreachable)) => client.error(ERR_NETWORK_UNREACHABLE),
+        // The lease the lookup asked under went, and the next has resolvers of its own.
+        Err(Ended::LeaseChanged) => client.error(ERR_TRY_AGAIN),
         Err(Ended::Failed(why @ (Dns::Truncated | Dns::ServerFailed(_) | Dns::TooManyAliases))) => {
             say!("netstack: a lookup ended without an answer: {why:?}");
             client.error(ERR_OTHER);

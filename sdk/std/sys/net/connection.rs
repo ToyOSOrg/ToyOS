@@ -1,5 +1,5 @@
 use toyos::net::socket;
-use toyos::net::stream::{self, Refused, Wait};
+use toyos::net::stream::{self, Wait};
 use toyos::net::NetError;
 
 use crate::fmt;
@@ -8,13 +8,14 @@ use crate::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, ToSocke
 use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use crate::sync::atomic::Ordering::Relaxed;
 use crate::sync::atomic::{AtomicBool, AtomicU32};
+use crate::sys::failed;
 use crate::time::Duration;
 
 // --- Helpers ---
 
 /// A stream's handle this process just got, as an owned descriptor.
 fn stream_fd(handle: toyos::OwnedHandle) -> io::Result<OwnedFd> {
-    let fd = toyos::fd::install(stream::descriptor(handle), false, 0).map_err(crate::sys::fd_error)?;
+    let fd = toyos::fd::install(stream::descriptor(handle), false, 0).map_err(crate::sys::failed)?;
     // SAFETY: a descriptor just installed for this stream alone.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
@@ -22,7 +23,7 @@ fn stream_fd(handle: toyos::OwnedHandle) -> io::Result<OwnedFd> {
 /// A listener's or a datagram socket's handle this process just got, as an
 /// owned descriptor.
 fn socket_fd(handle: toyos::OwnedHandle) -> io::Result<OwnedFd> {
-    let fd = toyos::fd::install(socket::descriptor(handle), false, 0).map_err(crate::sys::fd_error)?;
+    let fd = toyos::fd::install(socket::descriptor(handle), false, 0).map_err(crate::sys::failed)?;
     // SAFETY: a descriptor just installed for this socket alone.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
@@ -36,23 +37,6 @@ fn kernel(fd: &OwnedFd) -> toyos::BorrowedHandle<'_> {
         .expect("std::net: an owned descriptor was closed by another owner");
     // SAFETY: `fd` owns the descriptor, which names the handle until it closes.
     unsafe { toyos::BorrowedHandle::borrow_raw(raw) }
-}
-
-fn net_err_to_io(e: NetError) -> io::Error {
-    let kind = match e {
-        NetError::ConnectionRefused => io::ErrorKind::ConnectionRefused,
-        NetError::ConnectionReset => io::ErrorKind::ConnectionReset,
-        NetError::TimedOut => io::ErrorKind::TimedOut,
-        NetError::AddrInUse => io::ErrorKind::AddrInUse,
-        NetError::NotConnected => io::ErrorKind::NotConnected,
-        NetError::InvalidInput => io::ErrorKind::InvalidInput,
-        NetError::NetstackNotFound => io::ErrorKind::NotConnected,
-        NetError::PermissionDenied => io::ErrorKind::PermissionDenied,
-        NetError::WouldBlock => return io::ErrorKind::WouldBlock.into(),
-        NetError::NotASocket => io::ErrorKind::InvalidInput,
-        NetError::ResourceExhausted | NetError::Protocol(_) | NetError::Io => io::ErrorKind::Other,
-    };
-    io::Error::new(kind, "netstack error")
 }
 
 fn addr_to_v4(addr: &SocketAddr) -> io::Result<([u8; 4], u16)> {
@@ -75,29 +59,6 @@ fn timeout_ms(d: Option<Duration>) -> io::Result<u32> {
 
 /// How long `TcpStream::connect` waits for each address to answer.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
-const TIMED_OUT: io::Error = io::const_error!(io::ErrorKind::TimedOut, "timed out");
-
-const SHUT_DOWN: io::Error =
-    io::const_error!(io::ErrorKind::BrokenPipe, "the stream was shut down for writing");
-
-/// What std answers for a stream's refusal. netstack gone is
-/// `ConnectionAborted`: neither the peer's reset nor its FIN.
-pub fn stream_refused(refusal: Refused) -> io::Error {
-    match refusal {
-        Refused::NotThisProcess(handle) => {
-            io::Error::new(io::ErrorKind::InvalidInput, stream::Misuse::NotThisProcess(handle).to_string())
-        }
-        Refused::WouldBlock => io::ErrorKind::WouldBlock.into(),
-        Refused::TimedOut => TIMED_OUT,
-        Refused::Reset => io::const_error!(io::ErrorKind::ConnectionReset, "connection reset"),
-        Refused::ConnectionTimedOut => io::const_error!(io::ErrorKind::TimedOut, "the connection timed out"),
-        Refused::Unreachable => io::const_error!(io::ErrorKind::HostUnreachable, "the peer is unreachable"),
-        Refused::AddressGone => io::const_error!(io::ErrorKind::AddrNotAvailable, "this machine gave up the connection's address"),
-        Refused::Aborted => io::const_error!(io::ErrorKind::ConnectionAborted, "netstack ended the stream"),
-        Refused::Shut => SHUT_DOWN,
-    }
-}
 
 /// How a call waits: not at all on a nonblocking stream, and otherwise until
 /// its direction is ready or `timeout_ms`, 0 for no timeout, passes.
@@ -145,7 +106,7 @@ impl TcpStream {
 
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         let (ip, port) = addr_to_v4(addr)?;
-        let connected = stream::connect(ip, port, timeout_ms(Some(timeout))?, false).map_err(net_err_to_io)?;
+        let connected = stream::connect(ip, port, timeout_ms(Some(timeout))?, false).map_err(failed)?;
         Ok(TcpStream::from_fd(stream_fd(connected.handle)?))
     }
 
@@ -179,7 +140,7 @@ impl TcpStream {
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         let wait = wait(self.nonblocking.load(Relaxed), self.read_timeout_ms.load(Relaxed));
-        stream::read(self.handle(), buf, wait).map_err(stream_refused)
+        stream::read(self.handle(), buf, wait).map_err(failed)
     }
 
     pub fn read_buf(&self, mut cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
@@ -198,7 +159,7 @@ impl TcpStream {
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         let wait = wait(self.nonblocking.load(Relaxed), self.write_timeout_ms.load(Relaxed));
-        stream::write(self.handle(), buf, wait).map_err(stream_refused)
+        stream::write(self.handle(), buf, wait).map_err(failed)
     }
 
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -210,21 +171,21 @@ impl TcpStream {
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        let ((addr, port), _) = stream::endpoints(self.handle()).map_err(stream_refused)?;
+        let ((addr, port), _) = stream::endpoints(self.handle()).map_err(failed)?;
         Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(addr), port)))
     }
 
     pub fn socket_addr(&self) -> io::Result<SocketAddr> {
-        let (_, (addr, port)) = stream::endpoints(self.handle()).map_err(stream_refused)?;
+        let (_, (addr, port)) = stream::endpoints(self.handle()).map_err(failed)?;
         Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(addr), port)))
     }
 
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         if matches!(how, Shutdown::Read | Shutdown::Both) {
-            stream::shutdown_read(self.handle()).map_err(stream_refused)?;
+            stream::shutdown_read(self.handle()).map_err(failed)?;
         }
         if matches!(how, Shutdown::Write | Shutdown::Both) {
-            stream::shutdown_write(self.handle()).map_err(stream_refused)?;
+            stream::shutdown_write(self.handle()).map_err(failed)?;
         }
         Ok(())
     }
@@ -249,11 +210,11 @@ impl TcpStream {
     }
 
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
-        stream::set_nodelay(self.handle(), nodelay).map_err(stream_refused)
+        stream::set_nodelay(self.handle(), nodelay).map_err(failed)
     }
 
     pub fn nodelay(&self) -> io::Result<bool> {
-        stream::nodelay(self.handle()).map_err(stream_refused)
+        stream::nodelay(self.handle()).map_err(failed)
     }
 
     pub fn set_keepalive(&self, _keepalive: bool) -> io::Result<()> {
@@ -274,8 +235,8 @@ impl TcpStream {
 
     /// The failure that ended the stream: the receive ring's `end`.
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
-        let failure = stream::failure(self.handle()).map_err(stream_refused)?;
-        Ok(failure.map(stream_refused))
+        let failure = stream::failure(self.handle()).map_err(failed)?;
+        Ok(failure.map(failed))
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
@@ -294,21 +255,21 @@ impl TcpStream {
     /// The stream's send bell: the handle a watch for room is made on, for
     /// reading.
     pub fn bell(&self) -> io::Result<u32> {
-        let bell = stream::doorbell(self.handle(), stream::Way::Send).map_err(stream_refused)?;
+        let bell = stream::doorbell(self.handle(), stream::Way::Send).map_err(failed)?;
         Ok(bell.raw().0)
     }
 
     /// The stream's receive bell: the handle a watch for bytes is made on,
     /// for reading.
     pub fn receive_bell(&self) -> io::Result<u32> {
-        let bell = stream::doorbell(self.handle(), stream::Way::Receive).map_err(stream_refused)?;
+        let bell = stream::doorbell(self.handle(), stream::Way::Receive).map_err(failed)?;
         Ok(bell.raw().0)
     }
 
     /// Registered for readiness: each named way's want armed, and netstack rung
     /// where one is ready, so the first event comes.
     pub fn register(&self, readable: bool, writable: bool) -> io::Result<()> {
-        stream::register(self.handle(), readable, writable).map_err(stream_refused)
+        stream::register(self.handle(), readable, writable).map_err(failed)
     }
 }
 
@@ -348,18 +309,18 @@ impl TcpListener {
             .next()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no addresses found"))?;
         let (ip, port) = addr_to_v4(&addr)?;
-        let bound = socket::listen(ip, port, toyos::net::TcpOptions::new(false)).map_err(net_err_to_io)?;
+        let bound = socket::listen(ip, port, toyos::net::TcpOptions::new(false)).map_err(failed)?;
         Ok(TcpListener::from_fd(socket_fd(bound.handle)?))
     }
 
     pub fn socket_addr(&self) -> io::Result<SocketAddr> {
-        let (addr, port) = socket::local(self.handle()).map_err(net_err_to_io)?;
+        let (addr, port) = socket::local(self.handle()).map_err(failed)?;
         Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(addr), port)))
     }
 
     pub fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
         let wait = if self.nonblocking.load(Relaxed) { Wait::Nonblocking } else { Wait::Blocking(None) };
-        let accepted = socket::accept(self.handle(), wait).map_err(net_err_to_io)?;
+        let accepted = socket::accept(self.handle(), wait).map_err(failed)?;
         let peer = SocketAddr::V4(SocketAddrV4::new(
             Ipv4Addr::from(accepted.remote_addr),
             accepted.remote_port,
@@ -444,19 +405,19 @@ impl UdpSocket {
             .next()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no addresses found"))?;
         let (ip, port) = addr_to_v4(&addr)?;
-        let bound = socket::bind(ip, port).map_err(net_err_to_io)?;
+        let bound = socket::bind(ip, port).map_err(failed)?;
         Ok(UdpSocket::from_fd(socket_fd(bound.handle)?))
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        match socket::peer(self.handle()).map_err(net_err_to_io)? {
+        match socket::peer(self.handle()).map_err(failed)? {
             Some((addr, port)) => Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(addr), port))),
             None => Err(io::Error::new(io::ErrorKind::NotConnected, "not connected")),
         }
     }
 
     pub fn socket_addr(&self) -> io::Result<SocketAddr> {
-        let (addr, port) = socket::local(self.handle()).map_err(net_err_to_io)?;
+        let (addr, port) = socket::local(self.handle()).map_err(failed)?;
         Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(addr), port)))
     }
 
@@ -464,7 +425,7 @@ impl UdpSocket {
         let wait = wait(self.nonblocking.load(Relaxed), self.read_timeout_ms.load(Relaxed));
         let received = socket::recv_from(self.handle(), buf, wait).map_err(|e| match e {
             NetError::TimedOut if wait != Wait::Nonblocking => io::ErrorKind::WouldBlock.into(),
-            e => net_err_to_io(e),
+            e => failed(e),
         })?;
         Ok((received.len, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(received.addr), received.port))))
     }
@@ -475,7 +436,7 @@ impl UdpSocket {
 
     pub fn send_to(&self, buf: &[u8], addr: &SocketAddr) -> io::Result<usize> {
         let (ip, port) = addr_to_v4(addr)?;
-        socket::send_to(self.handle(), ip, port, buf).map_err(net_err_to_io)
+        socket::send_to(self.handle(), ip, port, buf).map_err(failed)
     }
 
     pub fn duplicate(&self) -> io::Result<UdpSocket> {
@@ -508,11 +469,11 @@ impl UdpSocket {
     }
 
     pub fn set_broadcast(&self, broadcast: bool) -> io::Result<()> {
-        socket::set_option(self.handle(), toyos::net::OPT_BROADCAST, broadcast as u32).map_err(net_err_to_io)
+        socket::set_option(self.handle(), toyos::net::OPT_BROADCAST, broadcast as u32).map_err(failed)
     }
 
     pub fn broadcast(&self) -> io::Result<bool> {
-        socket::option(self.handle(), toyos::net::OPT_BROADCAST).map(|on| on != 0).map_err(net_err_to_io)
+        socket::option(self.handle(), toyos::net::OPT_BROADCAST).map(|on| on != 0).map_err(failed)
     }
 
     pub fn set_multicast_loop_v4(&self, _: bool) -> io::Result<()> {
@@ -582,7 +543,7 @@ impl UdpSocket {
     }
 
     pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
-        socket::send(self.handle(), buf).map_err(net_err_to_io)
+        socket::send(self.handle(), buf).map_err(failed)
     }
 
     pub fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
@@ -591,7 +552,7 @@ impl UdpSocket {
             .next()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no addresses found"))?;
         let (ip, port) = addr_to_v4(&addr)?;
-        socket::connect(self.handle(), ip, port).map_err(net_err_to_io)
+        socket::connect(self.handle(), ip, port).map_err(failed)
     }
 
     pub fn as_raw_fd(&self) -> i32 {
@@ -631,10 +592,12 @@ pub fn lookup_host(host: &str, port: u16) -> io::Result<LookupHost> {
     }
 
     let mut results = [[0u8; 4]; 16];
-    let count = toyos::net::dns_lookup(host, &mut results).map_err(net_err_to_io)?;
+    let count = toyos::net::dns_lookup(host, &mut results).map_err(failed)?;
 
+    // netstack's answer for a name that has no address, which a lookup that
+    // failed is never answered with.
     if count == 0 {
-        return Err(io::Error::new(io::ErrorKind::Other, "DNS lookup failed: no results"));
+        return Err(io::const_error!(io::ErrorKind::NotFound, "the name has no address"));
     }
 
     let addrs = results[..count]

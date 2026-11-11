@@ -39,11 +39,10 @@ onto `cf715c49` as a checked patch, four more sessions of the same suite had it
 green 4/4. The branch touches nothing on the spawn path. Neither arm
 reproduced it, so neither arm explains it.
 
-**Exit.** The refusal named. The cheapest step is that the message carry
-`e.raw_os_error()` — `other error` is a message that costs a whole run to
-learn nothing from — and the next sighting then says which refusal it was.
-Until then the rate is one guest in one shard of one run, and its `ALONE`
-re-run was green.
+**Exit.** The refusal named. Since std reads every spawn refusal by name
+(`refused`, `sdk/std/sys/pal/mod.rs`), none prints `other error`: the next
+sighting's message says which refusal it was. Until then the rate is one guest
+in one shard of one run, and its `ALONE` re-run was green.
 
 **Its test is deleted**, as a flaky test is: `3b8102cf5` took
 `log_nested_emit` out with `log-nested-emit`, the nest vector on both

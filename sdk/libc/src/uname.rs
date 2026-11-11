@@ -27,7 +27,7 @@ pub unsafe extern "C" fn uname(buf: *mut Utsname) -> i32 {
     let mut file = [0u8; FILE_BYTES];
     let len = match read(toyos_osrelease::GUEST_PATH, &mut file) {
         Ok(len) => len,
-        Err(e) => return crate::posix_io::refuse_files(e),
+        Err(e) => return crate::posix_io::set_errno(e),
     };
     let Ok(release) = toyos_osrelease::parse(&file[..len]) else {
         errno::set(EIO);

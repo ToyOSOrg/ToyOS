@@ -11,10 +11,7 @@ use toyos::net::socket::{self, Kind};
 use toyos::net::stream::{self, Wait};
 use toyos::net::{NetError, TcpOptions, OPT_BROADCAST, OPT_NODELAY};
 
-use crate::errcode::{
-    EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, EISCONN, ENOMEM,
-    ENOPROTOOPT, ENOSPC, ENOTCONN, ETIMEDOUT,
-};
+use crate::errcode::{EAFNOSUPPORT, EBADF, EFAULT, EINVAL, EISCONN, ENOMEM, ENOPROTOOPT, ENOSPC, ENOTCONN};
 use crate::inaddr::{self, SockaddrIn, AF_INET};
 use crate::dgramreq;
 use crate::sockopt::{self, Kept};
@@ -169,24 +166,8 @@ extern "C" fn release_socket(word: u64) {
     }
 }
 
+use crate::errcode::eai;
 use crate::errno::set as set_errno;
-
-// netstack error conversion
-
-fn net_err_to_errno(e: NetError) -> i32 {
-    match e {
-        NetError::ConnectionRefused => ECONNREFUSED,
-        NetError::ConnectionReset => ECONNRESET,
-        NetError::TimedOut => ETIMEDOUT,
-        NetError::AddrInUse => EADDRINUSE,
-        NetError::NotConnected => ENOTCONN,
-        NetError::InvalidInput => EINVAL,
-        NetError::PermissionDenied => EACCES,
-        NetError::WouldBlock => EAGAIN,
-        NetError::NotASocket => EBADF,
-        NetError::NetstackNotFound | NetError::ResourceExhausted | NetError::Protocol(_) | NetError::Io => EIO,
-    }
-}
 
 /// Parse sockaddr_in into (ipv4_octets, port).
 unsafe fn parse_sockaddr(addr: *const Sockaddr, len: SocklenT) -> Option<([u8; 4], u16)> {
@@ -209,7 +190,7 @@ unsafe fn fill_sockaddr(addr: *mut Sockaddr, addrlen: *mut SocklenT, ip: [u8; 4]
 /// `peer`: from here `fd` names netstack's socket, and the entry goes once the
 /// caller's hold does.
 fn bind_datagram(fd: i32, entry: &SocketEntry, ip: [u8; 4], port: u16, peer: Option<([u8; 4], u16)>) -> Result<toyos::fd::Hold, i32> {
-    let bound = socket::bind(ip, port).map_err(net_err_to_errno)?;
+    let bound = socket::bind(ip, port).map_err(crate::errcode::of)?;
     let handle = toyos::AsHandle::as_handle(&bound.handle);
     let handed = (|| {
         if entry.broadcast {
@@ -222,7 +203,7 @@ fn bind_datagram(fd: i32, entry: &SocketEntry, ip: [u8; 4], port: u16, peer: Opt
     })();
     if let Err(e) = handed {
         socket::let_go(bound.handle);
-        return Err(net_err_to_errno(e));
+        return Err(crate::errcode::of(e));
     }
     // SAFETY: `fd` names a socket entry, libc's own object, which its
     // netstack socket replaces at the number C keeps using.
@@ -252,7 +233,7 @@ impl dgramreq::Datagrams for Sending<'_> {
     fn send(&mut self, data: &[u8], ip: [u8; 4], port: u16) -> Result<usize, i32> {
         let held = self.bound.as_ref().ok_or(EBADF)?;
         let handle = held.object().handle().ok_or(EBADF)?;
-        socket::send_to(handle, ip, port, data).map_err(net_err_to_errno)
+        socket::send_to(handle, ip, port, data).map_err(crate::errcode::of)
     }
 }
 
@@ -294,7 +275,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
         Some(Sock::Datagram(held)) => {
             return match socket::connect(held.handle(), ip, port) {
                 Ok(()) => 0,
-                Err(e) => { set_errno(net_err_to_errno(e)); -1 }
+                Err(e) => { set_errno(crate::errcode::of(e)); -1 }
             };
         }
         Some(Sock::Stream(_) | Sock::Listener(_)) => { set_errno(EISCONN); return -1; }
@@ -311,7 +292,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
             // Nagle's algorithm off from the first segment where it was set before.
             let connected = match stream::connect(ip, port, 30000, entry.nodelay) {
                 Ok(c) => c,
-                Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
+                Err(e) => { set_errno(crate::errcode::of(e)); return -1; }
             };
             // The descriptor names the stream from here on; the entry goes once
             // this call's hold does.
@@ -347,7 +328,7 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
 
     let bound = match entry.kind {
         SocketKind::Tcp => socket::listen(ip, port, TcpOptions::new(entry.nodelay))
-            .map_err(net_err_to_errno)
+            .map_err(crate::errcode::of)
             // SAFETY: `fd` names a socket entry, libc's own object, which its
             // listener replaces at the number C keeps using.
             .and_then(|bound| unsafe { toyos::fd::replace(fd, socket::descriptor(bound.handle)) }.map_err(|_| EBADF)),
@@ -395,7 +376,7 @@ pub unsafe extern "C" fn accept(
     );
     let accepted = match accepted {
         Ok(Ok(accepted)) => accepted,
-        Ok(Err(e)) => { set_errno(net_err_to_errno(e)); return -1; }
+        Ok(Err(e)) => { set_errno(crate::errcode::of(e)); return -1; }
         Err(errno) => { set_errno(errno); return -1; }
     };
 
@@ -421,7 +402,7 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
         Some(Sock::Stream(held)) => write_stream(held.handle(), data),
         Some(Sock::Datagram(held)) => match socket::send(held.handle(), data) {
             Ok(sent) => sent as isize,
-            Err(e) => { set_errno(net_err_to_errno(e)); -1 }
+            Err(e) => { set_errno(crate::errcode::of(e)); -1 }
         },
         // A socket netstack does not hold was never connected.
         Some(Sock::Entry(_)) => { set_errno(ENOTCONN); -1 }
@@ -434,7 +415,7 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
 fn write_stream(handle: toyos::BorrowedHandle<'_>, data: &[u8]) -> isize {
     match stream::write(handle, data, Wait::Blocking(None)) {
         Ok(n) => n as isize,
-        Err(refused) => { set_errno(crate::errcode::of_stream(refused)); -1 }
+        Err(refused) => { set_errno(crate::errcode::of(refused)); -1 }
     }
 }
 
@@ -452,12 +433,12 @@ fn read_stream(handle: toyos::BorrowedHandle<'_>, data: &mut [u8]) -> isize {
         },
         |wake| {
             let poller = poller.get_or_insert_with(|| toyos::poller::Poller::new(2));
-            stream::wait_ready(handle, stream::Way::Receive, wake, poller).map_err(crate::errcode::of_stream)
+            stream::wait_ready(handle, stream::Way::Receive, wake, poller).map_err(crate::errcode::of)
         },
     );
     match read {
         Ok(Ok(n)) => n as isize,
-        Ok(Err(refused)) => { set_errno(crate::errcode::of_stream(refused)); -1 }
+        Ok(Err(refused)) => { set_errno(crate::errcode::of(refused)); -1 }
         Err(errno) => { set_errno(errno); -1 }
     }
 }
@@ -480,7 +461,7 @@ fn read_datagram(handle: toyos::BorrowedHandle<'_>, data: &mut [u8]) -> Result<s
             Ok(())
         },
     );
-    received?.map_err(net_err_to_errno)
+    received?.map_err(crate::errcode::of)
 }
 
 #[no_mangle]
@@ -717,7 +698,7 @@ unsafe fn set_held_option(handle: toyos::BorrowedHandle<'_>, kind: Kind, level: 
     let Some(option) = held_option(kind, option) else { return 0 };
     match socket::set_option(handle, option, on as u32) {
         Ok(()) => 0,
-        Err(e) => { set_errno(net_err_to_errno(e)); -1 }
+        Err(e) => { set_errno(crate::errcode::of(e)); -1 }
     }
 }
 
@@ -735,7 +716,7 @@ unsafe fn set_stream_option(handle: toyos::BorrowedHandle<'_>, level: i32, optna
     match option {
         Kept::NoDelay => match stream::set_nodelay(handle, on) {
             Ok(()) => 0,
-            Err(refused) => { set_errno(crate::errcode::of_stream(refused)); -1 }
+            Err(refused) => { set_errno(crate::errcode::of(refused)); -1 }
         },
         // A stream sends to no broadcast address.
         Kept::Broadcast => 0,
@@ -754,7 +735,7 @@ pub unsafe extern "C" fn getsockopt(
         Some(Sock::Stream(held)) => match sockopt::kept(level, optname, false) {
             Ok(Some(Kept::NoDelay)) => match stream::nodelay(held.handle()) {
                 Ok(on) => (Some(Kept::NoDelay), on as i32),
-                Err(refused) => { set_errno(crate::errcode::of_stream(refused)); return -1; }
+                Err(refused) => { set_errno(crate::errcode::of(refused)); return -1; }
             },
             Ok(option) => (option, 0),
             Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
@@ -768,7 +749,7 @@ pub unsafe extern "C" fn getsockopt(
             match sockopt::kept(level, optname, kind == Kind::Datagram) {
                 Ok(Some(kept)) => match held_option(kind, kept).map(|option| socket::option(held.handle(), option)) {
                     Some(Ok(value)) => (Some(kept), (value != 0) as i32),
-                    Some(Err(e)) => { set_errno(net_err_to_errno(e)); return -1; }
+                    Some(Err(e)) => { set_errno(crate::errcode::of(e)); return -1; }
                     None => (Some(kept), 0),
                 },
                 Ok(None) => (None, 0),
@@ -805,11 +786,11 @@ pub unsafe extern "C" fn getpeername(
     let peer = match sock_from_fd(fd) {
         Some(Sock::Stream(held)) => match stream::endpoints(held.handle()) {
             Ok((peer, _)) => Some(peer),
-            Err(refused) => { set_errno(crate::errcode::of_stream(refused)); return -1; }
+            Err(refused) => { set_errno(crate::errcode::of(refused)); return -1; }
         },
         Some(Sock::Datagram(held)) => match socket::peer(held.handle()) {
             Ok(peer) => peer,
-            Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
+            Err(e) => { set_errno(crate::errcode::of(e)); return -1; }
         },
         Some(Sock::Listener(_) | Sock::Entry(_)) => None,
         None => { set_errno(EBADF); return -1; }
@@ -828,11 +809,11 @@ pub unsafe extern "C" fn getsockname(
     let (ip, port) = match sock_from_fd(fd) {
         Some(Sock::Stream(held)) => match stream::endpoints(held.handle()) {
             Ok((_, local)) => local,
-            Err(refused) => { set_errno(crate::errcode::of_stream(refused)); return -1; }
+            Err(refused) => { set_errno(crate::errcode::of(refused)); return -1; }
         },
         Some(Sock::Listener(held) | Sock::Datagram(held)) => match socket::local(held.handle()) {
             Ok(local) => local,
-            Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
+            Err(e) => { set_errno(crate::errcode::of(e)); return -1; }
         },
         // Neither bound nor connected: the unspecified address, and no port.
         Some(Sock::Entry(mut socket)) => match *socket.slot() {
@@ -855,7 +836,7 @@ pub unsafe extern "C" fn getaddrinfo(
     res: *mut *mut Addrinfo,
 ) -> i32 {
     if node.is_null() || res.is_null() {
-        return -1; // EAI_NONAME
+        return eai::NONAME;
     }
 
     let name_len = super::string::strlen(node);
@@ -869,15 +850,22 @@ pub unsafe extern "C" fn getaddrinfo(
     // Use toyos::net dns_lookup
     let hostname = match core::str::from_utf8(name) {
         Ok(s) => s,
-        Err(_) => return -1,
+        Err(_) => return eai::NONAME,
     };
     let mut results = [[0u8; 4]; 16];
     let count = match toyos::net::dns_lookup(hostname, &mut results) {
         Ok(n) => n,
-        Err(_) => return -1,
+        Err(e) => {
+            let (word, errno) = crate::errcode::of_lookup(e);
+            if let Some(errno) = errno {
+                set_errno(errno);
+            }
+            return word;
+        }
     };
+    // netstack's answer for a name that has no address.
     if count == 0 {
-        return -1; // EAI_NONAME
+        return eai::NONAME;
     }
 
     let addrs: Vec<([u8; 4], u16)> = results[..count].iter().map(|ip| (*ip, 0u16)).collect();
@@ -890,13 +878,13 @@ unsafe fn build_addrinfo_result(res: *mut *mut Addrinfo, addrs: &[([u8; 4], u16)
     for &(ip, port) in addrs.iter().rev() {
         let layout_ai = core::alloc::Layout::new::<Addrinfo>();
         let ai = heap_alloc(layout_ai) as *mut Addrinfo;
-        if ai.is_null() { return -1; }
+        if ai.is_null() { return eai::MEMORY; }
 
         let layout_sa = core::alloc::Layout::new::<SockaddrIn>();
         let sa = heap_alloc(layout_sa) as *mut SockaddrIn;
         if sa.is_null() {
             heap_dealloc(ai as *mut u8, layout_ai);
-            return -1;
+            return eai::MEMORY;
         }
 
         sa.write(SockaddrIn::new(ip, port));
@@ -929,8 +917,16 @@ pub unsafe extern "C" fn freeaddrinfo(mut res: *mut Addrinfo) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gai_strerror(_errcode: i32) -> *const u8 {
-    b"DNS lookup failed\0".as_ptr()
+pub unsafe extern "C" fn gai_strerror(errcode: i32) -> *const u8 {
+    let text: &[u8] = match errcode {
+        eai::NONAME => b"the name has no address\0",
+        eai::AGAIN => b"the name could not be resolved now, and may be later\0",
+        eai::FAIL => b"the resolver failed\0",
+        eai::MEMORY => b"no memory for the answer\0",
+        eai::SYSTEM => b"a system error, which errno names\0",
+        _ => b"no error getaddrinfo answers\0",
+    };
+    text.as_ptr()
 }
 
 // inet_pton / inet_ntop / inet_addr / htons / ntohs / htonl / ntohl
