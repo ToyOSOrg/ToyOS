@@ -101,6 +101,8 @@ the group map with the job reference it drops at 130 and 55, the parked
 map's remove at the wake at 100 and 55, and the pick at 90 and 65. #1260
 makes the run queue's operations cheaper.
 
+**Owed on metal:** `pingpong.*` in one A/B of main from before and after #1260 (the run queue's operations), on the T14 and the AMD bench, with a Linux reference timed through the TSC and its `.slack1ns` rows. The speed-up is not yet measured on metal. Main must read `pingpong.futex.same_cpu` faster by more than 3% on both benches and no `pingpong.*` row slower; `pingpong.futex.cross_core` is bimodal and counts neither way.
+
 **Exit**: `pingpong.*` within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured to its parts
 and justified; and `pingpong.futex.*` reports the parks of each round, so a

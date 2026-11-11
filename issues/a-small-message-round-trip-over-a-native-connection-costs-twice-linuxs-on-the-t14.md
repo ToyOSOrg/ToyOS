@@ -65,6 +65,8 @@ pass's fixed work 282 and 240, the timer 267 and 155, the post and kick 255
 and 152, and the wait 245 and 115. #1260 makes the run queue's operations
 cheaper.
 
+**Owed on metal:** `ipc.reqrep.*` in one A/B of main from before and after #1260 (the run queue's operations), on the T14 and the AMD bench, with a Linux reference timed through the TSC and its `.slack1ns` rows. The speed-up is not yet measured on metal. Main must read none of them slower.
+
 **Exit**: `ipc.reqrep.8` and `ipc.reqrep_handle.8` within Linux's on both
 benches in a labelled current-state comparison, or each remaining difference
 measured to its parts and justified.

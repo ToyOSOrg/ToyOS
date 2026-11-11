@@ -39,6 +39,8 @@ read and conversion 54 and 46), and the entry and exit 70 and 42. #1260
 makes the run queue's operations cheaper; the pass's periodic work and the
 timer's re-arm are not yet addressed.
 
+**Owed on metal:** `time.yield` in one A/B of main from before and after #1260 (the run queue's operations), on the T14 and the AMD bench, with a Linux reference timed through the TSC and its `.slack1ns` rows. The speed-up is not yet measured on metal. Main must read it faster by more than 3% on both benches, and no scheduler, IPC, wake or spawn row slower.
+
 **Exit**: `time.yield` within Linux's on both benches in a labelled
 current-state comparison, or the difference measured to its parts and
 justified.
