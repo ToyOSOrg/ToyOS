@@ -374,7 +374,7 @@ the first.
 | What | Size | Dependents | Owner in the design, and what blocks it |
 |---|---|---|---|
 | A child's arguments and environment | about 140, by #1200's count | std, libc, `toyos::startup` | the parent's startup block: #1200 |
-| Endowment labels: a blob per process for its life, answered by `SYS_ENDOWMENTS`, of which the kernel reads three (`JOB_LABEL`, `SELF_LABEL`, `QUIT_LABEL`) | ~130 | `toyos::endow`, the supervisor's table | the startup block (inferred, and #1200's record says so); needs the child's handle numbers known to its parent and the three kernel-read labels as typed spawn fields; after #1200 |
+| Endowment labels: a blob per process for its life, answered by `SYS_ENDOWMENTS`, of which the kernel compares three (`JOB_LABEL`, `SELF_LABEL`, `QUIT_LABEL`) and writes three more for the supervisor | ~130 | `toyos::endow`, the supervisor's table | the startup block (inferred, and #1200's record says so); needs the child's handle numbers known to its parent and the three kernel-read labels as typed spawn fields; after #1200 |
 | The path a program was read from, up to 64 KiB of text per process, which a crash's frames and the spawn's log lines name | ~40 | `symbolize`, `lib/symbols` | userland, once a frame is named by build-id and something maps a build-id to a file; unbuilt |
 | The TTY mark on a pipe end (`SYS_MARK_TTY`, `FileType::Tty`) | ~40 | std's spawn, libc's `isatty` and stdio, std's stdio | a fact about a stream that only libc and std read; a label or the block could carry it (inferred); after the labels |
 | The main thread's stack: 8 MiB and a guard the kernel chooses and reserves | ~30 | `SYS_STACK_INFO`, which only a guest test calls | the parent's layout, as a thread's stack already is its process's (inferred); after #1200, when a child's stack starts empty |
@@ -425,9 +425,9 @@ before any is work, and the OpRegion window needs a design first.
   read by one log line (`kernel/src/main.rs`), and `wall_clock_*` by no
   x86-64 code.
 - `KernelStack::heap` (`kernel/src/loader/start.rs`) charges every thread
-  two strings at 64 KiB and a page, "as a rename's paths"; no call takes
-  two strings since the file calls went, and after #1200 the spawn's path
-  is the one string of that bound.
+  two strings at 64 KiB and a page, "as a rename's paths". No rename is
+  left; a spawn's path and arguments are the two strings today, and after
+  #1200 its path is the one string of that bound.
 - `FileType::File`, `Directory` and `Symlink` are answered by no kernel path
   and named by nothing in `sdk`, `system`, `lib` or `apps`; the kernel's
   `Stat` answers `mtime`, `volume` and `node` as zero for every object.
