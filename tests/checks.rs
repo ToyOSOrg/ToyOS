@@ -164,6 +164,42 @@ mod checks {
         Ok(())
     }
 
+    /// **A program of `libc_children` that stalls is named, and ends the
+    /// row**: its boot runs nothing after it, so each later program would
+    /// spend its whole guard in silence. Fed the result a guest silent past
+    /// its guard gives, between a program that exits 0 and one that fails.
+    #[test]
+    fn a_stalled_program_ends_its_row_and_is_named() {
+        let ceiling = Duration::from_secs(300);
+        let stall = qemu::ceiling_verdict(None, ceiling + Duration::from_secs(16), ceiling, qemu::GUEST_QUIET, 40)
+            .expect("a guest silent past its guard has a verdict");
+        let window = "[ 9.100 cpu1 kernel] spawn: /system/bin/test_rs_stalls pid=31\n";
+        let mut asked = Vec::new();
+        let jobs: Vec<(&str, String)> =
+            ["passes", "fails", "stalls", "never_run", "nor_this"].map(|name| (name, format!("test_rs_{name}"))).into();
+        let verdict = common::libcchildren::judge(&jobs, |job| {
+            asked.push(job.to_string());
+            let (exit_code, error) = match job {
+                "test_rs_passes" => (Some(0), None),
+                "test_rs_fails" => (Some(3), None),
+                _ => (None, Some(qemu::WaitVerdict::for_test(stall.clone(), "", window, true))),
+            };
+            qemu::TestResult { name: job.to_string(), exit_code, stdout: String::new(), serial: window.to_string(), error }
+        });
+        assert_eq!(asked, ["test_rs_passes", "test_rs_fails", "test_rs_stalls"], "a boot whose job never ended was asked for more");
+        let reason = verdict.expect_err("a failed program and a stalled one are a red");
+        for said in [
+            "fails exited 3",
+            "stalls ended with no exit code, and 2 program(s) after it were not run: never_run, nor_this",
+            stall.as_str(),
+            window.trim(),
+        ] {
+            assert!(reason.contains(said), "the row's red never says {said:?}:\n{reason}");
+        }
+        let outcome = Outcome { name: "libc_children".into(), reason: Some(reason), elapsed: ceiling, suspended: Duration::ZERO };
+        assert!(outcome.stalled(), "the suite files the row's red as an answer and not as a blown guard");
+    }
+
     /// A blown ceiling stays red, and is named apart from a failed assertion.
     ///
     /// Both halves, because each fails the other's way round. An implementation

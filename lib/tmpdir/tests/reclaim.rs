@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use toyos_tmpdir::{private, TempDir, GLOBAL, OWNER, PRIVATE_PREFIX, ROOT_PREFIX, SHORT_BASE};
+use toyos_tmpdir::{private, reclaim_gone, TempDir, GLOBAL, OWNER, PRIVATE_PREFIX, ROOT_PREFIX, SHORT_BASE};
 
 const HOLD: &str = "TOYOS_TMPDIR_TEST_HOLD";
 const HOLDING: &str = "holding ";
@@ -329,5 +329,30 @@ fn an_adopted_root_goes_with_its_adopter() {
     let adopted = adopter.to_path_buf();
     drop(adopter);
     assert!(!adopted.exists(), "{} outlived its TempDir", adopted.display());
+    live.finish();
+}
+
+/// A caller that ended a process removes what it held at once: the gone roots
+/// it asks for go with everything in them, and a gone root it does not ask
+/// for, a live one and the lock stay.
+#[test]
+fn a_gone_root_is_reclaimed_when_asked_and_a_live_one_never() {
+    let _spawning = spawning();
+    let tmp = TempDir::new("reclaim-gone");
+    let live = Holder::start(&tmp);
+    let killed = Holder::start(&tmp);
+    let root = killed.root();
+    killed.kill();
+    let earlier = private(&tmp).join(format!("{ROOT_PREFIX}1-0"));
+    std::fs::create_dir(&earlier).unwrap();
+
+    assert_eq!(reclaim_gone(&tmp, |gone| gone != earlier), 1);
+    assert!(!root.exists(), "{} was not reclaimed", root.display());
+    assert!(earlier.exists(), "a root that was not asked for was reclaimed");
+    assert!(live.dir.join("image.img").exists(), "a live root was reclaimed");
+    let live_root = live.root().file_name().unwrap().to_string_lossy().into_owned();
+    let mut left = vec![GLOBAL.to_string(), live_root, format!("{ROOT_PREFIX}1-0")];
+    left.sort();
+    assert_eq!(entries(&private(&tmp)), left, "the reclaiming root stayed, or something else went");
     live.finish();
 }

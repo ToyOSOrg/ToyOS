@@ -328,6 +328,23 @@ pub fn gone_roots(base: &Path) -> Vec<PathBuf> {
     gone_under(&base)
 }
 
+/// Remove every root in `base`'s [`private`] directory whose process is gone
+/// and that `take` passes, and answer how many: for a caller that ended those
+/// processes itself, rather than leave them to the next process's sweep. They
+/// go as a sweep's do, through a root of this process's there.
+pub fn reclaim_gone(base: &Path, take: impl Fn(&Path) -> bool) -> usize {
+    let tmp = private(base);
+    let root = Root::make(&tmp, &mut 0);
+    let reap = {
+        let _global = global(&tmp);
+        reap_into(&tmp, &root.dir, |path| path != root.dir && take(path))
+    };
+    let reclaimed = reap.len();
+    reclaim(&tmp, reap, |dir| fs::remove_dir_all(dir));
+    root.remove();
+    reclaimed
+}
+
 /// This user's directory of `base`, which any user may share: made if absent,
 /// and refused with a panic unless it is a directory, not a symlink, that this
 /// user owns with mode 0700, since one another user made could be read or
