@@ -17,8 +17,8 @@ These answer failure in their POSIX form and do nothing
   LLVM's `getDefaultStackSize` (`llvm/lib/Support/ProgramStack.cpp`) ignores
   the failure and reads the `rlimit` it did not get.
 - `gethostname`, `ENOSYS`: no host name is published to a process.
-- `msync`, `ENOSYS`: a file is mapped read-only only, so no mapping holds
-  anything to write back; it answers once 7b's step 5 maps files writable.
+- `msync`, `ENOSYS`: no call answers which pages of a range are mapped, which
+  POSIX's `ENOMEM` for an unmapped one needs.
 - `mmap` of a file other than `PROT_READ`, `ENODEV`: the kernel maps a file's
   pages read-only and shared, and a private one shares them until it is written,
   which waits for 7b's write faults (step 5); a private copy range of a file

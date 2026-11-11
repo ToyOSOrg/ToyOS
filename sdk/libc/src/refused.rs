@@ -110,8 +110,8 @@ pub unsafe extern "C" fn getpwuid_r(_uid: u32, _pwd: *mut u8, _buf: *mut u8, _bu
     ENOSYS
 }
 
-/// No call answers which pages of a range are mapped, and no mapping is of a
-/// file (`mmap`).
+/// No call answers which pages of a range are mapped, which POSIX's `ENOMEM`
+/// for an unmapped one needs.
 #[no_mangle]
 pub unsafe extern "C" fn msync(_addr: *mut u8, _len: usize, _flags: i32) -> i32 {
     refuse()

@@ -160,16 +160,15 @@ mappings and write-back; (6) the #1077 retry
   processes map, truncated). Their correctness runs in a guest
   (`osbench_map_group_exits_0`); what they measure is unmeasured until then.
 
-What these rows price: fault waiters wake on their pager's watch, so a
-supply, a write's end or a removal wakes every fault waiter of that pager and
-not only those its pages meet, a departure from the design's per-request
-wakes (§3, S4) that `threads_touch_16m` on a file past its server's capacity
-prices; and a revocation visits each mapper once per batch of 64 revoking
-pages, each batch read by walking the object's resident pages under its
-pager's lock, which `truncate_255` prices. Exit for both: per-request wakes
-or a cheaper visit where those rows show the cost. A cold DATA page's miss in
-stages is not yet an osbench row (owner map7b; exit: such a row on DATA,
-judged against Linux on metal).
+Fault waiters wake on their pager's watch, so a supply, a write's end or a
+removal wakes every fault waiter of that pager and not only those its pages
+meet: a departure from the design's per-request wakes (§3, S4). No row
+prices it, since `threads_touch_16m` faults a RAM file's pages, which are
+never absent. Owner: map7b, with step 3, whose spawns fault a DATA image's
+pages cold. Exit: a many-threads cold-fault row on a DATA file larger than its
+pager's capacity, judged against Linux on metal, and per-request wakes where
+it shows the cost. A cold DATA page's miss in stages is the same kind of row
+and waits with it.
 
 The pinned-copy mode (a copy holding a page pin stops at an absent page, lets
 its pins go, waits holding nothing and copies again) is reached by no process
