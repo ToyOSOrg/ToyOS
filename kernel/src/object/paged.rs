@@ -193,7 +193,7 @@ pub struct PagerObject {
     /// Posted when a notice is owed.
     watch: Arc<Watch>,
     /// Posted on every change a waiter reads again: a supply, a failure, a
-    /// shrink, a release, the end.
+    /// write's end, a resize, a release, the end.
     changed: Arc<Watch>,
     pid: Pid,
     report: Duration,
@@ -641,17 +641,26 @@ impl PagerObject {
     /// The write call [`Self::write_begin`] began ends, `whole` where it took
     /// everything it was given: its reference goes.
     fn write_end(&self, slot: u32, whole: bool) {
-        let mut state = self.state.lock();
-        state.entry_mut(slot).object.write_end(whole);
-        self.unref_locked(&mut state, slot);
+        {
+            let mut state = self.state.lock();
+            state.entry_mut(slot).object.write_end(whole);
+            self.unref_locked(&mut state, slot);
+        }
+        // The version moved, which ends a holder's wait.
+        self.changed.post();
     }
 
     /// The pager ends the write of object `id` a short call left under way.
     pub fn end_write(&self, id: u64) -> u64 {
         let mut state = self.state.lock();
         let ended = state.live(id).and_then(|slot| state.entry_mut(slot).object.end_write().map_err(word));
+        drop(state);
         match ended {
-            Ok(()) => 0,
+            Ok(()) => {
+                // As at `write_end`.
+                self.changed.post();
+                0
+            }
             Err(e) => e.to_u64(),
         }
     }
