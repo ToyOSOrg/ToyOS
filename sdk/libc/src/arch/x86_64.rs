@@ -47,11 +47,12 @@ pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) -> *m
 /// The longest copy [`copy_short`] makes where a short `rep movsb` is slow.
 const SHORT: usize = 256;
 
-/// Copies shorter than this are [`copy_short`]'s, longer ones one `rep movsb`:
-/// 0 where the CPU declares fast short `rep movsb`, CPUID.(EAX=7,ECX=0):EDX[4]
-/// (FSRM; Intel SDM vol. 2A and AMD APM vol. 3, `CPUID`), its vendor's
-/// statement that a short one starts fast; past [`SHORT`] elsewhere; and
-/// [`UNASKED`] until a process's first copy asks.
+/// Copies shorter than this are [`copy_short`]'s, the rest one `rep movsb`: 0
+/// where the CPU declares fast short `rep movsb`, CPUID.(EAX=7,ECX=0):EDX[4]
+/// (FSRM; Intel SDM Vol. 1 Table 21-21, AMD APM Vol. 3 Appendix E), its
+/// vendor's statement that a short one starts fast (Intel's Optimization
+/// Reference Manual §3.7.6.1); past [`SHORT`] elsewhere; and [`UNASKED`] until
+/// a process's first copy asks.
 static MOVES_BELOW: AtomicUsize = AtomicUsize::new(UNASKED);
 const UNASKED: usize = usize::MAX;
 

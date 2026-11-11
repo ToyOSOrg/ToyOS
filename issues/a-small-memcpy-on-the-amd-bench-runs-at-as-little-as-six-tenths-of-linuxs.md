@@ -7,9 +7,12 @@ opened: 2026-10-28
 # A small memcpy on the AMD bench runs at as little as six tenths of Linux's
 
 `osbench mem`'s `mem.memcpy.<bytes>` copies a buffer of that size with each
-system's own `memcpy`. On ToyOS that is `sdk/libc`'s, whose `copy_forward` is
-one `rep movsb` at every length (`sdk/libc/src/arch/x86_64.rs`). On Linux it
-is the static musl build's.
+system's own `memcpy`. On ToyOS that is `sdk/libc`'s (`sdk/libc/src/arch/x86_64.rs`):
+one `rep movsb` at every length on a CPU that declares fast short `rep movsb`
+(FSRM), such as the T14's; elsewhere, such as on the AMD bench, a copy of up
+to 256 bytes is moves from each end and a longer one `rep movsb`. Until
+2026-11 it was one `rep movsb` everywhere, which the tables below measure. On
+Linux it is the static musl build's.
 
 From the 2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`):
 ToyOS at 069cbbeb8, four boots off the internal NVMe, against five runs of
