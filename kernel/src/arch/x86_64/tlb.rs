@@ -86,7 +86,7 @@ pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64) -> bool {
     targets[me / 64] &= !(1 << (me % 64));
     if targets.iter().all(|&word| word == 0) || !smp::answering() {
         if here {
-            flush_asked(Flush::Range { tag, start, end });
+            flush_asked_by(Flush::Range { tag, start, end }, Answerer::Initiator);
         }
         return false;
     }
@@ -96,24 +96,68 @@ pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64) -> bool {
     crate::shootdown::for_each(&targets, |cpu| apic::tlb_ipi_to(cpu as u32));
     // Its own flush goes while the IPIs fly.
     if here {
-        flush_asked(Flush::Range { tag, start, end });
+        flush_asked_by(Flush::Range { tag, start, end }, Answerer::Initiator);
     }
     crate::shootdown::for_each(&targets, |cpu| wait_for(cpu, || ASKS.answered(me, cpu)));
     let took = crate::clock::nanos_since_boot().saturating_sub(began);
     WAIT_NS.fetch_add(took, Ordering::Relaxed);
     MAX_NS.fetch_max(took, Ordering::Relaxed);
+    probe::say();
     true
 }
 
 /// What an ask has this CPU flush.
 fn flush_asked(what: Flush) {
+    flush_asked_by(what, Answerer::Asked);
+}
+
+fn flush_asked_by(what: Flush, by: Answerer) {
+    let t = probe::now();
     match what {
         Flush::Range { tag, start, end } if (end - start) / crate::mm::PAGE_SIZE <= BY_PAGE => {
             (start..end).step_by(crate::mm::PAGE_SIZE as usize).for_each(|va| crate::mm::paging::flush_user_page(tag, va));
+            let kind = if by == Answerer::Asked { &probe::TARGET_RANGE } else { &probe::OWN_RANGE };
+            probe::add(kind, (end - start) / crate::mm::PAGE_SIZE, t);
         }
-        Flush::Range { .. } | Flush::All => flush(Reach::Narrow),
+        Flush::Range { .. } | Flush::All => {
+            flush(Reach::Narrow);
+            let kind = if by == Answerer::Asked { &probe::TARGET_FULL } else { &probe::OWN_FULL };
+            probe::add(kind, 0, t);
+        }
     }
 }
+/// MEASUREMENT ONLY, never lands: cycles spent flushing for user changes, by kind.
+pub mod probe {
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    /// [count, pages, cycles] per kind.
+    pub static TARGET_RANGE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+    pub static TARGET_FULL: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+    pub static OWN_RANGE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+    pub static OWN_FULL: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+    pub static CHANGES: AtomicU64 = AtomicU64::new(0);
+    pub fn now() -> u64 {
+        // SAFETY: unprivileged and side-effect free.
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+    pub fn add(kind: &[AtomicU64; 3], pages: u64, since: u64) {
+        kind[0].fetch_add(1, Relaxed);
+        kind[1].fetch_add(pages, Relaxed);
+        kind[2].fetch_add(now().wrapping_sub(since), Relaxed);
+    }
+    pub fn say() {
+        let n = CHANGES.fetch_add(1, Relaxed) + 1;
+        if n % 4096 != 0 {
+            return;
+        }
+        let r = |k: &[AtomicU64; 3]| (k[0].load(Relaxed), k[1].load(Relaxed), k[2].load(Relaxed));
+        let (a, b, c, d) = (r(&TARGET_RANGE), r(&TARGET_FULL), r(&OWN_RANGE), r(&OWN_FULL));
+        crate::log!(
+            "tlbprobe: changes={n} target_range={}/{}/{} target_full={}/{}/{} own_range={}/{}/{} own_full={}/{}/{} (count/pages/cycles)",
+            a.0, a.1, a.2, b.0, b.1, b.2, c.0, c.1, c.2, d.0, d.1, d.2
+        );
+    }
+}
+
 
 use crate::invalidation::{Half, Origin};
 
@@ -274,7 +318,9 @@ enum Answerer {
 /// The flush, then the staged delay: every serve's closure but `join`'s.
 fn answer(by: Answerer) -> impl FnOnce(Reach) {
     move |reach| {
+        let t = probe::now();
         flush(reach);
+        probe::add(if by == Answerer::Asked { &probe::TARGET_FULL } else { &probe::OWN_FULL }, 0, t);
         stage_ack_delay(by);
     }
 }
