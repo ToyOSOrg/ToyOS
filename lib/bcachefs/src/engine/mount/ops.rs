@@ -151,6 +151,11 @@ impl<D: BlockDev> Mount<D> {
         Source::readdir(self, dir, cursor, max).await
     }
 
+    /// Every entry of `dir` with its inode, by inode number.
+    pub async fn listing(&self, dir: u64) -> Result<Vec<(read::DirEntry, Inode)>> {
+        Source::listing(self, dir).await
+    }
+
     /// A new file or directory `name` in directory `dir`, owned by `owner`,
     /// its times `now`, in nanoseconds since the Unix epoch. Its number is
     /// the inode cursor's next free one (A8.7), its name in the first free

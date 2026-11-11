@@ -84,6 +84,11 @@ pub struct DirEntry {
     pub next: u64,
 }
 
+/// How far apart two inode numbers may be for the second to be read by
+/// stepping over the keys between them: far fewer keys than a leaf holds, so
+/// the steps cost less than finding the second from the root.
+const NEAR: u64 = 32;
+
 /// Entries [`Volume::names`] asks of one directory at a time.
 const LISTING: usize = 256;
 
@@ -279,12 +284,57 @@ pub(crate) trait Source {
     /// The inode numbered `ino`.
     async fn inode(&self, ino: u64) -> Result<Inode> {
         let (key, value) = self.get(Btree::Inodes, Bpos::new(0, ino, ROOT_SNAPSHOT)).await?.ok_or(Error::NotFound)?;
+        self.decode_inode(ino, &key, &value)
+    }
+
+    /// The inodes numbered `inos`, in that order, each [`Source::inode`]'s
+    /// answer. Ascending numbers within [`NEAR`] of each other are read in
+    /// one pass over their leaves, not each from the root.
+    async fn inodes(&self, inos: &[u64]) -> Result<Vec<Inode>> {
+        let mut found: Vec<Inode> = Vec::with_capacity(inos.len());
+        while let Some(&first) = inos.get(found.len()) {
+            let before = found.len();
+            self.walk(Btree::Inodes, Bpos::new(0, first, ROOT_SNAPSHOT), |key, value| {
+                let Some(&ino) = inos.get(found.len()) else { return Ok(false) };
+                let wanted = Bpos::new(0, ino, ROOT_SNAPSHOT);
+                if key.pos < wanted {
+                    return Ok(true);
+                }
+                if key.pos > wanted {
+                    return Err(Error::NotFound);
+                }
+                let inode = self.decode_inode(ino, key, value)?;
+                // Two names of one inode ask for it twice.
+                while inos.get(found.len()) == Some(&ino) {
+                    found.push(inode.clone());
+                }
+                Ok(inos.get(found.len()).is_some_and(|&next| next.checked_sub(ino).is_some_and(|gap| gap <= NEAR)))
+            })
+            .await?;
+            if found.len() == before {
+                return Err(Error::NotFound);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Every entry of `dir` with its inode, by inode number: the names in
+    /// one pass over the dirents, then their inodes by [`Source::inodes`].
+    async fn listing(&self, dir: u64) -> Result<Vec<(DirEntry, Inode)>> {
+        let (mut entries, _) = self.readdir(dir, 0, usize::MAX).await?;
+        entries.sort_unstable_by_key(|e| e.ino);
+        let inos: Vec<u64> = entries.iter().map(|e| e.ino).collect();
+        Ok(entries.into_iter().zip(self.inodes(&inos).await?).collect())
+    }
+
+    /// The inode numbered `ino`, from its key in the inodes btree.
+    fn decode_inode(&self, ino: u64, key: &Key, value: &[u8]) -> Result<Inode> {
         match key.kind {
             kind::INODE_V3 => {}
             kind::INODE | kind::INODE_V2 => return Err(Error::Unsupported("inode in a format before inode_v3")),
             _ => return Err(Error::NotFound),
         }
-        let v = InodeValue::decode(&value)?;
+        let v = InodeValue::decode(value)?;
         let mode = v.mode();
         let stored = v.field(inode_field::NLINK) as u32;
         let nlink = if v.flags & inode_flag::UNLINKED != 0 {

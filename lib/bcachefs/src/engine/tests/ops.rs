@@ -296,3 +296,102 @@ fn a_rename_across_many_leaves_dirties_no_more_nodes_than_its_grant() {
     let v = checked(&dev);
     assert!(names_of(&v, b).contains(&name) && !names_of(&v, a).contains(&name));
 }
+
+/// A source that counts the walks asked of it: each is one search of a
+/// btree from its root.
+struct Walks<'a, S: read::Source> {
+    of: &'a S,
+    walks: std::cell::Cell<usize>,
+}
+
+impl<S: read::Source> read::Source for Walks<'_, S> {
+    type Dev = S::Dev;
+
+    fn dev(&self) -> &S::Dev {
+        self.of.dev()
+    }
+    fn superblock(&self) -> &superblock::Superblock {
+        self.of.superblock()
+    }
+    fn master_key(&self) -> Option<&crypt::MasterKey> {
+        self.of.master_key()
+    }
+    fn root_dir(&self) -> u64 {
+        self.of.root_dir()
+    }
+    fn root_of(&self, btree: Btree) -> Option<superblock::Root> {
+        self.of.root_of(btree)
+    }
+    async fn walk(&self, btree: Btree, from: Bpos, visit: impl FnMut(&Key, &[u8]) -> Result<bool>) -> Result<()> {
+        self.walks.set(self.walks.get() + 1);
+        self.of.walk(btree, from, visit).await
+    }
+}
+
+/// A thousand files made one after another, a second name for one of them,
+/// and a file made after forty elsewhere: the directory's inode, its names,
+/// and the inodes in two passes, where an inode read alone for each name is
+/// a thousand and two.
+#[test]
+fn a_listing_reads_its_inodes_in_a_pass_over_each_run_of_them() {
+    use read::Source;
+    let dev = formatted(64 << 20, None);
+    mounted(&dev, async |m: &Mount<&Image>| {
+        let d = m.create(m.root(), b"d", New::Dir, OWNER, NOW).await.unwrap();
+        let mut first = 0;
+        for i in 0..1000 {
+            let f = m.create(d.ino, format!("f{i}").as_bytes(), New::File, OWNER, NOW).await.unwrap();
+            if i == 0 {
+                first = f.ino;
+            }
+        }
+        m.link(first, d.ino, b"again", Link::New, NOW).await.unwrap();
+        for i in 0..40 {
+            m.create(m.root(), format!("elsewhere{i}").as_bytes(), New::File, OWNER, NOW).await.unwrap();
+        }
+        m.create(d.ino, b"late", New::File, OWNER, NOW).await.unwrap();
+
+        let counted = Walks { of: m, walks: std::cell::Cell::new(0) };
+        let listed = counted.listing(d.ino).await.unwrap();
+        assert_eq!(counted.walks.get(), 4);
+        assert_eq!(listed.len(), 1002);
+        let (mut entries, more) = m.readdir(d.ino, 0, usize::MAX).await.unwrap();
+        assert!(!more);
+        entries.sort_unstable_by_key(|e| e.ino);
+        for ((entry, inode), want) in listed.iter().zip(&entries) {
+            assert_eq!(entry.ino, want.ino);
+            assert_eq!(*inode, m.inode(entry.ino).await.unwrap(), "{:?}", String::from_utf8_lossy(&entry.name));
+        }
+        let mut names: Vec<&[u8]> = listed.iter().map(|(e, _)| &e.name[..]).collect();
+        names.sort_unstable();
+        let mut want: Vec<&[u8]> = entries.iter().map(|e| &e.name[..]).collect();
+        want.sort_unstable();
+        assert_eq!(names, want);
+    });
+}
+
+/// Inodes asked for in any order, one twice, are each the answer of asking
+/// for it alone; a number no inode has refuses them all, wherever it falls.
+#[test]
+fn inodes_read_together_are_those_read_alone() {
+    use read::Source;
+    let dev = formatted(64 << 20, None);
+    mounted(&dev, async |m: &Mount<&Image>| {
+        let mut made = Vec::new();
+        for i in 0..8 {
+            made.push(m.create(m.root(), format!("f{i}").as_bytes(), New::File, OWNER, NOW).await.unwrap().ino);
+        }
+        m.unlink(m.root(), b"f3", false, NOW).await.unwrap();
+        m.release(made[3]).await.unwrap();
+        let asked = [made[5], made[0], made[0], made[7], made[1]];
+        let got = m.inodes(&asked).await.unwrap();
+        assert_eq!(got.len(), asked.len());
+        for (inode, ino) in got.iter().zip(asked) {
+            assert_eq!(*inode, m.inode(ino).await.unwrap());
+        }
+        assert_eq!(m.inodes(&[]).await, Ok(Vec::new()));
+        for absent in [[made[2], made[3], made[4]], [made[3], made[4], made[5]], [made[6], made[7], u64::MAX]] {
+            assert_eq!(m.inodes(&absent).await, Err(Error::NotFound), "{absent:?}");
+        }
+    });
+}
