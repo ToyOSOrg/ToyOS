@@ -9,8 +9,8 @@
 //!
 //! **A pinned frame is never reissued.** [`Pins`] counts, per frame and
 //! without the allocator's lock, the kernel's copies reading or writing a
-//! paged object's frame through the direct map; a page's frame is never
-//! pinned. A frame freed while pinned is deferred: the allocator does
+//! paged object's frame through the direct map; an address space's frame is
+//! never pinned. A frame freed while pinned is deferred: the allocator does
 //! not take it back until its last pin goes, and [`Pins::unpin`] says when
 //! that is.
 //!
@@ -725,10 +725,11 @@ impl<'m> Frames<'m> {
     }
 
     /// Free the frame at `phys` of a page that stays committed, promising
-    /// the page a frame again, which the frame backs at once: nothing pins a
-    /// page's frame, so it is free now and never deferred to a later unpin.
+    /// the page a frame again, which the frame backs at once: nothing pins an
+    /// address space's frame, so it is free now and never deferred to a later
+    /// unpin.
     pub fn discard(&mut self, phys: u64, pins: &Pins) {
-        assert!(!pins.pinned(phys), "frames: {phys:#x} discarded pinned, and nothing pins a page's frame");
+        assert!(!pins.pinned(phys), "frames: {phys:#x} discarded pinned, and nothing pins an address space's frame");
         self.give_back(phys, pins);
         self.repromise(1);
         self.refill();
@@ -1463,7 +1464,7 @@ mod tests {
 
     /// A discarded frame is promised to its page again, backed by itself: a
     /// pinned one would come back only at its last unpin, leaving the promise
-    /// backed by no free frame, and nothing pins a page's frame.
+    /// backed by no free frame, and nothing pins an address space's frame.
     #[test]
     #[should_panic(expected = "discarded pinned")]
     fn a_pinned_frame_discarded_is_a_panic() {

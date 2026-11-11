@@ -462,15 +462,19 @@ mod tests {
     }
 
     /// A copied page holds the source's bytes as far as the range's copy and
-    /// the source both go, and zeros after them, whatever the frame held.
+    /// the source both go, and zeros after them, whatever the frame held; a
+    /// page that takes none asks the source for nothing.
     #[test]
     fn a_copied_page_keeps_nothing_its_frame_held() {
         for (at, offset, copied, size, n) in [
             (PAGE, 0, 3 * PAGE, 4 * PAGE, PAGE),
             (0, PAGE, 100, 2 * PAGE, 100),
-            (PAGE, 0, 3 * PAGE, PAGE + 50, 50),
+            (PAGE, 0, PAGE + 50, PAGE + 50, 50),
             (PAGE, 0, 100, 4 * PAGE, 0),
             (0, 0, 0, PAGE, 0),
+            // A range longer than its object: a page wholly past its end,
+            // where a read would be past the object, which no read may be.
+            (2 * PAGE, 0, 100, PAGE, 0),
         ] {
             let (asked, frame) = copy_page(at, offset, copied, size);
             let n = n as usize;
@@ -479,16 +483,6 @@ mod tests {
             assert!(frame[..n].iter().all(|&b| b == 7), "{what}: its {n} bytes");
             assert!(frame[n..].iter().all(|&b| b == 0), "{what}: zeros past {n} bytes");
         }
-    }
-
-    /// A page wholly past its source's end, which a range longer than its
-    /// object reaches, reads zeros and asks the source for nothing: a read
-    /// there is past the object, which no read may be.
-    #[test]
-    fn a_page_wholly_past_its_source_reads_nothing_from_it() {
-        let (asked, frame) = copy_page(2 * PAGE, 0, 3 * PAGE, PAGE);
-        assert_eq!(asked, None, "a read past the source's end");
-        assert!(frame.iter().all(|&b| b == 0));
     }
 
     /// An object by number.

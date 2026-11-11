@@ -133,8 +133,8 @@ pub fn release_floor(job: &Job) {
 /// under one hold of the allocator's lock.
 ///
 /// # Safety
-/// Each is a frame [`Frame::into_raw`] gave up, that no leaf on any CPU maps
-/// any more and nothing else frees.
+/// Each is a frame drawn for a committed page of `job`'s, which no leaf on
+/// any CPU maps any more and nothing else frees.
 pub unsafe fn free_drawn(job: &Job, frames: &[u64]) {
     let pins = pins();
     with(|f| f.free_drawn(job.memory(), frames.iter().copied(), &pins));
@@ -308,7 +308,7 @@ pub fn alloc_promised() -> Frame {
 
 /// [`alloc_promised`]'s frame holding what its last owner left, by its
 /// address: its caller writes every byte of it before anything maps it, and
-/// gives it back through [`free_drawn`].
+/// gives it back through [`free_drawn`] or [`discard`].
 pub(super) fn alloc_promised_unzeroed() -> u64 {
     with(Frames::alloc_promised)
 }
