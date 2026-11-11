@@ -3027,10 +3027,10 @@ fn translated(claim: toyos::Device, function: &Pci) -> Result<toyos::Device, Mis
     if !claims::is_virtio(function) {
         return Ok(claim);
     }
-    // SAFETY: a device claim, as either type holds.
+    // SAFETY: `claim` was minted for `function`, a PCI function.
     let dev = unsafe { toyos::PciDev::from_handle(claim.into()) };
     let offered = toyos_pci_claim::virtio::offers_access_platform(&dev);
-    // SAFETY: as above.
+    // SAFETY: a device claim, which a `Device` is whatever its class.
     let claim = unsafe { toyos::Device::from_handle(dev.into()) };
     match offered {
         Ok(true) => Ok(claim),

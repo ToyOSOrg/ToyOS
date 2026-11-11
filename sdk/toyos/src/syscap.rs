@@ -88,7 +88,9 @@ impl SysCap {
         // The kernel installed this handle in this process's table for this
         // call and no other, so nothing else answers for it.
         let claim = OwnedHandle(syscall::device_claim(self.0.raw(), request)?);
-        // SAFETY: the kernel made a device claim, which `T` is a type of.
+        // SAFETY: the kernel made a claim of the class `request` names.
+        // That `T` is that class's type, or `Device`, is the caller's to
+        // keep: the bound does not hold it.
         Ok(unsafe { T::from_handle(claim) })
     }
 

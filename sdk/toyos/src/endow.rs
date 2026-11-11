@@ -64,7 +64,8 @@ pub trait OfKind: FromHandle {
 }
 
 /// A type the system capability mints a device claim as: [`Device`], or a
-/// class's type over it, which the minting call's class decides.
+/// class's type over it. The SDK does not pair the type with the class a call
+/// claims: a caller that names a class type keeps it to the class it asks for.
 pub trait ClaimType: FromHandle {}
 
 /// Whether `kinds` names `kind`.
