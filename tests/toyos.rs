@@ -6873,11 +6873,18 @@ fn microcode_on_metal(bench: Bench, loader: &str, log: &str, cpus: u32) -> Resul
 /// revision, which the `microcode` row holds: a boot of that machine reads
 /// these again, and `checks::the_benches_words_decide_as_their_vendors_rows`
 /// holds what they decide to each vendor's row for that CPU.
-const MITIGATION_BENCHES: [(&str, &str); 1] = [(
-    "the AMD bench",
-    "Amd signature=0x860f01 hypervisor=false smt=true cpuid.7.0.ebx=0x219c91a9 cpuid.7.0.edx=0x0 cpuid.7.2.edx=0x0 \
-     arch_capabilities=0x0 cpuid.80000008.ebx=0x90cf757 cpuid.80000021.eax=0x0 cpuid.80000021.ecx=0x0",
-)];
+const MITIGATION_BENCHES: [(&str, &str); 2] = [
+    (
+        "the T14",
+        "Intel signature=0x806c1 hypervisor=false smt=true cpuid.7.0.ebx=0xf3bfa7eb cpuid.7.0.edx=0xfc100710 \
+         cpuid.7.2.edx=0x1 arch_capabilities=0xa005c6b cpuid.80000008.ebx=0x0 cpuid.80000021.eax=0x0 cpuid.80000021.ecx=0x0",
+    ),
+    (
+        "the AMD bench",
+        "Amd signature=0x860f01 hypervisor=false smt=true cpuid.7.0.ebx=0x219c91a9 cpuid.7.0.edx=0x0 cpuid.7.2.edx=0x0 \
+         arch_capabilities=0x0 cpuid.80000008.ebx=0x90cf757 cpuid.80000021.eax=0x0 cpuid.80000021.ecx=0x0",
+    ),
+];
 
 /// A `mitigations:` words line: the facts it gives, its microcode revision
 /// aside, and its other `name=value` fields.

@@ -23,13 +23,18 @@ line per vulnerability, and a later CPU's where they differ
 dispatch-serializing bit (70586 G-2, MSR C001_1029[1]) where the decision
 names it, after its microcode loads and before the clocksource's
 `RDTSCP; LFENCE` relies on it, and stops the machine if the bit does not
-hold. The AMD bench's words are pinned in the harness, and
-`checks::the_benches_words_decide_as_their_vendors_rows` holds what they
-decide to AMD's documents for that CPU. No other mitigation the decision
+hold. Both benches' words, as each one's boot logged them, are pinned in the
+harness, and `checks::the_benches_words_decide_as_their_vendors_rows` holds
+what they decide to each vendor's row for that CPU. No other mitigation the decision
 names is applied: each is its own record's.
 
 **Left**:
-- The T14's words pinned as the AMD bench's are, and its host test row.
+- Shared Buffers Data Read lets a program with MMIO access read the stale
+  data other cores' MMIO left in the shared uncore buffers. Intel's
+  "Processor MMIO Stale Data Vulnerabilities" answers it by keeping MMIO
+  from untrusted software, and ToyOS's drivers hold MMIO; the decision names
+  only the microcode's overwrite of what RDRAND, RDSEED and EGETKEY leave.
+  The T14 is affected.
 - An AMD guest whose CPUID does not say LFENCE always serializes cannot set
   the bit and reports it lacking; the kernel's ordered TSC read is then not
   dispatch-ordered there. No proving machine is a guest.

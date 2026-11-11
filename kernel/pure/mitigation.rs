@@ -716,15 +716,26 @@ fn intel(f: &Facts, of: Vulnerability) -> Verdict {
             }
         }
         // "Processor MMIO Stale Data Vulnerabilities": the three `_NO`
-        // bits, else the table. VERW overwrites the fill buffers where
-        // `FB_CLEAR`, or where MDS affects the part and it has `MD_CLEAR`
-        // and `L1D_FLUSH`.
+        // bits, else the table. VERW's fill-buffer overwrite blocks the fill
+        // buffer stale data propagator, where `FB_CLEAR` enumerates it or MDS
+        // affects the part and it has `MD_CLEAR` and `L1D_FLUSH`. Against
+        // Shared Buffers Data Read and the sideband propagator, the microcode
+        // that has RDRAND, RDSEED and EGETKEY overwrite the uncore buffers
+        // "is also relevant", under the control `SRBDS_CTRL` enumerates. What
+        // the primary propagator alone leaves reaches only a fill buffer,
+        // which only MDS's sampling reads.
         Vulnerability::MmioStaleData => {
             if f.cap(cap::SBDR_SSDP_NO) && f.cap(cap::FBSDP_NO) && f.cap(cap::PSDP_NO) {
                 return Verdict::NotAffected;
             }
             let implicit = f.intel_mds() != Verdict::NotAffected && edx & MD_CLEAR != 0 && edx & L1D_FLUSH != 0;
-            f.intel_listed(MMIO, Asks::of(Mitigation::Verw, f.cap(cap::FB_CLEAR) || implicit))
+            let asks = Asks::NOTHING
+                .and_if(!f.cap(cap::FBSDP_NO), Mitigation::Verw, f.cap(cap::FB_CLEAR) || implicit)
+                .and_if(!f.cap(cap::SBDR_SSDP_NO), Mitigation::SrbdsMicrocode, edx & SRBDS_CTRL != 0);
+            if asks.needs.is_empty() {
+                return Verdict::NotAffected;
+            }
+            f.intel_listed(MMIO, asks)
         }
         // "Register File Data Sampling": `RFDS_NO`; an affected part whose
         // VERW clears the register files enumerates `RFDS_CLEAR`.
@@ -1076,9 +1087,11 @@ mod tests {
     }
 
     /// Intel's row for CPUID 806C1, eight threads on four cores, with the
-    /// words its columns imply once its listed microcode is loaded: enhanced
-    /// IBRS, the `_NO` bits of what it lists "Not Affected", `GDS_CTRL` for
-    /// its "MCU", and neither `BHI_NO` nor `BHI_CTRL` for its "Software".
+    /// bits its rules read of what the T14 enumerates on its listed
+    /// microcode: enhanced IBRS; `FBSDP_NO` and no `FB_CLEAR`, so that its
+    /// "MCU" for Shared Buffers Data Read is the uncore buffers' overwrite
+    /// `SRBDS_CTRL` controls; `GDS_CTRL` for its gather "MCU"; and neither
+    /// `BHI_NO` nor `BHI_CTRL` for its "Software".
     const INTEL_806C1: Facts = Facts {
         signature: 0x806c1,
         smt: true,
@@ -1087,9 +1100,9 @@ mod tests {
             | cap::IBRS_ALL
             | cap::MDS_NO
             | cap::IF_PSCHANGE_MC_NO
-            | cap::TAA_NO
-            | cap::FB_CLEAR
-            | cap::GDS_CTRL,
+            | cap::FBSDP_NO
+            | cap::GDS_CTRL
+            | cap::RFDS_NO,
         ..NOTHING
     };
 
@@ -1103,10 +1116,16 @@ mod tests {
                 (BranchHistoryInjection, needs(&[BhbClear])),
                 (IndirectTargetSelection, needs(&[BranchesInUpperHalf])),
                 (SpecStoreBypass, needs(&[Ssbd])),
-                (MmioStaleData, needs(&[Verw])),
+                (MmioStaleData, needs(&[SrbdsMicrocode])),
                 (GatherDataSampling, needs(&[GdsMicrocode])),
             ],
         );
+        // A part with the fill buffer propagator asks VERW as well, which
+        // only `FB_CLEAR` enumerates where MDS does not affect it.
+        let propagating = Facts { arch_capabilities: INTEL_806C1.arch_capabilities & !cap::FBSDP_NO, ..INTEL_806C1 };
+        assert_eq!(decide(&propagating).verdict(MmioStaleData), lacking(&[Verw, SrbdsMicrocode], &[Verw]));
+        let cleared = Facts { arch_capabilities: propagating.arch_capabilities | cap::FB_CLEAR, ..propagating };
+        assert_eq!(decide(&cleared).verdict(MmioStaleData), needs(&[Verw, SrbdsMicrocode]));
         // Without enhanced IBRS its core's other thread can steer a
         // program's branches, which STIBP keeps from a program that asks.
         let legacy = Facts { arch_capabilities: INTEL_806C1.arch_capabilities & !cap::IBRS_ALL, ..INTEL_806C1 };
@@ -1165,7 +1184,7 @@ mod tests {
                 (L1tf, needs(&[TerminalEntriesNameNoSecret])),
                 (Mds, needs(&[Verw])),
                 (TsxAsyncAbort, needs(&[Verw])),
-                (MmioStaleData, needs(&[Verw])),
+                (MmioStaleData, needs(&[Verw, SrbdsMicrocode])),
                 (Srbds, needs(&[SrbdsMicrocode])),
                 (GatherDataSampling, lacking(&[GdsMicrocode], &[GdsMicrocode])),
                 (ItlbMultihit, needs(&[NoGuest])),
@@ -1180,7 +1199,7 @@ mod tests {
         assert_eq!(decision.verdict(SpectreV2), lacking(&[IbrsOnEntry, Smep, Ibpb, Stibp], &[IbrsOnEntry, Ibpb, Stibp]));
         assert_eq!(decision.verdict(SpecStoreBypass), lacking(&[Ssbd], &[Ssbd]));
         assert_eq!(decision.verdict(Mds), lacking(&[Verw], &[Verw]));
-        assert_eq!(decision.verdict(MmioStaleData), lacking(&[Verw], &[Verw]));
+        assert_eq!(decision.verdict(MmioStaleData), lacking(&[Verw, SrbdsMicrocode], &[Verw, SrbdsMicrocode]));
         assert_eq!(decision.verdict(Srbds), lacking(&[SrbdsMicrocode], &[SrbdsMicrocode]));
     }
 
@@ -1263,7 +1282,7 @@ mod tests {
                 (Meltdown, assumed(needs(&[KernelUnmappedInUserMode]))),
                 (L1tf, assumed(needs(&[TerminalEntriesNameNoSecret]))),
                 (Mds, assumed(needs(&[Verw]))),
-                (MmioStaleData, assumed(needs(&[Verw]))),
+                (MmioStaleData, assumed(lacking(&[Verw, SrbdsMicrocode], &[SrbdsMicrocode]))),
                 (RegFileDataSampling, assumed(lacking(&[Verw], &[Verw]))),
                 (Srbds, assumed(lacking(&[SrbdsMicrocode], &[SrbdsMicrocode]))),
                 (GatherDataSampling, assumed(lacking(&[GdsMicrocode], &[GdsMicrocode]))),
@@ -1427,8 +1446,11 @@ mod tests {
         let unread = Registers { mcu_opt_ctrl: None, de_cfg2: None, c001_1029: None };
         let intel = decide(&INTEL_806C1);
         assert_eq!(intel.in_force(&unread), ALWAYS);
-        assert_eq!(intel.in_force(&Registers { mcu_opt_ctrl: Some(0), ..unread }), ALWAYS.with(GdsMicrocode));
-        assert_eq!(intel.in_force(&Registers { mcu_opt_ctrl: Some(msr::GDS_MITG_DIS), ..unread }), ALWAYS);
+        let both = ALWAYS.with(SrbdsMicrocode).with(GdsMicrocode);
+        assert_eq!(intel.in_force(&Registers { mcu_opt_ctrl: Some(0), ..unread }), both);
+        assert_eq!(intel.in_force(&Registers { mcu_opt_ctrl: Some(msr::GDS_MITG_DIS), ..unread }), ALWAYS.with(SrbdsMicrocode));
+        let opted_out = Registers { mcu_opt_ctrl: Some(msr::GDS_MITG_DIS | msr::RNGDS_MITG_DIS), ..unread };
+        assert_eq!(intel.in_force(&opted_out), ALWAYS);
         let amd = decide(&AMD_17H_60H);
         let both = Registers { de_cfg2: Some(msr::SUPPRESS_BP_ON_NON_BR), c001_1029: Some(C001_1029_LFENCE_SERIALIZES_DISPATCH), ..unread };
         assert_eq!(amd.in_force(&both), ALWAYS.with(SuppressBpOnNonBr).with(LfenceDispatchSerializing));

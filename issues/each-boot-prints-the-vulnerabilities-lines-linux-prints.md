@@ -15,7 +15,6 @@ no guest runs`. The `mitigations` metal row holds every CPU's lines to the
 decision on its words, and a bench's words to its pinned ones.
 
 **Left**:
-- The T14's words pinned, so that its boot's words are held to them.
 - `spec_store_bypass` reads `vulnerable: needs SSBD for programs that ask`:
   nothing applies SSBD for a program that asks yet.
 - The lines read on each proving machine, compared there with the lines
