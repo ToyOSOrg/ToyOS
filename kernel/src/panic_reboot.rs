@@ -104,7 +104,7 @@ pub fn arm(on_the_record: bool) -> Bound {
     match (deadline(budget), crate::power::can_reboot()) {
         (Some((cycles, source)), true) => {
             if on_the_record {
-                let _ = (secs, source); // NEGATIVE CONTROL: the armed line is never written
+                let _ = (ARMED, secs, source); // NEGATIVE CONTROL: the armed line is never written
             } else {
                 serial::panic_registers().write(b"panic: rebooting\n");
             }
