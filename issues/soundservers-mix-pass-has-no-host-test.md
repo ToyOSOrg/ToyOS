@@ -4,16 +4,16 @@ kind: track
 opened: 2026-07-28
 ---
 
-# soundd's mix pass has no host test, and neither negative gate exists
+# soundserver's mix pass has no host test, and neither negative gate exists
 
-Both soundd defects found on 2026-07-28 were in pure code needing no device, no
+Both soundserver defects found on 2026-07-28 were in pure code needing no device, no
 syscall and no kernel — and both cost a 120-boot QEMU campaign to find. That is
 the case for host-testing the daemons, and it is empirical.
 
-Part of it landed: `toyos-abi` is host-tested, soundd has a `#[cfg(test)]` module
-covering quantisation, the deferral floor and shape refusal, and netd/sshd got
-their own boot configs. What did not land is the pass itself. Everything from the
-mix loop's `loop {` to its stats flush — the free-mask fold, the drain branch,
+Part of it landed: `toyos-abi` is host-tested, soundserver has a `#[cfg(test)]` module
+covering quantisation, the deferral floor and shape refusal, and netstack and
+sshserver got their own boot configs. What did not land is the pass itself.
+Everything from the mix loop's `loop {` to its stats flush — the free-mask fold, the drain branch,
 the refill loop, the pending-removal retain, the stats window — runs only in a
 booted guest.
 
@@ -53,13 +53,12 @@ test and the QEMU gate quantise into the same buckets from one implementation.
   it. An 11-line pure bug removed the integration gate's detection power once
   already.
 
-Deliberately out of scope, so nobody re-argues it: sshd (~17 pure lines, and its
+Deliberately out of scope, so nobody re-argues it: sshserver (~17 pure lines, and its
 handler surface cannot be faked without widening a fork); the compositor's `fn
 main` decomposition (its two worst defects were found by reading and the right
-fix for one is to make it unrepresentable); netd's protocol layer (stock
-smoltcp — conformance tests there test upstream); and the resampler's numerics
+fix for one is to make it unrepresentable); and the resampler's numerics
 (libm `sin`/`exp` need not agree bit-for-bit between an arm64 host and the
 x86-64 target). Test the code around the resampler, not its output values.
 
 **And the honest ceiling:** none of this touches the wake lateness that causes
-the dropouts. It makes soundd's *response* to lateness a controlled variable.
+the dropouts. It makes soundserver's *response* to lateness a controlled variable.

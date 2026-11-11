@@ -8,7 +8,7 @@ opened: 2026-08-07
 
 The owner ran `cargo run` on 2026-08-07 (guest RTC 13:14:51 UTC, tree at or
 after `43ce73e`), started doom from the terminal, let its demo loop run to
-t=69 s, then ran `tone` 44 times. 391 s of serial, 119 soundd stats windows.
+t=69 s, then ran `tone` 44 times. 391 s of serial, 119 soundserver stats windows.
 Every number below is from that capture.
 
 **Harm, by the fast tier's own definition.** Two windows during doom:
@@ -41,15 +41,15 @@ whose *worst of 30* is 10090. The two distributions are disjoint.
 `deferred` column separates them.** `deferred` counts a mix cycle declining to
 submit because a streaming client's ring was empty and there was still playout
 margin (the `mid_refill` arm of `mix_thread`, now `system/soundserver/src/mix.rs`) —
-soundd's restraint, waiting for a producer:
+soundserver's restraint, waiting for a producer:
 
 ```
 doom phase   173 deferrals across 14 of 31 windows
 tone phase     1 deferral  across  1 of 88 windows
 ```
 
-Same soundd, same device, same kernel. So the doom-phase underruns are **doom
-failing to fill its ring**, held off by soundd until the floor and then paid in
+Same soundserver, same device, same kernel. So the doom-phase underruns are **doom
+failing to fill its ring**, held off by soundserver until the floor and then paid in
 silence — not the audio path being late. The 92175 us window sits beside a
 compositor window of `frames=23` where the steady state is 65-70, so doom
 stopped presenting at the same moment it stopped producing; both recovered
@@ -78,7 +78,7 @@ windows, one per stream start). One candidate mechanism, offered as a
 hypothesis and not a measurement: the mix loop arms its wait on
 `target` — the *next future* grid point when the DLL estimate is past due — but
 records `armed_on = Some(t_est)`, the stale estimate, so the sample is taken
-from an instant soundd deliberately did not ask to be woken at and includes
+from an instant soundserver deliberately did not ask to be woken at and includes
 every whole period it skipped.
 
 **Where that code is now, and what has moved under it.** soundd is
@@ -89,7 +89,7 @@ taken against `armed_on`. Two things have changed around it and
 neither settles the question:
 
 - The site now argues the choice rather than only asserting it: reading the DLL
-  estimate at wake would score a window's first wake — armed while soundd was
+  estimate at wake would score a window's first wake — armed while soundserver was
   idle and asking for no wake time at all — as a missed deadline, so the sample
   is deliberately the distance from the prediction, "however large". That is an
   answer about `t_est` versus the DLL's later estimate. It is not an answer

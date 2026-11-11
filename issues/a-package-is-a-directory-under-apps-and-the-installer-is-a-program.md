@@ -56,7 +56,7 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
   `pkg install <file>` stays for local and offline installs, checked against
   the `SHA256SUMS` beside it.
 - **Fetching is HTTPS.** GitHub serves releases only over TLS, so `pkg`
-  carries a TLS client; the network stack under it is netd's. A crate that
+  carries a TLS client; the network stack under it is netstack's. A crate that
   does TLS is not our job to write and is widely used; it takes the fork
   treatment every third-party crate takes. The redirect GitHub answers with
   is followed once.

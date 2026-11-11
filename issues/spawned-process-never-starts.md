@@ -69,7 +69,7 @@ with no CPU is one that blocked before its first user instruction, and any CPU
 at all moves the fault into userland startup. The owner ran it on the T14
 during boot 10 of `boot5-doom-wedge.log` and **`ps` pid 17 printed nothing and
 never exited**, and neither did `/system/bin/shutdown` pid 25 or three `doom`s. In
-that whole boot the only processes that ever exited were `netd` and one
+that whole boot the only processes that ever exited were `netstack` and one
 `locale`.
 
 That is an answer rather than a lost measurement, and it is worth more than the

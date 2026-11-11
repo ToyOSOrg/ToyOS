@@ -19,21 +19,21 @@ On top of retention, in dependency order:
 
 1. **Retention plus one query syscall and a topic decoder**, with `hw` and
    `disk` as its first two consumers.
-2. **A diagnostic port on `/system/bin/init`**, answering a program name with a
+2. **A diagnostic port on `/system/bin/supervisor`**, answering a program name with a
    `Process` handle narrowed to `Rights::READ`. `SYS_PROCESS_STATS` takes a
    `Process` handle and a handle is the whole of the right, so nothing hands a
-   diagnostic tool a way to sample a daemon: `/system/bin/init` holds the only `Process`
+   diagnostic tool a way to sample a daemon: `/system/bin/supervisor` holds the only `Process`
    handles for what `[boot] start` names. So "where is
-   soundd's / the compositor's / netd's time going?" is unanswerable from a
+   soundserver's / the compositor's / netstack's time going?" is unanswerable from a
    shell, and `audio_idle_suspend` name-matches `SYS_SYSINFO` entries out of a
    byte buffer to sample a running daemon twice. Nothing in the kernel has to
    change for it — the addressing half is done, and this is the policy half.
 3. **A status-query message in the SDK**, reserved out of the message-id space,
    answered by the compositor first.
-4. **A cumulative soundd snapshot** published under a seqlock, and an `audio`
+4. **A cumulative soundserver snapshot** published under a seqlock, and an `audio`
    tool that reads it. Today's stats struct is windowed and reset wholesale in
    four places, so nothing outside the mix thread can read a total.
-5. **netd interface, link and counter reporting**, and a `net` tool — the name
+5. **netstack interface, link and counter reporting**, and a `net` tool — the name
    is taken by an HTTP GET demo that should be renamed `http` first, which is
    the owner's call.
 6. **Master gain, and `audio volume`** — see

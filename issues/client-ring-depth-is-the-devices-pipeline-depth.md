@@ -6,7 +6,7 @@ opened: 2026-08-01
 
 # Every client's ring geometry is the device's pipeline depth
 
-soundd sets `slot_count = num_buffers`, the kernel driver's `TX_INFLIGHT_MAX`.
+soundserver sets `slot_count = num_buffers`, the kernel driver's `TX_INFLIGHT_MAX`.
 So a device with a different pipeline depth silently changes the shm size, the
 number of slots a client fills per wake, and the latency floor of *every*
 client, through a constant no client sees and none can influence.
@@ -18,7 +18,7 @@ was assumed.
 
 **What to build.** `slot_count` becomes a client property negotiated in
 `MSG_STREAM_OPEN`/`MSG_STREAM_OPENED`, which already carries the format
-negotiation, with soundd clamping to `[num_buffers.next_power_of_two(),
+negotiation, with soundserver clamping to `[num_buffers.next_power_of_two(),
 MAX_SLOTS]`. A client that asks for nothing gets today's value, so the default
 is unchanged. `num_buffers` stays a device property and stops leaking.
 

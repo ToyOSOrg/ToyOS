@@ -46,7 +46,7 @@ why, and the boot still leases.
   management firmware that shares it expect. Ubuntu has had link after every
   ToyOS boot so far; that becomes a tested property.
 - **Every received frame is hostile.** The receive path and every parser above
-  it are fuzzed; a malformed frame ends netd at worst, never the kernel.
+  it are fuzzed; a malformed frame ends netstack at worst, never the kernel.
 - **Error counters** (CRC, missed, no-buffer) are read and asserted zero under load.
 - **No register is left to its reset value, but `TIDV` and the receive
   addresses past the first, deliberately.** Done for these registers (pull

@@ -20,7 +20,7 @@ the T14, and the reason is the loop rather than the kernel.
    `tests/common/metal.rs`'s `Mode::Drive` tolerates the non-zero exit.
 
 2. `test-late-panic` fires in `kernel_main` after `spawn_init` and before
-   `enter_idle_loop`, so `logd` has not run: that boot writes no `/log` file at
+   `enter_idle_loop`, so `logkeeper` has not run: that boot writes no `/log` file at
    all and `boot.<label>.complete_ms` has nothing to read. `metal-panic-probe`
    fires late enough — five seconds after a process claims the framebuffer — but
    `tests/metal/src/image.rs`'s `derive` appends `reboot` to every arm's job list
@@ -31,4 +31,4 @@ the T14, and the reason is the loop rather than the kernel.
 
 A per-boot predicate in place of `bootlog::verdict` as the loop's judge, and
 either an arm that may decline the derived `reboot` job, or a panic actuator that fires after
-`logd` is up and before the runner's first job returns.
+`logkeeper` is up and before the runner's first job returns.

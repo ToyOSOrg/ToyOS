@@ -6,16 +6,16 @@ opened: 2026-09-26
 
 # Logging: records from every producer, and a kernel that waits on nobody
 
-What is built: every program init starts or launches writes records into a
-log ring of its own that init makes and names to `logd` (`sdk/toyos/src/log/`);
+What is built: every program the supervisor starts or launches writes records into a
+log ring of its own that the supervisor makes and names to `logkeeper` (`sdk/toyos/src/log/`);
 writing never waits, allocates or makes a syscall, a full ring is a count
-`logd` says, and soundd's mix thread writes a lane of its own wait-free. The
+`logkeeper` says, and soundserver's mix thread writes a lane of its own wait-free. The
 clock is a page (`sdk/abi/src/clock.rs`). Between the kernel's boot and its
-stop the console UART is its userland driver's, which `logd` feeds the log it
-writes, so a program's line reaches the console only through `logd`, under
-its name. The kernel waits on `logd` neither at a
+stop the console UART is its userland driver's, which `logkeeper` feeds the log it
+writes, so a program's line reaches the console only through `logkeeper`, under
+its name. The kernel waits on `logkeeper` neither at a
 panic, which halts the other CPUs first and paints its report,
-nor at a stop, which init sequences through `logd`'s flush. `logd` syncs on an
+nor at a stop, which the supervisor sequences through `logkeeper`'s flush. `logkeeper` syncs on an
 alert or an interval, keeps every boot's first part, and holds each program
 to an allowance. Severity is an ordered ladder.
 
@@ -46,11 +46,11 @@ breaks a verdict. Records grow a key the way journald's `MESSAGE_ID` does, and
 a verdict matches the key.
 *Exit:* no verdict in `tests/` or `tests/metal/src/*.rs` reads a record by its prose.
 
-**3. A machine whose `logd` ended says so.** Nothing restarts `logd` and
-nothing names its end: init holds no `Process` handle to it, so the rings fill,
+**3. A machine whose `logkeeper` ended says so.** Nothing restarts `logkeeper` and
+nothing names its end: the supervisor holds no `Process` handle to it, so the rings fill,
 their writers go on unharmed, and the console says nothing.
-*Exit:* init names `logd`'s exit on the console, and a guest test that ends
-`logd` finds that line and every other daemon still serving.
+*Exit:* the supervisor names `logkeeper`'s exit on the console, and a guest test that ends
+`logkeeper` finds that line and every other daemon still serving.
 
 **4. The control that stages a kernel writing a file.** `log-writes-the-file`
 puts a kernel context back to appending records to `/log` through the VFS —
@@ -67,12 +67,12 @@ that burst starves a tone playing beside it
 
 Constraints a reader would otherwise re-derive:
 
-- A ring lives as long as the process init started with it: `logd` sweeps and
+- A ring lives as long as the process the supervisor started with it: `logkeeper` sweeps and
   retires it at that process's end, so a child the process spawned into its own
   slots and that outlives it writes into a ring nobody reads.
 - A shared-memory region is a 2 MiB page, so a ring costs 2 MiB per program —
   what the pipe it replaced cost once written to.
-- The UART's driver takes the log at the UART's own rate, and `logd` holds
+- The UART's driver takes the log at the UART's own rate, and `logkeeper` holds
   what it has not taken in its replay, as for every reader.
 - A raw `SYS_REBOOT` or `SYS_SHUTDOWN` loses whatever a ring holds unread: the
-  one caller that has `logd` flush first is init's `power` port.
+  one caller that has `logkeeper` flush first is the supervisor's `power` port.

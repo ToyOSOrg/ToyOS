@@ -30,10 +30,10 @@ somewhere between the kernel's last record and the firmware's next pass, and
 which side is not known.
 
 **The one state this boot had and the clean ones did not** is the I219: the
-swapped-in netd's first grant started it mastering while it still ran the old
-netd's rings, its write faulted at the unit, and the fault handler cleared its
+swapped-in netstack's first grant started it mastering while it still ran the old
+netstack's rings, its write faulted at the unit, and the fault handler cleared its
 bus mastering with receive still enabled. It stayed that way to the reset. The
-swap's fix (the kernel resets a released function, netd stops the part before
+swap's fix (the kernel resets a released function, netstack stops the part before
 it starts it mastering) removes that state; the next swap run says whether the hang
 goes with it. If it does not, the reboot path is owed a quiesce of every
 function a process holds.

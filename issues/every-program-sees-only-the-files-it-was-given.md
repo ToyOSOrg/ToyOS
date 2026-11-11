@@ -108,7 +108,7 @@ other, with the same per-session isolation (owner, 2026-11-05).
    single key list sits in the login authority's view. **Exit**: a program in
    one user's session cannot name a file in another's, and appending to the
    key list is inexpressible from any session.
-4. **What is not a file.** netd names a socket by an id any
+4. **What is not a file.** netstack names a socket by an id any
    client can name, and memory and process count have no
    per-session bound, so one session can starve another. Both close before
    the stage exits. **Exit**: a hostile session can neither reach another

@@ -9,13 +9,12 @@ opened: 2026-10-03
 #660 (`06788146b`) deleted `tests/common/update.rs` with its `Rig`,
 `tests/common/fwvars.rs` and `tests/updatecase/system.toml`. `git grep -n
 'fwvars\|updatecase\|common/update\.rs\|Rig::\|vars::plant\|vars::live'` finds
-six lines in one file, each planning or describing a test on them:
+four lines in one file, each planning or describing a test on them:
 
 - `issues/the-loader-does-only-what-must-precede-the-handover.md`,
-  six lines. Stage 3's exit takes `fwvars::live` as
+  four lines. Stage 3's exit takes `fwvars::live` as
   `update_floor_is_the_images_own`'s oracle. Stage 5 says
-  `tests/updatecase/system.toml` grants `slots` and that two tests run
-  `updatecase`; one of its negative controls signs with `Rig::update` and
+  `tests/updatecase/system.toml` grants `slots`; one of its negative controls
   reads the floor with `fwvars::live`, which its oracles name too.
 
 What it should name is the tier its test has now, and stage A of

@@ -140,7 +140,7 @@ that hold nothing against 7 ms finding everything that is there
 
 The record this came from also warned about a NIC retry that looks like boot
 cost; that warning is spent. `sdk/toyos/src/net.rs:272` says the hundred retries at
-ten milliseconds are gone — a `netd` connector is live from a process's first
+ten milliseconds are gone — a `netstack` connector is live from a process's first
 instruction — so nothing after `Boot: complete` inflates a reading any more.
 
 The panic path's own metal price belongs to the same session: the T14 measured

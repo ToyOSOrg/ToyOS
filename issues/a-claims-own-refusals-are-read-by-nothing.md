@@ -29,7 +29,7 @@ A one-field mutation of any of them — an index bound compared `<=` rather than
 green.
 
 Owned by whoever next adds a boot config whose own test binary holds a claimable
-function: netd holds this machine's only claim, and a test that makes it fail
+function: netstack holds this machine's only claim, and a test that makes it fail
 this way costs the machine its NIC for that boot. Exit condition: a guest arm in
 which a test binary's claim is refused each of these ways, each one red against
 a kernel whose corresponding check answers `Ok`.

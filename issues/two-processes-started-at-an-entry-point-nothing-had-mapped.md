@@ -28,7 +28,7 @@ with its address space's **PML4 entry** for the user half absent — not a leaf
 page missing under demand paging but the top-level entry, so nothing of the
 image was reachable. Both had run: `cpu=4471ms` and `cpu=4553ms` are their own
 spent time, and both stacks still hold their argv (`/system/bin/test-runner`,
-`/system/bin/soundd`). Each carries a distinct PCID (3 and 4) and a distinct
+`/system/bin/soundserver`). Each carries a distinct PCID (3 and 4) and a distinct
 CR3, so this is not one address space seen twice. The registers read
 `rip=_start+0x0`, `rsp=0xffffffffd0`, `r12=<entry>` on both — the shape of a
 thread being started, not of one that ran and returned into nothing.

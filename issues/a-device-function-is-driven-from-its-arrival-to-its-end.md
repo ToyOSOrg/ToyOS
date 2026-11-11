@@ -16,11 +16,9 @@ started. Nothing reaches userland when a device arrives or leaves.
 
 Rulings that bound the stages: the ownership and event model (owner,
 2026-10-13); PCIe hot-plug as stage 2, native only, with physical arrival
-witnessed through `issues/toyos-supports-thunderbolt-and-usb4.md`, and the
-claim-slot limit removed by stage 1 if cheap, otherwise by its own pull
-request before stage 1's guest smoke
-(`issues/a-cargo-run-boot-claims-every-pcidev-slot.md`) (orchestrator, on
-#910); and one shared block service to which disk drivers offer their disks
+witnessed through `issues/toyos-supports-thunderbolt-and-usb4.md`
+(orchestrator, on #910); and one shared block service to which disk drivers
+offer their disks
 (orchestrator, 2026-10-20, replacing #901's `block@<location>` ports). The
 supervisor starts the `drives` processes before the storage rows and tells
 the block service how many disk drivers it started; an open of a partition no

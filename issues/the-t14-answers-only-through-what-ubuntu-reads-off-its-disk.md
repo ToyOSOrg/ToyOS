@@ -26,7 +26,7 @@ Constraints a reader would otherwise pay to re-derive:
   interrupts and owns its DMA, which lives in that function's own IOMMU domain.
 - **A machine with no IOMMU unit** is governed by
   `issues/a-machine-without-an-iommu-refuses-every-claim.md`. Today
-  every claim there is refused by name, netd exits, and the machine boots on;
+  every claim there is refused by name, netstack exits, and the machine boots on;
   `iommu_virtio_platform`'s no-unit arm is where that is read back. The T14
   has VT-d, so this is not a bound on the bench — but a `pcidev` refusal there
   is the first thing to check before suspecting the driver.
@@ -39,17 +39,17 @@ Constraints a reader would otherwise pay to re-derive:
   a firmware image.
 - **QEMU's `virtio-net-pci-non-transitional` on `q35` advertises no PCIe
   function-level reset** — measured, not assumed: `pcidev`'s refusal on that
-  ground reddened every netd registration at once. So a re-claim is made safe by
+  ground reddened every netstack registration at once. So a re-claim is made safe by
   ordering instead: bus mastering starts when the claim's holder **starts** it
   (`device_dma_start`), never at hand-over, so a function still holding its
   last holder's queue addresses can act on none of them before it is stopped. `release` asks for a reset where the function advertises
   one; the I219 does, so on the T14 both hold.
-- **The machine served its own log, and the Mac found it by name.** `logd`
-  served the boot from its first line on a TCP port, and netd answers multicast
+- **The machine served its own log, and the Mac found it by name.** `logkeeper`
+  served the boot from its first line on a TCP port, and netstack answers multicast
   DNS for `toyos-t14.local` once it holds a lease (`toyos-mdns`), so nothing in
   the image named the Mac and nothing on the Mac listened. The serving half and
   the Mac's reader are deleted
   (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`); a boot
-  that dies before netd leases needed the disk Ubuntu reads either way.
+  that dies before netstack leases needed the disk Ubuntu reads either way.
 - The metal loop is `toyos-metal` (`tests/metal/src/lib.rs`), and the T14 is run by the
   orchestrator alone.

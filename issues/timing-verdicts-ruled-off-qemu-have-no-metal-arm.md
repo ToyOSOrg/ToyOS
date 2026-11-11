@@ -12,11 +12,11 @@ their clocks, and no `METAL` row judges them.
 
 **Owed a metal row:**
 
-- **Audio.** soundd's `underruns` stay 0 under two CPU burners
+- **Audio.** soundserver's `underruns` stay 0 under two CPU burners
   (`audio_tone_load`). `desktop_audio_client`'s three verdicts: a desktop client
   through the null sink exits, a second is taken up while the first streams,
   and the desktop still answers afterwards. A null sink drains a client at the
-  audio rate (`metal_sim_null_audio`). soundd submits at least a period for
+  audio rate (`metal_sim_null_audio`). soundserver submits at least a period for
   every period's worth of frames a client handed it
   (`inspect_reads_its_owners`: `sound.periods.submitted × sound.period_frames`
   against what `inspect_plays` proved taken).
@@ -33,8 +33,8 @@ their clocks, and no `METAL` row judges them.
   These ride the shared metal boot without their bounds. A kept, closed window
   takes no wakes while its application idles (`toolkit_winit_loop`'s stage 6).
 - **Accounting.** A refused syscall is charged to its caller's CPU time
-  (`process_stats`). A client out-writing a stalled peer costs netd under half
-  a CPU (`netd_stalled_peer`). blockd's bench throughput (`blockd_io`).
+  (`process_stats`). A client out-writing a stalled peer costs netstack under half
+  a CPU (`netd_stalled_peer`). diskserver's bench throughput (`blockd_io`).
 - **Input.** A boot with no i8042 is no slower than one with it
   (`i8042_absent`). The i8042 counters repeat at most once per 10 s and only
   when the pin asserted (`i8042_health_cadence`), and the idle loop does not
@@ -46,16 +46,16 @@ their clocks, and no `METAL` row judges them.
   its rung (`tests/common/usb.rs`). A controller that will not halt and a port
   that will not reset are refused only after the 2 s budget was waited out
   (`xhci_deaf_registers`).
-- **Network.** netd's connection cap counts connects still pending alongside
+- **Network.** netstack's connection cap counts connects still pending alongside
   established ones (`netd_connection_caps`, which now fills the cap with
   established connections only). A burst of silent connections is bounded:
-  netd keeps some and not all (`netd_hostile_peer`).
-- **Logging.** init's stop waited for logd's flush answer
-  (`log_ring_keeps_the_owners_slots`; only init's own word is read now). logd
-  lets a network reader that stopped reading go within its `STALLED`
-  (`log_stream_stalled_reader`). logd writes `/log` promptly while the machine
-  runs (`kernel_log_file`, and `tests/common/usb.rs`'s stick with no write
-  cache).
+  netstack keeps some and not all (`netd_hostile_peer`).
+- **Logging.** The supervisor's stop waited for logkeeper's flush answer
+  (`log_ring_keeps_the_owners_slots`; only the supervisor's own word is read
+  now). logkeeper lets a network reader that stopped reading go within its
+  `STALLED` (`log_stream_stalled_reader`). logkeeper writes `/log` promptly
+  while the machine runs (`kernel_log_file`, and `tests/common/usb.rs`'s stick
+  with no write cache).
 - **Storage.** A same-length overwrite of a pinned `/home` file
   reads back whole through its displaced file's teardown: one read is taken
   now, and it may come before the teardown (`home_overwrite_reads_back`).

@@ -96,7 +96,7 @@ What the tail names as the machine's state when the records stop:
 Between those, cpu5 and then cpu0 repeat `usb-storage: 00:14.0 slot 5
 transport broke on SCSI 0x28` and `SCSI 0x28 broke 3 times running; the
 transport is not coming back on its own`: the boot stick's READ(10) transport
-broke at 3.47 s, the root filesystem stopped answering, `logd` and `netd` died
+broke at 3.47 s, the root filesystem stopped answering, `logkeeper` and `netstack` died
 on page faults over file bytes the device would not read, the test runner
 could not be loaded, and the disk went offline at 5.556 s. A boot with no
 runner asks for no reboot; the deadline was the only bound left, and it fired

@@ -40,12 +40,12 @@ applets that have no use for it is not the list this test declares
  right: []
 ```
 
-Every applet but `tone` in the test image holds a connector to soundd
+Every applet but `tone` in the test image holds a connector to soundserver
 because `tone` needs one. That list is now `DECLARED_OVER_GRANTS`, so the size
 of the defect cannot grow without a red naming what grew.
 
 **What is still missing is the shipped image.** A guest test boots
-`tests/images/testcases.toml`, whose `toybox` row is `receives = ["soundd"]` and
+`tests/images/testcases.toml`, whose `toybox` row is `receives = ["soundserver"]` and
 carries no `syscap` at all. The row this record opened on — `system.toml:112`,
 `syscap = ["power", "roster"]` across every link — is measured by nothing:
 the differential that would see `/system/bin/echo` holding `Rights::POWER` has to read
