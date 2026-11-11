@@ -71,11 +71,11 @@ fn loader() -> String {
 const STARTED: &str = "[2026-09-29 18:22:38  0.050 cpu0 kernel] spawn: /system/bin/logkeeper pid=6\n\
                        [2026-09-29 18:22:38  0.050 supervisor] supervisor: started logkeeper\n";
 
-/// A T14 boot's `boot.txt` as the loop writes it.
 /// When [`boot_file`]'s boot came back, by its host's clock: 2026-09-29
 /// 18:23:19 UTC, 40 s after [`BOOTED`]'s date.
 const BACK_AT: u64 = 1_790_706_199;
 
+/// A T14 boot's `boot.txt` as the loop writes it.
 pub(super) fn boot_file() -> String {
     let phases = Phases {
         preamble: 3.1,

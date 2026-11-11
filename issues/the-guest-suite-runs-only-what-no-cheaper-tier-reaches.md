@@ -95,7 +95,6 @@ and a compile-fail case.
 - metal `tls_rebase_window`: a thread's TLS block is never reachable before its rebase.
 - metal `kernel_heartbeat`: the kernel's heartbeat record arrives on its period; brings back
   `kernel/src/heartbeat.rs`.
-- metal `wall_clock_utc`: the wall clock reads firmware's time as UTC.
 - metal `spawn_cwd`: a spawn's working directory.
 - host `log_conservation_smp2`: every record is read or counted lost.
 - unrepresentable `lock_across_switch_halts`: a lock guard cannot be held across a switch.

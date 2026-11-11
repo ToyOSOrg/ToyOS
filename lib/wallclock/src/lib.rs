@@ -12,7 +12,7 @@ const DAY: u64 = 86_400;
 
 /// A wall-clock instant in the fields a human reads.
 ///
-/// The one calendar in the tree. The RTC decodes its registers into this, the
+/// The one calendar in the tree. The loader reads firmware's time into this, the
 /// log's file names come out of it, the compositor's clock reads it and FAT's
 /// directory stamps are built from it — so there is one conversion between
 /// seconds and dates rather than one per caller.

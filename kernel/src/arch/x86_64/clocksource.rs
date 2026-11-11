@@ -12,10 +12,9 @@
 //! **Where the TSC and the HPET disagree, the PM timer says which moved.** It
 //! agreeing with the TSC is the HPET moving, and the span is left out. It
 //! agreeing with the HPET, or a machine with none, is taken as the TSC's
-//! step. The chipset's two counters stopping together would read the same
-//! and the clock would follow them: nothing here tells that from a step, and
-//! neither counter may stop in S0 (ACPI 6.5 §4.8.3.3; IA-PC HPET
-//! Specification 1.0a, §2.3.3). The boot's first forward step is slewed away;
+//! step, which the chipset's counters standing still together would read as
+//! too (`issues/chipset-counters-that-stall-together-read-as-a-tsc-step.md`).
+//! The boot's first forward step is slewed away;
 //! a second, one back, a check that finds a CPU's TSC written or behind, or
 //! an AP's start that proves its offset demotes the TSC ([`demote`]), and
 //! every process's reading of now asks the kernel, which counts by the HPET.

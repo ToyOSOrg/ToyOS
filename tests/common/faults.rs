@@ -219,21 +219,33 @@ pub fn a_stalled_hpet_is_left_out(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The same of a boot's whole kernel log, on a machine: the stall staged, the
-/// span left out as the HPET's, a report after it, and the TSC neither
-/// stepped nor demoted, which is what a PM timer that did not tell the two
-/// apart would leave.
+/// The records `log` holds of the span `hpet-stall` staged, on a machine: the
+/// first disagreement the clock wrote after the staging is that span's, since
+/// the sample after the staging reads it. The span is left out, and the PM
+/// timer reads the TSC 10 ms nearer than the HPET does, which is the staged
+/// stall put on the HPET and not on the TSC; and the clock reported again
+/// after it. A step the machine's own TSC took is no part of it, in another
+/// span or in this one, where every counter then disagrees and the PM timer
+/// still stands the 10 ms from the HPET.
 pub fn stalled_hpet_left_out(log: &str) -> Result<(), String> {
-    let staged = log
-        .find(HPET_STALL_STAGED)
-        .ok_or_else(|| format!("no {HPET_STALL_STAGED:?}: the boot was not armed, or ended before the clock's first report staged it"))?;
-    let moved = log[staged..].find(HPET_MOVED).map(|at| staged + at).ok_or_else(|| format!("no {HPET_MOVED:?} after the stall"))?;
-    if !log[moved..].contains(CLOCK_REPORT) {
-        return Err("the clock did not report again after it left the span out".to_string());
+    const ALL_DISAGREE: &str = "all disagree, so this span is left out: ";
+    const DISAGREED: [&str; 4] = [HPET_MOVED, ALL_DISAGREE, kernel::clock::TSC_STEP, TSC_DEMOTED];
+    let mut after = log.lines().skip_while(|line| !line.contains(HPET_STALL_STAGED)).skip(1);
+    let read = after
+        .by_ref()
+        .find(|line| DISAGREED.iter().any(|said| line.contains(said)))
+        .ok_or_else(|| format!("no record of the span {HPET_STALL_STAGED:?} staged: the boot was not armed, or ended before the next sample"))?;
+    let apart = |spans: &str| -> Option<i64> { spans.split_once(" and reads ")?.1.split_once(" ns apart")?.0.parse().ok() };
+    let told = [HPET_MOVED, ALL_DISAGREE].iter().find_map(|said| read.split_once(said)).and_then(|(_, spans)| {
+        let (hpet, pm) = spans.split_once("; the PM timer counted ")?;
+        Some(apart(hpet)? - apart(pm)?)
+    });
+    if !told.is_some_and(|ns| (9_000_000..=11_000_000).contains(&ns)) {
+        return Err(format!("the PM timer did not put the staged 10 ms on the HPET and leave the span out: {}", read.trim()));
     }
-    if let Some(line) = log.lines().find(|line| line.contains(TSC_STEP_SLEWED) || line.contains(TSC_DEMOTED)) {
-        return Err(format!("the stall was read as the TSC's: {}", line.trim()));
+    if !after.any(|line| line.contains(CLOCK_REPORT)) {
+        return Err("the clock did not report again after it left the staged span out".to_string());
     }
-    eprintln!("  [hpet_stall] {}", log[moved..].lines().next().unwrap_or_default().trim());
+    eprintln!("  [hpet_stall] {}", read.trim());
     Ok(())
 }

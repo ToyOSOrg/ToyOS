@@ -80,6 +80,9 @@ const RUST_SKIP: &[&str] = &[
     // The log-write load `mask_windows` reads windows under, on the boot
     // whose kernel reports them.
     "log_write",
+    // It waits for records only a boot armed with `hpet-stall` writes: the
+    // `a_stalled_hpet_is_told_by_the_pm_timer` metal row runs it there.
+    "hpet_stall_read",
     // It opens a window, which needs a compositor the shared boot does not
     // run: `a_window_is_drawn_at_the_scale_and_relaid_at_the_next` runs it on
     // tests/images/scalecase.toml, and the `gop_edid_scale` metal row on
@@ -1203,9 +1206,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // The wall clock the kernel anchors on the loader's reading of
-        // firmware's `GetTime`, against this host's clock: which answer each
-        // bench's firmware gives is the machine's, and QEMU's is OVMF's.
+        // Every dated line is the loader's reading of firmware's `GetTime`
+        // carried on by the log's clock, and that reading is this host's
+        // time: which answer each bench's firmware gives is the machine's,
+        // and QEMU's is OVMF's.
         "wall_clock_is_firmwares",
         metal::Metal { arms: TESTCASES, judge: |b| wall_clock_is_firmwares(b[0]) },
     ),
@@ -1447,7 +1451,16 @@ const METAL: &[(&str, metal::Metal)] = &[
         // ACPI PM timer, which is all that tells them apart: its readings and
         // their brackets are the machine's.
         "a_stalled_hpet_is_told_by_the_pm_timer",
-        metal::Metal { arms: SELFTESTS, judge: |b| faults::stalled_hpet_left_out(b[0].kernel().text()) },
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: ACTUATOR_KERNEL,
+                ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_hpet_stall_read"])
+            }],
+            judge: |b| {
+                b[0].job_passed("test_rs_hpet_stall_read")?;
+                faults::stalled_hpet_left_out(b[0].kernel().text())
+            },
+        },
     ),
     (
         // No drain on this side: the whole boot's records are on the log, so
@@ -7937,9 +7950,9 @@ fn timer_calibration(log: &str) -> Result<(), String> {
 
 /// How far a bench's hardware clock may stand from this host's: a third of
 /// the smallest step between two zones, 15 minutes, so a clock kept in any
-/// zone but UTC is outside it, and far past what two disciplined clocks and a
-/// whole-second reading leave.
-const WALL_CLOCK_APART_SECS: u64 = 300;
+/// zone but UTC is outside it, and far past what the bench's other system
+/// leaves a clock it disciplines. A bound on the bench, not on ToyOS.
+const BENCH_CLOCK_APART_SECS: u64 = 300;
 
 /// `YYYY-MM-DD HH:MM:SS` where `text` starts, as Unix seconds.
 fn unix_secs_at(text: &str) -> Option<u64> {
@@ -7949,42 +7962,70 @@ fn unix_secs_at(text: &str) -> Option<u64> {
     civil.is_valid().then(|| civil.to_unix_secs())
 }
 
-/// **The wall clock is firmware's, and firmware's is the time.** The kernel
-/// says the instant it anchored on, which is the one the loader said firmware's
-/// `GetTime` answered; and the boot's last dated line, which `logkeeper` dates
-/// by `SYS_CLOCK_EPOCH`, lies in the span this host's clock saw the boot run
-/// in ([`metal::Readback::ran_within`]), [`WALL_CLOCK_APART_SECS`] either side.
-fn wall_clock_is_firmwares(boot: &metal::Readback) -> Result<(), String> {
-    const LOADER_READ: &str = "Wall clock: firmware's GetTime reads ";
-    const KERNEL_READ: &str = "clock: firmware's clock read ";
-    let read = |line: &str, said: &str| {
-        line.split_once(said).and_then(|(_, rest)| unix_secs_at(rest)).ok_or_else(|| format!("no instant after {said:?} in {line:?}"))
-    };
-    let (loader, kernel, log) = (boot.loader(), boot.kernel(), boot.log());
-    let handed = read(loader.must_say(LOADER_READ)?, LOADER_READ)?;
-    let anchored = read(kernel.must_say(KERNEL_READ)?, KERNEL_READ)?;
-    if handed != anchored {
-        return Err(format!("the loader handed {handed} and the kernel anchored on {anchored}, in Unix seconds"));
+/// **Every dated line is the loader's reading carried on by the log's own
+/// clock.** The loader says the instant firmware's `GetTime` answered and the
+/// counter then; the counter over the rate the clock started at is that
+/// reading's time on the log's clock, which counts from the counter's zero.
+/// A line stamped `ms` is dated the reading plus the seconds between, less up
+/// to three and plus up to one: the kernel's anchor, `SYS_CLOCK_EPOCH`, and
+/// `logkeeper`'s two divisions each drop a part of a second, three one way and
+/// one the other. A tenth of a second more either side is the rate the clock
+/// retunes to and a step it slews, far under what they move a boot's stamps.
+/// No host's clock is read.
+fn dates_carry_the_loaders_reading(loader: &str, kernel: &str, log: &str) -> Result<u64, String> {
+    const READ: &str = "Wall clock: firmware's GetTime reads ";
+    const AT: &str = " UTC at counter ";
+    let said = loader.lines().find(|line| line.contains(READ)).ok_or_else(|| format!("the loader never said {READ:?}"))?;
+    let (read, counter) = said
+        .split_once(READ)
+        .and_then(|(_, rest)| Some((unix_secs_at(rest)?, rest.split_once(AT)?.1.trim().parse::<u64>().ok()?)))
+        .ok_or_else(|| format!("no instant and counter in {said:?}"))?;
+    let read_ms = u128::from(counter) * 1_000_000 / u128::from(boot_rate(kernel)?.millihertz);
+    let mut dated = 0;
+    for line in log.lines() {
+        let Some(date) = line.strip_prefix('[').and_then(unix_secs_at) else { continue };
+        let Some(ms) = toyos_logstream::parse(line).and_then(|said| said.ms) else { continue };
+        let carried = i128::from(read) * 1_000 + i128::from(ms) - read_ms as i128;
+        let ahead = i128::from(date) * 1_000 - carried;
+        if !(-3_100..=1_100).contains(&ahead) {
+            return Err(format!(
+                "a line is dated {ahead} ms from the loader's reading of {read} carried {} ms on by the log's clock: {}",
+                i128::from(ms) - read_ms as i128,
+                line.trim()
+            ));
+        }
+        dated += 1;
     }
-    let (line, dated) = log
-        .text()
-        .lines()
-        .rev()
-        .find_map(|line| Some((line, unix_secs_at(line.strip_prefix('[')?)?)))
-        .ok_or("no line of the log carries a date")?;
-    let ran = boot.ran_within();
-    if dated + WALL_CLOCK_APART_SECS < *ran.start() || dated > ran.end() + WALL_CLOCK_APART_SECS {
+    if dated == 0 {
+        return Err("no line of the log carries a date and a time".to_string());
+    }
+    eprintln!("  [wall] {dated} dated lines carry the loader's reading of {read}, taken {read_ms} ms on the log's clock");
+    Ok(read)
+}
+
+/// **The bench's part: its hardware clock keeps UTC.** Firmware's reading
+/// lies in the span this host's clock saw the boot run in
+/// ([`metal::Readback::ran_within`]), [`BENCH_CLOCK_APART_SECS`] either side.
+/// With the bench's clock set, it is the independent reading of the loader's
+/// decode of `EFI_TIME`.
+fn bench_clock_keeps_utc(read: u64, ran: std::ops::RangeInclusive<u64>) -> Result<(), String> {
+    let apart = if read < *ran.start() { ran.start() - read } else { read.saturating_sub(*ran.end()) };
+    if apart > BENCH_CLOCK_APART_SECS {
         return Err(format!(
-            "the log's last dated line reads {dated} in Unix seconds, and this host's clock saw the boot run in {ran:?}, \
-             {WALL_CLOCK_APART_SECS} s allowed either side: {}",
-            line.trim()
+            "this bench's hardware clock stands {apart} s from this host's: firmware read {read} in Unix seconds and the \
+             host saw the boot run in {ran:?}. The design requires the hardware clock to keep UTC; this is the bench's \
+             setting and not ToyOS's reading of it"
         ));
     }
-    eprintln!(
-        "  [wall] firmware read {handed}; the last dated line reads {dated}, {} s before the machine answered this host again",
-        ran.end().saturating_sub(dated)
-    );
+    eprintln!("  [wall] firmware read {read}, {apart} s outside the span the host saw the boot run in");
     Ok(())
+}
+
+/// The wall clock on a bench: ToyOS's carrying of firmware's reading, then
+/// the bench's own clock.
+fn wall_clock_is_firmwares(boot: &metal::Readback) -> Result<(), String> {
+    let read = dates_carry_the_loaders_reading(boot.loader().text(), boot.kernel().text(), boot.log().text())?;
+    bench_clock_keeps_utc(read, boot.ran_within())
 }
 
 /// The rate the boot started the clock at: CPUID 15H's, or one the HPET
