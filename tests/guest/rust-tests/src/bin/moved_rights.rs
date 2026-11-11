@@ -21,7 +21,7 @@ mod image;
 use toyos::ipc::Connection;
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::end::End;
-use toyos_abi::handle::{Rights, TransferEntry};
+use toyos_abi::handle::{ReceivedEntry, Rights, TransferEntry};
 use toyos_abi::syscall::{self, SpawnArgs, SpawnEndow, SyscallError, MAX_TRANSFER_HANDLES};
 use toyos_abi::RawHandle;
 
@@ -82,11 +82,11 @@ impl Pair {
 
     /// The one handle of the next message.
     fn take(&self) -> RawHandle {
-        let mut handles = [RawHandle(0); MAX_TRANSFER_HANDLES];
+        let mut handles = [ReceivedEntry::NONE; MAX_TRANSFER_HANDLES];
         let got = syscall::message_recv(self.server.as_handle().raw(), &mut [], &mut [0; 1], &mut handles, true)
             .expect("the message just sent");
         assert_eq!(got.handles, 1, "the message carried {} handles", got.handles);
-        handles[0]
+        handles[0].handle
     }
 
     /// `h` moved through the connection as `entry` asks: its number after.

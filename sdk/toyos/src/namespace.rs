@@ -54,13 +54,6 @@ impl Namespace {
         self.0.try_clone().map(Self)
     }
 
-    /// A namespace a peer sent, consumed. Its type is the sender's word: the
-    /// kernel refuses each namespace call on a handle of another type, as it
-    /// does a connection's ([`Connection::received`]).
-    pub fn received(handle: OwnedHandle) -> Self {
-        Self(handle)
-    }
-
     /// # Safety
     /// `raw` must be a live namespace handle this process owns and nothing else
     /// answers for.

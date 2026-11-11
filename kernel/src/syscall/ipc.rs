@@ -19,12 +19,12 @@ use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
 use crate::{message, pipe, process};
 
-use toyos_abi::handle::{NotRights, RawHandle, Rights, TransferEntry};
+use toyos_abi::handle::{NotRights, RawHandle, ReceivedEntry, Rights, TransferEntry};
 use toyos_abi::syscall::*;
 use kernel::sched::task::WaitClass;
 use kernel::vm::Prot;
 
-use super::{cancelled, HANDLE_LEN, TRANSFER_ENTRY_LEN};
+use super::{cancelled, RECEIVED_ENTRY_LEN, TRANSFER_ENTRY_LEN};
 use super::handles::handle_result;
 
 pub(super) fn sys_pipe() -> u64 {
@@ -627,10 +627,13 @@ fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
 }
 
 /// A message is taken, its bytes in the reader's buffers: answer its
-/// handles' numbers and wake the sender, for its room.
-fn delivered(rx: &QueueRef, into: &mut Incoming<'_>, head: kernel::message::Head, installed: &[RawHandle]) -> u64 {
+/// handles' numbers and kinds and wake the sender, for its room.
+fn delivered(rx: &QueueRef, into: &mut Incoming<'_>, head: kernel::message::Head, installed: &[ReceivedEntry]) -> u64 {
     let installed = &installed[..head.handles];
-    let told = installed.iter().enumerate().try_for_each(|(i, h)| into.handles.write_at(i * HANDLE_LEN, &h.0.to_ne_bytes()));
+    let told = installed
+        .iter()
+        .enumerate()
+        .try_for_each(|(i, entry)| into.handles.write_at(i * RECEIVED_ENTRY_LEN, toyos_abi::usersafe::bytes(entry)));
     if let Err(faulted) = told {
         return undelivered(rx, installed, faulted);
     }
@@ -640,9 +643,9 @@ fn delivered(rx: &QueueRef, into: &mut Incoming<'_>, head: kernel::message::Head
 
 /// A message taken whose reader's buffers faulted: its bytes are lost, and
 /// its handles, installed at numbers the reader was never told, are closed.
-fn undelivered(rx: &QueueRef, installed: &[RawHandle], faulted: crate::user_ptr::Faulted) -> u64 {
+fn undelivered(rx: &QueueRef, installed: &[ReceivedEntry], faulted: crate::user_ptr::Faulted) -> u64 {
     process::with_handles(|handles| {
-        for &h in installed {
+        for ReceivedEntry { handle: h, .. } in installed.iter().copied() {
             // A sibling may have closed the number since, or reused it for a
             // handle of its own, which this then closes: the race is the
             // misbehaving process's own, and stays inside it.

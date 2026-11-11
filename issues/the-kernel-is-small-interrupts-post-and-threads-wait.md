@@ -411,9 +411,8 @@ By mechanisms eliminated:
 3. What the loader named, independent of the others: `SYS_BOOT_SOURCES`,
    the inventory's partition records, the device-path parser. **Done**
    (#1210).
-4. The TTY mark, with or after 2: `SYS_MARK_TTY`. It meets
-   `issues/a-received-handle-has-no-knowable-type.md`, which wants
-   `SYS_FSTAT` to answer more, so the two are designed together.
+4. The TTY mark, with or after 2: `SYS_MARK_TTY`. A receive reports each
+   handle's kind and a TTY is no kind, so `SYS_FSTAT` still answers it.
 5. The main thread's stack, after #1200: `SYS_STACK_INFO` and the kernel's
    two stack constants.
 

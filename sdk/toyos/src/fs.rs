@@ -794,7 +794,7 @@ impl Dir {
 
     /// The one handle a reply that answers with one carries; an error carries
     /// none, and any other count ends the connection.
-    fn one(&mut self, msg_type: u32, reply: Reply, carried: crate::ipc::Batch) -> Result<crate::OwnedHandle, Error> {
+    fn one(&mut self, msg_type: u32, reply: Reply, carried: crate::ipc::Batch) -> Result<crate::ipc::ReceivedHandle, Error> {
         let n = carried.len();
         match (answer(msg_type, reply), carried.exact::<1>()) {
             (Ok(_), Some([handle])) => Ok(handle),
@@ -945,7 +945,7 @@ impl Dir {
         let paths = Paths { first: path, second: &[] };
         let (reply, mut carried) = self.path_call_with(op, Request { flags, ..Request::new() }, [base, Base::Root], paths, 0)?;
         let fid = Fid { id: reply.value, generation: self.generation };
-        let holder = carried.next();
+        let holder = carried.next().map(crate::OwnedHandle::from);
         if !carried.is_empty() {
             self.close(fid);
             self.conn = None;
@@ -1030,7 +1030,7 @@ impl Dir {
         }
         let request = Request { len: fids.len() as u64, span: (fids.len() * 8) as u64, ..Request::new() };
         let (msg_type, reply, carried) = self.call_with(EXPORT, request)?;
-        self.one(msg_type, reply, carried).map(Connection::received)
+        self.one(msg_type, reply, carried)?.typed().map_err(|_| Error::Malformed)
     }
 
     /// What `path` names from `base`: the link itself where `follow` is
@@ -1101,7 +1101,7 @@ impl Dir {
         let mut request = Request::new();
         request.fid = self.held(fid)?;
         let (msg_type, reply, carried) = self.call_with(STREAM, request)?;
-        self.one(msg_type, reply, carried).map(Pipe)
+        self.one(msg_type, reply, carried)?.typed().map_err(|_| Error::Malformed)
     }
 
     /// The bytes of the file `fid` opened, as [`IMAGE`] answers them.
@@ -1109,7 +1109,7 @@ impl Dir {
         let mut request = Request::new();
         request.fid = self.held(fid)?;
         let (msg_type, reply, carried) = self.call_with(IMAGE, request)?;
-        self.one(msg_type, reply, carried)
+        self.one(msg_type, reply, carried).map(crate::OwnedHandle::from)
     }
 
     /// The entries of the directory `dir` opened, from `cursor` (0 at its

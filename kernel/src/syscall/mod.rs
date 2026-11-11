@@ -15,13 +15,13 @@ mod paged;
 mod proc;
 pub(crate) mod vm;
 
-use toyos_abi::handle::RawHandle;
+use toyos_abi::handle::ReceivedEntry;
 use toyos_abi::syscall::SyscallError;
 
 use crate::process;
 
-/// Byte width of one [`RawHandle`] on the wire.
-const HANDLE_LEN: usize = core::mem::size_of::<RawHandle>();
+/// Byte width of one handle a receive answers.
+const RECEIVED_ENTRY_LEN: usize = core::mem::size_of::<ReceivedEntry>();
 
 /// Byte width of one handle a send moves.
 const TRANSFER_ENTRY_LEN: usize = core::mem::size_of::<toyos_abi::handle::TransferEntry>();

@@ -55,7 +55,7 @@ pub(crate) struct Login {
     pub link: Link,
     rx: LaunchRx,
     /// The owner's handle to itself, which places a detached app under it.
-    place: Option<OwnedHandle>,
+    place: Option<toyos::process::Process>,
     /// The session's launcher port, which every launcher in it is minted on.
     /// Held here alone, so the session's end closes it and a launch connected
     /// to it reads its end.
@@ -450,8 +450,9 @@ impl Supervisor<'_> {
                         Ok(_) => say!("supervisor: launcher: refusing a handed-over launch: the table is full"),
                         Err(why) => say!("supervisor: launcher: a launch session {} handed over is dropped: {why}", session.share()),
                     },
-                    wire::MSG_PLACE => match batch.exact::<1>() {
-                        Some([handle]) => self.logins.open[at].place = Some(handle),
+                    wire::MSG_PLACE => match batch.exact::<1>().map(|[handle]| handle.typed()) {
+                        Some(Ok(place)) => self.logins.open[at].place = Some(place),
+                        Some(Err(why)) => say!("supervisor: session {}'s owner sent a place that is none: {why}", session.share()),
                         None => say!("supervisor: session {}'s owner sent no place", session.share()),
                     },
                     wire::MSG_WAITING => {
@@ -475,7 +476,7 @@ impl Supervisor<'_> {
     /// `session`, which the badge must name.
     fn handed_over(&self, session: Session, badge: &[u8], batch: ipc::Batch) -> Result<Pending, String> {
         let [handle] = batch.exact::<1>().ok_or("it carried no single connection")?;
-        let conn = Connection::received(handle);
+        let conn = handle.typed::<Connection>().map_err(|why| why.to_string())?;
         let Some(Authority { row, session: named }) = Authority::decode(badge) else {
             return Err(format!("its badge is not one this supervisor writes: {badge:?}"));
         };

@@ -477,7 +477,9 @@ mod owner {
                     Ok(object) => object,
                     Err(_) => { refused += 1; continue; }
                 },
-                Kind::Exported => match crate::net::adopt_exported(handle) {
+                // SAFETY: a descriptor this process was endowed as an exported
+                // end, which is its parent's to say.
+                Kind::Exported => match unsafe { crate::net::adopt_exported(handle) } {
                     Some(object) => object,
                     None => {
                         refused += 1;

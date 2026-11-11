@@ -32,7 +32,7 @@ fn answer(conn: &Connection) -> Result<Served, String> {
     let boot_so_far: u64 = toyos::ipc::decode_payload(rx.payload(frame.payload_len))
         .map_err(|e| format!("logkeeper's answer is not one `u64`: {e:?}"))?;
     let [pipe] = rx.take_handles::<1>().ok_or("logkeeper's answer carried no pipe")?;
-    let pipe = Pipe::from(pipe);
+    let pipe = pipe.typed::<Pipe>().map_err(|why| format!("logkeeper's answer carried no pipe: {why}"))?;
     Ok(Served { pipe, boot_so_far })
 }
 

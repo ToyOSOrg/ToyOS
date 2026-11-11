@@ -226,6 +226,8 @@ pub enum AudioError {
     /// with it. Handles travel in the frame that names them, so a short
     /// batch is a protocol violation and never something to wait for.
     MissingHandles,
+    /// The signal soundserver sent is no bell.
+    Signal(ipc::WrongKind),
     /// The slot ring soundserver sent is refused ([`SharedMemory::lent`]).
     Lent(crate::shm::Lent),
     Ipc(IpcError),
@@ -273,7 +275,7 @@ impl AudioStream {
         };
 
         let [shm, signal] = rx.take_handles::<STREAM_OPENED_HANDLES>().ok_or(AudioError::MissingHandles)?;
-        let signal = crate::wake::Bell::from(signal);
+        let signal = signal.typed::<crate::wake::Bell>().map_err(AudioError::Signal)?;
 
         let slot_count = resp.slot_count as u32;
         let shm_size = AudioSlotHeader::SIZE + slot_count as usize * resp.client_period_bytes as usize;

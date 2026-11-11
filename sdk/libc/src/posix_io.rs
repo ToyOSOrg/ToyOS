@@ -119,7 +119,7 @@ pub(crate) fn open_handle(path: &[u8], flags: i32, _mode: u32) -> Result<(RawHan
         return syscall::null(null_rights(how.read, how.write)).map(|h| (h, toyos::fd::Kind::Handle)).map_err(crate::errcode::of);
     }
     let fd = files::open(At::Cwd, path, how).map_err(crate::errcode::of_files)?;
-    let exported = files::export(fd).map(|h| (h.into_raw(), toyos::fd::Kind::File)).map_err(crate::errcode::of_files);
+    let exported = files::export(fd).map(|h| (h.into_owned().into_raw(), toyos::fd::Kind::File)).map_err(crate::errcode::of_files);
     // SAFETY: this function's descriptor, after the server exported its description.
     let _ = unsafe { toyos::fd::close(fd) };
     exported

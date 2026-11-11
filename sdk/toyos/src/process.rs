@@ -10,7 +10,6 @@ pub use toyos_abi::end::{End, Fault};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, ProcessStats, SyscallError};
 
-use crate::endow::FromHandle;
 use crate::shm::{Immutable, SharedMemory};
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
@@ -92,12 +91,6 @@ impl Process {
 impl AsHandle for Process {
     fn as_handle(&self) -> crate::BorrowedHandle<'_> {
         self.0.as_handle()
-    }
-}
-
-impl FromHandle for Process {
-    fn from_handle(handle: OwnedHandle) -> Self {
-        Self(handle)
     }
 }
 

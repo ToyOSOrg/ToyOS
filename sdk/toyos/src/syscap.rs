@@ -7,7 +7,7 @@
 //! and each is one bit on a handle to this. The kernel makes exactly one at boot, for the supervisor, so the set of
 //! processes that can ever do any of them is exactly what the supervisor endowed.
 
-use toyos_abi::handle::Rights;
+use toyos_abi::handle::{ObjectKind, Rights};
 use toyos_abi::inventory::{RawRecord, Record, Undecodable};
 use toyos_abi::syscall::{self, DeviceRequest, DeviceType, SyscallError};
 
@@ -87,7 +87,10 @@ impl SysCap {
     fn mint<T: FromHandle>(&self, request: DeviceRequest) -> Result<T, SyscallError> {
         // The kernel installed this handle in this process's table for this
         // call and no other, so nothing else answers for it.
-        Ok(T::from_handle(OwnedHandle(syscall::device_claim(self.0.raw(), request)?)))
+        const { assert!(crate::endow::names(T::KINDS, ObjectKind::Device), "a claim is minted as a device's type") };
+        let claim = OwnedHandle(syscall::device_claim(self.0.raw(), request)?);
+        // SAFETY: the kernel made a device claim, which `T` is a type of.
+        Ok(unsafe { T::from_handle(claim) })
     }
 
     /// A second handle to this capability, carrying the same rights.

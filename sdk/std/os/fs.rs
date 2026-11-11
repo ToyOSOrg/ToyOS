@@ -70,8 +70,14 @@ pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Resu
 /// For the one process no parent endows a namespace: the supervisor builds the machine's
 /// directory capabilities itself. Refused, and the handle closed, when this
 /// process already resolves through one.
+///
+/// # Safety
+/// `namespace` names a namespace: the kernel ends a process that opens a name
+/// through a handle to anything else.
 #[stable(feature = "toyos_ext", since = "1.0.0")]
-pub fn adopt_namespace(namespace: crate::os::toyos::io::OwnedHandle) -> io::Result<()> {
-    toyos::endow::adopt_namespace(toyos::endow::FromHandle::from_handle(namespace.into_inner()))
+pub unsafe fn adopt_namespace(namespace: crate::os::toyos::io::OwnedHandle) -> io::Result<()> {
+    // SAFETY: the caller's.
+    let namespace = unsafe { toyos::endow::FromHandle::from_handle(namespace.into_inner()) };
+    toyos::endow::adopt_namespace(namespace)
         .map_err(|_| io::const_error!(io::ErrorKind::AlreadyExists, "this process already has a namespace"))
 }

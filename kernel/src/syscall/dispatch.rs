@@ -18,7 +18,7 @@ use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::debug_action as DA;
 use toyos_abi::syscall::*;
 
-use super::{HANDLE_LEN, TRANSFER_ENTRY_LEN};
+use super::{RECEIVED_ENTRY_LEN, TRANSFER_ENTRY_LEN};
 #[cfg(feature = "test-actuators")]
 use super::debug::{canary, debug_heap_alloc, ring0_timer_in_syscall, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
 use super::device::{
@@ -612,7 +612,7 @@ fn incoming<'a>(ctx: &SyscallContext<'a>, args: &MessageRecv) -> Result<Option<I
         Some(Incoming {
             head: ctx.user_bytes_mut(UserAddr::new(args.head), head_len)?,
             bytes: ctx.user_bytes_mut(UserAddr::new(args.bytes), len)?,
-            handles: ctx.user_bytes_mut(UserAddr::new(args.handles), (cap * HANDLE_LEN) as u64)?,
+            handles: ctx.user_bytes_mut(UserAddr::new(args.handles), (cap * RECEIVED_ENTRY_LEN) as u64)?,
             cap,
         })
     })())

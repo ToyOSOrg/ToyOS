@@ -554,7 +554,8 @@ fn main() {
             }
             builder.finish().expect("supervisor: no namespace for its own files")
         };
-        if let Err(e) = std::os::toyos::fs::adopt_namespace(build().into()) {
+        // SAFETY: the namespace built just above.
+        if let Err(e) = unsafe { std::os::toyos::fs::adopt_namespace(build().into()) } {
             panic!("supervisor: std would not take its namespace ({e}), and the supervisor is endowed none");
         }
         Box::leak(Box::new(build()))
@@ -1917,7 +1918,7 @@ impl<'a> Supervisor<'a> {
         if matches!(&service.source, Binary::Swapped(running) if running.digest == request.digest) {
             return refuse(name, Refusal::AlreadyRuns(request.digest));
         }
-        let swapped_in = match Swapped::copied(lent, &request) {
+        let swapped_in = match Swapped::copied(lent.into(), &request) {
             Ok(swapped_in) => swapped_in,
             Err(why) => return refuse(name, why),
         };
@@ -2410,17 +2411,25 @@ impl Supervisor<'_> {
         // Past every refusal that does not know which handle is which: the
         // descriptors, the extras, the place if it names one, and the job.
         let mut carried = carried;
-        let fds: Vec<toyos::OwnedHandle> = carried.by_ref().take(request.fd_count()).collect();
+        let fds: Vec<toyos::OwnedHandle> = carried.by_ref().take(request.fd_count()).map(Into::into).collect();
         // `SYS_NAMESPACE_BUILD` copies a connector into the namespace and
         // leaves the caller's handle, and the supervisor's copy of a client's
-        // connector has no life beyond this launch. **Not a claim about the
-        // type** — a client sends what it likes, and everything below treats a
-        // wrong one as a refused launch rather than as the supervisor's own bug.
-        let extras: Vec<(String, Connector)> =
-            names.into_iter().zip(carried.by_ref()).map(|(name, handle)| (name.to_string(), Connector::from_handle(handle))).collect();
-        let mut rest: Vec<toyos::OwnedHandle> = carried.collect();
-        let job = toyos::job::Job::from_handle(rest.pop().expect("a launch's batch ends with its job"));
-        let place = rest.pop();
+        // connector has no life beyond this launch.
+        let extras: Result<Vec<(String, Connector)>, ipc::WrongKind> =
+            names.into_iter().zip(carried.by_ref()).map(|(name, handle)| Ok((name.to_string(), handle.typed()?))).collect();
+        let mut rest: Vec<ipc::ReceivedHandle> = carried.collect();
+        let job = rest.pop().expect("a launch's batch ends with its job").typed::<toyos::job::Job>();
+        let place = rest.pop().map(ipc::ReceivedHandle::typed::<toyos::process::Process>).transpose();
+        // A client sends what it likes: what its frame calls a connector, a
+        // place or a job and the kernel does not is a refused launch.
+        let (extras, job, place) = match (extras, job, place) {
+            (Ok(extras), Ok(job), Ok(place)) => (extras, job, place),
+            (Err(why), ..) | (_, Err(why), _) | (.., Err(why)) => {
+                say!("supervisor: launcher: refused a launch whose handles are not what its frame says: {why}");
+                let _ = conn.try_signal(launch::MSG_REFUSED);
+                return;
+            }
+        };
 
         // std joins a relative `current_dir` onto the supervisor's own cwd, so passing one
         // on would start the child in the supervisor's `/` — the default this field removes.
@@ -3018,9 +3027,11 @@ fn translated(claim: toyos::Device, function: &Pci) -> Result<toyos::Device, Mis
     if !claims::is_virtio(function) {
         return Ok(claim);
     }
-    let dev = toyos::PciDev::from_handle(claim.into());
+    // SAFETY: a device claim, as either type holds.
+    let dev = unsafe { toyos::PciDev::from_handle(claim.into()) };
     let offered = toyos_pci_claim::virtio::offers_access_platform(&dev);
-    let claim = toyos::Device::from_handle(dev.into());
+    // SAFETY: as above.
+    let claim = unsafe { toyos::Device::from_handle(dev.into()) };
     match offered {
         Ok(true) => Ok(claim),
         Ok(false) => Err(Missing::Untranslated(None)),

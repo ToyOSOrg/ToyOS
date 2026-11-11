@@ -400,7 +400,10 @@ impl Log {
                     let Some([ring, alive]) = self.supervisor_rx.take_handles::<2>() else {
                         panic!("logkeeper: the supervisor registered {name:?} with no ring");
                     };
-                    self.take(registration.tag, registration.pid, ring, Bell::from(alive));
+                    let Ok(alive) = alive.typed::<Bell>() else {
+                        panic!("logkeeper: the supervisor registered {name:?} with a bell that is none");
+                    };
+                    self.take(registration.tag, registration.pid, ring.into(), alive);
                 }
                 // **The flush runs before the next frame is read**: the supervisor sends
                 // RESUME when the stop it flushed for was refused, which can be

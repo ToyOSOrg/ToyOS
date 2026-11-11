@@ -48,7 +48,7 @@ impl Drop for Exporter {
     }
 }
 
-use crate::ipc::{Frame, FrameRx, IpcError, IpcPayload};
+use crate::ipc::{Frame, FrameRx, IpcError, IpcPayload, ReceivedHandle};
 use crate::ipc_payload;
 use crate::{Connection, OwnedHandle};
 
@@ -323,8 +323,12 @@ const MAX_ADOPT: usize = {
 /// is read without waiting: netstack queued it before it answered the export,
 /// so it is there or never sent. `None`, with everything closed, where the
 /// process takes up no holder of it.
-pub fn adopt_exported(end: OwnedHandle) -> Option<crate::fd::Object> {
-    let connection = Connection::received(end);
+///
+/// # Safety
+/// `end` names a connection, as [`FromHandle::from_handle`](crate::endow::FromHandle::from_handle)
+/// asks.
+pub unsafe fn adopt_exported(end: OwnedHandle) -> Option<crate::fd::Object> {
+    let connection = Connection(end);
     let mut frames: FrameRx<MAX_ADOPT> = FrameRx::new();
     let first = match frames.pump(&connection) {
         crate::ipc::RxStep::Frame { msg_type, payload_len, .. } => {
@@ -411,7 +415,7 @@ impl PendingResponse {
 
     /// The answer, the `N` handles it hands over, and the connection, which
     /// is then the caller's.
-    pub fn answer_with_handles<Resp: IpcPayload, const N: usize>(self) -> Result<(Resp, [OwnedHandle; N], Connection), NetError> {
+    pub fn answer_with_handles<Resp: IpcPayload, const N: usize>(self) -> Result<(Resp, [ReceivedHandle; N], Connection), NetError> {
         const { assert!(core::mem::size_of::<Resp>() <= MAX_ANSWER && core::mem::size_of::<ErrorResponse>() <= MAX_ANSWER) };
         let mut rx = FrameRx::<MAX_ANSWER>::new();
         let frame = answer(self.conn(), &mut rx)?;
