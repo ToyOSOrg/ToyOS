@@ -769,6 +769,16 @@ impl<'m> Frames<'m> {
         phys
     }
 
+    /// `count` frames promises held, each handed to `each`: as many
+    /// [`alloc_promised`](Self::alloc_promised)s, which a caller makes under
+    /// one hold of the allocator's lock.
+    pub fn alloc_promised_each(&mut self, count: u64, mut each: impl FnMut(u64)) {
+        assert!(count <= self.promised, "frames: {count} promised frames drawn of {} promised", self.promised);
+        for _ in 0..count {
+            each(self.alloc_promised());
+        }
+    }
+
     /// One frame for the kernel's own use: one nothing holds back, or else
     /// one of a kept superframe, which is kept no longer.
     pub fn alloc_frame(&mut self) -> Option<u64> {
@@ -1339,6 +1349,21 @@ mod tests {
         // A frame freed into the first goes out before the second is used up.
         m.frames.free_frame(first[7], &m.pins);
         assert_eq!(m.frames.alloc_frame(), Some(first[7]));
+    }
+
+    /// A batch of promised frames is as many single draws: distinct free
+    /// frames, each promise drawn once, and the ledger as it was.
+    #[test]
+    fn a_batch_of_promised_frames_draws_each_promise_once() {
+        let mut m = whole(2);
+        assert!(m.frames.promise(&m.l, 40));
+        let (free, usage) = (m.frames.free_frames(), m.l.usage());
+        let mut drawn = Vec::new();
+        m.frames.alloc_promised_each(30, |phys| drawn.push(phys));
+        assert_eq!(drawn.iter().collect::<BTreeSet<_>>().len(), 30, "no frame twice");
+        assert_eq!((m.frames.promised(), m.frames.free_frames(), m.l.usage()), (10, free - 30, usage));
+        let single = m.frames.alloc_promised();
+        assert!(!drawn.contains(&single), "a single draw after the batch took one of its frames");
     }
 
     /// What is promised is refused to every other allocation and drawn by

@@ -91,11 +91,7 @@ impl SharedMemObject {
         let mut left = pages as usize;
         while left > 0 {
             let n = left.min(CHUNK);
-            let mut piece = Vec::with_capacity(n);
-            for _ in 0..n {
-                piece.push(pmm::alloc_promised());
-            }
-            pieces.push(piece.into_boxed_slice());
+            pieces.push(pmm::alloc_promised_many(n));
             left -= n;
         }
         Ok(Self::new(core, Backing::Frames(pieces), pages * PAGE_SIZE, CachePolicy::Normal))
