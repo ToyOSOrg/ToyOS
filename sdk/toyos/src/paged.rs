@@ -12,8 +12,8 @@
 use core::time::Duration;
 
 use toyos_abi::syscall::{
-    self, PagedArgs, PagedOp, PagedRange, SyscallError, NOTICE_DIRTIED, NOTICE_NO_HOLDERS, NOTICE_REQUESTED, PAGED_APPEND,
-    PAGED_DIRTY, PAGED_WRITTEN,
+    self, PagedArgs, PagedOp, PagedRange, SyscallError, NOTICE_DIRTIED, NOTICE_NO_HOLDERS, NOTICE_REQUESTED, PAGED_DIRTY,
+    PAGED_WRITTEN,
 };
 
 pub use toyos_abi::syscall::{PagedNotice, PagedStat, PagedStatus, PAGED_HOLDER_PAGES, PAGED_RANGE_PAGES, PAGED_RECORD};
@@ -272,28 +272,26 @@ impl Paged {
     /// every absent page until it is supplied, failed (`Io`, or a short count
     /// after some bytes), cut off by a shrink, or its object or pager ends
     /// (`Gone`). It reads each write whole or not at all, waiting out one
-    /// under way; one that keeps meeting writes answers fewer bytes, all of
-    /// one moment. `WouldBlock` where the kernel had no frames to copy into:
-    /// ask the pager.
+    /// under way; one that has met three is `WouldBlock`: ask the pager,
+    /// whose read holds the writes off.
     pub fn read(&self, out: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
         syscall::paged_read(self.0.raw(), out, offset)
     }
 
-    /// `bytes` at `offset`, one write whole: the bytes written, those of
-    /// [`PAGED_HOLDER_PAGES`] pages from `offset`'s at most. `WouldBlock` with
-    /// nothing written where another write is under way, or the pager has to
-    /// act first — supply a page, grant credit, write back — and the holder
-    /// asks it to write instead; `Busy` while a program runs from the
-    /// object; `PermissionDenied` for a holder not minted to write.
+    /// `bytes` at `offset`, one write whole: the bytes written. `WouldBlock`
+    /// with nothing written where another write is under way, the write spans
+    /// more than [`PAGED_HOLDER_PAGES`] pages, or the pager has to act first —
+    /// supply a page, grant credit, write back — and the holder asks it to
+    /// write instead; `Busy` while a program runs from the object;
+    /// `PermissionDenied` for a holder not minted to write.
     pub fn write(&self, bytes: &[u8], offset: u64) -> Result<usize, SyscallError> {
         syscall::paged_write(self.0.raw(), bytes, offset)
     }
 
-    /// All of `bytes` at the size, as [`Self::write`] writes: the size after
-    /// them. `WouldBlock` too for more than fits one page fewer than
-    /// [`PAGED_HOLDER_PAGES`].
+    /// All of `bytes` at the size, which the kernel reads as it admits them,
+    /// as [`Self::write`] writes: the size after them.
     pub fn append(&self, bytes: &[u8]) -> Result<u64, SyscallError> {
-        syscall::paged_write(self.0.raw(), bytes, PAGED_APPEND).map(|end| end as u64)
+        syscall::paged_append(self.0.raw(), bytes)
     }
 
     /// The object's size, modification time and its pager's record, of one moment.

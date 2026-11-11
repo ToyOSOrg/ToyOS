@@ -6,11 +6,10 @@
 
 use alloc::sync::Arc;
 
-use kernel::paged::{append_fits, holder_span, within_reach};
+use kernel::paged::within_reach;
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{
-    PagedArgs, PagedOp, SyscallError, PAGED_APPEND, PAGED_DIRTY, PAGED_HOLDER_WRITE, PAGED_RANGE_PAGES, PAGED_RECORD,
-    PAGED_WRITTEN,
+    PagedArgs, PagedOp, SyscallError, PAGED_DIRTY, PAGED_HOLDER_WRITE, PAGED_RANGE_PAGES, PAGED_RECORD, PAGED_WRITTEN,
 };
 
 use crate::object::paged::{PagedHolderObject, PagerObject, Unmade};
@@ -94,20 +93,19 @@ pub(super) fn sys_paged_read(h: RawHandle, out: &mut UserBytesMut, offset: u64) 
     }
 }
 
-/// A holder's write at `offset`, of as many bytes as lie in
-/// [`kernel::paged::HOLDER_PAGES`] pages from its page, the rest left for the
-/// next call; or, where `offset` is [`PAGED_APPEND`], of all `len` bytes at
-/// the size, whole or refused `WouldBlock` where they would not fit those
-/// pages. Refused as a read is, and for a span past the last page.
+/// A holder's write of `len` bytes at `offset`, whole or refused: the kernel
+/// object checks the span ([`kernel::paged::holder_span`]).
 pub(super) fn sys_paged_write(ctx: &SyscallContext<'_>, h: RawHandle, buf: UserAddr, len: u64, offset: u64) -> u64 {
-    let (at, len) = match offset {
-        PAGED_APPEND if !append_fits(len) => return SyscallError::WouldBlock.to_u64(),
-        PAGED_APPEND => (None, len),
-        _ => match holder_span(offset, len) {
-            Some(len) => (Some(offset), len),
-            None => return SyscallError::InvalidArgument.to_u64(),
-        },
-    };
+    holder_write(ctx, h, buf, len, Some(offset))
+}
+
+/// A holder's write of `len` bytes at the object's size, which it reads under
+/// its own lock, whole or refused.
+pub(super) fn sys_paged_append(ctx: &SyscallContext<'_>, h: RawHandle, buf: UserAddr, len: u64) -> u64 {
+    holder_write(ctx, h, buf, len, None)
+}
+
+fn holder_write(ctx: &SyscallContext<'_>, h: RawHandle, buf: UserAddr, len: u64, at: Option<u64>) -> u64 {
     let Some(src) = ctx.user_bytes(buf, len) else { return SyscallError::BadAddress.to_u64() };
     match holder(h, Rights::WRITE) {
         Ok(holder) => holder.write(&src, at),

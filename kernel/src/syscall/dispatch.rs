@@ -46,8 +46,8 @@ use super::machine::{
 #[cfg(feature = "test-actuators")]
 use super::machine::lower_sysinfo_bound;
 use super::paged::{
-    sys_paged_create, sys_paged_holder, sys_paged_notices, sys_paged_op, sys_paged_read, sys_paged_stat, sys_paged_write,
-    sys_pager_create,
+    sys_paged_append, sys_paged_create, sys_paged_holder, sys_paged_notices, sys_paged_op, sys_paged_read, sys_paged_stat,
+    sys_paged_write, sys_pager_create,
 };
 use super::proc::{
     spawn_pager, spawn_place, spawn_program, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
@@ -563,6 +563,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_paged_read(RawHandle(a1 as u32), &mut buf, a4)
         }
         SYS_PAGED_WRITE => sys_paged_write(&ctx, RawHandle(a1 as u32), UserAddr::new(a2), a3, a4),
+        SYS_PAGED_APPEND => sys_paged_append(&ctx, RawHandle(a1 as u32), UserAddr::new(a2), a3),
         SYS_PAGED_STAT => sys_paged_stat(&ctx, RawHandle(a1 as u32), UserAddr::new(a2)),
         SYS_PAGED_OP => sys_paged_op(&ctx, RawHandle(a1 as u32), a2, UserAddr::new(a3)),
         SYS_PAGED_NOTICES => {

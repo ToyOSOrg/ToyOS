@@ -60,6 +60,8 @@ struct Model {
     during_answer: Option<Option<usize>>,
     /// Pages of credit granted, all told.
     granted: u64,
+    /// Whether the last time stamped was stamped under the pager's hold.
+    last_stamp_held: Option<bool>,
     /// Each object's pages as a holder could read them after each change
     /// that left no write under way.
     views: Vec<(u64, BTreeMap<u64, Vec<u8>>)>,
@@ -273,6 +275,7 @@ impl Pager for Fake {
         }
         if let Some(mtime) = mtime {
             m.mtimes.insert(id, mtime);
+            m.last_stamp_held = Some(m.holding.contains(&id));
         }
         Ok(())
     }
@@ -1230,4 +1233,20 @@ fn a_page_the_server_writes_gives_its_holders_credit_back() {
     files.write(&mut v, id, node, Some(0), &pattern(PAGE as usize, 2)).unwrap();
     assert_eq!(fake.status(object).unwrap().credit, BULK, "the page the server wrote paid back");
     assert_eq!(fake.0.borrow().granted, BULK, "and nothing more was granted, nor room held for it");
+}
+
+/// The server stamps the time of its write, and of its truncation, inside
+/// its hold: no holder states the size it left with the time before it.
+#[test]
+fn a_server_write_stamps_its_time_inside_its_hold() {
+    let mut v = volume();
+    let fake = Fake::new(64, 16);
+    let mut files = Files::new(Some(fake.clone()));
+    let (node, id) = open(&mut files, &mut v, "home/f");
+    fake.0.borrow_mut().last_stamp_held = None;
+    files.write(&mut v, id, node, Some(0), b"stamped").unwrap();
+    assert_eq!(fake.0.borrow().last_stamp_held, Some(true), "the write's");
+    fake.0.borrow_mut().last_stamp_held = None;
+    files.truncate(&mut v, id, node, 3).unwrap();
+    assert_eq!(fake.0.borrow().last_stamp_held, Some(true), "the truncation's");
 }

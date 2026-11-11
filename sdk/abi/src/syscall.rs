@@ -363,6 +363,8 @@ pub const SYS_SET_THREAD_POINTER: u64 = 171;
 pub const SYS_PAGED_WRITE: u64 = 172;
 /// A paged object's size, time and record, through a holder. See [`paged_stat`].
 pub const SYS_PAGED_STAT: u64 = 173;
+/// Write at a paged object's end through a holder. See [`paged_append`].
+pub const SYS_PAGED_APPEND: u64 = 174;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -370,13 +372,13 @@ pub const SYS_PAGED_STAT: u64 = 173;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 175;
+pub const SYSCALL_PROFILE_BINS: usize = 176;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_PAGED_STAT < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_PAGED_APPEND < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -3108,10 +3110,8 @@ pub const PAGED_DIRTY: u64 = 1;
 pub const PAGED_WRITTEN: u64 = 1;
 /// [`paged_holder`]'s holder carries `WRITE`.
 pub const PAGED_HOLDER_WRITE: u64 = 1;
-/// [`paged_write`]'s offset that writes at the object's size.
-pub const PAGED_APPEND: u64 = u64::MAX;
-/// The most pages one holder's write takes, and one holder's read copies
-/// under the writes' exclusion.
+/// The most pages one holder's write spans; a longer one is refused, and the
+/// holder asks the pager to write it.
 pub const PAGED_HOLDER_PAGES: u64 = 64;
 
 /// The bytes of a paged object's record: what its pager says of it beside
@@ -3227,26 +3227,33 @@ pub fn paged_holder(pager: RawHandle, object: u64, writes: bool) -> Result<RawHa
     check(syscall(SYS_PAGED_HOLDER, pager.0 as u64, object, flags, 0)).map(|raw| RawHandle(raw as u32))
 }
 
-/// A holder's write of `bytes` at `offset`, which takes what lies in
-/// [`PAGED_HOLDER_PAGES`] pages from `offset`'s page and leaves the rest for
-/// the next call: the bytes written. With `offset` [`PAGED_APPEND`] it writes
-/// all of `bytes` at the size, refused `WouldBlock` where they would not fit
-/// one page fewer, and answers the size after them. Every write to the object is one
-/// at a time: this one never waits, and is refused `WouldBlock` while
-/// another write is under way or waiting, as it is where a page inside the
-/// size is not present or failed, the credit or the pager's dirty ceiling is
-/// short, or a fresh page has no room; the holder asks the pager to write
-/// instead. Admitted, it is whole, read by no holder half done. `Busy` where
-/// something runs from the object; `BadAddress` for `bytes` the kernel cannot
-/// read, with nothing written; `Gone` once the object or the pager ended. The
-/// object's modification time is stamped. A pager's process is refused,
-/// `PermissionDenied`, as is a holder without `WRITE`; any other kind of
-/// handle, `InvalidArgument`, as is a span past the last page.
+/// A holder's write of `bytes` at `offset`, whole: the bytes written. Every
+/// write to the object is one at a time: this one never waits, and is refused
+/// `WouldBlock` with nothing written while another write is under way or the
+/// pager waits for its turn, as it is where it spans more than
+/// [`PAGED_HOLDER_PAGES`] pages, a page inside the size is not present or
+/// failed, the credit or the pager's dirty ceiling is short, or a fresh page
+/// has no room; the holder asks the pager to write instead. Admitted, it is
+/// whole, read by no holder half done. `InvalidArgument` for a span past the
+/// last page a `u64` reaches; `Busy` where something runs from the object;
+/// `BadAddress` for `bytes` the kernel cannot read, with nothing written;
+/// `Gone` once the object or the pager ended. The object's modification time
+/// is stamped. A pager's process is refused, `PermissionDenied`, as is a
+/// holder without `WRITE`; any other kind of handle, `InvalidArgument`.
 pub fn paged_write(holder: RawHandle, bytes: &[u8], offset: u64) -> Result<usize, SyscallError> {
     check(syscall(SYS_PAGED_WRITE, holder.0 as u64, bytes.as_ptr() as u64, bytes.len() as u64, offset)).map(|n| n as usize)
 }
 
-/// What a holder reads of its object, all of one moment: `Gone` once the
+/// A holder's write of `bytes` at the object's size, which the kernel reads
+/// in the same hold of its lock that admits the write, refused as
+/// [`paged_write`] refuses, and `InvalidArgument` where the size leaves no
+/// room for them below the last page: the size after them.
+pub fn paged_append(holder: RawHandle, bytes: &[u8]) -> Result<u64, SyscallError> {
+    check(syscall(SYS_PAGED_APPEND, holder.0 as u64, bytes.as_ptr() as u64, bytes.len() as u64, 0))
+}
+
+/// What a holder reads of its object, all of one moment, and while the pager
+/// holds the object's writes, of the moment it took them: `Gone` once the
 /// object or the pager ended. Refused as [`paged_read`] refuses.
 pub fn paged_stat(holder: RawHandle) -> Result<PagedStat, SyscallError> {
     let mut out = PagedStat::default();
@@ -3260,9 +3267,8 @@ pub fn paged_stat(holder: RawHandle) -> Result<PagedStat, SyscallError> {
 /// for a failed page before any byte was read (a short count after some),
 /// `Gone` once the object or the pager ended. A read that meets a write
 /// waits for its end and reads again, so it reads each write whole or not at
-/// all; one that has met three copies the object under the writes' own
-/// exclusion, at most [`PAGED_HOLDER_PAGES`] pages from `offset`'s, and
-/// answers what it copied, all of one moment. A pager's process is refused,
+/// all; one that has met three is answered `WouldBlock`, and the holder asks
+/// the pager, whose read holds the writes off. A pager's process is refused,
 /// `PermissionDenied`, as is a holder without `READ`; any other kind of
 /// handle, `InvalidArgument`, so a peer's claim that a handle is a holder
 /// can be checked.

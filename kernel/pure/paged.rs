@@ -28,12 +28,14 @@
 //!
 //! **One write at a time** (POSIX XSH 2.9.7): every write takes the object's
 //! write side ([`Side`]) for its whole: a holder's, which never waits for it
-//! and is refused while it is taken; the pager's, from its hold to its
-//! unhold, its truncations and its own reads among them; and a holder's read
-//! that met [`READ_RESTARTS`] writes, which then waits only for the one under
-//! way and is served before any other. A holder's read begins only while no
-//! write is under way ([`Object::read_begin`]), and its bytes count only where
-//! none has begun since ([`Object::unchanged`]).
+//! and is refused while it is taken or the pager waits for it; and the
+//! pager's, from its hold to its unhold, its truncations and its own reads
+//! among them. A holder's read begins only while no write is under way
+//! ([`Object::read_begin`]), and its bytes count only where none has begun
+//! since ([`Object::unchanged`]); one that met [`READ_RESTARTS`] writes asks the
+//! pager, whose read holds the writes off. While the pager holds them, a
+//! holder states the size and time of the moment it took them
+//! ([`Object::stat`]).
 //!
 //! **A holder's dirtying is told once** ([`Object::take_tell`]): the first page
 //! a holder dirties after the pager last took the range
@@ -183,6 +185,9 @@ pub enum Refused {
     /// A holder's write meets a page inside the size that is not present: the
     /// pager supplies it.
     Absent,
+    /// A holder's write spans more pages than one call takes whole: the pager
+    /// writes it.
+    TooLong,
     /// A range that is empty, too long, overlaps an open write-back, or names
     /// none that was begun.
     InvalidArgument,
@@ -262,10 +267,11 @@ pub struct Object {
     /// resize.
     version: u64,
     side: Side,
-    /// Holders' reads queued for the write side, which no writer takes first.
-    readers_waiting: u32,
     /// The pager waits for the write side, which no holder takes first.
     pager_waiting: bool,
+    /// The size and time when the pager took the side, what a holder states
+    /// until it gives it back.
+    held: Option<(u64, u64)>,
     /// Image holders and the ranges sourced from them: sealed while above 0.
     seals: u32,
     /// Pages a holder's write may still turn dirty.
@@ -358,7 +364,14 @@ impl Object {
 
     /// Where a holder's read begins: `None` while a write is under way.
     pub fn read_begin(&self) -> Option<Version> {
-        matches!(self.side, Side::Free | Side::Reader).then_some(Version(self.version))
+        (self.side == Side::Free).then_some(Version(self.version))
+    }
+
+    /// The size and modification time a holder states: while the pager holds
+    /// the writes, those of the moment it took them, so a statement of them
+    /// comes whole before the pager's write as a read does.
+    pub fn stat(&self) -> (u64, u64) {
+        self.held.unwrap_or((self.size, self.mtime))
     }
 
     /// Whether no write or resize has begun since the read began at `v`.
@@ -373,19 +386,14 @@ impl Object {
     /// Whether [`take_pager`](Self::take_pager) would take the side now: what
     /// a waiting pager waits for.
     pub fn free_for_pager(&self) -> bool {
-        self.side == Side::Free && self.readers_waiting == 0
-    }
-
-    /// Whether [`take_reader`](Self::take_reader) would take the side now.
-    pub fn free_for_reader(&self) -> bool {
         self.side == Side::Free
     }
 
     /// A holder's write takes the write side, or is refused while anyone
-    /// holds it or waits for it: it never waits, and its writer asks the
-    /// pager instead.
+    /// holds it or the pager waits for it: it never waits, and its writer asks
+    /// the pager instead.
     pub fn take_holder(&mut self) -> bool {
-        let free = self.side == Side::Free && self.readers_waiting == 0 && !self.pager_waiting;
+        let free = self.side == Side::Free && !self.pager_waiting;
         if free {
             self.side = Side::Holder;
             self.version += 1;
@@ -394,47 +402,25 @@ impl Object {
     }
 
     /// The pager takes the write side, or waits, and asks again, while a
-    /// holder's write or a queued read holds it or is owed it first: work
-    /// inside the kernel that ends without waiting on anything.
+    /// holder's write holds it: work inside the kernel that ends without
+    /// waiting on anything. No holder's write begins meanwhile.
     pub fn take_pager(&mut self) -> bool {
         let free = self.free_for_pager();
         self.pager_waiting = !free;
         if free {
             self.side = Side::Pager;
+            self.held = Some((self.size, self.mtime));
             self.version += 1;
         }
         free
-    }
-
-    /// A holder's read that met [`READ_RESTARTS`] writes queues for the
-    /// write side: no write begins before it has had it.
-    pub fn queue_reader(&mut self) {
-        self.readers_waiting = self.readers_waiting.checked_add(1).expect("an object's queued reads overflowed");
-    }
-
-    /// A queued read takes the write side once the write under way gives it
-    /// back. Others still read beside it; no write lands meanwhile.
-    pub fn take_reader(&mut self) -> bool {
-        let free = self.free_for_reader();
-        if free {
-            self.readers_waiting -= 1;
-            self.side = Side::Reader;
-        }
-        free
-    }
-
-    /// A queued read ends without the side: its object or pager went.
-    pub fn unqueue_reader(&mut self) {
-        self.readers_waiting = self.readers_waiting.checked_sub(1).expect("a read left a queue it never joined");
     }
 
     /// `who` gives the write side back.
     pub fn give(&mut self, who: Side) {
         assert_eq!(self.side, who, "the write side given back by another than its taker");
-        if who != Side::Reader {
-            self.version += 1;
-        }
+        self.version += 1;
         self.side = Side::Free;
+        self.held = None;
     }
 }
 
@@ -448,29 +434,26 @@ pub enum Side {
     /// The pager's, from its hold to its unhold: its writes, truncations and
     /// own reads, however many calls and waits they take.
     Pager,
-    /// A holder's read that met [`READ_RESTARTS`] writes, copying the object
-    /// out within the kernel.
-    Reader,
 }
 
-/// The writes a holder's read meets before it queues for the write side.
+/// The writes a holder's read meets before it asks the pager instead.
 pub const READ_RESTARTS: u32 = 3;
 
-/// The most pages one holder's write takes, and one read copies under the
-/// write side.
+/// The most pages one holder's write takes, whole.
 pub const HOLDER_PAGES: u64 = 64;
 
-/// How many of `len` bytes from `offset` one holder's write takes: what lies
-/// in [`HOLDER_PAGES`] pages from `offset`'s. `None` for a span past the last
-/// page.
-pub fn holder_span(offset: u64, len: u64) -> Option<u64> {
-    within_reach(offset, len).then(|| len.min(HOLDER_PAGES * PAGE - offset % PAGE))
-}
-
-/// Whether a holder's append of `len` bytes fits [`HOLDER_PAGES`] wherever
-/// the size leaves it in its page: an append is whole or refused.
-pub fn append_fits(len: u64) -> bool {
-    len <= (HOLDER_PAGES - 1) * PAGE
+/// The pages a holder's write of `len` bytes at `offset` spans, which one
+/// call takes whole: `PastEnd` for a span past the last page, `TooLong` for
+/// one past [`HOLDER_PAGES`], which the holder asks the pager to write.
+pub fn holder_span(offset: u64, len: u64) -> Result<u64, Refused> {
+    if !within_reach(offset, len) {
+        return Err(Refused::PastEnd);
+    }
+    let pages = (offset % PAGE + len).div_ceil(PAGE);
+    if pages > HOLDER_PAGES {
+        return Err(Refused::TooLong);
+    }
+    Ok(pages)
 }
 
 /// A pager's table: `capacity` slots and a hash of them, both made here.
@@ -557,8 +540,8 @@ impl<F: Copy> Pages<F> {
             pages: 0,
             version: 0,
             side: Side::Free,
-            readers_waiting: 0,
             pager_waiting: false,
+            held: None,
             seals: 0,
             credit: 0,
             mtime: 0,
@@ -1120,42 +1103,49 @@ mod tests {
         assert!(o.take_holder(), "free again");
     }
 
-    /// A read that met too many writes queues: no write begins until it has
-    /// had the side, other reads go on beside it, and it moves no version.
+    /// While the pager holds the writes, a holder states the size and time of
+    /// the moment it took them, however its writes move them; its unhold
+    /// shows what they left.
     #[test]
-    fn a_queued_read_has_the_write_side_before_any_writer() {
-        let mut p = Pages::<u64>::new(8, 4).unwrap();
-        let mut o = p.object(1, PAGE);
-        assert!(o.take_holder());
-        o.queue_reader();
-        o.give(Side::Holder);
-        assert!(!o.take_holder() && !o.take_pager(), "neither writer goes before the queued read");
-        assert!(o.take_reader());
-        let v = o.read_begin().expect("other reads go on beside it");
-        assert!(!o.take_pager(), "the pager waits for the read's copy");
-        o.give(Side::Reader);
-        assert!(o.unchanged(v), "a read changes nothing");
+    fn a_holder_states_the_moment_the_pager_took_the_writes() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, 100);
+        o.stamp(5);
+        assert_eq!(o.stat(), (100, 5));
         assert!(o.take_pager());
+        p.supply(&mut o, 1, 1, true, 2 * PAGE).unwrap();
+        o.stamp(9);
+        assert_eq!((o.size(), o.mtime()), (2 * PAGE, 9), "the pager sees its own");
+        assert_eq!(o.stat(), (100, 5), "a holder sees the moment the hold began");
+        p.resize(&mut o, 0, &mut none).unwrap();
+        assert_eq!(o.stat(), (100, 5), "and a truncation under it");
+        p.resize(&mut o, 3 * PAGE, &mut none).unwrap();
         o.give(Side::Pager);
-        o.queue_reader();
-        o.unqueue_reader();
-        assert!(o.take_holder(), "a read that left the queue holds nothing back");
+        assert_eq!(o.stat(), (3 * PAGE, 9), "the unhold shows what the writes left");
+        assert!(o.take_holder());
+        o.stamp(11);
+        assert_eq!(o.stat(), (3 * PAGE, 11), "a holder's write holds no statement back");
     }
 
-    /// A holder's write takes at most its pages' worth, wherever it starts:
-    /// at the last pages a `u64` reaches the arithmetic stays inside them.
+    /// A holder's write is taken whole or refused: past the last page, or
+    /// spanning more pages than one call takes, wherever it starts; at the
+    /// last pages a `u64` reaches the arithmetic stays inside them.
     #[test]
-    fn a_holders_span_stays_in_its_pages_up_to_the_last() {
-        assert_eq!(holder_span(100, 1 << 30), Some(HOLDER_PAGES * PAGE - 100));
-        assert_eq!(holder_span(PAGE, 10), Some(10));
+    fn a_holders_span_is_whole_or_refused_up_to_the_last_page() {
+        assert_eq!(holder_span(0, HOLDER_PAGES * PAGE), Ok(HOLDER_PAGES));
+        assert_eq!(holder_span(1, HOLDER_PAGES * PAGE), Err(Refused::TooLong), "one byte into a page more");
+        assert_eq!(holder_span(PAGE - 1, 2), Ok(2));
+        assert_eq!(holder_span(100, 1 << 30), Err(Refused::TooLong));
         for k in 1..=2 * HOLDER_PAGES {
             let at = LAST_END - k * PAGE;
-            assert_eq!(holder_span(at, 1), Some(1), "the page {k} below the last end");
-            assert_eq!(holder_span(at + 7, k * PAGE - 7), Some((k * PAGE - 7).min(HOLDER_PAGES * PAGE - 7)));
+            assert_eq!(holder_span(at, 1), Ok(1), "the page {k} below the last end");
+            assert_eq!(holder_span(at + 7, k * PAGE - 7).is_ok(), k <= HOLDER_PAGES);
         }
-        assert_eq!(holder_span(LAST_END - PAGE + 1, PAGE), None, "past the last page");
-        assert_eq!(holder_span(u64::MAX, 1), None);
-        assert!(append_fits((HOLDER_PAGES - 1) * PAGE) && !append_fits((HOLDER_PAGES - 1) * PAGE + 1));
+        assert_eq!(holder_span(LAST_END - 1, 1), Ok(1), "a size at the last end leaves an append its last byte");
+        assert_eq!(holder_span(LAST_END, 1), Err(Refused::PastEnd), "an append at a size at the last end");
+        assert_eq!(holder_span(LAST_END - PAGE + 1, PAGE), Err(Refused::PastEnd));
+        assert_eq!(holder_span(u64::MAX, 1), Err(Refused::PastEnd), "the old append offset is a plain refusal");
+        assert_eq!(holder_span(u64::MAX - 3, 8), Err(Refused::PastEnd), "an end that wraps");
     }
 
     /// The room a holder's credit paid for a page is credit again where the
@@ -1661,25 +1651,30 @@ mod tests {
     /// **A model of the kernel's protocol, not its code**: a holder's read of
     /// two pages, two holders' writes (one of them twice) and a write the
     /// pager makes, each step an atomic action on the object under its
-    /// pager's lock, driven through every interleaving. The reader and the
-    /// writers follow `kernel/src/object/paged.rs`: a read restarts where a
-    /// write began, waits where one is under way, and after
-    /// [`READ_RESTARTS`] queues and copies under the write side; a holder's
-    /// write that cannot take the side goes to the pager, which writes it
-    /// after its own. Every read is one write's generation, no two writes
-    /// are under way at once, nothing deadlocks, and no write begins once a
-    /// read has queued until that read has had the side.
+    /// pager's lock, driven through every interleaving. They follow
+    /// `kernel/src/object/paged.rs` and the file server: a read restarts where
+    /// a write began, waits where one is under way, and after
+    /// [`READ_RESTARTS`] asks the pager, which reads under its hold; a holder's
+    /// write that cannot take the side asks the pager, which writes it after
+    /// what it was asked before. Every read is one write's generation, no two
+    /// writes are under way at once, nothing deadlocks, and no holder's write
+    /// takes the side while the pager waits for it.
     #[test]
-    fn every_interleaving_reads_whole_writes_one_at_a_time_and_a_queued_read_goes_first() {
+    fn every_interleaving_reads_whole_writes_one_at_a_time_and_the_pager_is_not_overtaken() {
         use std::collections::HashSet;
         use std::vec;
 
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        enum Ask {
+            Write(u64),
+            Read,
+        }
         #[derive(Clone, PartialEq, Eq, Hash)]
         enum Reader {
             Begin { restarts: u32 },
             Waiting { restarts: u32 },
             Copy { v: Version, at: usize, got: [u64; 2], restarts: u32 },
-            Queued,
+            Asked,
             Done,
         }
         #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1691,8 +1686,9 @@ mod tests {
         #[derive(Clone, PartialEq, Eq, Hash)]
         enum Pager {
             Idle,
-            Taking(u64),
+            Taking(Ask),
             Write(u64, usize),
+            Read(usize, [u64; 2]),
         }
         #[derive(Clone, PartialEq, Eq, Hash)]
         struct World {
@@ -1701,9 +1697,7 @@ mod tests {
             reader: Reader,
             writers: [Writer; 2],
             pager: Pager,
-            asked: Vec<u64>,
-            /// Writes begun since the reader queued.
-            overtook: u32,
+            asked: Vec<Ask>,
         }
 
         fn steps(w: &World) -> Vec<World> {
@@ -1711,9 +1705,8 @@ mod tests {
             let mut r = w.clone();
             match w.reader.clone() {
                 Reader::Begin { restarts } if restarts >= READ_RESTARTS => {
-                    r.o.queue_reader();
-                    r.reader = Reader::Queued;
-                    r.overtook = 0;
+                    r.asked.push(Ask::Read);
+                    r.reader = Reader::Asked;
                     next.push(r);
                 }
                 Reader::Begin { restarts } => {
@@ -1741,25 +1734,19 @@ mod tests {
                     }
                     next.push(r);
                 }
-                Reader::Queued if r.o.take_reader() => {
-                    assert_eq!(r.overtook, 0, "a write began after the read queued");
-                    assert_eq!(r.page[0], r.page[1], "the side's read met half a write");
-                    r.o.give(Side::Reader);
-                    r.reader = Reader::Done;
-                    next.push(r);
-                }
                 _ => {}
             }
             for k in 0..2 {
                 let mut n = w.clone();
                 match w.writers[k].clone() {
                     Writer::Take(gens) if !gens.is_empty() => {
+                        let pager_waits = n.o.pager_waiting;
                         if n.o.take_holder() {
-                            n.overtook += 1;
+                            assert!(!pager_waits, "a holder's write took the side the pager waits for");
                             n.writers[k] = Writer::Write(gens, 0);
                         } else {
                             // Refused, the holder asks the pager to write it.
-                            n.asked.push(gens[0]);
+                            n.asked.push(Ask::Write(gens[0]));
                             n.writers[k] = if gens.len() > 1 { Writer::Take(gens[1..].to_vec()) } else { Writer::Gone };
                         }
                         next.push(n);
@@ -1781,20 +1768,39 @@ mod tests {
             let mut p = w.clone();
             match w.pager {
                 Pager::Idle if !w.asked.is_empty() => {
-                    let g = p.asked.remove(0);
-                    p.pager = Pager::Taking(g);
+                    let ask = p.asked.remove(0);
+                    p.pager = Pager::Taking(ask);
                     next.push(p);
                 }
-                Pager::Taking(g) if p.o.take_pager() => {
-                    p.overtook += 1;
-                    p.pager = Pager::Write(g, 0);
-                    next.push(p);
+                Pager::Taking(ask) => {
+                    let before = p.o.clone();
+                    if p.o.take_pager() {
+                        p.pager = match ask {
+                            Ask::Write(g) => Pager::Write(g, 0),
+                            Ask::Read => Pager::Read(0, [0; 2]),
+                        };
+                        next.push(p);
+                    } else if p.o != before {
+                        // The first refused take marks the pager waiting.
+                        next.push(p);
+                    }
                 }
-                Pager::Taking(_) if p.pager_waiting_changed(w) => next.push(p),
                 Pager::Write(g, at) if at < 2 => {
                     assert_eq!(p.o.side(), Side::Pager, "the pager wrote without the side");
                     p.page[at] = g;
                     p.pager = Pager::Write(g, at + 1);
+                    next.push(p);
+                }
+                Pager::Read(at, mut got) if at < 2 => {
+                    got[at] = p.page[at];
+                    p.pager = Pager::Read(at + 1, got);
+                    next.push(p);
+                }
+                Pager::Read(_, got) => {
+                    assert_eq!(got[0], got[1], "the pager's read for the reader met half a write");
+                    p.o.give(Side::Pager);
+                    p.reader = Reader::Done;
+                    p.pager = Pager::Idle;
                     next.push(p);
                 }
                 Pager::Write(..) => {
@@ -1807,13 +1813,6 @@ mod tests {
             next
         }
 
-        impl World {
-            /// A refused take that marked the pager waiting changed the world.
-            fn pager_waiting_changed(&self, before: &World) -> bool {
-                self.o != before.o
-            }
-        }
-
         let mut p = Pages::<u64>::new(4, 4).unwrap();
         let start = World {
             o: p.object(1, 2 * PAGE),
@@ -1821,14 +1820,14 @@ mod tests {
             reader: Reader::Begin { restarts: 0 },
             writers: [Writer::Take(vec![1, 2]), Writer::Take(vec![3])],
             pager: Pager::Idle,
-            asked: vec![4],
-            overtook: 0,
+            asked: vec![Ask::Write(4)],
         };
-        let (mut seen, mut stack, mut ends) = (HashSet::new(), vec![start], 0);
+        let (mut seen, mut stack, mut ends, mut asked_reads) = (HashSet::new(), vec![start], 0, 0);
         while let Some(w) = stack.pop() {
             if !seen.insert(w.clone()) {
                 continue;
             }
+            asked_reads += usize::from(w.reader == Reader::Asked);
             let next = steps(&w);
             if next.is_empty() {
                 let finished = w.reader == Reader::Done
@@ -1841,5 +1840,6 @@ mod tests {
             stack.extend(next);
         }
         assert!(ends > 0 && seen.len() > 1000, "{} states, {ends} ends: the model explored too little", seen.len());
+        assert!(asked_reads > 0, "no interleaving sent the read to the pager");
     }
 }

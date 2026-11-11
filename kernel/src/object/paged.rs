@@ -13,14 +13,14 @@
 //!
 //! **One write at a time** ([`kernel::paged::Side`]): a holder's write
 //! copies its bytes into frames held aside first, then takes the object's
-//! write side in one hold of the lock, refused at once while anyone holds or
-//! waits for it, and is checked whole and admitted there; its copy into the
-//! object's frames is the kernel's own. The pager holds the side from its
-//! hold to its unhold, its waits included. A holder's read that met
-//! [`kernel::paged::READ_RESTARTS`] writes queues for the side, copies the
-//! object into frames held aside under it, and copies them out after giving
-//! it back. So the pager waits for the side only on work inside the kernel,
-//! never on a holder's memory. A holder's write stamps the object's
+//! write side in one hold of the lock, refused at once while the side is held
+//! or the pager waits for it, and is checked whole and admitted there; its
+//! copy into the object's frames is the kernel's own. The pager holds the
+//! side from its hold to its unhold, its waits included, and a holder states
+//! the size and time of the moment it took them. A holder's read that met
+//! [`kernel::paged::READ_RESTARTS`] writes asks the pager, whose read holds
+//! them off. So the pager waits for the side only on a holder's copy inside
+//! the kernel, never on what the holder controls. A holder's write stamps the
 //! modification time; the pager sets it for its own changes, and its record
 //! of the rest is bytes the kernel keeps and never reads.
 //!
@@ -35,11 +35,6 @@
 //! release, the pager's end or a kill; a wait past the pager's report time is
 //! counted and logged overdue and goes on. A pager's own process is refused a
 //! holder's calls, so no pager waits on a pager.
-//!
-//! **A holder's read is atomic against every write**
-//! ([`kernel::paged::Object::read_begin`]): one that meets a write waits for
-//! its end and reads again, and after [`kernel::paged::READ_RESTARTS`] it
-//! copies under the write side, which it has before any writer.
 //!
 //! **Lock order.** The pager's lock is innermost but for the allocator's. A
 //! copy to or from user memory holds pins, never the lock; no wait holds a
@@ -61,7 +56,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel::chunked::{Chunked, Stack};
 use kernel::paged::{
-    Core, Draw, Leave, Lookup, Object, Pages, Refused, Side, Supplied, Version, Writer, HOLDER_PAGES, PAGE, READ_RESTARTS,
+    holder_span, Core, Draw, Leave, Lookup, Object, Pages, Refused, Side, Supplied, Version, Writer, HOLDER_PAGES, PAGE,
+    READ_RESTARTS,
 };
 use kernel::sched::task::WaitClass;
 use toyos_abi::syscall::{
@@ -523,10 +519,10 @@ impl PagerObject {
     /// Read `out.len()` bytes of the object at `slot` from `offset`; a holder
     /// waits for absent pages and for a write under way, and its bytes count
     /// only where no write began meanwhile; one that meets [`READ_RESTARTS`]
-    /// writes copies under the write side ([`Self::read_queued`]). An owner
-    /// is answered `WouldBlock` for an absent first page, and orders its
-    /// read against writes by holding them. The caller holds a reference on
-    /// `slot` for the call.
+    /// writes is answered `WouldBlock`, and asks the pager, whose read holds
+    /// the writes off. An owner is answered `WouldBlock` for an absent first
+    /// page, and orders its read against writes by holding them. The caller
+    /// holds a reference on `slot` for the call.
     fn read(&self, slot: u32, out: &mut UserBytesMut, offset: u64, waits: bool) -> u64 {
         let want = out.len();
         let mut done = 0usize;
@@ -537,7 +533,7 @@ impl PagerObject {
         let mut restarts = 0;
         loop {
             if restarts >= READ_RESTARTS {
-                return self.read_queued(slot, out, offset);
+                return SyscallError::WouldBlock.to_u64();
             }
             let at = offset.saturating_add(done as u64);
             let step = {
@@ -633,137 +629,6 @@ impl PagerObject {
                     }
                 }
             }
-        }
-    }
-
-    /// A holder's read that met [`READ_RESTARTS`] writes. Queued for the
-    /// write side, which it has before any writer, it copies up to
-    /// [`HOLDER_PAGES`] pages from `offset` into frames held aside with no
-    /// write under way, gives the side back, and only then copies them out,
-    /// so no write waits on the reader's memory. Fewer bytes than asked
-    /// where there were more: all of one moment.
-    fn read_queued(&self, slot: u32, out: &mut UserBytesMut, offset: u64) -> u64 {
-        let span = (out.len() as u64).min(HOLDER_PAGES * PAGE - offset % PAGE) as usize;
-        let waiting = core::pin::pin!(Waiting::new(self, slot));
-        let mut drawn = [None; HOLDER];
-        let frames = (span as u64).div_ceil(PAGE) as usize;
-        {
-            let mut state = self.state.lock();
-            if state.gone || state.entry(slot).object.gone() {
-                return SyscallError::Gone.to_u64();
-            }
-            let got = self.draw(&mut state, &mut drawn[..frames]);
-            if got < frames {
-                self.give_back_drawn(&mut state, &drawn[..got]);
-                return SyscallError::WouldBlock.to_u64();
-            }
-        }
-        let mut bounce = [0u64; HOLDER];
-        for (frame, drawn) in bounce.iter_mut().zip(drawn).take(frames) {
-            *frame = materialize(drawn, false);
-        }
-        let copied = loop {
-            match self.copy_under_side(slot, offset, span, &bounce[..frames], waiting.as_ref()) {
-                Ok(Some(copied)) => break Ok(copied),
-                // A page went absent: wait for it with the side given back.
-                Ok(None) => {}
-                Err(e) => break Err(e),
-            }
-        };
-        let answer = copied.map(|copied| {
-            let mut done = 0;
-            for &frame in &bounce[..frames] {
-                let n = (copied - done).min(PAGE as usize);
-                if n == 0 {
-                    break;
-                }
-                // SAFETY: a frame this read drew and filled, which nothing
-                // else reaches.
-                if unsafe { out.write_raw(done, DirectMap::from_phys(frame).as_ptr::<u8>(), n) }.is_err() {
-                    return if done > 0 { done as u64 } else { SyscallError::BadAddress.to_u64() };
-                }
-                done += n;
-            }
-            done as u64
-        });
-        let mut state = self.state.lock();
-        self.give_frames(&mut state, &bounce[..frames]);
-        answer.unwrap_or_else(SyscallError::to_u64)
-    }
-
-    /// Queue for the write side of the object at `slot`, take it, and copy
-    /// `span` bytes from `offset`, up to the size, into the flat `bounce`
-    /// frames with every write held off: the bytes copied, or `None` where a
-    /// page was absent, which this has waited for with the side given back.
-    fn copy_under_side(
-        &self,
-        slot: u32,
-        offset: u64,
-        span: usize,
-        bounce: &[u64],
-        waiting: Pin<&Waiting<'_>>,
-    ) -> Result<Option<usize>, SyscallError> {
-        self.state.lock().entry_mut(slot).object.queue_reader();
-        let mut queued = Queued { pager: self, slot, taken: false };
-        loop {
-            {
-                let mut state = self.state.lock();
-                if state.gone || state.entry(slot).object.gone() {
-                    return Err(SyscallError::Gone);
-                }
-                if state.entry_mut(slot).object.take_reader() {
-                    queued.taken = true;
-                    break;
-                }
-            }
-            let ready = || {
-                let state = self.state.lock();
-                let object = &state.entry(slot).object;
-                state.gone || object.gone() || object.free_for_reader()
-            };
-            self.wait_changed(slot, offset / PAGE, bounce.len() as u64, ready)?;
-        }
-        let mut pieces = [Piece::default(); CHUNK];
-        let mut done = 0usize;
-        let absent = loop {
-            let at = offset + done as u64;
-            let step = {
-                let mut state = self.state.lock();
-                let object = &state.entry(slot).object;
-                let end = object.size().min(offset + span as u64);
-                if state.gone || object.gone() {
-                    Step::Gone
-                } else if at >= end {
-                    Step::Done
-                } else {
-                    self.pin_chunk(&mut state, slot, at..end, &mut pieces, Some(waiting))
-                }
-            };
-            match step {
-                Step::Copy(count) => {
-                    for piece in &pieces[..count] {
-                        match piece.phys {
-                            Some(phys) => {
-                                copy_flat(bounce, done, phys, piece.within, piece.len, Direction::FromFrame);
-                                pmm::unpin_range(phys, PAGE as usize);
-                            }
-                            None => zero_flat(bounce, done, piece.len),
-                        }
-                        done += piece.len;
-                    }
-                }
-                Step::Done => break None,
-                Step::Absent(page) => break Some(page),
-                Step::Failed if done > 0 => break None,
-                Step::Failed => return Err(SyscallError::Io),
-                Step::Gone => return Err(SyscallError::Gone),
-                Step::Written => unreachable!("pin_chunk answers no write"),
-            }
-        };
-        drop(queued);
-        match absent {
-            None => Ok(Some(done)),
-            Some(page) => self.wait_supplied(slot, page, waiting).map(|()| None),
         }
     }
 
@@ -1247,7 +1112,8 @@ impl PagerObject {
         if state.gone || entry.object.gone() {
             return Err(SyscallError::Gone);
         }
-        Ok(PagedStat { size: entry.object.size(), mtime: entry.object.mtime(), record: entry.record })
+        let (size, mtime) = entry.object.stat();
+        Ok(PagedStat { size, mtime, record: entry.record })
     }
 
     /// A holder's write of `src` at `at`, or at the size where `None`: whole
@@ -1283,7 +1149,10 @@ impl PagerObject {
             }
             let (pages, object) = state.split(slot);
             let offset = at.unwrap_or(object.size());
-            let span = (offset % PAGE + len as u64).div_ceil(PAGE).max(1);
+            let span = match holder_span(offset, len as u64) {
+                Ok(span) => span,
+                Err(why) => return holder_word(why).to_u64(),
+            };
             let fresh_count = match pages.holder_fits(object, offset / PAGE, span) {
                 Ok(fresh) => fresh as usize,
                 Err(why) => return holder_word(why).to_u64(),
@@ -1329,8 +1198,11 @@ impl PagerObject {
             }
             let offset = at.unwrap_or(object.size());
             let first = offset / PAGE;
-            let count = (offset % PAGE + len as u64).div_ceil(PAGE) as usize;
-            let refused = match pages.holder_fits(object, first, count as u64) {
+            // An append's end is read here, in this hold of the lock, and
+            // checked as a positioned write's is.
+            let span = holder_span(offset, len as u64);
+            let count = span.unwrap_or(0) as usize;
+            let refused = match span.and_then(|span| pages.holder_fits(object, first, span)) {
                 Ok(needed) if needed as usize <= fresh_count => None,
                 // The object changed since the frames were drawn.
                 Ok(_) => Some(SyscallError::WouldBlock),
@@ -1367,7 +1239,7 @@ impl PagerObject {
         };
         let mut from = 0;
         for &(_, phys, within, n) in &pinned[..count] {
-            copy_flat(&staged[..staged_count], from, phys, within, n, Direction::ToFrame);
+            copy_staged(&staged[..staged_count], from, phys, within, n);
             from += n;
         }
         {
@@ -1491,43 +1363,24 @@ fn materialize(drawn: Option<u64>, zero: bool) -> u64 {
     }
 }
 
-/// Which way [`copy_flat`] copies.
-#[derive(Clone, Copy)]
-enum Direction {
-    ToFrame,
-    FromFrame,
-}
-
-/// Copy `n` bytes between `flat`, frames read as one run of bytes from its
-/// byte `at`, and `frame` from its byte `within`, never through a reference:
+/// Copy `n` bytes of `staged`, frames read as one run of bytes, from its byte
+/// `at` into `frame` from its byte `within`, never through a reference:
 /// another CPU may read the frame meanwhile.
-fn copy_flat(flat: &[u64], at: usize, frame: u64, within: usize, n: usize, way: Direction) {
+fn copy_staged(staged: &[u64], at: usize, frame: u64, within: usize, n: usize) {
     let mut done = 0;
     while done < n {
         let (k, inside) = ((at + done) / PAGE as usize, (at + done) % PAGE as usize);
         let take = (PAGE as usize - inside).min(n - done);
-        let run = DirectMap::from_phys(flat[k]).as_mut_ptr::<u8>();
-        let object = DirectMap::from_phys(frame).as_mut_ptr::<u8>();
-        // SAFETY: both frames are pinned or held by the caller for the copy,
-        // the ranges lie inside them, and they are distinct frames.
+        // SAFETY: the staged frame is the caller's and the object's frame is
+        // pinned by it for the copy; the ranges lie inside them, and they are
+        // distinct frames.
         unsafe {
-            match way {
-                Direction::ToFrame => core::ptr::copy_nonoverlapping(run.add(inside), object.add(within + done), take),
-                Direction::FromFrame => core::ptr::copy_nonoverlapping(object.add(within + done), run.add(inside), take),
-            }
+            core::ptr::copy_nonoverlapping(
+                DirectMap::from_phys(staged[k]).as_ptr::<u8>().add(inside),
+                DirectMap::from_phys(frame).as_mut_ptr::<u8>().add(within + done),
+                take,
+            );
         }
-        done += take;
-    }
-}
-
-/// Zero `n` bytes of `flat` from its byte `at`: a hole's.
-fn zero_flat(flat: &[u64], at: usize, n: usize) {
-    let mut done = 0;
-    while done < n {
-        let (k, inside) = ((at + done) / PAGE as usize, (at + done) % PAGE as usize);
-        let take = (PAGE as usize - inside).min(n - done);
-        // SAFETY: a frame the caller drew and holds, the range inside it.
-        unsafe { core::ptr::write_bytes(DirectMap::from_phys(flat[k]).as_mut_ptr::<u8>().add(inside), 0, take) };
         done += take;
     }
 }
@@ -1548,6 +1401,7 @@ fn word(why: Refused) -> SyscallError {
         Refused::Gone => SyscallError::Gone,
         Refused::PastEnd | Refused::InvalidArgument => SyscallError::InvalidArgument,
         Refused::Absent => SyscallError::NotFound,
+        Refused::TooLong => SyscallError::InvalidArgument,
         Refused::NoRoom => SyscallError::ResourceExhausted,
         Refused::DirtyFull | Refused::NoCredit => SyscallError::WouldBlock,
         Refused::Sealed => SyscallError::Busy,
@@ -1561,7 +1415,7 @@ fn holder_word(why: Refused) -> SyscallError {
     match why {
         Refused::Gone => SyscallError::Gone,
         Refused::Sealed => SyscallError::Busy,
-        Refused::Absent | Refused::NoCredit | Refused::DirtyFull | Refused::NoRoom => SyscallError::WouldBlock,
+        Refused::Absent | Refused::NoCredit | Refused::DirtyFull | Refused::NoRoom | Refused::TooLong => SyscallError::WouldBlock,
         Refused::PastEnd | Refused::InvalidArgument => SyscallError::InvalidArgument,
     }
 }
@@ -1735,29 +1589,6 @@ impl Drop for HolderWriting<'_> {
         let mut state = self.pager.state.lock();
         state.entry_mut(self.slot).writers -= 1;
         self.pager.say_no_holders(&mut state, self.slot);
-    }
-}
-
-/// A holder's read queued for its object's write side, and holding it once
-/// taken, until it is given back or leaves the queue by any path.
-struct Queued<'a> {
-    pager: &'a PagerObject,
-    slot: u32,
-    taken: bool,
-}
-
-impl Drop for Queued<'_> {
-    fn drop(&mut self) {
-        {
-            let mut state = self.pager.state.lock();
-            let object = &mut state.entry_mut(self.slot).object;
-            match self.taken {
-                true => object.give(Side::Reader),
-                false => object.unqueue_reader(),
-            }
-        }
-        // A write waiting for the side, or held back by the queue, goes on.
-        self.pager.changed.post();
     }
 }
 

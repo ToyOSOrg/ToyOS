@@ -82,7 +82,7 @@ fn is_directory<T>(_: &str) -> Result<T, Error> { Err(Error::Served(fs::Error::I
 /// Its lock makes a read or write and the offset's move one step against
 /// every other thread's, through the server or the file's paged object.
 struct Position {
-    /// Every write lands at the end, which only the server knows.
+    /// Every write lands at the file's end, read where the write is made.
     append: bool,
     at: Lock<Offset>,
 }
@@ -135,6 +135,9 @@ impl Position {
             *at = Offset::Here(end);
             return Some(Ok(data.len()));
         }
+        if !super::in_a_file(offset, data.len()) {
+            return None;
+        }
         let n = held_write(holder.write(data, offset))?;
         if let Ok(n) = n {
             *at = Offset::Here(offset + n as u64);
@@ -161,7 +164,7 @@ impl Position {
 
     /// Where a seek lands, by the rule the server keeps for its own offsets:
     /// at or below [`fs::MAX_FILE_BYTES`] and not before the start. From the
-    /// end, the server is asked, since only it knows the size.
+    /// end, the server is asked: it reads the end as of the writes it orders.
     fn seek(&self, dir: &mut Dir, fid: Fid, whence: u64, delta: i64) -> Result<u64, fs::Error> {
         let mut at = self.at.lock();
         let Offset::Here(offset) = *at else { return dir.seek(fid, whence, delta) };
@@ -608,7 +611,7 @@ unsafe extern "C" fn toyos_fs_pwrite(fd: Fd, buf: *const u8, len: usize, offset:
         fd,
         |_| Err(SyscallError::NotSupported),
         is_directory,
-        |holder, _| held_write(holder.write(buf, offset)),
+        |holder, _| if super::in_a_file(offset, buf.len()) { held_write(holder.write(buf, offset)) } else { None },
         |dir, fid, _| dir.pwrite(fid, offset, buf),
     );
     answer(n.map(|n| n as u64))

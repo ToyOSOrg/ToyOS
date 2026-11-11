@@ -316,9 +316,9 @@ impl<P: Pager> Files<P> {
             let f = files.files.get_mut(&identity).expect("found");
             f.dirty = None;
             let id = f.object;
-            files.pg().resize(id, 0).map_err(word)
-        })?;
-        self.stamp(identity, volume.node_meta(node)?.mtime)
+            files.pg().resize(id, 0).map_err(word)?;
+            files.stamp(identity, volume.node_meta(node)?.mtime)
+        })
     }
 
     /// A description opened `identity` at `node`, which the volume holds once
@@ -577,16 +577,17 @@ impl<P: Pager> Files<P> {
             }
             return Ok(end);
         }
+        // Stamped inside the hold, so no holder states the new size with the old time.
         let end = self.under_hold(identity, |files, size| {
             let offset = at.unwrap_or(size);
             let end = crate::bounds::in_a_file(offset, data.len() as u64)?;
             if !data.is_empty() {
                 files.write_held(volume, identity, node, size, offset, data)?;
+                files.stamp(identity, volume.node_meta(node)?.mtime)?;
             }
             Ok(end)
         })?;
         if !data.is_empty() {
-            self.stamp(identity, volume.node_meta(node)?.mtime)?;
             // A holder asks this server once its credit is spent.
             self.top_up(volume, identity);
         }
@@ -699,9 +700,9 @@ impl<P: Pager> Files<P> {
                 let hi = hi.min(size.div_ceil(PAGE));
                 f.dirty = (lo < hi).then_some((lo, hi));
             }
-            files.pg().resize(id, size).map_err(word)
-        })?;
-        self.stamp(identity, volume.node_meta(node)?.mtime)
+            files.pg().resize(id, size).map_err(word)?;
+            files.stamp(identity, volume.node_meta(node)?.mtime)
+        })
     }
 
     /// `identity`'s dirty pages written to the volume. A page dirtied again
