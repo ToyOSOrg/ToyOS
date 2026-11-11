@@ -18,33 +18,37 @@ pub(super) enum Routed<C> {
     Directory,
 }
 
-/// Route `abs` through `held`, which answers the capability a prefix names:
-/// the longest prefix first, at most [`MAX_CAPABILITY_DEPTH`] components,
-/// then `/`.
-pub(super) fn route<'a, C>(
+/// Route `abs` through `held`, which answers the capability a held directory
+/// names: the longest held directory `abs` lies in first. Only a directory
+/// the view holds is asked for, so a path costs the kernel nothing.
+pub(super) fn route<C>(
     abs: &str,
-    dirs: impl FnOnce() -> Result<&'a Directories, Error>,
+    dirs: &Directories,
     mut held: impl FnMut(&str) -> Result<Option<C>, Error>,
 ) -> Result<Routed<C>, Error> {
-    let parts: Vec<&str> = abs.split('/').filter(|p| !p.is_empty()).collect();
-    for depth in (1..=parts.len().min(MAX_CAPABILITY_DEPTH)).rev() {
-        let prefix = alloc::format!("/{}", parts[..depth].join("/"));
-        if let Some(cap) = held(&prefix)? {
-            return Ok(Routed::Served(cap, parts[depth..].join("/")));
+    for root in dirs.holding(abs) {
+        if let Some(cap) = held(root)? {
+            let beneath = abs[root.len()..].trim_start_matches('/');
+            return Ok(Routed::Served(cap, String::from(beneath)));
         }
     }
-    match held("/")? {
-        Some(cap) => Ok(Routed::Served(cap, parts.join("/"))),
-        None if dirs()?.node(abs).is_some() => Ok(Routed::Directory),
+    match dirs.node(abs) {
+        Some(_) => Ok(Routed::Directory),
         None => Err(Error::Served(fs::Error::NotHeld)),
     }
 }
 
-pub(super) struct Directories(Vec<String>);
+/// A view's directories: every held capability's directory and its
+/// ancestors, sorted, and which of them are held.
+pub(super) struct Directories {
+    paths: Vec<String>,
+    held: Vec<String>,
+}
 
 impl Directories {
     pub(super) fn new(names: impl IntoIterator<Item = String>) -> Self {
         let mut paths = BTreeSet::from([String::from("/")]);
+        let mut held = BTreeSet::new();
         for name in names {
             let Some(path) = name.strip_prefix(crate::fs::CAPABILITY_PREFIX) else { continue };
             if !path.starts_with('/') || super::absolute("/", path) != path {
@@ -55,16 +59,32 @@ impl Directories {
             for end in 1..=parts.len() {
                 paths.insert(alloc::format!("/{}", parts[..end].join("/")));
             }
+            held.insert(String::from(path));
         }
-        Self(paths.into_iter().collect())
+        Self { paths: paths.into_iter().collect(), held: held.into_iter().collect() }
+    }
+
+    /// The held directories the absolute, lexically clean `abs` is or lies
+    /// in, deepest first.
+    fn holding<'a>(&'a self, abs: &'a str) -> impl Iterator<Item = &'a str> {
+        let ends = abs.match_indices('/').skip(1).map(|(at, _)| at).chain([abs.len()]).take(MAX_CAPABILITY_DEPTH);
+        let mut prefixes = [""; MAX_CAPABILITY_DEPTH];
+        let mut count = 0;
+        for end in ends {
+            prefixes[count] = &abs[..end];
+            count += 1;
+        }
+        let root = (abs != "/").then_some("/");
+        let held = |prefix: &&str| self.held.binary_search_by(|held| held.as_str().cmp(prefix)).is_ok();
+        prefixes.into_iter().take(count).rev().chain(root).filter(held)
     }
 
     pub(super) fn node(&self, path: &str) -> Option<u64> {
-        self.0.binary_search_by(|name| name.as_str().cmp(path)).ok().map(|i| i as u64 + 1)
+        self.paths.binary_search_by(|name| name.as_str().cmp(path)).ok().map(|i| i as u64 + 1)
     }
 
     pub(super) fn children<'a>(&'a self, path: &'a str) -> impl Iterator<Item = (&'a str, u64)> {
-        self.0.iter().enumerate().filter_map(move |(i, child)| {
+        self.paths.iter().enumerate().filter_map(move |(i, child)| {
             let rest = child.strip_prefix(path)?;
             let rest = if path == "/" { rest } else { rest.strip_prefix('/')? };
             (!rest.is_empty() && !rest.contains('/')).then_some((rest, i as u64 + 1))
@@ -97,9 +117,10 @@ mod tests {
     /// answered by its own prefix.
     fn routed(names: &[&str], abs: &str) -> Result<Routed<String>, Error> {
         let dirs = Directories::new(names.iter().map(|n| String::from(*n)));
-        route(abs, || Ok(&dirs), |prefix| {
+        route(abs, &dirs, |prefix| {
             let name = alloc::format!("{}{prefix}", fs::CAPABILITY_PREFIX);
-            Ok(names.contains(&name.as_str()).then(|| String::from(prefix)))
+            assert!(names.contains(&name.as_str()), "asked for {name}, which the view does not hold");
+            Ok(Some(String::from(prefix)))
         })
     }
 
@@ -117,6 +138,28 @@ mod tests {
             assert_eq!(routed(&[], abs), not_held, "{abs}");
         }
         assert_eq!(routed(&[], "/"), Ok(Routed::Directory));
+    }
+
+    /// The deepest held directory serves a path, the root's capability what
+    /// no other holds, and the root itself is its own capability's.
+    #[test]
+    fn the_deepest_held_directory_serves_a_path() {
+        let view = ["fs:/", "fs:/home", "fs:/home/toy/Apps/doom"];
+        assert_eq!(routed(&view, "/"), Ok(Routed::Served("/".into(), "".into())));
+        assert_eq!(routed(&view, "/tmp/x"), Ok(Routed::Served("/".into(), "tmp/x".into())));
+        assert_eq!(routed(&view, "/home"), Ok(Routed::Served("/home".into(), "".into())));
+        assert_eq!(routed(&view, "/home/toy/Apps"), Ok(Routed::Served("/home".into(), "toy/Apps".into())));
+        assert_eq!(routed(&view, "/home/toy/Apps/doom/a/b/c"), Ok(Routed::Served("/home/toy/Apps/doom".into(), "a/b/c".into())));
+        assert_eq!(routed(&view, "/homestead"), Ok(Routed::Served("/".into(), "homestead".into())));
+    }
+
+    /// A held directory that will not connect leaves the path to the next
+    /// one out.
+    #[test]
+    fn a_directory_that_answers_nothing_leaves_the_path_to_the_one_above() {
+        let dirs = Directories::new(["fs:/home", "fs:/home/toy"].map(String::from));
+        let routed = route("/home/toy/x", &dirs, |prefix| Ok((prefix == "/home").then(|| String::from(prefix))));
+        assert_eq!(routed, Ok(Routed::Served("/home".into(), "toy/x".into())));
     }
 
     /// A view holding `/tmp` and a package's folder names what is beneath

@@ -20,7 +20,8 @@ struct Capability {
     dir: Turnstile<Dir>,
 }
 
-/// Every capability this process has looked for, found or not.
+/// Every capability of the view this process has looked for, found or not:
+/// bounded by the view, as only a held directory is looked for.
 static CAPABILITIES: Lock<BTreeMap<String, Option<Arc<Capability>>>> = Lock::new(BTreeMap::new());
 
 /// A path's capability, starting directory and relative name.
@@ -239,7 +240,7 @@ fn capability(prefix: &str) -> Result<Option<Arc<Capability>>, Error> {
 
 /// Which server the absolute, lexically clean `abs` is on, and the path there.
 fn route(abs: &str) -> Result<Place, Error> {
-    Ok(match super::namespace::route(abs, directories, capability)? {
+    Ok(match super::namespace::route(abs, directories()?, capability)? {
         Routed::Served(cap, rel) => Place::Served(cap, Base::Root, rel),
         Routed::Directory => Place::Directory(String::from(abs)),
     })
