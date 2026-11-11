@@ -2468,8 +2468,8 @@ pub unsafe fn dup(handle: RawHandle) -> Result<RawHandle, SyscallError> {
 ///
 /// `PermissionDenied` for a set the source does not itself hold: rights only
 /// shrink, and asking to widen is a bug in the asker rather than a request to
-/// be quietly cut down to size. This is how the supervisor hands a program an `RT`-only
-/// `SysCap` while keeping the full one.
+/// be quietly cut down to size. The duplicate stays in this process: one meant
+/// for another is narrowed by the move that takes it there ([`TransferEntry`]).
 ///
 /// # Safety
 /// As [`dup`]'s.

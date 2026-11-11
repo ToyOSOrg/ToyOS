@@ -221,8 +221,8 @@ impl SysCap {
 
     /// A second handle to this capability carrying **less**.
     ///
-    /// How the supervisor gives a program the RT band and nothing else: rights only
-    /// shrink, so the dup can never mint a claim however the holder asks.
+    /// Rights only shrink, so the duplicate can never do what this one cannot,
+    /// however its holder asks.
     pub fn narrowed(&self, rights: Rights) -> Result<Self, SyscallError> {
         self.0.as_handle().try_clone_narrowed(rights).map(Self)
     }
