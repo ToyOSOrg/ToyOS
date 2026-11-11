@@ -1,6 +1,6 @@
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::Path;
 use std::os::toyos::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -130,7 +130,6 @@ fn main() {
         let _ = env::set_current_dir(home);
     }
     let mut history = load_history();
-    std::os::toyos::io::set_stdin_raw(true);
 
     loop {
         let cwd = env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "?".into());
@@ -1013,17 +1012,22 @@ fn save_history(history: &[String]) {
 
 // --- Readline helpers ---
 
+/// The next byte of standard input, or `None` at its end.
+///
+/// **Read from the descriptor itself, a byte a read**: std's `Stdin` reads
+/// ahead of what it is asked for, and what is typed after a line is the input
+/// of the program that line starts, which reads the same pipe.
 fn read_byte() -> Option<u8> {
-    let mut buf = [0u8; 1];
-    if let Err(e) = io::stdin().lock().read_exact(&mut buf) {
-        // UnexpectedEof is the ordinary end of input; anything else is a
-        // device error or a revoked fd, and would otherwise be silent.
-        if e.kind() != io::ErrorKind::UnexpectedEof {
-            eprintln!("shell: stdin fd=0: {:?}", e.kind());
+    let mut byte = [0u8; 1];
+    match toyos::files::read(0, &mut byte) {
+        Ok(1) => Some(byte[0]),
+        // A closed descriptor is at its end, as std reads one.
+        Ok(_) | Err(toyos::files::Error::Fd(toyos::fd::Error::BadFd)) => None,
+        Err(e) => {
+            eprintln!("shell: stdin fd=0: {e:?}");
+            None
         }
-        return None;
     }
-    Some(buf[0])
 }
 
 fn read_char() -> Option<char> {
