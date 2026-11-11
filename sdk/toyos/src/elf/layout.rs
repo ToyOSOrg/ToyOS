@@ -162,6 +162,19 @@ impl Segment {
         self.flags.writable()
     }
 
+    /// Whether the file's own pages hold the segment as a program reads it:
+    /// one it cannot write, with no byte past the file's (`p_memsz` is
+    /// `p_filesz`, all of it inside a file of `file_len` bytes), lying in its
+    /// pages as it lies in the file's. Mapped from the file it reads what a
+    /// copy would.
+    pub fn is_file_pages(&self, page_size: u64, file_len: u64) -> bool {
+        let start = self.image.start;
+        !self.writable()
+            && self.image.len() == self.filesz
+            && self.file_offset.checked_add(self.filesz).is_some_and(|end| end <= file_len)
+            && start % page_size == self.file_offset % page_size
+    }
+
     /// The segment rounded out to whole pages, in image offsets.
     ///
     /// Image-relative because the loader rebases the image: with a page-aligned

@@ -18,6 +18,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use kernel::sched::job::Job;
+use kernel::vm::{Prot, Shared};
 
 use toyos_abi::syscall::SyscallError;
 
@@ -179,6 +180,16 @@ impl SharedMemObject {
             Backing::Boot { len, .. } => Some(*len),
             Backing::Sub { whole, len, .. } => whole.immutable().map(|_| *len),
             Backing::Frames(_) | Backing::Run(_) | Backing::Aperture { .. } => None,
+        }
+    }
+
+    /// `InvalidArgument` unless a space may map `[offset, offset + len)` of it
+    /// as `prot` (`kernel::vm::Shared::maps`).
+    pub fn mappable(&self, prot: Prot, offset: u64, len: u64) -> Result<(), SyscallError> {
+        let shared = Shared { size: self.size, immutable: self.immutable().is_some(), aperture: !self.is_ordinary() };
+        match shared.maps(prot, offset, len) {
+            true => Ok(()),
+            false => Err(SyscallError::InvalidArgument),
         }
     }
 

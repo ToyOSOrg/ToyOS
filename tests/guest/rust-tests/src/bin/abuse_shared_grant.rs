@@ -108,7 +108,7 @@ fn owner() {
     let part = unsafe { syscall::shm_sub(own_handle.raw(), 0, SECRET.len() as u64) }.expect("part of our own region");
     // SAFETY: the mapping is the part's, at least `SECRET.len()` bytes, and
     // nothing here writes it meanwhile.
-    let seen = unsafe { core::slice::from_raw_parts(syscall::shm_map(part, syscall::VmProt::Read).expect("map the part"), SECRET.len()) };
+    let seen = unsafe { core::slice::from_raw_parts(syscall::vm_map(part, 0, SECRET.len(), syscall::VmProt::Read, syscall::VmAt::ANYWHERE).expect("map the part"), SECRET.len()) };
     assert_eq!(seen, SECRET, "part of a region is not its pages");
     for (offset, len) in [(0, 0), (1, 1), (0, REGION as u64 + 1), (REGION as u64, 1)] {
         assert_eq!(
@@ -182,7 +182,7 @@ fn uninvited() -> ! {
         std::env::args().nth(2).expect("uninvited needs the owner's handle value").parse().unwrap(),
     );
     marker("uninvited");
-    let reached = unsafe { syscall::shm_map(guess, syscall::VmProt::Read) };
+    let reached = unsafe { syscall::vm_map(guess, 0, REGION, syscall::VmProt::Read, syscall::VmAt::ANYWHERE) };
     panic!("the owner's handle value answered {:?} here", reached.map(|_| ()));
 }
 
@@ -203,6 +203,6 @@ fn dropped() -> ! {
     let closed = region.as_handle().raw();
     drop(region);
     marker("dropped");
-    let reached = unsafe { syscall::shm_map(closed, syscall::VmProt::Read) };
+    let reached = unsafe { syscall::vm_map(closed, 0, REGION, syscall::VmProt::Read, syscall::VmAt::ANYWHERE) };
     panic!("a closed handle answered {:?}", reached.map(|_| ()));
 }

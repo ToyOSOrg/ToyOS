@@ -2,7 +2,9 @@
 //! executable names (`DT_NEEDED`, [`start`]), laid out in memory of the
 //! process's own, relocated ([`image`]), given their protections and
 //! published in the process's one module list ([`crate::tls`]), which every
-//! copy of std and libc in the process reads.
+//! copy of std and libc in the process reads. A segment that is the pages of
+//! a file nobody can write is those pages, shared with every process that
+//! loads the library, and not a copy.
 //!
 //! **A load is one set**: the libraries named and every library they name that
 //! is not yet published, found breadth first, so a cycle of names is one set
@@ -28,12 +30,14 @@ use core::ffi::CStr;
 use core::fmt;
 
 use toyos_abi::syscall::{self, SyscallError, VmAt, VmProt};
+
+use crate::AsHandle;
 use crate::elf::RelocError;
 
 use crate::files;
 use crate::process::ImageRefused;
 use crate::tls::{self, Loading, Module};
-use image::{Mapped, Pass, Plan, Scope, Tables, PAGE};
+use image::{FilePages, Mapped, Pass, Plan, Scope, Tables, PAGE};
 
 /// Where a library named by file name alone is looked for.
 const LIBRARY_DIR: &str = "/system/lib/";
@@ -216,8 +220,18 @@ fn lay(name: &str) -> Result<(Laid, Vec<String>), Refused> {
     // SAFETY: placed anywhere, so it replaces nothing.
     let at = unsafe { syscall::vm_reserve(plan.span, VmProt::ReadWrite, VmAt::ANYWHERE) }.map_err(Refused::Memory)?;
     let memory = Reservation { at, len: plan.span, kept: false };
+    let shared = file.as_immutable();
+    let pages = if shared.is_some() { FilePages::Mapped } else { FilePages::Copied };
     // SAFETY: the fresh, zeroed reservation, this function's alone.
-    plan.lay(bytes, unsafe { core::slice::from_raw_parts_mut(at, plan.span) })?;
+    plan.lay(bytes, unsafe { core::slice::from_raw_parts_mut(at, plan.span) }, pages)?;
+    if let Some(image) = shared {
+        for (lo, hi, offset, flags) in plan.file_pages(bytes.len() as u64) {
+            let prot = if flags.executable() { VmProt::ReadExec } else { VmProt::Read };
+            // SAFETY: whole pages of the reservation, which nothing reaches yet.
+            unsafe { syscall::vm_map(image.as_handle().raw(), offset, (hi - lo) as usize, prot, VmAt::Fixed(at.add(lo as usize))) }
+                .map_err(Refused::Memory)?;
+        }
+    }
     // SAFETY: laid out whole and writable, reached by nothing else until
     // published, and released only after every view of it is gone.
     let mapped = unsafe { Mapped::new(at, &plan) };

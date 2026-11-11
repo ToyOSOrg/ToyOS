@@ -22,14 +22,14 @@ in turn, each carrying at most `SHARED_BOOT_BYTES` (64 MiB) of test binaries;
 carries `tests/images/testcases.toml`'s own programs, 13 MiB (3328 blocks), where every test
 boot carried the whole 619 MiB catalogue before.
 
-**A running `/system` program's pages are in RAM twice.** Its spawn names
-SYSTEM's object for the file, a subrange of ROOT's own pages (`fs::IMAGE`,
-`SYS_SHM_SUB`), and `SharedImage::read_page` (`kernel/src/file_backing.rs`)
-copies each page the child touches out of it: ROOT's copy and the page's are
-held. Until SYSTEM handed that object out, each spawn also read the whole
-binary into an image object of the spawner's, a third copy, and the
-measurements below are of that design. Measured on QEMU's x86-64 machine booting
-`tests/images/testcases.toml`, toybox's `free` after the boot: 330 MiB in use
+**A running `/system` program's read-only pages are ROOT's own.** Its spawn
+names SYSTEM's object for the file, a subrange of ROOT's own pages
+(`fs::IMAGE`, `SYS_SHM_SUB`), and shares the segments the program cannot
+write (`SpawnBacking::Share`); a writable segment's pages are copied as the
+child touches them. Before that every touched page was copied, and until
+SYSTEM handed the object out each spawn also read the whole binary into an
+image object of the spawner's; the measurements below are of that design.
+Measured on QEMU's x86-64 machine booting `tests/images/testcases.toml`, toybox's `free` after the boot: 330 MiB in use
 at `b9e4c5862`, 384 MiB once ROOT left the kernel, one boot each, the same
 session; the 54 MiB are the running services' images, each rounded up to
 2 MiB, and the SYSTEM file server.
@@ -78,11 +78,6 @@ complete K ms`; a test boot on QEMU reads 1390, 108 (14) and 344.
 Not measured: the T14. What that run owes is that line off the stick and off
 NVMe, against the base's `Boot: complete`.
 
-Exit: a program's pages mapped from ROOT's own read-only pages rather than
-copied into each process, before the self-update's signature check makes the whole read a fixed
-cost. The orchestrator ruled the mechanism (2026-10-22): the memory design's
-stages 2, 4 and 6, namely 4 KiB pages, so an image is a program's size and not
-2 MiB; memory-object subranges; and immutable file objects shared across
-spawns, so that SYSTEM's object for a ROOT file is a subrange of the boot
-image. No dedicated call over part of a boot image is to be built.
-`spawn_children_cap` holds all 255 children again once that has landed.
+Exit: the T14's boot line read off the stick and off NVMe, and the used
+memory of 255 held children of one `/system` program read again now that
+their read-only segments are ROOT's pages.

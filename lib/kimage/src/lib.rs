@@ -40,7 +40,7 @@ pub const MAGIC: [u8; 8] = *b"TOYOSKRN";
 /// writes, and what the loader and the kernel each check against their own.
 pub const EM_X86_64: u16 = 62;
 pub const EM_AARCH64: u16 = 183;
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 const HEADER: usize = 72;
 const RANGE: usize = 24;
 const RELOCATION: usize = 16;
@@ -265,6 +265,7 @@ impl Supervisor<'_> {
                 offset: u64_at(m, 24)?,
                 copied: u64_at(m, 32)?,
                 prot: u64_at(m, 40)?,
+                backing: u64_at(m, 48)?,
             })
         })
     }

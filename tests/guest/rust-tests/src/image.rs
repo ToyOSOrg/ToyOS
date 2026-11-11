@@ -46,6 +46,6 @@ impl std::ops::Deref for Laid {
 /// its ranges (`maps_ptr`, `maps_count`), `entry`, `image_base` and build-id.
 pub fn laid(image: &Image, argv: &str) -> Laid {
     let block = Block::new(argv.as_bytes(), b"", None).unwrap_or_else(|e| panic!("a startup block: {e:?}"));
-    let program = lay_out(image.bytes(), Machine::RUNNING, image.handle()).unwrap_or_else(|why| panic!("lay out an image: {why}"));
+    let program = lay_out(image.bytes(), Machine::RUNNING, image.source()).unwrap_or_else(|why| panic!("lay out an image: {why}"));
     Laid { program: program.starting_with(&block), _block: block }
 }

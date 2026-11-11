@@ -9,7 +9,7 @@
 //!   runs what it had copied and faults on the rest, and the machine goes on —
 //!   the next spawn from a fresh object runs.
 
-use toyos::elf::program::lay_out;
+use toyos::elf::program::{lay_out, Source};
 use toyos::elf::Machine;
 use toyos::shm::SharedMemory;
 use toyos::startup::Block;
@@ -34,7 +34,7 @@ fn object_of(path: &str) -> (SharedMemory, Vec<u8>) {
 /// Spawn the program `bytes`, laid out from the object `image` names.
 fn spawn(image: RawHandle, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
     let block = Block::new(format!("{SELF}\0{CHILD}").as_bytes(), b"", None).expect("a startup block");
-    let laid = lay_out(bytes, Machine::RUNNING, u64::from(image.0)).expect("this program lays out").starting_with(&block);
+    let laid = lay_out(bytes, Machine::RUNNING, Source::Copied(u64::from(image.0))).expect("this program lays out").starting_with(&block);
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {

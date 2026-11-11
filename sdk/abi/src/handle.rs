@@ -8,7 +8,7 @@
 //!
 //! **Only an owner ends, moves, duplicates or lends a handle.** The calls that
 //! do (`close`, `message_send`'s handles, `dup`, `dup_narrowed`, `shm_sub`,
-//! `shm_map`, `device_dma_map` and a spawn's endowment) are `unsafe`
+//! `vm_map`, `device_dma_map` and a spawn's endowment) are `unsafe`
 //! here, since a safe type over the same slot (a mapping, an exclusive writer)
 //! would otherwise be undone by a number. A call that only acts on the object
 //! (`read`, `write`, `fstat`, a poll) stays safe over a number: misdirected, it

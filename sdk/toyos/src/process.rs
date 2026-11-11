@@ -225,15 +225,15 @@ impl Image {
         &bytes[..self.len as usize]
     }
 
-    /// The handle a spawn's ranges name the object by (`SpawnMap::object`).
-    /// The object is this process's until the spawn returns; the child's pages
-    /// are copied out of it.
-    pub fn handle(&self) -> u64 {
-        let handle = match &self.object {
-            Object::Read(object) => object.as_handle(),
-            Object::Immutable(image) => image.as_handle(),
-        };
-        u64::from(handle.raw().0)
+    /// The object a spawn's ranges name (`SpawnMap::object`), which is this
+    /// process's until the spawn returns: the child shares the pages of one
+    /// nobody writes that it cannot write itself, and copies the rest.
+    pub fn source(&self) -> crate::elf::program::Source {
+        use crate::elf::program::Source;
+        match &self.object {
+            Object::Read(object) => Source::Copied(u64::from(object.as_handle().raw().0)),
+            Object::Immutable(image) => Source::Immutable(u64::from(image.as_handle().raw().0)),
+        }
     }
 }
 

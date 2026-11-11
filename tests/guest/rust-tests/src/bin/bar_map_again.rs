@@ -194,11 +194,13 @@ fn main() {
     println!("bar_map_again: a BAR's handle kept past its claim's end maps nothing");
 }
 
-/// `shm` mapped, or why not.
+/// `shm` mapped whole, or why not.
 fn map(shm: RawHandle) -> Result<*mut u8, SyscallError> {
+    use toyos_abi::syscall::{VmAt, VmProt};
+    let size = syscall::fstat(shm)?.size as usize;
     // SAFETY: a refused map makes no mapping; one made is only read, as a
     // device register.
-    unsafe { syscall::shm_map(shm, toyos_abi::syscall::VmProt::ReadWrite) }
+    unsafe { syscall::vm_map(shm, 0, size, VmProt::ReadWrite, VmAt::ANYWHERE) }
 }
 
 /// The kernel handle this process's standard output is, descriptor 1's.

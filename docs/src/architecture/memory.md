@@ -13,9 +13,14 @@
 - Each thread's stack capacity is committed before the thread starts, populated
   lazily and guarded, with caller-chosen sizes and ordinary creation failure.
 - Programs may generate executable code without a prompt; write and execute
-  stay separate and executable pages are shared safely.
-- Shared memory may be installed at a requested address in a child before it
-  starts; conflicts are refused. There is no address-space cloning.
+  stay separate and executable pages are shared safely: shared memory is
+  executed only where nobody can write it.
+- A range of a memory object is mapped at a requested address, in the caller
+  or in a child before it starts; conflicts in a child are refused. There is
+  no address-space cloning.
+- A program's read-only segments are the pages of its image wherever nobody
+  can write the image, held once however many processes run it. Its writable
+  segments are private copies, taken as they are touched.
 
 ## The kernel's own memory
 

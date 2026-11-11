@@ -9,7 +9,7 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{plan, relocate, Mapped, Pass, Scope};
+use super::{plan, relocate, FilePages, Mapped, Pass, Scope};
 use crate::dl::Refused;
 use crate::elf::RelocError;
 
@@ -172,7 +172,7 @@ fn load(file: &[u8], scope: &dyn Scope, pass: Pass<'_>) -> (Vec<u64>, Result<(),
     let mut words = vec![0u64; plan.span / 8];
     // SAFETY: the buffer's own bytes.
     let image = unsafe { core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), plan.span) };
-    plan.lay(file, image).unwrap();
+    plan.lay(file, image, FilePages::Copied).unwrap();
     let base = image.as_ptr() as u64;
     // SAFETY: the buffer, laid out whole and writable, which nothing else reaches.
     let mapped = unsafe { Mapped::new(image.as_mut_ptr(), &plan) };
@@ -324,11 +324,63 @@ fn a_modules_thread_local_has_no_one_address() {
     let mut words = vec![0u64; plan.span / 8];
     // SAFETY: the buffer's own bytes.
     let image = unsafe { core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), plan.span) };
-    plan.lay(&file, image).unwrap();
+    plan.lay(&file, image, FilePages::Copied).unwrap();
     // SAFETY: the buffer, laid out whole, which nothing else reaches.
     let mapped = unsafe { Mapped::new(image.as_mut_ptr(), &plan) };
     let tables = mapped.tables(true).unwrap().unwrap();
     assert_eq!(tables.defined("exported", 0x10_0000), Some(0x10_0500));
     assert_eq!(tables.defined("counter", 0x10_0000), None);
     assert_eq!(tables.defined("imported", 0x10_0000), None);
+}
+
+/// A loader that holds the file where nobody writes it maps the segment that
+/// is the file's own pages and copies the writable one: mapped so, the image
+/// is the image a copy of every segment is.
+#[test]
+fn a_segment_that_is_its_files_pages_is_mapped_and_reads_as_its_copy() {
+    let file = object(&[(DATA, RELATIVE, 0, 0x500)], RELA, |b| b[0xf00..0x1000].fill(0xab));
+    let plan = plan(&file[..0x1000]).unwrap();
+    assert_eq!(plan.file_pages(file.len() as u64).map(|(lo, hi, offset, flags)| (lo, hi, offset, flags.executable())).collect::<Vec<_>>(), [(0, 0x1000, 0, true)]);
+    let mut copied = vec![0u8; plan.span];
+    plan.lay(&file, &mut copied, FilePages::Copied).unwrap();
+    let mut mapped = vec![0u8; plan.span];
+    plan.lay(&file, &mut mapped, FilePages::Mapped).unwrap();
+    assert!(mapped[..0x1000].iter().all(|&b| b == 0), "a mapped segment is copied");
+    for (lo, hi, offset, _) in plan.file_pages(file.len() as u64) {
+        mapped[lo as usize..hi as usize].copy_from_slice(&file[offset as usize..(offset + hi - lo) as usize]);
+    }
+    assert_eq!(mapped, copied);
+}
+
+/// A segment is copied, whoever holds the file, where the file does not hold
+/// it as the program reads it or a relocation may write its pages.
+#[test]
+fn a_segment_a_copy_alone_holds_is_never_mapped() {
+    let none = |file: &[u8], len: usize| plan(&file[..0x1000]).unwrap().file_pages(len as u64).count() == 0;
+    // Zeros past its file bytes.
+    assert!(none(&object(&[], RELA, |b| b[PHDRS + 32..PHDRS + 40].copy_from_slice(&0x800u64.to_le_bytes())), SIZE));
+    // File bytes the file is too short to hold.
+    assert!(none(&object(&[], RELA, |_| ()), 0xfff));
+    // The read-only segment at 0x1000 after the writable one at 0 is its
+    // file's pages; with a second writable one at 0x2000 it lies inside the
+    // window relocations write.
+    let swapped = |b: &mut [u8]| {
+        b[PHDRS + 4..PHDRS + 8].copy_from_slice(&6u32.to_le_bytes());
+        b[PHDRS + 56 + 4..PHDRS + 56 + 8].copy_from_slice(&4u32.to_le_bytes());
+        b[PHDRS + 56 + 32..PHDRS + 56 + 40].copy_from_slice(&0x1000u64.to_le_bytes());
+    };
+    assert!(!none(&object(&[], RELA, swapped), SIZE));
+    let between = object(&[], RELA, |b| {
+        swapped(b);
+        let third = PHDRS + 4 * 56;
+        b[third..third + 4].copy_from_slice(&1u32.to_le_bytes());
+        b[third + 4..third + 8].copy_from_slice(&6u32.to_le_bytes());
+        for field in [8, 16, 24] {
+            b[third + field..third + field + 8].copy_from_slice(&0x2000u64.to_le_bytes());
+        }
+        b[third + 40..third + 48].copy_from_slice(&0x1000u64.to_le_bytes());
+        b[third + 48..third + 56].copy_from_slice(&0x1000u64.to_le_bytes());
+        b[56..58].copy_from_slice(&5u16.to_le_bytes());
+    });
+    assert!(none(&between, SIZE));
 }

@@ -22,7 +22,6 @@ use crate::{message, pipe, process};
 use toyos_abi::handle::{NotRights, RawHandle, Rights, TransferEntry};
 use toyos_abi::syscall::*;
 use kernel::sched::task::WaitClass;
-use kernel::vm::Prot;
 
 use super::{cancelled, HANDLE_LEN, TRANSFER_ENTRY_LEN};
 use super::handles::handle_result;
@@ -393,39 +392,6 @@ pub(super) fn sys_shm_sub(h: RawHandle, offset: u64, len: u64) -> u64 {
     process::with_handles(|handles| {
         handle_result(handles.install(entry).map_err(|_| SyscallError::ResourceExhausted))
     })
-}
-
-/// `toyos_abi::syscall::shm_map`: readable on `MAP`, writable on `MAP` and `WRITE`.
-pub(super) fn sys_shm_map(h: RawHandle, prot: u64) -> u64 {
-    let (prot, need) = match VmProt::from_u64(prot) {
-        Some(VmProt::Read) => (Prot::Read, Rights::MAP),
-        Some(VmProt::ReadWrite) => (Prot::ReadWrite, Rights::MAP.union(Rights::WRITE)),
-        Some(VmProt::None | VmProt::ReadExec) | None => return SyscallError::InvalidArgument.to_u64(),
-    };
-    let shm = match process::with_handles(|handles| {
-        handles.get::<crate::object::shm::SharedMemObject>(h, need)
-    }) {
-        Ok(shm) => shm,
-        Err(e) => return e.refuse(),
-    };
-    assert!(
-        matches!(prot, Prot::Read) || shm.immutable().is_none(),
-        "shm: a handle to memory nobody writes carries WRITE"
-    );
-    let pt = process::current_address_space();
-    let len = shm.size();
-    let mapped = pt.lock().map(alloc::sync::Arc::clone(&shm), 0, len, prot, crate::mm::space::At::ANYWHERE);
-    let at = match mapped {
-        Ok(at) => at,
-        Err(e) => return e.to_u64(),
-    };
-    // A device's window is taken back with its last handle, so it says
-    // where it is mapped; one whose last handle went meanwhile is refused.
-    if let Err(e) = shm.mapped_at(&pt, at, len) {
-        pt.lock().release_object(at, len, &shm);
-        return e.to_u64();
-    }
-    at.raw()
 }
 
 /// A send's arguments as the dispatch bounded them.

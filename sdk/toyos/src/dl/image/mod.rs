@@ -17,8 +17,8 @@ use core::marker::PhantomData;
 use crate::elf::dynamic::ENTRY_SIZE as DYN_SIZE;
 use crate::elf::sym::{STB_WEAK, STT_TLS};
 use crate::elf::{
-    rela, Dynamic, GnuHash, InitArray, Layout, Machine, Op, RelaTable, RelocError, SegmentFlags, Sym, SymTab, TlsRef,
-    TlsSegment,
+    rela, Dynamic, GnuHash, InitArray, Layout, Machine, Op, RelaTable, RelocError, Segment, SegmentFlags, Sym, SymTab,
+    TlsRef, TlsSegment,
 };
 
 use super::Refused;
@@ -30,6 +30,15 @@ pub(crate) const PAGE: u64 = 4096;
 const MACHINE: Machine = Machine::RUNNING;
 
 const DT_NEEDED: u64 = 1;
+
+/// Whether a loader holds an image's file where nobody can write it, and so
+/// maps the segments that are the file's own pages
+/// ([`Plan::file_pages`]), or copies every segment.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FilePages {
+    Mapped,
+    Copied,
+}
 
 /// What an image's header says it is, before anything of it is laid out.
 pub(crate) struct Plan {
@@ -69,10 +78,33 @@ impl Plan {
         }
     }
 
-    /// Copy every `PT_LOAD`'s file bytes from `file` into `image`, its first
-    /// `span` bytes zeroed and writable.
-    pub(crate) fn lay(&self, file: &[u8], image: &mut [u8]) -> Result<(), Refused> {
+    /// Whether `seg` is the pages of its file, `file_len` bytes long, and no
+    /// relocation writes a page of it: the writable window runs from the
+    /// first writable segment to the last, over whatever lies between.
+    fn is_file_pages(&self, seg: &Segment, file_len: u64) -> bool {
+        let (lo, hi) = seg.page_range(PAGE);
+        let written = self.layout.writable_window().is_some_and(|(w_lo, w_hi)| lo < w_hi && w_lo < hi);
+        seg.is_file_pages(PAGE, file_len) && !written
+    }
+
+    /// Each segment that is the pages of its file, `file_len` bytes long:
+    /// its whole pages `[lo, hi)` in image offsets, where in the file `lo`
+    /// is, and its flags.
+    pub(crate) fn file_pages(&self, file_len: u64) -> impl Iterator<Item = (u64, u64, u64, SegmentFlags)> + '_ {
+        self.layout.segments().iter().filter(move |seg| self.is_file_pages(seg, file_len)).map(|seg| {
+            let (lo, hi) = seg.page_range(PAGE);
+            (lo, hi, seg.file_offset() & !(PAGE - 1), seg.flags())
+        })
+    }
+
+    /// Copy the file bytes of every `PT_LOAD` from `file` into `image`, its
+    /// first `span` bytes zeroed and writable, but those `pages` leaves to be
+    /// mapped.
+    pub(crate) fn lay(&self, file: &[u8], image: &mut [u8], pages: FilePages) -> Result<(), Refused> {
         for seg in self.layout.segments() {
+            if pages == FilePages::Mapped && self.is_file_pages(seg, file.len() as u64) {
+                continue;
+            }
             let at = seg.image().start().get() as usize;
             let len = seg.filesz() as usize;
             let from = usize::try_from(seg.file_offset()).ok().filter(|&from| from.checked_add(len).is_some_and(|end| end <= file.len()));
