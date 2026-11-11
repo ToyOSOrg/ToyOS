@@ -53,6 +53,14 @@ the T14 and the AMD bench, main must show:
 - `nmi_finds_the_kernels_gs`, on the `shared-debug` boot: `nmi-user-gs: PASS`.
 - `syscall_cost`, on the `testcases` boot: within its bound.
 
+**Owed on metal** (#1264, the same way). On the T14 and the AMD bench, main
+must show:
+- `fsgs_bases_per_thread`, on the `testcases` boot: both threads read back
+  their own bases, and both crossing counts are above 0.
+- The rows above, through the entries' `RDGSBASE` and `WRGSBASE`.
+- An A/B of main before and after #1264 on the T14's `benchcase` boot:
+  `pingpong.pipe.*`, reported. It decides nothing.
+
 **Unobserved**: the `#DB` entry's resume into a gate it interrupted, where
 a single-step held over a `MOV SS` lands on the first instruction of
 `SYSCALL`'s entry or of the `#BP` gate (`tf-mov-ss-syscall`,

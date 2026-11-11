@@ -13,12 +13,12 @@
 //! other gate swaps when its frame's `CS` is Ring 3's. That decision is sound
 //! because the kernel's CPL-0 spans with a user's base live — before
 //! `SYSCALL`'s `swapgs`, and from an exit's `swapgs` to its `SYSRET` or
-//! `IRETQ` — run with `IF` clear and no instruction that can fault, and no
-//! `#DB` lands in them: nothing arms a debug register, `IA32_FMASK` clears
-//! `TF`, and a single-step trap after `MOV SS` is suppressed, not deferred
-//! (SDM Vol. 3A §7.8.3). NMI, `#MC` and `#DF` can land there, so their gates
-//! take the kernel's base from `GDTR` whatever GS holds
-//! ([`install_kernel_gs`]).
+//! `IRETQ` — run with `IF` clear and no instruction that can fault. What can
+//! still land there takes the kernel's base from `GDTR` whatever GS holds
+//! ([`install_kernel_gs`]): NMI, `#MC`, `#DF`, and `#DB`, which a `MOV SS`
+//! holds over the next instruction into the first one of whatever entry that
+//! instruction reaches — for a data breakpoint on Intel (SDM Vol. 3A §7.8.3),
+//! for single-step too on AMD (APM Vol. 2 §8.1.4). `#DB` relies on neither.
 
 /// `cld`, which every Ring 0 entry runs before it calls anything: no gate
 /// clears `DF`, and this kernel's forward-only `memmove`/`memcpy` write
@@ -42,8 +42,9 @@ macro_rules! cld {
 /// `naked_asm!` for an interrupt or trap gate a Ring 3 thread can arrive
 /// through, `cs = N;` bytes below its frame's `CS` on entry: prepends `cld`,
 /// `clac`, and a `swapgs` when that `CS` is Ring 3's. The body must end with a
-/// trailing comma, and every `iretq` in it that can return to Ring 3 is
-/// [`gate_iretq`]'s.
+/// trailing comma, and swap back before every `iretq` that can return to
+/// Ring 3: [`gate_iretq`] where the frame decides, a bare `swapgs` on a path
+/// only a Ring 3 frame takes.
 ///
 /// Such a gate clears neither `DF` nor `AC` (Intel SDM Vol. 3A §6.12.1.3 names
 /// `TF`, `VM`, `RF`, `NT`, and `IF` for an interrupt gate), and Ring 3 sets
