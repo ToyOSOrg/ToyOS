@@ -337,6 +337,20 @@ impl AddressSpace {
         self.private(len, at, prot, Kind::Private { committed: prot != Prot::None })
     }
 
+    /// [`reserve`](Self::reserve)'s `len` bytes wherever they fit above
+    /// `guard` bytes reserved with them, which nothing backs: a stack, and
+    /// the fault below it. All or nothing.
+    pub fn reserve_above_guard(&mut self, guard: u64, len: u64, prot: Prot) -> Result<UserAddr, SyscallError> {
+        let whole = guard.checked_add(len).ok_or(SyscallError::InvalidArgument)?;
+        let below = UserAddr::new(self.place(whole, At::ANYWHERE)?);
+        self.reserve(guard, At::Fixed(below), Prot::None)?;
+        let at = self.reserve(len, At::Fixed(below + guard), prot);
+        if at.is_err() {
+            self.release(below, guard);
+        }
+        at
+    }
+
     /// `len` bytes of private memory, committed, whose pages start as a copy
     /// of `source` from `offset` as far as their first `copied` bytes go and
     /// zeros past them, each taken at its first touch: a program's segment
@@ -837,26 +851,20 @@ fn copyable(entry: &SpaceEntry) -> bool {
 }
 
 /// A fresh frame for `page` of the committed range `entry` at `start`: zeros,
-/// or its source's bytes for a copied range.
+/// or for a copied range as many of its source's bytes as the range's copy
+/// and the source both hold, and zeros after them.
 fn owned_frame(start: u64, entry: &SpaceEntry, page: u64) -> u64 {
-    let phys = pmm::alloc_promised().into_raw();
-    if let Kind::Copy { source, offset, len } = &entry.kind {
-        copy_in(&**source, offset + (page - start), len.saturating_sub(page - start), phys);
-    }
-    phys
-}
-
-/// Write `source`'s bytes from `offset` into the zeroed frame at `phys`, as
-/// many of the page's as `len` and the source both hold.
-fn copy_in(source: &dyn CopySource, offset: u64, len: u64, phys: u64) {
-    let n = len.min(PAGE_SIZE).min(source.size().saturating_sub(offset)) as usize;
-    if n == 0 {
-        return;
-    }
+    let Kind::Copy { source, offset, len } = &entry.kind else {
+        return pmm::alloc_promised().into_raw();
+    };
+    let (at, offset) = (page - start, offset + (page - start));
+    let n = len.saturating_sub(at).min(PAGE_SIZE).min(source.size().saturating_sub(offset)) as usize;
+    let phys = pmm::alloc_promised_unzeroed().into_raw();
     // SAFETY: a frame just allocated to this page, which no leaf maps yet, so
-    // nothing else reaches it; `n` bytes stay inside it.
-    let frame = unsafe { core::slice::from_raw_parts_mut(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), n) };
-    source.read(offset, frame);
+    // nothing else reaches it.
+    let frame = unsafe { core::slice::from_raw_parts_mut(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), PAGE_SIZE as usize) };
+    vm::copied_page(frame, n, |bytes| source.read(offset, bytes));
+    phys
 }
 
 /// Every frame the space owns goes back; its tables go with `UserTables`.

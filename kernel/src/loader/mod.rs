@@ -156,7 +156,6 @@ pub fn spawn<C: Commit>(
         return Err(SyscallError::ResourceExhausted.into());
     };
     let (stack_base, sp) = {
-        use crate::mm::space::At;
         use kernel::vm::Prot;
         let mut space = child_pt.lock();
         crate::clock::map_page(&mut space);
@@ -166,9 +165,7 @@ pub fn spawn<C: Commit>(
         }
         // Never executable, and a reserved guard below it, so running off the
         // stack's bottom faults instead of writing what lies there.
-        let stack = space.reserve(STACK_GUARD + USER_STACK_SIZE as u64, At::ANYWHERE, Prot::None)?;
-        let stack_base = stack + STACK_GUARD;
-        space.reserve(USER_STACK_SIZE as u64, At::Fixed(stack_base), Prot::ReadWrite)?;
+        let stack_base = space.reserve_above_guard(STACK_GUARD, USER_STACK_SIZE as u64, Prot::ReadWrite)?;
         (stack_base, stack_base.raw() + USER_STACK_SIZE as u64)
     };
 
