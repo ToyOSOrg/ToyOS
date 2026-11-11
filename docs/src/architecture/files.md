@@ -77,5 +77,11 @@ directory, which the child resolves in its own view.
   that server's open files, which then answer that they are gone; a fresh open
   reaches the restarted server. Unsaved changes may be lost; data already
   confirmed durable stays durable.
+- A file server's end revokes every mapping of its files, so a program
+  executing from, or reading a mapping of, that server's files ends at its
+  next access to that mapping, a system service mapping a data file included.
+  A file server's death is the loss of that file system: its parent restarts
+  it, and programs that depended on it fail clearly rather than run on with
+  stale memory.
 - Per-session temporary storage is an ordinary file server holding its
   contents in RAM.

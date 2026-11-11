@@ -67,6 +67,10 @@ Every server admits its clients the same way, through one shared mechanism:
 - **Recovery restores durable state, not sessions.** File servers recover what
   was on disk, not old opens; network sessions may fail; the memory service
   keeps recoverable swapped contents.
+- **A file server's end is the loss of its file system.** Every mapping of its
+  files is revoked, so a program executing from or reading a mapping of them,
+  a service included, ends at its next access to that mapping rather than run
+  on with stale memory.
 - **Nothing is silently replayed.** An operation with an uncertain outcome is
   reported, and retried only where safe; a write whose acknowledgement was lost
   is never replayed behind the client's back.
