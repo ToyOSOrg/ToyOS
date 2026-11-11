@@ -609,12 +609,7 @@ impl AddressSpace {
     /// Free every frame behind `[start, start + len)` and keep its ranges as
     /// they are: a private page reads zeros at its next touch, a copied one
     /// its source again, an object's page is mapped again from the object.
-    ///
-    /// A private page's frame is freed and the page promised a frame again;
-    /// one a user copy pins is filled as new in place instead and kept,
-    /// since freed it would come back only at its last unpin and the promise
-    /// would be backed by nothing meanwhile (`Frames::discard`). No pin is
-    /// taken meanwhile: a copy pins under this space's lock, which this holds.
+    /// Each freed frame's page is promised a frame again.
     pub fn discard(&mut self, start: UserAddr, len: u64) -> Result<(), SyscallError> {
         let (start, end) = self.held(start, len)?;
         let mut present = false;
@@ -633,31 +628,15 @@ impl AddressSpace {
             self.shoot_down(start, end, &Unlinked::none());
         }
         let mut freed = 0;
-        let inventory = &self.inventory;
-        self.tables.discard_owned(start, end, |frames, vas, kept| {
-            let mut sorted = [0u64; 512];
-            let sorted = &mut sorted[..frames.len()];
-            sorted.copy_from_slice(frames);
-            sorted.sort_unstable();
-            crate::sched::futex::revoke_frames(&self.futex, sorted);
-            for ((&phys, &va), kept) in frames.iter().zip(vas).zip(kept.iter_mut()) {
+        self.tables.take_owned(start, end, |frames| {
+            frames.sort_unstable();
+            crate::sched::futex::revoke_frames(&self.futex, frames);
+            for &phys in frames.iter() {
                 // SAFETY: a frame an owned leaf held, which no leaf on any CPU
-                // maps now and no waiter is keyed on; one kept is the page's.
-                *kept = match unsafe { pmm::discard(phys) } {
-                    pmm::Discarded::Freed => {
-                        freed += 1;
-                        false
-                    }
-                    pmm::Discarded::Kept => {
-                        let (s, entry) = inventory.find(va).unwrap_or_else(|| panic!("space: a frame owned at {va:#x} outside every range"));
-                        // SAFETY: the page's own frame, which a copy may be
-                        // reading or writing as the page's contents; what the
-                        // page starts as is what the discard makes them.
-                        unsafe { fill_as_new(entry, va - s, phys) };
-                        true
-                    }
-                };
+                // maps now and no waiter is keyed on.
+                unsafe { pmm::discard(phys) };
             }
+            freed += frames.len() as u64;
         });
         self.usage.freed(freed);
         Ok(())
@@ -888,12 +867,9 @@ impl AddressSpace {
         let mut leaves = self.tables.leaf_table(page).unwrap_or_else(|| panic!("space: no tables under {page:#x}"));
         let phys = match leaves.get(page) {
             Leaf::Mapped(m) => m.phys,
-            // A frame the page keeps while no leaf maps it: a discard that
-            // filled a pinned frame as new in place.
-            Leaf::Held(phys) => {
-                leaves.set(page, Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal }));
-                phys
-            }
+            // Only a protection to `None` leaves a frame held where no leaf
+            // maps it, and its range allows no access.
+            Leaf::Held(_) => unreachable!("space: a held frame at {page:#x} in a range that allows an access"),
             Leaf::Empty => {
                 // A neighbour in the next table down or up is another run's.
                 let (lo, hi) = vm::around(start, entry.end, page, |at| leaves.covers(at) && leaves.get(at) != Leaf::Empty);
@@ -942,44 +918,28 @@ fn copyable(entry: &SpaceEntry) -> bool {
     }
 }
 
-/// A fresh frame for `page` of the committed range `entry` at `start`.
+/// A fresh frame for `page` of the committed range `entry` at `start`, every
+/// byte of it written: zeros, or for a copied range its source's bytes as far
+/// as the range's copy and the source both go, and zeros after them.
 fn owned_frame(start: u64, entry: &SpaceEntry, page: u64) -> u64 {
-    let phys = pmm::alloc_promised_unzeroed().into_raw();
-    // SAFETY: a frame just allocated to this page, which no leaf maps yet, so
+    let phys = pmm::alloc_promised_unzeroed();
+    // SAFETY: a frame just drawn for this page, which no leaf maps yet, so
     // nothing else reaches it.
-    unsafe { fill_as_new(entry, page - start, phys) };
-    phys
-}
-
-/// Write every byte of the frame at `phys` as the page `at` bytes into the
-/// committed range `entry` starts: zeros, or for a copied range as many of
-/// its source's bytes as the range's copy and the source both hold, and
-/// zeros after them.
-///
-/// # Safety
-///
-/// `phys` is the page's own frame, which nothing reaches meanwhile but a
-/// user copy that pins the page.
-unsafe fn fill_as_new(entry: &SpaceEntry, at: u64, phys: u64) {
-    // SAFETY: the caller's; a frame is a page of RAM the direct map reaches.
     let frame = unsafe { core::slice::from_raw_parts_mut(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), PAGE_SIZE as usize) };
     match &entry.kind {
         Kind::Private { .. } => frame.fill(0),
-        Kind::Copy { source, offset, len } => {
-            let offset = offset + at;
-            let n = len.saturating_sub(at).min(PAGE_SIZE).min(source.size().saturating_sub(offset)) as usize;
-            vm::copied_page(frame, n, |bytes| source.read(offset, bytes));
-        }
+        Kind::Copy { source, offset, len } => vm::copied_page(frame, page - start, *offset, *len, source.size(), |from, bytes| source.read(from, bytes)),
         Kind::Object { .. } => unreachable!("space: an object's page owns no frame"),
     }
+    phys
 }
 
 /// Every frame the space owns goes back; its tables go with `UserTables`.
 ///
 /// Not through [`AddressSpace::clear`]: no thread runs in a space that drops,
 /// no CPU holds its root ([`Space::retire`]), and a private frame is mapped in
-/// no other, so no CPU caches its leaves, no futex waiter is keyed on its
-/// frames and no copy pins them.
+/// no other, so no CPU caches its leaves and no futex waiter is keyed on its
+/// frames.
 impl Drop for AddressSpace {
     fn drop(&mut self) {
         let committed = self.committed_pages(FLOOR, TOP);

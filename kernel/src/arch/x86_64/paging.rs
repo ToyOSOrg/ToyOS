@@ -966,36 +966,6 @@ impl UserTables {
         });
     }
 
-    /// [`take_owned`](Self::take_owned), where `decide` says of each frame of
-    /// a table's batch, with the address its leaf maps, whether the leaf
-    /// keeps it: a kept frame's leaf stays, every other is emptied.
-    pub fn discard_owned(&mut self, start: u64, end: u64, mut decide: impl FnMut(&[u64], &[u64], &mut [bool])) {
-        self.each_table(start, end, |base, table| {
-            let mut frames = [0u64; 512];
-            let mut vas = [0u64; 512];
-            let mut slot = [0usize; 512];
-            let mut n = 0;
-            for i in slots(start, end, base, 12) {
-                if let Leaf::Held(phys) | Leaf::Mapped(Mapping { phys, owned: true, .. }) = Leaf::decode(table.0[i]) {
-                    frames[n] = phys;
-                    vas[n] = base + ((i as u64) << 12);
-                    slot[n] = i;
-                    n += 1;
-                }
-            }
-            if n == 0 {
-                return;
-            }
-            let mut kept = [false; 512];
-            decide(&frames[..n], &vas[..n], &mut kept[..n]);
-            for k in 0..n {
-                if !kept[k] {
-                    table.store(slot[k], Leaf::Empty.encode());
-                }
-            }
-        });
-    }
-
     /// Empty every leaf of `[start, end)` holding a frame the space owns, one
     /// table of leaves at a time, handing each table's frames to `taken`: at
     /// most 512 at once, in a buffer of its own, so nothing is allocated.

@@ -18,6 +18,12 @@ const SELF: &str = "/system/bin/test_rs_abuse_spawn_maps";
 const NAME: &str = "test_rs_abuse_spawn_maps";
 const CHILD: &str = "spawned-from-checked-ranges";
 const NONE: u64 = toyos_abi::HANDLE_INVALID.0 as u64;
+const PAGE: u64 = 0x1000;
+/// The child that reads the last of three writable pages laid at [`PAST_AT`],
+/// a copy whose last page lies wholly past its object's end.
+const PAST: &str = "a range's page wholly past its object's end";
+/// Far from the program's ranges and the clock page, inside the user half.
+const PAST_AT: u64 = 0x40_0000_0000;
 
 /// Spawn this program with `maps` and `entry`, its image laid out otherwise.
 fn spawn(maps: &[SpawnMap], entry: u64, image_base: u64) -> Result<RawHandle, SyscallError> {
@@ -51,8 +57,15 @@ fn runs(what: &str, image: &Image) {
 }
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some(CHILD) {
-        return;
+    match std::env::args().nth(1).as_deref() {
+        Some(CHILD) => return,
+        Some(PAST) => {
+            // SAFETY: the parent laid three writable pages at `PAST_AT`.
+            let byte = unsafe { core::ptr::read_volatile((PAST_AT + 2 * PAGE) as *const u8) };
+            assert_eq!(byte, 0, "{PAST}: read {byte}");
+            return;
+        }
+        _ => {}
     }
     let image = image::image_of(SELF);
     let laid = image::laid(&image, &format!("{SELF}\0{CHILD}"));
@@ -95,6 +108,16 @@ fn main() {
     refused("an object without MAP", with(&|m| m[text].object = u64::from(unmappable.0)), laid.entry, SyscallError::PermissionDenied);
     // SAFETY: no type holds this number.
     unsafe { syscall::close(unmappable) };
+
+    // Its first touch reads zeros and nothing from the object, whose every
+    // read is bounded by its size.
+    let size = (image.bytes().len() as u64).next_multiple_of(PAGE);
+    let past = image::laid(&image, &format!("{SELF}\0{PAST}"));
+    let mut maps = past.maps().to_vec();
+    maps.push(SpawnMap { addr: PAST_AT, len: 3 * PAGE, object: honest[text].object, offset: size - PAGE, copied: PAGE, prot: VmProt::ReadWrite as u64 });
+    let child = spawn(&maps, past.entry, past.image_base).unwrap_or_else(|e| panic!("{PAST}: spawn: {e:?}"));
+    assert_eq!(syscall::process_wait(child), Ok(End::Exited(0)), "{PAST}");
+    println!("abuse_spawn_maps: {PAST}: zeros");
 
     runs("after every refusal", &image::image_of(SELF));
     println!("abuse_spawn_maps: PASS");
