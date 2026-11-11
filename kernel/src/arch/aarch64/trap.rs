@@ -164,7 +164,7 @@ fn user_copy_abort(frame: &mut Frame) -> bool {
         let served = crate::process::handle_page_fault(frame.far, access);
         cpu::disable_interrupts();
         percpu::set_fault_state(CpuFaultState::Normal);
-        if served {
+        if served == crate::process::Faulted::Served {
             return true;
         }
     }
@@ -356,7 +356,8 @@ fn user_abort(frame: &mut Frame) {
         };
         let served = crate::process::handle_page_fault(frame.far, access);
         cpu::disable_interrupts();
-        if served {
+        // A kill that ended a wait is acted on as the thread returns to EL0.
+        if served != crate::process::Faulted::Refused {
             percpu::set_fault_state(CpuFaultState::Normal);
             percpu::preempt_count_down();
             return;

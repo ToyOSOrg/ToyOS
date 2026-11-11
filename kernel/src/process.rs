@@ -958,17 +958,46 @@ pub fn ask_join(join: &join::Join, tid: Tid, parent_pid: Pid) -> Option<Result<i
     join.ask(|| join::collect_zombie(PROCESS_TABLE.lock().as_mut().unwrap(), parent_pid, tid))
 }
 
-/// Serve a fault at `fault_addr` for `access` in the running thread's space:
-/// whether its page was populated, or already held a leaf allowing the access.
-/// Takes the space's lock and nothing else.
-pub fn handle_page_fault(fault_addr: u64, access: kernel::vm::Access) -> bool {
-    let Some(space) = scheduler::current_address_space() else { return false };
+/// What serving a fault came to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Faulted {
+    /// The page is populated, or already held a leaf allowing the access.
+    Served,
+    /// No range allows the access, or its paged page cannot be had.
+    Refused,
+    /// A kill ended a wait for a paged page: the thread never runs its user
+    /// code again, and a copy stops where it is.
+    Killed,
+}
+
+/// Serve a fault at `fault_addr` for `access` in the running thread's space,
+/// at its trap's depth with interrupts on: its page populated under the
+/// space's lock, or, for a paged page that is absent, waited for holding no
+/// lock and touched again. While it waits the CPU's fault mark is down, so
+/// another fault on this CPU meanwhile is no recursion; it is up again on
+/// whichever CPU the thread wakes on.
+pub fn handle_page_fault(fault_addr: u64, access: kernel::vm::Access) -> Faulted {
+    use crate::arch::percpu::{self, CpuFaultState};
+    let Some(space) = scheduler::current_address_space() else { return Faulted::Refused };
     let began = crate::clock::nanos_since_boot();
-    let served = space.lock().fault(fault_addr, access);
-    if served {
-        space.usage().faulted(crate::clock::nanos_since_boot().saturating_sub(began));
+    loop {
+        let populated = space.lock().fault(fault_addr, access);
+        match populated {
+            crate::mm::space::Populated::At(_) => break,
+            crate::mm::space::Populated::Refused => return Faulted::Refused,
+            crate::mm::space::Populated::Wait(page) => {
+                percpu::set_fault_state(CpuFaultState::Normal);
+                let woken = page.wait();
+                let prev = percpu::swap_fault_state(CpuFaultState::PageFault);
+                assert_eq!(prev, CpuFaultState::Normal, "a fault woke on a CPU marked {prev:?}");
+                if !woken {
+                    return Faulted::Killed;
+                }
+            }
+        }
     }
-    served
+    space.usage().faulted(crate::clock::nanos_since_boot().saturating_sub(began));
+    Faulted::Served
 }
 
 /// Dump memory around `fault_addr` and the instruction pointer for the

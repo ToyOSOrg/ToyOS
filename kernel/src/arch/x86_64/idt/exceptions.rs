@@ -532,7 +532,8 @@ pub(super) fn page_fault_handler(frame: &mut TrapFrame) {
         } else {
             kernel::vm::Access::Read
         };
-        if is_user && process::handle_page_fault(fault_addr, access) {
+        // A kill that ended a wait is acted on as the thread returns to Ring 3.
+        if is_user && process::handle_page_fault(fault_addr, access) != process::Faulted::Refused {
             percpu::set_fault_state(percpu::CpuFaultState::Normal);
             return;
         }
@@ -563,7 +564,7 @@ fn user_copy_fault(frame: &mut TrapFrame, addr: u64, fixup: u64) {
         percpu::preempt_count_down();
         let served = process::handle_page_fault(addr, access);
         percpu::preempt_count_up();
-        if served {
+        if served == process::Faulted::Served {
             return;
         }
     }

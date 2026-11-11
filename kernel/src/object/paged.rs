@@ -1251,17 +1251,82 @@ unsafe impl Send for MapNode {}
 // SAFETY: as for `Send`.
 unsafe impl Sync for MapNode {}
 
+/// Why the index holds no frame a fault may map for a page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Missing {
+    /// Absent, or revoking, at this version of the object: the fault waits.
+    Absent(Version),
+    /// Failed, past the end, a hole of an anonymous object, or the pager is
+    /// gone: the fault is refused.
+    Refused,
+}
+
+/// A mapped object's pages as its index holds them, under the pager's lock.
+pub struct Index<'a> {
+    state: &'a State,
+    slot: u32,
+}
+
+impl Index<'_> {
+    /// The frame present for the object's `page`, or why there is none.
+    pub fn page(&self, page: u64) -> Result<u64, Missing> {
+        let object = &self.state.entry(self.slot).object;
+        match self.state.pages.lookup(object, page) {
+            _ if self.state.gone => Err(Missing::Refused),
+            Lookup::Present(phys) => Ok(phys),
+            Lookup::Absent => Err(Missing::Absent(object.version())),
+            Lookup::Zero | Lookup::Failed | Lookup::PastEnd | Lookup::Gone => Err(Missing::Refused),
+        }
+    }
+}
+
+/// The pages a fault's request names: the aligned run around its page.
+const FAULT_RUN: u64 = 16;
+
 impl MapNode {
-    /// Under the pager's lock, through `present`, which answers the frame the
-    /// index holds present for a page of the object, or `None`: `f`'s answer.
-    pub fn with_present<R>(&self, f: impl FnOnce(&dyn Fn(u64) -> Option<u64>) -> R) -> R {
+    /// `f` over the object's pages, under the pager's lock.
+    pub fn with_present<R>(&self, f: impl FnOnce(&Index<'_>) -> R) -> R {
         let state = self.pager.state.lock();
-        let object = &state.entry(self.slot).object;
-        let present = |page: u64| match state.pages.lookup(object, page) {
-            Lookup::Present(phys) => Some(phys),
-            _ => None,
+        f(&Index { state: &state, slot: self.slot })
+    }
+
+    /// A fault's wait for the object's `page`, found absent at `since`, its
+    /// space's lock not held: the page's aligned run is requested in a fresh
+    /// request, so a fault whose last wait a write or resize ended asks
+    /// afresh, and the wait lasts until the page is no longer absent, the
+    /// version moved, or the pager is gone. Reported overdue past the pager's
+    /// report time, as a holder's read is, and never ended by a timeout; a
+    /// file's page behaves as memory does (7b's D6). `false` where a kill
+    /// ended it.
+    pub fn wait(&self, page: u64, since: Version) -> bool {
+        let (pager, slot) = (&*self.pager, self.slot);
+        let over = |state: &State| state.gone || state.pages.wait_over(&state.entry(slot).object, page, since);
+        let waiting = core::pin::pin!(Waiting::new(pager, slot));
+        let (first, count) = {
+            let mut state = pager.state.lock();
+            if over(&state) {
+                return true;
+            }
+            // Absent, so inside the object.
+            let end = state.entry(slot).object.size().div_ceil(PAGE);
+            let first = page - page % FAULT_RUN;
+            let count = (first + FAULT_RUN).min(end) - first;
+            waiting.as_ref().request(&mut state, first, count);
+            (first, count)
         };
-        f(&present)
+        let ready = || over(&pager.state.lock());
+        let parkable = crate::scheduler::Parkable::at_entry();
+        let began = crate::clock::now();
+        if watch::wait_until(&parkable, &pager.changed, 0, WaitClass::Io, Deadline::at(began + pager.report), ready).is_err() {
+            return false;
+        }
+        if !ready() {
+            let _overdue = Overdue::begin(pager, slot, first, count, began);
+            if watch::wait_until(&parkable, &pager.changed, 0, WaitClass::Io, Deadline::never(), ready).is_err() {
+                return false;
+            }
+        }
+        true
     }
 }
 

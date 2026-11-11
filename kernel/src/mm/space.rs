@@ -33,7 +33,7 @@ use super::charge::{self, Charge};
 use super::paging::{Leaf, Mapping, Root, Unlinked, UserTables};
 use super::policy::{self, CachePolicy};
 use super::{pmm, PAGE_2M, PAGE_SIZE};
-use crate::object::paged::{MapNode, PagedHolderObject, PagedRange};
+use crate::object::paged::{MapNode, Missing, PagedHolderObject, PagedRange};
 use crate::object::shm::SharedMemObject;
 use crate::sync::{Lock, LockGuard};
 use crate::UserAddr;
@@ -558,7 +558,7 @@ impl AddressSpace {
         let tables = &mut self.tables;
         let mut cleared = [0u64; 64];
         let mut n = 0;
-        node.with_present(|present| {
+        node.with_present(|object| {
             for (start, entry) in self.inventory.meeting(FLOOR, TOP) {
                 let Kind::Object { object: Mapped::Paged(range), offset, .. } = &entry.kind else { continue };
                 if !core::ptr::eq(range.node(), node) {
@@ -566,7 +566,7 @@ impl AddressSpace {
                 }
                 let mut stale = false;
                 tables.edit(start, entry.end, |va, leaf| match leaf {
-                    Leaf::Mapped(m) if present((offset + (va - start)) / PAGE_SIZE) != Some(m.phys) => {
+                    Leaf::Mapped(m) if object.page((offset + (va - start)) / PAGE_SIZE) != Ok(m.phys) => {
                         stale = true;
                         if n == cleared.len() {
                             cleared.sort_unstable();
@@ -932,27 +932,32 @@ impl AddressSpace {
     }
 
     /// Serve a fault at `va` for `access`: populate its page if its range
-    /// allows the access and the page is empty. `false` ends the thread.
-    pub fn fault(&mut self, va: u64, access: Access) -> bool {
-        self.populate(va, access, |_| true).is_some()
+    /// allows the access and the page is empty, or say which paged page to
+    /// wait for. `Refused` ends the thread.
+    pub fn fault(&mut self, va: u64, access: Access) -> Populated {
+        self.populate(va, access, |_| true)
     }
 
     /// Where the byte at `va` is, for the kernel to reach through the direct
     /// map, populating its page where its range allows `access`; `None` for
-    /// an aperture's page, which the direct map does not reach.
+    /// an aperture's page, which the direct map does not reach, and for a
+    /// paged page that is absent, which only a fault waits for.
     pub fn reach(&mut self, va: u64, access: Access) -> Option<u64> {
-        self.populate(va, access, copyable)
+        match self.populate(va, access, copyable) {
+            Populated::At(phys) => Some(phys),
+            Populated::Refused | Populated::Wait(_) => None,
+        }
     }
 
     /// The frame behind `va`, populated where its range allows `access` and
     /// is one `admits`.
-    fn populate(&mut self, va: u64, access: Access, admits: fn(&SpaceEntry) -> bool) -> Option<u64> {
-        let (start, entry) = self.inventory.find(va)?;
+    fn populate(&mut self, va: u64, access: Access, admits: fn(&SpaceEntry) -> bool) -> Populated {
+        let Some((start, entry)) = self.inventory.find(va) else { return Populated::Refused };
         if !admits(entry) || !entry.prot.allows(access) {
-            return None;
+            return Populated::Refused;
         }
         let page = va & !(PAGE_SIZE - 1);
-        let prot = leaf_prot(entry.prot)?;
+        let Some(prot) = leaf_prot(entry.prot) else { return Populated::Refused };
         // A range that allows an access is backed, so its tables are built.
         let mut leaves = self.tables.leaf_table(page).unwrap_or_else(|| panic!("space: no tables under {page:#x}"));
         let phys = match leaves.get(page) {
@@ -978,17 +983,22 @@ impl AddressSpace {
                     // its way out.
                     Kind::Object { object: Mapped::Paged(range), offset, .. } => {
                         let of = |at: u64| (offset + (at - start)) / PAGE_SIZE;
-                        range.node().with_present(|present| {
-                            let own = present(of(page))?;
+                        let found = range.node().with_present(|object| {
+                            let own = object.page(of(page))?;
                             let mut at = lo;
                             while at < hi {
-                                if let (Leaf::Empty, Some(phys)) = (leaves.get(at), present(of(at))) {
+                                if let (Leaf::Empty, Ok(phys)) = (leaves.get(at), object.page(of(at))) {
                                     leaves.set(at, Leaf::Mapped(Mapping { phys, prot, owned: false, cache: CachePolicy::Normal }));
                                 }
                                 at += PAGE_SIZE;
                             }
-                            Some(own)
-                        })?
+                            Ok(own)
+                        });
+                        match found {
+                            Ok(phys) => phys,
+                            Err(Missing::Absent(since)) => return Populated::Wait(PageWait { range: range.clone(), page: of(page), since }),
+                            Err(Missing::Refused) => return Populated::Refused,
+                        }
                     }
                     Kind::Private { committed: true } | Kind::Copy { .. } => {
                         let (mut filled, mut own) = (0, 0);
@@ -1007,7 +1017,7 @@ impl AddressSpace {
                 }
             }
         };
-        Some(phys + va % PAGE_SIZE)
+        Populated::At(phys + va % PAGE_SIZE)
     }
 
     /// The frame and protection a present leaf maps `va` with, populating
@@ -1017,6 +1027,35 @@ impl AddressSpace {
             Leaf::Mapped(m) => Some((m.phys + va % PAGE_SIZE, m.prot)),
             Leaf::Held(_) | Leaf::Empty => None,
         }
+    }
+}
+
+/// What a touch of a page found.
+pub enum Populated {
+    /// The byte's physical address.
+    At(u64),
+    /// No range allows the access there, or its paged page failed, lies past
+    /// the object's end or its pager is gone.
+    Refused,
+    /// A paged page that is absent: the thread waits for it, holding nothing,
+    /// and touches it again.
+    Wait(PageWait),
+}
+
+/// A paged page a fault waits for: the object's page, and its version when
+/// it was found absent ([`MapNode::wait`]).
+pub struct PageWait {
+    range: PagedRange,
+    page: u64,
+    since: kernel::paged::Version,
+}
+
+impl PageWait {
+    /// Wait, holding no lock, until the page is no longer absent, the
+    /// object's version moved, or its pager is gone: `false` where a kill
+    /// ended the wait.
+    pub fn wait(self) -> bool {
+        self.range.node().wait(self.page, self.since)
     }
 }
 
