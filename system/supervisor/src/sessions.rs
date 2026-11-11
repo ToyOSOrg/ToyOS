@@ -497,7 +497,7 @@ impl Supervisor<'_> {
         let started = Started { instance, name: name.to_string() };
         let sent = match login.link.conn() {
             Some(link) => link.try_send_bytes_with(wire::MSG_STARTED, &started.encode(), [managed]).map_err(|e| format!("{e:?}")),
-            None => Err("its link is not connected".to_string()),
+            None => Err("it holds no link".to_string()),
         };
         if let Err(e) = sent {
             say!("supervisor: session {}'s owner was not told of {name} ({e:?})", session.share());
