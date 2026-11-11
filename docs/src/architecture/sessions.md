@@ -44,14 +44,19 @@
 
 ## Ending a session
 
-- Sign-out asks the session's apps to finish, allows cancel or force, then
-  ends the session's subtree.
+- Sign-out asks each of the session's apps to quit
+  ([Processes and authority](authority.md)). An app that never listened for
+  such a request ends at once. The others receive it, and the sign-out waits
+  for them, reporting what remains, until it is cancelled or forced. The
+  session's subtree ends once its last app has.
 - A dropped connection or closed terminal sends its tree a hang-up, reports
   what remains and for how long, and keeps waiting.
-- **No timer ends a process.** Only an explicit force does: a sign-out's
-  force, scoped to the user's own sessions, or the system controls' stop. A
-  second quit request ends a process that ignored the first only when a person
-  or an explicit force sends it.
+- **No timer ends a process.** A process that received a request and carries
+  on is ended only by an explicit force: a sign-out's force, scoped to the
+  user's own sessions, or the system controls' stop. No request is repeated on
+  a timer. A second one, which ends a process that has not yet taken the
+  first and asks again one that has, is sent only by a person's action or
+  the machine's stop.
 
 ## Permissions
 

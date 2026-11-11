@@ -69,7 +69,15 @@
 ## The process tree
 
 - Every process has one parent. A parent's end, whether exit, crash or kill,
-  ends its whole subtree at once; quitting gracefully is the parent's job.
+  ends its whole subtree at once.
+- A holder of a child's process handle may ask the child and everything
+  below it to quit, with a reason: an interrupt, a hang-up or a terminate. The
+  kernel carries the request to every process below. A process that listens
+  for such requests receives it as an event. One that never listened, or has
+  not yet taken the last request, is ended instead, and its subtree with it;
+  no process in between can shield what is below it.
+- The kernel never asks on its own: whether and when to ask is the holder's
+  decision.
 - A child's end is readiness on its process handle, and says how: an exit code,
   a kill, or a fault of a named class.
 - There are no process groups, POSIX sessions, controlling terminals, signals,
