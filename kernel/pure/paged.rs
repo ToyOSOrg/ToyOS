@@ -14,8 +14,9 @@
 //! reads as absent, takes no supply or write, and keeps its slot and frame,
 //! so no page is ever two frames at once. One walk per object visits each of
 //! its mappers ([`Mappers`]) after the marking, and a removal that finds a
-//! walk running is taken by that walk's next pass; the last pass's end gives
-//! every revoking page's frame out ([`Pages::walk`]).
+//! walk running is taken by that walk's next pass; after the last pass and a
+//! sweep of the futex waits on them, the walk's end gives every revoking
+//! page's frame out ([`Pages::walk`]).
 //!
 //! **A dirty page holds a slot until a write-back cleans it.** Slots are
 //! bounded by `dirty_ceiling`. A write-back begin clears the dirty bit and
@@ -262,15 +263,15 @@ pub enum Supplied {
     Present,
 }
 
-/// What a walk does next ([`Pages::next_visit`]).
+/// What a walk's step asks of its caller, or that it ended ([`Pages::walk`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Next<N> {
     /// Visit this mapper: clear its leaves of the walk's set.
     Visit(N),
     /// End every futex wait on a frame of the walk's set.
     Sweep,
-    /// Give the set's frames back ([`Pages::finish`]).
-    Finish,
+    /// The walk ended: the set's frames were given out.
+    Finished,
 }
 
 /// Where a reader of an object's revoking pages has read to
@@ -382,7 +383,7 @@ pub struct Object {
     walk: Walk,
     /// The epoch whose pass last ended the walk.
     finished: u64,
-    /// The epoch the running walk last ended every futex wait on its set at
+    /// The epoch at which the running walk was last told to sweep
     /// ([`Next::Sweep`]).
     swept: Option<u64>,
 }
@@ -733,15 +734,22 @@ impl<F: Copy> Pages<F> {
         o.revoke_tail = i;
     }
 
-    /// What `o`'s walk does next, after pages were marked revoking
+    /// The next step of `o`'s walk, after pages were marked revoking
     /// ([`Object::revoke`]): visit a mapper not visited in this pass, a new
     /// pass begun where a removal queued more pages meanwhile; once every
-    /// mapper has been visited, end every futex wait on the walk's set,
-    /// again whenever a pass has begun since the last time, since a page
-    /// marked during a sweep may be waited on through a leaf an unmap
-    /// already cleared; and once both are done, [`Self::finish`], owed under
-    /// the same hold.
-    pub fn next_visit<M: Mappers>(&mut self, o: &mut Object, mappers: &mut M) -> Next<M::Node> {
+    /// mapper has been visited, have every futex wait on the walk's set
+    /// ended, again whenever a pass has begun since it was last asked, since
+    /// a page marked during a sweep may be waited on through a leaf an unmap
+    /// already cleared; and once both are done, end the walk here
+    /// ([`Next::Finished`]): each revoking page leaves, its frame given out
+    /// to `out` with its page and what it became.
+    pub fn walk<M: Mappers>(
+        &mut self,
+        o: &mut Object,
+        mappers: &mut M,
+        waiters: &mut impl Waiters,
+        out: &mut impl FnMut(F, u64, Revoked),
+    ) -> Next<M::Node> {
         loop {
             if let Some(node) = mappers.head().filter(|&n| mappers.seen(n) != o.epoch) {
                 mappers.visited(node, o.epoch);
@@ -756,19 +764,21 @@ impl<F: Copy> Pages<F> {
                     o.swept = Some(o.epoch);
                     return Next::Sweep;
                 }
-                Walk::Running { again: false } => return Next::Finish,
+                Walk::Running { again: false } => {
+                    self.finish(o, waiters, out);
+                    return Next::Finished;
+                }
                 Walk::Idle => panic!("paged: a walk of object {} that never began", o.id),
             }
         }
     }
 
-    /// The walk's end, once [`Self::next_visit`] answered [`Next::Finish`]: each
-    /// revoking page leaves, its frame given out with its page and what it
-    /// became. A page that ends absent was withdrawn, perhaps after a supply
-    /// for a waiter's notice, without moving the version: every want of
-    /// `waiters` it meets is named again.
-    pub fn finish(&mut self, o: &mut Object, waiters: &mut impl Waiters, out: &mut impl FnMut(F, u64, Revoked)) {
-        assert!(o.walk == Walk::Running { again: false } && o.swept == Some(o.epoch), "paged: object {}'s walk ended with a pass or a sweep owed", o.id);
+    /// The walk's end, which only [`Self::walk`] reaches: each revoking page
+    /// leaves, its frame given out with its page and what it became. A page
+    /// that ends absent was withdrawn, perhaps after a supply for a waiter's
+    /// notice, without moving the version: every want of `waiters` it meets
+    /// is named again.
+    fn finish(&mut self, o: &mut Object, waiters: &mut impl Waiters, out: &mut impl FnMut(F, u64, Revoked)) {
         let held = !o.gone;
         let mut at = core::mem::replace(&mut o.revoke_head, NONE);
         o.revoke_tail = NONE;
@@ -1098,29 +1108,6 @@ mod tests {
 
     use super::*;
 
-    impl<F: Copy> Pages<F> {
-        /// The kernel's walk where no futex wait is to end: the next mapper
-        /// to visit, or, once every one is visited and the sweep passed, the
-        /// walk's end and `None`.
-        fn walk<M: Mappers>(
-            &mut self,
-            o: &mut Object,
-            mappers: &mut M,
-            waiters: &mut impl Waiters,
-            out: &mut impl FnMut(F, u64, Revoked),
-        ) -> Option<M::Node> {
-            loop {
-                match self.next_visit(o, mappers) {
-                    Next::Visit(node) => return Some(node),
-                    Next::Sweep => {}
-                    Next::Finish => {
-                        self.finish(o, waiters, out);
-                        return None;
-                    }
-                }
-            }
-        }
-    }
 
     /// No space maps anything: a walk ends at its first step.
     struct Unmapped;
@@ -1141,7 +1128,10 @@ mod tests {
         let mut freed = Vec::new();
         match o.revoke() {
             Revoke::Done => {}
-            Revoke::Walk => assert_eq!(p.walk(o, &mut Unmapped, &mut Nobody, &mut |f, _, _| freed.push(f)), None),
+            Revoke::Walk => {
+                assert_eq!(p.walk(o, &mut Unmapped, &mut Nobody, &mut |f, _, _| freed.push(f)), Next::Sweep);
+                assert_eq!(p.walk(o, &mut Unmapped, &mut Nobody, &mut |f, _, _| freed.push(f)), Next::Finished);
+            }
             Revoke::Queued(_) => panic!("a walk ran with no walker"),
         }
         freed
@@ -1191,16 +1181,15 @@ mod tests {
             let n = p.revoking(o, &mut Cursor::Start, &mut batch);
             swept.extend(batch[..n].iter().map(|&(_, frame)| frame));
         };
-        assert_eq!(p.next_visit(&mut o, &mut Unmapped), Next::Sweep);
+        let mut freed = Vec::new();
+        assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |frame, _, _| freed.push(frame)), Next::Sweep);
         sweep(&p, &o);
         // Between the sweep's last read and its relock, another removal.
         assert_eq!(p.withdraw(&mut o, 1, 1, &mut Nobody).0, 1);
         assert!(matches!(o.revoke(), Revoke::Queued(_)));
-        assert_eq!(p.next_visit(&mut o, &mut Unmapped), Next::Sweep, "a pass began since the sweep");
+        assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |frame, _, _| freed.push(frame)), Next::Sweep, "a pass began since the sweep");
         sweep(&p, &o);
-        assert_eq!(p.next_visit(&mut o, &mut Unmapped), Next::Finish);
-        let mut freed = Vec::new();
-        p.finish(&mut o, &mut Nobody, &mut |frame, _, _| freed.push(frame));
+        assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |frame, _, _| freed.push(frame)), Next::Finished);
         assert_eq!(freed, [100, 101]);
         assert!(freed.iter().all(|frame| swept.contains(frame)), "a frame went back unswept: swept {swept:?}");
     }
@@ -1229,7 +1218,8 @@ mod tests {
         assert_eq!(p.revoking(&o, &mut at, &mut batch), 0);
         assert_eq!(o.revoke(), Revoke::Walk);
         let mut freed = Vec::new();
-        assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |f, _, _| freed.push(f)), None);
+        assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |f, _, _| freed.push(f)), Next::Sweep);
+        assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |f, _, _| freed.push(f)), Next::Finished);
         assert_eq!(freed, [107, 102, 111, 100]);
         assert_eq!(p.revoking(&o, &mut Cursor::Start, &mut batch), 0, "the walk's end empties its set");
     }
@@ -1253,10 +1243,11 @@ mod tests {
         assert_eq!(o.revoke(), Revoke::Walk);
         let mut freed = Vec::new();
         let mut out = |f, page, becomes| freed.push((f, page, becomes));
-        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Some(10));
-        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Some(11));
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Next::Visit(10));
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Next::Visit(11));
         assert!(!o.empty());
-        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), None);
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Next::Sweep);
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Next::Finished);
         assert_eq!(freed, [(7, 0, Revoked::Absent)]);
         assert!(o.finished(o.epoch()));
         assert_eq!(p.supply(&mut o, 0, 8, false, PAGE), Ok(Supplied::Installed));
@@ -1279,13 +1270,18 @@ mod tests {
         assert_eq!(o.revoke(), Revoke::Walk);
         let mut freed = Vec::new();
         let mut out = |f, page, becomes| freed.push((f, page, becomes));
-        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Some(10));
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Next::Visit(10));
         ring.link(12, &o);
         p.fail(&mut o, 1, 1).unwrap();
         let Revoke::Queued(second) = o.revoke() else { panic!("a walk runs") };
         assert!(!o.finished(second));
-        let visits: Vec<_> = core::iter::from_fn(|| p.walk(&mut o, &mut ring, &mut Nobody, &mut out)).collect();
+        let visits: Vec<_> = core::iter::from_fn(|| match p.walk(&mut o, &mut ring, &mut Nobody, &mut out) {
+            Next::Visit(node) => Some(node),
+            Next::Sweep | Next::Finished => None,
+        })
+        .collect();
         assert_eq!(visits, [11, 10, 12, 11], "the first pass ends at 11, the second visits all three");
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Next::Finished, "the sweep, then the end");
         assert!(o.finished(second));
         assert_eq!(freed, [(7, 0, Revoked::Absent), (8, 1, Revoked::Failed)], "in marking order");
         assert_eq!((p.lookup(&o, 0), p.lookup(&o, 1)), (Lookup::Absent, Lookup::Failed));
@@ -1303,9 +1299,10 @@ mod tests {
         p.withdraw(&mut o, 0, 1, &mut Nobody);
         assert_eq!(o.revoke(), Revoke::Walk);
         let mut out = |_, _, _| {};
-        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Some(10));
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Next::Visit(10));
         ring.link(11, &o);
-        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), None);
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Next::Sweep);
+        assert_eq!(p.walk(&mut o, &mut ring, &mut Nobody, &mut out), Next::Finished);
     }
 
     /// A page failed and then shrunk away while revoking ends with no slot,
@@ -1321,7 +1318,8 @@ mod tests {
         p.resize(&mut o, PAGE);
         assert_eq!(o.revoke(), Revoke::Walk);
         let mut ended = Vec::new();
-        assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |f, page, becomes| ended.push((f, page, becomes))), None);
+        assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |f, page, becomes| ended.push((f, page, becomes))), Next::Sweep);
+        assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |f, page, becomes| ended.push((f, page, becomes))), Next::Finished);
         assert_eq!(ended, [(7, 0, Revoked::Failed), (8, 1, Revoked::Removed)]);
         assert_eq!((p.lookup(&o, 0), p.used()), (Lookup::Failed, 1));
     }
@@ -1753,7 +1751,8 @@ mod tests {
         assert_eq!(p.withdraw(&mut taken, 0, 1, &mut Nobody).0, 1);
         assert_eq!(taken.revoke(), Revoke::Walk);
         assert!(!want.unreported(), "named only once no mapping reaches the page");
-        assert_eq!(p.walk(&mut taken, &mut Unmapped, &mut One(&mut want), &mut |_, _, _| ()), None);
+        assert_eq!(p.walk(&mut taken, &mut Unmapped, &mut One(&mut want), &mut |_, _, _| ()), Next::Sweep);
+        assert_eq!(p.walk(&mut taken, &mut Unmapped, &mut One(&mut want), &mut |_, _, _| ()), Next::Finished);
         assert!(!p.wait_over(&taken, 0, since), "a withdraw leaves the read waiting");
         assert!(want.unreported(), "and its walk's end names its range again");
     }
@@ -1869,8 +1868,9 @@ mod tests {
             /// A removal's walk, over no mapper, to its end.
             fn settle(&mut self) {
                 if self.o.revoke() == Revoke::Walk {
-                    let walked = self.p.walk(&mut self.o, &mut super::Unmapped, &mut One(&mut self.want), &mut |_, _, _| ());
-                    assert_eq!(walked, None);
+                    for end in [Next::Sweep, Next::Finished] {
+                        assert_eq!(self.p.walk(&mut self.o, &mut super::Unmapped, &mut One(&mut self.want), &mut |_, _, _| ()), end);
+                    }
                 }
             }
 
@@ -1944,9 +1944,14 @@ mod tests {
             Answer,
             /// Every parked fault looks at its page again.
             Retry,
+            /// A thread of space `s` waits on a futex word in `page`, keyed on
+            /// the frame its leaf maps; only a sweep ends the wait, since a
+            /// visit or an unmap clears a leaf and revokes no frame it does
+            /// not own.
+            Wait(u32, u64),
         }
 
-        pub(super) const STEPS: [Step; 22] = [
+        pub(super) const STEPS: [Step; 24] = [
             Step::Map(0),
             Step::Map(1),
             Step::Unmap(0),
@@ -1969,6 +1974,8 @@ mod tests {
             Step::Report,
             Step::Answer,
             Step::Retry,
+            Step::Wait(0, 0),
+            Step::Wait(1, 1),
         ];
 
         pub(super) struct World {
@@ -1983,10 +1990,10 @@ mod tests {
             /// The space a walk visits, and where its visit has read the
             /// object's revoking pages to.
             visiting: Option<(u32, Cursor)>,
-            /// Where the walker's sweep has read the walk's set to, and the
-            /// frames that sweep reached.
+            /// Where the walker's sweep has read the walk's set to.
             sweeping: Option<Cursor>,
-            swept: BTreeSet<u64>,
+            /// The frames a futex waiter is keyed on.
+            futex: BTreeSet<u64>,
             /// Faults parked on an absent page: the space, the page, and the
             /// request as the pager hears of it.
             parked: std::vec::Vec<(u32, u64, Want, Version)>,
@@ -2020,7 +2027,7 @@ mod tests {
                     walking: false,
                     visiting: None,
                     sweeping: None,
-                    swept: BTreeSet::new(),
+                    futex: BTreeSet::new(),
                     parked: std::vec::Vec::new(),
                     asked: std::collections::VecDeque::new(),
                 }
@@ -2074,20 +2081,15 @@ mod tests {
                         self.revoke();
                     }
                     Step::Walk if self.walking && self.visiting.is_none() && self.sweeping.is_none() => {
-                        match self.p.next_visit(&mut self.o, &mut self.ring) {
+                        let (freed, futex) = (&mut self.freed, &self.futex);
+                        let walked = self.p.walk(&mut self.o, &mut self.ring, &mut Parked(&mut self.parked), &mut |f, _, _| {
+                            assert!(!futex.contains(&f), "frame {f} given back with a futex waiter keyed on it");
+                            assert!(freed.insert(f), "frame {f} given back twice");
+                        });
+                        match walked {
                             Next::Visit(node) => self.visiting = Some((node, Cursor::Start)),
-                            Next::Sweep => {
-                                self.sweeping = Some(Cursor::Start);
-                                self.swept.clear();
-                            }
-                            Next::Finish => {
-                                let (freed, swept) = (&mut self.freed, &self.swept);
-                                self.p.finish(&mut self.o, &mut Parked(&mut self.parked), &mut |f, _, _| {
-                                    assert!(swept.contains(&f), "frame {f} given back unswept");
-                                    assert!(freed.insert(f), "frame {f} given back twice");
-                                });
-                                self.walking = false;
-                            }
+                            Next::Sweep => self.sweeping = Some(Cursor::Start),
+                            Next::Finished => self.walking = false,
                         }
                     }
                     // The sweep, a frame at a time: anything may run between.
@@ -2095,9 +2097,12 @@ mod tests {
                         let mut at = self.sweeping.take().unwrap();
                         let mut batch = [(0, 0)];
                         if self.p.revoking(&self.o, &mut at, &mut batch) == 1 {
-                            self.swept.insert(batch[0].1);
+                            self.futex.remove(&batch[0].1);
                             self.sweeping = Some(at);
                         }
+                    }
+                    Step::Wait(s, page) if self.mapped[s as usize] && self.leaves[s as usize][page as usize].is_some() => {
+                        self.futex.insert(self.leaves[s as usize][page as usize].unwrap());
                     }
                     Step::Report => {
                         let before = self.asked.len();
@@ -2246,6 +2251,27 @@ mod tests {
         use mapped::Step;
         let played = explore(&[Step::Map(0), Step::Map(1), Step::Supply(0), Step::Supply(1), Step::Fault(0, 0), Step::Fault(1, 1)], 5);
         assert!(played > 20_000, "only {played} sequences played");
+    }
+
+    /// From a futex waiter an unmap left keyed on a frame and a walk begun
+    /// with no mapper left, every sequence of five steps gives back no frame
+    /// a waiter is keyed on: a page marked while the sweep has its lock
+    /// dropped is swept before the walk ends.
+    #[test]
+    fn a_waiter_an_unmap_left_is_never_on_a_frame_given_back() {
+        use mapped::Step;
+        let prefix = [
+            Step::Map(0),
+            Step::Supply(0),
+            Step::Supply(1),
+            Step::Fault(0, 0),
+            Step::Wait(0, 0),
+            Step::Unmap(0),
+            Step::Withdraw(1),
+            Step::Walk,
+        ];
+        let played = explore(&prefix, 5);
+        assert!(played > 1_000, "only {played} sequences played");
     }
 
     /// A fault whose request the pager read and answered, before the fault
