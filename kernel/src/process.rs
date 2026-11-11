@@ -942,9 +942,9 @@ pub fn thread_sched(pid: Pid, tid: Tid) -> Option<ThreadSched> {
     table.get(pid)?.threads.get(&tid)?.sched().cloned()
 }
 
-/// The physical address of a futex word, its page populated like any other user access. Alignment matters: the scheduler dereferences this directly on every wake check, so an unaligned word could straddle into the next physical page.
-/// Not a lease: nothing pins the frame, and a sibling's `munmap` can free it under a parked wait. Made safe by an unmap ending the waits on the frames it frees (`sched::futex::revoke_frames`), and `scheduler::futex_wait` re-deriving the translation on every check.
-fn futex_word(addr: UserAddr) -> Option<crate::mm::DirectMap> {
+/// A futex word's frame, its page populated like any other user access. Alignment matters: the scheduler reads the word through the frame, so an unaligned word could straddle into the next physical page.
+/// Not a lease: nothing pins the frame, and a sibling's `munmap` can free it under a parked wait. Made safe by an unmap ending the waits on the frames it frees (`sched::futex::revoke_frames`) after it counts the change the translation's `holds` reads.
+fn futex_word(addr: UserAddr) -> Option<crate::mm::space::Translation> {
     if !addr.raw().is_multiple_of(4) {
         return None;
     }
@@ -962,12 +962,12 @@ pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
     };
 
     // Physical, so a futex in shared memory works across processes.
-    let Some(phys_addr) = futex_word(addr) else {
+    let Some(word) = futex_word(addr) else {
         return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
     };
 
     // 0 covers both woken and never-blocked (the caller re-checks the word either way); 1 means only the caller's own deadline ended it.
-    match scheduler::futex_wait(addr, phys_addr, expected, deadline) {
+    match scheduler::futex_wait(&word, expected, deadline) {
         scheduler::FutexEnd::Changed => 0,
         scheduler::FutexEnd::Timeout => 1,
     }
@@ -975,10 +975,10 @@ pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
 
 /// Wake up to `count` threads blocked on the same physical address as `addr`.
 pub fn futex_wake(addr: UserAddr, count: u64) -> u64 {
-    let Some(phys_addr) = futex_word(addr) else {
+    let Some(word) = futex_word(addr) else {
         return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
     };
-    scheduler::futex_wake(phys_addr, count as usize)
+    scheduler::futex_wake(word.phys(), count as usize)
 }
 
 /// Wake processes blocked on reading from a pipe that now has data.
