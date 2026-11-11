@@ -526,6 +526,16 @@ type MachineTest = (&'static str, fn(&Path) -> Result<(), String>);
 
 /// The tests whose machine shape *is* the test, each on a boot of its own.
 const MACHINE_TESTS: &[MachineTest] = &[
+    // The metal profile's two shared boots, each run whole: its members are
+    // guest binaries and corpus cases whose claims are a booted kernel's and
+    // its programs' together, which no host build has, and whose verdicts are
+    // order, completion, contents and counts, which QEMU establishes. Each
+    // boot is staged as the T14's is ([`shared_members`]) and its members are
+    // judged by their own exits, on QEMU x86-64's q35 (`Profile::Headless`,
+    // `qemu::SUITE_ARCH`): KVM on the guest runner, TCG where the host has
+    // none. AArch64 builds no member.
+    ("testcases_members_exit_0", |_| shared_members("testcases")),
+    ("shared_debug_members_exit_0", |_| shared_members("shared-debug")),
     // A `drives` row's one process per function, on QEMU x86-64's q35 with
     // two `edu` (`Profile::HeadlessTwoEdu`): which functions get one is
     // `toyos-supervisor`'s, host-tested, and this is the supervisor
@@ -2349,12 +2359,13 @@ const FIRMWARE_LEFT: &[metal::Arm] = &[metal::Arm {
     ..metal::once("iommu-firmware-left", "tests/images/testcases.toml", &["iommu-firmware-left"], &[])
 }];
 
-/// The two boots every discovered member rides on the T14, each behind its
-/// rows' jobs: `testcases`, the shipping kernel's, carries every discovered
-/// Rust binary, then the C corpus, then [`LAST_MEMBERS`]; `shared-debug`
-/// carries [`ACTUATOR_TESTS`] on the kernel that has `SYS_DEBUG`, armed with
-/// [`SELFTEST_PARAMS`]. A second boot rather than one image for the whole
-/// set: what those need is a syscall number the rest must not have.
+/// The two boots every discovered member rides, on the T14 behind its rows'
+/// jobs and on QEMU by [`shared_members`]: `testcases`, the shipping kernel's,
+/// carries every discovered Rust binary, then the C corpus, then
+/// [`LAST_MEMBERS`]; `shared-debug` carries [`ACTUATOR_TESTS`] on the kernel
+/// that has `SYS_DEBUG`, armed with [`SELFTEST_PARAMS`]. A second boot rather
+/// than one image for the whole set: what those need is a syscall number the
+/// rest must not have.
 fn shared_metal(c_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
     let rust = |names: Vec<String>| {
         names.into_iter().map(|n| metal::Member { job: format!("test_rs_{n}"), adds_ms: toyos_tco::RUST_MEMBER_MS })
@@ -2376,6 +2387,114 @@ fn shared_metal(c_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
             links: Vec::new(),
         },
     ]
+}
+
+/// The shared boot `label` of [`shared_metal`] on QEMU: staged as its T14
+/// boot is, its members' job list run to the list's `reboot`, and each
+/// member judged by its own exit.
+fn shared_members(label: &str) -> Result<(), String> {
+    let (c_bins, rust_bins) = build_shared_bins();
+    let boot = shared_metal(c_bins)
+        .into_iter()
+        .find(|boot| boot.boot == label)
+        .unwrap_or_else(|| panic!("the metal profile has no shared boot {label:?}"));
+    let batches = metal::batches(&[], std::slice::from_ref(&boot))?;
+    let batch = &batches[label];
+    // The runner's bound, widened as far as this harness pays any host:
+    // under QEMU the host's ceiling, paid for the host this boot measures,
+    // ends a list that does not end itself.
+    let bound_ms = batch.bound_ms() * u64::from(qemu::HOST_SCALE_CAP);
+    let home = common::lane::dir().join(label);
+    let staged = metal::stage(&compile::repo_root(), &home, batch, bound_ms, rust_bins)?;
+    let mut qemu = QemuInstance::boot_with_options(
+        &staged.config,
+        &[],
+        &[],
+        BootOptions {
+            kernel_params: boot.params,
+            kernel_features: boot.features,
+            extra_root_files: staged.files,
+            ..Default::default()
+        },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    let ended = qemu.await_end(&mut console, Duration::from_millis(batch.bound_ms()));
+    let verdicts = member_verdicts(&console, &batch.jobs);
+    let death = serial::kernel_death(&console);
+    let red: Vec<(&str, &String)> = verdicts.iter().filter_map(|(job, verdict)| Some((*job, verdict.as_ref().err()?))).collect();
+    if red.is_empty() && ended.is_ok() && death.is_none() {
+        eprintln!("  [shared] {label}: {} member(s) exited 0", verdicts.len());
+        return Ok(());
+    }
+    let mut said = if red.is_empty() {
+        format!("each of {label}'s {} member(s) exited 0, and its boot did not end cleanly", verdicts.len())
+    } else {
+        let names: Vec<&str> = red.iter().map(|(job, _)| *job).take(12).collect();
+        let more = red.len().saturating_sub(names.len());
+        let more = if more > 0 { format!(" and {more} more") } else { String::new() };
+        format!("{} of {label}'s {} member(s) did not exit 0: {}{more}", red.len(), verdicts.len(), names.join(", "))
+    };
+    if let Err(why) = &ended {
+        said.push_str(&format!("\nthe boot did not end by its list's reboot: {}", why.lines().next().unwrap_or_default()));
+    }
+    if let Some(line) = death {
+        said.push_str(&format!("\nthe kernel died: {}", line.trim()));
+    }
+    let (unreached, judged): (Vec<_>, Vec<_>) = red.iter().partition(|(_, why)| why.as_str() == UNREACHED);
+    for (job, why) in judged {
+        said.push_str(&format!("\n--- {job}: {why}"));
+    }
+    if !unreached.is_empty() {
+        let names: Vec<&str> = unreached.iter().map(|(job, _)| *job).collect();
+        said.push_str(&format!("\n--- {UNREACHED}: {}", names.join(", ")));
+    }
+    Err(qemu::WaitVerdict::new(said, &[&console]).to_string())
+}
+
+/// A job the list never got to.
+const UNREACHED: &str = "the list never reached it";
+
+/// What the runner said of each of `jobs` on a job list's `console`, in their
+/// order: `Ok` for its `exit=0`, and otherwise why not, over its own lines.
+/// A marker is the runner's only under the head the supervisor registered for
+/// it, with no `pid=`, which a job's line in the runner's ring carries.
+fn member_verdicts<'a>(console: &str, jobs: &'a [String]) -> Vec<(&'a str, Result<(), String>)> {
+    use toyos_logstream::{parse, Source};
+    let lines: Vec<&str> = console.lines().collect();
+    let mut started: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut ended: BTreeMap<&str, (usize, &str)> = BTreeMap::new();
+    for (at, line) in lines.iter().enumerate() {
+        let Some(said) = parse(line) else { continue };
+        if said.source != Source::Program("test-runner") || said.rest.contains("pid=") {
+            continue;
+        }
+        let text = said.text;
+        if let Some(job) = text.strip_prefix("===TEST_START ").and_then(|rest| rest.strip_suffix("===")) {
+            started.entry(job).or_insert(at);
+        } else if let Some(rest) = text.strip_prefix("===TEST_END ").and_then(|rest| rest.strip_suffix("===")) {
+            let (job, said) = rest.split_once(' ').unwrap_or((rest, ""));
+            ended.entry(job).or_insert((at, said));
+        }
+    }
+    let own = |from: usize, to: usize| qemu::window(&lines[from..to].join("\n"));
+    jobs.iter()
+        .map(|job| {
+            let verdict = match (started.get(job.as_str()), ended.get(job.as_str())) {
+                (_, Some((_, "exit=0"))) => Ok(()),
+                (from, Some(&(to, said))) => {
+                    let said = match (said.strip_prefix("exit="), said.strip_prefix("error=")) {
+                        (Some(code), _) => format!("exited {code}"),
+                        (_, Some(why)) => format!("did not run: {why}"),
+                        _ => format!("ended saying {said:?}"),
+                    };
+                    Err(format!("{said}\n{}", own(from.copied().unwrap_or(to), to + 1)))
+                }
+                (Some(&from), None) => Err(format!("started and never ended\n{}", own(from, lines.len()))),
+                (None, None) => Err(UNREACHED.to_string()),
+            };
+            (job.as_str(), verdict)
+        })
+        .collect()
 }
 
 /// **One boot for both measurements this suite takes rather than reads.**
@@ -8644,21 +8763,25 @@ fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]
 /// Built test binaries, each by the name `run` takes.
 type Binaries = Vec<(String, Vec<u8>)>;
 
-/// The binaries the shared boots carry, C and Rust: every Rust test binary,
-/// and the C corpus, compiled once its declared cases have been attempted to
-/// their stages.
-fn build_shared_bins() -> (Binaries, Binaries) {
-    let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/guest/rust-tests");
-    let mut rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
-    rust_bins.push(crypto_parity_unasserted());
-    let c_names = discover_c_tests();
-    eprintln!(
-        "[toyos] Compiling {} C tests, and attempting {} declared ones...",
-        c_names.len(),
-        NOT_RUN.len()
-    );
-    check_not_run();
-    (compile_c_tests(&c_names), rust_bins)
+/// The binaries the shared boots carry, C and Rust, built once a run: every
+/// Rust test binary, and the C corpus, compiled once its declared cases have
+/// been attempted to their stages. Once, because both shared rows carry them
+/// and a corpus compile swaps the process's panic hook.
+fn build_shared_bins() -> &'static (Binaries, Binaries) {
+    static BUILT: std::sync::OnceLock<(Binaries, Binaries)> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| {
+        let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/guest/rust-tests");
+        let mut rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
+        rust_bins.push(crypto_parity_unasserted());
+        let c_names = discover_c_tests();
+        eprintln!(
+            "[toyos] Compiling {} C tests, and attempting {} declared ones...",
+            c_names.len(),
+            NOT_RUN.len()
+        );
+        check_not_run();
+        (compile_c_tests(&c_names), rust_bins)
+    })
 }
 
 /// `crypto_parity` with debug assertions off, by the name its job runs.
@@ -9253,7 +9376,7 @@ fn main() {
             }
         };
         let (c_bins, rust_bins) = build_shared_bins();
-        let boots = shared_metal(&c_bins);
+        let boots = shared_metal(c_bins);
         let taken = match metal::select(filters, &parsed.boots, bench, METAL, &boots) {
             Ok(taken) => taken,
             Err(refusal) => {
@@ -9266,7 +9389,7 @@ fn main() {
         // and "measured nothing" — a run that staged images and never reached
         // the machine has no claim to make.
         run.exit(
-            match metal::run(mode, bench, &host, &taken, &rust_bins, !nocapture && !debug_mode) {
+            match metal::run(mode, bench, &host, &taken, rust_bins, !nocapture && !debug_mode) {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,
                 metal::Verdict::Staged => 2,
@@ -9283,7 +9406,7 @@ fn main() {
 
     if debug_mode {
         let (c_bins, rust_bins) = build_shared_bins();
-        run_debug_mode(&c_bins, &rust_bins);
+        run_debug_mode(c_bins, rust_bins);
         return;
     }
 
@@ -9292,7 +9415,11 @@ fn main() {
     // A filter that takes nothing would be dropped in silence beside one that
     // takes something.
     if let Some(dead) = filters.iter().find(|f| !declared().any(|name| name.contains(**f))) {
-        eprintln!("No test matches filter {dead:?}");
+        if shared.iter().any(|member| member.contains(*dead)) {
+            eprintln!("No test matches filter {dead:?}, which names a shared member: a shared boot runs whole, as `members_exit_0`");
+        } else {
+            eprintln!("No test matches filter {dead:?}");
+        }
         run.exit(1);
     }
 

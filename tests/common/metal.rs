@@ -692,23 +692,29 @@ pub fn reached(
     out
 }
 
-/// Build one batch's image, and answer where it landed.
-fn build(
+/// What one batch's image is built from: its config with the job list derived
+/// onto it, and the files it puts on ROOT beside the config's own.
+pub struct Staged {
+    pub config: PathBuf,
+    pub files: Vec<(String, Vec<u8>)>,
+}
+
+/// Stage `batch` in `home`, its runner given `bound_ms` for the whole list:
+/// the bench's image and a guest row's boot of the same batch both start here.
+pub fn stage(
     root: &Path,
-    dir: &Path,
-    label: &str,
+    home: &Path,
     batch: &Batch,
+    bound_ms: u64,
     rust_bins: &[(String, Vec<u8>)],
-    quiet: bool,
-) -> Result<PathBuf, String> {
-    let home = at(dir, label);
-    std::fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
+) -> Result<Staged, String> {
+    std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
 
     let committed = root.join(batch.config);
     let text = std::fs::read_to_string(&committed)
         .map_err(|e| format!("{}: {e}", committed.display()))?;
     let jobs: Vec<&str> = batch.jobs.iter().map(String::as_str).collect();
-    let derived = image::derive(&text, batch.bound_ms(), &jobs, &batch.links)
+    let derived = image::derive(&text, bound_ms, &jobs, &batch.links)
         .map_err(|why| format!("{}: {why}", committed.display()))?;
     // **The job list is in the file name, not only in the file.**
     // `build_test_image` memoizes ROOT on the config's *path*, so two runs whose
@@ -762,6 +768,20 @@ fn build(
         }
         extra.extend(reached(&reachable, &batch.jobs, rust_bins));
     }
+    Ok(Staged { config, files: extra })
+}
+
+/// Build one batch's image, and answer where it landed.
+fn build(
+    root: &Path,
+    dir: &Path,
+    label: &str,
+    batch: &Batch,
+    rust_bins: &[(String, Vec<u8>)],
+    quiet: bool,
+) -> Result<PathBuf, String> {
+    let home = at(dir, label);
+    let staged = stage(root, &home, batch, batch.bound_ms(), rust_bins)?;
 
     // The build a boot asked for, or — where it asked for none — the one its
     // arms imply: an actuator outside `kernel/src/params.rs` needs the kernel
@@ -796,9 +816,9 @@ fn build(
     let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, batch.deadline_ms());
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
-    let mut plan = toyos_build::build::Plan::new(toyos_build::arch::Arch::X86_64, &config, features, &params);
+    let mut plan = toyos_build::build::Plan::new(toyos_build::arch::Arch::X86_64, &staged.config, features, &params);
     plan.machines = toyos_build::microcode::Machines::Benches;
-    let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
+    let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &staged.files);
     let image = home.join("image.img");
     std::fs::write(&image, &bytes).map_err(|e| format!("{}: {e}", image.display()))?;
     Ok(image)

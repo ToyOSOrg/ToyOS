@@ -1321,6 +1321,46 @@ mod checks {
         metal_checks::a_failing_shared_member_fails_itself_alone();
     }
 
+    /// A shared boot's guest row judges each member by the runner's own end
+    /// for it and nothing else: another member's end, a longer name's that
+    /// opens with its own, a job's line or a kernel record's does not answer
+    /// for it.
+    #[test]
+    fn a_shared_member_is_judged_by_its_own_end() {
+        let console = "\
+[ 1.200 cpu0 kernel] Boot: complete (1200ms)
+[ 1.300 test-runner] ===READY===
+[ 1.301 test-runner] ===TEST_START test_rs_passes===
+[ 1.302 test-runner] ===TEST_END test_rs_passes exit=0===
+[ 1.303 test-runner] ===TEST_START test_rs_fails===
+[ 1.304 test-runner pid=7] assertion failed: the census moved
+[ 1.305 test-runner] ===TEST_END test_rs_fails exit=101===
+[ 1.306 test-runner] ===TEST_START 40_stdio===
+[ 1.307 test-runner] ===TEST_END 40_stdio error=entity not found===
+[ 1.308 test-runner] ===TEST_START test_rs_stuck===
+[ 1.309 test-runner] ===TEST_START test_rs_stuck_longer===
+[ 1.310 test-runner] ===TEST_END test_rs_stuck_longer exit=0===
+[ 1.311 cpu1 kernel] exit: test_rs_never pid=9 code=0
+[ 1.312 test-runner pid=11] ===TEST_END test_rs_stuck exit=0===
+[ 1.313 test-runner pid=11] still going
+";
+        let jobs: Vec<String> = ["test_rs_passes", "test_rs_fails", "40_stdio", "test_rs_stuck", "test_rs_stuck_longer", "test_rs_never"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let verdicts = member_verdicts(console, &jobs);
+        let said = |job: &str| verdicts.iter().find(|(name, _)| *name == job).map(|(_, verdict)| verdict.clone()).expect(job);
+        assert_eq!(said("test_rs_passes"), Ok(()));
+        assert_eq!(said("test_rs_stuck_longer"), Ok(()));
+        let fails = said("test_rs_fails").expect_err("exit 101 passed");
+        assert!(fails.starts_with("exited 101\n") && fails.contains("the census moved"), "{fails}");
+        assert!(said("40_stdio").expect_err("an error passed").starts_with("did not run: entity not found"));
+        let stuck = said("test_rs_stuck").expect_err("a job with no end passed");
+        assert!(stuck.starts_with("started and never ended\n") && stuck.contains("still going"), "{stuck}");
+        assert_eq!(said("test_rs_never"), Err(UNREACHED.to_string()));
+        assert_eq!(verdicts.iter().map(|(job, _)| *job).collect::<Vec<_>>(), jobs.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+
     #[test]
     fn metal_boots_last_job_is_behind_every_other() {
         metal_checks::a_boots_last_job_is_behind_every_other();
