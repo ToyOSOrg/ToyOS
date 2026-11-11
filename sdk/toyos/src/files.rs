@@ -441,14 +441,6 @@ pub fn read_image_for(path: &[u8], job: Option<crate::BorrowedHandle<'_>>) -> Re
     image
 }
 
-/// Whether a write of `len` bytes at `offset` lies inside what a file holds
-/// ([`fs::MAX_FILE_BYTES`]): only such a write goes to the file's holder, so
-/// a write past it is the server's to refuse, as for a file with none.
-#[cfg_attr(not(all(feature = "fd-table", not(test))), allow(dead_code))]
-fn in_a_file(offset: u64, len: usize) -> bool {
-    offset.checked_add(len as u64).is_some_and(|end| end <= fs::MAX_FILE_BYTES)
-}
-
 /// `path` as a path names something: UTF-8, and not empty, which names
 /// nothing, as POSIX resolves no empty path. A call that takes the empty path
 /// as the descriptor itself (`stat` and `set_times` of `At::Fd`, a `link`
@@ -538,17 +530,6 @@ mod owner;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A write goes to a file's holder only inside what a file holds: past
-    /// it, and at the offset an append once was, it is the server's to refuse.
-    #[test]
-    fn only_a_write_inside_what_a_file_holds_goes_to_its_holder() {
-        assert!(in_a_file(0, 1));
-        assert!(in_a_file(fs::MAX_FILE_BYTES - 1, 1));
-        assert!(!in_a_file(fs::MAX_FILE_BYTES, 1));
-        assert!(!in_a_file(u64::MAX, 1));
-        assert!(!in_a_file(u64::MAX - 1, 4), "an end that wraps");
-    }
 
     /// Where a child given `env` starts.
     fn starts(env: &[u8]) -> Option<String> {

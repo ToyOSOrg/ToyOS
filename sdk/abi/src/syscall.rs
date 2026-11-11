@@ -3113,6 +3113,9 @@ pub const PAGED_HOLDER_WRITE: u64 = 1;
 /// The most pages one holder's write spans; a longer one is refused, and the
 /// holder asks the pager to write it.
 pub const PAGED_HOLDER_PAGES: u64 = 64;
+/// The furthest a holder's write ends; one past it is refused, and the holder
+/// asks the pager, which keeps its own bound for it.
+pub const PAGED_HOLDER_END: u64 = 1 << 44;
 
 /// The bytes of a paged object's record: what its pager says of it beside
 /// its size and modification time, which the kernel keeps and never reads.
@@ -3231,14 +3234,13 @@ pub fn paged_holder(pager: RawHandle, object: u64, writes: bool) -> Result<RawHa
 /// write to the object is one at a time: this one never waits, and is refused
 /// `WouldBlock` with nothing written while another write is under way or the
 /// pager waits for its turn, as it is where it spans more than
-/// [`PAGED_HOLDER_PAGES`] pages, a page inside the size is not present or
-/// failed, the credit or the pager's dirty ceiling is short, or a fresh page
-/// has no room; the holder asks the pager to write instead. Admitted, it is
-/// whole, read by no holder half done. `InvalidArgument` for a span past the
-/// last page a `u64` reaches; `Busy` where something runs from the object;
-/// `BadAddress` for `bytes` the kernel cannot read, with nothing written;
-/// `Gone` once the object or the pager ended. The object's modification time
-/// is stamped. A pager's process is refused, `PermissionDenied`, as is a
+/// [`PAGED_HOLDER_PAGES`] pages or ends past [`PAGED_HOLDER_END`], a page
+/// inside the size is not present or failed, the credit or the pager's dirty
+/// ceiling is short, or a fresh page has no room; the holder asks the pager to
+/// write instead. Admitted, it is whole, read by no holder half done. `Busy`
+/// where something runs from the object; `BadAddress` for `bytes` the kernel
+/// cannot read, with nothing written; `Gone` once the object or the pager
+/// ended. The object's modification time is stamped. A pager's process is refused, `PermissionDenied`, as is a
 /// holder without `WRITE`; any other kind of handle, `InvalidArgument`.
 pub fn paged_write(holder: RawHandle, bytes: &[u8], offset: u64) -> Result<usize, SyscallError> {
     check(syscall(SYS_PAGED_WRITE, holder.0 as u64, bytes.as_ptr() as u64, bytes.len() as u64, offset)).map(|n| n as usize)
@@ -3246,8 +3248,7 @@ pub fn paged_write(holder: RawHandle, bytes: &[u8], offset: u64) -> Result<usize
 
 /// A holder's write of `bytes` at the object's size, which the kernel reads
 /// in the same hold of its lock that admits the write, refused as
-/// [`paged_write`] refuses, and `InvalidArgument` where the size leaves no
-/// room for them below the last page: the size after them.
+/// [`paged_write`] refuses: the size after them.
 pub fn paged_append(holder: RawHandle, bytes: &[u8]) -> Result<u64, SyscallError> {
     check(syscall(SYS_PAGED_APPEND, holder.0 as u64, bytes.as_ptr() as u64, bytes.len() as u64, 0))
 }

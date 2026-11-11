@@ -136,9 +136,6 @@ impl Position {
             *at = Offset::Here(end);
             return Some(Ok(data.len()));
         }
-        if !super::in_a_file(offset, data.len()) {
-            return None;
-        }
         let n = held_write(holder.write(data, offset))?;
         if let Ok(n) = n {
             *at = Offset::Here(offset + n as u64);
@@ -610,7 +607,7 @@ unsafe extern "C" fn toyos_fs_pwrite(fd: Fd, buf: *const u8, len: usize, offset:
         fd,
         |_| Err(SyscallError::NotSupported),
         is_directory,
-        |holder, _| if super::in_a_file(offset, buf.len()) { held_write(holder.write(buf, offset)) } else { None },
+        |holder, _| held_write(holder.write(buf, offset)),
         |dir, fid, _| dir.pwrite(fid, offset, buf),
     );
     answer(n.map(|n| n as u64))

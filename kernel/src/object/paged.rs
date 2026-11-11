@@ -1412,7 +1412,7 @@ fn word(why: Refused) -> SyscallError {
         Refused::Gone => SyscallError::Gone,
         Refused::PastEnd | Refused::InvalidArgument => SyscallError::InvalidArgument,
         Refused::Absent => SyscallError::NotFound,
-        Refused::TooLong => SyscallError::InvalidArgument,
+        Refused::OutOfReach => SyscallError::InvalidArgument,
         Refused::NoRoom => SyscallError::ResourceExhausted,
         Refused::DirtyFull | Refused::NoCredit => SyscallError::WouldBlock,
         Refused::Sealed => SyscallError::Busy,
@@ -1426,7 +1426,9 @@ fn holder_word(why: Refused) -> SyscallError {
     match why {
         Refused::Gone => SyscallError::Gone,
         Refused::Sealed => SyscallError::Busy,
-        Refused::Absent | Refused::NoCredit | Refused::DirtyFull | Refused::NoRoom | Refused::TooLong => SyscallError::WouldBlock,
+        Refused::Absent | Refused::NoCredit | Refused::DirtyFull | Refused::NoRoom | Refused::OutOfReach => {
+            SyscallError::WouldBlock
+        }
         Refused::PastEnd | Refused::InvalidArgument => SyscallError::InvalidArgument,
     }
 }

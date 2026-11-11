@@ -16,7 +16,9 @@ use toyos_abi::syscall::{
     PAGED_WRITTEN,
 };
 
-pub use toyos_abi::syscall::{PagedNotice, PagedStat, PagedStatus, PAGED_HOLDER_PAGES, PAGED_RANGE_PAGES, PAGED_RECORD};
+pub use toyos_abi::syscall::{
+    PagedNotice, PagedStat, PagedStatus, PAGED_HOLDER_END, PAGED_HOLDER_PAGES, PAGED_RANGE_PAGES, PAGED_RECORD,
+};
 
 use crate::shm::Bytes;
 use crate::{AsHandle, BorrowedHandle, OwnedHandle};
@@ -280,7 +282,8 @@ impl Paged {
 
     /// `bytes` at `offset`, one write whole: the bytes written. `WouldBlock`
     /// with nothing written where another write is under way, the write spans
-    /// more than [`PAGED_HOLDER_PAGES`] pages, or the pager has to act first —
+    /// more than [`PAGED_HOLDER_PAGES`] pages or ends past
+    /// [`PAGED_HOLDER_END`], or the pager has to act first —
     /// supply a page, grant credit, write back — and the holder asks it to
     /// write instead; `Busy` while a program runs from the object;
     /// `PermissionDenied` for a holder not minted to write.

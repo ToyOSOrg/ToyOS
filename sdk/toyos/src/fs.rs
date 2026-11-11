@@ -72,6 +72,9 @@ pub use toyos_abi::syscall::MAX_PATH;
 /// truncate past it where the file is.
 pub const MAX_FILE_BYTES: u64 = (u32::MAX as u64 + 1) * 4096;
 
+// A holder's write grows no file past it: the server answers one that would.
+const _: () = assert!(toyos_abi::syscall::PAGED_HOLDER_END <= MAX_FILE_BYTES);
+
 /// The requests a client may have unanswered on one connection at once.
 pub const MAX_OUTSTANDING: usize = 16;
 

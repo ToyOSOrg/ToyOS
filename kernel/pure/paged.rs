@@ -252,9 +252,9 @@ pub enum Refused {
     /// A holder's write meets a page inside the size that is not present: the
     /// pager supplies it.
     Absent,
-    /// A holder's write spans more pages than one call takes whole: the pager
-    /// writes it.
-    TooLong,
+    /// A holder's write spans more pages than one call takes whole, or ends
+    /// past [`HOLDER_END`]: the pager writes it.
+    OutOfReach,
     /// A range that is empty, too long, overlaps an open write-back, or names
     /// none that was begun.
     InvalidArgument,
@@ -510,16 +510,20 @@ pub const WRITES_A_READ_MEETS: u32 = 3;
 /// The most pages one holder's write takes, whole.
 pub const HOLDER_PAGES: u64 = 64;
 
+/// The furthest a holder's write ends: a served file's largest size, which
+/// its pager keeps for every other write.
+pub const HOLDER_END: u64 = 1 << 44;
+
 /// The pages a holder's write of `len` bytes at `offset` spans, which one
-/// call takes whole: `PastEnd` for a span past the last page, `TooLong` for
-/// one past [`HOLDER_PAGES`], which the holder asks the pager to write.
+/// call takes whole: `OutOfReach` for one past [`HOLDER_PAGES`] or ending
+/// past [`HOLDER_END`], which the holder asks the pager to write.
 pub fn holder_span(offset: u64, len: u64) -> Result<u64, Refused> {
-    if !within_reach(offset, len) {
-        return Err(Refused::PastEnd);
+    if !offset.checked_add(len).is_some_and(|end| end <= HOLDER_END) {
+        return Err(Refused::OutOfReach);
     }
     let pages = (offset % PAGE + len).div_ceil(PAGE);
     if pages > HOLDER_PAGES {
-        return Err(Refused::TooLong);
+        return Err(Refused::OutOfReach);
     }
     Ok(pages)
 }
@@ -1236,25 +1240,27 @@ mod tests {
         assert_eq!(o.stat(), (3 * PAGE, 11), "a holder's write holds no statement back");
     }
 
-    /// A holder's write is taken whole or refused: past the last page, or
-    /// spanning more pages than one call takes, wherever it starts; at the
-    /// last pages a `u64` reaches the arithmetic stays inside them.
+    /// A holder's write is taken whole, or refused for the pager to write:
+    /// spanning more pages than one call takes, wherever it starts, or ending
+    /// past a holder's reach, up to the last offsets a `u64` holds.
     #[test]
-    fn a_holders_span_is_whole_or_refused_up_to_the_last_page() {
+    fn a_holders_span_is_whole_or_refused_up_to_its_reach() {
         assert_eq!(holder_span(0, HOLDER_PAGES * PAGE), Ok(HOLDER_PAGES));
-        assert_eq!(holder_span(1, HOLDER_PAGES * PAGE), Err(Refused::TooLong), "one byte into a page more");
+        assert_eq!(holder_span(1, HOLDER_PAGES * PAGE), Err(Refused::OutOfReach), "one byte into a page more");
         assert_eq!(holder_span(PAGE - 1, 2), Ok(2));
-        assert_eq!(holder_span(100, 1 << 30), Err(Refused::TooLong));
+        assert_eq!(holder_span(100, 1 << 30), Err(Refused::OutOfReach));
         for k in 1..=2 * HOLDER_PAGES {
-            let at = LAST_END - k * PAGE;
-            assert_eq!(holder_span(at, 1), Ok(1), "the page {k} below the last end");
+            let at = HOLDER_END - k * PAGE;
+            assert_eq!(holder_span(at, 1), Ok(1), "the page {k} below the reach");
             assert_eq!(holder_span(at + 7, k * PAGE - 7).is_ok(), k <= HOLDER_PAGES);
         }
-        assert_eq!(holder_span(LAST_END - 1, 1), Ok(1), "a size at the last end leaves an append its last byte");
-        assert_eq!(holder_span(LAST_END, 1), Err(Refused::PastEnd), "an append at a size at the last end");
-        assert_eq!(holder_span(LAST_END - PAGE + 1, PAGE), Err(Refused::PastEnd));
-        assert_eq!(holder_span(u64::MAX, 1), Err(Refused::PastEnd), "the old append offset is a plain refusal");
-        assert_eq!(holder_span(u64::MAX - 3, 8), Err(Refused::PastEnd), "an end that wraps");
+        assert_eq!(holder_span(HOLDER_END - 1, 1), Ok(1), "a size at the reach leaves an append its last byte");
+        assert_eq!(holder_span(HOLDER_END, 1), Err(Refused::OutOfReach), "an append at a size at the reach");
+        assert_eq!(holder_span(HOLDER_END - PAGE + 1, PAGE), Err(Refused::OutOfReach));
+        for at in [LAST_END - PAGE, LAST_END - 1, u64::MAX] {
+            assert_eq!(holder_span(at, 1), Err(Refused::OutOfReach), "{at:#x}");
+        }
+        assert_eq!(holder_span(u64::MAX - 3, 8), Err(Refused::OutOfReach), "an end that wraps");
     }
 
     /// The room a holder's credit paid for a page is credit again where the

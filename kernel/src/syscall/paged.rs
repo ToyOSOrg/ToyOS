@@ -19,6 +19,7 @@ use crate::user_ptr::{SyscallContext, UserBytesMut};
 use crate::UserAddr;
 
 const _: () = assert!(kernel::paged::HOLDER_PAGES == toyos_abi::syscall::PAGED_HOLDER_PAGES);
+const _: () = assert!(kernel::paged::HOLDER_END == toyos_abi::syscall::PAGED_HOLDER_END);
 
 pub(super) fn sys_pager_create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> u64 {
     let claimed = process::with_process_data(|data| match data.pager {
