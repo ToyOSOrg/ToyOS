@@ -1,24 +1,13 @@
 //! A number another process published designates nothing here.
 //!
-//! This test used to sweep `SYS_PIPE_OPEN` over the dense machine-wide `PipeId`
-//! space, because a pipe id *was* the authority: mode 0 handed the caller a
-//! reader of somebody else's stream, mode 1 a writer into it, and
-//! `SYS_SOCKET_CREATE` was the same reach under another name. That family is
-//! retired and a pipe end travels as a handle.
+//! **A handle is a slot in one process's own table**, so a number lifted out of
+//! a sibling's output resolves to this process's slot or to nothing at all.
 //!
-//! The property that replaced it is stronger. **A handle is a slot in one
-//! process's own table**, so a number lifted out of a sibling's output resolves
-//! to this process's slot or to nothing at all — and the attack the old shape
-//! describes is not expressible rather than refused.
-//!
-//! **The sweep cannot survive the fail-fast flip, and what replaces it says
-//! more.** Naming a handle a process does not hold is a bug in that process, so
-//! the first miss of a 4,000-slot sweep is where the sweeping process ends;
-//! there is no run of `NotFound`s to count any more. So each way of naming the
-//! victim's ends is a child of its own, and beside them is a child that names a
-//! slot *nobody* published — the two die identically, which is the whole claim:
-//! the victim's number is not refused here, it is not distinguishable from a
-//! number that never meant anything.
+//! Naming a handle a process does not hold is a bug in that process and ends
+//! it. So each way of naming the victim's ends is a child of its own, and
+//! beside them is a child that names a slot *nobody* published — the two die
+//! identically, which is the whole claim: the victim's number is not refused
+//! here, it is not distinguishable from a number that never meant anything.
 //!
 //! The victim is what stops all of that being vacuous. It holds a live pipe at
 //! the numbers it published for as long as the attacks run, and afterwards

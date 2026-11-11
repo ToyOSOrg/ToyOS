@@ -196,11 +196,11 @@ on a 244 GB drive.
 
 **Reading the stick it booted from.** On the ThinkPad, ToyOS's own xHCI and USB
 mass-storage drivers enumerate the stick UEFI booted it from, parse its GPT,
-and mount both FAT32 partitions. The running kernel then appends its log to a
-file there, through its own FAT32 write path, so a machine with no serial port
-can be read afterwards on any other computer. The GPT parser is `no_std`,
-allocation-free and `forbid(unsafe_code)`, and answers exactly one question:
-where is the partition with this GUID.
+and mount both FAT32 partitions. logkeeper, the userland program that owns
+the machine's log, then appends it to a file there, so a machine with no
+serial port can be read afterwards on any other computer. The GPT parser is
+`no_std`, allocation-free and `forbid(unsafe_code)`, and answers exactly one
+question: where is the partition with this GUID.
 
 **A test suite that boots the OS, not a mock of it.** `cargo test` builds the
 toolchain, kernel, bootloader and root filesystem, then boots the whole system across a
@@ -304,7 +304,7 @@ Then boot the machine from it. Secure Boot has to be off — ToyOS's bootloader
 is signed by nobody.
 
 The image carries two partitions: the EFI system partition the firmware boots
-from, and a FAT32 one labelled `TOYOS-LOG`, where the kernel writes a log file
+from, and a FAT32 one labelled `TOYOS-LOG`, where logkeeper writes a log file
 per boot named for the wall clock. It has its own partition for a mundane
 reason — macOS will not auto-mount an EFI-typed one, so a log written there was
 unreadable on the machine that needed to read it. Pull the stick after a boot
