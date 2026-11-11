@@ -41,4 +41,7 @@ cannot.
 ## What would close it
 
 `host_scale` reads only boots of one profile that stop at one marker, or it is
-deleted with `budget_smp`'s promise of it.
+deleted with `budget_smp`'s promise of it. The deletion is ruled out while
+nightly's `kvm` and `tcg` lanes run on GitHub-hosted runners rather than the
+idle guest runner: there a quiet host is still a slow one (the 2026-11-01 KVM
+lane read 1.07×), and only the scale pays a ceiling out for it.

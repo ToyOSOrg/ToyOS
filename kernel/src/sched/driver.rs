@@ -504,7 +504,6 @@ pub fn pass(dispose: Dispose) {
     maybe_sweep(now);
     #[cfg(feature = "pass-spin")]
     maybe_hold(now);
-    let stops = matches!(dispose, Dispose::Stop);
     let action = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
         if let Some(current) = pass.cpu().running() {
@@ -531,10 +530,6 @@ pub fn pass(dispose: Dispose) {
     // while idling, so `pass_block` need not be a second one.
     #[cfg(feature = "sched-check")]
     report_pass_costs(now);
-    // After the band, before the switch: the running task is still this one.
-    if stops {
-        crate::quiesce::note_progress();
-    }
     execute(action);
     crate::preempt::enable_no_resched();
 }
@@ -577,18 +572,18 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
     let ticket = ticket.into_raw();
     crate::preempt::clear_need_resched();
     let now = HW.now();
-    let (action, parked) = with_cpu(|cpu| {
+    let action = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
         if let Some(current) = pass.cpu().running() {
             check_stack(current.ext());
             current.ext().handle.publish(current.acct(), None);
         }
         match ticket.commit() {
-            Commit::Parked(committed) => (pass.dispose_block(committed, deadline).finish(), true),
+            Commit::Parked(committed) => pass.dispose_block(committed, deadline).finish(),
             // A post landed between phase 1 and the commit: do not park; the quantum may still have expired.
-            Commit::AlreadyWoken => (pass.dispose_none().finish(), false),
+            Commit::AlreadyWoken => pass.dispose_none().finish(),
             // A retire landed while deciding to park: the thread keeps running and unwinds rather than exit through a dead switch.
-            Commit::Killed => (pass.dispose_none().finish(), false),
+            Commit::Killed => pass.dispose_none().finish(),
         }
     });
     #[cfg(feature = "mask-windows")]
@@ -599,10 +594,6 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
             current.ext().handle.publish(current.acct(), Some(now));
         }
     });
-    // After the commit, before the switch: the running task is still this one.
-    if parked {
-        crate::quiesce::note_progress();
-    }
     execute(action);
     crate::preempt::enable_no_resched();
 }
@@ -731,15 +722,28 @@ pub fn pass_owed() -> bool {
     cpus().get(current_cpu()).doorbell().kick_pending()
 }
 
-/// Ring every other CPU's doorbell with nothing behind it and kick each whose
-/// edge this raised, so each runs a pass: what a machine-wide stop needs of a
-/// CPU halted with its timer stopped, or running a thread that never enters
-/// the kernel.
-pub fn ring_all_but_self() {
+/// Demand a pass of every other CPU and return once each has begun one. A
+/// pass runs in Ring 0, so a thread a CPU returns to Ring 3 after that pass
+/// reads what the caller wrote before the call. A CPU that begins none inside
+/// [`crate::time::DEAF_CPU`] is wedged, and a panic.
+pub fn pass_on_every_other_cpu() {
     let me = current_cpu();
-    for cpu in (0..cpus().len() as u32).map(CpuId).filter(|&cpu| cpu != me) {
-        if cpus().get(cpu).poke() == Kick::Send {
+    let others = || (0..cpus().len() as u32).map(CpuId).filter(move |&cpu| cpu != me);
+    for cpu in others() {
+        if cpus().get(cpu).doorbell().demand_pass() == Kick::Send {
             HW.kick(cpu);
+        }
+    }
+    let deadline = crate::time::Deadline::at(crate::clock::now() + crate::time::Duration::from_nanos(crate::time::DEAF_CPU.nanos()));
+    for cpu in others() {
+        while cpus().get(cpu).doorbell().pass_demanded() {
+            assert!(
+                !deadline.reached(crate::clock::now()),
+                "sched: cpu{} began no pass in {} of being kicked for one",
+                cpu.0,
+                crate::time::DEAF_CPU,
+            );
+            core::hint::spin_loop();
         }
     }
 }

@@ -18,6 +18,7 @@ const JOB: &str = "launch_unsent_stdio";
 /// and the one its echo given the job's stdout says.
 const UNSENT: &str = "nothing-sent-said-this";
 const SENT: &str = "slot-sent-said-this";
+/// A hang ceiling on the job, never a timing.
 const BOUND: Duration = Duration::from_secs(60);
 
 pub fn a_launch_gives_each_unsent_stdio_slot_a_null() -> Result<(), String> {

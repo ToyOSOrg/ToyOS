@@ -7,8 +7,7 @@
 /// CPU's own stack's guard page taken out of the direct map at bring-up),
 /// `Stack` (retired thread-stack slots made clean for reuse), `Staged` (a test actuator's), `Bench`
 /// (`arch::tlb::bench`'s own, so a measured shootdown is never counted as one
-/// a path in this kernel needed), `Stop` (the power-off's, for the answer from
-/// Ring 0 every other CPU owes it, not for a flush).
+/// a path in this kernel needed).
 #[derive(Clone, Copy)]
 #[repr(usize)]
 pub enum Origin {
@@ -21,9 +20,6 @@ pub enum Origin {
     Staged,
     #[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
     Bench,
-    // Ports are x86-64's alone, so AArch64 builds a variant it never issues.
-    #[allow(dead_code)]
-    Stop,
 }
 
 /// Which half of every address space a shootdown's write changed: x86-64's
@@ -38,8 +34,8 @@ pub enum Half {
 }
 
 impl Origin {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 7;
     /// Order matches the variants.
     pub const NAMES: [&'static str; Self::COUNT] =
-        ["pcid", "mmio", "unmap", "guard", "stack", "staged", "bench", "stop"];
+        ["pcid", "mmio", "unmap", "guard", "stack", "staged", "bench"];
 }

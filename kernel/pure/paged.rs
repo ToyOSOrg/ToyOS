@@ -68,6 +68,73 @@ pub const OPEN_RANGES: usize = 64;
 
 const NONE: u32 = u32::MAX;
 
+/// A waiting reader's want of an object's pages, as its pager hears of it: a
+/// range is named in one notice and not again while the reader waits for it,
+/// unless a withdraw takes back a page of it, which may have been supplied
+/// for that notice. Every other way a page becomes absent again moves the
+/// object's version, which ends the wait ([`Pages::wait_over`]), and the read
+/// that begins again asks anew ([`Want::anew`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Want {
+    first: u64,
+    count: u64,
+    reported: bool,
+}
+
+impl Want {
+    /// No pages wanted yet.
+    pub const NONE: Self = Self { first: 0, count: 0, reported: true };
+
+    /// The reader wants `count` pages from `first`: whether that is news its
+    /// pager must hear.
+    pub fn ask(&mut self, first: u64, count: u64) -> bool {
+        if self.first == first && self.count == count {
+            return false;
+        }
+        *self = Self { first, count, reported: false };
+        true
+    }
+
+    /// `count` pages from `first` were withdrawn: whether that makes the
+    /// range news again.
+    pub fn withdrawn(&mut self, first: u64, count: u64) -> bool {
+        let meets = first < self.first.saturating_add(self.count) && self.first < first.saturating_add(count);
+        let news = meets && self.reported;
+        self.reported &= !news;
+        news
+    }
+
+    /// The range to name in a notice, once per ask or withdraw.
+    pub fn report(&mut self) -> Option<(u64, u64)> {
+        (!self.reported).then(|| {
+            self.reported = true;
+            (self.first, self.count)
+        })
+    }
+
+    /// The reader begins its read again, after a write: its next range is
+    /// news, as what was supplied for its last notice may have gone since.
+    pub fn anew(&mut self) {
+        *self = Self::NONE;
+    }
+
+    /// Whether a notice is owed.
+    pub fn unreported(&self) -> bool {
+        !self.reported
+    }
+
+    /// The range last asked for.
+    pub fn range(&self) -> (u64, u64) {
+        (self.first, self.count)
+    }
+}
+
+/// The wants of the readers waiting on one object, which a withdraw marks.
+pub trait Waiters {
+    /// `f` on each want, written back after.
+    fn each(&mut self, f: &mut dyn FnMut(&mut Want));
+}
+
 /// A pager's core commitment: `core` frames committed at its making and kept
 /// for its life, each promised, in the index, out on a supply or held aside
 /// for the next one. A frame leaving the index while the core would hold
@@ -664,6 +731,13 @@ impl<F: Copy> Pages<F> {
         s.frame
     }
 
+    /// Whether a holder's read of `o` that began at `since` and waits for
+    /// `page` looks again: the page is no longer absent, or a write or resize
+    /// moved the version, which the read answers `WouldBlock`.
+    pub fn wait_over(&self, o: &Object, page: u64, since: Version) -> bool {
+        !o.unchanged(since) || !matches!(self.lookup(o, page), Lookup::Absent)
+    }
+
     pub fn lookup(&self, o: &Object, page: u64) -> Lookup<F> {
         if o.gone {
             return Lookup::Gone;
@@ -941,10 +1015,13 @@ impl<F: Copy> Pages<F> {
     }
 
     /// Remove the clean pages of the range that no write-back or write pin
-    /// holds: their frames, for the caller to free at their last pin.
+    /// holds: their frames, for the caller to free at their last pin. How
+    /// many, and whether a waiter's range they meet is news its pager must
+    /// hear again: they end absent without moving the version, so they may
+    /// have been supplied for a notice the waiter has not yet looked at.
     /// A range longer than the object holds pages walks its pages, not the range.
-    pub fn withdraw(&mut self, o: &mut Object, first: u64, count: u64, out: &mut impl FnMut(F)) -> usize {
-        if o.anonymous { return 0; }
+    pub fn withdraw(&mut self, o: &mut Object, first: u64, count: u64, waiters: &mut impl Waiters, out: &mut impl FnMut(F)) -> (usize, bool) {
+        if o.anonymous { return (0, false); }
         let end = first.saturating_add(count);
         let mut removed = 0;
         let mut take = |pages: &mut Self, o: &mut Object, i: u32| {
@@ -974,7 +1051,11 @@ impl<F: Copy> Pages<F> {
                 }
             }
         }
-        removed
+        let mut news = false;
+        if removed > 0 {
+            waiters.each(&mut |want| news |= want.withdrawn(first, count));
+        }
+        (removed, news)
     }
 
     /// Mark the range failed: present pages give up their frames, and a read
@@ -1064,6 +1145,33 @@ mod tests {
 
     fn sink(freed: &mut Vec<u64>) -> impl FnMut(u64) + '_ {
         |f| freed.push(f)
+    }
+
+    /// No reader waits.
+    struct Nobody;
+
+    impl Waiters for Nobody {
+        fn each(&mut self, _: &mut dyn FnMut(&mut Want)) {}
+    }
+
+    #[test]
+    fn a_want_is_named_once_while_waited_and_again_after_a_withdraw() {
+        let mut w = Want::NONE;
+        assert_eq!(w.report(), None, "nothing asked");
+        assert!(w.ask(4, 16));
+        assert!(!w.withdrawn(4, 1), "a withdraw before its notice is no news");
+        assert_eq!(w.report(), Some((4, 16)));
+        assert!(!w.ask(4, 16), "asked again while it waits");
+        assert_eq!(w.report(), None, "named twice while it waits");
+        assert!(!w.withdrawn(0, 4), "a withdraw before the range");
+        assert!(!w.withdrawn(20, 1), "a withdraw past the range");
+        assert!(w.withdrawn(19, 8), "a withdraw of the range's last page goes unheard");
+        assert!(w.unreported());
+        assert!(!w.ask(4, 16), "asked again after the withdraw");
+        assert_eq!(w.report(), Some((4, 16)));
+        assert!(w.ask(5, 15), "a range that moved");
+        assert_eq!(w.report(), Some((5, 15)));
+        assert_eq!(w.range(), (5, 15));
     }
 
     /// XSH 2.9.7: a read that began before a write, or while one was under
@@ -1194,7 +1302,7 @@ mod tests {
         assert_eq!(pages.dirty_held(), 0);
         assert_eq!(pages.admit(&mut object, 0, Writer::Pager), Ok(42));
         pages.write_unpin(&mut object, 0, 42, PAGE);
-        assert_eq!(pages.withdraw(&mut object, 0, 1, &mut none), 0);
+        assert_eq!(pages.withdraw(&mut object, 0, 1, &mut Nobody, &mut none).0, 0);
         assert_eq!(pages.writeback_begin(&mut object, 0, 1), Err(Refused::InvalidArgument));
         assert_eq!(pages.fail(&mut object, 0, 1, &mut none), Err(Refused::InvalidArgument));
         assert_eq!(pages.lookup(&object, 0), Lookup::Present(42));
@@ -1272,7 +1380,7 @@ mod tests {
         p.supply(&mut o, 0, 8, true, 10).unwrap();
         p.write_unpin(&mut o, 0, 7, PAGE);
         assert_eq!(o.size(), 10, "the shrink's size, and the new page's, stand over a copy they overtook");
-        assert_eq!(p.withdraw(&mut o, 0, 1, &mut none), 0, "the new page is dirty");
+        assert_eq!(p.withdraw(&mut o, 0, 1, &mut Nobody, &mut none).0, 0, "the new page is dirty");
         p.writeback_begin(&mut o, 0, 1).unwrap();
         assert_eq!(p.writeback_end(&mut o, 0, 1, true).unwrap()[0], 0, "and holds no pin of the old one");
     }
@@ -1350,7 +1458,7 @@ mod tests {
         p.writeback_begin(&mut o, 2, 1).unwrap(); // clean but under write-back
         p.admit(&mut o, 3, Writer::Pager).unwrap(); // write-pinned
         let mut freed = Vec::new();
-        assert_eq!(p.withdraw(&mut o, 0, 4, &mut sink(&mut freed)), 1);
+        assert_eq!(p.withdraw(&mut o, 0, 4, &mut Nobody, &mut sink(&mut freed)).0, 1);
         assert_eq!(freed, [10]);
         assert_eq!(p.lookup(&o, 0), Lookup::Absent);
     }
@@ -1405,11 +1513,11 @@ mod tests {
         p.supply(&mut o, 1 << 40, 2, false, ((1 << 40) + 1) * PAGE).unwrap();
         let mut freed = Vec::new();
         p.probes.set(0);
-        assert_eq!(p.withdraw(&mut o, 8, 1 << 24, &mut sink(&mut freed)), 0, "neither page lies in 8..8+2^24");
+        assert_eq!(p.withdraw(&mut o, 8, 1 << 24, &mut Nobody, &mut sink(&mut freed)).0, 0, "neither page lies in 8..8+2^24");
         assert!(p.probes.get() < 8, "{} probes for a range of 2^24 pages", p.probes.get());
-        assert_eq!(p.withdraw(&mut o, 8, u64::MAX, &mut sink(&mut freed)), 1);
+        assert_eq!(p.withdraw(&mut o, 8, u64::MAX, &mut Nobody, &mut sink(&mut freed)).0, 1);
         assert_eq!(freed, [2], "only the page inside the range");
-        assert_eq!(p.withdraw(&mut o, 0, u64::MAX, &mut sink(&mut freed)), 1);
+        assert_eq!(p.withdraw(&mut o, 0, u64::MAX, &mut Nobody, &mut sink(&mut freed)).0, 1);
         assert_eq!(o.pages(), 0);
     }
 
@@ -1485,7 +1593,7 @@ mod tests {
             let o = &mut objects[which];
             if (x >> 20).is_multiple_of(3) {
                 let mut freed = Vec::new();
-                p.withdraw(o, page, 1, &mut sink(&mut freed));
+                p.withdraw(o, page, 1, &mut Nobody, &mut sink(&mut freed));
                 if !freed.is_empty() {
                     assert!(model.remove(&(which, page)));
                 }
@@ -1841,5 +1949,198 @@ mod tests {
         }
         assert!(ends > 0 && seen.len() > 1000, "{} states, {ends} ends: the model explored too little", seen.len());
         assert!(asked_reads > 0, "no interleaving sent the read to the pager");
+    }
+
+    /// A page made absent again by a shrink and a grow, or by a dirty supply
+    /// refused over its failure, moves the version, which ends a holder's
+    /// wait; a withdraw does not, and names the waiter's range again instead.
+    #[test]
+    fn a_holders_wait_ends_where_its_page_or_its_object_changed() {
+        let mut p = Pages::<u64>::new(8, 0).unwrap();
+        let mut o = p.object(1, PAGE);
+        let since = o.read_begin().unwrap();
+        assert!(!p.wait_over(&o, 0, since), "absent");
+        p.supply(&mut o, 0, 7, false, PAGE).unwrap();
+        assert!(p.wait_over(&o, 0, since), "supplied");
+        p.resize(&mut o, 0, &mut none).unwrap();
+        p.resize(&mut o, PAGE, &mut none).unwrap();
+        assert_eq!(p.lookup(&o, 0), Lookup::Absent);
+        assert!(p.wait_over(&o, 0, since), "shrunk and grown back before the reader looked");
+
+        let mut failed = p.object(2, PAGE);
+        let since = failed.read_begin().unwrap();
+        p.fail(&mut failed, 0, 1, &mut none).unwrap();
+        assert!(failed.take_pager());
+        assert_eq!(p.supply(&mut failed, 0, 8, true, PAGE), Err(Refused::DirtyFull));
+        failed.give(Side::Pager);
+        assert_eq!(p.lookup(&failed, 0), Lookup::Absent, "the refused supply took the failure");
+        assert!(p.wait_over(&failed, 0, since), "a write over the failure before the reader looked");
+
+        let mut taken = p.object(3, PAGE);
+        let since = taken.read_begin().unwrap();
+        p.supply(&mut taken, 0, 9, false, PAGE).unwrap();
+        let mut want = Want::NONE;
+        want.ask(0, 1);
+        assert_eq!(want.report(), Some((0, 1)));
+        let mut waiting = One(&mut want);
+        assert_eq!(p.withdraw(&mut taken, 0, 1, &mut waiting, &mut none), (1, true));
+        assert!(!p.wait_over(&taken, 0, since), "a withdraw leaves the read waiting");
+        assert!(want.unreported(), "and names its range again");
+    }
+
+    /// One reader's want.
+    struct One<'a>(&'a mut Want);
+
+    impl Waiters for One<'_> {
+        fn each(&mut self, f: &mut dyn FnMut(&mut Want)) {
+            f(self.0);
+        }
+    }
+
+    /// One holder's read of page 0, waiting on the pager the kernel's read
+    /// loop waits on, beside a client that withdraws, fails, shrinks, grows and
+    /// writes. The reader looks again only where its wait is over.
+    mod wait {
+        use super::*;
+
+        #[derive(Clone, Copy, Debug)]
+        pub(super) enum Step {
+            Withdraw,
+            Fail,
+            Shrink,
+            Grow,
+            /// A pager's write whose dirty supply the ceiling refuses.
+            Refused,
+            /// A supply nobody asked for.
+            Supply,
+            /// The pager reads its notices.
+            Report,
+            /// The pager supplies what it read a request for.
+            Answer,
+            Look,
+        }
+
+        pub(super) const STEPS: [Step; 9] =
+            [Step::Withdraw, Step::Fail, Step::Shrink, Step::Grow, Step::Refused, Step::Supply, Step::Report, Step::Answer, Step::Look];
+
+        pub(super) struct World {
+            p: Pages<u64>,
+            o: Object,
+            since: Version,
+            want: Want,
+            /// The read waits; `false` once it answered.
+            waits: bool,
+            /// The writes the read met.
+            restarts: u32,
+            asked: bool,
+            next: u64,
+        }
+
+        impl World {
+            /// The read begins and finds its page absent.
+            pub(super) fn new() -> Self {
+                let mut p = Pages::new(4, 0).unwrap();
+                let o = p.object(1, PAGE);
+                let since = o.read_begin().unwrap();
+                let mut want = Want::NONE;
+                want.ask(0, 1);
+                World { p, o, since, want, waits: true, restarts: 0, asked: false, next: 10 }
+            }
+
+            pub(super) fn step(&mut self, step: Step) -> bool {
+                let next = self.next + 1;
+                match step {
+                    Step::Withdraw => {
+                        let mut waiting = One(&mut self.want);
+                        self.p.withdraw(&mut self.o, 0, 1, &mut waiting, &mut |_| ());
+                    }
+                    Step::Fail => {
+                        self.p.fail(&mut self.o, 0, 1, &mut |_| ()).unwrap();
+                    }
+                    Step::Shrink if self.o.size() == PAGE => {
+                        self.p.resize(&mut self.o, 0, &mut |_| ()).unwrap();
+                    }
+                    Step::Grow if self.o.size() == 0 => {
+                        self.p.resize(&mut self.o, PAGE, &mut |_| ()).unwrap();
+                    }
+                    Step::Refused => {
+                        assert!(self.o.take_pager());
+                        let _ = self.p.supply(&mut self.o, 0, next, true, PAGE);
+                        self.o.give(Side::Pager);
+                    }
+                    Step::Supply => {
+                        let _ = self.p.supply(&mut self.o, 0, next, false, PAGE);
+                    }
+                    Step::Report if self.waits && !self.asked && self.want.report().is_some() => self.asked = true,
+                    Step::Answer if self.asked => {
+                        self.asked = false;
+                        // The file server fails a requested range past the
+                        // end, which inserts nothing there.
+                        if self.p.supply(&mut self.o, 0, next, false, PAGE) == Err(Refused::PastEnd) {
+                            self.p.fail(&mut self.o, 0, 1, &mut |_| ()).unwrap();
+                        }
+                    }
+                    Step::Look if self.waits && self.p.wait_over(&self.o, 0, self.since) => {
+                        // As the read loop: a moved version begins the read
+                        // again, asking anew, until it met `READ_RESTARTS`
+                        // writes and asks the pager; else the page decides.
+                        if !self.o.unchanged(self.since) {
+                            self.restarts += 1;
+                            if self.restarts >= READ_RESTARTS {
+                                self.waits = false;
+                                return true;
+                            }
+                            self.since = self.o.read_begin().unwrap();
+                            self.want.anew();
+                        }
+                        let absent = matches!(self.p.lookup(&self.o, 0), Lookup::Absent);
+                        self.waits = absent;
+                        if absent {
+                            self.want.ask(0, 1);
+                        }
+                    }
+                    _ => return false,
+                }
+                self.next = next;
+                true
+            }
+
+            /// The pager answers what it hears and the reader looks whenever
+            /// its wait is over: the read ends.
+            pub(super) fn drain(&mut self, steps: &[Step]) {
+                for _ in 0..8 {
+                    for step in [Step::Look, Step::Report, Step::Answer] {
+                        self.step(step);
+                    }
+                }
+                assert!(!self.waits, "after {steps:?}: the read waits for ever, {:?}", self.want);
+            }
+        }
+    }
+
+    /// Every sequence of six of those steps, each then drained: no read is
+    /// left waiting on a page nobody is asked for.
+    #[test]
+    fn no_interleaving_leaves_a_read_waiting_unasked() {
+        let mut stack = std::vec![std::vec::Vec::new()];
+        let mut played = 0u64;
+        while let Some(seq) = stack.pop() {
+            played += 1;
+            let mut w = wait::World::new();
+            assert!(seq.iter().all(|&s| w.step(s)), "a sequence played before");
+            w.drain(&seq);
+            if seq.len() == 6 {
+                continue;
+            }
+            for &step in &wait::STEPS {
+                let mut next = seq.clone();
+                next.push(step);
+                let mut w = wait::World::new();
+                if next.iter().all(|&s| w.step(s)) {
+                    stack.push(next);
+                }
+            }
+        }
+        assert!(played > 10_000, "only {played} sequences played");
     }
 }

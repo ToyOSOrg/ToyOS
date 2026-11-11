@@ -39,7 +39,7 @@ use crate::sched::cpu::CpuHandles;
 use crate::sched::hw::Kicker;
 use crate::sched::mailbox::{PreemptGuard, SchedMsg};
 use crate::sched::park::{notify, revoke, Deferred};
-use crate::sched::sync::{fence, Arc, AtomicU32, CellLock, Ordering};
+use crate::sched::sync::{Arc, CellLock};
 use crate::sched::task::{TaskShared, WakeCause};
 
 /// Why a ring entry is posted.
@@ -328,59 +328,6 @@ fn take_dead<R: Ring>(rings: &mut Vec<R>, dead: &mut [Option<R>; FEW]) -> usize 
         }
     }
     taken
-}
-
-/// A word in front of a watch that its posters read to learn whether a post is
-/// owed at all, for a waiter whose condition is a sweep of words the posters
-/// write: the machine's stop, whose posters are every thread's park, band and
-/// exit, and whose watch no poster may take a lock for until a stop begins.
-///
-/// **Each side is a store followed by a load of another location**: the waiter
-/// opens the gate and then sweeps the posters' words; a poster writes its own
-/// word and then reads the gate. So each side puts a `SeqCst` fence between the
-/// two, and either the poster sees the gate open and posts, or the sweep sees
-/// the poster's write. Without the fences both may read the old value, which
-/// x86's locked read-modify-writes hide and ARM64 does not.
-/// `loom_watch`'s `a_transition_racing_an_opening_gate_is_never_missed` is the
-/// model and `gate-fence-off` its control.
-pub struct Gate(AtomicU32);
-
-impl Gate {
-    #[cfg(not(feature = "loom"))]
-    pub const fn new(value: u32) -> Self {
-        Self(AtomicU32::new(value))
-    }
-
-    // Loom's atomics have no const constructor, so this arm alone drops `const`.
-    #[cfg(feature = "loom")]
-    pub fn new(value: u32) -> Self {
-        Self(AtomicU32::new(value))
-    }
-
-    /// The waiter's side: publish `value`, then sweep.
-    pub fn open(&self, value: u32) {
-        self.0.store(value, Ordering::Release);
-        gate_fence();
-    }
-
-    /// The poster's side, after the write its waiter sweeps for.
-    pub fn after_write(&self) -> u32 {
-        gate_fence();
-        self.0.load(Ordering::Acquire)
-    }
-
-    /// A reader that owes nobody a post.
-    pub fn read(&self) -> u32 {
-        self.0.load(Ordering::Acquire)
-    }
-}
-
-fn gate_fence() {
-    // `gate-fence-off` is the negative control: without the fence either side
-    // may read the other's old value, and `loom_watch` reds.
-    if cfg!(not(feature = "gate-fence-off")) {
-        fence(Ordering::SeqCst);
-    }
 }
 
 /// An object that ends with polls still registered answers them: dropping a

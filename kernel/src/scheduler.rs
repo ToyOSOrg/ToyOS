@@ -140,13 +140,13 @@ pub fn do_preempt() {
     driver::pass(Dispose::None);
 }
 
-/// The last thing a thread does before returning to user mode, if either mark it
-/// can carry says it never does. [`exit_to_user`] is the one caller;
-/// `kernel/src/quiesce.rs`'s header says why that boundary is the safe point.
+/// The last thing a thread does before returning to user mode, if the
+/// machine's stop or the thread's kill says it never does. [`exit_to_user`]
+/// is the one caller; `kernel/src/quiesce.rs`'s header says why that boundary
+/// is the safe point.
 ///
-/// **One call and one match, so the two marks have no order to disagree
-/// about**: `kernel::sched::task::SafePoint` ranks them, here and in
-/// `CpuSched::place` alike.
+/// **One call and one match, so the two have no order to disagree about**:
+/// `kernel::sched::task::SafePoint` ranks them.
 #[track_caller]
 pub fn leave_user_if_due() {
     let Some(due) = driver::current_safe_point(crate::quiesce::stops_this_thread()) else {

@@ -57,9 +57,15 @@ const SPARES: [PciId; 4] = [
     PciId { vendor: 0x1022, device: 0x1639 },
 ];
 
-/// How long usbd has to say it has settled. Policy, and loose: enumeration
-/// is a few control transfers per device, and the guest may be slow.
+/// How long usbd has to say it has settled: a hang ceiling, never a timing.
+/// Enumeration is a few control transfers per device.
 const SETTLE_BOUND: Duration = Duration::from_secs(30);
+
+/// How long the fault arm has, all told, for the controller's halt, its reset
+/// and the unit's refusal: a hang ceiling, never a timing. A sixth of a metal
+/// job list's bound, so a controller that never gets there is this job's red
+/// and not its shared boot's end.
+const FAULT_BOUND: Duration = Duration::from_millis(toyos_tco::JOB_BOUND_MS / 6);
 
 /// The span across which a parked usbd may wake for nothing but an event:
 /// the absence is what is measured, so the span is the instrument.
@@ -204,16 +210,17 @@ pub fn fault(cap: &SysCap) {
     dev.dma_start().expect("usbd_spare: the start");
     let op = usize::from(regs.read::<u8>(0));
     let db = (regs.read::<u32>(0x14) & !3) as usize;
+    let deadline = Instant::now() + FAULT_BOUND;
     let settle = |what: &str, done: &dyn Fn() -> bool| {
-        let began = Instant::now();
         while !done() {
-            assert!(began.elapsed() < Duration::from_secs(2), "usbd_spare: the controller {what}");
+            assert!(Instant::now() < deadline, "usbd_spare: the controller {what} within {FAULT_BOUND:?}, its hang ceiling");
+            std::hint::spin_loop();
         }
     };
     regs.write::<u32>(op, 0);
-    settle("never halted", &|| regs.read::<u32>(op + 4) & 1 != 0);
+    settle("did not halt", &|| regs.read::<u32>(op + 4) & 1 != 0);
     regs.write::<u32>(op, 1 << 1);
-    settle("held its reset", &|| regs.read::<u32>(op) & (1 << 1) == 0 && regs.read::<u32>(op + 4) & (1 << 11) == 0);
+    settle("did not leave its reset", &|| regs.read::<u32>(op) & (1 << 1) == 0 && regs.read::<u32>(op + 4) & (1 << 11) == 0);
     let aimed = grant.device_addr + PAST_THE_GRANT;
     // The command ring there, the controller running, and its doorbell rung:
     // its first fetch is a read of an address no grant maps.
@@ -224,7 +231,9 @@ pub fn fault(cap: &SysCap) {
 
     let poller = Poller::new(1);
     poller.watch(&dev, READABLE, 0);
-    poller.wait(1, Duration::from_secs(10).as_nanos() as u64, |_| {});
+    let mut answered = false;
+    poller.wait(1, deadline.saturating_duration_since(Instant::now()).as_nanos() as u64, |_| answered = true);
+    assert!(answered, "usbd_spare: the claim read no refusal within {FAULT_BOUND:?}, its hang ceiling");
     match dev.irq() {
         Err(SyscallError::Io) => println!("usbd_spare: the claim refuses its interrupt read: Io"),
         Ok(record) => panic!("usbd_spare: after the aimed fetch the claim answered a record of {}, not the unit's refusal", record.count),

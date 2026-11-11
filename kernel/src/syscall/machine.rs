@@ -132,25 +132,18 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
         log!("power: this machine is already stopping, so this caller stops with the rest");
         return Err(SyscallError::AlreadyExists);
     }
-    // First: what follows outlasts a feed cadence, and no pass runs to feed again.
+    // First: what follows may outlast a feed cadence.
     crate::arch::watchdog::disarm();
-    // Every userland thread stops here, the log's writer and the UART's holder
-    // with the rest: the supervisor had the log flush before it asked for this stop.
-    let (stopped, stopping) = crate::quiesce::stop();
+    // No thread returns to Ring 3 from here, the log's writer and the UART's
+    // holder with the rest: the supervisor had the log flush before it asked.
+    let stopping = crate::quiesce::stop();
     // Held to the machine's end: every record below reaches the UART before a
     // CPU is taken down.
-    let mut wire = crate::log::console::take_for_the_stop();
+    let mut wire = crate::log::console::take_for_the_stop(&stopping);
     // The machine's census, which no process's start or end takes.
     crate::census::log();
     #[cfg(feature = "mask-windows")]
     crate::windows::report();
-    // A shortfall is the budget spent, not the reset refused: it is said at
-    // alert level, and the reset lands anyway.
-    if stopped.stopped_the_machine() {
-        log!("{stopped}");
-    } else {
-        crate::alert!("{stopped}");
-    }
     log!("{last}");
     wire.drain();
     Ok((stopping, wire))

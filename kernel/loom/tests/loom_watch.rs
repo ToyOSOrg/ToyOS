@@ -18,11 +18,9 @@
 //! cargo test -p kernel-loom --features commit-ignores-notify --test loom_watch
 //! ```
 //!
-//! Four more controls: `notify-flag-load-only` lets a post that finds its bits
+//! Three more controls: `notify-flag-load-only` lets a post that finds its bits
 //! already set answer off a load, and
 //! `a_second_post_is_not_lost_to_a_flag_the_waiter_consumed` must red;
-//! `gate-fence-off` removes the [`Gate`]'s two fences, and
-//! `a_transition_racing_an_opening_gate_is_never_missed` must red;
 //! `poll-fire-load-store`, the kernel's own control for the poll's one-shot
 //! answer, which the ring models below compile, must red every
 //! `*_completes_exactly_once` model here; and `fault-posted-before-it-is-set`
@@ -38,7 +36,6 @@
 //! compiled here, so the models count answers instead of writing them.
 //!
 //! [`TaskShared::notify`]: kernel_loom::sched::task::TaskShared::notify
-//! [`Gate`]: kernel_loom::sched::watch::Gate
 //! [`Once`]: once::Once
 //! [`prepare`]: kernel_loom::sched::park::prepare
 //! [`Ring::fire`]: kernel_loom::sched::watch::Ring::fire
@@ -62,7 +59,7 @@ use kernel_loom::sched::task::{
     Claim, Refused, TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason,
 };
 use kernel_loom::sched::sync::CellLock;
-use kernel_loom::sched::watch::{Fire, Gate, Poster, Ring, Waiters, Watch};
+use kernel_loom::sched::watch::{Fire, Poster, Ring, Waiters, Watch};
 
 use kernel_loom::{inbox_polls as polls, poll_once as once};
 
@@ -538,76 +535,6 @@ fn a_revoke_racing_the_wait_loop_ends_it_in_every_arm() {
             }
         }
         world.watch.unregister(&waiter);
-    });
-}
-
-/// **The machine's stop against one thread's park**, the gate included. The
-/// stop opens its [`Gate`], registers on its watch and sweeps the thread's
-/// word, parking if the thread is still running; the thread parks — the
-/// transition the stop waits for — and then posts only if it finds the gate
-/// open, which is `quiesce::note_progress`. Either the sweep sees the park or
-/// the post reaches the stop: a stop parked over a thread that has parked,
-/// with no post owed to it, sleeps out its whole budget.
-#[test]
-fn a_transition_racing_an_opening_gate_is_never_missed() {
-    model(|| {
-        let (world, mut rx) = world();
-        let gate = Arc::new(Gate::new(0));
-        let stopper = task(1);
-        let thread = Arc::new(TaskShared::<Msg>::new(TaskKey(2), TaskState::Running(CPU1), CpuMask::ANY));
-
-        let poster = {
-            let world = world.clone();
-            let gate = gate.clone();
-            let thread = thread.clone();
-            loom::thread::spawn(move || {
-                let ticket =
-                    prepare(&CurrentTask::new(&thread, CPU1), Cancel::Answers, WaitClass::Other)
-                        .expect("nothing posts to the stopped thread");
-                assert!(matches!(ticket.commit(), Commit::Parked(_)));
-                if gate.after_write() != 0 {
-                    world.post();
-                }
-            })
-        };
-        let stop = {
-            let world = world.clone();
-            let stopper = stopper.clone();
-            loom::thread::spawn(move || {
-                gate.open(1);
-                world.watch.register(&stopper, 0);
-                // One post ends at most one iteration.
-                for _ in 0..3 {
-                    if thread.stop_pending() || thread.stop_if_blocked() {
-                        return false;
-                    }
-                    let Ok(ticket) =
-                        prepare(&CurrentTask::new(&stopper, CPU0), Cancel::Ignores, WaitClass::Other)
-                    else {
-                        continue;
-                    };
-                    match ticket.commit() {
-                        Commit::Parked(_) => return true,
-                        Commit::AlreadyWoken => continue,
-                        Commit::Killed => unreachable!("an uncancellable wait"),
-                    }
-                }
-                unreachable!("one post ended more than two iterations")
-            })
-        };
-
-        let parked = stop.join().unwrap();
-        poster.join().unwrap();
-        let msgs = drain(&mut rx, &world.preempt);
-
-        if parked {
-            assert_eq!(
-                msgs,
-                [Msg::Wake(TaskKey(1), WakeReason::Woken)],
-                "the stop parked over a thread that had parked, and nothing posted it",
-            );
-        }
-        world.watch.unregister(&stopper);
     });
 }
 

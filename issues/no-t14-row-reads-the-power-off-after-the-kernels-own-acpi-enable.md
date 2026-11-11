@@ -31,7 +31,7 @@ ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2, SCI_EN set 13371ns after` at
 13.535 s, the supervisor's `(Shutdown)` line followed at 13.540 s, and the
 loader pass after it found no panic record.
 
-**What QEMU reads of it.** `machine_shutdown`, `machine_shutdown_short_stop`
+**What QEMU reads of it.** `machine_shutdown`, `machine_shutdown_with_a_thread_spinning`
 and `acpi_power_button` power q35 off in ACPI mode, and none of them after
 the kernel's enable: OVMF hands q35 over with `SCI_EN` set, so the mint
 writes nothing. A guest can be put in legacy mode from outside, with nothing

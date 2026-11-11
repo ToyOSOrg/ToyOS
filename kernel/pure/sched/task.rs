@@ -167,18 +167,7 @@ const GEN_MASK: u64 = (1 << GEN_BITS) - 1;
 const KILL: u64 = 1 << 62;
 /// Sticky: exactly one retirer may post the retire node.
 const RETIRE_QUEUED: u64 = 1 << 63;
-/// Sticky: the task has reached a point it may never run past again. Every
-/// route that would make it runnable puts it in its CPU's stopped band
-/// instead, and no pick serves that band — so it executes no further
-/// instruction in either ring, and nothing clears this.
-///
-/// **The opposite of [`KILL`] and not a variant of it.** A killed task is
-/// dispatched *sooner* so it can unwind and release what a retirer waits on;
-/// a stopped one is never dispatched at all, because the machine is going away
-/// and what it would do on the way out is the thing being prevented. Where a
-/// task carries both, [`SafePoint`] is where that is decided.
-const STOP: u64 = 1 << 61;
-const STICKY: u64 = KILL | RETIRE_QUEUED | STOP;
+const STICKY: u64 = KILL | RETIRE_QUEUED;
 /// A post reached this task while it was neither parked nor committing. The
 /// next [`TaskShared::begin_commit`] consumes it and refuses the park, so a post
 /// landing between a waiter's registration on a watch and its commit is a
@@ -197,7 +186,9 @@ const KEPT: u64 = STICKY | NOTIFIED | REVOKED;
 /// userland.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SafePoint {
-    /// Band it where it stands; it takes [`STOP`] here.
+    /// Band it where it stands, in its CPU's stopped band, which no pick
+    /// serves: the opposite of [`KILL`], whose task is dispatched sooner so it
+    /// can unwind.
     Stop,
     /// Let it unwind and die: [`KILL`].
     Exit,
@@ -413,57 +404,17 @@ impl<M> TaskShared<M> {
         self.state.load(Ordering::Acquire) & RETIRE_QUEUED != 0
     }
 
-    pub fn stop_pending(&self) -> bool {
-        self.state.load(Ordering::Acquire) & STOP != 0
-    }
-
-    /// **The one rank of the two marks**, read by the kernel's Ring 3 boundary
-    /// and applied to a task that is not running by `CpuSched::place`:
-    /// [`SafePoint::Stop`] outranks [`SafePoint::Exit`], because the unwind a
-    /// killed task is dispatched for is what writes the record the machine's
-    /// stop exists to keep out from under the boot's last word.
+    /// **The one rank of the two**, read by the kernel's Ring 3 boundary:
+    /// [`SafePoint::Stop`] outranks [`SafePoint::Exit`], since a thread the
+    /// machine's stop names runs no further, its own end included.
     ///
-    /// `stopping` is a parameter and the kill is the word's: a running task may
-    /// not carry [`STOP`] while it might still hold a kernel lock, so it takes
-    /// that mark at this boundary and never before.
+    /// `stopping` is a parameter and the kill is the word's: a task is
+    /// stopped only at this boundary, where it holds no kernel lock.
     pub fn at_safe_point(&self, stopping: bool) -> Option<SafePoint> {
         if stopping {
             return Some(SafePoint::Stop);
         }
         self.kill_pending().then_some(SafePoint::Exit)
-    }
-
-    /// Stop a task that is parked, and answer whether it now carries [`STOP`].
-    ///
-    /// **One CAS, because the read and the mark may not come apart.** A task
-    /// that is running may hold a kernel lock, so marking it where it stands
-    /// would band it holding that lock; a running task reaches this bit at its
-    /// own safe point instead, through `SchedPass::dispose_stop`. `false` here
-    /// therefore means "not parked, and not this caller's to stop" — including
-    /// the task a waker claimed between the read and the exchange, which is on
-    /// its way to a CPU that will dispatch it to that safe point.
-    ///
-    /// Idempotent: a task already carrying the bit answers `true` without
-    /// writing.
-    pub fn stop_if_blocked(&self) -> bool {
-        let mut cur = self.state.load(Ordering::Acquire);
-        loop {
-            if cur & STOP != 0 {
-                return true;
-            }
-            if !matches!(unpack(cur), TaskState::Blocked(_)) {
-                return false;
-            }
-            match self.state.compare_exchange_weak(
-                cur,
-                cur | STOP,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return true,
-                Err(now) => cur = now,
-            }
-        }
     }
 
     /// Move the word from `from` to `to`, preserving the sticky bits.
@@ -680,14 +631,6 @@ impl<M> TaskShared<M> {
     /// Mark the task killed without queuing a retire.
     pub fn mark_kill(&self) {
         self.state.fetch_or(KILL, Ordering::AcqRel);
-    }
-
-    /// Sticky [`STOP`] on a task that is *running on the calling CPU* and has
-    /// reached its safe point; `SchedPass::dispose_stop` is the only caller,
-    /// which is what makes the unconditional `fetch_or` sound where
-    /// [`Self::stop_if_blocked`]'s CAS is not.
-    pub(crate) fn mark_stop(&self) {
-        self.state.fetch_or(STOP, Ordering::AcqRel);
     }
 }
 
@@ -1316,8 +1259,8 @@ mod tests {
     }
 
     /// The kernel's Ring 3 boundary reads this and nothing else, so a boundary
-    /// that ranked the two marks the other way would dispatch a killed thread
-    /// to unwind — and log — on a machine that is stopping.
+    /// that ranked the two the other way would dispatch a killed thread to
+    /// unwind on a machine that is stopping.
     #[test]
     fn stopping_outranks_killing_at_a_safe_point() {
         let s = running(C0);

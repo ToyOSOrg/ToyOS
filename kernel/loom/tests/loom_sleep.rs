@@ -30,6 +30,9 @@
 //! makes that read-modify-write relaxed and this file must red, at
 //! [`a_halted_cpu_with_queued_work_was_kicked`], whose assertion names the
 //! failure exactly: halted with messages still queued and no IPI in flight.
+//! A demanded pass rests on the same edge, and
+//! [`a_pass_that_answers_a_demand_reads_what_its_demander_wrote`] must red
+//! with it.
 
 #![cfg(feature = "loom")]
 
@@ -202,5 +205,33 @@ fn an_ask_is_taken_by_the_pass_its_ring_owes() {
         assert!(victim.doorbell().kick_pending(), "the ask was neither taken nor owed a pass: it is lost");
         victim.doorbell().begin_pass();
         assert!(taken(victim.take_asks()), "the pass the ask's ring owed did not find it");
+    });
+}
+
+/// The machine's stop against one CPU's pass. The stop writes its gate, then
+/// demands a pass; once it reads the demand answered, what that CPU reads
+/// after its pass is the gate open. The gate is relaxed on both sides, so the
+/// doorbell's edge alone carries it.
+#[test]
+fn a_pass_that_answers_a_demand_reads_what_its_demander_wrote() {
+    model(|| {
+        let gate = Arc::new(AtomicBool::new(false));
+        let doorbell = Arc::new(Doorbell::new());
+
+        let stop = {
+            let (gate, doorbell) = (gate.clone(), doorbell.clone());
+            loom::thread::spawn(move || {
+                gate.store(true, Ordering::Relaxed);
+                let _ = doorbell.demand_pass();
+                !doorbell.pass_demanded()
+            })
+        };
+
+        doorbell.begin_pass();
+        let open = gate.load(Ordering::Relaxed);
+
+        if stop.join().unwrap() {
+            assert!(open, "a pass answered the demand and read the gate closed after it");
+        }
     });
 }

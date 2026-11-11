@@ -23,7 +23,7 @@ dc1a8642e on its private format (nightly 2026-10-31-2316); T14 / AMD:
 
 The larger gaps have records of their own
 (`issues/a-4-kib-overwrite-on-data-costs-about-2-4-times-mains.md`,
-`issues/a-data-directory-listing-reads-every-entrys-inode-alone.md`).
+`issues/a-data-directory-listing-is-read-whole-for-every-readdir-request.md`).
 
 **What is known of the causes.**
 - `tree.100` creates, writes and removes 100 small files: each create,

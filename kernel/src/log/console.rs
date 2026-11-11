@@ -16,8 +16,7 @@
 //! **One writer at a time**: the boot's, whose drains take turns through a
 //! claim on the wire, which the hand-over takes for good; then the holder's;
 //! then the stop's, once userland is stopped, or a fatal path's, once every
-//! other CPU is. A holder the stop did not stop within its budget, which the
-//! stop's record names, may still write over it.
+//! other CPU is.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -119,7 +118,7 @@ impl StopWire {
 
 /// The UART, for the stop once it has stopped userland: from a line of its
 /// own, since the holder may have been stopped mid-line or behind the log.
-pub fn take_for_the_stop() -> StopWire {
+pub fn take_for_the_stop(_stopping: &crate::quiesce::Stopping) -> StopWire {
     after_the_holder(serial::write);
     StopWire(())
 }

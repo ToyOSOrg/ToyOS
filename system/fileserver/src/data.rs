@@ -377,25 +377,14 @@ impl<D: Disk> Volume for DataVolume<D> {
         if !inode.is_dir() {
             return Err(Error::NotADirectory);
         }
-        let mut cursor = 0;
-        let mut listed = Vec::new();
-        loop {
-            let (entries, more) = mapped("readdir", self.cache.block_on(self.fs.readdir(inode.ino, cursor, 256)))?;
-            if entries.is_empty() && more {
-                return Err(Error::Io);
-            }
-            for entry in entries {
-                cursor = entry.next;
-                let inode = mapped("directory entry", self.cache.block_on(self.fs.inode(entry.ino)))?;
-                listed.push(Listed {
-                    name: String::from_utf8(entry.name).map_err(|_| Error::Io)?,
-                    meta: self.meta(&inode)?,
-                    identity: entry.ino,
-                });
-            }
-            if !more {
-                break;
-            }
+        let entries = mapped("readdir", self.cache.block_on(self.fs.listing(inode.ino)))?;
+        let mut listed = Vec::with_capacity(entries.len());
+        for (entry, inode) in entries {
+            listed.push(Listed {
+                name: String::from_utf8(entry.name).map_err(|_| Error::Io)?,
+                meta: self.meta(&inode)?,
+                identity: entry.ino,
+            });
         }
         listed.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         Ok(listed)
@@ -934,6 +923,27 @@ mod tests {
         v.sync().unwrap();
         let mut v = reopen(v);
         assert_eq!(v.read_link("home/moved/link").unwrap(), "file");
+    }
+    /// Each entry of a listing is what its own path answers.
+    #[test]
+    fn a_listing_says_of_each_entry_what_its_path_does() {
+        let mut v = volume();
+        v.mkdir("home/dir").unwrap();
+        for (name, len) in [("b", 3), ("a", 5000), ("c", 0)] {
+            let f = v.open(&format!("home/{name}"), CREATE).unwrap();
+            v.write(f, 0, &vec![7; len]).unwrap();
+            v.close(f).unwrap();
+        }
+        v.symlink("home/link", "a").unwrap();
+        v.sync().unwrap();
+        let mut v = reopen(v);
+        let listed = v.list("home").unwrap();
+        assert_eq!(listed.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["a", "b", "c", "dir", "link"]);
+        for entry in &listed {
+            let path = format!("home/{}", entry.name);
+            assert_eq!(entry.meta, v.lstat(&path).unwrap(), "{path}");
+            assert_eq!(entry.identity, v.identity(&path).unwrap(), "{path}");
+        }
     }
     #[test]
     fn cancelling_one_reservation_keeps_an_earlier_dirty_page() {
