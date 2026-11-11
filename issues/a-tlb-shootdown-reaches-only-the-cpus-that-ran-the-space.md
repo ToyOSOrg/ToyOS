@@ -33,9 +33,9 @@ who runs it rest on, and reds with either pairing's fence removed;
 `kernel/loom/tests/tlb_shootdown.rs` checks that an answered ask flushed its
 range after the write, alone or with a second initiator's, and that a mailbox
 reused waits for its new answer, each red under its mutation;
-`tlb_shootdown_waits` shows on the test kernel that
-a change waits for a CPU running a thread of the space and for none when no
-other CPU runs one, each half red under its mutation.
+`tlb_shootdown_waits` shows on the test kernel that a change waits for a CPU
+running a thread of the space, and that one freeing no table waits for none
+when no other CPU runs one, each half red under its mutation.
 
 What is owed, now that a thread can be pinned
 (`toyos_abi::syscall::thread_set_affinity`): on a machine with PCID,

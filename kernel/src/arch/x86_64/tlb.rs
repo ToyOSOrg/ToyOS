@@ -13,12 +13,10 @@
 //! translation where it was asked more than one at once or the range is long.
 //! Every other shootdown targets every other CPU the machine brought up.
 //!
-//! **A CPU in its idle context keeps the root it last loaded** (`arch::hw`)
-//! and runs that space for the targeting: a change that frees no table passes
-//! it by, and it flushes when a thread of the space resumes there ([`idle`],
-//! [`resume`]); one that frees a table reaches it, and its answer loads the
-//! kernel's root ([`answer`]), so it is reached once and never holds a space
-//! that is gone ([`retire`]).
+//! **A CPU in its idle context keeps the root it last loaded** (`arch::hw`);
+//! `crate::tlb_tags` says which changes reach it. Its answer to any shootdown
+//! or ask loads the kernel's root ([`answer`], [`answer_ask`]), so it is
+//! reached once, and a space's [`retire`] reaches every CPU still holding it.
 //!
 //! **A user-half change keeps global translations**: its flush is `INVPCID`
 //! type 3 or a `CR3` reload, and only a kernel-half change, whose leaves are
@@ -114,6 +112,13 @@ const BY_PAGE: u64 = 64;
 /// and every other flushes before it next uses the space. So the change's
 /// frames and tables may go as soon as it returns.
 /// Answers whether it reached another CPU.
+///
+/// A CPU idle on the space may still read those frames speculatively through
+/// its stale translations (SDM Vol. 3A §5.10.4.4). That is sound while SMAP
+/// faults every other Ring 0 access to a user page, a freed user frame is only
+/// ever mapped write-back again (§14.12.4), and a user mapping that is not
+/// write-back is a device window: UC, never read speculatively (§14.3), or the
+/// WC scanout, which a read does not disturb.
 pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64, tables: bool) -> bool {
     let me = percpu::cpu_id() as usize;
     let mut targets = CpuSet::default();

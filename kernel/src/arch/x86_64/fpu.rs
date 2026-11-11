@@ -12,9 +12,7 @@
 //! [`load_initial`] puts. Nothing is deferred to a trap: whatever runs in Ring 3
 //! holds only its own state. The area is compacted under `XSAVES` and `XSAVEC`,
 //! standard under `XSAVEOPT`; its header starts zero, as a fresh kernel stack
-//! is zeroed, and is written by nothing but the saves after it. A kernel
-//! thread never enters Ring 3, so it has no area and its switches neither save
-//! nor restore: the registers keep the state of the last thread that ran.
+//! is zeroed, and is written by nothing but the saves after it.
 //!
 //! **The modified optimisation's invariant.** `XSAVEOPT` and `XSAVES` skip a
 //! component unmodified since the last `XRSTOR` or `XRSTORS` a CPU ran from the

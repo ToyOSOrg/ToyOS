@@ -1,5 +1,6 @@
 //! A shootdown returns when every CPU running the space has flushed — and the
-//! paths that free memory are behind it; one no other CPU runs reaches none.
+//! paths that free memory are behind it; one no other CPU runs, freeing no
+//! table, reaches none.
 //!
 //! **Why this needs an actuator at all.** A correct wait and no wait whatsoever
 //! measure the same zero on a machine where every CPU answers in microseconds,
@@ -45,6 +46,7 @@ const FLOOR_NANOS: u64 = DELAY_NANOS / 2;
 const TRIALS: u32 = 5;
 
 const PAGE_2M: usize = 2 * 1024 * 1024;
+const PAGE_4K: usize = 4096;
 
 use toyos_abi::syscall::debug_action::{SPACE_REACHED, TLB_ACK_DELAY_ARM as ARM, TLB_ACK_DELAY_DISARM as DISARM};
 
@@ -200,17 +202,23 @@ fn main() {
     );
     spinners.stop();
 
-    // 3. With no other thread of this process left, a change reaches no
-    //    other CPU: counted, not timed, since a guest's clock bounds nothing
-    //    from above.
-    let alone = map(PAGE_2M);
+    // 3. With no other thread of this process left, a change that frees no
+    //    table reaches no other CPU: counted, not timed, since a guest's clock
+    //    bounds nothing from above. One that frees a table rightly reaches a
+    //    CPU still idle on this space's root, so the page released is the
+    //    mapping's middle one, whose table a neighbour in the mapping keeps.
+    let around = map(PAGE_2M);
+    let alone = unsafe { around.add(PAGE_2M / 2) };
     unsafe { alone.write_volatile(1) };
     let before = debug(SPACE_REACHED, 0);
-    unsafe { syscall::vm_release(alone, PAGE_2M) }.expect("munmap alone");
+    unsafe { syscall::vm_release(alone, PAGE_4K) }.expect("munmap alone");
     let after = debug(SPACE_REACHED, 0);
+    unsafe { syscall::vm_release(around, PAGE_2M / 2) }.expect("munmap below");
+    unsafe { syscall::vm_release(alone.add(PAGE_4K), PAGE_2M / 2 - PAGE_4K) }.expect("munmap above");
     assert_eq!(
         after, before,
-        "a munmap no other CPU's thread could reach interrupted another CPU {} time(s)",
+        "a munmap that freed no table, which no other CPU's thread could reach, interrupted \
+         another CPU {} time(s)",
         after - before,
     );
 
@@ -218,6 +226,6 @@ fn main() {
 
     println!(
         "a shootdown waits for every CPU running the space, munmap and a fixed mmap wait for it, \
-         and a space no other CPU runs waits for none"
+         and a change freeing no table in a space no other CPU runs waits for none"
     );
 }

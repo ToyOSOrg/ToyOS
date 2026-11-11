@@ -364,7 +364,7 @@ impl Hw for KernelHw {
             }
             crate::hw::note_running(restore);
             // An entry from Ring 3 through an IDT gate leaves SS null (SDM Vol.
-            // 3A §7.14.2, "Stack Switching in IA-32e Mode"); see `SYSRET_KEEPS_SS`.
+            // 3A §7.14.4, "Stack Switching in IA-32e Mode"); see `SYSRET_KEEPS_SS`.
             if SYSRET_KEEPS_SS.load(Relaxed) && read_ss() != percpu::KERNEL_DS {
                 write_ss(percpu::KERNEL_DS);
             }

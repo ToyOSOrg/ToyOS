@@ -122,8 +122,10 @@ pub struct PerCpu {
     /// The `CR3` value `paging::Cr3::activate` last loaded on this CPU, its
     /// only writer; `u64::MAX` before the first.
     root: u64,
-    /// `IA32_FS_BASE` as this CPU's switch last read or wrote it: what it
-    /// holds while no Ring 3 code has run since; `u64::MAX` before the first.
+    /// `IA32_FS_BASE` as this CPU's bring-up or its last switch read or wrote
+    /// it. Exact at every switch-in, since every switch away from a user
+    /// thread reads the register back; stale while a thread runs, which moves
+    /// it by a segment load or `SYS_SET_THREAD_POINTER`.
     fs_base: u64,
     /// The context whose switch-out last left its user state in this CPU's
     /// registers, 0 before the first: `arch::fpu`'s record.
@@ -393,8 +395,8 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 nmi_active: 0,
                 ap_token: 0,
                 root: u64::MAX,
-                // No thread pointer: zero or a user-half address.
-                fs_base: u64::MAX,
+                // Read from the register on the CPU itself (`init_bsp`, `init_ap`).
+                fs_base: 0,
                 fpu_holder: 0,
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::Source::COUNT],
             },
@@ -558,6 +560,7 @@ pub fn init_bsp(lapic_id: u32) {
     let percpu = unsafe { &mut *ptr };
 
     percpu.kernel_rsp = cpu::stack_pointer();
+    percpu.fs_base = cpu::read_fs_base();
     // SAFETY: `Tss` is `repr(C, packed)`; `rsp0` may be unaligned.
     unsafe { core::ptr::write_unaligned(&raw mut percpu.tss.rsp0, cpu::stack_pointer()); }
 
@@ -605,6 +608,7 @@ pub fn alloc_ap(cpu_id: u32, token: u32) -> *mut PerCpu {
 pub fn init_ap(percpu_ptr: *mut PerCpu) {
     // SAFETY: this CPU's own `PerCpu`, read from `gs:[0]`; the BSP dropped its `&mut` before the SIPI.
     let percpu = unsafe { &mut *percpu_ptr };
+    percpu.fs_base = cpu::read_fs_base();
     // SAFETY: `load_gdt`'s once-per-CPU contract; this is this AP's call.
     unsafe { percpu.load_gdt(); }
     super::control_regs::init(percpu.cpu_id);
@@ -686,7 +690,7 @@ pub fn set_root(cr3: u64) {
     gs::write_u64::<OFF_ROOT>(cr3);
 }
 
-/// `IA32_FS_BASE` as the switch last read or wrote it on this CPU.
+/// `IA32_FS_BASE` as of this CPU's last switch: exact only at a switch-in.
 pub fn fs_base() -> u64 {
     gs::read_u64::<OFF_FS_BASE>()
 }
