@@ -234,8 +234,10 @@ What makes the disk rows one comparison, and what stays each system's own:
   evicting in insertion order, and the 4 KiB sequential read misses
   (`issues/a-sequential-read-of-a-file-as-large-as-datas-clean-cache-reads-the-disk.md`).
 
-The `osbench_disk` metal row runs `files`, `nvme` and `persist` alone, on
-the benchcase image.
+The `osbench_disk` metal row runs `files`, `nvme` and `persist` without the
+rest of the suite, on the benchcase image. Of the three only `persist`
+writes the bench's NVMe; `files` is the memory filesystem's rows, and `nvme`
+is read-only and unsupported on ToyOS.
 
 ## What is not a comparison
 
