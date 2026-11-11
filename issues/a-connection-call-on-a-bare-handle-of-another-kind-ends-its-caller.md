@@ -17,3 +17,14 @@ before any connection call. Found in review of #1239, by reading.
 
 **Exit**: the SDK's connection calls take a `Connection` rather than any
 `AsHandle`, so a bare handle cannot reach a message syscall.
+
+- **Owed on metal:** the receive that reports each handle's kind (#1239),
+  end to end. Its guest binaries are shared-boot members, which no guest row
+  runs.
+  - Rows: the `testcases`, `testcases-watchdog` and `shared-debug` boots of
+    main, whole, and the `proctreecase` boot (`process_tree`).
+  - Bench: the T14.
+  - Main must show `messages_are_whole: each handle arrived with its kind, and
+    another kind was refused by name`, then `messages_are_whole: ok`.
+    `mutual_kill`, `moved_rights` and `served_file_offset` pass. `process_tree`
+    passes, with `a_pipe_is_no_place` refused by the supervisor by name.
