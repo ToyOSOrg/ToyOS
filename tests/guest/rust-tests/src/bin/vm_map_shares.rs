@@ -8,13 +8,15 @@
 //! boundary and the frames a real address space populates.
 
 use std::io::Write;
+use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 
 use toyos::shm::SharedMemory;
 use toyos::AsHandle;
 use toyos_abi::end::{End, Fault};
-use toyos_abi::syscall::{self, SyscallError, VmAt, VmProt, PAGE_SIZE};
+use toyos_abi::syscall::{self, ProcessStats, SyscallError, VmAt, VmProt, PAGE_SIZE};
+use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_vm_map_shares";
 const STORES: &str = "stores";
@@ -65,30 +67,15 @@ fn main() {
 }
 
 /// The most private memory a run of this program in `role` held, in bytes,
-/// read off its end through the handle its spawn answers: a process's own
-/// handle carries no `READ`, so none reads its own.
+/// read off its end through its `Child`'s handle: a process's own handle
+/// carries no `READ`, so none reads its own.
 fn peak_of(role: &str) -> u64 {
-    let image = toyos::files::read_image(SELF_PATH.as_bytes()).expect("vm_map_shares: its own image");
-    let argv = format!("{SELF_PATH}\0{role}\0");
-    let request = toyos::spawn::Spawn {
-        program: SELF_PATH,
-        image: None,
-        image_held: true,
-        argv: argv.as_bytes(),
-        env: b"",
-        cwd: "/",
-        fds: &[],
-        endow: Vec::new(),
-        provided: Vec::new(),
-        parent: toyos::spawn::Parent::Caller,
-        independent: false,
-        launcher: None,
-        pager: None,
-    };
-    let Ok(toyos::spawn::Start::Helper(helper)) = request.start() else { panic!("vm_map_shares: a spawn of its own image is no helper") };
-    let reader = helper.spawn(Some(&image)).expect("vm_map_shares: a reader starts");
-    assert_eq!(reader.wait(), Ok(End::Exited(0)), "vm_map_shares: the {role} reader");
-    reader.stats().expect("vm_map_shares: a reader's statistics").peak_memory
+    let mut reader = Command::new(SELF_PATH).arg(role).spawn().expect("vm_map_shares: a reader starts");
+    let status = reader.wait().expect("vm_map_shares: wait a reader");
+    assert_eq!(End::from_word(status.into_raw()), Some(End::Exited(0)), "vm_map_shares: the {role} reader");
+    let mut stats = ProcessStats::default();
+    syscall::process_stats(RawHandle(reader.as_raw_handle()), &mut stats).expect("vm_map_shares: a reader's statistics");
+    stats.peak_memory
 }
 
 /// One word of each page of a table of this program's.
@@ -160,8 +147,8 @@ fn an_image_is_executed_and_never_written() {
     assert_eq!(widened, Err(SyscallError::PermissionDenied), "vm_map_shares: vm_protect made an image's mapping writable");
 }
 
-/// Reading every page of the read-only table takes no frame of this
-/// process's own, and no call makes a page of it writable; reading the
+/// Reading every page of the read-only table takes no frame of its reader's
+/// own, and no call makes a page of it writable; reading the
 /// writable table, the same bytes in the file, takes a frame a page.
 fn read_only_segments_are_the_files_pages() {
     let want = want();
