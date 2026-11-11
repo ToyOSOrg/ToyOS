@@ -104,9 +104,6 @@ notify-flag-load-only = []
 # `pure/sched/cpu.rs`'s steal probe rings its victim before it sets the
 # thief's bit, and `kernel/loom/tests/loom_sleep.rs` must red.
 ask-rings-first = []
-# The two `SeqCst` fences of `pure/sched/watch.rs`'s `Gate` go, and
-# `kernel/loom/tests/loom_watch.rs` must red — the stop's store-buffering pair.
-gate-fence-off = []
 # The staleness test's negative control: `pure/sched/cpu.rs`'s
 # `CpuHandle::answering` answers `true` for every CPU under it, which is what
 # every path that chooses a CPU believed before it existed. `kernel-sim`'s
@@ -408,7 +405,6 @@ toyos-rootimage = { path = "../lib/rootimage" }
 # Its own image's ranges and symbols and the supervisor's program, as the
 # build laid them out: the kernel parses no ELF.
 toyos-kimage = { path = "../lib/kimage" }
-toyos-quiesce = { path = "../lib/quiesce" }
 toyos-random = { path = "../lib/random" }
 toyos-symbols = { path = "../lib/symbols" }
 toyos-userbound = { path = "../lib/userbound" }

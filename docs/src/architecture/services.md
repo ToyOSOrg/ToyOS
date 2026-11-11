@@ -10,7 +10,10 @@
 - It never dies and stays small: its decisions are pure, host-tested logic,
   and the process only holds handles, spawns and runs its loop.
 - It owns the machine's orderly stop, derived from the manifest's
-  dependencies, and replaces a running service's binary when an authorised
+  dependencies. Once it asks the kernel to end the machine, no program but
+  the asking thread runs its own code again; the kernel waits for no
+  program to finish, so what must finish first is done before the ask.
+- It replaces a running service's binary when an authorised
   caller in a login session asks.
 
 The other services are the components in the [Overview](overview.md). Each is

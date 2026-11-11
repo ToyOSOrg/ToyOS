@@ -269,13 +269,6 @@ commit-ignores-notify = []
 #   cargo test -p kernel-loom --features notify-flag-load-only --test loom_watch
 #
 notify-flag-load-only = []
-# The negative control for the stop's gate. It removes the two `SeqCst` fences
-# of `watch.rs`'s `Gate`, so a poster's transition and the stop's sweep may
-# each miss the other, and `loom_watch.rs` must red:
-#
-#   cargo test -p kernel-loom --features gate-fence-off --test loom_watch
-#
-gate-fence-off = []
 # The control for `poll_racing`'s lost-completion half: its producer posts, then
 # stores the readiness, the reverse of the order `pcidev::note_fault` keeps, so
 # both `*_racing_a_post*_completes_exactly_once` models must red with a poll

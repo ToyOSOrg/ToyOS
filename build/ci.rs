@@ -620,6 +620,12 @@ pub(crate) const CONTROLS: &[Control] = &[
         test: "a_halted_cpu_with_queued_work_was_kicked",
         message: "halted with 2 of 2 messages queued and no IPI in flight",
     }]),
+    // The same edge under a demanded pass, in a run of its own: the model
+    // above ends its process.
+    red(KERNEL_LOOM, "doorbell-kick-relaxed", Some("loom_sleep"), &[Says {
+        test: "a_pass_that_answers_a_demand_reads_what_its_demander_wrote",
+        message: "a pass answered the demand and read the gate closed after it",
+    }]),
     red(KERNEL_LOOM, "push-fence-relaxed", Some("loom_push"), &[Says {
         test: "a_cpu_that_halts_without_seeing_the_surplus_was_pushed",
         message: "published and no push behind it",
@@ -645,11 +651,6 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "notify-flag-load-only", Some("loom_watch"), &[Says {
         test: "a_second_post_is_not_lost_to_a_flag_the_waiter_consumed",
         message: "parked with both conditions true and no wake owed: a post answered off a load",
-    }]),
-    // The stop's store-buffering pair with the gate's fences gone.
-    red(KERNEL_LOOM, "gate-fence-off", Some("loom_watch"), &[Says {
-        test: "a_transition_racing_an_opening_gate_is_never_missed",
-        message: "the stop parked over a thread that had parked, and nothing posted it",
     }]),
     // `kernel-loom`'s control, over the kernel's `Once` as the watch models'
     // ring entry.

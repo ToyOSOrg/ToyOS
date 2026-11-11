@@ -140,13 +140,10 @@ pub fn mediated(passed: &PortAt) -> Port {
 /// Every row's ports, the kernel's again: the power-off's, and nobody else's.
 pub struct TakenBack(());
 
-/// Take every row's ports back from whoever holds them, whatever the stop's
-/// record says. Once `stopping` exists a thread enters Ring 3 only past
-/// `scheduler::leave_user_if_due`, which stops all but the stop's caller; the
-/// shootdown returns only once every other CPU has answered it from Ring 0,
-/// so no thread that was in Ring 3 before is there still.
+/// Every row's ports are the kernel's again, with nothing to undo: `stopping`
+/// says no thread but the stop's caller is in Ring 3 or returns to it, so no
+/// holder reaches its row.
 pub fn take_back(_stopping: &crate::quiesce::Stopping) -> TakenBack {
-    super::tlb::shootdown(crate::invalidation::Origin::Stop, crate::invalidation::Half::User);
     TakenBack(())
 }
 

@@ -1,103 +1,60 @@
-//! Stopping this machine's userland, so the shutdown's claims about it are
-//! claims about a machine that has stopped.
+//! The machine's stop: once it has begun, no thread but its caller returns
+//! to Ring 3.
 //!
-//! Every decision here is [`toyos_quiesce`]'s; this module marks threads and
-//! spends the time.
+//! The kernel's last sequence takes hardware back from the programs it was
+//! handed to, settles what they left in flight and cuts power, and no program
+//! can vouch that nothing runs in Ring 3 across it; so the gate is here.
+//! **The stop waits for no thread.** A thread inside a syscall, or parked in
+//! one and woken later, runs on to the boundary, and what it logs may follow
+//! the last word; what had to finish first is the caller's to establish
+//! before it asks.
 //!
-//! # Where the stop is taken, and why there
+//! [`stops_this_thread`] is read by `scheduler::leave_user_if_due`, which
+//! every return to Ring 3 passes: the syscall gate, every interrupt and trap
+//! epilogue, and a task's first dispatch. A thread standing there holds no
+//! kernel lock, and is banded where no pick serves it
+//! (`SchedPass::dispose_stop`).
 //!
-//! [`stops_this_thread`] is read by `scheduler::leave_user_if_due`, called
-//! from `kernel_exit_to_user_check` — the one function every return to Ring 3
-//! in this kernel passes through: the syscall gate, every device interrupt, the
-//! timer, the TLB shootdown IPI, the general trap epilogue and a task's first
-//! dispatch. A thread standing there holds no kernel lock, has nothing in the
-//! block layer and nothing in flight on any controller; it is between two
-//! userland instructions, and every record this kernel writes with a userland
-//! author is written from inside a syscall.
-//!
-//! # What keeps running
-//!
-//! **Tasks stop; CPUs do not.** Every CPU keeps `IF` set, keeps taking its
-//! LAPIC timer and every device interrupt, and keeps taking scheduler passes —
-//! it simply has no userland left to dispatch. That is what the USB stop below
-//! the boot's last word needs. Freezing CPUs inside a pass instead would strand
-//! whatever lock the thread on that CPU was holding.
-//!
-//! # What the stop waits on
-//!
-//! [`PROGRESS`], posted by [`note_progress`] from the three transitions that
-//! turn a thread a sweep counted as running into one it does not: the pass
-//! that bands it at its safe point, the pass that parks it, and its exit. Each
-//! posts after its own transition, so the sweep it wakes finds it done; a
-//! thread still running when the budget is spent is the record's shortfall.
-//!
-//! Lock order: [`process::PROCESS_TABLE`] alone.
+//! **Tasks stop; CPUs do not.** Every CPU keeps taking interrupts and
+//! scheduler passes; freezing one inside a pass would strand whatever lock
+//! the thread on it held.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Relaxed};
-
-use toyos_quiesce::{must_stop, Record, Sweep, ThreadId};
-use kernel::sched::task::WaitClass;
-use kernel::sched::watch::Gate;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::AcqRel, Ordering::Acquire, Ordering::Release};
 
 use crate::arch::percpu;
-use crate::watch::{self, Watch};
-use crate::process;
-use crate::time::{Budget, Deadline, Duration};
 
-/// How long the machine gets to stop.
-///
-/// **A budget, and not a bound the kernel can prove.** One `QUANTUM_NS` is
-/// what a thread running in Ring 3 needs to reach the boundary, and as long
-/// again covers one inside a syscall that does not park. A thread can
-/// therefore outlast this, which is why its expiry is a clause in the record.
-pub(crate) const PARK: Budget = Budget::of(
-    Duration::from_nanos(2 * kernel::sched::task::QUANTUM_NS),
-    "the reset lands wherever the threads that never reached a safe point are, and \
-     the record names how many",
-);
+/// No thread: the stop has not begun.
+const NOBODY: u64 = u64::MAX;
 
-const RUNNING: u32 = 0;
-const STOPPING: u32 = 1;
+/// The thread running the stop, which never stops itself, as
+/// [`thread_word`] spells it; [`NOBODY`] until [`stop`] begins.
+static CALLER: AtomicU64 = AtomicU64::new(NOBODY);
 
-/// Whether the machine is stopping. **The one word every other read here hangs
-/// off**: it is opened last and read first, so a reader that sees it sees the
-/// caller that goes with it. A [`Gate`], because [`note_progress`] reads it
-/// after the transition [`stop`]'s sweep reads, and the stop opens it before
-/// that sweep: the gate's fences are what keep both from reading stale.
-static STAGE: Gate = Gate::new(RUNNING);
-
-/// The thread running the stop, which never stops itself; no thread at all
-/// until [`stop`] stores one, spelt as `percpu` spells idle.
-static CALLER_PID: AtomicU32 = AtomicU32::new(u32::MAX);
-static CALLER_TID: AtomicU32 = AtomicU32::new(u32::MAX);
-
-fn caller() -> ThreadId {
-    ThreadId { pid: CALLER_PID.load(Relaxed), tid: CALLER_TID.load(Relaxed) }
+fn thread_word(pid: u32, tid: u32) -> u64 {
+    u64::from(pid) << 32 | u64::from(tid)
 }
 
 /// Whether the machine's stop names the running thread, for the one Ring 3
-/// boundary that ranks this against the kill mark.
+/// boundary that ranks this against the kill mark. A sibling thread of the
+/// caller's process stops like any other.
 pub fn stops_this_thread() -> bool {
-    stops(STAGE.read())
-}
-
-/// Whether this boot's stop has begun; once it has, it never ends.
-pub fn begun() -> bool {
-    STAGE.read() == STOPPING
-}
-
-fn stops(stage: u32) -> bool {
-    if stage != STOPPING {
+    let caller = CALLER.load(Acquire);
+    if caller == NOBODY {
         return false;
     }
     let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
         return false;
     };
-    must_stop(ThreadId { pid: pid.raw(), tid: tid.raw() }, caller())
+    thread_word(pid.raw(), tid.raw()) != caller
 }
 
-/// Whether this thread is the one shutdown this boot gets: a second caller's
-/// sweep would band the first where it parks inside its own sync.
+/// Whether this boot's stop has begun; once it has, it never ends.
+pub fn begun() -> bool {
+    CALLER.load(Acquire) != NOBODY
+}
+
+/// Whether this thread is the one shutdown this boot gets: a second caller
+/// stops with the rest.
 pub fn claim_the_shutdown() -> bool {
     // One exchange: a read and a write that can come apart let two callers in.
     !CLAIMED.swap(true, AcqRel)
@@ -105,112 +62,19 @@ pub fn claim_the_shutdown() -> bool {
 
 static CLAIMED: AtomicBool = AtomicBool::new(false);
 
-/// What the stop's caller parks on between two sweeps.
-static PROGRESS: Watch = Watch::new();
-
-/// Called just after the running thread made a transition that can end the
-/// stop's wait on it — banded at its safe point, parked, or exited — and never
-/// before one: a sweep woken first would find it still running and wait for a
-/// post that has already come.
-pub fn note_progress() {
-    if stops(STAGE.after_write()) {
-        PROGRESS.post();
-    }
-}
-
-/// This boot's stop has begun: from here every thread but its caller that
-/// returns to Ring 3 is stopped at that boundary, whatever the [`Record`] says.
+/// This boot's stop has begun and every other CPU has been through Ring 0
+/// since: no thread but the caller is in Ring 3, and none returns to it.
 pub struct Stopping(());
 
-/// Stop every userland thread but the caller, and answer with what it took.
-///
-/// Returns when the machine is stopped or when [`PARK`] is spent, never
-/// otherwise: an expiry is a line in the record and a reset that lands where
-/// it lands, because a machine nobody can turn off is worse than one whose
-/// last word overlapped somebody's syscall.
+/// Begin the stop. Returns once every other CPU has begun a scheduler pass:
+/// whatever it returns to Ring 3 after that pass reads the stop begun.
 #[must_use]
-pub fn stop() -> (Record, Stopping) {
+pub fn stop() -> Stopping {
     // Refused by name rather than defaulted: a caller with no task identity is
     // not a reboot syscall.
-    let caller = ThreadId {
-        pid: percpu::current_pid().expect("quiesce::stop: the caller holds no process").raw(),
-        tid: percpu::current_tid().expect("quiesce::stop: the caller holds no thread").raw(),
-    };
-    // Armed before the first sweep, so a transition landing between a sweep
-    // and the park after it leaves a record that park returns on at once; and
-    // before the stage opens, so nothing between the opening and the first
-    // sweep is a point where a pass can take this CPU.
-    let parkable = crate::scheduler::Parkable::at_entry();
-    let armed = watch::arm(&PROGRESS, 0, WaitClass::Other)
-        .expect("quiesce::stop: the caller holds no task to park");
-    CALLER_PID.store(caller.pid, Relaxed);
-    CALLER_TID.store(caller.tid, Relaxed);
-    // Last: a gate that sees the stop sees the caller it must not stop.
-    STAGE.open(STOPPING);
-
-    crate::sched::driver::ring_all_but_self();
-    let cpus = crate::smp::cpu_count();
-
-    let began = crate::clock::now();
-    let budget = if crate::actuator::stop_budget_spent() { Duration::from_nanos(0) } else { PARK.duration() };
-    let deadline = Deadline::at(began + budget);
-    let mut sweeps = 0;
-    loop {
-        let swept = sweep(caller);
-        sweeps += 1;
-        let elapsed = (crate::clock::now() - began).nanos();
-        if swept.keep_waiting(elapsed, budget.nanos()) {
-            // Uncancellable: the claim is taken, and a caller that left here
-            // would leave a machine nothing else may turn off. The deadline is
-            // `keep_waiting`'s own, so an expiry ends the loop at the next sweep.
-            watch::wait_uncancellable(&parkable, &armed, deadline);
-            continue;
-        }
-        // Read here and not by the caller: the question is what was open at the
-        // moment the stop ended, and every line between here and the record's
-        // own would open more.
-        return (
-            Record {
-                sweep: swept,
-                elapsed_ms: elapsed / 1_000_000,
-                budget_ms: budget.nanos() / 1_000_000,
-                sweeps,
-                cpus,
-            },
-            Stopping(()),
-        );
-    }
-}
-
-/// Mark every parked thread but the caller and count the rest.
-///
-/// The table lock is held for the walk and given up before the park: a thread
-/// on another CPU finishing its own teardown takes this same lock.
-fn sweep(caller: ThreadId) -> Sweep {
-    let mut out = Sweep::default();
-    let guard = process::PROCESS_TABLE.lock();
-    let Some(table) = guard.as_ref() else { return out };
-    for (_, proc) in table.iter() {
-        let pid = proc.pid();
-        for (&tid, thread) in proc.threads() {
-            if !must_stop(ThreadId { pid: pid.raw(), tid: tid.raw() }, caller) {
-                continue;
-            }
-            if matches!(thread.state(), process::ThreadLocation::Zombie(_)) {
-                continue;
-            }
-            let sched = thread
-                .sched()
-                .expect("quiesce::sweep: a live thread in the table with no task");
-            // `stop_if_blocked` refuses a running thread: it has to reach its
-            // own safe point, and until it does it is what this sweep is
-            // waiting for.
-            if sched.shared.stop_pending() || sched.shared.stop_if_blocked() {
-                out.stopped += 1;
-            } else {
-                out.running += 1;
-            }
-        }
-    }
-    out
+    let pid = percpu::current_pid().expect("quiesce::stop: the caller holds no process");
+    let tid = percpu::current_tid().expect("quiesce::stop: the caller holds no thread");
+    CALLER.store(thread_word(pid.raw(), tid.raw()), Release);
+    crate::sched::driver::pass_on_every_other_cpu();
+    Stopping(())
 }

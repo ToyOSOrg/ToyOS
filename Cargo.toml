@@ -337,9 +337,6 @@ acpiserver-api = { path = "lib/acpiserver-api" }
 # The metal loop, the suite's command line, and what the metal profile
 # derives, times and reads off a boot.
 toyos-metal = { path = "tests/metal" }
-# The shutdown's stop record: the kernel renders it and the harness reads it
-# back off a log, so one declaration is what both sides spell it with.
-toyos-quiesce = { path = "lib/quiesce" }
 # The parity table `crypto_parity` prints and the judge reads, under one rule.
 toyos-parity = { path = "lib/parity" }
 # The package energy counter's decode, so the `counters` judge's reading of

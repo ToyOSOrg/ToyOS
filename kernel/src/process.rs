@@ -745,7 +745,7 @@ pub fn stats_from(
 }
 
 /// The last thread out's teardown of its process, on its own stack: free what the process holds, run every release its handles owed, then keep its exit until every end below it is published. Every other thread has left, so none can run in what is freed.
-/// The thread is in the process until the last table section marks it, so a machine stop waits for every record and release here.
+/// The thread is in the process until the last table section marks it.
 /// Waits on nothing: it runs on a killed thread whose one cancel may be spent, and at the exit boundary's preempt depth, where a park asserts.
 /// The section that marks it also lets the teardown's own hold on the publication go: the exit is published here when nothing below it is left, and otherwise by the last end below it.
 /// The supervisor's end, whatever ended it, ends the machine: nothing starts it again.
@@ -772,8 +772,6 @@ fn teardown(pid: Pid, tid: Tid, end: End, mark: i32, process_data: &Arc<Lock<Pro
             Some(crate::object::process::Exit::new(end, stats, released));
         tree::teardown_done(table, pid)
     };
-    // The table says zombie now, which a sweep counts as nothing left to stop.
-    crate::quiesce::note_progress();
     publish_climb(ready);
     if supervisor {
         panic!("the supervisor ended, {end}, and nothing starts it again");
@@ -812,8 +810,7 @@ fn leave_as(leaving: Leaving) {
         }
     };
     match out {
-        // The table says zombie, or has it no more, which a sweep counts as nothing left to stop.
-        proclife::Leave::NotLast => crate::quiesce::note_progress(),
+        proclife::Leave::NotLast => {}
         proclife::Leave::Last { end, mark } => teardown(pid, tid, end, mark, &process_data),
     }
 }
