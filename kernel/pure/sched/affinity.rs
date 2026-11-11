@@ -106,6 +106,26 @@ impl CpuMask {
     pub fn words(&self) -> &[u64; MASK_WORDS] {
         &self.0
     }
+
+    pub fn reach(&self) -> Reach {
+        if *self == Self::ANY {
+            Reach::Any
+        } else if self.single().is_some() {
+            Reach::One
+        } else {
+            Reach::Several
+        }
+    }
+}
+
+/// What a run queue counts of a task's mask, so it compares no mask: whether
+/// no other CPU may be given the task, or every CPU may.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reach {
+    One,
+    Several,
+    /// [`CpuMask::ANY`].
+    Any,
 }
 
 impl FromIterator<CpuId> for CpuMask {

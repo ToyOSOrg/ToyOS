@@ -12,10 +12,16 @@
 //! The queue owns its [`ReadyTask`] values. The running fair thread's entity
 //! stays queued, charged as it runs, while its value is the CPU's `running`.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+
+#[cfg(test)]
+mod differential;
+#[cfg(test)]
+mod reference;
 
 use crate::sched::eevdf::{Arena, Lag, Queue, Slot};
-use crate::sched::affinity::CpuMask;
+use crate::sched::affinity::{CpuMask, Reach};
 use crate::sched::hw::{CpuId, Nanos};
 use crate::sched::job::{Job, JobKey};
 use crate::sched::sync::Arc;
@@ -58,7 +64,10 @@ pub struct RunQueue<X: SchedPayload> {
     /// Every queued thread's entity, whichever group's queue it is in, holding
     /// its value: `None` for the running thread's.
     threads: Arena<TaskKey, Option<ReadyTask<X>>>,
-    members: BTreeMap<JobKey, Slot>,
+    /// Each queued group's job and entity, in job order, the order every walk
+    /// of the groups takes. A pass already walks every group, so a linear
+    /// insert costs it no more.
+    members: Vec<(JobKey, Slot)>,
     /// The running thread, where it is fair: its entity is queued and its
     /// value is not.
     running: Option<Place>,
@@ -84,7 +93,7 @@ impl<X: SchedPayload> RunQueue<X> {
             groups: Queue::new(),
             group_slots: Arena::new(),
             threads: Arena::new(),
-            members: BTreeMap::new(),
+            members: Vec::new(),
             running: None,
             ready_fair: 0,
             pinned_fair: 0,
@@ -129,12 +138,13 @@ impl<X: SchedPayload> RunQueue<X> {
         let job = task.job().clone();
         let jk = job.key();
         job.enter();
-        self.count_in(task.affinity());
+        self.count_in(task.reach());
         let standing = task.standing_mut();
         let carried = core::mem::take(&mut standing.group_lag);
         let left = standing.left.take();
-        let group = match self.members.get(&jk) {
-            Some(&group) => {
+        let group = match self.member(jk) {
+            Ok(at) => {
+                let group = self.members[at].1;
                 if carried != Lag::ZERO {
                     let weight = self.group_slots.weight(group);
                     self.groups.readmit(&mut self.group_slots, group, weight, |mut held| {
@@ -144,7 +154,7 @@ impl<X: SchedPayload> RunQueue<X> {
                 }
                 group
             }
-            None => {
+            Err(at) => {
                 // At the weight it holds once this thread is counted here.
                 let weight = job.group_weight(1);
                 let group = self.groups.join(
@@ -155,7 +165,7 @@ impl<X: SchedPayload> RunQueue<X> {
                     carried,
                     Group { job, threads: Queue::new() },
                 );
-                self.members.insert(jk, group);
+                self.members.insert(at, (jk, group));
                 group
             }
         };
@@ -179,11 +189,17 @@ impl<X: SchedPayload> RunQueue<X> {
         group.job.leave();
         if group.threads.is_empty() {
             let (left, group) = self.groups.leave(&mut self.group_slots, at.group);
-            self.members.remove(&group.job.key());
+            let at = self.member(group.job.key()).expect("a queued group is a member");
+            self.members.remove(at);
             standing.group_lag = left.lag.clamp_ns(LAG_BOUND_NS);
         } else {
             self.reweigh(at.group);
         }
+    }
+
+    /// Where `job`'s group is in [`Self::members`], or would go.
+    fn member(&self, job: JobKey) -> Result<usize, usize> {
+        self.members.binary_search_by_key(&job, |&(key, _)| key)
     }
 
     /// Hold a group at its current weight on this CPU.
@@ -196,7 +212,7 @@ impl<X: SchedPayload> RunQueue<X> {
     /// Every group at the weight its job's runnable count now gives it: what
     /// the job's other CPUs changed since this one last decided.
     pub fn refresh(&mut self) {
-        for &group in self.members.values() {
+        for &(_, group) in &self.members {
             let g = self.group_slots.payload(group);
             let weight = g.job.group_weight(g.threads.len() as u32);
             self.groups.reweight(&mut self.group_slots, group, weight);
@@ -230,7 +246,7 @@ impl<X: SchedPayload> RunQueue<X> {
         let at = self.pick_fair()?;
         let task = self.threads.payload_mut(at.thread).take().expect("the pick has its value");
         self.ready_fair -= 1;
-        self.count_out(task.affinity());
+        self.count_out(task.reach());
         self.running = Some(at);
         Some(task)
     }
@@ -274,7 +290,7 @@ impl<X: SchedPayload> RunQueue<X> {
                         self.groups.end_request(&mut self.group_slots, at.group);
                         self.group_slots.payload_mut(at.group).threads.end_request(&mut self.threads, at.thread);
                     }
-                    self.count_in(task.affinity());
+                    self.count_in(task.reach());
                     *self.threads.payload_mut(at.thread) = Some(task);
                     self.ready_fair += 1;
                 }
@@ -311,7 +327,7 @@ impl<X: SchedPayload> RunQueue<X> {
 
     /// Every queued fair thread whose value is here, with the group it is in.
     fn ready(&self) -> impl Iterator<Item = (Place, &ReadyTask<X>)> + '_ {
-        self.members.values().flat_map(move |&group| {
+        self.members.iter().flat_map(move |&(_, group)| {
             self.group_slots.payload(group).threads.slots(&self.threads).filter_map(move |thread| {
                 self.threads.payload(thread).as_ref().map(|task| (Place { group, thread }, task))
             })
@@ -322,7 +338,7 @@ impl<X: SchedPayload> RunQueue<X> {
     fn take(&mut self, at: Place) -> ReadyTask<X> {
         let mut task = self.threads.payload_mut(at.thread).take().expect("a ready task");
         self.ready_fair -= 1;
-        self.count_out(task.affinity());
+        self.count_out(task.reach());
         self.leave(at, task.standing_mut());
         task
     }
@@ -342,7 +358,7 @@ impl<X: SchedPayload> RunQueue<X> {
         let (_, _, _, at) = self
             .members
             .iter()
-            .filter_map(|(&jk, &group)| {
+            .filter_map(|&(jk, group)| {
                 let g = self.group_slots.payload(group);
                 let (key, thread) = g
                     .threads
@@ -397,24 +413,24 @@ impl<X: SchedPayload> RunQueue<X> {
             return CpuMask::ANY;
         }
         self.ready()
+            .filter(|(_, task)| task.reach() != Reach::One)
             .map(|(_, task)| task.affinity())
-            .filter(|mask| mask.single().is_none())
             .fold(CpuMask::NONE, CpuMask::union)
     }
 
-    fn count_in(&mut self, mask: CpuMask) {
-        self.pinned_fair += usize::from(mask.single().is_some());
-        self.unrestricted_fair += usize::from(mask == CpuMask::ANY);
+    fn count_in(&mut self, reach: Reach) {
+        self.pinned_fair += usize::from(reach == Reach::One);
+        self.unrestricted_fair += usize::from(reach == Reach::Any);
     }
 
-    fn count_out(&mut self, mask: CpuMask) {
-        self.pinned_fair -= usize::from(mask.single().is_some());
-        self.unrestricted_fair -= usize::from(mask == CpuMask::ANY);
+    fn count_out(&mut self, reach: Reach) {
+        self.pinned_fair -= usize::from(reach == Reach::One);
+        self.unrestricted_fair -= usize::from(reach == Reach::Any);
     }
 
     /// Is `key` queued in the fair band with a mask naming more than one CPU?
     pub fn holds_movable(&self, key: TaskKey) -> bool {
-        self.ready().any(|(_, task)| task.key() == key && task.affinity().single().is_none())
+        self.ready().any(|(_, task)| task.key() == key && task.reach() != Reach::One)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -431,7 +447,7 @@ impl<X: SchedPayload> RunQueue<X> {
     pub fn groups(&self) -> impl Iterator<Item = (JobKey, u64, usize)> + '_ {
         self.members
             .iter()
-            .map(|(&jk, &group)| (jk, self.group_slots.weight(group), self.group_slots.payload(group).threads.len()))
+            .map(|&(jk, group)| (jk, self.group_slots.weight(group), self.group_slots.payload(group).threads.len()))
     }
 
     /// Residents, for the invariant walks: the real-time band, then each
