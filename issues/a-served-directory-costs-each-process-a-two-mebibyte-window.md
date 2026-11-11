@@ -18,7 +18,7 @@ that 2 MiB is the size shared memory comes in, is gone: a region is whole
 4 KiB pages.
 
 **Its creation is most of what the all-CPU build loses** (2026-11-11,
-[evidence](EVIDENCE); the attribution is in
+[evidence](https://github.com/ToyOSOrg/evidence/tree/36117dda5c9a1a3803745c45785cc8243c5b5d51/spawnperf-diag); the attribution is in
 `issues/spawning-a-process-costs-toyos-up-to-147-times-linuxs.md`). A build
 child makes four `SHM_CREATE`s beside its four directory connections, by
 inference from the SDK their windows. Each is 512 frames drawn one at a time

@@ -53,7 +53,7 @@ A fourth, `IN_PASS`, was measured with them and now sits in its CPU's own
 record (`kernel/src/cpu_local.rs`), a line no other CPU writes.
 
 **The frame allocator's lock is what the all-CPU build waits on**
-(2026-11-11, [evidence](EVIDENCE); the attribution is in
+(2026-11-11, [evidence](https://github.com/ToyOSOrg/evidence/tree/36117dda5c9a1a3803745c45785cc8243c5b5d51/spawnperf-diag); the attribution is in
 `issues/spawning-a-process-costs-toyos-up-to-147-times-linuxs.md`). Under the
 build's 256 children, one a CPU, it is 99 % of every contended lock wait on
 both benches: 418,000 contended acquisitions and 243 ms of spin a round on
