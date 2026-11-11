@@ -17,6 +17,8 @@ use toyos::log::ring::Reader;
 use toyos::log::stdio::{self, Stream};
 use toyos::shm::SharedMemory;
 
+// libc's calls, which a Rust program links only where it asks for them.
+#[link(name = "toyos_c", kind = "static")]
 unsafe extern "C" {
     fn dup2(old: i32, new: i32) -> i32;
     fn write(fd: i32, buf: *const u8, len: usize) -> isize;
