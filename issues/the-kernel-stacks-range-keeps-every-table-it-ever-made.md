@@ -1,6 +1,6 @@
 ---
-status: open
-kind: finding
+status: owner
+kind: question
 opened: 2026-11-11
 ---
 
@@ -13,13 +13,21 @@ and are never freed: a dropped stack's slot is reused only after a flush, and
 freeing a table without one would leave it named by another CPU's
 paging-structure cache.
 
-The bound is one 4 KiB table for each 8 slots ever in use at once, at most 64
-slots more than the most threads alive at once, and one directory for each
-4096 slots: 2 MiB of tables for a process at its 4096-thread limit. A spawn
-that cannot get a frame for one is refused.
+The bound is one 4 KiB table for each 8 slots ever in use at once and one
+directory for each 4096. The slots ever in use are at most the most stacks
+alive at once, 64 more (`kernel::stackslots::FLUSH_BATCH`), and one for each
+spawn that raced a flush: 2 MiB of tables for a process at its 4096-thread
+limit, and 128 MiB at the range's own limit of 262144 stacks. A spawn that
+cannot get a frame for one is refused. The slots' own bookkeeping is 96 KiB
+of the kernel's image.
+
+The range and this allocation are the orchestrator's decision, taken after
+review r1 of #1211 and recorded on that pull request; the owner has not ruled
+on either.
 
 Not measured: no boot has read how many tables the range holds.
 
-**Exit**: the owner accepted this bound when the range was designed; this
-record goes when a census line shows the tables' count on a machine, or a
-workload shows the bound mattering.
+**For the owner**: whether a kernel allocation that is charged to no job and
+never returned is accepted at this bound. If it is not, the tables of a
+2 MiB page whose eight slots are all clean can be freed behind the flush that
+made them clean.

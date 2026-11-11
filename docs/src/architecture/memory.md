@@ -27,7 +27,8 @@
   thread ends; the address is reused only once no CPU can still translate it.
 - That range's page tables are the kernel's own and are kept: one for each
   eight stacks ever in use at once, about 2 MiB for a process at its thread
-  limit. A thread that cannot get one is refused.
+  limit. A thread that cannot get one is refused, as is one past the fixed
+  number of stacks the range holds at once.
 - A CPU's own stacks are set aside when it is brought up and kept for the
   machine's life.
 

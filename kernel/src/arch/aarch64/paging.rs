@@ -396,19 +396,25 @@ pub fn guard_4k(phys: u64) {
 }
 
 /// The table of 4 KiB pages over the 2 MiB at `va` in the kernel stacks'
-/// range, made with the tables above it where absent, or `None` with no
-/// frame for one. They are the kernel's and stay for good.
-fn stack_table(high: &mut Tables, va: u64) -> Option<&mut Table> {
+/// range: made with the tables above it where absent and `make` asks, or
+/// `None` with no frame for one; only looked for where it does not. They are
+/// the kernel's and stay for good.
+fn stack_table(high: &mut Tables, va: u64, make: bool) -> Option<&mut Table> {
     let mut table: *mut Table = high.root_mut();
     for level in 0..3 {
         // SAFETY: the root or a table it linked, and `high` is the only reference.
         let current = unsafe { &mut *table };
         let i = index(va, level);
         if current.0[i] & VALID == 0 {
+            if !make {
+                return None;
+            }
             current.set(i, crate::mm::pmm::alloc_frame()?.into_raw() | TABLE | VALID);
         }
-        // SAFETY: valid, and only tables are linked over this range.
-        table = unsafe { Table::at_mut(current.0[i] & ADDR) };
+        let entry = current.0[i];
+        assert!(entry & TABLE != 0, "stack_table: a block at level {level} over {va:#x}, where only stacks' tables belong");
+        // SAFETY: valid and a table: one this root linked.
+        table = unsafe { Table::at_mut(entry & ADDR) };
     }
     // SAFETY: as in the loop.
     Some(unsafe { &mut *table })
@@ -421,7 +427,7 @@ fn stack_table(high: &mut Tables, va: u64) -> Option<&mut Table> {
 pub fn map_stack(va: u64, frames: &[u64]) -> bool {
     let mut high = high();
     let high = high.as_mut().expect("map_stack: before the kernel's tables exist");
-    let Some(pages) = stack_table(high, va) else { return false };
+    let Some(pages) = stack_table(high, va, true) else { return false };
     for (j, &frame) in frames.iter().enumerate() {
         pages.set(index(va, 3) + j, frame | kernel_leaf(CachePolicy::Normal, Prot::ReadWrite) | TABLE);
     }
@@ -435,7 +441,7 @@ pub fn map_stack(va: u64, frames: &[u64]) -> bool {
 pub fn unmap_stack(va: u64, pages: usize, mut each: impl FnMut(u64)) {
     let mut high = high();
     let high = high.as_mut().expect("unmap_stack: before the kernel's tables exist");
-    let table = stack_table(high, va).expect("unmap_stack: a mapped stack has its table");
+    let table = stack_table(high, va, false).expect("unmap_stack: a mapped stack has its table");
     for j in index(va, 3)..index(va, 3) + pages {
         let leaf = table.0[j];
         assert!(leaf & VALID != 0, "unmap_stack: nothing mapped in {va:#x}'s table at {j}");

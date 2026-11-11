@@ -5,12 +5,13 @@
 //! slot of a kernel virtual range of their own ([`RANGE`]). The rest of every
 //! slot is never mapped in any incarnation, so the guard is true on every CPU
 //! with nothing to flush. A dropped stack's frames go back at once and its
-//! slot's address waits ([`FLUSH_BATCH`]): until the flush, a stale
+//! slot's address waits (`kernel::stackslots`): until the flush, a stale
 //! translation of it reaches only what a kernel use-after-free of the dead
 //! stack would, the exposure every frame already has through the direct map.
 //! The range's page tables are the kernel's own and are never freed, since a
 //! CPU's paging-structure cache may still name one: a table for each 8 slots
-//! ever in use at once and a directory for each 4096.
+//! ever in use at once and a directory for each 4096. The range holds
+//! `kernel::stackslots::SLOTS` stacks at once.
 //!
 //! **A CPU's own** (idle, x86-64's IST) is [`permanent`]: carved at bring-up
 //! out of the direct map, above a page taken out of it, because an x86-64 AP
@@ -22,6 +23,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use kernel::sched::job::Job;
+use kernel::stackslots::{Slots, Take};
 
 use super::{DirectMap, PAGE_2M, PAGE_BYTES, PAGE_SIZE};
 use crate::invalidation::{Half, Origin};
@@ -35,60 +37,32 @@ pub const RANGE: u64 = 0xFFFF_FF00_0000_0000;
 /// 4 KiB leaves, so no slot crosses one.
 const SLOT: u64 = 256 * 1024;
 
-/// How many slots the range's 512 GiB holds.
-const SLOTS: u32 = ((1u64 << 39) / SLOT) as u32;
+/// Which slots are in use, clean or waiting on a flush (`kernel::stackslots`).
+static SLOTS: Lock<Slots> = Lock::new(Slots::new());
 
-/// Retired slots a spawn waits for before it flushes them clean rather than
-/// take a slot never used. A flush interrupts every CPU, so a spawn pays one
-/// in at most this many; and this many slots' addresses, eight tables' worth,
-/// are the most that wait unused.
-const FLUSH_BATCH: usize = 64;
-
-struct Slots {
-    /// Slots below this have been used.
-    fresh: u32,
-    /// Used slots no CPU holds a translation of.
-    clean: Vec<u32>,
-    /// Slots whose stack dropped since the last flush.
-    retired: Vec<u32>,
-    /// A spawn is flushing `retired`'s head, outside the lock.
-    flushing: bool,
+/// A slot no CPU holds a translation of, or `None` where every slot the
+/// range holds is in use: a refused spawn.
+fn take_slot() -> Option<u32> {
+    loop {
+        // Bound to a name so the lock is let go before the flush.
+        let take = SLOTS.lock().take();
+        match take {
+            Take::Slot(slot) => return Some(slot),
+            Take::Spent => return None,
+            Take::Flush => {
+                // Every CPU drops every translation of the kernel half.
+                // AArch64's unmap already broadcast each page's, and this
+                // does nothing there.
+                crate::arch::tlb::shootdown(Origin::Stack, Half::Kernel);
+                SLOTS.lock().flushed();
+            }
+        }
+    }
 }
 
-static SLOTS_FREE: Lock<Slots> = Lock::new(Slots { fresh: 0, clean: Vec::new(), retired: Vec::new(), flushing: false });
-
-/// A slot no CPU holds a translation of, or `None` where the range is spent
-/// or the lists cannot grow: a refused spawn.
-fn take_slot() -> Option<u32> {
-    let mut slots = SLOTS_FREE.lock();
-    // Room for every used slot in either list, so a drop never allocates.
-    let used = slots.fresh as usize + 1;
-    let (clean, retired) = (used - slots.clean.len(), used - slots.retired.len());
-    slots.clean.try_reserve(clean).ok()?;
-    slots.retired.try_reserve(retired).ok()?;
-    if let Some(slot) = slots.clean.pop() {
-        return Some(slot);
-    }
-    let waiting = slots.retired.len();
-    let spent = slots.fresh == SLOTS;
-    if !slots.flushing && (waiting >= FLUSH_BATCH || (spent && waiting > 0)) {
-        slots.flushing = true;
-        drop(slots);
-        // Every CPU drops every translation of the kernel half, so the
-        // `waiting` slots retired before it are clean. AArch64's unmap
-        // already broadcast each page's, and this does nothing there.
-        crate::arch::tlb::shootdown(Origin::Stack, Half::Kernel);
-        let mut slots = SLOTS_FREE.lock();
-        slots.flushing = false;
-        let slots = &mut *slots;
-        slots.clean.extend(slots.retired.drain(..waiting));
-        return slots.clean.pop();
-    }
-    if spent {
-        return None;
-    }
-    slots.fresh += 1;
-    Some(slots.fresh - 1)
+/// Where the `pages`-page stack in `slot` begins: it ends with its slot.
+fn bottom_of(slot: u32, pages: usize) -> u64 {
+    RANGE + (u64::from(slot) + 1) * SLOT - (pages * PAGE_BYTES) as u64
 }
 
 /// A thread's kernel stack: zeroed frames `job` holds, which go back to it
@@ -101,7 +75,7 @@ pub struct Stack {
 
 impl Stack {
     /// `bytes` in whole pages for `job`, or `None` where it may hold no more
-    /// frames, no table can be had for the slot, or the range is spent.
+    /// frames, no table can be had for the slot, or every slot is in use.
     pub fn new(job: &Arc<Job>, bytes: usize) -> Option<Self> {
         let pages = bytes / PAGE_BYTES;
         assert!(bytes.is_multiple_of(PAGE_BYTES) && pages > 0 && (pages as u64) < SLOT / PAGE_SIZE, "stack: {bytes} bytes");
@@ -114,31 +88,25 @@ impl Stack {
             // SAFETY: a frame just taken off the allocator, through the direct map.
             unsafe { core::ptr::write_bytes(DirectMap::from_phys(frame).as_mut_ptr::<u8>(), 0, PAGE_BYTES) };
         }
-        let stack = take_slot().map(|slot| Self { slot, pages, job: Arc::clone(job) });
-        match stack {
-            Some(stack) if super::paging::map_stack(stack.bottom() as u64, &frames) => Some(stack),
+        let slot = take_slot();
+        match slot {
+            Some(slot) if super::paging::map_stack(bottom_of(slot, pages), &frames) => {
+                Some(Self { slot, pages, job: Arc::clone(job) })
+            }
             unmapped => {
-                // SAFETY: no table names the frames. A slot taken and not
-                // mapped is still clean.
+                // SAFETY: no table names the frames.
                 unsafe { super::pmm::free_held(job, frames) };
-                if let Some(stack) = unmapped {
-                    SLOTS_FREE.lock().clean.push(stack.slot);
-                    #[expect(clippy::disallowed_methods, reason = "it holds no frame, and its slot went back above")]
-                    core::mem::forget(stack);
+                if let Some(slot) = unmapped {
+                    SLOTS.lock().unused(slot);
                 }
                 None
             }
         }
     }
 
-    /// One past the highest byte: its slot's end.
-    pub fn top(&self) -> u64 {
-        RANGE + (u64::from(self.slot) + 1) * SLOT
-    }
-
     /// The lowest byte.
     pub fn bottom(&self) -> *mut u8 {
-        (self.top() - (self.pages * PAGE_BYTES) as u64) as *mut u8
+        bottom_of(self.slot, self.pages) as *mut u8
     }
 }
 
@@ -155,7 +123,7 @@ impl Drop for Stack {
         // holds is the module's stated exposure, and the slot is not reused
         // until it is flushed.
         unsafe { super::pmm::free_held(&self.job, frames[..count].iter().copied()) };
-        SLOTS_FREE.lock().retired.push(self.slot);
+        SLOTS.lock().retire(self.slot);
     }
 }
 

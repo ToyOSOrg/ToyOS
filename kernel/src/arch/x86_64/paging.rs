@@ -552,10 +552,11 @@ impl KernelTables {
     }
 
     /// The table of 4 KiB leaves over the 2 MiB at `va` in the kernel stacks'
-    /// range, made with the directory above it where absent, or `None` with
-    /// no frame for one. Both are the kernel's and stay for good: a CPU's
-    /// paging-structure cache may name one long after its leaves are clear.
-    fn stack_table(&mut self, va: u64) -> Option<&mut PageTablePage> {
+    /// range: made with the directory above it where absent and `make` asks,
+    /// or `None` with no frame for one; only looked for where it does not.
+    /// Both are the kernel's and stay for good: a CPU's paging-structure
+    /// cache may name one long after its leaves are clear.
+    fn stack_table(&mut self, va: u64, make: bool) -> Option<&mut PageTablePage> {
         let (pml4_idx, pdpt_idx, pd_idx) = indices(va);
         let mut at = self.root_table()[pml4_idx];
         assert!(at & PAGE_PRESENT != 0, "stack_table: no table under the root slot of {va:#x}");
@@ -564,10 +565,14 @@ impl KernelTables {
             // forever; `&mut self` gives the exclusivity.
             let table = unsafe { PageTablePage::from_phys_mut(at & ADDR_MASK) };
             if table[index] & PAGE_PRESENT == 0 {
+                if !make {
+                    return None;
+                }
                 let frame = crate::mm::pmm::alloc_frame()?.into_raw();
                 table.write(index, va, frame | KERNEL_TABLE).expect_install("stack_table");
             }
             at = table[index];
+            assert!(at & PAGE_SIZE_BIT == 0, "stack_table: a leaf over {va:#x}, where only stacks' tables belong");
         }
         // SAFETY: as in the loop.
         Some(unsafe { PageTablePage::from_phys_mut(at & ADDR_MASK) })
@@ -671,10 +676,13 @@ pub fn guard_4k(phys: u64) {
 /// table. A leaf that was not present owes no invalidation.
 pub fn map_stack(va: u64, frames: &[u64]) -> bool {
     let mut kernel = KERNEL.lock();
-    let Some(table) = kernel.stack_table(va) else { return false };
+    let Some(table) = kernel.stack_table(va, true) else { return false };
     let first = ((va >> 12) & 0x1FF) as usize;
     for (i, &frame) in frames.iter().enumerate() {
-        let leaf = frame | kernel_leaf(CachePolicy::Normal, Prot::ReadWrite);
+        // Accessed and dirty from the start, as a user leaf is
+        // (`Prot::leaf_bits`): a stack's every page is written, and the
+        // walker would otherwise store both on each one's first touch.
+        let leaf = frame | kernel_leaf(CachePolicy::Normal, Prot::ReadWrite) | PAGE_ACCESSED | PAGE_DIRTY;
         table.write(first + i, va + i as u64 * PAGE_4K, leaf).expect_install("map_stack");
     }
     true
@@ -685,7 +693,7 @@ pub fn map_stack(va: u64, frames: &[u64]) -> bool {
 /// addresses unused until a kernel-half shootdown.
 pub fn unmap_stack(va: u64, pages: usize, mut each: impl FnMut(u64)) {
     let mut kernel = KERNEL.lock();
-    let table = kernel.stack_table(va).expect("unmap_stack: a mapped stack has its table");
+    let table = kernel.stack_table(va, false).expect("unmap_stack: a mapped stack has its table");
     let first = ((va >> 12) & 0x1FF) as usize;
     for index in first..first + pages {
         let leaf = table[index];
