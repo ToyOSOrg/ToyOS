@@ -4,7 +4,7 @@
 
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
-use super::{apic, control_regs, copy, cpu, idt, ioapic, microcode, pat, percpu};
+use super::{apic, control_regs, copy, cpu, idt, ioapic, microcode, mitigation, pat, percpu};
 use crate::drivers::acpi::{self, MadtInfo};
 use crate::log;
 use crate::mm::Region;
@@ -65,6 +65,7 @@ pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     // RDSEED, and `control_regs::init`'s CPUID.
     microcode::init(args);
     microcode::load(0);
+    mitigation::record_boot_cpu(mitigation::apply());
 
     let rule = match cpu::vendor() {
         _ if crate::actuator::copies_go_down() => copy::Rule { window: 4096 },
