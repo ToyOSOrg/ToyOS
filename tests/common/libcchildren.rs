@@ -55,9 +55,10 @@ pub fn libc_children() -> Result<(), String> {
     judge(&jobs, |job| qemu.run_test(job, BOUND))
 }
 
-/// Each program `run` in turn, its verdict said as it ends. One that ends
-/// with no exit code ends the row: the guest's runner takes one job at a time
-/// and waits for it, so a boot whose job never ended runs nothing after it.
+/// Each program `run` in turn, its verdict said as it ends. Any that ends with
+/// no exit code ends the row, as a failing job ends every other row's: one
+/// that never ended leaves the guest's runner, which takes one job at a time,
+/// running nothing after it.
 pub fn judge(jobs: &[(&str, String)], mut run: impl FnMut(&str) -> TestResult) -> Result<(), String> {
     let mut failed = Vec::new();
     for (at, (name, job)) in jobs.iter().enumerate() {

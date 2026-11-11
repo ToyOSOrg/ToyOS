@@ -1163,14 +1163,19 @@ fn attempted(programs: &[Program], os: Os) -> (Vec<&Program>, Vec<&str>) {
 
 /// [`left_behind`], once what a group [`heard`] ended left is removed: no
 /// process of it unwound, the step that hung is the red that says so, and its
-/// scratch goes now rather than at some later process's sweep.
+/// scratch goes now rather than at some later process's sweep. Whether the
+/// steps wrote to `tmp` at all is read before that removal, which makes the
+/// lock it is read from.
 fn nothing_left(tmp: &Path, short: &Path, before: &[PathBuf], owed: bool) -> Result<String, String> {
     if !ENDED_A_GROUP.load(Ordering::SeqCst) {
         return left_behind(tmp, short, before, owed);
     }
+    if let Some(why) = never_written(tmp).filter(|_| owed) {
+        return Err(why);
+    }
     let removed = reclaim_ended(tmp, short, before);
     left_behind(tmp, short, before, owed)
-        .map(|said| format!("{said}, once {removed} root(s) of the processes this driver ended were removed"))
+        .map(|said| format!("{said}, once {removed} root(s) of gone processes were removed"))
 }
 
 /// Remove every root under `tmp` whose process is gone, and every such root
@@ -1196,16 +1201,11 @@ fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf], owed: bool) -> Resu
             .collect::<Result<_, _>>()
             .map_err(|e| format!("read {}: {e}", dir.display()))
     };
+    if let Some(why) = never_written(tmp).filter(|_| owed) {
+        return Err(why);
+    }
     let mine = toyos_tmpdir::private(tmp);
     let mut left = names(&mine)?;
-    if owed && !left.iter().any(|name| name == toyos_tmpdir::GLOBAL) {
-        return Err(format!(
-            "{} holds no {}: every step above makes a `toyos_tmpdir::TempDir`, so its absence \
-             means this $TMPDIR was never the one the steps actually wrote to",
-            mine.display(),
-            toyos_tmpdir::GLOBAL
-        ));
-    }
     let private = mine.file_name().expect("a private directory has a name").to_string_lossy();
     left.retain(|name| name != toyos_tmpdir::GLOBAL);
     for name in &mut left {
@@ -1235,6 +1235,20 @@ fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf], owed: bool) -> Resu
         return Ok("every test took its scratch with it".into());
     }
     Err(said.join("; "))
+}
+
+/// Why `tmp`'s [`toyos_tmpdir::private`] directory shows the steps never
+/// wrote there, if it holds no [`toyos_tmpdir::GLOBAL`].
+fn never_written(tmp: &Path) -> Option<String> {
+    let mine = toyos_tmpdir::private(tmp);
+    (!mine.join(toyos_tmpdir::GLOBAL).exists()).then(|| {
+        format!(
+            "{} holds no {}: every step above makes a `toyos_tmpdir::TempDir`, so its absence \
+             means this $TMPDIR was never the one the steps actually wrote to",
+            mine.display(),
+            toyos_tmpdir::GLOBAL
+        )
+    })
 }
 
 // --- The change's scope --------------------------------------------------------
@@ -1621,6 +1635,7 @@ mod tests {
         let tmp = toyos_tmpdir::TempDir::new("ended-group");
         let short = toyos_tmpdir::TempDir::new("ended-group-short");
         let (mine, short_mine) = (toyos_tmpdir::private(&tmp), toyos_tmpdir::private(&short));
+        std::fs::write(mine.join(toyos_tmpdir::GLOBAL), b"").unwrap();
         let earlier = short_mine.join(format!("{}1-0", toyos_tmpdir::ROOT_PREFIX));
         std::fs::create_dir(&earlier).unwrap();
         let before = toyos_tmpdir::gone_roots(&short);
@@ -1629,7 +1644,13 @@ mod tests {
             std::fs::create_dir_all(root.join("run-0")).unwrap();
             std::fs::write(root.join("run-0/boot.img"), b"a guest's disk").unwrap();
         }
-        left_behind(&tmp, &short, &before, true).expect_err("the ended group's roots are a red while they stand");
+        let refusal =
+            left_behind(&tmp, &short, &before, true).expect_err("the ended group's roots are a red while they stand");
+        // One clause for what is left in `tmp`, one for a dead process's root under `short`.
+        let (left_in_tmp, died) = refusal.split_once("; ").unwrap_or_else(|| panic!("one root is not named: {refusal}"));
+        let private = mine.file_name().unwrap().to_string_lossy();
+        assert!(left_in_tmp.contains(&format!("{private}/{}2-0", toyos_tmpdir::ROOT_PREFIX)), "{refusal}");
+        assert!(died.contains(&ended[1].display().to_string()), "{refusal}");
         assert_eq!(reclaim_ended(&tmp, &short, &before), 2);
         assert!(ended.iter().all(|root| !root.exists()) && earlier.exists(), "{ended:?} {earlier:?}");
         left_behind(&tmp, &short, &before, true).expect("nothing of the ended group is left");
