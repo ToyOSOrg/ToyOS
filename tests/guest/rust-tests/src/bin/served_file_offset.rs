@@ -10,6 +10,9 @@
 //! - A child given the file as its output writes at the parent's offset, and
 //!   the parent's next write lands after the child's bytes.
 
+#[path = "../image.rs"]
+mod image;
+
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::{Command, Stdio};
@@ -113,15 +116,19 @@ fn refused_spawn_keeps_export(fd: i32) {
     use toyos::AsHandle;
     let exported = toyos::files::export(fd).expect("export the shared description");
     let fds = [(1, exported.as_handle(), toyos::fd::Kind::File)];
+    let image = image::image_of("/system/bin/toybox");
+    // A pipe is no process to place a child under, which only the kernel says.
+    let (_read, write) = toyos::pipe_pair().expect("a pipe of our own");
     let request = toyos::spawn::Spawn {
         program: "/system/bin/toybox", image: None, image_held: false,
         argv: b"toybox\0", env: &[], cwd: "/", fds: &fds,
-        endow: Vec::new(), provided: Vec::new(), parent: toyos::spawn::Parent::Caller,
+        endow: Vec::new(), provided: Vec::new(), parent: toyos::spawn::Parent::Place(write.as_handle()),
         independent: false, launcher: None, pager: None,
     };
     let toyos::spawn::Start::Helper(helper) = request.start().expect("a helper") else { panic!("a helper became a launch") };
-    // No image: the kernel refuses after the SDK duplicated the endowments.
-    assert!(matches!(helper.spawn(None), Err(toyos::spawn::Refused::Syscall(toyos_abi::syscall::SyscallError::InvalidArgument))));
+    // The kernel refuses after the SDK duplicated the descriptors and laid the program out.
+    let refused = helper.spawn(Some(&image)).err();
+    assert_eq!(refused, Some(toyos::spawn::Refused::Syscall(toyos_abi::syscall::SyscallError::InvalidArgument)));
     let mut dir = toyos::fs::Dir::adopt(toyos::ipc::Connection::received(exported)).expect("refusal kept the original export");
     let fid = toyos::fs::Fid { id: 1, generation: dir.generation() };
     assert_eq!(dir.seek(fid, toyos::fs::SEEK_CURRENT, 0).unwrap(), 4, "refusal kept the shared offset");
