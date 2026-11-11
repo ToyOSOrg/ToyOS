@@ -79,6 +79,27 @@ is nothing to enable.
 - **The wake storm's per-waiter gap** between the benches; next, its split
   (`issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`).
 
+**The switch's skips (#1251), unmeasured on metal.** A switch loads no
+root, FPU state, FS base or SS the incoming thread already has. No bench has
+run it, so its speed-up is not measured.
+
+- **Owed on metal:** on the T14 and the AMD bench, main's `testcases` boot
+  green, `vector_state` reporting its 16 trips back to a CPU whose registers
+  held the thread's earlier state; and main's `shared-debug` boot with
+  `sysret_ss_reload` judging "not needed" on the T14 (host bridge 8086) and
+  "reloaded" on the AMD bench (1022).
+- **Owed on metal:** on the T14, the restore skip's two negative controls,
+  each main with one half of the skip's test removed
+  ([patches](https://github.com/ToyOSOrg/evidence/tree/1a08e6bb6978c796427b929bb6c9bb764db0a851/r2/patches))
+  and `vector_state` alone, each red for its own reason: ignoring where the
+  thread last left its state, "held the file it had left there"; ignoring
+  the CPU's holder, "changed while it was switched out".
+- **Owed on metal:** `osbench` (the `benchcase` boot) of main before #1251
+  against main after it, four boots a side in a counterbalanced order, on the
+  T14 and the AMD bench: the switch-bound rows (`pingpong.futex.same_cpu`,
+  `pingpong.pipe.same_cpu`, `ipc.reqrep.*`, `wake.onto_busy`, `time.yield`)
+  read as the four skips together, and no row slower beyond its spread.
+
 **Exit**: every issue below is closed. They are listed in the order they are
 taken: the instruments, then what is measured, then the design rounds not
 yet measured.
