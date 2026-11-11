@@ -222,51 +222,6 @@ fn one_serve_answers_two_concurrent_shootdowns() {
     });
 }
 
-/// A CPU that is waiting for an acknowledgement has not stopped giving them.
-///
-/// **Not an interleaving question, so loom explores nothing here** — the
-/// schedule below is written out because it is the one two CPUs took on
-/// 2026-08-07, and it is the whole defect. `loom::model` is still what wraps it:
-/// this crate compiles `shootdown.rs` against loom's atomics, which panic
-/// outside a model, and the property under test is the protocol's shape rather
-/// than any edge between its atomics.
-///
-/// `IF` is clear for the whole of a syscall (`arch::syscall`'s `MSR_FMASK`), so
-/// neither CPU below can take the other's IPI. Each one's own wait is the only
-/// thing left that can answer the other, and until this test existed the wait
-/// asked without answering: both spun until `ACK_TIMEOUT_NS` killed them, as a
-/// double kernel panic and as seven wide-phase test failures sharing one line.
-#[test]
-fn an_initiator_answers_while_it_waits() {
-    model(|| {
-        let s = two_cpus();
-
-        // cpu 0 unmaps and answers for itself; cpu 1 has not issued yet, so the
-        // generation cpu 0 publishes is its own.
-        let g0 = s.issue(Reach::Narrow);
-        s.serve(0, |_| {});
-
-        // cpu 1 unmaps while cpu 0 is between its own `serve` and its wait.
-        let g1 = s.issue(Reach::Narrow);
-
-        // cpu 0's wait is not satisfied — cpu 1 has not flushed — and that turn
-        // is nevertheless where cpu 1's answer comes from: a turn of
-        // `arch::tlb`'s wait answers what its CPU owes, then asks.
-        s.serve_if_owed(0, |_| {});
-        assert!(!s.served(1, g0));
-        assert!(
-            s.served(0, g1),
-            "cpu 0 is waiting for cpu 1 and has stopped answering it, which is \
-             a wait neither CPU can leave",
-        );
-
-        // And cpu 1's own wait then has an answer to find.
-        s.serve(1, |_| {});
-        assert!(s.served(0, g1));
-        assert!(s.served(1, g0));
-    });
-}
-
 /// A serve that an interrupt nests inside another publishes the later
 /// generation, and the outer serve, finishing after it, must not take it back.
 ///
@@ -400,8 +355,9 @@ fn a_serve_nested_in_an_unfinished_wide_one_answers_wide() {
 /// kernel-half one, which it answers wide once: a user-half change keeps the
 /// kernel's global translations.
 ///
-/// **Not an interleaving question**, as `an_initiator_answers_while_it_waits`
-/// is not; reds when a serve answers wide with no wide generation owed.
+/// **Not an interleaving question**: `loom::model` wraps it because this
+/// crate's atomics are loom's. Reds when a serve answers wide with no wide
+/// generation owed.
 #[test]
 fn only_a_kernel_half_shootdown_asks_a_wide_answer() {
     model(|| {
@@ -464,7 +420,7 @@ impl Asked {
             loom::thread::yield_now();
             self.asks.serve(1, |what| match what {
                 Flush::Range { start, end, .. } => (start..end.min(2)).for_each(|page| self.rewalk(page as usize)),
-                Flush::All => (0..2).for_each(|page| self.rewalk(page)),
+                Flush::User => (0..2).for_each(|page| self.rewalk(page)),
             });
         }
     }
@@ -489,10 +445,11 @@ impl Asked {
 /// An answered ask means cpu 1 has re-walked the page asked after the unmap.
 ///
 /// Reds when the target takes its asks `Relaxed`
-/// (`shootdown-take-relaxed`), so its flush no longer follows the write, and
-/// when the asking CPU writes its range after asking
-/// (`shootdown-ask-range-late`), so the target can flush a range it was never
-/// asked.
+/// (`shootdown-take-relaxed`), so its flush no longer follows the write; when
+/// it answers `Relaxed` (`shootdown-answer-relaxed`), so the asking CPU can
+/// read its answer before the flush; and when the asking CPU writes its range
+/// after asking (`shootdown-ask-range-late`), so the target can flush a range
+/// it was never asked.
 #[test]
 fn an_answered_ask_flushed_its_range_after_the_write() {
     acknowledged_model(|| {
@@ -571,12 +528,14 @@ fn a_mailbox_reused_waits_for_its_new_answer() {
     });
 }
 
-/// Two CPUs that ask each other while neither takes interrupts each answer
-/// the other from their own wait, as `arch::tlb`'s wait answers before it
-/// asks. **Not an interleaving question**, as
-/// `an_initiator_answers_while_it_waits` is not.
+/// A serve answers each CPU asking it once, with that CPU's own range: two
+/// CPUs that ask each other each find their answer once the other has
+/// served, and a second serve finds nothing left to answer. **Not an
+/// interleaving question.** The order in which a waiting CPU answers before
+/// it reads its own answer is `arch::tlb::wait_for`'s, which loom does not
+/// compile; its doc states it and inspection holds it.
 #[test]
-fn two_cpus_asking_each_other_answer_from_their_waits() {
+fn each_asker_is_answered_once_with_its_own_range() {
     model(|| {
         let asks = Asks::new();
         asks.size(2);
@@ -585,10 +544,10 @@ fn two_cpus_asking_each_other_answer_from_their_waits() {
         to_zero[0] = 1;
         asks.ask(0, 0, 0, 1, &to_one);
         asks.ask(1, 0, 1, 2, &to_zero);
-        // cpu 0's first turn answers cpu 1, which then has its answer.
+        // cpu 0's serve answers cpu 1 with cpu 1's range.
         assert!(asks.serve(0, |what| assert_eq!(what, Flush::Range { tag: 0, start: 1, end: 2 })));
         assert!(!asks.answered(0, 1));
-        assert!(asks.answered(1, 0), "cpu 0 is waiting for cpu 1 and has stopped answering it");
+        assert!(asks.answered(1, 0), "cpu 0 served and did not answer cpu 1");
         assert!(asks.serve(1, |_| {}));
         assert!(asks.answered(0, 1));
         assert!(!asks.serve(0, |_| {}), "an ask was answered twice");

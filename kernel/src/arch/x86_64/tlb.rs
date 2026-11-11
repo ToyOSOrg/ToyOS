@@ -111,7 +111,7 @@ fn flush_asked(what: Flush) {
         Flush::Range { tag, start, end } if (end - start) / crate::mm::PAGE_SIZE <= BY_PAGE => {
             (start..end).step_by(crate::mm::PAGE_SIZE as usize).for_each(|va| crate::mm::paging::flush_user_page(tag, va));
         }
-        Flush::Range { .. } | Flush::All => flush(Reach::Narrow),
+        Flush::Range { .. } | Flush::User => flush(Reach::Narrow),
     }
 }
 

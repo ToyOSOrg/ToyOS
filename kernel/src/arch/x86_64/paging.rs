@@ -355,7 +355,7 @@ pub fn flush_tlb_all() {
 /// Flush this CPU's translation of the user page `va` in the space tagged
 /// `tag`: by the tag where PCIDs are on; otherwise in the space this CPU runs,
 /// since without them loading a root drops every translation of the one it
-/// replaces (SDM Vol. 3A §4.10.4.1).
+/// replaces (SDM Vol. 3A §4.10.4.1, APM Vol. 2 §5.5).
 pub fn flush_user_page(tag: u16, va: u64) {
     match pcid_active() {
         Some(have) => crate::arch::cpu::invpcid(have, Invpcid::Address, tag, va),
@@ -1074,8 +1074,9 @@ impl UserTables {
     }
 
     /// Every CPU has dropped what it cached of `[start, end)` and of the
-    /// tables `unlinked` took out before this returns: every CPU's user
-    /// translations go, paging-structure caches with them.
+    /// tables `unlinked` took out before this returns. Where tables went,
+    /// every reached CPU's user translations go, paging-structure caches with
+    /// them; otherwise a short range goes page by page.
     /// Answers whether it reached another CPU.
     pub fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) -> bool {
         // A table taken away is cached apart from the leaves: by page is not

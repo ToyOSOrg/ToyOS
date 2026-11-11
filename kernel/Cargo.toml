@@ -53,6 +53,9 @@ shootdown-served-relaxed = []
 # `src/shootdown.rs`'s `Asks::serve` takes its asks `Relaxed`, and
 # `tlb_shootdown` reds.
 shootdown-take-relaxed = []
+# `src/shootdown.rs`'s `Asks::serve` answers `Relaxed`, and `tlb_shootdown`
+# reds.
+shootdown-answer-relaxed = []
 # `src/shootdown.rs`'s `Asks::ask` writes its range after asking, and
 # `tlb_shootdown` reds.
 shootdown-ask-range-late = []

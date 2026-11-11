@@ -94,6 +94,8 @@ shootdown-served-relaxed = []
 #
 # `shootdown-take-relaxed`: the target takes its asks `Relaxed`, so its flush
 # no longer follows the asking CPU's page-table write.
+# `shootdown-answer-relaxed`: the target answers `Relaxed`, so an asking CPU
+# can read its answer before the flush it stands for.
 # `shootdown-ask-range-late`: the asking CPU writes its range after asking, so
 # a target can flush a range it was not asked.
 # `shootdown-ask-stale-answers`: an ask leaves the last ask's answers standing,
@@ -103,6 +105,7 @@ shootdown-served-relaxed = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same names only so `cfg` checking knows them.
 shootdown-take-relaxed = []
+shootdown-answer-relaxed = []
 shootdown-ask-range-late = []
 shootdown-ask-stale-answers = []
 shootdown-ask-many-as-one = []

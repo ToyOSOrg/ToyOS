@@ -569,6 +569,9 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "shootdown-take-relaxed", Some("tlb_shootdown"), &[
         Fails("an_answered_ask_flushed_its_range_after_the_write"),
     ]),
+    red(KERNEL_LOOM, "shootdown-answer-relaxed", Some("tlb_shootdown"), &[
+        Fails("an_answered_ask_flushed_its_range_after_the_write"),
+    ]),
     red(KERNEL_LOOM, "shootdown-ask-range-late", Some("tlb_shootdown"), &[
         Fails("an_answered_ask_flushed_its_range_after_the_write"),
     ]),

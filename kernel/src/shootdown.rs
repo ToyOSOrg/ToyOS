@@ -118,7 +118,10 @@ impl Shootdown {
 
     /// Does `cpu` owe anyone a flush?
     pub fn owes(&self, cpu: usize) -> bool {
-        // A hint: `serve` carries the real ordering, so a stale `false` costs nothing.
+        // `serve` carries the ordering of the flush. A poll that reads a stale
+        // `false` answers on a later turn; the interrupt handler, which gets
+        // no later turn, reads what the IPI asks because its send is ordered
+        // after the issue (`arch::tlb::serve_ipi`).
         self.requested.load(Ordering::Relaxed) > self.answers[cpu].flushed.load(Ordering::Relaxed)
     }
 
@@ -144,6 +147,13 @@ const TAKE: Ordering = Ordering::Acquire;
 // Relaxed arm: kernel-loom's negative-control mutation, never selected by a kernel build.
 #[cfg(feature = "shootdown-take-relaxed")]
 const TAKE: Ordering = Ordering::Relaxed;
+
+// Release: an asking CPU that reads its answer follows the flush before it.
+#[cfg(not(feature = "shootdown-answer-relaxed"))]
+const ANSWER: Ordering = Ordering::Release;
+// Relaxed arm: kernel-loom's negative-control mutation, never selected by a kernel build.
+#[cfg(feature = "shootdown-answer-relaxed")]
+const ANSWER: Ordering = Ordering::Relaxed;
 
 /// A set of CPUs, a bit each, of the first [`ASKABLE`]: as many as a user
 /// change asks, past which it reaches every CPU by a [`Shootdown`].
@@ -173,7 +183,7 @@ struct Mailbox {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Flush {
     Range { tag: u16, start: u64, end: u64 },
-    All,
+    User,
 }
 
 pub struct Asks {
@@ -207,8 +217,9 @@ impl Asks {
     }
 
     /// `me` asks each CPU `targets` holds, a bit per CPU, to flush
-    /// `[start, end)` of the space tagged `tag`. Its previous ask is answered:
-    /// no CPU reads its range or answers it but the ones this asks.
+    /// `[start, end)` of the space tagged `tag`. The caller's precondition,
+    /// on which the protocol rests: every CPU `me` asked last has answered, so
+    /// no CPU still reads its range or will answer it but the ones this asks.
     pub fn ask(&self, me: usize, tag: u16, start: u64, end: u64, targets: &CpuSet) {
         let own = &self.boxes[me];
         // Kernel-loom's negative controls, never selected by a kernel build,
@@ -242,6 +253,8 @@ impl Asks {
         let Some(own) = self.boxes.get(cpu) else { return false };
         let mut taken = CpuSet::default();
         for (word, asking) in taken.iter_mut().zip(&own.asking) {
+            // A stale 0 leaves the bit for a later serve; the interrupt
+            // handler reads it because the IPI's send is ordered after it.
             if asking.load(Ordering::Relaxed) != 0 {
                 *word = asking.swap(0, TAKE);
             }
@@ -255,10 +268,10 @@ impl Asks {
         let Some(asker) = asker else { return false };
         // Kernel-loom's negative control answers many as one, never selected by a kernel build.
         let one = asked == 1 || cfg!(feature = "shootdown-ask-many-as-one");
-        flush(if one { self.boxes[asker].ask.load() } else { Flush::All });
+        flush(if one { self.boxes[asker].ask.load() } else { Flush::User });
         for_each(&taken, |asker| {
             // Release: an asking CPU that reads its answer follows the flush.
-            self.boxes[asker].answered[cpu / 64].fetch_or(1 << (cpu % 64), Ordering::Release);
+            self.boxes[asker].answered[cpu / 64].fetch_or(1 << (cpu % 64), ANSWER);
         });
         true
     }
