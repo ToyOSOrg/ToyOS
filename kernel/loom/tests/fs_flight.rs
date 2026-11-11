@@ -3,11 +3,12 @@
 //!
 //! Callers share connections whose replies whoever waits receives: a reply
 //! filed in another caller's slot, the receive turn handed on, a connection
-//! that ends under requests in flight, a send that fails beside a fresh
-//! connection, a slot used again, and a request too large for a slot holding
-//! every slot. The futex the shim gives wakes only the word woken, and every
-//! wire here blocks, so a caller left waiting with nobody receiving or nobody
-//! waking it is loom's deadlock.
+//! that ends under requests in flight, a send that fails beside its own
+//! connection's callers and beside a fresh connection, two connections each
+//! receiving for itself, a slot used again,
+//! and a request too large for a slot holding every slot. The futex the shim
+//! gives wakes only the word woken, and every wire here blocks, so a caller
+//! left waiting with nobody receiving or nobody waking it is loom's deadlock.
 
 #![cfg(feature = "loom")]
 
@@ -219,6 +220,47 @@ fn a_connection_that_ends_fails_no_request_on_a_fresh_one() {
         assert_eq!(ended.join().unwrap(), Err(Why::Gone));
         unsent.join().unwrap().unwrap();
         assert!(fresh.join().unwrap().is_ok(), "a fresh connection's request failed with the old one");
+    });
+}
+
+/// Two callers and a send that fails, all on one connection: a turn handed to
+/// the failed send goes on to the caller still waiting, which is answered.
+#[test]
+fn a_failed_send_hands_its_turn_on() {
+    model(2, || {
+        let world = World::new();
+        let unsent = spawn(&world, |w| {
+            w.unsent(1);
+            Ok(0)
+        });
+        let callers: Vec<_> = (0..2).map(|_| spawn(&world, |w| w.ask(1, false))).collect();
+        for _ in 0..2 {
+            let tag = world.wire(1).take(1)[0];
+            world.wire(1).answer(tag);
+        }
+        unsent.join().unwrap().unwrap();
+        for caller in callers {
+            assert!(caller.join().unwrap().is_ok());
+        }
+    });
+}
+
+/// A caller on one connection is answered while a caller on another holds
+/// that connection's turn, whose server answers only once the first caller
+/// has returned: each connection receives for itself, so neither waits on
+/// the other.
+#[test]
+fn each_connection_receives_for_itself() {
+    model(3, || {
+        let world = World::new();
+        let second = spawn(&world, |w| w.ask(2, false));
+        let first = spawn(&world, |w| w.ask(1, false));
+        let tag = world.wire(1).take(1)[0];
+        world.wire(1).answer(tag);
+        assert!(first.join().unwrap().is_ok());
+        let tag = world.wire(2).take(1)[0];
+        world.wire(2).answer(tag);
+        assert!(second.join().unwrap().is_ok());
     });
 }
 

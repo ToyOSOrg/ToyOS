@@ -2,10 +2,11 @@
 //! holds a slot, which is its span of the window and where its reply is
 //! filed, and a tag naming the slot; one too large for a slot holds them all.
 //!
-//! **Whoever waits receives.** A caller waiting for its reply takes the
-//! receive turn if nobody holds it, and takes replies off its connection,
-//! filing each other caller's in that caller's slot, until its own comes; then
-//! it wakes a caller still waiting, which takes the turn if it is still free.
+//! **Whoever waits receives.** Each connection has its own receive turn. A
+//! caller waiting for its reply takes its connection's turn if nobody holds
+//! it, and takes replies off that connection, filing each other caller's in
+//! that caller's slot, until its own comes; then it wakes a caller still
+//! waiting on the same connection, which takes the turn if it is still free.
 //! A receive that fails, or a reply naming no request in flight, fails every
 //! request in flight on that connection.
 //!
@@ -40,8 +41,8 @@ struct Table<R, E> {
     free: u32,
     /// Callers waiting for every slot, ahead of whom no slot is taken.
     wholes: u32,
-    /// A caller holds the receive turn.
-    receiving: bool,
+    /// The slots whose callers hold their connection's receive turn.
+    receiving: u32,
     /// Requests sent, which a tag counts above its slot.
     sent: u64,
     requests: [Request<R, E>; SLOTS],
@@ -91,7 +92,7 @@ impl<R, E> Flight<R, E> {
             table: Lock::new(Table {
                 free: ALL,
                 wholes: 0,
-                receiving: false,
+                receiving: 0,
                 sent: 0,
                 requests: core::array::from_fn(|_| Request { link: 0, tag: 0, state: State::Idle }),
             }),
@@ -154,9 +155,9 @@ impl<R, E> Flight<R, E> {
                 if let Some(filed) = table.take_filed(mine) {
                     return filed;
                 }
-                if !table.receiving {
-                    table.receiving = true;
-                    let link = table.requests[mine].link;
+                let link = table.requests[mine].link;
+                if !table.receives(link) {
+                    table.receiving |= 1 << mine;
                     drop(table);
                     return self.lead(mine, link, &mut receive, malformed);
                 }
@@ -180,8 +181,8 @@ impl<R, E> Flight<R, E> {
             };
             let answered = table.take_filed(mine);
             let next = answered.is_some().then(|| {
-                table.receiving = false;
-                table.waiting(Some(link))
+                table.receiving &= !(1 << mine);
+                table.waiting(link)
             });
             drop(table);
             self.wake(woken & !(1 << mine));
@@ -193,15 +194,17 @@ impl<R, E> Flight<R, E> {
     }
 
     /// Give `taken` back, answered or never sent. A request never sent, whose
-    /// caller may have been woken to take the turn, wakes another waiting
-    /// caller while nobody receives.
+    /// caller may have been woken to take its connection's turn, wakes
+    /// another caller waiting on that connection while nobody receives there.
     pub fn give(&self, taken: Taken) {
         let next = {
             let mut table = self.table.lock();
-            let unsent = matches!(table.requests[taken.first].state, State::Waiting);
-            table.requests[taken.first].state = State::Idle;
+            let request = &mut table.requests[taken.first];
+            let unsent = matches!(request.state, State::Waiting);
+            request.state = State::Idle;
+            let link = request.link;
             table.free |= if taken.count == SLOTS { ALL } else { 1 << taken.first };
-            if unsent && !table.receiving { table.waiting(None) } else { None }
+            if unsent && !table.receives(link) { table.waiting(link) } else { None }
         };
         self.freed.fetch_add(1, Ordering::Release);
         wake_all(&self.freed);
@@ -257,11 +260,14 @@ impl<R, E> Table<R, E> {
         }
     }
 
-    /// A slot whose caller still waits, one on connection `link` first: the
-    /// caller to take the turn next.
-    fn waiting(&self, link: Option<u64>) -> Option<usize> {
-        let waits = |i: &usize| matches!(self.requests[*i].state, State::Waiting);
-        let on_link = (0..SLOTS).filter(waits).find(|&i| Some(self.requests[i].link) == link);
-        on_link.or_else(|| (0..SLOTS).find(waits))
+    /// Whether a caller holds connection `link`'s receive turn.
+    fn receives(&self, link: u64) -> bool {
+        (0..SLOTS).any(|i| self.receiving & (1 << i) != 0 && self.requests[i].link == link)
+    }
+
+    /// A slot whose caller still waits on connection `link`: the caller to
+    /// take its turn next.
+    fn waiting(&self, link: u64) -> Option<usize> {
+        (0..SLOTS).find(|&i| matches!(self.requests[i].state, State::Waiting) && self.requests[i].link == link)
     }
 }

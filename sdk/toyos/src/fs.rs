@@ -886,9 +886,9 @@ impl Dir {
         Ok(link)
     }
 
-    /// A fresh connection through the same connector, lent the window again.
-    /// The old one's file ids name nothing on it; an exported connection has
-    /// no connector, and stays gone.
+    /// A fresh connection through the same connector, lent a window of its
+    /// own. The old one's file ids name nothing on it; an exported connection
+    /// has no connector, and stays gone.
     fn reconnect(&self) -> Result<Link, Error> {
         let Source::Held(connector) = self.source else { return Err(Error::Gone) };
         let conn = match crate::port::connect(connector) {
@@ -919,10 +919,19 @@ impl Dir {
 
     /// A share of the window for a request of `span` bytes, on the current
     /// connection: one slot, or the whole window for more than a slot holds.
+    /// The slot comes first: a request that failed retired its connection
+    /// before it gave its slot back, so the slot's next request goes out on a
+    /// newer connection and window than the one a let-go server may still
+    /// write.
     fn ticket(&self, span: usize) -> Result<Ticket<'_>, Error> {
-        let link = self.connection()?;
         let taken = self.flight.take(span > SLOT_BYTES);
-        Ok(Ticket { dir: self, link, taken })
+        match self.connection() {
+            Ok(link) => Ok(Ticket { dir: self, link, taken }),
+            Err(e) => {
+                self.flight.give(taken);
+                Err(e)
+            }
+        }
     }
 
     /// A call on a file id, with `span` bytes of its share of the window.
@@ -1464,13 +1473,21 @@ fn hello(conn: &Connection, window: &SharedMemory) -> Result<Reply, Error> {
     answer(msg_type, reply)
 }
 
-/// How long a client waits for the next reply it is owed before it takes its
-/// server for hung: a hang's bound, never an answer's expected time. A
-/// request's own work ends in the server's disk requests, each answered or
-/// refused within the disk service's minute, and in its turns behind every
-/// other connection's one request; five minutes is past any such sum on a
-/// machine whose server still answers.
-pub const REPLY_BOUND_NS: u64 = 300_000_000_000;
+/// How long a client waits for the next reply it is owed before it lets its
+/// server go as hung: a hang's bound, never an answer's expected time.
+///
+/// A reply waits on the server's block requests and on its turns behind its
+/// other connections. A block server may stay silent for the block protocol's
+/// bound, 365 s (`toyos_blockring::SILENCE_BOUND_NS`, which this crate cannot
+/// name, as that crate depends on this one, and which holds itself under this
+/// bound); this one is that and 60 s of room for the server's own work and
+/// turns. A file server's reply has no derived worst case: one request may
+/// wait on several block requests in turn, and nothing sums them or the turns
+/// (`issues/a-file-server-reply-has-no-derived-worst-case.md`).
+pub const REPLY_BOUND_NS: u64 = BLOCK_SILENCE_NS + 60_000_000_000;
+
+/// The block protocol's bound on a block server's silence.
+const BLOCK_SILENCE_NS: u64 = 365_000_000_000;
 
 /// The next reply frame on `conn`, into `rx`: its frame type and words,
 /// [`Error::Unanswered`] for none within [`REPLY_BOUND_NS`].

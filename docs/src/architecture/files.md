@@ -85,6 +85,7 @@ directory, which the child resolves in its own view.
 - Ordinary I/O failure returns an error. A file server's crash invalidates
   that server's open files, which then answer that they are gone; a fresh open
   reaches the restarted server. Unsaved changes may be lost; data already
-  confirmed durable stays durable.
+  confirmed durable stays durable. A server that stays silent past its bound
+  while it owes a reply is let go as if it had crashed, as a block server is.
 - Per-session temporary storage is an ordinary file server holding its
   contents in RAM.
