@@ -29,7 +29,9 @@
 //!
 //! **A command the controller does not answer is reclaimed by a controller
 //! reset** (§3.7.2): `CC.EN` cleared, every command it held is gone, the queues
-//! are made again. Whoever owned one is told it was not done.
+//! are made again. Whoever owned one is told it was not done. Every wait of
+//! the reset is bounded, so a session's command is answered within the block
+//! protocol's bound on a server's silence ([`ANSWERED_WITHIN`]).
 
 use std::time::{Duration, Instant};
 
@@ -108,6 +110,56 @@ pub enum Power {
     TooManyStates(u8),
     /// The states, and each one's transition.
     Autonomous { states: Vec<nvme_apst::PowerState>, plan: Vec<Option<nvme_apst::Transition>> },
+}
+
+/// How long a command may go unanswered before the controller is reset to
+/// take it back. Policy: NVMe defines no per-command bound, and a flush of a
+/// large cache is the slowest thing a healthy drive does.
+pub const COMMAND_SILENCE: Duration = Duration::from_secs(10);
+
+/// How long an admin command is waited for, at bring-up and in a reset: the
+/// same policy as any other command's.
+const ADMIN_BOUND: Duration = COMMAND_SILENCE;
+
+/// `CAP.TO`'s unit, and its largest value: the controller's own bound on a
+/// `CSTS.RDY` transition, in 500 ms units, at most 255 (NVMe Base 2.0
+/// §3.1.4.1).
+const READY_UNIT: Duration = Duration::from_millis(500);
+const READY_BOUND_MOST: Duration = READY_UNIT.checked_mul(255).unwrap();
+
+/// The admin commands a reset waits for ([`Controller::make_io_queues`]): Set
+/// Features (Number of Queues), then Create I/O Completion Queue and Create
+/// I/O Submission Queue for each of at most [`MAX_IO_QUEUES`].
+const RESET_ADMIN_COMMANDS: u32 = 1 + 2 * MAX_IO_QUEUES as u32;
+
+/// The longest a command goes unanswered: [`COMMAND_SILENCE`], then the reset,
+/// whose two `CSTS.RDY` transitions are each bounded by `CAP.TO` and whose
+/// admin commands each by [`ADMIN_BOUND`].
+const ANSWERED_WITHIN: Duration = COMMAND_SILENCE
+    .checked_add(READY_BOUND_MOST.checked_mul(2).unwrap())
+    .unwrap()
+    .checked_add(ADMIN_BOUND.checked_mul(RESET_ADMIN_COMMANDS).unwrap())
+    .unwrap();
+const _: () = assert!(
+    ANSWERED_WITHIN.as_nanos() <= toyos_blockring::SILENCE_BOUND_NS as u128,
+    "a command the controller leaves silent would be answered past the block protocol's bound"
+);
+
+/// What `step` answers, asked until it answers or `bound` has passed by
+/// `elapsed`. `step` is given how long it may wait before it looks: nothing
+/// the first time, then never more than is left of the bound, so a wake just
+/// before the bound buys no second one.
+fn within<T>(bound: Duration, elapsed: impl Fn() -> Duration, mut step: impl FnMut(Duration) -> Option<T>) -> Option<T> {
+    let mut left = Duration::ZERO;
+    loop {
+        if let Some(answer) = step(left) {
+            return Some(answer);
+        }
+        left = bound.saturating_sub(elapsed());
+        if left.is_zero() {
+            return None;
+        }
+    }
 }
 
 /// Whose a command is.
@@ -257,7 +309,8 @@ pub struct Controller {
     dma: Window,
     dma_addr: u64,
     stride: usize,
-    /// `CAP.TO`: the controller's own worst case for a `CSTS.RDY` transition.
+    /// `CAP.TO`: the controller's own worst case for a `CSTS.RDY` transition,
+    /// at most [`READY_BOUND_MOST`].
     ready_bound: Duration,
     admin: Queue,
     io: Vec<Queue>,
@@ -321,7 +374,7 @@ impl Controller {
             dma,
             dma_addr,
             stride,
-            ready_bound: Duration::from_millis(to * 500),
+            ready_bound: READY_UNIT.saturating_mul(to as u32),
             admin: Queue::new(0, ADMIN_DEPTH, OFF_ADMIN_SQ, OFF_ADMIN_CQ),
             io: Vec::new(),
             lba_bytes: 0,
@@ -356,16 +409,18 @@ impl Controller {
     /// (§3.1.4.1, §3.5.1).
     fn settle(&self, ready: bool, what: &'static str) -> Result<(), Refusal> {
         let start = Instant::now();
-        while (self.csts() & CSTS_RDY != 0) != ready {
-            if self.csts() & CSTS_CFS != 0 {
-                return Err(Refusal::Fatal(what));
+        let settled = within(self.ready_bound, || start.elapsed(), |_| {
+            let csts = self.csts();
+            if (csts & CSTS_RDY != 0) == ready {
+                return Some(Ok(()));
             }
-            if start.elapsed() > self.ready_bound {
-                return Err(Refusal::Silent(what, self.ready_bound));
+            if csts & CSTS_CFS != 0 {
+                return Some(Err(Refusal::Fatal(what)));
             }
             std::thread::yield_now();
-        }
-        Ok(())
+            None
+        });
+        settled.unwrap_or(Err(Refusal::Silent(what, self.ready_bound)))
     }
 
     /// The machine stops: a normal shutdown (NVMe Base 2.0 §3.6.2), which has
@@ -637,20 +692,22 @@ impl Controller {
     /// An admin command, waited for: bring-up and reset are the only callers,
     /// and nothing else is on the device then.
     fn admin_command(&mut self, what: &'static str, cmd: Command) -> Result<u32, Refusal> {
-        let cid = self.submit(None, cmd, Owner::Driver, |_| 0);
+        self.submit(None, cmd, Owner::Driver, |_| 0);
         let start = Instant::now();
         let mut out = Vec::new();
-        loop {
+        let done = within(ADMIN_BOUND, || start.elapsed(), |left| {
+            if !left.is_zero() {
+                self.wait_interrupt(left);
+            }
             self.reap_queue(None, &mut out);
-            if let Some(done) = out.pop() {
-                debug_assert!(out.is_empty());
-                let _ = cid;
-                return if done.ok { Ok(done.dw0) } else { Err(Refusal::Admin(what, done.status)) };
-            }
-            if start.elapsed() > self.ready_bound {
-                return Err(Refusal::Silent(what, self.ready_bound));
-            }
-            self.wait_interrupt(self.ready_bound);
+            let done = out.pop();
+            debug_assert!(out.is_empty());
+            done
+        });
+        match done {
+            Some(done) if done.ok => Ok(done.dw0),
+            Some(done) => Err(Refusal::Admin(what, done.status)),
+            None => Err(Refusal::Silent(what, ADMIN_BOUND)),
         }
     }
 
@@ -761,7 +818,52 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
-    use super::{page_size, sector_shift};
+    use core::cell::Cell;
+    use std::time::Duration;
+
+    use super::{page_size, sector_shift, within, ANSWERED_WITHIN};
+
+    /// A command left silent is answered `Device` after 10 s and a reset of two
+    /// `CSTS.RDY` transitions at the largest `CAP.TO`, 127.5 s each, and nine
+    /// admin commands at 10 s each: 355 s, the block protocol's bound.
+    #[test]
+    fn a_command_left_silent_is_answered_within_355_s() {
+        assert_eq!(ANSWERED_WITHIN, Duration::from_secs(355));
+        assert_eq!(ANSWERED_WITHIN.as_nanos(), u128::from(toyos_blockring::SILENCE_BOUND_NS));
+    }
+
+    /// A wake for something else 1 ms before the bound, then nothing: the wait
+    /// after it is for the 1 ms left, so the whole takes the bound.
+    #[test]
+    fn a_wake_before_the_bound_buys_no_second_bound() {
+        let bound = Duration::from_secs(10);
+        let clock = Cell::new(Duration::ZERO);
+        let mut waits = Vec::new();
+        let answer: Option<()> = within(bound, || clock.get(), |left| {
+            waits.push(left);
+            let woke = if waits.len() == 2 { left.saturating_sub(Duration::from_millis(1)) } else { left };
+            clock.set(clock.get() + woke);
+            None
+        });
+        assert_eq!(answer, None);
+        assert_eq!(clock.get(), bound);
+        assert_eq!(waits, [Duration::ZERO, bound, Duration::from_millis(1)]);
+    }
+
+    /// An answer at the first look ends the wait without one, and an answer
+    /// after a wait is the answer.
+    #[test]
+    fn an_answer_ends_the_wait() {
+        assert_eq!(within(Duration::from_secs(10), || Duration::ZERO, |_| Some(7)), Some(7));
+        let clock = Cell::new(Duration::ZERO);
+        let mut looks = 0;
+        let answer = within(Duration::from_secs(10), || clock.get(), |left| {
+            looks += 1;
+            clock.set(clock.get() + left.min(Duration::from_secs(3)));
+            (looks == 3).then_some("done")
+        });
+        assert_eq!((answer, looks, clock.get()), (Some("done"), 3, Duration::from_secs(6)));
+    }
 
     /// An Identify Namespace page: `formats` LBA formats, each `(MS, LBADS)`.
     fn namespace(formats: &[(u16, u8)]) -> impl Fn(usize) -> u32 {

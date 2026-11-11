@@ -4,10 +4,10 @@
 //! **What the server writes ends the session or is a completion the client
 //! takes**: a cursor no server writes, words that are no completion, and a
 //! completion [`Client::complete`] refuses are each a [`Violation`]. **So does
-//! its silence**, once the client has waited [`SILENCE_BOUND_NS`] for a
-//! completion. Either way [`ClientEnds::exchange`] answers [`Next::End`], the
-//! caller ends the session, and [`Client::session_ended`] answers what was on
-//! the wire.
+//! its silence**, once the client has waited [`SILENCE_BOUND_NS`], the bound
+//! every server keeps, for a completion. Either way [`ClientEnds::exchange`]
+//! answers [`Next::End`], the caller ends the session, and
+//! [`Client::session_ended`] answers what was on the wire.
 //!
 //! **A wait is only ever for the server**: [`Next::Wait`] is answered only
 //! once every request that can go has gone and no answer is decided.
@@ -17,14 +17,7 @@ use toyos::transport::{Run, Violation, Word};
 use crate::client::{Client, Placing};
 use crate::entry::Completion;
 use crate::layout::{self, ClientRings, RING_WORDS};
-
-/// How long a client that is owed a completion goes without one before it
-/// ends the session. Policy, and below the longest a server may be silent
-/// while it works: the NVMe driver resets its controller after 10 s of a
-/// command's silence and answers nothing until the reset is done, and each
-/// of the reset's steps may take the controller's `CAP.TO`, up to 127.5 s
-/// (NVMe Base 2.0 §3.1.4.1).
-pub const SILENCE_BOUND_NS: u64 = 60_000_000_000;
+use crate::SILENCE_BOUND_NS;
 
 /// What a client does after an exchange with its server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -29,6 +29,12 @@
 //! **Requests in flight at once are unordered**, as on the device: a client
 //! that needs one to follow another waits for the first's answer.
 //!
+//! **A server is never silent past [`SILENCE_BOUND_NS`] while it owes an
+//! answer**: from a request it has not answered, or from its last completion,
+//! it posts the next completion or ends the session within it. A client that
+//! has waited longer ends the session ([`ends`]); a driver shows its own worst
+//! case fits under the bound.
+//!
 //! **One service, many disks.** The block service serves [`PORT`] to clients
 //! and [`disk::PORT`] to disk drivers, each of which offers its disks and is
 //! handed the sessions opened on them ([`disk`]); data moves between a
@@ -54,6 +60,12 @@ pub mod wire;
 
 #[cfg(test)]
 mod model;
+
+/// The protocol's bound on a server's silence, set by the slowest server: the
+/// NVMe driver, a command's silence before it resets the controller and the
+/// reset, which it shows fit. A driver whose worst case does not fit cannot
+/// serve a client that keeps to it.
+pub const SILENCE_BOUND_NS: u64 = 355_000_000_000;
 
 pub use entry::{Completion, Op, Request, Status};
 pub use toyos::transport::Run;

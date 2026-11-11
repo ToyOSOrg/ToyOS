@@ -7,9 +7,12 @@ opened: 2026-09-26
 # The NVMe driver resets a drive that is slow and healthy
 
 The NVMe driver reclaims a command the controller has not answered in
-`COMMAND_SILENCE`, ten seconds (`system/nvme/src/main.rs`), by resetting the
-controller. NVMe bounds no command's time, and a Flush of a large volatile
-cache is the slowest thing a healthy drive does: a drive still flushing at ten
+`COMMAND_SILENCE`, ten seconds (`system/nvme/src/nvme.rs`), by resetting the
+controller. The same ten seconds bound each admin command of the reset, and
+with the reset they set the block protocol's silence bound
+(`toyos_blockring::SILENCE_BOUND_NS`), which a longer one must raise. NVMe
+bounds no command's time, and a Flush of a large volatile cache is the
+slowest thing a healthy drive does: a drive still flushing at ten
 seconds is reset, every command it held is answered `Device`, and a flush
 retried past `toyos_blockring::client::MAX_ATTEMPTS` reaches its caller as
 `Device` — a loss reported for a drive that lost nothing.

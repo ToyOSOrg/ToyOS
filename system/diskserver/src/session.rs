@@ -18,9 +18,9 @@
 //! Nothing here restarts a service: whoever holds its claim does.
 //!
 //! **No wait is on the server's word alone.** A server that breaks the
-//! protocol, or leaves the session unanswered for
-//! [`toyos_blockring::ends::SILENCE_BOUND_NS`], is ended as one that hung up
-//! is (`toyos_blockring::ends`). That server is still running, and the
+//! protocol, or leaves the session unanswered past the bound every server
+//! keeps ([`SILENCE_BOUND_NS`]), is ended as one that hung up is
+//! (`toyos_blockring::ends`). That server is still running, and the
 //! reconnect reaches it again. One that still holds a request of the ended
 //! session refuses the open [`Refusal::Held`] until the request is answered,
 //! which is the reconnect failing: the caller's disk is gone and nothing is
@@ -39,10 +39,10 @@ use toyos::wake::{Bell, Waker};
 use toyos_abi::syscall::SyscallError;
 use toyos_blockdev::SharedBlock;
 use toyos_blockring::client::{Ask, Client, Outcome, Placing, Ticket};
-use toyos_blockring::ends::{ClientEnds, Ending, Exchange, Next, SILENCE_BOUND_NS};
+use toyos_blockring::ends::{ClientEnds, Ending, Exchange, Next};
 use toyos_blockring::layout::{ARENA, MAX_REQUEST_BLOCKS};
 use toyos_blockring::wire::{self, Opened, Refusal};
-use toyos_blockring::{Run, BLOCK_BYTES};
+use toyos_blockring::{Run, BLOCK_BYTES, SILENCE_BOUND_NS};
 
 use toyos_blockserve::region::Region;
 
