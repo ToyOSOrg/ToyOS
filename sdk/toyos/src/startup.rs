@@ -288,7 +288,12 @@ pub fn endowed(into: &mut [&'static str; MAX_SPAWN_ENDOWMENTS]) -> Result<usize,
 /// was found malformed, where no checked name exists. `None` for a table
 /// that names none or is no table up to that name.
 pub(crate) fn early(name: &[u8]) -> Option<usize> {
-    entries(own().ok()?).take(MAX_SPAWN_ENDOWMENTS).position(|entry| entry == Ok(name))
+    unchecked_position(own().ok()?, name)
+}
+
+/// [`early`]'s walk over `table`.
+fn unchecked_position(table: &[u8], name: &[u8]) -> Option<usize> {
+    entries(table).take(MAX_SPAWN_ENDOWMENTS).position(|entry| entry == Ok(name))
 }
 
 #[cfg(test)]
@@ -411,18 +416,17 @@ mod tests {
     /// that is none, and nothing past it.
     #[test]
     fn the_early_walk_stops_at_the_first_entry_that_is_none() {
-        let find = |table: &[u8], name: &[u8]| entries(table).take(MAX_SPAWN_ENDOWMENTS).position(|entry| entry == Ok(name));
         let mut table = table(&["fd:0", "fd:1", "fd:2"]).unwrap();
-        assert_eq!(find(&table, b"fd:2"), Some(2));
-        assert_eq!(find(&table, b"fd:3"), None);
+        assert_eq!(unchecked_position(&table, b"fd:2"), Some(2));
+        assert_eq!(unchecked_position(&table, b"fd:3"), None);
         // The second name's length runs past the table: the first is still found.
         table[14..16].copy_from_slice(&u16::MAX.to_ne_bytes());
-        assert_eq!(find(&table, b"fd:0"), Some(0));
-        assert_eq!(find(&table, b"fd:2"), None);
+        assert_eq!(unchecked_position(&table, b"fd:0"), Some(0));
+        assert_eq!(unchecked_position(&table, b"fd:2"), None);
         // A count of every `u32` walks no further than a spawn endows.
         table[4..8].copy_from_slice(&u32::MAX.to_ne_bytes());
-        assert_eq!(find(&table, b"fd:2"), None);
-        assert_eq!(find(&[], b"fd:2"), None);
+        assert_eq!(unchecked_position(&table, b"fd:2"), None);
+        assert_eq!(unchecked_position(&[], b"fd:2"), None);
     }
 
     /// A table lies inside the reservation whole, or is refused before a byte
