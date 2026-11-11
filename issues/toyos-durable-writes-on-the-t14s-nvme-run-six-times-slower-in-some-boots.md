@@ -39,6 +39,20 @@ ac6b89a, `metal-t14/`). The second of those boots ran slow, its
 `write_4k_fsync` at 6.26 ms, and its clean fsync still read 16 µs: the slow
 mode appears only where a Flush or a write is owed.
 
+On 2026-11-11 four boots of four at main ad5db5a65 ran slow through all of
+`persist` ([evidence](https://github.com/ToyOSOrg/evidence/tree/d44ebdae1f9f584d7b826e1498dbfd791a8d2339), the scoreboard's four `osbench` boots
+interleaved with five Linux runs, p50 per boot):
+
+| row | boot 1 | boot 2 | boot 3 | boot 4 | Linux's five runs |
+|---|---|---|---|---|---|
+| `write_4k_fsync` | 6.49 ms | 6.21 ms | 6.57 ms | 5.72 ms | 0.87 to 1.08 ms |
+| `append_4k_fsync` | 6.75 ms | 6.52 ms | 6.42 ms | 5.95 ms | 0.91 to 1.06 ms |
+| `write_4k_fsync_beside_1m` | 7.88 ms | 7.44 ms | 7.76 ms | 6.98 ms | 1.03 to 1.33 ms |
+| `create_fsync_unlink` | 7.41 ms | 7.20 ms | 7.36 ms | 6.87 ms | 0.86 to 0.97 ms |
+| `seq_write_fsync` | 189 MB/s | 201 MB/s | 167 MB/s | 175 MB/s | 574 to 597 MB/s |
+
+Those boots had no idle row. Their clean fsync read 7.4 to 7.6 µs.
+
 Four boots of four that idled 80 s inside `persist` left the slow mode there
 (`issues/the-t14s-slow-durable-writes-ended-during-80-s-of-idle-in-four-boots-of-four.md`).
 

@@ -17,7 +17,7 @@ model 60h) and AMD EPYC KVM guests, and a stage's correctness test runs on
 each that has its feature. A figure is the T14's, and the AMD bench's too
 where the stage's path differs there, since the EPYC guests are shared CI
 runners: the median of 11 runs with its spread, taken by the program of
-`issues/no-published-run-compares-toyos-with-linux-on-one-machine.md`.
+`issues/toyos-against-linux-on-both-benches-the-scoreboard.md`.
 A stage that its hardware's manufacturers or the published state of the art
 back follows and cites them, and its figure is reported and never blocks it: a
 slowdown is filed as a defect carrying both figures and investigated. A stage nothing published covers is
@@ -57,7 +57,11 @@ and contention).
   reads is `issues/idle-cpus-enter-the-c-states-cst-names.md`'s. The AMD
   bench has no such gap: its one-thread `crunch.single` deflate, matmul and
   sha256 run at 0.98 to 1.02 of Linux's; parse, faster under ToyOS on both
-  benches, is no clock reading.
+  benches, is no clock reading. Its matmul has since read 1.03 times
+  Linux's, resolved, in both scoreboards (944,960 against 918,648 ns on
+  2026-10-28; 943,710 against 920,525 ns on 2026-11-11,
+  `issues/toyos-against-linux-on-both-benches-the-scoreboard.md`), at one
+  settled clock; unexplained.
 
 **Moot.** PCID on the AMD bench: its CPUs read `pcid=0 invpcid=0`, so there
 is nothing to enable.
@@ -79,7 +83,7 @@ is nothing to enable.
 taken: the instruments, then what is measured, then the design rounds not
 yet measured.
 
-- `issues/no-published-run-compares-toyos-with-linux-on-one-machine.md`
+- `issues/toyos-against-linux-on-both-benches-the-scoreboard.md`
 - `issues/no-row-holds-a-wake-beside-seven-spinners-to-100-us.md`
 - `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`
 - `issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`

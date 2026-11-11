@@ -34,7 +34,11 @@ initiator unmapped it meanwhile. The TCG model has no PCID
 In the 2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`) the
 T14 lost `mem.munmap_part.4k` at 1.22x Linux's (1,558 against 1,280 ns) and
 `mem.munmap_touched_remote.4k` at 1.32x (3,028 against 2,290 ns), each
-resolved; the AMD won both.
+resolved; the AMD won both. On 2026-11-11 at ad5db5a65 ([evidence](https://github.com/ToyOSOrg/evidence/tree/d44ebdae1f9f584d7b826e1498dbfd791a8d2339),
+four boots against five Linux runs) the T14 read `mem.munmap_part.4k` at
+1.12x (1,406 against 1,254 ns) and `mem.munmap_touched_remote.4k` at 1.47x
+(3,341 against 2,279 ns), each resolved, and `mem.mprotect.4k` ahead (816
+against 1,019 ns); the AMD bench is ahead on all three.
 
 **Exit**: that case, on each proving machine with PCID, red with the flush on
 entry removed; and the T14's munmap and `vm_protect` figures against Linux.

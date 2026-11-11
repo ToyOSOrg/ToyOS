@@ -4,13 +4,15 @@ kind: defect
 opened: 2026-10-28
 ---
 
-# A tmpfs metadata call costs ToyOS up to six times Linux's
+# A memory-filesystem call costs ToyOS up to 35 times Linux's
 
 `osbench files` runs the same operations under each system's memory
-filesystem: ToyOS's `/tmp`, which the kernel served through syscalls when
-this was measured, and Linux's `/dev/shm`, tmpfs through the VFS.
+filesystem: ToyOS's `/tmp`, the MEMORY file server's
+(`system/fileserver/src/memory.rs`), and Linux's `/dev/shm`, tmpfs through
+the VFS. The current figures are the second table.
 
-From the 2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`):
+**When the kernel still served `/tmp` through syscalls**, from the
+2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`):
 ToyOS at 069cbbeb8, four boots off the internal NVMe, against five runs of
 each bench's Linux as installed, interleaved. A cell is the p50 with its
 run-to-run range. The AMD's Linux runs 1 to 3 timed through the TSC and 4
@@ -27,19 +29,16 @@ and 5 through the HPET, at 1.2 µs a timestamp.
 | `fs.mem.write_4k_at` | 1,237 ns (4.0%) | 625 ns (5.0%) | 1,563 ns (7.7%) | 1,823 ns (61.0%) |
 | `fs.mem.read_4k_at` | 1,222 ns (2.3%) | 710 ns (4.5%) | 1,422 ns (3.5%) | 1,403 ns (70.8%) |
 
-On the T14 ToyOS loses all eight, 1.7x to 6.5x, each resolved. On the AMD it
+On the T14 ToyOS lost all eight, 1.7x to 6.5x, each resolved. On the AMD it
 loses `open_close` (2.1x) and `rename` (1.4x), both resolved, wins
 `tree.100`, `create_write_unlink` and `write_4k_at`, and is unresolved on the
 other three. There the HPET explains Linux's spread: its TSC runs read
 `open_close` at 2.9 µs and its HPET runs at 4.3 µs. The sequential copies are
 `issues/user-memory-hot-paths-are-slower-than-2-mib-pages.md`'s.
 
-`/tmp` is now the MEMORY file server's (`system/fileserver/src/memory.rs`), so
-each `fs.mem` call is a file server request, which cost 3 to 12 times a kernel
-file call when both existed
+Each `fs.mem` call is a file server request now, which cost 3 to 12 times a
+kernel file call when both existed
 (`issues/a-file-server-request-costs-three-to-twelve-times-a-kernel-file-call.md`).
-These rows have not been measured since the move; the gap is expected to have
-grown.
 
 **Current state, 2026-11-11** ([evidence](https://github.com/ToyOSOrg/evidence/tree/d44ebdae1f9f584d7b826e1498dbfd791a8d2339)): ToyOS at main ad5db5a65, four
 boots a bench interleaved with five runs of its Linux as installed; a cell is
@@ -70,17 +69,16 @@ times there.
 | `fs.mem.tree.100` | ns | 3,357,680 (1.6%) | 559,607 (0.8%) | 6.00x | 4,017,158 (18.7%) | 1,405,962 (1.1%) | 2.86x |
 | `fs.mem.write_4k_at` | ns | 9,033 (1.1%) | 617 (4.7%) | 14.64x | 11,361 (20.1%) | 2,863 (41.2%) | 3.97x |
 
-These are the first figures since `/tmp` became the MEMORY file server's. On
+These are the first figures since the move. On
 the T14 every `fs.mem` row is behind: the metadata rows 6x to 35x, a 4 KiB
 write at an offset 14.6x, 4 KiB sequential writes 8.2x, 1 MiB sequential
 writes 1.14x, and the reads 1.24x to 1.54x. On the AMD bench the metadata
 rows, `write_4k_at`, `seq_write.4096` and `readdir.1000` are behind, the
 sequential reads and 1 MiB writes ahead, and the 4 KiB and 8-byte reads
-unresolved against Linux's HPET-widened spread. `seek`, which the client answers itself, is 248 ns against
-Linux's 116 ns on the T14. The exit below covers every `fs.mem` row in this
-table, not the eight above alone.
+unresolved against Linux's HPET-widened spread. `seek`, which the client
+answers itself, is 248 ns against Linux's 116 ns on the T14.
 
-**Exit**: these eight rows within Linux's on both benches in a labelled
+**Exit**: every `fs.mem` row of the second table within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured to its parts
 and justified.
 

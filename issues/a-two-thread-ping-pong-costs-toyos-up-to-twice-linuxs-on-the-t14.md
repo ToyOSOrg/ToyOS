@@ -55,13 +55,23 @@ times there.
 
 On the T14 `futex.same_cpu` and `pipe.cross_core` are behind.
 `pipe.same_cpu` is unresolved: Linux's five runs range 2.9 to 7.0 µs.
-`futex.cross_core` read 257, 250, 257 and 4,573 ns in ToyOS's four boots:
-bimodal per boot and unresolved, and which mode is a round trip through a
-park is not established. All four are ahead on the AMD bench.
+All four are ahead on the AMD bench.
+
+**`futex.cross_core` did not measure a parked round trip in three of the
+T14's four boots.** Their p50s read 257, 250 and 257 ns (minimum 213 to
+215 ns); the third mixed both shapes in one run (p90 4,578, mean 1,188 ns),
+as the AMD bench's fourth did (minimum 150, p50 4,629, mean 2,911 ns). A
+round trip that short cannot hold a park: the same boots' `time.yield` alone
+costs 652 ns and the same-CPU round trip 4,091 ns. The fourth boot read
+4,573 ns, as all four did on 2026-10-28, which is 1.37x Linux's 3,346 ns:
+where the row measured what it means, it is behind as before. That neither
+thread slept in the short rounds is an inference from the timings; the row
+counts no parks, so a run's p50 is not this row's value.
 
 **Exit**: `pingpong.*` within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured to its parts
-and justified.
+and justified; and `pingpong.futex.*` reports the parks of each round, so a
+round trip that held none is not read as one.
 
 **Owner**: the kernel's futex and wake path (`kernel/src/sched/futex.rs`,
 `kernel/src/sched/`), and the pipe (`kernel/src/pipe.rs`) for its rows.
