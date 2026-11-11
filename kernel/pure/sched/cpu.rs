@@ -2186,18 +2186,30 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             Some(_) => Some(self.cpu.settle_decision(self.now)),
             None => None,
         };
-        let plan = TimerPlan::compute(decision, deadline).no_later_than(extra);
-        match plan {
-            TimerPlan::Arm(at) => self.env.hw.set_timer(at),
-            TimerPlan::Stop => self.env.hw.stop_timer(),
+        match TimerPlan::compute(decision, deadline).no_later_than(extra) {
+            // A one-shot still to fire and due no later is left: an early fire
+            // is a spurious pass, so a running CPU writes its timer once a
+            // request rather than once a pass. An idle CPU arms exactly, so
+            // nothing wakes it before it is owed.
+            TimerPlan::Arm(at)
+                if self.cpu.running.is_some()
+                    && self.cpu.armed.is_some_and(|armed| self.now < armed && armed <= at)
+                    && self.env.hw.timer_pending() => {}
+            TimerPlan::Arm(at) => {
+                self.env.hw.set_timer(at);
+                self.cpu.armed = Some(at);
+            }
+            TimerPlan::Stop => {
+                self.env.hw.stop_timer();
+                self.cpu.armed = None;
+            }
         }
-        self.cpu.armed = plan.armed();
         // Invariant T is a statement about a CPU *outside* a pass, and the
         // arming that makes it true is the last thing a pass does — so the
         // check cannot move earlier.
         #[cfg(feature = "sched-check")]
         crate::sched::invariants::check_cpu(self.cpu);
-        TimerApplied::new(plan.armed())
+        TimerApplied::new(self.cpu.armed)
     }
 
     fn switch_to_current(&mut self) -> Action<<H as Hw>::Payload> {
@@ -2551,9 +2563,14 @@ impl<M: SchedMsg> CpuHandle<M> {
     }
 
     /// Every ask since the last take, emptied: this CPU's own pass, after its
-    /// `begin_pass`.
+    /// `begin_pass`. A word read empty is not swapped: an ask landing after
+    /// the read rings the doorbell after it, and the pass that ring owes
+    /// takes it.
     pub fn take_asks(&self) -> [u64; MASK_WORDS] {
-        core::array::from_fn(|word| self.asks[word].swap(0, Ordering::Relaxed))
+        core::array::from_fn(|word| match self.asks[word].load(Ordering::Relaxed) {
+            0 => 0,
+            _ => self.asks[word].swap(0, Ordering::Relaxed),
+        })
     }
 
     pub fn publish_weight(&self, weight: u64) {
@@ -2937,6 +2954,9 @@ mod tests {
         timers: Vec<Option<Nanos>>,
         /// The revisit an idle plan asks, where a test sets one.
         revisit: Option<u64>,
+        /// The last arm's one-shot, not yet fired: a test fires it by
+        /// clearing this.
+        pending: bool,
     }
 
     #[derive(Default)]
@@ -2962,10 +2982,17 @@ mod tests {
             Nanos::ZERO
         }
         fn set_timer(&self, deadline: Nanos) {
-            self.state().timers.push(Some(deadline));
+            let mut state = self.state();
+            state.timers.push(Some(deadline));
+            state.pending = true;
         }
         fn stop_timer(&self) {
-            self.state().timers.push(None);
+            let mut state = self.state();
+            state.timers.push(None);
+            state.pending = false;
+        }
+        fn timer_pending(&self) -> bool {
+            self.state().pending
         }
         fn idle_plan(&self, deadline: Option<Nanos>, now: Nanos) -> crate::sched::idle::Plan {
             let mut plan = crate::sched::idle::Plan::c1(deadline.map(|d| d.0), now.0);
@@ -4920,6 +4947,70 @@ mod tests {
         let Action::Idle(token) = pass.dispose_none().finish() else { panic!("an empty CPU sleeps") };
         assert_eq!(token.armed(), None);
         assert_eq!(w.hw.state().timers, [None], "a plan with no wake leaves the plan main makes: stopped");
+    }
+
+    /// **A running CPU writes its timer once a request, not once a pass.** A
+    /// pass that finds its one-shot pending and due no later than it needs
+    /// leaves it, so a thread that keeps entering the kernel re-arms nothing;
+    /// once it fired, or once something is owed sooner, the pass writes.
+    #[test]
+    fn a_running_cpu_leaves_a_pending_one_shot_due_no_later() {
+        let mut w = World::new(1);
+        w.spawn(C0);
+        w.run_a_pass_at(C0, NOW);
+        let armed = w.cpus[0].armed().expect("a running thread's request is armed");
+        assert_eq!(w.hw.state().timers, [Some(armed)]);
+
+        w.run_a_pass_at(C0, NOW.after(1_000));
+        assert_eq!(w.hw.state().timers, [Some(armed)], "the request's end has not moved: nothing written");
+        assert_eq!(w.cpus[0].armed(), Some(armed));
+
+        w.hw.state().pending = false;
+        w.run_a_pass_at(C0, NOW.after(2_000));
+        assert_eq!(w.hw.state().timers.len(), 2, "a fired one-shot is armed again");
+
+        // A sleeper due before the request's end is owed sooner.
+        let (_, sleeper) = w.spawn(C0);
+        let (cpus, env) = w.split();
+        let pass = SchedPass::begin(&mut cpus[0], env, NOW.after(3_000));
+        let _ = pass.dispose_yield().finish();
+        let due = NOW.after(50_000);
+        let (cpus, env) = w.split();
+        let sched = &mut cpus[0];
+        let current = CurrentTask::new(sched.running().expect("one of them runs").shared(), C0);
+        let ticket = crate::sched::park::prepare(&current, crate::sched::park::Cancel::Answers, WaitClass::Other)
+            .expect("nothing notified this task");
+        let crate::sched::park::Commit::Parked(committed) = ticket.commit() else { panic!("an uncontended park") };
+        let pass = SchedPass::begin(sched, env, NOW.after(4_000));
+        let _ = pass.dispose_block(committed, Some(due)).finish();
+        assert!(w.cpus[0].running().is_some(), "the other thread runs");
+        assert_eq!(w.cpus[0].armed(), Some(due), "a deadline before the armed one-shot is written");
+        assert_eq!(*w.hw.state().timers.last().unwrap(), Some(due));
+        let _ = sleeper;
+        w.abandon();
+    }
+
+    /// **An idle CPU arms exactly**: a pending one-shot due before the
+    /// deadline it parks with is not left to wake it early.
+    #[test]
+    fn a_cpu_going_idle_writes_its_deadline_over_a_pending_earlier_one_shot() {
+        let mut w = World::new(1);
+        w.spawn(C0);
+        w.run_a_pass_at(C0, NOW);
+        let armed = w.cpus[0].armed().expect("armed for the running thread");
+        let due = armed.after(1_000_000);
+        assert!(w.hw.state().pending);
+        let (cpus, env) = w.split();
+        let sched = &mut cpus[0];
+        let current = CurrentTask::new(sched.running().expect("it runs").shared(), C0);
+        let ticket = crate::sched::park::prepare(&current, crate::sched::park::Cancel::Answers, WaitClass::Other)
+            .expect("nothing notified this task");
+        let crate::sched::park::Commit::Parked(committed) = ticket.commit() else { panic!("an uncontended park") };
+        let pass = SchedPass::begin(sched, env, NOW.after(1_000));
+        let _ = pass.dispose_block(committed, Some(due)).finish();
+        assert_eq!(w.cpus[0].armed(), Some(due));
+        assert_eq!(*w.hw.state().timers.last().unwrap(), Some(due), "the idle CPU's deadline is written");
+        w.abandon();
     }
 
     /// **Locality first, then a free physical core, then rotation**: a forward

@@ -14,7 +14,7 @@ use crate::sched::hw::{CpuId, Nanos};
 use crate::sched::job::Job;
 use crate::sched::mailbox::MailboxNode;
 use crate::sched::msg::Msg;
-use crate::sched::affinity::{affinity_fence, CpuMask, Reach, SharedMask};
+use crate::sched::affinity::{affinity_fence, CpuMask, LoadedMask, Reach, SharedMask};
 use crate::sched::sync::{Arc, AtomicBool, AtomicU64, Ordering};
 use crate::sched::park::CommittedTicket;
 use crate::sched::queue::{next_request, SLICE_NS};
@@ -737,10 +737,9 @@ struct TaskInner<X: SchedPayload> {
     ctx: X::Ctx,
     rt: RtState,
     acct: TaskAccounting,
-    /// The owner CPU's copy of [`TaskShared::mask`], its reach and the
-    /// version it was loaded at. Changed only by [`Task::refresh_affinity`].
-    affinity: CpuMask,
-    reach: Reach,
+    /// The owner CPU's copy of [`TaskShared::mask`] and the version it was
+    /// loaded at. Changed only by [`Task::refresh_affinity`].
+    affinity: LoadedMask,
     affinity_version: u64,
     /// What it asks of a queue at a time, in ns: [`next_request`] of its
     /// bursts, each the CPU time from a wake to the next park.
@@ -797,11 +796,11 @@ impl<X: SchedPayload> Task<X> {
     }
 
     pub fn affinity(&self) -> CpuMask {
-        self.0.affinity
+        self.0.affinity.mask()
     }
 
     pub fn reach(&self) -> Reach {
-        self.0.reach
+        self.0.affinity.reach()
     }
 
     pub fn request_ns(&self) -> u64 {
@@ -814,8 +813,8 @@ impl<X: SchedPayload> Task<X> {
         if self.0.shared.mask().version() == self.0.affinity_version {
             return false;
         }
-        (self.0.affinity, self.0.affinity_version) = self.0.shared.mask().load();
-        self.0.reach = self.0.affinity.reach();
+        let (mask, version) = self.0.shared.mask().load();
+        (self.0.affinity, self.0.affinity_version) = (LoadedMask::new(mask), version);
         true
     }
 
@@ -980,8 +979,7 @@ impl<X: SchedPayload> TaskBuilder<X> {
             ctx: self.ctx,
             rt: self.rt,
             acct: TaskAccounting::default(),
-            affinity: self.mask,
-            reach: self.mask.reach(),
+            affinity: LoadedMask::new(self.mask),
             affinity_version: 0,
             request: SLICE_NS,
             woke_cpu_ns: 0,
