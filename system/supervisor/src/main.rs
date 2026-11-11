@@ -3790,7 +3790,7 @@ fn say_last_words_on_panic(syscap: &'static SysCap) {
 /// started again from them, and what the loader named of where this boot came
 /// from.
 struct Boot {
-    /// Handles and not mappings: the supervisor reads neither, it hands them on.
+    /// This and `root` are handles, not mappings: the supervisor hands them on unread.
     fileserver: toyos::OwnedHandle,
     root: toyos::OwnedHandle,
     names: toyos_bootnames::Names<'static>,

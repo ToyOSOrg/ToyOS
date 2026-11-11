@@ -19,8 +19,8 @@
   through the firmware's block I/O, so no storage driver is needed to boot.
 - It hands the kernel a typed description of what it loaded and which slot it
   chose.
-- Where it loaded from is not the kernel's to know: the partitions it read, by
-  role, and the firmware's device paths for them travel as a record the kernel
+- Where it loaded from is not the kernel's to know: the partitions it names,
+  by role, and the firmware's device paths for them travel as a record the kernel
   keeps read-only and hands the supervisor unread. The supervisor validates it
   once and refuses a record it cannot read.
 - On every boot it asks the firmware to overwrite memory before the next one

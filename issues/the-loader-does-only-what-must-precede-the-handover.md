@@ -63,11 +63,17 @@ Each stage lands on its own, in this order.
      supervisor's record. What holds since: the word follows only the
      fields the kernel reads before it compares it (the memory map, its own
      memory and stack, the RSDP, its image, the scanout and the boot map),
-     each pinned by `offset_of!`, and a field leaves or joins that prefix
-     only with the word moving again. A loader older than #1210 wrote the
-     low half of its ESP's first block at offset 112, and a kernel older
-     than it reads the high half of the handoff counter at 164; each
-     refuses the other by the word.
+     every one of the sixteen and the word pinned by `offset_of!`, so a
+     field leaves, joins or moves in that prefix only by failing to build.
+     A loader older than #1210 wrote at offset 112 the low half of the
+     first block of the partition firmware loaded it from, or zero. The
+     word's low byte is asserted non-zero, so the kernel refuses that
+     loader by the word wherever that partition starts on a 1 MiB
+     boundary; where it starts off one and its first block's low half
+     equals the word, it is not refused and the kernel reads moved fields
+     as garbage. A kernel older than #1210 reads the high half of the
+     handoff counter at 164 and refuses a newer loader unless that half
+     equals its own word, a counter past `0x5459` << 48 ticks.
    - The kernel logs `boot: IA32_TSC_ADJUST` beside its power-on report, and
      the loader no longer reads it. aarch64's `counter_origin` is deleted.
    - The loader's TCO arm stays until stage 8.

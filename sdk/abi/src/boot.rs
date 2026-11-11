@@ -119,7 +119,10 @@ pub const SEED_LEN: usize = 32;
 
 /// [`KernelArgs::layout`] for the struct this file declares: the struct's own
 /// size folded in. A loader older than the word's place wrote the low half of
-/// its partition's first block at this offset, which no ESP starts at.
+/// its partition's first block at this offset, or zero. The word's low byte is
+/// not zero (asserted below), so it is neither of those for a partition that
+/// starts on a 1 MiB boundary, at 512-byte or 4 KiB blocks; a partition that
+/// starts off one can equal it, and that loader is then not refused.
 pub const LAYOUT: u32 = 0x5459_0000 | core::mem::size_of::<KernelArgs>() as u32;
 
 /// The boot parameter on which the loader writes 0 as [`KernelArgs::layout`]:
@@ -146,9 +149,22 @@ pub fn tokens(cmdline: &str) -> impl Iterator<Item = &str> {
 /// separate binaries built for separate targets.
 const _: () = {
     use core::mem::{align_of, offset_of, size_of};
+    assert!(offset_of!(KernelArgs, memory_map_addr) == 0);
+    assert!(offset_of!(KernelArgs, memory_map_size) == 8);
     assert!(offset_of!(KernelArgs, kernel_memory_addr) == 16);
+    assert!(offset_of!(KernelArgs, kernel_memory_size) == 24);
     assert!(offset_of!(KernelArgs, kernel_stack_addr) == 32);
     assert!(offset_of!(KernelArgs, kernel_stack_size) == 40);
+    assert!(offset_of!(KernelArgs, rsdp_addr) == 48);
+    assert!(offset_of!(KernelArgs, kernel_image_addr) == 56);
+    assert!(offset_of!(KernelArgs, kernel_image_size) == 64);
+    assert!(offset_of!(KernelArgs, gop_framebuffer) == 72);
+    assert!(offset_of!(KernelArgs, gop_framebuffer_size) == 80);
+    assert!(offset_of!(KernelArgs, gop_width) == 88);
+    assert!(offset_of!(KernelArgs, gop_height) == 92);
+    assert!(offset_of!(KernelArgs, gop_stride) == 96);
+    assert!(offset_of!(KernelArgs, gop_pixel_format) == 100);
+    assert!(offset_of!(KernelArgs, boot_pml4_addr) == 104);
     assert!(offset_of!(KernelArgs, layout) == 112);
     assert!(offset_of!(KernelArgs, cmdline_addr) == 120);
     assert!(offset_of!(KernelArgs, cmdline_len) == 128);
@@ -170,6 +186,8 @@ const _: () = {
     assert!(offset_of!(KernelArgs, boot_names) == 424);
     assert!(size_of::<KernelArgs>() == 440);
     assert!(size_of::<BootImage>() == 16);
+    // A partition aligned to 1 MiB starts at a multiple of 256 blocks.
+    assert!(LAYOUT % 256 != 0);
     assert!(align_of::<KernelArgs>() == 8);
 };
 

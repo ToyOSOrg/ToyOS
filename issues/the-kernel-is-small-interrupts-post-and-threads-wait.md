@@ -449,8 +449,7 @@ out, and a larger number needs one of the design changes above.
   `quiesce.rs`'s header speaks of the block layer and a USB stop, neither
   of which the kernel has; `UserImage`'s doc comment
   (`kernel/src/process.rs`) says "the file the kernel opened", and the
-  kernel opens none; `loaded.rs`'s header says it "interprets no path"
-  above a function that parses one.
+  kernel opens none.
 
 ## Standing
 

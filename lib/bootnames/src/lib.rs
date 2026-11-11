@@ -45,7 +45,7 @@ pub struct Names<'a> {
     /// The partition firmware loaded the loader from, where it named one: a
     /// network boot or an unpartitioned device has none.
     pub boot: Option<Guid>,
-    /// The device [`Self::boot`] is on, where firmware gave it a path.
+    /// The device firmware loaded the loader from, where it gave it a path.
     pub loader_source: Option<Source<'a>>,
     /// The device [`Self::slot`] is on.
     pub slot_source: Option<Source<'a>>,
