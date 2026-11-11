@@ -34,6 +34,14 @@ struct Piece {
     fresh: bool,
 }
 
+/// A write onto reserved sectors, planned: its pieces in file order, and the
+/// buffer their sealed blocks lie in.
+#[derive(Default)]
+struct Plan {
+    pieces: Vec<Piece>,
+    buf: Vec<[u8; BLOCK]>,
+}
+
 /// The most extents of one bucket one transaction points at (fresh ones of
 /// a reserved write) or removes (whole ones a truncation passes). The
 /// group shares one change of its bucket: its alloc key, its LRU entry,
@@ -54,6 +62,9 @@ pub(super) struct Reserved {
     ino: u64,
     block_sectors: u64,
     runs: Vec<Run>,
+    /// A pool ([`Mount::reserve_blocks`]): its blocks are placed wherever
+    /// each write lands, and it outlives being spent, to grow again.
+    pool: bool,
 }
 
 impl Reserved {
@@ -148,6 +159,11 @@ impl<D: BlockDev> Mount<D> {
     /// contiguous sectors at a time: a later write into it cannot be refused
     /// for space.
     pub async fn reserve(&self, ino: u64, offset: u64, len: usize) -> Result<Reservation> {
+        self.reserve_as(ino, offset, len, false).await
+    }
+
+    /// [`Self::reserve`], of a pool where `pool`.
+    async fn reserve_as(&self, ino: u64, offset: u64, len: usize, is_pool: bool) -> Result<Reservation> {
         let block = self.sb.block_bytes() as u64;
         let first = offset / block * block;
         let end = offset.checked_add(len as u64).filter(|&end| len > 0 && i64::try_from(end).is_ok()).ok_or(Error::Invalid("reservation of nothing or past 2^63-1"))?;
@@ -155,7 +171,7 @@ impl<D: BlockDev> Mount<D> {
             let mut pool = self.reservations.borrow_mut();
             let id = pool.next;
             pool.next = pool.next.checked_add(1).expect("reservation identifiers exhausted");
-            pool.active.insert(id, Reserved { ino, block_sectors: block / SECTOR as u64, runs: Vec::new() });
+            pool.active.insert(id, Reserved { ino, block_sectors: block / SECTOR as u64, runs: Vec::new(), pool: is_pool });
             id
         };
         let mut reservation = Reservation { owner: Rc::clone(&self.reservations), id, first, bytes: 0 };
@@ -283,14 +299,9 @@ impl<D: BlockDev> Mount<D> {
         let _slot = self.data_slot().await;
         self.check_writable()?;
         self.observe(now);
-        let bucket = u64::from(self.sb.member.bucket_sectors);
         let ino = self.reservations.borrow().active.get(&reservation.id).ok_or(Error::Invalid("reservation already written"))?.ino;
         regular_mode(self.inode(ino).await?.mode)?;
-        // The data slot keeps the file's extents as they are from here to the
-        // last pointer but for this write's own, so each extent is cut and
-        // sealed once, before its bytes go.
-        let mut pieces: Vec<Piece> = Vec::new();
-        let mut buf: Vec<[u8; BLOCK]> = Vec::new();
+        let mut plan = Plan::default();
         let mut planned = 0;
         while planned < data.len() {
             let at = offset + planned as u64;
@@ -306,17 +317,37 @@ impl<D: BlockDev> Mount<D> {
                 }
                 (run.sector + (at / block * block - run.first) / SECTOR as u64, end)
             };
-            let version = self.data_version().await?;
-            let input = &data[planned..(end - offset) as usize];
-            let (first, end, old) = self.span(ino, at, input.len()).await?;
-            let n = (input.len() as u64).min(end - at) as usize;
-            let blocks = buf.len()..buf.len() + (end - first) as usize / BLOCK;
-            buf.resize(blocks.end, [0; BLOCK]);
-            self.fill(ino, first, end, at, &input[..n], buf[blocks.clone()].as_flattened_mut()).await?;
-            let seal = self.seal(&mut buf[blocks.clone()], version)?;
-            pieces.push(Piece { at, n, first, end, blocks, sector, version, seal, fresh: old.is_empty() });
-            planned += n;
+            planned += self.plan_piece(&mut plan, ino, at, &data[planned..(end - offset) as usize], sector).await?;
         }
+        self.send_and_point(reservation.id, ino, plan, now).await
+    }
+
+    /// One piece of a write onto reserved `sector`: the whole blocks `input`
+    /// at `at` spans, or as many as one transaction replaces, cut and sealed
+    /// into `plan`. Bytes it takes.
+    async fn plan_piece(&self, plan: &mut Plan, ino: u64, at: u64, input: &[u8], sector: u64) -> Result<usize> {
+        let version = self.data_version().await?;
+        let (first, end, old) = self.span(ino, at, input.len()).await?;
+        let n = (input.len() as u64).min(end - at) as usize;
+        let blocks = plan.buf.len()..plan.buf.len() + (end - first) as usize / BLOCK;
+        plan.buf.resize(blocks.end, [0; BLOCK]);
+        self.fill(ino, first, end, at, &input[..n], plan.buf[blocks.clone()].as_flattened_mut()).await?;
+        let seal = self.seal(&mut plan.buf[blocks.clone()], version)?;
+        plan.pieces.push(Piece { at, n, first, end, blocks, sector, version, seal, fresh: old.is_empty() });
+        Ok(n)
+    }
+
+    /// A planned write onto reservation `id`'s sectors: its bytes to the
+    /// device first, each stretch of contiguous sectors as one write, then
+    /// its extents' pointers, up to [`POINTED`] fresh ones of a bucket a
+    /// transaction, each block counted written as its pointer lands. Bytes
+    /// written; a failure after some returns their count. A reservation
+    /// with nothing left unwritten goes, and a pool keeps only its runs not
+    /// written whole.
+    async fn send_and_point(&self, id: u64, ino: u64, plan: Plan, now: i64) -> Result<usize> {
+        let block = self.sb.block_bytes() as u64;
+        let bucket = u64::from(self.sb.member.bucket_sectors);
+        let Plan { pieces, buf } = plan;
         for stretch in pieces.chunk_by(|a, b| b.sector == a.sector + (a.end - a.first) / SECTOR as u64) {
             let (head, last) = (&stretch[0], &stretch[stretch.len() - 1]);
             let bytes = &buf[head.blocks.start..last.blocks.end];
@@ -331,7 +362,7 @@ impl<D: BlockDev> Mount<D> {
         let groups = pieces.chunk_by(|a, b| a.fresh && b.fresh && a.sector / bucket == b.sector / bucket).flat_map(|together| together.chunks(POINTED));
         for group in groups {
             let pointed = self
-                .transact(K_TX, FOOTPRINT, Draw::Reserved(reservation.id), async |txn: &mut Txn| {
+                .transact(K_TX, FOOTPRINT, Draw::Reserved(id), async |txn: &mut Txn| {
                     let mut inode = self.inode_in(txn, ino).await?;
                     regular(&inode)?;
                     match group {
@@ -365,17 +396,27 @@ impl<D: BlockDev> Mount<D> {
             }
             let mut pool = self.reservations.borrow_mut();
             let mut st = self.st.borrow_mut();
-            let reserved = pool.active.get_mut(&reservation.id).expect("a reservation being written");
+            let reserved = pool.active.get_mut(&id).expect("a reservation being written");
+            let block_sectors = reserved.block_sectors;
             for piece in group {
-                let run = reserved.runs.iter_mut().find(|r| (r.first..r.first + u64::from(r.blocks) * block).contains(&piece.at)).expect("the run just written");
-                for b in ((piece.at - run.first) / block) as u32..((piece.at + piece.n as u64 - run.first).div_ceil(block)) as u32 {
+                let run = reserved
+                    .runs
+                    .iter_mut()
+                    .find(|r| (r.sector..r.sector + u64::from(r.blocks) * block_sectors).contains(&piece.sector))
+                    .expect("the run just written");
+                let first = ((piece.sector - run.sector) / block_sectors) as u32;
+                for b in first..first + ((piece.end - piece.first) / block) as u32 {
                     run.written |= 1 << b;
                     st.alloc.unpin(run.sector / bucket);
                 }
                 done += piece.n;
             }
-            if reserved.unwritten() == 0 {
-                pool.active.remove(&reservation.id);
+            if reserved.pool {
+                // A pool lives as long as its file is written, and grows
+                // again once spent: only its runs written whole go.
+                reserved.runs.retain(|r| r.written.count_ones() < r.blocks);
+            } else if reserved.unwritten() == 0 {
+                pool.active.remove(&id);
             }
         }
         Ok(done)
@@ -392,7 +433,7 @@ impl<D: BlockDev> Mount<D> {
     /// one range ([`Self::reserve`]) cannot serve.
     pub async fn reserve_blocks(&self, ino: u64, blocks: u64) -> Result<Reservation> {
         let len = blocks.checked_mul(self.sb.block_bytes() as u64).and_then(|len| usize::try_from(len).ok());
-        self.reserve(ino, 0, len.ok_or(Error::Invalid("a pool past 2^63-1 bytes"))?).await
+        self.reserve_as(ino, 0, len.ok_or(Error::Invalid("a pool past 2^63-1 bytes"))?, true).await
     }
 
     /// `blocks` more blocks into a pool [`Self::reserve_blocks`] made: whole
@@ -417,10 +458,11 @@ impl<D: BlockDev> Mount<D> {
     }
 
     /// Writes `data` at `offset` into the lowest blocks of a pool
-    /// ([`Self::reserve_blocks`]) not yet written, wherever they lie: one
-    /// extent for each run of them the bytes take. As
-    /// [`Self::write_reserved`] otherwise; a pool with too few blocks left
-    /// refuses what does not fit.
+    /// ([`Self::reserve_blocks`]) not yet written, wherever they lie, as
+    /// [`Self::write_reserved`] writes into its reserved blocks: one extent
+    /// for each run of them the bytes take, sent before any is pointed. A
+    /// pool with too few blocks left writes what fits: bytes written, refused
+    /// where none fits.
     pub async fn write_placed(&self, pool: &mut Reservation, offset: u64, data: &[u8], now: i64) -> Result<usize> {
         if !Rc::ptr_eq(&pool.owner, &self.reservations) {
             return Err(Error::Invalid("reservation belongs to another mount"));
@@ -432,55 +474,36 @@ impl<D: BlockDev> Mount<D> {
         let _slot = self.data_slot().await;
         self.check_writable()?;
         self.observe(now);
-        let bucket = u64::from(self.sb.member.bucket_sectors);
+        // Each run's sectors and the blocks already written or taken by a
+        // piece planned here: the cursor the pieces take the lowest from.
+        let (ino, block_sectors, mut runs) = {
+            let reservations = self.reservations.borrow();
+            let reserved = reservations.active.get(&pool.id).ok_or(Error::Invalid("a pool with no block left"))?;
+            (reserved.ino, reserved.block_sectors, reserved.runs.iter().map(|r| (r.sector, r.blocks, r.written)).collect::<Vec<_>>())
+        };
+        regular_mode(self.inode(ino).await?.mode)?;
         let end = offset + data.len() as u64;
-        let mut done = 0;
-        while done < data.len() {
-            let at = offset + done as u64;
+        let mut plan = Plan::default();
+        let mut planned = 0;
+        while planned < data.len() {
+            let at = offset + planned as u64;
             let wanted = (end.div_ceil(block) - at / block) as u32;
-            // The lowest unwritten block, and those after it in its run.
-            let (ino, sector, took) = {
-                let reservations = self.reservations.borrow();
-                let reserved = reservations.active.get(&pool.id).ok_or(Error::Invalid("a pool with no block left"))?;
-                let (run, first) = reserved
-                    .runs
-                    .iter()
-                    .find_map(|r| (0..r.blocks).find(|b| r.written & 1 << b == 0).map(|b| (r, b)))
-                    .ok_or(Error::Invalid("a pool with no block left"))?;
-                let free = (first..run.blocks).take_while(|b| run.written & 1 << b == 0).count() as u32;
-                (reserved.ino, run.sector + u64::from(first) * reserved.block_sectors, free.min(wanted))
-            };
-            let stop = end.min((at / block + u64::from(took)) * block);
-            let version = match self.data_version().await {
-                Ok(version) => version,
-                Err(_) if done > 0 => return Ok(done),
-                Err(e) => return Err(e),
-            };
-            let n = match self.write_run(ino, at, &data[done..(stop - offset) as usize], now, version, Some((pool.id, sector))).await {
-                Ok(n) => n,
-                Err(_) if done > 0 => return Ok(done),
-                Err(e) => return Err(e),
-            };
-            let mut reservations = self.reservations.borrow_mut();
-            let mut st = self.st.borrow_mut();
-            let reserved = reservations.active.get_mut(&pool.id).expect("a pool being written");
-            let block_sectors = reserved.block_sectors;
-            let run = reserved
-                .runs
-                .iter_mut()
-                .find(|r| (r.sector..r.sector + u64::from(r.blocks) * block_sectors).contains(&sector))
-                .expect("the run just written");
-            let first = ((sector - run.sector) / block_sectors) as u32;
-            for b in first..first + ((at + n as u64).div_ceil(block) - at / block) as u32 {
-                run.written |= 1 << b;
-                st.alloc.unpin(run.sector / bucket);
+            let lowest = runs.iter().enumerate().find_map(|(i, &(_, blocks, taken))| (0..blocks).find(|b| taken & 1 << b == 0).map(|b| (i, b)));
+            let Some((i, first)) = lowest else { break };
+            let (sector, blocks, taken) = runs[i];
+            let free = (first..blocks).take_while(|b| taken & 1 << b == 0).count() as u32;
+            let stop = end.min((at / block + u64::from(free.min(wanted))) * block);
+            let n = self.plan_piece(&mut plan, ino, at, &data[planned..(stop - offset) as usize], sector + u64::from(first) * block_sectors).await?;
+            let piece = plan.pieces.last().expect("a piece just planned");
+            for b in first..first + ((piece.end - piece.first) / block) as u32 {
+                runs[i].2 |= 1 << b;
             }
-            // A pool lives as long as its file is written, and grows again
-            // once spent: only its runs written whole go.
-            reserved.runs.retain(|r| r.written.count_ones() < r.blocks);
-            done += n;
+            planned += n;
         }
-        Ok(done)
+        if plan.pieces.is_empty() {
+            return Err(Error::Invalid("a pool with no block left"));
+        }
+        self.send_and_point(pool.id, ino, plan, now).await
     }
 
     pub(super) async fn create_symlink(&self, dir: u64, name: &[u8], target: &[u8], owner: Owner, now: i64) -> Result<Inode> {
@@ -538,7 +561,7 @@ impl<D: BlockDev> Mount<D> {
             let room = (at / block * block + longest - at) as usize;
             let part = &data[done..done + room.min(data.len() - done)];
             let out = match self.data_version().await {
-                Ok(version) => self.write_run(ino, at, part, now, version, None).await,
+                Ok(version) => self.write_run(ino, at, part, now, version).await,
                 Err(e) => Err(e),
             };
             let out = match out {
@@ -700,31 +723,23 @@ impl<D: BlockDev> Mount<D> {
         Ok(())
     }
 
-    /// One extent of `input` at `at` onto new sectors, or onto the sector a
-    /// pool `placed` it at: the whole blocks it spans, or as many as the open
-    /// bucket has left. Bytes written.
-    async fn write_run(&self, ino: u64, at: u64, input: &[u8], now: i64, version: Version, placed: Option<(u64, u64)>) -> Result<usize> {
-        let draw = placed.map_or(Draw::Ordinary, |(pool, _)| Draw::Reserved(pool));
-        self.transact(K_TX, FOOTPRINT, draw, async |txn: &mut Txn| {
+    /// One extent of `input` at `at` onto new sectors: the whole blocks it
+    /// spans, or as many as the open bucket has left. Bytes written.
+    async fn write_run(&self, ino: u64, at: u64, input: &[u8], now: i64, version: Version) -> Result<usize> {
+        self.transact(K_TX, FOOTPRINT, Draw::Ordinary, async |txn: &mut Txn| {
             let mut inode = self.inode_in(txn, ino).await?;
             regular(&inode)?;
             let block = self.sb.block_bytes() as u64;
             let (first, mut end, mut old) = self.span(ino, at, input.len()).await?;
-            let sector = match placed {
-                Some((_, sector)) => sector,
-                None => {
-                    let (sector, got) = if end - first == block {
-                        (self.data_sector(block / SECTOR as u64, Draw::Ordinary, true).await?.0, block / SECTOR as u64)
-                    } else {
-                        self.data_run((end - first) / SECTOR as u64, Draw::Ordinary).await?
-                    };
-                    end = first + got * SECTOR as u64;
-                    old.retain(|(k, _)| start(k).is_ok_and(|s| s < end));
-                    self.st.borrow_mut().alloc.pin(sector / u64::from(self.sb.member.bucket_sectors));
-                    txn.allocated_data.push(sector);
-                    sector
-                }
+            let (sector, got) = if end - first == block {
+                (self.data_sector(block / SECTOR as u64, Draw::Ordinary, true).await?.0, block / SECTOR as u64)
+            } else {
+                self.data_run((end - first) / SECTOR as u64, Draw::Ordinary).await?
             };
+            end = first + got * SECTOR as u64;
+            old.retain(|(k, _)| start(k).is_ok_and(|s| s < end));
+            self.st.borrow_mut().alloc.pin(sector / u64::from(self.sb.member.bucket_sectors));
+            txn.allocated_data.push(sector);
             let n = (input.len() as u64).min(end - at) as usize;
             let mut data = alloc::vec![[0u8; BLOCK]; (end - first) as usize / BLOCK];
             self.fill(ino, first, end, at, &input[..n], data.as_flattened_mut()).await?;
