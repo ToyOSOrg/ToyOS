@@ -341,6 +341,7 @@ fn serve(
             match event {
                 admission::Event::Admitted(asker) if asker.msg_type() == MSG_INSPECT => answer(&asker, usb, &wakes, wake_at),
                 admission::Event::Left { why, say: Some(unsaid), .. } => println!("{name}: letting a connection go: {why}{unsaid}"),
+                admission::Event::Unsaid(unsaid) => println!("{name}: {}", unsaid.alone()),
                 admission::Event::Admitted(_) | admission::Event::Left { .. } => {}
             }
         }

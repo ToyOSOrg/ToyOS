@@ -6,7 +6,7 @@
 //! the file changes — and this thread
 //! owns the acceptor, reads each reader's request without ever blocking on it,
 //! answers in one non-blocking write and closes. A reader that connects and
-//! says nothing costs a slot of [`READERS`] for its limit, never the log.
+//! says nothing costs a slot of [`READERS`] for its limit, never the log's loop.
 
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -168,6 +168,7 @@ fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
                 },
                 Event::Left { why, say: Some(unsaid), .. } => say!("logkeeper: letting a reader go: {why}{unsaid}"),
                 Event::Left { .. } => {}
+                Event::Unsaid(unsaid) => say!("logkeeper: readers: {}", unsaid.alone()),
             }
         }
     }

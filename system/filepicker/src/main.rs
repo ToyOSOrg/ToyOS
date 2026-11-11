@@ -592,6 +592,10 @@ fn main() {
                     continue;
                 }
                 admission::Event::Left { .. } => continue,
+                admission::Event::Unsaid(unsaid) => {
+                    eprintln!("filepicker: {}", unsaid.alone());
+                    continue;
+                }
             };
             match *asker.key() {
                 Port::Consent => match consent::question(asker.payload(), asker.msg_type()) {

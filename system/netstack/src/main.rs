@@ -380,6 +380,7 @@ fn hear_links(greeting: &mut Greeting, now: Wall) -> Vec<Asked> {
             }
             Event::Left { why, say: Some(unsaid), .. } => say!("netstack: letting a NIC driver's connection go: {why}{unsaid}"),
             Event::Left { .. } => {}
+            Event::Unsaid(unsaid) => say!("netstack: NIC drivers: {}", unsaid.alone()),
         }
     }
     asked
@@ -691,6 +692,7 @@ fn main() {
                     say!("netstack: letting a connection of {key:?} go: {why}{unsaid}")
                 }
                 Event::Left { .. } => {}
+                Event::Unsaid(unsaid) => say!("netstack: {}", unsaid.alone()),
             }
         }
 

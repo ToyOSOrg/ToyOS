@@ -40,11 +40,14 @@ Every server admits its clients the same way, through one shared mechanism:
 - **No client writes its server's log at its own rate.** Of a client's
   refusals and of connections let go for what they sent or did not, its
   server says one line a client a limit for as many clients as its table has
-  slots, and one more line a limit for all clients past those. Every line not
-  said is counted into the next one said, so however many clients arrive a
-  table says at most one line a slot and one more a limit, and accounts for
-  every refusal. A hang-up is not said: a client may connect only to learn
-  that its server is there.
+  slots, and one more line a limit shared by all clients past those; no
+  client is said of twice in a limit. Each refusal or connection let go that
+  is not said is counted into the next line said, and a count no line has
+  carried within a limit of the last is said on its own, on the shared line.
+  So however many clients arrive, a table says at most one line a slot and
+  one more a limit, and says or counts every refusal and connection let go
+  within a limit of the line before. A hang-up is not said: a client may
+  connect only to learn that its server is there.
 - **The size of a table and of a share are the server's**; the mechanism and
   its limit are the same for all.
 

@@ -7,8 +7,9 @@ opened: 2026-11-11
 # A client writes its server's log at its own rate through refused requests
 
 `toyos::admission` (`sdk/toyos/src/admission.rs`) has its server say at most
-one line a holder a limit of what befalls a connection before its first
-request: a refusal, a frame no protocol describes, a silence. What a server
+one line a holder a limit, and a table at most one more than its slots, of
+what befalls a connection before its first request: a refusal, a frame no
+protocol describes, a silence. What a server
 says of a request it then refuses has no such bound. The supervisor says a
 line for each launch it refuses (`serve_launch`,
 `system/supervisor/src/main.rs`: a working directory that is not absolute, a

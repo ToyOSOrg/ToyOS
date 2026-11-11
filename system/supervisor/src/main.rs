@@ -1752,6 +1752,7 @@ impl<'a> Supervisor<'a> {
                     }
                     Event::Left { why, say: Some(unsaid), .. } => say!("supervisor: power: letting a connection go: {why}{unsaid}"),
                     Event::Left { .. } => {}
+                    Event::Unsaid(unsaid) => say!("supervisor: power: {}", unsaid.alone()),
                 }
             }
             while let Some(event) = asking.next(now) {
@@ -1762,6 +1763,10 @@ impl<'a> Supervisor<'a> {
                         continue;
                     }
                     Event::Left { .. } => continue,
+                    Event::Unsaid(unsaid) => {
+                        say!("supervisor: {}", unsaid.alone());
+                        continue;
+                    }
                 };
                 let (msg_type, payload, carried) = (asker.msg_type(), asker.payload().to_vec(), asker.take_batch());
                 let (conn, _, port) = asker.into_parts();

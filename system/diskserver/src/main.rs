@@ -394,6 +394,7 @@ impl Service {
                 match event {
                     Event::Admitted(line) => self.named(line),
                     Event::Left { key, why, say, .. } => self.unnamed(key, say.map(|unsaid| format!("{why}{unsaid}"))),
+                    Event::Unsaid(unsaid) => println!("diskserver: disk drivers: {}", unsaid.alone()),
                 }
             }
             let ids: Vec<u64> = self.drivers.keys().copied().collect();
@@ -423,6 +424,7 @@ impl Service {
                         println!("diskserver: letting a connection of {key:?} go: {why}{unsaid}")
                     }
                     Event::Left { .. } => {}
+                    Event::Unsaid(unsaid) => println!("diskserver: {}", unsaid.alone()),
                 }
             }
 

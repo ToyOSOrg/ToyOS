@@ -22,12 +22,15 @@
 //! **No client writes its server's log at its own rate.** Of what befalls a
 //! key's connections, a refusal, a frame no protocol describes or a silence,
 //! the table has its server say one line a key a [`LIMIT`] for at most
-//! [`Policy::slots`] keys at once, and one more line a limit for every key
-//! past those. Each line it does not say is counted into the next it does
-//! ([`Unsaid`]), so a table says at most `slots + 1` lines a limit however
-//! many keys arrive, and accounts for every one; a count names no key. A
-//! hang-up is never said: a client may connect only to learn whether its
-//! server is there.
+//! [`Policy::slots`] keys at once, and one more line a limit shared by all
+//! the keys past those; no key is said twice in a limit. Each refusal or
+//! connection let go that is not said is counted into the next line said
+//! ([`Unsaid`]), and a count no line has carried within a limit of the last
+//! is said on its own ([`Event::Unsaid`]), on the shared line. So a table
+//! says at most `slots + 1` lines a limit however many keys arrive, and says
+//! or counts every refusal and connection let go in a line within a limit of
+//! the line before; a count names no key. A hang-up is never said: a client
+//! may connect only to learn whether its server is there.
 //!
 //! **Every wait here is the server's own.** The table waits on nothing: the
 //! server's wait wakes for a connection that became readable
@@ -276,12 +279,27 @@ impl<K, C, const MAX: usize> AsHandle for Client<K, C, MAX> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unsaid(pub usize);
 
+impl Unsaid {
+    /// The count as a line of its own, for [`Event::Unsaid`].
+    pub fn alone(self) -> impl fmt::Display {
+        Alone(self.0)
+    }
+}
+
 impl fmt::Display for Unsaid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
             0 => Ok(()),
             n => write!(f, " ({n} more of this table's unsaid since its last line)"),
         }
+    }
+}
+
+struct Alone(usize);
+
+impl fmt::Display for Alone {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} more connections refused or let go since this table's last line went unsaid", self.0)
     }
 }
 
@@ -341,6 +359,9 @@ pub enum Event<K, C, const MAX: usize, L = Connection> {
     /// It is let go unanswered; the connection closes with this. `say` is
     /// whether its server says so, never for a hang-up.
     Left { conn: L, key: K, context: C, why: Left, say: Option<Unsaid> },
+    /// No line has carried the table's count of unsaid ones within a limit
+    /// of its last: its server says it now.
+    Unsaid(Unsaid),
 }
 
 struct Waiting<K, C, I, const MAX: usize, L> {
@@ -368,8 +389,11 @@ pub struct Admission<K, C, I, const MAX: usize, L = Connection> {
     /// The keys said of within the last [`LIMIT`], each with when: at most
     /// [`Policy::slots`] of them.
     said: Vec<(K, I)>,
-    /// When a key past those was last said of.
-    said_past: Option<I>,
+    /// When the line shared by the keys past those was last said, and of
+    /// which key; none for a count said on its own.
+    shared: Option<(I, Option<K>)>,
+    /// When the table's last line was said.
+    last: Option<I>,
     /// Lines counted and not yet said.
     unsaid: usize,
 }
@@ -382,7 +406,7 @@ where
 {
     pub fn new(policy: Policy) -> Self {
         assert!(policy.slots > 0 && policy.share > 0, "a table nobody can enter");
-        Self { policy, waiting: Vec::new(), cursor: 0, said: Vec::new(), said_past: None, unsaid: 0 }
+        Self { policy, waiting: Vec::new(), cursor: 0, said: Vec::new(), shared: None, last: None, unsaid: 0 }
     }
 
     /// Whether another connection may wait. While it may not,
@@ -446,16 +470,18 @@ where
     }
 
     /// How long the server's wait may last before the oldest entry's limit
-    /// ends: what is left of it, never a fresh limit. `None` while none waits.
+    /// ends, or a count of unsaid lines falls due: what is left of it, never
+    /// a fresh limit. `None` while none waits and no count is owed.
     pub fn left(&self, now: I) -> Option<Duration> {
-        let left = |w: &Waiting<K, C, I, MAX, L>| if w.deadline > now { w.deadline - now } else { Duration::ZERO };
-        self.waiting.iter().map(left).min()
+        let until = |at: I| if at > now { at - now } else { Duration::ZERO };
+        let owed = self.last.filter(|_| self.unsaid > 0).map(|last| until(last + LIMIT));
+        self.waiting.iter().map(|w| until(w.deadline)).chain(owed).min()
     }
 
     /// The next connection this pass settles, until `None` ends the pass.
     /// Each one woken, or past its limit at `now`, is read once: a whole
     /// request admits it, even past its limit, and only one that has sent
-    /// none by then is let go for it.
+    /// none by then is let go for it. A count fallen due ends the pass.
     pub fn next(&mut self, now: I) -> Option<Event<K, C, MAX, L>> {
         while let Some(w) = self.waiting.get_mut(self.cursor) {
             let due = now >= w.deadline;
@@ -482,23 +508,31 @@ where
             return Some(Event::Left { conn, key, context, why, say });
         }
         self.cursor = 0;
+        // Every line said before `now - LIMIT` has run its limit, so the
+        // shared line is free for the count.
+        if self.unsaid > 0 && self.last.is_some_and(|last| now >= last + LIMIT) {
+            (self.shared, self.last) = (Some((now, None)), Some(now));
+            return Some(Event::Unsaid(Unsaid(core::mem::take(&mut self.unsaid))));
+        }
         None
     }
 
     /// Whether a line is said of `key`'s connection at `now`, carrying the
     /// count of the table's unsaid since its last: once a [`LIMIT`] for a key
-    /// it said of within none, while fewer than [`Policy::slots`] were; once
-    /// a limit for all the keys past those; and else counted. A key is
-    /// forgotten only when its limit has passed.
+    /// not said of within one, in a slot while fewer than [`Policy::slots`]
+    /// keys hold one, else on the line all the rest share once a limit; and
+    /// else counted. A key is forgotten only when its limit has passed.
     fn say(&mut self, key: &K, now: I) -> Option<Unsaid> {
         self.said.retain(|(_, at)| now < *at + LIMIT);
-        let said = if self.said.iter().any(|(k, _)| k == key) {
+        let shared_free = self.shared.as_ref().is_none_or(|(at, _)| now >= *at + LIMIT);
+        let on_shared = !shared_free && self.shared.as_ref().is_some_and(|(_, k)| k.as_ref() == Some(key));
+        let said = if on_shared || self.said.iter().any(|(k, _)| k == key) {
             false
         } else if self.said.len() < self.policy.slots {
             self.said.push((key.clone(), now));
             true
-        } else if self.said_past.is_none_or(|at| now >= at + LIMIT) {
-            self.said_past = Some(now);
+        } else if shared_free {
+            self.shared = Some((now, Some(key.clone())));
             true
         } else {
             false
@@ -507,6 +541,7 @@ where
             self.unsaid += 1;
             return None;
         }
+        self.last = Some(now);
         Some(Unsaid(core::mem::take(&mut self.unsaid)))
     }
 }
@@ -606,11 +641,22 @@ mod tests {
     fn said(table: &mut Table, now: Duration) -> Vec<(Left, Option<Unsaid>)> {
         let mut said = Vec::new();
         while let Some(event) = table.next(now) {
-            if let Event::Left { why, say, .. } = event {
-                said.push((why, say));
+            match event {
+                Event::Left { why, say, .. } => said.push((why, say)),
+                Event::Unsaid(unsaid) => panic!("a count said where none was due: {unsaid:?}"),
+                Event::Admitted(_) => {}
             }
         }
         said
+    }
+
+    /// Whether `key`'s connection that sends what no protocol describes, at
+    /// `now`, is said.
+    fn malformed(table: &mut Table, key: &'static str, now: Duration) -> Vec<(Left, Option<Unsaid>)> {
+        let peer = Peer::default();
+        peer.does(Does::SendsWhatNoProtocolDescribes);
+        assert!(table.admit(peer, key, 0, now).is_ok(), "{key}'s connection was refused");
+        said(table, now)
     }
 
     /// Every event of one pass at `now`, as `(key, what happened)`.
@@ -620,6 +666,7 @@ mod tests {
             seen.push(match event {
                 Event::Admitted(client) => (*client.key(), Ok(client.msg_type())),
                 Event::Left { key, why, .. } => (key, Err(why)),
+                Event::Unsaid(unsaid) => panic!("a count said where none was due: {unsaid:?}"),
             });
         }
         seen
@@ -857,6 +904,47 @@ mod tests {
         assert_eq!(said[..3], [Some(Unsaid(0)); 3]);
         assert_eq!(said.iter().flatten().count(), 3, "more than slots + 1 lines in one limit");
         assert_eq!(refuse(&mut table, "k0", at(2)), None, "a key forgotten within its limit");
-        assert_eq!(refuse(&mut table, "late", LIMIT + at(1)), Some(Unsaid(98)), "a line unaccounted for");
+        let late: Vec<Option<Unsaid>> =
+            ["late0", "late1", "late2", "late3"].into_iter().map(|key| refuse(&mut table, key, LIMIT + at(1))).collect();
+        assert_eq!(late, [Some(Unsaid(98)), Some(Unsaid(0)), Some(Unsaid(0)), None], "not slots + 1 lines in the next limit");
+    }
+
+    /// A count no later line carries is said on its own once the limit of
+    /// the line before it has passed, and its server's wait ends for it.
+    #[test]
+    fn a_count_no_line_carries_is_said_on_its_own_a_limit_after_the_last_line() {
+        let mut table = Table::new(POLICY);
+        assert_eq!(malformed(&mut table, "noisy", at(0)), [(Left::Malformed, Some(Unsaid(0)))]);
+        assert_eq!(malformed(&mut table, "noisy", at(1)), [(Left::Malformed, None)]);
+        assert_eq!(table.left(at(1)), Some(LIMIT.saturating_sub(at(1))), "nothing wakes its server for the count");
+        assert!(table.next(LIMIT.saturating_sub(Duration::from_nanos(1))).is_none(), "said before it fell due");
+        assert!(matches!(table.next(LIMIT), Some(Event::Unsaid(Unsaid(1)))), "the count was never said");
+        assert!(table.next(LIMIT).is_none(), "said twice");
+        assert_eq!(table.left(LIMIT), None, "still owed once said");
+    }
+
+    /// A count said on its own spends the line the keys past the slots
+    /// share, so the table still says at most `slots + 1` lines a limit.
+    #[test]
+    fn a_count_said_on_its_own_spends_the_shared_line() {
+        let mut table = Table::new(Policy { slots: 1, share: 1 });
+        assert_eq!(malformed(&mut table, "a", at(0)), [(Left::Malformed, Some(Unsaid(0)))]);
+        assert_eq!(malformed(&mut table, "a", at(1)), [(Left::Malformed, None)]);
+        assert!(matches!(table.next(LIMIT), Some(Event::Unsaid(Unsaid(1)))));
+        assert_eq!(malformed(&mut table, "b", LIMIT), [(Left::Malformed, Some(Unsaid(0)))]);
+        assert_eq!(malformed(&mut table, "c", LIMIT), [(Left::Malformed, None)], "slots + 2 lines in one limit");
+    }
+
+    /// A key said on the shared line is not said again in a slot freed
+    /// within its limit: no key is said twice in a limit.
+    #[test]
+    fn a_key_said_on_the_shared_line_is_said_once_a_limit() {
+        let mut table = Table::new(Policy { slots: 2, share: 1 });
+        assert_eq!(malformed(&mut table, "a", at(0)), [(Left::Malformed, Some(Unsaid(0)))]);
+        assert_eq!(malformed(&mut table, "b", at(0)), [(Left::Malformed, Some(Unsaid(0)))]);
+        assert_eq!(malformed(&mut table, "c", at(1)), [(Left::Malformed, Some(Unsaid(0)))]);
+        let within = LIMIT + Duration::from_millis(500);
+        assert_eq!(malformed(&mut table, "c", within), [(Left::Malformed, None)], "said twice in its limit");
+        assert_eq!(malformed(&mut table, "c", LIMIT + at(1)), [(Left::Malformed, Some(Unsaid(1)))]);
     }
 }

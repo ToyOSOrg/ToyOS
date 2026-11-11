@@ -84,6 +84,7 @@ fn first_frame<K, C>(
             eprintln!("compositor: dropping client {} — {reason}{unsaid}", conn.as_handle().raw().0);
         }
         Event::Left { .. } => {}
+        Event::Unsaid(unsaid) => eprintln!("compositor: {}", unsaid.alone()),
     }
 }
 

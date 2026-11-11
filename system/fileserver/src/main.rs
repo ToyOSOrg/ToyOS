@@ -525,6 +525,7 @@ impl Server {
                         println!("fileserver: letting a connection of {:?}, share {key}, go: {why}{unsaid}", context.root)
                     }
                     Event::Left { .. } => {}
+                    Event::Unsaid(unsaid) => println!("fileserver: {}", unsaid.alone()),
                 }
             }
             if self.writeback.take_due(now) && let Err(e) = self.sync() {
