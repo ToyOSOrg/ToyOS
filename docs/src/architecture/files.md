@@ -69,6 +69,9 @@ directory, which the child resolves in its own view.
 - An open file is identified by its node, not its path, and lookup is relative
   to a directory. Deleting a name keeps existing handles and mappings working
   until their last release; recreating the name makes a distinct file.
+- Reading, writing and stating an open file reach its pages in the kernel
+  without asking its server, which a path, a name or an open asks (see
+  [Memory](memory.md)).
 - Each format owns its on-disk structures, allocation and crash recovery.
   Common operations, authority, file lifetimes, asynchronous I/O and mapping
   integration are shared in userland. An unsupported feature fails clearly;

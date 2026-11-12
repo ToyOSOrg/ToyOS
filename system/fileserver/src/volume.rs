@@ -190,8 +190,30 @@ pub trait Volume {
     }
 
     /// `data` at the whole-page `offset`, inside the size, into the room
-    /// [`Self::reserve`] made; a last page in part is zeros past the size.
+    /// [`Self::reserve`] made, or [`Self::grant`] made for a page no write
+    /// of the server's reserved; a last page in part is zeros past the size.
     fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> WriteBack;
+
+    /// Whether [`Self::grant`] can hold room for holders' writes.
+    fn grants(&self) -> bool {
+        false
+    }
+
+    /// Room for `pages` more pages of `node` that holders of its object may
+    /// dirty anywhere in the file, each placed at its write-back: whole or
+    /// refused.
+    fn grant(&mut self, _node: Node, _pages: u64) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+
+    /// Give back room [`Self::grant`] held for `pages` no holder dirtied, or
+    /// all it holds where fewer.
+    fn ungrant(&mut self, _node: Node, _pages: u64) {}
+
+    /// The open file `node` is `size` bytes, last written at `mtime`, as its
+    /// object says once holders wrote it: its pages up to `size` are written
+    /// back after this, before any sync makes the size durable.
+    fn adopt(&mut self, _node: Node, _size: u64, _mtime: u64) {}
 
     fn truncate(&mut self, node: Node, size: u64) -> Result<(), Error>;
 

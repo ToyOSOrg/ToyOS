@@ -74,10 +74,10 @@ fn is_directory<T>(_: &str) -> Result<T, Error> { Err(Error::Served(fs::Error::I
 /// [`Position::export`] and [`Position::stream`] share descriptions, so each
 /// hands the offset over before another process can use it.
 ///
-/// Reached only under the capability's turn, so a read or write and the
-/// offset's move are one step against every other thread's.
+/// Its lock makes a read or write and the offset's move one step against
+/// every other thread's, through the server or the file's paged object.
 struct Position {
-    /// Every write lands at the end, which only the server knows.
+    /// Every write lands at the file's end, read where the write is made.
     append: bool,
     at: Lock<Offset>,
 }
@@ -108,11 +108,32 @@ impl Position {
     /// A read at the local offset through the file's paged object, which
     /// takes no turn on the capability: `None` where the offset is the
     /// server's or the object would not answer, and the server is asked.
-    fn read_held(&self, holder: &crate::paged::Paged, out: &mut [u8]) -> Option<usize> {
+    fn read_held(&self, holder: &crate::paged::Paged, out: &mut [u8]) -> Option<Result<usize, Error>> {
         let mut at = self.at.lock();
         let Offset::Here(offset) = *at else { return None };
         let n = holder.read(out, offset).ok()?;
         *at = Offset::Here(offset + n as u64);
+        Some(Ok(n))
+    }
+
+    /// A write at the local offset, or at the end where the file appends,
+    /// through the file's paged object, as [`Self::read_held`] reads: `None`
+    /// where the offset is the server's, or the object sends the write to it.
+    fn write_held(&self, holder: &crate::paged::Paged, data: &[u8]) -> Option<Result<usize, Error>> {
+        let mut at = self.at.lock();
+        let Offset::Here(offset) = *at else { return None };
+        if self.append {
+            let end = match holder.append(data) {
+                Ok(end) => end,
+                Err(e) => return held_write(Err(e)),
+            };
+            *at = Offset::Here(end);
+            return Some(Ok(data.len()));
+        }
+        let n = held_write(holder.write(data, offset))?;
+        if let Ok(n) = n {
+            *at = Offset::Here(offset + n as u64);
+        }
         Some(n)
     }
 
@@ -135,7 +156,7 @@ impl Position {
 
     /// Where a seek lands, by the rule the server keeps for its own offsets:
     /// at or below [`fs::MAX_FILE_BYTES`] and not before the start. From the
-    /// end, the server is asked, since only it knows the size.
+    /// end, the server is asked: it reads the end as of the writes it orders.
     fn seek(&self, dir: &mut Dir, fid: Fid, whence: u64, delta: i64) -> Result<u64, fs::Error> {
         let mut at = self.at.lock();
         let Offset::Here(offset) = *at else { return dir.seek(fid, whence, delta) };
@@ -308,6 +329,17 @@ fn on_fd<T>(
     on_fd_held(fd, kernel, synthetic, |_, _| None, served)
 }
 
+/// What a holder's write answered, as this module says it: `None` where the
+/// kernel sends the write to the server, which supplies, grants or answers
+/// what the object could not.
+fn held_write(written: Result<usize, SyscallError>) -> Option<Result<usize, Error>> {
+    match written {
+        Ok(n) => Some(Ok(n)),
+        Err(e @ (SyscallError::TextBusy | SyscallError::BadAddress)) => Some(Err(Error::Kernel(e))),
+        Err(_) => None,
+    }
+}
+
 /// [`on_fd`], trying `holding` first on a served file whose paged object
 /// this descriptor holds, without the capability's turn, so a reader waiting
 /// for a page holds up no request of another thread's; `None` from it, and
@@ -316,7 +348,7 @@ fn on_fd_held<T>(
     fd: Fd,
     kernel: impl FnOnce(crate::BorrowedHandle<'_>) -> Result<T, SyscallError>,
     synthetic: impl FnOnce(&str) -> Result<T, Error>,
-    holding: impl FnOnce(&crate::paged::Paged, &Position) -> Option<T>,
+    holding: impl FnOnce(&crate::paged::Paged, &Position) -> Option<Result<T, Error>>,
     served: impl FnOnce(&mut Dir, Fid, &Position) -> Result<T, fs::Error>,
 ) -> Result<T, Error> {
     // A kernel call is made while the descriptor's object is held; an object
@@ -333,7 +365,7 @@ fn on_fd_held<T>(
         Ok(held) => match &*held {
             Held::Directory(path) => synthetic(path),
             Held::Served(held) => match held.holder.as_ref().and_then(|h| holding(h, &held.position)) {
-                Some(answer) => Ok(answer),
+                Some(answer) => answer,
                 None => served(&mut held.cap.dir.lock(), held.fid, &held.position).map_err(Error::Served),
             },
         },
@@ -474,11 +506,12 @@ unsafe extern "C" fn toyos_fs_stat(at: Fd, path: *const u8, len: usize, follow: 
     // SAFETY: the caller's.
     let path = unsafe { bytes(path, len) };
     let stat = match (At::of(at), path.is_empty()) {
-        // What the descriptor names itself.
-        (At::Fd(fd), true) => on_fd(
+        // What the descriptor names itself: its object's, where it holds one.
+        (At::Fd(fd), true) => on_fd_held(
             fd,
             |h| syscall::fstat(h.raw()).map(Stat::of_kernel),
             directory_stat,
+            |holder, _| holder.stat().ok().map(|s| Ok(stat_of(fs::Record::stat(&s.record, s.size, s.mtime)))),
             |dir, fid, _| dir.fstat(fid).map(stat_of),
         ),
         (at, _) => on_path(
@@ -533,7 +566,13 @@ unsafe extern "C" fn toyos_fs_write(fd: Fd, buf: *const u8, len: usize) -> i64 {
     if let Some(n) = on_stream(fd, |h| crate::net::stream::write(h, buf, blocking)) {
         return answer(n.map(|n| n as u64));
     }
-    let n = on_fd(fd, |h| syscall::write(h.raw(), buf), is_directory, |dir, fid, position| position.write(dir, fid, buf));
+    let n = on_fd_held(
+        fd,
+        |h| syscall::write(h.raw(), buf),
+        is_directory,
+        |holder, position| position.write_held(holder, buf),
+        |dir, fid, position| position.write(dir, fid, buf),
+    );
     answer(n.map(|n| n as u64))
 }
 
@@ -547,7 +586,7 @@ unsafe extern "C" fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u6
         fd,
         |_| Err(SyscallError::NotSupported),
         is_directory,
-        |holder, _| holder.read(out(), offset).ok(),
+        |holder, _| holder.read(out(), offset).ok().map(Ok),
         |dir, fid, _| dir.pread(fid, offset, out()),
     );
     answer(n.map(|n| n as u64))
@@ -557,7 +596,13 @@ unsafe extern "C" fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u6
 unsafe extern "C" fn toyos_fs_pwrite(fd: Fd, buf: *const u8, len: usize, offset: u64) -> i64 {
     // SAFETY: the caller's.
     let buf = unsafe { bytes(buf, len) };
-    let n = on_fd(fd, |_| Err(SyscallError::NotSupported), is_directory, |dir, fid, _| dir.pwrite(fid, offset, buf));
+    let n = on_fd_held(
+        fd,
+        |_| Err(SyscallError::NotSupported),
+        is_directory,
+        |holder, _| held_write(holder.write(buf, offset)),
+        |dir, fid, _| dir.pwrite(fid, offset, buf),
+    );
     answer(n.map(|n| n as u64))
 }
 

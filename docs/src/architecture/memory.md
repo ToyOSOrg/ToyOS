@@ -48,9 +48,24 @@
 ```
 
 - One authoritative page cache serves both file I/O and file mappings. A
-  file's pages are a paged memory object its file server supplies and its
-  holders read without a request; the server's own cache holds only volume
-  structures.
+  file's pages are a paged memory object its file server supplies; an open
+  file's holders read it, write it and read its size and times without a
+  request. The server's own cache holds only volume structures.
+- A holder writes without a request against credit: pages it may turn
+  dirty, for whose write-back the server holds room on the volume. A write
+  the credit does not cover, longer than 256 KiB, that meets a page the
+  server must supply first, or that meets another write under way goes to
+  the server whole, so a full volume is answered at the write and never at a
+  later write-back. While holders may write, the object's size and
+  modification time are the file's, and the server writes them back with
+  its pages.
+- Writes to one file go one at a time, as POSIX requires: each, a holder's,
+  the server's or an append, lands whole before or after every other, and
+  an append lands at the end the last write left. A read, and a statement of
+  the file's size and time, sees each write whole or not at all; a holder's
+  read that keeps meeting writes goes to the server, whose reads hold the
+  writes off. A holder's write never waits for another, and nothing a holder
+  does keeps the server's writes waiting.
 - Mapped files may be larger than RAM, partially mapped, and coherently shared
   and written; their length is never committed in RAM.
 - Clean pages are reclaimed; dirty pages are written back first, without losing

@@ -619,7 +619,9 @@ impl Server {
             };
             let more = notices.len() == NOTICES;
             for notice in notices {
-                self.files.notice(&mut *self.volume, notice);
+                if self.files.notice(&mut *self.volume, notice) {
+                    self.dirtied();
+                }
             }
             if !more {
                 return;
@@ -814,7 +816,7 @@ impl Server {
     /// What the volume path `path` is.
     fn stat_path(&mut self, path: &str) -> Result<Answer, Error> {
         let (meta, identity) = self.volume.stat(path)?;
-        Ok(Answer::Reply(stat_reply(meta, identity, self.volume_id, 1)))
+        Ok(Answer::Reply(stat_reply(self.files.meta(identity, meta), identity, self.volume_id, 1)))
     }
 
     /// What a description holds open is.
@@ -828,7 +830,7 @@ impl Server {
             (held, f.identity)
         };
         let (meta, linked) = match held {
-            Ok(node) => (self.volume.node_meta(node)?, self.volume.linked(node)?),
+            Ok(node) => (self.files.meta(identity, self.volume.node_meta(node)?), self.volume.linked(node)?),
             Err((_, true)) => (Meta { kind: Kind::Dir, size: 0, mtime: 0 }, false),
             Err((path, false)) => (self.volume.lstat(&path)?, true),
         };
@@ -891,17 +893,18 @@ impl Server {
                 window.read(0, &mut self.scratch[..len]);
                 let end = match op {
                     WRITE => self.write_at(&file, len)?,
-                    _ => self.write_to(&file, r.offset, len)?,
+                    _ => self.write_to(&file, Some(r.offset), len)?,
                 };
                 Ok(Answer::Reply(Reply { value: len as u64, value2: end, ..Reply::ok() }))
             }
             SEEK => {
                 let file = self.settled(id, r.fid)?;
                 let node = file.borrow().node()?;
+                let identity = file.borrow().identity;
                 let base = match r.flags {
                     SEEK_START => 0,
                     SEEK_CURRENT => file.borrow().offset,
-                    SEEK_END => self.volume.node_meta(node)?.size,
+                    SEEK_END => self.files.meta(identity, self.volume.node_meta(node)?).size,
                     _ => return Err(Error::InvalidRequest),
                 };
                 let at = bounds::seek(base, r.offset as i64)?;
@@ -927,7 +930,7 @@ impl Server {
                 };
                 let (meta, identity) = self.volume.stat(&path)?;
                 if !(follow && meta.kind == Kind::Symlink) {
-                    return Ok(Answer::Reply(stat_reply(meta, identity, self.volume_id, 1)));
+                    return Ok(Answer::Reply(stat_reply(self.files.meta(identity, meta), identity, self.volume_id, 1)));
                 }
                 match self.resolve(id, r.fid, &rel, true)? {
                     Resolved::Absolute(p) => self.follow(id, &r, &p),
@@ -986,7 +989,13 @@ impl Server {
                 };
                 let (_, room) = Self::span(&r)?;
                 let (out, next) = match dir {
-                    Some(dir) => listing::batch(&self.volume.list(&dir)?, r.offset, room)?,
+                    Some(dir) => {
+                        let mut listed = self.volume.list(&dir)?;
+                        for entry in &mut listed {
+                            entry.meta = self.files.meta(entry.identity, entry.meta);
+                        }
+                        listing::batch(&listed, r.offset, room)?
+                    }
                     None => (Vec::new(), READDIR_END),
                 };
                 self.put(id, &r, &out)?;
@@ -1159,7 +1168,10 @@ impl Server {
                 // The volume truncated first, so a refused open changed
                 // nothing; the object follows before anything writes back.
                 if how.truncate && found.is_some() {
-                    let truncated = self.volume.identity(&path).and_then(|identity| self.files.truncated(identity));
+                    let truncated = match self.volume.identity(&path) {
+                        Ok(identity) => self.files.truncated(&mut *self.volume, identity, node),
+                        Err(e) => Err(e),
+                    };
                     if let Err(e) = truncated {
                         let _ = self.volume.close(node);
                         return Err(e);
@@ -1188,27 +1200,31 @@ impl Server {
                 return Err(e);
             }
         };
+        let write = r.flags & (O_WRITE | O_APPEND) != 0;
         let mut holder = None;
+        let mut meta = meta;
         if let Held::File(node) = held {
-            if let Err(e) = self.files.opened(&mut *self.volume, identity, node) {
+            let record = Record { kind: KIND_FILE, nlink: 1, atime: 0, ctime: 0, volume: self.volume_id, node: identity };
+            if let Err(e) = self.files.opened(&mut *self.volume, identity, node, record) {
                 let _ = self.volume.close(node);
                 return Err(e);
             }
-            // An open to read is answered with a holder of the file's
-            // object, which reads without asking this server.
-            if r.flags & O_READ != 0 {
-                let minted = self.files.pager().zip(self.files.object(identity)).map(|(pager, object)| pager.holder(object));
-                holder = match minted {
-                    Some(Ok(handle)) => Some(handle),
-                    Some(Err(e)) => {
-                        println!("fileserver: file {identity}'s object made no holder ({e:?}); it is read through requests");
-                        None
-                    }
-                    None => None,
-                };
-            }
+            meta = self.files.meta(identity, meta);
+            // An open file is answered with a holder of its object, which
+            // reads, states and, opened to write, writes it without asking
+            // this server.
+            let writes = write && self.clients[&id].writes && self.files.holders_write(&*self.volume, identity);
+            let minted =
+                self.files.pager().zip(self.files.object(identity)).map(|(pager, object)| pager.holder(object, writes));
+            holder = match minted {
+                Some(Ok(handle)) => Some((handle, writes)),
+                Some(Err(e)) => {
+                    println!("fileserver: file {identity}'s object made no holder ({e:?}); it is served through requests");
+                    None
+                }
+                None => None,
+            };
         }
-        let write = r.flags & (O_WRITE | O_APPEND) != 0;
         let append = r.flags & O_APPEND != 0;
         let node = match held {
             Held::File(node) => Some(node),
@@ -1228,8 +1244,8 @@ impl Server {
         };
         let reply = Reply { value: fid, ..stat_reply(meta, identity, self.volume_id, 1) };
         Ok(match holder {
-            Some(handle) => {
-                self.files.held(identity);
+            Some((handle, writes)) => {
+                self.files.held(&mut *self.volume, identity, writes);
                 Answer::WithHandle(reply, handle)
             }
             None => Answer::Reply(reply),
@@ -1271,6 +1287,7 @@ impl Server {
             let file = self.fid(id, r.fid)?;
             let node = file.borrow().node().map_err(|_| Error::Unsupported)?;
             self.volume.set_mtime(node, mtime)?;
+            self.files.stamp(file.borrow().identity, mtime)?;
         } else {
             let path = match self.resolve(id, r.fid, &rel, r.flags & FOLLOW_LAST != 0)? {
                 Resolved::Absolute(p) => return self.follow(id, r, &p),
@@ -1279,10 +1296,12 @@ impl Server {
             if self.volume.lstat(&path)?.kind != Kind::File {
                 return Err(Error::Unsupported);
             }
+            let identity = self.volume.identity(&path)?;
             let node = self.volume.open(&path, OpenHow { create: false, create_new: false, truncate: false })?;
             let set = self.volume.set_mtime(node, mtime);
             let closed = self.volume.close(node);
             set.and(closed)?;
+            self.files.stamp(identity, mtime)?;
         }
         self.dirtied();
         Ok(Answer::Reply(Reply::ok()))
@@ -1321,25 +1340,23 @@ impl Server {
     /// Write the scratch's first `len` bytes to `file` at its offset, or at
     /// its end when it appends, and move the offset past them: the offset.
     fn write_at(&mut self, file: &Shared, len: usize) -> Result<u64, Error> {
-        let (node, append, offset) = {
+        let (append, offset) = {
             let f = file.borrow();
-            (f.node()?, f.append, f.offset)
+            (f.append, f.offset)
         };
-        let at = if append { self.volume.node_meta(node)?.size } else { offset };
-        let end = self.write_to(file, at, len)?;
+        let end = self.write_to(file, (!append).then_some(offset), len)?;
         file.borrow_mut().offset = end;
         Ok(end)
     }
 
-    /// Write the scratch's first `len` bytes to `file` at `at`: the offset
-    /// after them.
-    fn write_to(&mut self, file: &Shared, at: u64, len: usize) -> Result<u64, Error> {
+    /// Write the scratch's first `len` bytes to `file` at `at`, or at its end
+    /// where `None`: the offset after them.
+    fn write_to(&mut self, file: &Shared, at: Option<u64>, len: usize) -> Result<u64, Error> {
         let (node, identity) = {
             let f = file.borrow();
             (f.node()?, f.identity)
         };
-        let end = bounds::in_a_file(at, len as u64)?;
-        self.files.write(&mut *self.volume, identity, node, at, &self.scratch[..len])?;
+        let end = self.files.write(&mut *self.volume, identity, node, at, &self.scratch[..len])?;
         self.dirtied();
         Ok(end)
     }

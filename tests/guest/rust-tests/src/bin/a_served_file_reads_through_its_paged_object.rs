@@ -2,8 +2,8 @@
 //! with a holder of the file's paged object, and the holder reads what the
 //! server wrote without a request.
 //!
-//! - An open to read carries a holder; an open to write alone, and a
-//!   directory, carry none.
+//! - An open file carries a holder, opened to read or to write alone; a
+//!   directory carries none.
 //! - The holder reads every byte written through the server, across pages,
 //!   stops at the size, and sees a later write and a truncation at once.
 //! - A file reopened after its last close reads the same bytes.
@@ -36,8 +36,8 @@ fn main() {
     let mut dir = Dir::named(DIR).expect("the home directory");
     let data = pattern(5 * 4096 + 123);
 
-    let writer = dir.open(Base::Root, NAME, O_WRITE | O_CREATE | O_TRUNCATE).expect("open to write");
-    assert!(writer.holder.is_none(), "an open to write alone carries no holder");
+    let mut writer = dir.open(Base::Root, NAME, O_WRITE | O_CREATE | O_TRUNCATE).expect("open to write");
+    let writing = writer.holder.take().expect("an open to write alone carries a holder");
     assert_eq!(dir.pwrite(writer.fid, 0, &data[..data.len() / 2]), Ok(data.len() / 2));
     assert_eq!(dir.pwrite(writer.fid, (data.len() / 2) as u64, &data[data.len() / 2..]), Ok(data.len() - data.len() / 2));
 
@@ -56,6 +56,7 @@ fn main() {
 
     dir.close(reader.fid);
     drop(holder);
+    drop(writing);
     dir.close(writer.fid);
     let again = dir.open(Base::Root, NAME, O_READ).expect("open again");
     let holder = Paged::received(again.holder.expect("a holder again")).expect("a holder");

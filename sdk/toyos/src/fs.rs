@@ -72,6 +72,9 @@ pub use toyos_abi::syscall::MAX_PATH;
 /// truncate past it where the file is.
 pub const MAX_FILE_BYTES: u64 = (u32::MAX as u64 + 1) * 4096;
 
+// A holder's write grows no file past it: the server answers one that would.
+const _: () = assert!(toyos_abi::syscall::PAGED_HOLDER_END <= MAX_FILE_BYTES);
+
 /// The requests a client may have unanswered on one connection at once.
 pub const MAX_OUTSTANDING: usize = 16;
 
@@ -580,6 +583,47 @@ pub struct Stat {
     pub node: u64,
 }
 
+/// What a server says of an open file in its paged object's record, which a
+/// holder reads beside the object's size and modification time
+/// ([`crate::paged::Paged::stat`]): the rest of a [`Stat`], six
+/// little-endian words.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Record {
+    pub kind: u64,
+    pub nlink: u64,
+    pub atime: u64,
+    pub ctime: u64,
+    pub volume: u64,
+    pub node: u64,
+}
+
+impl Record {
+    pub fn encode(&self) -> [u8; crate::paged::PAGED_RECORD] {
+        let mut out = [0u8; crate::paged::PAGED_RECORD];
+        let words = [self.kind, self.nlink, self.atime, self.ctime, self.volume, self.node];
+        for (at, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(words) {
+            *at = word.to_le_bytes();
+        }
+        out
+    }
+
+    /// The [`Stat`] a holder reads: the record's words beside the object's
+    /// `size` and `mtime`, its volume marked a server's.
+    pub fn stat(record: &[u8; crate::paged::PAGED_RECORD], size: u64, mtime: u64) -> Stat {
+        let word = |k: usize| u64::from_le_bytes(record.as_chunks::<8>().0[k]);
+        Stat {
+            kind: word(0),
+            size,
+            nlink: word(1),
+            atime: word(2),
+            mtime,
+            ctime: word(3),
+            volume: word(4) | SERVED_VOLUME,
+            node: word(5),
+        }
+    }
+}
+
 /// How much more the volume behind a capability holds: `free` bytes, taken in
 /// allocation units of `unit` bytes, so a file of `n` bytes takes `n` rounded
 /// up to `unit`. A volume's own structures take room too, so it is a bound and
@@ -612,9 +656,10 @@ pub struct Fid {
 pub struct Opened {
     pub fid: Fid,
     pub stat: Stat,
-    /// A holder of the file's paged object, through which it is read
-    /// without a request ([`crate::paged::Paged`]): a regular file opened to
-    /// read on a server that keeps its files' pages there.
+    /// A holder of the file's paged object, through which it is read and
+    /// stated without a request, and written where opened to write
+    /// ([`crate::paged::Paged`]): a regular file on a server that keeps its
+    /// files' pages there.
     pub holder: Option<crate::OwnedHandle>,
 }
 
@@ -1451,6 +1496,15 @@ mod tests {
     fn a_stat_crosses_the_wire_whole_and_its_volume_is_marked_served() {
         let stat = Stat { kind: KIND_FILE, size: 5, nlink: 2, atime: 6, mtime: 7, ctime: 8, volume: 9, node: 10 };
         assert_eq!(stat_of(&Reply::stat(&stat)), Stat { volume: 9 | SERVED_VOLUME, ..stat });
+    }
+
+    /// What a holder reads of its object is what a server would have said:
+    /// the record's every word, the object's size and time, the volume marked.
+    #[test]
+    fn a_record_and_its_objects_size_and_time_are_the_stat_a_server_says() {
+        let record = Record { kind: KIND_FILE, nlink: 1, atime: 3, ctime: 4, volume: 5, node: 6 };
+        let want = Stat { kind: KIND_FILE, size: 7, nlink: 1, atime: 3, mtime: 8, ctime: 4, volume: 5 | SERVED_VOLUME, node: 6 };
+        assert_eq!(Record::stat(&record.encode(), 7, 8), want);
     }
 
     /// Every refusal a server sends reads back as itself, and 0 — a reply's

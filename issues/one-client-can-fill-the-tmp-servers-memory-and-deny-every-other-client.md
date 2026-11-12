@@ -25,13 +25,16 @@ names the client that took it (`issues/no-physical-memory-fairness.md`).
 
 **What one client leaves charged.** The kernel makes a pager's object slots
 256 at a time and keeps every piece for the pager's life (`kernel/pure/slots.rs`).
-A freed slot is taken again, but its piece never goes back. A slot is 72
-bytes: a 56-byte entry and a 12-byte mark, measured with a host replica of
-the layouts:
+A freed slot is taken again, but its piece never goes back. A slot is 216
+bytes since #1258: a 192-byte entry, of which the object's own state is 112
+and the pager's record 64, and two 12-byte marks, one for each notice it can
+owe. Measured with a host replica of the layouts at #1258's merge of main:
+https://github.com/ToyOSOrg/evidence/blob/af88668ec3bf695893aeabf229b7ac3c1bad4a95/r8/slot-sizes.log
+At #1273 it was 72:
 https://github.com/ToyOSOrg/evidence/tree/f81e4b2ddb7d89a92f82f9eb8da1fdf58587a563/pr-1273/sizes
-So the server's job stays charged 72 bytes for each `/tmp` file of the most
+So the server's job stays charged 216 bytes for each `/tmp` file of the most
 it held at once, until the server ends. A client that makes and removes a
-million files leaves about 72 MB. The manual has unused backing return under
+million files leaves about 216 MB. The manual has unused backing return under
 pressure; this never returns.
 
 Owner: the file server and the kernel's paged objects, once the owner has

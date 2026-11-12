@@ -5,14 +5,20 @@
 //! A [`Pager`] is a process's one, made only by a process started as a pager;
 //! it names its objects by id, makes holders of them and reads ready while a
 //! [`Notice`] is owed. A [`Paged`] holder reads one object, waiting for absent
-//! pages, and may be duplicated and sent; a pager's own process is refused a
-//! holder's read.
+//! pages, writes it where minted to, against the credit its pager granted,
+//! and may be duplicated and sent; a pager's own process is refused a
+//! holder's calls.
 
 use core::time::Duration;
 
-use toyos_abi::syscall::{self, PagedArgs, PagedOp, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED, PAGED_DIRTY, PAGED_WRITTEN};
+use toyos_abi::syscall::{
+    self, PagedArgs, PagedOp, PagedRange, SyscallError, NOTICE_DIRTIED, NOTICE_NO_HOLDERS, NOTICE_REQUESTED, PAGED_DIRTY,
+    PAGED_WRITTEN,
+};
 
-pub use toyos_abi::syscall::{PagedNotice, PAGED_RANGE_PAGES};
+pub use toyos_abi::syscall::{
+    PagedNotice, PagedStat, PagedStatus, PAGED_HOLDER_END, PAGED_HOLDER_PAGES, PAGED_RANGE_PAGES, PAGED_RECORD,
+};
 
 use crate::shm::Bytes;
 use crate::{AsHandle, BorrowedHandle, OwnedHandle};
@@ -56,6 +62,8 @@ pub enum Notice {
     Requested { object: u64, first: u64, count: u64 },
     /// The last holder handle went.
     NoHolders { object: u64 },
+    /// A holder dirtied pages, which [`Pager::take_dirtied`] names.
+    Dirtied { object: u64 },
 }
 
 /// This process's one pager.
@@ -78,6 +86,7 @@ impl Pager {
         Ok(out[..n].iter().map(|n| match n.kind {
             NOTICE_REQUESTED => Notice::Requested { object: n.object, first: n.first, count: n.count },
             NOTICE_NO_HOLDERS => Notice::NoHolders { object: n.object },
+            NOTICE_DIRTIED => Notice::Dirtied { object: n.object },
             kind => panic!("paged: the kernel answered a notice of kind {kind}"),
         }))
     }
@@ -99,9 +108,9 @@ impl Pager {
         self.op(PagedOp::Room, PagedArgs::default(), None)
     }
 
-    /// A holder handle on object `id`, to send.
-    pub fn holder(&self, id: u64) -> Result<OwnedHandle, SyscallError> {
-        let raw = syscall::paged_holder(self.0.raw(), id)?;
+    /// A holder handle on object `id`, which writes it where `writes`, to send.
+    pub fn holder(&self, id: u64, writes: bool) -> Result<OwnedHandle, SyscallError> {
+        let raw = syscall::paged_holder(self.0.raw(), id, writes)?;
         // SAFETY: the kernel just installed it in this process's table.
         Ok(unsafe { OwnedHandle::from_raw(raw) })
     }
@@ -130,18 +139,25 @@ impl Pager {
     }
 
     /// `bytes` into the present pages of object `id` from `offset`, dirty,
-    /// the size growing as they land: how many were written before the
-    /// first absent page.
+    /// under [`Self::hold`], the size growing as they land: how many were
+    /// written before the first absent page.
     pub fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
         let args = PagedArgs { object: id, offset, len: bytes.len() as u64, buf: bytes.as_ptr() as u64, flags: 0 };
         self.op(PagedOp::Write, args, Some(SyscallError::NotFound)).map(|n| n as usize)
     }
 
-    /// End the write of object `id` that a [`Self::write`] or dirty
-    /// [`Self::supply`] which did not take all it was given left under way:
-    /// until this, every holder's read of it is asked of this pager instead.
-    pub fn end_write(&self, id: u64) -> Result<(), Refused> {
-        self.op(PagedOp::EndWrite, PagedArgs { object: id, ..PagedArgs::default() }, None).map(drop)
+    /// Hold object `id`'s writes until [`Self::unhold`]: no other write
+    /// lands and no holder reads half of one meanwhile, so this pager's
+    /// writes, truncations and reads in between are each one whole, however
+    /// many calls they take. Every [`Self::write`], dirty [`Self::supply`]
+    /// and [`Self::resize`] is made under it. The size, of this moment.
+    pub fn hold(&self, id: u64) -> Result<u64, Refused> {
+        self.op(PagedOp::Hold, PagedArgs { object: id, ..PagedArgs::default() }, None)
+    }
+
+    /// Give back what [`Self::hold`] held.
+    pub fn unhold(&self, id: u64) -> Result<(), Refused> {
+        self.op(PagedOp::Unhold, PagedArgs { object: id, ..PagedArgs::default() }, None).map(drop)
     }
 
     /// Drop the clean pages of `count` from page `first` that nothing holds:
@@ -155,8 +171,8 @@ impl Pager {
         self.op(PagedOp::Fail, PagedArgs { object: id, offset: first, len: count, ..PagedArgs::default() }, None).map(drop)
     }
 
-    /// Set the size: a shrink drops every
-    /// page past it, dirty or not.
+    /// Set the size, under [`Self::hold`]: a shrink drops every page past it,
+    /// dirty or not.
     pub fn resize(&self, id: u64, size: u64) -> Result<(), Refused> {
         self.op(PagedOp::Resize, PagedArgs { object: id, offset: size, ..PagedArgs::default() }, None).map(drop)
     }
@@ -182,6 +198,43 @@ impl Pager {
     /// Let object `id` go: its holders answer `Gone`.
     pub fn release(&self, id: u64) -> Result<(), Refused> {
         self.op(PagedOp::Release, PagedArgs { object: id, ..PagedArgs::default() }, None).map(drop)
+    }
+
+    /// Let holders of object `id` turn `pages` more pages dirty, whose
+    /// write-back this pager holds room for: the credit now.
+    pub fn grant(&self, id: u64, pages: u64) -> Result<u64, Refused> {
+        self.op(PagedOp::Grant, PagedArgs { object: id, len: pages, ..PagedArgs::default() }, None)
+    }
+
+    /// Take back the credit of object `id` its holders have not spent: how much.
+    pub fn take_back(&self, id: u64) -> Result<u64, Refused> {
+        self.op(PagedOp::TakeBack, PagedArgs { object: id, ..PagedArgs::default() }, None)
+    }
+
+    /// Object `id`'s record, where given, and modification time, where given,
+    /// which its holders read from now on.
+    pub fn set_record(&self, id: u64, record: Option<&[u8; PAGED_RECORD]>, mtime: Option<u64>) -> Result<(), Refused> {
+        let (buf, len) = record.map_or((0, 0), |r| (r.as_ptr() as u64, PAGED_RECORD as u64));
+        let args = PagedArgs { object: id, offset: mtime.unwrap_or(u64::MAX), len, buf, flags: 0 };
+        self.op(PagedOp::SetRecord, args, None).map(drop)
+    }
+
+    /// Object `id`'s size and modification time, which its holders' writes
+    /// move, and its credit left.
+    pub fn status(&self, id: u64) -> Result<PagedStatus, Refused> {
+        let mut status = PagedStatus::default();
+        let args = PagedArgs { object: id, buf: &mut status as *mut PagedStatus as u64, ..PagedArgs::default() };
+        self.op(PagedOp::Status, args, None)?;
+        Ok(status)
+    }
+
+    /// The pages of object `id` its holders dirtied since the last call, as
+    /// `(first, count)`: the next a holder dirties owes a notice again.
+    pub fn take_dirtied(&self, id: u64) -> Result<Option<(u64, u64)>, Refused> {
+        let mut range = PagedRange::default();
+        let args = PagedArgs { object: id, buf: &mut range as *mut PagedRange as u64, ..PagedArgs::default() };
+        self.op(PagedOp::TakeDirtied, args, None)?;
+        Ok((range.count > 0).then_some((range.first, range.count)))
     }
 }
 
@@ -221,9 +274,32 @@ impl Paged {
     /// Up to `out.len()` bytes at `offset`, 0 at or past the size, waiting for
     /// every absent page until it is supplied, failed (`Io`, or a short count
     /// after some bytes), cut off by a shrink, or its object or pager ends
-    /// (`Gone`). A read a write of the pager's met is `WouldBlock`: ask the
-    /// pager, whose writes order its own reads.
+    /// (`Gone`). It reads each write whole or not at all, waiting out one
+    /// under way; one that has met three is `WouldBlock`: ask the pager,
+    /// whose read holds the writes off.
     pub fn read(&self, out: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
         syscall::paged_read(self.0.raw(), out, offset)
+    }
+
+    /// `bytes` at `offset`, one write whole: the bytes written. `WouldBlock`
+    /// with nothing written where another write is under way, the write spans
+    /// more than [`PAGED_HOLDER_PAGES`] pages or ends past
+    /// [`PAGED_HOLDER_END`], or the pager has to act first —
+    /// supply a page, grant credit, write back — and the holder asks it to
+    /// write instead; `TextBusy` while a program runs from the object;
+    /// `PermissionDenied` for a holder not minted to write.
+    pub fn write(&self, bytes: &[u8], offset: u64) -> Result<usize, SyscallError> {
+        syscall::paged_write(self.0.raw(), bytes, offset)
+    }
+
+    /// All of `bytes` at the size, which the kernel reads as it admits them,
+    /// as [`Self::write`] writes: the size after them.
+    pub fn append(&self, bytes: &[u8]) -> Result<u64, SyscallError> {
+        syscall::paged_append(self.0.raw(), bytes)
+    }
+
+    /// The object's size, modification time and its pager's record, of one moment.
+    pub fn stat(&self) -> Result<PagedStat, SyscallError> {
+        syscall::paged_stat(self.0.raw())
     }
 }

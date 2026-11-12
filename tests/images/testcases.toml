@@ -81,7 +81,8 @@ starts = ["pagerprobe"]
 receives = ["soundserver", "volume", "power", "log"]
 syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace", "inventory", "jobs"]
 
-# A pager a test ends under a waiting reader (`tests/guest/pagerprobe`).
+# A pager a test ends under a waiting reader, and whose holders' writes it
+# reads back (`tests/guest/pagerprobe`).
 [programs.pagerprobe]
 pager = true
 
