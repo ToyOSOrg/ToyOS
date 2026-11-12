@@ -112,7 +112,8 @@ struct Entry {
     /// The pager's own reference, while unreleased, each holder object's, and
     /// each owner read's, while it runs: the slot is free again with the last.
     refs: u32,
-    /// Holder objects whose handles have not all gone.
+    /// Holder objects whose handles have not all gone, and spaces mapping it:
+    /// a mapping holds the object as a handle does.
     holders: u32,
     /// Not released: owner calls reach it.
     owned: bool,
@@ -431,8 +432,10 @@ impl PagerObject {
     }
 
     /// Every futex wait on a frame of the walk's set at `slot` ends
-    /// ([`Next::Sweep`]): the frames read a batch at a time under the pager's
-    /// lock, and the waits ended outside it (`sched::futex::revoke_frames`).
+    /// ([`Next::Sweep`], asked only of an object a mapper ever linked): the
+    /// frames read a batch at a time under the pager's lock, and the waits
+    /// ended outside it in every bucket, since a wait in any space that mapped
+    /// the object can be keyed on them (`sched::futex::revoke_sorted`).
     /// An unmap, `discard`, `protect` to none or a space's end clears a leaf
     /// without ending the waits on a frame it does not own, so a waiter keyed
     /// on a file's frame through such a leaf is ended here, before the frame
@@ -1581,7 +1584,7 @@ impl PagerObject {
         // SAFETY: a fresh node no list holds yet, and the tail's, linked,
         // under the lock.
         unsafe {
-            *(*at).link.get() = Link { seen: entry.object.epoch(), prev: entry.mappers.tail, next: ptr::null() };
+            *(*at).link.get() = Link { seen: entry.object.link(), prev: entry.mappers.tail, next: ptr::null() };
             match entry.mappers.tail.is_null() {
                 true => entry.mappers.head = at,
                 false => (*(*entry.mappers.tail).link.get()).next = at,
