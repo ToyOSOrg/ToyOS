@@ -59,24 +59,33 @@ build's 256 children, one a CPU, it is 99 % of every contended lock wait on
 both benches: 418,000 contended acquisitions and 243 ms of wait a round on the
 T14 (`j8`), 1.05 of its 8 CPUs for the whole round, and 605,000 and 2,348 ms on
 the AMD bench (`j16`), 7.1 of its 16. 82 % of the spin is in the children's
-`SHM_CREATE`s, which draw each frame of what are, by inference from the SDK,
+`SHM_CREATE`s, which drew each frame of what are, by inference from the SDK,
 their 2 MiB directory windows under its own hold (`SharedMemObject::create`),
-and 13 to 14 % in their faults, which draw each frame of a populated run under
-its own hold (`owned_frame`). The next contended lock waits under a hundredth
+and 13 to 14 % in their faults, which drew each frame of a populated run under
+its own hold. The next contended lock waits under a hundredth
 as long. On the T14 the spin is a third of the children's growth in CPU, so
 the lock bounds less of the build there than on the AMD bench, where it is 72 %.
 
-**Decided** (the orchestrator, 2026-11-11), first of three: **a draw of many
-frames takes the lock once.** A promised batch serves a shared-memory region's
-frames and a fault's whole run, the way frees already go back, a region's drop
-through `pmm::free_all` and a space's teardown through `free_drawn`: one
-acquisition a window or a run instead of one a frame, with promises and ledgers
-moving as for as many single draws. Per-CPU frame caches in front of the lock
-are held until the batched build is measured; they would take single draws off
-it too, but every promise must stay backed by a frame free now, so a draw that
-finds the shared pool empty while another CPU's cache holds frames has to reach
-them. The second, a region's frames drawn at first touch, and the third, the
+**Decided** (the orchestrator, 2026-11-11), first of three, and built (#1268):
+**a draw of many frames takes the lock once.** A shared-memory region's frames
+(`pmm::alloc_promised_many`) and a fault's whole run (`pmm::alloc_promised_into`)
+are drawn a superframe's worth to a hold, as a space's teardown already gave
+frames back (`free_drawn`), with promises and ledgers moving as for as many
+single draws. Per-CPU frame caches in front of the lock are held until the
+batched build is measured; they would take single draws off it too, but every
+promise must stay backed by a frame free now, so a draw that finds the shared
+pool empty while another CPU's cache holds frames has to reach them. The second, a region's frames drawn at first touch, and the third, the
 window's size, are in their own records (the spawn record names them).
+
+- **Owed on metal:** #1268, a draw of many promised frames under one hold of
+  the frame allocator's lock. An A/B of main before and after it on the T14
+  and the AMD bench, of `osbench work` (`work.build_shaped.j1`, and `.j8` on
+  the T14 and `.j16` on the AMD bench), `spawn_cost` and `osbench procs`. Main
+  after must show `work.build_shaped.j<cpus>` faster on both benches and no
+  `j1` or `proc` row slower beyond the before run's spread. And the lock
+  census of the build-shaped set (the spawn diagnosis's boot 3 instrument,
+  branch `spawnperf-split`, carried onto main after) must show this lock's
+  share of contended waits, 99 % before, fallen on both.
 
 **Exit**: that attribution, posted, and read again after the change; the
 all-CPU build's lock waits read again with the batched draw; and each of the
