@@ -782,6 +782,10 @@ pub const FLASHABLE: &[&str] = &[
     // a reset does not; the boot goes on to userland and ends the way an
     // unarmed one does.
     "nmi-user-gs",
+    // It sets `IA32_MCU_OPT_CTRL.GDS_MITG_DIS` on each CPU just before the
+    // kernel's own write clears it, so the machine runs as an unarmed one
+    // does; a reset clears it too (Intel, "Gather Data Sampling", Table 3).
+    "gds-found-disabled",
     // It enters one port in the kernel's table of declared ports at boot. No
     // kernel path reads or writes a port for that entry, so it reaches no
     // device; what it changes is that a claim on the i8042's row is refused.
