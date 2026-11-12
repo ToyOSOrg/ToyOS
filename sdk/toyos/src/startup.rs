@@ -45,6 +45,9 @@ pub const AT: u64 = BASE - RESERVED;
 /// The most bytes of a block: a reserved page is left below the program.
 pub const MAX_BLOCK: usize = (RESERVED - PAGE_SIZE as u64) as usize;
 
+/// The bytes of the names' address, the count and of each pointer.
+pub const WORD: usize = 8;
+
 /// A table's two counts.
 const TABLE_HEADER: usize = 8;
 
@@ -75,22 +78,22 @@ fn table(names: &[&str]) -> Option<Vec<u8>> {
 
 /// The bytes of the block that says `args`, `env` and `names`. `None` past
 /// [`MAX_BLOCK`], or for names [`table`] makes none of.
-fn bytes(args: &[u8], env: &[u8], names: &[&str]) -> Option<Vec<u8>> {
+pub(crate) fn bytes(args: &[u8], env: &[u8], names: &[&str]) -> Option<Vec<u8>> {
     let table = if names.is_empty() { Vec::new() } else { table(names)? };
     let argc = strings(args).count();
     let words = argc + strings(env).count() + 4;
     let text: usize = strings(args).chain(strings(env)).map(|s| s.len() + 1).sum();
-    if words * 8 + text + table.len() > MAX_BLOCK {
+    if words * WORD + text + table.len() > MAX_BLOCK {
         return None;
     }
-    let mut block = alloc::vec![0u8; words * 8];
+    let mut block = alloc::vec![0u8; words * WORD];
     block.reserve_exact(text + table.len());
-    block[8..16].copy_from_slice(&(argc as u64).to_ne_bytes());
+    block[WORD..2 * WORD].copy_from_slice(&(argc as u64).to_ne_bytes());
     let mut word = 2;
     for run in [args, env] {
         for string in strings(run) {
             let at = AT + block.len() as u64;
-            block[word * 8..word * 8 + 8].copy_from_slice(&at.to_ne_bytes());
+            block[word * WORD..(word + 1) * WORD].copy_from_slice(&at.to_ne_bytes());
             block.extend_from_slice(string);
             block.push(0);
             word += 1;
@@ -100,7 +103,7 @@ fn bytes(args: &[u8], env: &[u8], names: &[&str]) -> Option<Vec<u8>> {
     }
     if !table.is_empty() {
         let at = AT + block.len() as u64;
-        block[..8].copy_from_slice(&at.to_ne_bytes());
+        block[..WORD].copy_from_slice(&at.to_ne_bytes());
         block.extend_from_slice(&table);
     }
     Some(block)
@@ -358,7 +361,7 @@ mod tests {
     /// A block ends below the program with a page to spare, and one byte more is refused.
     #[test]
     fn a_block_past_its_reservation_is_refused() {
-        let fits = alloc::vec![b'a'; MAX_BLOCK - 5 * 8 - 1];
+        let fits = alloc::vec![b'a'; MAX_BLOCK - 5 * WORD - 1];
         assert_eq!(bytes(&fits, b"", &[]).map(|block| block.len()), Some(MAX_BLOCK));
         let mut past = fits;
         past.push(b'a');

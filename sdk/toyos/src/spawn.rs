@@ -34,6 +34,15 @@ use alloc::vec::Vec;
 
 use crate::{AsHandle, BorrowedHandle, Moved, OwnedHandle, RawHandle};
 
+/// The most bytes of its own arguments and environment a caller can give a
+/// helper, counted as POSIX's `ARG_MAX` counts them: each string with its NUL,
+/// a pointer to each and the null ending each list. The child's block
+/// ([`crate::startup`]) holds beside them the names' address, its argument
+/// count and the starting directory the spawn states, a pointer, an entry and
+/// a NUL, counted at its longest ([`crate::files::MAX_STATED`]).
+pub const MAX_ARGS: usize =
+    crate::startup::MAX_BLOCK - 2 * crate::startup::WORD - (crate::startup::WORD + crate::files::MAX_STATED + 1);
+
 /// Whom a child is placed under, whose end takes it down.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Parent<'a> {
@@ -568,5 +577,28 @@ mod tests {
     fn a_named_image_runs_under_its_program_s_name() {
         assert_eq!(image_and_name("/bin/cat", Some("/tmp/other")), ("/tmp/other", "/bin/cat"));
         assert_eq!(image_and_name("/bin/cat", None), ("/bin/cat", "/bin/cat"));
+    }
+
+    /// A caller's own arguments and environment of [`MAX_ARGS`] bytes start a
+    /// child from the longest working directory, and one byte more does not:
+    /// what [`Helper::spawn`] composes, the stated directory, then the block.
+    #[test]
+    fn max_args_of_a_caller_s_own_fit_beside_the_longest_directory() {
+        use crate::startup::{self, WORD};
+        let cwd = alloc::format!("/{}", "d".repeat(crate::fs::MAX_PATH - 1));
+        let env: &[u8] = b"TERM=toyos\0";
+        // POSIX's count, kept apart from the block's own arithmetic.
+        let counted = |argv: &[u8]| {
+            let strings = |run: &[u8]| run.split(|&b| b == 0).filter(|s| !s.is_empty()).map(<[u8]>::len).collect::<Vec<_>>();
+            [strings(argv), strings(env)].iter().map(|run| (run.len() + 1) * WORD + run.iter().map(|len| len + 1).sum::<usize>()).sum::<usize>()
+        };
+        let mut argv = alloc::vec![b'a'; MAX_ARGS - 4 * WORD - env.len() - 1];
+        argv.push(0);
+        assert_eq!(counted(&argv), MAX_ARGS);
+        let stated = crate::files::starting_in(env, &cwd).expect("the longest directory is stated");
+        assert!(startup::bytes(&argv, &stated, &[]).is_some(), "a caller's MAX_ARGS bytes");
+        argv.insert(0, b'a');
+        assert_eq!(counted(&argv), MAX_ARGS + 1);
+        assert_eq!(startup::bytes(&argv, &stated, &[]), None, "one byte past MAX_ARGS");
     }
 }
