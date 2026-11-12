@@ -40,8 +40,8 @@ pub fn libc_children() -> Result<(), String> {
     names.sort();
     let bins: Vec<(String, Vec<u8>)> = names
         .iter()
-        .map(|name| (name.clone(), compile::link_toyos(&[compile::compile_own_c(&dir, name)], name)))
-        .collect();
+        .map(|name| Ok((name.clone(), compile::link_toyos(&[compile::compile_own_c(&dir, name)?], name)?)))
+        .collect::<Result<_, String>>()?;
     let case = compile::repo_root().join("tests/images/libccase.toml");
     let rust_tests = compile::repo_root().join("tests/guest/rust-tests");
     let probes: Vec<(String, Vec<u8>)> =

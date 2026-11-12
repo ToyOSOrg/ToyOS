@@ -15,6 +15,12 @@ writer, main's toolchain release, and the fresh-machine and macOS builds.
 Guest rows run only where an agent dispatches them on the guest runner
 (`guest-rows.yml`), so a regression in a row no PR selected goes unseen.
 
+The unfiltered suite now carries the shared boots' guest rows,
+`testcases_members_exit_0` and `shared_debug_members_exit_0`, and with them an
+in-suite build of every guest binary and corpus case. Their cost on a TCG lane
+is unmeasured, and resumption measures it rather than meeting it at a lane's
+timeout.
+
 `build/ci/qemu-version` moved to 11.1.3, the guest runner's and the dev host's
 QEMU, while `guest.yml`'s container still installs 11.1.1 from its snapshot
 archive, so its instrument step reds until the container moves to an image

@@ -50,8 +50,8 @@ fn first_error(stderr: &[u8]) -> String {
 }
 
 /// Compile `source` in `dir` to an object with the toolchain's clang, from
-/// that directory and by its bare name.
-fn compile_one(c: &CSysroot, dir: &Path, flags: &[&str], source: &str, object: &Path) {
+/// that directory and by its bare name, or the first error it reported.
+fn compile_one(c: &CSysroot, dir: &Path, flags: &[&str], source: &str, object: &Path) -> Result<(), String> {
     let output = Command::new(&c.clang)
         .args(c.args())
         .args(flags)
@@ -62,14 +62,17 @@ fn compile_one(c: &CSysroot, dir: &Path, flags: &[&str], source: &str, object: &
         .current_dir(dir)
         .output()
         .unwrap_or_else(|e| panic!("run {}: {e}", c.clang.display()));
-    assert!(output.status.success(), "{}", first_error(&output.stderr));
+    if !output.status.success() {
+        return Err(first_error(&output.stderr));
+    }
+    Ok(())
 }
 
 /// Compile a corpus case, and its companion if it has one (`104+_inline.c`
 /// for `104_inline`), and return the objects. Each is compiled as TinyCC's
 /// runner does, in the corpus's directory by its bare name: `__FILE__` is
 /// part of what some cases print.
-pub fn compile_c(name: &str) -> Vec<PathBuf> {
+pub fn compile_c(name: &str) -> Result<Vec<PathBuf>, String> {
     let c = c_sysroot();
     let mut sources = vec![format!("{name}.c")];
     if let Some((prefix, suffix)) = name.split_once('_') {
@@ -83,18 +86,18 @@ pub fn compile_c(name: &str) -> Vec<PathBuf> {
         .enumerate()
         .map(|(i, source)| {
             let object = scratch(name, &format!("-{i}.o"));
-            compile_one(&c, &testcases_dir(), CORPUS_FLAGS, source, &object);
-            object
+            compile_one(&c, &testcases_dir(), CORPUS_FLAGS, source, &object)?;
+            Ok(object)
         })
         .collect()
 }
 
 /// Compile `<name>.c` in `dir`, one of ToyOS's own C programs, to an object,
 /// with warnings refused.
-pub fn compile_own_c(dir: &Path, name: &str) -> PathBuf {
+pub fn compile_own_c(dir: &Path, name: &str) -> Result<PathBuf, String> {
     let object = scratch(name, ".o");
-    compile_one(&c_sysroot(), dir, &["-Wall", "-Werror"], &format!("{name}.c"), &object);
-    object
+    compile_one(&c_sysroot(), dir, &["-Wall", "-Werror"], &format!("{name}.c"), &object)?;
+    Ok(object)
 }
 
 /// Link flags a case needs beyond the corpus's, by case name.
@@ -109,13 +112,13 @@ const LINK_FLAGS: &[(&str, &[&str])] = &[
 
 /// Link `objects` into a ToyOS executable through the clang driver — which
 /// names `ld.lld` and the sysroot's `libtoyos_c.a`, and makes a PIE — and
-/// return its bytes.
+/// return its bytes, or why it did not link.
 ///
 /// **Without DWARF, and with `.symtab`**, as `[profile.toyos]` links every Rust
 /// guest binary: the archive brings its Rust libraries' DWARF into every case
 /// and nothing reads it, while `symbolize` and the loader's dlopen binding read
 /// `.symtab`.
-pub fn link_toyos(objects: &[PathBuf], name: &str) -> Vec<u8> {
+pub fn link_toyos(objects: &[PathBuf], name: &str) -> Result<Vec<u8>, String> {
     let c = c_sysroot();
     let out = scratch(name, ".elf");
     let output = Command::new(&c.clang)
@@ -130,14 +133,15 @@ pub fn link_toyos(objects: &[PathBuf], name: &str) -> Vec<u8> {
     for object in objects {
         let _ = fs::remove_file(object);
     }
-    // One line: the harness reads a failed link for the symbol a declared case
-    // stops on, and LLD reports each undefined symbol on a line of its own.
-    assert!(
-        output.status.success(),
-        "clang could not link {name}: {}",
-        String::from_utf8_lossy(&output.stderr).lines().collect::<Vec<_>>().join(" | "),
-    );
+    // One line, as a failed compile's is: each case's refusal is one line of
+    // the corpus compile's list and of `NOT_RUN`'s report.
+    if !output.status.success() {
+        return Err(format!(
+            "clang could not link {name}: {}",
+            String::from_utf8_lossy(&output.stderr).lines().collect::<Vec<_>>().join(" | ")
+        ));
+    }
     let linked = fs::read(&out).unwrap_or_else(|e| panic!("read {}: {e}", out.display()));
     let _ = fs::remove_file(&out);
-    linked
+    Ok(linked)
 }

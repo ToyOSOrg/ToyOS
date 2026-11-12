@@ -383,9 +383,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is each bench's verdict on its own CPU's fault path;
     // `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` runs it under QEMU.
     "user_copy_faults",
-    // Its shared run is each bench's verdict;
-    // `tmp_holds_empty_files_by_what_each_costs` runs it under QEMU, and
-    // `virt_tmp_holds_empty_files_by_what_each_costs` on AArch64's.
+    // Its shared run is the x86-64 verdict;
+    // `virt_tmp_holds_empty_files_by_what_each_costs` builds it for AArch64
+    // and runs it on that architecture's case.
     "tmp_empty_files",
     // Its shared run is ring's known answers in a guest; the crypto boot runs it
     // first on each bench, and `crypto_instrument_prints_its_table` before the
@@ -453,8 +453,8 @@ const SCREEN_TESTS: &[ScreenTest] = &[
     // the unprivileged copies and their EL1 fixup (`arch::uaccess`).
     ("virt_user_copy_faults", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_USER_COPY}"))),
     ("virt_vm_map_shares", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_VM_MAP}"))),
-    // `tmp_holds_empty_files_by_what_each_costs` on AArch64: the paged
-    // objects' table and its notices are shared memory-management code.
+    // `tmp_empty_files` on AArch64: the paged objects' table and its notices
+    // are shared memory-management code.
     ("virt_tmp_holds_empty_files_by_what_each_costs", qemu::Profile::Virt, |profile, _| virt_tmp_holds_empty_files_by_what_each_costs(profile)),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_RING0_TIMER}"))),
     // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and
@@ -526,6 +526,16 @@ type MachineTest = (&'static str, fn(&Path) -> Result<(), String>);
 
 /// The tests whose machine shape *is* the test, each on a boot of its own.
 const MACHINE_TESTS: &[MachineTest] = &[
+    // The metal profile's two shared boots, each run whole: its members are
+    // guest binaries and corpus cases whose claims are a booted kernel's and
+    // its programs' together, which no host build has, and whose verdicts are
+    // order, completion, contents and counts, which QEMU establishes. Each
+    // boot is staged as the T14's is ([`shared_members`]) and its members are
+    // judged by their own exits, on QEMU x86-64's q35 (`Profile::Headless`,
+    // `qemu::SUITE_ARCH`): KVM on the guest runner, TCG where the host has
+    // none. AArch64 builds no member.
+    ("testcases_members_exit_0", |_| shared_members("testcases")),
+    ("shared_debug_members_exit_0", |_| shared_members("shared-debug")),
     // A `drives` row's one process per function, on QEMU x86-64's q35 with
     // two `edu` (`Profile::HeadlessTwoEdu`): which functions get one is
     // `toyos-supervisor`'s, host-tested, and this is the supervisor
@@ -721,12 +731,6 @@ const MACHINE_TESTS: &[MachineTest] = &[
     ("a_user_copy_highest_first_faults_or_ends_as_bad_address", |test_config| {
         a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &["copies-go-down"])
     }),
-    // `/tmp` holds more empty files than its guest has MiB of memory, and
-    // each one's last holder going reaches its server: the memory file
-    // server's objects as the kernel makes, charges and reports them, which
-    // no host build has. One boot of QEMU's x86-64 machine; the shared boots
-    // run it on each bench.
-    ("tmp_holds_empty_files_by_what_each_costs", |test_config| tmp_holds_empty_files_by_what_each_costs(test_config)),
     // The boot's log written through usbd onto the stick it booted from, and
     // still there once the machine has stopped: the path every metal boot's
     // `/log` takes, which no other QEMU row reads, because their console is
@@ -2349,12 +2353,13 @@ const FIRMWARE_LEFT: &[metal::Arm] = &[metal::Arm {
     ..metal::once("iommu-firmware-left", "tests/images/testcases.toml", &["iommu-firmware-left"], &[])
 }];
 
-/// The two boots every discovered member rides on the T14, each behind its
-/// rows' jobs: `testcases`, the shipping kernel's, carries every discovered
-/// Rust binary, then the C corpus, then [`LAST_MEMBERS`]; `shared-debug`
-/// carries [`ACTUATOR_TESTS`] on the kernel that has `SYS_DEBUG`, armed with
-/// [`SELFTEST_PARAMS`]. A second boot rather than one image for the whole
-/// set: what those need is a syscall number the rest must not have.
+/// The two boots every discovered member rides, on the T14 behind its rows'
+/// jobs and on QEMU by [`shared_members`]: `testcases`, the shipping kernel's,
+/// carries every discovered Rust binary, then the C corpus, then
+/// [`LAST_MEMBERS`]; `shared-debug` carries [`ACTUATOR_TESTS`] on the kernel
+/// that has `SYS_DEBUG`, armed with [`SELFTEST_PARAMS`]. A second boot rather
+/// than one image for the whole set: what those need is a syscall number the
+/// rest must not have.
 fn shared_metal(c_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
     let rust = |names: Vec<String>| {
         names.into_iter().map(|n| metal::Member { job: format!("test_rs_{n}"), adds_ms: toyos_tco::RUST_MEMBER_MS })
@@ -2376,6 +2381,147 @@ fn shared_metal(c_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
             links: Vec::new(),
         },
     ]
+}
+
+/// The shared boot `label` of [`shared_metal`] on QEMU: staged as its T14
+/// boot is, its members' job list run to the list's `reboot`, and each
+/// member judged by its own exit.
+fn shared_members(label: &str) -> Result<(), String> {
+    let (c_bins, rust_bins) = build_shared_bins();
+    let boot = shared_metal(c_bins)
+        .into_iter()
+        .find(|boot| boot.boot == label)
+        .unwrap_or_else(|| panic!("the metal profile has no shared boot {label:?}"));
+    let batches = metal::batches(&[], std::slice::from_ref(&boot))?;
+    let batch = &batches[label];
+    // The runner's bound, widened as far as this harness pays any host:
+    // under QEMU the host's ceiling, paid for the host this boot measures,
+    // ends a list that does not end itself.
+    let bound_ms = batch.bound_ms() * u64::from(qemu::HOST_SCALE_CAP);
+    let home = common::lane::dir().join(label);
+    let staged = metal::stage(&compile::repo_root(), &home, batch, bound_ms, rust_bins)?;
+    let mut qemu = QemuInstance::boot_with_options(
+        &staged.config,
+        &[],
+        &[],
+        BootOptions {
+            qmp: true,
+            kernel_params: boot.params,
+            kernel_features: boot.features,
+            extra_root_files: staged.files,
+            ..Default::default()
+        },
+    );
+    // Opened at once: QMP delivers no event emitted before its client
+    // connected, and the list's reboot is that event.
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
+    let mut console = format!("{}\n", qemu.boot_log());
+    let ended = qemu.await_end(&mut console, Duration::from_millis(batch.bound_ms())).map(|()| stop.reason());
+    let passed = judge_shared(label, &console, &batch.jobs, ended)?;
+    eprintln!("  [shared] {label}: {passed} member(s) exited 0, and the list's reboot ended the boot");
+    Ok(())
+}
+
+/// A shared boot's verdict on what it left: `console`, and how QEMU ended,
+/// with the reason its `SHUTDOWN` event named. Each of `jobs` by its own
+/// exit ([`member_verdicts`]), and the boot by its list's `reboot`: the
+/// kernel's `Rebooting.` and a `guest-reset`, since a reset, a power-off and
+/// a triple fault all end a `-no-reboot` QEMU with status 0. A kernel death
+/// anywhere reds it too. Answers how many members passed.
+fn judge_shared(label: &str, console: &str, jobs: &[String], ended: Result<Option<String>, String>) -> Result<usize, String> {
+    let rebooted = match ended {
+        Err(why) => Err(why.lines().next().unwrap_or_default().to_string()),
+        Ok(reason) if reason.as_deref() != Some("guest-reset") => Err(format!("QEMU stopped it for {reason:?}, not guest-reset")),
+        Ok(_) if !console.lines().filter_map(toyos_logstream::parse).any(|said| {
+            said.source == toyos_logstream::Source::Kernel && said.text == bootlog::REBOOTING
+        }) => Err(format!("the kernel never said {:?}", bootlog::REBOOTING)),
+        Ok(_) => Ok(()),
+    };
+    let verdicts = member_verdicts(console, jobs);
+    let death = serial::kernel_death(console);
+    let red: Vec<(&str, &Member)> = verdicts.iter().filter(|(_, member)| *member != Member::Passed).map(|(job, member)| (*job, member)).collect();
+    if red.is_empty() && rebooted.is_ok() && death.is_none() {
+        return Ok(verdicts.len());
+    }
+    let mut said = if red.is_empty() {
+        format!("each of {label}'s {} member(s) exited 0, and its boot did not end cleanly", verdicts.len())
+    } else {
+        let names: Vec<&str> = red.iter().map(|(job, _)| *job).take(12).collect();
+        let more = red.len().saturating_sub(names.len());
+        let more = if more > 0 { format!(" and {more} more") } else { String::new() };
+        format!("{} of {label}'s {} member(s) did not exit 0: {}{more}", red.len(), verdicts.len(), names.join(", "))
+    };
+    if let Err(why) = &rebooted {
+        said.push_str(&format!("\nthe boot did not end by its list's reboot: {why}"));
+    }
+    if let Some(line) = death {
+        said.push_str(&format!("\nthe kernel died: {}", line.trim()));
+    }
+    let mut unreached: Vec<&str> = Vec::new();
+    for (job, member) in red {
+        match member {
+            Member::Failed(why) => said.push_str(&format!("\n--- {job}: {why}")),
+            Member::Unreached => unreached.push(job),
+            Member::Passed => unreachable!("only reds are listed"),
+        }
+    }
+    if !unreached.is_empty() {
+        said.push_str(&format!("\n--- the list never reached: {}", unreached.join(", ")));
+    }
+    Err(qemu::WaitVerdict::new(said, &[console]).to_string())
+}
+
+/// What a job list's console says of one of its jobs.
+#[derive(Debug, PartialEq)]
+enum Member {
+    Passed,
+    /// Why not, over its own lines.
+    Failed(String),
+    /// The list never got to it.
+    Unreached,
+}
+
+/// What the runner said of each of `jobs` on a job list's `console`, in their
+/// order. A marker is the runner's only under the head the supervisor
+/// registered for it, with no `pid=`, which a job's line in the runner's ring
+/// carries.
+fn member_verdicts<'a>(console: &str, jobs: &'a [String]) -> Vec<(&'a str, Member)> {
+    use toyos_logstream::{parse, Source};
+    let lines: Vec<&str> = console.lines().collect();
+    let mut started: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut ended: BTreeMap<&str, (usize, &str)> = BTreeMap::new();
+    for (at, line) in lines.iter().enumerate() {
+        let Some(said) = parse(line) else { continue };
+        if said.source != Source::Program("test-runner") || said.rest.contains("pid=") {
+            continue;
+        }
+        let text = said.text;
+        if let Some(job) = text.strip_prefix("===TEST_START ").and_then(|rest| rest.strip_suffix("===")) {
+            started.entry(job).or_insert(at);
+        } else if let Some(rest) = text.strip_prefix("===TEST_END ").and_then(|rest| rest.strip_suffix("===")) {
+            let (job, said) = rest.split_once(' ').unwrap_or((rest, ""));
+            ended.entry(job).or_insert((at, said));
+        }
+    }
+    let own = |from: usize, to: usize| qemu::window(&lines[from..to].join("\n"));
+    jobs.iter()
+        .map(|job| {
+            let member = match (started.get(job.as_str()), ended.get(job.as_str())) {
+                (_, Some((_, "exit=0"))) => Member::Passed,
+                (from, Some(&(to, said))) => {
+                    let said = match (said.strip_prefix("exit="), said.strip_prefix("error=")) {
+                        (Some(code), _) => format!("exited {code}"),
+                        (_, Some(why)) => format!("did not run: {why}"),
+                        _ => format!("ended saying {said:?}"),
+                    };
+                    Member::Failed(format!("{said}\n{}", own(from.copied().unwrap_or(to), to + 1)))
+                }
+                (Some(&from), None) => Member::Failed(format!("started and never ended\n{}", own(from, lines.len()))),
+                (None, None) => Member::Unreached,
+            };
+            (job.as_str(), member)
+        })
+        .collect()
 }
 
 /// **One boot for both measurements this suite takes rather than reads.**
@@ -2665,12 +2811,9 @@ fn discover_rust_tests() -> Vec<String> {
 }
 
 fn compile_c_tests(names: &[String]) -> Vec<(String, Vec<u8>)> {
-    // Made before the hook below goes in: a C sysroot that cannot be made is
-    // no case's failure, and says so in its own words.
+    // Made before any case: a C sysroot that cannot be made is no case's
+    // failure, and says so in its own words.
     compile::c_sysroot();
-    // Suppress panic messages during compilation — we handle failures via catch_unwind.
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
 
     // A clang and a link per case, so the cases are spread over threads; the
     // result is in `names`' order whatever order they finish in.
@@ -2682,20 +2825,13 @@ fn compile_c_tests(names: &[String]) -> Vec<(String, Vec<u8>)> {
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .map(|name| {
-                            let built = std::panic::catch_unwind(|| {
-                                compile::link_toyos(&compile::compile_c(name), name)
-                            });
-                            (name, built.map_err(|e| panic_message(&e)))
-                        })
+                        .map(|name| (name, compile::compile_c(name).and_then(|objects| compile::link_toyos(&objects, name))))
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
-        workers.into_iter().flat_map(|w| w.join().expect("a compile thread")).collect()
+        workers.into_iter().flat_map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
     });
-
-    std::panic::set_hook(prev_hook);
 
     let mut bins = Vec::new();
     let mut broken: Vec<(&str, String)> = Vec::new();
@@ -2730,10 +2866,6 @@ fn check_not_run() {
     let mut wrong: Vec<String> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
 
-    compile::c_sysroot();
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-
     for entry in NOT_RUN {
         let case = entry.case;
         let before = wrong.len();
@@ -2745,10 +2877,8 @@ fn check_not_run() {
             wrong.push(format!("{case}: no such file in the corpus — a rename left this behind"));
             continue;
         }
-        let compiled = std::panic::catch_unwind(|| compile::compile_c(case));
-        match (&entry.stage, compiled) {
-            (Stage::Refused(says), Err(e)) => {
-                let said = panic_message(&e);
+        match (&entry.stage, compile::compile_c(case)) {
+            (Stage::Refused(says), Err(said)) => {
                 if !said.contains(says) {
                     wrong.push(format!(
                         "{case}: refused, but not for the declared reason.\n    \
@@ -2760,15 +2890,12 @@ fn check_not_run() {
                 "{case}: compiles now — it was declared to stop with {says:?}. \
                  The fix arrived; delete the entry and let the case run."
             )),
-            (_, Err(e)) => wrong.push(format!(
-                "{case}: no longer compiles, and it was declared to get further: {}",
-                panic_message(&e)
+            (_, Err(said)) => wrong.push(format!(
+                "{case}: no longer compiles, and it was declared to get further: {said}"
             )),
             (stage, Ok(objects)) => {
-                let linked = std::panic::catch_unwind(|| compile::link_toyos(&objects, case));
-                match (stage, linked) {
-                    (Stage::NoLink(symbol), Err(e)) => {
-                        let said = panic_message(&e);
+                match (stage, compile::link_toyos(&objects, case)) {
+                    (Stage::NoLink(symbol), Err(said)) => {
                         if !said.contains(symbol) {
                             wrong.push(format!(
                                 "{case}: the link fails on something else.\n    \
@@ -2780,9 +2907,8 @@ fn check_not_run() {
                         "{case}: links now — it was declared to fail on {symbol:?}. \
                          The fix arrived; delete the entry and let the case run."
                     )),
-                    (Stage::Built, Err(e)) => wrong.push(format!(
-                        "{case}: no longer links, and it was declared to build: {}",
-                        panic_message(&e)
+                    (Stage::Built, Err(said)) => wrong.push(format!(
+                        "{case}: no longer links, and it was declared to build: {said}"
                     )),
                     (Stage::Built, Ok(_)) => {}
                     (Stage::Refused(_), _) => unreachable!("handled above"),
@@ -2794,25 +2920,12 @@ fn check_not_run() {
         }
     }
 
-    std::panic::set_hook(prev_hook);
-
     assert!(
         wrong.is_empty(),
         "NOT_RUN no longer describes the corpus. Every entry is attempted to its declared \
          stage on every run, so this is a case that moved:\n  {}",
         wrong.join("\n  "),
     );
-}
-
-/// What a caught panic said, first line, whole. A refusal quoted in `NOT_RUN`
-/// is compared against this, so nothing here may shorten it.
-fn panic_message(e: &Box<dyn std::any::Any + Send>) -> String {
-    let full = e
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
-        .unwrap_or_else(|| "<non-string panic>".to_string());
-    full.lines().next().unwrap_or_default().to_string()
 }
 
 /// A case's committed expectation as both comparators read it, the host's and
@@ -5934,29 +6047,8 @@ fn ring3_debug_traps_end_their_process(test_config: &Path) -> Result<(), String>
 /// the machine's memory and 1,024 more, was opened to read and removed.
 const TMP_FILES_SAID: &str = "empty files, one per MiB of memory and 1024 more, made, read-opened and removed";
 
-/// `tmp_empty_files` alone: more empty files in `/tmp` than the guest has
-/// MiB of memory, each opened to read and closed, and removed.
-fn tmp_holds_empty_files_by_what_each_costs(test_config: &Path) -> Result<(), String> {
-    const JOB: &str = "tmp_empty_files";
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
-    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
-    serial::Serial::boot(&qemu).must_be_clean()?;
-    let result = qemu.run_test("test_rs_tmp_empty_files", Duration::from_secs(300));
-    if let Some(why) = &result.error {
-        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
-    }
-    let Some(said) = result.stdout.lines().find(|l| l.contains(TMP_FILES_SAID)) else {
-        return Err(format!("the job never said {TMP_FILES_SAID:?}:\n{}", result.stdout));
-    };
-    eprintln!("  [tmp] {}", said.trim());
-    Ok(())
-}
-
-/// The same job on AArch64: `tests/images/virttmpcase.toml`, whose one job it
-/// is, beside the memory file server alone.
+/// `tmp_empty_files` on AArch64: `tests/images/virttmpcase.toml`, whose one
+/// job it is, beside the memory file server alone.
 fn virt_tmp_holds_empty_files_by_what_each_costs(profile: qemu::Profile) -> Result<(), String> {
     let config = compile::repo_root().join("tests/images/virttmpcase.toml");
     let options = BootOptions {
@@ -8644,21 +8736,24 @@ fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]
 /// Built test binaries, each by the name `run` takes.
 type Binaries = Vec<(String, Vec<u8>)>;
 
-/// The binaries the shared boots carry, C and Rust: every Rust test binary,
-/// and the C corpus, compiled once its declared cases have been attempted to
-/// their stages.
-fn build_shared_bins() -> (Binaries, Binaries) {
-    let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/guest/rust-tests");
-    let mut rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
-    rust_bins.push(crypto_parity_unasserted());
-    let c_names = discover_c_tests();
-    eprintln!(
-        "[toyos] Compiling {} C tests, and attempting {} declared ones...",
-        c_names.len(),
-        NOT_RUN.len()
-    );
-    check_not_run();
-    (compile_c_tests(&c_names), rust_bins)
+/// The binaries the shared boots carry, C and Rust, built once a run: every
+/// Rust test binary, and the C corpus, compiled once its declared cases have
+/// been attempted to their stages. Once, because both shared rows carry them.
+fn build_shared_bins() -> &'static (Binaries, Binaries) {
+    static BUILT: std::sync::OnceLock<(Binaries, Binaries)> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| {
+        let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/guest/rust-tests");
+        let mut rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
+        rust_bins.push(crypto_parity_unasserted());
+        let c_names = discover_c_tests();
+        eprintln!(
+            "[toyos] Compiling {} C tests, and attempting {} declared ones...",
+            c_names.len(),
+            NOT_RUN.len()
+        );
+        check_not_run();
+        (compile_c_tests(&c_names), rust_bins)
+    })
 }
 
 /// `crypto_parity` with debug assertions off, by the name its job runs.
@@ -9253,7 +9348,7 @@ fn main() {
             }
         };
         let (c_bins, rust_bins) = build_shared_bins();
-        let boots = shared_metal(&c_bins);
+        let boots = shared_metal(c_bins);
         let taken = match metal::select(filters, &parsed.boots, bench, METAL, &boots) {
             Ok(taken) => taken,
             Err(refusal) => {
@@ -9266,7 +9361,7 @@ fn main() {
         // and "measured nothing" — a run that staged images and never reached
         // the machine has no claim to make.
         run.exit(
-            match metal::run(mode, bench, &host, &taken, &rust_bins, !nocapture && !debug_mode) {
+            match metal::run(mode, bench, &host, &taken, rust_bins, !nocapture && !debug_mode) {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,
                 metal::Verdict::Staged => 2,
@@ -9283,7 +9378,7 @@ fn main() {
 
     if debug_mode {
         let (c_bins, rust_bins) = build_shared_bins();
-        run_debug_mode(&c_bins, &rust_bins);
+        run_debug_mode(c_bins, rust_bins);
         return;
     }
 
@@ -9292,7 +9387,11 @@ fn main() {
     // A filter that takes nothing would be dropped in silence beside one that
     // takes something.
     if let Some(dead) = filters.iter().find(|f| !declared().any(|name| name.contains(**f))) {
-        eprintln!("No test matches filter {dead:?}");
+        if shared.iter().any(|member| member.contains(*dead)) {
+            eprintln!("No test matches filter {dead:?}, which names a shared member: a shared boot runs whole, as `members_exit_0`");
+        } else {
+            eprintln!("No test matches filter {dead:?}");
+        }
         run.exit(1);
     }
 
