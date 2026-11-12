@@ -572,7 +572,7 @@ impl Speculation {
         if asked {
             Self::Isolated
         } else {
-            self
+            Self::Shared
         }
     }
 }
