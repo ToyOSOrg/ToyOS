@@ -8,7 +8,7 @@ opened: 2026-09-29
 
 Five stages each owe a gate over `kernel.elf`'s instructions:
 
-- `issues/no-entry-or-switch-clears-the-bhb-fills-the-rsb-or-issues-an-ibpb.md`
+- `issues/no-gate-holds-the-bhb-clear-and-the-return-fill-to-their-vendors-sequences.md`
 - `issues/indirect-branches-and-returns-run-without-thunks.md`
 - `issues/kernel-functions-return-with-their-used-registers-intact.md`
 - `issues/the-kernel-runs-without-indirect-branch-tracking.md`

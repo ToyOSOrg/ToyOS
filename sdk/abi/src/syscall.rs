@@ -1038,6 +1038,9 @@ pub mod debug_action {
     /// spaces one of which asked; `NotSupported` where its decision names
     /// no IBPB.
     pub const SWITCH_IBPBS: u64 = 32;
+    /// The branch history clears every CPU's entries from Ring 3 have run;
+    /// `NotSupported` where this CPU's decision names none.
+    pub const BRANCH_HISTORY_CLEARS: u64 = 33;
 }
 
 /// Create a pipe. Returns the read and write ends.

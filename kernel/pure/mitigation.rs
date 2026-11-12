@@ -488,13 +488,13 @@ impl Decision {
 
     /// What is in force on a CPU whose registers read `registers`: [`ALWAYS`];
     /// what the kernel applies by construction wherever this decision names
-    /// it and the CPU enumerates it, which no register shows at bring-up (the
-    /// controls a program that asks runs with, [`ON_REQUEST`]); and each
-    /// control a register shows on. Intel's two `IA32_MCU_OPT_CTRL` bits opt
-    /// out of a mitigation its microcode turns on; the others turn one on.
+    /// it and the CPU enumerates it, which no register shows at bring-up
+    /// ([`BY_CONSTRUCTION`]); and each control a register shows on. Intel's
+    /// two `IA32_MCU_OPT_CTRL` bits opt out of a mitigation its microcode
+    /// turns on; the others turn one on.
     pub fn in_force(&self, registers: &Registers) -> Mitigations {
         let mut on = ALWAYS;
-        for one in Mitigation::ALL.into_iter().filter(|&one| ON_REQUEST.has(one) && self.enumerates(one)) {
+        for one in Mitigation::ALL.into_iter().filter(|&one| BY_CONSTRUCTION.has(one) && self.enumerates(one)) {
             on = on.with(one);
         }
         if let Some(spec_ctrl) = registers.spec_ctrl {
@@ -530,15 +530,17 @@ impl Decision {
 /// CPU without `CR4.SMEP`, and enters no VMX or SVM operation.
 pub const ALWAYS: Mitigations = Mitigations::of(&[Mitigation::UserPointerClamp, Mitigation::Smep, Mitigation::NoGuest]);
 
-/// What the kernel applies for a program that asked, on every CPU that
-/// enumerates it ([`Decision::on_request`]). No register shows it at
-/// bring-up, before any program has.
-const ON_REQUEST: Mitigations = Mitigations::of(&[
+/// What the kernel applies on every CPU whose decision names it and that
+/// enumerates it, and no register shows at bring-up: what a program that
+/// asks runs with ([`Decision::on_request`]), and the branch history clear of
+/// the entries each CPU loads for its decision.
+const BY_CONSTRUCTION: Mitigations = Mitigations::of(&[
     Mitigation::Ibpb,
     Mitigation::ReturnPredictorFilled,
     Mitigation::Stibp,
     Mitigation::Ssbd,
     Mitigation::VirtSsbd,
+    Mitigation::BhbClear,
 ]);
 
 /// What a CPU applies for a program that asked, and for no other.
@@ -883,7 +885,17 @@ fn intel(f: &Facts, of: Vulnerability) -> Verdict {
             } else if f.cpuid_7_2_edx & BHI_CTRL != 0 {
                 Asks::of(Mitigation::BhiDisS, true).affected()
             } else if f.cap(cap::IBRS_ALL) {
-                Asks::of(Mitigation::BhbClear, true).affected()
+                // Its short sequence is "sufficient to clear the BHB on all
+                // processors prior to Alder Lake", the table's software rows; a
+                // guest's VMM sets `BHI_DIS_S` under it on any other ("Software
+                // Mitigations in Migration Pools"). A later part names
+                // `BHI_DIS_S`, which microcode older than its BHI update lacks.
+                match f.intel_lists(BHI_SOFTWARE) {
+                    _ if f.hypervisor => Asks::of(Mitigation::BhbClear, true).affected(),
+                    Some(true) => Asks::of(Mitigation::BhbClear, true).affected(),
+                    Some(false) => Asks::of(Mitigation::BhiDisS, false).affected(),
+                    None => Asks::of(Mitigation::BhiDisS, false).assumed(true),
+                }
             } else if f.hypervisor && ibrs && (f.intel_rsba() || f.cap(cap::RRSBA)) {
                 // A guest that enumerates IBRS and not IBRS_ALL may run on
                 // hardware that has it: the sequence, where the guest relies
@@ -1207,7 +1219,10 @@ const fn any_stepping(signature: u32, affected: u16) -> Row {
 // Check Error Avoidance (CVE-2018-12207); Special Register Buffer Data
 // Sampling; the two MMIO columns; Gather Data Sampling; Register File Data
 // Sampling; the three Indirect Target Selection columns; RSBU's RRSBA
-// column; Branch History Injection.
+// column; Branch History Injection, and where its every row gives BHI's
+// mitigation as "Software" alone, which the table gives every processor
+// before Alder Lake, against "MCU+Software" or "Hardware+Software" for one
+// with `BHI_DIS_S`.
 const MELTDOWN: u16 = 1 << 0;
 const L1TF: u16 = 1 << 1;
 const MDS: u16 = 1 << 2;
@@ -1219,6 +1234,7 @@ const RFDS: u16 = 1 << 7;
 const ITS: u16 = 1 << 8;
 const RRSBA: u16 = 1 << 9;
 const BHI: u16 = 1 << 10;
+const BHI_SOFTWARE: u16 = 1 << 11;
 
 /// Intel's "Affected Processors: Guidance for Security Issues on Intel
 /// Processors" as its machine-readable list gave it on 2026-09-04: each
@@ -1232,46 +1248,46 @@ const INTEL_ROWS: [Row; 67] = [
     row(0x406f1, MELTDOWN | L1TF | MDS | MCEPSC | MMIO),
     row(0x50653, MELTDOWN | L1TF | MDS | MCEPSC | MMIO),
     row(0x50654, MELTDOWN | L1TF | MDS | MCEPSC | MMIO | GDS),
-    row(0x5065b, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI),
+    row(0x5065b, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI | BHI_SOFTWARE),
     row(0x50663, MELTDOWN | L1TF | MDS | MCEPSC | MMIO),
     row(0x50664, MELTDOWN | L1TF | MDS | MCEPSC | MMIO),
     row(0x50665, MELTDOWN | L1TF | MDS | MCEPSC | MMIO),
     row(0x506ca, RFDS),
     row(0x506e3, MELTDOWN | L1TF | MDS | MCEPSC | SRBDS | MMIO | GDS),
     any_stepping(0x506f0, RFDS),
-    row(0x606a6, MMIO | GDS | ITS | BHI),
-    any_stepping(0x606c0, MMIO | GDS | ITS | BHI),
-    row(0x706a8, RFDS | BHI),
-    row(0x706e5, MDS | MCEPSC | MMIO | GDS | ITS | RRSBA | BHI),
-    row(0x80665, MMIO | RFDS | BHI),
-    row(0x80667, MMIO | RFDS | BHI),
-    row(0x806c1, MMIO | GDS | ITS | BHI),
-    row(0x806c2, GDS | ITS | BHI),
-    row(0x806d1, MMIO | GDS | ITS | BHI),
+    row(0x606a6, MMIO | GDS | ITS | BHI | BHI_SOFTWARE),
+    any_stepping(0x606c0, MMIO | GDS | ITS | BHI | BHI_SOFTWARE),
+    row(0x706a8, RFDS | BHI | BHI_SOFTWARE),
+    row(0x706e5, MDS | MCEPSC | MMIO | GDS | ITS | RRSBA | BHI | BHI_SOFTWARE),
+    row(0x80665, MMIO | RFDS | BHI | BHI_SOFTWARE),
+    row(0x80667, MMIO | RFDS | BHI | BHI_SOFTWARE),
+    row(0x806c1, MMIO | GDS | ITS | BHI | BHI_SOFTWARE),
+    row(0x806c2, GDS | ITS | BHI | BHI_SOFTWARE),
+    row(0x806d1, MMIO | GDS | ITS | BHI | BHI_SOFTWARE),
     row(0x806e9, MELTDOWN | L1TF | MDS | MCEPSC | SRBDS | MMIO | GDS),
     row(0x806ea, MELTDOWN | L1TF | MDS | MCEPSC | SRBDS | MMIO | GDS),
     row(0x806eb, MDS | MCEPSC | SRBDS | MMIO | GDS),
-    row(0x806ec, MCEPSC | SRBDS | MMIO | GDS | ITS | RRSBA | BHI),
+    row(0x806ec, MCEPSC | SRBDS | MMIO | GDS | ITS | RRSBA | BHI | BHI_SOFTWARE),
     row(0x806f5, RRSBA | BHI),
     row(0x806f6, RRSBA | BHI),
     row(0x806f7, RRSBA | BHI),
     row(0x806f8, RRSBA | BHI),
-    any_stepping(0x90660, MMIO | RFDS | BHI),
+    any_stepping(0x90660, MMIO | RFDS | BHI | BHI_SOFTWARE),
     row(0x90672, RFDS | BHI),
     row(0x90675, RFDS | BHI),
     row(0x906a3, RFDS | BHI),
     row(0x906a4, RFDS | BHI),
-    any_stepping(0x906c0, MMIO | RFDS | BHI),
+    any_stepping(0x906c0, MMIO | RFDS | BHI | BHI_SOFTWARE),
     row(0x906e9, MELTDOWN | L1TF | MDS | MCEPSC | SRBDS | MMIO | GDS),
     row(0x906ea, MELTDOWN | L1TF | MDS | MCEPSC | SRBDS | MMIO | GDS),
     row(0x906ec, MDS | MCEPSC | SRBDS | MMIO | GDS),
-    row(0x906ed, MCEPSC | SRBDS | MMIO | GDS | ITS | RRSBA | BHI),
-    row(0xa0652, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI),
-    row(0xa0653, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI),
-    row(0xa0655, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI),
-    row(0xa0660, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI),
-    row(0xa0661, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI),
-    row(0xa0671, MMIO | GDS | ITS | BHI),
+    row(0x906ed, MCEPSC | SRBDS | MMIO | GDS | ITS | RRSBA | BHI | BHI_SOFTWARE),
+    row(0xa0652, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI | BHI_SOFTWARE),
+    row(0xa0653, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI | BHI_SOFTWARE),
+    row(0xa0655, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI | BHI_SOFTWARE),
+    row(0xa0660, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI | BHI_SOFTWARE),
+    row(0xa0661, MCEPSC | MMIO | GDS | ITS | RRSBA | BHI | BHI_SOFTWARE),
+    row(0xa0671, MMIO | GDS | ITS | BHI | BHI_SOFTWARE),
     row(0xa06a4, RRSBA | BHI),
     row(0xa06d1, RRSBA | BHI),
     row(0xa06e1, RRSBA | BHI),
@@ -1523,12 +1539,35 @@ mod tests {
                 (SpecStoreBypass, needs(&[Ssbd])),
             ],
         );
-        // Without the controls enhanced IBRS holds its RRSBA, and the
-        // sequence its branch history.
+        // Without the controls enhanced IBRS holds its RRSBA, and its branch
+        // history needs the `BHI_DIS_S` it lacks: the short sequence is not
+        // Intel's for a part this late.
         let without = decide(&Facts { cpuid_7_2_edx: 0, ..facts });
         assert_eq!(without.verdict(Retbleed), needs(&[EnhancedIbrs]));
-        assert_eq!(without.verdict(BranchHistoryInjection), needs(&[BhbClear]));
+        assert_eq!(without.verdict(BranchHistoryInjection), lacking(&[BhiDisS], &[BhiDisS]));
         assert_eq!(decide(&Facts { arch_capabilities: facts.arch_capabilities | cap::BHI_NO, ..facts }).verdict(BranchHistoryInjection), Verdict::NotAffected);
+    }
+
+    /// Intel's short sequence is the BHB clear only where its table gives
+    /// BHI's mitigation as software alone, the processors before Alder Lake,
+    /// and in a guest, whose VMM sets `BHI_DIS_S` under it. A later part, or
+    /// one the table omits, whose microcode predates `BHI_CTRL` is said to
+    /// lack `BHI_DIS_S` rather than to be mitigated.
+    #[test]
+    fn the_short_sequence_is_named_only_where_intel_scopes_it() {
+        let bhi = |facts: &Facts| decide(facts).verdict(BranchHistoryInjection);
+        assert_eq!(bhi(&INTEL_806C1), needs(&[BhbClear]));
+        let alder_lake = Facts { signature: 0x906a3, ..INTEL_806C1 };
+        assert_eq!(bhi(&alder_lake), lacking(&[BhiDisS], &[BhiDisS]));
+        assert_eq!(bhi(&Facts { cpuid_7_2_edx: BHI_CTRL, ..alder_lake }), needs(&[BhiDisS]));
+        assert_eq!(bhi(&Facts { signature: 0x50657, ..INTEL_806C1 }), assumed(lacking(&[BhiDisS], &[BhiDisS])));
+        assert_eq!(bhi(&Facts { hypervisor: true, ..alder_lake }), needs(&[BhbClear]));
+        let decision = decide(&alder_lake);
+        let unread = Registers { spec_ctrl: None, mcu_opt_ctrl: None, de_cfg2: None, c001_1029: None };
+        assert_eq!(
+            std::format!("{}", decision.line(BranchHistoryInjection, decision.in_force(&unread))),
+            "vulnerable: needs BHI_DIS_S; this CPU enumerates no BHI_DIS_S"
+        );
     }
 
     #[test]
@@ -1759,14 +1798,14 @@ mod tests {
         );
     }
 
-    /// What every CPU has, what it applies on request where it enumerates
-    /// it, and each control its register shows on: a register the CPU was
-    /// not read for shows nothing.
+    /// What every CPU has, what it applies on request or on entry where it
+    /// enumerates it, and each control its register shows on: a register the
+    /// CPU was not read for shows nothing.
     #[test]
     fn what_is_in_force_is_what_the_registers_show() {
         let unread = Registers { spec_ctrl: None, mcu_opt_ctrl: None, de_cfg2: None, c001_1029: None };
         let intel = decide(&INTEL_806C1);
-        let always = ALWAYS.with(Ibpb).with(Ssbd);
+        let always = ALWAYS.with(Ibpb).with(Ssbd).with(BhbClear);
         assert_eq!(intel.in_force(&unread), always);
         assert_eq!(intel.in_force(&Registers { spec_ctrl: Some(msr::IBRS), ..unread }), always.with(EnhancedIbrs));
         // A bit the decision does not name shows nothing.
@@ -1778,7 +1817,7 @@ mod tests {
         assert_eq!(intel.in_force(&opted_out), always);
         // What the CPU does not enumerate is not applied for anyone.
         let bare = decide(&Facts { cpuid_7_0_edx: 0, ..INTEL_806C1 });
-        assert_eq!(bare.in_force(&unread), ALWAYS);
+        assert_eq!(bare.in_force(&unread), ALWAYS.with(BhbClear));
         let amd = decide(&AMD_17H_60H);
         let always = ALWAYS.with(Ibpb).with(ReturnPredictorFilled).with(Stibp).with(Ssbd);
         let both = Registers { de_cfg2: Some(msr::SUPPRESS_BP_ON_NON_BR), c001_1029: Some(C001_1029_LFENCE_SERIALIZES_DISPATCH), ..unread };

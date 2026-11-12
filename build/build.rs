@@ -1783,12 +1783,19 @@ fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
     );
 }
 
-/// `arch::syscall::syscall_entry`'s v0-mangled path, less the crate
-/// disambiguator that stands in front of it.
-const SYSCALL_ENTRY_SYMBOL: &str = "6kernel4arch6x86_647syscall13syscall_entry";
+/// `SYSCALL`'s two entries, which `LSTAR` names per CPU: their names, and
+/// their v0-mangled paths less the crate disambiguator that stands in front
+/// of each.
+const SYSCALL_ENTRIES: [(&str, &str); 2] = [
+    ("syscall_entry", "6kernel4arch6x86_647syscall13syscall_entry"),
+    (
+        "syscall_entry_clearing_branch_history",
+        "6kernel4arch6x86_647syscall37syscall_entry_clearing_branch_history",
+    ),
+];
 
 /// `swapgs` then `cld`, which `arch::entry::syscall_naked_asm` puts first in
-/// `syscall_entry`: the kernel's GS base before anything addresses GS.
+/// each entry: the kernel's GS base before anything addresses GS.
 const OPENS: [u8; 4] = [0x0f, 0x01, 0xf8, 0xfc];
 /// `mov gs:[disp32], rsp` less its displacement: the `gs` override, `REX.W`,
 /// the opcode, and the ModRM/SIB pair that says `rsp` against an absolute
@@ -1799,28 +1806,26 @@ const LOAD_RSP_FROM_GS: [u8; 5] = [0x65, 0x48, 0x8b, 0x24, 0x25];
 /// Bytes either `mov` occupies, displacement included.
 const MOV_RSP_GS_LEN: usize = 9;
 
-/// A kernel's `syscall_entry` from its first instruction to the end of the
-/// segment it is in, found at its symbol.
-fn syscall_entry_bytes(kernel: &[u8]) -> Result<&[u8], String> {
+/// The entry at `symbol` from its first instruction to the end of the
+/// segment it is in.
+fn syscall_entry_bytes<'a>(kernel: &'a [u8], (name, symbol): (&str, &str)) -> Result<&'a [u8], String> {
     use toyos::elf::header::{ProgramHeader, PT_LOAD};
 
     let (syms, strs) =
         toyos::elf::section::symbol_tables(kernel).ok_or("the kernel has no readable `.symtab`")?;
     let table = toyos::elf::SymTab::new(syms, strs);
     let mut entries = table.defined().filter(|&(i, sym)| {
-        sym.kind() == toyos::elf::sym::STT_FUNC && table.name(i).ends_with(SYSCALL_ENTRY_SYMBOL)
+        sym.kind() == toyos::elf::sym::STT_FUNC && table.name(i).ends_with(symbol)
     });
     let (Some((_, entry)), None) = (entries.next(), entries.next()) else {
-        return Err(format!(
-            "the kernel's `.symtab` does not name exactly one function `…{SYSCALL_ENTRY_SYMBOL}`"
-        ));
+        return Err(format!("the kernel's `.symtab` does not name exactly one function `…{symbol}`"));
     };
     let header = toyos::elf::FileHeader::parse(kernel).map_err(|e| format!("{e:?}"))?;
     let extent = toyos::elf::Layout::parse(kernel, header.machine).map_err(|e| format!("{e}"))?.extent();
     let value = entry
         .address(extent)
         .map(|at| extent.min() + at.get())
-        .ok_or("the kernel's `syscall_entry` lies outside its own image")?;
+        .ok_or_else(|| format!("the kernel's `{name}` lies outside its own image"))?;
     let segments = header.program_headers(kernel).map_err(|e| format!("{e:?}"))?;
     (0..header.phnum as usize)
         .filter_map(|i| ProgramHeader::parse(segments, i))
@@ -1830,7 +1835,7 @@ fn syscall_entry_bytes(kernel: &[u8]) -> Result<&[u8], String> {
             let left = segment.filesz.checked_sub(within).filter(|&left| left != 0)?;
             toyos::elf::file_range(kernel, segment.offset.checked_add(within)?, left)
         })
-        .ok_or_else(|| format!("no `PT_LOAD` holds `syscall_entry` at {value:#x} in the file"))
+        .ok_or_else(|| format!("no `PT_LOAD` holds `{name}` at {value:#x} in the file"))
 }
 
 /// Whether an entry switches to the kernel's `rsp` in the instruction after it
@@ -1843,7 +1848,7 @@ fn entry_window(entry: &[u8]) -> Result<Result<(), &[u8]>, String> {
     let after_save = OPENS.len() + MOV_RSP_GS_LEN;
     if !entry.starts_with(&OPENS) || !entry[OPENS.len()..].starts_with(&SAVE_RSP_TO_GS) {
         return Err(format!(
-            "`syscall_entry` does not open `swapgs`, `cld`, `mov gs:[…], rsp`: it opens {:02x?}",
+            "a `SYSCALL` entry does not open `swapgs`, `cld`, `mov gs:[…], rsp`: it opens {:02x?}",
             &entry[..entry.len().min(after_save)],
         ));
     }
@@ -1860,25 +1865,28 @@ fn entry_window(entry: &[u8]) -> Result<Result<(), &[u8]>, String> {
     Ok(Err(&rest[..between]))
 }
 
-/// Refuse to write a shipping image whose `syscall_entry` does anything between
-/// saving the user's `rsp` and switching to the kernel's.
+/// Refuse to write a shipping image either of whose `SYSCALL` entries does
+/// anything between saving the user's `rsp` and switching to the kernel's.
 ///
-/// Read at the entry's own symbol, the shipping kernel's first four
+/// Read at each entry's own symbol, the shipping kernel's first four
 /// instructions are `swapgs`, `cld`, the save and the switch, with nothing
 /// between.
 fn judge_entry_window(features: &str, kernel: &[u8]) -> Result<(), String> {
     if !features.is_empty() {
         return Ok(());
     }
-    match entry_window(syscall_entry_bytes(kernel)?)? {
-        Ok(()) => Ok(()),
-        Err(between) => Err(format!(
-            "the shipping kernel's `syscall_entry` does not switch to the kernel's `rsp` in the \
-             instruction after it saves the user's; between them stand {between:02x?}.\nEvery \
-             instruction there runs at CPL 0 on a user's stack, and an image that ships must \
-             not be able to be asked to stop there."
-        )),
+    for entry in SYSCALL_ENTRIES {
+        if let Err(between) = entry_window(syscall_entry_bytes(kernel, entry)?)? {
+            return Err(format!(
+                "the shipping kernel's `{}` does not switch to the kernel's `rsp` in the \
+                 instruction after it saves the user's; between them stand {between:02x?}.\nEvery \
+                 instruction there runs at CPL 0 on a user's stack, and an image that ships must \
+                 not be able to be asked to stop there.",
+                entry.0,
+            ));
+        }
     }
+    Ok(())
 }
 
 fn assert_entry_window_matches_features(features: &str, kernel: &[u8]) {
@@ -3874,22 +3882,27 @@ mod tests {
     ];
 
     /// A PIE of one `PT_LOAD` over the whole file, whose `.symtab` names one
-    /// function per `names` entry, each at `entry`'s address.
+    /// function per `names` entry, each at a copy of `entry`.
     fn kernel_with_entry(names: &[&str], entry: &[u8]) -> Vec<u8> {
+        kernel_with_entries(&names.iter().map(|name| (*name, entry)).collect::<Vec<_>>())
+    }
+
+    /// The same with each function at its own code, one after another.
+    fn kernel_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
         const TEXT: u64 = 0x200;
         let mut strtab = vec![0u8];
         let mut symtab = vec![0u8; 24];
-        for name in names {
+        let mut file = vec![0u8; TEXT as usize];
+        for (name, code) in entries {
             symtab.extend((strtab.len() as u32).to_le_bytes());
             // `STB_GLOBAL`, `STT_FUNC`; `st_other`; defined in section 1.
             symtab.extend([0x12, 0, 1, 0]);
-            symtab.extend(TEXT.to_le_bytes());
-            symtab.extend((entry.len() as u64).to_le_bytes());
+            symtab.extend((file.len() as u64).to_le_bytes());
+            symtab.extend((code.len() as u64).to_le_bytes());
             strtab.extend(name.as_bytes());
             strtab.push(0);
+            file.extend(*code);
         }
-        let mut file = vec![0u8; TEXT as usize];
-        file.extend(entry);
         let symtab_at = file.len() as u64;
         file.extend(&symtab);
         let strtab_at = file.len() as u64;
@@ -3932,6 +3945,9 @@ mod tests {
     }
 
     const ENTRY_NAME: &str = "_RNvNtNtNtCs2TF9wDo3GXK_6kernel4arch6x86_647syscall13syscall_entry";
+    const CLEARING_NAME: &str =
+        "_RNvNtNtNtCs2TF9wDo3GXK_6kernel4arch6x86_647syscall37syscall_entry_clearing_branch_history";
+    const BOTH: [&str; 2] = [ENTRY_NAME, CLEARING_NAME];
 
     fn entry_with(between: &[u8]) -> Vec<u8> {
         [&ENTRY_OPENS[..], between, &SWITCH[..], &[0x90; 32][..]].concat()
@@ -3939,30 +3955,40 @@ mod tests {
 
     #[test]
     fn a_clean_entry_is_the_shipping_kernels() {
-        let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(&[]));
+        let kernel = kernel_with_entry(&BOTH, &entry_with(&[]));
         assert_eq!(judge_entry_window("", &kernel), Ok(()));
     }
 
     #[test]
     fn a_hold_is_refused_in_a_shipping_entry_however_its_labels_are_spelled() {
         for hold in [&LABELLED_HOLD[..], &LOCAL_LABEL_HOLD[..]] {
-            let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(hold));
+            let kernel = kernel_with_entry(&BOTH, &entry_with(hold));
             let refusal = judge_entry_window("", &kernel).unwrap_err();
             assert!(refusal.contains(&format!("between them stand {hold:02x?}")), "{refusal}");
         }
     }
 
+    /// The entry that clears branch history is judged as the other is: a
+    /// clear moved in front of the switch would run on the user's stack.
+    #[test]
+    fn a_hold_in_the_clearing_entry_alone_is_refused() {
+        let hold = entry_with(&LABELLED_HOLD);
+        let kernel = kernel_with_entries(&[(ENTRY_NAME, &entry_with(&[])[..]), (CLEARING_NAME, &hold[..])]);
+        let refusal = judge_entry_window("", &kernel).unwrap_err();
+        assert!(refusal.contains("`syscall_entry_clearing_branch_history` does not switch"), "{refusal}");
+    }
+
     #[test]
     fn a_hold_in_front_of_the_save_is_an_entry_the_judge_refuses_to_read() {
         let entry = [&ENTRY_OPENS[..4], &[0xf3, 0x90][..], &ENTRY_OPENS[4..], &SWITCH[..]].concat();
-        let kernel = kernel_with_entry(&[ENTRY_NAME], &entry);
+        let kernel = kernel_with_entry(&BOTH, &entry);
         let refusal = judge_entry_window("", &kernel).unwrap_err();
         assert!(refusal.contains("does not open `swapgs`, `cld`"), "{refusal}");
     }
 
     #[test]
     fn an_entry_without_its_swapgs_is_refused() {
-        let kernel = kernel_with_entry(&[ENTRY_NAME], &[&ENTRY_OPENS[3..], &SWITCH[..]].concat());
+        let kernel = kernel_with_entry(&BOTH, &[&ENTRY_OPENS[3..], &SWITCH[..]].concat());
         let refusal = judge_entry_window("", &kernel).unwrap_err();
         assert!(refusal.contains("does not open `swapgs`, `cld`"), "{refusal}");
     }
@@ -3970,7 +3996,7 @@ mod tests {
     #[test]
     fn a_kernel_that_does_not_name_exactly_one_entry_is_refused() {
         let clean = entry_with(&[]);
-        for names in [&["_RNvCs1_6kernel4main"][..], &[ENTRY_NAME, ENTRY_NAME][..]] {
+        for names in [&["_RNvCs1_6kernel4main"][..], &[ENTRY_NAME, ENTRY_NAME][..], &[ENTRY_NAME][..]] {
             let refusal = judge_entry_window("", &kernel_with_entry(names, &clean)).unwrap_err();
             assert!(refusal.contains("does not name exactly one function"), "{refusal}");
         }

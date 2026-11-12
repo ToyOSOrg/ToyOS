@@ -116,7 +116,7 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     super::power::init_control(rsdp_addr);
     ioapic::init(&madt);
     idt::enable_interrupts();
-    super::syscall::init();
+    super::syscall::init(super::mitigation::boot_cpu_clears_branch_history());
     Platform { madt, facs }
 }
 

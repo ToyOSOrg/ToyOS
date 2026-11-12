@@ -3,7 +3,7 @@ use crate::arch::entry::{gate_iretq, ring3_naked_asm};
 /// IDT entry point for the TLB-shootdown IPI vector.
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn tlb_flush_entry() {
-    ring3_naked_asm!(cs = 8;
+    ring3_naked_asm!(gate cs = 8;
         // Every pushed register must be popped before `iretq`: `flush` may clobber any System V scratch register.
         "push rax",
         "push rcx",

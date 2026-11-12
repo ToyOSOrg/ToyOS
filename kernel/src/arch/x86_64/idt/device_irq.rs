@@ -11,18 +11,19 @@
 /// CPU's frame, which `$handler` takes as its argument and the exit drops.
 macro_rules! device_irq_entry {
     ($(#[$meta:meta])* $vis:vis fn $name:ident => $handler:path) => {
-        device_irq_entry!(@entry $(#[$meta])* $vis fn $name => $handler; 88; []; []);
+        device_irq_entry!(@entry $(#[$meta])* $vis fn $name => $handler; [gate]; 88; []; []);
     };
     ($(#[$meta:meta])* $vis:vis fn $name:ident => $handler:path, numbered) => {
-        device_irq_entry!(@entry $(#[$meta])* $vis fn $name => $handler; 96; ["mov rdi, [rbp + 80]"]; ["add rsp, 8"]);
+        device_irq_entry!(@entry $(#[$meta])* $vis fn $name => $handler; []; 96; ["mov rdi, [rbp + 80]"]; ["add rsp, 8"]);
     };
     // `$cs` is the CS word's offset from `rbp`: 10 GPRs and RIP, and the stub's word if there is one.
-    (@entry $(#[$meta:meta])* $vis:vis fn $name:ident => $handler:path; $cs:literal; [$($argument:literal)?]; [$($drop:literal)?]) => {
+    // A numbered entry is a stub's jump target, and the stub is the gate.
+    (@entry $(#[$meta:meta])* $vis:vis fn $name:ident => $handler:path; [$($gate:ident)?]; $cs:literal; [$($argument:literal)?]; [$($drop:literal)?]) => {
         $(#[$meta])*
         #[unsafe(naked)]
         $vis extern "sysv64" fn $name() {
             // On entry the 10 GPRs are not yet pushed.
-            $crate::arch::entry::ring3_naked_asm!(cs = $cs - 80;
+            $crate::arch::entry::ring3_naked_asm!($($gate)? cs = $cs - 80;
                 // Handler may clobber any scratch GPR; one left unsaved leaks kernel state into a user register on iretq.
                 "push rax",
                 "push rcx",

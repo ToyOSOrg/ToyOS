@@ -306,7 +306,7 @@ there:
   reads 159 against 49 ns, and its run lines state retpolines, conditional
   IBPB, STIBP and Safe RET
   (`issues/indirect-branches-and-returns-run-without-thunks.md`,
-  `issues/no-entry-or-switch-clears-the-bhb-fills-the-rsb-or-issues-an-ibpb.md`).
+  `issues/no-gate-holds-the-bhb-clear-and-the-return-fill-to-their-vendors-sequences.md`).
 - After 23 of the 76, all shapes that block and wake, the clock Linux's
   reporting thread read was 1.37 to 1.9 GHz in the median run, where ToyOS's
   read 4.2 to 4.3 GHz. The probe reads the reporting thread's CPU, so that

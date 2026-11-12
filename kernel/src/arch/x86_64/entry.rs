@@ -39,12 +39,31 @@ macro_rules! cld {
     };
 }
 
+/// The [`GATE_PREFIX`] bytes every gate the IDT names opens with: where the
+/// frame's `CS`, `{gate_cs}` bytes above `rsp`, is Ring 3's, a call of
+/// `{clear_branch_history}` (`arch::mitigation::clear_branch_history`). A CPU
+/// whose decision names the clear has its IDT enter each gate here; every
+/// other CPU's enters past it and runs none of it (`arch::idt`). A `jz`
+/// mispredicted past the clear is followed by no load through GS and no
+/// indirect branch before the gate's own `lfence` or serializing `wrmsr`.
+macro_rules! gate_prefix {
+    () => {
+        "test byte ptr [rsp + {gate_cs}], 3\njz 78f\ncall {clear_branch_history}\n78:"
+    };
+}
+
+/// [`gate_prefix`]'s length: `test` with an 8-bit displacement and
+/// immediate, a short `jz` and a `call` with a 32-bit displacement. `arch::idt`
+/// reads it back off each gate before it points a table past it.
+pub(crate) const GATE_PREFIX: usize = 12;
+
 /// `naked_asm!` for an interrupt or trap gate a Ring 3 thread can arrive
 /// through, `cs = N;` bytes below its frame's `CS` on entry: prepends `cld`,
 /// `clac`, and a `swapgs` when that `CS` is Ring 3's. The body must end with a
 /// trailing comma, and swap back before every `iretq` that can return to
 /// Ring 3: [`gate_iretq`] where the frame decides, a bare `swapgs` on a path
-/// only a Ring 3 frame takes.
+/// only a Ring 3 frame takes. `gate cs = N;` makes it a gate the IDT names,
+/// opening with [`gate_prefix`]; `cs = N;` one a stub jumps to.
 ///
 /// Such a gate clears neither `DF` nor `AC` (Intel SDM Vol. 3A §6.12.1.3 names
 /// `TF`, `VM`, `RF`, `NT`, and `IF` for an interrupt gate), and Ring 3 sets
@@ -57,6 +76,21 @@ macro_rules! cld {
 /// of SWAPGS and Segment Registers", ID 758371). On AMD it holds where
 /// `LFENCE` is dispatch-serializing (AMD 70586 G-2).
 macro_rules! ring3_naked_asm {
+    (gate cs = $cs:expr; $($body:tt)*) => {
+        core::arch::naked_asm!(
+            $crate::arch::entry::gate_prefix!(),
+            $crate::arch::entry::cld!(),
+            "clac",
+            "test byte ptr [rsp + {gate_cs}], 3",
+            "jz 70f",
+            "swapgs",
+            "70:",
+            "lfence",
+            $($body)*
+            gate_cs = const $cs,
+            clear_branch_history = sym $crate::arch::mitigation::clear_branch_history,
+        )
+    };
     (cs = $cs:expr; $($body:tt)*) => {
         core::arch::naked_asm!(
             $crate::arch::entry::cld!(),
@@ -82,7 +116,7 @@ macro_rules! gate_iretq {
     };
 }
 
-/// `naked_asm!` for `SYSCALL`'s entry: prepends `swapgs`, since only Ring 3
+/// `naked_asm!` for `SYSCALL`'s entries: prepends `swapgs`, since only Ring 3
 /// executes `SYSCALL`, then `cld`. `IA32_FMASK` clears `AC`
 /// (`arch::syscall::init`), so the entry's next instructions are the switch
 /// off the user's stack.
@@ -116,7 +150,7 @@ macro_rules! install_kernel_gs {
     };
 }
 
-pub(crate) use {cld, gate_iretq, install_kernel_gs, ring3_naked_asm, syscall_naked_asm};
+pub(crate) use {cld, gate_iretq, gate_prefix, install_kernel_gs, ring3_naked_asm, syscall_naked_asm};
 
 /// A thread's first entry to Ring 3, at `r12` on the stack `r13`, `$align`
 /// applied to it, with `rdi` = `r14`: a process's argument is zero, a thread's

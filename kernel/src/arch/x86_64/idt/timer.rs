@@ -8,7 +8,7 @@ use crate::hw::HW;
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn timer_entry() {
     // No error code for interrupts. CS is at [rsp + 8].
-    ring3_naked_asm!(cs = 8;
+    ring3_naked_asm!(gate cs = 8;
         "test dword ptr [rsp + 8], 3",
         "jz 2f",
 

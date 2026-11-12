@@ -595,7 +595,7 @@ pub fn init_bsp(lapic_id: u32) {
     // loaded table is the one firmware left across `ExitBootServices`, whose
     // handlers report on no channel of this kernel's — so a fault in `fpu`
     // below would stop the machine with the panel holding the record before it.
-    super::idt::init();
+    super::idt::init(super::mitigation::boot_cpu_clears_branch_history());
     super::control_regs::init_performance(0);
 
     super::fpu::init(0);

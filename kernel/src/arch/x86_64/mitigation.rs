@@ -9,7 +9,9 @@
 //! opt-outs and AMD's LFENCE bit. The boot CPU runs it before the allocator
 //! is up, so what it returns and where the boot CPU keeps it hold no heap.
 //! [`switch_to`] applies at each switch what the decision names for a program
-//! that asked for isolated speculation.
+//! that asked for isolated speculation. Where the decision names the branch
+//! history clear, this CPU's `LSTAR` and IDT enter through
+//! [`clear_branch_history`] (`arch::syscall`, `arch::idt`).
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
@@ -155,6 +157,20 @@ pub fn record_boot_cpu(read: Read) {
     *BOOT_CPU.lock() = Some(read);
 }
 
+impl Read {
+    /// Whether this CPU's entries from Ring 3 clear branch history: what its
+    /// decision names, which its core's other threads do not change.
+    pub fn clears_branch_history(&self) -> bool {
+        decide(&self.facts).enumerates(Mitigation::BhbClear)
+    }
+}
+
+/// [`Read::clears_branch_history`] for the boot CPU, once [`record_boot_cpu`]
+/// has kept its words.
+pub fn boot_cpu_clears_branch_history() -> bool {
+    BOOT_CPU.lock().expect("mitigation: the boot CPU's words are read before its entries are installed").clears_branch_history()
+}
+
 /// Keeps a later CPU's [`apply`].
 pub fn record(cpu_id: u32, read: Read) {
     *LATER[cpu_id as usize].lock() = Some(read);
@@ -183,6 +199,8 @@ pub fn install() {
     for (cpu_id, read) in online() {
         let local = &crate::cpu_local::of(cpu_id).arch.mitigation;
         local.install(read.registers.spec_ctrl, decide(&read.facts).on_request());
+        #[cfg(feature = "test-actuators")]
+        local.clears_branch_history.store(read.clears_branch_history(), Relaxed);
     }
 }
 
@@ -280,6 +298,9 @@ pub struct Local {
     /// Whether this CPU has an `IA32_SPEC_CTRL` to read.
     #[cfg(feature = "test-actuators")]
     has_spec_ctrl: AtomicBool,
+    /// Whether this CPU's entries clear branch history.
+    #[cfg(feature = "test-actuators")]
+    clears_branch_history: AtomicBool,
 }
 
 impl Local {
@@ -297,6 +318,8 @@ impl Local {
             ibpbs: AtomicU64::new(0),
             #[cfg(feature = "test-actuators")]
             has_spec_ctrl: AtomicBool::new(false),
+            #[cfg(feature = "test-actuators")]
+            clears_branch_history: AtomicBool::new(false),
         }
     }
 
@@ -399,4 +422,63 @@ pub fn debug_spec_ctrl_on_request() -> u64 {
 pub fn debug_switch_ibpbs() -> Option<u64> {
     let local = &crate::cpu_local::here().arch.mitigation;
     local.ibpb.load(Relaxed).then(|| local.ibpbs.load(Relaxed))
+}
+
+/// Intel's short branch history clearing sequence ("Branch History
+/// Injection and Intra-mode Branch Target Injection", Listing 1, "sufficient
+/// to clear the BHB on all processors prior to Alder Lake"), between a save
+/// and a restore of the two registers it writes: callable from the first
+/// instruction of a gate, before anything of the interrupted context is
+/// saved. Its own `call`s use the stack it is called on; it reads nothing
+/// through GS and clobbers the flags, which no caller holds across it. Each
+/// of its returns goes back to a call it made, at most seven deep, so the RSB
+/// holds its target: Intel's "Indirect Target Selection" reaches a return,
+/// wherever it lies in its line, only through the alternate predictors an
+/// empty RSB falls back on.
+#[unsafe(naked)]
+pub(crate) extern "sysv64" fn clear_branch_history() {
+    core::arch::naked_asm!(
+        "push rax",
+        "push rcx",
+        #[cfg(feature = "test-actuators")]
+        "lock inc qword ptr [rip + {clears}]",
+        "mov ecx, 5",
+        "call 2f",
+        "jmp 6f",
+        ".balign 64",
+        "2:",
+        "call 3f",
+        "ret",
+        ".balign 64",
+        "3:",
+        "mov eax, 5",
+        "4:",
+        "jmp 5f",
+        "nop",
+        "5:",
+        "sub eax, 1",
+        "jnz 4b",
+        "sub ecx, 1",
+        "jnz 2b",
+        "ret",
+        "6:",
+        "lfence",
+        "pop rcx",
+        "pop rax",
+        "ret",
+        #[cfg(feature = "test-actuators")]
+        clears = sym CLEARS,
+    );
+}
+
+/// Clears [`clear_branch_history`] has run, on every CPU.
+#[cfg(feature = "test-actuators")]
+static CLEARS: AtomicU64 = AtomicU64::new(0);
+
+/// `SYS_DEBUG`'s `BRANCH_HISTORY_CLEARS`: the clears every CPU's entries have
+/// run, where this CPU's decision names the clear.
+#[cfg(feature = "test-actuators")]
+pub fn debug_branch_history_clears() -> Option<u64> {
+    let local = &crate::cpu_local::here().arch.mitigation;
+    local.clears_branch_history.load(Relaxed).then(|| CLEARS.load(Relaxed))
 }

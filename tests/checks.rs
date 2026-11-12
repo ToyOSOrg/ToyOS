@@ -562,7 +562,7 @@ mod checks {
     const T14_BENCH_LINES: [&str; 17] = [
         "spectre_v1: mitigated: user pointers clamped without a branch",
         "spectre_v2: mitigated: SMEP, enhanced IBRS, IBPB between programs that ask",
-        "branch_history_injection: vulnerable: needs BHB cleared on entry",
+        "branch_history_injection: mitigated: BHB cleared on entry",
         "retbleed: not affected",
         "spec_rstack_overflow: not affected",
         "indirect_target_selection: vulnerable: needs indirect branches in a line's upper half",

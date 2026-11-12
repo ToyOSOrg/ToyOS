@@ -14,13 +14,18 @@ const MSR_LSTAR: u32 = 0xC000_0082;
 const MSR_FMASK: u32 = 0xC000_0084;
 
 /// `EFER.SCE` is applied and asserted on this CPU before `init` is called, on both the BSP's path and an AP's.
-pub fn init() {
+/// `LSTAR` names the entry that clears branch history where
+/// `clears_branch_history`, what this CPU's decision names, and the other
+/// elsewhere, which runs none of it.
+pub fn init(clears_branch_history: bool) {
     let star = ((percpu::STAR_SYSRET_BASE as u64) << 48) | ((percpu::KERNEL_CS as u64) << 32);
     // SAFETY: this function owns all three `SYSCALL` MSRs.
     // All three `wrmsr` writes stay in one `unsafe` block because they are one declaration: a CPU holding only some of them has its `SYSCALL` gate aimed by something this file did not decide, and no point between the writes is a state the machine may be left in.
     unsafe {
         cpu::wrmsr(MSR_STAR, star);
-        cpu::wrmsr(MSR_LSTAR, syscall_entry as *const () as u64);
+        let entry: extern "sysv64" fn() =
+            if clears_branch_history { syscall_entry_clearing_branch_history } else { syscall_entry };
+        cpu::wrmsr(MSR_LSTAR, entry as *const () as u64);
         // `SYSCALL` clears exactly the bits named here; every bit left out carries a Ring 3 thread's flag into Ring 0.
         // The pre-mask `RFLAGS` survives in `r11` and `sysretq` restores it to the thread regardless — `FMASK` only decides what the kernel itself runs with.
         const TF: u64 = 1 << 8;
@@ -40,64 +45,80 @@ pub fn init() {
 
 // `SYSCALL` switches no stack: before the `rsp` switch below runs, the CPU is at CPL 0 on the user's stack, so nothing that can fault may execute there.
 // The same holds from the exit's `swapgs` on, with the user's GS base live (`arch::entry`): `SYSRET` cannot fault, since no instruction ends at the user half's top for `rcx` to be non-canonical (`toyos_userbound`'s placement).
-#[unsafe(naked)]
-extern "sysv64" fn syscall_entry() {
-    syscall_naked_asm!(
-        "mov gs:[{user_rsp}], rsp",
-        "mov rsp, gs:[{kernel_rsp}]",
-        "mov gs:[{syscall_rip}], rcx",
-        "mov gs:[{syscall_num}], rdi",
-        "mov gs:[{syscall_rbp}], rbp",
-        "push gs:[{user_rsp}]",  // user RSP on kernel stack
-        "push rcx",             // return RIP
-        "push r11",             // return RFLAGS
-        "push rdi",
-        "push rsi",
-        "push rdx",
-        "push r8",
-        "push r9",
-        "push r10",
-        // Nine words below a 16-byte-aligned top: the pad aligns `rsp` for
-        // both calls, and parks the return value across `exit_to_user`.
-        "sub rsp, 8",
+/// One of `SYSCALL`'s two entries, which `LSTAR` names per CPU (`init`): the
+/// second calls the branch history clear as soon as the kernel's stack is
+/// under it and before any branch.
+macro_rules! syscall_entry {
+    ($name:ident $(, $clear:literal, $operand:ident = $path:path)?) => {
+        #[unsafe(naked)]
+        extern "sysv64" fn $name() {
+            syscall_naked_asm!(
+                "mov gs:[{user_rsp}], rsp",
+                "mov rsp, gs:[{kernel_rsp}]",
+                $($clear,)?
+                "mov gs:[{syscall_rip}], rcx",
+                "mov gs:[{syscall_num}], rdi",
+                "mov gs:[{syscall_rbp}], rbp",
+                "push gs:[{user_rsp}]",  // user RSP on kernel stack
+                "push rcx",             // return RIP
+                "push r11",             // return RFLAGS
+                "push rdi",
+                "push rsi",
+                "push rdx",
+                "push r8",
+                "push r9",
+                "push r10",
+                // Nine words below a 16-byte-aligned top: the pad aligns `rsp` for
+                // both calls, and parks the return value across `exit_to_user`.
+                "sub rsp, 8",
 
-        "add dword ptr gs:[{preempt_count}], 1",
+                "add dword ptr gs:[{preempt_count}], 1",
 
-        "call {handler}",
+                "call {handler}",
 
-        "sub dword ptr gs:[{preempt_count}], 1",
-        // The helper called before `pop rsp`/`sysretq` (`exit_to_user`) preserves `IF=0` across its return.
-        // Runs before GPR restore: the sysv64 call would otherwise clobber rcx/r11 (sysretq's RIP/RFLAGS) and the restored args.
-        "mov [rsp], rax",
-        "call {exit_to_user}",
-        "mov rax, [rsp]",
-        "add rsp, 8",
+                "sub dword ptr gs:[{preempt_count}], 1",
+                // The helper called before `pop rsp`/`sysretq` (`exit_to_user`) preserves `IF=0` across its return.
+                // Runs before GPR restore: the sysv64 call would otherwise clobber rcx/r11 (sysretq's RIP/RFLAGS) and the restored args.
+                "mov [rsp], rax",
+                "call {exit_to_user}",
+                "mov rax, [rsp]",
+                "add rsp, 8",
 
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rdx",
-        "pop rsi",
-        "pop rdi",
-        "pop r11",
-        "pop rcx",
-        "pop rsp",              // restore user RSP from kernel stack
-        "swapgs",
-        "sysretq",
-        handler = sym syscall_handler,
-        exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
-        kernel_rsp = const percpu::OFF_KERNEL_RSP,
-        user_rsp = const percpu::OFF_USER_RSP,
-        syscall_rip = const percpu::OFF_SYSCALL_RIP,
-        syscall_num = const percpu::OFF_SYSCALL_NUM,
-        syscall_rbp = const percpu::OFF_SYSCALL_RBP,
-        preempt_count = const percpu::OFF_PREEMPT_COUNT,
-    );
+                "pop r10",
+                "pop r9",
+                "pop r8",
+                "pop rdx",
+                "pop rsi",
+                "pop rdi",
+                "pop r11",
+                "pop rcx",
+                "pop rsp",              // restore user RSP from kernel stack
+                "swapgs",
+                "sysretq",
+                handler = sym syscall_handler,
+                exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
+                kernel_rsp = const percpu::OFF_KERNEL_RSP,
+                user_rsp = const percpu::OFF_USER_RSP,
+                syscall_rip = const percpu::OFF_SYSCALL_RIP,
+                syscall_num = const percpu::OFF_SYSCALL_NUM,
+                syscall_rbp = const percpu::OFF_SYSCALL_RBP,
+                preempt_count = const percpu::OFF_PREEMPT_COUNT,
+                $($operand = sym $path,)?
+            );
+        }
+    };
 }
 
-/// Where `SYSCALL` enters, as `LSTAR` holds it.
-pub(crate) fn entry_address() -> u64 {
-    syscall_entry as *const () as u64
+syscall_entry!(syscall_entry);
+syscall_entry!(
+    syscall_entry_clearing_branch_history,
+    "call {clear_branch_history}",
+    clear_branch_history = crate::arch::mitigation::clear_branch_history
+);
+
+/// Whether `rip` is where either entry begins.
+pub(crate) fn is_entry(rip: u64) -> bool {
+    [syscall_entry as *const () as u64, syscall_entry_clearing_branch_history as *const () as u64].contains(&rip)
 }
 
 /// The syscall bracket: the entry's diagnostic stores stay readable only while [`percpu::in_syscall`] is true.

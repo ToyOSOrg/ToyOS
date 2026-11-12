@@ -12,7 +12,7 @@
 
 use core::arch::naked_asm;
 
-use crate::arch::entry::install_kernel_gs;
+use crate::arch::entry::{gate_prefix, install_kernel_gs};
 use crate::arch::percpu::{MSR_GS_BASE, OFF_GDT, OFF_NMI_ACTIVE};
 
 /// The words the entry pushes before it can tell a nested NMI: three
@@ -31,6 +31,7 @@ const RFLAGS_OFFSET: usize = 8 * (FIRST_PUSHES + 7) + 16;
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn nmi_entry() {
     naked_asm!(
+        gate_prefix!(),
         // Not routed through `arch::entry::ring3_naked_asm`: cld must run here, since `note`'s sysv64 call requires DF clear.
         "cld",
         // And from Ring 3 it arrives with that thread's `AC`, as every gate does.
@@ -95,6 +96,8 @@ pub(super) extern "sysv64" fn nmi_entry() {
         nested_rsp = const NESTED_RSP_OFFSET,
         note = sym note,
         nested = sym nested_nmi,
+        gate_cs = const 8,
+        clear_branch_history = sym crate::arch::mitigation::clear_branch_history,
     );
 }
 
