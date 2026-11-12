@@ -1235,11 +1235,12 @@ impl<X: SchedPayload> CpuSched<X> {
         }
         // Somewhere else. Re-post the *same* node — legal precisely because
         // this consumer just unlinked it — unless the word names this CPU,
-        // which means an `Adopt` is on its way here: re-posting would spin
-        // against the producer, and the sticky kill bit already guarantees the
-        // adopter *dispatches* it on arrival, into its own dying list, where it
-        // unwinds and dies by its own `die`. A task in this CPU's stopped band
-        // names this CPU too, and stays in the band.
+        // which means the task is on its way: an `Adopt` or a `Wake` to here,
+        // or a claimant sending it on from here. Re-posting would spin against
+        // the producer, and the sticky kill bit already guarantees that the
+        // CPU that places it *dispatches* it, into its own dying list, where
+        // it unwinds and dies by its own `die`. A task in this CPU's stopped
+        // band names this CPU too, and stays in the band.
         match shared.state() {
             TaskState::Dead => {}
             state if home_of(state) == Some(self.id) => {}
@@ -1314,12 +1315,12 @@ impl<X: SchedPayload> CpuSched<X> {
 impl<X: SchedPayload> CpuHandles<Msg<X>> {
     /// The wake of a park whose claim the caller won, sent where the task
     /// will run: where its home runs a task of its band, straight to an idle
-    /// CPU in its mask that sleeps unrung, nearest the home and in the
-    /// shallowest state ([`Self::idle_near`]), as an `Adopt`; otherwise a
-    /// `Wake` to the home, which places it there as before. A claimant on the
-    /// home itself costs no hop and leaves the home's own pass to place it,
-    /// which knows whether the poster is about to park; a killed task goes
-    /// home, where its dying list is.
+    /// CPU in its mask that sleeps unrung, chosen as [`Self::idle_near`]
+    /// chooses from the home, as an `Adopt`; otherwise a `Wake` to the home,
+    /// which places it there as before. A claimant on the home itself costs
+    /// no hop and leaves the home's own pass to place it, which knows whether
+    /// the poster is about to park; a killed task goes home, where its dying
+    /// list is.
     #[allow(unsafe_code)] // the slot's take and hand-back; the claim is the exclusion
     pub fn send_claimed_wake(
         &self,
