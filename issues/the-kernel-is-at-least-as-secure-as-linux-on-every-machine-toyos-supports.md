@@ -24,6 +24,7 @@ work needs.
 - `issues/automatic-ibrs-stays-off-on-an-amd-cpu-that-has-it.md`
 - `issues/no-entry-sets-ibrs-on-a-cpu-with-rsba-and-no-enhanced-ibrs.md`
 - `issues/no-program-runs-with-speculative-store-bypass-disabled.md`
+- `issues/no-aarch64-program-runs-with-speculative-store-bypass-disabled.md`
 - `issues/no-gate-decodes-kernel-elfs-instructions.md`
 - `issues/no-entry-or-switch-clears-the-bhb-fills-the-rsb-or-issues-an-ibpb.md`
 - `issues/user-pointer-checks-have-no-spectre-v1-fence.md`

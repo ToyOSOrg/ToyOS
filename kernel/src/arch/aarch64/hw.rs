@@ -85,6 +85,7 @@ impl Hw for KernelHw {
             let incoming_id = incoming.runs.id();
             percpu::set_current_tid(incoming_id.map(|id| id.1));
             percpu::set_current_pid(incoming_id.map(|id| id.0));
+            super::mitigation::switch_to(incoming_id.map(|id| (id.0, incoming.speculation)));
             match incoming_id {
                 Some(_) => {
                     percpu::set_kernel_stack(incoming.kernel_stack_top);

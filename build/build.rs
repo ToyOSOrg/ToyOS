@@ -218,6 +218,9 @@ struct ProgramConfig {
     restart: bool,
     /// Started as a pager (`toyos_manifest::Program::pager`): the file server's row.
     pager: bool,
+    /// It asks for isolated speculation
+    /// (`toyos_manifest::Program::isolated_speculation`).
+    isolated_speculation: bool,
     /// The rows it may start through the launcher (`toyos_manifest::Program::starts`).
     starts: Vec<String>,
     /// A login authority, for which the supervisor opens login sessions
@@ -925,6 +928,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     roles: cfg.roles.clone(),
                     restart: cfg.restart,
                     pager: cfg.pager,
+                    isolated_speculation: cfg.isolated_speculation,
                     starts: cfg.starts.clone(),
                     login: cfg.login,
                     folder: None,

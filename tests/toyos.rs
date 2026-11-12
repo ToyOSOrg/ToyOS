@@ -66,6 +66,11 @@ const ACTUATOR_TESTS: &[&str] = &[
     // check `RFLAGS.AC`: the shipping one does not, and the binary's verdict is
     // that check not firing.
     "ring0_clears_ac",
+    // Actions 30 to 32: the CPU's `IA32_SPEC_CTRL` and the IBPBs its switches
+    // issued, which only Ring 0 reads. Held where the CPU enumerates IBPB and
+    // SSBD: both benches and the KVM guest runner; under TCG's `qemu64`, which
+    // enumerates neither, it says so and holds nothing.
+    "speculation_on_request",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`.

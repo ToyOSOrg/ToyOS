@@ -39,6 +39,7 @@ fn spawn(maps: &[SpawnMap], entry: u64, image_base: u64) -> Result<RawHandle, Sy
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
             job: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
+            isolated_speculation: 0,
         })
     }
 }

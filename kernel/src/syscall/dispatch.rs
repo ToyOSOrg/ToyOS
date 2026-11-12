@@ -128,6 +128,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(pager) => pager,
                 Err(refused) => return refused,
             };
+            let speculation = match args.isolated_speculation {
+                asked @ (0 | 1) => crate::scheduler::current_speculation().of_child(asked == 1),
+                _ => return SyscallError::InvalidArgument.to_u64(),
+            };
             // Each bounded before it is copied: the path text of a record's
             // line, the name one token of it.
             if args.path_len > toyos_abi::syscall::MAX_PATH as u64 || args.name_len > toyos_abi::syscall::MAX_PROCESS_NAME as u64 {
@@ -149,7 +153,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Some(endow) = ctx.user_bytes(UserAddr::new(args.endow_ptr), endow_len) else {
                 return bad_addr;
             };
-            let pending = match process::build_child_handles(&endow, job, pager) {
+            let pending = match process::build_child_handles(&endow, job, pager, speculation) {
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };
@@ -448,6 +452,12 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             DA::ACPI_FIRMWARE_LOCK => crate::arch::acpi_mode::debug_firmware_lock(a2),
             // A translation outliving its entry, which only a TLB that keeps one shows.
             DA::GLOBAL_LEAF_REWRITE => crate::mm::paging::debug_global_leaf(a2),
+            // What a program that asked runs with, which only Ring 0 reads.
+            DA::SPEC_CTRL => crate::arch::mitigation::debug_spec_ctrl().unwrap_or(SyscallError::NotSupported.to_u64()),
+            DA::SPEC_CTRL_ON_REQUEST => crate::arch::mitigation::debug_spec_ctrl_on_request(),
+            DA::SWITCH_IBPBS => {
+                crate::arch::mitigation::debug_switch_ibpbs().unwrap_or(SyscallError::NotSupported.to_u64())
+            }
             _ => SyscallError::InvalidArgument.to_u64(),
         },
         SYS_JOB_FLOOR => sys_job_floor(RawHandle(a1 as u32), RawHandle(a2 as u32), a3),

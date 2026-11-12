@@ -608,6 +608,7 @@ pub fn spawn_thread(
         handles,
         mask,
         near: Some(Near { spawner: driver::current_cpu(), homes }),
+        speculation: scheduler::current_speculation(),
     });
     proc.threads.get_mut(&tid).unwrap().set_sched(sched);
     drop(guard);

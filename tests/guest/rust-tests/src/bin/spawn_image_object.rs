@@ -53,6 +53,7 @@ fn spawn(image: RawHandle, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
             job: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
+            isolated_speculation: 0,
         })
     }
 }

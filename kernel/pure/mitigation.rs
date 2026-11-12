@@ -25,6 +25,8 @@
 
 use core::fmt;
 
+use toyos_abi::Pid;
+
 use crate::cpu::{Ident, Vendor};
 use crate::microcode::Revision;
 
@@ -107,6 +109,7 @@ mod amd {
     pub const SSBD_NOT_REQUIRED: u32 = 1 << 26;
     pub const PSFD: u32 = 1 << 28;
     pub const BTC_NO: u32 = 1 << 29;
+    pub const IBPB_RET: u32 = 1 << 30;
     pub const LFENCE_ALWAYS_SERIALIZING: u32 = 1 << 2;
     pub const VERW_CLEAR: u32 = 1 << 5;
     pub const AUTOMATIC_IBRS: u32 = 1 << 8;
@@ -149,6 +152,9 @@ pub enum Mitigation {
     Retpoline,
     /// `PRED_CMD.IBPB` between two programs one of which asks.
     Ibpb,
+    /// After that IBPB, a call for each of the return address predictor's
+    /// entries, where the IBPB leaves them (AMD-SB-1040; AMD 70586 V2-3).
+    ReturnPredictorFilled,
     /// `SPEC_CTRL.STIBP` for a program that asks, against its core's other
     /// thread.
     Stibp,
@@ -197,7 +203,7 @@ pub enum Mitigation {
 }
 
 impl Mitigation {
-    const ALL: [Self; 26] = [
+    const ALL: [Self; 27] = [
         Self::UserPointerClamp,
         Self::LfenceDispatchSerializing,
         Self::Smep,
@@ -207,6 +213,7 @@ impl Mitigation {
         Self::IbrsOnEntry,
         Self::Retpoline,
         Self::Ibpb,
+        Self::ReturnPredictorFilled,
         Self::Stibp,
         Self::BhiDisS,
         Self::BhbClear,
@@ -237,6 +244,7 @@ impl Mitigation {
             Self::IbrsOnEntry => "IBRS on entry",
             Self::Retpoline => "retpoline",
             Self::Ibpb => "IBPB between programs that ask",
+            Self::ReturnPredictorFilled => "return address predictor filled after IBPB",
             Self::Stibp => "STIBP for programs that ask",
             Self::BhiDisS => "BHI_DIS_S",
             Self::BhbClear => "BHB cleared on entry",
@@ -450,6 +458,18 @@ impl Decision {
         clears
     }
 
+    /// What this CPU applies for a program that asked ([`Speculation::Isolated`]):
+    /// each control the decision names that it enumerates.
+    pub fn on_request(&self) -> OnRequest {
+        let bit = |one, bit| if self.enumerates(one) { bit } else { 0 };
+        OnRequest {
+            spec_ctrl: bit(Mitigation::Ssbd, msr::SSBD) | bit(Mitigation::Stibp, msr::STIBP),
+            virt_spec_ctrl: bit(Mitigation::VirtSsbd, msr::SSBD),
+            ibpb: self.enumerates(Mitigation::Ibpb),
+            fill_after_ibpb: self.enumerates(Mitigation::ReturnPredictorFilled),
+        }
+    }
+
     /// What the kernel sets at a CPU's bring-up, this decision names and the
     /// CPU enumerates, and `registers` do not show in force.
     pub fn unapplied(&self, registers: &Registers) -> Mitigations {
@@ -466,12 +486,17 @@ impl Decision {
         named.filter(|&one| !in_force.has(one)).fold(Mitigations::NONE, Mitigations::with)
     }
 
-    /// What is in force on a CPU whose registers read `registers`: [`ALWAYS`]
-    /// and each control a register shows on. Intel's two `IA32_MCU_OPT_CTRL`
-    /// bits opt out of a mitigation its microcode turns on; the others turn
-    /// one on.
+    /// What is in force on a CPU whose registers read `registers`: [`ALWAYS`];
+    /// what the kernel applies by construction wherever this decision names
+    /// it and the CPU enumerates it, which no register shows at bring-up (the
+    /// controls a program that asks runs with, [`ON_REQUEST`]); and each
+    /// control a register shows on. Intel's two `IA32_MCU_OPT_CTRL` bits opt
+    /// out of a mitigation its microcode turns on; the others turn one on.
     pub fn in_force(&self, registers: &Registers) -> Mitigations {
         let mut on = ALWAYS;
+        for one in Mitigation::ALL.into_iter().filter(|&one| ON_REQUEST.has(one) && self.enumerates(one)) {
+            on = on.with(one);
+        }
         if let Some(spec_ctrl) = registers.spec_ctrl {
             for (one, bit) in [
                 (Mitigation::EnhancedIbrs, msr::IBRS),
@@ -505,6 +530,88 @@ impl Decision {
 /// CPU without `CR4.SMEP`, and enters no VMX or SVM operation.
 pub const ALWAYS: Mitigations = Mitigations::of(&[Mitigation::UserPointerClamp, Mitigation::Smep, Mitigation::NoGuest]);
 
+/// What the kernel applies for a program that asked, on every CPU that
+/// enumerates it ([`Decision::on_request`]). No register shows it at
+/// bring-up, before any program has.
+const ON_REQUEST: Mitigations = Mitigations::of(&[
+    Mitigation::Ibpb,
+    Mitigation::ReturnPredictorFilled,
+    Mitigation::Stibp,
+    Mitigation::Ssbd,
+    Mitigation::VirtSsbd,
+]);
+
+/// What a CPU applies for a program that asked, and for no other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OnRequest {
+    /// `IA32_SPEC_CTRL` bits set while it runs: SSBD, and STIBP.
+    pub spec_ctrl: u64,
+    /// AMD's `VIRT_SPEC_CTRL` (C001_011FH) bits set while it runs: its SSBD
+    /// (APM Vol. 3 Fn8000_0008_EBX[SsbdVirtSpecCtrl]).
+    pub virt_spec_ctrl: u64,
+    /// An IBPB on a switch between its address space and another's
+    /// ([`LastAsked`]).
+    pub ibpb: bool,
+    /// The return address predictor filled after each such IBPB.
+    pub fill_after_ibpb: bool,
+}
+
+/// Whether a program asked for what ToyOS applies only on request
+/// ([`OnRequest`]). A program asks as the program that started it does, or
+/// because its start asked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Speculation {
+    #[default]
+    Shared,
+    Isolated,
+}
+
+impl Speculation {
+    /// What a program this one starts runs with, where its start `asked` or not.
+    pub const fn of_child(self, asked: bool) -> Self {
+        if asked {
+            Self::Isolated
+        } else {
+            self
+        }
+    }
+}
+
+/// The address space a CPU last ran a program in, by its process's pid,
+/// where that program asked. An IBPB goes between two spaces one of which
+/// asked: ToyOS's policy on the barrier the vendors prescribe between
+/// programs (Intel "Speculative Execution Side Channel Mitigations" §2.4.3;
+/// AMD 70586 V2-4). The idle context runs no program's code and changes
+/// nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LastAsked(Option<Pid>);
+
+impl LastAsked {
+    pub const fn new(space: Option<Pid>) -> Self {
+        Self(space)
+    }
+
+    /// The space, where it asked.
+    pub const fn space(self) -> Option<Pid> {
+        self.0
+    }
+
+    /// A switch to `next`, a program's space and its ask, or `None` for the
+    /// idle context: whether an IBPB goes before it runs.
+    pub fn switch_to(&mut self, next: Option<(Pid, Speculation)>) -> bool {
+        let Some((space, speculation)) = next else { return false };
+        let asked = speculation == Speculation::Isolated;
+        // A space that did not ask leaves none named, so an asking one owes
+        // the barrier on arrival from any other.
+        let barrier = match self.0 {
+            Some(last) => last != space,
+            None => asked,
+        };
+        self.0 = asked.then_some(space);
+        barrier
+    }
+}
+
 /// The registers that show which of a CPU's controls are on, each read only
 /// where the decision found its control enumerated (an absent MSR is `#GP`)
 /// and `None` elsewhere.
@@ -530,6 +637,9 @@ pub const C001_1029_LFENCE_SERIALIZES_DISPATCH: u64 = 1 << 1;
 /// Guidance for Mitigating Branch Type Confusion" §6.2.1).
 mod msr {
     pub const IBRS: u64 = 1 << 0;
+    pub const STIBP: u64 = 1 << 1;
+    /// Bit 2 of `IA32_SPEC_CTRL` and of AMD's `VIRT_SPEC_CTRL` alike.
+    pub const SSBD: u64 = 1 << 2;
     pub const BHI_DIS_S: u64 = 1 << 10;
     pub const RNGDS_MITG_DIS: u64 = 1 << 0;
     pub const GDS_MITG_DIS: u64 = 1 << 4;
@@ -933,6 +1043,11 @@ fn amd(f: &Facts, of: Vulnerability) -> Verdict {
     let id = Ident::new(f.vendor, f.signature);
     let ibpb = ebx & amd::IBPB != 0;
     let stibp = ebx & amd::STIBP != 0;
+    // AMD-SB-1040: an IBPB may leave the return address predictor's entries,
+    // and "in addition to performing the IBPB" AMD asks 70586's V2-3 fill,
+    // which follows an IBPB and so is had only with one; `IBPB_RET`
+    // enumerates an IBPB that clears them (APM Vol. 3 Fn8000_0008_EBX[30]).
+    let fill = ebx & amd::IBPB_RET == 0;
     match of {
         // 70586 V1-2, and G-2 for LFENCE: its families 0Fh and 11h always
         // serialize and have no MSR; 10h, 12h to 17h and "all future
@@ -962,6 +1077,7 @@ fn amd(f: &Facts, of: Vulnerability) -> Verdict {
             Asks::of(branches, true)
                 .and(Mitigation::Smep, true)
                 .and(Mitigation::Ibpb, ibpb)
+                .and_if(fill, Mitigation::ReturnPredictorFilled, ibpb)
                 .and_if(f.smt, Mitigation::Stibp, stibp)
                 .affected()
         }
@@ -995,6 +1111,7 @@ fn amd(f: &Facts, of: Vulnerability) -> Verdict {
             }
             Asks::NOTHING
                 .by_policy(true, Mitigation::Ibpb, ibpb)
+                .by_policy(fill, Mitigation::ReturnPredictorFilled, ibpb)
                 .and_if(eax & amd::SRSO_USER_KERNEL_NO == 0, Mitigation::SafeRet, true)
                 .assumed(id.family > 0x19)
         }
@@ -1314,9 +1431,9 @@ mod tests {
             &AMD_17H_60H,
             &[
                 (SpectreV1, needs(&[UserPointerClamp, LfenceDispatchSerializing])),
-                (SpectreV2, needs(&[Retpoline, Smep, Ibpb, Stibp])),
+                (SpectreV2, needs(&[Retpoline, Smep, Ibpb, ReturnPredictorFilled, Stibp])),
                 (Retbleed, exposed(needs(&[Jmp2Ret, SuppressBpOnNonBr]), SmtExposure::StibpOnRequest)),
-                (SpecRstackOverflow, policy(needs(&[SafeRet, Ibpb]), &[Ibpb])),
+                (SpecRstackOverflow, policy(needs(&[SafeRet, Ibpb, ReturnPredictorFilled]), &[Ibpb, ReturnPredictorFilled])),
                 (SpecStoreBypass, needs(&[Ssbd])),
             ],
         );
@@ -1332,7 +1449,11 @@ mod tests {
             guest.verdict(SpectreV1),
             lacking(&[UserPointerClamp, LfenceDispatchSerializing], &[LfenceDispatchSerializing])
         );
-        assert_eq!(guest.verdict(SpectreV2), needs(&[Retpoline, Smep, Ibpb]));
+        assert_eq!(guest.verdict(SpectreV2), needs(&[Retpoline, Smep, Ibpb, ReturnPredictorFilled]));
+        // An IBPB that clears the return address predictor needs no fill.
+        let cleared = decide(&Facts { cpuid_8000_0008_ebx: AMD_17H_60H.cpuid_8000_0008_ebx | amd::IBPB_RET, ..AMD_17H_60H });
+        assert_eq!(cleared.verdict(SpectreV2), needs(&[Retpoline, Smep, Ibpb, Stibp]));
+        assert_eq!(cleared.verdict(SpecRstackOverflow), policy(needs(&[SafeRet, Ibpb]), &[Ibpb]));
     }
 
     /// CPUID 506E3 as it came, before any microcode gave it
@@ -1510,8 +1631,8 @@ mod tests {
             &old,
             &[
                 (SpectreV1, needs(&[UserPointerClamp, LfenceDispatchSerializing])),
-                (SpectreV2, needs(&[IbrsAlwaysOn, Smep, Ibpb, Stibp])),
-                (SpecRstackOverflow, policy(needs(&[SafeRet, Ibpb]), &[Ibpb])),
+                (SpectreV2, needs(&[IbrsAlwaysOn, Smep, Ibpb, ReturnPredictorFilled, Stibp])),
+                (SpecRstackOverflow, policy(needs(&[SafeRet, Ibpb, ReturnPredictorFilled]), &[Ibpb, ReturnPredictorFilled])),
                 (SpecStoreBypass, needs(&[Ssbd])),
                 (Tsa, lacking(&[Verw], &[Verw])),
             ],
@@ -1532,7 +1653,7 @@ mod tests {
         let facts = Facts {
             vendor: Vendor::Amd,
             signature: 0x00b0_0f00 | 0x8 << 16 | 0x4 << 4,
-            cpuid_8000_0008_ebx: amd::IBPB | amd::STIBP | amd::SSBD | amd::BTC_NO,
+            cpuid_8000_0008_ebx: amd::IBPB | amd::STIBP | amd::SSBD | amd::BTC_NO | amd::IBPB_RET,
             cpuid_8000_0021_eax: amd::AUTOMATIC_IBRS | amd::SRSO_USER_KERNEL_NO,
             cpuid_8000_0021_ecx: amd::TSA_SQ_NO | amd::TSA_L1_NO,
             ..NOTHING
@@ -1549,7 +1670,8 @@ mod tests {
         );
         let bare = decide(&Facts { cpuid_8000_0008_ebx: 0, cpuid_8000_0021_eax: 0, cpuid_8000_0021_ecx: 0, ..facts });
         assert_eq!(bare.verdict(Retbleed), assumed(needs(&[Jmp2Ret])));
-        assert_eq!(bare.verdict(SpecRstackOverflow), assumed(policy(lacking(&[SafeRet, Ibpb], &[Ibpb]), &[Ibpb])));
+        let fill = ReturnPredictorFilled;
+        assert_eq!(bare.verdict(SpecRstackOverflow), assumed(policy(lacking(&[SafeRet, Ibpb, fill], &[Ibpb, fill]), &[Ibpb, fill])));
         assert_eq!(bare.verdict(Tsa), assumed(lacking(&[Verw], &[Verw])));
         assert_eq!(bare.verdict(SpecStoreBypass), lacking(&[Ssbd], &[Ssbd]));
     }
@@ -1609,11 +1731,16 @@ mod tests {
             line(Retbleed, &[Jmp2Ret, SuppressBpOnNonBr]),
             "mitigated: Jmp2Ret, DE_CFG2[SuppressBPOnNonBr]; SMT vulnerable: STIBP only for programs that ask (policy)"
         );
-        assert_eq!(line(SpecRstackOverflow, &[]), "vulnerable: needs IBPB between programs that ask (policy), Safe-RET");
+        assert_eq!(
+            line(SpecRstackOverflow, &[]),
+            "vulnerable: needs IBPB between programs that ask (policy), \
+             return address predictor filled after IBPB (policy), Safe-RET"
+        );
         // The vendor's own choice is not marked.
         assert_eq!(
             line(SpectreV2, &[Smep]),
-            "vulnerable: needs retpoline, IBPB between programs that ask, STIBP for programs that ask; has SMEP"
+            "vulnerable: needs retpoline, IBPB between programs that ask, \
+             return address predictor filled after IBPB, STIBP for programs that ask; has SMEP"
         );
         let bare = decide(&Facts { cpuid_8000_0008_ebx: 0, ..AMD_17H_60H });
         assert_eq!(
@@ -1632,25 +1759,79 @@ mod tests {
         );
     }
 
-    /// What every CPU has, and each control its register shows on: a
-    /// register the CPU was not read for shows nothing.
+    /// What every CPU has, what it applies on request where it enumerates
+    /// it, and each control its register shows on: a register the CPU was
+    /// not read for shows nothing.
     #[test]
     fn what_is_in_force_is_what_the_registers_show() {
         let unread = Registers { spec_ctrl: None, mcu_opt_ctrl: None, de_cfg2: None, c001_1029: None };
         let intel = decide(&INTEL_806C1);
-        assert_eq!(intel.in_force(&unread), ALWAYS);
-        assert_eq!(intel.in_force(&Registers { spec_ctrl: Some(msr::IBRS), ..unread }), ALWAYS.with(EnhancedIbrs));
+        let always = ALWAYS.with(Ibpb).with(Ssbd);
+        assert_eq!(intel.in_force(&unread), always);
+        assert_eq!(intel.in_force(&Registers { spec_ctrl: Some(msr::IBRS), ..unread }), always.with(EnhancedIbrs));
         // A bit the decision does not name shows nothing.
-        assert_eq!(intel.in_force(&Registers { spec_ctrl: Some(msr::BHI_DIS_S), ..unread }), ALWAYS);
-        let both = ALWAYS.with(SrbdsMicrocode).with(GdsMicrocode);
+        assert_eq!(intel.in_force(&Registers { spec_ctrl: Some(msr::BHI_DIS_S), ..unread }), always);
+        let both = always.with(SrbdsMicrocode).with(GdsMicrocode);
         assert_eq!(intel.in_force(&Registers { mcu_opt_ctrl: Some(0), ..unread }), both);
-        assert_eq!(intel.in_force(&Registers { mcu_opt_ctrl: Some(msr::GDS_MITG_DIS), ..unread }), ALWAYS.with(SrbdsMicrocode));
+        assert_eq!(intel.in_force(&Registers { mcu_opt_ctrl: Some(msr::GDS_MITG_DIS), ..unread }), always.with(SrbdsMicrocode));
         let opted_out = Registers { mcu_opt_ctrl: Some(msr::GDS_MITG_DIS | msr::RNGDS_MITG_DIS), ..unread };
-        assert_eq!(intel.in_force(&opted_out), ALWAYS);
+        assert_eq!(intel.in_force(&opted_out), always);
+        // What the CPU does not enumerate is not applied for anyone.
+        let bare = decide(&Facts { cpuid_7_0_edx: 0, ..INTEL_806C1 });
+        assert_eq!(bare.in_force(&unread), ALWAYS);
         let amd = decide(&AMD_17H_60H);
+        let always = ALWAYS.with(Ibpb).with(ReturnPredictorFilled).with(Stibp).with(Ssbd);
         let both = Registers { de_cfg2: Some(msr::SUPPRESS_BP_ON_NON_BR), c001_1029: Some(C001_1029_LFENCE_SERIALIZES_DISPATCH), ..unread };
-        assert_eq!(amd.in_force(&both), ALWAYS.with(SuppressBpOnNonBr).with(LfenceDispatchSerializing));
-        assert_eq!(amd.in_force(&Registers { de_cfg2: Some(0), c001_1029: Some(0), ..unread }), ALWAYS);
+        assert_eq!(amd.in_force(&both), always.with(SuppressBpOnNonBr).with(LfenceDispatchSerializing));
+        assert_eq!(amd.in_force(&Registers { de_cfg2: Some(0), c001_1029: Some(0), ..unread }), always);
+    }
+
+    /// What each CPU applies for a program that asked: SSBD alone on the
+    /// T14's, whose enhanced IBRS keeps its branches from the core's other
+    /// thread; SSBD, STIBP and the fill after IBPB on Zen 2's; and SSBD by
+    /// `VIRT_SPEC_CTRL` in an AMD guest that enumerates no other.
+    #[test]
+    fn a_cpu_applies_on_request_what_its_decision_names() {
+        let ssbd = OnRequest { spec_ctrl: msr::SSBD, virt_spec_ctrl: 0, ibpb: true, fill_after_ibpb: false };
+        assert_eq!(decide(&INTEL_806C1).on_request(), ssbd);
+        let zen2 = OnRequest { spec_ctrl: msr::SSBD | msr::STIBP, fill_after_ibpb: true, ..ssbd };
+        assert_eq!(decide(&AMD_17H_60H).on_request(), zen2);
+        assert_eq!(decide(&Facts { smt: false, ..AMD_17H_60H }).on_request(), OnRequest { spec_ctrl: msr::SSBD, ..zen2 });
+        let guest = Facts { hypervisor: true, smt: false, cpuid_8000_0008_ebx: amd::IBPB | amd::SSBD_VIRT_SPEC_CTRL, ..AMD_17H_60H };
+        let virt = OnRequest { spec_ctrl: 0, virt_spec_ctrl: msr::SSBD, ibpb: true, fill_after_ibpb: true };
+        assert_eq!(decide(&guest).on_request(), virt);
+        assert_eq!(decide(&NOTHING).on_request(), OnRequest::default());
+    }
+
+    /// A program asks as the program that started it does, or because its
+    /// start asked.
+    #[test]
+    fn a_child_asks_as_its_spawner_or_its_start() {
+        use Speculation::{Isolated, Shared};
+        assert_eq!(Shared.of_child(false), Shared);
+        assert_eq!(Shared.of_child(true), Isolated);
+        assert_eq!(Isolated.of_child(false), Isolated);
+        assert_eq!(Isolated.of_child(true), Isolated);
+    }
+
+    /// Spaces B, C and A, of which A asked, run in turn on one CPU: B, C,
+    /// idle, B, A, idle, A, B. An IBPB goes before A, which arrives from B,
+    /// and before B, which arrives from A: the switch back from idle to A
+    /// stays in A's space, and no other switch involves it.
+    #[test]
+    fn an_ibpb_goes_between_two_spaces_one_of_which_asked() {
+        use Speculation::{Isolated, Shared};
+        let (a, b, c) = (Some((Pid(1), Isolated)), Some((Pid(2), Shared)), Some((Pid(3), Shared)));
+        let mut last = LastAsked::new(None);
+        let barriers = [b, c, None, b, a, None, a, b].map(|next| last.switch_to(next));
+        assert_eq!(barriers, [false, false, false, false, true, false, false, true]);
+        assert_eq!(last.space(), None);
+        // Two spaces that both asked, and one asking space alone.
+        let d = Some((Pid(4), Isolated));
+        let mut last = LastAsked::new(None);
+        let barriers = [a, d, a, None, a, a].map(|next| last.switch_to(next));
+        assert_eq!(barriers, [true, true, true, false, false, false]);
+        assert_eq!(last.space(), Some(Pid(1)));
     }
 
     /// The registers each verdict sets at bring-up: `IBRS` for enhanced IBRS
