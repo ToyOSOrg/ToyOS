@@ -160,24 +160,37 @@ pub fn record(cpu_id: u32, read: Read) {
     *LATER[cpu_id as usize].lock() = Some(read);
 }
 
-/// Says each online CPU's words and lines once bring-up has installed the
-/// topology: the first CPU's, and a later one's where they differ; and gives
-/// each CPU what [`switch_to`] applies there, before any program runs. A
-/// CPU's `smt` is whether another online CPU shares its core, by the cores the
-/// topology places their APIC IDs in: CPUID.0BH/1FH EBX[15:0] is the count
+/// Each online CPU's [`Read`] once bring-up has installed the topology, with
+/// its `smt`: whether another online CPU shares its core, by the cores the
+/// topology places their APIC IDs in. CPUID.0BH/1FH EBX[15:0] is the count
 /// as shipped and "must not" enumerate the topology (SDM Vol. 1, Chapter 21).
-pub fn report() {
+fn online() -> impl Iterator<Item = (u32, Read)> {
     let topology = crate::smp::topology();
-    let mut first = None;
-    for cpu_id in 0..topology.cpus() as u32 {
+    (0..topology.cpus() as u32).map(move |cpu_id| {
         let read = match cpu_id {
             0 => *BOOT_CPU.lock(),
             later => *LATER[later as usize].lock(),
         };
         let read = read.unwrap_or_else(|| panic!("mitigation: cpu{cpu_id} is online and recorded no words at bring-up"));
-        let said = Read { facts: Facts { smt: topology.core(CpuId(cpu_id)).len() > 1, ..read.facts }, ..read };
-        let decision = decide(&said.facts);
-        crate::cpu_local::of(cpu_id).arch.mitigation.install(said.facts.has_spec_ctrl(), decision.spec_ctrl(), decision.on_request());
+        (cpu_id, Read { facts: Facts { smt: topology.core(CpuId(cpu_id)).len() > 1, ..read.facts }, ..read })
+    })
+}
+
+/// Gives each online CPU what [`switch_to`] applies there, once SMT is known
+/// and before any program runs: what its decision names on request, and the
+/// `IA32_SPEC_CTRL` its bring-up left.
+pub fn install() {
+    for (cpu_id, read) in online() {
+        let local = &crate::cpu_local::of(cpu_id).arch.mitigation;
+        local.install(read.registers.spec_ctrl, decide(&read.facts).on_request());
+    }
+}
+
+/// Says each online CPU's words and lines: the first CPU's, and a later
+/// one's where they differ.
+pub fn report() {
+    let mut first = None;
+    for (cpu_id, said) in online() {
         match first {
             Some(first) if first == said => continue,
             Some(_) => {}
@@ -239,11 +252,14 @@ impl fmt::Display for Msr {
 }
 
 /// This CPU's half of [`switch_to`]. What its decision applies for a
-/// program that asked, [`report`] writes once every CPU is up and before any
+/// program that asked, [`install`] writes once every CPU is up and before any
 /// program runs; what the CPU last loaded, its own switches alone write.
 pub struct Local {
-    has_spec_ctrl: AtomicBool,
-    /// `IA32_SPEC_CTRL` while no program that asked runs.
+    /// Whether the decision names anything on request: where it does not,
+    /// [`switch_to`] has nothing to do.
+    applies: AtomicBool,
+    /// `IA32_SPEC_CTRL` as this CPU's bring-up left it, which a program that
+    /// did not ask runs with.
     spec_ctrl: AtomicU64,
     /// [`OnRequest::spec_ctrl`].
     asked_spec_ctrl: AtomicU64,
@@ -261,12 +277,15 @@ pub struct Local {
     /// IBPBs [`switch_to`] issued on this CPU.
     #[cfg(feature = "test-actuators")]
     ibpbs: AtomicU64,
+    /// Whether this CPU has an `IA32_SPEC_CTRL` to read.
+    #[cfg(feature = "test-actuators")]
+    has_spec_ctrl: AtomicBool,
 }
 
 impl Local {
     pub const fn new() -> Self {
         Self {
-            has_spec_ctrl: AtomicBool::new(false),
+            applies: AtomicBool::new(false),
             spec_ctrl: AtomicU64::new(0),
             asked_spec_ctrl: AtomicU64::new(0),
             asked_virt_spec_ctrl: AtomicU64::new(0),
@@ -276,12 +295,16 @@ impl Local {
             loaded: AtomicBool::new(false),
             #[cfg(feature = "test-actuators")]
             ibpbs: AtomicU64::new(0),
+            #[cfg(feature = "test-actuators")]
+            has_spec_ctrl: AtomicBool::new(false),
         }
     }
 
-    fn install(&self, has_spec_ctrl: bool, spec_ctrl: u64, on_request: OnRequest) {
-        self.has_spec_ctrl.store(has_spec_ctrl, Relaxed);
-        self.spec_ctrl.store(spec_ctrl, Relaxed);
+    fn install(&self, spec_ctrl: Option<u64>, on_request: OnRequest) {
+        self.applies.store(on_request != OnRequest::default(), Relaxed);
+        self.spec_ctrl.store(spec_ctrl.unwrap_or(0), Relaxed);
+        #[cfg(feature = "test-actuators")]
+        self.has_spec_ctrl.store(spec_ctrl.is_some(), Relaxed);
         self.asked_spec_ctrl.store(on_request.spec_ctrl, Relaxed);
         self.asked_virt_spec_ctrl.store(on_request.virt_spec_ctrl, Relaxed);
         self.ibpb.store(on_request.ibpb, Relaxed);
@@ -302,6 +325,9 @@ impl Local {
 /// for the machine's life, and a process keeps one space for its own.
 pub fn switch_to(next: Option<(Pid, Speculation)>) {
     let local = &crate::cpu_local::here().arch.mitigation;
+    if !local.applies.load(Relaxed) {
+        return;
+    }
     let raw = local.last_asked.load(Relaxed);
     let mut last = LastAsked::new((raw != Pid::MAX.0).then_some(Pid(raw)));
     if last.switch_to(next) && local.ibpb.load(Relaxed) {

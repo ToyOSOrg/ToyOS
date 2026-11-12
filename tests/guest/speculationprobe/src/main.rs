@@ -6,13 +6,22 @@
 
 use std::process::Command;
 
-use toyos_abi::syscall::{self, debug_action, CPU_MASK_WORDS};
+use toyos_abi::syscall::{self, debug_action, SyscallError, CPU_MASK_WORDS};
 
 const SELF: &str = "/system/bin/speculationprobe";
 
+/// `SYS_DEBUG`'s answer to `action`, which is refused an error word.
+fn answered(action: u64) -> u64 {
+    let value = syscall::debug(action);
+    if let Some(e) = SyscallError::from_u64(value) {
+        panic!("speculationprobe: SYS_DEBUG action {action} answered {e}");
+    }
+    value
+}
+
 fn holds_the_asked_bits(who: &str) {
-    let asked = syscall::debug(debug_action::SPEC_CTRL_ON_REQUEST);
-    let now = syscall::debug(debug_action::SPEC_CTRL);
+    let asked = answered(debug_action::SPEC_CTRL_ON_REQUEST);
+    let now = answered(debug_action::SPEC_CTRL);
     assert!(
         asked != 0 && now & asked == asked,
         "speculationprobe: {who} runs with IA32_SPEC_CTRL {now:#x}, and its CPU sets {asked:#x} for a program that asked"

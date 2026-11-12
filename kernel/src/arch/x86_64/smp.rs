@@ -250,6 +250,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
             .map(|(cpu, keys)| keys.unwrap_or_else(|e| panic!("smp: cpu{cpu}'s CPUID places it in no tree: {e:?}")))
             .collect(),
     );
+    crate::arch::mitigation::install();
     crate::arch::mitigation::report();
 }
 

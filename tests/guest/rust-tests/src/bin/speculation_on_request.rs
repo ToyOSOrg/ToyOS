@@ -4,7 +4,9 @@
 //! `speculationprobe`'s row asks, so it runs with them, and so does the child
 //! it starts itself without asking. Pinned to one CPU beside the probe, this
 //! job switches with it between two address spaces one of which asked, and
-//! the CPU issues IBPBs; beside a child of its own that does not ask, none.
+//! the CPU issues IBPBs, and back on it this job runs without the asked
+//! bits again; beside a child of its own that does not ask, none. A CPU that
+//! enumerates no IBPB, as TCG's `qemu64` does not, has none of this to hold.
 
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -20,6 +22,15 @@ const ROUNDS: u32 = 200;
 /// How long the other side of a pair may take to end: a failure bound, never
 /// what ends a passing run.
 const END_BOUND: Duration = Duration::from_secs(30);
+
+/// Whether this CPU enumerates IBPB: Intel's CPUID.(07H,0):EDX[26] or AMD's
+/// CPUID Fn8000_0008_EBX[12].
+fn enumerates_ibpb() -> bool {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+    let intel = __cpuid(0).eax >= 7 && __cpuid_count(7, 0).edx & (1 << 26) != 0;
+    let amd = __cpuid(0x8000_0000).eax >= 0x8000_0008 && __cpuid(0x8000_0008).ebx & (1 << 12) != 0;
+    intel || amd
+}
 
 fn pin(cpu: u32) {
     let mut mask = [0u64; CPU_MASK_WORDS];
@@ -58,7 +69,11 @@ fn main() {
         }
         return;
     }
-    let asked = syscall::debug(debug_action::SPEC_CTRL_ON_REQUEST);
+    if !enumerates_ibpb() {
+        println!("speculation_on_request: this CPU enumerates no IBPB, so nothing here applies");
+        return;
+    }
+    let asked = answered(debug_action::SPEC_CTRL_ON_REQUEST, "no asked bits");
     assert_ne!(asked, 0, "this CPU sets no IA32_SPEC_CTRL bit for a program that asks, so nothing here is held");
     let mine = answered(debug_action::SPEC_CTRL, "this CPU has no IA32_SPEC_CTRL");
     assert_eq!(mine & asked, 0, "a program whose row does not ask runs with IA32_SPEC_CTRL {mine:#x}, and {asked:#x} is asked");
@@ -73,6 +88,8 @@ fn main() {
         .expect("the probe launches: testcases' test-runner starts it");
     let beside_probe = ibpbs_beside(&mut probe);
     assert!(beside_probe >= 2, "CPU {cpu} issued {beside_probe} IBPBs while a program that asked took turns with this one there");
+    let after = answered(debug_action::SPEC_CTRL, "this CPU has no IA32_SPEC_CTRL");
+    assert_eq!(after & asked, 0, "back on CPU {cpu} after a program that asked, this one runs with IA32_SPEC_CTRL {after:#x}");
 
     // A helper starts with this thread's mask, so it shares the CPU.
     let mut peer = Command::new(SELF).arg("--beside").spawn().expect("a child that does not ask starts");

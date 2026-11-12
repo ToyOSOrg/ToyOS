@@ -46,15 +46,17 @@ DMA stays behind the IOMMU.
 
 ## Speculative execution applied on request
 
-- The barrier between two programs that run in turn on a CPU, and a
-  program's isolation from the core's other thread, are applied for a
-  program that asks for them. Applied at every switch they would cost every
-  program, most of which have nothing to keep from the others; a program
-  that asks gets them. Where a vendor prescribes either for every program,
-  each boot's report marks it as policy.
-- A program asks through its row in the system manifest. Every program it
-  starts itself asks with it; one the system starts on its behalf, as a
-  launch, asks as its own row says.
+- The barrier between two programs that run in turn on a CPU, a program's
+  isolation from the core's other thread, and speculative store bypass
+  disabled (SSBD), so that its loads do not run ahead of older stores, are
+  applied for a program that asks for them. Applied at every switch they
+  would cost every program, most of which have nothing to keep from the
+  others; a program that asks gets them. Where a vendor prescribes any for
+  every program, each boot's report marks it as policy.
+- A program asks through its row in the system manifest, and any program may
+  ask for a child it starts: the ask is a protection, not a privilege. Every
+  program a program that asked starts itself asks too; one the system starts
+  on its behalf, as a launch, asks as its own row says.
 - The same policy limits one protection of the kernel. On an AMD processor
   affected by Branch Type Confusion, while a CPU runs a program that has not
   asked, untrusted code on its core's other thread can steer the kernel's

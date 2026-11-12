@@ -25,6 +25,8 @@
 
 use core::fmt;
 
+use toyos_abi::Pid;
+
 use crate::cpu::{Ident, Vendor};
 use crate::microcode::Revision;
 
@@ -575,27 +577,28 @@ impl Speculation {
     }
 }
 
-/// The address space a CPU last ran a program in, where that program asked.
-/// An IBPB goes between two spaces one of which asked: ToyOS's policy on the
-/// barrier the vendors prescribe between programs (Intel "Speculative
-/// Execution Side Channel Mitigations" §2.4.3; AMD 70586 V2-4). The idle
-/// context runs no program's code and changes nothing.
+/// The address space a CPU last ran a program in, by its process's pid,
+/// where that program asked. An IBPB goes between two spaces one of which
+/// asked: ToyOS's policy on the barrier the vendors prescribe between
+/// programs (Intel "Speculative Execution Side Channel Mitigations" §2.4.3;
+/// AMD 70586 V2-4). The idle context runs no program's code and changes
+/// nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LastAsked<S>(Option<S>);
+pub struct LastAsked(Option<Pid>);
 
-impl<S: Copy + Eq> LastAsked<S> {
-    pub const fn new(space: Option<S>) -> Self {
+impl LastAsked {
+    pub const fn new(space: Option<Pid>) -> Self {
         Self(space)
     }
 
     /// The space, where it asked.
-    pub const fn space(self) -> Option<S> {
+    pub const fn space(self) -> Option<Pid> {
         self.0
     }
 
     /// A switch to `next`, a program's space and its ask, or `None` for the
     /// idle context: whether an IBPB goes before it runs.
-    pub fn switch_to(&mut self, next: Option<(S, Speculation)>) -> bool {
+    pub fn switch_to(&mut self, next: Option<(Pid, Speculation)>) -> bool {
         let Some((space, speculation)) = next else { return false };
         let asked = speculation == Speculation::Isolated;
         // A space that did not ask leaves none named, so an asking one owes
@@ -1818,17 +1821,17 @@ mod tests {
     #[test]
     fn an_ibpb_goes_between_two_spaces_one_of_which_asked() {
         use Speculation::{Isolated, Shared};
-        let (a, b, c) = (Some(('A', Isolated)), Some(('B', Shared)), Some(('C', Shared)));
+        let (a, b, c) = (Some((Pid(1), Isolated)), Some((Pid(2), Shared)), Some((Pid(3), Shared)));
         let mut last = LastAsked::new(None);
         let barriers = [b, c, None, b, a, None, a, b].map(|next| last.switch_to(next));
         assert_eq!(barriers, [false, false, false, false, true, false, false, true]);
         assert_eq!(last.space(), None);
         // Two spaces that both asked, and one asking space alone.
-        let d = Some(('D', Isolated));
+        let d = Some((Pid(4), Isolated));
         let mut last = LastAsked::new(None);
         let barriers = [a, d, a, None, a, a].map(|next| last.switch_to(next));
         assert_eq!(barriers, [true, true, true, false, false, false]);
-        assert_eq!(last.space(), Some('A'));
+        assert_eq!(last.space(), Some(Pid(1)));
     }
 
     /// The registers each verdict sets at bring-up: `IBRS` for enhanced IBRS
