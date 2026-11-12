@@ -3436,11 +3436,12 @@ fn osbench_capability_groups_exit_0() -> Result<(), String> {
     let mut console = format!("{}\n", qemu.boot_log());
     let last = format!("===TEST_END {} ", JOBS[JOBS.len() - 1]);
     await_guest(&mut qemu, &mut console, "osbench's groups to end", |said| said.contains(&last))?;
+    eprintln!("{console}");
     let said = serial::Serial::named("osbench boot", console);
     for job in JOBS {
         said.must_say(&format!("===TEST_END {job} exit=0==="))?;
     }
-    Ok(())
+    Err("a demonstration of the masked log, red so that its serial logs are kept".to_string())
 }
 
 /// Boot the image `--console-boot` builds, on the machine shape with a panel
