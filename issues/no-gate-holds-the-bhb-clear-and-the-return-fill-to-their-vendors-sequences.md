@@ -5,7 +5,7 @@ severity: [security]
 opened: 2026-09-29
 ---
 
-# No entry or switch clears the BHB, fills the RSB or issues an IBPB
+# No gate holds the BHB clear and the return fill to their vendors' sequences
 
 **Built**:
 - Where a CPU's decision names the BHB cleared on entry, every entry from
@@ -16,9 +16,12 @@ opened: 2026-09-29
   names opens with a 12-byte prefix that calls it where the frame's `CS` is
   Ring 3's; such a CPU loads the table that enters each gate there, and
   every other CPU the one that enters past it, so it runs none of it
-  (`arch::x86_64::entry::gate_prefix`, `arch::x86_64::idt`).
-  `branch_history_cleared_per_syscall` counts at least one clear per
-  syscall where the CPU's decision names it.
+  (`arch::x86_64::entry::gate_prefix`, `arch::x86_64::idt`). The decision
+  names the short sequence only where Intel scopes it: its table's
+  processors whose BHI mitigation is software alone, those before Alder
+  Lake, and a guest, whose VMM sets `BHI_DIS_S` under it.
+  `branch_history_cleared_on_each_entry` counts at least one clear per
+  syscall and one per page fault where the CPU's decision names it.
 - A switch into a program's address space issues an IBPB where the space
   this CPU last ran a program in is another and either asked for isolated
   speculation (the ask of
@@ -42,19 +45,29 @@ opened: 2026-09-29
   for it (`arch/x86/mm/tlb.c:384`).
 
 **Left**:
+- An NMI or `#MC` that lands on an entry from Ring 3 before its clear
+  finishes, in `SYSCALL`'s first four instructions or while a gate's clear
+  runs, arrives as a Ring 0 frame, skips the clear and runs its handler on
+  the user's branch history. User code cannot time either.
+- An Intel host that the table gives `BHI_DIS_S` (its "MCU+Software" and
+  "Hardware+Software" rows, Alder Lake on), or one the table omits, whose
+  microcode predates `BHI_CTRL` says branch history injection vulnerable,
+  lacking `BHI_DIS_S`: the short sequence is not Intel's for it, and the
+  long sequence, Listing 2, which covers every part without `BHI_NO`, is not
+  built. ToyOS ships microcode for no such part.
 - A guest that clears with the short sequence does not tell its VMM so:
   Intel's guidance asks it to set `BHB_CLEAR_SEQ_S_USED` in
   `MSR_VIRTUAL_MITIGATION_CTRL` where `MSR_VIRTUAL_MITIGATION_ENUM`
   enumerates `BHB_CLEAR_SEQ_S_SUPPORT`, so that a VMM migrating it to a part
   the short sequence does not cover sets `BHI_DIS_S` under it. A guest on
   the guest runner is one; no proving machine is.
-- **Owed on metal:** `branch_history_cleared_per_syscall` and
+- **Owed on metal:** `branch_history_cleared_on_each_entry` and
   `speculation_on_request`, members of main's `shared-debug` boot.
   - Benches: the T14 and the AMD bench.
   - Main must show both members exit 0: on the T14 the first naming at
-    least 1000 clears over 1000 syscalls, on the AMD bench naming no clear;
-    the second naming at least 2 IBPBs beside the probe and none beside the
-    child that did not ask.
+    least 1000 clears over 1000 syscalls and 256 over 256 page faults, on
+    the AMD bench naming no clear; the second naming at least 2 IBPBs beside
+    the probe and none beside the child that did not ask.
   - The T14's `mitigations` row, the `metalcase` boot of main, with
     `branch_history_injection: mitigated: BHB cleared on entry` on every CPU.
 

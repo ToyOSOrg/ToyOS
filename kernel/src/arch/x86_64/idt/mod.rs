@@ -131,7 +131,7 @@ struct Idt {
 
 /// Every gate entered at its prefix: the table a CPU whose decision names the
 /// branch history clear loads.
-static IDT: Lock<Idt> = Lock::new(Idt {
+static AT_PREFIX: Lock<Idt> = Lock::new(Idt {
     entries: [IdtEntry::EMPTY; 256],
 });
 
@@ -332,7 +332,7 @@ const _: () = {
 /// Whether `rip` is where some gate of either table enters.
 fn is_gate_target(rip: u64) -> bool {
     // SAFETY: the tables are written only by `init`, before any gate is taken.
-    let tables = unsafe { [&*IDT.data_ptr(), &*PAST_PREFIX.data_ptr()] };
+    let tables = unsafe { [&*AT_PREFIX.data_ptr(), &*PAST_PREFIX.data_ptr()] };
     tables.iter().flat_map(|idt| &idt.entries).any(|gate| gate.type_attr != 0 && gate.target() == rip)
 }
 
@@ -494,32 +494,32 @@ fn disable_pic() {
 pub fn init(clears_branch_history: bool) {
     disable_pic();
 
-    install_gates(&mut IDT.lock());
+    install_gates(&mut AT_PREFIX.lock());
     // `INT3` from Ring 3 arrives as the `#BP` it is, and ends its process as a
     // trap, as `BRK` does on AArch64.
     {
-        let mut idt = IDT.lock();
+        let mut idt = AT_PREFIX.lock();
         let breakpoint = &mut idt.entries[Vector::Breakpoint as usize];
         *breakpoint = breakpoint.reachable_from_ring3();
     }
-    user_dev::install(&mut IDT.lock());
+    user_dev::install(&mut AT_PREFIX.lock());
     // Every slot no row filled: delivery through a P = 0 gate is a
     // contributory fault, and the machine would halt as #DF with no name.
     let mut unclaimed = 0u32;
-    for entry in IDT.lock().entries.iter_mut() {
+    for entry in AT_PREFIX.lock().entries.iter_mut() {
         if entry.type_attr == 0 {
             *entry = IdtEntry::at(unclaimed::unclaimed_entry);
             unclaimed += 1;
         }
     }
-    let gates = IDT.lock().entries;
+    let gates = AT_PREFIX.lock().entries;
     PAST_PREFIX.lock().entries = gates.map(IdtEntry::past_prefix);
     let ptr = load(clears_branch_history);
 
     // The table this CPU is now loaded with: how many vectors carry a handler
     // this kernel named, and how many carry only the unclaimed stub, which is
     // what a machine delivering an interrupt nobody declared would land on.
-    let entries = IDT.lock().entries.len() as u32;
+    let entries = AT_PREFIX.lock().entries.len() as u32;
     // Copied out first: `IdtPointer` is packed, so a formatting argument would
     // be a reference to an unaligned field.
     let (base, limit) = (ptr.base, ptr.limit);
@@ -537,7 +537,7 @@ pub fn init(clears_branch_history: bool) {
 /// clear where `clears_branch_history`, and the one past it elsewhere: what
 /// this CPU's decision names. After [`init`].
 pub fn load(clears_branch_history: bool) -> IdtPointer {
-    let table = if clears_branch_history { &IDT } else { &PAST_PREFIX };
+    let table = if clears_branch_history { &AT_PREFIX } else { &PAST_PREFIX };
     let ptr = IdtPointer { limit: (core::mem::size_of::<Idt>() - 1) as u16, base: table.data_ptr() as u64 };
     // SAFETY: `ptr` names one of the two static tables `init` filled whole.
     unsafe { cpu::lidt(&ptr as *const IdtPointer as *const u8) };

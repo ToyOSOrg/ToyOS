@@ -23,7 +23,11 @@ script asserts (`arch/x86/kernel/vmlinux.lds.S:510-539`):
 pair's addresses differing in exactly bits 2, 8, 14 and 20, and each ITS
 thunk's branch in its line's upper half. Each proving machine's boot installs
 the thunks the decision selects for it: ITS's on the T14, SRSO's alias on a
-family-0x19 EPYC guest. No proving machine is family 0x17, so the untrained
+family-0x19 EPYC guest. The branch history clear's returns
+(`arch::x86_64::mitigation::clear_branch_history`) are Intel's sequence and
+take no thunk; three lie in the lower halves of their lines, and each returns
+to a call the sequence made, so the RSB predicts it and ITS, which reaches a
+return only through an empty RSB's alternate predictors, does not. No proving machine is family 0x17, so the untrained
 return is proven by the gate and the decision's host test alone.
 **Mutation**, each red: an ITS thunk at a line start; `retbleed_return_thunk`
 one byte past its line start; the SRSO alias one cache line off its pair; an

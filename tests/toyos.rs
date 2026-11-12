@@ -73,7 +73,7 @@ const ACTUATOR_TESTS: &[&str] = &[
     "speculation_on_request",
     // Action 33: the branch history clears the entries ran, which leave
     // nothing a guest can read.
-    "branch_history_cleared_per_syscall",
+    "branch_history_cleared_on_each_entry",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`.

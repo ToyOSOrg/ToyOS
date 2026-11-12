@@ -45,9 +45,9 @@ pub fn init(clears_branch_history: bool) {
 
 // `SYSCALL` switches no stack: before the `rsp` switch below runs, the CPU is at CPL 0 on the user's stack, so nothing that can fault may execute there.
 // The same holds from the exit's `swapgs` on, with the user's GS base live (`arch::entry`): `SYSRET` cannot fault, since no instruction ends at the user half's top for `rcx` to be non-canonical (`toyos_userbound`'s placement).
-/// One of `SYSCALL`'s two entries, which `LSTAR` names per CPU (`init`):
-/// with a template line and its operand, the branch history clear, which runs
-/// as soon as the kernel's stack is under it and before any branch.
+/// One of `SYSCALL`'s two entries, which `LSTAR` names per CPU (`init`): the
+/// second calls the branch history clear as soon as the kernel's stack is
+/// under it and before any branch.
 macro_rules! syscall_entry {
     ($name:ident $(, $clear:literal, $operand:ident = $path:path)?) => {
         #[unsafe(naked)]

@@ -429,8 +429,12 @@ pub fn debug_switch_ibpbs() -> Option<u64> {
 /// to clear the BHB on all processors prior to Alder Lake"), between a save
 /// and a restore of the two registers it writes: callable from the first
 /// instruction of a gate, before anything of the interrupted context is
-/// saved. Its own `call`s use the stack it is called on; it reads no memory
-/// through GS and leaves the flags as it found them not.
+/// saved. Its own `call`s use the stack it is called on; it reads nothing
+/// through GS and clobbers the flags, which no caller holds across it. Each
+/// of its returns goes back to a call it made, at most seven deep, so the RSB
+/// holds its target: Intel's "Indirect Target Selection" reaches a return,
+/// wherever it lies in its line, only through the alternate predictors an
+/// empty RSB falls back on.
 #[unsafe(naked)]
 pub(crate) extern "sysv64" fn clear_branch_history() {
     core::arch::naked_asm!(
