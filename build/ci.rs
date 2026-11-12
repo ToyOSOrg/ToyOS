@@ -1681,9 +1681,10 @@ impl Identity {
                     Some(hex) => u64::from_str_radix(hex, 16),
                     None => value.parse(),
                 }
-                .map_err(|e| format!("/proc/cpuinfo's {name} {value:?}: {e}"))
+                .map_err(|e| format!("/proc/cpuinfo's {name} is no number: {e}"))
             };
-            identity.add(CPU_MODEL, Value::Words(words_of(field("model name")?)?));
+            let model = words_of(field("model name")?).ok_or("the CPU's model name has no word to mask")?;
+            identity.add(CPU_MODEL, Value::Words(model));
             let eax = signature(number("cpu family")?, number("model")?, number("stepping")?);
             identity.add(CPU_SIGNATURE, Value::Number(eax));
             identity.add(MICROCODE, Value::Hex(number("microcode")?));
@@ -1691,7 +1692,7 @@ impl Identity {
         if identity.0.is_empty() {
             return Err("/proc/cpuinfo names no CPU".to_string());
         }
-        identity.add(HOST_NAME, Value::Words(words_of(host)?));
+        identity.add(HOST_NAME, Value::Words(words_of(host).ok_or("the host name has no word to mask")?));
         Ok(identity)
     }
 
@@ -1741,15 +1742,12 @@ impl Identity {
     }
 }
 
-/// `text`'s maximal runs of ASCII letters and digits, lower-cased; none is a
-/// refusal, as a value nothing spells cannot be masked.
-fn words_of(text: &str) -> Result<Vec<String>, String> {
+/// `text`'s maximal runs of ASCII letters and digits, lower-cased, if it has
+/// one: nothing else can be masked of it.
+fn words_of(text: &str) -> Option<Vec<String>> {
     let words: Vec<String> =
         alphanumeric_runs(text.as_bytes()).into_iter().map(|run| text[run].to_ascii_lowercase()).collect();
-    if words.is_empty() {
-        return Err(format!("{text:?} has no word to mask"));
-    }
-    Ok(words)
+    (!words.is_empty()).then_some(words)
 }
 
 fn alphanumeric_runs(line: &[u8]) -> Vec<Range<usize>> {
@@ -2433,6 +2431,8 @@ mod tests {
         assert_eq!(signature(5, 2, 12), 0x52c);
     }
 
+    /// A refusal is published, so it names what is missing and none of what
+    /// was read.
     #[test]
     fn a_machine_is_read_whole_or_refused() {
         let words = |text: &str| Value::Words(words_of(text).unwrap());
@@ -2452,7 +2452,8 @@ mod tests {
             (CPUINFO.to_string(), " \n"),
             (String::new(), "somebody-pc"),
         ] {
-            assert!(Identity::read(&cpuinfo, host).is_err(), "{cpuinfo:?} {host:?}");
+            let refusal = Identity::read(&cpuinfo, host).expect_err(&cpuinfo);
+            assert!(["twenty", "(@)", "Example", "somebody"].iter().all(|v| !refusal.contains(v)), "{refusal}");
         }
     }
 
