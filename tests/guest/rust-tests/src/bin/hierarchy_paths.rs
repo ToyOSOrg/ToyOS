@@ -5,8 +5,9 @@ use std::os::toyos::process::CommandExt;
 use std::process::Command;
 
 use toyos::files::{self, At, Open};
-use toyos::{endow, namespace, port};
-use toyos_abi::syscall::{FileType, SVC_LABEL};
+use toyos::endow::{self, service_label, SVC_PREFIX};
+use toyos::port;
+use toyos_abi::syscall::FileType;
 
 const SELF: &str = "/system/bin/test_rs_hierarchy_paths";
 const PROBE: &str = "/tmp/hierarchy_paths_probe";
@@ -20,14 +21,21 @@ fn names(dir: &str) -> Vec<String> {
     out
 }
 
+/// The services this process holds, sorted.
+fn services() -> Vec<&'static str> {
+    let mut held: Vec<_> = endow::services().collect();
+    held.sort();
+    held
+}
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("empty") => {
-            assert!(endow::namespace().expect("namespace").names().unwrap().is_empty());
+            assert!(services().is_empty());
             assert!(fs::metadata("/").expect("empty root").is_dir());
             assert!(names("/").is_empty());
             std::env::set_current_dir("/").expect("cwd in empty root");
-            assert!(fs::read(PROBE).is_err(), "an empty namespace reached /tmp");
+            assert!(fs::read(PROBE).is_err(), "a process given no service reached /tmp");
         }
         Some("narrow") => narrowed(),
         Some(other) => panic!("unknown role {other}"),
@@ -36,14 +44,14 @@ fn main() {
             // The unserved connector supplies an ancestor, without granting any
             // global filesystem access or requiring a filesystem implementation.
             let (_acceptor, connector) = port::create().expect("port");
-            let narrow = namespace::build()
-                .keep(endow::namespace().expect("namespace"), &["fs:/tmp"])
-                .add("fs:/nested/leaf", &connector)
-                .finish().expect("narrow namespace");
-            for (role, names) in [("narrow", narrow), ("empty", namespace::build().finish().unwrap())] {
-                assert!(Command::new(SELF).arg(role).endow(SVC_LABEL, names.into())
-                    .status().expect("spawn namespace probe").success(), "{role} child failed");
-            }
+            let narrow = Command::new(SELF)
+                .arg("narrow")
+                .services_only(&["fs:/tmp"])
+                .endow(&service_label(SVC_PREFIX, "fs:/nested/leaf"), connector.into())
+                .status();
+            assert!(narrow.expect("spawn the narrowed probe").success(), "narrow child failed");
+            let empty = Command::new(SELF).arg("empty").services_only(&[]).status();
+            assert!(empty.expect("spawn the empty probe").success(), "empty child failed");
             fs::remove_file(PROBE).expect("remove probe");
             println!("all hierarchy tests passed");
         }
@@ -51,7 +59,7 @@ fn main() {
 }
 
 fn narrowed() {
-    assert_eq!(endow::namespace().expect("namespace").names().unwrap(), ["fs:/nested/leaf", "fs:/tmp"]);
+    assert_eq!(services(), ["fs:/nested/leaf", "fs:/tmp"]);
     assert_eq!(names("/"), ["nested", "tmp"]);
     assert_eq!(names("/nested"), ["leaf"]);
     assert!(fs::metadata("/nested").expect("synthetic ancestor").is_dir());

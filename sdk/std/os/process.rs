@@ -55,18 +55,36 @@ pub trait CommandExt {
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn endow_narrowed(&mut self, label: &str, handle: crate::os::toyos::io::OwnedHandle, rights: u32) -> &mut Self;
 
-    /// Put `connector` in an [`independent`](CommandExt::independent)
-    /// child's namespace under `name`, on top of what its manifest row holds.
+    /// Give an [`independent`](CommandExt::independent) child `connector`
+    /// as the service `name`, on top of what its manifest row holds.
     ///
     /// A terminal's `surface` port exists once per terminal, so no manifest
     /// can name it, but the shell's own row is what should decide the rest of
     /// what a shell holds. So the caller supplies this one connector, the
-    /// launcher supplies the row, and the child's namespace is the union.
+    /// launcher supplies the row, and the child's services are the union. A
+    /// child whose row does not receive `name` is not given it; one that is,
+    /// without `DUP`, `TRANSFER` and `WRITE`, refuses the launch.
     ///
     /// The connector is **moved**, like [`endow`](CommandExt::endow). A
     /// command that is not independent is refused `InvalidInput`.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn provide(&mut self, name: &str, connector: crate::os::toyos::io::OwnedHandle) -> &mut Self;
+
+    /// Run the child in the job `job` names, a handle carrying `WRITE`,
+    /// rather than in this process's own: the owner its threads share CPU
+    /// time under and its memory is counted to. The command takes a copy of
+    /// it now; an [`independent`](CommandExt::independent) launch carries it
+    /// too.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn job(&mut self, job: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
+
+    /// Give a helper only those of this process's services `names` names,
+    /// and none where it is empty, rather than a duplicate of every one. A
+    /// service the command [`endow`](CommandExt::endow)s is the child's
+    /// either way. An [`independent`](CommandExt::independent) launch runs
+    /// its row, and is refused `InvalidInput`.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn services_only(&mut self, names: &[&str]) -> &mut Self;
 
     /// Make now, on this thread, every file read this command's spawn needs:
     /// find the program, judge the working directory, and read a program on a
@@ -118,14 +136,14 @@ pub trait CommandExt {
     /// launcher this process holds: the program its manifest row declares,
     /// holding that row's authority, its own identity and the connectors
     /// [`provide`](CommandExt::provide)d. Without it a spawn is a helper,
-    /// which inherits this process's namespace, environment and the
+    /// which inherits this process's services, environment and the
     /// descriptors its spawn names.
     ///
     /// **A launch or nothing.** It is refused `PermissionDenied`, with the
     /// reason, where this process holds no launcher, the launcher will not
     /// open, or no row declares the program or this one may not start it; and
-    /// `InvalidInput` for an endowment other than a job, a descriptor past
-    /// stdio or an [`image_from`](CommandExt::image_from). It is never
+    /// `InvalidInput` for an endowment, a descriptor past stdio or an
+    /// [`image_from`](CommandExt::image_from). It is never
     /// started as a helper instead. A relative program is made absolute
     /// against the child's working directory.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
@@ -138,12 +156,12 @@ pub trait CommandExt {
     fn detached(&mut self) -> &mut Self;
 
     /// Make an [`independent`](CommandExt::independent) launch through the
-    /// launcher `namespace` names, a namespace holding `launcher` that this
-    /// process holds and keeps, in place of the one it was endowed: a login
-    /// authority's for a session it opened. It reaches only what that launcher
-    /// does. A command that is not independent is refused `InvalidInput`.
+    /// launcher `launcher` names, a connector this process holds and keeps,
+    /// in place of the one it was endowed: a login authority's for a session
+    /// it opened. It reaches only what that launcher does. A command that is
+    /// not independent is refused `InvalidInput`.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn launcher(&mut self, namespace: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
+    fn launcher(&mut self, launcher: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
 
     /// Start the child as a pager, by `syscap`, a `SysCap` carrying
     /// `Rights::PAGER`, which this process keeps: it may then make the pager
@@ -186,6 +204,16 @@ impl CommandExt for crate::process::Command {
         self
     }
 
+    fn job(&mut self, job: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
+        self.as_inner_mut().job(job);
+        self
+    }
+
+    fn services_only(&mut self, names: &[&str]) -> &mut Self {
+        self.as_inner_mut().services_only(names);
+        self
+    }
+
     fn prepare(&mut self) -> crate::io::Result<&mut Self> {
         self.as_inner_mut().prepare()?;
         Ok(self)
@@ -220,8 +248,8 @@ impl CommandExt for crate::process::Command {
         self
     }
 
-    fn launcher(&mut self, namespace: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
-        self.as_inner_mut().launcher(namespace);
+    fn launcher(&mut self, launcher: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
+        self.as_inner_mut().launcher(launcher);
         self
     }
 

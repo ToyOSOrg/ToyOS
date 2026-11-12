@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::log::console::StopWire;
+use crate::mm::charge::{self, Charge};
 use crate::power;
 use crate::user_ptr::{SyscallContext, UserBytes, UserBytesMut};
 use crate::UserAddr;
@@ -255,10 +256,20 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
             return e.refuse();
         }
     }
-    match sysinfo_laid(max_entries) {
-        Ok(laid) => out.write_at(0, &laid).map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| laid.len() as u64),
-        Err(e) => e.to_u64(),
-    }
+    let laid = match sysinfo_laid(max_entries) {
+        Ok(laid) => laid,
+        Err(e) => return e.to_u64(),
+    };
+    // A roster is charged to the caller's job for the copy-out, which can
+    // fault and wait; a header alone is a fixed few bytes, and never refused.
+    let charged = match max_entries {
+        0 => Ok(None),
+        _ => Charge::current(charge::array::<u8>(laid.capacity())).map(Some),
+    };
+    let Ok(_held) = charged else {
+        return SyscallError::ResourceExhausted.to_u64();
+    };
+    out.write_at(0, &laid).map_or_else(|faulted| SyscallError::from(faulted).to_u64(), |()| laid.len() as u64)
 }
 
 /// [`sys_sysinfo`]'s answer, its header and at most `max_entries` entries,
@@ -276,9 +287,6 @@ fn sysinfo_laid(max_entries: usize) -> Result<Vec<u8>, SyscallError> {
     let table = guard.as_ref().unwrap();
 
     let entry_count = live_threads(table) as u32;
-    if entry_count as usize > sysinfo_thread_bound() {
-        return Err(SyscallError::ResourceExhausted);
-    }
 
     let mut header = [0u8; HEADER_SIZE];
     header[0..8].copy_from_slice(&total_mem.to_le_bytes());
@@ -291,9 +299,13 @@ fn sysinfo_laid(max_entries: usize) -> Result<Vec<u8>, SyscallError> {
     let mut laid = Vec::new();
     laid.extend_from_slice(&header);
 
-    // Header-only callers pay for no sort of the roster below.
+    // Header-only callers pay for no sort of the roster below, and the bound
+    // guards the roster's allocations alone.
     if max_entries == 0 {
         return Ok(laid);
+    }
+    if entry_count as usize > sysinfo_thread_bound() {
+        return Err(SyscallError::ResourceExhausted);
     }
     laid.reserve_exact(max_entries.min(entry_count as usize) * ENTRY_SIZE);
 

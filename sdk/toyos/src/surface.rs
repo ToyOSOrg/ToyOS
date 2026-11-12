@@ -31,11 +31,11 @@
 //!   another's line is asked only while it runs nothing of its own.
 //!
 //! **The channel is a port, not a name.** A surface makes its own — one per
-//! terminal, one per console — and puts the connector in the namespace it
-//! builds for the shell it spawns. A wizard three processes below a terminal
-//! still finds it, because the namespace is inherited down the same chain the
-//! environment used to be; nothing outside that chain can name it, and nothing
-//! in it can name a service its parent did not pass.
+//! terminal, one per console — and endows the connector to the shell it
+//! spawns. A wizard three processes below a terminal still finds it, because
+//! services are inherited down the same chain the environment used to be;
+//! nothing outside that chain can name it, and nothing in it can name a
+//! service its parent did not pass.
 
 use alloc::vec::Vec;
 
@@ -51,10 +51,10 @@ use crate::poller::{Poller, READABLE};
 use crate::port::Acceptor;
 use crate::AsHandle;
 
-/// What a surface is called in the namespace of everything below it.
+/// What a surface is called among the services of everything below it.
 ///
-/// One name, not one per host: a name in a private namespace does not have to
-/// be unique machine-wide, and making it so is what needed a pid in it.
+/// One name, not one per host: a name in one process's own table does not
+/// have to be unique machine-wide, and making it so is what needed a pid in it.
 pub const SERVICE: &str = "surface";
 
 /// The file that says which keyboard layout this machine uses.
@@ -206,8 +206,8 @@ pub struct Host {
 }
 
 impl Host {
-    /// Serve from a port the caller made, whose connector it puts in the
-    /// namespace of every child that is to reach this surface.
+    /// Serve from a port the caller made, whose connector it gives every
+    /// child that is to reach this surface.
     pub fn serve(acceptor: Acceptor) -> Self {
         Self {
             acceptor,

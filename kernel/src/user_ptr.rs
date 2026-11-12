@@ -21,7 +21,6 @@
 //! Every single-word user read is `read_volatile`, including the futex word
 //! and the crash dump's walk, both outside this module.
 
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -32,9 +31,6 @@ use toyos_abi::UserSafe;
 
 use crate::arch::uaccess;
 use crate::UserAddr;
-
-/// Longest string, in bytes, the kernel accepts from userspace; one bound for every string syscall, since each copies or tokenizes rather than streaming.
-pub const MAX_USER_STR: u64 = 64 * 1024;
 
 pub(crate) use toyos_userbound::Access;
 
@@ -108,15 +104,6 @@ impl<'a> SyscallContext<'a> {
     /// A bulk buffer the kernel writes into and never borrows.
     pub fn user_bytes_mut(&self, ptr: UserAddr, len: u64) -> Option<UserBytesMut<'a>> {
         Some(UserBytesMut(View::window(ptr, len)?, PhantomData))
-    }
-
-    /// Copy a user string of at most [`MAX_USER_STR`] bytes into kernel memory; an over-long or non-UTF-8 string is `InvalidArgument`, not `BadAddress`.
-    pub fn user_str(&self, ptr: UserAddr, len: u64) -> Result<String, SyscallError> {
-        if len > MAX_USER_STR {
-            return Err(SyscallError::InvalidArgument);
-        }
-        let bytes = self.user_vec(ptr, len)?;
-        String::from_utf8(bytes).map_err(|_| SyscallError::InvalidArgument)
     }
 
     /// Read a typed value out of user memory, copied rather than borrowed.

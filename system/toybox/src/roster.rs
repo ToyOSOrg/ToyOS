@@ -1,6 +1,5 @@
 //! The roster `ps` prints, as the kernel answers it: the machine's header,
-//! then one entry per live thread, or nothing to a capability carrying no
-//! `ROSTER`.
+//! then one entry per live thread, or nothing where it refused the roster.
 
 use toyos_abi::syscall::{SYSINFO_ENTRY_SIZE as ENTRY, SYSINFO_HEADER_SIZE as HEADER};
 
@@ -17,8 +16,9 @@ pub struct Row {
 }
 
 /// The machine's uptime, the CPU nanoseconds it has ever run, and every row of
-/// `answer`, a roster the kernel wrote. `None` is a capability carrying no
-/// `ROSTER`, which the kernel answers with nothing.
+/// `answer`, a roster the kernel wrote. `None` is a roster the kernel refused,
+/// which it answers with nothing: to a capability carrying no `ROSTER`, or to
+/// a job without the room to hold the roster while it is copied out.
 pub fn rows(answer: &[u8]) -> Option<(u64, u64, Vec<Row>)> {
     let (buf, n) = (answer, answer.len());
     if n < HEADER {

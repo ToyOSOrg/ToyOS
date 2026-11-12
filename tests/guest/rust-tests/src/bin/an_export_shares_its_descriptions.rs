@@ -22,8 +22,7 @@ const STREAMED: &str = "an-export-shares-its-descriptions-streamed";
 const STREAM_BYTES: usize = 1 << 20;
 
 fn main() {
-    let names = toyos::endow::namespace().expect("a test is endowed a namespace");
-    let mut parent = Dir::connect(names, DIR).expect("the home directory");
+    let mut parent = Dir::named(DIR).expect("the home directory");
     let fid = parent.open(Base::Root, FILE, O_READ | O_WRITE | O_CREATE | O_TRUNCATE).expect("open").fid;
     let written = parent.write(fid, b"abcdef").expect("write");
     assert_eq!((written.len, written.offset), (6, 6));

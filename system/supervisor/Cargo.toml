@@ -1,6 +1,6 @@
 [package]
 name = "supervisor"
-description = "The one program the kernel starts: it builds every program's namespace and device claims from /system/etc/system.manifest and starts it."
+description = "The one program the kernel starts: it gives every program its services and device claims from /system/etc/system.manifest and starts it."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -37,4 +37,4 @@ toyos-pci-claim = { path = "../../lib/pci-claim" }
 toyos-quiesce = { path = "../../lib/quiesce" }
 
 [package.metadata.toyos.host]
-exempt.owns = "the machine's system capability: the kernel starts it, and it builds every program's namespace"
+exempt.owns = "the machine's system capability: the kernel starts it, and it gives every program its services"

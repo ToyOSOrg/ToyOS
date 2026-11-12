@@ -32,12 +32,12 @@ use alloc::vec::Vec;
 use crate::object::{ops, HandleTable, KObjectRef};
 use crate::mm::space::CopySource;
 use crate::process::{
-    Admission, Endowments, Parent, Pid, ProcessAccounting, ProcessData,
+    Admission, Parent, Pid, ProcessAccounting, ProcessData,
     ProcessEntry, ThreadData, ThreadEntry, UserImage, PROCESS_TABLE,
 };
 use crate::sync::Lock;
 use crate::{scheduler, UserAddr};
-use toyos_abi::handle::Rights;
+use toyos_abi::handle::{RawHandle, Rights};
 use crate::object::shm::SharedMemObject;
 use toyos_abi::syscall::{SpawnBacking, SpawnMap, SyscallError};
 use toyos_symbols::frame::BuildId;
@@ -212,14 +212,13 @@ pub fn spawn<C: Commit>(
     let notice = crate::object::notice::NoticeObject::new().map_err(SyscallError::from)?;
     // The point of no return: every failure above answers the caller with its
     // table untouched.
-    let (handles, endowments, held) = commit.commit(start::Own::new(&object, &notice))?;
+    let (handles, held) = commit.commit(start::Own::new(&object, &notice))?;
     let handles = crate::process::Handles::new(handles, pager);
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles: Arc::clone(&handles),
         space: Arc::clone(&child_pt),
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
-        endowments,
         job: job.clone(),
         _charge: charge,
     }));
@@ -282,17 +281,15 @@ pub fn spawn<C: Commit>(
 const SUPERVISOR: &str = "supervisor";
 
 /// Start the supervisor from its boot image as the build laid it out, holding the machine's one
-/// full-rights `SysCap`, the file server's image, ROOT's and the loader's boot names
-/// (`toyos_abi::syscall::FILESERVER_IMAGE_LABEL`, `ROOT_IMAGE_LABEL`, `BOOT_NAMES_LABEL`).
+/// full-rights `SysCap`, the file server's image, ROOT's and the loader's boot names, at the handles
+/// `toyos_abi::boot::supervisor` states.
 ///
 /// Nothing else can construct one: what the supervisor endows is the entire set of
 /// processes that can ever claim a device, enter the RT band, or power off.
 /// Panics on failure: a boot that cannot start the supervisor has nowhere to report to.
 pub fn spawn_supervisor(images: crate::bootimage::Objects, laid: &toyos_kimage::Supervisor<'_>) -> Pid {
+    use toyos_abi::boot::supervisor as at;
     let job = crate::object::job::new_job();
-    let mut handles = HandleTable::new(&job);
-    let mut entries = Vec::new();
-    let mut labels = Vec::new();
     let cap = KObjectRef::SysCap(crate::object::syscap::SysCap::new().expect("spawn_supervisor: no heap for the system capability"));
     // Every machine-wide authority the system has: rights only shrink from
     // here, so a bit absent here is a bit no manifest can ever name. LOG and
@@ -315,36 +312,18 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects, laid: &toyos_kimage::
         .union(Rights::PAGER)
         .union(Rights::CONSOLE)
         .union(Rights::LAST_WORDS);
-    let cap_handle = handles
-        .install(crate::object::HandleEntry::new(cap, rights))
-        .expect("spawn_supervisor: an empty table refused the system capability");
-    let label = toyos_abi::syscall::SYSCAP_LABEL;
-    entries.push(toyos_abi::syscall::EndowEntry {
-        label_off: labels.len() as u32,
-        label_len: label.len() as u32,
-        handle: cap_handle,
-        _pad: 0,
-    });
-    labels.extend_from_slice(label.as_bytes());
-    // The two images go on to the file server; the names are the supervisor's to read.
-    for (label, object, keeps) in [
-        (toyos_abi::syscall::FILESERVER_IMAGE_LABEL, &images.fileserver, None),
-        (toyos_abi::syscall::ROOT_IMAGE_LABEL, &images.root, None),
-        (toyos_abi::syscall::BOOT_NAMES_LABEL, &images.names, Some(toyos_abi::handle::Rights::MAP)),
-    ] {
+    let memory = |object: &Arc<SharedMemObject>, keeps: Option<Rights>| {
         let object = KObjectRef::SharedMem(Arc::clone(object));
         let rights = keeps.unwrap_or_else(|| ops::initial_rights(&object));
-        let handle = handles
-            .install(crate::object::HandleEntry::new(object, rights))
-            .expect("spawn_supervisor: a table of four handles refused a boot image");
-        entries.push(toyos_abi::syscall::EndowEntry {
-            label_off: labels.len() as u32,
-            label_len: label.len() as u32,
-            handle,
-            _pad: 0,
-        });
-        labels.extend_from_slice(label.as_bytes());
-    }
+        crate::object::HandleEntry::new(object, rights)
+    };
+    // The two images go on to the file server; the names are the supervisor's to read.
+    let endowed = [
+        (at::SYSCAP, crate::object::HandleEntry::new(cap, rights)),
+        (at::FILESERVER_IMAGE, memory(&images.fileserver, None)),
+        (at::ROOT_IMAGE, memory(&images.root, None)),
+        (at::BOOT_NAMES, memory(&images.names, Some(Rights::MAP))),
+    ];
     // Its ranges as the build laid them out of the supervisor section
     // (`toyos_kimage`), checked as a spawn's are.
     let maps = laid.maps().map(|raw| {
@@ -358,7 +337,7 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects, laid: &toyos_kimage::
         build_id: BuildId::new(laid.build_id),
     };
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
-    let table = SupervisorTable { job, handles, entries, labels };
+    let table = SupervisorTable { handles: HandleTable::new(&job), job, endowed };
     let name = toyos_abi::syscall::process_name(SUPERVISOR.as_bytes()).expect("spawn_supervisor: its own name");
     match spawn(SUPERVISOR, name, table, program, Parent::Root) {
         Ok((pid, ())) => pid,
@@ -371,8 +350,8 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects, laid: &toyos_kimage::
 struct SupervisorTable {
     job: Arc<kernel::sched::job::Job>,
     handles: HandleTable,
-    entries: Vec<toyos_abi::syscall::EndowEntry>,
-    labels: Vec<u8>,
+    /// What it holds beside its own two, each at the handle the ABI states.
+    endowed: [(RawHandle, crate::object::HandleEntry); 4],
 }
 
 impl Commit for SupervisorTable {
@@ -386,9 +365,13 @@ impl Commit for SupervisorTable {
         false
     }
 
-    fn commit(self, own: start::Own) -> Result<(HandleTable, Endowments, ()), crate::object::Refusal> {
-        let Self { mut handles, mut entries, mut labels, .. } = self;
-        own.endow(&mut handles, &mut entries, &mut labels);
-        Ok((handles, Endowments::new(entries, labels), ()))
+    fn commit(self, own: start::Own) -> Result<(HandleTable, ()), crate::object::Refusal> {
+        let Self { mut handles, endowed, .. } = self;
+        own.install(&mut handles);
+        for (at, entry) in endowed {
+            let handle = handles.install(entry).expect("spawn_supervisor: an empty table refused what the supervisor starts with");
+            assert_eq!(handle, at, "spawn_supervisor: a new table issued its handles out of order");
+        }
+        Ok((handles, ()))
     }
 }

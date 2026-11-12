@@ -18,7 +18,7 @@
 
 use toyos::ipc::{Connection, FrameRx, WrongKind};
 use toyos::poller::OTHER_END_GONE;
-use toyos::{namespace, pipe_pair, port, AsHandle, OwnedHandle, Pipe};
+use toyos::{pipe_pair, port, AsHandle, OwnedHandle, Pipe};
 use toyos_abi::syscall::{
     self, Received, SyscallError, MAX_MESSAGE_LEN, MAX_QUEUED_HANDLES, MAX_QUEUED_MESSAGES, MAX_TRANSFER_HANDLES,
     PIPE_CAPACITY,
@@ -30,9 +30,8 @@ const CEILING_NANOS: u64 = 10_000_000_000;
 
 fn main() {
     let (acceptor, connector) = port::create().expect("a port");
-    let names = namespace::build().add("conn", &connector).finish().expect("a namespace");
     let pair = || {
-        let client = names.open("conn").expect("connect");
+        let client = connector.connect().expect("connect");
         (client, acceptor.accept().expect("accept"))
     };
 

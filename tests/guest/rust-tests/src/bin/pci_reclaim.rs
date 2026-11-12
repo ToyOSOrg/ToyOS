@@ -8,7 +8,8 @@ mod function;
 use toyos::endow::Endowments;
 use toyos::syscap::SysCap;
 use toyos::PciDev;
-use toyos_abi::syscall::{PciId, SYSCAP_LABEL};
+use toyos_abi::syscall::PciId;
+use toyos::endow::SYSCAP_LABEL;
 
 const I219: PciId = PciId { vendor: 0x8086, device: 0x15fc };
 

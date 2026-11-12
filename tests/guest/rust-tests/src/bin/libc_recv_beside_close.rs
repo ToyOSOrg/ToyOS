@@ -35,9 +35,9 @@ use toyos::net::stream::{Server, Words, LAYOUT, RECEIVE_RING, REGION_BYTES};
 use toyos::wake::{self, Hungup};
 use toyos::net::{MsgType, RespType, TcpConnectRequest, TcpConnectResponse};
 use toyos::shm::SharedMemory;
-use toyos::{namespace, port, OwnedHandle};
+use toyos::endow::{service_label, SVC_PREFIX};
+use toyos::{port, OwnedHandle};
 use std::os::toyos::process::CommandExt;
-use toyos_abi::syscall::SVC_LABEL;
 
 const SELF_PATH: &str = "/system/bin/test_rs_libc_recv_beside_close";
 
@@ -115,10 +115,10 @@ fn main() {
 
 fn test(role: &str) {
     let (acceptor, connector) = port::create().expect("a port");
-    let ns = namespace::build().add(SERVICE, &connector).finish().expect("a namespace");
     let mut child = Command::new(SELF_PATH)
         .arg(role)
-        .endow(SVC_LABEL, ns.into())
+        .services_only(&[])
+        .endow(&service_label(SVC_PREFIX, SERVICE), connector.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

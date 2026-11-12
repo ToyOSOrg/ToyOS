@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::ipc::{self, Connection, RxStep};
-use toyos::namespace::Namespace;
+use toyos::port::Connector;
 use toyos::poller::{Poller, READABLE};
 use toyos::power::{self, Mode, Pending, Stop, Update};
 use toyos::syscap::SysCap;
@@ -28,12 +28,12 @@ const OPENS: usize = 10;
 const CEILING: Duration = Duration::from_secs(60);
 
 fn main() {
-    let login = Endowments::get().take::<Namespace>(wire::LOGIN_PORT).expect("test-runner hands this job its `login`");
+    let login = Endowments::get().take::<Connector>(wire::LOGIN_PORT).expect("test-runner hands this job its `login`");
     let (launcher, control) = wire::open(&login).expect("a session for this job");
     let mut control = Control { conn: control, rx: ipc::FrameRx::new() };
     // `logout` runs in a second session, which no sign-out here asks to quit.
     let (admin, _admin_control) = wire::open(&login).expect("a second session, for `logout`");
-    let launched = |launcher: &Namespace, program: &str, args: &[&str]| {
+    let launched = |launcher: &Connector, program: &str, args: &[&str]| {
         Command::new(program)
             .independent()
             .launcher(launcher.as_handle().into())
@@ -116,7 +116,7 @@ fn main() {
 /// `hangupholder` detached in `launcher`'s session, once it listens for its
 /// quits: its pid. Until it listens a quit ends it, so a stop asked before
 /// that would find nothing to wait for.
-fn detach(launcher: &Namespace) -> u32 {
+fn detach(launcher: &Connector) -> u32 {
     let before = live(HOLDER);
     let mut holder = Command::new(format!("/system/bin/{HOLDER}"))
         .independent()

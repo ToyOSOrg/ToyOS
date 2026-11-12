@@ -1,7 +1,7 @@
 //! A handle to a job: the owner a process's threads, and its children's unless
 //! a spawn names another, share CPU time under (`kernel::sched::job`), and the
 //! account their memory is counted to (`kernel::frames::Ledger`). A spawn
-//! that endows one under `JOB_LABEL` with `WRITE` puts its child in it.
+//! that names one carrying `WRITE` (`SpawnArgs::job`) puts its child in it.
 //!
 //! The job lives while a thread of it runs, a handle to it is held or an
 //! object charged to it lives, and not past all three: its launcher ending

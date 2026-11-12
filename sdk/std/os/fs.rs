@@ -64,20 +64,21 @@ pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Resu
     crate::sys::fs::symlink(original.as_ref(), link.as_ref())
 }
 
-/// Resolve this process's files through `namespace`, a namespace handle it
-/// gives up here.
+/// Resolve this process's files through `services`, each a connector it
+/// gives up here under the name it is a service by.
 ///
-/// For the one process no parent endows a namespace: the supervisor builds the machine's
-/// directory capabilities itself. Refused, and the handle closed, when this
-/// process already resolves through one.
+/// For the one process no parent endows a service: the supervisor makes the
+/// machine's directory capabilities itself. No child inherits them. Refused,
+/// and the connectors closed, when this process has adopted some already or
+/// has resolved a file.
 ///
 /// # Safety
-/// `namespace` names a namespace: the kernel ends a process that opens a name
-/// through a handle to anything else.
+/// Each handle names a connector: it is taken as one on the caller's word.
 #[stable(feature = "toyos_ext", since = "1.0.0")]
-pub unsafe fn adopt_namespace(namespace: crate::os::toyos::io::OwnedHandle) -> io::Result<()> {
+pub unsafe fn adopt_services(services: Vec<(String, crate::os::toyos::io::OwnedHandle)>) -> io::Result<()> {
     // SAFETY: the caller's.
-    let namespace = unsafe { toyos::endow::FromHandle::from_handle(namespace.into_inner()) };
-    toyos::endow::adopt_namespace(namespace)
-        .map_err(|_| io::const_error!(io::ErrorKind::AlreadyExists, "this process already has a namespace"))
+    let services = services.into_iter().map(|(name, connector)| (name, unsafe { toyos::endow::FromHandle::from_handle(connector.into_inner()) })).collect();
+    toyos::endow::adopt(services)
+        .map(drop)
+        .map_err(|_| io::const_error!(io::ErrorKind::AlreadyExists, "this process already resolves its files"))
 }

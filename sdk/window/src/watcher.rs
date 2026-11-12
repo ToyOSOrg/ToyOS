@@ -93,8 +93,8 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    /// Watch the clipboard through the compositor's port named `port` in this
-    /// program's namespace.
+    /// Watch the clipboard through the compositor's port this program was
+    /// given as the service `port`.
     pub fn connect(port: &str) -> Result<Self, WatchError> {
         let conn = endow::service(port).map_err(CreateError::from)?;
         conn.try_signal(MSG_CLIPBOARD_WATCH)?;

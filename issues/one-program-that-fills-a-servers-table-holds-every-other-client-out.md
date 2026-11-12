@@ -42,7 +42,7 @@ names the holder:
 
 The supervisor mints the connector of every server it spawns, but hands out
 one unbadged connector per port to every row that receives it
-(`build_namespace`); console and terminal each create their own surface port
+(`received`); console and terminal each create their own surface port
 and move its connector only into the shell they spawn. A program that holds
 several sessions, or that launches other rows, holds as many keys:
 `issues/four-shares-take-a-file-server.md`.

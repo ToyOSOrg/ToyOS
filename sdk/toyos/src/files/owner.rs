@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use toyos_abi::syscall::{self, FileType, SyscallError};
 
-use super::namespace::Routed;
+use super::routing::Routed;
 use super::{encode, At, Error, Open, Stat, MAX_LINKS, SEEK_CURRENT, SEEK_END, SEEK_START};
 use crate::fd::{self, Fd, Object, SERVED_FILE};
 use crate::fs::{self, Base, Change, Dir, Fid, Refused};
@@ -46,25 +46,19 @@ impl Drop for Served {
     }
 }
 
-/// Namespace inspection is bounded and immutable; no service is opened to
-/// discover its names. Failed inspection is kept as an error, not an empty view.
-static DIRECTORIES: crate::endow::Once<Result<super::namespace::Directories, Error>> = crate::endow::Once::new();
+/// The directories this process's services make, read once: no service is
+/// opened to discover its name.
+static DIRECTORIES: crate::endow::Once<super::routing::Directories> = crate::endow::Once::new();
 
-fn directories() -> Result<&'static super::namespace::Directories, Error> {
-    DIRECTORIES.get_or_init(|| {
-        let names = match crate::endow::namespace() {
-            Some(namespace) => namespace.names().map_err(Error::Kernel)?,
-            None => Vec::new(),
-        };
-        Ok(super::namespace::Directories::new(names))
-    }).as_ref().map_err(|e| *e)
+fn directories() -> &'static super::routing::Directories {
+    DIRECTORIES.get_or_init(|| super::routing::Directories::new(crate::endow::services()))
 }
 
 fn directory_stat(path: &str) -> Result<Stat, Error> {
     Ok(Stat {
         file_type: FileType::Directory, size: 0, nlink: 1,
         atime: 0, mtime: 0, ctime: 0, volume: 0,
-        node: directories()?.node(path).expect("a routed namespace directory"),
+        node: directories().node(path).expect("a routed directory"),
     })
 }
 
@@ -229,16 +223,15 @@ fn capability(prefix: &str) -> Result<Arc<Capability>, Error> {
     if let Some(found) = CAPABILITIES.lock().get(prefix) {
         return Ok(Arc::clone(found));
     }
-    let names = crate::endow::namespace().ok_or(Error::Served(fs::Error::NotHeld))?;
     let name = alloc::format!("{}{prefix}", fs::CAPABILITY_PREFIX);
-    let dir = Dir::connect(names, &name).map_err(Error::Served)?;
+    let dir = Dir::named(&name).map_err(Error::Served)?;
     let found = Arc::new(Capability { dir: Turnstile::new(dir) });
     Ok(Arc::clone(CAPABILITIES.lock().entry(String::from(prefix)).or_insert(found)))
 }
 
 /// Which server the absolute, lexically clean `abs` is on, and the path there.
 fn route(abs: &str) -> Result<Place, Error> {
-    Ok(match super::namespace::route(abs, directories()?, capability)? {
+    Ok(match super::routing::route(abs, directories(), capability)? {
         Routed::Served(cap, rel) => Place::Served(cap, Base::Root, rel),
         Routed::Directory => Place::Directory(String::from(abs)),
     })
@@ -755,9 +748,9 @@ unsafe extern "C" fn toyos_fs_readdir(fd: Fd, cursor: u64, out: *mut u8, cap: us
         |path| {
             let mut out = Vec::new();
             if cursor == 0 {
-                for (name, node) in directories()?.children(path) {
+                for (name, node) in directories().children(path) {
                     fs::encode_entry(&mut out, &fs::Entry { kind: fs::KIND_DIR, size: 0, node, name })
-                        .expect("namespace service names fit directory entries");
+                        .expect("a directory capability's name fits a directory entry");
                 }
             }
             Ok((out, None))

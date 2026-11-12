@@ -136,7 +136,7 @@ a signal an event raises (`sdk/libc/src/sigreq.rs`).
    session's `logout` acts on every session. An owner's end other than its
    sign-out's is a failure, and a login authority whose sessions failed more
    than the restart budget's three times in ten seconds is refused its next
-   open; no other open is counted. Its namespace is
+   open; no other open is counted. What it holds is
    `issues/a-user-is-a-home-tree-and-a-login-row.md`'s login row; the SSH
    session's shell holds no host key and no SSH service authority.
    *Exit*: ending the desktop's session owner ends every program of that
@@ -173,7 +173,7 @@ a signal an event raises (`sdk/libc/src/sigreq.rs`).
      as the kill does, and the reason is `toyos_abi::quit::Reason`:
      interrupt, hang-up or terminate. A quit reaches the process's subtree.
      Each process is started holding its notice, the object kind `Notice`
-     under `QUIT_LABEL` (`quit`), `READ` and `WAIT` alone, readable while a
+     at `RawHandle::NOTICE`, `READ` and `WAIT` alone, readable while a
      reason is asked and not yet read, whose read takes it and an empty read
      takes nothing. A process listens from its first read of its notice or
      the first readable watch armed on it. A quit kills a process that never

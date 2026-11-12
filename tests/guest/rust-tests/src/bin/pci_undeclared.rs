@@ -7,7 +7,8 @@ use toyos::syscap::SysCap;
 use toyos::Device;
 use toyos_abi::devset::Declaration;
 use toyos_abi::inventory::{Pci, RawRecord};
-use toyos_abi::syscall::{SyscallError, SYSCAP_LABEL};
+use toyos_abi::syscall::SyscallError;
+use toyos::endow::SYSCAP_LABEL;
 
 /// What it says once every claim was refused.
 const REFUSED: &str = "pci_undeclared: the set says the declaration is pending, and each edu's claim was refused at once: WouldBlock";

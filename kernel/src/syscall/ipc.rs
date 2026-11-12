@@ -1,7 +1,7 @@
-//! What one process reaches another through: pipes, ports and the namespaces
-//! that name them, connections, shared memory, and inboxes.
-//! No peer is addressed by name or pid: ports, namespaces and connections are
-//! built only from connectors and handles the caller already holds.
+//! What one process reaches another through: pipes, ports, connections,
+//! shared memory, and inboxes.
+//! No peer is addressed by name or pid: a connection is made only through a
+//! connector the caller already holds.
 //! Every all-or-nothing claim here is structural: whatever can refuse is
 //! resolved and checked before anything is installed or removed, or under the
 //! hold that installs it. No handle is taken back across a released hold: a
@@ -15,8 +15,6 @@ use crate::message::{MessageBounce, QueueRef, SendRefused, Unclaimed, Unsent};
 use crate::object::handle::{HandleEntry, HandleTable};
 use crate::object::service::ConnectionEnd;
 use crate::time::Deadline;
-use crate::user_ptr::SyscallContext;
-use crate::UserAddr;
 use crate::{message, pipe, process};
 
 use toyos_abi::handle::{NotRights, RawHandle, ReceivedEntry, Rights, TransferEntry};
@@ -65,162 +63,13 @@ pub(super) fn sys_port_create() -> u64 {
     }
 }
 
-/// Build a namespace from a base's kept names plus new bindings; a refusal leaves the caller's table unchanged (every name resolved and connector checked first).
-pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -> u64 {
-    // A bit this kernel does not define is a caller asking for something it will not get, so it is refused rather than skipped.
-    if args.flags & !NAMESPACE_FLAGS_KNOWN != 0 {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    let keep_all = args.flags & NAMESPACE_KEEP_ALL != 0;
-    if keep_all && args.keep_n > 0 {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    let total = args.keep_n.saturating_add(args.add_n);
-    if total > MAX_NAMESPACE_ENTRIES as u64 {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    if args.names_len > (MAX_NAMESPACE_ENTRIES * MAX_SERVICE_NAME) as u64 {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    let names = match ctx.user_vec(UserAddr::new(args.names_ptr), args.names_len) {
-        Ok(bytes) => bytes,
-        Err(e) => return e.to_u64(),
-    };
-    let name_at = |off: u32, len: u32| -> Option<alloc::boxed::Box<str>> {
-        let end = (off as usize).checked_add(len as usize)?;
-        let bytes = names.get(off as usize..end)?;
-        Some(alloc::string::String::from(core::str::from_utf8(bytes).ok()?).into_boxed_str())
-    };
-
-    let mut entries: Vec<(alloc::boxed::Box<str>, alloc::sync::Arc<port::Connector>)> =
-        Vec::new();
-
-    if keep_all {
-        let base = match process::with_handles(|handles| {
-            handles.get::<crate::object::namespace::Namespace>(args.base, Rights::READ)
-        }) {
-            Ok(base) => base,
-            Err(e) => return e.refuse(),
-        };
-        for (name, connector) in base.entries() {
-            entries.push((name.clone(), connector.clone()));
-        }
-    }
-
-    if args.keep_n > 0 {
-        let Some(keep) = (args.keep_n as usize)
-            .checked_mul(core::mem::size_of::<NameRef>())
-            .and_then(|len| ctx.user_bytes(UserAddr::new(args.keep_ptr), len as u64))
-        else {
-            return SyscallError::BadAddress.to_u64();
-        };
-        let base = match process::with_handles(|handles| {
-            handles.get::<crate::object::namespace::Namespace>(args.base, Rights::READ)
-        }) {
-            Ok(base) => base,
-            Err(e) => return e.refuse(),
-        };
-        for i in 0..args.keep_n as usize {
-            let mut raw = [0u8; 8];
-            if keep.read_at(i * 8, &mut raw).is_err() {
-                return SyscallError::BadAddress.to_u64();
-            }
-            let off = u32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
-            let len = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
-            let Some(name) = name_at(off, len) else {
-                return SyscallError::InvalidArgument.to_u64();
-            };
-            // A name absent from the base is silently absent from the child: narrowing asks for an intersection, not an error.
-            if let Some(connector) = base.lookup(&name) {
-                entries.push((name, connector.clone()));
-            }
-        }
-    }
-
-    if args.add_n > 0 {
-        let Some(add) = (args.add_n as usize)
-            .checked_mul(core::mem::size_of::<NamespaceEntry>())
-            .and_then(|len| ctx.user_bytes(UserAddr::new(args.add_ptr), len as u64))
-        else {
-            return SyscallError::BadAddress.to_u64();
-        };
-        for i in 0..args.add_n as usize {
-            let mut raw = [0u8; 16];
-            if add.read_at(i * 16, &mut raw).is_err() {
-                return SyscallError::BadAddress.to_u64();
-            }
-            let off = u32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
-            let len = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
-            let handle = RawHandle(u32::from_ne_bytes([raw[8], raw[9], raw[10], raw[11]]));
-            let Some(name) = name_at(off, len) else {
-                return SyscallError::InvalidArgument.to_u64();
-            };
-            let connector = match process::with_handles(|handles| {
-                handles.get_sent::<port::Connector>(handle, Rights::TRANSFER)
-            }) {
-                Ok(c) => c,
-                Err(e) => return e.refuse(),
-            };
-            entries.push((name, connector));
-        }
-    }
-
-    let namespace = match crate::object::namespace::Namespace::build(entries) {
-        Ok(ns) => ns,
-        Err(crate::object::namespace::BuildError::TooMany) => {
-            return SyscallError::InvalidArgument.to_u64()
-        }
-        Err(crate::object::namespace::BuildError::Duplicate) => {
-            return SyscallError::AlreadyExists.to_u64()
-        }
-        Err(crate::object::namespace::BuildError::Exhausted) => {
-            return SyscallError::ResourceExhausted.to_u64()
-        }
-    };
-    process::with_handles(|handles| {
-        handle_result(ops::install(handles, KObjectRef::Namespace(namespace)))
-    })
-}
-
-/// Open a connection to `name` in the namespace `ns_h` holds; `NotFound` means the namespace lacks the name, `Gone` means its port has closed.
-pub(super) fn sys_namespace_open(ns_h: RawHandle, name: &str) -> u64 {
-    let connector = match process::with_handles(|handles| {
-        let ns = handles.get::<crate::object::namespace::Namespace>(ns_h, Rights::READ)?;
-        Ok::<_, crate::object::HandleError>(ns.lookup(name).cloned())
-    }) {
-        Ok(Some(c)) => c,
-        Ok(None) => return SyscallError::NotFound.to_u64(),
+/// Open a connection through the connector `h` names, which needs `WRITE`: the client's end is installed and the server's queued on the port.
+/// `Gone` for a port whose acceptor closed; a handle that is no connector is `InvalidArgument`, since a connector is one a peer sent.
+pub(super) fn sys_connect(h: RawHandle) -> u64 {
+    let connector = match process::with_handles(|handles| handles.get_sent::<port::Connector>(h, Rights::WRITE)) {
+        Ok(connector) => connector,
         Err(e) => return e.refuse(),
     };
-    connect_through(&connector)
-}
-
-/// Inspect only the names this namespace already holds. The Arc keeps the
-/// immutable entries alive after the handle-table lock is released; copying
-/// into user memory therefore holds no object or handle-table lock.
-pub(super) fn sys_namespace_names(ns_h: RawHandle, out: &mut crate::user_ptr::UserBytesMut) -> u64 {
-    let namespace = match process::with_handles(|handles| {
-        handles.get::<crate::object::namespace::Namespace>(ns_h, Rights::READ)
-    }) {
-        Ok(namespace) => namespace,
-        Err(e) => return e.refuse(),
-    };
-    let required: usize = namespace.entries().iter().map(|(name, _)| 2 + name.len()).sum();
-    if out.len() >= required {
-        let mut at = 0;
-        for (name, _) in namespace.entries() {
-            let wrote = out.write_at(at, &(name.len() as u16).to_le_bytes()).and_then(|()| out.write_at(at + 2, name.as_bytes()));
-            if let Err(faulted) = wrote {
-                return SyscallError::from(faulted).to_u64();
-            }
-            at += 2 + name.len();
-        }
-    }
-    required as u64
-}
-
-/// The client half of a connection, and the server half queued on the port.
-fn connect_through(connector: &port::Connector) -> u64 {
     if connector.closed() {
         return SyscallError::Gone.to_u64();
     }

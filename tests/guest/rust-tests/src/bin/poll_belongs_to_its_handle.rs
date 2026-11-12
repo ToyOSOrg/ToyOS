@@ -27,7 +27,7 @@ use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::ipc::Connection;
 use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
-use toyos::{namespace, port, AsHandle, OwnedHandle};
+use toyos::{port, AsHandle, OwnedHandle};
 use toyos_abi::inbox::{RingHeader, Submission, OP_WATCH, SUBMISSIONS_OFF, SUBMISSION_RING_OFF};
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
@@ -126,8 +126,7 @@ fn a_child_watched_through_a_duplicate_is_answered_at_its_close() {
 
 fn a_watched_handle_sent_away_is_answered() {
     let (acceptor, connector) = port::create().expect("a port");
-    let names = namespace::build().add("conn", &connector).finish().expect("a namespace");
-    let client: Connection = names.open("conn").expect("a connection");
+    let client: Connection = connector.connect().expect("a connection");
     let server = acceptor.accept().expect("its other end");
     let (read, _write) = toyos::pipe_pair().expect("a pipe no byte enters");
     let poller = Poller::new(1);

@@ -1,6 +1,6 @@
 //! The SYSTEM role's volume: ROOT, the bcachefs volume of the slot's signed
 //! image, served read-only out of the memory the kernel handed the supervisor
-//! (`toyos_abi::syscall::ROOT_IMAGE_LABEL`). No disk and no cache: the bytes
+//! (`toyos_manifest::ROOT_IMAGE_LABEL`). No disk and no cache: the bytes
 //! are already in memory, and nobody writes them.
 //!
 //! **ROOT crossed the loader's hash and nothing else.** The engine's reader

@@ -111,15 +111,6 @@ pub const SYS_SET_THREAD_NAME: u64 = 95;
 /// [`device_reg_read`].
 pub const SYS_DEVICE_REG_READ: u64 = 97;
 
-/// Read this process's endowment table back: the `(label, handle)` pairs its
-/// parent gave it at spawn, as an `[EndowEntry]` count followed by the entries
-/// and the label blob they index into. `buf_len == 0` asks how many bytes the
-/// answer needs. See [`endowments`].
-///
-/// The handles themselves are in the table whether or not this is ever called —
-/// the labels are *names* for them, not the authority.
-pub const SYS_ENDOWMENTS: u64 = 99;
-
 /// Make a port: one [`Acceptor`] for the server, one `Connector` for its
 /// clients, packed `(acceptor << 32) | connector`. See [`port_create`].
 ///
@@ -134,12 +125,8 @@ pub const SYS_ENDOWMENTS: u64 = 99;
 ///
 /// [`Acceptor`]: port_create
 pub const SYS_PORT_CREATE: u64 = 100;
-/// Build a namespace from a base and a set of `(name, connector)` additions.
-/// See [`NamespaceBuild`].
-pub const SYS_NAMESPACE_BUILD: u64 = 101;
-/// Open a connection to a name **in a namespace this process holds**. There is
-/// no other place to ask, and a name it was not given resolves to nothing.
-pub const SYS_NAMESPACE_OPEN: u64 = 102;
+/// Open a connection through a connector this process holds. See [`connect`].
+pub const SYS_CONNECT: u64 = 102;
 
 /// Make a shared-memory region, sized up to whole [`PAGE_SIZE`]s.
 /// See [`shm_create`].
@@ -355,8 +342,6 @@ pub const SYS_DEVICE_SET_READ: u64 = 167;
 pub const SYS_YIELD: u64 = 168;
 /// The caller's last words, once per boot. See [`log_last_words`].
 pub const SYS_LOG_LAST_WORDS: u64 = 169;
-/// List the names held by a namespace, without opening any connector.
-pub const SYS_NAMESPACE_NAMES: u64 = 170;
 /// Point the calling thread's thread pointer somewhere. See [`set_thread_pointer`].
 pub const SYS_SET_THREAD_POINTER: u64 = 171;
 
@@ -386,8 +371,12 @@ crate::user_safe! {
     /// so a parent that wants to keep what it endows duplicates first. That is
     /// what makes endowing a device claim work with no special case: a claim
     /// carries no [`Rights::DUP`], so the move is the only expressible form and
-    /// the parent provably no longer holds it. A child's descriptors are
-    /// endowments labelled [`FD_PREFIX`] and their number.
+    /// the parent provably no longer holds it.
+    ///
+    /// **The child's table starts in a stated order**: [`RawHandle::SELF`],
+    /// [`RawHandle::NOTICE`], then the endowments as `endow` lists them, the
+    /// `i`th at [`RawHandle::endowed`]. The kernel holds no name for any of
+    /// them: what a parent calls each is bytes of the child's memory.
     ///
     /// [`Rights::DUP`]: crate::handle::Rights::DUP
     #[derive(Clone, Copy)]
@@ -402,12 +391,10 @@ crate::user_safe! {
         /// authority. `InvalidArgument` unless [`process_name`] takes it.
         pub name_ptr: u64,
         pub name_len: u64,
-        /// `[SpawnEndow]`, moved out of the parent's table.
+        /// `[TransferEntry]`, at most [`MAX_SPAWN_ENDOWMENTS`], each moved out
+        /// of the caller's table with the rights it names.
         pub endow_ptr: u64,
         pub endow_count: u64,
-        /// The label blob every [`SpawnEndow`]'s `label_off`/`label_len` indexes.
-        pub labels_ptr: u64,
-        pub labels_len: u64,
         /// The child's memory, `[SpawnMap]`, as the caller laid out its program:
         /// 1 to [`MAX_SPAWN_MAPS`] ranges, none meeting another or the clock
         /// page, each checked as an ordinary mapping (`SpawnMap`). Everything
@@ -428,7 +415,7 @@ crate::user_safe! {
         pub build_id_len: u64,
         /// The process the child is placed under, whose end takes it down: a
         /// handle carrying [`Rights::WRITE`] to it — a copy of that process's
-        /// [`SELF_LABEL`] — or [`HANDLE_INVALID`] for the caller itself.
+        /// [`RawHandle::SELF`] — or [`HANDLE_INVALID`] for the caller itself.
         /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
         /// for one to no process, since a place is a handle a peer sent;
         /// `Gone` for a process being torn down, and `ResourceExhausted` for a
@@ -436,6 +423,14 @@ crate::user_safe! {
         ///
         /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
         pub place: u64,
+        /// The job the child runs in, the owner its threads, and its
+        /// children's unless a spawn names another, share CPU time under: a
+        /// handle carrying [`Rights::WRITE`] to a job — the caller's own is
+        /// [`job_own`]'s, and a new one [`job_create`]'s — or
+        /// [`HANDLE_INVALID`] for the caller's. `PermissionDenied` for a
+        /// handle without `WRITE` and `InvalidArgument` for one to no job. The
+        /// handle stays the caller's.
+        pub job: u64,
         /// A `SysCap` handle carrying [`Rights::PAGER`], which starts the
         /// child as a pager for its life, or [`HANDLE_INVALID`] for none.
         /// `PermissionDenied` for a handle without the right. The handle stays
@@ -542,99 +537,10 @@ pub const MAX_SPAWN_MAPS: usize = 64;
 /// The most bytes of a build-id a spawn carries.
 pub const MAX_BUILD_ID: usize = 32;
 
-crate::user_safe! {
-    /// One handle a spawn moves out of its caller's table into the child's,
-    /// and the label the child finds it under ([`EndowEntry`]): `label_off`
-    /// and `label_len` index [`SpawnArgs`]'s label blob.
-    #[derive(Clone, Copy)]
-    pub struct SpawnEndow {
-        pub label_off: u32,
-        pub label_len: u32,
-        pub moved: TransferEntry,
-    }
-}
-
-const _: () = assert!(core::mem::size_of::<SpawnEndow>() == 16);
-
-/// One `(label, handle)` pair of a process's endowment table, as
-/// [`endowments`] answers it.
-///
-/// `label_off`/`label_len` index the label blob that travels beside the
-/// entries. The label is a *local name* in one process's own table and buys
-/// nothing to guess: a name not in your table resolves to nothing.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct EndowEntry {
-    pub label_off: u32,
-    pub label_len: u32,
-    pub handle: RawHandle,
-    /// Named, so nothing leaks kernel stack into it.
-    pub _pad: u32,
-}
-
-const _: () = assert!(core::mem::size_of::<EndowEntry>() == 16);
-
-/// The label the kernel puts on the supervisor's system capability, and the one
-/// the supervisor puts on the `RT`-only dup it endows a `realtime` program.
-///
-/// Here rather than in the SDK because the kernel writes it and userland reads
-/// it, and a label spelled twice is a label that can be spelled two ways.
-pub const SYSCAP_LABEL: &str = "syscap";
-/// The label for a program's namespace — what its manifest `receives` becomes.
-pub const SVC_LABEL: &str = "svc";
-/// The labels the kernel puts on the immutable memory objects it hands the
-/// supervisor beside the system capability: the file server's executable and
-/// ROOT's bytes, both as the loader verified them, and what the loader wrote
-/// of where it booted from (`boot::KernelArgs`).
-pub const FILESERVER_IMAGE_LABEL: &str = "boot:fileserver";
-pub const ROOT_IMAGE_LABEL: &str = "boot:root";
-pub const BOOT_NAMES_LABEL: &str = "boot:names";
-/// The label every process starts holding a handle to itself under, carrying
-/// `WRITE`, `DUP` and `TRANSFER`: what it hands on for a child to be placed
-/// under it ([`SpawnArgs::place`]). The kernel puts it in every table.
-pub const SELF_LABEL: &str = "self";
-/// The label every process starts holding its notice under: readable while a
-/// quit has asked it a reason it has not read, which a read takes
-/// ([`SYS_PROCESS_QUIT`]). The kernel puts it in every table.
-pub const QUIT_LABEL: &str = "quit";
-/// The label a spawn endows a job under to put its child in it: the owner its
-/// threads, and its children's unless a spawn names another, share CPU time
-/// under. It takes a handle carrying [`Rights::WRITE`] to a job — the caller's
-/// own is [`job_own`]'s, and a new one [`job_create`]'s. A spawn naming none
-/// puts the child in its spawner's job.
-///
-/// [`Rights::WRITE`]: crate::handle::Rights::WRITE
-pub const JOB_LABEL: &str = "job";
-/// `serve:<name>`: the acceptor of a machine-wide port this program serves.
-pub const SERVE_PREFIX: &str = "serve:";
-/// `dev:<class>`: the claim for a device class this program was given.
-pub const DEV_PREFIX: &str = "dev:";
-/// `fd:<n>`: the child's descriptor `n`, which its descriptor table installs
-/// at that number (`toyos::fd`). Numbering is userland's: the kernel only
-/// moves the handle.
-pub const FD_PREFIX: &str = "fd:";
-/// `provide:<name>`: a connector a *launching client* transferred, beside the
-/// namespace entry the launcher made from it.
-///
-/// **Both, and the second is what makes the chain work.** A namespace answers
-/// with connections, not with connectors, so a process holding `surface` only
-/// in its namespace cannot hand `surface` to a child — and the terminal → shell
-/// → `locale` chain is exactly that. The connector arrives labelled as well, so
-/// the holder can pass it on and the child's own manifest row still decides
-/// everything else it gets.
-pub const PROVIDE_PREFIX: &str = "provide:";
-
-/// `(label, handle)` pairs one endowment table holds, the kernel's own
-/// [`SELF_LABEL`] and [`QUIT_LABEL`] among them. Policy on the primitive,
-/// refused by name, never truncated — the widest manifest row plus stdio.
-pub const MAX_ENDOWMENTS: usize = 32;
-/// `(label, handle)` pairs one spawn may carry: the kernel adds [`SELF_LABEL`]
-/// and [`QUIT_LABEL`].
-pub const MAX_SPAWN_ENDOWMENTS: usize = MAX_ENDOWMENTS - 2;
-/// Bytes of label blob one endowment table holds, the kernel's labels among them.
-pub const MAX_LABELS_LEN: usize = 4096;
-/// Bytes of label blob one spawn may carry: the kernel adds its two labels.
-pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len() - QUIT_LABEL.len();
+/// The most handles one spawn endows. Policy on the primitive, refused by
+/// name, never truncated. Nothing here bounds what a parent calls them: names
+/// are bytes of the child's startup block, which its parent lays out.
+pub const MAX_SPAWN_ENDOWMENTS: usize = 96;
 
 use crate::end::End;
 use crate::handle::{ReceivedEntry, Rights, TransferEntry};
@@ -661,9 +567,9 @@ pub enum SyscallError {
     /// The object was there and its other end is not.
     ///
     /// **A different fact from `NotFound`, and the design does not work without
-    /// the difference.** "The name is not in the namespace this process was
-    /// given" is a statement about this process and the answer is "you have a
-    /// bug"; "the server exited" is a statement about the machine. The SDK sees
+    /// the difference.** "This process was not given that" is a statement about
+    /// this process and the answer is "you have a bug"; "the server exited" is
+    /// a statement about the machine. The SDK sees
     /// one `u64`, so if the kernel gives one word the SDK has one answer — and
     /// the same rule the storage layer already obeys applies here: a dead peer
     /// must not be indistinguishable from a handle that was never there.
@@ -1189,16 +1095,6 @@ pub fn handle_wait(handle: RawHandle, interest: u32, timeout_nanos: u64) -> Resu
 pub unsafe fn spawn(args: &SpawnArgs) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_SPAWN, args as *const SpawnArgs as u64, 0, 0, 0))
         .map(|h| RawHandle(h as u32))
-}
-
-/// Read this process's endowment table into `buf`: an `[EndowEntry]` count and
-/// entries followed by the label blob. Returns the bytes written, or — when
-/// `buf` is empty — the bytes the answer needs.
-///
-/// The one place a name is resolved to a handle at all: there is no global
-/// registry, so a process learns what it holds only from its own table.
-pub fn endowments(buf: &mut [u8]) -> usize {
-    syscall(SYS_ENDOWMENTS, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) as usize
 }
 
 /// Block until the process `proc` names has ended, and take how.
@@ -1824,8 +1720,8 @@ pub fn device_claim(syscap: RawHandle, request: DeviceRequest) -> Result<RawHand
 
 /// Make a new job, presenting a `SysCap` handle that carries
 /// [`Rights::JOBS`], and answer a handle to it carrying `WRITE`, `DUP` and
-/// `TRANSFER`: what a spawn endows under [`JOB_LABEL`] to start an independent
-/// job, with its own share of the CPU.
+/// `TRANSFER`: what a spawn names as its child's job (`SpawnArgs::job`) to
+/// start an independent job, with its own share of the CPU.
 ///
 /// [`Rights::JOBS`]: crate::handle::Rights::JOBS
 pub fn job_create(syscap: RawHandle) -> Result<RawHandle, SyscallError> {
@@ -1934,7 +1830,7 @@ pub fn device_reg_read(
         .map(|v| v as u32)
 }
 
-// Ports and namespaces
+// Ports
 
 /// Both ends of a fresh port.
 ///
@@ -1959,100 +1855,20 @@ pub fn port_create() -> Result<Port, SyscallError> {
     })
 }
 
-/// One `(name, connector)` pair `SYS_NAMESPACE_BUILD` adds.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct NamespaceEntry {
-    pub off: u32,
-    pub len: u32,
-    pub connector: RawHandle,
-    /// Named, so nothing leaks kernel stack into it.
-    pub _pad: u32,
-}
-
-/// One name carried over from the base namespace.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct NameRef {
-    pub off: u32,
-    pub len: u32,
-}
-
-crate::user_safe! {
-    /// Arguments for [`SYS_NAMESPACE_BUILD`], passed as a single pointer.
-    ///
-    /// A namespace is immutable once built: there is no insert, no remove and no
-    /// replace, so a narrower one is a *new* object built from this one and a
-    /// handle to a namespace is a handle to a fixed set.
-    #[derive(Clone, Copy)]
-    pub struct NamespaceBuild {
-        /// [`HANDLE_INVALID`] for an empty base.
-        ///
-        /// [`HANDLE_INVALID`]: crate::handle::HANDLE_INVALID
-        pub base: RawHandle,
-        /// [`NAMESPACE_KEEP_ALL`], and nothing else.
-        pub flags: u32,
-        /// `[NameRef]` — the names to carry over from `base`.
-        pub keep_ptr: u64,
-        pub keep_n: u64,
-        /// `[NamespaceEntry]` — new bindings.
-        pub add_ptr: u64,
-        pub add_n: u64,
-        /// The blob every `off`/`len` above indexes into.
-        pub names_ptr: u64,
-        pub names_len: u64,
-    }
-}
-
-const _: () = assert!(core::mem::size_of::<NamespaceEntry>() == 16);
-const _: () = assert!(core::mem::size_of::<NameRef>() == 8);
-
-/// Carry over every name `base` holds — no syscall enumerates a namespace, so
-/// no `keep` list can spell it. `keep_n` must be `0` beside it, and a name it
-/// carries that `add` also binds is `AlreadyExists`.
-pub const NAMESPACE_KEEP_ALL: u32 = 1 << 0;
-/// Every bit [`NamespaceBuild::flags`] defines. A caller that sets another is
-/// refused `InvalidArgument`, never served the request it did not make.
-pub const NAMESPACE_FLAGS_KNOWN: u32 = NAMESPACE_KEEP_ALL;
-
-/// Names one namespace may bind. Policy on the primitive; a caller asking for
-/// one more is refused by name and never truncated.
-pub const MAX_NAMESPACE_ENTRIES: usize = 64;
-/// Bytes in one service name.
-pub const MAX_SERVICE_NAME: usize = 64;
-
-/// # Safety
-/// Every pointer in `args` must name `args`'s stated length of readable memory.
-pub unsafe fn namespace_build(args: &NamespaceBuild) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_NAMESPACE_BUILD, args as *const _ as u64, 0, 0, 0))
-        .map(|v| RawHandle(v as u32))
-}
-
-/// Open a connection to `name` in the namespace `ns` holds.
+/// Open a connection to the port `connector` names, which needs
+/// [`Rights::WRITE`] on it: the client's end is the answer, and the server's
+/// waits on the port for its [`accept`].
 ///
-/// `NotFound` means the name is not in this namespace — a fact about this
-/// process. [`SyscallError::Gone`] means the server that held the acceptor has
-/// exited. There is no third answer, and in particular there is no "not yet":
-/// the port exists before either process runs.
-pub fn namespace_open(ns: RawHandle, name: &str) -> Result<RawHandle, SyscallError> {
-    check(syscall(
-        SYS_NAMESPACE_OPEN,
-        ns.0 as u64,
-        name.as_ptr() as u64,
-        name.len() as u64,
-        0,
-    ))
-    .map(|v| RawHandle(v as u32))
+/// [`SyscallError::Gone`] means the server that held the acceptor has exited,
+/// and `ResourceExhausted` that the port's queue or the caller's table is
+/// full. There is no "not yet": the port exists before either process runs.
+/// `InvalidArgument` is a handle that is no connector, since a connector is
+/// routinely a handle a peer sent.
+///
+/// [`Rights::WRITE`]: crate::handle::Rights::WRITE
+pub fn connect(connector: RawHandle) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_CONNECT, connector.0 as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
-
-/// The namespace's names, sorted, encoded as a little-endian `u16` length
-/// followed by that many UTF-8 bytes for each name. Requires READ. Returns
-/// the complete required byte length; writes nothing when `out` is smaller.
-/// A namespace is immutable, so a size query and a later read agree.
-pub fn namespace_names(namespace: RawHandle, out: &mut [u8]) -> Result<usize, SyscallError> {
-    check(syscall(SYS_NAMESPACE_NAMES, namespace.0 as u64, out.as_mut_ptr() as u64, out.len() as u64, 0)).map(|n| n as usize)
-}
-
 
 /// Bytes one badge may carry. Policy on the primitive: a badge is kernel
 /// memory no process is charged for, so the bound is what its one reader, the
@@ -2064,7 +1880,7 @@ pub const MAX_BADGE: usize = 64;
 /// `InvalidArgument`.
 ///
 /// **The kernel vouches for what was granted, never for who connects**: the
-/// connector is duplicated, moved and put in a namespace like any other, and
+/// connector is duplicated and moved like any other, and
 /// every copy stamps the same bytes.
 pub fn port_mint(acceptor: RawHandle, badge: &[u8]) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_PORT_MINT, acceptor.0 as u64, badge.as_ptr() as u64, badge.len() as u64, 0))
@@ -2377,6 +2193,10 @@ pub fn log_last_words(syscap: RawHandle, text: &[u8]) -> Result<(), SyscallError
 /// `buf` is a request for the roster, and the ordinary handle rules apply to
 /// `syscap`: a capability without the bit is refused with a word, and a handle
 /// the caller does not hold ends it.
+///
+/// A roster the kernel lays out is charged to the caller's job while it is
+/// copied out; a job without the room is answered 0. A header alone is never
+/// refused for memory.
 ///
 /// [`HANDLE_INVALID`]: crate::handle::HANDLE_INVALID
 pub fn sysinfo(syscap: RawHandle, buf: &mut [u8]) -> usize {

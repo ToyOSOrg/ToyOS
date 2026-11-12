@@ -25,9 +25,9 @@ use toyos::audio::{
 };
 use toyos::ipc::IpcError;
 use toyos::shm::SharedMemory;
-use toyos::{namespace, port};
+use toyos::endow::{service_label, SVC_PREFIX};
+use toyos::port;
 use toyos_abi::audio::AudioSlotHeader;
-use toyos_abi::syscall::SVC_LABEL;
 
 const SELF: &str = "/system/bin/test_rs_cpal_drop_unreleased";
 
@@ -65,13 +65,11 @@ fn main() {
 
 fn serve() {
     let (acceptor, connector) = port::create().expect("a port");
-    let names = namespace::build()
-        .add("soundserver", &connector)
-        .finish()
-        .expect("a namespace naming this binary soundserver");
+    // The client is given this binary as its soundserver, and no other.
     let mut child = Command::new(SELF)
         .arg("client")
-        .endow(SVC_LABEL, names.into())
+        .services_only(&[])
+        .endow(&service_label(SVC_PREFIX, "soundserver"), connector.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

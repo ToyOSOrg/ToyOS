@@ -13,7 +13,7 @@
 //! reads every completion the server posted before it hung up, answers what
 //! was still on the wire [`Outcome::Refused`], and says the session ended; the
 //! caller decides when to [`Session::reconnect`], which reaches the service
-//! through the same name, opens the same partition, and issues every
+//! through the same connector, opens the same partition, and issues every
 //! acknowledged write no flush had covered again before anything else.
 //! Nothing here restarts a service: whoever holds its claim does.
 //!
@@ -33,8 +33,10 @@
 use std::collections::BTreeMap;
 
 use toyos::ipc::{Connection, Frame, FrameRx};
-use toyos::namespace::Namespace;
+use toyos::port::Connector;
+use toyos::{AsHandle, BorrowedHandle};
 use toyos::poller::READABLE;
+use toyos_gpt::Guid;
 use toyos::wake::{Bell, Waker};
 use toyos_abi::syscall::SyscallError;
 use toyos_blockdev::SharedBlock;
@@ -136,8 +138,7 @@ enum Pending {
 }
 
 pub struct Session {
-    names: Namespace,
-    service: String,
+    service: Connector,
     guid: [u8; wire::GUID_BYTES],
     region: Region,
     /// The open session's doorbells, `None` once it ended.
@@ -153,17 +154,17 @@ pub struct Session {
 }
 
 impl Session {
-    /// Open the partition whose unique GUID is `guid` through the service
-    /// `names` calls `service`.
-    pub fn open(names: Namespace, service: &str, guid: [u8; wire::GUID_BYTES]) -> Result<Self, Error> {
+    /// Open the partition whose unique GUID is `guid` through `service`, a
+    /// connector to the block service, which the session connects through
+    /// again after the service ends.
+    pub fn open(service: Connector, guid: [u8; wire::GUID_BYTES]) -> Result<Self, Error> {
         let region = Region::create().map_err(Error::Kernel)?;
         let ends = ClientEnds::new(region.words());
-        let (bells, opened) = handshake(&names, service, guid, &region)?;
+        let (bells, opened) = handshake(service.as_handle(), guid, &region)?;
         let mut client = Client::new(KEPT_BLOCKS);
         client.session_started();
         Ok(Self {
-            names,
-            service: service.to_string(),
+            service,
             guid,
             region,
             bells: Some(bells),
@@ -273,10 +274,10 @@ impl Session {
             let now = toyos_abi::clock::nanos_since_boot();
             match self.exchange(now, &mut waited.answers) {
                 Next::End(Ending::Violation(violation)) => {
-                    println!("{}: the session's server broke the protocol ({violation:?})", self.service);
+                    println!("diskserver: the session on {}: its server broke the protocol ({violation:?})", Guid(self.guid));
                 }
                 Next::End(Ending::Silence) => {
-                    println!("{}: the session's server answered nothing in {} s", self.service, SILENCE_BOUND_NS / 1_000_000_000);
+                    println!("diskserver: the session on {}: its server answered nothing in {} s", Guid(self.guid), SILENCE_BOUND_NS / 1_000_000_000);
                 }
                 Next::Wait(patience) if block => {
                     let bells = self.bells.as_ref().expect("diskserver: the session is open");
@@ -328,19 +329,19 @@ impl Session {
         waited.ended = true;
     }
 
-    /// Open the same partition through the same name over a fresh region,
+    /// Open the same partition through the same connector over a fresh region,
     /// after the session ended; at the next [`Self::wait`] the writes the
     /// client holds go out again, first. Refused [`Refusal::Held`] while the
     /// server still holds a request of the session that ended.
     ///
     /// Blocks until the service answers, within [`wire::ANSWER_BOUND_NS`]: a
-    /// name whose server is being restarted queues the connection until the
-    /// new one accepts it.
+    /// connector whose server is being restarted queues the connection until
+    /// the new one accepts it.
     pub fn reconnect(&mut self) -> Result<(), Error> {
         assert!(self.bells.is_none(), "diskserver: reconnect while a session is open");
         let region = Region::create().map_err(Error::Kernel)?;
         let ends = ClientEnds::new(region.words());
-        let (bells, opened) = handshake(&self.names, &self.service, self.guid, &region)?;
+        let (bells, opened) = handshake(self.service.as_handle(), self.guid, &region)?;
         if opened != self.opened {
             return Err(Error::Protocol);
         }
@@ -355,9 +356,18 @@ fn transfer_blocks(blocks: usize) -> u32 {
     blocks as u32
 }
 
-pub(crate) fn connect(names: &Namespace, service: &str) -> Result<Connection, Error> {
-    names.open(service).map_err(|e| match e {
-        SyscallError::NotFound => Error::NotHeld,
+/// A connector of the caller's own to the block service this process holds
+/// as the service `name`: [`Error::NotHeld`] for a name it was not given.
+pub fn held(name: &str) -> Result<Connector, Error> {
+    let copy = toyos::endow::connector(name).ok_or(Error::NotHeld)?.try_clone_to_owned().map_err(Error::Kernel)?;
+    // SAFETY: a duplicate of a connector this process was endowed or adopted
+    // as a service, which is its parent's word or its own.
+    Ok(unsafe { <Connector as toyos::endow::FromHandle>::from_handle(copy) })
+}
+
+pub(crate) fn connect(service: BorrowedHandle<'_>) -> Result<Connection, Error> {
+    toyos::port::connect(service).map_err(|e| match e {
+        SyscallError::PermissionDenied => Error::NotHeld,
         e => Error::Kernel(e),
     })
 }
@@ -385,13 +395,8 @@ struct Bells {
 /// Connect, send the region with an open, and wait for the answer, which
 /// carries the session's doorbells: the session is theirs from here, and the
 /// connection goes.
-fn handshake(
-    names: &Namespace,
-    service: &str,
-    guid: [u8; wire::GUID_BYTES],
-    region: &Region,
-) -> Result<(Bells, Opened), Error> {
-    let conn = connect(names, service)?;
+fn handshake(service: BorrowedHandle<'_>, guid: [u8; wire::GUID_BYTES], region: &Region) -> Result<(Bells, Opened), Error> {
+    let conn = connect(service)?;
     conn.send_bytes_with(wire::MSG_OPEN, &guid, [region.share().map_err(Error::Kernel)?]).map_err(|_| Error::Ended)?;
     let mut rx = Box::new(FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
     let frame = answer(&conn, &mut rx)?;
@@ -408,10 +413,11 @@ fn handshake(
     }
 }
 
-/// Every partition the service `names` calls `service` serves: what a client
-/// that finds its partition by type asks before it opens one.
-pub fn list(names: &Namespace, service: &str) -> Result<Vec<wire::Listed>, Error> {
-    let conn = connect(names, service)?;
+/// Every partition the block service serves through `service`, a connector
+/// to it: what a client that finds its partition by type asks before it
+/// opens one.
+pub fn list(service: BorrowedHandle<'_>) -> Result<Vec<wire::Listed>, Error> {
+    let conn = connect(service)?;
     conn.signal(wire::MSG_LIST).map_err(|_| Error::Ended)?;
     let mut rx = Box::new(FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
     let frame = answer(&conn, &mut rx)?;

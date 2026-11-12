@@ -44,11 +44,13 @@ pub(super) struct Directories {
 }
 
 impl Directories {
-    pub(super) fn new(names: impl IntoIterator<Item = String>) -> Self {
+    /// The directories the services named `names` make: each directory
+    /// capability's and its ancestors'.
+    pub(super) fn new<N: AsRef<str>>(names: impl IntoIterator<Item = N>) -> Self {
         let mut paths = BTreeSet::from([String::from("/")]);
         let mut held = BTreeSet::new();
         for name in names {
-            let Some(path) = name.strip_prefix(crate::fs::CAPABILITY_PREFIX) else { continue };
+            let Some(path) = name.as_ref().strip_prefix(crate::fs::CAPABILITY_PREFIX) else { continue };
             if !path.starts_with('/') || super::absolute("/", path) != path {
                 continue;
             }
@@ -96,7 +98,7 @@ mod tests {
 
     #[test]
     fn only_held_filesystem_names_create_directories() {
-        let dirs = Directories::new(["fs:/home/jan", "fs:/tmp", "fs:/home/jan/Games", "net", "fs:relative", "fs:/bad/../name", "fs:/a/b/c/d/e"].map(String::from));
+        let dirs = Directories::new(["fs:/home/jan", "fs:/tmp", "fs:/home/jan/Games", "net", "fs:relative", "fs:/bad/../name", "fs:/a/b/c/d/e"]);
         assert_eq!(dirs.children("/").map(|(s, _)| s).collect::<Vec<_>>(), ["home", "tmp"]);
         assert_eq!(dirs.children("/home").map(|(s, _)| s).collect::<Vec<_>>(), ["jan"]);
         assert!(dirs.node("/home/jane").is_none());
@@ -105,8 +107,8 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_namespace_has_an_empty_root() {
-        let dirs = Directories::new([]);
+    fn a_process_with_no_service_has_an_empty_root() {
+        let dirs = Directories::new([""; 0]);
         assert_eq!(dirs.node("/"), Some(1));
         assert_eq!(dirs.children("/").count(), 0);
     }
@@ -114,7 +116,7 @@ mod tests {
     /// `abs` routed in a view holding exactly `names`, each capability
     /// answered by its own prefix.
     fn routed(names: &[&str], abs: &str) -> Result<Routed<String>, Error> {
-        let dirs = Directories::new(names.iter().map(|n| String::from(*n)));
+        let dirs = Directories::new(names);
         route(abs, &dirs, |prefix| {
             let name = alloc::format!("{}{prefix}", fs::CAPABILITY_PREFIX);
             assert!(names.contains(&name.as_str()), "asked for {name}, which the view does not hold");

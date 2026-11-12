@@ -6,7 +6,7 @@ starting authority from it and from nothing else, and the build refuses a
 manifest that contradicts itself, such as two programs claiming one device.
 
 ```text
-   manifest row ──> supervisor ──> spawn with:  namespace (services it receives)
+   manifest row ──> supervisor ──> spawn with:  connectors (services it receives)
                                                 acceptors (services it serves)
                                                 view (directories)
                                                 device claims

@@ -15,7 +15,6 @@
 use core::sync::atomic::Ordering;
 
 use toyos::ipc::Connection;
-use toyos::namespace;
 use toyos::port::{self, Acceptor, Connector};
 use toyos::AsHandle;
 use toyos_abi::handle::Rights;
@@ -24,8 +23,6 @@ use toyos_abi::inbox::{
 };
 use toyos_abi::syscall::{self, SyscallError, MAX_BADGE};
 use toyos_abi::RawHandle;
-
-const NAME: &str = "port";
 
 fn main() {
     let (acceptor, _) = port::create().expect("a port");
@@ -46,8 +43,7 @@ fn main() {
             Err(SyscallError::PermissionDenied),
             "another port's acceptor read this port's stamp"
         );
-        let names = namespace::build().add(NAME, &minted).finish().expect("a namespace");
-        let _client = names.open(NAME).expect("connect");
+        let _client = minted.connect().expect("connect");
         let server = accept_through_inbox(&acceptor);
         let len = syscall::port_badge(acceptor.as_handle().raw(), server, &mut out);
         assert_eq!(len.map(|len| &out[..len]), Ok(badge), "an inbox's accept lost the stamp");
@@ -119,8 +115,7 @@ fn accept_through_inbox(acceptor: &Acceptor) -> RawHandle {
 
 /// A connection through `connector`, and its end accepted on `acceptor`.
 fn connect(acceptor: &Acceptor, connector: &Connector) -> (Connection, Connection) {
-    let names = namespace::build().add(NAME, connector).finish().expect("a namespace");
-    let client = names.open(NAME).expect("connect");
+    let client = connector.connect().expect("connect");
     let server = acceptor.accept().expect("accept");
     (client, server)
 }

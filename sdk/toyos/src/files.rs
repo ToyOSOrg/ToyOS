@@ -1,5 +1,5 @@
 //! Files and directories through the capabilities a process holds, named
-//! `fs:<directory>` in its namespace. Absolute paths and paths from the
+//! `fs:<directory>` among its services. Absolute paths and paths from the
 //! working directory go to the deepest held directory they lie in, at most
 //! [`MAX_CAPABILITY_DEPTH`] components deep. A relative path from a
 //! descriptor stays on that directory's server. Absolute symlinks return
@@ -10,7 +10,7 @@
 //! Kernel objects still support generic reads, writes and metadata queries.
 
 #[cfg(any(feature = "fd-table", test))]
-mod namespace;
+mod routing;
 
 use alloc::string::String;
 use alloc::vec::Vec;

@@ -17,7 +17,7 @@
 #[path = "../image.rs"]
 mod image;
 
-use toyos_abi::syscall::{self, debug_action, SpawnEndow, SpawnArgs, SyscallError};
+use toyos_abi::syscall::{self, debug_action, SpawnArgs, SyscallError};
 use toyos_abi::handle::TransferEntry;
 use toyos_abi::RawHandle;
 use toyos_abi::end::End;
@@ -44,8 +44,8 @@ fn main() {
 fn test() {
     // Laid out once, before the table is filled: an image and a startup block take handles.
     let own = image::image_of(SELF_PATH);
-    let laid = |role: &str| image::laid(&own, &format!("{SELF_PATH}\0{role}"));
-    let (exit, speak) = (laid("exit"), laid("speak"));
+    let laid = |role: &str, names: &[&str]| image::laid_naming(&own, &format!("{SELF_PATH}\0{role}"), names);
+    let (exit, speak) = (laid("exit", &[]), laid("speak", &[STDOUT]));
     hold_the_next_spawn();
     let child = spawn(&exit, None).expect("a spawn whose child ended inside it");
     assert_eq!(
@@ -97,12 +97,13 @@ fn hold_the_next_spawn() {
     );
 }
 
-/// `SYS_SPAWN` of `laid`, this binary in one role, endowed `stdout` as its
-/// descriptor 1, which moves only on a spawn that happens.
+/// What a child laid out to speak calls its one endowment: its descriptor 1.
+const STDOUT: &str = "fd:1";
+
+/// `SYS_SPAWN` of `laid`, this binary in one role, endowed `stdout`, which
+/// moves only on a spawn that happens.
 fn spawn(laid: &image::Laid, stdout: Option<RawHandle>) -> Result<RawHandle, SyscallError> {
-    const LABEL: &str = "fd:1";
-    let endow: Vec<SpawnEndow> =
-        stdout.into_iter().map(|handle| SpawnEndow { label_off: 0, label_len: LABEL.len() as u32, moved: TransferEntry::unchanged(handle) }).collect();
+    let endow: Vec<TransferEntry> = stdout.into_iter().map(TransferEntry::unchanged).collect();
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,
@@ -110,8 +111,6 @@ fn spawn(laid: &image::Laid, stdout: Option<RawHandle>) -> Result<RawHandle, Sys
         name_len: NAME.len() as u64,
         endow_ptr: endow.as_ptr() as u64,
         endow_count: endow.len() as u64,
-        labels_ptr: LABEL.as_ptr() as u64,
-        labels_len: LABEL.len() as u64,
         maps_ptr: laid.maps().as_ptr() as u64,
         maps_count: laid.maps().len() as u64,
         entry: laid.entry,
@@ -119,6 +118,7 @@ fn spawn(laid: &image::Laid, stdout: Option<RawHandle>) -> Result<RawHandle, Sys
         build_id_ptr: laid.build_id().as_ptr() as u64,
         build_id_len: laid.build_id().len() as u64,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
+        job: u64::from(toyos_abi::HANDLE_INVALID.0),
         pager: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
     // SAFETY: every pointer names a buffer of this frame that outlives the call.

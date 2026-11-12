@@ -30,8 +30,6 @@ fn spawn(maps: &[SpawnMap], entry: u64, image_base: u64) -> Result<RawHandle, Sy
             name_len: NAME.len() as u64,
             endow_ptr: 0,
             endow_count: 0,
-            labels_ptr: 0,
-            labels_len: 0,
             maps_ptr: maps.as_ptr() as u64,
             maps_count: maps.len() as u64,
             entry,
@@ -39,6 +37,7 @@ fn spawn(maps: &[SpawnMap], entry: u64, image_base: u64) -> Result<RawHandle, Sy
             build_id_ptr: 0,
             build_id_len: 0,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            job: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }

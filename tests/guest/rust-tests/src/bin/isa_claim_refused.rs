@@ -7,7 +7,8 @@
 use toyos::endow::Endowments;
 use toyos::syscap::SysCap;
 use toyos::Device;
-use toyos_abi::syscall::{IsaId, SyscallError, SYSCAP_LABEL};
+use toyos_abi::syscall::{IsaId, SyscallError};
+use toyos::endow::SYSCAP_LABEL;
 
 fn main() {
     let cap: SysCap = Endowments::get()

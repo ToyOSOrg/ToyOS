@@ -17,7 +17,7 @@
 use std::io::Write;
 
 use toyos::endow::Endowments;
-use toyos::namespace::Namespace;
+use toyos::port::Connector;
 use toyos_manifest::grants::{self, Access, Folder, Request};
 
 const USAGE: &str = "usage: grants list | add <package> <folder> [read-only] | revoke <package>";
@@ -53,10 +53,10 @@ fn request(args: &[String]) -> Result<Request, &'static str> {
 
 /// The supervisor's answer: whether it was done, and its text.
 fn ask(request: &Request) -> (bool, String) {
-    let Some(held) = Endowments::get().take::<Namespace>(grants::PORT) else {
+    let Some(held) = Endowments::get().take::<Connector>(grants::PORT) else {
         return (false, "this program holds no grants connector".to_string());
     };
-    let supervisor = match held.open(grants::PORT) {
+    let supervisor = match held.connect() {
         Ok(conn) => conn,
         Err(e) => return (false, format!("the supervisor's grants port did not answer: {e:?}")),
     };

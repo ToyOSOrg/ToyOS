@@ -29,8 +29,8 @@ static JOB: Mutex<Option<Process>> = Mutex::new(None);
 /// connector, which each job is handed a copy of, and the launcher of the
 /// session it opens for its jobs, which a login authority's launches are in.
 struct Login {
-    connector: toyos::namespace::Namespace,
-    session: toyos::namespace::Namespace,
+    connector: toyos::port::Connector,
+    session: toyos::port::Connector,
     _control: toyos::ipc::Connection,
 }
 
@@ -39,7 +39,7 @@ static LOGIN: std::sync::OnceLock<Option<Login>> = std::sync::OnceLock::new();
 fn login() -> Option<&'static Login> {
     LOGIN
         .get_or_init(|| {
-            let connector = Endowments::get().take::<toyos::namespace::Namespace>(LOGIN_PORT)?;
+            let connector = Endowments::get().take::<toyos::port::Connector>(LOGIN_PORT)?;
             match toyos_session::open(&connector) {
                 Ok((session, control)) => Some(Login { connector, session, _control: control }),
                 Err(why) => panic!("test-runner: a login authority with no session for its jobs: {why}"),
@@ -80,8 +80,8 @@ fn main() {
     // **The test estate's authority, and the one place least authority is not
     // enforced.** The guest binaries are not `[programs]` keys, so no manifest
     // row can name what any of them holds: a test binary holds what test-runner
-    // holds. The namespace
-    // travels by inheritance; this capability is handed over explicitly, as a
+    // holds. Its services
+    // travel by inheritance; this capability is handed over explicitly, as a
     // duplicate rather than the cap itself, because one boot runs several
     // binaries that each need the keyboard and a device claim moves.
     let cap: Option<SysCap> = Endowments::get().take(SYSCAP_LABEL);
@@ -261,7 +261,7 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
     // **A refused dup is an answer and not a failure — but only one
     // refusal is.** `duplicate` needs `DUP` on the capability, which a
     // manifest grants by name, so `PermissionDenied` says this cap is one
-    // the program holds *for itself* and the child gets the namespace and
+    // the program holds *for itself* and the child gets the services and
     // no capability at all. `logread` is exactly such a cap, as `realtime`
     // is: the estate does not hand either down. The `expect` here
     // assumed every cap was dup-able and took the whole boot down on the

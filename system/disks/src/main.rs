@@ -18,6 +18,7 @@
 use toyos_blockring::wire::{Designated, DiskHead, SlotLine};
 use toyos_gpt::Guid;
 use toyos_manifest::authorize::Authorization;
+use toyos::AsHandle;
 
 mod format;
 
@@ -65,11 +66,11 @@ fn unauthorized(authorization: Authorization) -> i32 {
 }
 
 fn list() -> i32 {
-    let Some(names) = toyos::endow::namespace() else {
+    let Ok(service) = diskserver::held(Authorization::Tables.name()) else {
         return unauthorized(Authorization::Tables);
     };
-    let service = Authorization::Tables.name();
-    let listed = match diskserver::list(names, service) {
+    let service = service.as_handle();
+    let listed = match diskserver::list(service) {
         Ok(listed) => listed,
         Err(diskserver::Error::NotHeld) => return unauthorized(Authorization::Tables),
         Err(why) => {
@@ -86,7 +87,7 @@ fn list() -> i32 {
     }
     let mut code = 0;
     for disk in disks {
-        match diskserver::tables::describe(names, service, disk) {
+        match diskserver::tables::describe(service, disk) {
             Ok((head, slots)) => print!("{}", describe(disk, &head, &slots)),
             Err(why) => {
                 println!("disk {disk}: not described: {why:?}");
@@ -98,10 +99,10 @@ fn list() -> i32 {
 }
 
 fn designate(commit: bool) -> i32 {
-    let Some(names) = toyos::endow::namespace() else {
+    let Ok(service) = diskserver::held(Authorization::DesignateData.name()) else {
         return unauthorized(Authorization::DesignateData);
     };
-    match diskserver::tables::designate(names, Authorization::DesignateData.name(), commit) {
+    match diskserver::tables::designate(service.as_handle(), commit) {
         Err(diskserver::Error::NotHeld) => unauthorized(Authorization::DesignateData),
         Ok(done) => {
             println!("{}", designated(&done));
@@ -126,11 +127,10 @@ impl toyos_crypto::Random for OsRandom {
 fn format(commit: bool) -> i32 {
     use toyos_blockdev::{BlockDev, block_on};
     let authorization = Authorization::FormatData;
-    let Some(names) = toyos::endow::namespace() else {
+    let Ok(service) = diskserver::held(authorization.name()) else {
         return unauthorized(authorization);
     };
-    let service = authorization.name();
-    let listed = match diskserver::list(names, service) {
+    let listed = match diskserver::list(service.as_handle()) {
         Ok(listed) => listed,
         Err(diskserver::Error::NotHeld) => return unauthorized(authorization),
         Err(why) => return refuse(&format!("disks: DATA was not listed: {why:?}")),
@@ -139,16 +139,8 @@ fn format(commit: bool) -> i32 {
         Ok(target) => target,
         Err(why) => return refuse(&format!("disks: {why}; nothing was written")),
     };
-    let own = match toyos::namespace::build().keep(names, &[service]).finish() {
-        Ok(own) => own,
-        Err(why) => {
-            return refuse(&format!(
-                "disks: the formatting capability could not be kept: {why:?}"
-            ));
-        }
-    };
     // The block service holds the partition exclusively for this session.
-    let session = match diskserver::Session::open(own, service, target.unique) {
+    let session = match diskserver::Session::open(service, target.unique) {
         Ok(session) => session,
         Err(why) => {
             return refuse(&format!(

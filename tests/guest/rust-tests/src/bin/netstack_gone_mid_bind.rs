@@ -19,7 +19,7 @@
 //! Three arms, and they are three different syscalls answering the same fact:
 //!
 //! 1. **Gone before the connect.** The port closes first, so
-//!    `SYS_NAMESPACE_OPEN` refuses — `SyscallError::Gone`. This is the arm that
+//!    `SYS_CONNECT` refuses — `SyscallError::Gone`. This is the arm that
 //!    already worked, and it is asserted through `std::net::TcpListener` as
 //!    well as through the SDK, because `ErrorKind::NotConnected` is the literal
 //!    thing `/system/bin/sshserver` matches on.
@@ -51,10 +51,10 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
-use toyos::endow::EndowError;
+use toyos::endow::{service_label, EndowError, SVC_PREFIX};
 use toyos::net::{BoundResponse, MsgType, NetError, NetstackConn, TcpConnectRequest, TcpListenRequest, TcpOptions};
-use toyos::{namespace, port, AsHandle};
-use toyos_abi::syscall::{self, SyscallError, SVC_LABEL};
+use toyos::{port, AsHandle};
+use toyos_abi::syscall::{self, SyscallError};
 
 const SELF_PATH: &str = "/system/bin/test_rs_netstack_gone_mid_bind";
 
@@ -83,7 +83,7 @@ fn test() {
 }
 
 /// Arm 1. The port is closed before the child exists, so its very first
-/// `SYS_NAMESPACE_OPEN` is refused.
+/// `SYS_CONNECT` is refused.
 fn arm_already_gone() {
     let (acceptor, connector) = port::create().expect("a port");
     // The whole of a server leaving: there is no unregister and nothing to tell
@@ -120,12 +120,13 @@ fn arm_mid_flight(role: &str, what: &str) {
     println!("  mid-flight: {what} says the peer is gone");
 }
 
-/// Spawn `role` with a namespace whose only name is this test's own port.
+/// Spawn `role` holding one service, this test's own port.
 fn spawn(connector: &port::Connector, role: &str) -> (Child, BufReader<ChildStdout>) {
-    let ns = namespace::build().add(SERVICE, connector).finish().expect("a namespace");
+    let connector = connector.duplicate().expect("a copy of the connector");
     let mut child = Command::new(SELF_PATH)
         .arg(role)
-        .endow(SVC_LABEL, ns.into())
+        .services_only(&[])
+        .endow(&service_label(SVC_PREFIX, SERVICE), connector.into())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("spawn {role}: {e}"));

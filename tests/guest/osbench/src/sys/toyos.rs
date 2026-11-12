@@ -143,7 +143,6 @@ pub mod ipc {
     use toyos::{OwnedHandle, Pipe};
 
     const LABEL: &str = "osbench-ipc";
-    const NAME: &str = "osbench";
     const FRAME: usize = MAX_FRAME_LEN as usize;
 
     /// One end of a connection. A message longer than one frame
@@ -212,8 +211,7 @@ pub mod ipc {
     /// connection to it.
     pub fn start_server(exe: &std::path::Path) -> io::Result<(Child, Peer)> {
         let (acceptor, connector) = port::create().map_err(|e| failed("port", e))?;
-        let names = toyos::namespace::build().add(NAME, &connector).finish().map_err(|e| failed("namespace", e))?;
-        let conn = names.open(NAME).map_err(|e| failed("connect", e))?;
+        let conn = connector.connect().map_err(|e| failed("connect", e))?;
         let child = Command::new(exe)
             .arg("ipc-serve")
             .endow(LABEL, acceptor.into())
@@ -233,19 +231,18 @@ pub mod ipc {
     /// connection's setup alone.
     pub struct Rendezvous {
         acceptor: Acceptor,
-        names: toyos::namespace::Namespace,
+        connector: port::Connector,
     }
 
     impl Rendezvous {
         pub fn new() -> io::Result<Self> {
             let (acceptor, connector) = port::create().map_err(|e| failed("port", e))?;
-            let names = toyos::namespace::build().add(NAME, &connector).finish().map_err(|e| failed("namespace", e))?;
-            Ok(Self { acceptor, names })
+            Ok(Self { acceptor, connector })
         }
 
         /// Open a connection and accept it; both ends close on return.
         pub fn connect_accept(&self) -> io::Result<()> {
-            let client = self.names.open(NAME).map_err(|e| failed("connect", e))?;
+            let client = self.connector.connect().map_err(|e| failed("connect", e))?;
             let server = self.acceptor.accept().map_err(|e| failed("accept", e))?;
             drop((client, server));
             Ok(())
@@ -641,8 +638,7 @@ pub mod direct {
     /// `dir`'s capability, connected: `None` where no file server serves it,
     /// and why where its server would not take this second connection.
     pub fn connect(dir: &str) -> Result<Option<Dir>, String> {
-        let Some(names) = toyos::endow::namespace() else { return Ok(None) };
-        match Dir::connect(names, &format!("{}{dir}", toyos::fs::CAPABILITY_PREFIX)) {
+        match Dir::named(&format!("{}{dir}", toyos::fs::CAPABILITY_PREFIX)) {
             Ok(d) => Ok(Some(d)),
             Err(Error::NotHeld) => Ok(None),
             Err(e) => Err(format!("{dir}'s file server would not take a second connection: {e:?}")),

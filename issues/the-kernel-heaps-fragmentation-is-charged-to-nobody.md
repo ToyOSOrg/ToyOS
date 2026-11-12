@@ -15,8 +15,8 @@ size. So a process that keeps its charged total constant while it changes the
 sizes of what it holds forces the heap to grow with no new charge:
 
 - with every frame taken, it frees every other small name it made on `/tmp`
-  and makes larger ones in their place, or does the same with port badges or
-  namespaces, whose sizes it chooses;
+  and makes larger ones in their place, or does the same with port badges,
+  whose sizes it chooses;
 - that growth takes a spare superframe while one is left, then a kept one;
 - past the kept superframes, `alloc` answers null and the kernel panics,
   naming the allocation.

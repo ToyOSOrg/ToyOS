@@ -365,7 +365,7 @@ pub fn set_inheritable(fd: Fd, inheritable: bool) -> Result<(), Error> {
 /// in canonical decimal, and its kind: `None` for any other label, and for a
 /// number past the table.
 pub fn endowed_fd(label: &str) -> Option<(Fd, Kind)> {
-    let rest = label.strip_prefix(toyos_abi::syscall::FD_PREFIX)?;
+    let rest = label.strip_prefix(crate::endow::FD_PREFIX)?;
     let (digits, kind) = match rest.split_once(':') {
         None => (rest, Kind::Handle),
         Some((digits, "exported")) => (digits, Kind::Exported),

@@ -29,7 +29,7 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use toyos::endow::Endowments;
-use toyos::namespace::Namespace;
+use toyos::port::Connector;
 use toyos_swap::{Refusal, Request};
 
 fn main() {
@@ -103,10 +103,10 @@ fn take(args: &[String]) -> Result<Asked, Refusal> {
 /// program holds until the go where the supervisor accepted.
 fn ask(asked: &Asked) -> (Answer, Option<toyos::ipc::Connection>) {
     let unasked = |why: String| (Answer::Unasked(why), None);
-    let Some(held) = Endowments::get().take::<Namespace>(toyos_swap::LABEL) else {
+    let Some(held) = Endowments::get().take::<Connector>(toyos_swap::LABEL) else {
         return unasked(format!("{}; run it with `launch swap`", Refusal::NoAuthority));
     };
-    let supervisor = match held.open(toyos_swap::PORT) {
+    let supervisor = match held.connect() {
         Ok(conn) => conn,
         Err(e) => return unasked(format!("the supervisor's swap port did not answer: {e:?}")),
     };

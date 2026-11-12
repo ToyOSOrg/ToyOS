@@ -1,4 +1,4 @@
-//! Files through the process's directory capabilities and namespace ancestors.
+//! Files through the process's directory capabilities and their read-only ancestors.
 //! `toyos::files` owns routing, connections and descriptors shared with libc.
 
 use toyos::files::{self, At, Open};

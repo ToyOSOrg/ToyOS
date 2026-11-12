@@ -29,8 +29,9 @@ use std::os::toyos::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
 use toyos::shm::SharedMemory;
-use toyos::{namespace, port, AsHandle};
-use toyos_abi::syscall::{self, SVC_LABEL};
+use toyos::endow::{service_label, SVC_PREFIX};
+use toyos::{port, AsHandle};
+use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 use std::os::toyos::process::ExitStatusExt;
 use toyos_abi::end::{End, Fault};
@@ -64,13 +65,10 @@ fn owner() {
     // The peer that is *given* the region. It holds one connector and this is
     // where it points; it never names a number, because being sent the handle
     // is the whole of how it gets there.
-    let ns = namespace::build()
-        .add(SERVICE, &connector)
-        .finish()
-        .expect("the kernel refused a namespace");
     let mut invited = Command::new(SELF_PATH)
         .arg("invited")
-        .endow(SVC_LABEL, ns.into())
+        .services_only(&[])
+        .endow(&service_label(SVC_PREFIX, SERVICE), connector.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the invited peer");

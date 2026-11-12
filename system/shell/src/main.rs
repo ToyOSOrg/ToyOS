@@ -4,11 +4,14 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::os::toyos::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
-use toyos::port::Connector;
 use toyos::quit::Reason;
 use toyos::surface::Foreground;
+
+mod quit;
+
+use quit::Asked;
 
 /// This program's own folder, whose `State` keeps the history: `$HOME` itself
 /// once the supervisor makes that folder the shell's `HOME`, and `$HOME/Apps/shell`
@@ -18,78 +21,57 @@ const HISTORY_MAX: usize = 200;
 
 static mut LAST_STATUS: i32 = 0;
 
-/// What a quit asked of this shell. **A shell relays nothing**: a quit of it
+/// What a quit asked this shell. **A shell relays nothing**: a quit of it
 /// reaches what it runs as well, so an interrupt it reads is only noted, and a
-/// hang-up or a terminate ends it once the line it waits for has ended.
-struct Asked {
-    /// Whether it waits for a line now.
-    waiting: bool,
-    /// An interrupt read while it waited.
-    interrupted: bool,
-    /// A hang-up or a terminate read while it waited.
-    ended_by: Option<Reason>,
-}
-
-static ASKED: Mutex<Asked> = Mutex::new(Asked { waiting: false, interrupted: false, ended_by: None });
+/// hang-up or a terminate ends it once the line it waits for has ended. Its
+/// notice is read only while this is held ([`reason`]).
+static ASKED: Mutex<Asked> = Mutex::new(Asked::new());
 
 /// The line it waits for, handed to the surface above it for Ctrl+C.
 static FOREGROUND: Mutex<Option<Foreground>> = Mutex::new(None);
 
-/// Whether it runs one `-c` command and ends, which an interrupt of its line
-/// ends once the line has.
-static mut ONE_COMMAND: bool = false;
-
-/// The exit code a quit's reason ends it with: 128 plus the signal's number,
-/// as a shell reads one.
-fn code_of(reason: Reason) -> i32 {
-    128 + match reason {
-        Reason::Interrupt => 2,
-        Reason::HangUp => 1,
-        Reason::Terminate => 15,
-    }
+/// The next reason this shell's notice holds, or none: read under [`ASKED`]
+/// alone.
+fn reason() -> Option<Reason> {
+    toyos::quit::notice().try_read().expect("shell: its own notice refused a read")
 }
 
 /// Listen to this shell's notice, before anything is spawned, on a thread of
-/// its own.
+/// its own, which a reason wakes and which takes it under [`ASKED`].
 fn listen() {
-    let Some(notice) = toyos::quit::notice() else { return };
+    let notice = toyos::quit::notice();
     if notice.listen().is_err() {
         return;
     }
-    std::thread::spawn(move || {
-        while let Ok(reason) = notice.read() {
-            let mut asked = ASKED.lock().unwrap();
-            match reason {
-                Reason::Interrupt => asked.interrupted |= asked.waiting,
-                _ if !asked.waiting => std::process::exit(code_of(reason)),
-                _ => asked.ended_by = Some(reason),
-            }
+    std::thread::spawn(move || loop {
+        let woken = toyos::poller::wait_one(notice, toyos::poller::READABLE, u64::MAX);
+        woken.expect("shell: its own notice refused a wait");
+        if let Some(code) = ASKED.lock().unwrap().take(reason) {
+            std::process::exit(code);
         }
     });
+}
+
+/// `child` has landed: a `-c` shell asks it to quit when an interrupt reached
+/// the shell first, which a child that landed after it never heard.
+fn landed(child: &Child) {
+    if ASKED.lock().unwrap().landed(reason) {
+        // `Ok` for one already ended; a spawn's handle carries `MANAGE`.
+        let quit = toyos_abi::syscall::process_quit(toyos::AsHandle::as_handle(child).raw(), Reason::Interrupt);
+        quit.expect("shell: a child's handle refused the quit its spawn gave it");
+    }
 }
 
 /// It waits for `line` from now: an interactive shell hands it to the
 /// surface. A `-c` shell is itself a process of the line that started it, so
 /// a quit of that line reaches what it runs already, and it hands nothing.
-///
-/// A `-c` shell interrupted before its line was whole ends that line itself:
-/// a child spawned after the quit read its tree was not asked.
 fn waiting_for(line: &[&Child]) {
-    if unsafe { ONE_COMMAND } {
-        if ASKED.lock().unwrap().interrupted {
-            for child in line {
-                // `Ok` for one already ended; a spawn's handle carries `MANAGE`.
-                let quit = toyos_abi::syscall::process_quit(toyos::AsHandle::as_handle(child).raw(), Reason::Interrupt);
-                quit.expect("shell: a child's handle refused the quit its spawn gave it");
-            }
-        }
+    if ASKED.lock().unwrap().is_one_command() {
         return;
     }
     let handles: Vec<toyos::BorrowedHandle<'_>> = line.iter().map(toyos::AsHandle::as_handle).collect();
     FOREGROUND.lock().unwrap().get_or_insert_with(Foreground::default).set(&handles);
-    let mut asked = ASKED.lock().unwrap();
-    asked.waiting = true;
-    asked.interrupted = false;
+    ASKED.lock().unwrap().waiting();
 }
 
 /// The line it waited for has ended: the surface is told, and a quit read
@@ -99,13 +81,8 @@ fn waited(status: i32) {
     if let Some(foreground) = FOREGROUND.lock().unwrap().as_mut() {
         foreground.clear();
     }
-    let mut asked = ASKED.lock().unwrap();
-    asked.waiting = unsafe { ONE_COMMAND };
-    if let Some(reason) = asked.ended_by {
-        std::process::exit(code_of(reason));
-    }
-    if core::mem::take(&mut asked.interrupted) && unsafe { ONE_COMMAND } {
-        std::process::exit(status);
+    if let Some(code) = ASKED.lock().unwrap().waited(status, reason) {
+        std::process::exit(code);
     }
 }
 
@@ -113,14 +90,13 @@ fn main() {
     if env::var_os("PATH").is_none() {
         env::set_var("PATH", "/system/bin");
     }
-    listen();
-
     let args: Vec<String> = env::args().collect();
-    if args.len() >= 3 && args[1] == "-c" {
-        unsafe { ONE_COMMAND = true };
-        // Its command is its line from the start: an interrupt is noted
-        // whenever it comes, and ends the shell once what runs has.
-        ASKED.lock().unwrap().waiting = true;
+    let one_command = args.len() >= 3 && args[1] == "-c";
+    if one_command {
+        ASKED.lock().unwrap().one_command();
+    }
+    listen();
+    if one_command {
         let input = args[2..].join(" ");
         execute_line(&input);
         std::process::exit(unsafe { LAST_STATUS });
@@ -680,6 +656,7 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
 
         match command.spawn() {
             Ok(mut child) => {
+                landed(&child);
                 // Write heredoc data to first command's stdin
                 if is_first {
                     if let Some(ref data) = cmd.heredoc {
@@ -776,6 +753,7 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
         // Spawn, write heredoc to stdin, then wait
         match command.spawn() {
             Ok(mut child) => {
+                landed(&child);
                 waiting_for(&[&child]);
                 if let Some(mut stdin) = child.stdin.take() {
                     let _ = stdin.write_all(data.as_bytes());
@@ -804,6 +782,7 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
             return false;
         }
     };
+    landed(&child);
     waiting_for(&[&child]);
     let ok = match child.wait() {
         Ok(status) => {
@@ -817,24 +796,6 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
     };
     waited(unsafe { LAST_STATUS });
     ok
-}
-
-/// The connectors whoever started this shell transferred to it.
-///
-/// **A shell forwards them and holds no opinion about what they are.** The
-/// terminal above gives this shell a `surface`, and `locale` run from here has
-/// `surface` in *its* manifest row — but the supervisor cannot supply a name there is one
-/// port of per terminal, so it travels down the chain instead. Nothing here
-/// knows the name is `surface`, which is what stops a shell from being the
-/// place a second such name has to be added.
-fn provided() -> &'static [(&'static str, Connector)] {
-    static PROVIDED: OnceLock<Vec<(&'static str, Connector)>> = OnceLock::new();
-    PROVIDED.get_or_init(|| {
-        let mut slots: [Option<(&'static str, Connector)>; toyos::launch::MAX_LAUNCH_EXTRAS] =
-            [const { None }; toyos::launch::MAX_LAUNCH_EXTRAS];
-        let n = toyos::endow::provided(&mut slots);
-        slots.into_iter().take(n).flatten().collect()
-    })
 }
 
 /// `detach <program> [args...]`: launch it under the launcher's owner, so it
@@ -870,7 +831,7 @@ fn detach(cmd: &SimpleCommand) -> bool {
 }
 
 /// The program a simple command starts: a helper, which inherits this shell's
-/// namespace and so the surface it was provided; or after `launch`, an
+/// services and so the surface it was provided; or after `launch`, an
 /// independent launch of the program's own row, provided what this shell was.
 /// The status, said, for a `launch` this shell cannot make, as `detach`'s.
 fn build_command(cmd: &SimpleCommand) -> Result<Command, i32> {
@@ -890,9 +851,11 @@ fn build_command(cmd: &SimpleCommand) -> Result<Command, i32> {
     command.args(&args[1..]);
     if launched {
         command.independent();
-        for (name, connector) in provided() {
-            // A duplicate per child: this shell keeps its own for the next one.
-            if let Ok(handed) = connector.duplicate() {
+        // What whoever started this shell provided, forwarded without knowing
+        // what it is: the terminal's `surface` reaches `locale` this way. A
+        // duplicate per child, so this shell keeps its own for the next one.
+        for (name, connector) in toyos::endow::provided() {
+            if let Ok(handed) = connector.try_clone_to_owned() {
                 command.provide(name, handed.into());
             }
         }

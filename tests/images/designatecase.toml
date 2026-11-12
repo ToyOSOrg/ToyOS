@@ -24,8 +24,8 @@ service = true
 devices = ["acpi"]
 receives = ["power"]
 
-# `power` for the reboot that ends the list. Its jobs inherit its namespace,
-# the authorization among it.
+# `power` for the reboot that ends the list. Its jobs inherit its services,
+# the authorization among them.
 [programs.test-runner]
 receives = ["power"]
 authorize = ["designate:data"]

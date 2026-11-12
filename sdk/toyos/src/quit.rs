@@ -52,46 +52,11 @@ impl AsHandle for Notice {
     }
 }
 
-crate::endow::from_handle! { Notice: Notice => Notice }
-
-/// This process's notice, from the kernel under `QUIT_LABEL`. Borrowed, as
-/// [`crate::endow::this_process`] is.
-///
-/// **One copy of this crate takes it**, the one that owns the descriptor
-/// table (`crate::fd`): std's in a Rust program, libc's own in a C program.
-/// Every copy asks that one, so a Rust program that links libc listens to one
-/// notice whichever copy reads it.
-pub fn notice() -> Option<&'static Notice> {
-    static NOTICE: Once<Option<Notice>> = Once::new();
-    NOTICE
-        .get_or_init(|| {
-            // SAFETY: the owner's definition below, which answers a handle the
-            // process holds for good, or none.
-            let raw = RawHandle(unsafe { toyos_quit_notice() });
-            (raw != toyos_abi::HANDLE_INVALID).then_some(Notice(OwnedHandle(raw)))
-        })
-        .as_ref()
-}
-
-extern "C" {
-    fn toyos_quit_notice() -> u32;
-}
-
-/// The copy that owns the notice.
-#[cfg(all(feature = "fd-table", not(test)))]
-mod owner {
-    use super::Notice;
-    use crate::endow::{Endowments, Once};
-
-    /// The notice, taken once from this process's endowments and never
-    /// closed, or `HANDLE_INVALID` for none.
-    #[no_mangle]
-    extern "C" fn toyos_quit_notice() -> u32 {
-        static TAKEN: Once<u32> = Once::new();
-        *TAKEN.get_or_init(|| {
-            Endowments::get()
-                .take::<Notice>(toyos_abi::syscall::QUIT_LABEL)
-                .map_or(toyos_abi::HANDLE_INVALID.0, |notice| notice.0.into_raw().0)
-        })
-    }
+/// This process's notice, which the kernel starts it holding at
+/// [`RawHandle::NOTICE`]. Borrowed, as [`crate::endow::this_process`] is:
+/// every copy of this crate names the one handle, so a Rust program that
+/// links libc listens to one notice whichever copy reads it.
+pub fn notice() -> &'static Notice {
+    static NOTICE: Once<Notice> = Once::new();
+    NOTICE.get_or_init(|| Notice(OwnedHandle(RawHandle::NOTICE)))
 }

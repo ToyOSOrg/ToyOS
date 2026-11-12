@@ -19,17 +19,15 @@
 mod image;
 
 use toyos::ipc::Connection;
-use toyos::{namespace, port, AsHandle};
+use toyos::{port, AsHandle};
 use toyos_abi::end::End;
 use toyos_abi::handle::{ReceivedEntry, Rights, TransferEntry};
-use toyos_abi::syscall::{self, SpawnArgs, SpawnEndow, SyscallError, MAX_TRANSFER_HANDLES};
+use toyos_abi::syscall::{self, SpawnArgs, SyscallError, MAX_TRANSFER_HANDLES};
 use toyos_abi::RawHandle;
 
 const SELF: &str = "/system/bin/test_rs_moved_rights";
 /// The name the child goes by.
 const NAME: &str = "moved_rights";
-/// The label a child finds its endowment under.
-const LABEL: &str = "moved";
 /// The role a spawned copy takes: its exit code is what it found its
 /// endowment to carry ([`code`]).
 const CHILD: &str = "endowed";
@@ -39,8 +37,8 @@ const NO_RIGHTS: u32 = 1 << 30;
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some(CHILD) {
-        let endowed = toyos::endow::Endowments::get().take::<toyos::OwnedHandle>(LABEL).expect("the endowment");
-        std::process::exit(code(carries(&Pair::new(), endowed.into_raw())));
+        // A raw spawn names nothing: the endowment is the first handle after the kernel's own.
+        std::process::exit(code(carries(&Pair::new(), RawHandle::endowed(0))));
     }
     // Each arm is judged by itself, so one red names every claim that broke.
     let arms: [(&str, fn(&Pair)); 5] = [
@@ -70,8 +68,7 @@ struct Pair {
 impl Pair {
     fn new() -> Self {
         let (acceptor, connector) = port::create().expect("a port");
-        let names = namespace::build().add("conn", &connector).finish().expect("a namespace");
-        let client = names.open("conn").expect("connect");
+        let client = connector.connect().expect("connect");
         Self { client, server: acceptor.accept().expect("accept") }
     }
 
@@ -166,11 +163,10 @@ fn a_refused_send_gives_back_the_rights_it_had(pair: &Pair) {
     close(&[read]);
 }
 
-/// `SYS_SPAWN` of this binary as [`CHILD`], endowed `moved` under [`LABEL`].
+/// `SYS_SPAWN` of this binary as [`CHILD`], endowed `moved`.
 fn spawn(moved: TransferEntry) -> Result<RawHandle, SyscallError> {
     static OWN: std::sync::OnceLock<toyos::process::Image> = std::sync::OnceLock::new();
     let laid = image::laid(OWN.get_or_init(|| image::image_of(SELF)), &format!("{SELF}\0{CHILD}"));
-    let entry = SpawnEndow { label_off: 0, label_len: LABEL.len() as u32, moved };
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {
@@ -178,10 +174,8 @@ fn spawn(moved: TransferEntry) -> Result<RawHandle, SyscallError> {
             path_len: SELF.len() as u64,
             name_ptr: NAME.as_ptr() as u64,
             name_len: NAME.len() as u64,
-            endow_ptr: &entry as *const SpawnEndow as u64,
+            endow_ptr: &moved as *const TransferEntry as u64,
             endow_count: 1,
-            labels_ptr: LABEL.as_ptr() as u64,
-            labels_len: LABEL.len() as u64,
             maps_ptr: laid.maps().as_ptr() as u64,
             maps_count: laid.maps().len() as u64,
             entry: laid.entry,
@@ -189,6 +183,7 @@ fn spawn(moved: TransferEntry) -> Result<RawHandle, SyscallError> {
             build_id_ptr: laid.build_id().as_ptr() as u64,
             build_id_len: laid.build_id().len() as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            job: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }

@@ -13,7 +13,8 @@ use toyos::fs::WINDOW_BYTES;
 use toyos::shm::{Lent, SharedMemory};
 use toyos::syscap::SysCap;
 use toyos::{AsHandle, PciDev};
-use toyos_abi::syscall::{self, PciId, SYSCAP_LABEL};
+use toyos_abi::syscall::{self, PciId};
+use toyos::endow::SYSCAP_LABEL;
 
 const NIC: PciId = PciId { vendor: 0x1af4, device: 0x1041 };
 

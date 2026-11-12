@@ -5,16 +5,16 @@
 //! binary holds what `test-runner` holds, because the guest binaries are not
 //! `[programs]` keys and no manifest row can name what any of them needs.
 //! This binary is where least
-//! authority *is* asserted, and it works because it builds its own namespaces
-//! and spawns itself: nothing here depends on what test-runner handed over.
+//! authority *is* asserted, and it works because it gives its own children
+//! their services: nothing here depends on what test-runner handed over.
 //!
 //! Two halves.
 //!
-//! **Names.** One child is endowed a namespace carrying `echo` alone and another
-//! the same namespace carrying `echo` and `privileged`. The first must resolve
-//! `echo` and answer `NotFound` for `privileged`; the second must resolve both.
-//! The second arm is the whole of what stops the first passing because the
-//! service was never there.
+//! **Names.** One child is given the service `echo` alone and another `echo`
+//! and `privileged`. The first must connect to `echo` and answer `NotEndowed`
+//! for `privileged`; the second must connect to both. The second arm is the
+//! whole of what stops the first passing because the service was never there.
+//! A connector without `WRITE` connects nowhere.
 //!
 //! **Capabilities.** Five things are reachable no other way — minting a device
 //! claim, entering the real-time band, turning a pid into a process handle,
@@ -64,15 +64,12 @@ use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::endow::{service_label, Endowments, SVC_PREFIX, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
 use toyos::system::{SYSINFO_ENTRY_SIZE, SYSINFO_HEADER_SIZE};
-use toyos::{namespace, port, AsHandle};
+use toyos::{port, AsHandle};
 use toyos_abi::handle::{Rights, HANDLE_INVALID};
-use toyos_abi::syscall::{
-    self, DeviceRequest, DeviceType, NamespaceBuild, SyscallError, NAMESPACE_FLAGS_KNOWN,
-    NAMESPACE_KEEP_ALL, SVC_LABEL,
-};
+use toyos_abi::syscall::{self, DeviceRequest, DeviceType, SyscallError};
 use toyos_abi::RawHandle;
 use std::os::toyos::process::ExitStatusExt;
 use toyos_abi::end::{End, Fault};
@@ -80,10 +77,6 @@ use toyos_abi::end::{End, Fault};
 const SELF_PATH: &str = "/system/bin/test_rs_endowment_denied";
 const OPEN: &str = "echo";
 const PRIVILEGED: &str = "privileged";
-
-/// A `NamespaceBuild` flags bit nothing defines; the assert keeps it that way.
-const UNDEFINED_FLAG: u32 = 1 << 31;
-const _: () = assert!(UNDEFINED_FLAG & NAMESPACE_FLAGS_KNOWN == 0);
 
 /// A buffer with room for one roster entry: the smallest question that costs
 /// `Rights::ROSTER`, and one byte more than the largest that does not.
@@ -164,107 +157,58 @@ fn main() {
 
 fn test() {
     only_what_was_given();
-    the_base_plus_one_more_name();
+    a_connector_without_write_connects_nowhere();
     a_right_the_capability_lacks_is_a_word();
     the_roster_is_a_right_and_the_header_is_not();
     every_applet_holds_only_what_its_policy_names();
     for (role, what_would_be_wrong) in NOT_A_HANDLE {
         killed(role, what_would_be_wrong);
     }
-    println!("a name outside the namespace resolves to nothing, and a capability is its bits");
+    println!("a service not given resolves to nothing, and a capability is its bits");
 }
 
-/// The two namespaces, and the one difference between them.
+/// The two children, and the one difference between them.
 fn only_what_was_given() {
     let (_open_acceptor, open) = port::create().expect("a port for the open service");
     let (_priv_acceptor, privileged) = port::create().expect("a port for the privileged service");
 
-    let narrow = namespace::build().add(OPEN, &open).finish().expect("the narrow namespace");
+    let copy = |connector: &port::Connector| connector.duplicate().expect("a copy of a connector");
     assert_eq!(
-        probe_with(narrow),
-        format!("{OPEN}=ok {PRIVILEGED}=NotFound"),
-        "a child endowed one name reached the other",
+        probe_with(vec![(OPEN, copy(&open))]),
+        format!("{OPEN}=ok {PRIVILEGED}=NotEndowed"),
+        "a child given one service reached the other",
     );
-
-    let wide = namespace::build()
-        .add(OPEN, &open)
-        .add(PRIVILEGED, &privileged)
-        .finish()
-        .expect("the wide namespace");
     assert_eq!(
-        probe_with(wide),
+        probe_with(vec![(OPEN, copy(&open)), (PRIVILEGED, privileged)]),
         format!("{OPEN}=ok {PRIVILEGED}=ok"),
-        "a child endowed both names could not reach one of them",
+        "a child given both services could not reach one of them",
     );
     println!("  names: the narrow child reached one, the wide child reached both");
 }
 
-/// Inheritance plus one more name, which only a flags bit can spell: no syscall
-/// enumerates a namespace. The refusal arm is what stops the first from being a
-/// bit the kernel merely tolerated.
-fn the_base_plus_one_more_name() {
-    let (_open_acceptor, open) = port::create().expect("a port for the open service");
-    let (_priv_acceptor, privileged) = port::create().expect("a port for the privileged service");
-
-    let base = namespace::build().add(OPEN, &open).finish().expect("the base namespace");
-    // `keep` spells the same base by naming it, so the two spellings must reach
-    // the same child.
-    let listed = namespace::build()
-        .keep(&base, &[OPEN])
-        .add(PRIVILEGED, &privileged)
-        .finish()
-        .expect("the base's one name listed, plus one more");
-    let by_name = probe_with(listed);
-    let merged = namespace::build()
-        .keep_all(&base)
-        .add(PRIVILEGED, &privileged)
-        .finish()
-        .expect("the whole base, plus one more name");
+/// A connector carrying no `WRITE` connects nowhere, which is a word: a
+/// connector is routinely one a peer sent. The same port's connector
+/// carrying it connects, so what was refused is the right.
+fn a_connector_without_write_connects_nowhere() {
+    let (_acceptor, connector) = port::create().expect("a port");
+    let unwritable = connector.as_handle().try_clone_narrowed(Rights::DUP.union(Rights::TRANSFER)).expect("a connector without WRITE");
     assert_eq!(
-        probe_with(merged),
-        by_name,
-        "keep_all and a keep list over the same base reached different children",
+        syscall::connect(unwritable.as_handle().raw()).err(),
+        Some(SyscallError::PermissionDenied),
+        "a connector without WRITE connected",
     );
-    assert_eq!(
-        by_name,
-        format!("{OPEN}=ok {PRIVILEGED}=ok"),
-        "a child given the base plus one name could not reach both",
-    );
-
-    let undefined = NamespaceBuild {
-        base: base.as_handle().raw(),
-        flags: NAMESPACE_KEEP_ALL | UNDEFINED_FLAG,
-        keep_ptr: 0,
-        keep_n: 0,
-        add_ptr: 0,
-        add_n: 0,
-        names_ptr: 0,
-        names_len: 0,
-    };
-    // SAFETY: every length is zero, so no pointer above is read.
-    let refused = unsafe { syscall::namespace_build(&undefined) };
-    assert_eq!(
-        refused.err(),
-        Some(SyscallError::InvalidArgument),
-        "a build carrying an undefined flags bit was not refused",
-    );
-
-    // The same request with the bit cleared, so what was refused is the bit.
-    let defined = NamespaceBuild { flags: NAMESPACE_KEEP_ALL, ..undefined };
-    // SAFETY: as above.
-    let built = unsafe { syscall::namespace_build(&defined) }.expect("the request without the bit");
-    // SAFETY: no type holds this number.
-    unsafe { syscall::close(built) };
-    println!("  keep_all: the whole base carried over, and an undefined flags bit was refused");
+    connector.connect().expect("the same port's connector, carrying WRITE, connects");
+    println!("  connect: a connector without WRITE was refused, and one with it connected");
 }
 
-fn probe_with(ns: namespace::Namespace) -> String {
-    let mut child = Command::new(SELF_PATH)
-        .arg("probe")
-        .endow(SVC_LABEL, ns.into())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("spawn the probe");
+/// A probe holding `services` and no other.
+fn probe_with(services: Vec<(&str, port::Connector)>) -> String {
+    let mut command = Command::new(SELF_PATH);
+    command.arg("probe").services_only(&[]).stdout(Stdio::piped());
+    for (name, connector) in services {
+        command.endow(&service_label(SVC_PREFIX, name), connector.into());
+    }
+    let mut child = command.spawn().expect("spawn the probe");
     let mut out = BufReader::new(child.stdout.take().expect("probe stdout"));
     let mut line = String::new();
     out.read_line(&mut line).expect("the probe's report");
@@ -559,10 +503,9 @@ fn killed(role: &str, what_would_be_wrong: &str) {
 }
 
 fn probe() {
-    let answer = |name: &str| match toyos::endow::namespace().map(|ns| ns.open(name)) {
-        Some(Ok(_)) => "ok".to_string(),
-        Some(Err(e)) => format!("{e:?}"),
-        None => "no namespace".to_string(),
+    let answer = |name: &str| match toyos::endow::service(name) {
+        Ok(_) => "ok".to_string(),
+        Err(e) => format!("{e:?}"),
     };
     println!("{OPEN}={} {PRIVILEGED}={}", answer(OPEN), answer(PRIVILEGED));
     std::io::stdout().flush().expect("probe: flush");

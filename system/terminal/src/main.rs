@@ -68,8 +68,8 @@ fn copy(text: &str) {
 
 fn main() {
     // **This terminal's surface is a port it makes, not a name it registers.**
-    // One per instance: the connector goes into the namespace of the shell it
-    // spawns and nowhere else, so nothing outside that subtree can reach this
+    // One per instance: the connector goes to the shell it spawns and
+    // nowhere else, so nothing outside that subtree can reach this
     // terminal's keyboard and nothing inside it can name a service this
     // process was not given. `TOYOS_SURFACE` — an ambient string naming a
     // machine-wide service — is what that replaces.
@@ -108,9 +108,7 @@ fn main() {
         for client in host.client_handles() {
             poller.watch(&client, READABLE, TOKEN_CLIENT);
         }
-        if let Some(notice) = notice {
-            poller.watch(notice, READABLE, TOKEN_NOTICE);
-        }
+        poller.watch(notice, READABLE, TOKEN_NOTICE);
 
         let mut ready = [false; 6];
         poller.wait(1, u64::MAX, |token| {
@@ -151,7 +149,7 @@ fn main() {
         // An interrupt is the foreground's, which the quit that asked it
         // reached already; a hang-up or a terminate closes this terminal.
         if ready[TOKEN_NOTICE as usize] {
-            let asked = notice.and_then(|n| n.try_read().ok().flatten());
+            let asked = notice.try_read().ok().flatten();
             if let Some(reason @ (toyos::quit::Reason::HangUp | toyos::quit::Reason::Terminate)) = asked {
                 break Leaving::Asked(reason);
             }

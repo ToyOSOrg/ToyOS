@@ -58,8 +58,9 @@ use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos::transport::session::{Holder, Rings};
 use toyos::wake::{self, Bell, Hungup, Waker};
-use toyos::{namespace, port, AsHandle, Connection, OwnedHandle};
-use toyos_abi::syscall::{self, SyscallError, SVC_LABEL};
+use toyos::endow::{service_label, SVC_PREFIX};
+use toyos::{port, AsHandle, Connection, OwnedHandle};
+use toyos_abi::syscall::{self, SyscallError};
 
 const SELF_PATH: &str = "/system/bin/test_rs_stream_handles";
 
@@ -412,7 +413,7 @@ struct Netstack {
     server: Server,
     holders: Vec<Holding>,
     /// The private port every holder past the first is a connection of.
-    exports: (port::Acceptor, namespace::Namespace),
+    exports: (port::Acceptor, port::Connector),
 }
 
 /// The region's header.
@@ -466,7 +467,7 @@ impl Netstack {
     fn serve_export(&mut self, asker: Holder) -> Holder {
         assert_eq!(self.next_frame(asker), Some(EXPORT), "the spawn asks for a holder");
         let number = Holder::new(self.holders.len() as u16 + 1).expect("a holder's number");
-        let theirs = self.exports.1.open("export").expect("a connection of the private port");
+        let theirs = self.exports.1.connect().expect("a connection of the private port");
         let ours = self.exports.0.accept().expect("the private port's connection");
         let ([receive_bell, send_bell, rung_waker], (receive, send, rung)) = bells();
         let adopt = Adopt { holder: number.number(), peer_port: 80, peer_addr: [192, 0, 2, 2], local_addr: [192, 0, 2, 1], local_port: 49_152, _pad: 0 };
@@ -514,13 +515,11 @@ fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
 /// [`run`], the connect answered as left from `local`, port 49152.
 fn run_answering(role: &str, peer: &[u8], local: [u8; 4]) -> (Child, Netstack) {
     let (acceptor, connector) = port::create().expect("a port");
-    // This test's own names, so a child reaches the file server its own
+    // This test's own services, so a child reaches the file server its own
     // spawns read images through, and this test as its `netstack`.
-    let own = toyos::endow::namespace().expect("this test's namespace");
-    let ns = namespace::build().keep_all(own).add(SERVICE, &connector).finish().expect("a namespace");
     let child = Command::new(SELF_PATH)
         .arg(role)
-        .endow(SVC_LABEL, ns.into())
+        .endow(&service_label(SVC_PREFIX, SERVICE), connector.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -540,9 +539,8 @@ fn run_answering(role: &str, peer: &[u8], local: [u8; 4]) -> (Child, Netstack) {
     conn.send_with(RespType::Result as u32, &TcpConnectResponse { local_addr: local, local_port: 49_152, _pad: 0 }, handed)
         .expect("answer the connect with the bells");
     let (exports, export_connector) = port::create().expect("the private port");
-    let names = namespace::build().add("export", &export_connector).finish().expect("the private port's namespace");
     let first = Holding { number: Holder::FIRST, connection: conn, frames: FrameRx::new(), receive, send, rung };
-    (child, Netstack { region, server, holders: vec![first], exports: (exports, names) })
+    (child, Netstack { region, server, holders: vec![first], exports: (exports, export_connector) })
 }
 
 fn line(out: &mut BufReader<ChildStdout>) -> String {
@@ -702,8 +700,7 @@ fn client() -> ! {
         }
     }
     let (acceptor, connector) = port::create().expect("a port of the client's own");
-    let names = namespace::build().add("sink", &connector).finish().expect("its namespace");
-    let conn = names.open("sink").expect("a connection to it");
+    let conn = connector.connect().expect("a connection to it");
     let _accepted = acceptor.accept().expect("its other end");
     match conn.signal_with(1, [OwnedHandle::from(copy())]) {
         Err(IpcError::Syscall(SyscallError::PermissionDenied)) => say("send refused"),

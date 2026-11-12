@@ -41,7 +41,7 @@ pub enum HandleError {
     BadHandle,
     /// The slot has moved past this handle: closed, or its generations ran out.
     Stale,
-    /// Ends the caller like the two above, except through [`HandleTable::get_sent`], the one lookup of a handle a peer sent — `SYS_NAMESPACE_BUILD`'s connector and `SYS_SPAWN`'s place — where it is `InvalidArgument`.
+    /// Ends the caller like the two above, except through [`HandleTable::get_sent`], the one lookup of a handle a peer sent — `SYS_CONNECT`'s connector and `SYS_SPAWN`'s place and job — where it is `InvalidArgument`.
     WrongType { held: &'static str, wanted: &'static str },
     /// The handle is fine and does not carry what the call needs.
     Rights { held: Rights, needed: Rights },

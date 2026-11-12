@@ -32,18 +32,10 @@ pub const ADMIN_HOLDER: &str = "logout";
 /// The session owner's row.
 pub const OWNER: &str = "session";
 
-/// The label of the namespace the session owner connects its link to the
-/// supervisor through, holding [`LINK`]: the owner connects, so the link is
-/// counted to the owner's job and not the supervisor's.
+/// The label of the connector the session owner connects its link to the
+/// supervisor through: the owner connects, so the link is counted to the
+/// owner's job and not the supervisor's.
 pub const LINK_LABEL: &str = "session-link";
-
-/// The name of the link in the owner's [`LINK_LABEL`] namespace.
-pub const LINK: &str = "link";
-
-/// The name of a session's controls in a namespace a login authority is
-/// handed: it connects its control connection itself, which is then its
-/// own, as a launcher's is.
-pub const CONTROL: &str = "control";
 
 /// The label of the session launcher's acceptor in the session owner.
 pub const LAUNCHER_ACCEPTOR_LABEL: &str = "session-launcher";
@@ -53,14 +45,14 @@ pub const LAUNCHER_ACCEPTOR_LABEL: &str = "session-launcher";
 pub const CONTROL_ACCEPTOR_LABEL: &str = "session-controls";
 
 /// The label a login authority the supervisor started with its session holds
-/// that session's controls under, a namespace holding [`CONTROL`].
+/// that session's controls under: a connector, through which it connects its
+/// control connection itself, which is then its own, as a launcher's is.
 pub const CONTROL_LABEL: &str = "session-control";
 
 /// On [`LOGIN_PORT`]: open a remote session. No payload.
 pub const MSG_OPEN: u32 = 1;
-/// The answer: the session's launcher, as a namespace holding
-/// `toyos::launch::LAUNCHER`, then its controls, a namespace holding
-/// [`CONTROL`].
+/// The answer: the session's launcher's connector, then its controls'
+/// connector.
 pub const MSG_OPENED: u32 = 2;
 /// The answer to a request refused: the reason, UTF-8.
 pub const MSG_REFUSED: u32 = 3;
@@ -275,23 +267,21 @@ impl Listed {
 /// still hands out after this long is one it does not read as ended.
 const ENDED_UNREAD: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// A session opened on [`LOGIN_PORT`] through `login`, the namespace a
-/// login authority is endowed under that name: its launcher, as a namespace
-/// holding `toyos::launch::LAUNCHER`, and its control connection.
+/// A session opened on [`LOGIN_PORT`] through `login`, the connector a
+/// login authority is endowed under that name: its launcher's connector,
+/// and its control connection.
 ///
 /// **A session whose controls are gone is asked for again**, at once: its
 /// owner ended, and the supervisor answers from what it has read of that
 /// end, which an ask can outrun more than once. The asking ends with a
 /// session whose controls connect, with the supervisor's refusal, which a
 /// failing owner's budget comes to, or after [`ENDED_UNREAD`] as an error.
-pub fn open(
-    login: &toyos::namespace::Namespace,
-) -> Result<(toyos::namespace::Namespace, toyos::ipc::Connection), String> {
+pub fn open(login: &toyos::port::Connector) -> Result<(toyos::port::Connector, toyos::ipc::Connection), String> {
     let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
     let began = std::time::Instant::now();
     let mut asks = 0u32;
     loop {
-        let conn = login.open(LOGIN_PORT).map_err(|e| format!("the supervisor's login port refused: {e:?}"))?;
+        let conn = login.connect().map_err(|e| format!("the supervisor's login port refused: {e:?}"))?;
         conn.signal(MSG_OPEN).map_err(|e| format!("the open was not sent: {e:?}"))?;
         let frame = rx.recv(&conn).map_err(|e| format!("the open was not answered: {e:?}"))?;
         if frame.msg_type != MSG_OPENED {
@@ -299,12 +289,12 @@ pub fn open(
             return Err(format!("the supervisor refused a session: {why}"));
         }
         let [launcher, controls] = rx.take_handles::<2>().ok_or("the session came without its handles")?;
-        let namespace = |handle: toyos::ipc::ReceivedHandle| {
-            handle.typed::<toyos::namespace::Namespace>().map_err(|why| format!("the session's handles are not namespaces: {why}"))
+        let connector = |handle: toyos::ipc::ReceivedHandle| {
+            handle.typed::<toyos::port::Connector>().map_err(|why| format!("the session's handles are not connectors: {why}"))
         };
-        let (launcher, controls) = (namespace(launcher)?, namespace(controls)?);
+        let (launcher, controls) = (connector(launcher)?, connector(controls)?);
         asks += 1;
-        match controls.open(CONTROL) {
+        match controls.connect() {
             Ok(control) => return Ok((launcher, control)),
             Err(toyos_abi::syscall::SyscallError::Gone) if began.elapsed() < ENDED_UNREAD => {}
             Err(toyos_abi::syscall::SyscallError::Gone) => {

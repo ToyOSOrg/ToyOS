@@ -127,33 +127,25 @@ struct Stream {
 /// always has another cannot keep the rest from being served.
 const FRAMES_A_WAKE: usize = 64;
 
-/// The name the private port holders are made on has in netstack's own
-/// namespace.
-const EXPORT_PORT: &str = "export";
-
 /// The private port every holder netstack makes is a connection of, but the
 /// first of a connect, a listen and a bind, which is the request's own: its
-/// acceptor, and the namespace holding netstack's one connector to it. It
+/// acceptor, and netstack's one connector to it. It
 /// dies with netstack, so nothing pending reaches a restarted one.
 struct Exports {
     acceptor: Acceptor,
-    names: toyos::namespace::Namespace,
+    connector: toyos::port::Connector,
 }
 
 impl Exports {
     fn new() -> Self {
         let (acceptor, connector) = toyos::port::create().unwrap_or_else(|e| panic!("netstack: no export port ({e:?})"));
-        let names = toyos::namespace::build()
-            .add(EXPORT_PORT, &connector)
-            .finish()
-            .unwrap_or_else(|e| panic!("netstack: no namespace for the export port ({e:?})"));
-        Self { acceptor, names }
+        Self { acceptor, connector }
     }
 
     /// A connection to netstack: the end to hand away, which keeps every right
     /// a connection is made with, `TRANSFER` among them, and netstack's.
     fn connect(&self) -> Result<(Connection, Connection), SyscallError> {
-        let theirs = self.names.open(EXPORT_PORT)?;
+        let theirs = self.connector.connect()?;
         let ours = self.acceptor.accept().unwrap_or_else(|e| panic!("netstack: the export port refused an accept ({e:?})"));
         Ok((theirs, ours))
     }

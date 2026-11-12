@@ -15,15 +15,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use toyos::ipc::Connection;
 use toyos::process::Process;
 use toyos::shm::SharedMemory;
-use toyos::{endow, namespace, port, OwnedHandle};
-use toyos_abi::syscall::{self, SVC_LABEL};
+use toyos::endow::{self, service_label, SVC_PREFIX};
+use toyos::{port, OwnedHandle};
+use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 use std::os::toyos::process::ExitStatusExt;
 use toyos_abi::end::End;
 
 const SELF_PATH: &str = "/system/bin/test_rs_mutual_kill";
 
-/// The name the child's namespace carries the connector under.
+/// The service the child is given the connector as.
 const SERVICE: &str = "mutual";
 
 const ROUNDS: usize = 64;
@@ -79,13 +80,10 @@ fn test() {
 /// Spawn a killer holding a connector for a fresh port, and accept it.
 fn killer_child() -> (Connection, Child) {
     let (acceptor, connector) = port::create().expect("a port of our own");
-    let ns = namespace::build()
-        .add(SERVICE, &connector)
-        .finish()
-        .expect("a namespace carrying one connector");
     let child = Command::new(SELF_PATH)
         .arg("killer")
-        .endow(SVC_LABEL, ns.into())
+        .services_only(&[])
+        .endow(&service_label(SVC_PREFIX, SERVICE), connector.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn a killer");
@@ -117,8 +115,7 @@ fn word(go: &SharedMemory) -> &AtomicU32 {
 }
 
 fn killer() -> ! {
-    let ns = endow::namespace().expect("the parent endowed a namespace");
-    let conn = ns.open(SERVICE).expect("connect through the endowed connector");
+    let conn = endow::service(SERVICE).expect("connect through the endowed connector");
     let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
     let frame = rx.recv(&conn).expect("the arming frame");
     assert_eq!(frame.msg_type, ARM, "an unexpected frame");

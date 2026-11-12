@@ -9,7 +9,7 @@ opened: 2026-09-29
 `run_one` endows each job it spawns a `SysCap::duplicate` of test-runner's own
 capability (`tests/guest/test-runner/src/main.rs`), and a duplicate carries
 every right the original does (`sdk/toyos/src/syscap.rs`). The job also
-inherits test-runner's whole namespace. On `tests/images/testcases.toml` the
+inherits every service test-runner holds. On `tests/images/testcases.toml` the
 row grants `device`, `dup`, `logread`, `power`, `roster`, `counters`, `trace`
 and `inventory`, so every test binary may mint a device claim, read every
 kernel record, reset or power off the machine, list every process, and hand

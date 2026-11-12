@@ -26,7 +26,8 @@ impl Census {
 
     /// Live objects of one kind.
     pub fn kind(&self, kind: ObjectKind) -> u64 {
-        self.0[kind as usize]
+        let at = ObjectKind::ALL.iter().position(|listed| *listed == kind).expect("ObjectKind::ALL lists every kind");
+        self.0[at]
     }
 
     pub fn total(&self) -> u64 {

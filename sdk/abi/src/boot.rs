@@ -111,6 +111,20 @@ pub struct BootImage {
     pub len: u64,
 }
 
+/// What the kernel starts the supervisor holding, beside every process's own
+/// two handles: the machine's one full system capability, then three memory
+/// objects nobody writes, the file server's executable and ROOT's bytes as
+/// the loader verified them, and what the loader wrote of where it booted
+/// from, which arrives carrying `MAP` alone.
+pub mod supervisor {
+    use crate::RawHandle;
+
+    pub const SYSCAP: RawHandle = RawHandle::endowed(0);
+    pub const FILESERVER_IMAGE: RawHandle = RawHandle::endowed(1);
+    pub const ROOT_IMAGE: RawHandle = RawHandle::endowed(2);
+    pub const BOOT_NAMES: RawHandle = RawHandle::endowed(3);
+}
+
 /// The bytes of [`KernelArgs::gop_edid`]: one EDID base block.
 pub const EDID_BLOCK: usize = 128;
 

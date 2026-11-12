@@ -153,8 +153,8 @@ fn main() {
     // This console *is* the root of its surface tree — there is no compositor
     // in this image — so it both owns the translator and serves the channel a
     // child asks for raw keys on.
-    // Its own port, one per instance, whose connector goes into the namespace
-    // of the shell it spawns and nowhere else.
+    // Its own port, one per instance, whose connector it provides to the shell
+    // it spawns and nowhere else.
     let (acceptor, connector) =
         port::create().expect("console: the kernel refused a port of its own");
     let mut host = Host::serve(acceptor);

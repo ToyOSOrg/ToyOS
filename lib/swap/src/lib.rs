@@ -39,10 +39,10 @@
 /// session.
 pub const PORT: &str = toyos_manifest::SWAP_PORT;
 
-/// The endowment label [`PORT`] reaches its holder under: a namespace holding
-/// that one name, and never an entry of the holder's `svc` namespace — which
-/// std hands, duplicated, to every program the holder spawns directly, so a
-/// name in it is a name whatever the holder runs undeclared would hold too.
+/// The endowment label [`PORT`]'s connector reaches its holder under, never
+/// as one of the holder's services, which std hands, duplicated, to every
+/// program the holder spawns directly, so a service is one whatever the
+/// holder runs undeclared would hold too.
 pub const LABEL: &str = "swap";
 
 /// The one program a build may let receive [`PORT`]: `/system/bin/swap`,

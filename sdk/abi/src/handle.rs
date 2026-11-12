@@ -59,6 +59,25 @@ impl RawHandle {
         (self.0 & Self::SLOT_MASK) as u16
     }
 
+    /// Every process's handle to itself, carrying [`Rights::WRITE`],
+    /// [`Rights::DUP`] and [`Rights::TRANSFER`]: what it hands on for a child
+    /// to be placed under it (`SpawnArgs::place`). The first handle the
+    /// kernel puts in a new table.
+    pub const SELF: RawHandle = RawHandle::new(0, 0);
+
+    /// Every process's notice, readable while a quit has asked it a reason
+    /// it has not read, which a read takes (`SYS_PROCESS_QUIT`). The second
+    /// handle the kernel puts in a new table.
+    pub const NOTICE: RawHandle = RawHandle::new(1, 0);
+
+    /// The `i`th handle a process was endowed at its start, in the order its
+    /// spawn listed them (`SpawnArgs::endow_ptr`): a new table's handles
+    /// follow [`SELF`](Self::SELF) and [`NOTICE`](Self::NOTICE) in that order.
+    pub const fn endowed(i: usize) -> RawHandle {
+        assert!(i < crate::syscall::MAX_SPAWN_ENDOWMENTS);
+        RawHandle::new(2 + i as u16, 0)
+    }
+
     pub const fn generation(self) -> u32 {
         self.0 >> Self::SLOT_BITS
     }
@@ -74,7 +93,8 @@ pub const HANDLE_INVALID: RawHandle = RawHandle(u32::MAX);
 ///
 /// **A kind's word is ABI: it is never renumbered and never given to another
 /// kind.** A new kind takes the next word, a kind that goes leaves its word
-/// unused for good, and a receiver refuses a word it does not know.
+/// unused for good, as 8, the namespace's, is, and a receiver refuses a word it
+/// does not know.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ObjectKind {
@@ -86,7 +106,6 @@ pub enum ObjectKind {
     Inbox = 5,
     SharedMem = 6,
     Connector = 7,
-    Namespace = 8,
     SysCap = 9,
     Process = 10,
     Null = 11,
@@ -101,7 +120,8 @@ pub enum ObjectKind {
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 20] = [
+    /// Every kind, in word order.
+    pub const ALL: [ObjectKind; 19] = [
         Self::PipeRead,
         Self::PipeWrite,
         Self::Connection,
@@ -110,7 +130,6 @@ impl ObjectKind {
         Self::Inbox,
         Self::SharedMem,
         Self::Connector,
-        Self::Namespace,
         Self::SysCap,
         Self::Process,
         Self::Null,
@@ -124,19 +143,27 @@ impl ObjectKind {
         Self::DeviceSet,
     ];
 
+    /// The kind `word` names: `None` for a word no kind has, a retired one's among them.
     pub const fn from_word(word: u32) -> Option<Self> {
-        if (word as usize) < Self::ALL.len() { Some(Self::ALL[word as usize]) } else { None }
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            if Self::ALL[i] as u32 == word {
+                return Some(Self::ALL[i]);
+            }
+            i += 1;
+        }
+        None
     }
 }
 
-// `from_word` indexes `ALL` by the word: a row out of order would count a
-// kind's neighbour.
+// `ALL` lists each kind once, in word order, and the namespace's word stays retired.
 const _: () = {
-    let mut i = 0;
+    let mut i = 1;
     while i < ObjectKind::ALL.len() {
-        assert!(ObjectKind::ALL[i] as usize == i, "ObjectKind::ALL is out of word order");
+        assert!((ObjectKind::ALL[i - 1] as u32) < ObjectKind::ALL[i] as u32, "ObjectKind::ALL is out of word order");
         i += 1;
     }
+    assert!(ObjectKind::from_word(8).is_none(), "word 8, the namespace's, was reassigned");
 };
 
 /// What the holder of a handle may do with the object behind it.
@@ -329,7 +356,7 @@ impl Rights {
 
 crate::user_safe! {
     /// One handle a move takes out of its holder's table, by a message
-    /// ([`message_send`]) or a spawn's endowment ([`SpawnEndow`]), and what it
+    /// ([`message_send`]) or a spawn's endowment (`SpawnArgs::endow_ptr`), and what it
     /// carries where it arrives.
     ///
     /// The mover needs [`Rights::TRANSFER`] on it and names its own set or
@@ -338,7 +365,6 @@ crate::user_safe! {
     /// given a handle it cannot pass on.
     ///
     /// [`message_send`]: crate::syscall::message_send
-    /// [`SpawnEndow`]: crate::syscall::SpawnEndow
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct TransferEntry {
         pub handle: RawHandle,

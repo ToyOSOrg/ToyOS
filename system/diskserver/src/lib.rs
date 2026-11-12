@@ -7,5 +7,5 @@ pub mod disk;
 pub mod session;
 pub mod tables;
 
-pub use session::{list, Answer, Error, Session, Unsent, Waited};
+pub use session::{held, list, Answer, Error, Session, Unsent, Waited};
 pub use toyos_blockring::client::{Outcome, Ticket};

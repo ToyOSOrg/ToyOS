@@ -31,7 +31,7 @@ use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::ipc::Connection;
 use toyos::poller::{Poller, OTHER_END_GONE, READABLE};
 use toyos::syscap::SysCap;
-use toyos::{namespace, pipe_pair, port, AsHandle, BorrowedHandle, OwnedHandle, Pipe};
+use toyos::{pipe_pair, port, AsHandle, BorrowedHandle, OwnedHandle, Pipe};
 use toyos_abi::syscall::SyscallError;
 
 #[path = "../roster.rs"]
@@ -42,7 +42,6 @@ const TOKEN: u64 = 7;
 /// What the holding child is endowed the write end as. It never takes it: its
 /// table holds it.
 const HELD_LABEL: &str = "held";
-const SERVICE: &str = "queue";
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -159,8 +158,7 @@ fn pipe(unread: &str) -> (Pipe, Pipe) {
 /// Both ends of one connection, made through a port of this process's own.
 fn connection() -> (Connection, Connection) {
     let (acceptor, connector) = port::create().expect("a port");
-    let names = namespace::build().add(SERVICE, &connector).finish().expect("a namespace");
-    let client = names.open(SERVICE).expect("a connection to the port");
+    let client = connector.connect().expect("a connection to the port");
     let server = acceptor.accept().expect("the connection's other end");
     (client, server)
 }

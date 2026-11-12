@@ -146,8 +146,7 @@ impl Usbd {
 
     /// One `inspect` answer, printed whole.
     fn ask(&self, when: &str) -> BTreeMap<String, Value> {
-        let ns = toyos::namespace::build().add(USB.port, &self.conn).finish().expect("usbd_spare: a namespace");
-        let conn: Connection = ns.open(USB.port).expect("usbd_spare: a connection to usbd");
+        let conn: Connection = self.conn.connect().expect("usbd_spare: a connection to usbd");
         conn.signal(MSG_INSPECT).expect("usbd_spare: the request");
         let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
         let frame = rx.recv(&conn).expect("usbd_spare: usbd's answer");

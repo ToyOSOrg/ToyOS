@@ -4,8 +4,8 @@
 //! Everything else is started from here, holding exactly what
 //! `/system/etc/system.manifest` says it holds. **Every port exists before any server
 //! runs**: the supervisor creates one per `serves` name in the whole manifest, then
-//! builds each program's namespace out of the connectors and spawns it with the
-//! acceptor moved in. So a client's connection works from its first
+//! endows each program a copy of the connectors its row receives and the
+//! acceptors it serves. So a client's connection works from its first
 //! instruction whether or not the server has reached `accept` or has even been
 //! spawned, there is no instant at which a name is not bound yet, and there is
 //! nothing anywhere to retry.
@@ -126,11 +126,10 @@ use toyos_abi::devset::Declaration;
 use toyos_supervisor::drives::{self, Act, Drives};
 use toyos_supervisor::restart::{self, AfterEnd, Budget};
 use toyos::admission::{self, Admission, Event, Policy, Refused};
-use toyos::endow::{Endowments, FromHandle};
+use toyos::endow::{service_label, FromHandle, DEV_PREFIX, PROVIDE_PREFIX, SERVE_PREFIX, SVC_PREFIX, SYSCAP_LABEL};
 use toyos::fs::{Access, Grant, CAPABILITY_PREFIX};
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::launch::{self, Parent, Request, LAUNCHER};
-use toyos::namespace::{self, Namespace};
 use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::port::{self, Acceptor, Connector};
 use toyos::log::region::{Ring, RING_BYTES};
@@ -146,10 +145,8 @@ use toyos_logstream::{
     Registration, Tag, Unanswered, ALIVE, CONSOLE_INPUT, FLUSH, MARK, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
 };
 use toyos_abi::inventory::{Arrival, Pci, PciAddr};
-use toyos_abi::syscall::{
-    DeviceRequest, FileType, SyscallError, DEV_PREFIX, FILESERVER_IMAGE_LABEL, JOB_LABEL, MAX_BADGE, PROVIDE_PREFIX,
-    BOOT_NAMES_LABEL, ROOT_IMAGE_LABEL, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL,
-};
+use toyos_abi::syscall::{DeviceRequest, FileType, SyscallError, MAX_BADGE};
+use toyos_manifest::ROOT_IMAGE_LABEL;
 
 /// netstack's port, whose every connector the supervisor mints for one row and
 /// session (`Grants::netstack`).
@@ -353,11 +350,7 @@ fn view(region: &SharedMemory) -> Ring {
 impl Log {
     fn open() -> Self {
         let (acceptor, connector) = port::create().expect("supervisor: no port for the log's origins");
-        let names = namespace::build()
-            .add(ORIGINS, &connector)
-            .finish()
-            .expect("supervisor: no namespace for the log's origins");
-        let conn = names.open(ORIGINS).expect("supervisor: the log's origins port refused the supervisor");
+        let conn = connector.connect().expect("supervisor: the log's origins port refused the supervisor");
         let (input, console_input) = toyos::pipe_pair().expect("supervisor: no pipe for the console's input");
         let stdin = input.as_handle().try_clone_narrowed(STDIN_RIGHTS).expect("supervisor: the console's input would not narrow");
         let log = Self {
@@ -504,11 +497,10 @@ fn make_dir(path: &str) -> std::io::Result<()> {
 }
 
 fn main() {
-    let syscap: &'static SysCap = Box::leak(Box::new(
-        Endowments::get()
-            .take(SYSCAP_LABEL)
-            .expect("supervisor: the kernel spawns this program holding the system capability"),
-    ));
+    // SAFETY: the kernel starts the supervisor holding its system capability
+    // at this handle (`toyos_abi::boot::supervisor`).
+    let syscap = unsafe { SysCap::from_handle(kernel_gave(toyos_abi::boot::supervisor::SYSCAP)) };
+    let syscap: &'static SysCap = Box::leak(Box::new(syscap));
     say_last_words_on_panic(syscap);
     // Before anything is started, and before the supervisor says anything: from here
     // the supervisor's own lines are records in its ring.
@@ -535,27 +527,24 @@ fn main() {
     }
     // The supervisor's own files are resolved through grants like every
     // program's, under a share no session is given, and it is the one
-    // process nobody endows a namespace: std resolves through this one, and
-    // the stop's syncs through the second.
-    let files: &'static Namespace = {
+    // process nobody endows a service: std resolves through a copy of each,
+    // and the stop's syncs through these.
+    let files: &'static [(String, Connector)] = {
         let whole = toyos_manifest::whole_tree();
         let own: Vec<(String, Connector)> = whole
             .iter()
             .map(|view| (&role_acceptors[view.role], view))
             .map(|(acceptor, view)| mint(acceptor, authority::SUPERVISOR_SHARE, view))
             .collect();
-        let build = || {
-            let mut builder = namespace::build();
-            for (name, connector) in &own {
-                builder = builder.add(name, connector);
-            }
-            builder.finish().expect("supervisor: no namespace for its own files")
-        };
-        // SAFETY: the namespace built just above.
-        if let Err(e) = unsafe { std::os::toyos::fs::adopt_namespace(build().into()) } {
-            panic!("supervisor: std would not take its namespace ({e}), and the supervisor is endowed none");
+        let copies = own
+            .iter()
+            .map(|(name, connector)| (name.clone(), connector.duplicate().expect("supervisor: no copy of a grant of its own").into()))
+            .collect();
+        // SAFETY: each is a duplicate of a connector minted just above.
+        if let Err(e) = unsafe { std::os::toyos::fs::adopt_services(copies) } {
+            panic!("supervisor: std would not take its files ({e}), and the supervisor is endowed none");
         }
-        Box::leak(Box::new(build()))
+        Box::leak(own.into_boxed_slice())
     };
     // Its connector goes at once: every launcher a program holds is one minted
     // with that program's row.
@@ -642,12 +631,7 @@ fn main() {
 
     // The supervisor alone holds a connector to it, so a connection on it is
     // the supervisor's question and nobody else's.
-    let consent = connectors.remove(consent::PORT).map(|connector| {
-        namespace::build()
-            .add(consent::PORT, &connector)
-            .finish()
-            .expect("supervisor: no namespace for the consent port")
-    });
+    let consent = connectors.remove(consent::PORT);
     let mut grants = no_grants;
     grants.roles.push((toyos_manifest::SYSTEM, Rc::clone(&system_service.ports)));
     let mut supervisor = Supervisor {
@@ -770,7 +754,7 @@ struct Supervisor<'a> {
     store: Store,
     /// [`consent::PORT`], where its server runs: what a launch asks the person at
     /// the screen on.
-    consent: Option<Namespace>,
+    consent: Option<Connector>,
     syscap: &'a SysCap,
     /// The images the kernel handed the supervisor.
     boot: &'static Boot,
@@ -782,8 +766,8 @@ struct Supervisor<'a> {
     grants: Grants<'a>,
     /// The shares its services and the login sessions launches opened spend.
     sessions: Sessions,
-    /// The same directories as a namespace of the supervisor's own, for the stop's syncs.
-    files: &'static Namespace,
+    /// The supervisor's own directory capabilities, by name, for the stop's syncs.
+    files: &'static [(String, Connector)],
     /// What `[boot] start` named, a file server once per role.
     services: Vec<Service<'a>>,
     /// Every `drives` matcher, with its row.
@@ -958,7 +942,6 @@ impl<'a> Service<'a> {
             Some(job) => job,
             None => self.job.insert(job_for(syscap, self.program)?),
         };
-        let endowed = job.duplicate().map_err(memory_refused)?;
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
         let command = match source {
@@ -982,10 +965,10 @@ impl<'a> Service<'a> {
             served,
             connectors,
             grants,
-            &[],
+            Vec::new(),
             storage,
             Minting::machine(minted, self.program, self.session),
-            Output::Boot { log, job: endowed },
+            Output::Boot { log, job },
         )?;
         drop(ports);
         let pid = child.id();
@@ -1383,9 +1366,8 @@ impl<'a> Supervisor<'a> {
         let served = Served::Keep { acceptors: &[], owed: &[] };
         let path = row.source.path().ok_or_else(|| format!("{} runs {}, and a `drives` row runs a file", row.name, row.source))?;
         let job = job_for(self.syscap, row).map_err(|e| e.to_string())?;
-        let endowed = job.duplicate().map_err(|e| format!("its job would not duplicate: {e:?}"))?;
-        let output = Output::Boot { log: &mut self.log, job: endowed };
-        start(Command::new(path), row, self.system, self.syscap, served, &self.connectors, &self.grants, &[], extra, launcher, output)
+        let output = Output::Boot { log: &mut self.log, job: &job };
+        start(Command::new(path), row, self.system, self.syscap, served, &self.connectors, &self.grants, Vec::new(), extra, launcher, output)
             .map(|(child, _)| (child, stop, job))
             .map_err(|e| e.to_string())
     }
@@ -2084,9 +2066,9 @@ impl<'a> Supervisor<'a> {
             let Some(dir) = toyos_manifest::role_dirs(role).and_then(|dirs| dirs.first()) else { continue };
             let name = format!("{CAPABILITY_PREFIX}{}", dir.dir);
             let (done_tx, done_rx) = std::sync::mpsc::channel();
-            let (asked, names) = (name.clone(), self.files);
+            let Some((_, held)) = self.files.iter().find(|(held, _)| *held == name) else { continue };
             let spawned = std::thread::Builder::new().name(format!("sync-{role}")).spawn(move || {
-                let answer = toyos::fs::Dir::connect(names, &asked).and_then(|mut dir| dir.sync());
+                let answer = toyos::fs::Dir::connect(held.as_handle()).and_then(|mut dir| dir.sync());
                 let _ = done_tx.send(answer);
             });
             match spawned {
@@ -2380,16 +2362,15 @@ impl Supervisor<'_> {
         // descriptors, the extras, the place if it names one, and the job.
         let mut carried = carried;
         let fds: Vec<toyos::OwnedHandle> = carried.by_ref().take(request.fd_count()).map(Into::into).collect();
-        // `SYS_NAMESPACE_BUILD` copies a connector into the namespace and
-        // leaves the caller's handle, and the supervisor's copy of a client's
-        // connector has no life beyond this launch.
         let extras: Result<Vec<(String, Connector)>, ipc::WrongKind> =
             names.into_iter().zip(carried.by_ref()).map(|(name, handle)| Ok((name.to_string(), handle.typed()?))).collect();
         let mut rest: Vec<ipc::ReceivedHandle> = carried.collect();
         let job = rest.pop().expect("a launch's batch ends with its job").typed::<toyos::job::Job>();
         let place = rest.pop().map(ipc::ReceivedHandle::typed::<toyos::process::Process>).transpose();
         // A client sends what it likes: what its frame calls a connector, a
-        // place or a job and the kernel does not is a refused launch.
+        // place or a job and the kernel does not is a refused launch, and a
+        // connector without the rights a provided one carries (`PROVIDED`)
+        // refuses it at its spawn.
         let (extras, job, place) = match (extras, job, place) {
             (Ok(extras), Ok(job), Ok(place)) => (extras, job, place),
             (Err(why), ..) | (_, Err(why), _) | (.., Err(why)) => {
@@ -2489,9 +2470,10 @@ impl Supervisor<'_> {
             false => None,
         };
 
-        // Endowed before `prepare` reads the program, so its image is read for the
-        // job the child runs in, which keeps it as long as the child runs.
-        command.endow(JOB_LABEL, job.into());
+        // Named before `prepare` reads the program, so its image is read for the
+        // job the child runs in, which keeps it as long as the child runs. The
+        // command keeps a copy, and the caller's goes with this call.
+        command.job(job.as_handle().into());
 
         // On the worker, every file the launch reads: a path under `/apps` is
         // read off its package, and the program and its working directory may
@@ -2617,7 +2599,7 @@ impl Supervisor<'_> {
             .consent
             .as_ref()
             .ok_or_else(|| format!("this image serves no `{}`", consent::PORT))
-            .and_then(|names| names.open(consent::PORT).map_err(|e| format!("its server is gone ({e:?})")))
+            .and_then(|connector| connector.connect().map_err(|e| format!("its server is gone ({e:?})")))
             .and_then(|conn| {
                 let ask = consent::Ask { package: name.clone(), access };
                 conn.try_send_bytes(consent::MSG_ASK, &ask.encode())
@@ -2731,7 +2713,7 @@ impl Supervisor<'_> {
             Served::Move(&mut self.acceptors),
             &self.connectors,
             &self.grants,
-            &extras,
+            extras,
             storage,
             Minting { minted: &self.minted, session, launches },
             Output::Launch { log: &mut self.log, fds: &fds, ring },
@@ -2829,7 +2811,7 @@ fn said(reply: &consent::Reply) -> String {
 ///
 /// **The row's own path has to match, and matching it is the whole check.** The
 /// path is a client's claim and the row is authority: keyed on the basename
-/// alone, a caller writing `/tmp/toybox` would be handed `toybox`'s namespace
+/// alone, a caller writing `/tmp/toybox` would be handed `toybox`'s services
 /// for a binary it wrote itself. So the answer is a row only where the caller
 /// named that row's binary — directly, or through a link that lands on it.
 fn declared<'a>(system: &'a Manifest, path: &str) -> Option<&'a Program> {
@@ -2904,14 +2886,8 @@ fn served_slots(
     roots: Connector,
 ) -> Result<(toyos_update::slots::Table, [u8; 16], Vec<toyos_update::slots::Listed>), String> {
     use toyos_blockdev::{BlockDev as _, BLOCK};
-    let names = |connector: &Connector| {
-        namespace::build()
-            .add(toyos_blockring::PORT, connector)
-            .finish()
-            .map_err(|e| format!("no namespace for the block service: {e:?}"))
-    };
     let list = |connector: &Connector| {
-        diskserver::list(&names(connector)?, toyos_blockring::PORT)
+        diskserver::list(connector.as_handle())
             .map_err(|why| format!("the block service would not list the slots' partitions: {why:?}"))
     };
     let root_parts = list(&roots)?;
@@ -2925,7 +2901,7 @@ fn served_slots(
             on_its_disk.len()
         ));
     };
-    let session = diskserver::Session::open(names(&tables)?, toyos_blockring::PORT, table_part.unique)
+    let session = diskserver::Session::open(tables, table_part.unique)
         .map_err(|why| format!("the slot table would not open: {why:?}"))?;
     let table_unique = table_part.unique;
     let disk = diskserver::disk::Served::new(session);
@@ -3045,7 +3021,7 @@ fn start<'a>(
     served: Served<'_, 'a>,
     connectors: &BTreeMap<&str, Connector>,
     grants: &Grants<'_>,
-    extras: &[(String, Connector)],
+    extras: Vec<(String, Connector)>,
     extra: Extra,
     minting: Minting<'_>,
     output: Output<'_>,
@@ -3075,43 +3051,51 @@ fn start<'a>(
     for (label, handle) in endow {
         command.endow(label, handle.into());
     }
-    let mut view = grants.view(program, minting.session);
-    view.extend(ports);
-    view.extend(grants.authorizations(program).map_err(StartError::Refused)?);
-    view.extend(grants.netstack(program, minting.session));
-    if let Some(ns) = build_namespace(program, system, connectors, view, extras)? {
-        command.endow(SVC_LABEL, ns.into());
+    let mut services = received(program, system, connectors)?;
+    services.extend(grants.view(program, minting.session));
+    services.extend(ports);
+    services.extend(grants.authorizations(program).map_err(StartError::Refused)?);
+    services.extend(grants.netstack(program, minting.session));
+    for (name, connector) in services {
+        command.endow(&service_label(SVC_PREFIX, &name), connector.into());
     }
-    if let Some(ns) = swap_namespace(program, connectors) {
-        command.endow(toyos_swap::LABEL, ns.into());
+    // Each under a name of its own and never as a service: a helper is given
+    // a duplicate of every service its parent holds (`toyos::spawn`), so
+    // these stay with the one process the supervisor started.
+    if program.receives.iter().any(|name| name == toyos_swap::PORT) {
+        let connector = connectors
+            .get(toyos_swap::PORT)
+            .expect("supervisor: the manifest declares the supervisor serves `swap`")
+            .duplicate()
+            .map_err(|e| std::io::Error::other(format!("the swap connector did not duplicate: {e:?}")))?;
+        // Its one holder connects through it and hands it to nobody.
+        command.endow_narrowed(toyos_swap::LABEL, connector.into(), Rights::WRITE.bits());
     }
-    if let Some(ns) = minting.launches.and_then(|launches| launcher_namespace(program, launches)) {
-        command.endow(LAUNCHER, ns.into());
+    if let Some((launcher, session)) = minting.launches.filter(|_| !program.starts.is_empty()) {
+        command.endow(LAUNCHER, badged(program, LAUNCHER, launcher, session).into());
     }
     let minted = minting.minted;
-    let badged = [
-        (grants::PORT, program.receives.iter().any(|name| name == grants::PORT), &minted.grants),
-        (toyos_session::ADMIN_PORT, program.receives.iter().any(|name| name == toyos_session::ADMIN_PORT), &minted.admin),
-    ];
-    for (name, _, acceptor) in badged.into_iter().filter(|(_, receives, _)| *receives) {
-        command.endow(name, badged_namespace(program, name, acceptor, minting.session).into());
+    for (name, acceptor) in [(grants::PORT, &minted.grants), (toyos_session::ADMIN_PORT, &minted.admin)] {
+        if program.receives.iter().any(|received| received == name) {
+            command.endow(name, badged(program, name, acceptor, minting.session).into());
+        }
     }
     if program.login {
-        command.endow(toyos_session::LOGIN_PORT, login_namespace(program, &minted.login).into());
+        let connector = minted
+            .login
+            .mint(program.name.as_bytes())
+            .unwrap_or_else(|e| panic!("supervisor: no `login` connector for {}: {e:?}", program.name));
+        command.endow(toyos_session::LOGIN_PORT, connector.into());
     }
 
-    // The namespace answers with connections, so a child holding `surface`
-    // only there could never hand `surface` to a child of its own — which is
-    // the terminal → shell → `locale` chain. The connector travels labelled as
-    // well, and a duplicate because the namespace above took one of its own.
+    // A `provides` name reaches its holder from whoever made the port, never
+    // from the supervisor, and only a row that receives the name. A client's
+    // handle that does not carry `PROVIDED` refuses the launch, never the
+    // supervisor.
     for (name, connector) in extras {
-        // **Not an `expect`.** The connector is a client's, and a client may
-        // send one it narrowed `DUP` away from. That is a refused launch, not
-        // the supervisor's bug — and the supervisor is the one process the machine cannot lose.
-        let Ok(handed) = connector.duplicate() else {
-            return Err(std::io::Error::other("a provided connector cannot be duplicated").into());
-        };
-        command.endow(&format!("{PROVIDE_PREFIX}{name}"), handed.into());
+        if program.receives.contains(&name) {
+            command.endow_narrowed(&service_label(PROVIDE_PREFIX, &name), connector.into(), PROVIDED.bits());
+        }
     }
 
     // A `serves` port whose acceptor is gone can never be served again, so
@@ -3229,7 +3213,7 @@ fn start<'a>(
             // **Every service the supervisor starts is a job of its own**,
             // which its caller made ([`job_for`]).
             let ring = ring_for(job.as_handle())?;
-            command.endow(JOB_LABEL, job.into());
+            command.job(job.as_handle().into());
             command.inherit_handle(0, log.stdin.as_handle().into());
             command.inherit_handle(1, ring.as_handle().into());
             command.inherit_handle(2, ring.as_handle().into());
@@ -3324,7 +3308,7 @@ fn endow_served(command: &mut Command, name: &str, acceptor: &Acceptor) -> Resul
 /// job it joins, or a launch's caller's descriptors with any ring among them
 /// replaced by the program's.
 enum Output<'l> {
-    Boot { log: &'l mut Log, job: toyos::job::Job },
+    Boot { log: &'l mut Log, job: &'l toyos::job::Job },
     Launch { log: &'l mut Log, fds: &'l [(u32, LaunchFd)], ring: Option<SharedMemory> },
 }
 
@@ -3336,44 +3320,37 @@ enum LaunchFd {
     Ring,
 }
 
-/// The namespace this program's `receives` names, [`toyos_swap::PORT`] and
-/// [`toyos_blockring::PORT`] apart, with `view`'s.
+/// What a provided connector arrives carrying: a copy for each helper and
+/// launch of the program, and its connect.
+const PROVIDED: Rights = Rights::DUP.union(Rights::TRANSFER).union(Rights::WRITE);
+
+/// A copy of the connector to each service this program's `receives` names
+/// that the supervisor's own map holds, by name.
 ///
-/// A name some program *provides* rather than serves is not the supervisor's to give: it
-/// is one port per instance, made by whoever spawns the holder, and it reaches
-/// this program from its own parent. A name that is neither is a config the
-/// build-time gate should have refused, so it is a panic here.
-/// A refusal is a launch that does not happen, never a panic: `extras` are a
-/// client's handles and the kernel judges their type, so `finish` answers
-/// `InvalidArgument` for a client that sent a pipe where a connector belongs.
-fn build_namespace(
-    program: &Program,
-    system: &Manifest,
-    connectors: &BTreeMap<&str, Connector>,
-    view: Vec<(String, Connector)>,
-    extras: &[(String, Connector)],
-) -> std::io::Result<Option<Namespace>> {
-    // Never the swap port nor the grants port: [`swap_namespace`] and
-    // [`badged_namespace`] say why. Never the block port's own connector,
-    // which reaches nothing: a holder of `block` holds one minted for what it
-    // reaches, in `view`, and a disk driver one of `disk` minted for who it
-    // is; nor netstack's, which nothing holds: a holder of `netstack` holds
-    // one minted for its row and session, in `view` too.
-    let receives: Vec<&String> = program
-        .receives
-        .iter()
-        .filter(|name| {
-            ![toyos_swap::PORT, grants::PORT, toyos_session::ADMIN_PORT, toyos_blockring::PORT, toyos_blockring::disk::PORT, NETSTACK]
-                .contains(&name.as_str())
-        })
-        .collect();
-    if receives.is_empty() && extras.is_empty() && view.is_empty() {
-        return Ok(None);
-    }
-    let mut builder = namespace::build();
-    for name in receives {
+/// Never the swap, grants or admin port, which go under names of their own
+/// ([`start`]). Never the block port's own connector, which reaches nothing:
+/// a holder of `block` holds one minted for what it reaches, and a disk
+/// driver one of `disk` minted for who it is; nor netstack's, which nothing
+/// holds: a holder of `netstack` holds one minted for its row and session.
+///
+/// A name some program *provides* rather than serves is not the supervisor's
+/// to give: it is one port per instance, made by whoever spawns the holder,
+/// and it reaches this program from its own parent. A name that is neither
+/// is a config the build-time gate should have refused, so it is a panic
+/// here.
+fn received(program: &Program, system: &Manifest, connectors: &BTreeMap<&str, Connector>) -> std::io::Result<Vec<(String, Connector)>> {
+    let mut services = Vec::new();
+    for name in program.receives.iter().filter(|name| {
+        ![toyos_swap::PORT, grants::PORT, toyos_session::ADMIN_PORT, toyos_blockring::PORT, toyos_blockring::disk::PORT, NETSTACK]
+            .contains(&name.as_str())
+    }) {
         match connectors.get(name.as_str()) {
-            Some(connector) => builder = builder.add(name, connector),
+            Some(connector) => {
+                let copy = connector
+                    .duplicate()
+                    .map_err(|e| std::io::Error::other(format!("the `{name}` connector did not duplicate: {e:?}")))?;
+                services.push((name.clone(), copy));
+            }
             None => assert!(
                 system.programs.iter().any(|p| p.provides.contains(name)),
                 "supervisor: {} receives `{name}`, which nothing in this image serves or provides",
@@ -3381,21 +3358,7 @@ fn build_namespace(
             ),
         }
     }
-    for (name, connector) in &view {
-        builder = builder.add(name, connector);
-    }
-    // A `provides` name reaches its holder from whoever made the port, never
-    // from the supervisor, and this is where it arrives.
-    for (name, connector) in extras {
-        builder = builder.add(name, connector);
-    }
-    match builder.finish() {
-        Ok(ns) => Ok(Some(ns)),
-        Err(e) if extras.is_empty() => {
-            panic!("supervisor: no namespace for {}: {e:?}", program.name)
-        }
-        Err(e) => Err(std::io::Error::other(format!("a provided connector was refused: {e:?}"))),
-    }
+    Ok(services)
 }
 
 /// What each program's directory capabilities are minted from: each
@@ -3504,7 +3467,7 @@ impl Grants<'_> {
     }
 
     /// The directory capabilities `program` is endowed for one start in
-    /// `session`, by namespace name: its row's view (`Program::view`), but
+    /// `session`, by service name: its row's view (`Program::view`), but
     /// that a storage row sees none, since a file server resolving a path of
     /// its own through itself waits for ever.
     fn view(&self, program: &Program, session: Session) -> Vec<(String, Connector)> {
@@ -3538,7 +3501,7 @@ const _: () = assert!(
 );
 
 /// A grant on `acceptor`, `dir`'s role's port, naming `share`, by the
-/// namespace name a program opens it under.
+/// service name a program opens it under.
 fn mint(acceptor: &Acceptor, share: u64, dir: &View) -> (String, Connector) {
     let access = if dir.write { Access::ReadWrite } else { Access::ReadOnly };
     let mut badge = [0u8; MAX_BADGE];
@@ -3551,64 +3514,15 @@ fn mint(acceptor: &Acceptor, share: u64, dir: &View) -> (String, Connector) {
     (format!("{CAPABILITY_PREFIX}{}", dir.dir), connector)
 }
 
-/// [`toyos_swap::PORT`] in a namespace of its own, for a program whose row
-/// receives it, endowed under [`toyos_swap::LABEL`].
-///
-/// **Not an entry of `svc`**, because std gives a duplicate of `svc` to every
-/// program its holder spawns directly — sshserver running one the manifest does not
-/// declare — and to their descendants. A label other than `svc` is not
-/// inherited, so the port stays with the one process the supervisor endowed.
-fn swap_namespace(program: &Program, connectors: &BTreeMap<&str, Connector>) -> Option<Namespace> {
-    if !program.receives.iter().any(|name| name == toyos_swap::PORT) {
-        return None;
-    }
-    let connector = connectors
-        .get(toyos_swap::PORT)
-        .expect("supervisor: the manifest declares the supervisor serves `swap`");
-    let ns = namespace::build()
-        .add(toyos_swap::PORT, connector)
-        .finish()
-        .unwrap_or_else(|e| panic!("supervisor: no swap namespace for {}: {e:?}", program.name));
-    Some(ns)
-}
-
-/// A `launcher` minted with `program`'s row and the session its launches run
-/// in, on that session's launcher port, in a namespace of its own, for a row
-/// whose `starts` lists anything; endowed under [`LAUNCHER`] and never an
-/// entry of `svc`, for [`swap_namespace`]'s reason.
-fn launcher_namespace(program: &Program, (launcher, session): (&Acceptor, Session)) -> Option<Namespace> {
-    if program.starts.is_empty() {
-        return None;
-    }
-    Some(badged_namespace(program, LAUNCHER, launcher, session))
-}
-
-/// `name`, minted on `acceptor` with `program`'s row and `session`, in a
-/// namespace of its own: endowed under that name and never an entry of `svc`,
-/// for [`swap_namespace`]'s reason. The badge is who asks: the supervisor
-/// honours a login session's alone on [`grants::PORT`] and
-/// [`toyos_session::ADMIN_PORT`].
-fn badged_namespace(program: &Program, name: &str, acceptor: &Acceptor, session: Session) -> Namespace {
+/// `name`, minted on `acceptor` with `program`'s row and `session`. The badge
+/// is who asks: the supervisor honours a login session's alone on
+/// [`grants::PORT`] and [`toyos_session::ADMIN_PORT`], and a launcher's
+/// launches run in its session.
+fn badged(program: &Program, name: &str, acceptor: &Acceptor, session: Session) -> Connector {
     let badge = Authority { row: program.name.clone(), session }.encode();
-    let connector = acceptor
+    acceptor
         .mint(&badge)
-        .unwrap_or_else(|e| panic!("supervisor: no `{name}` connector for {}: {e:?}", program.name));
-    namespace::build()
-        .add(name, &connector)
-        .finish()
-        .unwrap_or_else(|e| panic!("supervisor: no `{name}` namespace for {}: {e:?}", program.name))
-}
-
-/// [`toyos_session::LOGIN_PORT`] minted with a `login` row's key, the login
-/// authority whose sessions it opens.
-fn login_namespace(program: &Program, login: &Acceptor) -> Namespace {
-    let connector = login
-        .mint(program.name.as_bytes())
-        .unwrap_or_else(|e| panic!("supervisor: no `login` connector for {}: {e:?}", program.name));
-    namespace::build()
-        .add(toyos_session::LOGIN_PORT, &connector)
-        .finish()
-        .unwrap_or_else(|e| panic!("supervisor: no `login` namespace for {}: {e:?}", program.name))
+        .unwrap_or_else(|e| panic!("supervisor: no `{name}` connector for {}: {e:?}", program.name))
 }
 
 /// One of the supervisor's words on a swap: its line in the log.
@@ -3617,8 +3531,8 @@ fn swapped(service: &str, word: Word, detail: &str) {
 }
 
 /// What a process is started with beside its row: arguments, a `drives`
-/// process's claim on its function endowed by label, and connectors in its
-/// namespace by name, each minted for what it reaches: the partitions the
+/// process's claim on its function endowed by label, and services by name,
+/// each minted for what it reaches: the partitions the
 /// block service serves, or a disk driver's `disk`.
 #[derive(Default)]
 struct Extra {
@@ -3780,24 +3694,28 @@ impl Boot {
     /// Where the loader's record is not one this supervisor reads: the two
     /// are not one build's, and no partition it names can be trusted.
     fn take() -> Self {
-        let handle = |label: &str| -> toyos::OwnedHandle {
-            Endowments::get()
-                .take(label)
-                .unwrap_or_else(|| panic!("supervisor: the kernel spawns this program holding `{label}`"))
-        };
-        let image = |label: &str| {
-            let handle = handle(label);
+        use toyos_abi::boot::supervisor as at;
+        let image = |at: toyos::RawHandle, what: &str| {
+            let handle = kernel_gave(at);
             let kind = toyos_abi::syscall::fstat(handle.as_handle().raw()).map(|stat| stat.file_type);
-            assert_eq!(kind, Ok(FileType::ImmutableMemory), "supervisor: `{label}` is no image nobody writes");
+            assert_eq!(kind, Ok(FileType::ImmutableMemory), "supervisor: {what} is no image nobody writes");
             handle
         };
-        let record = toyos::shm::Immutable::adopt(handle(BOOT_NAMES_LABEL))
-            .unwrap_or_else(|why| panic!("supervisor: `{BOOT_NAMES_LABEL}` is no image nobody writes: {why}"));
+        let record = toyos::shm::Immutable::adopt(kernel_gave(at::BOOT_NAMES))
+            .unwrap_or_else(|why| panic!("supervisor: the loader's boot names are no image nobody writes: {why}"));
         let record: &'static toyos::shm::Immutable = Box::leak(Box::new(record));
         let names = toyos_bootnames::Names::parse(record.as_slice())
             .unwrap_or_else(|why| panic!("supervisor: the loader's boot names are refused: {why}"));
-        Self { fileserver: image(FILESERVER_IMAGE_LABEL), root: image(ROOT_IMAGE_LABEL), names }
+        Self { fileserver: image(at::FILESERVER_IMAGE, "the file server's image"), root: image(at::ROOT_IMAGE, "ROOT"), names }
     }
+}
+
+/// The handle the kernel starts the supervisor holding at `at`, one of
+/// `toyos_abi::boot::supervisor`'s, owned from here.
+fn kernel_gave(at: toyos::RawHandle) -> toyos::OwnedHandle {
+    // SAFETY: the kernel installs each of those in this process's table
+    // before it runs, and `main` and `Boot::take` each take one once.
+    unsafe { toyos::OwnedHandle::from_raw(at) }
 }
 
 /// The row SYSTEM is started under, which no manifest declares since it

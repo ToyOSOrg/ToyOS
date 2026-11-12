@@ -16,9 +16,9 @@ mod image;
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use toyos::endow::{self, SVC_LABEL};
+use toyos::endow::{self, service_label, SVC_PREFIX};
 use toyos::process::Process;
-use toyos::{namespace, port, AsHandle, OwnedHandle};
+use toyos::{port, AsHandle, OwnedHandle};
 use toyos_abi::syscall::{self, debug_action, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
 use std::os::toyos::process::ExitStatusExt;
@@ -28,10 +28,10 @@ const SELF_PATH: &str = "/system/bin/test_rs_spawn_lands_claimed";
 /// The name its children go by.
 const NAME: &str = "test_rs_spawn_lands_claimed";
 
-/// The name the place's namespace carries the port back to the test under.
+/// The service the place is given the port back to the test as.
 const BACK: &str = "back";
 
-/// The place to the test: a copy of its own `self`.
+/// The place to the test: a copy of its handle to itself.
 const MSG_SELF: u32 = 1;
 
 const KILLED: End = End::Killed;
@@ -47,10 +47,10 @@ fn main() {
 
 fn test() {
     let (acceptor, connector) = port::create().expect("a port of our own");
-    let ns = namespace::build().add(BACK, &connector).finish().expect("a namespace carrying the port back");
     let mut place = Command::new(SELF_PATH)
         .arg("place")
-        .endow(SVC_LABEL, ns.into())
+        .services_only(&[])
+        .endow(&service_label(SVC_PREFIX, BACK), connector.into())
         .stdin(Stdio::null())
         .spawn()
         .expect("spawn the place");
@@ -91,8 +91,6 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
         name_len: NAME.len() as u64,
         endow_ptr: 0,
         endow_count: 0,
-        labels_ptr: 0,
-        labels_len: 0,
         maps_ptr: laid.maps().as_ptr() as u64,
         maps_count: laid.maps().len() as u64,
         entry: laid.entry,
@@ -100,6 +98,7 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
         build_id_ptr: laid.build_id().as_ptr() as u64,
         build_id_len: laid.build_id().len() as u64,
         place: u64::from(place.0),
+        job: u64::from(toyos_abi::HANDLE_INVALID.0),
         pager: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
     // SAFETY: every pointer names a buffer of this frame that outlives the call.

@@ -74,10 +74,10 @@ Stage 3 is in the kernel (`kernel/pure/sched/queue.rs`, `kernel/pure/sched/job.r
 - **sshserver sessions.** `sshserver` starts every session as one of its own
   helpers, so all remote logins share its job: it has no ToyOS dependency
   through which to make one. Exit: sshserver holds `jobs` and starts each session in a job
-  of its own, through std's endowment of `JOB_LABEL` or the std/libc path
+  of its own, through std's `CommandExt::job` or the std/libc path
   below.
 - **A new job from std and libc.** Their spawn reaches a new job only through
-  `CommandExt::endow(JOB_LABEL, …)`, and libc has no such call. This waits
+  `CommandExt::job`, and libc has no such call. This waits
   for the fd-table work that rewrites spawn. Exit: std and libc each take a
   job for a child through their ordinary spawn interface, which is then the
   route the bullet above uses.

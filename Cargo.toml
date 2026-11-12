@@ -133,6 +133,7 @@ members = [
     "system/hda/driver",
     "system/session",
     "system/shell",
+    "system/shell/copies",
     "system/soundserver",
     "system/soundserver/mixer",
     "system/soundserver/output",

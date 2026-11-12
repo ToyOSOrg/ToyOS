@@ -142,7 +142,9 @@ impl SysCap {
     }
 
     /// The machine's header, then one entry per live thread for as much of
-    /// `buf` as is left. Answers the bytes written, and `0` if it was refused.
+    /// `buf` as is left. Answers the bytes written, and `0` if it was refused:
+    /// to a capability without `ROSTER`, or to a job without the room to hold
+    /// the roster while it is copied out.
     ///
     /// Needs [`Rights::ROSTER`], which is what makes the entries — a pid, a
     /// size, a CPU time and a **name** for every process in the machine — the

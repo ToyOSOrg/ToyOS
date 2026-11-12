@@ -21,9 +21,6 @@ use toyos_abi::RawHandle;
 /// table's cap.
 const ATTEMPTS: usize = 200;
 
-/// The name this process's own namespace maps to its own port.
-const NAME: &str = "abuse-connect-flood";
-
 /// Physical bytes in use, from `SYS_SYSINFO`'s header.
 fn used_bytes() -> u64 {
     let mut buf = [0u8; toyos::system::SYSINFO_HEADER_SIZE];
@@ -33,20 +30,15 @@ fn used_bytes() -> u64 {
 }
 
 fn main() {
+    // A connector this process holds is the only way to open a connection at
+    // all.
     let (acceptor, connector) = port::create().expect("a port of our own");
-    // One namespace holding that connector, which is the only way to open a
-    // connection at all: a name resolves in a namespace this process holds and
-    // nowhere else.
-    let ns = toyos::namespace::build()
-        .add(NAME, &connector)
-        .finish()
-        .expect("a namespace naming our own port");
 
     let before = used_bytes();
     let mut held: Vec<RawHandle> = Vec::new();
     let mut refused_after = None;
     for i in 0..ATTEMPTS {
-        match syscall::namespace_open(ns.as_handle().raw(), NAME) {
+        match syscall::connect(connector.as_handle().raw()) {
             Ok(handle) => held.push(handle),
             Err(SyscallError::ResourceExhausted) => {
                 refused_after = Some(i);
@@ -68,6 +60,27 @@ fn main() {
     // The exact allowance, not a range: a silent change to it should be a
     // decision someone makes on purpose. Tracks `MAX_PENDING_CONNECTIONS`.
     assert_eq!(depth, 32, "the burst allowance moved");
+
+    // A refused connect leaves the caller's table as it was. The table hands
+    // out the slot it was given back last, so a handle made and closed around
+    // the refusal lands where it lands around nothing: one installed and
+    // closed between would have moved the slot's generation on further.
+    let made_and_closed = || {
+        // SAFETY: nothing relies on being the source's only holder, and no type holds the copy.
+        let copy = unsafe { syscall::dup(connector.as_handle().raw()) }.expect("a copy of the connector");
+        unsafe { syscall::close(copy) };
+        copy
+    };
+    let (first, second) = (made_and_closed(), made_and_closed());
+    let before_refusal = made_and_closed();
+    assert_eq!(syscall::connect(connector.as_handle().raw()), Err(SyscallError::ResourceExhausted), "a connect past the depth");
+    let after_refusal = made_and_closed();
+    assert_eq!(
+        (after_refusal.slot(), after_refusal.generation().wrapping_sub(before_refusal.generation())),
+        (before_refusal.slot(), second.generation().wrapping_sub(first.generation())),
+        "a refused connect changed the caller's table",
+    );
+    println!("  a refused connect left the caller's table as it was");
 
     // What the queued connections cost. Eagerly allocated, `depth` of them is
     // `depth * 4 MiB`; lazily, it is the queue entries and nothing else. The
@@ -103,7 +116,7 @@ fn main() {
 
     // SAFETY: no type holds this number.
     unsafe { syscall::close(accepted) };
-    let handle = syscall::namespace_open(ns.as_handle().raw(), NAME)
+    let handle = syscall::connect(connector.as_handle().raw())
         .expect("an open must succeed once the server drains one");
     held.push(handle);
 

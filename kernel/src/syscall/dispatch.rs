@@ -34,7 +34,7 @@ use super::io::{
 use super::ipc::{
     Incoming, Outgoing,
     sys_accept, sys_inbox_setup, sys_message_recv, sys_message_send,
-    sys_inbox_submit, sys_namespace_build, sys_namespace_names, sys_namespace_open, sys_pipe,
+    sys_connect, sys_inbox_submit, sys_pipe,
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_sub,
 };
 use super::machine::{
@@ -47,7 +47,7 @@ use super::machine::{
 use super::machine::lower_sysinfo_bound;
 use super::paged::{sys_paged_create, sys_paged_holder, sys_paged_notices, sys_paged_op, sys_paged_read, sys_pager_create};
 use super::proc::{
-    spawn_pager, spawn_place, spawn_program, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
+    spawn_job, spawn_pager, spawn_place, spawn_program, sys_exit, sys_nanosleep, sys_process_stats,
     sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_get_affinity, sys_thread_join, sys_thread_set_affinity, sys_set_thread_pointer, sys_thread_spawn, sys_wake_latency_hold, sys_yield,
 };
 use super::vm::{
@@ -120,6 +120,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(parent) => parent,
                 Err(refused) => return refused,
             };
+            let job = match spawn_job(args.job) {
+                Ok(job) => job,
+                Err(refused) => return refused,
+            };
             let pager = match spawn_pager(args.pager) {
                 Ok(pager) => pager,
                 Err(refused) => return refused,
@@ -137,24 +141,15 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Some(name) = toyos_abi::syscall::process_name(&name) else {
                 return SyscallError::InvalidArgument.to_u64();
             };
-            if args.endow_count as usize > toyos_abi::syscall::MAX_SPAWN_ENDOWMENTS
-                || args.labels_len > toyos_abi::syscall::MAX_SPAWN_LABELS_LEN as u64
-            {
+            // Bounded before it is multiplied; a window, not a copy: each entry is read once.
+            if args.endow_count > toyos_abi::syscall::MAX_SPAWN_ENDOWMENTS as u64 {
                 return SyscallError::InvalidArgument.to_u64();
             }
-            // endow stays a window, not a copy: its count is userland's and each entry
-            // is read once. labels is copied because the child keeps it.
-            let Some(endow) = (args.endow_count as usize)
-                .checked_mul(core::mem::size_of::<toyos_abi::syscall::SpawnEndow>())
-                .and_then(|len| ctx.user_bytes(UserAddr::new(args.endow_ptr), len as u64))
-            else {
+            let endow_len = args.endow_count * core::mem::size_of::<toyos_abi::handle::TransferEntry>() as u64;
+            let Some(endow) = ctx.user_bytes(UserAddr::new(args.endow_ptr), endow_len) else {
                 return bad_addr;
             };
-            let labels = match ctx.user_vec(UserAddr::new(args.labels_ptr), args.labels_len) {
-                Ok(bytes) => bytes,
-                Err(e) => return e.to_u64(),
-            };
-            let pending = match process::build_child_handles(&endow, &labels, pager) {
+            let pending = match process::build_child_handles(&endow, job, pager) {
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };
@@ -280,10 +275,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         }
         SYS_DEVICE_DMA_UNMAP => sys_device_dma_unmap(RawHandle(a1 as u32), a2),
         SYS_DEVICE_DMA_START => sys_device_dma_start(RawHandle(a1 as u32)),
-        SYS_ENDOWMENTS => {
-            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
-            sys_endowments(&mut buf)
-        }
         SYS_DEVICE_CLAIM => sys_device_claim(RawHandle(a1 as u32), a2, [a3, a4]),
         SYS_RT_ENTER => sys_rt_enter(RawHandle(a1 as u32)),
         SYS_JOB_CREATE => sys_job_create(RawHandle(a1 as u32)),
@@ -354,22 +345,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             };
             sys_port_badge(RawHandle(a1 as u32), RawHandle(a2 as u32), &mut out)
         }
-        SYS_NAMESPACE_BUILD => {
-            let Ok(args) = ctx.copy_in::<NamespaceBuild>(UserAddr::new(a1)) else {
-                return bad_addr;
-            };
-            // ctx lets sys_namespace_build bound both counts before it reads either vector.
-            sys_namespace_build(&ctx, &args)
-        }
-        SYS_NAMESPACE_NAMES => {
-            let len = a3.min((MAX_NAMESPACE_ENTRIES * (2 + MAX_SERVICE_NAME)) as u64);
-            let Some(mut out) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
-            sys_namespace_names(RawHandle(a1 as u32), &mut out)
-        }
-        SYS_NAMESPACE_OPEN => {
-            let name = match ctx.user_str(UserAddr::new(a2), a3) { Ok(s) => s, Err(e) => return e.to_u64() };
-            sys_namespace_open(RawHandle(a1 as u32), &name)
-        }
+        SYS_CONNECT => sys_connect(RawHandle(a1 as u32)),
         SYS_INBOX_SETUP => {
             // Taken before the inbox exists: a bad address must not leave a handle the caller was never told.
             let len = core::mem::size_of::<InboxSetup>() as u64;

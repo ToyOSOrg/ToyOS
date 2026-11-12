@@ -15,15 +15,14 @@ const OWN: &str = "/state/test-runner";
 const SERVICE: &str = "/state/logkeeper";
 
 fn main() {
-    let names = toyos::endow::namespace().expect("a job inherits test-runner's namespace");
     let mut red = Vec::new();
 
     for held in ["fs:/state", "fs:/state/supervisor", "fs:/state/logkeeper"] {
-        if names.open(held).is_ok() {
+        if toyos::endow::service(held).is_ok() {
             red.push(format!("it holds {held}"));
         }
     }
-    if let Err(e) = names.open(&format!("fs:{OWN}")) {
+    if let Err(e) = toyos::endow::service(&format!("fs:{OWN}")) {
         red.push(format!("fs:{OWN} would not connect: {e:?}"));
     }
 

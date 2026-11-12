@@ -10,7 +10,7 @@
 /// Of a pipeline's periods, how many soundserver keeps in reserve rather than
 /// spending on a client that is still filling.
 ///
-/// Policy, not physics, with the same standing as the kernel's `MAX_USER_STR`:
+/// Policy, not physics, with the same standing as the kernel's `MAX_HANDLES`:
 /// of the shipped pipeline's 8 periods, soundserver waits on a client for at most 3
 /// and always keeps 5 unplayed. It cannot be derived from worst-case wake
 /// lateness — the recorded worst exceeds two whole pipelines, so no floor
