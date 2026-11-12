@@ -674,9 +674,11 @@ pub enum SyscallError {
     /// the same rule the storage layer already obeys applies here: a dead peer
     /// must not be indistinguishable from a handle that was never there.
     Gone = 10,
-    /// The object is in use in a way that excludes the call: a write to a file
-    /// a program runs from, or a call on an inbox another thread submits to.
+    /// Another thread holds what the call needs alone: an inbox's submitter.
     Busy = 11,
+    /// The object is a program's text: a program runs from it, so nothing
+    /// writes it.
+    TextBusy = 12,
 }
 
 impl SyscallError {
@@ -702,6 +704,7 @@ impl SyscallError {
             9 => Some(Self::Io),
             10 => Some(Self::Gone),
             11 => Some(Self::Busy),
+            12 => Some(Self::TextBusy),
             _ => Some(Self::Unknown),
         }
     }
@@ -722,6 +725,7 @@ impl core::fmt::Display for SyscallError {
             Self::Io => f.write_str("the device did not complete the transfer"),
             Self::Gone => f.write_str("the other end is gone"),
             Self::Busy => f.write_str("busy"),
+            Self::TextBusy => f.write_str("text file busy: a program runs from it"),
         }
     }
 }
@@ -3296,11 +3300,13 @@ pub fn paged_holder(pager: RawHandle, object: u64, writes: bool) -> Result<RawHa
 /// [`PAGED_HOLDER_PAGES`] pages or ends past [`PAGED_HOLDER_END`], a page
 /// inside the size is not present or failed, the credit or the pager's dirty
 /// ceiling is short, or a fresh page has no room; the holder asks the pager to
-/// write instead. Admitted, it is whole, read by no holder half done. `Busy`
+/// write instead. Admitted, it is whole, read by no holder half done. `TextBusy`
 /// where something runs from the object; `BadAddress` for `bytes` the kernel
 /// cannot read, with nothing written; `Gone` once the object or the pager
-/// ended. The object's modification time is stamped. A pager's process is refused, `PermissionDenied`, as is a
-/// holder without `WRITE`; any other kind of handle, `InvalidArgument`.
+/// ended, or its holders' last handle closed before the write began. The
+/// object's modification time is stamped. A pager's process is refused,
+/// `PermissionDenied`, as is a holder without `WRITE`; any other kind of
+/// handle, `InvalidArgument`.
 pub fn paged_write(holder: RawHandle, bytes: &[u8], offset: u64) -> Result<usize, SyscallError> {
     check(syscall(SYS_PAGED_WRITE, holder.0 as u64, bytes.as_ptr() as u64, bytes.len() as u64, offset)).map(|n| n as usize)
 }

@@ -218,18 +218,6 @@ impl State {
         (&mut self.pages, &mut entry.object)
     }
 
-    /// The object at `slot` owes a notice of holders' dirtying, or no longer
-    /// does: whether it is owed newly.
-    fn owe_dirtied(&mut self, slot: u32, owed: bool) -> bool {
-        match owed {
-            true => self.entries.mark(DIRTIED, slot),
-            false => {
-                self.entries.unmark(DIRTIED, slot);
-                false
-            }
-        }
-    }
-
     /// A free slot for the next object, its piece charged where one is made:
     /// `ResourceExhausted` where the charge is refused or the table is whole.
     fn make_slot(&mut self) -> Result<(), SyscallError> {
@@ -468,8 +456,10 @@ impl PagerObject {
                 }
                 while n < want {
                     let Some(slot) = state.entries.take_marked(NO_HOLDERS) else { break };
-                    // Said only while still so: a holder made since is held.
-                    if state.entry(slot).holders == 0 {
+                    // Said only while still so: a holder made since is held,
+                    // and a write under way marks the object again at its end.
+                    let entry = state.entry(slot);
+                    if entry.holders == 0 && entry.writers == 0 {
                         batch[n] = PagedNotice { object: u64::from(slot), kind: NOTICE_NO_HOLDERS, first: 0, count: 0 };
                         n += 1;
                     }
@@ -1099,7 +1089,7 @@ impl PagerObject {
     /// not yet taken of them is owed no more.
     pub fn take_dirtied(&self, id: u64) -> Result<PagedRange, SyscallError> {
         self.on_live(id, |state, slot| {
-            state.owe_dirtied(slot, false);
+            state.entries.unmark(DIRTIED, slot);
             let (first, count) = state.entry_mut(slot).object.take_dirtied().unwrap_or((0, 0));
             PagedRange { first, count }
         })
@@ -1139,7 +1129,9 @@ impl PagerObject {
         let mut staged = [0u64; HOLDER];
         let mut fresh = [0u64; HOLDER];
         let mut drawn = [None; 2 * HOLDER];
-        let _writing = HolderWriting::begin(self, slot);
+        let Some(_writing) = HolderWriting::begin(self, slot) else {
+            return SyscallError::Gone.to_u64();
+        };
         // Frames for the bytes, and for the pages the write would install,
         // as the object stands now: one fewer than it needs then refuses it.
         let fresh_count = {
@@ -1253,7 +1245,7 @@ impl PagerObject {
             let tell = object.take_tell();
             self.give_frames(&mut state, &staged[..staged_count]);
             self.give_frames(&mut state, &fresh[used..fresh_count]);
-            if tell && !state.gone && state.entry(slot).owned && state.owe_dirtied(slot, true) {
+            if tell && !state.gone && state.entry(slot).owned && state.entries.mark(DIRTIED, slot) {
                 self.watch.post();
             }
         }
@@ -1404,7 +1396,7 @@ fn word(why: Refused) -> SyscallError {
         Refused::OutOfReach => SyscallError::InvalidArgument,
         Refused::NoRoom => SyscallError::ResourceExhausted,
         Refused::DirtyFull | Refused::NoCredit => SyscallError::WouldBlock,
-        Refused::Sealed => SyscallError::Busy,
+        Refused::Sealed => SyscallError::TextBusy,
     }
 }
 
@@ -1414,7 +1406,7 @@ fn word(why: Refused) -> SyscallError {
 fn holder_word(why: Refused) -> SyscallError {
     match why {
         Refused::Gone => SyscallError::Gone,
-        Refused::Sealed => SyscallError::Busy,
+        Refused::Sealed => SyscallError::TextBusy,
         Refused::Absent | Refused::NoCredit | Refused::DirtyFull | Refused::NoRoom | Refused::OutOfReach => {
             SyscallError::WouldBlock
         }
@@ -1607,9 +1599,16 @@ struct HolderWriting<'a> {
 }
 
 impl<'a> HolderWriting<'a> {
-    fn begin(pager: &'a PagerObject, slot: u32) -> Self {
-        pager.state.lock().entry_mut(slot).writers += 1;
-        Self { pager, slot }
+    /// `None` once the object's last holder went: its pager may have been
+    /// told so, and a write now would dirty what it was told no one holds.
+    fn begin(pager: &'a PagerObject, slot: u32) -> Option<Self> {
+        let mut state = pager.state.lock();
+        let entry = state.entry_mut(slot);
+        if entry.holders == 0 {
+            return None;
+        }
+        entry.writers += 1;
+        Some(Self { pager, slot })
     }
 }
 

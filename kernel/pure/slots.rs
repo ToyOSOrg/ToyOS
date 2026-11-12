@@ -309,8 +309,8 @@ mod tests {
         for _ in 0..4 {
             t.insert_with(|slot| slot).unwrap();
         }
-        assert!(t.mark(0, 1) && t.mark(1, 1) && t.mark(1, 2) && t.mark(0, 3));
-        assert!(t.unmark(1, 1) && !t.unmark(1, 3), "one list's unmark leaves the other's mark");
+        assert!(t.mark(0, 1) && t.mark(1, 1) && t.mark(1, 2) && t.mark(0, 3) && t.mark(1, 3));
+        assert!(t.unmark(1, 1), "one list's unmark leaves the other's mark");
         assert_eq!(t.remove(3), Some(3));
         assert_eq!(core::iter::from_fn(|| t.take_marked(0)).collect::<alloc::vec::Vec<_>>(), [1]);
         assert_eq!(core::iter::from_fn(|| t.take_marked(1)).collect::<alloc::vec::Vec<_>>(), [2]);

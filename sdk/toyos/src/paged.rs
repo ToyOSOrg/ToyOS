@@ -286,7 +286,7 @@ impl Paged {
     /// more than [`PAGED_HOLDER_PAGES`] pages or ends past
     /// [`PAGED_HOLDER_END`], or the pager has to act first —
     /// supply a page, grant credit, write back — and the holder asks it to
-    /// write instead; `Busy` while a program runs from the object;
+    /// write instead; `TextBusy` while a program runs from the object;
     /// `PermissionDenied` for a holder not minted to write.
     pub fn write(&self, bytes: &[u8], offset: u64) -> Result<usize, SyscallError> {
         syscall::paged_write(self.0.raw(), bytes, offset)

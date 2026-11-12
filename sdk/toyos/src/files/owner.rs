@@ -342,7 +342,7 @@ fn on_fd<T>(
 fn held_write(written: Result<usize, SyscallError>) -> Option<Result<usize, Error>> {
     match written {
         Ok(n) => Some(Ok(n)),
-        Err(e @ (SyscallError::Busy | SyscallError::BadAddress)) => Some(Err(Error::Kernel(e))),
+        Err(e @ (SyscallError::TextBusy | SyscallError::BadAddress)) => Some(Err(Error::Kernel(e))),
         Err(_) => None,
     }
 }
