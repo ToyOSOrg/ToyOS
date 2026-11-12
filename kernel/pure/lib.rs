@@ -29,6 +29,7 @@ pub mod pipe;
 pub mod pointers;
 pub mod rmrr;
 pub mod sched;
+pub mod slots;
 pub mod stackslots;
 pub mod vm;
 pub mod wx;

@@ -383,6 +383,10 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is each bench's verdict on its own CPU's fault path;
     // `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` runs it under QEMU.
     "user_copy_faults",
+    // Its shared run is each bench's verdict;
+    // `tmp_holds_empty_files_by_what_each_costs` runs it under QEMU, and
+    // `virt_tmp_holds_empty_files_by_what_each_costs` on AArch64's.
+    "tmp_empty_files",
     // Its shared run is ring's known answers in a guest; the crypto boot runs it
     // first on each bench, and `crypto_instrument_prints_its_table` before the
     // instrument under QEMU.
@@ -449,6 +453,9 @@ const SCREEN_TESTS: &[ScreenTest] = &[
     // the unprivileged copies and their EL1 fixup (`arch::uaccess`).
     ("virt_user_copy_faults", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_USER_COPY}"))),
     ("virt_vm_map_shares", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_VM_MAP}"))),
+    // `tmp_holds_empty_files_by_what_each_costs` on AArch64: the paged
+    // objects' table and its notices are shared memory-management code.
+    ("virt_tmp_holds_empty_files_by_what_each_costs", qemu::Profile::Virt, |profile, _| virt_tmp_holds_empty_files_by_what_each_costs(profile)),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_RING0_TIMER}"))),
     // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and
     // `virt_reboot`: under HVF a woken thread can go undispatched for seconds
@@ -714,6 +721,12 @@ const MACHINE_TESTS: &[MachineTest] = &[
     ("a_user_copy_highest_first_faults_or_ends_as_bad_address", |test_config| {
         a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &["copies-go-down"])
     }),
+    // `/tmp` holds more empty files than its guest has MiB of memory, and
+    // each one's last holder going reaches its server: the memory file
+    // server's objects as the kernel makes, charges and reports them, which
+    // no host build has. One boot of QEMU's x86-64 machine; the shared boots
+    // run it on each bench.
+    ("tmp_holds_empty_files_by_what_each_costs", |test_config| tmp_holds_empty_files_by_what_each_costs(test_config)),
     // The boot's log written through usbd onto the stick it booted from, and
     // still there once the machine has stopped: the path every metal boot's
     // `/log` takes, which no other QEMU row reads, because their console is
@@ -5915,6 +5928,46 @@ fn ring3_debug_traps_end_their_process(test_config: &Path) -> Result<(), String>
     };
     eprintln!("  [debug_trap] {}", line.trim());
     Ok(())
+}
+
+/// What `tmp_empty_files` says once every file it made, one for each MiB of
+/// the machine's memory and 1,024 more, was opened to read and removed.
+const TMP_FILES_SAID: &str = "empty files, one per MiB of memory and 1024 more, made, read-opened and removed";
+
+/// `tmp_empty_files` alone: more empty files in `/tmp` than the guest has
+/// MiB of memory, each opened to read and closed, and removed.
+fn tmp_holds_empty_files_by_what_each_costs(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "tmp_empty_files";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_tmp_empty_files", Duration::from_secs(300));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let Some(said) = result.stdout.lines().find(|l| l.contains(TMP_FILES_SAID)) else {
+        return Err(format!("the job never said {TMP_FILES_SAID:?}:\n{}", result.stdout));
+    };
+    eprintln!("  [tmp] {}", said.trim());
+    Ok(())
+}
+
+/// The same job on AArch64: `tests/images/virttmpcase.toml`, whose one job it
+/// is, beside the memory file server alone.
+fn virt_tmp_holds_empty_files_by_what_each_costs(profile: qemu::Profile) -> Result<(), String> {
+    let config = compile::repo_root().join("tests/images/virttmpcase.toml");
+    let options = BootOptions {
+        profile,
+        ready_marker: "control registers: SCTLR_EL1=",
+        extra_root_files: vec![suite_bin(profile.arch(), "tmp_empty_files")],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "test_rs_tmp_empty_files", TMP_FILES_SAID)
 }
 
 /// `std_threads` on a guest of [`BootOptions`]' CPUs: it asserts what it

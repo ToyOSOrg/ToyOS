@@ -3461,6 +3461,7 @@ mod tests {
         "tests/images/virtpaniccase.toml",
         "tests/images/virtrebootcase.toml",
         "tests/images/virtsmpcase.toml",
+        "tests/images/virttmpcase.toml",
     ];
 
     fn load(cfg: &str) -> SystemConfig {
