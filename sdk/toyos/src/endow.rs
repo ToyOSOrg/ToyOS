@@ -16,14 +16,20 @@
 //! through it, and a helper this process spawns is given a duplicate
 //! (`crate::spawn`). Every other name is taken, once ([`Endowments::take`]),
 //! and goes to a child only by an endowment its spawn names.
+//!
+//! **A process holds what it did with its endowments once**, however many
+//! copies of this crate it links: which names were taken, its launcher and the
+//! services it adopted. The copy that owns the descriptor table (`crate::fd`)
+//! keeps that state and defines `toyos_endow_*`, which every copy reaches it
+//! through, as it does the stdio state (`crate::log::stdio`).
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 
-use toyos_abi::handle::{ObjectKind, HANDLE_INVALID};
+use toyos_abi::handle::ObjectKind;
 use toyos_abi::syscall::{DeviceRequest, DeviceType, SyscallError, MAX_SPAWN_ENDOWMENTS};
 
 use crate::ipc::Connection;
@@ -173,14 +179,12 @@ macro_rules! class_of_claim {
 
 class_of_claim!(crate::FramebufferDev, crate::PciDev, crate::AcpiDev, crate::UartDev);
 
-/// This process's endowment table, read once.
+/// This process's endowment table, read once by each copy of this crate:
+/// what its parent calls each handle. What was taken from it is the
+/// process's, held once for every copy.
 pub struct Endowments {
     /// What its parent calls each handle, in the order endowed.
     names: [&'static str; MAX_SPAWN_ENDOWMENTS],
-    /// **Taken by swap**, so a name answers exactly once: the second `take`
-    /// finds [`HANDLE_INVALID`] and returns `None` rather than a second owner
-    /// of one handle.
-    handles: [AtomicU32; MAX_SPAWN_ENDOWMENTS],
     count: usize,
 }
 
@@ -193,34 +197,23 @@ impl Endowments {
     /// The table of a process whose parent called its `i`th endowment
     /// `names[i]`: the handle is `RawHandle::endowed(i)`.
     fn of(names: [&'static str; MAX_SPAWN_ENDOWMENTS], count: usize) -> Self {
-        let handles = core::array::from_fn(|i| AtomicU32::new(if i < count { RawHandle::endowed(i).0 } else { HANDLE_INVALID.0 }));
-        Self { names, handles, count }
+        Self { names, count }
     }
 
     /// Take the handle named `label`, as `T`. `None` once, for a name this
-    /// process was not given; `None` again for one already taken; and `None`
-    /// for a service's, which stays ([`connector`]).
+    /// process was not given; `None` again for one already taken, by any copy
+    /// of this crate; and `None` for a service's, which stays ([`connector`]).
     pub fn take<T: FromHandle>(&self, label: &str) -> Option<T> {
-        if service_of(label).is_some() {
-            return None;
-        }
-        let i = self.index_of(label)?;
-        let raw = self.handles[i].swap(HANDLE_INVALID.0, Ordering::AcqRel);
-        if raw == HANDLE_INVALID.0 {
-            return None;
-        }
-        // The swap is what makes this the only caller to see the handle, and
-        // the kernel put it in this process's table at spawn.
-        let handle = OwnedHandle(RawHandle(raw));
+        let raw = held::take(label)?;
         // SAFETY: what this process was endowed is its parent's to say, which
-        // made it and can end it as it likes.
-        Some(unsafe { T::from_handle(handle) })
+        // made it and can end it as it likes; and the process's one record of
+        // what was taken gave the handle to this caller alone.
+        Some(unsafe { T::from_handle(OwnedHandle(raw)) })
     }
 
     /// Whether `label` names something this process still holds.
     pub fn holds(&self, label: &str) -> bool {
-        self.index_of(label)
-            .is_some_and(|i| self.handles[i].load(Ordering::Acquire) != HANDLE_INVALID.0)
+        held::holds(label)
     }
 
     /// Every name in the table, taken or not: for a diagnostic, and for a
@@ -229,16 +222,12 @@ impl Endowments {
         self.names[..self.count].iter().copied()
     }
 
-    fn index_of(&self, label: &str) -> Option<usize> {
-        self.names[..self.count].iter().position(|name| *name == label)
-    }
-
     /// Every service's connector, by its whole label, in the table's order.
     fn services(&self) -> impl Iterator<Item = (&'static str, BorrowedHandle<'static>)> + '_ {
-        self.labels().zip(&self.handles).filter(|(label, _)| service_of(label).is_some()).map(|(label, handle)| {
-            // SAFETY: `take` gives no service's handle away, so it stays in
+        self.labels().enumerate().filter(|(_, label)| service_of(label).is_some()).map(|(i, label)| {
+            // SAFETY: no take gives a service's handle away, so it stays in
             // this process's table for its life.
-            (label, unsafe { BorrowedHandle::borrow_raw(RawHandle(handle.load(Ordering::Relaxed))) })
+            (label, unsafe { BorrowedHandle::borrow_raw(RawHandle::endowed(i)) })
         })
     }
 }
@@ -252,17 +241,13 @@ pub fn connector(name: &str) -> Option<BorrowedHandle<'static>> {
         .iter()
         .find_map(|prefix| table.services().find(|(label, _)| label.strip_prefix(prefix) == Some(name)))
         .map(|(_, connector)| connector)
-        .or_else(|| {
-            let (_, connector) = adopted().iter().find(|(held, _)| held == name)?;
-            // SAFETY: an adopted connector is never dropped.
-            Some(unsafe { BorrowedHandle::borrow_raw(connector.as_handle().raw()) })
-        })
+        .or_else(|| held::adopted().iter().find(|service| service.name() == name).map(Adopted::connector))
 }
 
 /// The name of every service this process holds, as [`connector`] takes it.
 pub fn services() -> impl Iterator<Item = &'static str> {
     let endowed = Endowments::get().services().filter_map(|(label, _)| service_of(label));
-    endowed.chain(adopted().iter().map(|(name, _)| name.as_str()))
+    endowed.chain(held::adopted().iter().map(Adopted::name))
 }
 
 /// The label and connector of every service a helper this process spawns is
@@ -279,10 +264,13 @@ pub fn provided() -> impl Iterator<Item = (&'static str, BorrowedHandle<'static>
 }
 
 /// The launcher this process was endowed under [`crate::launch::LAUNCHER`],
-/// or `None`. Borrowed: std connects through it for every launch, and a
-/// parent that hands it on endows a duplicate.
+/// or `None`. Borrowed: the process keeps it once for every copy of this
+/// crate, std connects through it for every launch, and a parent that hands it
+/// on endows a duplicate.
 pub fn launcher() -> Option<&'static Connector> {
-    LAUNCHER.0.get_or_init(|| Endowments::get().take::<Connector>(crate::launch::LAUNCHER)).as_ref()
+    // This copy's wrapper over the process's one launcher, never dropped, so
+    // nothing closes it.
+    LAUNCHER.0.get_or_init(|| held::launcher().map(|raw| Connector(OwnedHandle(raw)))).as_ref()
 }
 
 /// This process's handle to itself, which it hands on for a child to be
@@ -298,18 +286,24 @@ pub fn this_process() -> &'static Process {
 /// one process no parent endows any: the supervisor, which makes the
 /// machine's ports itself and resolves its own files through them as every
 /// program does. No child inherits them. Refused once this process has
-/// adopted any or has looked one up.
+/// adopted any or has looked one up, through any copy of this crate: the
+/// process holds one set.
 pub fn adopt(services: Vec<(String, Connector)>) -> Result<(), Vec<(String, Connector)>> {
-    let mut offered = Some(services);
-    ADOPTED.0.get_or_init(|| offered.take().expect("built once"));
-    match offered {
-        None => Ok(()),
-        Some(services) => Err(services),
+    let offered: Vec<Adopted> = services
+        .iter()
+        .map(|(name, connector)| Adopted { name: name.as_ptr(), len: name.len(), handle: connector.as_handle().raw().0 })
+        .collect();
+    // SAFETY: each entry names a name of `services` and its connector, both
+    // live for the call; on `true` the connectors are the process's set's,
+    // and are given up here.
+    if unsafe { held::adopt(&offered) } {
+        for (_, connector) in services {
+            let _ = connector.into_raw();
+        }
+        Ok(())
+    } else {
+        Err(services)
     }
-}
-
-fn adopted() -> &'static [(String, Connector)] {
-    ADOPTED.0.get_or_init(Vec::new)
 }
 
 /// Open a connection to the service `name`.
@@ -387,8 +381,8 @@ const BUILDING: u8 = 1;
 const READY: u8 = 2;
 
 /// The cell is written once, under the `UNSET -> BUILDING` exchange, and read
-/// only after `READY`.
-unsafe impl<T: Send> Sync for Once<T> {}
+/// only after `READY`: the value is built on one thread and shared with all.
+unsafe impl<T: Send + Sync> Sync for Once<T> {}
 
 impl<T> Once<T> {
     pub(crate) const fn new() -> Self {
@@ -417,12 +411,10 @@ impl<T> Once<T> {
 static TABLE: EndowTable = EndowTable(Once::new());
 static LAUNCHER: LauncherCell = LauncherCell(Once::new());
 static THIS_PROCESS: ProcessCell = ProcessCell(Once::new());
-static ADOPTED: AdoptedCell = AdoptedCell(Once::new());
 
 struct EndowTable(Once<Endowments>);
 struct LauncherCell(Once<Option<Connector>>);
 struct ProcessCell(Once<Process>);
-struct AdoptedCell(Once<Vec<(String, Connector)>>);
 
 impl EndowTable {
     /// The table its parent wrote, or the process's end: every channel a
@@ -445,8 +437,285 @@ impl EndowTable {
     }
 }
 
+/// What a process did with its endowments, held once for every copy of this
+/// crate it links: in the copy that owns the descriptor table ([`owner`]), and
+/// off ToyOS in each copy ([`held`]).
+#[cfg(any(test, feature = "fd-table", not(target_os = "toyos")))]
+mod kept {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use toyos_abi::syscall::MAX_SPAWN_ENDOWMENTS;
+
+    use super::{service_of, Adopted, Endowments, Once};
+    use crate::{AsHandle, OwnedHandle, RawHandle};
+
+    /// Which names were taken, the launcher and the services adopted.
+    pub(crate) struct State {
+        /// **Taken by swap**, so a name answers exactly once in the process:
+        /// the second take, from whichever copy, finds it taken rather than
+        /// making a second owner of one handle.
+        taken: [AtomicBool; MAX_SPAWN_ENDOWMENTS],
+        /// Taken once and never closed.
+        launcher: Once<Option<RawHandle>>,
+        adopted: Once<AdoptedSet>,
+    }
+
+    impl State {
+        pub(crate) const fn new() -> Self {
+            Self { taken: [const { AtomicBool::new(false) }; MAX_SPAWN_ENDOWMENTS], launcher: Once::new(), adopted: Once::new() }
+        }
+
+        /// The handle `table` names `label`, to this caller alone: `None` for
+        /// a name it does not hold, one already taken, or a service's, which
+        /// stays.
+        pub(crate) fn take(&self, table: &Endowments, label: &str) -> Option<RawHandle> {
+            if service_of(label).is_some() {
+                return None;
+            }
+            let i = table.labels().position(|name| name == label)?;
+            (!self.taken[i].swap(true, Ordering::AcqRel)).then_some(RawHandle::endowed(i))
+        }
+
+        pub(crate) fn holds(&self, table: &Endowments, label: &str) -> bool {
+            table.labels().position(|name| name == label).is_some_and(|i| !self.taken[i].load(Ordering::Acquire))
+        }
+
+        /// The launcher, taken on the first ask and kept for the process's
+        /// life.
+        pub(crate) fn launcher(&self, table: &Endowments) -> Option<RawHandle> {
+            *self.launcher.get_or_init(|| self.take(table, crate::launch::LAUNCHER))
+        }
+
+        /// Make `offered` the process's adopted set, unless a set was made or
+        /// looked up before: whether it did.
+        ///
+        /// # Safety
+        /// Each entry names `len` bytes of UTF-8 and a connector, both live
+        /// for the call; on `true`, the connectors are the set's.
+        pub(crate) unsafe fn adopt(&self, offered: &[Adopted]) -> bool {
+            let mut made = false;
+            self.adopted.get_or_init(|| {
+                made = true;
+                let kept: Vec<(String, OwnedHandle)> = offered
+                    .iter()
+                    // SAFETY: the caller's.
+                    .map(|entry| (String::from(unsafe { entry.text() }), OwnedHandle(RawHandle(entry.handle))))
+                    .collect();
+                let entries = kept
+                    .iter()
+                    .map(|(name, connector)| Adopted { name: name.as_ptr(), len: name.len(), handle: connector.as_handle().raw().0 })
+                    .collect();
+                AdoptedSet { _kept: kept, entries }
+            });
+            made
+        }
+
+        /// The adopted set, which this ends: no adoption follows a lookup.
+        pub(crate) fn adopted(&'static self) -> &'static [Adopted] {
+            &self.adopted.get_or_init(|| AdoptedSet { _kept: Vec::new(), entries: Vec::new() }).entries
+        }
+    }
+
+    /// What a process adopted, kept for its life: the names and connectors,
+    /// and the entries every copy reads them through.
+    struct AdoptedSet {
+        /// What `entries` point into: never changed, and never dropped.
+        _kept: Vec<(String, OwnedHandle)>,
+        entries: Vec<Adopted>,
+    }
+
+    // SAFETY: `entries` points into `_kept`'s names, whose bytes are on the
+    // heap and move with the set.
+    unsafe impl Send for AdoptedSet {}
+
+    // SAFETY: nothing changes the set once it is built, so every thread that
+    // shares it reads the same names and numbers.
+    unsafe impl Sync for AdoptedSet {}
+}
+
+/// One adopted service as it crosses between copies of this crate: its
+/// name's bytes and its connector's number.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct Adopted {
+    name: *const u8,
+    len: usize,
+    handle: u32,
+}
+
+impl Adopted {
+    /// # Safety
+    /// `name` is `len` bytes of UTF-8, live for `'a`.
+    unsafe fn text<'a>(&self) -> &'a str {
+        // SAFETY: the caller's.
+        unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(self.name, self.len)) }
+    }
+
+    /// The name of an entry of the process's set, which keeps it for its life.
+    fn name(&'static self) -> &'static str {
+        // SAFETY: an entry the set answered names its own kept name.
+        unsafe { self.text() }
+    }
+
+    /// The connector of an entry of the process's set, which never closes it.
+    fn connector(&'static self) -> BorrowedHandle<'static> {
+        // SAFETY: the set holds the connector for the process's life.
+        unsafe { BorrowedHandle::borrow_raw(RawHandle(self.handle)) }
+    }
+}
+
+/// The process's state as each copy reaches it on ToyOS: through
+/// `toyos_endow_*`, which the copy that owns the descriptor table defines
+/// ([`owner`]).
+#[cfg(all(target_os = "toyos", not(test)))]
+mod held {
+    use super::Adopted;
+    use crate::RawHandle;
+    use toyos_abi::handle::HANDLE_INVALID;
+
+    // What every copy calls and the owner defines.
+    extern "C" {
+        /// The handle the process's table names `len` bytes of UTF-8 at
+        /// `label`, to this caller alone, or [`HANDLE_INVALID`].
+        fn toyos_endow_take(label: *const u8, len: usize) -> u32;
+        fn toyos_endow_holds(label: *const u8, len: usize) -> bool;
+        /// The launcher's number, or [`HANDLE_INVALID`].
+        fn toyos_endow_launcher() -> u32;
+        /// `count` entries, each a name and a connector the owner keeps on `true`.
+        fn toyos_endow_adopt(offered: *const Adopted, count: usize) -> bool;
+        /// The adopted set's entries, kept for the process's life, and how many.
+        fn toyos_endow_adopted(count: *mut usize) -> *const Adopted;
+    }
+
+    fn handle(raw: u32) -> Option<RawHandle> {
+        (raw != HANDLE_INVALID.0).then_some(RawHandle(raw))
+    }
+
+    pub(super) fn take(label: &str) -> Option<RawHandle> {
+        // SAFETY: the owner's definition, which reads the label's bytes for
+        // the call.
+        handle(unsafe { toyos_endow_take(label.as_ptr(), label.len()) })
+    }
+
+    pub(super) fn holds(label: &str) -> bool {
+        // SAFETY: as `take`'s.
+        unsafe { toyos_endow_holds(label.as_ptr(), label.len()) }
+    }
+
+    pub(super) fn launcher() -> Option<RawHandle> {
+        // SAFETY: the owner's definition, of a plain value.
+        handle(unsafe { toyos_endow_launcher() })
+    }
+
+    /// # Safety
+    /// As `State::adopt`'s.
+    pub(super) unsafe fn adopt(offered: &[Adopted]) -> bool {
+        // SAFETY: the caller's.
+        unsafe { toyos_endow_adopt(offered.as_ptr(), offered.len()) }
+    }
+
+    pub(super) fn adopted() -> &'static [Adopted] {
+        let mut count = 0;
+        // SAFETY: the owner writes the count and answers its own entries,
+        // which it keeps for the process's life.
+        let entries = unsafe { toyos_endow_adopted(&mut count) };
+        if count == 0 {
+            return &[];
+        }
+        // SAFETY: as above, `count` entries at `entries`.
+        unsafe { core::slice::from_raw_parts(entries, count) }
+    }
+}
+
+/// Off ToyOS, a state this copy holds itself, as the owner holds the
+/// process's. A host build reads no endowment table, so it only links.
+#[cfg(not(all(target_os = "toyos", not(test))))]
+mod held {
+    use super::kept::State;
+    use super::{Adopted, Endowments};
+    use crate::RawHandle;
+
+    static STATE: State = State::new();
+
+    pub(super) fn take(label: &str) -> Option<RawHandle> {
+        STATE.take(Endowments::get(), label)
+    }
+
+    pub(super) fn holds(label: &str) -> bool {
+        STATE.holds(Endowments::get(), label)
+    }
+
+    pub(super) fn launcher() -> Option<RawHandle> {
+        STATE.launcher(Endowments::get())
+    }
+
+    /// # Safety
+    /// As `State::adopt`'s.
+    pub(super) unsafe fn adopt(offered: &[Adopted]) -> bool {
+        // SAFETY: the caller's.
+        unsafe { STATE.adopt(offered) }
+    }
+
+    pub(super) fn adopted() -> &'static [Adopted] {
+        STATE.adopted()
+    }
+}
+
+/// The process's state, in the copy that owns the descriptor table, and the
+/// `toyos_endow_*` every copy reaches it through.
+#[cfg(all(feature = "fd-table", not(test)))]
+mod owner {
+    use super::kept::State;
+    use super::{Adopted, Endowments};
+    use toyos_abi::handle::HANDLE_INVALID;
+
+    static STATE: State = State::new();
+
+    /// # Safety
+    /// `label` is `len` bytes of UTF-8, live for `'a`.
+    unsafe fn label<'a>(label: *const u8, len: usize) -> &'a str {
+        // SAFETY: the caller's.
+        unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(label, len)) }
+    }
+
+    #[no_mangle]
+    unsafe extern "C" fn toyos_endow_take(label: *const u8, len: usize) -> u32 {
+        // SAFETY: the caller's label, a `&str` of its own.
+        STATE.take(Endowments::get(), unsafe { self::label(label, len) }).map_or(HANDLE_INVALID.0, |h| h.0)
+    }
+
+    #[no_mangle]
+    unsafe extern "C" fn toyos_endow_holds(label: *const u8, len: usize) -> bool {
+        // SAFETY: as in `toyos_endow_take`.
+        STATE.holds(Endowments::get(), unsafe { self::label(label, len) })
+    }
+
+    #[no_mangle]
+    extern "C" fn toyos_endow_launcher() -> u32 {
+        STATE.launcher(Endowments::get()).map_or(HANDLE_INVALID.0, |h| h.0)
+    }
+
+    #[no_mangle]
+    unsafe extern "C" fn toyos_endow_adopt(offered: *const Adopted, count: usize) -> bool {
+        // SAFETY: the caller's `count` entries, live for the call, each as
+        // `State::adopt` asks.
+        unsafe { STATE.adopt(core::slice::from_raw_parts(offered, count)) }
+    }
+
+    #[no_mangle]
+    unsafe extern "C" fn toyos_endow_adopted(count: *mut usize) -> *const Adopted {
+        let entries = STATE.adopted();
+        // SAFETY: the caller's word, live for the call.
+        unsafe { count.write(entries.len()) };
+        entries.as_ptr()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::kept::State;
     use super::*;
 
     fn table(names: &[&'static str]) -> Endowments {
@@ -455,38 +724,69 @@ mod tests {
         Endowments::of(all, names.len())
     }
 
-    /// A taken handle's number, the wrapper given up so nothing closes it.
-    fn taken(table: &Endowments, label: &str) -> Option<RawHandle> {
-        table.take::<OwnedHandle>(label).map(OwnedHandle::into_raw)
+    /// A state of a process's own, kept for the test's life as the owner's
+    /// is for the process's.
+    fn state() -> &'static State {
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(State::new()))
     }
 
     /// The `i`th name is the `i`th endowed handle's, which answers once.
     #[test]
     fn a_name_is_the_handle_endowed_at_its_place_and_is_taken_once() {
-        let table = table(&["fd:0", "syscap", "serve:net"]);
-        assert!(table.holds("serve:net"));
-        assert_eq!(taken(&table, "serve:net"), Some(RawHandle::endowed(2)));
-        assert_eq!(taken(&table, "serve:net"), None);
-        assert!(!table.holds("serve:net"));
-        assert_eq!(taken(&table, "fd:0"), Some(RawHandle::endowed(0)));
-        assert_eq!(taken(&table, "fd:1"), None);
-        assert_eq!(taken(&table, ""), None, "a place past the table's count names nothing");
+        let (table, state) = (table(&["fd:0", "syscap", "serve:net"]), state());
+        assert!(state.holds(&table, "serve:net"));
+        assert_eq!(state.take(&table, "serve:net"), Some(RawHandle::endowed(2)));
+        assert_eq!(state.take(&table, "serve:net"), None);
+        assert!(!state.holds(&table, "serve:net"));
+        assert_eq!(state.take(&table, "fd:0"), Some(RawHandle::endowed(0)));
+        assert_eq!(state.take(&table, "fd:1"), None);
+        assert_eq!(state.take(&table, ""), None, "a place past the table's count names nothing");
         assert_eq!(table.labels().collect::<Vec<_>>(), ["fd:0", "syscap", "serve:net"]);
     }
 
     /// A service's connector stays in the table: it is listed with its
-    /// handle, and no `take` gives it away.
+    /// handle, and no take gives it away.
     #[test]
     fn a_service_stays_in_the_table() {
-        let table = table(&["svc:net", "launcher", "provide:surface", "svc:fs:/tmp"]);
-        assert_eq!(taken(&table, "svc:net"), None);
-        assert_eq!(taken(&table, "provide:surface"), None);
+        let (table, state) = (table(&["svc:net", "launcher", "provide:surface", "svc:fs:/tmp"]), state());
+        assert_eq!(state.take(&table, "svc:net"), None);
+        assert_eq!(state.take(&table, "provide:surface"), None);
         let held: Vec<_> = table.services().map(|(label, handle)| (label, handle.raw())).collect();
         assert_eq!(
             held,
             [("svc:net", RawHandle::endowed(0)), ("provide:surface", RawHandle::endowed(2)), ("svc:fs:/tmp", RawHandle::endowed(3))]
         );
-        assert_eq!(taken(&table, "launcher"), Some(RawHandle::endowed(1)));
+        assert_eq!(state.take(&table, "launcher"), Some(RawHandle::endowed(1)));
+    }
+
+    /// The launcher is taken on the first ask and kept: a take of it is
+    /// refused, and every later ask answers it again.
+    #[test]
+    fn the_launcher_is_taken_once_and_answered_again() {
+        let (table, state) = (table(&["fd:0", "launcher"]), state());
+        assert_eq!(state.launcher(&table), Some(RawHandle::endowed(1)));
+        assert_eq!(state.take(&table, "launcher"), None, "the launcher the process keeps");
+        assert_eq!(state.launcher(&table), Some(RawHandle::endowed(1)));
+        assert_eq!(self::state().launcher(&self::table(&["fd:0"])), None, "a table that names no launcher");
+    }
+
+    /// One adoption makes the set, and a lookup ends it: a second adoption is
+    /// refused, its offer left with its caller.
+    #[test]
+    fn the_adopted_set_is_made_once_and_ended_by_a_lookup() {
+        let state = state();
+        let name = "fs:/system";
+        let offered = [Adopted { name: name.as_ptr(), len: name.len(), handle: 7 }];
+        // SAFETY: a live name; the handle is a number the leaked set never closes.
+        assert!(unsafe { state.adopt(&offered) });
+        assert!(!unsafe { state.adopt(&offered) }, "a second adoption");
+        let set: Vec<_> = state.adopted().iter().map(|entry| (entry.name(), entry.connector().raw())).collect();
+        assert_eq!(set, [("fs:/system", RawHandle(7))]);
+
+        let looked_up = self::state();
+        assert!(looked_up.adopted().is_empty());
+        // SAFETY: as above.
+        assert!(!unsafe { looked_up.adopt(&offered) }, "an adoption after a lookup");
     }
 
     #[test]
