@@ -46,7 +46,9 @@ type SpaceKind = Kind<Arc<SharedMemObject>, Arc<dyn CopySource>>;
 /// hold, and it cannot fail: what it reads was fixed when the range was made.
 pub trait CopySource: Send + Sync {
     fn size(&self) -> u64;
-    /// `out.len()` bytes from `offset`, all inside [`size`](Self::size).
+    /// Write every byte of `out` from `offset`, all inside
+    /// [`size`](Self::size): `out` is a frame that holds what its last owner
+    /// left.
     fn read(&self, offset: u64, out: &mut [u8]);
 }
 
@@ -427,6 +429,20 @@ impl AddressSpace {
         self.private(len, at, prot, Kind::Private { committed: prot != Prot::None })
     }
 
+    /// [`reserve`](Self::reserve)'s `len` bytes wherever they fit above
+    /// `guard` bytes reserved with them, which nothing backs: a stack, and
+    /// the fault below it. All or nothing.
+    pub fn reserve_above_guard(&mut self, guard: u64, len: u64, prot: Prot) -> Result<UserAddr, SyscallError> {
+        let whole = guard.checked_add(len).ok_or(SyscallError::InvalidArgument)?;
+        let below = UserAddr::new(self.place(whole, At::ANYWHERE)?);
+        self.reserve(guard, At::Fixed(below), Prot::None)?;
+        let at = self.reserve(len, At::Fixed(below + guard), prot);
+        if at.is_err() {
+            self.release(below, guard);
+        }
+        at
+    }
+
     /// `len` bytes of private memory, committed, whose pages start as a copy
     /// of `source` from `offset` as far as their first `copied` bytes go and
     /// zeros past them, each taken at its first touch: a program's segment
@@ -593,12 +609,7 @@ impl AddressSpace {
     /// Free every frame behind `[start, start + len)` and keep its ranges as
     /// they are: a private page reads zeros at its next touch, a copied one
     /// its source again, an object's page is mapped again from the object.
-    ///
-    /// A private page's frame is freed and the page promised a frame again;
-    /// one a user copy pins is zeroed in place instead and kept, since freed
-    /// it would come back only at its last unpin and the promise would be
-    /// backed by nothing meanwhile (`Frames::discard`). No pin is taken
-    /// meanwhile: a copy pins under this space's lock, which this holds.
+    /// Each freed frame's page is promised a frame again.
     pub fn discard(&mut self, start: UserAddr, len: u64) -> Result<(), SyscallError> {
         let (start, end) = self.held(start, len)?;
         let mut present = false;
@@ -617,34 +628,15 @@ impl AddressSpace {
             self.shoot_down(start, end, &Unlinked::none());
         }
         let mut freed = 0;
-        let inventory = &self.inventory;
-        self.tables.discard_owned(start, end, |frames, vas, kept| {
-            let mut sorted = [0u64; 512];
-            let sorted = &mut sorted[..frames.len()];
-            sorted.copy_from_slice(frames);
-            sorted.sort_unstable();
-            crate::sched::futex::revoke_frames(&self.futex, sorted);
-            for ((&phys, &va), kept) in frames.iter().zip(vas).zip(kept.iter_mut()) {
+        self.tables.take_owned(start, end, |frames| {
+            frames.sort_unstable();
+            crate::sched::futex::revoke_frames(&self.futex, frames);
+            for &phys in frames.iter() {
                 // SAFETY: a frame an owned leaf held, which no leaf on any CPU
-                // maps now and no waiter is keyed on; one kept is the page's.
-                *kept = match unsafe { pmm::discard(phys) } {
-                    pmm::Discarded::Freed => {
-                        freed += 1;
-                        false
-                    }
-                    pmm::Discarded::Kept => {
-                        // SAFETY: the page's own frame, which a copy may be
-                        // reading or writing as the page's contents; zeroing
-                        // it is what the discard makes those contents.
-                        unsafe { core::ptr::write_bytes(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE_SIZE as usize) };
-                        // A copied page's contents start as its source's again.
-                        if let Some((s, Entry { kind: Kind::Copy { source, offset, len }, .. })) = inventory.find(va) {
-                            copy_in(&**source, offset + (va - s), len.saturating_sub(va - s), phys);
-                        }
-                        true
-                    }
-                };
+                // maps now and no waiter is keyed on.
+                unsafe { pmm::discard(phys) };
             }
+            freed += frames.len() as u64;
         });
         self.usage.freed(freed);
         Ok(())
@@ -875,12 +867,9 @@ impl AddressSpace {
         let mut leaves = self.tables.leaf_table(page).unwrap_or_else(|| panic!("space: no tables under {page:#x}"));
         let phys = match leaves.get(page) {
             Leaf::Mapped(m) => m.phys,
-            // A frame the page keeps while no leaf maps it: a discard that
-            // zeroed a pinned frame in place.
-            Leaf::Held(phys) => {
-                leaves.set(page, Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal }));
-                phys
-            }
+            // Only a protection to `None` leaves a frame held where no leaf
+            // maps it, and its range allows no access.
+            Leaf::Held(_) => unreachable!("space: a held frame at {page:#x} in a range that allows an access"),
             Leaf::Empty => {
                 // A neighbour in the next table down or up is another run's.
                 let (lo, hi) = vm::around(start, entry.end, page, |at| leaves.covers(at) && leaves.get(at) != Leaf::Empty);
@@ -929,35 +918,28 @@ fn copyable(entry: &SpaceEntry) -> bool {
     }
 }
 
-/// A fresh frame for `page` of the committed range `entry` at `start`: zeros,
-/// or its source's bytes for a copied range.
+/// A fresh frame for `page` of the committed range `entry` at `start`, every
+/// byte of it written: zeros, or for a copied range its source's bytes as far
+/// as the range's copy and the source both go, and zeros after them.
 fn owned_frame(start: u64, entry: &SpaceEntry, page: u64) -> u64 {
-    let phys = pmm::alloc_promised().into_raw();
-    if let Kind::Copy { source, offset, len } = &entry.kind {
-        copy_in(&**source, offset + (page - start), len.saturating_sub(page - start), phys);
+    let phys = pmm::alloc_promised_unzeroed();
+    // SAFETY: a frame just drawn for this page, which no leaf maps yet, so
+    // nothing else reaches it.
+    let frame = unsafe { core::slice::from_raw_parts_mut(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), PAGE_SIZE as usize) };
+    match &entry.kind {
+        Kind::Private { .. } => frame.fill(0),
+        Kind::Copy { source, offset, len } => vm::copied_page(frame, page - start, *offset, *len, source.size(), |from, bytes| source.read(from, bytes)),
+        Kind::Object { .. } => unreachable!("space: an object's page owns no frame"),
     }
     phys
-}
-
-/// Write `source`'s bytes from `offset` into the zeroed frame at `phys`, as
-/// many of the page's as `len` and the source both hold.
-fn copy_in(source: &dyn CopySource, offset: u64, len: u64, phys: u64) {
-    let n = len.min(PAGE_SIZE).min(source.size().saturating_sub(offset)) as usize;
-    if n == 0 {
-        return;
-    }
-    // SAFETY: a frame just allocated to this page, which no leaf maps yet, so
-    // nothing else reaches it; `n` bytes stay inside it.
-    let frame = unsafe { core::slice::from_raw_parts_mut(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), n) };
-    source.read(offset, frame);
 }
 
 /// Every frame the space owns goes back; its tables go with `UserTables`.
 ///
 /// Not through [`AddressSpace::clear`]: no thread runs in a space that drops,
 /// no CPU holds its root ([`Space::retire`]), and a private frame is mapped in
-/// no other, so no CPU caches its leaves, no futex waiter is keyed on its
-/// frames and no copy pins them.
+/// no other, so no CPU caches its leaves and no futex waiter is keyed on its
+/// frames.
 impl Drop for AddressSpace {
     fn drop(&mut self) {
         let committed = self.committed_pages(FLOOR, TOP);

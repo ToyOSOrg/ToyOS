@@ -18,7 +18,6 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 
 use kernel::frames::{self, Frames, Pins, PoolSplit, Super, Unpinned, FRAME, SUPER};
 use kernel::sched::job::Job;
-pub use kernel::frames::Discarded;
 
 use super::{DirectMap, PAGE_2M};
 use crate::sync::Lock;
@@ -134,8 +133,8 @@ pub fn release_floor(job: &Job) {
 /// under one hold of the allocator's lock.
 ///
 /// # Safety
-/// Each is a frame [`Frame::into_raw`] gave up, that no leaf on any CPU maps
-/// any more and nothing else frees.
+/// Each is a frame drawn for a committed page of `job`'s, which no leaf on
+/// any CPU maps any more and nothing else frees.
 pub unsafe fn free_drawn(job: &Job, frames: &[u64]) {
     let pins = pins();
     with(|f| f.free_drawn(job.memory(), frames.iter().copied(), &pins));
@@ -262,8 +261,9 @@ fn kept_supers(frames: &Frames) -> u64 {
 }
 
 /// Promise `frames` to a commitment of `job`'s, which draws each with
-/// [`alloc_promised`] when it is first touched; `false`, and nothing
-/// promised, where that would take what is held back.
+/// [`alloc_promised`] or [`alloc_promised_unzeroed`] when it is first
+/// touched; `false`, and nothing promised, where that would take what is
+/// held back.
 pub fn promise(job: &Job, frames: u64) -> bool {
     frames == 0 || with(|f| f.promise(job.memory(), frames))
 }
@@ -288,15 +288,14 @@ pub fn unpromise(job: &Job, frames: u64) {
     }
 }
 
-/// [`Frames::discard`] of `phys`, a committed page's frame the caller holds
-/// the lock of the mapping space for.
+/// Give back `phys`, the frame of a page that stays committed, and promise
+/// the page a frame again ([`Frames::discard`]).
 ///
 /// # Safety
-/// `phys` is an owned leaf's frame, which no leaf on any CPU maps any more,
-/// unless this answers [`Discarded::Kept`].
-pub unsafe fn discard(phys: u64) -> Discarded {
+/// `phys` is an owned leaf's frame, which no leaf on any CPU maps any more.
+pub unsafe fn discard(phys: u64) {
     let pins = pins();
-    with(|f| f.discard(phys, &pins))
+    with(|f| f.discard(phys, &pins));
 }
 
 /// A zeroed frame a promise held, which the promise guarantees is free.
@@ -305,6 +304,13 @@ pub fn alloc_promised() -> Frame {
     // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
     unsafe { core::ptr::write_bytes(frame.direct_map().as_mut_ptr::<u8>(), 0, FRAME as usize) };
     frame
+}
+
+/// [`alloc_promised`]'s frame holding what its last owner left, by its
+/// address: its caller writes every byte of it before anything maps it, and
+/// gives it back through [`free_drawn`] or [`discard`].
+pub(super) fn alloc_promised_unzeroed() -> u64 {
+    with(Frames::alloc_promised)
 }
 
 /// A zeroed frame for a page table of `job`'s, refused rather than take what
@@ -445,7 +451,7 @@ pub fn alloc_frame() -> Option<Frame> {
     Some(frame)
 }
 
-/// Pin every managed frame `[phys, phys + len)` touches so none is reissued while a user-copy window covers it; `false`, and nothing pinned, on a pin-count overflow.
+/// Pin every managed frame `[phys, phys + len)` touches so none is reissued while a copy reads or writes it; `false`, and nothing pinned, on a pin-count overflow.
 pub fn pin_range(phys: u64, len: usize) -> bool {
     let pins = pins();
     let frames = frame_span(phys, len);
