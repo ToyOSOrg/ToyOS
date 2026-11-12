@@ -9,7 +9,7 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{plan, relocate, FilePages, Mapped, Pass, Scope};
+use super::{executable_relro, plan, relocate, FilePages, Mapped, Pass, Scope};
 use crate::dl::Refused;
 use crate::elf::RelocError;
 
@@ -302,6 +302,48 @@ fn an_image_off_zero_or_with_segments_sharing_a_page_is_refused() {
     // The writable segment moved into the read-only one's last page.
     let shared = object(&[], RELA, |b| b[PHDRS + 56 + 16..PHDRS + 56 + 24].copy_from_slice(&0xf00u64.to_le_bytes()));
     assert_eq!(plan(&shared[..0x1000]).map(|_| ()).map_err(|e| e.to_string()), Err("ELF: two PT_LOAD segments share a page".to_string()));
+}
+
+/// An executable's RELRO is where its header says, counted from the header:
+/// the header's segment need not be where the image's addresses begin.
+#[test]
+fn an_executables_relro_pages_are_counted_from_its_header() {
+    /// `PT_TLS`'s header made `PT_GNU_RELRO` over `[vaddr, vaddr + memsz)`.
+    fn relro(vaddr: u64, memsz: u64) -> impl FnOnce(&mut [u8]) {
+        move |b| {
+            let p = PHDRS + 3 * 56;
+            b[p..p + 4].copy_from_slice(&0x6474_e552u32.to_le_bytes());
+            b[p + 16..p + 24].copy_from_slice(&vaddr.to_le_bytes());
+            b[p + 40..p + 48].copy_from_slice(&memsz.to_le_bytes());
+        }
+    }
+    let pages = |file: &[u8]| executable_relro(&file[..0x1000]).map_err(|e| e.to_string());
+    assert_eq!(pages(&object(&[], RELA, relro(DATA, 0x1000))), Ok(Some((0x1000, 0x1000))));
+    // Its last, partial page stays writable, and one inside a page is none.
+    assert_eq!(pages(&object(&[], RELA, relro(DATA, 0xfff))), Ok(None));
+    assert_eq!(pages(&object(&[], RELA, |_| {})), Ok(None));
+    // Every address 0x1_0000 higher: the header is still the image's first byte.
+    let lifted = object(&[], RELA, |b| {
+        relro(DATA + 0x1_0000, 0x1000)(b);
+        for p in [PHDRS, PHDRS + 56, PHDRS + 2 * 56] {
+            let vaddr = u64::from_le_bytes(b[p + 16..p + 24].try_into().unwrap()) + 0x1_0000;
+            b[p + 16..p + 24].copy_from_slice(&vaddr.to_le_bytes());
+        }
+        let entry = u64::from_le_bytes(b[24..32].try_into().unwrap()) + 0x1_0000;
+        b[24..32].copy_from_slice(&entry.to_le_bytes());
+    });
+    assert_eq!(pages(&lifted), Ok(Some((0x1000, 0x1000))));
+    // The header's segment above another: the writable segment at address 0,
+    // the header's at 0x1000.
+    let above = |relro_at: u64| {
+        object(&[], RELA, |b| {
+            relro(relro_at, 0x1000)(b);
+            b[PHDRS + 16..PHDRS + 24].copy_from_slice(&0x1000u64.to_le_bytes());
+            b[PHDRS + 56 + 16..PHDRS + 56 + 24].copy_from_slice(&0u64.to_le_bytes());
+        })
+    };
+    assert_eq!(pages(&above(0x1000)), Ok(Some((0, 0x1000))));
+    assert_eq!(pages(&above(0)), Err("ELF: PT_GNU_RELRO lies below the executable's header".to_string()));
 }
 
 /// A library's segment both writable and executable is refused rather than

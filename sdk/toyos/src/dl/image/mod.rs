@@ -68,6 +68,18 @@ pub(crate) fn plan(header: &[u8]) -> Result<Plan, Refused> {
     Ok(Plan { layout, span })
 }
 
+/// The whole pages of the `PT_GNU_RELRO` of the executable `header` begins,
+/// as an offset from `header` and a length: `header` is the first byte of
+/// the `PT_LOAD` at file offset 0, wherever the image's lowest address is.
+pub(crate) fn executable_relro(header: &[u8]) -> Result<Option<(usize, usize)>, Refused> {
+    let layout = Layout::parse(header, MACHINE).map_err(|e| e.as_str())?;
+    let Some((lo, hi)) = layout.relro_pages(PAGE) else { return Ok(None) };
+    let first = layout.segments().iter().find(|seg| seg.file_offset() == 0);
+    let first = first.ok_or("ELF: no PT_LOAD maps the executable's header")?;
+    let at = lo.checked_sub(first.image().start().get()).ok_or("ELF: PT_GNU_RELRO lies below the executable's header")?;
+    Ok(Some((at as usize, (hi - lo) as usize)))
+}
+
 impl Plan {
     /// A library's segments, which the loader protects as their flags say:
     /// one both writable and executable is refused rather than given either.
