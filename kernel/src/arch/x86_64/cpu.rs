@@ -555,7 +555,7 @@ pub fn stated_counter_hz() -> Option<u64> {
 const COUNTER_CEILING_HZ: u64 = 10_000_000_000;
 
 pub fn counter_ceiling_hz() -> Option<u64> {
-    Some(COUNTER_CEILING_HZ)
+    None.filter(|_: &u64| COUNTER_CEILING_HZ != 0)
 }
 
 /// Put this CPU in the shutdown state: an exception with no IDT to deliver it
