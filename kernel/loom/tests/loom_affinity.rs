@@ -30,6 +30,10 @@ use kernel_loom::sched_model::{model, Msg, PreemptModel, CPU0, CPU1};
 struct Kicked(AtomicU64);
 
 impl Kicker for Kicked {
+    fn trace(&self, _ev: kernel_loom::sched::hw::TraceEvent) {}
+    fn now(&self) -> kernel_loom::sched::hw::Nanos {
+        kernel_loom::sched::hw::Nanos::ZERO
+    }
     fn kick(&self, target: CpuId) {
         self.0.fetch_or(1 << target.0, Ordering::AcqRel);
     }

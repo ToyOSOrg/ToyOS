@@ -767,6 +767,17 @@ fn note_run_latency(vm: &mut Vm<'_>) {
         }
     }
 
+    // A park its waker sent straight to another CPU is in transit before any
+    // container sees it woken: its wait starts at that claim.
+    for (&key, &container) in &vm.prev_container {
+        if container == Container::Parked
+            && !seen.contains_key(&key)
+            && matches!(vm.shared.get(&key).map(|shared| shared.state()), Some(TaskState::InTransit(_)))
+        {
+            vm.awaiting.entry(key).or_insert((now, ReadyCause::Woken, vm.round));
+        }
+    }
+
     // A task in no container at all is inside a message (invariant I1 requires
     // its word to say `InTransit`), which is a hop of the wait and not the end
     // of it. Anything else has stopped being a task.

@@ -1,4 +1,4 @@
-use kernel::sched::hw::{CpuId, Machine, TraceEvent, TraceKind};
+use kernel::sched::hw::{CpuId, Kicker, TraceEvent, TraceKind};
 
 use crate::arch::entry::ring3_naked_asm;
 use crate::hw::HW;

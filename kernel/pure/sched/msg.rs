@@ -8,7 +8,9 @@
 //! Its own module rather than part of `mailbox.rs`, so that the scheduler core's single
 //! `#[allow(unsafe_code)]` island stays exactly the intrusive-list code.
 
-use crate::sched::mailbox::{MailboxNode, SchedMsg};
+use crate::sched::cpu::CpuHandles;
+use crate::sched::hw::{CpuId, Kicker};
+use crate::sched::mailbox::{MailboxNode, PreemptGuard, SchedMsg};
 use crate::sched::sync::Arc;
 use crate::sched::task::{BlockedTask, SchedPayload, TaskShared, TransitTask, WaitClass, WakeCause};
 use crate::sched::hw::Nanos;
@@ -59,6 +61,17 @@ impl<X: SchedPayload> SchedMsg for Msg<X> {
 
     fn wake(shared: Arc<TaskShared<Msg<X>>>, cause: WakeCause) -> Self {
         Msg::Wake { shared, cause }
+    }
+
+    fn send_wake(
+        shared: &Arc<TaskShared<Msg<X>>>,
+        home: CpuId,
+        cause: WakeCause,
+        cpus: &CpuHandles<Msg<X>>,
+        kicker: &impl Kicker,
+        preempt: &impl PreemptGuard,
+    ) {
+        cpus.send_claimed_wake(shared, home, cause, kicker, preempt);
     }
 
     /// `Retire` carries no `notify` handle, deliberately: a notify riding the

@@ -999,9 +999,9 @@ impl<'q> Vm<'q> {
             self.probing[cpu] = self.cpus[cpu].ask_held(&self.handles);
         }
         let actor = crate::explore::actor(&step);
-        // Only a CPU's own step takes a task out of its parked set.
-        let parked: Vec<TaskKey> = actor
-            .map_or_else(Vec::new, |cpu| self.parked().filter(|&(_, on)| on == cpu).map(|(key, _)| key).collect());
+        // Any step may end a park: its home's, or a waker's that sends the
+        // task on.
+        let parked: Vec<(TaskKey, usize)> = self.parked().collect();
         // A step on a CPU posts as that CPU, so a kick it aims at itself is its
         // own `need_resched`; a device interrupt belongs to none.
         let poster = match step {
@@ -1093,7 +1093,7 @@ impl<'q> Vm<'q> {
     /// wake crossed, and each probe the step consumed with no task handed back,
     /// from `actor`, the CPU whose step it was, and `parked`, its parked set
     /// before the step.
-    fn note_levels(&mut self, actor: Option<usize>, parked: Vec<TaskKey>) {
+    fn note_levels(&mut self, actor: Option<usize>, parked: Vec<(TaskKey, usize)>) {
         let topology = &self.scenario.topology;
         let at = |a: usize, b: CpuId| crate::topology::slot(topology.level(a, b.0 as usize));
         for target in self.hw.with(|s| std::mem::take(&mut s.kicked)) {
@@ -1107,27 +1107,26 @@ impl<'q> Vm<'q> {
                 self.levels.migrations[at(event.cpu.0 as usize, to)] += 1;
             }
         }
-        // A wake is a task leaving its CPU's parked set, whatever took it out —
-        // a message, its deadline or a retire — including one this step parked.
-        if let Some(home) = actor {
-            let parked_in_step = self.step_trace.iter().filter_map(|event| match event.kind {
-                TraceKind::ParkCommit { task, .. } => Some(task),
+        // A wake is a task leaving the parked set, whatever took it out — a
+        // message, its deadline, a retire or a waker sending it on —
+        // including one this step parked.
+        let parked_in_step = actor.into_iter().flat_map(|home| {
+            self.step_trace.iter().filter_map(move |event| match event.kind {
+                TraceKind::ParkCommit { task, .. } => Some((task, home)),
                 _ => None,
-            });
-            let woken: Vec<TaskKey> = parked
-                .into_iter()
-                .chain(parked_in_step)
-                .filter(|&task| self.shared[&task].peek_parked().is_none())
-                .collect();
-            for task in woken {
-                let placed = match self.shared[&task].state() {
-                    TaskState::Ready(cpu) | TaskState::Running(cpu) | TaskState::InTransit(cpu) => {
-                        cpu
-                    }
-                    state => unreachable!("{task:?} left the parked set as {state:?}"),
-                };
-                self.levels.wakes[at(home, placed)] += 1;
-            }
+            })
+        });
+        let woken: Vec<(TaskKey, usize)> = parked
+            .into_iter()
+            .chain(parked_in_step)
+            .filter(|&(task, _)| self.shared[&task].peek_parked().is_none())
+            .collect();
+        for (task, home) in woken {
+            let placed = match self.shared[&task].state() {
+                TaskState::Ready(cpu) | TaskState::Running(cpu) | TaskState::InTransit(cpu) => cpu,
+                state => unreachable!("{task:?} left the parked set as {state:?}"),
+            };
+            self.levels.wakes[at(home, placed)] += 1;
         }
         // An ask leaves its holder's word by that holder's take or by the
         // thief's own retraction; only the take is an answer.

@@ -32,7 +32,7 @@
 use core::marker::PhantomData;
 
 use crate::sched::cpu::CpuHandles;
-use crate::sched::hw::{CpuId, Kicker};
+use crate::sched::hw::{CpuId, Kicker, Nanos};
 use crate::sched::mailbox::{Kick, PreemptGuard, SchedMsg, Urgency};
 use crate::sched::sync::{Arc, AtomicU32, Ordering};
 use crate::sched::task::{Gen, Notify, Refused, TaskShared, WaitClass, WakeCause};
@@ -115,23 +115,36 @@ fn deliver<M: SchedMsg>(
     preempt: &impl PreemptGuard,
 ) -> Notify {
     if let Notify::Parked(cpu) = outcome {
-        // The claim CAS admits exactly one poster, so the node is free (I12).
-        let slot = shared
-            .wake_node()
-            .claim()
-            .expect("the wake claim admits one poster: node must be free");
-        let handle = cpus.get(cpu);
-        let msg = M::wake(shared.clone(), cause);
-        // An ordinary wake posted on the CPU it goes to rings nothing: that CPU's
-        // own next pass drains it, so the poster pays no pass for it now, and
-        // no edge stands with no pass owed to elide other CPUs' kicks.
-        if cause.urgency() == Urgency::Normal && kicker.runs_on(cpu) {
-            handle.post_unrung(slot, msg, preempt);
-        } else if handle.post(slot, msg, cause.urgency(), preempt) == Kick::Send {
-            kicker.kick(cpu);
-        }
+        M::send_wake(shared, cpu, cause, cpus, kicker, preempt);
     }
     outcome
+}
+
+/// Hand the claim of a park on `home` to `home`: `Msg::Wake`, whose pass
+/// takes the record and places the task.
+pub fn post_wake<M: SchedMsg>(
+    shared: &Arc<TaskShared<M>>,
+    home: CpuId,
+    cause: WakeCause,
+    cpus: &CpuHandles<M>,
+    kicker: &impl Kicker,
+    preempt: &impl PreemptGuard,
+) {
+    // The claim CAS admits exactly one poster, so the node is free (I12).
+    let slot = shared
+        .wake_node()
+        .claim()
+        .expect("the wake claim admits one poster: node must be free");
+    let handle = cpus.get(home);
+    let msg = M::wake(shared.clone(), cause);
+    // An ordinary wake posted on the CPU it goes to rings nothing: that CPU's
+    // own next pass drains it, so the poster pays no pass for it now, and
+    // no edge stands with no pass owed to elide other CPUs' kicks.
+    if cause.urgency() == Urgency::Normal && kicker.runs_on(home) {
+        handle.post_unrung(slot, msg, preempt);
+    } else if handle.post(slot, msg, cause.urgency(), preempt) == Kick::Send {
+        kicker.kick(home);
+    }
 }
 
 /// The kicks one post owes, sent when it is dropped: after the post's list
@@ -167,6 +180,14 @@ impl<K: Kicker> Kicker for Deferred<'_, K> {
 
     fn runs_on(&self, cpu: CpuId) -> bool {
         self.kicker.runs_on(cpu)
+    }
+
+    fn now(&self) -> Nanos {
+        self.kicker.now()
+    }
+
+    fn trace(&self, ev: crate::sched::hw::TraceEvent) {
+        self.kicker.trace(ev)
     }
 }
 
@@ -369,6 +390,10 @@ mod tests {
     #[derive(Default)]
     struct Kicks(Mutex<Vec<CpuId>>);
     impl Kicker for Kicks {
+        fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+        fn now(&self) -> Nanos {
+            Nanos::ZERO
+        }
         fn kick(&self, target: CpuId) {
             self.0.lock().unwrap().push(target);
         }
@@ -429,6 +454,10 @@ mod tests {
     /// A poster running on `.0`.
     struct On(CpuId, Kicks);
     impl Kicker for On {
+        fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+        fn now(&self) -> Nanos {
+            Nanos::ZERO
+        }
         fn kick(&self, target: CpuId) {
             self.1.kick(target);
         }

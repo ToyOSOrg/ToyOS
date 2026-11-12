@@ -502,6 +502,13 @@ impl<M: SchedMsg> TaskShared<M> {
         self.transition(TaskState::WakeQueued(cpu), TaskState::Running(cpu))
     }
 
+    /// Whether the word still holds the park on `cpu` committed as
+    /// `generation`.
+    pub(crate) fn parked_as(&self, cpu: CpuId, generation: Gen) -> bool {
+        let cur = self.state.load(Ordering::Acquire);
+        unpack(cur) == TaskState::Blocked(cpu) && Gen(((cur >> GEN_SHIFT) & GEN_MASK) as u32) == generation
+    }
+
     /// The deadline's claim on one park: `Blocked(cpu) → WakeQueued(cpu)`
     /// only while the word still holds the park committed as `generation`.
     /// `false` where that park already ended, so a deadline left over from an

@@ -357,6 +357,10 @@ type TaskMsg = kernel_loom::sched::msg::Msg<Payload>;
 struct Silent;
 
 impl Kicker for Silent {
+    fn trace(&self, _ev: TraceEvent) {}
+    fn now(&self) -> Nanos {
+        NOW
+    }
     fn kick(&self, _target: CpuId) {}
 
     fn runs_on(&self, _cpu: CpuId) -> bool {
@@ -365,14 +369,10 @@ impl Kicker for Silent {
 }
 
 impl Machine for Silent {
-    fn now(&self) -> Nanos {
-        NOW
-    }
     fn set_timer(&self, _deadline: Nanos) {}
     fn stop_timer(&self) {}
     fn halt(&self) {}
     fn need_resched(&self, _cpu: CpuId) {}
-    fn trace(&self, _ev: TraceEvent) {}
 }
 
 impl Hw for Silent {

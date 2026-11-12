@@ -33,6 +33,8 @@ use core::mem::ManuallyDrop;
 use core::ptr;
 
 use crate::sched::sync::{Arc, AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use crate::sched::cpu::CpuHandles;
+use crate::sched::hw::{CpuId, Kicker};
 use crate::sched::task::{TaskShared, WakeCause};
 
 /// The message vocabulary the primitives need to speak. Wait queues and the
@@ -43,6 +45,19 @@ pub trait SchedMsg: Send + Sized {
     type Parked: Send;
 
     fn wake(shared: Arc<TaskShared<Self>>, cause: WakeCause) -> Self;
+
+    /// Send the wake of a park on `home` whose claim the caller won: by
+    /// default a `Wake` to the home ([`crate::sched::park::post_wake`]).
+    fn send_wake(
+        shared: &Arc<TaskShared<Self>>,
+        home: CpuId,
+        cause: WakeCause,
+        cpus: &CpuHandles<Self>,
+        kicker: &impl Kicker,
+        preempt: &impl PreemptGuard,
+    ) {
+        crate::sched::park::post_wake(shared, home, cause, cpus, kicker, preempt);
+    }
 
     /// A retire carries the whole [`TaskShared`], not just the key: the home
     /// CPU that finds the task gone must read the state word to chase it, and
@@ -145,8 +160,10 @@ impl<P> ParkedSlot<P> {
     }
 
     /// # Safety
-    /// The caller is the task's home CPU in the pass that parks it, the word
-    /// still `Committing`, so no claim can take the slot yet.
+    /// The caller holds the slot: the task's home CPU in the pass that parks
+    /// it, the word still `Committing`, so no claim can take it yet; or the
+    /// claim's winner handing the record on with a message, whose post orders
+    /// this write before the receiver's take.
     pub(crate) unsafe fn publish(&self, record: P) {
         // SAFETY: the caller's.
         unsafe { self.0.put(record) };

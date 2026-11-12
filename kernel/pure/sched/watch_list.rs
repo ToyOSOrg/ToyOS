@@ -141,6 +141,10 @@ unsafe impl PreemptGuard for NoPreempt {}
 struct NoKick;
 
 impl Kicker for NoKick {
+    fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+    fn now(&self) -> crate::sched::hw::Nanos {
+        crate::sched::hw::Nanos::ZERO
+    }
     fn kick(&self, _target: CpuId) {}
 
     fn runs_on(&self, _cpu: CpuId) -> bool {

@@ -4,7 +4,7 @@
 //! Exception: [`Parkable`] lives here because the park token has no public
 //! constructor outside the door this module defines.
 
-use kernel::sched::hw::{CpuId, Machine, Nanos};
+use kernel::sched::hw::{CpuId, Kicker, Nanos};
 use kernel::sched::task::{Refused, SafePoint, WaitClass, QUANTUM_NS};
 
 use crate::arch::percpu;

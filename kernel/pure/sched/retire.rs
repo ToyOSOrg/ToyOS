@@ -133,6 +133,10 @@ mod tests {
     #[derive(Default)]
     struct Kicks(Mutex<Vec<CpuId>>);
     impl Kicker for Kicks {
+        fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+        fn now(&self) -> crate::sched::hw::Nanos {
+            crate::sched::hw::Nanos::ZERO
+        }
         fn kick(&self, target: CpuId) {
             self.0.lock().unwrap().push(target);
         }
@@ -149,6 +153,10 @@ mod tests {
     }
 
     impl Kicker for SamplingKicks {
+        fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+        fn now(&self) -> crate::sched::hw::Nanos {
+            crate::sched::hw::Nanos::ZERO
+        }
         fn kick(&self, _target: CpuId) {
             self.seen.lock().unwrap().push(self.task.kill_pending());
         }

@@ -159,6 +159,10 @@ impl Kicks {
 }
 
 impl Kicker for Kicks {
+    fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+    fn now(&self) -> crate::sched::hw::Nanos {
+        crate::sched::hw::Nanos::ZERO
+    }
     fn kick(&self, _target: CpuId) {
         self.count.fetch_add(1, Ordering::AcqRel);
     }

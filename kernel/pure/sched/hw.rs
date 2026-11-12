@@ -81,16 +81,21 @@ pub trait Kicker: Sync {
 
     /// Whether the calling code runs on `cpu`.
     fn runs_on(&self, cpu: CpuId) -> bool;
+
+    /// The clock. A pass samples it ONCE and threads the value; a wake path
+    /// reads it only where it hands a task on, whose accounting needs the
+    /// instant.
+    fn now(&self) -> Nanos;
+
+    /// Record what the scheduler did, for the trace and the simulator's
+    /// checks: a pass's every step, and a wake that hands a task on.
+    fn trace(&self, ev: TraceEvent);
 }
 
 /// The half of the hardware surface that says nothing about tasks: clock,
 /// one-shot timer, interrupt gate, halt, resched request, trace sink. Split
 /// from [`Hw`] so an implementor needs no [`SchedPayload`] to provide it.
 pub trait Machine: Kicker + 'static {
-    /// Sampled ONCE per pass by the driver and threaded as a value — the
-    /// core never reads the clock mid-flight.
-    fn now(&self) -> Nanos;
-
     /// Program the one-shot timer for an **absolute** deadline. The kernel's
     /// one-shot takes a span (`irqchip::arm_one_shot`), so
     /// `KernelHw::set_timer` converts.
@@ -132,7 +137,6 @@ pub trait Machine: Kicker + 'static {
     /// after the switch.
     fn need_resched(&self, cpu: CpuId);
 
-    fn trace(&self, ev: TraceEvent);
 
     /// Halt on the strength of a [`SleepToken`]. The token is the proof and
     /// [`Self::halt`] is the effect; they stay separate types.

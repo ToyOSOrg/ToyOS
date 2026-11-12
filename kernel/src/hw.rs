@@ -34,6 +34,13 @@ pub(crate) const MIN_ONE_SHOT: Floor =
     Floor::policy(Duration::from_micros(10), "above an interrupt's entry and return");
 
 impl Kicker for KernelHw {
+    fn trace(&self, ev: TraceEvent) {
+        crate::trace::record(ev);
+    }
+    fn now(&self) -> Nanos {
+        Nanos(crate::clock::nanos_since_boot())
+    }
+
     fn kick(&self, target: CpuId) {
         if self.runs_on(target) {
             crate::preempt::set_need_resched();
@@ -48,10 +55,6 @@ impl Kicker for KernelHw {
 }
 
 impl Machine for KernelHw {
-    fn now(&self) -> Nanos {
-        Nanos(crate::clock::nanos_since_boot())
-    }
-
     /// The absolute deadline as the one-shot's span from now; one already
     /// past becomes [`MIN_ONE_SHOT`] rather than an interrupt at once.
     fn set_timer(&self, deadline: Nanos) {
@@ -79,9 +82,6 @@ impl Machine for KernelHw {
         self.kick(cpu);
     }
 
-    fn trace(&self, ev: TraceEvent) {
-        crate::trace::record(ev);
-    }
 
     /// Waits in the state `crate::idle` chooses. Diagnostic builds arm a
     /// periodic wake first, so a quiescent CPU still reports.

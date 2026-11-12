@@ -413,6 +413,10 @@ mod tests {
 
     struct NoKick;
     impl Kicker for NoKick {
+        fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+        fn now(&self) -> crate::sched::hw::Nanos {
+            crate::sched::hw::Nanos::ZERO
+        }
         fn kick(&self, _target: CpuId) {}
         fn runs_on(&self, _cpu: CpuId) -> bool {
             false
@@ -526,6 +530,10 @@ mod tests {
         kicks: Mutex<std::vec::Vec<(CpuId, bool)>>,
     }
     impl Kicker for LockedKicks<'_> {
+        fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+        fn now(&self) -> crate::sched::hw::Nanos {
+            crate::sched::hw::Nanos::ZERO
+        }
         fn kick(&self, target: CpuId) {
             let held = self.watch.list.0.try_lock().is_err();
             self.kicks.lock().unwrap().push((target, held));
