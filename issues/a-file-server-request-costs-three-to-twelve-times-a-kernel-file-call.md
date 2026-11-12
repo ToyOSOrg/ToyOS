@@ -93,18 +93,24 @@ not yet measured on metal, its speed-up included; its rows are owed:
   `readdir.1000`, `stat`, `open_close`, `rename`, `mkdir_rmdir` and
   `create_write_unlink` must lie within main before's spread, and no row may
   be beyond twice main before's.
-- **Owed on the `testcases` shared boot's x86-64 guest row**, once it exists:
+- **Owed on `testcases_members_exit_0`**, the `testcases` shared boot's x86-64 guest row, on several vCPUs. It
+  shows order and contents only.
   - **The run.** `a_pager_s_end_answers_its_waiting_holders_gone` at #1258's code, or at any revision whose
-    paged object, pure paged module and pagerprobe are #1258's, run on several vCPUs. It shows order and contents
-    only. It must:
+    paged object, pure paged module and pagerprobe are #1258's. It must:
     - pass, its log showing pagerprobe's helper's writes admitted, then the owner's read-back, then the pager's
       end answering the wait `Gone`, then `pagerprobe: ok`; the helper's page written against credit somewhere
       between its writes admitted and `Gone`, since its process and the owner's print in either order;
     - leave no paged overdue report;
     - pass with the two served-file tests beside it.
-  - **The control.** With the kernel refusing every holder's write (#1258's control branch
-    `fileops-step1-ctl-refuse`), that test must go red: the helper on its first write, answered `WouldBlock`, and
-    the pager on never seeing the credited object dirtied. Every other member must stay green.
+- **The control, run.** Guest-rows 43146956481 ran the row at `fileops-step1-ctl-refuse` c97966eb2, #1258's
+  358182128 with the kernel refusing every holder's write. 240 of its 242 members passed.
+  - `a_pager_s_end_answers_its_waiting_holders_gone` went red. pagerprobe exited 101 after 30.49 s of system
+    calls, which matches its 30-second wait (`PARK_BOUND`) for the helper's dirtying of the credited object.
+    The panic text was not retained (`issues/a-red-run-keeps-no-serial-for-a-boot-whose-uart-is-qemus-stdio.md`),
+    so the reason, the helper's first write answered `WouldBlock`, is inferred from that timing and the code.
+  - `a_served_file_reads_through_its_paged_object` also went red, at its first assertion, "an open to write
+    alone carries no holder", before it writes. It writes only through the server. The assertion was stale:
+    since #1258 an open to write carries a holder too. The member now asserts that.
 - **Shown by no test yet:** that opening a file on `/tmp` or `/home` mints a write holder, and that the SDK writes
   through the holder before it asks the server. Today that rests on reading the file server's open and the SDK's
   write path, and on the owed `osbench_disk` rows, whose holder-path figures would show it.
