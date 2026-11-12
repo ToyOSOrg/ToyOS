@@ -32,6 +32,12 @@ pub fn stated_counter_hz() -> Option<u64> {
     (hz != 0).then_some(hz)
 }
 
+/// None: firmware states the generic timer's rate, and no ceiling stands in
+/// for one it did not state.
+pub fn counter_ceiling_hz() -> Option<u64> {
+    None
+}
+
 /// This function's caller's frame pointer: `x29`, which `-Cforce-frame-pointers=yes` makes one.
 #[inline(always)]
 pub fn frame_pointer() -> u64 {

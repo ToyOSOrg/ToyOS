@@ -745,6 +745,19 @@ const MACHINE_TESTS: &[MachineTest] = &[
     // which no host build has and the T14, whose CPUs offer x2APIC, never
     // reaches; the AMD laptop that needs it is not on the bench.
     ("desktop_without_x2apic", |_| desktop_without_x2apic()),
+    // A fatal event in each window the machine has to end itself from: an
+    // early panic before the clock, the same with no reset register, a
+    // double panic before the clock, and a second panic inside the console's
+    // hold while another CPU runs. Each a boot that ends in a reset, which no
+    // host build has, on QEMU x86-64's metal shape emulated on a CPU that
+    // states no counter rate (`Profile::MetalUnstatedRate`). AArch64 states
+    // its counter's rate and has one reset to choose; its panic rows are the
+    // `virt_` ones. Owed on metal in
+    // `issues/a-panics-end-is-unread-on-either-bench.md`.
+    ("an_early_panic_resets_at_its_bound", an_early_panic_resets_at_its_bound),
+    ("a_panic_with_no_reset_register_shuts_down", a_panic_with_no_reset_register_shuts_down),
+    ("a_double_panic_before_the_clock_resets", a_double_panic_before_the_clock_resets),
+    ("a_panic_inside_the_console_hold_stops_the_others", a_panic_inside_the_console_hold_stops_the_others),
     // A machine whose one NVMe disk is all it has boots the image off it and
     // serves every role off it: the firmware that reads it, the loader and
     // kernel it hands the image to, and the claim the nvme driver serves the
@@ -4967,9 +4980,9 @@ fn screen_fatal_behind_a_painter(profile: qemu::Profile, test_config: &Path) -> 
             dump.fill()
         ));
     }
-    // Only the CPU that claimed the panel watches the reset bound, so
-    // the machine resetting at it is that CPU's proof: QEMU exits on a
-    // reset, and the fatal path's last line says whose reset it was.
+    // The fatal path's CPU watches the reset bound whatever the panel's
+    // latch did, so the machine resetting at it is that CPU's proof: QEMU
+    // exits on a reset, and the fatal path's last line says whose it was.
     let by = qemu.budget(Duration::from_secs(15));
     let said = qemu.await_exit(by).map_err(|why| {
         format!("no CPU is watching the reset bound: {why}\ndecoded screen:\n{text}")
@@ -4980,6 +4993,154 @@ fn screen_fatal_behind_a_painter(profile: qemu::Profile, test_config: &Path) -> 
              path's reset\n{said}"
         ));
     }
+    Ok(())
+}
+
+/// What `panic_reboot::arm` names the clock it timed the bound by, and how
+/// the machine ends at it, and what `reboot_now` says at its end.
+const BY_THE_CEILING: &str = "timed by an uncalibrated ceiling on the counter's rate, so no sooner";
+const BY_THE_CLOCK: &str = "timed by the calibrated clock";
+const THROUGH_THE_REGISTER: &str = "through the reset register";
+const BY_SHUTDOWN: &str = "by processor shutdown: no reset register is known";
+const THE_BOUND_IS_OVER: &str = "panic: the bound is over";
+/// What `arch::power::reset` says where the register it wrote did not reset
+/// the machine.
+const THE_REGISTER_DID_NOTHING: &str = "and this machine still runs: shutting the processor down";
+
+/// Boot QEMU x86-64's metal shape on a CPU that states no counter rate
+/// ([`qemu::Profile::MetalUnstatedRate`]) with `params`, which hold
+/// `panic-reboot-fast`, until `ready`; run `during`, which answers what the
+/// console said meanwhile; and judge the end: every line of `said`, in order,
+/// then QEMU's stop for `guest-reset`.
+fn a_fatal_event_ends(
+    test_config: &Path,
+    smp: u32,
+    params: &'static [&'static str],
+    ready: &'static str,
+    said: &[&str],
+    during: impl FnOnce(&mut QemuInstance) -> Result<(String, qemu::QmpShutdown), String>,
+) -> Result<(), String> {
+    assert!(params.contains(&"panic-reboot-fast"), "a guest cannot spend the shipped minute");
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::MetalUnstatedRate, smp, qmp: true, kernel_params: params, ready_marker: ready, ..Default::default() },
+    );
+    let (meanwhile, mut stop) = during(&mut qemu)?;
+    // A liveness guard: at the ceiling the bound's five seconds take ten
+    // gigahertz over the host's TSC rate, which a TCG guest reads.
+    let rest = qemu.await_exit(qemu.budget(Duration::from_secs(90))).map_err(|why| format!("the machine did not end: {why}"))?;
+    let console = format!("{}\n{meanwhile}{rest}", qemu.boot_log());
+    let mut from = 0;
+    for want in said.iter().chain([&THE_BOUND_IS_OVER]) {
+        match console[from..].find(want) {
+            Some(at) => from += at + want.len(),
+            None => return Err(format!("{want:?} is not on the console after {:?}\n{console}", console[..from].lines().last().unwrap_or(""))),
+        }
+    }
+    // q35's reset register acts on its write, so its shutdown never follows.
+    if console.contains(THE_REGISTER_DID_NOTHING) {
+        return Err(format!("q35's reset register was said to leave the machine running\n{console}"));
+    }
+    match stop.reason().as_deref() {
+        Some("guest-reset") => Ok(()),
+        other => Err(format!("QEMU stopped the guest for {other:?}, not guest-reset\n{console}")),
+    }
+}
+
+/// [`a_fatal_event_ends`]'s `during` for a test that reads nothing before the end.
+fn only_the_end(qemu: &mut QemuInstance) -> Result<(String, qemu::QmpShutdown), String> {
+    Ok((String::new(), qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(Duration::from_secs(90)))))
+}
+
+/// A panic before the clock is calibrated, on a CPU that states no counter
+/// rate, ends through the FADT's reset register at a bound timed by the
+/// ceiling: the AMD bench's window between `after_console` and `clock::init`.
+fn an_early_panic_resets_at_its_bound(test_config: &Path) -> Result<(), String> {
+    a_fatal_event_ends(
+        test_config,
+        1,
+        &["test-early-panic", "panic-reboot-fast"],
+        "EARLY PANIC:",
+        &[EARLY_PANIC_MESSAGE, "panic: rebooting in 5 s, ", BY_THE_CEILING, THROUGH_THE_REGISTER],
+        only_the_end,
+    )?;
+    eprintln!("  [panic] an early panic held a ceiling bound and reset through the register");
+    Ok(())
+}
+
+/// The same panic on a machine whose FADT names no reset register this
+/// kernel keeps (`reset-withheld`), which is what a panic before the register
+/// is read finds: the bound held by the ceiling, then the processor's
+/// shutdown, which QEMU resets on.
+fn a_panic_with_no_reset_register_shuts_down(test_config: &Path) -> Result<(), String> {
+    a_fatal_event_ends(
+        test_config,
+        1,
+        &["reset-withheld", "test-early-panic", "panic-reboot-fast"],
+        "EARLY PANIC:",
+        &["withheld: this kernel keeps none", EARLY_PANIC_MESSAGE, "panic: rebooting in 5 s, ", BY_THE_CEILING, BY_SHUTDOWN],
+        only_the_end,
+    )?;
+    eprintln!("  [panic] with no reset register, a panic held a ceiling bound and shut the processor down");
+    Ok(())
+}
+
+/// A fault between the IDT and the clock whose report panics: the DOUBLE
+/// PANIC path, before anything is calibrated, ends at its bound.
+fn a_double_panic_before_the_clock_resets(test_config: &Path) -> Result<(), String> {
+    a_fatal_event_ends(
+        test_config,
+        1,
+        &["test-double-panic", "panic-reboot-fast"],
+        "DOUBLE PANIC",
+        &["test-double-panic: a panic inside a fault's report", "panic: rebooting in 5 s, ", BY_THE_CEILING, THROUGH_THE_REGISTER],
+        only_the_end,
+    )?;
+    eprintln!("  [panic] a double panic before the clock held a ceiling bound and reset through the register");
+    Ok(())
+}
+
+/// The CPUs `a_panic_inside_the_console_hold_stops_the_others` boots.
+const HOLD_CPUS: u32 = 2;
+
+/// A panic from an AP's idle loop, and a second inside its first hold of the
+/// console registers, while the boot CPU runs on: the reentry stops every
+/// other CPU before it holds on, and ends the machine at its bound.
+/// **QEMU is the judge**: once the reentry has said its arm line, every vCPU
+/// but the reentry's is one [`qemu::stopped_cpus`] calls halted.
+fn a_panic_inside_the_console_hold_stops_the_others(test_config: &Path) -> Result<(), String> {
+    a_fatal_event_ends(
+        test_config,
+        HOLD_CPUS,
+        &["panic-in-the-hold", "panic-reboot-fast"],
+        "PANIC REENTRY",
+        &["panic-in-the-hold: a second panic inside the console's hold", "panic: rebooting in 5 s, ", BY_THE_CLOCK, THROUGH_THE_REGISTER],
+        |qemu| {
+            let mut console = qemu.drain_until(Duration::from_secs(15), |l| l.contains("panic: rebooting in "));
+            let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
+            // A guard and never a verdict: a vCPU the host has not run yet has
+            // not taken the stop.
+            let give_up = Instant::now() + qemu::GUEST_QUIET;
+            loop {
+                let stopped = qemu::stopped_cpus(&mut monitor, toyos_build::arch::Arch::X86_64);
+                if stopped.len() == HOLD_CPUS as usize && stopped.iter().filter(|&&halted| !halted).count() == 1 {
+                    break;
+                }
+                if Instant::now() >= give_up {
+                    return Err(format!(
+                        "{STALLED} waiting for every CPU but the reentry's to halt with interrupts masked: QEMU \
+                         shows {stopped:?}\n{}\n{console}",
+                        qemu.boot_log()
+                    ));
+                }
+                console.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+            }
+            Ok((console, monitor.into_shutdown(qemu.budget(Duration::from_secs(90)))))
+        },
+    )?;
+    eprintln!("  [panic] a panic inside the console's hold stopped the other CPU and reset at its bound");
     Ok(())
 }
 

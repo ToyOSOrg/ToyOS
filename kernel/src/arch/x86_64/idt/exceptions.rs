@@ -604,6 +604,9 @@ fn fatal_exception(ctx: &ExceptionContext) -> ! {
         crate::panic::halt_all_cpus();
     }
 
+    if crate::actuator::test_double_panic() {
+        panic!("test-double-panic: a panic inside a fault's report");
+    }
     crash_report(&CrashInfo::Exception(ctx));
     // A Ring 3 fault holds no kernel lock, so the ordinary exit ends its
     // process; every Ring 0 fault is the kernel's, whatever thread is current.

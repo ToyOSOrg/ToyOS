@@ -305,24 +305,29 @@ pub fn last_words(
     }
 }
 
-/// Halt all CPUs: stop the others, flush pending log output, then hold this
-/// machine's panel until the reboot bound returns it to firmware. Every fatal
-/// path's one funnel.
-// panic_flush bypasses the log-ring and serial locks — once the others are stopped a wedged holder never releases them, so taking them normally could deadlock.
-pub fn halt_all_cpus() -> ! {
-    // Before the halt and the panel: from here this machine holds a report for
-    // whoever is in front of it, with interrupts masked and under a bound of its
-    // own — which to a hard-lockup sample or a deadline poll is
-    // indistinguishable from a wedge, and is the opposite of one. Both bounds,
-    // because either would reset the machine out from under the report.
+/// Stand down the machine's other bounds and stop the other CPUs: what every
+/// fatal path does before anything else of its own, a reentry's included.
+///
+/// From here this machine holds a report for whoever is in front of it, with
+/// interrupts masked and under a bound of its own — which to a hard-lockup
+/// sample or a deadline poll is indistinguishable from a wedge, and is the
+/// opposite of one. Both bounds, because either would reset the machine out
+/// from under the report. **The other CPUs next**: a kernel that has declared
+/// itself corrupt runs no userland again and no write path.
+pub fn stop_the_machine() {
     crate::hardlockup::stand_down();
     crate::deadline::stand_down();
     #[cfg(feature = "mask-windows")]
     crate::windows::stand_down();
-    // **The other CPUs first, before anything else here runs.** A kernel that
-    // has declared itself corrupt runs no userland again and no write path:
-    // the report reaches the console and the panel.
     crate::arch::irqchip::stop_other_cpus();
+}
+
+/// Halt all CPUs: stop the others, flush pending log output, then hold this
+/// machine's panel until the bound ends the machine. Every fatal path's one
+/// funnel but the panic handler's early and reentry branches.
+// panic_flush bypasses the log-ring and serial locks — once the others are stopped a wedged holder never releases them, so taking them normally could deadlock.
+pub fn halt_all_cpus() -> ! {
+    stop_the_machine();
     let bound = crate::panic_reboot::arm(true);
     // Folded into the still-unpainted capture only where the panel is this
     // boot's only account of itself: a refresh re-freezes the ring. A machine
@@ -331,15 +336,11 @@ pub fn halt_all_cpus() -> ! {
         crate::drivers::panic_console::refresh_capture();
     }
     // Render before the flush: it can't fail the proven serial channel, and a serial line then proves the paint already finished.
-    let painted = crate::drivers::panic_console::render();
+    crate::drivers::panic_console::render();
     // SAFETY: sound only once nothing else will run — the other CPUs are already stopped.
     unsafe { serial::panic_flush(); }
     // Must follow the flush — it's the deepest stack this path reaches.
     crate::arch::trap::report_fault_stack();
-    // hold_the_panel runs strictly after the flush: it is an unbounded loop and may only run once the serial report is out.
-    // Only the CPU that painted watches the bound; the rest halt below.
-    if painted {
-        crate::drivers::panic_console::hold_the_panel(bound);
-    }
-    cpu::halt();
+    // Strictly after the flush: it never returns, and the serial report must be out first.
+    bound.hold()
 }

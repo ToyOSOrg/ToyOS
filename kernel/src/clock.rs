@@ -23,6 +23,7 @@ use crate::object::shm::SharedMemObject;
 use crate::sync::Lock;
 use crate::time::Instant;
 use kernel::clock::anchor;
+pub use kernel::clock::Rate;
 use toyos_wallclock::Civil;
 
 /// The [`Line::mult`] of the rate the CPU states; zero where it states none,
@@ -203,6 +204,14 @@ pub fn counter_deadline(nanos: u64) -> u64 {
 /// derived from it is one its arm has to refuse.
 pub fn counter_ticks(nanos: u64) -> u64 {
     clock().map_or(0, |clock| clock.line.ticks(nanos))
+}
+
+/// `nanos` as [`cpu::counter`] ticks that take at least that long, at the best
+/// rate known now, and which; `None` where none is. Lock-free, for a fatal
+/// path at any point of the boot.
+pub fn ticks_at_least(nanos: u64) -> Option<(u64, Rate)> {
+    let measured = clock().map(|clock| clock.line.ticks(nanos));
+    kernel::clock::ticks_at_least(nanos, measured, cpu::stated_counter_hz(), cpu::counter_ceiling_hz())
 }
 
 /// The span a count of [`counter_ticks`] stands for, for a caller that measured

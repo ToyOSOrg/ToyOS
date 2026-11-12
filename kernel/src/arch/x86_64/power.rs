@@ -1,8 +1,8 @@
-//! Reset and power-off through the FADT: its reset register, and S5 soft-off
-//! through the PM1a control block with the `SLP_TYPa` the holder of the `acpi`
-//! claim supplied. The reset register is declared with `SMI_CMD`, the other
-//! port the FADT has a write command, since the two may be one port
-//! ([`init_reset`]).
+//! Reset and power-off through the FADT: its reset register, then the
+//! processor's own shutdown, and S5 soft-off through the PM1a control block
+//! with the `SLP_TYPa` the holder of the `acpi` claim supplied. The reset
+//! register is declared with `SMI_CMD`, the other port the FADT has a write
+//! command, since the two may be one port ([`init_reset`]).
 //!
 //! **This kernel reads no AML, so it knows no sleep type of its own.** `\_S5`
 //! is the firmware's AML to evaluate, and the claim's holder does
@@ -13,18 +13,19 @@
 //! them.
 //!
 //! All input is firmware-supplied and untrusted: a table that does not decode
-//! is a machine with no reboot or no PM1a control block, said by name, never
-//! a panic.
+//! is a machine with no reset register or no PM1a control block, said by
+//! name, never a panic.
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use toyos_acpi::{Facs, FacsRefused, Reset};
+use toyos_acpi::{FacsRefused, Reset, TableError};
 use toyos_userbound::firmware::SleepType;
 use toyos_userbound::{Mediated, Ports};
 
 use super::cpu;
 use super::pio::{self, Declared, Slot, TakenBack};
 use crate::drivers::acpi::direct_phys;
+use crate::drivers::serial;
 use crate::log;
 use crate::time::{Deadline, Duration, Tripwire};
 
@@ -42,34 +43,49 @@ const UNSUPPLIED: u8 = u8::MAX;
 static RESET: Slot = Slot::empty();
 static RESET_VALUE: AtomicU8 = AtomicU8::new(0);
 
+/// Whether [`init_reset`] found the FADT past the boot map's reach, so that
+/// [`init_reset_past_the_boot_map`] reads it once the kernel's own map does.
+static PAST_THE_BOOT_MAP: AtomicBool = AtomicBool::new(false);
+
 /// Declare the FADT's two ports a write commands, `SMI_CMD` and the reset
 /// register, and record the reset register; or say by name why this machine
-/// has either not. The FACS the FADT names is read here once, and handed to
-/// `acpi_mode::init`: `None` where the FADT is unusable.
+/// has either not. The FACS is read for `S4BIOS_F` alone.
+///
+/// **Before anything past the boot's own argument checks can panic**, so a
+/// panic in `after_console` or `mm::init` ends through the register. That is
+/// before `mm::init`, so nothing here allocates, and the tables are read
+/// through the boot map: a FADT past its reach is read by
+/// [`init_reset_past_the_boot_map`] once the kernel's map reaches it. Walking
+/// these tables inside the panic handler instead is refused — a table walk on
+/// a machine that has already failed once is how a panic becomes a triple
+/// fault nobody chose.
 ///
 /// **One port may be both** (an AMD laptop's 0xb0 is): it is declared once,
 /// as `SMI_CMD`, whose kept bytes then hold the reset's value too
 /// (`SmiCmd::named`), and the reset register is that declaration.
-///
-/// Before `percpu::init_bsp` loads the IDT: from then on every panic can be
-/// reported, and a panic that can be reported but not ended is a machine that
-/// still needs a hand. Walking these tables inside the panic handler instead is
-/// refused — a table walk on a machine that has already failed once is how a
-/// panic becomes a triple fault.
-pub fn init_reset(rsdp_addr: u64) -> Option<Result<Facs, FacsRefused>> {
+pub fn init_reset(rsdp_addr: u64) {
     let fadt = match toyos_acpi::find_table(direct_phys(), rsdp_addr, b"FACP", toyos_acpi::FADT_FOR_FIXED_HARDWARE) {
         Ok(table) => table,
+        Err(TableError::Unmapped { at, len }) if !PAST_THE_BOOT_MAP.swap(true, Ordering::Relaxed) => {
+            return log!("ACPI: {at:#x}+{len:#x} is past the boot map: the reset register is read once the kernel's map reaches it");
+        }
         Err(e) => {
-            log!("ACPI: FADT unusable: {e:?} — no reboot, a panic will hold the panel, and no SMI_CMD");
-            return None;
+            return log!("ACPI: FADT unusable: {e:?} — no reboot, a panic ends by processor shutdown, and no SMI_CMD");
         }
     };
     let facs = toyos_acpi::facs(fadt.phys(), &fadt);
     declare(&fadt, facs);
-    Some(facs)
 }
 
-fn declare<P: toyos_acpi::Phys>(fadt: &toyos_acpi::Table<P>, facs: Result<Facs, FacsRefused>) {
+/// [`init_reset`] again where the boot map did not reach the FADT: once
+/// `mm::init` has mapped every range the firmware's tables are in.
+pub fn init_reset_past_the_boot_map(rsdp_addr: u64) {
+    if PAST_THE_BOOT_MAP.load(Ordering::Relaxed) {
+        init_reset(rsdp_addr);
+    }
+}
+
+fn declare<P: toyos_acpi::Phys>(fadt: &toyos_acpi::Table<P>, facs: Result<toyos_acpi::Facs, FacsRefused>) {
     let reset = toyos_acpi::reset_register(fadt);
     // Fixed hardware this kernel does not serve has no ACPI row, and so no use for `SMI_CMD`.
     let smi_cmd = toyos_acpi::fixed_hardware(fadt).ok().and_then(|fixed| fixed.smi_cmd);
@@ -85,22 +101,27 @@ fn declare<P: toyos_acpi::Phys>(fadt: &toyos_acpi::Table<P>, facs: Result<Facs, 
         }
     }
     let Reset::Port { port, value } = reset else {
-        return log!("ACPI: no reset register this kernel writes ({reset:?}) — no reboot");
+        return log!("ACPI: no reset register this kernel writes ({reset:?}) — no reboot, and a panic ends by processor shutdown");
     };
     let shared = smi_cmd.is_some_and(|named| named.port == port);
     let declared = if shared {
-        super::smi_cmd::declared().ok_or_else(|| "SMI_CMD, which it is, was not declared".into())
+        let Some(declared) = super::smi_cmd::declared() else {
+            return log!("ACPI: reset register {port:#x} is SMI_CMD, which was not declared — no reboot, and a panic ends by processor shutdown");
+        };
+        declared
     } else {
-        pio::declare("the reset register", Ports::one(port), Mediated::Kept).map_err(|why| alloc::format!("{why:?}"))
-    };
-    match declared {
-        Ok(declared) => {
-            RESET_VALUE.store(value, Ordering::Relaxed);
-            RESET.set(declared);
-            log!("ACPI: reset register SystemIO {port:#x} <- {value:#04x}{}", if shared { ", which is SMI_CMD too" } else { "" });
+        match pio::declare("the reset register", Ports::one(port), Mediated::Kept) {
+            Ok(declared) => declared,
+            Err(why) => return log!("ACPI: reset register {port:#x} not declared ({why:?}) — no reboot, and a panic ends by processor shutdown"),
         }
-        Err(why) => log!("ACPI: reset register {port:#x} not declared ({why}) — no reboot"),
+    };
+    let shared = if shared { ", which is SMI_CMD too" } else { "" };
+    if crate::actuator::reset_withheld() {
+        return log!("ACPI: reset register SystemIO {port:#x} <- {value:#04x}{shared}, withheld: this kernel keeps none");
     }
+    RESET_VALUE.store(value, Ordering::Relaxed);
+    RESET.set(declared);
+    log!("ACPI: reset register SystemIO {port:#x} <- {value:#04x}{shared}");
 }
 
 /// Declare the FADT's PM1a control block, or say by name why this machine
@@ -150,21 +171,60 @@ pub fn pm1a_control() -> Option<Declared> {
     PM1A_CNT.get()
 }
 
-/// Write the reset register and nothing else: no lock, nothing but the port
-/// the FADT named. A machine with no reset register halts. Where the register
-/// is `SMI_CMD` this `out` is no write of `smi_cmd`'s: Table 5.9 asks the boot
+/// How long the reset register's write is given before the processor is shut
+/// down: the wait's failure timeout, since ACPI 6.5 §4.8.4.6 states no
+/// latency for the reset it asks.
+const RESET_TAKES: Tripwire = Tripwire::absurd(
+    Duration::from_secs(1),
+    "the register's write asks the platform's whole reset, so a machine still running a second \
+     later was not reset by it",
+);
+
+/// Write the reset register, and shut the processor down ([`cpu::shutdown`])
+/// where none is known or one has not reset the machine in [`RESET_TAKES`],
+/// timed by the best clock there is (`clock::ticks_at_least`). No lock;
+/// nothing is said but the register's failure. Where the register is
+/// `SMI_CMD` this `out` is no write of `smi_cmd`'s: Table 5.9 asks the boot
 /// processor of a command to `SMI_CMD` and nothing of the reset, which is
 /// made from whichever CPU ends the machine. Every IOMMU's SMI filter is off
 /// first: firmware may reset in its SMI handler, from an SMI its chipset
 /// raises through the filter.
-// No fallback: 0xCF9, the keyboard controller and anything else are written only where a table named them.
+// No other register: 0xCF9, the keyboard controller and anything else are written only where a table named them.
 pub fn reset() -> ! {
     if let Some(reset) = RESET.get() {
+        let value = RESET_VALUE.load(Ordering::Relaxed);
         super::amdvi::fault::pass_every_smi();
         // SAFETY: the port `init_reset` decoded as an 8-bit System I/O register and declared, and the value is that register's.
+        unsafe { cpu::outb(reset.port(0), value) };
+        let ticks = crate::clock::ticks_at_least(RESET_TAKES.nanos()).map_or(0, |(ticks, _)| ticks);
+        let by = cpu::counter().saturating_add(ticks);
+        while cpu::counter() < by {
+            core::hint::spin_loop();
+        }
+        let mut uart = serial::panic_registers();
+        uart.write(b"\npower: the reset register ");
+        uart.hex(u64::from(reset.port(0).number()));
+        uart.write(b" took ");
+        uart.hex(u64::from(value));
+        uart.write(b" and this machine still runs: shutting the processor down\n");
+    }
+    cpu::shutdown()
+}
+
+/// [`reset`] with no wait and nothing said: for a fatal path that failed in
+/// its own reentry.
+pub fn reset_at_once() -> ! {
+    if let Some(reset) = RESET.get() {
+        super::amdvi::fault::pass_every_smi();
+        // SAFETY: as in `reset`.
         unsafe { cpu::outb(reset.port(0), RESET_VALUE.load(Ordering::Relaxed)) };
     }
-    cpu::halt()
+    cpu::shutdown()
+}
+
+/// How [`reset`] ends this machine, for a fatal path's line: always somehow.
+pub fn ending() -> Option<&'static str> {
+    Some(if RESET.get().is_some() { "through the reset register" } else { "by processor shutdown: no reset register is known" })
 }
 
 /// How long a machine may go on running once `SLP_EN` is written.

@@ -674,6 +674,13 @@ extern "C" fn idle_loop() -> ! {
         if crate::drivers::panic_console::probe_due() {
             panic!("metal-panic-probe: a fatal report over a desktop that owns the screen");
         }
+        #[cfg(feature = "boot-actuators")]
+        if crate::actuator::panic_in_the_hold() && percpu::cpu_id() != 0 && crate::smp::is_ready() {
+            static FIRED: AtomicBool = AtomicBool::new(false);
+            if !FIRED.swap(true, Ordering::Relaxed) {
+                panic!("panic-in-the-hold: from an idle cpu while the others run");
+            }
+        }
         crate::scheduler::reap_finished();
         // `pass` below covers this too; here as well so a CPU that
         // halts immediately has still run every hook first.

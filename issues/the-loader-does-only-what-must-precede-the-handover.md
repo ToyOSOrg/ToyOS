@@ -320,7 +320,7 @@ Each stage lands on its own, in this order.
      `issues/the-t14-answers-only-through-what-ubuntu-reads-off-its-disk.md` owns, and
      waits on
      `issues/the-t14-hung-after-rebooting-with-its-i219-faulted.md`,
-     `issues/a-fatal-event-stands-down-both-bounds-and-may-leave-nothing-to-end-the-machine.md`,
+     `issues/a-panics-end-is-unread-on-either-bench.md`,
      `issues/most-t14-leases-land-one-dhcp-retry-late.md` and
      `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`,
      which deleted the host's reader, its ssh client and the machine's end of

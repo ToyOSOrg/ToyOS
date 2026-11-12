@@ -1,16 +1,19 @@
-//! What a panicked kernel does with the machine once its report is on the
-//! panel: it holds the panel for [`toyos_tco::PANIC_BOUND_MS`] and then returns
-//! the machine to firmware.
+//! What a panicked kernel does with the machine once its report is out: it
+//! holds the panel for [`toyos_tco::PANIC_BOUND_MS`] from the boot's first
+//! fatal event and then ends the machine (`power::reset_now`), however early
+//! the event.
 //!
-//! **The bound is carried in `cpu::counter` ticks, not nanoseconds.** A panic
-//! may land before `clock::init`, where the calibrated clock reads zero for
-//! every interval; the tick count comes from the frequency the CPU states
-//! instead (`cpu::stated_counter_hz`), and both phases then compare the same
-//! counter against the same unit. A machine that states no frequency and has no
-//! calibrated clock cannot time anything, and the arm line says so instead of
-//! resetting on a guess.
+//! **The bound is carried in `cpu::counter` ticks**, converted once at the
+//! best rate known when it is armed (`clock::ticks_at_least`): the calibrated
+//! clock, the rate the CPU states, or a ceiling on any rate the counter may
+//! have, at which the hold lasts the bound or longer and still ends. A fatal
+//! path that arms after the first, a reentry or another CPU's, keeps the
+//! first one's bound.
+
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use crate::arch::cpu;
+use crate::clock::Rate;
 use crate::drivers::serial;
 use crate::time::{Budget, Duration};
 
@@ -27,67 +30,54 @@ const FAST_BOUND: Budget = Budget::of(
     "a guest reaches the reset inside one test",
 );
 
-/// Whether a reboot is armed on this panic, and when.
+/// The `cpu::counter` reading the machine is ended at, or 0 before the first
+/// fatal path armed it.
+static AT: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a fatal path ends the machine, and when.
 #[derive(Clone, Copy)]
 pub enum Bound {
-    /// Reset the machine at this `cpu::counter` reading.
+    /// End the machine at this `cpu::counter` reading.
     At(u64),
-    /// Hold the panel: nothing here could time a wait, or this machine has no
-    /// reset this kernel performs.
+    /// Hold the panel for good: this machine has no end this kernel can take,
+    /// or nothing here can time a wait.
     Held,
 }
 
 impl Bound {
-    /// Reset the machine if the bound has passed; every wait on the panic path
-    /// calls this, and it is the only place that decides the reset has come due.
-    pub fn check(self) {
-        if let Self::At(cycles) = self {
-            if cpu::counter() >= cycles {
-                reboot_now();
-            }
+    /// Wait out the bound and end the machine: every fatal path's last call,
+    /// on every CPU that takes one, so none halts with what it holds while
+    /// another runs. Spins rather than `hlt`: nothing would wake it, and
+    /// re-arming the timer would dispatch the scheduler mid-panic.
+    pub fn hold(self) -> ! {
+        let Self::At(at) = self else {
+            cpu::halt();
+        };
+        while cpu::counter() < at {
+            core::hint::spin_loop();
         }
-    }
-
-    pub fn is_armed(self) -> bool {
-        matches!(self, Self::At(_))
+        reboot_now()
     }
 }
 
-/// Which clock converted the bound into cycles, for the one line that says so.
-#[derive(Clone, Copy)]
-enum Source {
-    Calibrated,
-    Stated,
-}
-
-impl Source {
-    fn named(self) -> &'static str {
-        match self {
-            Source::Calibrated => "the calibrated clock",
-            Source::Stated => "the counter frequency the CPU states",
-        }
+/// Which rate converted the bound, for the one line that says so.
+fn named(rate: Rate) -> &'static str {
+    match rate {
+        Rate::Calibrated => "the calibrated clock",
+        Rate::Stated => "the counter frequency the CPU states",
+        Rate::Ceiling => "an uncalibrated ceiling on the counter's rate, so no sooner",
     }
 }
 
 /// The two heads the panel's last line can have, kept apart here so neither
-/// can be read as the other: one says a reset is coming and the other says
-/// this machine will sit where it is.
+/// can be read as the other: one says the machine ends and the other says it
+/// will sit where it is.
 const ARMED: &str = "panic: rebooting";
 const HELD: &str = "panic: holding this panel";
 
-/// The bound in counter ticks from now, and which clock said so.
-fn deadline(bound: Budget) -> Option<(u64, Source)> {
-    if crate::clock::calibrated() {
-        return Some((crate::clock::counter_deadline(bound.nanos()), Source::Calibrated));
-    }
-    let hz = crate::arch::cpu::stated_counter_hz()?;
-    // Nanoseconds first, so a bound under a second is not rounded to nothing.
-    let cycles = (u128::from(bound.nanos()) * u128::from(hz) / 1_000_000_000) as u64;
-    Some((cpu::counter().saturating_add(cycles), Source::Stated))
-}
-
-/// Arm the reboot and say so in one line — the panel's last, because the panic
-/// path captures the log right after this and paints that capture.
+/// Arm the bound, or take the one a fatal path armed first, and say so in one
+/// line — the panel's last, because the panic path captures the log right
+/// after this and paints that capture.
 ///
 /// `on_the_record` writes the line through the log, which puts it on the panel
 /// and on the console; false is for the reentry guard, whose suspect is the log
@@ -100,45 +90,58 @@ pub fn arm(on_the_record: bool) -> Bound {
 
     // ASCII only, here and in every line below: the panel's font renders
     // anything outside 0x20..=0x7E as a dot.
+    let Some(how) = crate::arch::power::ending() else {
+        say(on_the_record, [HELD, ": this kernel has no reset to hand the machine back to firmware with", ""]);
+        return Bound::Held;
+    };
+    let first = AT.load(Relaxed);
+    if first != 0 {
+        say(on_the_record, [ARMED, " at the bound the first fatal path armed, ", how]);
+        return Bound::At(first);
+    }
+    let Some((ticks, rate)) = crate::clock::ticks_at_least(budget.nanos()) else {
+        say(on_the_record, [HELD, ": nothing here can time a wait", ""]);
+        return Bound::Held;
+    };
+    let at = cpu::counter().saturating_add(ticks).max(1);
+    let at = AT.compare_exchange(0, at, Relaxed, Relaxed).unwrap_or_else(|first| first);
     let secs = budget.duration().millis() / 1_000;
-    match (deadline(budget), crate::power::can_reboot()) {
-        (Some((cycles, source)), true) => {
-            if on_the_record {
-                alert!("{ARMED} in {secs} s, timed by {}", source.named());
-            } else {
-                serial::panic_registers().write(b"panic: rebooting\n");
-            }
-            Bound::At(cycles)
+    if on_the_record {
+        alert!("{ARMED} in {secs} s, timed by {}, {how}", named(rate));
+    } else {
+        let mut uart = serial::panic_registers();
+        uart.write(ARMED.as_bytes());
+        uart.write(b" in ");
+        uart.dec(secs);
+        uart.write(b" s, timed by ");
+        uart.write(named(rate).as_bytes());
+        uart.write(b", ");
+        uart.write(how.as_bytes());
+        uart.write(b"\n");
+    }
+    Bound::At(at)
+}
+
+/// `parts`, as one line through the log or raw on the UART.
+fn say(on_the_record: bool, parts: [&str; 3]) {
+    if on_the_record {
+        let [head, middle, tail] = parts;
+        alert!("{head}{middle}{tail}");
+    } else {
+        let mut uart = serial::panic_registers();
+        for part in parts {
+            uart.write(part.as_bytes());
         }
-        (Some((_, source)), false) => {
-            if on_the_record {
-                alert!(
-                    "{HELD}, timed by {}: this kernel has no reset to hand the machine back to \
-                     firmware with",
-                    source.named()
-                );
-            } else {
-                serial::panic_registers().write(b"panic: holding this panel: no reset\n");
-            }
-            Bound::Held
-        }
-        (None, _) => {
-            if on_the_record {
-                alert!(
-                    "{HELD}: this CPU states no counter frequency and none is calibrated, so \
-                     nothing here can time a wait"
-                );
-            } else {
-                serial::panic_registers().write(b"panic: holding this panel: no clock\n");
-            }
-            Bound::Held
-        }
+        uart.write(b"\n");
     }
 }
 
-/// Return the machine to firmware. The second of this path's two lines, and it
-/// goes out raw: the log has already been flushed and drained by here.
-pub fn reboot_now() -> ! {
+/// End the machine at the bound: once, by the first CPU to see it pass. Its
+/// line goes out raw: the log has already been flushed and drained by here.
+fn reboot_now() -> ! {
+    if !crate::deadline::claim_the_reset() {
+        cpu::halt();
+    }
     serial::panic_registers()
         .write(b"\npanic: the bound is over: returning this machine to firmware\n");
     // Not `power::reboot`: its flush waits on the console wire, and a CPU this

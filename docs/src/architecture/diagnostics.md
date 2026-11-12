@@ -33,10 +33,17 @@ exports them.
 
 ## Crashes
 
-A kernel panic halts the other CPUs and paints its report on the panel and the
-console. The loader asks the firmware to overwrite memory before every next
-boot, so where the firmware honours that request nothing in RAM survives the
-reset, and no crash record crosses one today. A killed program is reported as its file, offset and build id; one
+A kernel panic halts the other CPUs, paints its report on the panel and the
+console, and holds it there for a bound counted from the boot's first fatal
+event. Then the machine ends itself: through the firmware's reset where the
+firmware names one, otherwise by the processor's own shutdown where the
+architecture has one, whose effect is the platform's; a machine with neither
+holds its report. The bound holds however early the panic: before the boot has
+measured the CPU's counter, it is counted at the rate the CPU states, or at a
+ceiling on any rate, so the report stays up at least as long. The
+loader asks the firmware to overwrite memory before every next boot, so where
+the firmware honours that request nothing in RAM survives the reset, and no
+crash record crosses one today. A killed program is reported as its file, offset and build id; one
 userland naming service turns those into function names using the same lookup
 the kernel uses for itself.
 

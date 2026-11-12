@@ -18,7 +18,8 @@
 //!
 //! - **The span before `clock::init`,** which no bound in this file or in
 //!   [`crate::hardlockup`] reaches: no counter period to convert a bound with, and
-//!   no counter armed. A kernel that dies there still needs a hand.
+//!   no counter armed. A kernel that wedges there still needs a hand; one that
+//!   panics there is ended by `crate::panic_reboot`'s bound.
 //! - **A machine on which no CPU takes an interrupt at all.** Nothing polled
 //!   from a running CPU can cover that; **that half is [`crate::hardlockup`]**,
 //!   sampled by an NMI off a performance counter. The two are armed off this one
@@ -27,8 +28,8 @@
 //!   one deaf core is ended by that one, at the earlier bound. Whichever fires
 //!   takes the machine's one reset through [`claim_the_reset`].
 //! - **A panic in progress**, which is not a gap but a stand-down:
-//!   `panic::halt_all_cpus` calls [`stand_down`] before it holds the panel, so a
-//!   panic report is never cut short by an expiry.
+//!   `panic::stop_the_machine` calls [`stand_down`] before a fatal path holds
+//!   the panel, so a panic report is never cut short by an expiry.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
@@ -47,14 +48,15 @@ static AT_COUNTER: AtomicU64 = AtomicU64::new(0);
 static FIRED: AtomicBool = AtomicBool::new(false);
 
 /// Take this machine's one reset, or `false` where another CPU already holds
-/// it. Shared with [`crate::hardlockup`]: two bounds compose, one reset.
+/// it. Shared with [`crate::hardlockup`] and `crate::panic_reboot`'s bound:
+/// three bounds, one reset.
 pub fn claim_the_reset() -> bool {
     !FIRED.swap(true, Relaxed)
 }
 
 /// Stand this bound down for the rest of the machine's life.
 ///
-/// Called from `panic::halt_all_cpus` beside [`crate::hardlockup::stand_down`]:
+/// Called from `panic::stop_the_machine` beside [`crate::hardlockup::stand_down`]:
 /// from there this machine holds a panic report under a bound of its own, and an
 /// expiry would reset it out from under its reader. Disarms rather than latching a
 /// second flag, so [`poll`] stays one relaxed load.

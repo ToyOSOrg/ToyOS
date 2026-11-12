@@ -764,6 +764,11 @@ pub enum Profile {
     /// whatever the host, so its local APICs run in xAPIC mode: the machine
     /// an AMD laptop without x2APIC is.
     MetalNoX2apic,
+    /// [`Profile::Metal`] on the one declaration's emulated CPU whatever the
+    /// host: `qemu64`, whose CPUID states no counter rate (its largest
+    /// standard leaf is under 15H), as no AMD part's does, so a fatal path
+    /// before the clock is calibrated times its bound by a ceiling.
+    MetalUnstatedRate,
     /// [`Profile::Metal`] with QEMU's AMD unit in place of VT-d: the boot
     /// stick's controller behind an AMD-Vi unit, which the kernel finds by the
     /// IVRS and switches off.
@@ -850,6 +855,7 @@ impl Profile {
             | Self::MetalUsbKeyboard
             | Self::MetalBesideAHostDisk
             | Self::MetalNoX2apic
+            | Self::MetalUnstatedRate
             | Self::MetalAmdVi
             | Self::MetalAmdViTestdev
             | Self::HeadlessUsbSpareAmdVi
@@ -860,7 +866,7 @@ impl Profile {
     /// How this host provides the machine.
     pub fn accel(self) -> Accel {
         match self {
-            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::MetalNoX2apic => Accel::Tcg,
+            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::MetalNoX2apic | Self::MetalUnstatedRate => Accel::Tcg,
             _ => self.arch().accel(),
         }
     }
@@ -1180,7 +1186,7 @@ impl Profile {
                 virtio_gpu: false,
                 hda: false,
             },
-            Self::MetalNoX2apic => Self::Metal.shape(),
+            Self::MetalNoX2apic | Self::MetalUnstatedRate => Self::Metal.shape(),
             Self::MetalTwoHda => Shape { hda: true, ..Self::Metal.shape() },
             Self::MetalUsbKeyboard => Shape { usb: &["usb-kbd,bus=xhci.0"], ..Self::Metal.shape() },
             Self::MetalBesideAHostDisk => Shape { storage: Storage::Stick { beside: Beside::HostDisk }, ..Self::Metal.shape() },
@@ -2347,6 +2353,14 @@ impl QmpMonitor {
             "{{\"execute\":\"human-monitor-command\",\"arguments\":\
              {{\"command-line\":\"{command}\"}}}}"
         ))
+    }
+
+    /// This connection, waiting up to `budget` for the stop of a guest that
+    /// may stop while it is still being read: QMP delivers no event emitted
+    /// before a client connected.
+    pub fn into_shutdown(self, budget: Duration) -> QmpShutdown {
+        self.0.stream.set_read_timeout(Some(budget)).expect("qmp: the shutdown-event budget");
+        QmpShutdown(self.0)
     }
 }
 

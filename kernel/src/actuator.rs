@@ -168,6 +168,26 @@ actuators! {
     #[allow(dead_code)]
     psci_withheld = "psci-withheld";
 
+    /// `power::init_reset` keeps no reset register, so this kernel ends the
+    /// machine by processor shutdown: a machine whose FADT names none.
+    /// Judged by `a_panic_with_no_reset_register_shuts_down`.
+    // The FADT's reset register is x86-64's alone, so AArch64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    reset_withheld = "reset-withheld";
+
+    /// Take an invalid opcode once the IDT is loaded and before the clock,
+    /// and panic inside its report: the DOUBLE PANIC path with nothing
+    /// calibrated. Judged by `a_double_panic_before_the_clock_resets`.
+    // The fault's report is x86-64's alone, so AArch64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    test_double_panic = "test-double-panic";
+
+    /// Panic from an AP's idle loop once the machine is released, and panic
+    /// again inside that panic's first hold of the console registers, while
+    /// every other CPU still runs. Judged by
+    /// `a_panic_inside_the_console_hold_stops_the_others`.
+    panic_in_the_hold = "panic-in-the-hold";
+
     /// Give the `iommu-testdev` off bus 0 no route, and once the SMMUv3 is
     /// armed have it and the one on bus 0 write on no domain, then the one on
     /// bus 0 on a domain at an address it maps, and there again once it is

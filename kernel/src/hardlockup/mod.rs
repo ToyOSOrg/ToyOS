@@ -168,8 +168,8 @@ pub fn arm_this_cpu() {
 
 /// Stand the detector down for the rest of this machine's life.
 ///
-/// Called from `panic::halt_all_cpus`, which is every fatal path's one funnel: a
-/// panicked kernel pages its panel with `IF` clear, under a bound of its own,
+/// Called from `panic::stop_the_machine`, which every fatal path takes first: a
+/// panicked kernel holds its panel with `IF` clear, under a bound of its own,
 /// and a reader holding the machine open is not a machine to reset. One relaxed
 /// store, and the LVT then stays masked of its own accord — hardware masks it
 /// on delivery and only [`sample`]'s re-arm clears it.

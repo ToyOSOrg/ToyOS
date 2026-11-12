@@ -338,11 +338,15 @@ pub struct Platform {
     gic: super::irqchip::Gic,
 }
 
+/// The firmware's reset, once the boot parameter is read and before anything
+/// past it can panic.
+pub fn firmware_reset(rsdp_addr: u64) {
+    super::psci::init(rsdp_addr);
+}
+
 /// Interrupt delivery: this CPU's per-CPU block, the GIC and the timer's
 /// interrupt, and interrupts unmasked. The syscall gate is the vectors' own.
 pub fn interrupts(rsdp_addr: u64) -> Platform {
-    // First, so a panic in anything below has a reset to end its bound with.
-    super::psci::init(rsdp_addr);
     super::percpu::init_bsp();
     let gic = super::irqchip::init(rsdp_addr);
     super::cpu::enable_interrupts();

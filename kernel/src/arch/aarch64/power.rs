@@ -40,6 +40,21 @@ pub fn reset() -> ! {
     cpu::halt()
 }
 
+/// [`reset`] with nothing said: for a fatal path that failed in its own
+/// reentry.
+pub fn reset_at_once() -> ! {
+    if let Some(psci) = psci::conduit() {
+        psci.system_reset();
+    }
+    cpu::halt()
+}
+
+/// How [`reset`] ends this machine, for a fatal path's line; `None` with no
+/// PSCI, since this architecture has no end of its own to take instead.
+pub fn ending() -> Option<&'static str> {
+    psci::conduit().map(|_| "through PSCI SYSTEM_RESET")
+}
+
 /// What [`off`] takes: this machine hands out nothing a power-off takes back.
 pub struct Settled(());
 

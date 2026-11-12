@@ -102,34 +102,37 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     panic::record_panic(info);
 
     // Reentry guard, checked before any fallible access — else a panic here recurses until the stack meets the heap.
-    let depth = panic::depth_slot();
-    if depth.fetch_add(1, core::sync::atomic::Ordering::SeqCst) > 0 {
-        // UART only: percpu and the log path are what just panicked.
-        panic::last_words("PANIC REENTRY: CPU halted", None, info, false);
-        // Off the record like the report above it: the log path is what just panicked here.
-        let bound = panic_reboot::arm(false);
-        // No capture(): the outer panic's snapshot is the one worth showing.
-        // render() is safe by construction here: a fault inside the renderer itself would find the fatal panel already claimed, and return without touching a pixel.
-        if drivers::panic_console::render() {
-            drivers::panic_console::hold_the_panel(bound);
+    match panic::depth_slot().fetch_add(1, core::sync::atomic::Ordering::SeqCst) {
+        0 => {}
+        1 => {
+            // The other CPUs first: the outer panic may not have stopped
+            // them, and this CPU may hold the console registers for good.
+            panic::stop_the_machine();
+            // UART only: percpu and the log path are what just panicked.
+            panic::last_words("PANIC REENTRY", None, info, false);
+            // Off the record like the report above it: the log path is what just panicked here.
+            let bound = panic_reboot::arm(false);
+            // No capture(): the outer panic's snapshot is the one worth showing.
+            // render() is safe by construction here: a fault inside the renderer itself would find the fatal panel already claimed, and return without touching a pixel.
+            drivers::panic_console::render();
+            bound.hold();
         }
-        cpu::halt();
+        // The reentry's own path panicked: nothing of it is trusted again.
+        _ => arch::power::reset_at_once(),
     }
 
-    // Early boot: percpu not ready (single CPU at this point), and neither is the calibrated clock — the bound comes off CPUID there.
+    // Early boot: percpu not ready (single CPU at this point), and neither is the calibrated clock.
     if !log::PERCPU_READY.load(core::sync::atomic::Ordering::Relaxed) {
         alert!("EARLY PANIC: {}", info);
         // Before the capture, so the arm line is the panel's last one.
         let bound = panic_reboot::arm(true);
-        // Halts directly instead of via halt_all_cpus: the exception table is not loaded yet, so a renderer fault would find firmware's.
+        // Not via halt_all_cpus: the exception table is not loaded yet, so a renderer fault would find firmware's.
         drivers::panic_console::capture();
         // SAFETY: no other writer can be mid-transmission — IF is clear here and every other CPU is about to halt.
         unsafe { drivers::serial::panic_flush(); }
         // Flush before render: the serial report survives even if render then faults.
-        if drivers::panic_console::render() {
-            drivers::panic_console::hold_the_panel(bound);
-        }
-        cpu::halt();
+        drivers::panic_console::render();
+        bound.hold();
     }
 
     let prev = percpu::swap_fault_state(percpu::CpuFaultState::Panic);
@@ -239,6 +242,9 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     params::init(cmdline);
     deadline::claim(cmdline);
     actuator::init(cmdline);
+    // Before anything past the boot's own arguments can panic: from here every
+    // fatal path ends through the firmware's reset where it names one.
+    arch::boot::firmware_reset(kernel_args.rsdp_addr);
     let (boot_images, [supervisor_image, fileserver_image, root_image, boot_names]) = bootimage::init(&kernel_args, maps);
 
     arch::boot::after_console(&kernel_args, maps);

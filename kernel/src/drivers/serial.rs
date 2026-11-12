@@ -183,6 +183,9 @@ pub unsafe fn panic_flush() {
     let mut uart = panic_registers();
     if let Hold::Held(guard) = &mut uart.0 {
         crate::log::console::drain_locked(guard);
+        if crate::actuator::panic_in_the_hold() {
+            panic!("panic-in-the-hold: a second panic inside the console's hold");
+        }
         return;
     }
     if matches!(uart.0, Hold::Reentered(_)) {

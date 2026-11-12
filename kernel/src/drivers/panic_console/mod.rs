@@ -6,9 +6,9 @@
 //! [`render`] paints it inside `halt_all_cpus`, before `panic_flush`. A display
 //! a process drives, virtio-gpu's, is no scanout this module can reach.
 //!
-//! The hold this module ends a panic in, [`hold_the_panel`], is also where
-//! `crate::panic_reboot`'s bound is watched. It reads no input and scrolls
-//! nothing: a dead kernel takes none, and its report shows what fits, once.
+//! The panel reads no input and scrolls nothing once a fatal path paints it:
+//! a dead kernel takes none, and its report shows what fits, once, for as
+//! long as `crate::panic_reboot`'s bound holds it.
 
 mod access;
 mod latch;
@@ -21,7 +21,6 @@ use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use crate::log;
 use crate::log::LogStamp;
 use crate::log::read::Published;
-use crate::panic_reboot::Bound;
 use crate::time::{Budget, Duration};
 use crate::mm::policy::MmioPolicy;
 use crate::mm::{self, DirectMap};
@@ -648,31 +647,14 @@ fn fatal_claimed() -> bool {
     FATAL.load(Ordering::Relaxed) != 0
 }
 
-/// Paint the newest page of the captured report, fatal paths only; returns
-/// whether this call claimed the screen, entitling [`hold_the_panel`] — which
-/// it does whatever any painter that is not a fatal path holds.
-pub fn render() -> bool {
+/// Paint the newest page of the captured report, fatal paths only: the first
+/// to ask, whatever any painter that is not a fatal path holds.
+pub fn render() {
     if !seize() {
-        return false;
+        return;
     }
     forget_the_glass();
     paint(Fill::Fatal, fatal_text(), || false);
-    true
-}
-
-/// Keep the panel as it is until `bound` resets the machine: the panic path's
-/// terminal hold, and the last call its CPU makes.
-pub fn hold_the_panel(bound: Bound) -> ! {
-    if !bound.is_armed() {
-        // Nothing to wait for, so this CPU costs the machine no power.
-        crate::arch::cpu::halt()
-    }
-    // Spins rather than `hlt`: nothing would wake it, and re-arming the LAPIC
-    // timer would dispatch the scheduler mid-panic.
-    loop {
-        bound.check();
-        core::hint::spin_loop();
-    }
 }
 
 /// Repaint at a boot phase boundary, so a machine that wedges later still shows how far it got.

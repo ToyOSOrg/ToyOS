@@ -547,6 +547,29 @@ pub fn stated_counter_hz() -> Option<u64> {
     toyos_tsc::stated_hz((cpuid(0, 0).0 >= 0x15).then(|| cpuid(0x15, 0)))
 }
 
+/// A ceiling on any x86-64 TSC's rate: a span's ticks at it take no less than
+/// the span on a part whose rate nothing has stated or measured. **An
+/// inference, not a vendor's figure**: no document bounds the TSC's rate, and
+/// no shipped part's comes near this. A part past it would end such a wait
+/// sooner by its excess, never leave it unbounded.
+const COUNTER_CEILING_HZ: u64 = 10_000_000_000;
+
+pub fn counter_ceiling_hz() -> Option<u64> {
+    Some(COUNTER_CEILING_HZ)
+}
+
+/// Put this CPU in the shutdown state: an exception with no IDT to deliver it
+/// through, whose `#GP`, and then `#DF`, fail in turn (SDM Vol. 3A §7.15,
+/// Event 8, Table 7-5; APM Vol. 2 §8.2.9). The CPU then runs nothing, and
+/// signals the platform a shutdown, whose answer is the chipset's: a reset,
+/// an INIT, an SMI or nothing. An NMI wakes it into the same faults.
+pub fn shutdown() -> ! {
+    let no_vectors = [0u8; 10];
+    // SAFETY: a zero-limit IDT makes every vector's delivery fault, which is
+    // this function's whole purpose; nothing after the `ud2` runs.
+    unsafe { asm!("cli", "lidt [{}]", "2: ud2", "jmp 2b", in(reg) no_vectors.as_ptr(), options(noreturn, nostack)) }
+}
+
 
 /// The thread pointer this CPU is running with: the FS base, which user TLS is addressed from.
 #[inline]

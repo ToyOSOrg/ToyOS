@@ -194,7 +194,7 @@ pub fn self_check() -> Result<(), String> {
         ),
         // No prefix, and still the kernel's: the reentry line goes out the UART
         // port directly, and no program in this tree says these words.
-        ("\n!!! PANIC REENTRY: CPU halted !!! (apic 3)", Some(Died::Kernel)),
+        ("\n!!! PANIC REENTRY !!! (apic 3)", Some(Died::Kernel)),
         ("KERNEL PANIC: spliced onto somebody's unterminated write", Some(Died::Kernel)),
         // The kernel, about a process. Its line, somebody else's death.
         ("[ 0.412 cpu0 kernel] SEGFAULT tid=7: read unmapped address at 0x0", Some(Died::Faulted)),

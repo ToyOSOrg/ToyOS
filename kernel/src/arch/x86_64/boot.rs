@@ -91,11 +91,15 @@ pub fn reserved() -> Region {
     Region { start: toyos_bootmap::x86_64::AP_TRAMPOLINE, end: toyos_bootmap::x86_64::AP_TRAMPOLINE + toyos_bootmap::PAGE_4K }
 }
 
+/// The firmware's reset, once the boot parameter is read and before anything
+/// past it can panic.
+pub fn firmware_reset(rsdp_addr: u64) {
+    super::power::init_reset(rsdp_addr);
+}
+
 /// What the boot learns bringing interrupts up and hands later steps.
 pub struct Platform {
     madt: MadtInfo,
-    /// The FACS as `power::init_reset` read it, for `acpi_mode::init`.
-    facs: Option<Result<toyos_acpi::Facs, toyos_acpi::FacsRefused>>,
 }
 
 /// Interrupt delivery, this CPU's per-CPU block and the syscall gate.
@@ -105,10 +109,7 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     // the machine through the table the firmware left behind.
     let madt = acpi::parse_madt(rsdp_addr).expect("ACPI: MADT not found");
     super::idle::note_uids(&madt.processor_uids);
-    // Off the same tables as the MADT, and before the IDT below makes a panic
-    // reportable: a panic that can be reported but not ended leaves the machine
-    // holding its panel for a hand that may not be in the room.
-    let facs = super::power::init_reset(rsdp_addr);
+    super::power::init_reset_past_the_boot_map(rsdp_addr);
     percpu::init_bsp(super::cpu::hardware_id());
     // After the IDT: an xAPIC's register page is mapped here, and a fault
     // there must diagnose rather than triple-fault.
@@ -117,7 +118,11 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     ioapic::init(&madt);
     idt::enable_interrupts();
     super::syscall::init();
-    Platform { madt, facs }
+    if crate::actuator::test_double_panic() {
+        // SAFETY: `ud2` touches nothing; the #UD it raises is the IDT's above.
+        unsafe { core::arch::asm!("ud2", options(nomem, nostack)) };
+    }
+    Platform { madt }
 }
 
 /// The clock: the TSC, held to the HPET.
@@ -143,10 +148,10 @@ pub fn timer() {
 }
 
 /// The platform's own devices that are not PCI functions.
-pub fn platform_devices(platform: &Platform, rsdp_addr: u64) {
+pub fn platform_devices(_platform: &Platform, rsdp_addr: u64) {
     super::pio::fill_i8042_row();
     super::pio::fill_uart_row();
-    super::acpi_mode::init(rsdp_addr, platform.facs);
+    super::acpi_mode::init(rsdp_addr);
 }
 
 /// Every other CPU, running.

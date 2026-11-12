@@ -2,13 +2,15 @@
 //! the architecture's own (`arch::power`).
 //!
 //! **No reset this kernel performs leaves a claimed function mastering.**
-//! [`reset_now`] and [`shutdown`] are the only two places this kernel ends the
+//! [`reset_now`] and [`shutdown`] are the two places this kernel ends the
 //! machine, and each stops every function a claim holds
 //! ([`crate::pcidev::stop_before_reset`]) before it does — which is what
 //! makes that a property of the reset rather than of whoever asked for one,
-//! and what a third caller gets without knowing it is owed. Resets this
-//! kernel does not perform — a TCO or firmware watchdog, a triple fault,
-//! power loss — are outside it and always will be.
+//! and what a third caller gets without knowing it is owed. The one other is
+//! a fatal path that failed inside its own reentry, which trusts nothing of
+//! the kernel's but the reset itself (`arch::power::reset_at_once`). Resets
+//! this kernel does not perform — a TCO or firmware watchdog, a fault no
+//! vector reaches, power loss — are outside it and always will be.
 //!
 //! **Nothing an end says is logged after the console's last drain.** The
 //! stop holds the console's UART (`log::console::StopWire`), and its drain
@@ -20,7 +22,8 @@
 
 use crate::log::console::StopWire;
 
-/// Whether this machine has a reset this kernel can perform.
+/// Whether this machine has a reset this kernel can offer a reboot through:
+/// one the firmware names, not a fatal path's last resort.
 pub fn can_reboot() -> bool {
     crate::arch::power::can_reset()
 }
@@ -46,8 +49,8 @@ pub fn reboot(mut wire: StopWire) -> ! {
 /// whole life — so a CPU stuck inside one holds what the stop would wait for,
 /// on exactly the boots `crate::deadline` exists for. This takes no lock.
 ///
-/// A machine with no reset halts here rather than returning: holding is what
-/// such a machine has always done.
+/// How it ends is the architecture's (`arch::power::reset`); a machine with
+/// no end there halts rather than returning.
 pub fn reset_now() -> ! {
     // **Here and not at either caller**: the stop is registers and nothing
     // else, written for the panic path, so it takes no lock and allocates
