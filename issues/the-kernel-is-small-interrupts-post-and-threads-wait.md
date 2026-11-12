@@ -416,6 +416,11 @@ By mechanisms eliminated:
        connect leaves the caller's table as it was), `abuse_listener_hijack`,
        `user_copy_faults`, `adopted_services_stay`, `handle_lifetime`,
        `process_tree` and `launch_toctou` among them;
+     - the `testcases` members #1252 adapted, which have only been compiled
+       in that form, passing: `poll_belongs_to_its_handle` (#1261's, which
+       connects through its connector), `messages_are_whole`, `moved_rights`
+       and `mutual_kill`. The shared-boot guest row #1271 adds runs them
+       too, once it lands;
      - no kernel panic from the slot-order assertions;
      - `spawn_cost` within its guard.
    - **Owed on metal:** the spawn A/B of main before #1252 against main
