@@ -10,7 +10,7 @@ mod image;
 use toyos::process::Image;
 use toyos_abi::end::End;
 use toyos_abi::handle::Rights;
-use toyos_abi::syscall::{self, SpawnArgs, SpawnMap, SyscallError, VmProt, MAX_SPAWN_MAPS};
+use toyos_abi::syscall::{self, SpawnArgs, SpawnBacking, SpawnMap, SyscallError, VmProt, MAX_SPAWN_MAPS};
 use toyos_abi::RawHandle;
 
 const SELF: &str = "/system/bin/test_rs_abuse_spawn_maps";
@@ -114,7 +114,15 @@ fn main() {
     let size = (image.bytes().len() as u64).next_multiple_of(PAGE);
     let past = image::laid(&image, &format!("{SELF}\0{PAST}"));
     let mut maps = past.maps().to_vec();
-    maps.push(SpawnMap { addr: PAST_AT, len: 3 * PAGE, object: honest[text].object, offset: size - PAGE, copied: PAGE, prot: VmProt::ReadWrite as u64 });
+    maps.push(SpawnMap {
+        addr: PAST_AT,
+        len: 3 * PAGE,
+        object: honest[text].object,
+        offset: size - PAGE,
+        copied: PAGE,
+        prot: VmProt::ReadWrite as u64,
+        backing: SpawnBacking::Copy as u64,
+    });
     let child = spawn(&maps, past.entry, past.image_base).unwrap_or_else(|e| panic!("{PAST}: spawn: {e:?}"));
     assert_eq!(syscall::process_wait(child), Ok(End::Exited(0)), "{PAST}");
     println!("abuse_spawn_maps: {PAST}: zeros");
