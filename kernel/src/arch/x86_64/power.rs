@@ -208,7 +208,7 @@ pub fn reset() -> ! {
         uart.hex(u64::from(value));
         uart.write(b" and this machine still runs: shutting the processor down\n");
     }
-    cpu::shutdown()
+    cpu::halt()
 }
 
 /// [`reset`] with no wait and nothing said: for a fatal path that failed in

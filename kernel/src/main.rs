@@ -107,7 +107,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         1 => {
             // The other CPUs first: the outer panic may not have stopped
             // them, and this CPU may hold the console registers for good.
-            panic::stop_the_machine();
             // UART only: percpu and the log path are what just panicked.
             panic::last_words("PANIC REENTRY", None, info, false);
             // Off the record like the report above it: the log path is what just panicked here.
