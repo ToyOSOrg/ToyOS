@@ -561,12 +561,12 @@ mod checks {
     /// `IA32_MCU_OPT_CTRL` opt-out, as the kernel leaves them.
     const T14_BENCH_LINES: [&str; 17] = [
         "spectre_v1: mitigated: user pointers clamped without a branch",
-        "spectre_v2: vulnerable: needs IBPB between programs that ask; has SMEP, enhanced IBRS",
+        "spectre_v2: mitigated: SMEP, enhanced IBRS, IBPB between programs that ask",
         "branch_history_injection: vulnerable: needs BHB cleared on entry",
         "retbleed: not affected",
         "spec_rstack_overflow: not affected",
         "indirect_target_selection: vulnerable: needs indirect branches in a line's upper half",
-        "spec_store_bypass: vulnerable: needs SSBD for programs that ask",
+        "spec_store_bypass: mitigated: SSBD for programs that ask",
         "meltdown: not affected",
         "l1tf: not affected",
         "mds: not affected",
@@ -583,12 +583,14 @@ mod checks {
     /// microcode sets, and C001_1029[1], which the kernel sets.
     const AMD_BENCH_LINES: [&str; 17] = [
         "spectre_v1: mitigated: user pointers clamped without a branch, LFENCE dispatch-serializing",
-        "spectre_v2: vulnerable: needs retpoline, IBPB between programs that ask, STIBP for programs that ask; has SMEP",
+        "spectre_v2: vulnerable: needs retpoline; has SMEP, IBPB between programs that ask, \
+         return address predictor filled after IBPB, STIBP for programs that ask",
         "branch_history_injection: not affected",
         "retbleed: vulnerable: needs Jmp2Ret; has DE_CFG2[SuppressBPOnNonBr]; SMT vulnerable: STIBP only for programs that ask (policy)",
-        "spec_rstack_overflow: vulnerable: needs IBPB between programs that ask (policy), Safe-RET",
+        "spec_rstack_overflow: vulnerable: needs Safe-RET; has IBPB between programs that ask (policy), \
+         return address predictor filled after IBPB (policy)",
         "indirect_target_selection: not affected",
-        "spec_store_bypass: vulnerable: needs SSBD for programs that ask",
+        "spec_store_bypass: mitigated: SSBD for programs that ask",
         "meltdown: not affected",
         "l1tf: not affected",
         "mds: not affected",

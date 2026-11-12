@@ -120,6 +120,7 @@ fn spawn(laid: &image::Laid, stdout: Option<RawHandle>) -> Result<RawHandle, Sys
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
         job: u64::from(toyos_abi::HANDLE_INVALID.0),
         pager: u64::from(toyos_abi::HANDLE_INVALID.0),
+        isolated_speculation: 0,
     };
     // SAFETY: every pointer names a buffer of this frame that outlives the call.
     unsafe { syscall::spawn(&args) }

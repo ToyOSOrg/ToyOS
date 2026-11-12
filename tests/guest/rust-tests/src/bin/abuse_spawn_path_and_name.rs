@@ -7,8 +7,9 @@
 //! one line (`toyos_abi::syscall::spawn_path`): a path holding a line break
 //! would put a line of its caller's writing among the kernel's records. The
 //! name is printed in every record of the child, so it is one bounded token
-//! (`toyos_abi::syscall::process_name`). The same arguments with an honest
-//! path and name start a child, so each refusal is its own field's.
+//! (`toyos_abi::syscall::process_name`). An ask for isolated speculation is 0
+//! or 1. The same arguments with an honest path and name start a child, so
+//! each refusal is its own field's.
 
 #[path = "../image.rs"]
 mod image;
@@ -49,10 +50,11 @@ fn main() {
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
         job: u64::from(toyos_abi::HANDLE_INVALID.0),
         pager: u64::from(toyos_abi::HANDLE_INVALID.0),
+        isolated_speculation: 0,
     };
     let pathed = |path: &[u8]| SpawnArgs { path_ptr: path.as_ptr() as u64, path_len: path.len() as u64, ..honest };
     let named = |name: &[u8]| SpawnArgs { name_ptr: name.as_ptr() as u64, name_len: name.len() as u64, ..honest };
-    let refused: [(&str, SpawnArgs); 11] = [
+    let refused: [(&str, SpawnArgs); 12] = [
         ("a 2 MiB path", SpawnArgs { path_len: BLOB as u64, ..honest }),
         ("a path one byte past the bound", SpawnArgs { path_len: MAX_PATH as u64 + 1, ..honest }),
         ("a path of two lines", pathed(FORGED.as_bytes())),
@@ -64,6 +66,7 @@ fn main() {
         ("a name of two lines", named(b"a\nb")),
         ("a name of two words", named(b"a b")),
         ("a name that is not UTF-8", named(b"\xff")),
+        ("an ask that is neither 0 nor 1", SpawnArgs { isolated_speculation: 2, ..honest }),
     ];
     for (what, args) in refused {
         // SAFETY: every pointer names a live buffer for the whole call.

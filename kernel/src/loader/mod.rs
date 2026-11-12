@@ -168,6 +168,7 @@ pub fn spawn<C: Commit>(
 ) -> Result<(Pid, C::Held), crate::object::Refusal> {
     let job = Arc::clone(commit.job());
     let pager = commit.pager();
+    let speculation = commit.speculation();
     // Before anything is built; dropped on every way out below but the insert.
     let admission = Admission::ask(parent)?;
     let charge = ProcessData::charge(&job, path).map_err(SyscallError::from)?;
@@ -258,6 +259,7 @@ pub fn spawn<C: Commit>(
             // The spawning thread's, as a new thread's is.
             mask: crate::sched::driver::current_mask(),
             near: None,
+            speculation,
         });
         table.get_mut(pid).unwrap().threads_mut().get_mut(&tid).unwrap().set_sched(sched);
     });
@@ -363,6 +365,10 @@ impl Commit for SupervisorTable {
 
     fn pager(&self) -> bool {
         false
+    }
+
+    fn speculation(&self) -> kernel::mitigation::Speculation {
+        kernel::mitigation::Speculation::Shared
     }
 
     fn commit(self, own: start::Own) -> Result<(HandleTable, ()), crate::object::Refusal> {

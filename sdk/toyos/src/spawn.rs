@@ -96,6 +96,10 @@ pub struct Spawn<'a> {
     /// A `SysCap` carrying `Rights::PAGER`, borrowed, which starts the child
     /// as a pager (`SpawnArgs::pager`): a helper's alone.
     pub pager: Option<BorrowedHandle<'a>>,
+    /// Starts the child asking for isolated speculation
+    /// (`SpawnArgs::isolated_speculation`): a helper's alone. A child of a
+    /// process that asked asks whatever this says.
+    pub isolated_speculation: bool,
 }
 
 /// Which of the services this process was endowed a helper is given a
@@ -179,6 +183,7 @@ struct Shape {
     provided: bool,
     launcher_named: bool,
     pager: bool,
+    isolated_speculation: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,6 +210,9 @@ fn kind(shape: Shape) -> Result<Kind, &'static str> {
         (true, _, _) => Err("a launch carries no endowment"),
         (_, true, _) => Err("a launch carries descriptors 0 to 2 alone"),
         _ if shape.pager => Err("a launch starts its row as its row declares, never as a pager the caller names"),
+        _ if shape.isolated_speculation => {
+            Err("a launch starts its row as its row declares, never asking what its row does not")
+        }
         (_, _, true) => Err("a launch runs its row's own program, so it takes no image the caller names"),
         _ => Ok(Kind::Launch),
     }
@@ -225,6 +233,7 @@ impl<'a> Spawn<'a> {
             provided: !self.provided.is_empty(),
             launcher_named: self.launcher.is_some(),
             pager: self.pager.is_some(),
+            isolated_speculation: self.isolated_speculation,
         };
         match kind(shape).map_err(Refused::Invalid)? {
             Kind::Helper => Ok(Start::Helper(Helper(self))),
@@ -320,6 +329,7 @@ impl Helper<'_> {
             },
             job: s.job.map_or(none, |job| u64::from(job.raw().0)),
             pager: s.pager.map_or(none, |h| u64::from(h.raw().0)),
+            isolated_speculation: u64::from(s.isolated_speculation),
         };
         // SAFETY: every pointer is to a buffer above that outlives the call,
         // and every handle the endowment names is one `table` owns.
@@ -465,6 +475,7 @@ mod tests {
             Shape { extra_fds: true, ..Shape::default() },
             Shape { image_named: true, ..Shape::default() },
             Shape { pager: true, ..Shape::default() },
+            Shape { isolated_speculation: true, ..Shape::default() },
         ] {
             assert_eq!(kind(shape), Ok(Kind::Helper), "{shape:?}");
         }
@@ -475,7 +486,7 @@ mod tests {
     #[test]
     fn each_kind_refuses_what_the_other_alone_takes() {
         const LAUNCH: Shape =
-            Shape { independent: true, detached: false, endowed: false, narrowed: false, extra_fds: false, image_named: false, provided: false, launcher_named: false, pager: false };
+            Shape { independent: true, detached: false, endowed: false, narrowed: false, extra_fds: false, image_named: false, provided: false, launcher_named: false, pager: false, isolated_speculation: false };
         assert_eq!(kind(LAUNCH), Ok(Kind::Launch));
         assert_eq!(kind(Shape { detached: true, provided: true, launcher_named: true, ..LAUNCH }), Ok(Kind::Launch));
         for shape in [
@@ -491,6 +502,7 @@ mod tests {
             Shape { extra_fds: true, ..LAUNCH },
             Shape { image_named: true, ..LAUNCH },
             Shape { pager: true, ..LAUNCH },
+            Shape { isolated_speculation: true, ..LAUNCH },
         ] {
             assert!(kind(shape).is_err(), "{shape:?}");
         }

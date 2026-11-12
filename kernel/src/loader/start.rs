@@ -15,6 +15,7 @@ use crate::object::{ops, HandleEntry, HandleTable, KObjectRef, Refusal};
 use crate::process::{handles, KERNEL_STACK_SIZE};
 use crate::user_ptr::UserBytes;
 use toyos_abi::handle::{RawHandle, Rights, TransferEntry};
+use kernel::mitigation::Speculation;
 use kernel::sched::job::Job;
 use toyos_abi::syscall::{SyscallError, MAX_SPAWN_ENDOWMENTS};
 
@@ -102,6 +103,8 @@ pub struct PendingHandles {
     job: Arc<Job>,
     /// `SpawnArgs::pager` named a `SysCap` carrying `Rights::PAGER`.
     pager: bool,
+    /// The caller's ask, or `SpawnArgs::isolated_speculation`'s.
+    speculation: Speculation,
 }
 
 /// What a spawn's caller gives the child: the job it runs in, and its handle
@@ -115,6 +118,9 @@ pub trait Commit {
 
     /// Whether the child starts as a pager (`process::Handles::is_pager`).
     fn pager(&self) -> bool;
+
+    /// Whether the child asks for isolated speculation.
+    fn speculation(&self) -> Speculation;
 
     /// The child's table: `own`, then what the caller gives it, in the
     /// order `RawHandle::endowed` states.
@@ -130,6 +136,10 @@ impl Commit for PendingHandles {
 
     fn pager(&self) -> bool {
         self.pager
+    }
+
+    fn speculation(&self) -> Speculation {
+        self.speculation
     }
 
     /// Take the endowed handles out of the caller's table and put its handle to the child in it, all under one lock hold: a refusal leaves the table unchanged.
@@ -218,7 +228,12 @@ impl Own {
 
 /// Reads `SpawnArgs`'s endowments into the child's pending handle state, in the job `job`.
 // Every refusal here precedes any child state, so nothing is enqueued or orphaned.
-pub fn build_child_handles(endow: &UserBytes, job: Arc<Job>, pager: bool) -> Result<PendingHandles, Refusal> {
+pub fn build_child_handles(
+    endow: &UserBytes,
+    job: Arc<Job>,
+    pager: bool,
+    speculation: Speculation,
+) -> Result<PendingHandles, Refusal> {
     let count = endow.len() / TRANSFER_ENTRY_LEN;
     if count > MAX_SPAWN_ENDOWMENTS {
         return Err(SyscallError::InvalidArgument.into());
@@ -229,7 +244,7 @@ pub fn build_child_handles(endow: &UserBytes, job: Arc<Job>, pager: bool) -> Res
         endow.read_at(i * TRANSFER_ENTRY_LEN, toyos_abi::usersafe::bytes_mut(&mut entry)).map_err(SyscallError::from)?;
         entries.push(entry);
     }
-    Ok(PendingHandles { table: HandleTable::new(&job), endow: entries, job, pager })
+    Ok(PendingHandles { table: HandleTable::new(&job), endow: entries, job, pager, speculation })
 }
 
 /// One endowment of a spawn's request on the wire.

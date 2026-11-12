@@ -127,6 +127,7 @@ pub struct CpuLocal {
     pub counters: counters::Local,
     pub clock: clocksource::Local,
     pub idle_line: idle::Line,
+    pub mitigation: mitigation::Local,
     #[cfg(feature = "switch-witness")]
     pub hw: hw::Local,
 }
@@ -137,6 +138,7 @@ impl CpuLocal {
             counters: counters::Local::new(),
             clock: clocksource::Local::new(),
             idle_line: idle::Line::new(),
+            mitigation: mitigation::Local::new(),
             #[cfg(feature = "switch-witness")]
             hw: hw::Local::new(),
         }

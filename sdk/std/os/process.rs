@@ -169,6 +169,14 @@ pub trait CommandExt {
     /// refused `InvalidInput`.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn pager(&mut self, syscap: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
+
+    /// Start the child asking for isolated speculation: the protections
+    /// between programs, and against the core's other thread, that the kernel
+    /// applies only for a program that asks. A child of a process that asked
+    /// asks without this. An independent launch is refused `InvalidInput`: its
+    /// row says whether it asks.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn isolated_speculation(&mut self) -> &mut Self;
 }
 
 #[stable(feature = "toyos_ext", since = "1.0.0")]
@@ -255,6 +263,11 @@ impl CommandExt for crate::process::Command {
 
     fn pager(&mut self, syscap: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
         self.as_inner_mut().pager(syscap);
+        self
+    }
+
+    fn isolated_speculation(&mut self) -> &mut Self {
+        self.as_inner_mut().isolated_speculation();
         self
     }
 }

@@ -185,6 +185,7 @@ fn spawn(moved: TransferEntry) -> Result<RawHandle, SyscallError> {
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
             job: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
+            isolated_speculation: 0,
         })
     }
 }

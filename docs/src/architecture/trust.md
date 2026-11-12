@@ -52,6 +52,9 @@ DMA stays behind the IOMMU.
   program, most of which have nothing to keep from the others; a program
   that asks gets them. Where a vendor prescribes either for every program,
   each boot's report marks it as policy.
+- A program asks through its row in the system manifest. Every program it
+  starts itself asks with it; one the system starts on its behalf, as a
+  launch, asks as its own row says.
 - The same policy limits one protection of the kernel. On an AMD processor
   affected by Branch Type Confusion, while a CPU runs a program that has not
   asked, untrusted code on its core's other thread can steer the kernel's

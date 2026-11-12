@@ -1,0 +1,9 @@
+[package]
+name = "speculationprobe"
+description = "Test-only: a program whose row asks for isolated speculation, which reads that it and its child run with what its CPU sets on request."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../../sdk/abi" }

@@ -75,6 +75,7 @@ fn spawn_endowed_nothing(path: &str, argv: &str) -> Result<RawHandle, SyscallErr
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
             job: u64::from(toyos_abi::HANDLE_INVALID.0),
             pager: u64::from(toyos_abi::HANDLE_INVALID.0),
+            isolated_speculation: 0,
         })
     }
 }

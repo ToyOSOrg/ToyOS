@@ -173,6 +173,7 @@ members = [
     "tests/guest/osbench/rules",
     "tests/guest/pagerprobe",
     "tests/guest/pciholder",
+    "tests/guest/speculationprobe",
     "tests/guest/starveling",
     "tests/guest/test-runner",
     "tests/metal",

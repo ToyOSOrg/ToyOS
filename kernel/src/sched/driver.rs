@@ -375,6 +375,7 @@ fn idle_ctx() -> KernelCtx {
         // a switch away from idle always writes the real depth first.
         preempt: 0,
         fpu: crate::arch::fpu::Left::NOWHERE,
+        speculation: kernel::mitigation::Speculation::Shared,
     }
 }
 
@@ -406,6 +407,8 @@ pub struct NewTask {
     /// process's threads' homes (`CpuHandles::place`); `None` for a new
     /// process's first thread and a kernel thread.
     pub near: Option<kernel::sched::cpu::Near>,
+    /// Whether its process asked for isolated speculation.
+    pub speculation: kernel::mitigation::Speculation,
 }
 
 /// Place a new task by message — never by reaching into the destination's queue.
@@ -420,6 +423,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
         // The one level `trampoline_entry` discharges before the first `iretq`.
         preempt: 1,
         fpu: crate::arch::fpu::Left::NOWHERE,
+        speculation: new.speculation,
     };
     // One clock read for the placement and the build: `HW.now` is a divide.
     let now = HW.now();
@@ -435,6 +439,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
             handle: handle.clone(),
             image: new.image,
             handles: new.handles,
+            speculation: new.speculation,
         },
         rt: RtState::default(),
         mask: new.mask,
@@ -793,6 +798,13 @@ pub fn current_address_space() -> Option<PageTables> {
 /// The running task's process's handles. `None` off-task.
 pub fn current_handles() -> Option<Arc<crate::process::Handles>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handles.clone())).flatten()
+}
+
+/// Whether the running task's process asked for isolated speculation.
+pub fn current_speculation() -> kernel::mitigation::Speculation {
+    try_with_cpu(|cpu| cpu.running().map(|t| t.ext().speculation))
+        .flatten()
+        .expect("current_speculation: no thread is running")
 }
 
 /// The running thread leaves its address space for good: it runs on the

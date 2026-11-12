@@ -31,6 +31,7 @@
 //! role <role>               a file server for `<role>`: one process of it per role
 //! restart                   the supervisor starts it again when it ends
 //! pager                     started as a pager: it may make the paged objects its files are read through
+//! isolated-speculation      it asks for isolated speculation, and so does every program it starts itself
 //! memory-floor <bytes>      memory held back for its job however short every other runs
 //! supervisor-floor <bytes>  the same for the supervisor's own job
 //! supervisor-serve <name>   a name the supervisor serves itself
@@ -384,6 +385,11 @@ pub struct Program {
     /// the paged objects its readers wait on. The signed image's row alone
     /// confers it; no [`syscap_rights`] name and no package row reaches it.
     pub pager: bool,
+    /// It asks for isolated speculation: the protections between programs,
+    /// and against the core's other thread, that the kernel applies only for
+    /// a program that asks. Every program it starts itself asks too; a launch
+    /// runs as its own row says.
+    pub isolated_speculation: bool,
     /// The folder of the session's home a package's launch was granted
     /// ([`grants::decide`]): set by the supervisor on the row it synthesizes
     /// for that launch, and never on a declared row.
@@ -679,6 +685,9 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         if program.pager {
             out.push_str("pager\n");
         }
+        if program.isolated_speculation {
+            out.push_str("isolated-speculation\n");
+        }
         for key in &program.starts {
             check(&program.name, "starts", key)?;
             out.push_str(&format!("starts {key}\n"));
@@ -854,6 +863,7 @@ pub fn parse(text: &str) -> Manifest {
                     "role" => program.roles.push(rest.to_string()),
                     "restart" if rest.is_empty() => program.restart = true,
                     "pager" if rest.is_empty() => program.pager = true,
+                    "isolated-speculation" if rest.is_empty() => program.isolated_speculation = true,
                     "starts" => program.starts.push(rest.to_string()),
                     "login" if rest.is_empty() => program.login = true,
                     "memory-floor" => program.memory_floor = bytes(line, rest),
@@ -909,6 +919,7 @@ mod tests {
                     roles: vec!["data".into(), "log".into()],
                     restart: true,
                     pager: true,
+                    isolated_speculation: true,
                     ..Program::default()
                 },
                 Program {

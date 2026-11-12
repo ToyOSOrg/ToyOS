@@ -8,15 +8,19 @@
 //! owns here: `IA32_SPEC_CTRL` whole, the named `IA32_MCU_OPT_CTRL`
 //! opt-outs and AMD's LFENCE bit. The boot CPU runs it before the allocator
 //! is up, so what it returns and where the boot CPU keeps it hold no heap.
+//! [`switch_to`] applies at each switch what the decision names for a program
+//! that asked for isolated speculation.
 
 use core::fmt;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use kernel::microcode::Revision;
 use kernel::mitigation::{
-    decide, Facts, Mitigation, Registers, Vulnerability, C001_1029_LFENCE_SERIALIZES_DISPATCH,
-    CPUID_7_0_EDX_ARCH_CAPABILITIES,
+    decide, Facts, LastAsked, Mitigation, OnRequest, Registers, Speculation, Vulnerability,
+    C001_1029_LFENCE_SERIALIZES_DISPATCH, CPUID_7_0_EDX_ARCH_CAPABILITIES,
 };
 use kernel::sched::hw::CpuId;
+use toyos_abi::Pid;
 
 use super::{cpu, microcode};
 use crate::cpu_slice::CpuSlice;
@@ -35,6 +39,12 @@ const GDS_MITG_DIS: u64 = 1 << 4;
 const DE_CFG2: u32 = 0xC001_10E3;
 /// AMD 70586 G-2.
 const C001_1029: u32 = 0xC001_1029;
+/// `IA32_PRED_CMD`: Intel, "CPUID Enumeration and Architectural MSRs",
+/// Table 4; AMD's `PRED_CMD` at the same address. Bit 0 is IBPB.
+const IA32_PRED_CMD: u32 = 0x49;
+const IBPB: u64 = 1 << 0;
+/// AMD's `VIRT_SPEC_CTRL` (APM Vol. 3 Fn8000_0008_EBX[SsbdVirtSpecCtrl]).
+const VIRT_SPEC_CTRL: u32 = 0xC001_011F;
 
 /// What one CPU read of itself at bring-up.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,8 +161,9 @@ pub fn record(cpu_id: u32, read: Read) {
 }
 
 /// Says each online CPU's words and lines once bring-up has installed the
-/// topology: the first CPU's, and a later one's where they differ. A CPU's
-/// `smt` is whether another online CPU shares its core, by the cores the
+/// topology: the first CPU's, and a later one's where they differ; and gives
+/// each CPU what [`switch_to`] applies there, before any program runs. A
+/// CPU's `smt` is whether another online CPU shares its core, by the cores the
 /// topology places their APIC IDs in: CPUID.0BH/1FH EBX[15:0] is the count
 /// as shipped and "must not" enumerate the topology (SDM Vol. 1, Chapter 21).
 pub fn report() {
@@ -165,6 +176,8 @@ pub fn report() {
         };
         let read = read.unwrap_or_else(|| panic!("mitigation: cpu{cpu_id} is online and recorded no words at bring-up"));
         let said = Read { facts: Facts { smt: topology.core(CpuId(cpu_id)).len() > 1, ..read.facts }, ..read };
+        let decision = decide(&said.facts);
+        crate::cpu_local::of(cpu_id).arch.mitigation.install(said.facts.has_spec_ctrl(), decision.spec_ctrl(), decision.on_request());
         match first {
             Some(first) if first == said => continue,
             Some(_) => {}
@@ -223,4 +236,141 @@ impl fmt::Display for Msr {
             None => f.write_str("-"),
         }
     }
+}
+
+/// This CPU's half of [`switch_to`]. What its decision applies for a
+/// program that asked, [`report`] writes once every CPU is up and before any
+/// program runs; what the CPU last loaded, its own switches alone write.
+pub struct Local {
+    has_spec_ctrl: AtomicBool,
+    /// `IA32_SPEC_CTRL` while no program that asked runs.
+    spec_ctrl: AtomicU64,
+    /// [`OnRequest::spec_ctrl`].
+    asked_spec_ctrl: AtomicU64,
+    /// [`OnRequest::virt_spec_ctrl`].
+    asked_virt_spec_ctrl: AtomicU64,
+    /// [`OnRequest::ibpb`].
+    ibpb: AtomicBool,
+    /// [`OnRequest::fill_after_ibpb`].
+    fill: AtomicBool,
+    /// [`LastAsked`]'s space, by its raw pid; [`Pid::MAX`], which no process
+    /// is issued, for none.
+    last_asked: AtomicU32,
+    /// Whether the asked bits are loaded.
+    loaded: AtomicBool,
+    /// IBPBs [`switch_to`] issued on this CPU.
+    #[cfg(feature = "test-actuators")]
+    ibpbs: AtomicU64,
+}
+
+impl Local {
+    pub const fn new() -> Self {
+        Self {
+            has_spec_ctrl: AtomicBool::new(false),
+            spec_ctrl: AtomicU64::new(0),
+            asked_spec_ctrl: AtomicU64::new(0),
+            asked_virt_spec_ctrl: AtomicU64::new(0),
+            ibpb: AtomicBool::new(false),
+            fill: AtomicBool::new(false),
+            last_asked: AtomicU32::new(Pid::MAX.0),
+            loaded: AtomicBool::new(false),
+            #[cfg(feature = "test-actuators")]
+            ibpbs: AtomicU64::new(0),
+        }
+    }
+
+    fn install(&self, has_spec_ctrl: bool, spec_ctrl: u64, on_request: OnRequest) {
+        self.has_spec_ctrl.store(has_spec_ctrl, Relaxed);
+        self.spec_ctrl.store(spec_ctrl, Relaxed);
+        self.asked_spec_ctrl.store(on_request.spec_ctrl, Relaxed);
+        self.asked_virt_spec_ctrl.store(on_request.virt_spec_ctrl, Relaxed);
+        self.ibpb.store(on_request.ibpb, Relaxed);
+        self.fill.store(on_request.fill_after_ibpb, Relaxed);
+    }
+}
+
+/// Applies on this CPU what a switch to `next`, a program's process and its
+/// ask or `None` for the idle context, owes by the CPU's decision: an IBPB
+/// between two address spaces one of which asked, the return address
+/// predictor filled after it where the decision names that, and the asked
+/// bits of `IA32_SPEC_CTRL` and `VIRT_SPEC_CTRL` set while a program that
+/// asked runs and clear otherwise. Idle is among the otherwise, as Intel asks
+/// of STIBP and SSBD before a sleep state on a CPU whose threads share a
+/// core ("Speculative Execution Side Channel Mitigations" §2.4.2, §4.1.2).
+///
+/// A pid names one address space: `toyos_proclife::pids` issues none twice
+/// for the machine's life, and a process keeps one space for its own.
+pub fn switch_to(next: Option<(Pid, Speculation)>) {
+    let local = &crate::cpu_local::here().arch.mitigation;
+    let raw = local.last_asked.load(Relaxed);
+    let mut last = LastAsked::new((raw != Pid::MAX.0).then_some(Pid(raw)));
+    if last.switch_to(next) && local.ibpb.load(Relaxed) {
+        // SAFETY: the decision found IBPB enumerated on this CPU, and the
+        // barrier changes no architectural state.
+        unsafe { cpu::wrmsr(IA32_PRED_CMD, IBPB) };
+        if local.fill.load(Relaxed) {
+            fill_return_predictor();
+        }
+        #[cfg(feature = "test-actuators")]
+        local.ibpbs.fetch_add(1, Relaxed);
+    }
+    let now = last.space().map_or(Pid::MAX.0, |pid| pid.0);
+    if now != raw {
+        local.last_asked.store(now, Relaxed);
+    }
+    let asked = matches!(next, Some((_, Speculation::Isolated)));
+    if asked != local.loaded.load(Relaxed) {
+        let spec_ctrl = local.asked_spec_ctrl.load(Relaxed);
+        let virt_spec_ctrl = local.asked_virt_spec_ctrl.load(Relaxed);
+        // SAFETY: each asked bit is one the decision found enumerated, and
+        // the rest of `IA32_SPEC_CTRL` is what this CPU's bring-up wrote.
+        unsafe {
+            if spec_ctrl != 0 {
+                let base = local.spec_ctrl.load(Relaxed);
+                cpu::wrmsr(IA32_SPEC_CTRL, if asked { base | spec_ctrl } else { base });
+            }
+            if virt_spec_ctrl != 0 {
+                cpu::wrmsr(VIRT_SPEC_CTRL, if asked { virt_spec_ctrl } else { 0 });
+            }
+        }
+        local.loaded.store(asked, Relaxed);
+    }
+}
+
+/// AMD 70586's V2-3, which AMD-SB-1040 asks after an IBPB that leaves the
+/// return address predictor's entries: a call for each of the 32 entries
+/// AMD's largest predictor holds, each skipping an `int3` that a return
+/// predicted from its entry lands on; then the stack as it was.
+#[unsafe(naked)]
+extern "sysv64" fn fill_return_predictor() {
+    core::arch::naked_asm!(
+        ".rept 32",
+        "call 2f",
+        "int3",
+        "2:",
+        ".endr",
+        "add rsp, 32 * 8",
+        "ret",
+    );
+}
+
+/// `SYS_DEBUG`'s `SPEC_CTRL`: this CPU's `IA32_SPEC_CTRL`, where it has one.
+#[cfg(feature = "test-actuators")]
+pub fn debug_spec_ctrl() -> Option<u64> {
+    let local = &crate::cpu_local::here().arch.mitigation;
+    local.has_spec_ctrl.load(Relaxed).then(|| cpu::rdmsr(IA32_SPEC_CTRL))
+}
+
+/// `SYS_DEBUG`'s `SPEC_CTRL_ON_REQUEST`: [`OnRequest::spec_ctrl`] on this CPU.
+#[cfg(feature = "test-actuators")]
+pub fn debug_spec_ctrl_on_request() -> u64 {
+    crate::cpu_local::here().arch.mitigation.asked_spec_ctrl.load(Relaxed)
+}
+
+/// `SYS_DEBUG`'s `SWITCH_IBPBS`: the IBPBs [`switch_to`] issued on this CPU,
+/// where its decision names any.
+#[cfg(feature = "test-actuators")]
+pub fn debug_switch_ibpbs() -> Option<u64> {
+    let local = &crate::cpu_local::here().arch.mitigation;
+    local.ibpb.load(Relaxed).then(|| local.ibpbs.load(Relaxed))
 }

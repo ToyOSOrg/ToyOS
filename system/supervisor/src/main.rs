@@ -3185,6 +3185,9 @@ fn start<'a>(
     if program.pager {
         command.pager(syscap.as_handle().into());
     }
+    if program.isolated_speculation {
+        command.isolated_speculation();
+    }
 
     if !program.syscap.is_empty() {
         // A duplicate that arrives carrying exactly what the manifest asked

@@ -40,6 +40,8 @@ pub struct Command {
     launcher: Option<io::Result<toyos::OwnedHandle>>,
     /// A copy of the `SysCap` that starts a helper's child as a pager.
     pager: Option<io::Result<toyos::OwnedHandle>>,
+    /// A helper's child asks for isolated speculation.
+    isolated_speculation: bool,
     /// The program the child runs, when it is not the one `argv[0]` names.
     image_path: Option<OsString>,
     prepared: Option<Prepared>,
@@ -128,6 +130,7 @@ impl Command {
             independent: false,
             launcher: None,
             pager: None,
+            isolated_speculation: false,
             image_path: None,
             prepared: None,
             image: None,
@@ -318,6 +321,11 @@ impl Command {
         self.pager = Some(copy(syscap));
     }
 
+    /// Start a helper's child asking for isolated speculation.
+    pub fn isolated_speculation(&mut self) {
+        self.isolated_speculation = true;
+    }
+
     /// Place a launched child under the launcher's owner, so it outlives this process.
     pub fn detached(&mut self) {
         self.parent = Parent::Detached;
@@ -496,6 +504,7 @@ impl Command {
             independent: self.independent,
             launcher,
             pager,
+            isolated_speculation: self.isolated_speculation,
         };
         let pipes = |stdin, stdout, stderr| StdioPipes { stdin, stdout, stderr };
         let handle = match request.start().map_err(refused)? {

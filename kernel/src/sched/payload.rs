@@ -51,6 +51,9 @@ pub struct KernelCtx {
     pub preempt: u32,
     /// Where the switch last left this context's user machine state.
     pub fpu: crate::arch::fpu::Left,
+    /// Whether its program asked for isolated speculation; the idle
+    /// context's never did.
+    pub speculation: kernel::mitigation::Speculation,
 }
 
 /// What a context runs.
@@ -86,6 +89,9 @@ pub struct KernelPayload {
     pub image: Arc<UserImage>,
     /// This task's process's handles, kept here for the same reason: a lookup takes no lock but the table's.
     pub handles: Arc<Handles>,
+    /// Whether its process asked for isolated speculation, which every thread
+    /// of it and every child it spawns asks as it does.
+    pub speculation: kernel::mitigation::Speculation,
 }
 
 impl SchedPayload for KernelPayload {

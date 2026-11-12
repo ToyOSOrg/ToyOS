@@ -36,6 +36,7 @@ fn launched(program: &str, argv: &[u8], fds: &[(u32, BorrowedHandle<'_>, Kind)])
         independent: true,
         launcher: None,
         pager: None,
+        isolated_speculation: false,
     };
     let child = match request.start().map(|start| match start {
         Start::Launch(launch) => launch.launch(),

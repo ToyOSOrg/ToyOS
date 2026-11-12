@@ -100,6 +100,7 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
         place: u64::from(place.0),
         job: u64::from(toyos_abi::HANDLE_INVALID.0),
         pager: u64::from(toyos_abi::HANDLE_INVALID.0),
+        isolated_speculation: 0,
     };
     // SAFETY: every pointer names a buffer of this frame that outlives the call.
     let child = unsafe { syscall::spawn(&args) }?;

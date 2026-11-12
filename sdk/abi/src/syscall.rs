@@ -438,6 +438,12 @@ crate::user_safe! {
         ///
         /// [`Rights::PAGER`]: crate::handle::Rights::PAGER
         pub pager: u64,
+        /// 1 starts the child asking for isolated speculation: the
+        /// protections between programs, and against the core's other
+        /// thread, that the kernel applies only for a program that asks. 0
+        /// asks nothing of its own: a caller that asked passes its ask on
+        /// whatever this holds. `InvalidArgument` for any other value.
+        pub isolated_speculation: u64,
     }
 }
 
@@ -1019,6 +1025,19 @@ pub mod debug_action {
     pub const GLOBAL_LEAF_SAW_NEW: u64 = 1;
     pub const GLOBAL_LEAF_UNHELD: u64 = 2;
     pub const GLOBAL_LEAF_WIDENED: u64 = 3;
+    /// This CPU's `IA32_SPEC_CTRL` as the caller runs; `NotSupported` on a
+    /// CPU without one, and on AArch64.
+    pub const SPEC_CTRL: u64 = 30;
+    /// The `IA32_SPEC_CTRL` bits this CPU sets while a program that asked for
+    /// isolated speculation runs ([`SpawnArgs::isolated_speculation`]): 0
+    /// where its decision names none.
+    ///
+    /// [`SpawnArgs::isolated_speculation`]: super::SpawnArgs::isolated_speculation
+    pub const SPEC_CTRL_ON_REQUEST: u64 = 31;
+    /// The IBPBs this CPU has issued at a switch between two programs' address
+    /// spaces one of which asked; `NotSupported` where its decision names
+    /// no IBPB.
+    pub const SWITCH_IBPBS: u64 = 32;
 }
 
 /// Create a pipe. Returns the read and write ends.
