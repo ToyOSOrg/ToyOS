@@ -2,8 +2,139 @@
 //! a host tests them: whether a munmap pair's figure stands ([`pair`]), where
 //! the CPU crunch stops for heat ([`heat`]), what an energy counter
 //! read and when the machine is quiet ([`energy`]), whether two counters readings
-//! describe the row they were read around ([`window`]), and when a CPU's
-//! clock has settled ([`settle`]).
+//! describe the row they were read around ([`window`]), when a CPU's
+//! clock has settled ([`settle`]), what share of the machine each of
+//! several contending jobs is entitled to ([`fair`]), and which rounds of a
+//! futex exchange slept ([`parked`]).
+
+pub mod parked {
+    //! A side of a futex exchange parked in a round when the other's wake
+    //! found it queued in the kernel. A side that finds its word already
+    //! changed never sleeps, and across two cores a round of two such sides
+    //! is no wake's cost.
+
+    /// Whether a hand-over's wake found the other side queued: `None` from a
+    /// channel that cannot tell.
+    pub type Woke = Option<bool>;
+
+    /// The parks in the kept rounds, at most two a round: `None` from a
+    /// channel that cannot tell. `kept` and `pong` are [`split`]'s.
+    pub fn parks(kept: &[(u32, u64, Woke)], pong: &[Woke]) -> Option<u64> {
+        kept.iter().map(|&(round, _, ping)| Some(u64::from(ping?) + u64::from(pong[round as usize - 1]?))).sum()
+    }
+
+    /// The kept rounds' times, those in which both sides parked and the
+    /// rest. `kept` is each round's number from 1, its time and what the
+    /// pinger's wake found; `pong` what the ponger's found, by round. A round
+    /// either side cannot tell of counts as parked.
+    pub fn split(kept: &[(u32, u64, Woke)], pong: &[Woke]) -> (Vec<u64>, Vec<u64>) {
+        let (mut parked, mut unparked) = (Vec::new(), Vec::new());
+        for &(round, took, ping) in kept {
+            let both = match (ping, pong[round as usize - 1]) {
+                (Some(ping), Some(pong)) => ping && pong,
+                _ => true,
+            };
+            if both { parked.push(took) } else { unparked.push(took) }
+        }
+        (parked, unparked)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_round_parked_only_where_both_wakes_found_a_waiter() {
+            let pong = [Some(true), Some(true), Some(false), Some(false)];
+            let kept = [(1, 4600, Some(true)), (2, 900, Some(false)), (3, 800, Some(true)), (4, 250, Some(false))];
+            assert_eq!(split(&kept, &pong), (vec![4600], vec![900, 800, 250]));
+        }
+
+        #[test]
+        fn a_round_is_matched_to_the_ponger_by_its_number() {
+            // Rounds 1 and 3 were not kept: the pinger's second kept round is the ponger's fourth.
+            let pong = [Some(false), Some(true), Some(false), Some(true)];
+            assert_eq!(split(&[(2, 10, Some(true)), (4, 20, Some(true))], &pong), (vec![10, 20], vec![]));
+        }
+
+        #[test]
+        fn a_channel_that_cannot_tell_keeps_every_round_and_counts_no_park() {
+            assert_eq!(split(&[(1, 7, None), (2, 9, None)], &[None, None]), (vec![7, 9], vec![]));
+            assert_eq!(parks(&[(1, 7, None), (2, 9, None)], &[None, None]), None);
+        }
+
+        #[test]
+        fn each_wake_that_found_its_waiter_is_a_park() {
+            let pong = [Some(true), Some(true), Some(false), Some(false)];
+            let kept = [(1, 4600, Some(true)), (2, 900, Some(false)), (4, 250, Some(false))];
+            assert_eq!(parks(&kept, &pong), Some(3));
+        }
+    }
+}
+
+pub mod fair {
+    //! Max-min fairness at equal weights: no unit gets more than it can use,
+    //! and what one leaves is split evenly among the rest (Bertsekas and
+    //! Gallager, Data Networks, "Max-Min Flow Control"). A unit is whatever
+    //! the scheduler shares CPU time between, a job or a thread.
+
+    /// What the scheduler shares CPU time between.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Unit {
+        Job,
+        Thread,
+    }
+
+    /// Each demand's allocation of `capacity`, in the demands' order.
+    fn max_min(capacity: u64, demands: &[u64]) -> Vec<u64> {
+        let mut order: Vec<usize> = (0..demands.len()).collect();
+        order.sort_by_key(|&i| demands[i]);
+        let mut given = vec![0; demands.len()];
+        let mut left = capacity;
+        for (rank, &i) in order.iter().enumerate() {
+            given[i] = demands[i].min(left / (demands.len() - rank) as u64);
+            left -= given[i];
+        }
+        given
+    }
+
+    /// Each job's entitled share of a machine of `cpus` CPUs, in permille,
+    /// where job `i` keeps `threads[i]` threads runnable.
+    pub fn entitled_permille(cpus: u64, threads: &[u64], unit: Unit) -> Vec<u64> {
+        const MILLI: u64 = 1000;
+        let milli_cpus = match unit {
+            Unit::Job => max_min(cpus * MILLI, &threads.iter().map(|t| t * MILLI).collect::<Vec<_>>()),
+            Unit::Thread => {
+                let each = max_min(cpus * MILLI, &vec![MILLI; threads.iter().sum::<u64>() as usize]);
+                threads.iter().map(|&t| t * each.first().copied().unwrap_or(0)).collect()
+            }
+        };
+        milli_cpus.iter().map(|m| m / cpus.max(1)).collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_job_that_can_use_one_cpu_gets_it_and_the_others_split_the_rest() {
+            assert_eq!(entitled_permille(8, &[1, 8, 8], Unit::Job), [125, 437, 437]);
+            assert_eq!(entitled_permille(16, &[1, 16, 16], Unit::Job), [62, 468, 468]);
+        }
+
+        #[test]
+        fn jobs_that_each_want_the_machine_get_a_third() {
+            assert_eq!(entitled_permille(8, &[8, 8, 8], Unit::Job), [333, 333, 333]);
+            assert_eq!(entitled_permille(2, &[1, 8, 8], Unit::Job), [333, 333, 333], "one CPU is over a third of two");
+        }
+
+        #[test]
+        fn threads_as_the_unit_share_by_their_number() {
+            assert_eq!(entitled_permille(8, &[1, 8, 8], Unit::Thread), [58, 470, 470]);
+            assert_eq!(entitled_permille(8, &[1, 2, 2], Unit::Thread), [125, 250, 250], "fewer threads than CPUs run whole");
+        }
+    }
+}
 
 pub mod pair {
     //! A munmap pair is an initiator that unmaps and a sibling that touched

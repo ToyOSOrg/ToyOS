@@ -38,6 +38,11 @@ pub fn add_chain(turns: u64) {
 /// Adds per turn of [`add_chain`].
 pub const ADDS_PER_TURN: u64 = 100;
 
+/// The clocksource Linux's vDSO answers `clock_gettime` from without a
+/// syscall on a bench, as sysfs names it.
+#[cfg(target_os = "linux")]
+pub const VDSO_CLOCKSOURCE: &str = "tsc";
+
 /// The ELF machine a generated program is for (`EM_X86_64`).
 pub const ELF_MACHINE: u16 = 62;
 

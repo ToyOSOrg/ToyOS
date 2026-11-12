@@ -32,8 +32,11 @@ and the C library beneath it are each system's own.
 - **At least four runs of each system, interleaved**: Linux, ToyOS, Linux,
   ToyOS. A ToyOS run is one boot and one readback directory. A Linux run is
   `osbench all </dev/null` over ssh, each group a process of its own as the
-  ToyOS job list runs them. A run's value is its p50, compared by the exact
-  two-sided Mann-Whitney test at 0.05. With four runs each the only p under
+  ToyOS job list runs them. It starts `nvme` through `sudo -n` where that
+  asks no password, since the raw namespace takes root, and exits 3 before
+  any group on a boot whose clocksource the vDSO cannot read ("The clock",
+  below). A run's value is its p50, compared by the exact two-sided
+  Mann-Whitney test at 0.05. With four runs each the only p under
   0.05 is 2/70, so a resolved row is one whose every run of one system beat
   every run of the other. Fewer runs of either system than four cannot reach
   that, except against more of the other: three against five can (2/56).
@@ -49,11 +52,11 @@ and the C library beneath it are each system's own.
   its readback names.
 - **Compare** every run of the bench in one call:
   `cargo run -p osbench-compare -- <linux runs> <toyos kernel.logs>`. It
-  refuses runs of one system that disagree on their setup (`SETUP`) and
-  states each system's, and what each run's boot chose (`PER_RUN`, the
-  clocksource) run by run. Each row's verdict says whether the runs resolve a
-  difference. Each p is its row's alone: with no difference anywhere, about
-  2.9% of rows resolve by chance, a few in a table this size.
+  refuses runs of one system that disagree on their setup (`SETUP`, the
+  clocksource among it) and states each system's. Each row's verdict says
+  whether the runs resolve a difference. Each p is its row's alone: with no
+  difference anywhere, about 2.9% of rows resolve by chance, a few in a table
+  this size.
 - **The clocks are told beside each verdict.** No program reads the
   package's limit state or temperature on ToyOS, so the clock is what both
   systems report. A clock reading is the difference between a short add
@@ -72,12 +75,11 @@ and the C library beneath it are each system's own.
 
 ## Linux as installed, and Linux under ToyOS's requests
 
-**The baseline is Linux as the bench boots it**: its own governor, its own
-clocksource, its own checks. What it does on that machine is ordinary OS
-behaviour and part of what is compared. A comparison names its
-configuration in its setup lines, and `osbench-compare` refuses to mix two.
-What a boot chooses for itself, the clocksource, belongs to Linux as booted:
-each run states its own, and runs that differ are compared together.
+**The baseline is Linux as the bench boots it**: its own governor and its
+own checks, on a boot that kept the TSC as its clocksource. What it does on
+that machine is ordinary OS behaviour and part of what is compared. A
+comparison names its configuration in its setup lines, and `osbench-compare`
+refuses to mix two.
 
 **A matched request is a controlled experiment, labelled as one.** It asks
 the CPU's frequency control for what ToyOS's kernel asks of the same CPU, so
@@ -127,8 +129,15 @@ carried by every per-operation timing of that run. In 30 boots' kernel logs
 In a 13th boot the calibration read 1799.565 MHz and the watchdog let it
 stand, so that Linux kept a TSC clock some 1,630 ppm fast for the whole
 boot. Its `clocksource=tsc` reads the same as a right one's. The 12 others
-kept the TSC on a right calibration. Each run's clocksource is part of the
-Linux it measured, so the compare states it per run.
+kept the TSC on a right calibration.
+
+An HPET boot is no run. The scoreboard of 2026-11-11 took three of the AMD
+bench's five Linux runs on the HPET: their per-operation rows read slower by
+the timestamps' cost and their all-CPU rows a third lower, so the median of
+five was an HPET run's, and `fair.shared.total` read ToyOS above it and under
+both TSC runs. So `osbench` on Linux exits 3 before any group where the
+clocksource is not the one its vDSO reads, and the bench is booted again
+until it is; `osbench-compare` refuses runs whose clocksources differ.
 
 At runtime neither fault shows: across 16 CPUs and idle gaps up to 1 s, no
 CPU's TSC read behind another's and no step exceeded the 1.2 µs of a read.
@@ -245,11 +254,30 @@ rest of the suite, on the benchcase image. Of the three only `persist`
 writes the bench's NVMe; `files` is the memory filesystem's rows, and `nvme`
 is read-only and unsupported on ToyOS.
 
+## Waits are judged slack-free
+
+An ordinary Linux thread's sleep is padded by its timer slack, 50 µs by
+default, and ToyOS pads none. Linux runs each wait row a second time with
+the slack at 1 ns (`<row>.slack1ns`), and that is the row judged: the
+compare sets ToyOS's row of the unsuffixed name against it, and gives the
+unsuffixed row no verdict.
+
+## A futex round trip across cores is one that slept
+
+A side of `pingpong.futex.*` that finds its word already changed never
+sleeps. Across two cores a whole round can pass that way: three of the T14's
+four boots of 2026-11-11 read the row at 250 to 257 ns and the fourth at
+4.6 µs. So `pingpong.futex.cross_core` keeps the rounds in which each side's
+wake found the other queued in the kernel; the others are
+`pingpong.futex.cross_core.unparked`, and a run in which no round parked
+reports the row `unmeasured`. On one CPU no round passes without both sides
+leaving it, so that row keeps every round. Both say how many such wakes a
+kept round had, of two (`parks_per_round`).
+
 ## What is not a comparison
 
 The table also holds rows only one system can measure. They show the
 system's figure beside the other's reason: `unsupported` and `unmeasured`
-rows, Linux's `.slack1ns` variants and `fair.session`, and ToyOS's
-`tail.diag` and `fs.*.direct.*`, the file server's client without std's
-layer above it, which Linux has no counterpart to. They are records, not
-verdicts.
+rows, Linux's `fair.session`, and ToyOS's `tail.diag` and `fs.*.direct.*`,
+the file server's client without std's layer above it, which Linux has no
+counterpart to. They are records, not verdicts.

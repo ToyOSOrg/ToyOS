@@ -227,6 +227,38 @@ fn busy_permille(span: Duration) -> Option<u64> {
     (total > 0).then(|| (total - (idle1 - idle0)) * 1000 / total)
 }
 
+/// `exe` started as root: as itself where this process is root, through
+/// `sudo -n` where that asks no password, and otherwise as itself, whose
+/// rows then say what they were refused.
+pub fn as_root(exe: &std::path::Path) -> std::process::Command {
+    use std::process::{Command, Stdio};
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    let root = unsafe { libc::geteuid() } == 0;
+    let quiet = |c: &mut Command| c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    if !root && quiet(Command::new("sudo").args(["-n", "true"])).is_ok_and(|s| s.success()) {
+        let mut sudo = Command::new("sudo");
+        sudo.arg("-n").arg("--").arg(exe);
+        return sudo;
+    }
+    Command::new(exe)
+}
+
+/// What every timestamp here is read from.
+fn clocksource() -> String {
+    read("/sys/devices/system/clocksource/clocksource0/current_clocksource").unwrap_or_else(|| "absent".into())
+}
+
+/// Why this boot is no run, where it is none: its clocksource is one the
+/// vDSO cannot read, so each `Instant::now` is a syscall, which every
+/// per-operation timing would carry (`README.md`, "The clock").
+pub fn unfit_clock() -> Option<String> {
+    let clocksource = clocksource();
+    let vdso = crate::arch::VDSO_CLOCKSOURCE;
+    (clocksource != vdso).then(|| {
+        format!("this boot keeps time on {clocksource}, not {vdso}, so every timestamp would cost a syscall: boot again until current_clocksource is {vdso}")
+    })
+}
+
 /// What a Linux number depends on, read and never changed. `README.md` says
 /// which of them a comparison sets.
 pub fn conditions() {
@@ -250,10 +282,7 @@ pub fn conditions() {
     condition("boost", read("/sys/devices/system/cpu/cpufreq/boost").unwrap_or_else(|| "absent".into()));
     condition("amd_pstate", read("/sys/devices/system/cpu/amd_pstate/status").unwrap_or_else(|| "absent".into()));
     condition("platform_profile", read("/sys/firmware/acpi/platform_profile").unwrap_or_else(|| "absent".into()));
-    // What every timestamp here is read from: one the vDSO cannot read costs
-    // each `Instant::now` a syscall.
-    let clocksource = read("/sys/devices/system/clocksource/clocksource0/current_clocksource");
-    condition("clocksource", clocksource.unwrap_or_else(|| "absent".into()));
+    condition("clocksource", clocksource());
     for supply in fs::read_dir("/sys/class/power_supply").into_iter().flatten().flatten() {
         let at = supply.path();
         let get = |f: &str| read(&at.join(f).to_string_lossy());

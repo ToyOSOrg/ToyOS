@@ -25,12 +25,20 @@
 //! each, whose autogroup is the unit where autogroup applies. A `units` line
 //! says which unit applied: `3xcgroup` is a cgroup per workload, `1xcgroup`
 //! one cgroup for all three.
+//!
+//! `fair.<grouping>.off_fair` is how far the worst-served job's share lay
+//! from its entitlement, max-min fairness at equal weights between the
+//! grouping's units (`osbench_rules::fair`): the thread under `shared`, the
+//! workload under the others. A helper's start costs chunks, so the row has a
+//! floor above zero on any system.
 
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use crate::report::{condition, refuse, result};
+use osbench_rules::fair::{entitled_permille, Unit};
+
+use crate::report::{condition, refuse, result, unmeasured};
 use crate::sys::monotonic_ns;
 
 /// The warm-up between the jobs' start and the first window, in which every
@@ -223,6 +231,16 @@ pub enum Grouping {
 }
 
 impl Grouping {
+    /// What the grouping makes the scheduler's unit, where it took.
+    fn unit(self) -> Unit {
+        match self {
+            Grouping::Shared => Unit::Thread,
+            Grouping::Apart => Unit::Job,
+            #[cfg(target_os = "linux")]
+            Grouping::Session => Unit::Job,
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Grouping::Shared => "shared",
@@ -334,8 +352,24 @@ pub fn contend(grouping: Grouping) {
         return refuse(&bench, "a window in which no job finished a chunk");
     }
     let keys: Vec<String> = jobs.iter().map(|(_, _, _, key)| key.clone()).collect();
-    condition(&format!("{bench}.units"), units(grouping, &keys));
+    let units = units(grouping, &keys);
+    condition(&format!("{bench}.units"), &units);
     let cpus = crate::cpus() as u64;
+    let off_fair = format!("{bench}.off_fair");
+    if grouping.unit() == Unit::Job && !units.starts_with(&format!("{}x", JOBS.len())) {
+        unmeasured(&off_fair, &format!("the workloads were not each a unit: {units}"), &[]);
+    } else {
+        // In `JOBS`' order, as the jobs were started and read.
+        let entitled = entitled_permille(cpus, &[1, cpus, cpus], grouping.unit());
+        let mut off: Vec<u64> = (0..WINDOWS)
+            .map(|w| {
+                let apart = jobs.iter().zip(&entitled).map(|((_, counts, _, _), entitled)| (counts[w] * 1000 / totals[w]).abs_diff(*entitled));
+                apart.max().expect("three jobs")
+            })
+            .collect();
+        let entitled = entitled.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        result(&off_fair, "permille_off", &mut off, &[("entitled", entitled)]);
+    }
     for (kind, counts, helpers, _) in &jobs {
         let mut permille: Vec<u64> = counts.iter().zip(&totals).map(|(c, t)| c * 1000 / t).collect();
         permille.sort_unstable();
