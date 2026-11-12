@@ -26,3 +26,9 @@ pub fn debug_spec_ctrl_on_request() -> u64 {
 pub fn debug_switch_ibpbs() -> Option<u64> {
     None
 }
+
+/// x86-64's counts its entries' branch history clears, and none runs here.
+#[cfg(feature = "test-actuators")]
+pub fn debug_branch_history_clears() -> Option<u64> {
+    None
+}

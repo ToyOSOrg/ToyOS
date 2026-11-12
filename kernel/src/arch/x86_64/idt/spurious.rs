@@ -15,7 +15,7 @@ pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn spurious_entry() {
-    ring3_naked_asm!(cs = 8;
+    ring3_naked_asm!(gate cs = 8;
         "push rax",
         "push rcx",
         "push rdx",

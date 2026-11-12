@@ -18,7 +18,7 @@ pub(crate) use user_dev::ClaimVector;
 use core::arch::naked_asm;
 
 use super::cpu;
-use super::entry::{gate_iretq, install_kernel_gs, ring3_naked_asm};
+use super::entry::{gate_iretq, gate_prefix, install_kernel_gs, ring3_naked_asm, GATE_PREFIX};
 use super::cpu::{outb, io_wait};
 use super::pio::{Port, PIC_PRIMARY, PIC_SECONDARY};
 use super::percpu;
@@ -107,6 +107,21 @@ impl IdtEntry {
         self.ist = ist_index;
         self
     }
+
+    /// The same gate entered past its prefix (`entry::gate_prefix`), which
+    /// it is refused unless it opens with: the bytes of the `test` of the
+    /// frame's `CS`, the short `jz` over the call and the call.
+    fn past_prefix(self) -> Self {
+        let gate = self.target();
+        // SAFETY: a gate's first bytes are kernel text, mapped readable.
+        let opens = unsafe { core::ptr::read(gate as *const [u8; GATE_PREFIX]) };
+        assert!(
+            matches!(opens, [0xF6, 0x44, 0x24, _, 0x03, 0x74, 0x05, 0xE8, ..]),
+            "idt: the gate at {gate:#x} opens with {opens:02x?}, not the branch history prefix"
+        );
+        let past = gate + GATE_PREFIX as u64;
+        Self { offset_low: past as u16, offset_mid: (past >> 16) as u16, offset_high: (past >> 32) as u32, ..self }
+    }
 }
 
 #[repr(C, align(16))]
@@ -114,7 +129,14 @@ struct Idt {
     entries: [IdtEntry; 256],
 }
 
+/// Every gate entered at its prefix: the table a CPU whose decision names the
+/// branch history clear loads.
 static IDT: Lock<Idt> = Lock::new(Idt {
+    entries: [IdtEntry::EMPTY; 256],
+});
+
+/// Every gate entered past its prefix: every other CPU's table.
+static PAST_PREFIX: Lock<Idt> = Lock::new(Idt {
     entries: [IdtEntry::EMPTY; 256],
 });
 
@@ -165,11 +187,14 @@ macro_rules! exception_stub {
         #[unsafe(naked)]
         extern "sysv64" fn $stub() {
             naked_asm!(
+                gate_prefix!(),
                 "push 0",
                 "push {vector}",
                 "jmp {common}",
                 vector = const Vector::$variant as usize,
                 common = sym $common,
+                gate_cs = const 8,
+                clear_branch_history = sym super::mitigation::clear_branch_history,
             );
         }
     };
@@ -177,10 +202,13 @@ macro_rules! exception_stub {
         #[unsafe(naked)]
         extern "sysv64" fn $stub() {
             naked_asm!(
+                gate_prefix!(),
                 "push {vector}",
                 "jmp {common}",
                 vector = const Vector::$variant as usize,
                 common = sym $common,
+                gate_cs = const 16,
+                clear_branch_history = sym super::mitigation::clear_branch_history,
             );
         }
     };
@@ -301,17 +329,29 @@ const _: () = {
     }
 };
 
-/// Whether `rip` is where some gate of this CPU's table enters.
+/// Whether `rip` is where some gate of either table enters.
 fn is_gate_target(rip: u64) -> bool {
-    // SAFETY: the table is written only by `init`, before any gate is taken.
-    let idt = unsafe { &*IDT.data_ptr() };
-    idt.entries.iter().any(|gate| gate.type_attr != 0 && gate.target() == rip)
+    // SAFETY: the tables are written only by `init`, before any gate is taken.
+    let tables = unsafe { [&*IDT.data_ptr(), &*PAST_PREFIX.data_ptr()] };
+    tables.iter().flat_map(|idt| &idt.entries).any(|gate| gate.type_attr != 0 && gate.target() == rip)
+}
+
+/// Whether `rip` is where either table enters the gate at `gate`.
+fn is_gate_of(rip: u64, gate: u64) -> bool {
+    rip == gate || rip == gate + GATE_PREFIX as u64
 }
 
 /// Halt IPI from `halt_all_cpus()`; never returns.
 #[unsafe(naked)]
 extern "sysv64" fn stub_halt_all() {
-    naked_asm!("cli", "2: hlt", "jmp 2b");
+    naked_asm!(
+        gate_prefix!(),
+        "cli",
+        "2: hlt",
+        "jmp 2b",
+        gate_cs = const 8,
+        clear_branch_history = sym super::mitigation::clear_branch_history,
+    );
 }
 
 /// Every exception vector's second half: the [`TrapFrame`], 22 words below a
@@ -449,7 +489,9 @@ fn disable_pic() {
     }
 }
 
-pub fn init() {
+/// Builds both tables and loads the one `clears_branch_history` names: the
+/// boot CPU's.
+pub fn init(clears_branch_history: bool) {
     disable_pic();
 
     install_gates(&mut IDT.lock());
@@ -470,15 +512,9 @@ pub fn init() {
             unclaimed += 1;
         }
     }
-    let ptr = IdtPointer {
-        limit: (core::mem::size_of::<Idt>() - 1) as u16,
-        base: IDT.data_ptr() as u64,
-    };
-
-    // SAFETY: `ptr` is a valid IDT descriptor built from `size_of::<Idt>()` and the just-filled static IDT.
-    unsafe {
-        cpu::lidt(&ptr as *const IdtPointer as *const u8);
-    }
+    let gates = IDT.lock().entries;
+    PAST_PREFIX.lock().entries = gates.map(IdtEntry::past_prefix);
+    let ptr = load(clears_branch_history);
 
     // The table this CPU is now loaded with: how many vectors carry a handler
     // this kernel named, and how many carry only the unclaimed stub, which is
@@ -495,6 +531,17 @@ pub fn init() {
         base,
         limit,
     );
+}
+
+/// Loads on this CPU the table whose gates open with the branch history
+/// clear where `clears_branch_history`, and the one past it elsewhere: what
+/// this CPU's decision names. After [`init`].
+pub fn load(clears_branch_history: bool) -> IdtPointer {
+    let table = if clears_branch_history { &IDT } else { &PAST_PREFIX };
+    let ptr = IdtPointer { limit: (core::mem::size_of::<Idt>() - 1) as u16, base: table.data_ptr() as u64 };
+    // SAFETY: `ptr` names one of the two static tables `init` filled whole.
+    unsafe { cpu::lidt(&ptr as *const IdtPointer as *const u8) };
+    ptr
 }
 
 /// Take IF=1 on this CPU; split from `init` so `ioapic::init` can mask firmware-left entries before interrupts are live.

@@ -497,6 +497,10 @@ impl Decision {
         for one in Mitigation::ALL.into_iter().filter(|&one| ON_REQUEST.has(one) && self.enumerates(one)) {
             on = on.with(one);
         }
+        // Each CPU's entries are those its decision selects.
+        if self.enumerates(Mitigation::BhbClear) {
+            on = on.with(Mitigation::BhbClear);
+        }
         if let Some(spec_ctrl) = registers.spec_ctrl {
             for (one, bit) in [
                 (Mitigation::EnhancedIbrs, msr::IBRS),
@@ -1759,14 +1763,14 @@ mod tests {
         );
     }
 
-    /// What every CPU has, what it applies on request where it enumerates
-    /// it, and each control its register shows on: a register the CPU was
-    /// not read for shows nothing.
+    /// What every CPU has, what it applies on request or on entry where it
+    /// enumerates it, and each control its register shows on: a register the
+    /// CPU was not read for shows nothing.
     #[test]
     fn what_is_in_force_is_what_the_registers_show() {
         let unread = Registers { spec_ctrl: None, mcu_opt_ctrl: None, de_cfg2: None, c001_1029: None };
         let intel = decide(&INTEL_806C1);
-        let always = ALWAYS.with(Ibpb).with(Ssbd);
+        let always = ALWAYS.with(Ibpb).with(Ssbd).with(BhbClear);
         assert_eq!(intel.in_force(&unread), always);
         assert_eq!(intel.in_force(&Registers { spec_ctrl: Some(msr::IBRS), ..unread }), always.with(EnhancedIbrs));
         // A bit the decision does not name shows nothing.
@@ -1778,7 +1782,7 @@ mod tests {
         assert_eq!(intel.in_force(&opted_out), always);
         // What the CPU does not enumerate is not applied for anyone.
         let bare = decide(&Facts { cpuid_7_0_edx: 0, ..INTEL_806C1 });
-        assert_eq!(bare.in_force(&unread), ALWAYS);
+        assert_eq!(bare.in_force(&unread), ALWAYS.with(BhbClear));
         let amd = decide(&AMD_17H_60H);
         let always = ALWAYS.with(Ibpb).with(ReturnPredictorFilled).with(Stibp).with(Ssbd);
         let both = Registers { de_cfg2: Some(msr::SUPPRESS_BP_ON_NON_BR), c001_1029: Some(C001_1029_LFENCE_SERIALIZES_DISPATCH), ..unread };

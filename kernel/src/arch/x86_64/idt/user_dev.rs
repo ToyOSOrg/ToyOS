@@ -22,8 +22,8 @@ use super::{Idt, IdtEntry};
 const FIRST: u8 = 0x40;
 const COUNT: usize = 0xFC - FIRST as usize;
 
-/// Each stub's bytes: a push and a jump fit in 10.
-const STRIDE: usize = 16;
+/// Each stub's bytes: the gate prefix, a push and a jump fit in 22.
+const STRIDE: usize = 32;
 
 /// The `pcidev` function each vector is held for.
 static HELD: Owners<COUNT> = Owners::new();
@@ -65,14 +65,19 @@ pub(super) fn install(idt: &mut Idt) {
     }
 }
 
-/// `COUNT` stubs, `STRIDE` apart from the first `STRIDE` boundary: each pushes
-/// its number and jumps to [`claim_entry`]. Never called.
+/// `COUNT` stubs, `STRIDE` apart from the first `STRIDE` boundary: each opens
+/// with the gate prefix (`arch::entry::gate_prefix`, here in AT&T syntax),
+/// pushes its number and jumps to [`claim_entry`]. Never called.
 #[unsafe(naked)]
 extern "sysv64" fn stubs() {
     core::arch::naked_asm!(
         ".set toyos_claim_vector, 0",
         ".rept {count}",
         ".balign {stride}",
+        "testb $3, 8(%rsp)",
+        "jz 78f",
+        "call {clear_branch_history}",
+        "78:",
         "pushq $toyos_claim_vector",
         "jmp {entry}",
         ".set toyos_claim_vector, toyos_claim_vector + 1",
@@ -80,6 +85,7 @@ extern "sysv64" fn stubs() {
         count = const COUNT,
         stride = const STRIDE,
         entry = sym claim_entry,
+        clear_branch_history = sym crate::arch::mitigation::clear_branch_history,
         options(att_syntax),
     );
 }

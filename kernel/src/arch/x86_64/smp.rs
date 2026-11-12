@@ -269,7 +269,9 @@ extern "C" fn ap_entry() -> ! {
 
     // GS base was set by the trampoline; finish percpu init (GDT, CR4).
     percpu::init_ap(percpu::percpu_ptr());
-    syscall::init();
+    // The trampoline loaded the boot CPU's table; this CPU's decision names its own.
+    crate::arch::idt::load(mitigation.clears_branch_history());
+    syscall::init(mitigation.clears_branch_history());
     // Calibration is a one-time BSP measurement; nothing left for an AP to do here.
     apic::init_ap();
     super::clocksource::start_ap(percpu::cpu_id());

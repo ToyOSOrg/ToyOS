@@ -458,6 +458,9 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             DA::SWITCH_IBPBS => {
                 crate::arch::mitigation::debug_switch_ibpbs().unwrap_or(SyscallError::NotSupported.to_u64())
             }
+            DA::BRANCH_HISTORY_CLEARS => {
+                crate::arch::mitigation::debug_branch_history_clears().unwrap_or(SyscallError::NotSupported.to_u64())
+            }
             _ => SyscallError::InvalidArgument.to_u64(),
         },
         SYS_JOB_FLOOR => sys_job_floor(RawHandle(a1 as u32), RawHandle(a2 as u32), a3),

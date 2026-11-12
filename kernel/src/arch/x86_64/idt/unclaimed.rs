@@ -21,7 +21,7 @@ static NO_ISR: AtomicU64 = AtomicU64::new(0);
 
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn unclaimed_entry() {
-    ring3_naked_asm!(cs = 8;
+    ring3_naked_asm!(gate cs = 8;
         "push rax",
         "push rcx",
         "push rdx",

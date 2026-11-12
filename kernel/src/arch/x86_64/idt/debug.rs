@@ -18,7 +18,7 @@
 
 use core::arch::naked_asm;
 
-use crate::arch::entry::install_kernel_gs;
+use crate::arch::entry::{gate_prefix, install_kernel_gs};
 use crate::arch::percpu::{MSR_GS_BASE, OFF_GDT, OFF_KERNEL_RSP, USER_CS, USER_DS};
 
 /// Eleven pushes place the CPU frame's `rip` at 88.
@@ -27,6 +27,7 @@ const RIP_OFFSET: usize = 88;
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn debug_entry() {
     naked_asm!(
+        gate_prefix!(),
         "cld",
         "clac",
         // Neither path addresses GS before it has made it the kernel's, so a
@@ -105,6 +106,8 @@ pub(super) extern "sysv64" fn debug_entry() {
         vector = const super::Vector::Debug as usize,
         deferred = sym deferred,
         common = sym super::common_entry,
+        gate_cs = const 8,
+        clear_branch_history = sym crate::arch::mitigation::clear_branch_history,
     );
 }
 
@@ -122,11 +125,11 @@ struct Frame {
 /// reaches, whose trap it is. On `debug_entry` itself the frame becomes a Ring
 /// 3 one, its lost `rip` and `rsp` zero, so its thread ends as a trap.
 extern "sysv64" fn deferred(frame: &mut Frame) {
-    if frame.rip == debug_entry as *const () as u64 {
+    if super::is_gate_of(frame.rip, debug_entry as *const () as u64) {
         *frame = Frame { rip: 0, cs: u64::from(USER_CS), rflags: 0x202, rsp: 0, ss: u64::from(USER_DS) };
         return;
     }
-    if frame.rip != crate::arch::syscall::entry_address() && !super::is_gate_target(frame.rip) {
+    if !crate::arch::syscall::is_entry(frame.rip) && !super::is_gate_target(frame.rip) {
         panic!("#DB at {:#x} in Ring 0, which is no entry: nothing in this kernel arms a debug trap", frame.rip);
     }
 }
