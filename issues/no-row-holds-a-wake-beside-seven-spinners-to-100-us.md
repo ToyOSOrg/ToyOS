@@ -14,7 +14,11 @@ now kicks a busy target on its edge (`Doorbell::ring`,
 running fair task to an idle CPU. A task that stays and is due first cuts the
 running request at its minimum run, `MIN_SLICE_NS` (250 µs) after its dispatch
 (`kernel/pure/sched/queue.rs`), and one queued task counts as surplus to a
-steal (`PUSH_THRESHOLD` = 1).
+steal (`PUSH_THRESHOLD` = 1). Since #1274 a wake claimed on another CPU
+while its home runs a task of its band goes from the claimant straight to an
+idle CPU in its mask (`CpuHandles::send_claimed_wake`), and the home is
+neither kicked nor drained for it. The kick and the drain's forward remain
+for a wake that no idle CPU takes and for one claimed on the home itself.
 
 **What #874 measured.** The metal row `wake_onto_busy` (`tests/toyos.rs`)
 times a wake onto a CPU that one spinner holds, beside CPUs with nothing to

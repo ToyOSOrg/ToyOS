@@ -30,6 +30,17 @@ what is known of busy targets; neither compares with Linux.
 
 **Owed on metal:** one A/B of main from before and after #1266 (a thread's request follows its bursts), on the T14 and the AMD bench, of osbench's `sched`, `fair` and `time` groups, with a Linux reference timed through the TSC. Main must read the `wake.*` rows faster or unchanged, the `fair.*` share rows within 3%, `time.yield` within 3%, and no scheduler, wake, timer or fairness row slower. The latency change is measured only in the simulator so far.
 
+**Owed on metal:** one A/B of main from before and after #1274 (a wake behind
+a busy home goes from its claimant straight to an idle CPU), on the T14 and
+the AMD bench. Four boots a side, in the order B,H,H,B,H,B,B,H, where B is
+before and H is after. The rows are osbench's `wake.onto_busy`,
+`pingpong.*.cross_core`, `ipc.reqrep.*`, `wake.storm.*` and `energy.*`. Main
+must read `wake.onto_busy` faster on both benches, with no other of these
+rows slower beyond its spread. With it, the idle-exit latency per sleep
+depth on both benches, from the existing probes or the A/B's boots, so that
+each bench's `wake.onto_busy` is split between the removed hop and the idle
+exit. The speed-up is not yet measured on metal.
+
 **Exit**: `wake.onto_busy` within Linux's on both benches in a labelled
 current-state comparison, or the difference measured to its parts and
 justified.
