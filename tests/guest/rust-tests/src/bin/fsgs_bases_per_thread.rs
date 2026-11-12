@@ -39,6 +39,10 @@ fn main() {
 fn rounds(me: usize) -> u64 {
     assert!(core_affinity::set_for_current(CoreId { id: 0 }), "pin thread {me} to cpu0");
     PINNED.wait();
+    // Before either thread writes one: the base a thread starts with, which a
+    // switch that kept another thread's base or record would not give it.
+    let first = fsgsbase::gs_base();
+    assert_eq!(first, 0, "thread {me} started with GS base {first:#x}");
     let mut crossed = 0;
     for round in 0..ROUNDS {
         let fs = 0x0000_7000_0000_0000 | (me as u64) << 40 | round << 4;

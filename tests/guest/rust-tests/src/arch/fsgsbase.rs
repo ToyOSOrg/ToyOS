@@ -5,6 +5,14 @@ pub use x86_64::*;
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64 {
+    /// This thread's GS base.
+    pub fn gs_base() -> u64 {
+        let base: u64;
+        // SAFETY: reads GS's base alone.
+        unsafe { core::arch::asm!("rdgsbase {}", out(reg) base, options(nomem, nostack, preserves_flags)) };
+        base
+    }
+
     /// Writes `fs` and `gs` as this thread's bases, makes syscall `yield_number`,
     /// and reads both back; the FS base it found is back before it returns, so
     /// nothing here runs on another thread-local block. The bases it read.

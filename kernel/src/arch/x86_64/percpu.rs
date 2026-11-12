@@ -132,9 +132,9 @@ pub struct PerCpu {
     /// it by a segment load, `WRFSBASE` or `SYS_SET_THREAD_POINTER`.
     fs_base: u64,
     /// `IA32_KERNEL_GS_BASE`, the user GS base while the kernel runs, as this
-    /// CPU's last switch read or wrote it; `u64::MAX`, which no base is, before
-    /// the first. Exact at every switch-in as `fs_base` is; stale while a thread
-    /// runs, which moves it by a segment load or `WRGSBASE`.
+    /// CPU's last switch read or wrote it; [`NO_GS_BASE`] before the first.
+    /// Exact at every switch-in as `fs_base` is; stale while a thread runs,
+    /// which moves it by a segment load or `WRGSBASE`.
     user_gs_base: u64,
     /// The context whose switch-out last left its user state in this CPU's
     /// registers, 0 before the first: `arch::fpu`'s record.
@@ -243,6 +243,11 @@ const OFF_AP_TOKEN: u32 = offset_of!(PerCpu, ap_token) as u32;
 const OFF_ROOT: u32 = offset_of!(PerCpu, root) as u32;
 const OFF_FS_BASE: u32 = offset_of!(PerCpu, fs_base) as u32;
 const OFF_USER_GS_BASE: u32 = offset_of!(PerCpu, user_gs_base) as u32;
+
+/// `user_gs_base`'s start, which no thread's base equals: it is not canonical,
+/// and `WRGSBASE` and `WRMSR` refuse a base that is not (SDM Vol. 2D, WRGSBASE),
+/// so a CPU's first switch into a thread always writes the thread's.
+const NO_GS_BASE: u64 = 1 << 63;
 const OFF_FPU_HOLDER: u32 = offset_of!(PerCpu, fpu_holder) as u32;
 /// Where this CPU's interrupt counters start; `irq_census::slot_offset` derives every handler's offset from it.
 pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
@@ -414,7 +419,7 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 // `load_gdt` loads FS with `KERNEL_DS`, whose base is 0, and a
                 // segment load clears the base's upper half (SDM Vol. 3A §3.4.4).
                 fs_base: 0,
-                user_gs_base: u64::MAX,
+                user_gs_base: NO_GS_BASE,
                 fpu_holder: 0,
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::Source::COUNT],
             },

@@ -48,7 +48,5 @@ owes. The record closes when it has.
 **Exit**: a guest test, run on the T14 and the AMD bench, whose child loads GS
 with each selector Ring 3 can name and then makes a system call, and the kernel
 survives and ends the child; its negative control is the kernel without the
-fix. The fix is an entry that does not trust the GS base it finds, the owner's
-to choose; `issues/fsgsbase-is-taken.md` weighs the `swapgs` one. A GDT without
-a loadable Ring 3 data descriptor is not one: `IRETQ` to Ring 3 needs SS to name
-a writable DPL-3 data segment.
+fix. A GDT without a loadable Ring 3 data descriptor is no fix: `IRETQ` to
+Ring 3 needs SS to name a writable DPL-3 data segment.
