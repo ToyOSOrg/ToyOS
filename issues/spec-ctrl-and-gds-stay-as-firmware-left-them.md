@@ -35,7 +35,9 @@ before the kernel's write, as firmware that opted out would leave it, and the
   - Main must show the row green: every CPU's words line with
     `mcu_opt_ctrl_found` holding bit 4 and `mcu_opt_ctrl` without it. The
     same boot of main with the clear deleted from `arch::mitigation::apply`
-    must red it, the mutation below.
+    must red it, the mutation below. A red saying the arm's write did not
+    take means firmware set `GDS_MITG_LOCK` (bit 5), and the row has no
+    premise there rather than a defect.
 - **Owed on metal:** Linux's reads of 0x48 and 0x123 on each bench, beside
   ToyOS's, compared in evidence.
 

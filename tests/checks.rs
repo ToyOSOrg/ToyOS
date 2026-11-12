@@ -749,6 +749,7 @@ mod checks {
         refused("a boot with no words", String::new(), "cpu0 wrote no")?;
         refused("an arm that did not take", words(0, "0x0", "0x0"), "did not take")?;
         refused("a clear that did not", words(0, "0x10", "0x10"), "GDS_MITG_DIS stands")?;
+        refused("a CPU that read no IA32_MCU_OPT_CTRL", words(0, "-", "-"), "read no IA32_MCU_OPT_CTRL")?;
         refused("a later CPU's clear that did not", words(0, "0x10", "0x0") + &words(3, "0x10", "0x10"), "cpu3")?;
         Ok(())
     }

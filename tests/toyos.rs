@@ -7194,8 +7194,10 @@ fn mitigations_on_metal(log: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// [`mitigations_of_a_cpu`] on a guest's every CPU, and its words put on the
-/// run's output: they are what the host's CPU shows a guest.
+/// [`mitigations_of_a_cpu`] on a guest's every CPU, and its lines put on the
+/// run's output, which is public: what the host's CPU shows a guest and what
+/// its decision makes of it, but the signature and microcode revision, which
+/// name the model.
 fn mitigations_in_a_guest() -> Result<(), String> {
     let qemu = QemuInstance::boot_with_options(
         &compile::repo_root().join("tests/images/testcases.toml"),
@@ -7208,8 +7210,12 @@ fn mitigations_in_a_guest() -> Result<(), String> {
     let lines = mitigation_lines(said.text())?;
     for (cpu, lines) in &lines {
         mitigations_of_a_cpu(*cpu, lines, Machine::Guest)?;
-        for words in lines.iter().filter_map(|line| line.strip_prefix("words ")) {
-            eprintln!("  [mitigations] cpu{cpu} words {words}");
+        for line in lines {
+            let shown: Vec<&str> = line
+                .split_whitespace()
+                .filter(|field| !field.starts_with("signature=") && !field.starts_with("microcode="))
+                .collect();
+            eprintln!("  [mitigations] cpu{cpu} {}", shown.join(" "));
         }
     }
     Ok(())
@@ -7351,8 +7357,12 @@ fn gds_found_disabled(log: &str) -> Result<(), String> {
         match (found, now) {
             (Some(found), Some(now)) if found & GDS_MITG_DIS != 0 && now & GDS_MITG_DIS == 0 => {}
             (Some(found), _) if found & GDS_MITG_DIS == 0 => {
-                return Err(format!("cpu{cpu} found IA32_MCU_OPT_CTRL {found:#x}: the arm's GDS_MITG_DIS did not take"))
+                return Err(format!(
+                    "cpu{cpu} found IA32_MCU_OPT_CTRL {found:#x}: the arm's GDS_MITG_DIS did not take, as it does not \
+                     where firmware set GDS_MITG_LOCK (bit 5), which leaves this row no premise"
+                ))
             }
+            (None, _) => return Err(format!("cpu{cpu} read no IA32_MCU_OPT_CTRL: its decision names no gather mitigation")),
             (found, now) => {
                 return Err(format!("cpu{cpu} found IA32_MCU_OPT_CTRL {found:?} and left it {now:?}: GDS_MITG_DIS stands"))
             }

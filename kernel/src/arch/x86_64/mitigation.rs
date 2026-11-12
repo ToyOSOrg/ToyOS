@@ -90,15 +90,16 @@ fn words() -> Facts {
 /// it read of itself. The clocksource's ordered TSC read (`RDTSCP; LFENCE`)
 /// relies on LFENCE dispatch serializing as a bounds-check barrier does: a
 /// CPU where that bit does not hold stops the machine, as one without SMEP
-/// does. A register that does not hold another write is its line's to say.
-/// Which registers it reads does not depend on its core's other threads.
+/// does. Any other write that does not take is reported by the lines, not
+/// stopped. Which registers it reads does not depend on its core's other
+/// threads.
 pub fn apply() -> Read {
     let facts = words();
     let decision = decide(&facts);
     let lfence = decision.enumerates(Mitigation::LfenceDispatchSerializing);
     let mcu_opt_ctrl =
         decision.enumerates(Mitigation::SrbdsMicrocode) || decision.enumerates(Mitigation::GdsMicrocode);
-    if mcu_opt_ctrl && decision.enumerates(Mitigation::GdsMicrocode) && crate::actuator::gds_found_disabled() {
+    if decision.enumerates(Mitigation::GdsMicrocode) && crate::actuator::gds_found_disabled() {
         // SAFETY: GDS_CTRL enumerates the bit; the write below clears it.
         unsafe { cpu::wrmsr(IA32_MCU_OPT_CTRL, cpu::rdmsr(IA32_MCU_OPT_CTRL) | GDS_MITG_DIS) };
     }
