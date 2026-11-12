@@ -17,10 +17,9 @@ use crate::message::{Receiver, Sender};
 use crate::sync::Lock;
 use crate::watch::Watch;
 
-use super::{KObjectVariant, ObjectCore, ZeroHandles};
+use toyos_abi::syscall::MAX_PENDING_CONNECTIONS;
 
-/// Unaccepted connections one port may hold; past it, connect returns `ResourceExhausted`.
-pub const MAX_PENDING_CONNECTIONS: usize = 32;
+use super::{KObjectVariant, ObjectCore, ZeroHandles};
 
 /// A connection nobody has accepted yet: owns the server's ends of its two
 /// directions.
