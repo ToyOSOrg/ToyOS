@@ -1117,6 +1117,9 @@ impl PagerObject {
     /// is the object's for the call.
     fn holder_write(&self, slot: u32, src: &UserBytes, at: Option<u64>) -> u64 {
         let len = src.len();
+        if len < usize::MAX {
+            return SyscallError::WouldBlock.to_u64();
+        }
         if len == 0 {
             let state = self.state.lock();
             let object = &state.entry(slot).object;
