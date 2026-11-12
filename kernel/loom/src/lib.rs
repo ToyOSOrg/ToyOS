@@ -266,3 +266,69 @@ pub mod sched;
 
 #[cfg(feature = "loom")]
 pub mod sched_model;
+
+/// What a file server connection's requests in flight are built on, as loom's:
+/// its atomics and lock, and the futex. A wait sleeps only while its word
+/// still says what the waiter saw, checked under the lock a wake takes after
+/// its store, and returns only once that word is woken, as the kernel's futex
+/// wakes only a waiter of the word posted to: a wake the protocol leaves out
+/// is loom's deadlock.
+#[cfg(feature = "loom")]
+pub mod flight_prim {
+    use std::collections::HashMap;
+
+    pub use loom::sync::atomic::{AtomicU32, Ordering};
+    use loom::sync::{Condvar, Mutex};
+
+    pub struct Lock<T>(Mutex<T>);
+
+    impl<T> Lock<T> {
+        pub fn new(value: T) -> Self {
+            Self(Mutex::new(value))
+        }
+
+        pub fn lock(&self) -> loom::sync::MutexGuard<'_, T> {
+            self.0.lock().unwrap()
+        }
+    }
+
+    /// Wakes counted by the word's address.
+    struct Futex {
+        wakes: Mutex<HashMap<usize, u64>>,
+        woken: Condvar,
+    }
+
+    loom::lazy_static! {
+        static ref FUTEX: Futex = Futex { wakes: Mutex::new(HashMap::new()), woken: Condvar::new() };
+    }
+
+    fn address(word: &AtomicU32) -> usize {
+        word as *const AtomicU32 as usize
+    }
+
+    pub fn wait(word: &AtomicU32, expected: u32) {
+        let mut wakes = FUTEX.wakes.lock().unwrap();
+        if word.load(Ordering::SeqCst) != expected {
+            return;
+        }
+        let seen = wakes.get(&address(word)).copied().unwrap_or(0);
+        while wakes.get(&address(word)).copied().unwrap_or(0) == seen {
+            wakes = FUTEX.woken.wait(wakes).unwrap();
+        }
+    }
+
+    pub fn wake_one(word: &AtomicU32) {
+        wake_all(word);
+    }
+
+    pub fn wake_all(word: &AtomicU32) {
+        *FUTEX.wakes.lock().unwrap().entry(address(word)).or_insert(0) += 1;
+        FUTEX.woken.notify_all();
+    }
+}
+
+/// One file server connection's requests in flight, the SDK's, driven by
+/// `tests/fs_flight.rs` over [`flight_prim`].
+#[cfg(feature = "loom")]
+#[path = "../../../sdk/toyos/src/fs/flight.rs"]
+pub mod fs_flight;

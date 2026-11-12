@@ -33,7 +33,7 @@ fn read(holder: &Paged, offset: u64, len: usize) -> Vec<u8> {
 }
 
 fn main() {
-    let mut dir = Dir::named(DIR).expect("the home directory");
+    let dir = Dir::named(DIR).expect("the home directory");
     let data = pattern(5 * 4096 + 123);
 
     let mut writer = dir.open(Base::Root, NAME, O_WRITE | O_CREATE | O_TRUNCATE).expect("open to write");

@@ -18,6 +18,12 @@ prefix. An empty view names nothing.
   directory moved elsewhere never reach outside it. An absolute link is
   resolved again in the client's own view, so it reaches nothing the client
   does not hold.
+- **A process's threads share its connection.** Each directory capability is
+  one connection per process, on which its threads' requests are in flight at
+  once, each in its own share of the window the client lends; none waits for
+  another's round trip but one that needs the whole window, or one beyond the
+  sixteen a connection carries. The server answers connections in turn, so a
+  process's share of the server does not grow with its threads.
 - **Sharing is granted, never reached.** A file outside a program's view
   reaches it only through the file picker, which hands over that one file.
 - **No special cases.** The boot partition is in the updater's view and nobody
@@ -79,6 +85,7 @@ directory, which the child resolves in its own view.
 - Ordinary I/O failure returns an error. A file server's crash invalidates
   that server's open files, which then answer that they are gone; a fresh open
   reaches the restarted server. Unsaved changes may be lost; data already
-  confirmed durable stays durable.
+  confirmed durable stays durable. A server that stays silent past its bound
+  while it owes a reply is let go as if it had crashed, as a block server is.
 - Per-session temporary storage is an ordinary file server holding its
   contents in RAM.

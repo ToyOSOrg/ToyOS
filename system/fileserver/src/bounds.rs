@@ -34,6 +34,11 @@ use toyos::shm::Lent;
 /// process.
 pub const MAX_SERVED: usize = 128;
 
+// A client lets this server go once a reply it owes has waited past a bound
+// the client derives from its copy of the block protocol's silence bound,
+// which is the bound a block request this server waits on keeps.
+const _: () = assert!(toyos::fs::BLOCK_SILENCE_NS == toyos_blockring::SILENCE_BOUND_NS);
+
 /// Connections taken and not yet answered at their hello, a quarter of them
 /// one share's. While the table is full, the next waits in the port's queue.
 pub const HANDSHAKES: Policy = Policy::quartered(32);

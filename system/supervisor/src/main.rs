@@ -2068,7 +2068,7 @@ impl<'a> Supervisor<'a> {
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             let Some((_, held)) = self.files.iter().find(|(held, _)| *held == name) else { continue };
             let spawned = std::thread::Builder::new().name(format!("sync-{role}")).spawn(move || {
-                let answer = toyos::fs::Dir::connect(held.as_handle()).and_then(|mut dir| dir.sync());
+                let answer = toyos::fs::Dir::connect(held.as_handle()).and_then(|dir| dir.sync());
                 let _ = done_tx.send(answer);
             });
             match spawned {

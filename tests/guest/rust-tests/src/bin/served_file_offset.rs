@@ -129,7 +129,7 @@ fn refused_spawn_keeps_export(fd: i32) {
     // The kernel refuses after the SDK duplicated the descriptors and laid the program out.
     let refused = helper.spawn(Some(&image)).err();
     assert_eq!(refused, Some(toyos::spawn::Refused::Syscall(toyos_abi::syscall::SyscallError::InvalidArgument)));
-    let mut dir = toyos::fs::Dir::adopt(exported).expect("refusal kept the original export");
+    let dir = toyos::fs::Dir::adopt(exported).expect("refusal kept the original export");
     let fid = toyos::fs::Fid { id: 1, generation: dir.generation() };
     assert_eq!(dir.seek(fid, toyos::fs::SEEK_CURRENT, 0).unwrap(), 4, "refusal kept the shared offset");
     dir.close(fid);
