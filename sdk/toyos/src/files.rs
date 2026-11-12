@@ -470,6 +470,10 @@ pub fn getcwd(out: &mut [u8]) -> usize {
 /// starts there ([`starting_directory`]).
 pub const START: &str = "PWD";
 
+/// The longest entry [`starting_in`] writes, without its NUL: [`START`], `=`
+/// and a directory of [`fs::MAX_PATH`] bytes.
+pub const MAX_STATED: usize = START.len() + 1 + fs::MAX_PATH;
+
 /// `env`, `KEY=VALUE\0` repeated, stating `dir` as the child's starting
 /// directory in place of any [`START`] it held. `None` for a `dir` that is not
 /// absolute, is past [`fs::MAX_PATH`] or holds a NUL, which no child reads back.

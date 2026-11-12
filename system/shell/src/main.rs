@@ -866,12 +866,13 @@ fn build_command(cmd: &SimpleCommand) -> Result<Command, i32> {
 /// The word that makes a simple command an independent launch.
 const LAUNCH: &str = "launch";
 
-/// Say why `cmd` did not start: a helper's program is not found, and a
-/// launch's refusal is the launcher's to explain.
+/// Say why `cmd` did not start: `not found` for a program that is not
+/// there, and any other refusal in its own words.
 fn unstarted(cmd: &SimpleCommand, e: &std::io::Error) {
     match cmd.args.first().is_some_and(|word| word == LAUNCH) {
         true => println!("launch: {}: {e}", cmd.args.get(1).map_or("", String::as_str)),
-        false => println!("{}: not found", cmd.args[0]),
+        false if e.kind() == std::io::ErrorKind::NotFound => println!("{}: not found", cmd.args[0]),
+        false => println!("{}: {e}", cmd.args[0]),
     }
 }
 

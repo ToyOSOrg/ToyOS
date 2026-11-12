@@ -94,7 +94,7 @@ impl<'a> BorrowedHandle<'a> {
     /// A second handle to the same object, owned.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     pub fn try_clone_to_owned(&self) -> crate::io::Result<OwnedHandle> {
-        self.0.try_clone_to_owned().map(OwnedHandle).map_err(crate::sys::to_io_error)
+        self.0.try_clone_to_owned().map(OwnedHandle).map_err(crate::sys::failed)
     }
 
     pub(crate) fn from_inner(handle: toyos::BorrowedHandle<'a>) -> Self {

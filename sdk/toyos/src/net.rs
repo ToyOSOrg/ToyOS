@@ -118,6 +118,16 @@ pub const ERR_PERMISSION_DENIED: u32 = 8;
 /// A holder's accept or receive found nothing to take: its bell rings once
 /// there is something ([`socket`]).
 pub const ERR_WOULD_BLOCK: u32 = 9;
+/// No route to the peer's network: a connect an ICMP network-unreachable
+/// ended, and a lookup whose resolver could not be reached.
+pub const ERR_NETWORK_UNREACHABLE: u32 = 10;
+/// No route to the peer itself: a connect an ICMP host-unreachable ended, or
+/// one a router on the way administratively prohibited.
+pub const ERR_HOST_UNREACHABLE: u32 = 11;
+/// A lookup ended without an answer for a reason of this machine's that has
+/// passed, its lease having changed under it: the same question asked again
+/// may be answered.
+pub const ERR_TRY_AGAIN: u32 = 12;
 pub const ERR_OTHER: u32 = 255;
 
 /// Nagle's algorithm off, on a listener: its listen's [`TcpOptions`] and then
@@ -149,6 +159,12 @@ pub enum NetError {
     PermissionDenied,
     /// See [`ERR_WOULD_BLOCK`], and a holder's call that does not wait.
     WouldBlock,
+    /// See [`ERR_NETWORK_UNREACHABLE`].
+    NetworkUnreachable,
+    /// See [`ERR_HOST_UNREACHABLE`].
+    HostUnreachable,
+    /// See [`ERR_TRY_AGAIN`].
+    TryAgain,
     /// A handle that reaches none of this process's sockets.
     NotASocket,
     Protocol(u32),
@@ -174,6 +190,9 @@ impl NetError {
             ERR_RESOURCE_EXHAUSTED => NetError::ResourceExhausted,
             ERR_PERMISSION_DENIED => NetError::PermissionDenied,
             ERR_WOULD_BLOCK => NetError::WouldBlock,
+            ERR_NETWORK_UNREACHABLE => NetError::NetworkUnreachable,
+            ERR_HOST_UNREACHABLE => NetError::HostUnreachable,
+            ERR_TRY_AGAIN => NetError::TryAgain,
             ERR_OTHER => NetError::Io,
             // An older client meets a newer netstack here rather than at a panic:
             // an unknown code is still an error, and still says which one.

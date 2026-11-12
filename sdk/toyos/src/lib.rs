@@ -24,6 +24,7 @@ pub mod devset;
 pub mod dl;
 pub mod elf;
 pub mod endow;
+pub mod failure;
 pub mod fd;
 pub mod files;
 pub mod fs;
@@ -52,6 +53,7 @@ pub mod tls;
 pub mod transport;
 pub mod volatile;
 
+pub use failure::Failure;
 pub use ipc::Connection;
 pub use device::{
     AcpiDev, DmaRegion, FramebufferDev, PciDev, UartDev,

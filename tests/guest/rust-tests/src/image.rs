@@ -50,7 +50,8 @@ pub fn laid(image: &Image, argv: &str) -> Laid {
 
 /// [`laid`], its child calling the spawn's `i`th endowment `names[i]`.
 pub fn laid_naming(image: &Image, argv: &str, names: &[&str]) -> Laid {
-    let block = Block::new(argv.as_bytes(), b"", names, None).unwrap_or_else(|e| panic!("a startup block: {e:?}"));
+    let said = toyos::startup::bytes(argv.as_bytes(), b"", names).expect("arguments and names a startup block holds");
+    let block = Block::new(&said, None).unwrap_or_else(|e| panic!("a startup block: {e:?}"));
     let program = lay_out(image.bytes(), Machine::RUNNING, image.source()).unwrap_or_else(|why| panic!("lay out an image: {why}"));
     Laid { program: program.starting_with(&block), _block: block }
 }

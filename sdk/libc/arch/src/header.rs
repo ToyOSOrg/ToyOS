@@ -4,6 +4,7 @@
 pub(crate) const ERRNO_H: &str = include_str!("../../include/errno.h");
 pub(crate) const FCNTL_H: &str = include_str!("../../include/fcntl.h");
 pub(crate) const LIMITS_H: &str = include_str!("../../include/limits.h");
+pub(crate) const NETDB_H: &str = include_str!("../../include/netdb.h");
 pub(crate) const SIGNAL_H: &str = include_str!("../../include/signal.h");
 pub(crate) const STAT_H: &str = include_str!("../../include/sys/stat.h");
 

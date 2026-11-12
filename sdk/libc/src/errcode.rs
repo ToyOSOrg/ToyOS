@@ -1,8 +1,8 @@
 //! libc's errno codes, `include/errno.h`'s by name and value, and the one
-//! reading of a kernel's or a file server's refusal as one. Nothing here reads or sets `errno`
+//! table from a refusal to one ([`of`]). Nothing here reads or sets `errno`
 //! (`errno.rs` does), so the host tests it (`toyos-libc-copies`).
 
-use toyos_abi::syscall::SyscallError;
+use toyos::Failure;
 
 pub(crate) const EPERM: i32 = 1;
 pub(crate) const ENOENT: i32 = 2;
@@ -45,6 +45,7 @@ pub(crate) const ENOPROTOOPT: i32 = 92;
 pub(crate) const EOPNOTSUPP: i32 = 95;
 pub(crate) const EAFNOSUPPORT: i32 = 97;
 pub(crate) const EADDRINUSE: i32 = 98;
+pub(crate) const ENETUNREACH: i32 = 101;
 pub(crate) const ECONNABORTED: i32 = 103;
 pub(crate) const ECONNRESET: i32 = 104;
 pub(crate) const EISCONN: i32 = 106;
@@ -55,94 +56,72 @@ pub(crate) const EHOSTUNREACH: i32 = 113;
 pub(crate) const EADDRNOTAVAIL: i32 = 99;
 pub(crate) const ESTALE: i32 = 116;
 
-/// The errno a kernel refusal is answered with.
-pub(crate) fn of(e: SyscallError) -> i32 {
-    match e {
-        SyscallError::NotFound => ENOENT,
-        SyscallError::PermissionDenied => EACCES,
-        SyscallError::AlreadyExists => EEXIST,
-        SyscallError::InvalidArgument => EINVAL,
-        SyscallError::WouldBlock => EAGAIN,
+/// The errno a refusal is answered with: the kernel's, a file server's,
+/// netstack's or the SDK's own, each read as its [`Failure`] first, so every
+/// call answers one refusal with one word. A call whose POSIX page names
+/// another word for a refusal answers that itself, by the refusal's name.
+pub(crate) fn of(e: impl Into<Failure>) -> i32 {
+    match e.into() {
+        Failure::NotFound => ENOENT,
+        Failure::PermissionDenied => EACCES,
+        Failure::AlreadyExists => EEXIST,
+        Failure::InvalidArgument | Failure::InvalidName => EINVAL,
+        Failure::BadAddress => EFAULT,
+        Failure::WouldBlock | Failure::Quota | Failure::TryAgain => EAGAIN,
+        Failure::OutOfMemory => ENOMEM,
+        Failure::Unsupported => EOPNOTSUPP,
+        // `Unknown` too: POSIX has no word for a refusal that names no reason.
+        Failure::Io | Failure::Unknown | Failure::Protocol | Failure::Truncated => EIO,
         // A write whose reader is gone, and not `ENOENT`, which says the file does not exist.
-        SyscallError::Gone => EPIPE,
-        SyscallError::Io => EIO,
-        // The kernel's word for a full handle table and for no memory alike.
-        SyscallError::ResourceExhausted => ENOMEM,
-        SyscallError::NotSupported => EOPNOTSUPP,
-        SyscallError::Busy => EBUSY,
-        SyscallError::TextBusy => ETXTBSY,
-        _ => EINVAL,
+        Failure::BrokenPipe => EPIPE,
+        Failure::BadDescriptor | Failure::WrongDescriptor | Failure::NotOpenForWriting => EBADF,
+        Failure::TooManyDescriptors => EMFILE,
+        Failure::NotUtf8 => EILSEQ,
+        Failure::Loop => ELOOP,
+        Failure::CrossesDevices => EXDEV,
+        Failure::NotADirectory => ENOTDIR,
+        Failure::IsADirectory => EISDIR,
+        Failure::NotEmpty => ENOTEMPTY,
+        Failure::NameTooLong => ENAMETOOLONG,
+        Failure::ReadOnly => EROFS,
+        Failure::Busy => EBUSY,
+        Failure::TextBusy => ETXTBSY,
+        Failure::NoSpace => ENOSPC,
+        Failure::FileTooLarge => EFBIG,
+        Failure::TooManyOpenFiles => ENFILE,
+        Failure::Stale => ESTALE,
+        Failure::TimedOut => ETIMEDOUT,
+        Failure::ConnectionRefused => ECONNREFUSED,
+        Failure::ConnectionReset => ECONNRESET,
+        Failure::ConnectionAborted => ECONNABORTED,
+        Failure::NotConnected => ENOTCONN,
+        Failure::AddrInUse => EADDRINUSE,
+        Failure::AddrNotAvailable => EADDRNOTAVAIL,
+        Failure::HostUnreachable => EHOSTUNREACH,
+        Failure::NetworkUnreachable => ENETUNREACH,
+        Failure::NotExecutable => ENOEXEC,
+        Failure::TooBig => E2BIG,
     }
 }
 
-/// Why a program or a library was not read into an image, as POSIX words it.
-pub(crate) fn of_image(refused: toyos::process::ImageRefused<toyos::files::Error>) -> i32 {
-    use toyos::process::ImageRefused;
-    match refused {
-        ImageRefused::Empty => ENOEXEC,
-        ImageRefused::Shrank => EIO,
-        ImageRefused::Memory(e) => of(e),
-        ImageRefused::Read(e) => of_files(e),
-    }
+/// `getaddrinfo`'s words, `include/netdb.h`'s by name and value.
+pub(crate) mod eai {
+    pub(crate) const NONAME: i32 = -2;
+    pub(crate) const AGAIN: i32 = -3;
+    pub(crate) const FAIL: i32 = -4;
+    pub(crate) const MEMORY: i32 = -10;
+    pub(crate) const SYSTEM: i32 = -11;
 }
 
-/// The errno a refusal of `toyos::files` is answered with.
-pub(crate) fn of_files(e: toyos::files::Error) -> i32 {
-    use toyos::files::Error;
-    match e {
-        Error::Kernel(e) => of(e),
-        Error::Served(e) => of_served(e),
-        Error::Fd(toyos::fd::Error::BadFd) | Error::NotAFile => EBADF,
-        Error::Fd(toyos::fd::Error::Full) => EMFILE,
-        Error::NotUtf8 => EILSEQ,
-        Error::Loop => ELOOP,
-        Error::CrossesServers => EXDEV,
-        Error::NotADirectory => ENOTDIR,
-        Error::Stream(refused) => of_stream(refused),
-    }
-}
-
-/// A stream's refusal in POSIX's word: `send`'s, `recv`'s, and `read`'s and
-/// `write`'s of a stream's descriptor.
-pub(crate) fn of_stream(refused: toyos::net::stream::Refused) -> i32 {
-    use toyos::net::stream::Refused;
-    match refused {
-        Refused::NotThisProcess(_) => EBADF,
-        Refused::WouldBlock => EAGAIN,
-        Refused::TimedOut | Refused::ConnectionTimedOut => ETIMEDOUT,
-        Refused::Reset => ECONNRESET,
-        Refused::Unreachable => EHOSTUNREACH,
-        Refused::AddressGone => EADDRNOTAVAIL,
-        Refused::Aborted => ECONNABORTED,
-        Refused::Shut => EPIPE,
-    }
-}
-
-/// The errno a file server's refusal, or its client end's, is answered with.
-fn of_served(e: toyos::fs::Error) -> i32 {
-    use toyos::fs::Error;
-    match e {
-        Error::NotFound | Error::NotHeld => ENOENT,
-        Error::AlreadyExists => EEXIST,
-        Error::NotADirectory | Error::NoDirectory => ENOTDIR,
-        Error::IsADirectory => EISDIR,
-        Error::NotEmpty => ENOTEMPTY,
-        Error::NotALink | Error::IntoItself | Error::UnknownFile | Error::InvalidPath | Error::InvalidRequest => EINVAL,
-        Error::NameTooLong => ENAMETOOLONG,
-        Error::InvalidName => EINVAL,
-        Error::ReadOnly => EROFS,
-        Error::NotOpenForWriting => EBADF,
-        Error::Root => EBUSY,
-        Error::Escapes => EACCES,
-        Error::CrossesDirectories => EXDEV,
-        Error::Loop => ELOOP,
-        Error::NoSpace => ENOSPC,
-        Error::FileTooLarge => EFBIG,
-        Error::LimitExceeded | Error::TooManyConnections | Error::TooManyStreams => EAGAIN,
-        Error::TooManyOpen => ENFILE,
-        Error::Io | Error::Malformed => EIO,
-        Error::Stale | Error::Gone => ESTALE,
-        Error::Unsupported => EOPNOTSUPP,
-        Error::OutOfResources => ENOMEM,
+/// What `getaddrinfo` answers for a lookup's refusal: a word of its own, or
+/// [`eai::SYSTEM`] and the errno it is to set beside it.
+pub(crate) fn of_lookup(e: impl Into<Failure>) -> (i32, Option<i32>) {
+    match e.into() {
+        Failure::TryAgain | Failure::TimedOut | Failure::Quota | Failure::WouldBlock => (eai::AGAIN, None),
+        Failure::OutOfMemory => (eai::MEMORY, None),
+        Failure::InvalidArgument => (eai::NONAME, None),
+        // The resolver answered, and not with the name.
+        Failure::Io | Failure::Protocol => (eai::FAIL, None),
+        other => (eai::SYSTEM, Some(of(other))),
     }
 }
