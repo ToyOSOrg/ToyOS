@@ -30,9 +30,8 @@ const S_IFCHR: u32 = 0o020000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFLNK: u32 = 0o120000;
 
-// Helper: set errno from toyos-abi error
-
-pub(crate) fn set_errno(e: toyos_abi::syscall::SyscallError) -> i32 {
+/// `-1`, with `errno` set for the refusal `e`.
+pub(crate) fn set_errno(e: impl Into<toyos::Failure>) -> i32 {
     crate::errno::set(crate::errcode::of(e));
     -1
 }
@@ -46,18 +45,10 @@ pub(crate) fn refuse(e: Errno) -> i32 {
     -1
 }
 
-/// The table's refusal as `errno`.
-pub(crate) fn fd_errno(e: toyos::fd::Error) -> Errno {
-    match e {
-        toyos::fd::Error::BadFd => EBADF,
-        toyos::fd::Error::Full => crate::errcode::EMFILE,
-    }
-}
-
 /// A kernel handle this process just got, as the lowest free descriptor,
 /// inherited unless `cloexec`.
 pub(crate) fn install(handle: toyos::OwnedHandle, cloexec: bool) -> Result<i32, Errno> {
-    toyos::fd::install(toyos::fd::Object::handle(handle), !cloexec, 0).map_err(fd_errno)
+    toyos::fd::install(toyos::fd::Object::handle(handle), !cloexec, 0).map_err(crate::errcode::of)
 }
 
 /// A `write` to a descriptor. Stdout and stderr go through the SDK's stream
@@ -66,17 +57,12 @@ pub(crate) fn install(handle: toyos::OwnedHandle, cloexec: bool) -> Result<i32, 
 pub fn write_fd(raw: i32, buf: &[u8]) -> Result<usize, Errno> {
     use toyos::log::stdio::{self, Stream};
     // A closed stdout is `EBADF`'s, where the stream sink drops its bytes.
-    toyos::fd::inheritable(raw).map_err(fd_errno)?;
+    toyos::fd::inheritable(raw).map_err(crate::errcode::of)?;
     match raw {
-        1 => stdio::write(Stream::Out, buf).map_err(crate::errcode::of_files),
-        2 => stdio::write(Stream::Err, buf).map_err(crate::errcode::of_files),
-        other => files::write(other, buf).map_err(crate::errcode::of_files),
+        1 => stdio::write(Stream::Out, buf).map_err(crate::errcode::of),
+        2 => stdio::write(Stream::Err, buf).map_err(crate::errcode::of),
+        other => files::write(other, buf).map_err(crate::errcode::of),
     }
-}
-
-/// `-1`, with `errno` set for `toyos::files`' refusal `e`.
-pub(crate) fn refuse_files(e: files::Error) -> i32 {
-    refuse(crate::errcode::of_files(e))
 }
 
 pub fn c_str_to_bytes(s: *const u8) -> &'static [u8] {
@@ -107,7 +93,7 @@ pub unsafe extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, _mode: 
         };
     }
     match crate::atreq::at(dirfd, path) {
-        Ok(at) => files::open(at, path, how).unwrap_or_else(refuse_files),
+        Ok(at) => files::open(at, path, how).unwrap_or_else(set_errno),
         Err(e) => refuse(e),
     }
 }
@@ -118,8 +104,8 @@ pub(crate) fn open_handle(path: &[u8], flags: i32, _mode: u32) -> Result<(RawHan
     if path == DEV_NULL {
         return syscall::null(null_rights(how.read, how.write)).map(|h| (h, toyos::fd::Kind::Handle)).map_err(crate::errcode::of);
     }
-    let fd = files::open(At::Cwd, path, how).map_err(crate::errcode::of_files)?;
-    let exported = files::export(fd).map(|h| (h.into_owned().into_raw(), toyos::fd::Kind::File)).map_err(crate::errcode::of_files);
+    let fd = files::open(At::Cwd, path, how).map_err(crate::errcode::of)?;
+    let exported = files::export(fd).map(|h| (h.into_owned().into_raw(), toyos::fd::Kind::File)).map_err(crate::errcode::of);
     // SAFETY: this function's descriptor, after the server exported its description.
     let _ = unsafe { toyos::fd::close(fd) };
     exported
@@ -148,7 +134,7 @@ pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
     // SAFETY: C's `close`: the caller gives up `raw_fd`.
     match unsafe { toyos::fd::close(raw_fd) } {
         Ok(()) => 0,
-        Err(e) => refuse(fd_errno(e)),
+        Err(e) => refuse(crate::errcode::of(e)),
     }
 }
 
@@ -166,7 +152,7 @@ pub unsafe extern "C" fn read(raw_fd: i32, buf: *mut u8, count: usize) -> isize 
     }
     let blocking = |slice: &mut [u8]| match files::read(raw_fd, slice) {
         Ok(n) => n as isize,
-        Err(e) => refuse_files(e) as isize,
+        Err(e) => set_errno(e) as isize,
     };
     let Some(mut call) = Call::enter(None, false, false) else { return blocking(slice) };
     // Held for the call, so a `close` on another thread releases nothing it waits on.
@@ -224,7 +210,7 @@ pub unsafe extern "C" fn lseek(raw_fd: i32, offset: i64, whence: i32) -> i64 {
     };
     match files::seek(raw_fd, pos) {
         Ok(n) => n as i64,
-        Err(e) => refuse_files(e) as i64,
+        Err(e) => set_errno(e) as i64,
     }
 }
 
@@ -237,7 +223,7 @@ pub unsafe extern "C" fn fstat(raw_fd: i32, buf: *mut Stat) -> i32 {
 unsafe fn answered(answer: Result<files::Stat, files::Error>, buf: *mut Stat) -> i32 {
     let st = match answer {
         Ok(st) => st,
-        Err(e) => return refuse_files(e),
+        Err(e) => return set_errno(e),
     };
     if !buf.is_null() {
         // SAFETY: C's caller hands one `struct stat` at `buf`.
@@ -267,7 +253,7 @@ unsafe fn answered(answer: Result<files::Stat, files::Error>, buf: *mut Stat) ->
 #[no_mangle]
 pub unsafe extern "C" fn ftruncate(raw_fd: i32, length: i64) -> i32 {
     let Ok(length) = u64::try_from(length) else { return refuse(EINVAL) };
-    files::truncate(raw_fd, length).map_or_else(refuse_files, |()| 0)
+    files::truncate(raw_fd, length).map_or_else(set_errno, |()| 0)
 }
 
 /// [`ftruncate`] of `path` opened for writing.
@@ -300,14 +286,14 @@ pub unsafe extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn fsync(raw_fd: i32) -> i32 {
-    files::fsync(raw_fd).map_or_else(refuse_files, |()| 0)
+    files::fsync(raw_fd).map_or_else(set_errno, |()| 0)
 }
 
 /// POSIX's `dup`: the lowest free descriptor on the same object, not
 /// close-on-exec.
 #[no_mangle]
 pub unsafe extern "C" fn dup(raw_fd: i32) -> i32 {
-    toyos::fd::dup(raw_fd, 0, true).unwrap_or_else(|e| refuse(fd_errno(e)))
+    toyos::fd::dup(raw_fd, 0, true).unwrap_or_else(|e| refuse(crate::errcode::of(e)))
 }
 
 /// POSIX's `dup2`: `new_fd` on `old_fd`'s object, not close-on-exec, after
@@ -315,7 +301,7 @@ pub unsafe extern "C" fn dup(raw_fd: i32) -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
     // SAFETY: C's `dup2`: the caller gives up what `new_fd` named.
-    unsafe { toyos::fd::dup2(old_fd, new_fd, true) }.unwrap_or_else(|e| refuse(fd_errno(e)))
+    unsafe { toyos::fd::dup2(old_fd, new_fd, true) }.unwrap_or_else(|e| refuse(crate::errcode::of(e)))
 }
 
 #[no_mangle]
@@ -348,7 +334,7 @@ pub unsafe extern "C" fn pipe(pipefd: *mut i32) -> i32 {
 fn on_at(dirfd: i32, path: *const u8, f: impl FnOnce(At, &[u8]) -> Result<(), files::Error>) -> i32 {
     let path = c_str_to_bytes(path);
     match crate::atreq::at(dirfd, path) {
-        Ok(at) => f(at, path).map_or_else(refuse_files, |()| 0),
+        Ok(at) => f(at, path).map_or_else(set_errno, |()| 0),
         Err(e) => refuse(e),
     }
 }
@@ -380,7 +366,7 @@ pub unsafe extern "C" fn mkdirat(dirfd: i32, path: *const u8, _mode: u32) -> i32
 pub unsafe extern "C" fn renameat(from_dirfd: i32, from: *const u8, to_dirfd: i32, to: *const u8) -> i32 {
     let (from, to) = (c_str_to_bytes(from), c_str_to_bytes(to));
     match (crate::atreq::at(from_dirfd, from), crate::atreq::at(to_dirfd, to)) {
-        (Ok(a), Ok(b)) => files::rename((a, from), (b, to)).map_or_else(refuse_files, |()| 0),
+        (Ok(a), Ok(b)) => files::rename((a, from), (b, to)).map_or_else(set_errno, |()| 0),
         (Err(e), _) | (_, Err(e)) => refuse(e),
     }
 }
@@ -405,7 +391,7 @@ pub unsafe extern "C" fn linkat(from_dirfd: i32, from: *const u8, to_dirfd: i32,
     }
     match (crate::atreq::at(from_dirfd, from), crate::atreq::at(to_dirfd, to)) {
         (Ok(a), Ok(b)) => {
-            files::link((a, from), flags & AT_SYMLINK_FOLLOW != 0, (b, to)).map_or_else(refuse_files, |()| 0)
+            files::link((a, from), flags & AT_SYMLINK_FOLLOW != 0, (b, to)).map_or_else(set_errno, |()| 0)
         }
         (Err(e), _) | (_, Err(e)) => refuse(e),
     }
@@ -425,7 +411,7 @@ pub unsafe extern "C" fn getcwd(buf: *mut u8, size: usize) -> *mut u8 {
 
 #[no_mangle]
 pub unsafe extern "C" fn chdir(path: *const u8) -> i32 {
-    files::chdir(c_str_to_bytes(path)).map_or_else(refuse_files, |()| 0)
+    files::chdir(c_str_to_bytes(path)).map_or_else(set_errno, |()| 0)
 }
 
 #[no_mangle]
@@ -479,7 +465,7 @@ pub unsafe extern "C" fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, s
             unsafe { ptr::copy_nonoverlapping(target.as_ptr(), buf, n) };
             n as isize
         }
-        Err(e) => refuse_files(e) as isize,
+        Err(e) => set_errno(e) as isize,
     }
 }
 
@@ -495,17 +481,17 @@ pub unsafe extern "C" fn symlinkat(target: *const u8, dirfd: i32, link: *const u
         Ok(at) => at,
         Err(e) => return refuse(e),
     };
-    files::symlink(target, (at, link)).map_or_else(refuse_files, |()| 0)
+    files::symlink(target, (at, link)).map_or_else(set_errno, |()| 0)
 }
 
 struct TheServers;
 
 impl crate::resolve::Served for TheServers {
     fn name(&mut self, at: &[u8]) -> Result<crate::resolve::Name, i32> {
-        let st = files::stat(At::Cwd, at, false).map_err(crate::errcode::of_files)?;
+        let st = files::stat(At::Cwd, at, false).map_err(crate::errcode::of)?;
         match st.file_type {
             syscall::FileType::Symlink => {
-                files::read_link(At::Cwd, at).map(crate::resolve::Name::Link).map_err(crate::errcode::of_files)
+                files::read_link(At::Cwd, at).map(crate::resolve::Name::Link).map_err(crate::errcode::of)
             }
             syscall::FileType::Directory => Ok(crate::resolve::Name::Directory),
             _ => Ok(crate::resolve::Name::Other),
@@ -581,9 +567,9 @@ pub(crate) fn is_file(path: &[u8]) -> bool {
 pub unsafe extern "C" fn fcntl(raw_fd: i32, cmd: i32, arg: u64) -> i32 {
     use crate::fdreq::{Command, FD_CLOEXEC};
     let answer = match crate::fdreq::command(cmd, arg) {
-        Command::DupAtLeast { floor, cloexec } => toyos::fd::dup(raw_fd, floor, !cloexec).map_err(fd_errno),
-        Command::GetFd => toyos::fd::inheritable(raw_fd).map(|inherited| if inherited { 0 } else { FD_CLOEXEC }).map_err(fd_errno),
-        Command::SetFd(cloexec) => toyos::fd::set_inheritable(raw_fd, !cloexec).map(|()| 0).map_err(fd_errno),
+        Command::DupAtLeast { floor, cloexec } => toyos::fd::dup(raw_fd, floor, !cloexec).map_err(crate::errcode::of),
+        Command::GetFd => toyos::fd::inheritable(raw_fd).map(|inherited| if inherited { 0 } else { FD_CLOEXEC }).map_err(crate::errcode::of),
+        Command::SetFd(cloexec) => toyos::fd::set_inheritable(raw_fd, !cloexec).map(|()| 0).map_err(crate::errcode::of),
         Command::Invalid => Err(EINVAL),
         Command::Unsupported => Err(crate::errcode::ENOSYS),
     };
@@ -641,7 +627,7 @@ pub unsafe extern "C" fn fdopendir(fd: i32) -> *mut DIR {
             ptr::null_mut()
         }
         Err(e) => {
-            refuse_files(e);
+            set_errno(e);
             ptr::null_mut()
         }
     }
@@ -658,7 +644,7 @@ pub unsafe extern "C" fn dirfd(dir: *mut DIR) -> i32 {
 /// The next batch of `dir`'s listing, each entry's node and `d_type` beside
 /// its name.
 fn next_batch(dir: &mut DIR, cursor: u64) -> Result<(), i32> {
-    let (listing, next) = files::read_dir(dir.fd, cursor).map_err(crate::errcode::of_files)?;
+    let (listing, next) = files::read_dir(dir.fd, cursor).map_err(crate::errcode::of)?;
     let mut entries = Vec::new();
     toyos::fs::for_each_entry(&listing, |entry| {
         let d_type = match entry.kind {
@@ -669,7 +655,7 @@ fn next_batch(dir: &mut DIR, cursor: u64) -> Result<(), i32> {
         };
         entries.push((entry.node, d_type, Box::from(entry.name.as_bytes())));
     })
-    .map_err(|e| crate::errcode::of_files(files::Error::Served(e)))?;
+    .map_err(crate::errcode::of)?;
     (dir.entries, dir.at, dir.cursor) = (entries, 0, next);
     Ok(())
 }
@@ -707,7 +693,7 @@ pub unsafe extern "C" fn closedir(dir: *mut DIR) -> i32 {
     // SAFETY: a `DIR` `opendir` or `fdopendir` answered, closed once.
     let dir = unsafe { Box::from_raw(dir) };
     // SAFETY: the `DIR` owns its descriptor, and goes with it.
-    unsafe { toyos::fd::close(dir.fd) }.map_or_else(|e| refuse(fd_errno(e)), |()| 0)
+    unsafe { toyos::fd::close(dir.fd) }.map_or_else(|e| refuse(crate::errcode::of(e)), |()| 0)
 }
 
 // Positions and times
@@ -719,7 +705,7 @@ pub unsafe extern "C" fn pread(raw_fd: i32, buf: *mut u8, count: usize, offset: 
     if count == 0 { return 0; }
     // SAFETY: C's caller hands `count` writable bytes at `buf`.
     let slice = unsafe { core::slice::from_raw_parts_mut(buf, count) };
-    files::pread(raw_fd, slice, offset).map_or_else(|e| refuse_files(e) as isize, |n| n as isize)
+    files::pread(raw_fd, slice, offset).map_or_else(|e| set_errno(e) as isize, |n| n as isize)
 }
 
 /// Never moves the descriptor's offset, and writes at `offset` whether or
@@ -730,7 +716,7 @@ pub unsafe extern "C" fn pwrite(raw_fd: i32, buf: *const u8, count: usize, offse
     if count == 0 { return 0; }
     // SAFETY: C's caller hands `count` bytes at `buf`.
     let slice = unsafe { core::slice::from_raw_parts(buf, count) };
-    files::pwrite(raw_fd, slice, offset).map_or_else(|e| refuse_files(e) as isize, |n| n as isize)
+    files::pwrite(raw_fd, slice, offset).map_or_else(|e| set_errno(e) as isize, |n| n as isize)
 }
 
 /// The two `(tv_sec, tv_nsec)` or `(tv_sec, tv_usec)` pairs at `times`,
@@ -758,7 +744,7 @@ pub unsafe extern "C" fn utimensat(dirfd: i32, path: *const u8, times: *const [i
 #[no_mangle]
 pub unsafe extern "C" fn futimens(fd: i32, times: *const [i64; 2]) -> i32 {
     match crate::atreq::times(unsafe { pairs(times) }) {
-        Ok(change) => files::set_times(At::Fd(fd), b"", false, &change).map_or_else(refuse_files, |()| 0),
+        Ok(change) => files::set_times(At::Fd(fd), b"", false, &change).map_or_else(set_errno, |()| 0),
         Err(e) => refuse(e),
     }
 }
@@ -810,14 +796,12 @@ fn vm_prot(prot: i32) -> Result<syscall::VmProt, i32> {
     }
 }
 
-/// POSIX's errno for a refusal of the pages of a range: `ENOMEM` for pages
-/// the process does not hold, `EACCES` for a protection a shared mapping was
-/// not made with.
+/// POSIX's errno for a refusal of the pages of a range: `ENOMEM`, where the
+/// table has `EFAULT`, for pages the process does not hold.
 fn range_errno(e: syscall::SyscallError) -> i32 {
     match e {
-        syscall::SyscallError::PermissionDenied => crate::errcode::EACCES,
-        syscall::SyscallError::InvalidArgument => EINVAL,
-        _ => crate::errcode::ENOMEM,
+        syscall::SyscallError::BadAddress => crate::errcode::ENOMEM,
+        other => crate::errcode::of(other),
     }
 }
 
@@ -859,7 +843,7 @@ pub unsafe extern "C" fn mmap(
                 MAP_FAILED
             }
             Err(e) => {
-                refuse_files(e);
+                set_errno(e);
                 MAP_FAILED
             }
         };
@@ -868,10 +852,7 @@ pub unsafe extern "C" fn mmap(
     match unsafe { syscall::vm_reserve(len, prot, at) } {
         Ok(ptr) => ptr,
         Err(e) => {
-            crate::errno::set(match e {
-                syscall::SyscallError::InvalidArgument => EINVAL,
-                _ => crate::errcode::ENOMEM,
-            });
+            set_errno(e);
             MAP_FAILED
         }
     }
@@ -934,10 +915,7 @@ pub unsafe extern "C" fn munmap(addr: *mut u8, len: usize) -> i32 {
     let unmapped = match crate::memreq::whole_pages(len) {
         None => Err(EINVAL),
         // SAFETY: the caller's, as C's `munmap` leaves it.
-        Some(len) => unsafe { syscall::vm_release(addr, len) }.map_err(|e| match e {
-            syscall::SyscallError::ResourceExhausted => crate::errcode::ENOMEM,
-            _ => EINVAL,
-        }),
+        Some(len) => unsafe { syscall::vm_release(addr, len) }.map_err(crate::errcode::of),
     };
     match unmapped {
         Ok(()) => 0,

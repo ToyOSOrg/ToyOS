@@ -12,17 +12,11 @@ unsafe fn sys_close(fd: i32) {
 }
 
 fn sys_read(fd: i32, buf: &mut [u8]) -> isize {
-    match files::read(fd, buf) {
-        Ok(n) => n as isize,
-        Err(_) => -1,
-    }
+    files::read(fd, buf).map_or_else(|e| super::posix_io::set_errno(e) as isize, |n| n as isize)
 }
 
 fn sys_write(fd: i32, buf: &[u8]) -> isize {
-    match super::posix_io::write_fd(fd, buf) {
-        Ok(n) => n as isize,
-        Err(_) => -1,
-    }
+    super::posix_io::write_fd(fd, buf).map_or_else(|e| super::posix_io::refuse(e) as isize, |n| n as isize)
 }
 
 fn sys_seek(fd: i32, offset: i64, whence: i32) -> i64 {
@@ -30,12 +24,9 @@ fn sys_seek(fd: i32, offset: i64, whence: i32) -> i64 {
         0 => SeekFrom::Start(offset as u64),
         1 => SeekFrom::Current(offset),
         2 => SeekFrom::End(offset),
-        _ => return -1,
+        _ => return super::posix_io::refuse(crate::errcode::EINVAL) as i64,
     };
-    match files::seek(fd, pos) {
-        Ok(n) => n as i64,
-        Err(_) => -1,
-    }
+    files::seek(fd, pos).map_or_else(|e| super::posix_io::set_errno(e) as i64, |n| n as i64)
 }
 
 fn sys_fsync(fd: i32) { let _ = files::fsync(fd); }

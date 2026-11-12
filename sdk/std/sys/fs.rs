@@ -13,7 +13,7 @@ use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
 use crate::path::{Path, PathBuf};
 pub use crate::sys::fs::common::Dir;
 use crate::sys::time::SystemTime;
-use crate::sys::{fd_error, files_error, served_error, to_io_error};
+use crate::sys::{failed};
 
 /// A descriptor naming a file, which the `File` owns.
 pub struct File(i32);
@@ -203,7 +203,7 @@ impl Iterator for ReadDir {
                 Ok(read) => read,
                 Err(e) => {
                     self.cursor = None;
-                    return Some(Err(files_error(e)));
+                    return Some(Err(failed(e)));
                 }
             };
             let (mut batch, dir_path) = (Vec::new(), &self.dir_path);
@@ -213,7 +213,7 @@ impl Iterator for ReadDir {
             });
             if let Err(e) = decoded {
                 self.cursor = None;
-                return Some(Err(served_error(e)));
+                return Some(Err(failed(e)));
             }
             (self.batch, self.index, self.cursor) = (batch, 0, next);
         }
@@ -334,15 +334,15 @@ impl File {
     }
 
     pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
-        files::open(At::Cwd, bytes(path), opts.how()).map(File).map_err(files_error)
+        files::open(At::Cwd, bytes(path), opts.how()).map(File).map_err(failed)
     }
 
     pub fn file_attr(&self) -> io::Result<FileAttr> {
-        files::fstat(self.0).map(FileAttr::of).map_err(files_error)
+        files::fstat(self.0).map(FileAttr::of).map_err(failed)
     }
 
     pub fn fsync(&self) -> io::Result<()> {
-        files::fsync(self.0).map_err(files_error)
+        files::fsync(self.0).map_err(failed)
     }
 
     pub fn datasync(&self) -> io::Result<()> {
@@ -366,11 +366,11 @@ impl File {
     }
 
     pub fn truncate(&self, size: u64) -> io::Result<()> {
-        files::truncate(self.0, size).map_err(files_error)
+        files::truncate(self.0, size).map_err(failed)
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        files::read(self.0, buf).map_err(files_error)
+        files::read(self.0, buf).map_err(failed)
     }
 
     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
@@ -388,18 +388,18 @@ impl File {
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        files::write(self.0, buf).map_err(files_error)
+        files::write(self.0, buf).map_err(failed)
     }
 
     /// Read at `offset`, leaving the file's offset where it is.
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        files::pread(self.0, buf, offset).map_err(files_error)
+        files::pread(self.0, buf, offset).map_err(failed)
     }
 
     /// Write at `offset`, leaving the file's offset where it is, whether or
     /// not it appends.
     pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
-        files::pwrite(self.0, buf, offset).map_err(files_error)
+        files::pwrite(self.0, buf, offset).map_err(failed)
     }
 
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -420,7 +420,7 @@ impl File {
             SeekFrom::Current(n) => AbiSeek::Current(n),
             SeekFrom::End(n) => AbiSeek::End(n),
         };
-        files::seek(self.0, pos).map_err(files_error)
+        files::seek(self.0, pos).map_err(failed)
     }
 
     pub fn size(&self) -> Option<io::Result<u64>> {
@@ -433,7 +433,7 @@ impl File {
 
     /// A second descriptor on the same open file, sharing its offset.
     pub fn duplicate(&self) -> io::Result<File> {
-        toyos::fd::dup(self.0, 0, false).map(File).map_err(fd_error)
+        toyos::fd::dup(self.0, 0, false).map(File).map_err(failed)
     }
 
     pub fn set_permissions(&self, _perm: FilePermissions) -> io::Result<()> {
@@ -441,7 +441,7 @@ impl File {
     }
 
     pub fn set_times(&self, times: FileTimes) -> io::Result<()> {
-        files::set_times(At::Fd(self.0), b"", false, &times.change()?).map_err(files_error)
+        files::set_times(At::Fd(self.0), b"", false, &times.change()?).map_err(failed)
     }
 }
 
@@ -458,7 +458,7 @@ impl DirBuilder {
     }
 
     pub fn mkdir(&self, p: &Path) -> io::Result<()> {
-        files::mkdir(At::Cwd, bytes(p)).map_err(files_error)
+        files::mkdir(At::Cwd, bytes(p)).map_err(failed)
     }
 }
 
@@ -479,16 +479,16 @@ fn kernel_file_type(ty: syscall::FileType) -> FileType {
 
 pub fn readdir(p: &Path) -> io::Result<ReadDir> {
     let how = Open { read: true, directory: true, cloexec: true, ..Open::default() };
-    let dir = files::open(At::Cwd, bytes(p), how).map(File).map_err(files_error)?;
+    let dir = files::open(At::Cwd, bytes(p), how).map(File).map_err(failed)?;
     Ok(ReadDir { dir, dir_path: p.to_path_buf(), batch: Vec::new(), index: 0, cursor: Some(0) })
 }
 
 pub fn unlink(p: &Path) -> io::Result<()> {
-    files::unlink(At::Cwd, bytes(p), false).map_err(files_error)
+    files::unlink(At::Cwd, bytes(p), false).map_err(failed)
 }
 
 pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
-    files::rename((At::Cwd, bytes(old)), (At::Cwd, bytes(new))).map_err(files_error)
+    files::rename((At::Cwd, bytes(old)), (At::Cwd, bytes(new))).map_err(failed)
 }
 
 pub fn set_perm(_p: &Path, _perm: FilePermissions) -> io::Result<()> {
@@ -500,7 +500,7 @@ pub fn set_perm_nofollow(_p: &Path, _perm: FilePermissions) -> io::Result<()> {
 }
 
 pub fn rmdir(p: &Path) -> io::Result<()> {
-    files::unlink(At::Cwd, bytes(p), true).map_err(files_error)
+    files::unlink(At::Cwd, bytes(p), true).map_err(failed)
 }
 
 pub fn remove_dir_all(path: &Path) -> io::Result<()> {
@@ -525,27 +525,27 @@ pub fn exists(path: &Path) -> io::Result<bool> {
 }
 
 pub fn readlink(p: &Path) -> io::Result<PathBuf> {
-    let target = files::read_link(At::Cwd, bytes(p)).map_err(files_error)?;
+    let target = files::read_link(At::Cwd, bytes(p)).map_err(failed)?;
     // SAFETY: a link's target is the bytes a path was written as.
     Ok(PathBuf::from(unsafe { OsString::from_encoded_bytes_unchecked(target) }))
 }
 
 pub fn symlink(original: &Path, link: &Path) -> io::Result<()> {
-    files::symlink(bytes(original), (At::Cwd, bytes(link))).map_err(files_error)
+    files::symlink(bytes(original), (At::Cwd, bytes(link))).map_err(failed)
 }
 
 /// `dst` a second name of what `src` names, a symlink itself and not what it
 /// leads to.
 pub fn link(src: &Path, dst: &Path) -> io::Result<()> {
-    files::link((At::Cwd, bytes(src)), false, (At::Cwd, bytes(dst))).map_err(files_error)
+    files::link((At::Cwd, bytes(src)), false, (At::Cwd, bytes(dst))).map_err(failed)
 }
 
 pub fn stat(path: &Path) -> io::Result<FileAttr> {
-    files::stat(At::Cwd, bytes(path), true).map(FileAttr::of).map_err(files_error)
+    files::stat(At::Cwd, bytes(path), true).map(FileAttr::of).map_err(failed)
 }
 
 pub fn lstat(path: &Path) -> io::Result<FileAttr> {
-    files::stat(At::Cwd, bytes(path), false).map(FileAttr::of).map_err(files_error)
+    files::stat(At::Cwd, bytes(path), false).map(FileAttr::of).map_err(failed)
 }
 
 pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
@@ -578,11 +578,11 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
 }
 
 pub fn set_times(p: &Path, times: FileTimes) -> io::Result<()> {
-    files::set_times(At::Cwd, bytes(p), true, &times.change()?).map_err(files_error)
+    files::set_times(At::Cwd, bytes(p), true, &times.change()?).map_err(failed)
 }
 
 pub fn set_times_nofollow(p: &Path, times: FileTimes) -> io::Result<()> {
-    files::set_times(At::Cwd, bytes(p), false, &times.change()?).map_err(files_error)
+    files::set_times(At::Cwd, bytes(p), false, &times.change()?).map_err(failed)
 }
 
 /// Read a program image for the kernel to map into a child.
@@ -591,15 +591,15 @@ pub fn read_image(path: &Path, job: Option<toyos::BorrowedHandle<'_>>) -> io::Re
         toyos::process::ImageRefused::Empty => {
             io::const_error!(io::ErrorKind::InvalidData, "the program is an empty file")
         }
-        toyos::process::ImageRefused::Memory(e) => to_io_error(e),
+        toyos::process::ImageRefused::Memory(e) => failed(e),
         toyos::process::ImageRefused::Shrank => {
             io::const_error!(io::ErrorKind::UnexpectedEof, "the program shrank while it was read")
         }
-        toyos::process::ImageRefused::Read(e) => files_error(e),
+        toyos::process::ImageRefused::Read(e) => failed(e),
     })
 }
 
 /// Validate `p` and store it in the shared SDK working-directory state.
 pub fn chdir(p: &Path) -> io::Result<()> {
-    files::chdir(bytes(p)).map_err(files_error)
+    files::chdir(bytes(p)).map_err(failed)
 }

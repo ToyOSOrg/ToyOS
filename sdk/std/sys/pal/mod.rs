@@ -9,31 +9,67 @@ mod unsupported_common;
 
 pub use unsupported_common::{cleanup, init};
 
-/// The kernel's word as the `ErrorKind` a caller can act on.
+/// A refusal as std says it: the kernel's, a file server's, netstack's or the
+/// SDK's own, each read as its `toyos::Failure` first, so every module answers
+/// one refusal with one kind.
 ///
-/// Exhaustive: a new `SyscallError` has to be given a kind here rather than
-/// reaching callers as `Other` from whichever module mapped it last.
-pub fn to_io_error(e: toyos_abi::syscall::SyscallError) -> crate::io::Error {
-    use toyos_abi::syscall::SyscallError;
+/// Exhaustive: a new `Failure` has to be given a kind here.
+pub fn failed(e: impl Into<toyos::Failure>) -> crate::io::Error {
+    use toyos::Failure;
 
-    use crate::io::ErrorKind;
+    use crate::io::ErrorKind as Kind;
+    use crate::io::const_error;
 
-    let kind = match e {
-        SyscallError::Unknown => ErrorKind::Uncategorized,
-        SyscallError::NotFound => ErrorKind::NotFound,
-        SyscallError::PermissionDenied => ErrorKind::PermissionDenied,
-        SyscallError::AlreadyExists => ErrorKind::AlreadyExists,
-        SyscallError::InvalidArgument => ErrorKind::InvalidInput,
-        SyscallError::BadAddress => ErrorKind::InvalidInput,
-        SyscallError::WouldBlock => ErrorKind::WouldBlock,
-        SyscallError::ResourceExhausted => ErrorKind::OutOfMemory,
-        SyscallError::NotSupported => ErrorKind::Unsupported,
-        SyscallError::Io => ErrorKind::Other,
-        SyscallError::Gone => ErrorKind::BrokenPipe,
-        SyscallError::Busy => ErrorKind::ResourceBusy,
-        SyscallError::TextBusy => ErrorKind::ExecutableFileBusy,
-    };
-    crate::io::Error::from(kind)
+    match e.into() {
+        Failure::NotFound => const_error!(Kind::NotFound, "no such file, name or object"),
+        Failure::PermissionDenied => const_error!(Kind::PermissionDenied, "not permitted"),
+        Failure::AlreadyExists => const_error!(Kind::AlreadyExists, "it already exists"),
+        Failure::InvalidArgument => const_error!(Kind::InvalidInput, "an argument the call does not take"),
+        Failure::BadAddress => const_error!(Kind::InvalidInput, "an address the kernel could not reach"),
+        Failure::WouldBlock => Kind::WouldBlock.into(),
+        Failure::OutOfMemory => const_error!(Kind::OutOfMemory, "the kernel had no room for it"),
+        Failure::Unsupported => const_error!(Kind::Unsupported, "the object or its volume has no such operation"),
+        Failure::Io => const_error!(Kind::Uncategorized, "a device failed, or what it holds does not decode"),
+        Failure::BrokenPipe => const_error!(Kind::BrokenPipe, "the other end is gone"),
+        Failure::Unknown => const_error!(Kind::Uncategorized, "the kernel refused in a word this std does not know"),
+        Failure::BadDescriptor => const_error!(Kind::Uncategorized, "the descriptor is not open"),
+        Failure::WrongDescriptor => const_error!(Kind::InvalidInput, "the descriptor names no object of that kind"),
+        Failure::TooManyDescriptors => const_error!(Kind::QuotaExceeded, "the descriptor table is full"),
+        Failure::NotUtf8 => const_error!(Kind::InvalidInput, "the path is not UTF-8"),
+        Failure::Loop => const_error!(Kind::FilesystemLoop, "too many symbolic links"),
+        Failure::CrossesDevices => const_error!(Kind::CrossesDevices, "the two paths are under different authorities"),
+        Failure::NotADirectory => const_error!(Kind::NotADirectory, "not a directory"),
+        Failure::IsADirectory => const_error!(Kind::IsADirectory, "is a directory"),
+        Failure::NotEmpty => const_error!(Kind::DirectoryNotEmpty, "the directory is not empty"),
+        Failure::NameTooLong => const_error!(Kind::InvalidFilename, "the name or path is too long"),
+        Failure::InvalidName => const_error!(Kind::InvalidFilename, "the volume cannot store that name"),
+        Failure::ReadOnly => const_error!(Kind::PermissionDenied, "the directory is read-only to this process"),
+        Failure::NotOpenForWriting => const_error!(Kind::PermissionDenied, "the file is not open for writing"),
+        Failure::Busy => const_error!(Kind::ResourceBusy, "it is in use where it is"),
+        Failure::TextBusy => const_error!(Kind::ExecutableFileBusy, "a program runs from the file"),
+        Failure::NoSpace => const_error!(Kind::StorageFull, "the volume is full"),
+        Failure::FileTooLarge => const_error!(Kind::FileTooLarge, "the file would be too large"),
+        Failure::Quota => const_error!(Kind::QuotaExceeded, "past a bound its server keeps"),
+        Failure::TooManyOpenFiles => const_error!(Kind::QuotaExceeded, "too many files open on the file server"),
+        Failure::Protocol => const_error!(Kind::InvalidData, "a server answered outside its protocol"),
+        Failure::Stale => const_error!(
+            Kind::StaleNetworkFileHandle,
+            "the file was removed or replaced, or its file server restarted or ended, since it was opened",
+        ),
+        Failure::TimedOut => const_error!(Kind::TimedOut, "timed out"),
+        Failure::ConnectionRefused => const_error!(Kind::ConnectionRefused, "connection refused"),
+        Failure::ConnectionReset => const_error!(Kind::ConnectionReset, "connection reset"),
+        Failure::ConnectionAborted => const_error!(Kind::ConnectionAborted, "netstack ended the connection"),
+        Failure::NotConnected => const_error!(Kind::NotConnected, "not connected, or the machine has no network"),
+        Failure::AddrInUse => const_error!(Kind::AddrInUse, "the address is in use"),
+        Failure::AddrNotAvailable => const_error!(Kind::AddrNotAvailable, "this machine does not hold the address"),
+        Failure::HostUnreachable => const_error!(Kind::HostUnreachable, "the peer is unreachable"),
+        Failure::NetworkUnreachable => const_error!(Kind::NetworkUnreachable, "the peer's network is unreachable"),
+        Failure::TryAgain => const_error!(Kind::ResourceBusy, "the lookup's lease changed under it: ask again"),
+        Failure::NotExecutable => const_error!(Kind::InvalidData, "the file is no program this machine loads"),
+        Failure::Truncated => const_error!(Kind::UnexpectedEof, "the file shrank while it was read"),
+        Failure::TooBig => const_error!(Kind::ArgumentListTooLong, "more than a spawn carries"),
+    }
 }
 
 /// `f` on the kernel handle descriptor `fd` names, held for the call
@@ -44,125 +80,57 @@ pub fn on_fd<T>(
     f: impl FnOnce(toyos::BorrowedHandle<'_>) -> Result<T, toyos_abi::syscall::SyscallError>,
 ) -> crate::io::Result<T> {
     let answer = toyos::fd::with(fd, |object| match object.kernel_handle() {
-        Some(handle) => f(handle).map_err(to_io_error),
+        Some(handle) => f(handle).map_err(failed),
         None => Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "the descriptor names an object of a library's own",
         )),
     });
-    answer.map_err(fd_error)?
+    answer.map_err(failed)?
 }
 
-/// A file server's refusal, or the client end's own, as std says it.
-pub fn served_error(e: toyos::fs::Error) -> crate::io::Error {
-    use crate::io::{self, ErrorKind as Kind};
-    use toyos::fs::Error;
-    match e {
-        Error::NotFound => io::const_error!(Kind::NotFound, "no such file or directory"),
-        Error::AlreadyExists => io::const_error!(Kind::AlreadyExists, "it already exists"),
-        Error::NotADirectory => io::const_error!(Kind::NotADirectory, "not a directory"),
-        Error::IsADirectory => io::const_error!(Kind::IsADirectory, "is a directory"),
-        Error::NotEmpty => io::const_error!(Kind::DirectoryNotEmpty, "the directory is not empty"),
-        Error::NotALink => io::const_error!(Kind::InvalidInput, "not a symbolic link"),
-        Error::NameTooLong => io::const_error!(Kind::InvalidFilename, "the name or path is too long"),
-        Error::InvalidName => io::const_error!(Kind::InvalidFilename, "the volume cannot store that name"),
-        Error::ReadOnly => io::const_error!(Kind::PermissionDenied, "the directory is read-only to this process"),
-        Error::NotOpenForWriting => io::const_error!(Kind::PermissionDenied, "the file is not open for writing"),
-        Error::Root => io::const_error!(Kind::ResourceBusy, "a directory the file server serves stays where it is"),
-        Error::Escapes => io::const_error!(Kind::PermissionDenied, "a link leads out of the directory"),
-        Error::CrossesDirectories => {
-            io::const_error!(Kind::CrossesDevices, "a link leads to another directory capability")
-        }
-        Error::Loop => io::const_error!(Kind::FilesystemLoop, "too many symbolic links"),
-        Error::IntoItself => io::const_error!(Kind::InvalidInput, "a directory cannot move beneath itself"),
-        Error::NoSpace => io::const_error!(Kind::StorageFull, "the volume is full"),
-        Error::FileTooLarge => io::const_error!(Kind::FileTooLarge, "the file would be too large"),
-        Error::LimitExceeded => io::const_error!(Kind::QuotaExceeded, "past a bound the file server keeps"),
-        Error::TooManyOpen => io::const_error!(Kind::QuotaExceeded, "too many files open on the file server"),
-        Error::TooManyConnections => {
-            io::const_error!(Kind::QuotaExceeded, "the file server serves as many connections as it takes")
-        }
-        Error::TooManyStreams => {
-            io::const_error!(Kind::QuotaExceeded, "the file server serves as many streams as it takes")
-        }
-        Error::Io => io::const_error!(Kind::Other, "the volume's device failed, or its structures do not decode"),
-        Error::Stale => io::const_error!(
-            Kind::StaleNetworkFileHandle,
-            "the file was removed or replaced, or its file server restarted, since it was opened",
-        ),
-        Error::UnknownFile => io::const_error!(Kind::InvalidInput, "the file server holds no such open file"),
-        Error::InvalidPath => io::const_error!(Kind::InvalidInput, "the path is not one the file server takes"),
-        Error::InvalidRequest => io::const_error!(Kind::InvalidInput, "the file server takes no such request"),
-        Error::Unsupported => io::const_error!(Kind::Unsupported, "the volume's format has no such thing"),
-        Error::OutOfResources => io::const_error!(Kind::OutOfMemory, "the kernel had no room for the request"),
-        Error::NoDirectory => {
-            io::const_error!(Kind::NotADirectory, "the connection was given open files and no directory")
-        }
-        Error::Gone => io::const_error!(Kind::StaleNetworkFileHandle, "the file server is gone"),
-        Error::NotHeld => io::const_error!(Kind::NotFound, "this process holds no such directory"),
-        Error::Malformed => io::const_error!(Kind::InvalidData, "the file server answered outside its protocol"),
-    }
-}
-
-/// `toyos::files`' refusal, as std says it.
-pub fn files_error(e: toyos::files::Error) -> crate::io::Error {
-    use crate::io;
-    use toyos::files;
-    match e {
-        files::Error::Kernel(e) => to_io_error(e),
-        files::Error::Served(e) => served_error(e),
-        files::Error::Fd(e) => fd_error(e),
-        files::Error::NotUtf8 => io::const_error!(io::ErrorKind::InvalidInput, "path is not UTF-8"),
-        files::Error::Loop => io::const_error!(io::ErrorKind::FilesystemLoop, "too many symbolic links"),
-        files::Error::CrossesServers => {
-            io::const_error!(io::ErrorKind::CrossesDevices, "the two paths are on different servers")
-        }
-        files::Error::NotAFile => io::const_error!(io::ErrorKind::InvalidInput, "the descriptor names no file"),
-        files::Error::NotADirectory => {
-            io::const_error!(io::ErrorKind::NotADirectory, "the descriptor names no directory")
-        }
-        files::Error::Stream(refused) => crate::sys::net::stream_refused(refused),
-    }
-}
-
-/// Why nothing was spawned, as std's error.
+/// Why nothing was spawned, as std's error: the refusal's kind, and its own
+/// reason where it gives one.
 pub fn refused(refused: toyos::spawn::Refused) -> crate::io::Error {
     use toyos::spawn::Refused;
 
-    use crate::io::{Error, ErrorKind};
+    let error = failed(&refused);
     match refused {
-        Refused::Permission(why) => Error::new(ErrorKind::PermissionDenied, why),
-        Refused::Invalid(why) => Error::new(ErrorKind::InvalidInput, why),
-        Refused::Stream(handle) => {
-            Error::new(ErrorKind::InvalidInput, toyos::net::stream::Misuse::Moved(handle).to_string())
+        Refused::Permission(why) | Refused::Invalid(why) | Refused::NotExecutable(why) | Refused::TooBig(why) => {
+            crate::io::Error::new(error.kind(), why)
         }
-        Refused::Export(e) => match e {
-            toyos::net::NetError::NetstackNotFound => Error::from(ErrorKind::ConnectionAborted),
-            toyos::net::NetError::ResourceExhausted => Error::from(ErrorKind::QuotaExceeded),
-            _ => Error::from(ErrorKind::Other),
-        },
-        Refused::File(e) => files_error(e),
-        Refused::NotStarted => Error::from(ErrorKind::Other),
-        Refused::Syscall(e) => to_io_error(e),
+        Refused::NotStarted => {
+            crate::io::Error::new(error.kind(), "the launcher started nothing it permits, or its answer was lost")
+        }
+        Refused::Stream(handle) => {
+            crate::io::Error::new(error.kind(), toyos::net::stream::Misuse::Moved(handle).to_string())
+        }
+        Refused::Export(_) | Refused::File(_) | Refused::Syscall(_) => error,
+    }
+}
+
+/// A stream's refusal, as [`failed`] says it but naming the handle where this
+/// process holds no end of that stream.
+pub fn stream_failed(refused: toyos::net::stream::Refused) -> crate::io::Error {
+    match refused {
+        toyos::net::stream::Refused::NotThisProcess(handle) => crate::io::Error::new(
+            failed(refused).kind(),
+            toyos::net::stream::Misuse::NotThisProcess(handle).to_string(),
+        ),
+        other => failed(other),
     }
 }
 
 /// A kernel handle this process just got, as a descriptor of its own: std
 /// creates descriptors not inherited, as std is close-on-exec on unix.
 pub fn new_fd(handle: toyos::OwnedHandle) -> crate::io::Result<i32> {
-    toyos::fd::install(toyos::fd::Object::handle(handle), false, 0).map_err(fd_error)
+    toyos::fd::install(toyos::fd::Object::handle(handle), false, 0).map_err(failed)
 }
 
-/// The descriptor table's refusal as std's error.
+/// The descriptor table's refusal as std's error, by the name the fork's
+/// `BorrowedFd::try_clone_to_owned` calls.
 pub fn fd_error(e: toyos::fd::Error) -> crate::io::Error {
-    match e {
-        toyos::fd::Error::BadFd => {
-            crate::io::const_error!(crate::io::ErrorKind::Uncategorized, "the descriptor is not open")
-        }
-        toyos::fd::Error::Full => {
-            crate::io::const_error!(crate::io::ErrorKind::QuotaExceeded, "the descriptor table is full")
-        }
-    }
+    failed(e)
 }
 
 // The entry, on an empty stack. The image relocates itself first, from its

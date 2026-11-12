@@ -1,7 +1,7 @@
 use toyos_abi::syscall;
 
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
-use crate::sys::{fd_error, new_fd, on_fd};
+use crate::sys::{failed, new_fd, on_fd};
 
 /// One end of a pipe: a descriptor naming it.
 #[derive(Debug)]
@@ -10,7 +10,7 @@ pub struct Pipe {
 }
 
 pub fn pipe() -> io::Result<(Pipe, Pipe)> {
-    let (read, write) = toyos::pipe_pair().map_err(crate::sys::to_io_error)?;
+    let (read, write) = toyos::pipe_pair().map_err(crate::sys::failed)?;
     let read = new_fd(read.into())?;
     Ok((Pipe { fd: read }, Pipe { fd: new_fd(write.into())? }))
 }
@@ -26,7 +26,7 @@ impl Pipe {
     }
 
     pub fn try_clone(&self) -> io::Result<Self> {
-        toyos::fd::dup(self.fd, 0, false).map(|fd| Pipe { fd }).map_err(fd_error)
+        toyos::fd::dup(self.fd, 0, false).map(|fd| Pipe { fd }).map_err(failed)
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {

@@ -365,7 +365,6 @@ extern "sysv64" fn fatal_entry() {
         "call {dispatch}",
         "ud2",
         dispatch = sym trap_dispatch,
-        gs_base_msr = const percpu::MSR_GS_BASE,
         gdt_in_percpu = const percpu::OFF_GDT,
     );
 }

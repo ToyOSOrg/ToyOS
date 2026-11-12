@@ -12,7 +12,7 @@ pub fn getcwd() -> io::Result<PathBuf> {
     let mut buf = [0u8; 256];
     let n = toyos::files::getcwd(&mut buf);
     if n == 0 {
-        return Err(io::Error::new(io::ErrorKind::Other, "getcwd failed"));
+        return Err(io::const_error!(io::ErrorKind::NotFound, "the process has no working directory"));
     }
     if n <= buf.len() {
         return path_from_utf8(&buf[..n]);
@@ -24,14 +24,14 @@ pub fn getcwd() -> io::Result<PathBuf> {
     heap.resize(n, 0);
     let got = toyos::files::getcwd(&mut heap);
     if got == 0 || got > heap.len() {
-        return Err(io::Error::new(io::ErrorKind::Other, "getcwd failed"));
+        return Err(io::const_error!(io::ErrorKind::NotFound, "the process has no working directory"));
     }
     path_from_utf8(&heap[..got])
 }
 
 fn path_from_utf8(bytes: &[u8]) -> io::Result<PathBuf> {
     let s = core::str::from_utf8(bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "invalid utf-8 in cwd"))?;
+        .map_err(|_| io::const_error!(io::ErrorKind::InvalidData, "the working directory is not UTF-8"))?;
     Ok(PathBuf::from(s))
 }
 

@@ -34,6 +34,19 @@ use alloc::vec::Vec;
 
 use crate::{AsHandle, BorrowedHandle, Moved, OwnedHandle, RawHandle};
 
+/// The most bytes of its own arguments and environment a caller can give a
+/// helper, as ToyOS counts them for `ARG_MAX` (POSIX leaves whether pointers
+/// and terminators count to the implementation): each string with its NUL, a
+/// pointer to each and the null ending each list. The child's block
+/// (`starting_block`) holds beside them the names' address, its argument
+/// count, the starting directory the spawn states (a pointer, an entry and a
+/// NUL, counted at its longest, [`crate::files::MAX_STATED`]) and its names
+/// for its endowments, counted at their most ([`crate::startup::MAX_NAMES`]).
+pub const MAX_ARGS: usize = crate::startup::MAX_BLOCK
+    - 2 * crate::startup::WORD
+    - (crate::startup::WORD + crate::files::MAX_STATED + 1)
+    - crate::startup::MAX_NAMES;
+
 /// Whom a child is placed under, whose end takes it down.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Parent<'a> {
@@ -139,9 +152,14 @@ fn fd_label(fd: u32, handle: RawHandle, kind: FdKind, fds: &[(u32, BorrowedHandl
 pub enum Refused {
     /// Not permitted, for this reason.
     Permission(&'static str),
-    /// The spawn names more than it can carry, or asks what its kind does
-    /// not give, for this reason.
+    /// The spawn asks what its kind does not give, or names something no
+    /// child starts with, for this reason.
     Invalid(&'static str),
+    /// The image is no program this machine lays out, for this reason.
+    NotExecutable(&'static str),
+    /// The spawn carries more than a spawn or a launch carries, for this
+    /// reason.
+    TooBig(&'static str),
     /// It would put a stream's own handle in another process, where only an
     /// exported end of it goes (`crate::net::stream::export`).
     Stream(RawHandle),
@@ -249,15 +267,14 @@ impl Helper<'_> {
     /// Spawn the child here, running `image`, which this process lays out
     /// ([`crate::elf::program`]) and the kernel pages the child from, and
     /// starting with the spawn's arguments and environment
-    /// ([`crate::startup`]). Refused [`Refused::Invalid`] without one,
-    /// or for one that names a layout the child could not start from.
+    /// ([`crate::startup`]). Refused [`Refused::Invalid`] without one, and
+    /// [`Refused::NotExecutable`] for one that names a layout the child could
+    /// not start from.
     pub fn spawn(self, image: Option<&Image>) -> Result<Process, Refused> {
         let s = self.0;
         let image = image.ok_or(Refused::Invalid("a spawn names the program it runs"))?;
         let path = path_label(image_and_name(s.program, s.image).0);
         let name = name(s.argv.split(|&b| b == 0).find(|arg| !arg.is_empty()).unwrap_or(s.program.as_bytes()));
-        let env = crate::files::starting_in(s.env, s.cwd)
-            .ok_or(Refused::Invalid("a working directory that is not absolute, is too long or holds a NUL"))?;
         // What the child is endowed and what it calls each, in the order the
         // kernel installs them. Duplicates rather than this process's own
         // handles: an endowment is a move, and a parent that gave its
@@ -279,7 +296,7 @@ impl Helper<'_> {
             table.push((fd_label(fd, handle.raw(), kind, s.fds), copy.into()));
         }
         if table.len() > MAX_SPAWN_ENDOWMENTS {
-            return Err(Refused::Invalid("more endowments and descriptors than a spawn carries"));
+            return Err(Refused::TooBig("more endowments and descriptors than a spawn carries"));
         }
         let names: Vec<&str> = table.iter().map(|(label, _)| label.as_str()).collect();
         if names.iter().enumerate().any(|(i, label)| names[..i].contains(label)) {
@@ -289,13 +306,11 @@ impl Helper<'_> {
             return Err(Refused::Invalid("an endowment under no name"));
         }
         let entries: Vec<TransferEntry> = table.iter().map(|(_, moved)| moved.entry()).collect();
+        let said = starting_block(s.argv, s.env, s.cwd, &names)?;
         // Held until the spawn answers: the child copies its pages from it.
-        let block = crate::startup::Block::new(s.argv, &env, &names, s.job).map_err(|why| match why {
-            crate::startup::Refused::TooLarge => Refused::Invalid("arguments, an environment and names past what a child starts with"),
-            crate::startup::Refused::Memory(e) => Refused::Syscall(e),
-        })?;
+        let block = crate::startup::Block::new(&said, s.job).map_err(Refused::Syscall)?;
         let program = crate::elf::program::lay_out(image.bytes(), crate::elf::Machine::RUNNING, image.source())
-            .map_err(Refused::Invalid)?
+            .map_err(Refused::NotExecutable)?
             .starting_with(&block);
         let maps = program.maps();
         let build_id = program.build_id();
@@ -364,7 +379,7 @@ impl Independent<'_> {
             Parent::Caller => Some(crate::endow::this_process().as_handle()),
         };
         if s.provided.len() + usize::from(place.is_some()) + 1 > MAX_LAUNCH_EXTRAS {
-            return Err(Refused::Invalid("more connectors provided than a launch carries beside its place and job"));
+            return Err(Refused::TooBig("more connectors provided than a launch carries beside its place and job"));
         }
         if s.fds.len() > MAX_LAUNCH_FDS {
             return Err(Refused::Invalid("a launch carries descriptors 0 to 2 alone"));
@@ -400,7 +415,7 @@ impl Independent<'_> {
             }
             Ok(Outcome::Refused) | Err(LaunchError::Sent(_)) => Err(Refused::NotStarted),
             Ok(Outcome::Gone) => Err(Refused::Syscall(SyscallError::Gone)),
-            Err(LaunchError::NotSent(IpcError::TooLarge)) => Err(Refused::Invalid("the launch does not fit one frame")),
+            Err(LaunchError::NotSent(IpcError::TooLarge)) => Err(Refused::TooBig("the launch does not fit one frame")),
             Err(LaunchError::NotSent(IpcError::Syscall(e))) => Err(Refused::Syscall(e)),
             Err(LaunchError::NotSent(_)) => Err(Refused::NotStarted),
         }
@@ -442,6 +457,16 @@ fn path_label(path: &str) -> String {
         label.push(c);
     }
     label
+}
+
+/// The bytes of the block a helper's child starts with ([`crate::startup`]):
+/// `argv`, `env` stating `cwd` as its starting directory
+/// ([`crate::files::starting_in`]), and the child's names for its endowments.
+fn starting_block(argv: &[u8], env: &[u8], cwd: &str, names: &[&str]) -> Result<crate::startup::Said, Refused> {
+    let env = crate::files::starting_in(env, cwd)
+        .ok_or(Refused::Invalid("a working directory that is not absolute, is too long or holds a NUL"))?;
+    crate::startup::bytes(argv, &env, names)
+        .ok_or(Refused::TooBig("arguments, an environment and names past what a child starts with"))
 }
 
 /// What a helper runs, and the name it runs it under: the image named, else
@@ -568,5 +593,31 @@ mod tests {
     fn a_named_image_runs_under_its_program_s_name() {
         assert_eq!(image_and_name("/bin/cat", Some("/tmp/other")), ("/tmp/other", "/bin/cat"));
         assert_eq!(image_and_name("/bin/cat", None), ("/bin/cat", "/bin/cat"));
+    }
+
+    /// A caller's own arguments and environment of [`MAX_ARGS`] bytes start a
+    /// child from the longest working directory with a names table of
+    /// `MAX_NAMES` bytes, and one byte more does not: the block
+    /// [`Helper::spawn`] gives its child.
+    #[test]
+    fn max_args_of_a_caller_s_own_fit_beside_the_longest_directory() {
+        use crate::startup::{MAX_NAMES, WORD};
+        let cwd = alloc::format!("/{}", "d".repeat(MAX_PATH - 1));
+        let env: &[u8] = b"TERM=toyos\0";
+        // ToyOS's count, kept apart from the block's own arithmetic.
+        let counted = |argv: &[u8]| {
+            let strings = |run: &[u8]| run.split(|&b| b == 0).filter(|s| !s.is_empty()).map(<[u8]>::len).collect::<Vec<_>>();
+            [strings(argv), strings(env)].iter().map(|run| (run.len() + 1) * WORD + run.iter().map(|len| len + 1).sum::<usize>()).sum::<usize>()
+        };
+        let mut argv = alloc::vec![b'a'; MAX_ARGS - 4 * WORD - env.len() - 1];
+        argv.push(0);
+        assert_eq!(counted(&argv), MAX_ARGS);
+        // One name filling the most bytes of a table: its two counts, its length and itself.
+        let longest = "n".repeat(MAX_NAMES - 8 - 2);
+        let names = [longest.as_str()];
+        assert!(starting_block(&argv, env, &cwd, &names).is_ok(), "a caller's MAX_ARGS bytes");
+        argv.insert(0, b'a');
+        assert_eq!(counted(&argv), MAX_ARGS + 1);
+        assert!(matches!(starting_block(&argv, env, &cwd, &names), Err(Refused::TooBig(_))), "one byte past MAX_ARGS");
     }
 }

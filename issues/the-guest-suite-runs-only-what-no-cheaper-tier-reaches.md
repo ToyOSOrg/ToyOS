@@ -83,9 +83,9 @@ Metal: test kernels armed on the T14. Host: `kernel::sched` and `kernel-sim`, `k
 `toyos-wallclock`. Exit: as stage A; an unrepresentable name is a type the kernel builds against
 and a compile-fail case.
 
-- metal `fpu_isolation`, `gsbase_locked`, first: x86-64 FPU isolation runs nowhere until this
-  lands. One process's FPU state and GS base never reach another; brings back the
-  `fpu-save-nothing` and `user-writable-gsbase` features, their negative controls.
+- metal `fpu_isolation`, first: x86-64 FPU isolation runs nowhere until this lands. One
+  process's FPU state never reaches another; brings back the `fpu-save-nothing` feature, its
+  negative control.
 - metal `control_regs_negative`: an AP left without the declared control registers is caught,
   under `no-ap-control-regs`.
 - metal `va_exhaustion`, `heap_ceiling_bounds`: an exhausted address space and heap refuse by name.

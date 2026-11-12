@@ -93,16 +93,23 @@ fn drain(body: &mut ureq::Body, most: u64) -> Result<u64, String> {
 
 /// [`HOST`]'s first IPv4 address. A ToyOS netstack answers `NotConnected`
 /// until its lease lands and tells no one when it does, so a lookup it
-/// answers so is asked again each second for up to [`LEASE`].
+/// answers so, or [`unsettled`] otherwise, is asked again each second for up
+/// to [`LEASE`].
 fn resolve() -> Result<SocketAddr, String> {
     let start = Instant::now();
     loop {
         match (HOST, 443).to_socket_addrs() {
             Ok(mut addrs) => return addrs.find(SocketAddr::is_ipv4).ok_or_else(|| format!("{HOST} has no IPv4 address")),
-            Err(e) if e.kind() == ErrorKind::NotConnected && start.elapsed() < LEASE => std::thread::sleep(Duration::from_secs(1)),
+            Err(e) if unsettled(e.kind()) && start.elapsed() < LEASE => std::thread::sleep(Duration::from_secs(1)),
             Err(e) => return Err(format!("{HOST} did not resolve: {e}")),
         }
     }
+}
+
+/// A lookup's answer while the machine's lease is landing or changing: no
+/// network, no way out to a resolver yet, or a lease that went under it.
+fn unsettled(kind: ErrorKind) -> bool {
+    matches!(kind, ErrorKind::NotConnected | ErrorKind::NetworkUnreachable | ErrorKind::ResourceBusy)
 }
 
 /// One agent, so every request after the first rides a connection it keeps.

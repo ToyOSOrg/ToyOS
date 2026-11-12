@@ -33,7 +33,8 @@ fn object_of(path: &str) -> (SharedMemory, Vec<u8>) {
 
 /// Spawn the program `bytes`, laid out from the object `image` names.
 fn spawn(image: RawHandle, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
-    let block = Block::new(format!("{SELF}\0{CHILD}").as_bytes(), b"", &[], None).expect("a startup block");
+    let said = toyos::startup::bytes(format!("{SELF}\0{CHILD}").as_bytes(), b"", &[]).expect("arguments a startup block holds");
+    let block = Block::new(&said, None).expect("a startup block");
     let laid = lay_out(bytes, Machine::RUNNING, Source::Copied(u64::from(image.0))).expect("this program lays out").starting_with(&block);
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
