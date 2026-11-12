@@ -274,9 +274,8 @@ fn a_manage_only_handle_is_no_place() {
     println!("  a MANAGE-only handle is no place: PermissionDenied");
 }
 
-/// A pipe's write end carries `WRITE`, so the kernel reaches the type it is
-/// not: the supervisor answers the launch refused, and the arms after this one are the supervisor
-/// answering the next.
+/// A pipe's write end is no place: the supervisor answers the launch refused,
+/// and the arms after this one are the supervisor answering the next.
 fn a_pipe_is_no_place() {
     let (_read, write) = toyos::pipe_pair().expect("a pipe of our own");
     let place = write.as_handle().try_clone_to_owned().expect("a duplicate to send");

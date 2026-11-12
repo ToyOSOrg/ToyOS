@@ -41,7 +41,7 @@ pub enum HandleError {
     BadHandle,
     /// The slot has moved past this handle: closed, or its generations ran out.
     Stale,
-    /// Ends the caller like the two above, except through [`HandleTable::get_sent`], the one lookup of a handle a peer sent — `SYS_CONNECT`'s connector and `SYS_SPAWN`'s place and job — where it is `InvalidArgument`.
+    /// Ends the caller like the two above. [`HandleTable::get_sent`], the one lookup of a handle a peer sent (`SYS_CONNECT`'s connector and `SYS_SPAWN`'s place and job), answers a wrong type `InvalidArgument` and never builds this.
     WrongType { held: &'static str, wanted: &'static str },
     /// The handle is fine and does not carry what the call needs.
     Rights { held: Rights, needed: Rights },
@@ -318,16 +318,18 @@ impl HandleTable {
             .ok_or(HandleError::WrongType { held: entry.object.kind(), wanted: T::NAME })
     }
 
-    /// [`get`](Self::get) for a handle a peer sent, whose type is that peer's claim rather than proof of a bug in this caller: a wrong type refuses `InvalidArgument`, and every other failure is `get`'s.
+    /// [`get`](Self::get) for a handle a peer sent, whose type is that peer's claim rather than proof of a bug in this caller: a wrong type refuses `InvalidArgument` whatever rights the handle carries, since a right means something only on its kind, and every other failure is `get`'s.
     pub fn get_sent<T: KObjectVariant>(
         &self,
         h: RawHandle,
         need: Rights,
     ) -> Result<Arc<T>, Refusal> {
-        match self.get::<T>(h, need) {
-            Err(HandleError::WrongType { .. }) => Err(SyscallError::InvalidArgument.into()),
-            other => other.map_err(Refusal::from),
+        let entry = self.entry_of(h)?;
+        let object = T::from_ref(&entry.object).ok_or(SyscallError::InvalidArgument)?;
+        if !entry.rights.contains(need) {
+            return Err(HandleError::Rights { held: entry.rights, needed: need }.into());
         }
+        Ok(object.clone())
     }
 
     /// The borrowing accessor, for a call that completes while still holding the guard.
