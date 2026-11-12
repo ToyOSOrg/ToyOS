@@ -484,10 +484,12 @@ impl Decision {
         named.filter(|&one| !in_force.has(one)).fold(Mitigations::NONE, Mitigations::with)
     }
 
-    /// What is in force on a CPU whose registers read `registers`: [`ALWAYS`]
-    /// and each control a register shows on. Intel's two `IA32_MCU_OPT_CTRL`
-    /// bits opt out of a mitigation its microcode turns on; the others turn
-    /// one on.
+    /// What is in force on a CPU whose registers read `registers`: [`ALWAYS`];
+    /// what the kernel applies by construction wherever this decision names
+    /// it and the CPU enumerates it, which no register shows at bring-up (the
+    /// controls a program that asks runs with, [`ON_REQUEST`]); and each
+    /// control a register shows on. Intel's two `IA32_MCU_OPT_CTRL` bits opt
+    /// out of a mitigation its microcode turns on; the others turn one on.
     pub fn in_force(&self, registers: &Registers) -> Mitigations {
         let mut on = ALWAYS;
         for one in Mitigation::ALL.into_iter().filter(|&one| ON_REQUEST.has(one) && self.enumerates(one)) {
