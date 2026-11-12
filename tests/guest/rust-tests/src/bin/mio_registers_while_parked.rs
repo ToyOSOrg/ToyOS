@@ -5,8 +5,9 @@
 //!
 //! The poll is parked with nothing else registered: a `Poll` holds one waker,
 //! and the waker is the one source this boot can make ready, having no
-//! netstack. Red where the poll returns without the waker's event, or never
-//! returns: the second thread then ends the process past [`CEILING`], by name.
+//! netstack. Red where the poll returns without the waker's event, and where
+//! it never returns: the second thread then ends the process past [`CEILING`],
+//! by name.
 
 #[path = "../roster.rs"]
 mod roster;
@@ -36,8 +37,9 @@ fn main() {
     let (returned, on_return) = mpsc::channel::<()>();
 
     let late = std::thread::spawn(move || {
-        // Past `POLLING` the main thread blocks only in the poll: parked, or
-        // on the selector's lock with its copy of the registrations taken.
+        // Past `POLLING`, until its poll returns, the main thread blocks only
+        // inside the poll, so a registration made from here lands after the
+        // poll's copy of the registrations.
         roster::await_true(|| {
             POLLING.load(Ordering::SeqCst)
                 && roster::my_threads(&cap).iter().any(|&(is_thread, state)| !is_thread && state == roster::BLOCKED)
