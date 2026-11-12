@@ -12,8 +12,10 @@ one for a change to them before it hands them over in one `inbox_submit`. Its
 `queue` does not look at the ring's head, so a 65th watch overwrites the first
 before the kernel has taken it, and the kernel refuses a submit of more than
 its ring holds `InvalidArgument` (`kernel/src/inbox/mod.rs`,
-`submit_submissions`). So while more than 63 sources are registered, every
-`select` fails: a tokio runtime on ToyOS cannot serve a 64th socket.
+`submit_submissions`). So while more than 63 registrations stand, every
+`select` fails. A TCP stream registered for both directions takes two, its
+receive bell and its bell (`src/net/tcp/toyos_stream.rs`, `register`), so a
+tokio runtime with its waker and one listener fails at its 31st stream.
 
 Found by reading, not exercised.
 
