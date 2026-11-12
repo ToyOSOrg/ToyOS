@@ -68,7 +68,7 @@ pub fn failed(e: impl Into<toyos::Failure>) -> crate::io::Error {
         Failure::TryAgain => const_error!(Kind::ResourceBusy, "the lookup's lease changed under it: ask again"),
         Failure::NotExecutable => const_error!(Kind::InvalidData, "the file is no program this machine loads"),
         Failure::Truncated => const_error!(Kind::UnexpectedEof, "the file shrank while it was read"),
-        Failure::TooBig => const_error!(Kind::InvalidInput, "more than a spawn carries"),
+        Failure::TooBig => const_error!(Kind::ArgumentListTooLong, "more than a spawn carries"),
     }
 }
 

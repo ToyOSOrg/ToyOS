@@ -596,9 +596,9 @@ mod tests {
     }
 
     /// A caller's own arguments and environment of [`MAX_ARGS`] bytes start a
-    /// child from the longest working directory with the most names a block
-    /// holds, and one byte more does not: the block [`Helper::spawn`] gives its
-    /// child.
+    /// child from the longest working directory with a names table of
+    /// `MAX_NAMES` bytes, and one byte more does not: the block
+    /// [`Helper::spawn`] gives its child.
     #[test]
     fn max_args_of_a_caller_s_own_fit_beside_the_longest_directory() {
         use crate::startup::{MAX_NAMES, WORD};

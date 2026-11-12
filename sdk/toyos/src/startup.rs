@@ -53,8 +53,8 @@ const TABLE_HEADER: usize = 8;
 
 /// The most bytes of a names table: a share of the block of its own, so the
 /// rest is a caller's to fill with arguments and environment whatever it
-/// endows (`crate::spawn::MAX_ARGS`). It is many times any table a spawn in
-/// this tree makes: as many names as a spawn endows, of 680 bytes each.
+/// endows (`crate::spawn::MAX_ARGS`): as many names as a spawn endows, of 680
+/// bytes each.
 pub const MAX_NAMES: usize = 64 * 1024;
 
 /// The status a process whose endowment table is malformed exits with,

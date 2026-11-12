@@ -28,13 +28,13 @@ The descriptor table and the stdio stream state are already one per process:
 the instance that owns the table defines them and every instance calls it
 (`toyos_fd_*`, `toyos_stdio_*`).
 
-- **Owed on metal:** the stream state's test, the shared-boot member
-  `stream_state_is_one`, on the T14's `testcases` boot, with that boot's
-  `testcases-watchdog`, at main after #1226. `main` must show it green: pieces
-  of one line from std, libc and the SDK are one record, and a redirect
-  through libc or through the SDK is seen by the other runtimes. No other
-  `testcases` member may have regressed, and `testcases-watchdog` must be
-  green. The member runs only on metal.
+- **Owed on a guest row:** the stream state's test, the shared-boot member
+  `stream_state_is_one`, which the guest row `testcases_members_exit_0` runs
+  on QEMU, at main after #1226. `main` must show it green: pieces of one line
+  from std, libc and the SDK are one record, and a redirect through libc or
+  through the SDK is seen by the other runtimes. What it holds is which copy
+  of a static a linked image's runtimes reach, which no bench changes, so
+  nothing of it is owed on metal.
 
 **Exit condition**: one table of stream ends per process, held by the
 descriptor table's owner as the stream state is, shown by a guest test that
