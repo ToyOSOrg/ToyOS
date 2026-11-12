@@ -37,13 +37,6 @@ reused waits for its new answer, each red under its mutation;
 running a thread of the space, and that one freeing no table waits for none
 when no other CPU runs one, each half red under its mutation.
 
-- **Owed on metal:** the idle holder (#1251) on the T14: `tlb_shootdown_waits`
-  in the `shared-debug` boot, green, its third part counting zero CPUs
-  reached by a change that frees no table. On the T14 and the AMD bench, no
-  `testcases`, `shared-debug` or `testcases-watchdog` boot of main ends on
-  `tlb: a CPU still holds the root` or `paging: a space's tables are freed
-  while a CPU still holds its root`.
-
 What is owed, now that a thread can be pinned
 (`toyos_abi::syscall::thread_set_affinity`): on a machine with PCID,
 a sibling that touches a page, blocks off its pinned CPU while a thread of
@@ -61,10 +54,16 @@ four boots against five Linux runs) the T14 read `mem.munmap_part.4k` at
 against 1,019 ns); the AMD bench is ahead on all three.
 
 - **Owed on metal** for the asks above (a reached CPU flushing only the
-  change's range, the initiator owing itself nothing):
+  change's range, the initiator owing itself nothing) and the idle holder
+  (#1251):
   - The T14's `shared-debug` boot (the actuator kernel), where main must pass
     `test_rs_tlb_shootdown_waits`: a change still waits for every CPU running
-    the space.
+    the space, and its third part counts zero CPUs reached by a change that
+    frees no table.
+  - On the T14 and the AMD bench, no `testcases`, `shared-debug` or
+    `testcases-watchdog` boot of main ending on `tlb: a CPU still holds the
+    root` or `paging: a space's tables are freed while a CPU still holds its
+    root`.
   - An A/B on both benches of `osbench_system` and `osbench_mem`, main from
     before and after. Main after must read `mem.munmap_touched_remote.4k`
     faster, and `mem.munmap_part.4k`, `mem.mprotect.4k` and the multi-thread

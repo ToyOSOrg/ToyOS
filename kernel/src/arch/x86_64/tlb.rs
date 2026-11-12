@@ -71,8 +71,8 @@ pub fn idle() {
 }
 
 /// A thread of the space tagged `tag` resumes on this CPU, which holds its
-/// root: every user translation is flushed first where a change passed this
-/// CPU by while it idled there.
+/// root: where it idled there, every user translation is flushed first if
+/// the space changed after this CPU's last such flush.
 pub fn resume(tag: u16) {
     if USER.sized() && USER.resume(percpu::cpu_id() as usize, usize::from(tag)) {
         flush(Reach::Narrow);

@@ -159,10 +159,11 @@ impl Tags {
         }
     }
 
-    /// A thread of `tag` resumes on `cpu`, which holds its root: `true` where
-    /// it must flush every user translation first, since a change passed it by
-    /// while it was idle there ([`Self::idle`]). A CPU that ran a thread of
-    /// `tag` until now was reached by every change since.
+    /// A thread of `tag` resumes on `cpu`, which holds its root. If `cpu`
+    /// idled on it ([`Self::idle`]), `true` where it must flush every user
+    /// translation first: `tag` changed after its last such flush, as it has
+    /// where a change passed `cpu` by while it idled. A CPU that ran a thread
+    /// of `tag` until now was reached by every change since, and owes nothing.
     pub fn resume(&self, cpu: usize, tag: usize) -> bool {
         let Some(idle) = self.idle.get(cpu) else { return false };
         // Only `cpu` writes its mark.
