@@ -70,7 +70,8 @@ pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Resu
 /// For the one process no parent endows a service: the supervisor makes the
 /// machine's directory capabilities itself. No child inherits them. Refused,
 /// and the connectors closed, when this process has adopted some already, or
-/// once std has resolved a file or looked up a service of its own.
+/// has resolved a file or looked a service up, through std or any other copy
+/// of the SDK: the process holds one set.
 ///
 /// # Safety
 /// Each handle names a connector: it is taken as one on the caller's word.
