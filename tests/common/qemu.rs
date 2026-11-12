@@ -177,6 +177,10 @@ static FASTEST_BOOT_MS: AtomicU32 = AtomicU32::new(u32::MAX);
 /// host pays them at 1×.
 const REFERENCE_BOOT_MS: u32 = 1424;
 
+/// The most [`host_scale`] pays a ceiling for a slow host, so one anomalous
+/// boot cannot disable every guard in the suite at once.
+pub const HOST_SCALE_CAP: u32 = 8;
+
 fn record_boot(took: Duration) {
     let ms = took.as_millis().min(u32::MAX as u128) as u32;
     FASTEST_BOOT_MS.fetch_min(ms, Ordering::SeqCst);
@@ -186,8 +190,7 @@ fn record_boot(took: Duration) {
 /// a fraction so that a 1.4× host is not rounded to 1.
 ///
 /// **Only ever upward**, since a ceiling that shrank would report wedges that
-/// are not there; and at most 8×, so one anomalous boot cannot disable every
-/// guard in the suite at once.
+/// are not there; and at most [`HOST_SCALE_CAP`].
 fn host_scale() -> (u32, u32) {
     let fastest = FASTEST_BOOT_MS.load(Ordering::SeqCst);
     // Before the first boot there is no measurement, and the sentinel must not
@@ -195,7 +198,7 @@ fn host_scale() -> (u32, u32) {
     if fastest == u32::MAX || fastest <= REFERENCE_BOOT_MS {
         return (1, 1);
     }
-    (fastest.min(REFERENCE_BOOT_MS * 8), REFERENCE_BOOT_MS)
+    (fastest.min(REFERENCE_BOOT_MS * HOST_SCALE_CAP), REFERENCE_BOOT_MS)
 }
 
 /// The fastest boot seen, the reference, and the scale it produced — for a run's
@@ -407,7 +410,7 @@ pub const NEVER_ANNOUNCED: &str =
 const WINDOW_LINES: usize = 40;
 
 /// The last [`WINDOW_LINES`] lines of `said`, under the count of what was cut.
-fn window(said: &str) -> String {
+pub fn window(said: &str) -> String {
     let lines: Vec<&str> = said.lines().collect();
     let kept = lines.len().min(WINDOW_LINES);
     let head = if lines.len() > kept {
@@ -1410,14 +1413,14 @@ impl Drop for HeldCpus {
 /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants.
 ///
 /// **A parameter never decides a build.** Every actuator lives in the one test
-/// kernel, so asking for one selects that kernel and nothing more; the third
-/// build is asked for by name and by one test.
+/// kernel, so asking for one selects that kernel, which a boot may also name,
+/// and nothing more; the third build is asked for by name and by one test.
 fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
     if options.kernel_params.is_empty() {
         return options.kernel_features.to_vec();
     }
     assert!(
-        options.kernel_features.is_empty(),
+        options.kernel_features.is_empty() || options.kernel_features == toyos_build::build::TEST_KERNEL,
         "a boot asking to arm {:?} also asks for the kernel build {:?}; an actuator is a \
          parameter and the test kernel carries all of them",
         options.kernel_params,
@@ -1834,6 +1837,52 @@ impl QemuInstance {
             return Err(format!("QEMU exited {status}\n{said}"));
         }
         Ok(said)
+    }
+
+    /// Everything the guest says until QEMU exits, onto `log`, and `Ok` once
+    /// it has exited 0, which under `-no-reboot` a reset, a power-off and a
+    /// triple fault all do: what stopped the guest is the caller's to ask. Or
+    /// why it did not exit, as [`ceiling_verdict`] reads `ceiling` paid out
+    /// for this guest.
+    pub fn await_end(&mut self, log: &mut String, ceiling: Duration) -> Result<(), String> {
+        let ceiling = self.budget(ceiling);
+        let from = log.len();
+        let start = Instant::now();
+        let (mut last_line, mut said_waiting) = (start, start);
+        let mut lines = 0usize;
+        let mut dying: Option<String> = None;
+        loop {
+            match self.rx.recv_timeout(VERDICT_POLL) {
+                Ok(line) => {
+                    last_line = Instant::now();
+                    lines += 1;
+                    if dying.is_none() && super::serial::died(&line) == Some(super::serial::Died::Kernel) {
+                        dying = Some(line.clone());
+                    }
+                    log.push_str(&line);
+                    log.push('\n');
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            if said_waiting.elapsed() >= WAIT_SAID {
+                said_waiting = Instant::now();
+                eprintln!(
+                    "  [qemu] the job list has run {}s of its {}s guard, the guest last heard {}s ago",
+                    start.elapsed().as_secs(),
+                    ceiling.as_secs(),
+                    last_line.elapsed().as_secs()
+                );
+            }
+            if let Some(why) = ceiling_verdict(dying.as_deref(), start.elapsed(), ceiling, last_line.elapsed(), lines) {
+                return Err(WaitVerdict::new(why, &[&log[from..]]).to_string());
+            }
+        }
+        let status = self.child.wait().map_err(|e| format!("QEMU could not be waited for: {e}"))?;
+        if !status.success() {
+            return Err(format!("QEMU exited {status}"));
+        }
+        Ok(())
     }
 
     /// [`budget_smp`] for a host-side wait on this guest's own vCPU count.

@@ -8,8 +8,10 @@ opened: 2026-09-29
 
 The owner's direction: the tests run one after another in a ToyOS that stays
 booted, driven by the host over ssh, with no reboot between them and no Ubuntu.
-The T14 is the integration tier: the shared boot runs only as `shared_metal`
-and `c_corpus_metal`, and
+The T14 is the integration tier for hardware: the shared boots run there as
+`shared_metal` and `c_corpus_metal` stage them, and on QEMU as the guest rows
+`testcases_members_exit_0` and `shared_debug_members_exit_0`, which stage
+the same members in the same order without the bench rows' own jobs;
 `issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md` adds
 metal rows.
 

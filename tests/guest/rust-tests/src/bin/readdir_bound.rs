@@ -4,13 +4,30 @@ use std::collections::BTreeSet;
 use std::fs;
 
 const DIR: &str = "/tmp/readdir_bound";
-const ENTRIES: usize = 6_000;
+/// Long names, so few files make a listing of several replies: the names
+/// alone are 128,000 bytes, nearly twice a 64 KiB reply.
+const ENTRIES: usize = 640;
+const NAME_BYTES: usize = 200;
+const _: () = assert!(ENTRIES * NAME_BYTES > 64 * 1024);
+
+fn name(i: usize) -> String {
+    let mut name = format!("entry-{i:06}-");
+    name.extend(std::iter::repeat_n('x', NAME_BYTES - name.len()));
+    name
+}
 
 fn main() {
     fs::create_dir(DIR).expect("create listing directory");
-    // The names alone exceed a 64 KiB reply, independently of wire overhead.
     for i in 0..ENTRIES {
-        fs::write(format!("{DIR}/entry-{i:06}"), b"").expect("create file");
+        if let Err(e) = fs::write(format!("{DIR}/{}", name(i)), b"") {
+            // What it made goes first: a `/tmp` left full fails every later
+            // job of the boot that writes it.
+            for made in 0..i {
+                let _ = fs::remove_file(format!("{DIR}/{}", name(made)));
+            }
+            let _ = fs::remove_dir(DIR);
+            panic!("create file {i} of {ENTRIES}: {e:?}");
+        }
     }
     let mut names = BTreeSet::new();
     for entry in fs::read_dir(DIR).expect("open listing") {
@@ -21,7 +38,7 @@ fn main() {
     }
     assert_eq!(names.len(), ENTRIES, "listing omitted entries");
     for i in 0..ENTRIES {
-        let name = format!("entry-{i:06}");
+        let name = name(i);
         assert!(names.contains(&name), "listing omitted {name}");
         fs::remove_file(format!("{DIR}/{name}")).expect("remove file");
     }
