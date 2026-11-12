@@ -7,6 +7,9 @@ severity: [security, kernel-from-userland]
 
 # Ring 3 replaces the kernel's GS base with a segment load
 
+Fixed in code by #1262; what follows is the defect as it stood, and below it
+what the exit still owes.
+
 The kernel runs no `swapgs`: GS holds this CPU's per-CPU block from boot on,
 and the `SYSCALL` entry's first instructions address it through `gs:` while
 still on the user stack (`kernel/src/arch/x86_64/syscall.rs`). `CR4.FSGSBASE`
@@ -27,6 +30,20 @@ chose inside the kernel half, the processor writes the exception frame there
 first. Every handler after it addresses `gs:` with the same zero base. Found by
 reading, while deciding whether the switch may keep a thread's FS base instead
 of reading it back (it may not, for the same reason); not reproduced.
+
+**Built** (#1262): every entry from Ring 3 swaps in the kernel's GS base, and
+the IST entries install it from `GDTR` whatever GS holds
+(`kernel/src/arch/x86_64/entry.rs`). `gs_segment_load` is the exit's test. Its
+child loads GS with each selector CPL 3 may load (null, user data and user
+code, at RPL 0 to 3) and enters the kernel by a syscall, a page fault and a
+park. The call answers, and GS's base reads back as its own. It was green
+under QEMU. Its negative control, the fix reverted, stalled the machine at the
+first entry after a GS load.
+
+**Owed on metal** (the benches were down when #1262 landed): on the T14 and
+the AMD bench, main's `testcases` boot must show `gs_segment_load` with all 12
+selectors reported. `issues/fsgsbase-is-taken.md` lists it with the rest #1262
+owes. The record closes when it has.
 
 **Exit**: a guest test, run on the T14 and the AMD bench, whose child loads GS
 with each selector Ring 3 can name and then makes a system call, and the kernel
