@@ -562,6 +562,11 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "reap-raise-relaxed", Some("reap_gate"), &[
         Fails("a_claim_sees_the_enrolled_work"),
     ]),
+    // A region page's first touch installs its frame without its zeros.
+    red(KERNEL_LOOM, "slot-install-relaxed", Some("shm_slot"), &[
+        Fails("a_frame_is_handed_over_with_what_its_drawer_wrote"),
+        Fails("two_touches_draw_once_and_are_handed_one_frame"),
+    ]),
     red(KERNEL_LOOM, "shootdown-serve-relaxed", Some("tlb_shootdown"), &[
         Fails("an_acknowledged_flush_postdates_the_page_table_write"),
         Fails("one_serve_answers_two_concurrent_shootdowns"),

@@ -67,15 +67,18 @@ as long. On the T14 the spin is a third of the children's growth in CPU, so
 the lock bounds less of the build there than on the AMD bench, where it is 72 %.
 
 **Decided** (the orchestrator, 2026-11-11), first of three, and built (#1268):
-**a draw of many frames takes the lock once.** A shared-memory region's frames
-(`pmm::alloc_promised_many`) and a fault's whole run (`pmm::alloc_promised_into`)
-are drawn a superframe's worth to a hold, as a space's teardown already gave
-frames back (`free_drawn`), with promises and ledgers moving as for as many
-single draws. Per-CPU frame caches in front of the lock are held until the
-batched build is measured; they would take single draws off it too, but every
-promise must stay backed by a frame free now, so a draw that finds the shared
-pool empty while another CPU's cache holds frames has to reach them. The second, a region's frames drawn at first touch, and the third, the
-window's size, are in their own records (the spawn record names them).
+**a draw of many frames takes the lock once.** A fault's whole run is drawn
+under one hold (`pmm::alloc_promised_into`), and so are the untouched pages of
+a shared-memory region's run, since a region's frames are drawn at first touch
+(`pmm::alloc_promised_zeroed_into`, the first-touch record), where #1268 drew a
+whole region a superframe's worth to a hold. Promises and ledgers move as for
+as many single draws, and frees already went back in batches (`free_drawn`).
+Per-CPU frame caches in front of the lock are held until the batched build is
+measured; they would take single draws off it too, but every promise must stay
+backed by a frame free now, so a draw that finds the shared pool empty while
+another CPU's cache holds frames has to reach them. The second, a region's
+frames drawn at first touch, and the third, the window's size, are in their own
+records (the spawn record names them).
 
 - **Owed on metal:** #1268, a draw of many promised frames under one hold of
   the frame allocator's lock. An A/B of main before and after it on the T14

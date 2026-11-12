@@ -88,6 +88,17 @@ lock-acquire-off = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 reap-raise-relaxed = []
+# The negative control for a region page's first touch. It makes
+# `object/shm/slot.rs`'s install and its loads `Relaxed`, so a toucher handed
+# another's frame need not see the zeros its drawer wrote, and `shm_slot.rs`
+# must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features slot-install-relaxed \
+#     --test shm_slot
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+slot-install-relaxed = []
 # The negative control for the shootdown acknowledgement. It makes
 # `shootdown.rs`'s `serve` read what it owes `Relaxed`, so the flush no longer
 # postdates the initiator's page-table write, and `tlb_shootdown.rs` must red:
