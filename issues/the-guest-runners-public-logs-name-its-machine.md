@@ -17,12 +17,14 @@ are the owner's.
    personal name (run 43143902443). The runner's user has no sudo, so only the
    owner can give the host, or the runner's view of it, a name that identifies
    nobody, as the workflow's header requires.
-2. **Earlier runs carry the values.** The 446 runs from 2026-11-04 to
-   2026-11-12 carry the host name and, in each instrument line and summary,
-   the CPU's brand string; a red row's echoed serial carries its signature and
-   microcode revision, as do the 72 `serial` artifacts unexpired on
-   2026-11-12. The repository keeps logs 90 days and these artifacts 7.
-   Deleting them sooner is the owner's decision, and nothing has been deleted.
+2. **Earlier runs carry the values.** Each of the 446 runs from 2026-11-04 to
+   2026-11-12 carries the host name, and each that reached its instrument step
+   the CPU's brand string there and in its summary. A red row's echoed serial
+   carries the signature and microcode revision, as do the serial logs of an
+   x86-64 KVM boot that the 72 `serial` artifacts unexpired on 2026-11-12 keep
+   (run 43143902443's does). The repository keeps logs 90 days and these
+   artifacts 7. Deleting them sooner is the owner's decision, and nothing has
+   been deleted.
 3. **What a guest measures of its host is not masked.** A KVM guest's TSC
    rate, XSAVE layout and feature words are its host's, and narrow the CPU
    down without naming it.
