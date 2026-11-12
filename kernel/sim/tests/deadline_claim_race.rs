@@ -141,7 +141,7 @@ fn deliver(m: &Machine1, shared: &Arc<TaskShared<SimMsg>>, cause: WakeCause) {
     let kick = m
         .handles
         .get(CPU0)
-        .post(slot, Msg::Wake { key: KEY, cause }, cause.urgency(), &SimPreempt);
+        .post(slot, Msg::Wake { shared: shared.clone(), cause }, cause.urgency(), &SimPreempt);
     if kick == Kick::Send {
         m.hw.kick(CPU0);
     }
@@ -183,7 +183,7 @@ fn a_claim_between_the_drain_and_the_fire_leaves_the_timer_armed_for_what_is_par
     let after = DEADLINE.after(1_000);
     pass(&m, &mut cpu, after);
     let armed = cpu.armed();
-    let owed = cpu.parked().filter_map(|p| p.deadline()).min();
+    let owed = cpu.due().map(|(at, _)| at).min();
 
     // The remote CPU's second instruction, and the recovery it owes.
     deliver(&m, &shared, WakeCause::new(WakeReason::Woken));

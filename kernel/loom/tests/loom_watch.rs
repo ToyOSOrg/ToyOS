@@ -59,7 +59,7 @@ use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer};
 use kernel_loom::sched_model::{
     model, watch_list, Kicks, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0,
 };
-use kernel_loom::sched::park::{prepare, Cancel, Commit, CurrentTask};
+use kernel_loom::sched::park::{prepare, Cancel, Commit, CurrentTask, Parked};
 use kernel_loom::sched::task::{
     Claim, Refused, TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason,
 };
@@ -200,7 +200,8 @@ fn drain(rx: &mut MailboxConsumer<Msg>, preempt: &PreemptModel) -> Vec<Msg> {
 fn park(t: &Arc<TaskShared<Msg>>) {
     let ticket = prepare(&CurrentTask::new(t, CPU0), Cancel::Answers, WaitClass::Pipe)
         .expect("nothing has posted yet");
-    assert!(matches!(ticket.commit(), Commit::Parked(_)));
+    let Commit::Parked(committed) = ticket.commit() else { panic!("nothing has posted yet") };
+    assert!(matches!(committed.park(()), Parked::Blocked));
 }
 
 /// **The lost wake, closed by construction.** A waiter registers, reads its
@@ -233,7 +234,14 @@ fn a_post_racing_a_registration_leaves_nobody_parked() {
                         continue;
                     };
                     match ticket.commit() {
-                        Commit::Parked(_) => return true,
+                        Commit::Parked(committed) => match committed.park(()) {
+                            Parked::Blocked => return true,
+                            // A claim while it committed: woken at once, as the pass wakes it.
+                            Parked::WokenFirst(()) => {
+                                assert!(waiter.recover_if_claimed(CPU0));
+                                continue;
+                            }
+                        },
                         Commit::AlreadyWoken => continue,
                         Commit::Killed => unreachable!("nothing retires in this model"),
                     }
@@ -438,7 +446,14 @@ fn a_second_post_is_not_lost_to_a_flag_the_waiter_consumed() {
                         continue;
                     };
                     match ticket.commit() {
-                        Commit::Parked(_) => return true,
+                        Commit::Parked(committed) => match committed.park(()) {
+                            Parked::Blocked => return true,
+                            // A claim while it committed: woken at once, as the pass wakes it.
+                            Parked::WokenFirst(()) => {
+                                assert!(waiter.recover_if_claimed(CPU0));
+                                continue;
+                            }
+                        },
                         Commit::AlreadyWoken => continue,
                         Commit::Killed => unreachable!("nothing retires in this model"),
                     }
@@ -493,7 +508,14 @@ fn wait_out(waiter: &Arc<TaskShared<Msg>>) -> End {
             Err(Refused::Notified) => continue,
             Err(Refused::Revoked) => return End::Revoked,
             Ok(ticket) => match ticket.commit() {
-                Commit::Parked(_) => return End::Parked,
+                Commit::Parked(committed) => match committed.park(()) {
+                    Parked::Blocked => return End::Parked,
+                    // A claim while it committed: woken at once, as the pass wakes it.
+                    Parked::WokenFirst(()) => {
+                        assert!(waiter.recover_if_claimed(CPU0));
+                        continue;
+                    }
+                },
                 Commit::AlreadyWoken => continue,
                 Commit::Killed => unreachable!("nothing retires in this model"),
             },
@@ -709,7 +731,14 @@ fn submit_parks(ring: &RingRef, submitter: &Arc<TaskShared<Msg>>, cpu: CpuId, wa
                 continue;
             };
             match ticket.commit() {
-                Commit::Parked(_) => return true,
+                Commit::Parked(committed) => match committed.park(()) {
+                    Parked::Blocked => return true,
+                    // A claim while it committed: woken at once, as the pass wakes it.
+                    Parked::WokenFirst(()) => {
+                        assert!(submitter.recover_if_claimed(cpu));
+                        continue;
+                    }
+                },
                 Commit::AlreadyWoken => continue,
                 Commit::Killed => unreachable!("nothing retires in this model"),
             }

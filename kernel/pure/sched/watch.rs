@@ -70,21 +70,21 @@ pub trait Ring {
 }
 
 /// Everything a watch holds.
-pub struct Waiters<M, R> {
+pub struct Waiters<M: SchedMsg, R> {
     /// In registration order, so a bounded post reaches the longest waiter
     /// first.
     threads: Vec<Waiter<M>>,
     rings: Vec<R>,
 }
 
-struct Waiter<M> {
+struct Waiter<M: SchedMsg> {
     task: Arc<TaskShared<M>>,
     /// The waiter's own word for a bounded post: a futex's address, a sleep
     /// lock's ticket. Opaque here.
     token: u64,
 }
 
-impl<M, R> Waiters<M, R> {
+impl<M: SchedMsg, R> Waiters<M, R> {
     /// `const` so a watch can be a `static`: the keyboard's, the futex
     /// buckets', a device's.
     pub const fn new() -> Self {
@@ -95,7 +95,7 @@ impl<M, R> Waiters<M, R> {
     }
 }
 
-impl<M, R> Default for Waiters<M, R> {
+impl<M: SchedMsg, R> Default for Waiters<M, R> {
     fn default() -> Self {
         Self::new()
     }
@@ -113,12 +113,12 @@ pub struct Poster<'a, M, K, P> {
 /// lock let go, on the stack and so allocating nothing.
 pub const FEW: usize = 4;
 
-pub struct Watch<M, R: Ring, L: CellLock<Waiters<M, R>>> {
+pub struct Watch<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> {
     list: L,
     _msg: PhantomData<fn() -> (M, R)>,
 }
 
-impl<M, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
+impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
     pub const fn new(list: L) -> Self {
         Self {
             list,
@@ -359,7 +359,7 @@ fn take_matching<R: Ring>(rings: &mut Vec<R>, out: &mut [Option<R>; FEW], takes:
 
 /// An object that ends with polls still registered answers them: dropping a
 /// watch fires every live ring entry as [`Fire::Gone`].
-impl<M, R: Ring, L: CellLock<Waiters<M, R>>> Drop for Watch<M, R, L> {
+impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Drop for Watch<M, R, L> {
     fn drop(&mut self) {
         let ended = self.list.with(|w| core::mem::take(&mut w.rings));
         for ring in &ended {
@@ -378,7 +378,7 @@ mod tests {
     use crate::sched::topology::Topology;
     use crate::sched::hw::CpuId;
     use crate::sched::mailbox::{mailbox, MailboxConsumer, NoPreempt};
-    use crate::sched::park::{prepare, Cancel, Commit, CurrentTask};
+    use crate::sched::park::{prepare, Cancel, Commit, CurrentTask, Parked};
     use crate::sched::task::{Notify, Refused, TaskKey, TaskState, WaitClass, WakeReason};
     use alloc::vec;
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -395,8 +395,9 @@ mod tests {
     }
 
     impl SchedMsg for Msg {
-        fn wake(key: TaskKey, _cause: WakeCause) -> Self {
-            Msg::Wake(key)
+        type Parked = ();
+        fn wake(shared: Arc<TaskShared<Self>>, _cause: WakeCause) -> Self {
+            Msg::Wake(shared.key())
         }
         fn retire(shared: Arc<TaskShared<Self>>) -> Self {
             Msg::Retire(shared.key())
@@ -474,7 +475,8 @@ mod tests {
     fn parked(t: &Arc<TaskShared<Msg>>) {
         let ticket = prepare(&CurrentTask::new(t, C0), Cancel::Answers, WaitClass::Other)
             .expect("nothing notified this task");
-        assert!(matches!(ticket.commit(), Commit::Parked(_)));
+        let Commit::Parked(committed) = ticket.commit() else { panic!("nothing posted before the park") };
+        assert!(matches!(committed.park(()), Parked::Blocked));
     }
 
     /// The window a check-then-register waiter loses: registered, condition

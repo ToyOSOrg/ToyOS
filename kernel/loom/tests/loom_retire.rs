@@ -27,7 +27,7 @@ use kernel_loom::sched::task::{
     RtState, SchedPayload, TaskAccounting, TaskBuilder, TaskKey, TaskShared, TaskState, WaitClass,
     WakeCause, WakeReason,
 };
-use kernel_loom::sched::park::{notify, prepare, Cancel, Commit, CurrentTask};
+use kernel_loom::sched::park::{notify, prepare, Cancel, Commit, CurrentTask, Parked};
 
 struct World {
     cpus: CpuHandles<Msg>,
@@ -149,8 +149,9 @@ fn a_retire_racing_the_park_commit_always_leaves_someone_to_reap() {
             }
             // The commit read the bit before the retirer set it. That is fine
             // precisely because the message above exists: the pass that drains
-            // it finds the task in `parked` and reaps it there.
-            Commit::Parked(_) => {
+            // it claims the parked task and wakes it into its dying list.
+            Commit::Parked(committed) => {
+                assert!(matches!(committed.park(()), Parked::Blocked), "nothing claims in this model");
                 assert_eq!(waiter.state(), TaskState::Blocked(CPU0));
             }
             Commit::AlreadyWoken => unreachable!("nothing wakes in this model"),
@@ -527,10 +528,10 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
             "the task is in no container: the retire {} the claim and nothing placed it",
             if woke { "lost" } else { "won" },
         );
-        assert!(
-            cpu.parked().next().is_none(),
-            "a retire that lost the claim leaves the entry for the wake to find, \
-             and the wake takes it out of `parked`",
+        assert_eq!(
+            cpu.due().count(),
+            0,
+            "a park with no deadline leaves nothing for the timer",
         );
         assert!(
             !cpu.rq().keys().any(|key| key == KEY),

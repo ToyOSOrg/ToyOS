@@ -30,16 +30,16 @@ use crate::sched::mailbox::{
     Doorbell, Kick, MailboxConsumer, MailboxNode, MailboxProducer, PostSlot, PreemptGuard,
     Quiesced, SchedMsg, SleepArm, Urgency,
 };
-use crate::sched::msg::Msg;
+use crate::sched::msg::{Msg, ParkedRecord};
 use crate::sched::queue::{RunQueue, MIN_SLICE_NS};
 use crate::sched::sync::{fence, Arc, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::sched::task::{
-    BlockedTask, Claim, DeadTask, ReadyTask, RunningTask, SchedPayload, TaskKey, TaskShared,
-    TaskState, TransitTask, WaitClass, WakeCause, WakeReason, QUANTUM_NS,
+    Claim, DeadTask, Gen, ReadyTask, RunningTask, SchedPayload, TaskKey, TaskShared,
+    TaskState, TransitTask, WakeCause, WakeReason, QUANTUM_NS,
 };
 use crate::sched::timer::{TimerApplied, TimerPlan};
 use crate::sched::topology::{Level, Topology};
-use crate::sched::park::{CommittedTicket, CurrentTask};
+use crate::sched::park::{CommittedTicket, CurrentTask, Parked};
 
 /// Permission to switch. Holds pointers into the stable Box-backed task
 /// records; constructed only by safe code in
@@ -125,88 +125,45 @@ pub enum Action<X: SchedPayload> {
     Idle(SleepToken),
 }
 
-/// A parked task, plus the two facts that are only meaningful while parked.
-///
-/// The deadline lives *here*, so a task that is not parked structurally
-/// cannot have one; [`Parked`]'s order of deadlines is written only beside it.
-/// A `since` field here is omitted for the same reason: the residency stamp is
-/// in the task record.
-pub struct ParkedEntry<X: SchedPayload> {
-    task: BlockedTask<X>,
-    deadline: Option<Nanos>,
-    class: WaitClass,
+/// The deadlines this CPU owes the tasks that parked on it, in the order they
+/// fall due: what it owes first is one lookup, however many it holds. A
+/// parked task's record is in its own `TaskShared`, owned by whoever wins the
+/// claim that ends the park; this keeps only what the timer needs, one entry
+/// per task, its last timed park's. An entry whose park another claim ended
+/// stays until it falls due, and its claim then finds that park gone.
+struct Due<X: SchedPayload> {
+    order: BTreeSet<(Nanos, TaskKey)>,
+    parks: BTreeMap<TaskKey, (Nanos, Gen, Arc<TaskShared<Msg<X>>>)>,
 }
 
-/// The tasks parked on a CPU, and their deadlines in the order they fall due:
-/// what the CPU owes first is one lookup, however many tasks it holds. Only
-/// these methods write either, so the order cannot disagree with an entry.
-struct Parked<X: SchedPayload> {
-    entries: BTreeMap<TaskKey, ParkedEntry<X>>,
-    due: BTreeSet<(Nanos, TaskKey)>,
-}
-
-impl<X: SchedPayload> Parked<X> {
+impl<X: SchedPayload> Due<X> {
     fn new() -> Self {
-        Self { entries: BTreeMap::new(), due: BTreeSet::new() }
+        Self { order: BTreeSet::new(), parks: BTreeMap::new() }
     }
 
-    fn insert(&mut self, key: TaskKey, entry: ParkedEntry<X>) {
-        if let Some(at) = entry.deadline {
-            self.due.insert((at, key));
+    fn insert(&mut self, at: Nanos, generation: Gen, shared: Arc<TaskShared<Msg<X>>>) {
+        let key = shared.key();
+        if let Some((old, _, _)) = self.parks.insert(key, (at, generation, shared)) {
+            self.order.remove(&(old, key));
         }
-        assert!(self.entries.insert(key, entry).is_none(), "a task parked twice");
+        self.order.insert((at, key));
     }
 
-    fn remove(&mut self, key: TaskKey) -> Option<ParkedEntry<X>> {
-        let entry = self.entries.remove(&key)?;
-        if let Some(at) = entry.deadline {
-            self.due.remove(&(at, key));
-        }
-        Some(entry)
-    }
-
-    fn get(&self, key: TaskKey) -> Option<&ParkedEntry<X>> {
-        self.entries.get(&key)
-    }
-
-    /// The deadline that will not be honoured stops being owed.
-    fn forget_deadline(&mut self, key: TaskKey) {
-        if let Some(at) = self.entries.get_mut(&key).and_then(|entry| entry.deadline.take()) {
-            self.due.remove(&(at, key));
+    fn remove(&mut self, key: TaskKey) {
+        if let Some((at, _, _)) = self.parks.remove(&key) {
+            self.order.remove(&(at, key));
         }
     }
 
     fn earliest(&self) -> Option<Nanos> {
-        self.due.first().map(|&(at, _)| at)
+        self.order.first().map(|&(at, _)| at)
     }
 
-    /// The task whose deadline falls due first, if that is by `now`.
-    fn next_due(&self, now: Nanos) -> Option<TaskKey> {
-        self.due.first().filter(|&&(at, _)| at <= now).map(|&(_, key)| key)
-    }
-}
-
-/// One parked task as an outside reader sees it.
-pub struct ParkedView<'a, X: SchedPayload> {
-    key: TaskKey,
-    entry: &'a ParkedEntry<X>,
-}
-
-impl<X: SchedPayload> ParkedView<'_, X> {
-    pub fn key(&self) -> TaskKey {
-        self.key
-    }
-
-    pub fn deadline(&self) -> Option<Nanos> {
-        self.entry.deadline
-    }
-
-    pub fn is_rt(&self) -> bool {
-        self.entry.task.rt().is_rt()
-    }
-
-    pub fn shared_state(&self) -> TaskState {
-        self.entry.task.shared().state()
+    /// The park whose deadline falls due first, if that is by `now`, taken out.
+    fn pop_due(&mut self, now: Nanos) -> Option<(Gen, Arc<TaskShared<Msg<X>>>)> {
+        let &(at, key) = self.order.first().filter(|&&(at, _)| at <= now)?;
+        self.order.remove(&(at, key));
+        self.parks.remove(&key).map(|(_, generation, shared)| (generation, shared))
     }
 }
 
@@ -237,7 +194,7 @@ pub struct CpuSched<X: SchedPayload> {
     id: CpuId,
     running: Option<RunningTask<X>>,
     rq: RunQueue<X>,
-    parked: Parked<X>,
+    due: Due<X>,
     /// Killed tasks that still have a kernel stack to unwind, dispatched
     /// ahead of the **fair** queue, and behind the RT band only until the head
     /// of this list has aged ([`DYING_AGE_NS`]).
@@ -398,7 +355,7 @@ impl<X: SchedPayload> CpuSched<X> {
             id,
             running: None,
             rq: RunQueue::new(),
-            parked: Parked::new(),
+            due: Due::new(),
             dying: VecDeque::new(),
             stopped: VecDeque::new(),
             held: Vec::new(),
@@ -454,12 +411,10 @@ impl<X: SchedPayload> CpuSched<X> {
         &self.rq
     }
 
-    pub fn parked(&self) -> impl Iterator<Item = ParkedView<'_, X>> + '_ {
-        self.parked.entries.iter().map(|(key, entry)| ParkedView { key: *key, entry })
-    }
-
-    pub fn parked_task(&self, key: TaskKey) -> Option<&BlockedTask<X>> {
-        self.parked.get(key).map(|e| &e.task)
+    /// The deadlines this CPU owes, as `(deadline, task)`, stale ones
+    /// included.
+    pub fn due(&self) -> impl Iterator<Item = (Nanos, TaskKey)> + '_ {
+        self.due.order.iter().copied()
     }
 
     /// The killed tasks waiting to unwind, for the invariant walks and for a
@@ -624,7 +579,7 @@ impl<X: SchedPayload> CpuSched<X> {
                 (core::mem::offset_of!(Self, id), "id"),
                 (core::mem::offset_of!(Self, running), "running"),
                 (core::mem::offset_of!(Self, rq), "rq (the ready bands: rt deque, job groups)"),
-                (core::mem::offset_of!(Self, parked), "parked (the park map)"),
+                (core::mem::offset_of!(Self, due), "due (the deadlines owed)"),
                 (core::mem::offset_of!(Self, dying), "dying"),
                 (core::mem::offset_of!(Self, stopped), "stopped"),
                 (core::mem::offset_of!(Self, held), "held"),
@@ -1143,21 +1098,41 @@ impl<X: SchedPayload> CpuSched<X> {
         self.stopped.push_back(task);
     }
 
+    /// A claim that ended a park here handed this CPU the wake: the record
+    /// is in the task's slot, this CPU's to take.
     fn handle_wake<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
-        key: TaskKey,
+        shared: &Arc<TaskShared<Msg<X>>>,
         cause: WakeCause,
         env: Env<'_, H, P>,
         now: Nanos,
     ) {
-        let Some(entry) = self.parked.remove(key) else {
-            // Not parked here any more: a `Retire` already woke it into the
-            // dying list, or its deadline fired first and this wake lost the
-            // arbitration CAS. Keys are never reused, so a stale wake is
-            // provably about a task that is no longer waiting — a benign no-op.
-            return;
-        };
-        let mut task = entry.task.wake(self.id, cause, entry.class, now);
+        let record = self.take_parked(shared);
+        self.wake_parked(record, cause, env, now);
+    }
+
+    /// Take the record of a park this CPU holds the claim to.
+    #[allow(unsafe_code)] // the slot's take; the claim is the exclusion
+    fn take_parked(&mut self, shared: &Arc<TaskShared<Msg<X>>>) -> ParkedRecord<X> {
+        assert_eq!(shared.state(), TaskState::WakeQueued(self.id), "a park taken without its claim");
+        // SAFETY: the word is `WakeQueued(self)`, which only the claim this
+        // CPU holds or was handed can have made from this park's `Blocked`.
+        let record = unsafe { shared.parked().take() };
+        if record.deadline.is_some() {
+            self.due.remove(shared.key());
+        }
+        record
+    }
+
+    fn wake_parked<H: Hw<Payload = X>, P: PreemptGuard>(
+        &mut self,
+        record: ParkedRecord<X>,
+        cause: WakeCause,
+        env: Env<'_, H, P>,
+        now: Nanos,
+    ) {
+        let key = record.task.key();
+        let mut task = record.task.wake(self.id, cause, record.class, now);
         self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
         task.refresh_affinity();
         self.place(task, env, now);
@@ -1186,25 +1161,16 @@ impl<X: SchedPayload> CpuSched<X> {
         now: Nanos,
     ) {
         let key = shared.key();
-        if let Some(entry) = self.parked.get(key) {
-            // **Claim-arbitrated, exactly as `fire_deadlines` is**:
-            // remove-then-convert loses the race. If a remote waker has
-            // already claimed this task its `Msg::Wake` is in flight to this
-            // same CPU, so leaving the entry alone is what keeps the task in
-            // *some* container — `handle_wake` finds it and the wake places
-            // it, into the dying list, because the kill bit is already set.
-            match entry.task.shared().claim_wake() {
+        if shared.state() == TaskState::Blocked(self.id) {
+            // **Claim-arbitrated, exactly as `fire_deadlines` is.** A waker
+            // that claimed it first has the record and sends it on, to this
+            // CPU or another; wherever it lands the kill bit, already set,
+            // puts it in that CPU's dying list.
+            match shared.claim_wake() {
                 Claim::Parked(cpu) => {
                     assert_eq!(cpu, self.id, "a task parked here claims another CPU");
-                    let entry = self.parked.remove(key).expect("still there");
-                    let task = entry.task.wake(
-                        self.id,
-                        WakeCause::new(WakeReason::Woken),
-                        entry.class,
-                        now,
-                    );
-                    self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
-                    self.place(task, env, now);
+                    let record = self.take_parked(shared);
+                    self.wake_parked(record, WakeCause::new(WakeReason::Woken), env, now);
                 }
                 Claim::PrePark => panic!("a parked task cannot be pre-park"),
                 Claim::Lost => {}
@@ -1267,7 +1233,7 @@ impl<X: SchedPayload> CpuSched<X> {
     fn drain<H: Hw<Payload = X>, P: PreemptGuard>(&mut self, env: Env<'_, H, P>, now: Nanos) {
         while let Some(msg) = self.mailbox.pop(env.preempt) {
             match msg {
-                Msg::Wake { key, cause } => self.handle_wake(key, cause, env, now),
+                Msg::Wake { shared, cause } => self.handle_wake(&shared, cause, env, now),
                 Msg::Adopt { task } => self.handle_adopt(task, env, now),
                 Msg::Retire { shared } => self.handle_retire(&shared, env, now),
             }
@@ -1302,42 +1268,24 @@ impl<X: SchedPayload> CpuSched<X> {
     /// long*: a CPU that owes a wake is the wrong one to run unbounded I/O on,
     /// and the idle loop asks before it flushes (`sched::driver::owes_deadline`).
     pub fn earliest_deadline(&self) -> Option<Nanos> {
-        self.parked.earliest()
+        self.due.earliest()
     }
 
     /// Fire every deadline that is due, arbitrating with remote wakers
-    /// through the same claim CAS they use.
+    /// through the claim they use. A deadline whose park another claim ended
+    /// claims nothing, and goes.
     fn fire_deadlines<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
         env: Env<'_, H, P>,
         now: Nanos,
     ) {
-        while let Some(key) = self.parked.next_due(now) {
-            let entry = self.parked.get(key).expect("just found");
-            match entry.task.shared().claim_wake() {
-                Claim::Parked(cpu) => {
-                    assert_eq!(cpu, self.id, "a task parked here claims another CPU")
-                }
-                Claim::PrePark => panic!("a parked task cannot be pre-park"),
-                // A remote waker got there first and its `Wake` is in flight;
-                // no later claim can succeed either, so this timeout can never
-                // fire and the entry stops claiming it will. Clearing it is
-                // also what advances the loop — the deadline that will not be
-                // honoured and the deadline that is not reported are one field.
-                Claim::Lost => {
-                    self.parked.forget_deadline(key);
-                    continue;
-                }
+        while let Some((generation, shared)) = self.due.pop_due(now) {
+            if !shared.claim_deadline(self.id, generation) {
+                continue;
             }
-            let entry = self.parked.remove(key).expect("still there");
-            let task = entry.task.wake(
-                self.id,
-                WakeCause::new(WakeReason::Timeout),
-                entry.class,
-                now,
-            );
+            let record = self.take_parked(&shared);
             self.trace(env, now, TraceKind::TimerFire);
-            self.place(task, env, now);
+            self.wake_parked(record, WakeCause::new(WakeReason::Timeout), env, now);
         }
     }
 }
@@ -1720,6 +1668,8 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         let key = current.key();
         let name = current.ext().name();
         let class = ticket.class();
+        let shared = ticket.shared().clone();
+        let generation = ticket.generation();
         self.cpu.rq.leave_running(key, current.standing_mut());
         let task = current.park(
             &ticket,
@@ -1728,16 +1678,20 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             #[cfg(feature = "protocol-port")]
             self.cpu.park_keeps_lapsed_lend,
         );
-        self.cpu.parked.insert(
-            key,
-            ParkedEntry {
-                task,
-                deadline,
-                class,
-            },
-        );
         self.cpu
             .trace(self.env, self.now, TraceKind::ParkCommit { task: key, name });
+        match ticket.park(ParkedRecord { task, class, deadline }) {
+            Parked::Blocked => {
+                if let Some(at) = deadline {
+                    self.cpu.due.insert(at, generation, shared);
+                }
+            }
+            // A claim while it committed: parked and woken at once, as that
+            // claim's wake.
+            Parked::WokenFirst(record) => {
+                self.cpu.wake_parked(record, WakeCause::new(WakeReason::Woken), self.env, self.now);
+            }
+        }
         self.settle();
         self.dispose()
     }
@@ -2929,6 +2883,7 @@ impl<M: SchedMsg> CpuHandles<M> {
 /// container says which second occupant it needs and why.
 #[cfg(test)]
 mod tests {
+    use crate::sched::task::WaitClass;
     extern crate std;
 
     use super::*;
@@ -3033,6 +2988,8 @@ mod tests {
         hw: TestHw,
         preempt: NoPreempt,
         next_key: u64,
+        /// Every spawned task's job, by key: what a sibling joins.
+        jobs: BTreeMap<TaskKey, Arc<Job>>,
         /// `Env::balance`. [`Balance::None`] by default because most tests want
         /// a CPU's queue to stay where they put it; the probe's own tests turn
         /// the pull half on.
@@ -3049,7 +3006,7 @@ mod tests {
             let mut cpus = Vec::new();
             let mut handles = Vec::new();
             for i in 0..count {
-                let (tx, rx) = mailbox();
+                let (tx, rx) = mailbox::<Msg<TestPayload>>();
                 cpus.push(CpuSched::new(CpuId(i as u32), rx, ()));
                 handles.push(CpuHandle::new(CpuId(i as u32), tx));
             }
@@ -3059,6 +3016,7 @@ mod tests {
                 hw: TestHw::default(),
                 preempt: NoPreempt,
                 next_key: 1,
+                jobs: BTreeMap::new(),
                 balance: Balance::None,
             }
         }
@@ -3116,17 +3074,7 @@ mod tests {
             dst: CpuId,
             of: TaskKey,
         ) -> (TaskKey, Arc<TaskShared<Msg<TestPayload>>>) {
-            let job = (0..self.cpus.len())
-                .find_map(|cpu| {
-                    let sched = &self.cpus[cpu];
-                    sched
-                        .running()
-                        .filter(|t| t.key() == of)
-                        .map(|t| t.job().clone())
-                        .or_else(|| sched.parked_task(of).map(|t| t.job().clone()))
-                        .or_else(|| sched.rq().tasks().find(|t| t.key() == of).map(|t| t.job().clone()))
-                })
-                .expect("the sibling is running, parked or queued");
+            let job = self.jobs.get(&of).expect("the sibling was spawned here").clone();
             self.spawn_into(dst, RtState::default(), job)
         }
 
@@ -3148,6 +3096,7 @@ mod tests {
         ) -> (TaskKey, Arc<TaskShared<Msg<TestPayload>>>) {
             let key = TaskKey(self.next_key);
             self.next_key += 1;
+            self.jobs.insert(key, job.clone());
             let task = TaskBuilder {
                 key,
                 job,
@@ -3220,7 +3169,7 @@ mod tests {
                 .expect("the wake claim admits one poster: node must be free");
             if self.handles.get(cpu).post(
                 slot,
-                Msg::wake(shared.key(), cause),
+                Msg::<TestPayload>::wake(shared.clone(), cause),
                 cause.urgency(),
                 &NoPreempt,
             ) == Kick::Send
@@ -3314,8 +3263,8 @@ mod tests {
         }
 
         assert!(
-            w.cpus[0].parked_task(key).is_some(),
-            "the retire lost the claim: the entry stays for the wake to find",
+            shared.peek_parked().is_some(),
+            "the retire lost the claim: the record stays for the wake to take",
         );
         assert_eq!(w.cpus[0].dying().count(), 0, "the retire placed nothing itself");
         assert!(w.cpus[0].rq.is_empty(), "and queued nothing either");

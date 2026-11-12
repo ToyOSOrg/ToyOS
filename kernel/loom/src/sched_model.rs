@@ -26,8 +26,9 @@ pub enum Msg {
 }
 
 impl SchedMsg for Msg {
-    fn wake(key: TaskKey, cause: WakeCause) -> Self {
-        Msg::Wake(key, cause.reason)
+    type Parked = ();
+    fn wake(shared: Arc<TaskShared<Self>>, cause: WakeCause) -> Self {
+        Msg::Wake(shared.key(), cause.reason)
     }
 
     fn retire(shared: Arc<TaskShared<Self>>) -> Self {
@@ -131,7 +132,7 @@ impl<T: Send> CellLock<T> for LoomLock<T> {
     }
 }
 
-pub fn watch_list<M, R>() -> LoomLock<Waiters<M, R>>
+pub fn watch_list<M: SchedMsg, R>() -> LoomLock<Waiters<M, R>>
 where
     Waiters<M, R>: Send,
 {

@@ -173,9 +173,7 @@ fn check_single_ownership(vm: &mut Vm<'_>) {
                 (Container::Running, TaskState::Running(c))
                 | (Container::Ready, TaskState::Ready(c))
                 | (Container::Dying, TaskState::Ready(c))
-                | (Container::Outbound, TaskState::Ready(c))
-                | (Container::Parked, TaskState::Blocked(c))
-                | (Container::Parked, TaskState::WakeQueued(c)) => c.0 as usize == cpu,
+                | (Container::Outbound, TaskState::Ready(c)) => c.0 as usize == cpu,
                 // A task that has registered on a watch and not yet parked
                 // is still the running value. Exactly two words are legal
                 // there: `Committing`, while its own commit is still owed, and
@@ -198,6 +196,17 @@ fn check_single_ownership(vm: &mut Vm<'_>) {
                     "I1: {key:?} sits in cpu{cpu} {container:?} but its word says {state:?}",
                 ));
             }
+        }
+    }
+
+    // A parked task's record is in its own `TaskShared`, and its word names
+    // the CPU it parked on.
+    let parked: Vec<(TaskKey, usize)> = vm.parked().collect();
+    for (key, cpu) in parked {
+        if let Some((other, other_container)) = seen.insert(key, (cpu, Container::Parked)) {
+            problems.push(format!(
+                "I1: {key:?} is parked and also in cpu{other} {other_container:?}",
+            ));
         }
     }
 
@@ -380,7 +389,7 @@ fn check_timers(vm: &mut Vm<'_>) {
     for cpu in 0..vm.scenario.cpus() {
         let armed = vm.cpus[cpu].armed();
         let quantum = vm.cpus[cpu].running().map(|_| vm.cpus[cpu].decide_at());
-        let deadline = vm.cpus[cpu].parked().filter_map(|p| p.deadline()).min();
+        let deadline = vm.cpus[cpu].earliest_deadline();
         let earliest = match (quantum, deadline) {
             (Some(q), Some(d)) => Some(q.min(d)),
             (Some(q), None) => Some(q),
@@ -459,10 +468,10 @@ fn note_rt_service(vm: &mut Vm<'_>) -> bool {
                 occupied = true;
             }
         }
-        for parked in sched.parked() {
-            if parked.is_rt() {
-                rt.push(parked.key());
-            }
+    }
+    for (key, _) in vm.parked() {
+        if vm.shared[&key].peek_parked().is_some_and(|record| record.is_rt()) {
+            rt.push(key);
         }
     }
     for key in rt {
@@ -710,6 +719,9 @@ fn note_run_latency(vm: &mut Vm<'_>) {
         for (key, container) in residents(&vm.cpus[cpu]) {
             seen.insert(key, container);
         }
+    }
+    for (key, _) in vm.parked() {
+        seen.insert(key, Container::Parked);
     }
 
     let mut dispatched: Vec<(TaskKey, ReadyCause, u64)> = Vec::new();

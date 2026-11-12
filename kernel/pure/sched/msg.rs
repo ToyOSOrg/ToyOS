@@ -10,18 +10,35 @@
 
 use crate::sched::mailbox::{MailboxNode, SchedMsg};
 use crate::sched::sync::Arc;
-use crate::sched::task::{SchedPayload, TaskKey, TaskShared, TransitTask, WakeCause};
+use crate::sched::task::{BlockedTask, SchedPayload, TaskShared, TransitTask, WaitClass, WakeCause};
+use crate::sched::hw::Nanos;
 
 pub enum Msg<X: SchedPayload> {
-    /// The target CPU owns the parked task; this is a request, not a
-    /// transfer. Rides on `TaskShared.wake_node`.
-    Wake { key: TaskKey, cause: WakeCause },
+    /// The claim that ended a park, handed to the task's home CPU, which
+    /// takes the record from its `TaskShared` and places it. Rides on
+    /// `TaskShared.wake_node`.
+    Wake { shared: Arc<TaskShared<Msg<X>>>, cause: WakeCause },
     /// Ownership transfer: spawn placement, migration, wake-forwarding. Rides
     /// on the node embedded in the transferred task's own record, which is
     /// why a transfer can never be dropped for lack of queue space.
     Adopt { task: TransitTask<X> },
     /// Kill protocol. Rides on `TaskShared.retire_node`.
     Retire { shared: Arc<TaskShared<Msg<X>>> },
+}
+
+/// What a parked task leaves in its `TaskShared` for whoever ends the park.
+pub struct ParkedRecord<X: SchedPayload> {
+    pub(crate) task: BlockedTask<X>,
+    pub(crate) class: WaitClass,
+    /// The deadline its home CPU holds for it, if any.
+    pub(crate) deadline: Option<Nanos>,
+}
+
+#[cfg(feature = "protocol-port")]
+impl<X: SchedPayload> ParkedRecord<X> {
+    pub fn is_rt(&self) -> bool {
+        self.task.rt().is_rt()
+    }
 }
 
 impl<X: SchedPayload> Msg<X> {
@@ -38,8 +55,10 @@ impl<X: SchedPayload> Msg<X> {
 }
 
 impl<X: SchedPayload> SchedMsg for Msg<X> {
-    fn wake(key: TaskKey, cause: WakeCause) -> Self {
-        Msg::Wake { key, cause }
+    type Parked = ParkedRecord<X>;
+
+    fn wake(shared: Arc<TaskShared<Msg<X>>>, cause: WakeCause) -> Self {
+        Msg::Wake { shared, cause }
     }
 
     /// `Retire` carries no `notify` handle, deliberately: a notify riding the
@@ -56,7 +75,7 @@ impl<X: SchedPayload> SchedMsg for Msg<X> {
 impl<X: SchedPayload> core::fmt::Debug for Msg<X> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Msg::Wake { key, cause } => write!(f, "Wake({:?}, {:?})", key, cause.reason),
+            Msg::Wake { shared, cause } => write!(f, "Wake({:?}, {:?})", shared.key(), cause.reason),
             Msg::Adopt { task } => write!(f, "Adopt({:?})", task.key()),
             Msg::Retire { shared } => write!(f, "Retire({:?})", shared.key()),
         }

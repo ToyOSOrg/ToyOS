@@ -47,7 +47,6 @@ fn main() -> ExitCode {
                 println!("{}", scenario.name);
             }
             println!("old_steal_port          (negative gate: must fail)");
-            println!("old_commit_before_pass  (negative gate: must fail)");
             println!("old_migrate_kept_the_corpse (negative gate: must fail)");
             println!("old_rt_starved_the_corpse (negative gate: must fail)");
             println!("old_park_kept_the_lend  (negative gate: must fail)");
@@ -56,7 +55,6 @@ fn main() -> ExitCode {
             println!("fair_double_charge      (negative gate: must fail)");
             println!("fair_lowest_key_within_group (negative gate: must fail)");
             println!("overlong_pass           (negative gate: must abort)");
-            println!("old_commit_fused        (control: passes, and that is the point)");
             ExitCode::SUCCESS
         }
         "run" | "pct" => {
@@ -113,7 +111,6 @@ fn main() -> ExitCode {
                 // absent.
                 for negative in [
                     scenarios::old_steal_port(),
-                    scenarios::old_commit_before_pass(),
                     scenarios::old_migrate_kept_the_corpse(),
                     scenarios::old_rt_starved_the_corpse(),
                     scenarios::old_park_kept_the_lend(),
@@ -161,22 +158,6 @@ fn main() -> ExitCode {
                     }
                     clean &= caught.is_some();
                 }
-                // And the control, which must come back *clean*: the same
-                // blocking shape with the two halves fused into one step, which
-                // is the blind spot this harness used to have.
-                let control = scenarios::old_commit_fused();
-                let result = sweep::seed_sweep(&control, budget.min(500), 1);
-                println!(
-                    "{}: {} runs, {}",
-                    control.name,
-                    result.runs,
-                    if result.passed() {
-                        "clean (the control: no step boundary, no bug in sight)"
-                    } else {
-                        "FAILED — the control no longer controls for anything"
-                    },
-                );
-                clean &= result.passed();
             }
             ok(clean)
         }

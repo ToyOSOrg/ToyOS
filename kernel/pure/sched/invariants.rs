@@ -33,11 +33,14 @@ pub enum Container {
     /// Taken off this CPU because its mask leaves it out, while this CPU
     /// still stood on its context; the next pass sends it on.
     Outbound,
+    /// In its own `TaskShared`, parked on this CPU: no CPU holds it, so only a
+    /// checker that knows every task finds it there.
     Parked,
     Zombie,
 }
 
-/// Every task this CPU owns, with the container it sits in.
+/// Every task this CPU owns, with the container it sits in. A parked task
+/// is in no CPU's: its record is in its own `TaskShared`.
 pub fn residents<X: SchedPayload>(
     cpu: &CpuSched<X>,
 ) -> impl Iterator<Item = (TaskKey, Container)> + '_ {
@@ -48,7 +51,6 @@ pub fn residents<X: SchedPayload>(
         .chain(cpu.dying().map(|t| (t.key(), Container::Dying)))
         .chain(cpu.stopped().map(|t| (t.key(), Container::Stopped)))
         .chain(cpu.outbound().map(|t| (t.key(), Container::Outbound)))
-        .chain(cpu.parked().map(|p| (p.key(), Container::Parked)))
         .chain(cpu.zombie_key().map(|k| (k, Container::Zombie)))
 }
 
@@ -115,15 +117,6 @@ pub fn check_cpu<X: SchedPayload>(cpu: &CpuSched<X>) {
         );
     }
 
-    for parked in cpu.parked() {
-        let key = parked.key();
-        let state = parked.shared_state();
-        assert!(
-            matches!(state, TaskState::Blocked(c) | TaskState::WakeQueued(c) if c == id),
-            "parked task {key:?} disagrees with its state word: {state:?}",
-        );
-    }
-
     if let Some(key) = cpu.zombie_key() {
         assert!(
             residents(cpu).filter(|(k, _)| *k == key).count() == 1,
@@ -136,7 +129,7 @@ pub fn check_cpu<X: SchedPayload>(cpu: &CpuSched<X>) {
 
 /// Invariant T: outside a pass, the armed deadline is no later than the
 /// earliest thing that must happen — the running task's next decision or the
-/// earliest valid parked deadline. And a CPU with nothing loaded and a pending
+/// earliest deadline owed (a stale one included, which fires and goes). And a CPU with nothing loaded and a pending
 /// deadline must have the timer armed at all.
 pub fn check_timer<X: SchedPayload>(cpu: &CpuSched<X>) {
     let earliest = earliest_event(cpu);
@@ -156,7 +149,7 @@ pub fn check_timer<X: SchedPayload>(cpu: &CpuSched<X>) {
 
 fn earliest_event<X: SchedPayload>(cpu: &CpuSched<X>) -> Option<Nanos> {
     let decision = cpu.running().map(|_| cpu.decide_at());
-    let deadline = cpu.parked().filter_map(|p| p.deadline()).min();
+    let deadline = cpu.earliest_deadline();
     match (decision, deadline) {
         (Some(q), Some(d)) => Some(q.min(d)),
         (Some(q), None) => Some(q),

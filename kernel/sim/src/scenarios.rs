@@ -11,7 +11,7 @@ use kernel::sched::task::WaitClass;
 use crate::topology::Shape;
 use crate::vm::RUN_CHUNK_NS;
 use crate::workload::{
-    AgeShape, BlockShape, ChargeShape, GroupPick, IrqSpec, JobShape, MigrateShape, Op, ParkShape,
+    AgeShape, ChargeShape, GroupPick, IrqSpec, JobShape, MigrateShape, Op, ParkShape,
     PlacementShape, ProcSpec, Protocol, QueueSpec, Scenario, Script, SurplusShape, WindowShape,
 };
 
@@ -34,7 +34,6 @@ fn scenario(
         procs,
         irqs: Vec::new(),
         protocol: Protocol::New,
-        block: BlockShape::CommitInPass,
         window: WindowShape::PreemptOff,
         park: ParkShape::ReleaseLend,
         migrate: MigrateShape::ReapTheCorpse,
@@ -306,38 +305,6 @@ pub fn old_rt_starved_the_corpse() -> Scenario {
 pub fn old_steal_port() -> Scenario {
     let mut scenario = double_drop_exit_race().with_protocol(Protocol::OldSteal);
     scenario.name = "old_steal_port";
-    scenario
-}
-
-/// The second harness self-validation gate, and the reason the block is two
-/// steps: a port of the kernel's pre-`8508b37` blocking shape, where phase 2 of
-/// the wait handshake ran at the *call site* and the pass came after it.
-///
-/// It **must fail**. A remote waker that claims a task whose word already
-/// reads `Blocked` posts `Msg::Wake` to the task's home CPU — the very CPU
-/// about to park it — and that pass's own drain consumes the message while the
-/// task is not in `parked` yet. On real hardware that was a panic plus a hang
-/// on `--smp 8`, roughly twice in five audio suite runs.
-///
-/// Uses the `lost_wake_pipe` workload rather than a bespoke one: this is a
-/// property of the *blocking shape*, not of a particular scenario, so the gate
-/// should be the ordinary wait/wake workload with one thing changed.
-pub fn old_commit_before_pass() -> Scenario {
-    let mut scenario = lost_wake_pipe().with_block(BlockShape::CommitAtCallSite);
-    scenario.name = "old_commit_before_pass";
-    scenario
-}
-
-/// The same shape with the two halves fused into a single VM step — which is
-/// what this simulator did until the split. Nothing can interleave, so the
-/// window is not in the step relation and the run comes back clean.
-///
-/// It is the control for [`old_commit_before_pass`]: without it, "the harness
-/// could not see this" is an assertion about a simulator nobody can run any
-/// more. `blind_spot_needed_the_step_split` runs both.
-pub fn old_commit_fused() -> Scenario {
-    let mut scenario = lost_wake_pipe().with_block(BlockShape::CommitAtCallSiteFused);
-    scenario.name = "old_commit_fused";
     scenario
 }
 
@@ -831,11 +798,9 @@ pub fn overlong_pass() -> Scenario {
 }
 
 /// Every scenario the exit criterion covers.
-/// `old_steal_port` and `old_commit_before_pass` are deliberately absent: they
-/// are the negative gates, and a sweep that treated them as scenarios to pass
-/// would be asserting the opposite of what they are for. `old_commit_fused` is
-/// absent for the mirror-image reason — it passes, but only because the
-/// harness cannot see the bug it contains.
+/// `old_steal_port` is deliberately absent: it is a negative gate, and a sweep
+/// that treated it as a scenario to pass would be asserting the opposite of
+/// what it is for.
 ///
 /// The three measured-policy workloads are here at their **cheapest** widths and
 /// nowhere else. `sim/tests/policy.rs` measures them across a curve of widths and
@@ -917,8 +882,6 @@ pub fn by_name(name: &str) -> Option<Scenario> {
         "overlong_pass" => Some(overlong_pass()),
         "old_park_kept_the_lend" => Some(old_park_kept_the_lend()),
         "lend_then_block" => Some(lend_then_block()),
-        "old_commit_before_pass" => Some(old_commit_before_pass()),
-        "old_commit_fused" => Some(old_commit_fused()),
         "old_preemptible_window" => Some(old_preemptible_window()),
         "stopped_cpu" => Some(stopped_cpu()),
         _ => all().into_iter().find(|s| s.name == name),

@@ -16,14 +16,14 @@ use crate::sched::task::{TaskShared, TaskState};
 /// Exactly one retirer exists per task (process teardown or thread kill), and
 /// it holds this. Consumed by [`RetireTicket::post`].
 #[must_use = "a claimed retire must be posted"]
-pub struct RetireTicket<'a, M> {
+pub struct RetireTicket<'a, M: SchedMsg> {
     shared: &'a Arc<TaskShared<M>>,
 }
 
 /// Claim the right to retire `shared`: sets the sticky KILL and
 /// RETIRE_QUEUED bits. Panics if a retire is already queued — a second
 /// concurrent retire of one task is a kernel bug, not a condition to tolerate.
-pub fn begin<M>(shared: &Arc<TaskShared<M>>) -> RetireTicket<'_, M> {
+pub fn begin<M: SchedMsg>(shared: &Arc<TaskShared<M>>) -> RetireTicket<'_, M> {
     assert!(
         shared.claim_retire(),
         "a second retirer for task {:?}: single-retirer is a kernel invariant",
@@ -121,8 +121,9 @@ mod tests {
     }
 
     impl SchedMsg for Msg {
-        fn wake(key: TaskKey, _cause: WakeCause) -> Self {
-            Msg::Wake(key)
+        type Parked = ();
+        fn wake(shared: Arc<TaskShared<Self>>, _cause: WakeCause) -> Self {
+            Msg::Wake(shared.key())
         }
         fn retire(shared: Arc<TaskShared<Self>>) -> Self {
             Msg::Retire(shared.key())

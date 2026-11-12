@@ -27,7 +27,7 @@ use kernel::sched::task::{
     ReadyTask, RtState, TaskAccounting, TaskBuilder, TaskKey, TaskShared, TaskState, WaitClass,
     WakeCause, WakeReason,
 };
-use kernel::sched::park::{prepare, Cancel, Cancelled, Commit, CommittedTicket, WaitTicket};
+use kernel::sched::park::{prepare, Cancel, Cancelled, Commit, WaitTicket};
 use kernel::sched::watch::{Poster, Waiters, Watch};
 
 use crate::choice::ChoiceStream;
@@ -37,7 +37,7 @@ use crate::msg::{SimHandles, SimMsg, SimQueue};
 use crate::payload::{MockAddressSpace, SimCtx, SimPayload, SimPreempt, StdLock};
 use crate::topology::LevelCounts;
 use crate::workload::{
-    AgeShape, BlockShape, ChargeShape, GroupPick, JobShape, MigrateShape, Op, ParkShape, PlacementShape,
+    AgeShape, ChargeShape, GroupPick, JobShape, MigrateShape, Op, ParkShape, PlacementShape,
     Protocol, Scenario, Script, SurplusShape, WindowShape,
 };
 
@@ -185,22 +185,6 @@ pub struct Program {
     pub run_left: u64,
 }
 
-/// A block that has done phase 1 and owes phase 2.
-///
-/// It is held *between* two steps, which is the whole point: the wait is
-/// registered, the task is still running, and every other CPU in the system
-/// can take a step before the blocking pass happens. That is the window the
-/// kernel's lost wake lived in, and it exists only because the two halves are
-/// two steps.
-pub enum BlockPhase {
-    /// The ticket is registered and uncommitted; the commit CAS belongs to the
-    /// pass — the shipped shape.
-    Registered(WaitTicket<SimMsg>),
-    /// The commit already ran at the call site — the superseded shape, kept as a
-    /// negative gate: the word reads `Blocked` while the task is still running.
-    Committed(CommittedTicket<SimMsg>),
-}
-
 /// How phase 2 of a block ended — the three ways `WaitTicket::commit` can
 /// answer, as the workload driver has to see them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -219,7 +203,10 @@ pub struct Blocking {
     pub key: TaskKey,
     pub queue: usize,
     pub deadline: Option<Nanos>,
-    pub phase: BlockPhase,
+    /// Registered and uncommitted: the commit belongs to the pass. Held
+    /// between two steps, so every other CPU can take a step before the
+    /// blocking pass, which is the window the kernel's lost wake lived in.
+    pub ticket: WaitTicket<SimMsg>,
 }
 
 /// One step of the enabled-step relation.
@@ -328,9 +315,9 @@ pub struct Vm<'q> {
     pub finalized: Vec<(TaskKey, TaskAccounting)>,
     pub violations: Vec<String>,
     pub steps: usize,
-    /// How many parks published `Blocked` and had it claimed before the park
-    /// itself ran — the handshake's residual window, and the only thing that
-    /// exercises `RunningTask::park`'s `WakeQueued` arm.
+    /// How many parks had a claim land between the commit and the park
+    /// publishing `Blocked` — the handshake's residual window, and the only
+    /// thing that exercises `CommittedTicket::park`'s woken-first arm.
     pub pre_park_claims: u64,
     /// How many blocks ended in `Commit::Killed` — a retire that landed inside
     /// the registration window. Counted for the same reason as
@@ -447,10 +434,6 @@ pub struct Vm<'q> {
     /// Of [`Self::migrations`], those made before any thread exited: the moves
     /// the initial placement alone called for.
     pub migrations_before_exit: u64,
-    /// Blocks that committed at the call site and went on to park: under
-    /// [`BlockShape::CommitAtCallSite`], each is a task whose word says
-    /// `Blocked` while its CPU still runs it.
-    pub call_site_commits: u64,
     /// Threads that ran to their exit.
     pub exits: u64,
     /// Per CPU: the instant it first took an execution step, or `None` for a
@@ -567,13 +550,26 @@ pub struct FairEpoch {
 }
 
 impl<'q> Vm<'q> {
+    /// Every parked task, with the CPU it parked on: a parked record is in
+    /// the task's own `TaskShared`, in no CPU's containers.
+    pub fn parked(&self) -> impl Iterator<Item = (TaskKey, usize)> + '_ {
+        self.live.iter().filter_map(|&key| {
+            let shared = &self.shared[&key];
+            shared.peek_parked()?;
+            match shared.state() {
+                TaskState::Blocked(c) | TaskState::WakeQueued(c) => Some((key, c.0 as usize)),
+                state => unreachable!("{key:?} holds a parked record as {state:?}"),
+            }
+        })
+    }
+
     pub fn new(scenario: Scenario, queues: &'q [QueueState]) -> Self {
         let n = scenario.cpus();
         let hw = SimHw::new(n);
         let mut handles = Vec::with_capacity(n);
         let mut cpus = Vec::with_capacity(n);
         for i in 0..n {
-            let (tx, rx) = mailbox();
+            let (tx, rx) = mailbox::<SimMsg>();
             handles.push(CpuHandle::new(CpuId(i as u32), tx));
             let mut cpu = CpuSched::new(CpuId(i as u32), rx, SimCtx::default());
             cpu.set_park_keeps_lapsed_lend(scenario.park == ParkShape::KeepLapsedLend);
@@ -655,7 +651,6 @@ impl<'q> Vm<'q> {
             thread_finish_ns: BTreeMap::new(),
             migrations: 0,
             migrations_before_exit: 0,
-            call_site_commits: 0,
             exits: 0,
             first_exec_ns: vec![None; n],
             idle_wakes: vec![0; n],
@@ -1005,8 +1000,8 @@ impl<'q> Vm<'q> {
         }
         let actor = crate::explore::actor(&step);
         // Only a CPU's own step takes a task out of its parked set.
-        let parked: Vec<TaskKey> =
-            actor.map_or_else(Vec::new, |cpu| self.cpus[cpu].parked().map(|p| p.key()).collect());
+        let parked: Vec<TaskKey> = actor
+            .map_or_else(Vec::new, |cpu| self.parked().filter(|&(_, on)| on == cpu).map(|(key, _)| key).collect());
         // A step on a CPU posts as that CPU, so a kick it aims at itself is its
         // own `need_resched`; a device interrupt belongs to none.
         let poster = match step {
@@ -1122,7 +1117,7 @@ impl<'q> Vm<'q> {
             let woken: Vec<TaskKey> = parked
                 .into_iter()
                 .chain(parked_in_step)
-                .filter(|&task| self.cpus[home].parked_task(task).is_none())
+                .filter(|&task| self.shared[&task].peek_parked().is_none())
                 .collect();
             for task in woken {
                 let placed = match self.shared[&task].state() {
@@ -1356,11 +1351,6 @@ impl<'q> Vm<'q> {
                 Dispose::None => (pass.dispose_none().finish(), None, BlockEnd::Parked),
                 Dispose::Yield => (pass.dispose_yield().finish(), None, BlockEnd::Parked),
                 Dispose::Exit => (pass.dispose_exit().finish(), None, BlockEnd::Parked),
-                Dispose::Block(ticket, deadline) => (
-                    pass.dispose_block(ticket, deadline).finish(),
-                    None,
-                    BlockEnd::Parked,
-                ),
                 // Phase 2 inside the pass, after `begin`'s drain.
                 // Committing here puts every claim on one side of the drain or
                 // the other: an earlier one finds `Committing` and posts no
@@ -1425,7 +1415,7 @@ impl<'q> Vm<'q> {
             // Did the injected wake claim *this* task before its park ran?
             // Counted rather than argued: the arm it exercises was dead code in
             // every run this simulator had ever made.
-            if injected.is_some() && matches!(self.shared[&key].state(), TaskState::WakeQueued(_)) {
+            if injected.is_some() && !matches!(self.shared[&key].state(), TaskState::Blocked(_)) {
                 self.pre_park_claims += 1;
             }
         }
@@ -1658,50 +1648,12 @@ impl<'q> Vm<'q> {
         }
 
         let deadline = deadline.map(|ns| self.clock.after(ns));
-        let phase = match self.scenario.block {
-            BlockShape::CommitInPass => BlockPhase::Registered(ticket),
-            BlockShape::CommitAtCallSite | BlockShape::CommitAtCallSiteFused => {
-                match ticket.commit() {
-                    Commit::Parked(committed) => {
-                        self.call_site_commits += 1;
-                        self.registrations.insert(key, queue);
-                        BlockPhase::Committed(committed)
-                    }
-                    // A wake landed between registration and commit: do not
-                    // park, do not switch. The condition is satisfied.
-                    Commit::AlreadyWoken => {
-                        self.unregister(key, queue);
-                        let q = &queues[queue];
-                        if q.tokens.get() > 0 {
-                            q.tokens.set(q.tokens.get() - 1);
-                        }
-                        self.programs.get_mut(&key).expect("live").pc += 1;
-                        return;
-                    }
-                    // A retire beat the commit. Committing at the call site
-                    // does not change what that means — the thread dies
-                    // instead of parking — only where the pass that buries it
-                    // is entered from.
-                    Commit::Killed => {
-                        self.unregister(key, queue);
-                        self.finish_task(cpu, key);
-                        return;
-                    }
-                }
-            }
-        };
         self.blocking[cpu] = Some(Blocking {
             key,
             queue,
             deadline,
-            phase,
+            ticket,
         });
-        // The fused shape is the simulator's own pre-split behaviour: the pass
-        // runs in the *same* step, so no other CPU can act between the two
-        // halves and the window is outside the step relation entirely.
-        if self.scenario.block == BlockShape::CommitAtCallSiteFused {
-            self.block_pass(cpu, choices);
-        }
     }
 
     /// End a task's registration on an object's watch.
@@ -1733,30 +1685,18 @@ impl<'q> Vm<'q> {
             key,
             queue,
             deadline,
-            phase,
+            ticket,
         } = self.blocking[cpu]
             .take()
             .expect("a block pass with no block in progress");
 
-        let end = match phase {
-            BlockPhase::Registered(ticket) => {
-                // The commit and the park are one step here — a `SchedPass`
-                // borrows `CpuSched` and cannot be held across a step boundary
-                // — so the interval between them is reached by injection
-                // rather than by interleaving. `run_pass` explains what lives
-                // there and why the arm it exercises would otherwise be dead.
-                let after = (choices.choose(2) == 1)
-                    .then(|| self.hoist_wake(cpu, queue))
-                    .flatten();
-                self.run_pass(cpu, Dispose::Commit(ticket, deadline, after))
-            }
-            // A ticket committed at the call site has already published
-            // `Blocked`; there is no route back to `Running`, which is one more
-            // thing wrong with committing there.
-            BlockPhase::Committed(ticket) => {
-                self.run_pass(cpu, Dispose::Block(ticket, deadline))
-            }
-        };
+        // The commit and the park are one step here — a `SchedPass` borrows
+        // `CpuSched` and cannot be held across a step boundary — so the
+        // interval between them is reached by injection rather than by
+        // interleaving. `run_pass` explains what lives there and why the arm
+        // it exercises would otherwise be dead.
+        let after = (choices.choose(2) == 1).then(|| self.hoist_wake(cpu, queue)).flatten();
+        let end = self.run_pass(cpu, Dispose::Commit(ticket, deadline, after));
         match end {
             BlockEnd::Parked => {
                 self.registrations.insert(key, queue);
@@ -2051,8 +1991,6 @@ pub enum Dispose {
     None,
     Yield,
     Exit,
-    /// Park with a ticket that was committed before the pass was entered.
-    Block(CommittedTicket<SimMsg>, Option<Nanos>),
     /// Commit *inside* the pass, after its drain, and park with the result —
     /// the handshake's phase 2. The optional wake is issued between the commit
     /// and the park; see [`Vm::run_pass`].

@@ -324,8 +324,8 @@ mod tripwire {
         );
         // Walked for the walk's sake: a corrupt node fails inside the
         // iterator, and neither publishes a second length to disagree with.
-        for parked in sched.parked() {
-            fingerprint ^= parked.key().0;
+        for (_, key) in sched.due() {
+            fingerprint ^= key.0;
         }
         for dying in sched.dying() {
             fingerprint ^= dying.key().0;

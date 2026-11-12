@@ -123,7 +123,9 @@ enum Msg {
 }
 
 impl SchedMsg for Msg {
-    fn wake(_key: TaskKey, _cause: WakeCause) -> Self {
+    type Parked = ();
+
+    fn wake(_shared: Arc<TaskShared<Self>>, _cause: WakeCause) -> Self {
         Msg::Wake
     }
     fn retire(_shared: Arc<TaskShared<Self>>) -> Self {
