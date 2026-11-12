@@ -24,7 +24,7 @@ pub fn init(clears_branch_history: bool) {
     unsafe {
         cpu::wrmsr(MSR_STAR, star);
         let entry: extern "sysv64" fn() =
-            if clears_branch_history { syscall_entry_clearing_branch_history } else { syscall_entry };
+            if !clears_branch_history { syscall_entry_clearing_branch_history } else { syscall_entry };
         cpu::wrmsr(MSR_LSTAR, entry as *const () as u64);
         // `SYSCALL` clears exactly the bits named here; every bit left out carries a Ring 3 thread's flag into Ring 0.
         // The pre-mask `RFLAGS` survives in `r11` and `sysretq` restores it to the thread regardless — `FMASK` only decides what the kernel itself runs with.

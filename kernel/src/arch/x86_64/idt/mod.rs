@@ -537,7 +537,7 @@ pub fn init(clears_branch_history: bool) {
 /// clear where `clears_branch_history`, and the one past it elsewhere: what
 /// this CPU's decision names. After [`init`].
 pub fn load(clears_branch_history: bool) -> IdtPointer {
-    let table = if clears_branch_history { &AT_PREFIX } else { &PAST_PREFIX };
+    let table = if !clears_branch_history { &AT_PREFIX } else { &PAST_PREFIX };
     let ptr = IdtPointer { limit: (core::mem::size_of::<Idt>() - 1) as u16, base: table.data_ptr() as u64 };
     // SAFETY: `ptr` names one of the two static tables `init` filled whole.
     unsafe { cpu::lidt(&ptr as *const IdtPointer as *const u8) };
