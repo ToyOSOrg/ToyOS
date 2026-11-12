@@ -51,10 +51,13 @@ fn test() {
 }
 
 fn adopter() {
-    assert_eq!(toyos::endow::services().count(), 0, "the adopter was endowed a service");
     let system: Connector = Endowments::get().take(GIVEN).expect("the adopter is given /system");
     // SAFETY: a connector, as this process was endowed it.
     unsafe { std::os::toyos::fs::adopt_services(vec![(SYSTEM.to_string(), system.into())]) }.expect("the adopter adopts /system");
+    // The process holds one set, so what std adopted is what this program's
+    // own copy of toyos lists, which also says it was endowed no service. A
+    // listing ends the adoption, so it comes after it.
+    assert_eq!(toyos::endow::services().collect::<Vec<_>>(), [SYSTEM], "what the adopter holds");
     // Non-vacuity: std reads the helper's image through `/system`, which it
     // holds only by adopting it.
     let status = Command::new(SELF).arg("helper").status().expect("spawn the helper through the adopted /system");
