@@ -5,8 +5,7 @@ use std::fs;
 
 const DIR: &str = "/tmp/readdir_bound";
 /// Long names, so few files make a listing of several replies: the names
-/// alone are 128,000 bytes, nearly twice a 64 KiB reply, and the 641 objects
-/// this makes in `/tmp` are under the 1,024 any pager serves.
+/// alone are 128,000 bytes, nearly twice a 64 KiB reply.
 const ENTRIES: usize = 640;
 const NAME_BYTES: usize = 200;
 const _: () = assert!(ENTRIES * NAME_BYTES > 64 * 1024);
