@@ -584,6 +584,9 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "tlb-tags-enter-relaxed", Some("tlb_tags"), &[
         Fails("a_change_reaches_a_runner_or_the_entering_cpu_flushes"),
     ]),
+    red(KERNEL_LOOM, "tlb-tags-resume-relaxed", Some("tlb_tags"), &[
+        Fails("a_change_passing_an_idle_holder_by_is_flushed_when_its_thread_resumes"),
+    ]),
     red(KERNEL_LOOM, "shootdown-served-relaxed", Some("counters_round"), &[
         Fails("a_cpu_read_as_answered_is_read_with_its_answer"),
     ]),

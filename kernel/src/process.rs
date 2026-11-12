@@ -703,9 +703,10 @@ fn teardown_resources(
     ops::close_all(&mut handles.lock());
     // Every thread has left, and none returns to Ring 3 to use them.
     crate::isa::process_ends(pid);
+    let space = Arc::clone(&process_data_arc.lock().space);
+    space.retire();
 
-    let data = process_data_arc.lock();
-    let usage = data.space.usage();
+    let usage = space.usage();
     Consumed {
         peak_memory: usage.peak_bytes(),
         alloc_count: usage.ranges_made(),
@@ -833,7 +834,7 @@ enum Leaving {
 /// Returns rather than diverging: the exit pass never comes back, and the live `Arc`s here would leak with no scope left to drop them.
 fn leave_as(leaving: Leaving) {
     let (pid, tid) = (current_process(), current_tid());
-    crate::mm::paging::activate_kernel();
+    crate::sched::driver::leave_address_space();
     let process_data = process_data();
     scheduler::flush_current_stats(&mut process_data.lock().accounting);
     let out = {

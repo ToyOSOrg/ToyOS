@@ -1,7 +1,9 @@
 //! A thread's vector registers are its own: a new thread starts with every one
 //! above `xmm0`-`xmm15` zero, and what it loads into all of them survives
 //! being switched out for threads holding other values, whatever the kernel
-//! wrote on the thread's own kernel stack in between.
+//! wrote on the thread's own kernel stack in between — and survives a return
+//! to a CPU whose registers still hold what it had there before it ran
+//! elsewhere.
 //!
 //! More threads than CPUs, each spinning with its registers loaded, so every
 //! CPU is time-shared and each switch puts a thread with other values on it.
@@ -59,5 +61,32 @@ fn main() {
     for (thread, worker) in workers.into_iter().enumerate() {
         assert!(worker.join().is_ok(), "thread {thread} found a vector register not its own");
     }
-    println!("vector_state: {threads} threads each held {width:?} through {ROUNDS} rounds");
+    let trips = away_and_back(width);
+    println!("vector_state: {threads} threads each held {width:?} through {ROUNDS} rounds; {trips}");
+}
+
+/// Trips from one CPU to another and back, each a pair of files no other trip
+/// loads.
+const TRIPS: u64 = 16;
+
+/// The main thread leaves its registers on a CPU that then idles, changes them
+/// on another, and comes back: what it reads there is what it loaded last.
+fn away_and_back(width: vector::Width) -> String {
+    let cpus = toyos_abi::syscall::cpu_count();
+    if cpus < 2 {
+        return "no second CPU to go away to".to_string();
+    }
+    let (home, away) = (cpus - 1, cpus - 2);
+    for trip in 0..TRIPS {
+        let first = pattern(u64::MAX, 2 * trip, width.bytes());
+        let second = pattern(u64::MAX, 2 * trip + 1, width.bytes());
+        let (got, ran) = vector::away_and_back(width, &first, &second, home, away);
+        let wanted = [u64::from(home), u64::from(away), u64::from(home)];
+        assert_eq!(ran, wanted, "trip {trip} ran its legs on CPUs {ran:?}, not {wanted:?}");
+        if let Some(register) = width.first_difference(&got, &second) {
+            let held = if got == first { "the file it had left there" } else { "neither file" };
+            panic!("trip {trip}: back on CPU {home} from CPU {away}, {register} held {held}");
+        }
+    }
+    format!("{TRIPS} trips from CPU {home} to {away} and back kept what each loaded last")
 }

@@ -325,6 +325,14 @@ impl Root {
         self.0 & ADDR
     }
 
+    /// Whether this is the root `TTBR0_EL1` holds.
+    pub fn is_loaded(self) -> bool {
+        let held: u64;
+        // SAFETY: reads a system register into a scratch register; touches nothing else.
+        unsafe { core::arch::asm!("mrs {}, ttbr0_el1", out(reg) held, options(nomem, nostack, preserves_flags)) };
+        held == self.0
+    }
+
     /// No invalidation: the ASID is this space's alone, and a returned one was
     /// dropped from every CPU before it was issued again.
     /// # Safety
@@ -849,6 +857,10 @@ impl UserTables {
         }
         false
     }
+
+    /// No thread will load this space's root again, so no CPU holds it: an
+    /// idle context loads the kernel's (`arch::hw`).
+    pub fn retire(&self) {}
 }
 
 /// Frees every table under the root, and the root; the frames its leaves map

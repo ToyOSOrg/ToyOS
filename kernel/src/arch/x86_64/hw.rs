@@ -1,6 +1,7 @@
 //! x86-64's half of `crate::hw::KernelHw`: the halt and the context switch.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use kernel::sched::cpu::RunToken;
 use kernel::sched::hw::Hw;
@@ -236,7 +237,19 @@ unsafe fn switch_witness_mutate(restore: *const KernelCtx) {
     };
 }
 
-#[cfg(feature = "boot-actuators")]
+/// Whether `SYSRET` loads SS's selector but keeps its hidden descriptor, so a
+/// `sysretq` on a CPU whose SS is null hands userland an unusable one. Intel's
+/// writes the whole descriptor (SDM Vol. 2B, SYSRET, Operation); AMD's sets the
+/// selector alone (APM Vol. 3, SYSRET). True until [`declare_vendor`], and on
+/// every part but Intel's.
+static SYSRET_KEEPS_SS: AtomicBool = AtomicBool::new(true);
+
+/// Decide [`SYSRET_KEEPS_SS`] for the machine. Once, on the boot CPU, before
+/// the first switch.
+pub fn declare_vendor(vendor: kernel::cpu::Vendor) {
+    SYSRET_KEEPS_SS.store(vendor != kernel::cpu::Vendor::Intel, Relaxed);
+}
+
 fn read_ss() -> u16 {
     let ss: u16;
     // SAFETY: reads a segment selector into a scratch register; touches nothing else.
@@ -244,7 +257,6 @@ fn read_ss() -> u16 {
     ss
 }
 
-#[cfg(feature = "boot-actuators")]
 fn write_ss(sel: u16) {
     // SAFETY: loading SS at CPL 0 cannot fault for a null or flat-data selector, and a null SS still allows stack references there.
     unsafe { asm!("mov ss, {0:x}", in(reg) sel as u64, options(nomem, nostack, preserves_flags)); }
@@ -255,11 +267,16 @@ static PROBE_WATCH: crate::watch::Watch = crate::watch::Watch::new();
 
 /// Observes [`KernelHw::switch`]'s SS reload the one way a guest can (its `SYSRET`
 /// not reproducing the erratum): null SS, park, read SS; null means unreloaded.
+/// On a part whose `SYSRET` writes SS whole the switch owes nothing, and says so.
 #[cfg(feature = "boot-actuators")]
 pub fn sysret_ss_probe(parkable: &crate::scheduler::Parkable) {
     use crate::watch;
     use crate::time::{Deadline, Duration};
     use kernel::sched::task::WaitClass;
+    if !SYSRET_KEEPS_SS.load(Relaxed) {
+        crate::log!("sysret-ss: not needed — this part's SYSRET writes SS whole, so a switch leaves SS as it is");
+        return;
+    }
     let Some(armed) = watch::arm(&PROBE_WATCH, 0, WaitClass::Other)
     else {
         crate::log!("sysret-ss: probe could not arm");
@@ -297,12 +314,17 @@ impl Hw for KernelHw {
             // A thread's user state area lies above its stack's top (`fpu`);
             // the idle context has none, and switches with neither a save nor a
             // restore. The thread resumes in this frame, so the restore below
-            // reads the area its own save wrote.
+            // reads the area its own save wrote. Its FS base is read back, not
+            // kept: Ring 3 moves it with a segment load (SDM Vol. 2B, MOV).
             let area = match (*save).runs {
-                Runs::User(_) => Some((*save).kernel_stack_top),
+                Runs::User(_) => {
+                    let base = cpu::read_fs_base();
+                    (*save).thread_pointer = base;
+                    percpu::set_fs_base(base);
+                    Some((*save).kernel_stack_top)
+                }
                 Runs::Idle => None,
             };
-            (*save).thread_pointer = cpu::read_fs_base();
             (*save).preempt = crate::preempt::count();
             let incoming: &KernelCtx = &*restore;
             // The only load of `incoming.sp`: reading it again after `cr3.activate()`'s clobber would be a second, unguarded load.
@@ -314,39 +336,46 @@ impl Hw for KernelHw {
             switch_witness_mutate(restore);
             crate::preempt::set_count(incoming.preempt);
             let incoming_id = incoming.runs.id();
+            // Before the root is compared: once a thread is named here, no
+            // shootdown this CPU answers takes its root away (`arch::tlb`).
             percpu::set_current_tid(incoming_id.map(|id| id.1));
             percpu::set_current_pid(incoming_id.map(|id| id.0));
             super::pio::switch_to(incoming_id.map(|id| id.0));
             match incoming_id {
                 Some(_) => {
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
-                    incoming.root.activate();
-                    cpu::write_fs_base(incoming.thread_pointer);
+                    if incoming.root.is_loaded() {
+                        super::tlb::resume(incoming.root.pcid());
+                    } else {
+                        incoming.root.activate();
+                    }
+                    if percpu::fs_base() != incoming.thread_pointer {
+                        cpu::write_fs_base(incoming.thread_pointer);
+                        percpu::set_fs_base(incoming.thread_pointer);
+                    }
                 }
-                // idle's stack top is per-CPU, unknowable at boot-time init, so it is read here instead.
+                // idle's stack top is per-CPU, unknowable at boot-time init, so
+                // it is read here instead. It keeps whatever root is loaded:
+                // it reaches only the kernel half, which every root shares.
                 None => {
                     percpu::set_kernel_stack(percpu::idle_stack_top());
-                    incoming.root.activate();
+                    super::tlb::idle();
                 }
             }
             crate::hw::note_running(restore);
-            // AMD's `SYSRET` reloads SS's selector but not its cached descriptor, so
-            // a `sysretq` onto a task an IDT entry left with SS NULL hands userland an
-            // unusable SS; reloading it here keeps it valid (`X86_BUG_SYSRET_SS_ATTRS`).
-            // SAFETY: KERNEL_DS is a valid flat data selector; loading SS at CPL 0 cannot fault.
-            core::arch::asm!(
-                "mov ss, {ds:x}",
-                ds = in(reg) percpu::KERNEL_DS as u64,
-                options(nomem, nostack, preserves_flags),
-            );
+            // An entry from Ring 3 through an IDT gate leaves SS null (SDM Vol.
+            // 3A §7.14.4, "Stack Switching in IA-32e Mode"); see `SYSRET_KEEPS_SS`.
+            if SYSRET_KEEPS_SS.load(Relaxed) && read_ss() != percpu::KERNEL_DS {
+                write_ss(percpu::KERNEL_DS);
+            }
             if let Some(area) = area {
-                super::fpu::save(area);
+                super::fpu::leave(area, save as u64, &mut (*save).fpu);
             }
             context_switch(&raw mut (*save).sp, rsp);
             // The preempt count is still raised: nothing switches this task
             // out before its state is back.
             if let Some(area) = area {
-                super::fpu::restore(area);
+                super::fpu::resume(area, save as u64, (*save).fpu);
             }
         }
     }

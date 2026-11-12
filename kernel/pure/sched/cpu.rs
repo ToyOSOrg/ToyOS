@@ -437,6 +437,11 @@ impl<X: SchedPayload> CpuSched<X> {
         self.running.as_ref()
     }
 
+    /// The running task's saved context, which the next switch into it loads.
+    pub fn running_ctx(&mut self) -> Option<&mut X::Ctx> {
+        self.running.as_mut().map(RunningTask::ctx_mut)
+    }
+
     /// The handle `park::prepare` needs. Only the running task can
     /// be produced, so registering somebody else's task has no expression.
     pub fn current_task(&self) -> Option<CurrentTask<'_, Msg<X>>> {

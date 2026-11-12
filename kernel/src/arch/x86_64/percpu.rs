@@ -119,6 +119,17 @@ pub struct PerCpu {
     /// Non-zero inside this CPU's NMI handler, written only by `arch::idt::nmi`'s entry; IST2 isn't re-entrant, so this proves no second NMI lands on it.
     nmi_active: u32,
     ap_token: u32,
+    /// The `CR3` value `paging::Cr3::activate` last loaded on this CPU, its
+    /// only writer; `u64::MAX` before the first.
+    root: u64,
+    /// `IA32_FS_BASE` as `load_gdt` left it or this CPU's last switch read or
+    /// wrote it. Exact at every switch-in, since every switch away from a user
+    /// thread reads the register back; stale while a thread runs, which moves
+    /// it by a segment load or `SYS_SET_THREAD_POINTER`.
+    fs_base: u64,
+    /// The context whose switch-out last left its user state in this CPU's
+    /// registers, 0 before the first: `arch::fpu`'s record.
+    fpu_holder: u64,
     /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so a new source moves nothing else.
     pub irq_counts: [AtomicU64; crate::irq_census::Source::COUNT],
 }
@@ -216,6 +227,9 @@ const OFF_TIMER_PENDING: u32 = offset_of!(PerCpu, timer_pending) as u32;
 pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
 /// The AP's bring-up token, read by `ap_entry` to answer for its own attempt.
 const OFF_AP_TOKEN: u32 = offset_of!(PerCpu, ap_token) as u32;
+const OFF_ROOT: u32 = offset_of!(PerCpu, root) as u32;
+const OFF_FS_BASE: u32 = offset_of!(PerCpu, fs_base) as u32;
+const OFF_FPU_HOLDER: u32 = offset_of!(PerCpu, fpu_holder) as u32;
 /// Where this CPU's interrupt counters start; `irq_census::slot_offset` derives every handler's offset from it.
 pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
 
@@ -380,6 +394,11 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 log_shard: log::shard_for(cpu_id) as *const log::Shard as u64,
                 nmi_active: 0,
                 ap_token: 0,
+                root: u64::MAX,
+                // `load_gdt` loads FS with `KERNEL_DS`, whose base is 0, and a
+                // segment load clears the base's upper half (SDM Vol. 3A §3.4.4).
+                fs_base: 0,
+                fpu_holder: 0,
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::Source::COUNT],
             },
         );
@@ -658,6 +677,35 @@ pub fn current_pid() -> Option<crate::process::Pid> {
 /// Set the Pid of the process running on this CPU. None sets idle (u32::MAX).
 pub fn set_current_pid(pid: Option<crate::process::Pid>) {
     gs::write_u32::<OFF_CURRENT_PID>(pid.map_or(u32::MAX, |p| p.raw()));
+}
+
+/// The `CR3` value this CPU last loaded through `paging::Cr3::activate`.
+pub fn root() -> u64 {
+    gs::read_u64::<OFF_ROOT>()
+}
+
+/// `paging::Cr3::activate`'s record of the value it loads.
+pub fn set_root(cr3: u64) {
+    gs::write_u64::<OFF_ROOT>(cr3);
+}
+
+/// `IA32_FS_BASE` as of this CPU's last switch: exact only at a switch-in.
+pub fn fs_base() -> u64 {
+    gs::read_u64::<OFF_FS_BASE>()
+}
+
+pub fn set_fs_base(base: u64) {
+    gs::write_u64::<OFF_FS_BASE>(base);
+}
+
+/// The context whose switch-out last left its user state in this CPU's
+/// registers; 0 before the first.
+pub fn fpu_holder() -> u64 {
+    gs::read_u64::<OFF_FPU_HOLDER>()
+}
+
+pub fn set_fpu_holder(ctx: u64) {
+    gs::write_u64::<OFF_FPU_HOLDER>(ctx);
 }
 
 /// This CPU's `PerCpu`, reached through its own self-reference at `gs:[0]`; only [`init_ap`]'s caller needs it — everything else reads through [`gs`].

@@ -4,7 +4,7 @@
 //! free memory as soon as it returns; every `IF`-clear spin able to block one
 //! answers it directly instead of waiting on the interrupt vector. A stale
 //! memory-type translation surviving an early return is undefined per SDM
-//! Vol. 3A §11.12.4.
+//! Vol. 3A §14.12.4. SDM sections here are numbered as in order 325384-093US.
 //!
 //! **A change to one user space's leaves reaches only the CPUs running it**
 //! ([`user_change`], over `crate::tlb_tags`): a CPU that ran it before flushes
@@ -13,9 +13,14 @@
 //! translation where it was asked more than one at once or the range is long.
 //! Every other shootdown targets every other CPU the machine brought up.
 //!
+//! **A CPU in its idle context keeps the root it last loaded** (`arch::hw`);
+//! `crate::tlb_tags` says which changes reach it. Its answer to any shootdown
+//! or ask loads the kernel's root ([`answer`], [`answer_ask`]), so it is
+//! reached once, and a space's [`retire`] reaches every CPU still holding it.
+//!
 //! **A user-half change keeps global translations**: its flush is `INVPCID`
 //! type 3 or a `CR3` reload, and only a kernel-half change, whose leaves are
-//! global, asks the flush that drops them (SDM Vol. 3A §4.10.4.1, APM Vol. 2
+//! global, asks the flush that drops them (SDM Vol. 3A §5.10.4.1, APM Vol. 2
 //! §5.5.2). An answer covering both is the wider.
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -58,20 +63,67 @@ pub fn switching(to: u16, load: impl FnOnce()) {
     USER.left(cpu, switched.from);
 }
 
+/// This CPU switches to its idle context, keeping the root it holds.
+pub fn idle() {
+    if USER.sized() {
+        USER.idle(percpu::cpu_id() as usize);
+    }
+}
+
+/// A thread of the space tagged `tag` resumes on this CPU, which holds its
+/// root: where it idled there, every user translation is flushed first if
+/// the space changed after this CPU's last such flush.
+pub fn resume(tag: u16) {
+    if USER.sized() && USER.resume(percpu::cpu_id() as usize, usize::from(tag)) {
+        flush(Reach::Narrow);
+    }
+}
+
+/// No thread will load the root of the space tagged `tag` again: every CPU
+/// still idle on it has loaded the kernel's before this returns.
+pub fn retire(tag: u16) {
+    user_change(Origin::Retire, tag, 0, u64::MAX, true);
+    assert!(!held(tag), "tlb: a CPU still holds the root of a space no thread runs in");
+}
+
+/// Whether any CPU holds the root of the space tagged `tag`.
+pub fn held(tag: u16) -> bool {
+    USER.held(usize::from(tag))
+}
+
+/// Load the kernel's root if this CPU runs its idle context on a user
+/// space's. Its idle code reaches no user address, so nothing it runs needs
+/// the space it leaves.
+fn leave_idle_space() {
+    let kernel = crate::mm::paging::kernel_root();
+    if percpu::current_tid().is_none() && !kernel.is_loaded() {
+        // SAFETY: the kernel's own tables, which hold the code and stack this runs on.
+        unsafe { kernel.activate() };
+    }
+}
+
 /// Pages a change's flush takes one at a time; past this, every user
 /// translation.
 const BY_PAGE: u64 = 64;
 
 /// The user space tagged `tag` changed the leaves of `[start, end)`, already
-/// written: every CPU running it has flushed them before this returns, and
-/// every other flushes before it next enters the space. So the change's
-/// frames may go as soon as it returns.
+/// written, and took tables away where `tables`: every CPU running it has
+/// flushed them before this returns — one idle on it only where `tables` —
+/// and every other flushes before it next uses the space. So the change's
+/// frames and tables may go as soon as it returns.
 /// Answers whether it reached another CPU.
-pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64) -> bool {
+///
+/// A CPU idle on the space may still read those frames speculatively through
+/// its stale translations (SDM Vol. 3A §5.10.4.4). That is sound while SMAP
+/// faults every other access it makes to a user page, a freed user frame is
+/// only ever mapped write-back again (§14.12.4), and a user mapping that is not
+/// write-back is a device window: UC, never read speculatively (§14.3), or the
+/// WC scanout, which a read does not disturb.
+pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64, tables: bool) -> bool {
     let me = percpu::cpu_id() as usize;
     let mut targets = CpuSet::default();
     let mut beyond = false;
-    USER.changed(usize::from(tag), |cpu| match targets.get_mut(cpu / 64) {
+    USER.changed(usize::from(tag), tables, |cpu| match targets.get_mut(cpu / 64) {
         Some(word) => *word |= 1 << (cpu % 64),
         None => beyond = true,
     });
@@ -271,10 +323,12 @@ enum Answerer {
     Initiator,
 }
 
-/// The flush, then the staged delay: every serve's closure but `join`'s.
+/// The flush, the leave of an idle CPU's space, then the staged delay: every
+/// serve's closure but `join`'s.
 fn answer(by: Answerer) -> impl FnOnce(Reach) {
     move |reach| {
         flush(reach);
+        leave_idle_space();
         stage_ack_delay(by);
     }
 }
@@ -283,6 +337,7 @@ fn answer(by: Answerer) -> impl FnOnce(Reach) {
 fn answer_ask(by: Answerer) -> impl FnOnce(Flush) {
     move |what| {
         flush_asked(what);
+        leave_idle_space();
         stage_ack_delay(by);
     }
 }

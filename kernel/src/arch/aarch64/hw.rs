@@ -88,13 +88,14 @@ impl Hw for KernelHw {
             match incoming_id {
                 Some(_) => {
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
-                    incoming.root.activate();
                     cpu::write_thread_pointer(incoming.thread_pointer);
                 }
-                None => {
-                    percpu::set_kernel_stack(percpu::idle_stack_top());
-                    incoming.root.activate();
-                }
+                None => percpu::set_kernel_stack(percpu::idle_stack_top()),
+            }
+            // The idle context's root is the kernel's empty one, so a space
+            // is held only where it runs (`UserTables::retire`).
+            if !incoming.root.is_loaded() {
+                incoming.root.activate();
             }
             crate::hw::note_running(restore);
             context_switch(&raw mut (*save).sp, sp);
