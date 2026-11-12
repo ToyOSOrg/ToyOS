@@ -223,9 +223,9 @@ pub enum Step {
     Pass(usize),
     DeliverIpi(usize),
     FireTimer(usize),
-    /// The switch a pass ended in. A step of its own, interrupts masked, so
-    /// that other CPUs can act between a pass and the switch that saves the
-    /// context it leaves (invariant I11).
+    /// The switch a pass ended in. A step of its own, so that other CPUs can
+    /// act between a pass and the switch that saves the context it leaves
+    /// (invariant I11); the model takes the switch itself as one step.
     Switch(usize),
     /// A device completion interrupt (audio): wakes its queue's waiters with
     /// the IRQ-time boost, exactly as the ISR tail does.
@@ -884,7 +884,7 @@ impl<'q> Vm<'q> {
             if self.is_stopped(cpu) {
                 continue;
             }
-            // Mid-switch, interrupts masked: the switch is all this CPU can do.
+            // Mid-switch: the switch, one step, is all this CPU can do.
             if self.switching[cpu].is_some() {
                 steps.push(Step::Switch(cpu));
                 continue;
@@ -1461,16 +1461,21 @@ impl<'q> Vm<'q> {
         end
     }
 
-    /// Take the switch `cpu`'s last pass ended in.
-    #[allow(unsafe_code)] // `Hw::switch` is an unsafe fn
+    /// Take the switch `cpu`'s last pass ended in: save the outgoing context
+    /// (I11's shadow), and then clear the outgoing task's on-CPU word, as the
+    /// kernel's switch does once it has left that task's stack.
+    #[allow(unsafe_code)] // `Hw::switch` is an unsafe fn; SimHw's body derefs nothing
     fn switch(&mut self, cpu: usize) {
         let token = self.switching[cpu].take().expect("a switch step for a CPU with none owed");
+        let outgoing = token.outgoing();
         self.hw.enter_pass(CpuId(cpu as u32), self.clock);
         // SAFETY: the token came from `finish()`, which built it from live
-        // Box-backed records, and this CPU has run no pass since; every task's
-        // `TaskShared` lives as long as `Vm::shared`.
+        // Box-backed records, and this CPU has run no pass since.
         unsafe { self.hw.switch(token) };
         self.hw.leave_pass();
+        if let Some(key) = outgoing {
+            self.shared[&key].left_cpu();
+        }
     }
 
     fn exec_op(&mut self, cpu: usize, choices: &mut ChoiceStream) {

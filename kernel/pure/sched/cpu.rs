@@ -46,8 +46,8 @@ use crate::sched::park::{CommittedTicket, CurrentTask, Parked};
 /// [`SchedPass::finish`], consumed by the driver's `unsafe Hw::switch`.
 ///
 /// The keys let a driver do its own bookkeeping (trace, invariant I11's
-/// `ctx_saved` shadow) without dereferencing the pointers — which is what
-/// keeps the simulator free of `unsafe`.
+/// `ctx_saved` shadow, the outgoing task's on-CPU word) without dereferencing
+/// the pointers, which is what keeps the simulator from dereferencing any.
 #[must_use]
 pub struct RunToken<X: SchedPayload> {
     restore: *const X::Ctx,
@@ -67,9 +67,9 @@ impl<X: SchedPayload> RunToken<X> {
     }
 
     /// The outgoing task's on-CPU word, which the switch clears with a
-    /// release store once nothing more of the outgoing context is written:
-    /// from then on another CPU may run it. Null where the outgoing context
-    /// is this CPU's idle one.
+    /// release store once it has saved the outgoing context and left its
+    /// stack: from then on another CPU may run it. Null where the outgoing
+    /// context is this CPU's idle one.
     pub fn left_ptr(&self) -> *const AtomicBool {
         self.left
     }
@@ -178,7 +178,7 @@ impl<X: SchedPayload> Due<X> {
 
     /// Drop the earliest deadlines whose parks another claim has ended, so a
     /// timer is not armed for one and an idle CPU does not wake for nothing.
-    /// A claim that lands after this reads the word arms it all the same.
+    /// A park that a claim ends after this read leaves its deadline armed.
     fn prune(&mut self, cpu: CpuId) {
         while let Some(&(at, key)) = self.order.first() {
             let park = &self.parks[&key];
@@ -1353,8 +1353,8 @@ impl<X: SchedPayload> CpuHandles<Msg<X>> {
     /// unrung, chosen as [`Self::idle_near`] chooses from the home, as an
     /// `Adopt`. Otherwise it goes home as a `Wake`, which places it there.
     ///
-    /// Three claims go home whatever the home runs. A task whose context its
-    /// home has not yet saved ([`TaskShared::on_cpu`]) may move only by its
+    /// Three claims go home whatever the home runs. A task whose home has not
+    /// yet switched away from it ([`TaskShared::on_cpu`]) may move only by its
     /// home's hand, in a pass after that switch. A claimant on the home itself
     /// costs no hop, and leaves placement to the home's own pass, which knows
     /// whether the poster is about to park. A killed task goes where its dying
@@ -1765,11 +1765,11 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
 
     /// Park the current task **before** the switch. Its record goes into its
     /// own slot and its word to `Blocked`, so any CPU may claim it at once.
-    /// What keeps its stack this CPU's until the switch has saved it is the
-    /// task's on-CPU word, set when this CPU dispatched it and cleared with
-    /// release by the switch that leaves it, after the save: a claimant that
-    /// reads it set sends the wake here as a message, which this CPU's next
-    /// pass, after that switch, places ([`CpuHandles::send_claimed_wake`]).
+    /// What keeps its stack this CPU's until the switch has saved it and left
+    /// it is the task's on-CPU word, set when this CPU dispatched it and
+    /// cleared with release by that switch, on the incoming stack: a claimant
+    /// that reads it set sends the wake here as a message, which this CPU's
+    /// next pass, after that switch, places ([`CpuHandles::send_claimed_wake`]).
     pub fn dispose_block(
         mut self,
         ticket: CommittedTicket<Msg<H::Payload>>,

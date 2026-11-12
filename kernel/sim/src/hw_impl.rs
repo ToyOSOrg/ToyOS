@@ -8,7 +8,6 @@
 //! nothing about the code that ships.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 use kernel::sched::cpu::RunToken;
@@ -205,11 +204,8 @@ impl Machine for SimHw {
 impl Hw for SimHw {
     type Payload = SimPayload;
 
-    /// Saves the outgoing context (I11's shadow) and then clears the outgoing
-    /// task's on-CPU word, as the kernel's switch does.
-    #[allow(unsafe_code)]
+    #[allow(unsafe_code)] // the trait method is `unsafe fn`; this body derefs nothing
     unsafe fn switch(&self, token: RunToken<SimPayload>) {
-        let left = token.left_ptr();
         self.with(|s| {
             let cpu = Self::cpu(s);
             s.switches += 1;
@@ -227,11 +223,6 @@ impl Hw for SimHw {
             }
             s.loaded[cpu] = token.incoming();
         });
-        // SAFETY: the trait's: the word is null or the outgoing task's, whose
-        // `TaskShared` is live.
-        if let Some(left) = unsafe { left.as_ref() } {
-            left.store(false, Ordering::Release);
-        }
     }
 
     fn release(&self, key: TaskKey, payload: SimPayload, acct: TaskAccounting) {

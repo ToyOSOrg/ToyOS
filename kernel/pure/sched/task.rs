@@ -357,9 +357,9 @@ pub struct TaskShared<M: SchedMsg> {
     /// ends the park owns it, so the wake goes where that claimant sends it.
     parked: ParkedSlot<M::Parked>,
     /// Set by the CPU that dispatches the task, and cleared with release by
-    /// the switch that leaves it once its context is saved. While it is set
-    /// a CPU still stands on the task's kernel stack, so only that CPU may
-    /// move it ([`Self::on_cpu`]).
+    /// the switch that leaves it once its context is saved and its stack
+    /// left. While it is set a CPU may still stand on the task's kernel stack,
+    /// so only that CPU may move it ([`Self::on_cpu`]).
     on_cpu: AtomicBool,
 }
 
@@ -378,8 +378,8 @@ impl<M: SchedMsg> TaskShared<M> {
     }
 
     /// Whether a CPU may still stand on this task's context: dispatched and
-    /// not yet left by a switch that saved it. A claimant that reads `false`
-    /// after its claim reads it after that save.
+    /// not yet left by a switch that saved it and moved off its stack. A
+    /// claimant that reads `false` after its claim reads it after that.
     pub fn on_cpu(&self) -> bool {
         if cfg!(feature = "forward-ignores-on-cpu") {
             return false;
@@ -387,8 +387,10 @@ impl<M: SchedMsg> TaskShared<M> {
         self.on_cpu.load(Ordering::Acquire)
     }
 
-    /// The dispatching CPU is about to load this task's context. Ordered
-    /// before any park the task makes there by that CPU's own order.
+    /// The dispatching CPU is about to load this task's context. The set
+    /// reaches a claimant through the claim's acquire of the state word,
+    /// whose `begin_commit` and `commit_park` release it after the set, so no
+    /// claimant reads a previous run's clear.
     pub(crate) fn dispatched(&self) {
         self.on_cpu.store(true, Ordering::Relaxed);
     }
@@ -397,6 +399,13 @@ impl<M: SchedMsg> TaskShared<M> {
     /// saved, with a release store ([`crate::sched::cpu::RunToken::left_ptr`]).
     pub(crate) fn on_cpu_word(&self) -> *const AtomicBool {
         &self.on_cpu
+    }
+
+    /// The simulator's switch has saved this task's context and left it:
+    /// what a kernel switch does through [`Self::on_cpu_word`].
+    #[cfg(feature = "protocol-port")]
+    pub fn left_cpu(&self) {
+        self.on_cpu.store(false, Ordering::Release);
     }
 
     pub(crate) fn parked(&self) -> &ParkedSlot<M::Parked> {

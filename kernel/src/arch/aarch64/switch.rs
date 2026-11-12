@@ -27,12 +27,11 @@ const _: () = assert!(FRAME_BYTES.is_multiple_of(16));
 /// `old_sp`, clear `left` unless it is null, and return into the frame at
 /// `new_sp`.
 ///
-/// The stored stack pointer is the last of the outgoing context written, so
-/// the clear after it may hand the context to another CPU. It is a
-/// store-release (`STLRB`), which orders every earlier load and store of
-/// this CPU before it (Arm ARM, "Load-Acquire, Load-AcquirePC, and
-/// Store-Release"). Nothing is pushed onto the outgoing stack after the clear:
-/// IRQ and FIQ are masked, and an SError ends the machine.
+/// `left` is cleared once the outgoing context is saved and this CPU has left
+/// its stack, so nothing this CPU does afterwards touches either, and the
+/// clear may hand them to another CPU. It is a store-release (`STLRB`), which
+/// orders every earlier load and store of this CPU before it (Arm ARM,
+/// "Load-Acquire, Load-AcquirePC, and Store-Release").
 /// # Safety
 /// `old_sp` is the outgoing context's save slot and `new_sp` a frame this
 /// function or `super::entry::initial_frame` wrote, on a stack that is live.
@@ -75,10 +74,10 @@ pub(crate) unsafe extern "C" fn context_switch(old_sp: *mut u64, new_sp: u64, le
         "str x10, [x9, #520]",
         "mov x9, sp",
         "str x9, [x0]",
+        "mov sp, x1",
         "cbz x2, 2f",
         "stlrb wzr, [x2]",
         "2:",
-        "mov sp, x1",
         "add x9, sp, #{fp}",
         "ldp q0, q1, [x9, #0]",
         "ldp q2, q3, [x9, #32]",

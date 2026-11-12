@@ -39,7 +39,10 @@ must read `wake.onto_busy` faster on both benches, with no other of these
 rows slower beyond its spread. A second set of the same rows runs with
 every CPU busy: there a claimant's scan for an idle CPU finds none, and the
 home's own placement scans again, so main must read no row slower there
-beyond its spread. With it, the idle-exit latency per sleep depth on both
+beyond its spread. A third case is a wake whose home runs a task of another
+band with one of the wake's band queued. No `osbench` row stages it yet, and
+its reading decides
+`issues/a-claimed-wake-ignores-a-queued-task-of-its-band-at-home.md`. With it, the idle-exit latency per sleep depth on both
 benches, from the existing probes or the A/B's boots, so that each bench's
 `wake.onto_busy` is split between the removed hop and the idle exit. A wake
 claimed before its home has switched away from the task still takes both

@@ -6,13 +6,13 @@ use core::sync::atomic::AtomicBool;
 
 /// The outgoing half of [`context_switch`]. A macro, not inlined twice, so both builds share one instruction sequence.
 ///
-/// The outgoing `rsp` is the last of the outgoing context written, so the
-/// store that clears `left` after it may hand the context to another CPU. It
-/// is a release: x86-64 does not reorder a write with older writes (SDM Vol.
-/// 3A §11.2.2, order 325384-093US), and the caller's saves are ordinary
-/// writes made before this call. Nothing pushes onto the outgoing stack after
-/// the clear: interrupts are masked, and NMI, #MC, #DF and #DB switch to IST
-/// stacks.
+/// `left` is cleared once the outgoing context is saved and this CPU has left
+/// its stack, so nothing this CPU does afterwards touches either, and the
+/// clear may hand them to another CPU. It is a release: x86-64 does not
+/// reorder a write with older writes (SDM Vol. 3A §11.2.2, order
+/// 325384-093US), and the caller's saves are ordinary writes made before this
+/// call. It is here and not after the macro, where the witness build's `call`
+/// would clobber `rdx`.
 macro_rules! switch_save {
     () => {
         "pushfq
@@ -23,11 +23,11 @@ macro_rules! switch_save {
          push r14
          push r15
          mov [rdi], rsp
+         mov rsp, rsi
          test rdx, rdx
          jz 2f
          mov byte ptr [rdx], 0
-         2:
-         mov rsp, rsi"
+         2:"
     };
 }
 

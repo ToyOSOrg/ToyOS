@@ -197,9 +197,8 @@ fn a_claim_never_sends_on_a_context_its_home_has_not_saved() {
 /// a certainty — the migration needs a boosted wake to land on the RT daemon's
 /// CPU in the window between the teardown and that CPU's drain — so this asserts
 /// a floor over the sweep rather than every seed. Seeded schedules catch it
-/// about once in 140 and PCT's about once in 3,000, since a boosted wake whose
-/// claimant finds the CPU it may leave sends it on itself and never reaches
-/// `hand_off`; [`CORPSE_SEEDS`] seeded schedules catch it about fifteen times.
+/// about once in 140, so [`CORPSE_SEEDS`] of them catch it about fourteen
+/// times.
 #[test]
 fn old_migrate_keeping_the_corpse_is_caught() {
     let scenario = scenarios::old_migrate_kept_the_corpse();
