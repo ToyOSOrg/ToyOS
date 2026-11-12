@@ -65,7 +65,10 @@ const IBRS_IBPB: u32 = 1 << 26;
 const STIBP: u32 = 1 << 27;
 const L1D_FLUSH: u32 = 1 << 28;
 const SSBD: u32 = 1 << 31;
+const PSFD: u32 = 1 << 0;
+const IPRED_CTRL: u32 = 1 << 1;
 const RRSBA_CTRL: u32 = 1 << 2;
+const DDPD_U: u32 = 1 << 3;
 const BHI_CTRL: u32 = 1 << 4;
 
 /// `IA32_ARCH_CAPABILITIES`, the same article's Table 2.
@@ -102,6 +105,7 @@ mod amd {
     pub const SSBD: u32 = 1 << 24;
     pub const SSBD_VIRT_SPEC_CTRL: u32 = 1 << 25;
     pub const SSBD_NOT_REQUIRED: u32 = 1 << 26;
+    pub const PSFD: u32 = 1 << 28;
     pub const BTC_NO: u32 = 1 << 29;
     pub const LFENCE_ALWAYS_SERIALIZING: u32 = 1 << 2;
     pub const VERW_CLEAR: u32 = 1 << 5;
@@ -292,6 +296,13 @@ impl Mitigations {
     }
 }
 
+/// Each one's name, as a line gives it.
+impl fmt::Display for Mitigations {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Named { set: *self, by_policy: Self::NONE }.fmt(f)
+    }
+}
+
 /// The vulnerabilities decided, each named as its line names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -412,11 +423,66 @@ impl Decision {
         Line { verdict: self.verdict(of), applied }
     }
 
+    /// `IA32_SPEC_CTRL` (48H) on this CPU while no program that asked runs:
+    /// `IBRS` set once where enhanced IBRS or AMD's IBRS-always-on is named,
+    /// and `BHI_DIS_S` where it is. Every other bit is clear.
+    pub fn spec_ctrl(&self) -> u64 {
+        let mut value = 0;
+        if self.enumerates(Mitigation::EnhancedIbrs) || self.enumerates(Mitigation::IbrsAlwaysOn) {
+            value |= msr::IBRS;
+        }
+        if self.enumerates(Mitigation::BhiDisS) {
+            value |= msr::BHI_DIS_S;
+        }
+        value
+    }
+
+    /// The `IA32_MCU_OPT_CTRL` (123H) opt-outs the kernel clears: each where
+    /// the microcode mitigation it disables is named.
+    pub fn mcu_opt_ctrl_clears(&self) -> u64 {
+        let mut clears = 0;
+        if self.enumerates(Mitigation::SrbdsMicrocode) {
+            clears |= msr::RNGDS_MITG_DIS;
+        }
+        if self.enumerates(Mitigation::GdsMicrocode) {
+            clears |= msr::GDS_MITG_DIS;
+        }
+        clears
+    }
+
+    /// What the kernel sets at a CPU's bring-up, this decision names and the
+    /// CPU enumerates, and `registers` do not show in force.
+    pub fn unapplied(&self, registers: &Registers) -> Mitigations {
+        let set = Mitigations::of(&[
+            Mitigation::LfenceDispatchSerializing,
+            Mitigation::EnhancedIbrs,
+            Mitigation::IbrsAlwaysOn,
+            Mitigation::BhiDisS,
+            Mitigation::SrbdsMicrocode,
+            Mitigation::GdsMicrocode,
+        ]);
+        let named = Mitigation::ALL.into_iter().filter(|&one| set.has(one) && self.enumerates(one));
+        let in_force = self.in_force(registers);
+        named.filter(|&one| !in_force.has(one)).fold(Mitigations::NONE, Mitigations::with)
+    }
+
     /// What is in force on a CPU whose registers read `registers`: [`ALWAYS`]
-    /// and each control a register shows on. Intel's two bits opt out of a
-    /// mitigation its microcode turns on; AMD's two turn one on.
+    /// and each control a register shows on. Intel's two `IA32_MCU_OPT_CTRL`
+    /// bits opt out of a mitigation its microcode turns on; the others turn
+    /// one on.
     pub fn in_force(&self, registers: &Registers) -> Mitigations {
         let mut on = ALWAYS;
+        if let Some(spec_ctrl) = registers.spec_ctrl {
+            for (one, bit) in [
+                (Mitigation::EnhancedIbrs, msr::IBRS),
+                (Mitigation::IbrsAlwaysOn, msr::IBRS),
+                (Mitigation::BhiDisS, msr::BHI_DIS_S),
+            ] {
+                if self.enumerates(one) && spec_ctrl & bit != 0 {
+                    on = on.with(one);
+                }
+            }
+        }
         if let Some(opt) = registers.mcu_opt_ctrl {
             if self.enumerates(Mitigation::SrbdsMicrocode) && opt & msr::RNGDS_MITG_DIS == 0 {
                 on = on.with(Mitigation::SrbdsMicrocode);
@@ -444,6 +510,8 @@ pub const ALWAYS: Mitigations = Mitigations::of(&[Mitigation::UserPointerClamp, 
 /// and `None` elsewhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Registers {
+    /// `IA32_SPEC_CTRL` (48H), wherever the CPU has it ([`Facts::has_spec_ctrl`]).
+    pub spec_ctrl: Option<u64>,
     /// `IA32_MCU_OPT_CTRL` (123H).
     pub mcu_opt_ctrl: Option<u64>,
     /// AMD's `DE_CFG2` (C001_10E3H).
@@ -455,11 +523,14 @@ pub struct Registers {
 /// MSR C001_1029[1]: LFENCE is dispatch serializing (AMD 70586 G-2).
 pub const C001_1029_LFENCE_SERIALIZES_DISPATCH: u64 = 1 << 1;
 
-/// The bits [`Decision::in_force`] reads: `IA32_MCU_OPT_CTRL`'s two
-/// opt-outs ("CPUID Enumeration and Architectural MSRs", Table 6) and
-/// `DE_CFG2[SuppressBPOnNonBr]` ("Technical Guidance for Mitigating Branch
-/// Type Confusion" §6.2.1).
+/// The register bits the decision sets and reads: `IA32_SPEC_CTRL`'s
+/// ("CPUID Enumeration and Architectural MSRs", Table 3, which AMD's
+/// `SPEC_CTRL` shares: APM Vol. 3 Fn8000_0008_EBX), `IA32_MCU_OPT_CTRL`'s two
+/// opt-outs (the same, Table 6) and `DE_CFG2[SuppressBPOnNonBr]` ("Technical
+/// Guidance for Mitigating Branch Type Confusion" §6.2.1).
 mod msr {
+    pub const IBRS: u64 = 1 << 0;
+    pub const BHI_DIS_S: u64 = 1 << 10;
     pub const RNGDS_MITG_DIS: u64 = 1 << 0;
     pub const GDS_MITG_DIS: u64 = 1 << 4;
     pub const SUPPRESS_BP_ON_NON_BR: u64 = 1 << 1;
@@ -609,6 +680,22 @@ pub fn decide(facts: &Facts) -> Decision {
 }
 
 impl Facts {
+    /// Whether the CPU has `IA32_SPEC_CTRL` (48H), which an absent MSR's
+    /// `#GP` makes a question to ask first: on Intel wherever it enumerates
+    /// any of its bits ("CPUID Enumeration and Architectural MSRs", Table 3),
+    /// on AMD wherever it enumerates IBRS, STIBP, SSBD or PSFD (APM Vol. 3
+    /// Fn8000_0008_EBX).
+    pub fn has_spec_ctrl(&self) -> bool {
+        match self.vendor {
+            Vendor::Intel => {
+                self.cpuid_7_0_edx & (IBRS_IBPB | STIBP | SSBD) != 0
+                    || self.cpuid_7_2_edx & (PSFD | IPRED_CTRL | RRSBA_CTRL | DDPD_U | BHI_CTRL) != 0
+            }
+            Vendor::Amd => self.cpuid_8000_0008_ebx & (amd::IBRS | amd::STIBP | amd::SSBD | amd::PSFD) != 0,
+            Vendor::Other(_) => false,
+        }
+    }
+
     fn cap(&self, bit: u64) -> bool {
         self.arch_capabilities & bit != 0
     }
@@ -663,8 +750,10 @@ fn intel(f: &Facts, of: Vulnerability) -> Verdict {
         // no need to use STIBP when IBRS is set" (§2.4.1.3).
         Vulnerability::SpectreV2 => {
             let enhanced = f.cap(cap::IBRS_ALL);
+            // The bit it sets is `IBRS`'s, which CPUID.(07H,0):EDX[26]
+            // enumerates ("CPUID Enumeration and Architectural MSRs", Table 3).
             let branches = if enhanced {
-                Asks::of(Mitigation::EnhancedIbrs, true)
+                Asks::of(Mitigation::EnhancedIbrs, ibrs)
             } else if f.intel_rsba() {
                 Asks::of(Mitigation::IbrsOnEntry, ibrs)
             } else {
@@ -701,7 +790,7 @@ fn intel(f: &Facts, of: Vulnerability) -> Verdict {
                 Verdict::NotAffected
             } else if f.cap(cap::IBRS_ALL) {
                 if f.cap(cap::RRSBA) || f.intel_lists(RRSBA) == Some(true) {
-                    Asks::of(Mitigation::EnhancedIbrs, true).affected()
+                    Asks::of(Mitigation::EnhancedIbrs, ibrs).affected()
                 } else {
                     Verdict::NotAffected
                 }
@@ -1547,9 +1636,12 @@ mod tests {
     /// register the CPU was not read for shows nothing.
     #[test]
     fn what_is_in_force_is_what_the_registers_show() {
-        let unread = Registers { mcu_opt_ctrl: None, de_cfg2: None, c001_1029: None };
+        let unread = Registers { spec_ctrl: None, mcu_opt_ctrl: None, de_cfg2: None, c001_1029: None };
         let intel = decide(&INTEL_806C1);
         assert_eq!(intel.in_force(&unread), ALWAYS);
+        assert_eq!(intel.in_force(&Registers { spec_ctrl: Some(msr::IBRS), ..unread }), ALWAYS.with(EnhancedIbrs));
+        // A bit the decision does not name shows nothing.
+        assert_eq!(intel.in_force(&Registers { spec_ctrl: Some(msr::BHI_DIS_S), ..unread }), ALWAYS);
         let both = ALWAYS.with(SrbdsMicrocode).with(GdsMicrocode);
         assert_eq!(intel.in_force(&Registers { mcu_opt_ctrl: Some(0), ..unread }), both);
         assert_eq!(intel.in_force(&Registers { mcu_opt_ctrl: Some(msr::GDS_MITG_DIS), ..unread }), ALWAYS.with(SrbdsMicrocode));
@@ -1559,6 +1651,48 @@ mod tests {
         let both = Registers { de_cfg2: Some(msr::SUPPRESS_BP_ON_NON_BR), c001_1029: Some(C001_1029_LFENCE_SERIALIZES_DISPATCH), ..unread };
         assert_eq!(amd.in_force(&both), ALWAYS.with(SuppressBpOnNonBr).with(LfenceDispatchSerializing));
         assert_eq!(amd.in_force(&Registers { de_cfg2: Some(0), c001_1029: Some(0), ..unread }), ALWAYS);
+    }
+
+    /// The registers each verdict sets at bring-up: `IBRS` for enhanced IBRS
+    /// and AMD's always-on IBRS, `BHI_DIS_S` where it is named, and the
+    /// microcode opt-outs cleared where their mitigation is; and what a
+    /// register that does not hold them leaves unapplied.
+    #[test]
+    fn each_verdict_sets_the_registers_its_mitigations_name() {
+        let t14 = decide(&INTEL_806C1);
+        assert_eq!(t14.spec_ctrl(), msr::IBRS);
+        assert_eq!(t14.mcu_opt_ctrl_clears(), msr::RNGDS_MITG_DIS | msr::GDS_MITG_DIS);
+        let set = Registers { spec_ctrl: Some(msr::IBRS), mcu_opt_ctrl: Some(0), de_cfg2: None, c001_1029: None };
+        assert_eq!(t14.unapplied(&set), Mitigations::NONE);
+        let firmware = Registers { spec_ctrl: Some(0), mcu_opt_ctrl: Some(msr::GDS_MITG_DIS), ..set };
+        assert_eq!(t14.unapplied(&firmware), Mitigations::of(&[EnhancedIbrs, GdsMicrocode]));
+        // Enhanced IBRS sets a bit only CPUID.(07H,0):EDX[26] enumerates.
+        let no_ibrs = decide(&Facts { cpuid_7_0_edx: INTEL_806C1.cpuid_7_0_edx & !IBRS_IBPB, ..INTEL_806C1 });
+        assert_eq!(no_ibrs.spec_ctrl(), 0);
+        assert_eq!(no_ibrs.verdict(SpectreV2), lacking(&[EnhancedIbrs, Smep, Ibpb], &[EnhancedIbrs, Ibpb]));
+
+        let bhi_ctrl = decide(&Facts { cpuid_7_2_edx: BHI_CTRL, ..INTEL_806C1 });
+        assert_eq!(bhi_ctrl.spec_ctrl(), msr::IBRS | msr::BHI_DIS_S);
+
+        let zen2 = decide(&AMD_17H_60H);
+        assert_eq!((zen2.spec_ctrl(), zen2.mcu_opt_ctrl_clears()), (0, 0));
+        let preferred = amd::IBRS | amd::IBRS_ALWAYS_ON | amd::IBRS_PREFERRED;
+        let always_on = decide(&Facts { cpuid_8000_0008_ebx: AMD_17H_60H.cpuid_8000_0008_ebx | preferred, ..AMD_17H_60H });
+        assert_eq!(always_on.spec_ctrl(), msr::IBRS);
+        let lfence = Registers { spec_ctrl: Some(0), mcu_opt_ctrl: None, de_cfg2: None, c001_1029: Some(0) };
+        assert_eq!(always_on.unapplied(&lfence), Mitigations::of(&[LfenceDispatchSerializing, IbrsAlwaysOn]));
+    }
+
+    /// Which CPUs have `IA32_SPEC_CTRL` at all.
+    #[test]
+    fn spec_ctrl_exists_where_a_bit_of_it_is_enumerated() {
+        assert!(INTEL_806C1.has_spec_ctrl());
+        assert!(AMD_17H_60H.has_spec_ctrl());
+        assert!(!NOTHING.has_spec_ctrl());
+        assert!(Facts { cpuid_7_2_edx: PSFD, ..NOTHING }.has_spec_ctrl());
+        assert!(!Facts { cpuid_7_0_edx: MD_CLEAR | L1D_FLUSH, ..NOTHING }.has_spec_ctrl());
+        assert!(!Facts { vendor: Vendor::Amd, cpuid_8000_0008_ebx: amd::IBPB, ..NOTHING }.has_spec_ctrl());
+        assert!(!Facts { vendor: Vendor::Other(*b"HygonGenuine"), ..AMD_17H_60H }.has_spec_ctrl());
     }
 
     /// The set's bits are the enum's discriminants, so a mitigation left

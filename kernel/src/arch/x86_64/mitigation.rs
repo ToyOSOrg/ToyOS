@@ -5,8 +5,9 @@
 //! differ.
 //!
 //! [`apply`] sets the per-CPU controls the decision names that the kernel
-//! owns here. The boot CPU runs it before the allocator is up, so what it
-//! returns and where the boot CPU keeps it hold no heap.
+//! owns here: `IA32_SPEC_CTRL` whole, the named `IA32_MCU_OPT_CTRL`
+//! opt-outs and AMD's LFENCE bit. The boot CPU runs it before the allocator
+//! is up, so what it returns and where the boot CPU keeps it hold no heap.
 
 use core::fmt;
 
@@ -23,8 +24,13 @@ use crate::log;
 use crate::sync::Lock;
 
 const IA32_ARCH_CAPABILITIES: u32 = 0x10A;
+/// Intel, "CPUID Enumeration and Architectural MSRs", Table 3; AMD's
+/// `SPEC_CTRL` at the same address.
+const IA32_SPEC_CTRL: u32 = 0x48;
 /// Intel, "CPUID Enumeration and Architectural MSRs", Table 6.
 const IA32_MCU_OPT_CTRL: u32 = 0x123;
+/// `IA32_MCU_OPT_CTRL.GDS_MITG_DIS`: Intel, "Gather Data Sampling", Table 3.
+const GDS_MITG_DIS: u64 = 1 << 4;
 /// AMD, "Technical Guidance for Mitigating Branch Type Confusion" §6.2.1.
 const DE_CFG2: u32 = 0xC001_10E3;
 /// AMD 70586 G-2.
@@ -37,8 +43,8 @@ pub struct Read {
     /// every CPU is up.
     facts: Facts,
     registers: Registers,
-    /// C001_1029 as [`apply`] found it, where it wrote it.
-    c001_1029_found: Option<u64>,
+    /// Each register [`apply`] writes, as it found it.
+    found: Registers,
 }
 
 /// The boot CPU's [`Read`].
@@ -81,27 +87,46 @@ fn words() -> Facts {
 
 /// Sets this CPU's controls the decision on its words names, once its
 /// microcode has loaded and before anything relies on them, and returns what
-/// it read of itself. The control is LFENCE dispatch serializing, on which
-/// the clocksource's ordered TSC read (`RDTSCP; LFENCE`) relies as a
-/// bounds-check barrier does: a CPU where the bit does not hold stops the
-/// machine, as one without SMEP does. Which registers it reads does not
-/// depend on its core's other threads.
+/// it read of itself. The clocksource's ordered TSC read (`RDTSCP; LFENCE`)
+/// relies on LFENCE dispatch serializing as a bounds-check barrier does: a
+/// CPU where that bit does not hold stops the machine, as one without SMEP
+/// does. A register that does not hold another write is its line's to say.
+/// Which registers it reads does not depend on its core's other threads.
 pub fn apply() -> Read {
     let facts = words();
     let decision = decide(&facts);
     let lfence = decision.enumerates(Mitigation::LfenceDispatchSerializing);
-    let c001_1029_found = lfence.then(|| cpu::rdmsr(C001_1029));
-    if let Some(found) = c001_1029_found {
-        // SAFETY: the decision found the MSR on this CPU's family, outside a
-        // guest; the bit changes only how LFENCE dispatches.
-        unsafe { cpu::wrmsr(C001_1029, found | C001_1029_LFENCE_SERIALIZES_DISPATCH) };
+    let mcu_opt_ctrl =
+        decision.enumerates(Mitigation::SrbdsMicrocode) || decision.enumerates(Mitigation::GdsMicrocode);
+    if mcu_opt_ctrl && decision.enumerates(Mitigation::GdsMicrocode) && crate::actuator::gds_found_disabled() {
+        // SAFETY: GDS_CTRL enumerates the bit; the write below clears it.
+        unsafe { cpu::wrmsr(IA32_MCU_OPT_CTRL, cpu::rdmsr(IA32_MCU_OPT_CTRL) | GDS_MITG_DIS) };
     }
     let read = |enumerated: bool, msr: u32| enumerated.then(|| cpu::rdmsr(msr));
+    let found = Registers {
+        spec_ctrl: read(facts.has_spec_ctrl(), IA32_SPEC_CTRL),
+        mcu_opt_ctrl: read(mcu_opt_ctrl, IA32_MCU_OPT_CTRL),
+        de_cfg2: None,
+        c001_1029: read(lfence, C001_1029),
+    };
+    // SAFETY: each write names only bits the CPU enumerates, and each turns a
+    // mitigation on: `IA32_SPEC_CTRL`'s while no program that asked runs, the
+    // microcode's by clearing its opt-out, and LFENCE's dispatch ordering,
+    // whose MSR the decision found on this CPU's family outside a guest.
+    unsafe {
+        if found.spec_ctrl.is_some() {
+            cpu::wrmsr(IA32_SPEC_CTRL, decision.spec_ctrl());
+        }
+        if let Some(opt) = found.mcu_opt_ctrl.filter(|opt| opt & decision.mcu_opt_ctrl_clears() != 0) {
+            cpu::wrmsr(IA32_MCU_OPT_CTRL, opt & !decision.mcu_opt_ctrl_clears());
+        }
+        if let Some(c001_1029) = found.c001_1029 {
+            cpu::wrmsr(C001_1029, c001_1029 | C001_1029_LFENCE_SERIALIZES_DISPATCH);
+        }
+    }
     let registers = Registers {
-        mcu_opt_ctrl: read(
-            decision.enumerates(Mitigation::SrbdsMicrocode) || decision.enumerates(Mitigation::GdsMicrocode),
-            IA32_MCU_OPT_CTRL,
-        ),
+        spec_ctrl: read(found.spec_ctrl.is_some(), IA32_SPEC_CTRL),
+        mcu_opt_ctrl: read(mcu_opt_ctrl, IA32_MCU_OPT_CTRL),
         de_cfg2: read(decision.enumerates(Mitigation::SuppressBpOnNonBr), DE_CFG2),
         c001_1029: read(lfence, C001_1029),
     };
@@ -111,7 +136,7 @@ pub fn apply() -> Read {
             "mitigation: C001_1029 reads {now:#x} once LFENCE dispatch serializing was set, and the ordered TSC read needs it"
         );
     }
-    Read { facts, registers, c001_1029_found }
+    Read { facts, registers, found }
 }
 
 /// Keeps the boot CPU's [`apply`], which it takes before anything is sized.
@@ -149,7 +174,7 @@ pub fn report() {
 }
 
 fn say(cpu_id: u32, read: &Read) {
-    let Read { facts, registers, c001_1029_found } = *read;
+    let Read { facts, registers, found } = *read;
     let Facts {
         vendor,
         signature,
@@ -164,17 +189,21 @@ fn say(cpu_id: u32, read: &Read) {
         cpuid_8000_0021_eax,
         cpuid_8000_0021_ecx,
     } = facts;
-    let Registers { mcu_opt_ctrl, de_cfg2, c001_1029 } = registers;
+    let Registers { spec_ctrl, mcu_opt_ctrl, de_cfg2, c001_1029 } = registers;
     log!(
         "mitigations: cpu{cpu_id} words {vendor:?} signature={signature:#x} microcode={microcode:#x} hypervisor={hypervisor} \
          smt={smt} cpuid.7.0.ebx={cpuid_7_0_ebx:#x} cpuid.7.0.edx={cpuid_7_0_edx:#x} cpuid.7.2.edx={cpuid_7_2_edx:#x} \
          arch_capabilities={arch_capabilities:#x} cpuid.80000008.ebx={cpuid_8000_0008_ebx:#x} \
          cpuid.80000021.eax={cpuid_8000_0021_eax:#x} cpuid.80000021.ecx={cpuid_8000_0021_ecx:#x} \
-         mcu_opt_ctrl={} de_cfg2={} c001_1029={} c001_1029_found={}",
+         spec_ctrl={} mcu_opt_ctrl={} de_cfg2={} c001_1029={} \
+         spec_ctrl_found={} mcu_opt_ctrl_found={} c001_1029_found={}",
+        Msr(spec_ctrl),
         Msr(mcu_opt_ctrl),
         Msr(de_cfg2),
         Msr(c001_1029),
-        Msr(c001_1029_found),
+        Msr(found.spec_ctrl),
+        Msr(found.mcu_opt_ctrl),
+        Msr(found.c001_1029),
     );
     let decision = decide(&facts);
     let in_force = decision.in_force(&registers);

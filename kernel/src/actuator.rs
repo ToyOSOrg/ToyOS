@@ -48,6 +48,11 @@ actuators! {
     /// `a_user_copy_highest_first_faults_or_ends_as_bad_address`.
     copies_go_down = "copies-go-down";
 
+    /// Set `IA32_MCU_OPT_CTRL.GDS_MITG_DIS` on each CPU whose decision names
+    /// the microcode's gather mitigation, as firmware that opted out would
+    /// leave it, before the kernel's own write. Judged by `gds_found_disabled`.
+    gds_found_disabled = "gds-found-disabled";
+
     /// Have the first syscall null SS, force a switch, and report whether it reloaded — the
     /// AMD `SYSRET` SS-attributes workaround's only guest-observable proof.
     sysret_ss_probe = "sysret-ss-probe";

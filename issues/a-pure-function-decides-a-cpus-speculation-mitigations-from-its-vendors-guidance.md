@@ -26,8 +26,8 @@ names it, after its microcode loads and before the clocksource's
 `RDTSCP; LFENCE` relies on it, and stops the machine if the bit does not
 hold. Both benches' words, as each one's boot logged them, are pinned in the
 harness, and `checks::the_benches_words_decide_as_their_vendors_rows` holds
-what they decide to each vendor's row for that CPU. No other mitigation the decision
-names is applied: each is its own record's.
+what they decide to each vendor's row for that CPU. Applying every other
+mitigation the decision names is its own record's.
 
 **Left**:
 - Under the policy, an AMD CPU affected by Branch Type Confusion leaves the

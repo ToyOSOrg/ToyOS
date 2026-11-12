@@ -701,6 +701,12 @@ const MACHINE_TESTS: &[MachineTest] = &[
     // `images/console.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     ("console_image_boots", |_| console_image_boots()),
+    // What a hardware-virtualized CPU shows a guest, through the kernel's
+    // own lines: each CPU's writes at bring-up read back, and its lines are
+    // the decision on its words. A KVM guest on x86-64 only: the words are the
+    // hypervisor's, and TCG's CPU enumerates none of the controls. The
+    // benches' are the `mitigations` row's.
+    ("mitigations_in_a_guest", |_| mitigations_in_a_guest()),
     // The UEFI loader's check of a boot program and what follows its refusal,
     // which no host test reaches: a marked slot whose supervisor is bent is
     // refused before boot services end, and the machine stops with the whole
@@ -1605,6 +1611,13 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The kernel's own write clears the gather mitigation's opt-out that
+        // the arm set before it, as firmware that opted out would leave it.
+        // The T14 alone: the AMD bench has no `IA32_MCU_OPT_CTRL`.
+        "gds_found_disabled",
+        metal::Metal { on: On::Only(Bench::T14), arms: SELFTESTS, judge: |b| gds_found_disabled(b[0].kernel().text()) },
+    ),
+    (
         // No drain on this side: the whole boot's records are on the log, so
         // the probe's line is either in them or it never ran.
         "sysret_ss_reload",
@@ -2337,6 +2350,7 @@ const SELFTEST_PARAMS: &[&str] = &[
     "sysret-ss-probe",
     "hpet-stall",
     "nmi-user-gs",
+    "gds-found-disabled",
 ];
 
 const SELFTESTS: &[metal::Arm] = &[metal::Arm {
@@ -7172,8 +7186,47 @@ fn mitigation_words(words: &str) -> Result<(kernel::mitigation::Facts, BTreeMap<
 }
 
 /// Every CPU's `mitigations:` lines in `log`, cpu0's and those of each later
-/// CPU that differed from it: [`mitigations_of_a_cpu`] on each.
+/// CPU that differed from it: [`mitigations_of_a_cpu`] on each, as a bench's.
 fn mitigations_on_metal(log: &str) -> Result<(), String> {
+    for (cpu, lines) in &mitigation_lines(log)? {
+        mitigations_of_a_cpu(*cpu, lines, Machine::Bench)?;
+    }
+    Ok(())
+}
+
+/// [`mitigations_of_a_cpu`] on a guest's every CPU, and its words put on the
+/// run's output: they are what the host's CPU shows a guest.
+fn mitigations_in_a_guest() -> Result<(), String> {
+    let qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/testcases.toml"),
+        &[],
+        &[],
+        BootOptions { smp: 4, ..Default::default() },
+    );
+    let said = serial::Serial::named("the guest's boot", qemu.boot_log());
+    said.must_be_clean()?;
+    let lines = mitigation_lines(said.text())?;
+    for (cpu, lines) in &lines {
+        mitigations_of_a_cpu(*cpu, lines, Machine::Guest)?;
+        for words in lines.iter().filter_map(|line| line.strip_prefix("words ")) {
+            eprintln!("  [mitigations] cpu{cpu} words {words}");
+        }
+    }
+    Ok(())
+}
+
+/// Whose `mitigations:` lines [`mitigations_of_a_cpu`] judges.
+#[derive(Clone, Copy, PartialEq)]
+enum Machine {
+    /// A bench's, whose words are pinned.
+    Bench,
+    /// A hypervisor's guest's, whose words are what its hypervisor shows.
+    Guest,
+}
+
+/// Each CPU's `mitigations:` lines in `log`, by CPU, the words line among
+/// them; cpu0's at least.
+fn mitigation_lines(log: &str) -> Result<BTreeMap<u32, Vec<&str>>, String> {
     let mut said: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
     for line in log.lines() {
         let Some((_, rest)) = line.split_once("mitigations: cpu") else { continue };
@@ -7184,55 +7237,58 @@ fn mitigations_on_metal(log: &str) -> Result<(), String> {
     if !said.contains_key(&0) {
         return Err("cpu0 wrote no `mitigations:` lines".to_string());
     }
-    for (cpu, lines) in &said {
-        mitigations_of_a_cpu(*cpu, lines)?;
-    }
-    Ok(())
+    Ok(said)
 }
 
 /// One CPU's words and its line for each vulnerability: the words name a
-/// vendor whose guidance is read, are no guest's, and are its bench's pinned
-/// words; each line is what [`kernel::mitigation::decide`] says of the words
-/// with what the registers they give show in force; and what the kernel sets
-/// itself is in force wherever the decision names it.
-fn mitigations_of_a_cpu(cpu: u32, said: &[&str]) -> Result<(), String> {
-    use kernel::mitigation::{decide, Facts, Mitigation, Registers, Verdict, Vulnerability};
+/// vendor whose guidance is read, and are a bench's pinned words, or a
+/// guest's; each line is what [`kernel::mitigation::decide`] says of the
+/// words with what the registers they give show in force; and what the
+/// kernel sets itself is in force wherever the decision names it.
+fn mitigations_of_a_cpu(cpu: u32, said: &[&str], machine: Machine) -> Result<(), String> {
+    use kernel::mitigation::{decide, Facts, Verdict, Vulnerability};
     let mut words = said.iter().filter_map(|said| said.strip_prefix("words "));
     let words = match (words.next(), words.next()) {
         (Some(words), None) => words,
         _ => return Err(format!("cpu{cpu} wrote no one `mitigations:` words line: {said:?}")),
     };
     let (facts, fields) = mitigation_words(words).map_err(|e| format!("cpu{cpu}: {e}"))?;
-    if facts.hypervisor {
-        return Err(format!("cpu{cpu}'s words are a hypervisor's guest's, and this row judges a machine's: {words:?}"));
+    match (machine, facts.hypervisor) {
+        (Machine::Bench, true) => {
+            return Err(format!("cpu{cpu}'s words are a hypervisor's guest's, and this row judges a machine's: {words:?}"))
+        }
+        (Machine::Guest, false) => return Err(format!("cpu{cpu}'s words are no guest's, and this row judges one: {words:?}")),
+        _ => {}
     }
     let field = |name: &str| fields.get(name).copied().ok_or_else(|| format!("cpu{cpu}'s words carry no {name}: {words:?}"));
     let hex = |name: &str, digits: &str| {
         u64::from_str_radix(digits.trim_start_matches("0x"), 16).map_err(|e| format!("cpu{cpu}'s {name}={digits}: {e}"))
     };
-    let msr = |name: &str| match field(name)? {
-        "-" => Ok(None),
-        digits => hex(name, digits).map(Some),
-    };
     let microcode = field("microcode").and_then(|digits| hex("microcode", digits))?;
     let microcode = kernel::microcode::Revision(u32::try_from(microcode).map_err(|e| format!("cpu{cpu}'s microcode: {e}"))?);
-    let pinned = MITIGATION_BENCHES
-        .iter()
-        .map(|&(bench, pinned)| mitigation_words(pinned).map(|(pinned, _)| (bench, pinned)))
-        .collect::<Result<Vec<_>, _>>()?;
-    let Some(&(bench, pinned)) = pinned.iter().find(|(_, pinned)| pinned.signature == facts.signature) else {
-        return Err(format!("cpu{cpu}'s signature {:#x} is no bench's whose words are pinned: {words:?}", facts.signature));
+    let whose = match machine {
+        Machine::Guest => "a guest",
+        Machine::Bench => {
+            let pinned = MITIGATION_BENCHES
+                .iter()
+                .map(|&(bench, pinned)| mitigation_words(pinned).map(|(pinned, _)| (bench, pinned)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let Some(&(bench, pinned)) = pinned.iter().find(|(_, pinned)| pinned.signature == facts.signature) else {
+                return Err(format!("cpu{cpu}'s signature {:#x} is no bench's whose words are pinned: {words:?}", facts.signature));
+            };
+            if facts != pinned {
+                return Err(format!("cpu{cpu}'s words are not {bench}'s pinned words: {words:?} against {pinned:?}"));
+            }
+            bench
+        }
     };
-    if facts != pinned {
-        return Err(format!("cpu{cpu}'s words are not {bench}'s pinned words: {words:?} against {pinned:?}"));
-    }
     let facts = Facts { microcode, ..facts };
-    let registers = Registers { mcu_opt_ctrl: msr("mcu_opt_ctrl")?, de_cfg2: msr("de_cfg2")?, c001_1029: msr("c001_1029")? };
+    let registers = mitigation_registers(&fields).map_err(|e| format!("cpu{cpu}: {e}"))?;
     let decision = decide(&facts);
     let in_force = decision.in_force(&registers);
-    let lfence = Mitigation::LfenceDispatchSerializing;
-    if decision.enumerates(lfence) && !in_force.has(lfence) {
-        return Err(format!("cpu{cpu}'s C001_1029 reads {:?}: the LFENCE bit the kernel sets is clear", registers.c001_1029));
+    let unapplied = decision.unapplied(&registers);
+    if !unapplied.is_empty() {
+        return Err(format!("cpu{cpu}'s registers {registers:?} leave off what the kernel sets: {unapplied}"));
     }
     for of in Vulnerability::ALL {
         let prefix = format!("{}: ", of.name());
@@ -7248,10 +7304,61 @@ fn mitigations_of_a_cpu(cpu: u32, said: &[&str]) -> Result<(), String> {
     }
     let affected = Vulnerability::ALL.iter().filter(|&&of| decision.verdict(of) != Verdict::NotAffected).count();
     eprintln!(
-        "  [mitigations] cpu{cpu}, {bench}: its lines are the decision on its pinned words, {affected} naming a vulnerability; \
-         C001_1029 found {}",
+        "  [mitigations] cpu{cpu}, {whose}: its lines are the decision on its words, {affected} naming a vulnerability; \
+         as found, SPEC_CTRL {} MCU_OPT_CTRL {} C001_1029 {}",
+        field("spec_ctrl_found")?,
+        field("mcu_opt_ctrl_found")?,
         field("c001_1029_found")?,
     );
+    Ok(())
+}
+
+/// The registers a `mitigations:` words line gives, `-` for one the CPU was
+/// not read for.
+fn mitigation_registers(fields: &BTreeMap<&str, &str>) -> Result<kernel::mitigation::Registers, String> {
+    let msr = |name: &str| match fields.get(name).copied() {
+        None => Err(format!("the words carry no {name}")),
+        Some("-") => Ok(None),
+        Some(digits) => u64::from_str_radix(digits.trim_start_matches("0x"), 16).map(Some).map_err(|e| format!("{name}={digits}: {e}")),
+    };
+    Ok(kernel::mitigation::Registers {
+        spec_ctrl: msr("spec_ctrl")?,
+        mcu_opt_ctrl: msr("mcu_opt_ctrl")?,
+        de_cfg2: msr("de_cfg2")?,
+        c001_1029: msr("c001_1029")?,
+    })
+}
+
+/// What `gds-found-disabled` asks: every CPU's `mitigations:` words, cpu0's
+/// and each later CPU's that differed, found `IA32_MCU_OPT_CTRL.GDS_MITG_DIS`
+/// set, as the arm left it, and read it clear after the kernel's write.
+fn gds_found_disabled(log: &str) -> Result<(), String> {
+    const GDS_MITG_DIS: u64 = 1 << 4;
+    let words: Vec<(&str, &str)> = log
+        .lines()
+        .filter_map(|line| line.split_once("mitigations: cpu")?.1.split_once(" words "))
+        .collect();
+    if !words.iter().any(|(cpu, _)| *cpu == "0") {
+        return Err("cpu0 wrote no `mitigations:` words line".to_string());
+    }
+    for (cpu, said) in &words {
+        let (_, fields) = mitigation_words(said).map_err(|e| format!("cpu{cpu}: {e}"))?;
+        let now = mitigation_registers(&fields).map_err(|e| format!("cpu{cpu}: {e}"))?.mcu_opt_ctrl;
+        let found = match fields.get("mcu_opt_ctrl_found").copied() {
+            Some("-") | None => None,
+            Some(digits) => u64::from_str_radix(digits.trim_start_matches("0x"), 16).ok(),
+        };
+        match (found, now) {
+            (Some(found), Some(now)) if found & GDS_MITG_DIS != 0 && now & GDS_MITG_DIS == 0 => {}
+            (Some(found), _) if found & GDS_MITG_DIS == 0 => {
+                return Err(format!("cpu{cpu} found IA32_MCU_OPT_CTRL {found:#x}: the arm's GDS_MITG_DIS did not take"))
+            }
+            (found, now) => {
+                return Err(format!("cpu{cpu} found IA32_MCU_OPT_CTRL {found:?} and left it {now:?}: GDS_MITG_DIS stands"))
+            }
+        }
+    }
+    eprintln!("  [gds] {} words line(s): each found GDS_MITG_DIS set and left it clear", words.len());
     Ok(())
 }
 
