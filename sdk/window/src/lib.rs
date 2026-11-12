@@ -44,11 +44,13 @@ const COMPOSITOR: &str = "compositor";
 ///
 /// The compositor answers a whole request in the pass that reads it, with one
 /// send that never waits. Before that pass a connection may wait for a slot in
-/// the compositor's table, every connection of which the compositor serves or
-/// lets go within [`LIMIT`]. So one `LIMIT` for the slot, and one for the pass
-/// on a machine whose CPUs are busy elsewhere: the room the compositor gives a
-/// client's own step.
-pub const ANSWER_BOUND: Duration = LIMIT.saturating_mul(2);
+/// the compositor's table, which holds every connection the port can queue
+/// (the compositor asserts it). The compositor serves or lets go each
+/// connection there within [`LIMIT`], but a copy it answers with a region then
+/// waits in the same slot for its commit, so a slot can be held for two. So two
+/// `LIMIT`s for the slot, and one for the pass on a machine whose CPUs are busy
+/// elsewhere: the room the compositor gives a client's own step.
+pub const ANSWER_BOUND: Duration = LIMIT.saturating_mul(3);
 
 const ANSWER_BOUND_NANOS: u64 = {
     assert!(ANSWER_BOUND.as_nanos() < u64::MAX as u128, "a wait of u64::MAX is for good");
@@ -58,20 +60,10 @@ const ANSWER_BOUND_NANOS: u64 = {
 /// The compositor's answer on `conn`, into `rx`; `None` when neither it nor the
 /// compositor's hang-up came within [`ANSWER_BOUND`].
 fn answer<const MAX: usize>(conn: &Connection, rx: &mut ipc::FrameRx<MAX>) -> Result<Option<ipc::Frame>, ipc::IpcError> {
-    answered(|nanos| poller::wait_one(conn, READABLE, nanos), || rx.recv(conn))
-}
-
-/// What `take` reads once `wait`, given [`ANSWER_BOUND`], says there is
-/// something to read; `None` when there was not.
-fn answered<T>(
-    wait: impl FnOnce(u64) -> Result<bool, SyscallError>,
-    take: impl FnOnce() -> Result<T, ipc::IpcError>,
-) -> Result<Option<T>, ipc::IpcError> {
-    match wait(ANSWER_BOUND_NANOS) {
-        Ok(true) => take().map(Some),
-        Ok(false) => Ok(None),
-        Err(e) => Err(ipc::IpcError::Syscall(e)),
+    if !poller::wait_one(conn, READABLE, ANSWER_BOUND_NANOS).map_err(ipc::IpcError::Syscall)? {
+        return Ok(None);
     }
+    rx.recv(conn).map(Some)
 }
 
 /// The largest payload a client sends inline; past it a region moves instead.
@@ -944,22 +936,6 @@ mod tests {
         assert_eq!(buffer_bytes(10, 12, 3), Some(144));
         assert_eq!(buffer_bytes(10, 9, 3), None);
         assert_eq!(buffer_bytes(u32::MAX, u32::MAX, u32::MAX), None, "past the address space");
-    }
-
-    /// A compositor that never answers is waited on once, for the bound, and
-    /// nothing is read from it.
-    #[test]
-    fn a_compositor_that_never_answers_is_waited_on_for_the_bound_and_not_read() {
-        let mut waits = Vec::new();
-        let got = answered(
-            |nanos| {
-                waits.push(nanos);
-                Ok(false)
-            },
-            || -> Result<ipc::Frame, ipc::IpcError> { panic!("read a compositor that never answered") },
-        );
-        assert!(matches!(got, Ok(None)), "{got:?}");
-        assert_eq!(waits, [ANSWER_BOUND_NANOS]);
     }
 
     /// A zero on either axis asks the compositor to choose, as it always has.

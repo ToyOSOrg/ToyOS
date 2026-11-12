@@ -25,6 +25,11 @@ use toyos_desktop::{Buffers, Port, Window};
 /// names no holder.
 pub const CLIENTS: Policy = Policy::unshared(32);
 
+// Every connection the port can queue fits the table at once, so a queued one
+// has a slot once those in the table are served or let go: `window::ANSWER_BOUND`
+// counts on it.
+const _: () = assert!(CLIENTS.slots >= toyos_abi::syscall::MAX_PENDING_CONNECTIONS);
+
 /// One connection off each of `prompt`, `clipboard` and `display`, in a table
 /// of their own: no client filling [`CLIENTS`] keeps the prompt from being
 /// made, the clipboard from being watched or the display from being set.

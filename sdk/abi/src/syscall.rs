@@ -1946,6 +1946,10 @@ pub struct Port {
     pub connector: RawHandle,
 }
 
+/// Connections one port holds that its server has not accepted: a connect
+/// past them is refused [`SyscallError::ResourceExhausted`].
+pub const MAX_PENDING_CONNECTIONS: usize = 32;
+
 /// Make a port. Needs no right and grants none — a port with no clients is not
 /// authority.
 pub fn port_create() -> Result<Port, SyscallError> {
