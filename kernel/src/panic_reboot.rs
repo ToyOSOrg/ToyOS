@@ -104,7 +104,11 @@ pub fn arm(on_the_record: bool) -> Bound {
         return Bound::Held;
     };
     let at = cpu::counter().saturating_add(ticks).max(1);
-    let at = AT.compare_exchange(0, at, Relaxed, Relaxed).unwrap_or_else(|first| first);
+    // Another CPU's fatal path may have armed it since the load above.
+    let at = match AT.compare_exchange(0, at, Relaxed, Relaxed) {
+        Ok(_) => at,
+        Err(first) => first,
+    };
     let secs = budget.duration().millis() / 1_000;
     if on_the_record {
         alert!("{ARMED} in {secs} s, timed by {}, {how}", named(rate));

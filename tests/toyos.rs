@@ -5009,9 +5009,10 @@ const THE_REGISTER_DID_NOTHING: &str = "and this machine still runs: shutting th
 
 /// Boot QEMU x86-64's metal shape on a CPU that states no counter rate
 /// ([`qemu::Profile::MetalUnstatedRate`]) with `params`, which hold
-/// `panic-reboot-fast`, until `ready`; run `during`, which answers what the
-/// console said meanwhile; and judge the end: every line of `said`, in order,
-/// then QEMU's stop for `guest-reset`.
+/// `panic-reboot-fast`, until `ready`; run `during` inside the bound, which
+/// answers what the console said meanwhile and the connection that waits for
+/// the stop; and judge the end: every line of `said`, in order, then QEMU's
+/// stop for `guest-reset`.
 fn a_fatal_event_ends(
     test_config: &Path,
     smp: u32,
@@ -5049,8 +5050,19 @@ fn a_fatal_event_ends(
     }
 }
 
-/// [`a_fatal_event_ends`]'s `during` for a test that reads nothing before the end.
-fn only_the_end(qemu: &mut QemuInstance) -> Result<(String, qemu::QmpShutdown), String> {
+/// The bound's line as `panic-reboot-fast` arms it.
+const ARMED_FAST: &str = "panic: rebooting in 5 s, ";
+
+/// [`a_fatal_event_ends`]'s `during` for a report on the panel: the panel
+/// carries `needles` while the machine still runs, which a bound that ends at
+/// once never leaves QEMU up to answer. Then the connection that waits for the
+/// stop, opened well inside the bound.
+fn the_panel_holds(qemu: &mut QemuInstance, needles: &[&str]) -> Result<(String, qemu::QmpShutdown), String> {
+    let dump = qemu.screendump_until(needles, Duration::from_secs(15));
+    let text = dump.text();
+    if let Some(missing) = needles.iter().find(|needle| !text.contains(**needle)) {
+        return Err(format!("{missing:?} is not on the panel held at the bound\ndecoded screen:\n{text}"));
+    }
     Ok((String::new(), qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(Duration::from_secs(90)))))
 }
 
@@ -5063,8 +5075,8 @@ fn an_early_panic_resets_at_its_bound(test_config: &Path) -> Result<(), String> 
         1,
         &["test-early-panic", "panic-reboot-fast"],
         "EARLY PANIC:",
-        &[EARLY_PANIC_MESSAGE, "panic: rebooting in 5 s, ", BY_THE_CEILING, THROUGH_THE_REGISTER],
-        only_the_end,
+        &[EARLY_PANIC_MESSAGE, ARMED_FAST, BY_THE_CEILING, THROUGH_THE_REGISTER],
+        |qemu| the_panel_holds(qemu, &[EARLY_PANIC_MESSAGE, ARMED_FAST]),
     )?;
     eprintln!("  [panic] an early panic held a ceiling bound and reset through the register");
     Ok(())
@@ -5080,8 +5092,8 @@ fn a_panic_with_no_reset_register_shuts_down(test_config: &Path) -> Result<(), S
         1,
         &["reset-withheld", "test-early-panic", "panic-reboot-fast"],
         "EARLY PANIC:",
-        &["withheld: this kernel keeps none", EARLY_PANIC_MESSAGE, "panic: rebooting in 5 s, ", BY_THE_CEILING, BY_SHUTDOWN],
-        only_the_end,
+        &["withheld: this kernel keeps none", EARLY_PANIC_MESSAGE, ARMED_FAST, BY_THE_CEILING, BY_SHUTDOWN],
+        |qemu| the_panel_holds(qemu, &[EARLY_PANIC_MESSAGE, ARMED_FAST]),
     )?;
     eprintln!("  [panic] with no reset register, a panic held a ceiling bound and shut the processor down");
     Ok(())
@@ -5095,8 +5107,8 @@ fn a_double_panic_before_the_clock_resets(test_config: &Path) -> Result<(), Stri
         1,
         &["test-double-panic", "panic-reboot-fast"],
         "DOUBLE PANIC",
-        &["test-double-panic: a panic inside a fault's report", "panic: rebooting in 5 s, ", BY_THE_CEILING, THROUGH_THE_REGISTER],
-        only_the_end,
+        &["test-double-panic: a panic inside a fault's report", ARMED_FAST, BY_THE_CEILING, THROUGH_THE_REGISTER],
+        |qemu| the_panel_holds(qemu, &["DOUBLE PANIC", ARMED_FAST]),
     )?;
     eprintln!("  [panic] a double panic before the clock held a ceiling bound and reset through the register");
     Ok(())
@@ -5116,7 +5128,7 @@ fn a_panic_inside_the_console_hold_stops_the_others(test_config: &Path) -> Resul
         HOLD_CPUS,
         &["panic-in-the-hold", "panic-reboot-fast"],
         "PANIC REENTRY",
-        &["panic-in-the-hold: a second panic inside the console's hold", "panic: rebooting in 5 s, ", BY_THE_CLOCK, THROUGH_THE_REGISTER],
+        &["panic-in-the-hold: a second panic inside the console's hold", ARMED_FAST, BY_THE_CLOCK, THROUGH_THE_REGISTER],
         |qemu| {
             let mut console = qemu.drain_until(Duration::from_secs(15), |l| l.contains("panic: rebooting in "));
             let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
