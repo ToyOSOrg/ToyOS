@@ -29,11 +29,12 @@ console survived only as the failure message's tail.
 A shared row loses a red member's panic the same way. Guest-rows
 43146956481 reddened `testcases_members_exit_0` on
 `a_pager_s_end_answers_its_waiting_holders_gone`. The verdict carries a
-member's last 40 lines (`tests/common/qemu.rs`'s `window`), and those held
-only the backtrace of pagerprobe's panic, the last 40 of 102. The `serial`
-artifact held the boot's `uart-0.log`, which stops carrying the log once
-the console port takes it, before the first member started. Neither kept the
-panic's message.
+member's last 40 lines (`tests/common/qemu.rs`'s `window`), here 40 of 102:
+the end of pagerprobe's backtrace, then the member's own panic message and
+backtrace. The `serial` artifact held the boot's `uart-0.log`, which stops
+carrying the log once the console port takes it, at 3.984 s, after the pager
+member started and before pagerprobe printed anything. Neither kept
+pagerprobe's panic message.
 
 **Exit**: every boot of a red run leaves its whole console under
 `target/red-run-serial/`, whatever carries it.

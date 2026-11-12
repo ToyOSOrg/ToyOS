@@ -93,15 +93,12 @@ not yet measured on metal, its speed-up included; its rows are owed:
   `readdir.1000`, `stat`, `open_close`, `rename`, `mkdir_rmdir` and
   `create_write_unlink` must lie within main before's spread, and no row may
   be beyond twice main before's.
-- **Owed on `testcases_members_exit_0`**, the `testcases` shared boot's x86-64 guest row, on several vCPUs. It
-  shows order and contents only.
-  - **The run.** `a_pager_s_end_answers_its_waiting_holders_gone` at #1258's code, or at any revision whose
-    paged object, pure paged module and pagerprobe are #1258's. It must:
-    - pass, its log showing pagerprobe's helper's writes admitted, then the owner's read-back, then the pager's
-      end answering the wait `Gone`, then `pagerprobe: ok`; the helper's page written against credit somewhere
-      between its writes admitted and `Gone`, since its process and the owner's print in either order;
-    - leave no paged overdue report;
-    - pass with the two served-file tests beside it.
+- **The run, on `testcases_members_exit_0`**, the `testcases` shared boot's x86-64 guest row, on two vCPUs.
+  It shows contents and completion, not timing. Guest-rows 43152496728 ran it at #1258's cb8701bee: all 242 members exited 0
+  and the list's reboot ended the boot. Among them were `a_pager_s_end_answers_its_waiting_holders_gone`, whose
+  pagerprobe asserts its helper's writes admitted, the owner's read-back and the pager's end answering the wait
+  `Gone`, and the two served-file tests beside it. A green run keeps no console, so it shows neither the order
+  of those lines nor the absence of a paged overdue report; the T14's shared boot above owes the latter.
 - **The control, run.** Guest-rows 43146956481 ran the row at `fileops-step1-ctl-refuse` c97966eb2, #1258's
   358182128 with the kernel refusing every holder's write. 240 of its 242 members passed.
   - `a_pager_s_end_answers_its_waiting_holders_gone` went red. pagerprobe exited 101 after 30.49 s of system
