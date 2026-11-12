@@ -7,9 +7,12 @@ opened: 2026-10-28
 # A small memcpy on the AMD bench runs at as little as six tenths of Linux's
 
 `osbench mem`'s `mem.memcpy.<bytes>` copies a buffer of that size with each
-system's own `memcpy`. On ToyOS that is `sdk/libc`'s, whose `copy_forward` is
-one `rep movsb` at every length (`sdk/libc/src/arch/x86_64.rs`). On Linux it
-is the static musl build's.
+system's own `memcpy`. On ToyOS that is `sdk/libc`'s (`sdk/libc/src/arch/x86_64.rs`):
+one `rep movsb` at every length on a CPU that declares fast short `rep movsb`
+(FSRM), such as the T14's; elsewhere, such as on the AMD bench, a copy of up
+to 256 bytes is moves from each end and a longer one `rep movsb`. Until
+2026-11 it was one `rep movsb` everywhere, which the tables below measure. On
+Linux it is the static musl build's.
 
 From the 2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`):
 ToyOS at 069cbbeb8, four boots off the internal NVMe, against five runs of
@@ -76,6 +79,21 @@ On the T14 `mem.bw.copy`, 16 MiB and 64 MiB copies trail Linux by 3.7 to
 4.9% over its 4 KiB pages and its huge ones alike; a 4 MiB copy read 1.0%
 under Linux's over 4 KiB pages and 10.0% under its over huge ones
 (`issues/user-memory-hot-paths-are-slower-than-2-mib-pages.md`).
+
+- **Owed on metal** for the choice by FSRM: an A/B on both benches, main
+  from before and after it, of `osbench_mem` and of `osbench copyat`.
+  `copyat` is not on main: its rows are the measurement-only commit carried
+  by branches `memperf-copy-ab-base` and `memperf-copy-ab-head3`, #1133's
+  rows as one commit.
+  - On the AMD bench, which lacks FSRM, main after must read
+    `mem.memcpy.64` and `mem.memcpy.256` faster.
+  - On the T14, which has it, no `mem.memcpy.*` row may be slower.
+  - On both, neither `mem.memcpy.262144` nor the eight `copyat.place.*` rows
+    may be slower. The eight are judged together, by each boot's mean. #1133
+    was closed for a drop there that followed code placement.
+  - An AMD result whose boots spread by more than 5% is inconclusive and
+    asks for more rotated blocks.
+  - Until then the gain is unmeasured.
 
 **Exit**: `mem.memcpy.*` within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured and
