@@ -103,11 +103,11 @@ mod slot {
             unsafe { (*self.0.get()).take() }
         }
 
-        /// What the slot holds, for a checker that runs every CPU on one
-        /// thread (unit tests, the simulator).
-        #[cfg(any(test, feature = "protocol-port"))]
-        pub fn peek(&self) -> Option<&M> {
-            // SAFETY: the caller's one thread is the only one touching it.
+        /// # Safety
+        /// No other thread touches the slot while the reference lives.
+        #[cfg(feature = "protocol-port")]
+        pub unsafe fn peek(&self) -> Option<&M> {
+            // SAFETY: the caller's.
             unsafe { (*self.0.get()).as_ref() }
         }
     }
@@ -181,11 +181,15 @@ impl<P> ParkedSlot<P> {
     }
 }
 
-#[cfg(all(any(test, feature = "protocol-port"), not(feature = "loom")))]
+#[cfg(all(feature = "protocol-port", not(feature = "loom")))]
 impl<P> ParkedSlot<P> {
     /// The record, for a checker that runs every CPU on one thread.
-    pub fn peek(&self) -> Option<&P> {
-        self.0.peek()
+    ///
+    /// # Safety
+    /// No other thread touches the slot while the reference lives.
+    pub unsafe fn peek(&self) -> Option<&P> {
+        // SAFETY: the caller's.
+        unsafe { self.0.peek() }
     }
 }
 

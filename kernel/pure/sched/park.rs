@@ -81,8 +81,8 @@ pub fn prepare<M: SchedMsg>(
 }
 
 /// Post to one task: claim it if it is parked or committing, flag it
-/// otherwise, and post `Msg::Wake` to its home CPU when the claim owes one.
-/// The only producer of wake messages in the system.
+/// otherwise, and send the wake a claim of its park owes
+/// ([`SchedMsg::send_wake`]). The only producer of wake messages in the system.
 pub fn notify<M: SchedMsg>(
     shared: &Arc<TaskShared<M>>,
     cause: WakeCause,

@@ -316,6 +316,14 @@ commit-ignores-notify = []
 #   cargo test -p kernel-loom --features notify-flag-load-only --test loom_watch
 #
 notify-flag-load-only = []
+# The negative control for a parked task's record. It makes `task.rs`'s
+# `commit_park`, the `Committing -> Blocked` that publishes the record in the
+# task's slot, `Relaxed`, so a claimant's take is unordered after the home's
+# write, and `loom_claimed_wake.rs` must red:
+#
+#   cargo test -p kernel-loom --features parked-publish-relaxed --test loom_claimed_wake
+#
+parked-publish-relaxed = []
 # The control for `poll_racing`'s lost-completion half: its producer posts, then
 # stores the readiness, the reverse of the order `pcidev::note_fault` keeps, so
 # both `*_racing_a_post*_completes_exactly_once` models must red with a poll

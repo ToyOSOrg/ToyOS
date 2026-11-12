@@ -130,10 +130,18 @@ pub enum Action<X: SchedPayload> {
 /// parked task's record is in its own `TaskShared`, owned by whoever wins the
 /// claim that ends the park; this keeps only what the timer needs, one entry
 /// per task, its last timed park's. An entry whose park another claim ended
-/// stays until it falls due, and its claim then finds that park gone.
+/// is dropped before the timer is armed for it, or when it falls due, whose
+/// claim then finds that park gone.
 struct Due<X: SchedPayload> {
     order: BTreeSet<(Nanos, TaskKey)>,
-    parks: BTreeMap<TaskKey, (Nanos, Gen, Arc<TaskShared<Msg<X>>>)>,
+    parks: BTreeMap<TaskKey, DuePark<X>>,
+}
+
+/// One timed park: when it falls due, and which park of the task it is.
+struct DuePark<X: SchedPayload> {
+    at: Nanos,
+    generation: Gen,
+    shared: Arc<TaskShared<Msg<X>>>,
 }
 
 impl<X: SchedPayload> Due<X> {
@@ -143,15 +151,15 @@ impl<X: SchedPayload> Due<X> {
 
     fn insert(&mut self, at: Nanos, generation: Gen, shared: Arc<TaskShared<Msg<X>>>) {
         let key = shared.key();
-        if let Some((old, _, _)) = self.parks.insert(key, (at, generation, shared)) {
-            self.order.remove(&(old, key));
+        if let Some(old) = self.parks.insert(key, DuePark { at, generation, shared }) {
+            self.order.remove(&(old.at, key));
         }
         self.order.insert((at, key));
     }
 
     fn remove(&mut self, key: TaskKey) {
-        if let Some((at, _, _)) = self.parks.remove(&key) {
-            self.order.remove(&(at, key));
+        if let Some(park) = self.parks.remove(&key) {
+            self.order.remove(&(park.at, key));
         }
     }
 
@@ -163,8 +171,8 @@ impl<X: SchedPayload> Due<X> {
     /// timer is never armed for one: an idle CPU would wake for nothing.
     fn prune(&mut self, cpu: CpuId) {
         while let Some(&(at, key)) = self.order.first() {
-            let (_, generation, shared) = &self.parks[&key];
-            if shared.parked_as(cpu, *generation) {
+            let park = &self.parks[&key];
+            if park.shared.parked_as(cpu, park.generation) {
                 return;
             }
             self.order.remove(&(at, key));
@@ -176,7 +184,7 @@ impl<X: SchedPayload> Due<X> {
     fn pop_due(&mut self, now: Nanos) -> Option<(Gen, Arc<TaskShared<Msg<X>>>)> {
         let &(at, key) = self.order.first().filter(|&&(at, _)| at <= now)?;
         self.order.remove(&(at, key));
-        self.parks.remove(&key).map(|(_, generation, shared)| (generation, shared))
+        self.parks.remove(&key).map(|park| (park.generation, park.shared))
     }
 }
 
@@ -3332,25 +3340,22 @@ mod tests {
     }
 
     /// The claim is arbitrated and not assumed: a remote waker that got there
-    /// first owns a `Msg::Wake` in flight to this same CPU, so the retire
-    /// leaves the entry alone. Removing it here would leave the task in no
-    /// container at all — never runnable, never reaped — which is the state the
-    /// arbitration exists to prevent.
+    /// first owns the park's record and a `Msg::Wake` in flight to this same
+    /// CPU, so the retire takes nothing. Taking the record here would leave
+    /// the task in no container at all — never runnable, never reaped — which
+    /// is the state the arbitration exists to prevent.
     ///
     /// **The order has to be driven by hand, or this test does not reach the arm
-    /// it is named for.** Posting the wake and then the
-    /// retire cannot: the mailbox is FIFO, so the wake is drained first,
-    /// `parked` is empty by the time `handle_retire` runs, and the whole
-    /// `parked.contains_key` branch is skipped — with `Claim::Lost =>
-    /// panic!()` staged in it, such a test passes. What reaches the arm is the
-    /// window a waker really has ([`World::post_claimed_wake`]): the claim CAS
-    /// has been won and the push has not happened yet, so the retire is the
-    /// first message this CPU sees.
+    /// it is named for.** Posting the wake and then the retire cannot: the
+    /// mailbox is FIFO, so the wake is drained first, the task is no longer
+    /// parked by the time `handle_retire` runs, and its claim is skipped —
+    /// with `Claim::Lost => panic!()` staged in it, such a test passes. What
+    /// reaches the arm is the window a waker really has
+    /// ([`World::post_claimed_wake`]): the claim CAS has been won and the push
+    /// has not happened yet, so the retire is the first message this CPU sees.
     ///
-    /// The first block below is what has the teeth. It reds under
-    /// remove-then-convert and under a retirer that
-    /// claims and ignores the answer: both take the entry out of `parked`, and
-    /// there is nothing there for the wake to find.
+    /// A retirer that takes the record whatever its claim answers reds this:
+    /// the wake that lands next finds the slot empty.
     #[test]
     fn a_retire_that_loses_the_claim_leaves_the_wake_in_flight() {
         let mut w = World::new(1);
@@ -3366,10 +3371,6 @@ mod tests {
             cpus[0].drain(env, NOW);
         }
 
-        assert!(
-            shared.peek_parked().is_some(),
-            "the retire lost the claim: the record stays for the wake to take",
-        );
         assert_eq!(w.cpus[0].dying().count(), 0, "the retire placed nothing itself");
         assert!(w.cpus[0].rq.is_empty(), "and queued nothing either");
 
@@ -4595,6 +4596,54 @@ mod tests {
         w.abandon();
     }
 
+    /// **A wake whose mask admits no idle CPU goes home**, however busy.
+    #[test]
+    fn a_wake_whose_mask_admits_no_idle_cpu_goes_home() {
+        let mut w = World::new(2);
+        let job = Arc::new(Job::new(JobKey(99)));
+        let (_, sleeper) = w.spawn_masked(C0, RtState::default(), job, CpuMask::one(C0));
+        w.run_a_pass(C0);
+        w.park_running(C0);
+        w.spawn(C0);
+        w.run_a_pass(C0);
+        w.run_a_pass(C1);
+        assert!(w.handles.get(C1).doorbell().sleeping_unrung());
+        assert_eq!(notify_from_afar(&w, &sleeper), Notify::Parked(C0));
+        assert_eq!(sleeper.state(), TaskState::WakeQueued(C0), "the claim went home as a Wake");
+        assert!(w.handles.get(C1).doorbell().sleeping_unrung(), "and left cpu1 asleep");
+        w.run_a_pass(C0);
+        assert_eq!(sleeper.state(), TaskState::Ready(C0), "behind the task its home runs");
+        w.abandon();
+    }
+
+    /// **Wakes behind one busy home spread over the sleepers**: a sleeper
+    /// already rung is not chosen again, and once every one is rung the
+    /// next wake goes home.
+    #[test]
+    fn wakes_behind_one_busy_home_take_one_sleeper_each() {
+        const C2: CpuId = CpuId(2);
+        let mut w = World::new(3);
+        let mut sleepers = Vec::new();
+        for _ in 0..3 {
+            let (_, sleeper) = w.spawn(C0);
+            w.run_a_pass(C0);
+            w.park_running(C0);
+            sleepers.push(sleeper);
+        }
+        w.spawn(C0);
+        w.run_a_pass(C0);
+        w.run_a_pass(C1);
+        w.run_a_pass(C2);
+        for sleeper in &sleepers {
+            assert_eq!(notify_from_afar(&w, sleeper), Notify::Parked(C0));
+        }
+        let states: Vec<_> = sleepers.iter().map(|s| s.state()).collect();
+        w.abandon();
+        assert!(states.contains(&TaskState::InTransit(C1)), "{states:?}");
+        assert!(states.contains(&TaskState::InTransit(C2)), "{states:?}");
+        assert_eq!(states[2], TaskState::WakeQueued(C0), "the third found both sleepers rung: {states:?}");
+    }
+
     /// **A park sent on by its claimant leaves its home no timer**: the
     /// deadline the home held for it is dropped before the home arms, or an
     /// idle home would wake at it for nothing.
@@ -4630,9 +4679,8 @@ mod tests {
         assert_eq!(w.handles.get(C0).band(), Band::None);
         assert_eq!(notify_from_afar(&w, &sleeper), Notify::Parked(C0));
         assert_eq!(sleeper.state(), TaskState::WakeQueued(C0), "the claim went home as a Wake");
-        assert!(sleeper.peek_parked().is_some(), "with the record back in its slot");
         w.run_a_pass(C0);
-        assert_eq!(sleeper.state(), TaskState::Running(C0));
+        assert_eq!(sleeper.state(), TaskState::Running(C0), "which took the record its claimant handed back");
         w.abandon();
     }
 

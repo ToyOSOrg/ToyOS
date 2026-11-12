@@ -715,6 +715,12 @@ pub(crate) const CONTROLS: &[Control] = &[
         test: "an_ask_is_taken_by_the_pass_its_ring_owes",
         message: "the ask was neither taken nor owed a pass: it is lost",
     }]),
+    // A parked task's record published `Relaxed`: a remote claim's take
+    // races the home's write.
+    red(KERNEL_LOOM, "parked-publish-relaxed", Some("loom_claimed_wake"), &[Says {
+        test: "a_record_taken_by_a_remote_claim_is_the_one_its_park_published",
+        message: "Causality violation: Concurrent write accesses to `UnsafeCell`",
+    }]),
     // The isolation test reds, and the SDM's own judge of the allocator sees
     // the cross-space read it lets through.
     red(KERNEL, "counting-allocator", None, &[

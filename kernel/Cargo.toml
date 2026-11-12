@@ -128,6 +128,9 @@ commit-ignores-notify = []
 # off a load rather than a read-modify-write, and
 # `kernel/loom/tests/loom_watch.rs` must red.
 notify-flag-load-only = []
+# `pure/sched/task.rs`'s `commit_park` publishes a parked task's record
+# `Relaxed`, and `kernel/loom/tests/loom_claimed_wake.rs` must red.
+parked-publish-relaxed = []
 # `pure/sched/cpu.rs`'s steal probe rings its victim before it sets the
 # thief's bit, and `kernel/loom/tests/loom_sleep.rs` must red.
 ask-rings-first = []

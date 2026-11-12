@@ -14,19 +14,14 @@ use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
 
 use loom::sync::Arc;
 use kernel_loom::sched::affinity::CpuMask;
-use kernel_loom::sched::cpu::{Balance, CpuHandle, CpuHandles, CpuSched, Env, RunToken, SchedPass};
+use kernel_loom::sched::cpu::{Balance, CpuHandle, CpuHandles, CpuSched, Env, SchedPass};
 use kernel_loom::sched::topology::Topology;
-use kernel_loom::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent};
-use kernel_loom::sched::job::{Job, JobKey};
-use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer, Urgency};
+use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer};
 use kernel_loom::sched_model::{
-    model, IrqGuard, Kicks, Msg, PreemptModel, RemoteGuard, CPU0, CPU1,
+    model, IrqGuard, Kicks, Msg, Owner, Payload, PreemptModel, RemoteGuard, Silent, TaskMsg, CPU0, CPU1, NOW,
 };
 use kernel_loom::sched::retire;
-use kernel_loom::sched::task::{
-    RtState, SchedPayload, TaskAccounting, TaskBuilder, TaskKey, TaskShared, TaskState, WaitClass,
-    WakeCause, WakeReason,
-};
+use kernel_loom::sched::task::{TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason};
 use kernel_loom::sched::park::{notify, prepare, Cancel, Commit, CurrentTask, Parked};
 
 struct World {
@@ -332,68 +327,6 @@ fn a_retire_and_a_wake_never_both_claim_a_parked_task() {
     });
 }
 
-// The sixth model runs a whole `CpuSched`, so it needs the three things a pass
-// is built against: a payload, a hardware surface, and the shared half of a CPU.
-
-/// The smallest payload a `CpuSched` can be built over: no address space and
-/// no saved context.
-struct Payload;
-
-impl SchedPayload for Payload {
-    type Ctx = ();
-
-    fn name(&self) -> u64 {
-        0
-    }
-}
-
-/// The full message set (`crate::msg::Msg`), as opposed to the reduced [`Msg`]
-/// the primitive models use: a pass consumes `Adopt` and `Retire` too.
-type TaskMsg = kernel_loom::sched::msg::Msg<Payload>;
-
-/// An `Hw` that records nothing. Every question this model asks is about which
-/// of `CpuSched`'s own containers the task is in, and `CpuSched` answers those
-/// itself; a recorder would only add state loom has to explore.
-struct Silent;
-
-impl Kicker for Silent {
-    fn trace(&self, _ev: TraceEvent) {}
-    fn now(&self) -> Nanos {
-        NOW
-    }
-    fn kick(&self, _target: CpuId) {}
-
-    fn runs_on(&self, _cpu: CpuId) -> bool {
-        false
-    }
-}
-
-impl Machine for Silent {
-    fn set_timer(&self, _deadline: Nanos) {}
-    fn stop_timer(&self) {}
-    fn halt(&self) {}
-    fn need_resched(&self, _cpu: CpuId) {}
-}
-
-impl Hw for Silent {
-    type Payload = Payload;
-    #[allow(unsafe_code)] // the declaration is unsafe; this body does nothing
-    unsafe fn switch(&self, _token: RunToken<Payload>) {}
-    fn release(&self, _key: TaskKey, _payload: Payload, _acct: TaskAccounting) {}
-}
-
-/// Everything a pass touches that is **not** the `CpuSched`. The waker thread
-/// gets a handle to this and to nothing else: a remote CPU may post and ring,
-/// and there is no second way in.
-struct Owner {
-    cpus: CpuHandles<TaskMsg>,
-    hw: Silent,
-}
-
-/// The instant every pass in the model runs at. Constant on purpose: a request
-/// that never ends keeps `preempt_if_due` out of the interleavings, which have
-/// nothing to do with it.
-const NOW: Nanos = Nanos(1_000);
 /// The task the retire and the wake race for.
 const KEY: TaskKey = TaskKey(1);
 /// The task that keeps the CPU busy — see the model's own note on why an idle
@@ -455,34 +388,14 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
         let pass = |cpu: &mut CpuSched<Payload>| {
             let _ = SchedPass::begin(cpu, env, NOW).dispose_none().finish();
         };
-        // Spawn placement is a message, never a reach into the queue.
-        let spawn = |key: TaskKey| {
-            let task = TaskBuilder {
-                key,
-                job: Arc::new(Job::new(JobKey(key.0))),
-                ctx: (),
-                ext: Payload,
-                rt: RtState::default(),
-                mask: CpuMask::ANY,
-            }
-            .build(CPU0, NOW);
-            let shared = task.shared().clone();
-            let _ = owner.cpus.get(CPU0).post_owned(
-                TaskMsg::Adopt { task },
-                TaskMsg::adopt_node,
-                Urgency::Normal,
-                &guard,
-            );
-            shared
-        };
 
-        let shared = spawn(KEY);
+        let shared = owner.spawn(CPU0, KEY);
         pass(&mut cpu);
         assert_eq!(cpu.running().map(|t| t.key()), Some(KEY), "adopted and picked");
 
         // It blocks on something — the parked state is the arm that matters —
         // and the pick hands the CPU to `OTHER`, adopted in the same pass.
-        let other = spawn(OTHER);
+        let other = owner.spawn(CPU0, OTHER);
         let ticket = {
             let current = cpu.current_task().expect("the task is running");
             prepare(&current, Cancel::Answers, WaitClass::Pipe)

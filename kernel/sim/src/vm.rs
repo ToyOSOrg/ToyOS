@@ -20,7 +20,7 @@ use kernel::sched::job::{Job, JobKey};
 use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent, TraceKind};
 use kernel::sched::invariants::Container;
 use kernel::sched::mailbox::{mailbox, Kick, Urgency};
-use kernel::sched::msg::Msg;
+use kernel::sched::msg::{Msg, ParkedRecord};
 use kernel::sched::retire;
 use kernel::sched::sync::Arc;
 use kernel::sched::task::{
@@ -550,13 +550,21 @@ pub struct FairEpoch {
 }
 
 impl<'q> Vm<'q> {
+    /// The record `key` parked with, while it is parked.
+    pub fn parked_record(&self, key: TaskKey) -> Option<&ParkedRecord<SimPayload>> {
+        #[allow(unsafe_code)]
+        // SAFETY: the simulator runs every CPU on this one thread.
+        unsafe {
+            self.shared[&key].peek_parked()
+        }
+    }
+
     /// Every parked task, with the CPU it parked on: a parked record is in
     /// the task's own `TaskShared`, in no CPU's containers.
     pub fn parked(&self) -> impl Iterator<Item = (TaskKey, usize)> + '_ {
         self.live.iter().filter_map(|&key| {
-            let shared = &self.shared[&key];
-            shared.peek_parked()?;
-            match shared.state() {
+            self.parked_record(key)?;
+            match self.shared[&key].state() {
                 TaskState::Blocked(c) | TaskState::WakeQueued(c) => Some((key, c.0 as usize)),
                 state => unreachable!("{key:?} holds a parked record as {state:?}"),
             }
@@ -1119,7 +1127,7 @@ impl<'q> Vm<'q> {
         let woken: Vec<(TaskKey, usize)> = parked
             .into_iter()
             .chain(parked_in_step)
-            .filter(|&(task, _)| self.shared[&task].peek_parked().is_none())
+            .filter(|&(task, _)| self.parked_record(task).is_none())
             .collect();
         for (task, home) in woken {
             let placed = match self.shared[&task].state() {

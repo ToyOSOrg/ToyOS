@@ -287,8 +287,8 @@ fn legal(from: TaskState, to: TaskState) -> bool {
 /// The outcome of a waker's claim.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Claim {
-    /// The task was parked on `CpuId`: we own the wake and must post
-    /// `Msg::Wake` to that CPU.
+    /// The task was parked on `CpuId`: the claimant owns the wake and the
+    /// parked record.
     Parked(CpuId),
     /// The waiter had registered but not yet parked. Its own commit will
     /// observe the claim and refuse to park — no message needed.
@@ -301,8 +301,8 @@ pub enum Claim {
 /// What a post did to one task: the outcome of [`TaskShared::notify`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Notify {
-    /// The task was parked on `CpuId`: this post owns the wake and must post
-    /// `Msg::Wake` to that CPU.
+    /// The task was parked on `CpuId`: this post owns the wake and has sent
+    /// it (`SchedMsg::send_wake`).
     Parked(CpuId),
     /// The task was committing; its own commit observes the claim and refuses
     /// to park, so no message is owed.
@@ -375,9 +375,14 @@ impl<M: SchedMsg> TaskShared<M> {
     }
 
     /// The parked record, for a checker that runs every CPU on one thread.
-    #[cfg(all(any(test, feature = "protocol-port"), not(feature = "loom")))]
-    pub fn peek_parked(&self) -> Option<&M::Parked> {
-        self.parked.peek()
+    ///
+    /// # Safety
+    /// No other thread touches the task while the reference lives.
+    #[cfg(all(feature = "protocol-port", not(feature = "loom")))]
+    #[allow(unsafe_code)]
+    pub unsafe fn peek_parked(&self) -> Option<&M::Parked> {
+        // SAFETY: the caller's.
+        unsafe { self.parked.peek() }
     }
 
     pub fn mask(&self) -> &SharedMask {
@@ -425,6 +430,10 @@ impl<M: SchedMsg> TaskShared<M> {
     /// `false` means the word was no longer `from` — the caller lost a race
     /// and must re-read.
     pub fn transition(&self, from: TaskState, to: TaskState) -> bool {
+        self.transition_ordered(from, to, Ordering::AcqRel)
+    }
+
+    fn transition_ordered(&self, from: TaskState, to: TaskState, success: Ordering) -> bool {
         assert!(legal(from, to), "illegal task transition {from:?} -> {to:?}");
         let mut cur = self.state.load(Ordering::Acquire);
         loop {
@@ -432,10 +441,7 @@ impl<M: SchedMsg> TaskShared<M> {
                 return false;
             }
             let next = retarget(cur, to);
-            match self
-                .state
-                .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.state.compare_exchange_weak(cur, next, success, Ordering::Acquire) {
                 Ok(_) => return true,
                 Err(observed) => cur = observed,
             }
@@ -484,10 +490,8 @@ impl<M: SchedMsg> TaskShared<M> {
     /// while committing took the word to `WakeQueued` first: that claimant
     /// posted nothing and took nothing, so the record is still the caller's.
     pub fn commit_park(&self, cpu: CpuId, generation: Gen) -> bool {
-        if self.transition(
-            TaskState::Committing(cpu, generation),
-            TaskState::Blocked(cpu),
-        ) {
+        let publish = if cfg!(feature = "parked-publish-relaxed") { Ordering::Relaxed } else { Ordering::AcqRel };
+        if self.transition_ordered(TaskState::Committing(cpu, generation), TaskState::Blocked(cpu), publish) {
             return true;
         }
         let state = self.state();
@@ -635,7 +639,7 @@ impl<M: SchedMsg> TaskShared<M> {
         self.state.load(Ordering::Acquire) & NOTIFIED != 0
     }
 
-    /// The home CPU handling `Msg::Wake`: `WakeQueued(cpu) → Ready(cpu)`.
+    /// The end of a claimed park on `cpu`: `WakeQueued(cpu) → Ready(cpu)`.
     pub fn finish_wake(&self, cpu: CpuId) -> bool {
         self.transition(TaskState::WakeQueued(cpu), TaskState::Ready(cpu))
     }
@@ -1247,8 +1251,8 @@ impl<X: SchedPayload> RunningTask<X> {
 }
 
 impl<X: SchedPayload> BlockedTask<X> {
-    /// A `Msg::Wake` was handled, or the local deadline fired. The word is
-    /// `WakeQueued(cpu)` — claimed by whoever won the arbitration CAS.
+    /// The park on `cpu` ends, by the hand of whoever won the claim: the word
+    /// is `WakeQueued(cpu)`.
     pub(crate) fn wake(
         self,
         cpu: CpuId,

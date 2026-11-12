@@ -470,7 +470,7 @@ fn note_rt_service(vm: &mut Vm<'_>) -> bool {
         }
     }
     for (key, _) in vm.parked() {
-        if vm.shared[&key].peek_parked().is_some_and(|record| record.is_rt()) {
+        if vm.parked_record(key).is_some_and(|record| record.is_rt()) {
             rt.push(key);
         }
     }
