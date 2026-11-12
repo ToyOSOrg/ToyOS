@@ -263,6 +263,22 @@ pub unsafe fn write_cr4(value: u64) {
     asm!("mov cr4, {}", in(reg) value, options(nostack));
 }
 
+/// `DR7`: which breakpoints are armed.
+#[inline]
+pub fn read_dr7() -> u64 {
+    let value: u64;
+    // SAFETY: a read at CPL 0, which `DR7.GD` alone could fault, and nothing sets it.
+    unsafe { asm!("mov {}, dr7", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    value
+}
+
+/// # Safety
+/// `value` arms only breakpoints something answers; `#GP` on a set bit 63:32.
+#[inline]
+pub unsafe fn write_dr7(value: u64) {
+    asm!("mov dr7, {}", in(reg) value, options(nostack));
+}
+
 /// `XCR0`: which state components `XSAVE` and `XRSTOR` move.
 ///
 /// # Safety

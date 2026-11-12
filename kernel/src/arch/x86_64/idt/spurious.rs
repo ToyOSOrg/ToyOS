@@ -6,9 +6,8 @@
 //! EOI would strand some other in-service interrupt. Does not log — this
 //! handler can run inside the log's own commit bracket.
 
-use core::arch::naked_asm;
-
 use crate::arch::apic;
+use crate::arch::entry::{gate_iretq, ring3_naked_asm};
 
 /// The vector `apic::enable` writes into the SVR; pub because the IDT
 /// gate row hardcodes `0xFF` on its own and must be kept in sync by hand.
@@ -16,12 +15,7 @@ pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn spurious_entry() {
-    naked_asm!(
-        // Not routed through `ring3_naked_asm!`: this vector can interrupt any
-        // instruction, `memmove`'s `std` … `cld` window included, so it owes
-        // itself the `cld` and `clac` every Ring 0 entry needs.
-        "cld",
-        "clac",
+    ring3_naked_asm!(cs = 8;
         "push rax",
         "push rcx",
         "push rdx",
@@ -46,7 +40,7 @@ pub(super) extern "sysv64" fn spurious_entry() {
         "pop rdx",
         "pop rcx",
         "pop rax",
-        "iretq",
+        gate_iretq!(),
         took = sym took,
     );
 }

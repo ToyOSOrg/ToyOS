@@ -11,7 +11,11 @@ use crate::log;
 use crate::mm::stack;
 use crate::process::KERNEL_STACK_SIZE;
 
-const MSR_GS_BASE: u32 = 0xC000_0101;
+/// Where this CPU's `PerCpu` is while the kernel runs, and Ring 3's GS base
+/// while it does (`arch::entry`).
+pub(crate) const MSR_GS_BASE: u32 = 0xC000_0101;
+/// The other half of that pair: what `swapgs` exchanges `IA32_GS_BASE` with.
+pub(crate) const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
 // GDT selectors (must match entry order)
 pub const KERNEL_CS: u16 = 0x08;
@@ -144,6 +148,13 @@ const GDT_ENTRIES: [u64; 7] = [
     0,                      // TSS high (runtime)
 ];
 
+/// A descriptor's base, bits 16–39 and 56–63 (SDM Vol. 3A §3.4.5).
+const DESCRIPTOR_BASE: u64 = 0xFF00_00FF_FFFF_0000;
+
+// The two descriptors Ring 3 may load into GS, its data and its code: their
+// base is the one a user GS load makes (`clear_user_gs_base`).
+const _: () = assert!(GDT_ENTRIES[3] & DESCRIPTOR_BASE == 0 && GDT_ENTRIES[4] & DESCRIPTOR_BASE == 0);
+
 #[repr(C, packed)]
 struct GdtPointer {
     limit: u16,
@@ -167,7 +178,9 @@ impl PerCpu {
         self.gdt[6] = high;
     }
 
-    /// Load this CPU's GDT, reload segment registers, and load TSS.
+    /// Load this CPU's GDT, reload segment registers, and load TSS. From here
+    /// on `GDTR`'s base is this block's `gdt`, which is how
+    /// `arch::entry::install_kernel_gs` finds the block without GS.
     /// # Safety: must be called exactly once per CPU during init.
     unsafe fn load_gdt(&self) {
         let ptr = GdtPointer {
@@ -206,6 +219,8 @@ pub(crate) const OFF_KERNEL_RSP: u32 = offset_of!(PerCpu, kernel_rsp) as u32;
 pub(crate) const OFF_USER_RSP: u32 = offset_of!(PerCpu, user_rsp) as u32;
 const OFF_CURRENT_TID: u32 = offset_of!(PerCpu, current_tid) as u32;
 const OFF_CURRENT_PID: u32 = offset_of!(PerCpu, current_pid) as u32;
+/// Where `GDTR` points inside the block (`load_gdt`).
+pub(crate) const OFF_GDT: u32 = offset_of!(PerCpu, gdt) as u32;
 const OFF_IDLE_STACK_TOP: u32 = offset_of!(PerCpu, idle_stack_top) as u32;
 pub(crate) const OFF_SYSCALL_RIP: u32 = offset_of!(PerCpu, syscall_rip) as u32;
 pub(crate) const OFF_SYSCALL_NUM: u32 = offset_of!(PerCpu, syscall_num) as u32;
@@ -236,7 +251,8 @@ pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
 
 /// Every GS-relative access this kernel makes, as `const`-generic primitives.
 /// Caller-owed and unchecked: `GS_BASE` must already point at this CPU's `PerCpu`
-/// — set by [`init_bsp`] on the BSP and by the AP trampoline before an AP runs Rust.
+/// — set by [`init_bsp`] on the BSP and by the AP trampoline before an AP runs Rust,
+/// and swapped in by every entry from Ring 3 (`arch::entry`).
 pub(crate) mod gs {
     use core::arch::asm;
 
@@ -336,9 +352,10 @@ pub(crate) mod gs {
     }
 }
 
-/// The IST stacks this machine has: IST1 `#DF`, IST2 NMI, IST3 `#MC` — vectors
-/// that can arrive with `rsp` not a kernel stack (SDM Vol. 3A §6.14.5); `ist[n-1]` is IST*n*.
-pub(crate) const IST_STACKS: usize = 3;
+/// The IST stacks this machine has: IST1 `#DF`, IST2 NMI, IST3 `#MC`, IST4
+/// `#DB` — vectors that can arrive with `rsp` not a kernel stack (SDM Vol. 3A
+/// §6.14.5); `ist[n-1]` is IST*n*.
+pub(crate) const IST_STACKS: usize = 4;
 
 /// One size for every IST stack; must leave room to double the measured high water.
 const IST_STACK_SIZE: usize = 16384;
@@ -569,6 +586,7 @@ pub fn init_bsp(lapic_id: u32) {
 
     // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };
+    clear_user_gs_base();
     super::control_regs::init(0);
     // SAFETY: this CPU's own block, with no IDT of this kernel's loaded yet
     // and the `&mut` above ended.
@@ -593,6 +611,14 @@ pub fn init_bsp(lapic_id: u32) {
     log!("percpu: BSP cpu_id=0 lapic_id={lapic_id}");
 }
 
+/// Gives this CPU the user GS base every thread has: zero. Every descriptor
+/// Ring 3 may load into GS has base 0 and `CR4.FSGSBASE` is off, so no thread
+/// makes another and the switch moves none. Before this CPU's first `swapgs`.
+fn clear_user_gs_base() {
+    // SAFETY: zero is canonical, and nothing on this CPU has swapped GS yet.
+    unsafe { cpu::wrmsr(MSR_KERNEL_GS_BASE, 0) };
+}
+
 /// Allocate percpu for an AP; the trampoline writes the pointer into IA32_GS_BASE.
 pub fn alloc_ap(cpu_id: u32, token: u32) -> *mut PerCpu {
     let ptr = alloc_percpu(cpu_id);
@@ -610,6 +636,7 @@ pub fn init_ap(percpu_ptr: *mut PerCpu) {
     let percpu = unsafe { &mut *percpu_ptr };
     // SAFETY: `load_gdt`'s once-per-CPU contract; this is this AP's call.
     unsafe { percpu.load_gdt(); }
+    clear_user_gs_base();
     super::control_regs::init(percpu.cpu_id);
     super::control_regs::init_performance(percpu.cpu_id);
     super::fpu::init(percpu.cpu_id);

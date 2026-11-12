@@ -38,8 +38,8 @@ pub fn init() {
 
 }
 
-// GS permanently points to kernel per-CPU data here; no swapgs.
 // `SYSCALL` switches no stack: before the `rsp` switch below runs, the CPU is at CPL 0 on the user's stack, so nothing that can fault may execute there.
+// The same holds from the exit's `swapgs` on, with the user's GS base live (`arch::entry`): `SYSRET` cannot fault, since no instruction ends at the user half's top for `rcx` to be non-canonical (`toyos_userbound`'s placement).
 #[unsafe(naked)]
 extern "sysv64" fn syscall_entry() {
     syscall_naked_asm!(
@@ -82,6 +82,7 @@ extern "sysv64" fn syscall_entry() {
         "pop r11",
         "pop rcx",
         "pop rsp",              // restore user RSP from kernel stack
+        "swapgs",
         "sysretq",
         handler = sym syscall_handler,
         exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
@@ -92,6 +93,11 @@ extern "sysv64" fn syscall_entry() {
         syscall_rbp = const percpu::OFF_SYSCALL_RBP,
         preempt_count = const percpu::OFF_PREEMPT_COUNT,
     );
+}
+
+/// Where `SYSCALL` enters, as `LSTAR` holds it.
+pub(crate) fn entry_address() -> u64 {
+    syscall_entry as *const () as u64
 }
 
 /// The syscall bracket: the entry's diagnostic stores stay readable only while [`percpu::in_syscall`] is true.

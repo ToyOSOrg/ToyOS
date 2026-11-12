@@ -81,10 +81,9 @@ fn kernel_lines() -> Vec<(String, usize, String)> {
 const LOG_PRODUCERS: &[&str] = &["log!(", "alert!(", "boot_phase!(", "log::emit("];
 
 /// Every file whose whole contents run inside an NMI, and so may write no log
-/// record: the handler, and the hard-lockup detector it samples through. The
-/// detector's own control is not here — it stages from ordinary context, in
-/// `kernel/src/hardlockup/probe.rs`, which is why it is a file of its own — and
-/// neither is the line the arm writes, which its caller writes for it.
+/// record: the handler, and the hard-lockup detector it samples through. An
+/// arm that stages vector 2 from ordinary context and reports it is a file of
+/// its own for that reason, `kernel/src/arch/x86_64/idt/nmi_user_gs.rs`.
 const NMI_SILENT: &[&str] =
     &["kernel/src/arch/x86_64/idt/nmi.rs", "kernel/src/hardlockup/mod.rs"];
 

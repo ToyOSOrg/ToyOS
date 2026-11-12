@@ -366,6 +366,12 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is each bench's verdict, on the T14's AVX-512 and the AMD
     // bench's AVX; `vector_state_survives_a_switch` runs it under QEMU.
     "vector_state",
+    // Its shared run is each bench's verdict;
+    // `a_ring3_gs_load_leaves_the_kernel_its_gs` runs it under QEMU.
+    "gs_segment_load",
+    // Its shared run is each bench's verdict;
+    // `ring3_debug_traps_end_their_process` runs it under QEMU.
+    "debug_trap",
     "std_alloc",
     // Its shared run asserts what holds of one boot's draws on x86-64;
     // `virt_random_differs` builds it for AArch64, runs it on that
@@ -587,6 +593,12 @@ const MACHINE_TESTS: &[MachineTest] = &[
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     ("nested_nmi_is_loud", |test_config| faults::nested_nmi_is_loud(test_config)),
+    // Vector 2 entered at CPL 0 under a decoy user GS base, which `nmi-user-gs`
+    // stages with `swapgs; int 2`: the entry finds the kernel's own block by
+    // its GDT and returns to the base it found. The IDT, the MSRs and the
+    // entry are a booted kernel's; the `nmi_finds_the_kernels_gs` metal row is
+    // each bench's verdict, and this is the guest runner's CPU's.
+    ("nmi_under_a_user_gs_base", |test_config| faults::nmi_under_a_user_gs_base(test_config)),
     // The boot's W^X audit refusing a leaf an actuator staged: the panic ends
     // the boot, so it cannot share one, and the T14's `kernel_wx` row reads
     // the same audit passing. q35 on `Profile::Metal`, whose 16550 carries
@@ -837,6 +849,18 @@ const MACHINE_TESTS: &[MachineTest] = &[
     // run is the benches'; this is TCG's, whose XSAVE is QEMU's own reading of
     // the SDM, and the KVM runner's CPU.
     ("vector_state_survives_a_switch", |test_config| vector_state_survives_a_switch(test_config)),
+    // Ring 3 loads GS with every selector it may and enters the kernel by a
+    // syscall, a page fault and a park, which only the kernel's own entries
+    // and a CPU's segment loads have. The shared boot's run is each bench's
+    // verdict; this is the guest runner's CPU's, and a kernel that addresses
+    // its per-CPU block through the user's GS base dies on it.
+    ("a_ring3_gs_load_leaves_the_kernel_its_gs", |test_config| a_ring3_gs_load_leaves_the_kernel_its_gs(test_config)),
+    // Every Ring 3 route to `#DB` and `#BP` ends its process as a trap, `TF`
+    // across a `MOV SS` into a syscall and into `INT3` among them: the `#DB`
+    // gate's own stack and its move of a Ring 3 frame to the thread's, which
+    // only a booted kernel has. The shared boot's run is each bench's verdict;
+    // this is the guest runner's CPU's.
+    ("ring3_debug_traps_end_their_process", |test_config| ring3_debug_traps_end_their_process(test_config)),
     // std's CPU count against the CPUs the guest booted with, and an ended
     // thread's stack and table place given back, joined or detached, on the
     // two-CPU q35 guest: std's ToyOS layer, which no host builds.
@@ -1570,6 +1594,13 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { on: On::Every, arms: SELFTESTS, judge: |b| sysret_ss(b[0].kernel().text()) },
     ),
     (
+        // Vector 2 at CPL 0 under a decoy user GS base: each bench's NMI entry
+        // finds its own CPU's block without trusting GS, and returns to the
+        // base it found.
+        "nmi_finds_the_kernels_gs",
+        metal::Metal { on: On::Every, arms: SELFTESTS, judge: |b| faults::nmi_user_gs(b[0].kernel().text()).map(|_| ()) },
+    ),
+    (
         // A unit handed over translating, remapping and queueing, or on an
         // AMD-Vi machine blocking every DMA with its command buffer and event
         // log running, on real silicon: each field goes off by its own write
@@ -2288,6 +2319,7 @@ const SELFTEST_PARAMS: &[&str] = &[
     "unclaimed-vector-selftest",
     "sysret-ss-probe",
     "hpet-stall",
+    "nmi-user-gs",
 ];
 
 const SELFTESTS: &[metal::Arm] = &[metal::Arm {
@@ -5838,6 +5870,50 @@ fn vector_state_survives_a_switch(test_config: &Path) -> Result<(), String> {
         return Err(format!("the job never said what it held:\n{}", result.stdout));
     };
     eprintln!("  [claims] {}", line.trim());
+    Ok(())
+}
+
+/// [`MACHINE_TESTS`]' `a_ring3_gs_load_leaves_the_kernel_its_gs`: the shared
+/// boot's `gs_segment_load` alone.
+fn a_ring3_gs_load_leaves_the_kernel_its_gs(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "gs_segment_load";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu =
+        QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_gs_segment_load", Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let Some(line) = result.stdout.lines().find(|l| l.contains("gs_segment_load: ")) else {
+        return Err(format!("the job never said what it loaded:\n{}", result.stdout));
+    };
+    eprintln!("  [gs] {}", line.trim());
+    Ok(())
+}
+
+/// [`MACHINE_TESTS`]' `ring3_debug_traps_end_their_process`: the shared
+/// boot's `debug_trap` alone.
+fn ring3_debug_traps_end_their_process(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "debug_trap";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu =
+        QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_debug_trap", Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let Some(line) = result.stdout.lines().find(|l| l.contains("the machine is still here")) else {
+        return Err(format!("the job never said every arm ended:\n{}", result.stdout));
+    };
+    eprintln!("  [debug_trap] {}", line.trim());
     Ok(())
 }
 

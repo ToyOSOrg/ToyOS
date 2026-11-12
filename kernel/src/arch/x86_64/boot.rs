@@ -166,6 +166,9 @@ pub fn interrupt_selftests() {
     if crate::actuator::unclaimed_vector_selftest() {
         idt::unclaimed::selftest();
     }
+    if crate::actuator::nmi_user_gs() {
+        idt::nmi_user_gs_selftest();
+    }
     assert!(
         !crate::actuator::irq_storm() && !crate::actuator::timer_floor(),
         "irq-storm and timer-floor are the GIC and generic timer's selftests, and this machine has a local APIC"
