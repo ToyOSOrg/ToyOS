@@ -21,7 +21,7 @@ handler's return to the user return (`kernel/src/arch/x86_64/syscall.rs`,
 `need_resched`, which the syscall's exit serves, and the Ring 0 expiry re-arms
 one quantum on. What still runs masked is the Ring 3 tick's and kick's pass,
 which the handler runs, and the walk under an `IrqWatch`'s lock
-(`issues/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`).
+(`issues/a-claims-holder-lengthens-its-handlers-interrupts-off-walk-by-the-polls-it-arms.md`).
 
 This was masked until the preempt count was made conserved across a context
 switch (the scheduler's own baselines needed it): before that the count drifted,

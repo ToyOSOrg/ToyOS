@@ -193,8 +193,6 @@ impl ZeroHandles for Acceptor {
             core::mem::take(&mut queue.pending)
         };
         drop(queued);
-        // A poll on the port is answered as gone, not as ready: nothing will ever queue again.
-        self.shared.watch.cancel_polls();
         self.shared.watch.post();
     }
 }

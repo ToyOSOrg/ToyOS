@@ -19,6 +19,10 @@ pub const OP_NOP: u8 = 0;
 /// whose readiness the kernel does not hold — the log, read on the reader's own
 /// cursor, and a console — whose read post is the answer. A watch replaces its
 /// handle's earlier one, fired or not, so one look answers a handle once.
+///
+/// **A watch belongs to the handle it names.** That handle's close, or its
+/// move to another process, answers it `NotFound`; closing another handle to
+/// the same object answers nothing.
 pub const OP_WATCH: u8 = 1;
 pub const OP_ACCEPT: u8 = 3;
 

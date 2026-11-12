@@ -9,10 +9,16 @@
 //! handle watches is `ops::read_watch`/`ops::write_watch`'s answer, and the
 //! poll holds no reference to the object at all.
 //!
-//! **Only the ring's submitter writes a watch's answer, after a look**
-//! ([`polls`]): a post owes the poll a look, and `submit` looks at the object
-//! again before it writes anything, so an answer is never older than the wait
-//! that returned it.
+//! **A ring has one submitter, and only it writes the ring's completions**
+//! ([`Submitting`]): a second `inbox_submit` while one runs is refused `Busy`.
+//! A post owes a poll a look, and the submitter looks at the object again
+//! before it writes anything ([`polls`]), so an answer is never older than the
+//! wait that returned it. Closing the ring wakes its submitter, which reads the
+//! ring gone.
+//!
+//! **A poll lasts while the handle it was made through is in its table**: its
+//! entries go on the watches in one hold of the table that reads the handle
+//! there, and the handle's close or move ends them (`object::handle`).
 //!
 //! **A completion is a trust boundary, and the kernel is the only writer of
 //! its position.** `completion_tail` lives here, never in the page; the head
@@ -29,11 +35,13 @@
 //! ring, its submissions and its polls, is another's. No post reaches either:
 //! a fire takes its poll and posts the ring's watch. That watch is an
 //! [`IrqWatch`], because a device's interrupt handler fires polls, and holds
-//! only threads, because no handle names a ring as a thing to watch.
+//! only the ring's submitter, because no handle names a ring as a thing to
+//! watch.
 
 use alloc::sync::Arc;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 
+use kernel::sched::poll::{self as polls, Look, Polls, Submitter, Via};
 use kernel::sched::task::WaitClass;
 use kernel::sched::watch::{Fire, Ring};
 
@@ -54,11 +62,6 @@ use toyos_abi::inbox::{
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::SyscallError;
 
-mod once;
-mod polls;
-
-use polls::{Look, Polls, Submitter};
-
 /// The one owned reference to a ring, held by its handle's object; dropping it
 /// tears the ring down.
 pub struct InboxRef(Arc<Inbox>);
@@ -77,13 +80,13 @@ impl Drop for InboxRef {
         let Some(completions) = self.0.completions.lock().take() else {
             unreachable!("an inbox is torn down by its one reference, once");
         };
-        let Some(mut state) = self.0.state.lock().take() else {
+        let Some(RingState { polls: kept, owner_space, .. }) = self.0.state.lock().take() else {
             unreachable!("an inbox is torn down by its one reference, once");
         };
-        state.polls.withdraw_all();
+        polls::torn_down(kept, &self.0);
         // Unless the process replaced the mapping itself; the pages go once
         // neither the mapping nor these hold the object.
-        if let Some(space) = state.owner_space.upgrade() {
+        if let Some(space) = owner_space.upgrade() {
             completions.mapping.release(&space);
         }
     }
@@ -155,7 +158,7 @@ impl Readiness {
 
 type Poll = polls::Poll<Arc<Inbox>>;
 
-impl polls::Wake for Arc<Inbox> {
+impl polls::Wake for Inbox {
     fn wake(&self) {
         self.watch.post_in_place();
     }
@@ -179,6 +182,10 @@ impl Ring for PollEntry {
     fn live(&self) -> bool {
         self.poll.armed()
     }
+
+    fn via(&self) -> Via {
+        self.poll.via
+    }
 }
 
 /// Hard cap on pending polls per ring.
@@ -187,9 +194,12 @@ const MAX_PENDING_WATCHES: usize = 1024;
 pub struct Inbox {
     /// `None` once the ring's one reference let go of it.
     state: Lock<Option<RingState>>,
-    /// `None` from the moment that reference starts letting go of it.
+    /// `None` from the moment that reference starts letting go of it. Reached
+    /// through [`Submitting`] alone but by that teardown.
     completions: Lock<Option<Completions>>,
-    /// Threads parked in `submit`; never a poll — see the module header.
+    /// A thread is in `submit`: [`Inbox::claim`]'s.
+    submitting: AtomicBool,
+    /// The one thread parked in `submit`; never a poll — see the module header.
     watch: IrqWatch,
     /// Itself and its polls at their cap: a poll is made at a submission,
     /// which has no call of its own to refuse.
@@ -313,8 +323,25 @@ impl Inbox {
         self.state.lock().as_mut().map(f).ok_or(SyscallError::NotFound)
     }
 
+    /// This ring's one submitter, or `None` while another thread is.
+    fn claim(self: &Arc<Self>) -> Option<Submitting<'_>> {
+        (!self.submitting.swap(true, Ordering::Acquire)).then_some(Submitting(self))
+    }
+}
+
+/// The one thread in a ring's `inbox_submit`, from its claim to its return:
+/// the only writer of the ring's completions.
+struct Submitting<'a>(&'a Arc<Inbox>);
+
+impl Drop for Submitting<'_> {
+    fn drop(&mut self) {
+        self.0.submitting.store(false, Ordering::Release);
+    }
+}
+
+impl Submitting<'_> {
     fn with_completions<R>(&self, f: impl FnOnce(&Completions) -> R) -> Result<R, SyscallError> {
-        self.completions.lock().as_ref().map(f).ok_or(SyscallError::NotFound)
+        self.0.completions.lock().as_ref().map(f).ok_or(SyscallError::NotFound)
     }
 }
 
@@ -382,19 +409,22 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
             completion_size,
             completion_tail: 0,
         })),
+        submitting: AtomicBool::new(false),
         watch: IrqWatch::new(),
         _charge: charge,
     });
     Ok((InboxRef(inbox), at.raw()))
 }
 
-/// Processes submissions and waits for completions; called from the syscall handler.
+/// Processes submissions and waits for completions; called from the syscall
+/// handler. `Busy` while another thread submits to the same ring.
 pub fn submit(
     inbox: &Arc<Inbox>,
     to_submit: u32,
     min_complete: u32,
     timeout_nanos: u64,
 ) -> Result<u32, SyscallError> {
+    let ring = inbox.claim().ok_or(SyscallError::Busy)?;
     // `timeout_nanos` becomes a typed `Deadline` here; a bare absolute `u64` can't distinguish `0` from "no timeout".
     let non_blocking = timeout_nanos == 0;
     let deadline = if non_blocking {
@@ -406,12 +436,12 @@ pub fn submit(
     };
 
     if to_submit > 0 {
-        submit_submissions(inbox, to_submit)?;
+        submit_submissions(&ring, to_submit)?;
     }
 
     loop {
-        polls::deliver(inbox);
-        let (count, dropped) = inbox.with_completions(|c| (c.completion_count(), c.dropped()))?;
+        polls::deliver(&ring);
+        let (count, dropped) = ring.with_completions(|c| (c.completion_count(), c.dropped()))?;
 
         if count >= min_complete || min_complete == 0 {
             return Ok(count);
@@ -444,11 +474,7 @@ pub fn submit(
             0,
             WaitClass::Io,
             deadline,
-            || {
-                polls::awake(inbox, || {
-                    inbox.with_completions(|c| c.completion_count()).map_or(true, |n| n >= min_complete)
-                })
-            },
+            || polls::awake(&ring, || ring.with_completions(|c| c.completion_count()).map_or(true, |n| n >= min_complete)),
         )
         .is_err()
         {
@@ -458,13 +484,13 @@ pub fn submit(
 }
 
 /// Reads and processes submissions from the submission ring; unclamped inputs are refused, not silently clamped.
-fn submit_submissions(inbox: &Arc<Inbox>, count: u32) -> Result<(), SyscallError> {
-    if count > inbox.with_state(|s| s.submission_size)? {
+fn submit_submissions(ring: &Submitting<'_>, count: u32) -> Result<(), SyscallError> {
+    if count > ring.0.with_state(|s| s.submission_size)? {
         return Err(SyscallError::InvalidArgument);
     }
     for _ in 0..count {
-        let Some(submission) = claim_submission(inbox)? else { break };
-        process_submission(inbox, &submission);
+        let Some(submission) = claim_submission(ring.0)? else { break };
+        process_submission(ring, &submission);
     }
     Ok(())
 }
@@ -489,51 +515,65 @@ fn claim_submission(inbox: &Inbox) -> Result<Option<Submission>, SyscallError> {
 }
 
 /// Process a single submission.
-fn process_submission(inbox: &Arc<Inbox>, submission: &Submission) {
+fn process_submission(ring: &Submitting<'_>, submission: &Submission) {
     // `Submission::flags` is declared and read by nothing, so a caller setting
     // it is asking for a behaviour that does not exist.
     if submission.flags != 0 {
-        polls::complete(inbox, submission.token, -(SyscallError::InvalidArgument as i32));
+        ring.answer(submission.token, -(SyscallError::InvalidArgument as i32));
         return;
     }
     let op = match Op::from_raw(submission.op) {
         Ok(op) => op,
         Err(_) => {
-            polls::complete(inbox, submission.token, -(SyscallError::InvalidArgument as i32));
+            ring.answer(submission.token, -(SyscallError::InvalidArgument as i32));
             return;
         }
     };
 
     match op {
-        Op::Nop => polls::complete(inbox, submission.token, 0),
-        Op::Watch => process_watch(inbox, submission),
-        Op::Accept => process_accept(inbox, submission),
+        Op::Nop => ring.answer(submission.token, 0),
+        Op::Watch => process_watch(ring, submission),
+        Op::Accept => process_accept(ring, submission),
     }
 }
 
 /// Takes an `OP_WATCH` as its handle's one poll; every refusal writes a completion rather than going silent.
-fn process_watch(inbox: &Arc<Inbox>, submission: &Submission) {
+fn process_watch(ring: &Submitting<'_>, submission: &Submission) {
     let user_data = submission.token;
     let flags = match WatchFlags::from_raw(submission.op_flags) {
         Ok(flags) => flags,
         Err(e) => {
-            polls::complete(inbox, user_data, -(e as i32));
+            ring.answer(user_data, -(e as i32));
             return;
         }
     };
     // Nothing is held here: `resolve` has given the guard up.
-    let refused = resolve(submission.handle).map_err(HandleError::refuse_as_error).and_then(|object| {
-        arm(inbox, Poll::new(inbox.clone(), user_data, submission.handle, flags.raw()), None, &object)
+    let refused = resolve(submission.handle).map_err(HandleError::refuse_as_error).and_then(|(object, table)| {
+        let via = Via { table, handle: submission.handle };
+        arm(ring, Poll::new(ring.0.clone(), user_data, via, flags.raw()), None, &object)
     });
     if let Err(refusal) = refused {
-        polls::complete(inbox, user_data, -(refusal as i32));
+        ring.answer(user_data, -(refusal as i32));
     }
 }
 
-/// The object `handle` names in this process's table, not the thread's: a ring is process-wide.
-/// Cloned out, so what follows holds no handle-table lock.
-fn resolve(handle: RawHandle) -> Result<KObjectRef, HandleError> {
-    process::with_handles(|handles| handles.get_ref(handle, Rights::WAIT).cloned())
+/// The object `handle` names in this process's table, not the thread's: a
+/// ring is process-wide; and which table that is. Cloned out, so what follows
+/// holds no handle-table lock.
+fn resolve(handle: RawHandle) -> Result<(KObjectRef, u64), HandleError> {
+    process::with_handles(|handles| {
+        let object = handles.get_ref(handle, Rights::WAIT)?.clone();
+        Ok((object, handles.id()))
+    })
+}
+
+/// This process's table, as a poll's registration holds it.
+struct ThisProcess;
+
+impl polls::Table for ThisProcess {
+    fn while_held(&self, handle: RawHandle, add: impl FnOnce()) -> bool {
+        process::with_handles(|handles| handles.while_held(handle, add))
+    }
 }
 
 /// Keep `poll` as its handle's one poll, or in the place of `looked_at`, the
@@ -541,7 +581,7 @@ fn resolve(handle: RawHandle) -> Result<KObjectRef, HandleError> {
 /// on the object's watches if not. The refusal, when nothing could ever answer
 /// it.
 fn arm(
-    inbox: &Arc<Inbox>,
+    ring: &Submitting<'_>,
     poll: Poll,
     looked_at: Option<&Arc<Poll>>,
     object: &KObjectRef,
@@ -568,37 +608,39 @@ fn arm(
     let poll = Arc::new(poll);
     // The cap is checked before registering: registering first would leave a
     // watch holding a poll the ring never counted.
-    let kept = inbox.with_state(|state| match looked_at {
-        None if state.polls.admit(poll.clone(), MAX_PENDING_WATCHES) => Ok(true),
+    let kept = ring.0.with_state(|state| match looked_at {
+        None if state.polls.admit(poll.clone(), MAX_PENDING_WATCHES) => Ok(()),
         None => Err(SyscallError::ResourceExhausted),
-        Some(old) => Ok(state.polls.renew(old, poll.clone())),
+        Some(old) => {
+            state.polls.renew(old, poll.clone());
+            Ok(())
+        }
     });
     match kept {
         // Only a watch that stands listens: a refused one changes nothing.
-        Ok(Ok(true)) if flags.readable() => ops::watched_readable(object),
-        Ok(Ok(true)) => {}
+        Ok(Ok(())) if flags.readable() => ops::watched_readable(object),
+        Ok(Ok(())) => {}
         Ok(Err(full)) => return Err(full),
-        // A newer watch took the handle's place during the look, or the
-        // ring's last handle closed under this submit.
-        Ok(Ok(false)) | Err(_) => return Ok(()),
+        // The ring's last handle closed under this submit.
+        Err(_) => return Ok(()),
     }
     if ready {
         poll.fire(0);
         return Ok(());
     }
 
-    // Registered with no ring lock held, then rechecked: a post either ran
-    // before the registration — and the recheck sees what it changed — or
-    // finds the entry. Whichever fires first fires alone.
-    if let Some(watch) = &read {
-        watch.add_poll(PollEntry { poll: poll.clone(), direction: WatchFlags::READABLE });
-    }
-    if let Some(watch) = &write {
-        watch.add_poll(PollEntry { poll: poll.clone(), direction: WatchFlags::WRITABLE });
-    }
-    if let Some(watch) = &own {
-        watch.add_poll(PollEntry { poll: poll.clone(), direction: WatchFlags::OTHER_END_GONE });
-    }
+    // Registered with no ring lock held, in the hold of the table that reads
+    // the handle still there, then rechecked: a post either ran before the
+    // registration — and the recheck sees what it changed — or finds the
+    // entry. Whichever fires first fires alone.
+    polls::register(&poll, &ThisProcess, || {
+        let watches = [(&read, WatchFlags::READABLE), (&write, WatchFlags::WRITABLE), (&own, WatchFlags::OTHER_END_GONE)];
+        for (watch, direction) in watches {
+            if let Some(watch) = watch {
+                watch.add_poll(PollEntry { poll: poll.clone(), direction });
+            }
+        }
+    });
     if readiness_of(object, flags).any() {
         poll.fire(0);
     }
@@ -614,25 +656,25 @@ fn readiness_of(object: &KObjectRef, flags: WatchFlags) -> Readiness {
     }
 }
 
-impl Submitter<Arc<Inbox>> for Arc<Inbox> {
+impl Submitter<Arc<Inbox>> for Submitting<'_> {
     fn room(&self) -> bool {
         self.with_completions(Completions::room).unwrap_or(false)
     }
 
     fn answer(&self, user_data: u64, result: i32) {
         // A ring already torn down takes nothing.
-        if let Some(completions) = self.completions.lock().as_mut() {
+        if let Some(completions) = self.0.completions.lock().as_mut() {
             completions.post_completion(user_data, result, 0);
         }
     }
 
     fn polls<R>(&self, f: impl FnOnce(&mut Polls<Arc<Inbox>>) -> R) -> Option<R> {
-        self.with_state(|state| f(&mut state.polls)).ok()
+        self.0.with_state(|state| f(&mut state.polls)).ok()
     }
 
     fn look(&self, poll: &Arc<Poll>) -> Look {
-        let object = match resolve(poll.handle) {
-            Ok(object) => object,
+        let object = match resolve(poll.via.handle) {
+            Ok((object, _)) => object,
             // Closed since it was watched, which is no bug of the process's:
             // the poll is over, as a close that ends it says.
             Err(HandleError::BadHandle | HandleError::Stale | HandleError::WrongType { .. }) => {
@@ -651,7 +693,7 @@ impl Submitter<Arc<Inbox>> for Arc<Inbox> {
         if now.any() {
             return Look::Ready(now.result_flags());
         }
-        let again = Poll::new(self.clone(), poll.user_data, poll.handle, poll.flags);
+        let again = Poll::new(self.0.clone(), poll.user_data, poll.via, poll.flags);
         match arm(self, again, Some(poll), &object) {
             Ok(()) => Look::Waits,
             Err(refusal) => Look::Refused(refusal),
@@ -660,7 +702,7 @@ impl Submitter<Arc<Inbox>> for Arc<Inbox> {
 }
 
 /// The submission form of `SYS_ACCEPT`; refusals fold into one `-InvalidArgument` completion instead of ending the process.
-fn process_accept(inbox: &Arc<Inbox>, submission: &Submission) {
+fn process_accept(ring: &Submitting<'_>, submission: &Submission) {
     let user_data = submission.token;
 
     let acceptor = process::with_handles(|handles| {
@@ -672,7 +714,7 @@ fn process_accept(inbox: &Arc<Inbox>, submission: &Submission) {
         // Nothing held: `with_handles` has given the guard up.
         Err(e) => {
             let refusal = e.refuse_as_error();
-            polls::complete(inbox, user_data, -(refusal as i32));
+            ring.answer(user_data, -(refusal as i32));
             return;
         }
     };
@@ -681,7 +723,7 @@ fn process_accept(inbox: &Arc<Inbox>, submission: &Submission) {
     let core = match crate::object::service::ConnectionEnd::accept_core() {
         Ok(core) => core,
         Err(e) => {
-            polls::complete(inbox, user_data, -(SyscallError::from(e) as i32));
+            ring.answer(user_data, -(SyscallError::from(e) as i32));
             return;
         }
     };
@@ -691,10 +733,10 @@ fn process_accept(inbox: &Arc<Inbox>, submission: &Submission) {
                 ops::install(handles, KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(core, conn)))
             });
             match installed {
-                Ok(h) => polls::complete(inbox, user_data, h.0 as i32),
-                Err(e) => polls::complete(inbox, user_data, -(e as i32)),
+                Ok(h) => ring.answer(user_data, h.0 as i32),
+                Err(e) => ring.answer(user_data, -(e as i32)),
             }
         }
-        None => polls::complete(inbox, user_data, -(SyscallError::WouldBlock as i32)),
+        None => ring.answer(user_data, -(SyscallError::WouldBlock as i32)),
     }
 }

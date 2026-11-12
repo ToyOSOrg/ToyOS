@@ -668,6 +668,8 @@ pub enum SyscallError {
     /// the same rule the storage layer already obeys applies here: a dead peer
     /// must not be indistinguishable from a handle that was never there.
     Gone = 10,
+    /// Another thread holds what the call needs alone: an inbox's submitter.
+    Busy = 11,
 }
 
 impl SyscallError {
@@ -692,6 +694,7 @@ impl SyscallError {
             8 => Some(Self::NotSupported),
             9 => Some(Self::Io),
             10 => Some(Self::Gone),
+            11 => Some(Self::Busy),
             _ => Some(Self::Unknown),
         }
     }
@@ -711,6 +714,7 @@ impl core::fmt::Display for SyscallError {
             Self::NotSupported => f.write_str("not supported"),
             Self::Io => f.write_str("the device did not complete the transfer"),
             Self::Gone => f.write_str("the other end is gone"),
+            Self::Busy => f.write_str("busy"),
         }
     }
 }
@@ -2854,7 +2858,9 @@ pub unsafe fn inbox_setup(depth: u32) -> Result<(RawHandle, *mut u8), SyscallErr
 /// `min_complete`: block until at least this many completions are available
 /// (0 = don't block).
 /// `timeout_nanos`: 0 = non-blocking, u64::MAX = block forever, else timeout in nanos.
-/// Returns the number of completions available.
+/// Returns the number of completions available. An inbox has one submitter:
+/// a call while another thread's runs is `Busy`, and a wait on an inbox
+/// whose handle closes under it ends `NotFound`.
 pub fn inbox_submit(handle: RawHandle, to_submit: u32, min_complete: u32, timeout_nanos: u64) -> Result<u32, SyscallError> {
     check(syscall(SYS_INBOX_SUBMIT, handle.0 as u64, to_submit as u64, min_complete as u64, timeout_nanos))
         .map(|n| n as u32)

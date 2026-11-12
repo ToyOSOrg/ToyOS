@@ -22,9 +22,9 @@ pollers in the same way. `rg poll_event` finds those callers.
 
 **Evidence**: the stalling variant was not committed and its runs' logs were
 not kept; what is recorded is the shape above and that removing the second
-poller ended the stall. Related, and not shown to be the cause:
-`issues/a-close-of-one-handle-ends-every-rings-poll-on-its-object.md` and
-`issues/toyos-poller-is-sync-and-a-watch-moves-the-tail-in-two-steps.md`.
+poller ended the stall. Related, not shown to be the cause, and since fixed: a
+close of one handle ended every ring's poll on its object, and `Poller` was
+`Sync`.
 
 ## Owner
 

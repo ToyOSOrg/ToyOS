@@ -145,6 +145,12 @@ impl<L: CellLock<List>> Waitable<L> {
         self.0.cancel_rings();
     }
 
+    /// Answer as gone every poll made through `via`: that handle left its
+    /// table. A thread's, as [`Self::cancel_polls`] is.
+    pub fn end_polls(&self, via: kernel::sched::poll::Via) {
+        self.0.end_rings(via);
+    }
+
 }
 
 /// A thread's registration on one watch, held across its wait and ended by

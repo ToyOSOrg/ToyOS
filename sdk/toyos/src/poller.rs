@@ -209,9 +209,9 @@ pub struct Poller {
 // Safety: the base pointer is process-local shared memory mapped from the
 // kernel. It is only ever reached through `Rings`, which takes no reference
 // over it: atomics for the shared words, whole-value volatile copies for
-// everything else.
+// everything else. Not `Sync`: a ring has one submitter, and a watch moves the
+// submission tail in two steps that a second thread could interleave.
 unsafe impl Send for Poller {}
-unsafe impl Sync for Poller {}
 
 impl Poller {
     /// Widest handle set one poller can carry — the kernel's deepest
@@ -359,9 +359,9 @@ impl Poller {
             let idx = head & (self.rings.completion_ring_size - 1);
             let completion = self.rings.completion_at(idx);
             // Do not filter on `completion.result`. A negative result is the
-            // kernel saying the registration is over and will never fire
-            // (a watched handle's close answers every poll on a watch it ends
-            // with `-NotFound`, i.e. on any peer disconnect), and the caller must react
+            // kernel saying the registration is over and will never fire (the
+            // watched handle's own close or move answers it `-NotFound`, and
+            // so does the end of what it watched), and the caller must react
             // to that exactly as to readiness — by looking at the handle again.
             // A zero result is meaningful too: `OP_ACCEPT` reports handle 0
             // that way.
