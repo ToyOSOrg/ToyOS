@@ -14,14 +14,16 @@ pub use toyos::BorrowedHandle;
 pub use toyos_abi::RawHandle;
 use toyos_abi::syscall::SyscallError;
 
+use toyos::admission::LIMIT;
 use toyos::ipc;
 use toyos::AsHandle;
-use toyos::poller::{Poller, READABLE};
+use toyos::poller::{self, Poller, READABLE};
 use toyos::endow::{self, EndowError};
 use toyos::surface;
 use toyos::Connection;
 use toyos::shm::{Lent, ReadOnly, SharedMemory};
 use std::rc::Rc;
+use std::time::Duration;
 /// Re-exported because [`KeyPress`] is made of them and a client that holds
 /// its own translator — `console`, a test that stands in for a surface —
 /// should not have to name a second crate to do what this one does.
@@ -35,6 +37,42 @@ pub const WINDOW_FLAG_LOGICAL_SIZE: u8 = 2;
 
 /// The compositor's port every window but a prompt is asked for on.
 const COMPOSITOR: &str = "compositor";
+
+/// How long a client waits for the compositor's answer to a request before it
+/// takes the compositor as hung: a hang's bound, never an answer's expected
+/// time.
+///
+/// The compositor answers a whole request in the pass that reads it, with one
+/// send that never waits. Before that pass a connection may wait for a slot in
+/// the compositor's table, every connection of which the compositor serves or
+/// lets go within [`LIMIT`]. So one `LIMIT` for the slot, and one for the pass
+/// on a machine whose CPUs are busy elsewhere: the room the compositor gives a
+/// client's own step.
+pub const ANSWER_BOUND: Duration = LIMIT.saturating_mul(2);
+
+const ANSWER_BOUND_NANOS: u64 = {
+    assert!(ANSWER_BOUND.as_nanos() < u64::MAX as u128, "a wait of u64::MAX is for good");
+    ANSWER_BOUND.as_nanos() as u64
+};
+
+/// The compositor's answer on `conn`, into `rx`; `None` when neither it nor the
+/// compositor's hang-up came within [`ANSWER_BOUND`].
+fn answer<const MAX: usize>(conn: &Connection, rx: &mut ipc::FrameRx<MAX>) -> Result<Option<ipc::Frame>, ipc::IpcError> {
+    answered(|nanos| poller::wait_one(conn, READABLE, nanos), || rx.recv(conn))
+}
+
+/// What `take` reads once `wait`, given [`ANSWER_BOUND`], says there is
+/// something to read; `None` when there was not.
+fn answered<T>(
+    wait: impl FnOnce(u64) -> Result<bool, SyscallError>,
+    take: impl FnOnce() -> Result<T, ipc::IpcError>,
+) -> Result<Option<T>, ipc::IpcError> {
+    match wait(ANSWER_BOUND_NANOS) {
+        Ok(true) => take().map(Some),
+        Ok(false) => Ok(None),
+        Err(e) => Err(ipc::IpcError::Syscall(e)),
+    }
+}
 
 /// The largest payload a client sends inline; past it a region moves instead.
 ///
@@ -151,6 +189,8 @@ pub enum CreateError {
     /// exited or refused (its log says which), or sent a frame this client
     /// cannot read.
     BrokenOff,
+    /// The compositor neither answered nor hung up within [`ANSWER_BOUND`].
+    Unanswered,
     /// The compositor answered, and not with anything this exchange allows.
     Protocol(u32),
     /// The answer came without the one handle it carries: the compositor sent
@@ -176,6 +216,7 @@ impl std::fmt::Display for CreateError {
             }
             Self::Lent(why) => write!(f, "the compositor's region is refused: {why}"),
             Self::BrokenOff => write!(f, "the compositor broke off the exchange"),
+            Self::Unanswered => write!(f, "the compositor did not answer within {ANSWER_BOUND:?}"),
             Self::NoHandle => write!(f, "the compositor's answer arrived without its handle"),
             Self::AtCapacity => write!(f, "the compositor is at its window limit"),
             Self::TooLarge => write!(f, "the window is larger than the screen"),
@@ -525,7 +566,7 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
     }
     conn.send(MSG_COPY_BEGIN, &ClipboardShmMsg { len: bytes.len() as u32 })?;
     let mut rx = ipc::FrameRx::<0>::new();
-    let frame = rx.recv(&conn)?;
+    let frame = answer(&conn, &mut rx)?.ok_or(CreateError::Unanswered)?;
     if frame.msg_type != MSG_COPY_REGION {
         return Err(CreateError::Protocol(frame.msg_type));
     }
@@ -613,7 +654,7 @@ impl Window {
         // The two answers carry different structs, and a payload of another
         // length than its type's is a refusal from `decode_payload`, not a window.
         let mut rx = ipc::FrameRx::<{ core::mem::size_of::<WindowInfo>() }>::new();
-        let frame = rx.recv(&conn)?;
+        let frame = answer(&conn, &mut rx)?.ok_or(CreateError::Unanswered)?;
         let payload = rx.payload(frame.payload_len);
         match frame.msg_type {
             MSG_WINDOW_CREATED => {}
@@ -903,6 +944,22 @@ mod tests {
         assert_eq!(buffer_bytes(10, 12, 3), Some(144));
         assert_eq!(buffer_bytes(10, 9, 3), None);
         assert_eq!(buffer_bytes(u32::MAX, u32::MAX, u32::MAX), None, "past the address space");
+    }
+
+    /// A compositor that never answers is waited on once, for the bound, and
+    /// nothing is read from it.
+    #[test]
+    fn a_compositor_that_never_answers_is_waited_on_for_the_bound_and_not_read() {
+        let mut waits = Vec::new();
+        let got = answered(
+            |nanos| {
+                waits.push(nanos);
+                Ok(false)
+            },
+            || -> Result<ipc::Frame, ipc::IpcError> { panic!("read a compositor that never answered") },
+        );
+        assert!(matches!(got, Ok(None)), "{got:?}");
+        assert_eq!(waits, [ANSWER_BOUND_NANOS]);
     }
 
     /// A zero on either axis asks the compositor to choose, as it always has.

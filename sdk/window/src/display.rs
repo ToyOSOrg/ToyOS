@@ -177,6 +177,9 @@ pub enum Error {
     /// The compositor closed the connection, or sent what this end cannot
     /// read.
     BrokenOff,
+    /// The compositor neither answered nor hung up within
+    /// [`ANSWER_BOUND`](crate::ANSWER_BOUND).
+    Unanswered,
     /// The compositor answered with a message this exchange does not allow.
     Protocol(u32),
     Refused(Refused),
@@ -189,6 +192,7 @@ impl std::fmt::Display for Error {
             Self::Gone => write!(f, "the compositor is gone"),
             Self::Kernel(e) => write!(f, "the kernel refused the exchange ({e:?})"),
             Self::BrokenOff => write!(f, "the compositor broke off the exchange"),
+            Self::Unanswered => write!(f, "the compositor did not answer within {:?}", crate::ANSWER_BOUND),
             Self::Protocol(msg_type) => write!(f, "the compositor answered with message {msg_type}"),
             Self::Refused(why) => why.fmt(f),
         }
@@ -236,7 +240,7 @@ fn ask(port: &str, request: impl FnOnce(&Connection) -> Result<(), IpcError>) ->
     let conn = endow::service(port)?;
     request(&conn)?;
     let mut rx = FrameRx::<{ core::mem::size_of::<State>() }>::new();
-    let frame = rx.recv(&conn)?;
+    let frame = crate::answer(&conn, &mut rx)?.ok_or(Error::Unanswered)?;
     let payload = rx.payload(frame.payload_len);
     match frame.msg_type {
         MSG_STATE => {
