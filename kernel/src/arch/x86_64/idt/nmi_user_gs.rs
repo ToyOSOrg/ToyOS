@@ -23,16 +23,16 @@ pub fn selftest() {
         // Closed across the swapped span: a maskable gate there would read a
         // Ring 0 frame and keep the decoy.
         let _masked = crate::arch::IrqGuard::close();
-        let kept = cpu::rdmsr(percpu::MSR_KERNEL_GS_BASE);
+        let kept = cpu::read_user_gs_base();
         // SAFETY: the swapped span is `int 2` alone, which touches no
         // GS-relative memory of this code's; the second `swapgs` leaves in
         // `IA32_KERNEL_GS_BASE` the base the handler returned to, and this
         // thread's user GS base goes back there before interrupts open.
         unsafe {
-            cpu::wrmsr(percpu::MSR_KERNEL_GS_BASE, staged);
+            cpu::write_user_gs_base(staged);
             core::arch::asm!("swapgs", "int 2", "swapgs");
-            returned_to = cpu::rdmsr(percpu::MSR_KERNEL_GS_BASE);
-            cpu::wrmsr(percpu::MSR_KERNEL_GS_BASE, kept);
+            returned_to = cpu::read_user_gs_base();
+            cpu::write_user_gs_base(kept);
         }
     }
     let after = irq_census::deliveries(cpu, Source::Nmi).unwrap_or(before);

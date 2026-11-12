@@ -6,9 +6,6 @@ opened: 2026-09-29
 
 # FSGSBASE is taken
 
-`CR4.FSGSBASE` is forbidden (`CR4_FORBIDDEN`, `kernel/src/arch/x86_64/control_regs.rs`):
-the switch moves no thread's GS base, since every GS load Ring 3 can make
-leaves it zero, so a `WRGSBASE` would reach the next thread on the CPU.
 Intel names what it gives, user programs' FS and GS bases without a system
 call and a more efficient kernel context switch, and has it used "never in
 production environments unless accompanied by a complete OS implementation":
@@ -30,9 +27,14 @@ guidance asks; NMI, `#DB`, `#MC` and `#DF` install the kernel's base from
 found. The
 `nmi-user-gs` actuator enters vector 2 at CPL 0 under a decoy kernel-half
 base, which a sign test of `IA32_GS_BASE` would take for the kernel's.
+`CR4.FSGSBASE` is required of every CPU (`kernel/src/arch/x86_64/control_regs.rs`),
+and the switch carries each thread's FS and GS bases
+(`kernel/src/arch/x86_64/hw.rs`); `fsgs_bases_per_thread` reads them back
+across yields on one CPU.
 
-**Left**: `CR4.FSGSBASE` on every CPU, and the switch saving and restoring
-each thread's GS base beside its FS base.
+**Left**: the exit's runs: the vector-2 arm and the readback on each proving
+machine and under TCG, and the T14's pipe round trips with and without
+FSGSBASE.
 
 **Owed on metal** (#1262; the benches were down when it was reviewed). On
 the T14 and the AMD bench, main must show:
@@ -50,6 +52,14 @@ the T14 and the AMD bench, main must show:
 - `gs_segment_load`, on the `testcases` boot: all 12 selectors reported.
 - `nmi_finds_the_kernels_gs`, on the `shared-debug` boot: `nmi-user-gs: PASS`.
 - `syscall_cost`, on the `testcases` boot: within its bound.
+
+**Owed on metal** (#1264, the same way). On the T14 and the AMD bench, main
+must show:
+- `fsgs_bases_per_thread`, on the `testcases` boot: both threads read back
+  their own bases, and both crossing counts are above 0.
+- The rows above, through the entries' `RDGSBASE` and `WRGSBASE`.
+- An A/B of main before and after #1264 on the T14's `benchcase` boot:
+  `pingpong.pipe.*`, reported. It decides nothing.
 
 **Unobserved**: the `#DB` entry's resume into a gate it interrupted, where
 a single-step held over a `MOV SS` lands on the first instruction of

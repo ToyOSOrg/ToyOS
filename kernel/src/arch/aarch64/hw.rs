@@ -61,6 +61,15 @@ fn check_switch_frame(ctx: &KernelCtx) -> u64 {
     sp
 }
 
+/// Nothing: an AArch64 thread's one base register is its thread pointer,
+/// `TPIDR_EL0`.
+#[derive(Clone, Copy)]
+pub struct UserBases;
+
+impl UserBases {
+    pub const INITIAL: Self = Self;
+}
+
 impl Hw for KernelHw {
     type Payload = KernelPayload;
 

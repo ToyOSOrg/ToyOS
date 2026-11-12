@@ -96,23 +96,20 @@ macro_rules! syscall_naked_asm {
     };
 }
 
-/// Puts this CPU's `PerCpu` in `IA32_GS_BASE` whatever GS held, for a gate
-/// that can arrive in the kernel's CPL-0 stretches with a user's base live.
+/// Puts this CPU's `PerCpu` in GS's base whatever it held, for a gate that
+/// can arrive in the kernel's CPL-0 stretches with a user's base live.
 /// `GDTR`'s base is the block's own `gdt` (`percpu::load_gdt`), so it names
-/// the CPU without reading GS. Clobbers `rax`, `rcx` and `rdx`; the operands
-/// are `gs_base_msr` and `gdt_in_percpu`. No branch precedes the `wrmsr`, so
-/// no load through GS after it is speculated with another base.
+/// the CPU without reading GS. Clobbers `rax`; the operand is
+/// `gdt_in_percpu`. No branch precedes the `wrgsbase`, so no load through GS
+/// after it is speculated with another base.
 macro_rules! install_kernel_gs {
     () => {
-        "mov ecx, {gs_base_msr}\n\
-         sub rsp, 16\n\
+        "sub rsp, 16\n\
          sgdt [rsp + 6]\n\
          mov rax, [rsp + 8]\n\
          add rsp, 16\n\
          sub rax, {gdt_in_percpu}\n\
-         mov rdx, rax\n\
-         shr rdx, 32\n\
-         wrmsr"
+         wrgsbase rax"
     };
 }
 

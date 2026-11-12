@@ -436,20 +436,37 @@ pub fn disable_interrupts() {
     }
 }
 
-/// The kernel's own FS base, not `rd/wrfsbase` (`control_regs::CR4_FORBIDDEN`).
-const IA32_FS_BASE: u32 = 0xC000_0100;
-
+/// This CPU's FS base, which Ring 3 may have written itself (`CR4.FSGSBASE`).
 #[inline]
 pub fn read_fs_base() -> u64 {
-    rdmsr(IA32_FS_BASE)
+    let base: u64;
+    // SAFETY: reads FS's base alone; `CR4.FSGSBASE` is every CPU's declaration.
+    unsafe { asm!("rdfsbase {}", out(reg) base, options(nomem, nostack, preserves_flags)) };
+    base
 }
 
 /// # Safety
 /// `val` becomes this CPU's FS base; #GP if non-canonical, and the caller owns which thread's thread-locals it addresses.
 #[inline]
 pub unsafe fn write_fs_base(val: u64) {
-    // SAFETY: `IA32_FS_BASE` takes any canonical value; the caller owns both.
-    unsafe { wrmsr(IA32_FS_BASE, val) };
+    // SAFETY: the caller's; `CR4.FSGSBASE` is every CPU's declaration.
+    unsafe { asm!("wrfsbase {}", in(reg) val, options(nomem, nostack, preserves_flags)) };
+}
+
+/// The GS base Ring 3 returns to: `IA32_KERNEL_GS_BASE` while the kernel runs
+/// (`arch::entry`).
+#[inline]
+pub fn read_user_gs_base() -> u64 {
+    rdmsr(super::percpu::MSR_KERNEL_GS_BASE)
+}
+
+/// # Safety
+/// `val` is canonical, and the GS base of the thread this CPU next returns to
+/// Ring 3.
+#[inline]
+pub unsafe fn write_user_gs_base(val: u64) {
+    // SAFETY: the caller's.
+    unsafe { wrmsr(super::percpu::MSR_KERNEL_GS_BASE, val) };
 }
 
 pub fn halt() -> ! {

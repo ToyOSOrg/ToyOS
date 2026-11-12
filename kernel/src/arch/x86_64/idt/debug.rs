@@ -19,7 +19,7 @@
 use core::arch::naked_asm;
 
 use crate::arch::entry::install_kernel_gs;
-use crate::arch::percpu::{MSR_GS_BASE, OFF_GDT, OFF_KERNEL_RSP, USER_CS, USER_DS};
+use crate::arch::percpu::{OFF_GDT, OFF_KERNEL_RSP, USER_CS, USER_DS};
 
 /// Eleven pushes place the CPU frame's `rip` at 88.
 const RIP_OFFSET: usize = 88;
@@ -34,14 +34,11 @@ pub(super) extern "sysv64" fn debug_entry() {
         "test byte ptr [rsp + 8], 3",
         "jnz 2f",
         "push rax",
-        "push rcx",
-        "push rdx",
-        "mov ecx, {gs_base_msr}",
-        "rdmsr",
-        "shl rdx, 32",
-        "or rax, rdx",
+        "rdgsbase rax",
         "push rax",
         install_kernel_gs!(),
+        "push rcx",
+        "push rdx",
         "push rsi",
         "push rdi",
         "push r8",
@@ -61,14 +58,11 @@ pub(super) extern "sysv64" fn debug_entry() {
         "pop r8",
         "pop rdi",
         "pop rsi",
-        // The base this `#DB` found, back: nothing after it reads GS.
-        "pop rax",
-        "mov rdx, rax",
-        "shr rdx, 32",
-        "mov ecx, {gs_base_msr}",
-        "wrmsr",
         "pop rdx",
         "pop rcx",
+        // The base this `#DB` found, back: nothing after it reads GS.
+        "pop rax",
+        "wrgsbase rax",
         "pop rax",
         // `deferred` makes the frame a Ring 3 one where its thread is to end.
         "test byte ptr [rsp + 8], 3",
@@ -98,7 +92,6 @@ pub(super) extern "sysv64" fn debug_entry() {
         "push 0",
         "push {vector}",
         "jmp {common}",
-        gs_base_msr = const MSR_GS_BASE,
         gdt_in_percpu = const OFF_GDT,
         kernel_rsp = const OFF_KERNEL_RSP,
         rip_offset = const RIP_OFFSET,
