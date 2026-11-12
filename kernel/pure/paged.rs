@@ -295,8 +295,8 @@ pub enum Revoked {
 }
 
 /// The mappers of one object, one node per space that maps it, in the order
-/// a walk visits them. A node links at the tail, seen at
-/// [`Object::epoch`] then, and leaves only once its space maps none of the
+/// a walk visits them. A node links at the tail, seen at the epoch
+/// [`Object::link`] answers, and leaves only once its space maps none of the
 /// object's frames.
 pub trait Mappers {
     type Node: Copy;
@@ -567,8 +567,9 @@ impl<F: Copy> Pages<F> {
     }
 
     /// An object of `size` bytes, at most [`LAST_END`], named `id`: an id no
-    /// live object of this table has, which a released one's may be, since
-    /// [`release`](Self::release) takes every page it held.
+    /// live object of this table has. A released object's may be, once it is
+    /// [`empty`](Object::empty): [`invalidate`](Self::invalidate) marks every
+    /// page it held, and its walk's end takes them.
     pub fn object(&mut self, id: u32, size: u64) -> Object {
         assert!(size <= LAST_END, "an object of {size} bytes past the last page");
         Object {
