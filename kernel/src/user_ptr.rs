@@ -121,9 +121,9 @@ pub enum Stop {
     Absent,
 }
 
-/// A thread's user copies: whether it holds page pins across them, and what
-/// stopped its last one short. Written only by the thread itself, by its
-/// copies and their faults.
+/// A thread's user copies: whether they run holding what no wait may hold
+/// ([`Pinned`]), and what stopped its last one short. Written only by the
+/// thread itself, by its copies and their faults.
 pub struct Copies {
     pinned: AtomicBool,
     stop: AtomicU8,
@@ -135,8 +135,8 @@ impl Copies {
     }
 }
 
-/// Whether the running thread's copies hold page pins ([`Pinned`]), so its
-/// copy's fault must not wait.
+/// Whether the running thread's copies hold what no wait may ([`Pinned`]),
+/// so its copy's fault must not wait.
 pub fn pinned() -> bool {
     crate::sched::driver::with_current_copies(|c| c.pinned.load(Ordering::Relaxed)).unwrap_or(false)
 }
@@ -165,11 +165,11 @@ fn faulted(copied: Result<(), Stopped>) -> Result<(), Faulted> {
     })
 }
 
-/// The running thread's copies while it holds page pins, which no wait may
-/// hold: a fault on a mapped file's absent page stops the copy
-/// ([`Stopped::Absent`]) instead of waiting. The holder lets its pins go,
-/// waits for the window's pages holding nothing (`wait_in`), and copies
-/// again. Not `Send`: it marks the thread that made it.
+/// The running thread's copies while it holds what no wait may hold, page
+/// pins or frames drawn from a pager: a fault on a mapped file's absent page
+/// stops the copy ([`Stopped::Absent`]) instead of waiting. The holder lets
+/// them go, waits for the window's pages holding nothing (`wait_in`), and
+/// copies again. Not `Send`: it marks the thread that made it.
 pub struct Pinned(PhantomData<*const ()>);
 
 impl Pinned {

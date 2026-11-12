@@ -3633,6 +3633,7 @@ const MAPPED_FILE_SAID: &[&str] = &[
     "mapprobe: a kill ends a thread parked in its fault or in a copy, and the copy's write wrote nothing",
     "mapprobe: a touched hole is a zeroed page of the pager's, and none where it has no room",
     "mapprobe: a touch of a page the object shrank past ends its mapper as SIGBUS",
+    "mapprobe: a holder's write from a mapped page not yet supplied lands whole once it is",
     "mapprobe: a pager's end answers a write from its page Io, and ends its mapper at the next touch",
     "mapped_file: a mapped paged object follows its pager",
 ];

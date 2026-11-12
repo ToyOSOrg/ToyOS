@@ -45,9 +45,10 @@
 //! holder's calls, so no pager waits on a pager.
 //!
 //! **Lock order.** A space's lock, then the pager's, then the allocator's.
-//! A copy to or from user memory holds pins, never the lock; no wait holds a
-//! pin, so such a copy stops at an absent page (`user_ptr::Pinned`), lets its
-//! pins go, and waits for the page holding nothing.
+//! A copy to or from user memory holds pins, or a holder's write the frames
+//! it drew, never the lock; no wait holds either, so such a copy stops at an
+//! absent page (`user_ptr::Pinned`), lets them go, and waits for the page
+//! holding nothing.
 //!
 //! **What a pager holds** (`issues/a-pager-holds-a-fixed-capacity-until-the-memory-service-reclaims-its-clean-pages.md`):
 //! its core — `dirty` pages and a read's headroom — committed at its making
@@ -1261,8 +1262,10 @@ impl PagerObject {
     }
 
     /// A holder's write of `src` at `at`, or at the size where `None`: whole
-    /// or refused, and never waiting. Its bytes are copied into frames held
-    /// aside first, with nothing else held; then, in one hold of the lock, it
+    /// or refused, and never waiting for the write side. Its bytes are copied
+    /// into frames drawn first, with nothing else held, and a page of `src`
+    /// that is absent is waited for with the frames given back
+    /// (`user_ptr::Pinned`); then, in one hold of the lock, it
     /// takes the write side, refused while anyone holds or waits for it, and
     /// is checked and admitted whole ([`Pages::holder_fits`]). Its copy into
     /// the object's frames is the kernel's own, so whoever waits for the side
@@ -1286,50 +1289,73 @@ impl PagerObject {
         let Some(_writing) = HolderWriting::begin(self, slot) else {
             return SyscallError::Gone.to_u64();
         };
-        // Frames for the bytes, and for the pages the write would install,
-        // as the object stands now: one fewer than it needs then refuses it.
-        let fresh_count = {
-            let mut state = self.state.lock();
-            if state.gone {
-                return SyscallError::Gone.to_u64();
-            }
-            let (pages, object) = state.split(slot);
-            let offset = at.unwrap_or(object.size());
-            let span = match holder_span(offset, len as u64) {
-                Ok(span) => span,
-                Err(why) => return holder_word(why).to_u64(),
+        let fresh_count = loop {
+            // Frames for the bytes, and for the pages the write would install,
+            // as the object stands now: one fewer than it needs then refuses it.
+            let fresh_count = {
+                let mut state = self.state.lock();
+                if state.gone {
+                    return SyscallError::Gone.to_u64();
+                }
+                let (pages, object) = state.split(slot);
+                let offset = at.unwrap_or(object.size());
+                let span = match holder_span(offset, len as u64) {
+                    Ok(span) => span,
+                    Err(why) => return holder_word(why).to_u64(),
+                };
+                let fresh_count = match pages.holder_fits(object, offset / PAGE, span) {
+                    Ok(fresh) => fresh as usize,
+                    Err(why) => return holder_word(why).to_u64(),
+                };
+                let wanted = staged_count + fresh_count;
+                let got = self.draw(&mut state, &mut drawn[..wanted]);
+                if got < wanted {
+                    self.give_back_drawn(&mut state, &drawn[..got]);
+                    return SyscallError::WouldBlock.to_u64();
+                }
+                fresh_count
             };
-            let fresh_count = match pages.holder_fits(object, offset / PAGE, span) {
-                Ok(fresh) => fresh as usize,
-                Err(why) => return holder_word(why).to_u64(),
-            };
-            let wanted = staged_count + fresh_count;
-            let got = self.draw(&mut state, &mut drawn[..wanted]);
-            if got < wanted {
-                self.give_back_drawn(&mut state, &drawn[..got]);
-                return SyscallError::WouldBlock.to_u64();
+            for (k, frame) in staged.iter_mut().take(staged_count).enumerate() {
+                *frame = materialize(drawn[k], false);
             }
-            fresh_count
+            for (k, frame) in fresh.iter_mut().take(fresh_count).enumerate() {
+                *frame = materialize(drawn[staged_count + k], true);
+            }
+            // The bytes come in while the write holds frames of its pager's,
+            // which no wait may hold: a page of `src` that is absent stops the
+            // copy, the frames go back, and the write waits for the page
+            // holding nothing and draws again.
+            let pinned = Pinned::begin();
+            let mut stopped = None;
+            for (k, &frame) in staged[..staged_count].iter().enumerate() {
+                let n = (len - k * PAGE as usize).min(PAGE as usize);
+                // SAFETY: a frame this write drew, which nothing else reaches.
+                if let Err(why) = unsafe { pinned.read(src, k * PAGE as usize, DirectMap::from_phys(frame).as_mut_ptr::<u8>(), n) } {
+                    stopped = Some((k * PAGE as usize, why));
+                    break;
+                }
+            }
+            drop(pinned);
+            let Some((from, why)) = stopped else { break fresh_count };
+            {
+                let mut state = self.state.lock();
+                self.give_frames(&mut state, &staged[..staged_count]);
+                self.give_frames(&mut state, &fresh[..fresh_count]);
+            }
+            let waited = match why {
+                Stopped::Absent => src.wait_in(from, len - from),
+                Stopped::Faulted(faulted) => Err(faulted),
+            };
+            if let Err(faulted) = waited {
+                return SyscallError::from(faulted).to_u64();
+            }
         };
-        for (k, frame) in staged.iter_mut().take(staged_count).enumerate() {
-            *frame = materialize(drawn[k], false);
-        }
-        for (k, frame) in fresh.iter_mut().take(fresh_count).enumerate() {
-            *frame = materialize(drawn[staged_count + k], true);
-        }
         let give_up = |e: SyscallError| {
             let mut state = self.state.lock();
             self.give_frames(&mut state, &staged[..staged_count]);
             self.give_frames(&mut state, &fresh[..fresh_count]);
             e.to_u64()
         };
-        for (k, &frame) in staged[..staged_count].iter().enumerate() {
-            let n = (len - k * PAGE as usize).min(PAGE as usize);
-            // SAFETY: a frame this write drew, which nothing else reaches.
-            if unsafe { src.read_raw(k * PAGE as usize, DirectMap::from_phys(frame).as_mut_ptr::<u8>(), n) }.is_err() {
-                return give_up(SyscallError::BadAddress);
-            }
-        }
         let mut pinned = [(0u64, 0u64, 0usize, 0usize); HOLDER];
         let (offset, count, used) = {
             let mut state = self.state.lock();

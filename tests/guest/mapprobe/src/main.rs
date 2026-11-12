@@ -21,6 +21,10 @@
 //!   mapper and of the last the other, each with `SIGBUS`. The shrink revokes
 //!   79 pages, more than a walk reads at once, so one of the two is cleared
 //!   by a later batch.
+//! - `written`: a holder's write whose bytes come from a page of the
+//!   mapping that is absent lands whole once the pager supplies the page:
+//!   its copy holds frames of the pager's, so it lets them go and waits for
+//!   the page holding nothing.
 //! - `ends`, last: the pager's end answers a write from the mapping `Io`
 //!   and ends the mapper at its next touch.
 
@@ -40,6 +44,7 @@ const HOLDER: &str = "mapprobe-holder";
 const READY: &str = "mapprobe-ready";
 const GO: &str = "mapprobe-go";
 const OUT: &str = "mapprobe-out";
+const TARGET: &str = "mapprobe-target";
 
 /// Every page the pager holds at once, and dirty at once.
 const CAPACITY: u64 = 256;
@@ -65,6 +70,7 @@ fn main() {
     killed(&mut served);
     hole(&mut served);
     shrunk(&mut served);
+    written(&mut served);
     ends(served);
     println!("mapprobe: ok");
 }
@@ -261,6 +267,25 @@ fn shrunk(served: &mut Served) {
     println!("mapprobe: a touch of a page the object shrank past ends its mapper as SIGBUS");
 }
 
+fn written(served: &mut Served) {
+    let source = served.pager.object(RUN * PAGE).expect("mapprobe: an object");
+    let target = served.pager.object(0).expect("mapprobe: an object to write");
+    assert_eq!(served.pager.grant(target, 1), Ok(1), "mapprobe: a page of credit");
+    let writer = served.pager.holder(target, true).expect("mapprobe: a write holder");
+    let mut child = served.mapper(source, "written", vec![(TARGET, writer)]);
+    served.requested(source, 0);
+    served.supply(source, 0, RUN, 0x88);
+    assert_eq!(ended(&mut child), End::Exited(0), "mapprobe: the mapper writing from its mapping");
+    let mut bytes = vec![0; PAGE as usize];
+    // SAFETY: `bytes` outlives the read and nothing else reaches it.
+    let out = unsafe { toyos::shm::Bytes::from_raw(bytes.as_mut_ptr(), bytes.len()) };
+    assert_eq!(served.pager.read(target, out, 0), Ok(PAGE as usize));
+    assert!(bytes.iter().all(|&b| b == 0x88), "mapprobe: the write from an absent page landed other bytes");
+    served.pager.release(target).expect("mapprobe: release");
+    served.pager.release(source).expect("mapprobe: release");
+    println!("mapprobe: a holder's write from a mapped page not yet supplied lands whole once it is");
+}
+
 fn ends(mut served: Served) {
     let object = served.pager.object(2 * PAGE).expect("mapprobe: an object");
     served.supply(object, 0, 1, 0x77);
@@ -347,6 +372,14 @@ fn map(case: &str) {
             assert_eq!(pipe_end(GO).read(&mut [0]), Ok(1));
             let read = byte(at, page);
             panic!("mapprobe --map: page {page}, past the object's end, read {read}");
+        }
+        "written" => {
+            let at = mapped(RUN);
+            let handle: OwnedHandle = Endowments::get().take(TARGET).expect("mapprobe --map: a write holder");
+            let target = Paged::received(handle).expect("mapprobe --map: a holder it may write");
+            // SAFETY: a page of the mapping, which the kernel copies from.
+            let page = unsafe { std::slice::from_raw_parts(at, PAGE as usize) };
+            assert_eq!(target.write(page, 0), Ok(PAGE as usize), "mapprobe --map: a write from a page not yet supplied");
         }
         "ends" => {
             let at = mapped(2);

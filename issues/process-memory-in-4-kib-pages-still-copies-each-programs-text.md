@@ -170,13 +170,6 @@ pager's capacity, judged against Linux on metal, and per-request wakes where
 it shows the cost. A cold DATA page's miss in stages is the same kind of row
 and waits with it.
 
-The pinned-copy mode (a copy holding a page pin stops at an absent page, lets
-its pins go, waits holding nothing and copies again) is reached by no process
-until #1258's holder write, which copies from user memory under a write pin.
-Its guest test, a holder write sourced from a mapped file's absent page that
-completes, lands with whichever of #1258 and #1269 lands second (owner
-map7b).
-
 Step 2 measures a cached page's fault and a 4 KiB read through a mapping
 against Linux (osbench `fs.*.map_touch_16m`, `fs.*.map_read_4k`). Owed, by
 map7b, with step 3's metal: a cold DATA page's miss in stages, one object

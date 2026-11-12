@@ -1003,7 +1003,7 @@ impl Faulted {
 /// Serve a fault at `fault_addr` for `access` in the running thread's space,
 /// at its trap's depth with interrupts on: its page populated under the
 /// space's lock, or, for a paged page that is absent, waited for holding no
-/// lock and touched again, unless the fault is a copy's that holds page pins.
+/// lock and touched again, unless the fault is a [`crate::user_ptr::Pinned`] copy's.
 /// While it waits the CPU's fault mark is down, so another fault on this CPU
 /// meanwhile is no recursion; it is up again on whichever CPU the thread
 /// wakes on.
