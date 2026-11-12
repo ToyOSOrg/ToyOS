@@ -15,8 +15,13 @@
 //! verdicts. A guest job
 //! reds on a disagreement, and on a `/dev/kvm` that is present and does not
 //! open; `cargo run` only notes one, because a build must not stop for brew.
+//!
+//! **The rows job publishes from our own machine** ([`Identity`]): what
+//! identifies it is masked in all the job says and in the serial logs it keeps,
+//! and a machine it cannot read that from runs no suite.
 
 use std::io::{Read, Write};
+use std::ops::Range;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -53,7 +58,8 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   rows [<args>...]  `cargo test --test toyos-build -- <args>...`, each split at
                     whitespace, on this host's own toolchain store, held to the
                     instrument as `guest` is, after removing the serial logs
-                    earlier runs kept (guest-rows.yml)
+                    earlier runs kept, masking what identifies this machine
+                    (guest-rows.yml)
   release           put the sysroot main's nightly restored up as its toolchain release
   publish           put main's SDK crates on crates.io (publish.yml)";
 
@@ -140,11 +146,25 @@ pub fn dispatch(root: &Path, args: &[String]) {
         Job::Toolchain => vec![step("the stores of this tree's toolchain", || release::toolchain(root))],
         Job::Bootstrap => vec![step("this tree's toolchain", || release::bootstrap(root))],
         Job::Image => image(root),
-        Job::Guest => guest(root, &suite_args(&["--jobs", "1"]), true),
+        Job::Guest => guest(root, &suite_args(&["--jobs", "1"]), true, &Identity::NONE),
         Job::Rows(args) => {
             let suite = suite_args(&args.iter().map(String::as_str).collect::<Vec<_>>());
-            let mut steps = vec![step("no serial logs kept by an earlier run", || forget_kept_serial(root))];
-            steps.extend(guest(root, &suite, false));
+            let mut identity = Identity::NONE;
+            let mut steps = vec![
+                step("no serial logs kept by an earlier run", || forget_kept_serial(root)),
+                step("what identifies this machine, which the job masks", || {
+                    identity = Identity::of_this_machine()?;
+                    Ok("its CPU's model, signature and microcode revision, and its host name".to_string())
+                }),
+            ];
+            let read = steps[1].verdict.is_ok();
+            if steps.iter().all(|s| s.verdict.is_ok()) {
+                steps.extend(guest(root, &suite, false, &identity));
+            }
+            // Whatever the suite did: a red one is what keeps them.
+            if read {
+                steps.push(step("the kept serial logs, masked", || mask_kept_serial(root, &identity)));
+            }
             steps
         }
         Job::Release => vec![step("main's toolchain release", || release::release(root))],
@@ -216,7 +236,7 @@ fn summary(text: &str) {
 
 /// `cargo <args>` in `dir`, as [`cargo_logged`] runs it, judged by its exit.
 fn cargo(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let (status, _) = cargo_logged(dir, args)?;
+    let (status, _) = cargo_logged(dir, args, &Identity::NONE)?;
     let line = format!("cargo {}", args.join(" "));
     if status.success() {
         Ok(line)
@@ -286,27 +306,43 @@ fn started(group: i32) {
     }
 }
 
-/// What a command says, passed through as it arrives and kept: in bytes, so
-/// a line still unfinished is said too. libtest on one thread names a test
+/// What a command says, passed through and kept a line at a time, each line
+/// masked of [`Said::mask`] whole. The line it has not ended is said at its
+/// end, and is [`Said::last`]'s meanwhile: libtest on one thread names a test
 /// before it runs it and ends the line after.
-struct Said {
+struct Said<'a> {
     chunks: Receiver<Vec<u8>>,
+    mask: &'a Identity,
     log: Vec<u8>,
+    unended: Vec<u8>,
 }
 
-impl Said {
+impl Said<'_> {
     /// `Some(true)` for more of it within `within`, `Some(false)` at its end,
     /// which is every process that held it gone, and `None` for neither.
     fn more(&mut self, within: Duration) -> Option<bool> {
         match self.chunks.recv_timeout(within) {
             Ok(chunk) => {
-                let _ = std::io::stderr().write_all(&chunk);
-                self.log.extend(chunk);
+                self.unended.extend(chunk);
+                if let Some(end) = self.unended.iter().rposition(|&b| b == b'\n') {
+                    let lines: Vec<u8> = self.unended.drain(..=end).collect();
+                    self.say(&lines);
+                }
                 Some(true)
             }
-            Err(RecvTimeoutError::Disconnected) => Some(false),
+            Err(RecvTimeoutError::Disconnected) => {
+                let rest = std::mem::take(&mut self.unended);
+                self.say(&rest);
+                Some(false)
+            }
             Err(RecvTimeoutError::Timeout) => None,
         }
+    }
+
+    fn say(&mut self, text: &[u8]) {
+        let masked = self.mask.mask(text);
+        let _ = std::io::stderr().write_all(&masked);
+        self.log.extend(masked);
     }
 
     /// Whether it ended within [`GONE`].
@@ -328,21 +364,22 @@ impl Said {
     /// The last line with anything on it, finished or not, to the length a
     /// refusal can carry: a command may say megabytes without ending a line.
     fn last(&self) -> String {
-        let text = self.text();
+        let text = String::from_utf8_lossy(&[&self.log[..], &self.mask.mask(&self.unended)].concat()).into_owned();
         let last = text.lines().rfind(|line| !line.trim().is_empty()).unwrap_or("nothing");
         last.trim().chars().take(200).collect()
     }
 }
 
 /// `cargo <args>` in `dir`, as [`heard`] runs it.
-fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(ExitStatus, String), String> {
+fn cargo_logged(dir: &Path, args: &[&str], mask: &Identity) -> Result<(ExitStatus, String), String> {
     let mut cargo = Command::new("cargo");
     cargo.args(args).current_dir(dir);
-    heard(cargo).map_err(|why| format!("cargo {}: {why}", args.join(" ")))
+    heard(cargo, mask).map_err(|why| format!("cargo {}: {why}", args.join(" ")))
 }
 
 /// Run `cmd`, its output passed through and also kept, both streams in the
-/// order they were written: a verdict read off the log needs the whole of it.
+/// order they were written and masked of `mask` ([`Said`]): a verdict read
+/// off the log needs the whole of it.
 ///
 /// **A command that says nothing for [`QUIET`] is hung, and is ended with all
 /// it spawned**: it leads a process group of its own, because the process that
@@ -360,7 +397,7 @@ fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(ExitStatus, String), Strin
 ///
 /// **An interrupt of the driver ends the group** ([`interrupted`]), unless the
 /// driver was started ignoring that signal.
-fn heard(mut cmd: Command) -> Result<(ExitStatus, String), String> {
+fn heard(mut cmd: Command, mask: &Identity) -> Result<(ExitStatus, String), String> {
     static HANDED_ON: Once = Once::new();
     HANDED_ON.call_once(|| {
         for signal in INTERRUPTS {
@@ -407,7 +444,7 @@ fn heard(mut cmd: Command) -> Result<(ExitStatus, String), String> {
             }
         }
     });
-    let mut said = Said { chunks, log: Vec::new() };
+    let mut said = Said { chunks, mask, log: Vec::new(), unended: Vec::new() };
     let hung = loop {
         match said.more(QUIET) {
             Some(true) => {}
@@ -939,7 +976,7 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
     if !control.must_red {
         args.push("--nocapture");
     }
-    let (status, log) = cargo_logged(root, &args)?;
+    let (status, log) = cargo_logged(root, &args, &Identity::NONE)?;
     judge_control(control, status.success(), &log)
 }
 
@@ -1416,8 +1453,9 @@ fn suite_args(args: &[&str]) -> Vec<String> {
 /// every boot image — survives past the last step, which reds on it.
 ///
 /// `install`: the sysroot the job restored ([`release::install`]). Without it
-/// the suite builds from the host's own store, as a dev host does.
-fn guest(root: &Path, suite: &[String], install: bool) -> Vec<Step> {
+/// the suite builds from the host's own store, as a dev host does. `mask`:
+/// what the suite's output is masked of.
+fn guest(root: &Path, suite: &[String], install: bool, mask: &Identity) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-guest");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
     let before = toyos_tmpdir::gone_roots(short);
@@ -1435,7 +1473,7 @@ fn guest(root: &Path, suite: &[String], install: bool) -> Vec<Step> {
     if steps.iter().all(|s| s.verdict.is_ok()) {
         steps.push(step("the suite", || {
             let args: Vec<&str> = suite.iter().map(String::as_str).collect();
-            let (status, log) = cargo_logged(root, &args)?;
+            let (status, log) = cargo_logged(root, &args, mask)?;
             let said = verdicts(&log);
             if status.success() {
                 Ok(said)
@@ -1450,15 +1488,45 @@ fn guest(root: &Path, suite: &[String], install: bool) -> Vec<Step> {
     steps
 }
 
-/// An empty `target/red-run-serial`: a runner that keeps its workspace
-/// uploads only what this run kept.
+/// Where a red suite keeps its serial logs, which guest-rows.yml uploads.
+const KEPT_SERIAL: &str = "target/red-run-serial";
+
+/// An empty [`KEPT_SERIAL`]: a runner that keeps its workspace uploads only
+/// what this run kept.
 fn forget_kept_serial(root: &Path) -> Result<String, String> {
-    let kept = root.join("target/red-run-serial");
+    let kept = root.join(KEPT_SERIAL);
     match std::fs::remove_dir_all(&kept) {
         Ok(()) => Ok(format!("removed {}", kept.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("none".to_string()),
         Err(e) => Err(format!("remove {}: {e}", kept.display())),
     }
+}
+
+/// Every file under [`KEPT_SERIAL`] masked of `identity` in place, or, where
+/// one cannot be, all of them removed rather than uploaded as they are.
+fn mask_kept_serial(root: &Path, identity: &Identity) -> Result<String, String> {
+    fn mask_under(dir: &Path, identity: &Identity) -> Result<usize, String> {
+        let mut masked = 0;
+        for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| format!("read {}: {e}", dir.display()))?.path();
+            if path.is_dir() {
+                masked += mask_under(&path, identity)?;
+            } else {
+                let said = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+                std::fs::write(&path, identity.mask(&said)).map_err(|e| format!("write {}: {e}", path.display()))?;
+                masked += 1;
+            }
+        }
+        Ok(masked)
+    }
+    let kept = root.join(KEPT_SERIAL);
+    if !kept.exists() {
+        return Ok("none".to_string());
+    }
+    mask_under(&kept, identity).map(|n| format!("{n} masked")).map_err(|why| match std::fs::remove_dir_all(&kept) {
+        Ok(()) => format!("{why}: removed {}", kept.display()),
+        Err(e) => format!("{why}, and {} cannot be removed either: {e}", kept.display()),
+    })
 }
 
 /// The suite's own count line and every line naming a verdict worth reading
@@ -1498,19 +1566,8 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
         (true, Accel::Tcg, true) => "/dev/kvm is present and does not open",
         (true, Accel::Tcg, false) => "no /dev/kvm: emulated",
     };
-    let cpu = std::fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .and_then(|t| {
-            t.lines()
-                .find_map(|l| l.strip_prefix("model name"))
-                .map(|l| l.trim_start_matches([' ', '\t', ':']).to_string())
-        })
-        .unwrap_or_else(|| "an unnamed CPU".to_string());
     let cores = std::thread::available_parallelism().map_or(0, |n| n.get());
-    let line = format!(
-        "QEMU {have}, firmware {}, {accel}, {cpu}, {cores} core(s)",
-        firmware.code.display()
-    );
+    let line = format!("QEMU {have}, firmware {}, {accel}, {cores} core(s)", firmware.code.display());
     if have != want {
         return Err(format!(
             "{line}: this runs QEMU {have} and build/ci/qemu-version declares {want}. The \
@@ -1569,6 +1626,164 @@ pub fn qemu_version_note(root: &Path, arch: Arch) -> Option<String> {
              across the two is."
         )
     })
+}
+
+// --- What identifies the machine -----------------------------------------------
+
+const CPU_MODEL: &str = "<cpu model>";
+const CPU_SIGNATURE: &str = "<cpu signature>";
+const MICROCODE: &str = "<microcode>";
+const HOST_NAME: &str = "<host name>";
+
+/// What identifies the machine a job runs on, each value with the name it is
+/// masked by. A KVM guest's CPU is its host's, so a guest's lines carry them
+/// too, in whatever spelling the guest's printer chose.
+#[derive(Debug, PartialEq)]
+struct Identity(Vec<(&'static str, Value)>);
+
+#[derive(Debug, PartialEq)]
+enum Value {
+    /// These words, in this order, whatever separates them: a brand string
+    /// is spelled with `_` for its spaces where one word is wanted.
+    Words(Vec<String>),
+    /// A number in hex, with `0x` or without, or in decimal.
+    Number(u64),
+    /// A number in hex after `0x`: in any other spelling, one as small as a
+    /// microcode revision is any other number.
+    Hex(u64),
+}
+
+impl Identity {
+    /// Masks nothing.
+    const NONE: Self = Identity(Vec::new());
+
+    /// This machine's, as Linux gives it. A value it cannot read is a
+    /// refusal, because what the job cannot read it cannot mask.
+    fn of_this_machine() -> Result<Self, String> {
+        let read = |path: &str| std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"));
+        Self::read(&read("/proc/cpuinfo")?, &read("/proc/sys/kernel/hostname")?)
+    }
+
+    /// Each CPU's model name, signature and microcode revision in `cpuinfo`,
+    /// and `host`.
+    fn read(cpuinfo: &str, host: &str) -> Result<Self, String> {
+        let mut identity = Self::NONE;
+        for cpu in cpuinfo.split("\n\n").filter(|cpu| !cpu.trim().is_empty()) {
+            let field = |name: &str| {
+                cpu.lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find_map(|(key, value)| (key.trim() == name).then(|| value.trim()))
+                    .ok_or_else(|| format!("/proc/cpuinfo names a CPU with no {name:?}"))
+            };
+            let number = |name: &str| {
+                let value = field(name)?;
+                match value.strip_prefix("0x") {
+                    Some(hex) => u64::from_str_radix(hex, 16),
+                    None => value.parse(),
+                }
+                .map_err(|e| format!("/proc/cpuinfo's {name} is no number: {e}"))
+            };
+            let model = words_of(field("model name")?).ok_or("the CPU's model name has no word to mask")?;
+            identity.add(CPU_MODEL, Value::Words(model));
+            let eax = signature(number("cpu family")?, number("model")?, number("stepping")?);
+            identity.add(CPU_SIGNATURE, Value::Number(eax));
+            identity.add(MICROCODE, Value::Hex(number("microcode")?));
+        }
+        if identity.0.is_empty() {
+            return Err("/proc/cpuinfo names no CPU".to_string());
+        }
+        identity.add(HOST_NAME, Value::Words(words_of(host).ok_or("the host name has no word to mask")?));
+        Ok(identity)
+    }
+
+    fn add(&mut self, name: &'static str, value: Value) {
+        if !self.0.iter().any(|(_, held)| *held == value) {
+            self.0.push((name, value));
+        }
+    }
+
+    /// `text` with each value of this identity replaced by its name, line by
+    /// line, and every other byte as it was.
+    fn mask(&self, text: &[u8]) -> Vec<u8> {
+        text.split_inclusive(|&b| b == b'\n').flat_map(|line| self.mask_line(line)).collect()
+    }
+
+    fn mask_line(&self, line: &[u8]) -> Vec<u8> {
+        let runs = alphanumeric_runs(line);
+        let mut found: Vec<(Range<usize>, &str)> = Vec::new();
+        for &(name, ref value) in &self.0 {
+            match *value {
+                Value::Words(ref words) => {
+                    for at in runs.windows(words.len()) {
+                        if at.iter().zip(words).all(|(run, word)| line[run.clone()].eq_ignore_ascii_case(word.as_bytes())) {
+                            found.push((at[0].start..at[at.len() - 1].end, name));
+                        }
+                    }
+                }
+                Value::Number(n) | Value::Hex(n) => {
+                    let bare = matches!(value, Value::Number(_));
+                    let spelled = runs.iter().filter(|run| spells(&line[(*run).clone()], n, bare));
+                    found.extend(spelled.map(|run| (run.clone(), name)));
+                }
+            }
+        }
+        found.sort_by_key(|(span, _)| span.start);
+        let mut out = Vec::with_capacity(line.len());
+        let mut at = 0;
+        for (span, name) in found {
+            if span.start >= at {
+                out.extend_from_slice(&line[at..span.start]);
+                out.extend_from_slice(name.as_bytes());
+            }
+            at = at.max(span.end);
+        }
+        out.extend_from_slice(&line[at..]);
+        out
+    }
+}
+
+/// `text`'s maximal runs of ASCII letters and digits, lower-cased, if it has
+/// one: nothing else can be masked of it.
+fn words_of(text: &str) -> Option<Vec<String>> {
+    let words: Vec<String> =
+        alphanumeric_runs(text.as_bytes()).into_iter().map(|run| text[run].to_ascii_lowercase()).collect();
+    (!words.is_empty()).then_some(words)
+}
+
+fn alphanumeric_runs(line: &[u8]) -> Vec<Range<usize>> {
+    let mut runs = Vec::new();
+    let mut at = 0;
+    while at < line.len() {
+        let start = at;
+        while at < line.len() && line[at].is_ascii_alphanumeric() {
+            at += 1;
+        }
+        if at > start {
+            runs.push(start..at);
+        }
+        at += usize::from(at == start);
+    }
+    runs
+}
+
+/// Whether the ASCII `run` spells `n`: in hex after `0x`, and where `bare`,
+/// in hex or in decimal alone.
+fn spells(run: &[u8], n: u64, bare: bool) -> bool {
+    let run = std::str::from_utf8(run).expect("a run of ASCII");
+    let is = |digits: &str, radix| u64::from_str_radix(digits, radix) == Ok(n);
+    match run.strip_prefix("0x").or_else(|| run.strip_prefix("0X")) {
+        Some(hex) => is(hex, 16),
+        None => bare && (is(run, 16) || is(run, 10)),
+    }
+}
+
+/// `CPUID.01H:EAX` from the display family and model `/proc/cpuinfo` gives:
+/// Intel SDM Vol. 2A's CPUID and AMD's APM Vol. 3 Fn0000_0001_EAX add the
+/// extended family to a base family of 0Fh, and put the extended model above
+/// the base model's four bits.
+fn signature(family: u64, model: u64, stepping: u64) -> u64 {
+    let base = family.min(0xf);
+    (family - base) << 20 | (model >> 4) << 16 | base << 8 | (model & 0xf) << 4 | stepping
 }
 
 // --- The publisher -------------------------------------------------------------
@@ -1822,7 +2037,7 @@ mod tests {
     #[ignore = "the driver of the tests around it; never runs on its own"]
     fn a_hung_steps_driver() {
         let hung = crate::buildlock::tests::rerun("ci::tests::a_hung_step");
-        let refusal = heard(hung).expect_err("a step that hangs is a red");
+        let refusal = heard(hung, &Identity::NONE).expect_err("a step that hangs is a red");
         assert!(refusal.ends_with(LAST) && refusal.contains("by SIGQUIT") && !refusal.contains("outside"), "{refusal}");
     }
 
@@ -2192,6 +2407,128 @@ mod tests {
         for text in refused {
             assert!(std::panic::catch_unwind(|| refuses_main_and_writes_nothing("bad", &text, 1)).is_err(), "{text}");
         }
+    }
+
+    /// Two CPUs of the AMD bench, whose signature and revision the tree names
+    /// already, as `/proc/cpuinfo` gives them, under a made-up brand.
+    const CPUINFO: &str = "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 23\nmodel\t\t: 96\n\
+                           model name\t: Example(R) Processor 1234X @ 9.99GHz\nstepping\t: 1\nmicrocode\t: 0x860010d\n\n\
+                           processor\t: 1\nvendor_id\t: AuthenticAMD\ncpu family\t: 23\nmodel\t\t: 96\n\
+                           model name\t: Example(R) Processor 1234X @ 9.99GHz\nstepping\t: 1\nmicrocode\t: 0x860010d\n\n";
+
+    fn masked(identity: &Identity, line: &str) -> String {
+        String::from_utf8(identity.mask(line.as_bytes())).unwrap()
+    }
+
+    /// The two benches' signatures as their boots logged them, from the
+    /// family, model and stepping Linux gives of each; then a base family of
+    /// 0Fh and one below 6, which take no extension.
+    #[test]
+    fn a_signature_is_its_family_model_and_stepping_as_the_vendors_lay_them_out() {
+        assert_eq!(signature(6, 140, 1), 0x806c1);
+        assert_eq!(signature(23, 96, 1), 0x860f01);
+        assert_eq!(signature(15, 4, 1), 0xf41);
+        assert_eq!(signature(5, 2, 12), 0x52c);
+    }
+
+    /// A refusal is published, so it names what is missing and none of what
+    /// was read.
+    #[test]
+    fn a_machine_is_read_whole_or_refused() {
+        let words = |text: &str| Value::Words(words_of(text).unwrap());
+        assert_eq!(
+            Identity::read(CPUINFO, "somebody-pc\n"),
+            Ok(Identity(vec![
+                (CPU_MODEL, words("example r processor 1234x 9 99ghz")),
+                (CPU_SIGNATURE, Value::Number(0x860f01)),
+                (MICROCODE, Value::Hex(0x860010d)),
+                (HOST_NAME, words("somebody pc")),
+            ]))
+        );
+        for (cpuinfo, host) in [
+            (CPUINFO.replace("microcode\t: 0x860010d\n\nprocessor\t: 1", "\nprocessor\t: 1"), "somebody-pc"),
+            (CPUINFO.replace("cpu family\t: 23", "cpu family\t: twenty-three"), "somebody-pc"),
+            (CPUINFO.replace("Example(R) Processor 1234X @ 9.99GHz", "(@)"), "somebody-pc"),
+            (CPUINFO.to_string(), " \n"),
+            (String::new(), "somebody-pc"),
+        ] {
+            let refusal = Identity::read(&cpuinfo, host).expect_err(&cpuinfo);
+            assert!(["twenty", "(@)", "Example", "somebody"].iter().all(|v| !refusal.contains(v)), "{refusal}");
+        }
+    }
+
+    /// Each value in each spelling a log gives it — the kernel's, a guest's
+    /// `Debug`, osbench's, the runner's — and what only resembles one stays.
+    #[test]
+    fn each_value_is_masked_however_it_is_spelled_and_what_resembles_it_is_not() {
+        let amd = Identity::read(CPUINFO, "somebody-pc").unwrap();
+        for (line, want) in [
+            (
+                "microcode: cpu0 AuthenticAMD signature 0x860f01 found 0x860010d loads nothing: running 0x860010d",
+                "microcode: cpu0 AuthenticAMD signature <cpu signature> found <microcode> loads nothing: running <microcode>",
+            ),
+            ("fpu: cpu0 cpuid.1.eax=0x860f01 xsave=1", "fpu: cpu0 cpuid.1.eax=<cpu signature> xsave=1"),
+            (
+                "mitigations: cpu1 words signature=0x00860F01 microcode=0X860010D hypervisor=1",
+                "mitigations: cpu1 words signature=<cpu signature> microcode=<microcode> hypervisor=1",
+            ),
+            ("Facts { signature: 8785665, smt: true }", "Facts { signature: <cpu signature>, smt: true }"),
+            ("signature 860f01.", "signature <cpu signature>."),
+            (
+                "osbench v=2 os=toyos cond cpu_model=Example(R)_Processor_1234X_@_9.99GHz",
+                "osbench v=2 os=toyos cond cpu_model=<cpu model>",
+            ),
+            ("model name\t: EXAMPLE(R) Processor  1234X @ 9.99GHz\n", "model name\t: <cpu model>\n"),
+            ("Machine name: 'Somebody-PC'", "Machine name: '<host name>'"),
+        ] {
+            assert_eq!(masked(&amd, line), want);
+        }
+        for line in [
+            "signature 0x860f02, 0x860f010, 0x860010e and 0x86_0f01",
+            &format!("the revision in decimal is {} and bare is 860010d", 0x860010d),
+            "Example(R) Processor 1234Y @ 9.99GHz, Processor 1234X @ 9.99GHz",
+            "somebody-pcs and somebody's pc",
+        ] {
+            assert_eq!(masked(&amd, line), line);
+        }
+        let small = Identity(vec![(MICROCODE, Value::Hex(0xbe))]);
+        assert_eq!(masked(&small, "found 0xbe, so be it at 190"), "found <microcode>, so be it at 190");
+        let lines = b"\xff signature 0x860f01\nsomebody pc\n\n".as_slice();
+        assert_eq!(amd.mask(lines), b"\xff signature <cpu signature>\n<host name>\n\n");
+        assert_eq!(Identity::NONE.mask(lines), lines);
+    }
+
+    /// A value the command's output splits is masked whole, and the line it
+    /// has not ended is the refusal's, masked, before it is said.
+    #[test]
+    fn the_relay_masks_a_value_it_reads_in_pieces() {
+        let amd = Identity::read(CPUINFO, "somebody-pc").unwrap();
+        let (tx, chunks) = mpsc::channel();
+        let mut said = Said { chunks, mask: &amd, log: Vec::new(), unended: Vec::new() };
+        for chunk in ["microcode: signature 0x86", "0f01 found 0x8600", "10d\ncond cpu_model=Example(R)_Proc", "essor_1234X_@_9.99GHz"] {
+            tx.send(chunk.as_bytes().to_vec()).unwrap();
+            assert_eq!(said.more(Duration::from_secs(10)), Some(true));
+        }
+        let first = "microcode: signature <cpu signature> found <microcode>\n";
+        assert_eq!(said.text(), first);
+        assert_eq!(said.last(), "cond cpu_model=<cpu model>");
+        drop(tx);
+        assert_eq!(said.more(Duration::from_secs(10)), Some(false));
+        assert_eq!(said.text(), format!("{first}cond cpu_model=<cpu model>"));
+    }
+
+    #[test]
+    fn every_kept_serial_log_is_masked_in_place() {
+        let amd = Identity::read(CPUINFO, "somebody-pc").unwrap();
+        let root = toyos_tmpdir::TempDir::new("ci-kept-serial");
+        assert_eq!(mask_kept_serial(&root, &amd), Ok("none".to_string()));
+        let lane = root.join(KEPT_SERIAL).join("run/lane-0");
+        std::fs::create_dir_all(&lane).unwrap();
+        std::fs::write(lane.join("uart-0.log"), b"\xfe microcode: signature 0x860f01 found 0x860010d\n").unwrap();
+        std::fs::write(lane.join("../uart-1.log"), b"cond cpu_model=Example(R)_Processor_1234X_@_9.99GHz").unwrap();
+        assert_eq!(mask_kept_serial(&root, &amd), Ok("2 masked".to_string()));
+        assert_eq!(std::fs::read(lane.join("uart-0.log")).unwrap(), b"\xfe microcode: signature <cpu signature> found <microcode>\n");
+        assert_eq!(std::fs::read(lane.join("../uart-1.log")).unwrap(), b"cond cpu_model=<cpu model>");
     }
 
     #[test]

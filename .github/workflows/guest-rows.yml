@@ -22,7 +22,10 @@ run-name: guest-rows ${{ github.ref_name }} ${{ inputs.filter }}
 # descriptors of its x86-64 and AArch64 UEFI firmware; rustup's stable on
 # `PATH`; git, a C and C++ toolchain, CMake and Python 3 for a toolchain build.
 # The runner runs as a dedicated user with no sudo; job code can read that
-# user's files, the runner's `.credentials` among them.
+# user's files, the runner's `.credentials` among them. The job's log is
+# public: the job masks what identifies the machine in all it says and keeps,
+# but the runner writes the runner's and the host's names before the job's
+# first step, so neither name may identify anybody.
 on:
   workflow_dispatch:
     inputs:
