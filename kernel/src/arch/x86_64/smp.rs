@@ -250,6 +250,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
             .map(|(cpu, keys)| keys.unwrap_or_else(|e| panic!("smp: cpu{cpu}'s CPUID places it in no tree: {e:?}")))
             .collect(),
     );
+    crate::arch::mitigation::report();
 }
 
 extern "C" fn ap_entry() -> ! {
@@ -257,6 +258,7 @@ extern "C" fn ap_entry() -> ! {
     crate::arch::control_regs::init_paging(percpu::cpu_id());
     // Before `control_regs::init` reads what an update changes.
     crate::arch::microcode::load(percpu::cpu_id());
+    let mitigation = crate::arch::mitigation::apply();
 
     // Must run before this CPU touches the framebuffer, which needs write-combining mapped first.
     crate::arch::pat::init();
@@ -272,6 +274,7 @@ extern "C" fn ap_entry() -> ! {
     super::clocksource::start_ap(percpu::cpu_id());
     // Before the echo, so every CPU the roster counts has said its line.
     crate::arch::mtrr::compare(percpu::cpu_id());
+    crate::arch::mitigation::record(percpu::cpu_id(), mitigation);
 
     *AP_TOPOLOGY.lock() = Some(cpu::topology_keys());
     // Echo this attempt's token, so the BSP counts this AP for its own attempt.

@@ -314,7 +314,8 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
             // machine with no console nothing anywhere says why. The list ends
             // here instead, by handing the machine back.
             match toyos::AsHandle::as_handle(&child).try_clone_to_owned() {
-                Ok(watch) => *JOB.lock().unwrap_or_else(PoisonError::into_inner) = Some(Process::from_handle(watch)),
+                // SAFETY: a duplicate of the child's own process handle.
+                Ok(watch) => *JOB.lock().unwrap_or_else(PoisonError::into_inner) = Some(unsafe { Process::from_handle(watch) }),
                 Err(e) => give_the_machine_back(&format!(
                     "job {name:?} started and its handle would not duplicate ({e:?}), so the \
                      deadline has nothing to end it with"

@@ -210,24 +210,7 @@ pub mod reap_gate;
 #[path = "../../src/pcidev/record.rs"]
 pub mod device_irq;
 
-/// A poll ring's one-shot answer. It names atomics and nothing else, and that
-/// narrowness is load-bearing: a file that named a ring's page or a watch could
-/// not be compiled here at all, and the race would stop being checked by
-/// anything.
-#[path = "../../src/inbox/once.rs"]
-pub mod poll_once;
-
-/// `polls.rs` names its one-shot as `super::once`, which in the kernel is
-/// `crate::inbox::once`; this is what makes that path resolve here.
-pub use poll_once as once;
-
 extern crate alloc;
-
-/// A ring's polls and when one is answered, driven against a fake object by
-/// `tests/inbox_answer.rs`. It names the one-shot above, `toyos-abi` and
-/// `alloc`, and nothing of the kernel's.
-#[path = "../../src/inbox/polls.rs"]
-pub mod inbox_polls;
 
 /// The panic snapshot's owner and access state, driven together by
 /// `tests/panic_capture.rs`.

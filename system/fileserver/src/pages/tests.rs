@@ -37,7 +37,8 @@ impl crate::cache::Disk for RefusingRead {}
 
 /// The kernel's paged objects as far as the server can tell them apart: a
 /// table of `capacity` pages, `ceiling` of them dirty or under write-back,
-/// and at most `objects` objects.
+/// and at most `objects` objects, as many as the pager's job can be charged
+/// for.
 #[derive(Default)]
 struct Model {
     capacity: usize,
@@ -480,7 +481,7 @@ fn pattern(len: usize, seed: u8) -> Vec<u8> {
 fn memory_bytes_survive_close_sync_and_namespace_replacement_until_the_last_holder() {
     let mut volume = crate::memory::MemoryVolume::new(&[], clock);
     let fake = Fake::new(4, 0);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut volume, "file");
     files.write(&mut volume, id, node, Some(0), b"old contents").unwrap();
     files.closed(&mut volume, id, node).unwrap();
@@ -509,7 +510,7 @@ fn memory_bytes_survive_close_sync_and_namespace_replacement_until_the_last_hold
 fn persistent_unlink_preserves_dirty_bytes_until_the_last_holder() {
     let mut v = volume();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake));
+    let mut files = Files::new(Some(fake), None);
     let (node, id) = open(&mut files, &mut v, "home/held");
     files.write(&mut v, id, node, Some(0), b"still held").unwrap();
     files.held(&mut v, id, false);
@@ -529,7 +530,7 @@ fn persistent_unlink_preserves_dirty_bytes_until_the_last_holder() {
 fn memory_sparse_files_do_not_resurrect_truncated_bytes_or_evict_existing_data() {
     let mut volume = crate::memory::MemoryVolume::new(&[], clock);
     let fake = Fake::new(2, 0);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut volume, "file");
     files.write(&mut volume, id, node, Some(PAGE + 5), b"tail").unwrap();
     assert_eq!(fake.pages_of(files.object(id).unwrap()), 1, "the hole holds no pages");
@@ -559,7 +560,7 @@ fn a_read_is_supplied_off_the_volume_once_and_then_served_from_the_object() {
     v.write(n, 0, &data).unwrap();
     v.close(n).unwrap();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let at = open(&mut files, &mut v, "home/f");
     assert_eq!(read(&mut files, &mut v, at, 0, data.len() + 50), data, "the whole file, and no byte past it");
     assert_eq!(fake.0.borrow().supplies, 1, "four pages, one supply");
@@ -574,7 +575,7 @@ fn a_write_lands_in_the_object_and_reaches_the_volume_at_the_sync() {
     let n = v.open("home/f", CREATE).unwrap();
     v.write(n, 0, &old).unwrap();
     v.close(n).unwrap();
-    let mut files = Files::new(Some(Fake::new(64, 16)));
+    let mut files = Files::new(Some(Fake::new(64, 16)), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.write(&mut v, id, node, Some(5000), b"new bytes over the end of the file").unwrap();
     files.write(&mut v, id, node, Some(5990), b"and past it").unwrap();
@@ -593,7 +594,7 @@ fn a_write_lands_in_the_object_and_reaches_the_volume_at_the_sync() {
 #[test]
 fn a_write_past_the_dirty_ceiling_writes_back_and_goes_on() {
     let mut v = volume();
-    let mut files = Files::new(Some(Fake::new(64, 4)));
+    let mut files = Files::new(Some(Fake::new(64, 4)), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     let data = pattern(16 * PAGE as usize, 3);
     files.write(&mut v, id, node, Some(0), &data).unwrap();
@@ -611,7 +612,7 @@ fn room_is_made_by_a_file_nobody_holds_before_any_other() {
         v.close(n).unwrap();
     }
     let fake = Fake::new(8, 4);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let a = open(&mut files, &mut v, "home/a");
     read(&mut files, &mut v, a, 0, 4 * PAGE as usize);
     let b = open(&mut files, &mut v, "home/b");
@@ -627,7 +628,7 @@ fn room_is_made_by_a_file_nobody_holds_before_any_other() {
 #[test]
 fn a_shrink_drops_the_dirty_pages_before_the_volume_frees_their_blocks() {
     let mut v = volume();
-    let mut files = Files::new(Some(Fake::new(64, 16)));
+    let mut files = Files::new(Some(Fake::new(64, 16)), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.write(&mut v, id, node, Some(0), &pattern(3 * PAGE as usize, 5)).unwrap();
     files.truncate(&mut v, id, node, 1000).unwrap();
@@ -643,7 +644,7 @@ fn a_shrink_drops_the_dirty_pages_before_the_volume_frees_their_blocks() {
 fn a_write_refused_part_way_is_cut_back_to_what_it_put() {
     let mut v = volume();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.write(&mut v, id, node, Some(0), b"kept").unwrap();
     fake.0.borrow_mut().refusing = true;
@@ -658,7 +659,7 @@ fn a_write_refused_part_way_is_cut_back_to_what_it_put() {
 fn an_overwrite_keeps_incoming_capacity_while_its_older_dirty_page_is_flushed() {
     let mut v = volume();
     let fake = Fake::new(4, 1);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.write(&mut v, id, node, Some(0), &pattern(2 * PAGE as usize, 1)).unwrap();
     files.fsync(&mut v, Some((id, node))).unwrap();
@@ -691,7 +692,7 @@ fn a_partial_writeback_cleans_only_its_prefix_and_retries_the_same_reserved_suff
     v.sync().unwrap();
 
     let fake = Fake::new(4, 4);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     let new = pattern(PAGE as usize + TAIL, 8);
     files.write(&mut v, id, node, Some(PAGE), &new[PAGE as usize..]).unwrap();
@@ -719,7 +720,7 @@ fn a_partial_writeback_cleans_only_its_prefix_and_retries_the_same_reserved_suff
 fn cancelling_an_overwrite_before_copy_keeps_the_older_dirty_reservation() {
     let mut v = volume();
     let fake = Fake::new(4, 4);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     let old = pattern(PAGE as usize, 4);
     files.write(&mut v, id, node, Some(PAGE), &old).unwrap();
@@ -737,7 +738,7 @@ fn cancelling_an_overwrite_before_copy_keeps_the_older_dirty_reservation() {
 fn a_supply_stops_before_a_present_page_and_resumes_after_the_write_copies_it() {
     let mut v = volume();
     let fake = Fake::new(4, 4);
-    let mut files = Files::new(Some(fake));
+    let mut files = Files::new(Some(fake), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.write(&mut v, id, node, Some(PAGE), &pattern(PAGE as usize, 6)).unwrap();
     let replacement = pattern(3 * PAGE as usize, 7);
@@ -758,7 +759,7 @@ fn a_write_refused_in_a_hole_gives_back_the_block_it_took() {
     toyos_blockdev::block_on(toyos_blockdev::BlockDev::write(&disk, 0, &stale), || ()).unwrap();
     let mut v = DataVolume::format(disk, 256, &["home"], clock).unwrap();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.write(&mut v, id, node, Some(0), &pattern(PAGE as usize, 4)).unwrap();
     files.truncate(&mut v, id, node, 3 * PAGE).unwrap();
@@ -789,7 +790,7 @@ fn a_write_in_part_into_a_hole_supplies_zeros_around_it() {
     toyos_blockdev::block_on(toyos_blockdev::BlockDev::write(&disk, 0, &stale), || ()).unwrap();
     let mut v = DataVolume::format(disk, 256, &["home"], clock).unwrap();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.write(&mut v, id, node, Some(0), &pattern(PAGE as usize, 4)).unwrap();
     files.truncate(&mut v, id, node, 3 * PAGE).unwrap();
@@ -812,7 +813,7 @@ fn a_requested_page_is_supplied_by_its_notice() {
     v.write(n, 0, &pattern(2 * PAGE as usize, 7)).unwrap();
     v.close(n).unwrap();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (_, id) = open(&mut files, &mut v, "home/f");
     let object = files.object(id).unwrap();
     files.notice(&mut v, Notice::Requested { object, first: 1, count: 1 });
@@ -827,7 +828,7 @@ fn a_requested_page_is_supplied_by_its_notice() {
 fn a_truncating_open_leaves_the_object_no_page_of_before() {
     let mut v = volume();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.write(&mut v, id, node, Some(0), &pattern(2 * PAGE as usize, 8)).unwrap();
     
@@ -854,7 +855,7 @@ fn a_file_the_pager_holds_is_read_again_from_its_object_across_closes() {
     v.write(n, 0, &pattern(PAGES * PAGE as usize, 9)).unwrap();
     v.close(n).unwrap();
     let fake = Fake::new(2 * PAGES, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let round = |files: &mut Files<Fake>, v: &mut DataVolume<Ram>| {
         let before = fake.0.borrow().supplies;
         let at = open(files, v, "home/seq");
@@ -869,14 +870,14 @@ fn a_file_the_pager_holds_is_read_again_from_its_object_across_closes() {
     assert_eq!(again, [0; 3], "supplies each round after the first");
 }
 
-/// The pager serves a bounded count of objects: a refused create makes room
-/// by letting a file nobody holds go, and an open one is kept.
+/// A create the pager's job cannot be charged for makes room by letting a
+/// file nobody holds go, and an open one is kept.
 #[test]
-fn an_object_refused_for_room_is_made_by_a_closed_files_going() {
+fn an_object_refused_its_charge_is_made_by_a_closed_files_going() {
     let mut v = volume();
     let fake = Fake::new(64, 16);
     fake.0.borrow_mut().objects = 2;
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let a = open(&mut files, &mut v, "home/a");
     let b = open(&mut files, &mut v, "home/b");
     files.closed(&mut v, b.1, b.0).unwrap();
@@ -884,6 +885,26 @@ fn an_object_refused_for_room_is_made_by_a_closed_files_going() {
     assert!(files.object(c.1).is_some(), "the new file has its object");
     assert!(files.object(b.1).is_none(), "the closed file's went");
     assert!(files.object(a.1).is_some(), "the open file's stays");
+    let n = v.open("home/d", CREATE).unwrap();
+    let identity = v.identity("home/d").unwrap();
+    assert_eq!(files.opened(&mut v, identity, n, RECORD), Err(Error::NoSpace), "both held open: refused, by name");
+}
+
+/// A volume on a disk keeps at most its count of files, whatever its pager's
+/// job could be charged for: at the count, the oldest nobody holds goes, and
+/// with every one held an open is refused.
+#[test]
+fn a_disk_volume_keeps_its_count_and_lets_its_oldest_closed_file_go() {
+    let mut v = volume();
+    let fake = Fake::new(64, 16);
+    let mut files = Files::new(Some(fake.clone()), Some(2));
+    let a = open(&mut files, &mut v, "home/a");
+    let b = open(&mut files, &mut v, "home/b");
+    files.closed(&mut v, b.1, b.0).unwrap();
+    let c = open(&mut files, &mut v, "home/c");
+    assert!(files.object(b.1).is_none(), "the closed file's went at the count");
+    assert!(files.object(a.1).is_some() && files.object(c.1).is_some());
+    assert_eq!(fake.0.borrow().sizes.len(), 2, "the pager serves the count");
     let n = v.open("home/d", CREATE).unwrap();
     let identity = v.identity("home/d").unwrap();
     assert_eq!(files.opened(&mut v, identity, n, RECORD), Err(Error::NoSpace), "both held open: refused, by name");
@@ -904,7 +925,7 @@ fn a_write_of_many_calls_is_read_whole_or_not_at_all() {
     v.write(n, 0, &old).unwrap();
     v.close(n).unwrap();
     let fake = Fake::new(64, 4);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let at = open(&mut files, &mut v, "home/f");
     read(&mut files, &mut v, at, 0, PAGES * page);
     let object = files.object(at.1).unwrap();
@@ -953,7 +974,7 @@ fn after_a_stop(v: DataVolume<Ram>) -> DataVolume<Ram> {
 fn an_fsync_makes_its_file_durable_and_no_other_files_overwrite() {
     let page = PAGE as usize;
     let mut v = stale_volume();
-    let mut files = Files::new(Some(Fake::new(64, 16)));
+    let mut files = Files::new(Some(Fake::new(64, 16)), None);
     let b = open(&mut files, &mut v, "home/b");
     files.write(&mut v, b.1, b.0, Some(0), &pattern(2 * page, 1)).unwrap();
     assert_eq!(files.sync(&mut v).unwrap(), []);
@@ -976,7 +997,7 @@ fn an_fsync_makes_its_file_durable_and_no_other_files_overwrite() {
 fn an_fsync_commits_its_file_without_publishing_another_files_dirty_size() {
     let page = PAGE as usize;
     let mut v = stale_volume();
-    let mut files = Files::new(Some(Fake::new(64, 16)));
+    let mut files = Files::new(Some(Fake::new(64, 16)), None);
     let a = open(&mut files, &mut v, "home/a");
     let c = open(&mut files, &mut v, "home/c");
     files.write(&mut v, a.1, a.0, Some(0), &pattern(page, 4)).unwrap();
@@ -998,7 +1019,7 @@ fn a_file_a_sync_could_not_write_back_stays_owed_past_another_s_fsync() {
     let page = PAGE as usize;
     let mut v = volume();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let a = open(&mut files, &mut v, "home/a");
     let f = open(&mut files, &mut v, "home/f");
     files.write(&mut v, f.1, f.0, Some(0), &pattern(page, 6)).unwrap();
@@ -1015,7 +1036,7 @@ fn a_file_a_sync_could_not_write_back_stays_owed_past_another_s_fsync() {
 #[test]
 fn a_directorys_fsync_makes_a_new_name_durable() {
     let mut v = stale_volume();
-    let mut files = Files::new(Some(Fake::new(64, 16)));
+    let mut files = Files::new(Some(Fake::new(64, 16)), None);
     v.mkdir("home/d").unwrap();
     files.fsync(&mut v, None).unwrap();
     let mut v = after_a_stop(v);
@@ -1028,7 +1049,7 @@ fn a_directorys_fsync_makes_a_new_name_durable() {
 fn an_objects_size_is_the_volumes_after_every_change() {
     let mut v = volume();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let n = v.open("home/f", CREATE).unwrap();
     v.write(n, 0, b"before").unwrap();
     v.close(n).unwrap();
@@ -1058,7 +1079,7 @@ fn an_objects_size_is_the_volumes_after_every_change() {
 fn a_holders_writes_reach_the_volume_from_the_pool_at_the_sync() {
     let mut v = volume();
     let fake = Fake::new(256, 128);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     let room = v.room().unwrap().free;
     files.held(&mut v, id, true);
@@ -1087,7 +1108,7 @@ fn a_holders_writes_reach_the_volume_from_the_pool_at_the_sync() {
 fn an_fsync_writes_back_what_a_holder_dirtied_before_its_notice_is_read() {
     let mut v = volume();
     let fake = Fake::new(256, 128);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.held(&mut v, id, true);
     let object = files.object(id).unwrap();
@@ -1102,7 +1123,7 @@ fn an_fsync_writes_back_what_a_holder_dirtied_before_its_notice_is_read() {
 fn the_room_held_for_holders_comes_back_once_none_can_write() {
     let mut v = volume();
     let fake = Fake::new(256, 128);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     let room = v.room().unwrap().free;
     files.held(&mut v, id, true);
@@ -1124,7 +1145,7 @@ fn the_room_held_for_holders_comes_back_once_none_can_write() {
 fn a_write_past_the_credit_goes_to_the_server_which_makes_it_up() {
     let mut v = volume();
     let fake = Fake::new(512, 256);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.held(&mut v, id, true);
     let object = files.object(id).unwrap();
@@ -1144,7 +1165,7 @@ fn a_write_past_the_credit_goes_to_the_server_which_makes_it_up() {
 fn a_holder_writes_a_memory_file_without_credit() {
     let mut volume = crate::memory::MemoryVolume::new(&[], clock);
     let fake = Fake::new(8, 0);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut volume, "file");
     files.held(&mut volume, id, true);
     let object = files.object(id).unwrap();
@@ -1166,7 +1187,7 @@ fn a_holder_writes_a_memory_file_without_credit() {
 fn a_server_write_at_the_ceiling_writes_back_what_holders_dirtied() {
     let mut v = volume();
     let fake = Fake::new(64, 4);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     for (k, path) in ["home/a", "home/b"].into_iter().enumerate() {
         let (_, id) = open(&mut files, &mut v, path);
         files.held(&mut v, id, true);
@@ -1186,7 +1207,7 @@ fn a_server_write_at_the_ceiling_writes_back_what_holders_dirtied() {
 fn a_refused_server_write_holds_holders_off_and_cuts_back_only_its_own() {
     let mut v = volume();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.held(&mut v, id, true);
     let object = files.object(id).unwrap();
@@ -1209,7 +1230,7 @@ fn a_refused_server_write_holds_holders_off_and_cuts_back_only_its_own() {
 fn an_append_through_the_server_lands_at_the_end_holders_left() {
     let mut v = volume();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/log");
     files.held(&mut v, id, true);
     let object = files.object(id).unwrap();
@@ -1224,7 +1245,7 @@ fn an_append_through_the_server_lands_at_the_end_holders_left() {
 fn a_page_the_server_writes_gives_its_holders_credit_back() {
     let mut v = volume();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.held(&mut v, id, true);
     let object = files.object(id).unwrap();
@@ -1241,7 +1262,7 @@ fn a_page_the_server_writes_gives_its_holders_credit_back() {
 fn a_server_write_stamps_its_time_inside_its_hold() {
     let mut v = volume();
     let fake = Fake::new(64, 16);
-    let mut files = Files::new(Some(fake.clone()));
+    let mut files = Files::new(Some(fake.clone()), None);
     let (node, id) = open(&mut files, &mut v, "home/f");
     fake.0.borrow_mut().last_stamp_held = None;
     files.write(&mut v, id, node, Some(0), b"stamped").unwrap();

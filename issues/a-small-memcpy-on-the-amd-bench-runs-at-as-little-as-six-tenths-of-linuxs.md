@@ -7,9 +7,12 @@ opened: 2026-10-28
 # A small memcpy on the AMD bench runs at as little as six tenths of Linux's
 
 `osbench mem`'s `mem.memcpy.<bytes>` copies a buffer of that size with each
-system's own `memcpy`. On ToyOS that is `sdk/libc`'s, whose `copy_forward` is
-one `rep movsb` at every length (`sdk/libc/src/arch/x86_64.rs`). On Linux it
-is the static musl build's.
+system's own `memcpy`. On ToyOS that is `sdk/libc`'s (`sdk/libc/src/arch/x86_64.rs`):
+one `rep movsb` at every length on a CPU that declares fast short `rep movsb`
+(FSRM), such as the T14's; elsewhere, such as on the AMD bench, a copy of up
+to 256 bytes is moves from each end and a longer one `rep movsb`. Until
+2026-11 it was one `rep movsb` everywhere, which the tables below measure. On
+Linux it is the static musl build's.
 
 From the 2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`):
 ToyOS at 069cbbeb8, four boots off the internal NVMe, against five runs of
@@ -62,6 +65,35 @@ times there.
 On the AMD bench 64 bytes (0.61 of Linux's) and 256 bytes (0.90) are still
 behind; 256 KiB is unresolved, ToyOS's boots reading 35.2 to 41.6 GB/s. On
 the T14 4 MiB, 16 MiB, 64 MiB and `mem.bw.copy` are behind by 3 to 5%.
+
+**Candidates, 2026-11-11** ([evidence](https://github.com/ToyOSOrg/evidence/tree/cf6a882c04a646a8998e3bf0ad66e9f699b8e8aa/memperf/diagnosis)):
+six copies timed as the sweep times them, one boot and one Linux run a
+bench. Linux's `memcpy` there is musl's, `rep movsq` between byte loops. On
+the AMD bench a 64-byte copy took 15.8 ns by `rep movsb`, 8.7 by
+`rep movsq`, 5.4 by a 16-byte vector loop and 5.0 by a 32-byte one; at 256
+bytes 17.1, 14.3, 16.8 and 10.0; from 1 KiB `rep movsb` was fastest. On the
+T14 `rep movsb` was fastest or within half a nanosecond of it at every size
+(3.3 ns at 64 bytes against 5.0 by the 16-byte loop), so a vector path there
+would cost 1.5 to 2 times at 64 to 256 bytes. No one routine wins on both.
+On the T14 `mem.bw.copy`, 16 MiB and 64 MiB copies trail Linux by 3.7 to
+4.9% over its 4 KiB pages and its huge ones alike; a 4 MiB copy read 1.0%
+under Linux's over 4 KiB pages and 10.0% under its over huge ones
+(`issues/user-memory-hot-paths-are-slower-than-2-mib-pages.md`).
+
+- **Owed on metal** for the choice by FSRM: an A/B on both benches, main
+  from before and after it, of `osbench_mem` and of `osbench copyat`.
+  `copyat` is not on main: its rows are the measurement-only commit carried
+  by branches `memperf-copy-ab-base` and `memperf-copy-ab-head3`, #1133's
+  rows as one commit.
+  - On the AMD bench, which lacks FSRM, main after must read
+    `mem.memcpy.64` and `mem.memcpy.256` faster.
+  - On the T14, which has it, no `mem.memcpy.*` row may be slower.
+  - On both, neither `mem.memcpy.262144` nor the eight `copyat.place.*` rows
+    may be slower. The eight are judged together, by each boot's mean. #1133
+    was closed for a drop there that followed code placement.
+  - An AMD result whose boots spread by more than 5% is inconclusive and
+    asks for more rotated blocks.
+  - Until then the gain is unmeasured.
 
 **Exit**: `mem.memcpy.*` within Linux's on both benches in a labelled
 current-state comparison, or each remaining difference measured and

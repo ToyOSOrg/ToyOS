@@ -4,7 +4,7 @@
 
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
-use super::{apic, control_regs, copy, cpu, idt, ioapic, microcode, pat, percpu};
+use super::{apic, control_regs, copy, cpu, idt, ioapic, microcode, mitigation, pat, percpu};
 use crate::drivers::acpi::{self, MadtInfo};
 use crate::log;
 use crate::mm::Region;
@@ -65,14 +65,17 @@ pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     // RDSEED, and `control_regs::init`'s CPUID.
     microcode::init(args);
     microcode::load(0);
+    mitigation::record_boot_cpu(mitigation::apply());
 
-    let rule = match cpu::vendor() {
+    let vendor = cpu::vendor();
+    let rule = match vendor {
         _ if crate::actuator::copies_go_down() => copy::Rule { window: 4096 },
         kernel::cpu::Vendor::Amd => copy::Rule::AMD,
         kernel::cpu::Vendor::Intel | kernel::cpu::Vendor::Other(_) => copy::Rule::NEVER,
     };
     copy::set_rule(rule);
     log!("memcpy: highest first {rule:?}");
+    super::hw::declare_vendor(vendor);
 
     // The read-back `pat::init` owes, on a boot that now has three channels to
     // carry a refusal.
@@ -162,6 +165,9 @@ pub fn interrupt_selftests() {
     }
     if crate::actuator::unclaimed_vector_selftest() {
         idt::unclaimed::selftest();
+    }
+    if crate::actuator::nmi_user_gs() {
+        idt::nmi_user_gs_selftest();
     }
     assert!(
         !crate::actuator::irq_storm() && !crate::actuator::timer_floor(),

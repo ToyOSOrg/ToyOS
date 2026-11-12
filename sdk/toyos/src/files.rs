@@ -314,8 +314,9 @@ pub fn stream(fd: Fd) -> Result<OwnedHandle, Error> {
 
 /// Export a served description for another process, sharing its access mode
 /// and offset. The returned connection becomes an `fd:<n>:file` endowment.
-pub fn export(fd: Fd) -> Result<OwnedHandle, Error> {
-    fd::with(fd, export_held).map_err(Error::Fd)?
+pub fn export(fd: Fd) -> Result<crate::ipc::Connection, Error> {
+    // The owner made it of the file server's answer through `typed`.
+    fd::with(fd, export_held).map_err(Error::Fd)?.map(crate::ipc::Connection)
 }
 
 /// The object remains held across the owner ABI call, including if its
@@ -327,8 +328,8 @@ pub(crate) fn export_held(object: fd::Lent<'_>) -> Result<OwnedHandle, Error> {
 }
 
 #[cfg(all(feature = "fd-table", not(test)))]
-pub(crate) fn adopt_exported(handle: OwnedHandle) -> Result<fd::Object, Error> {
-    owner::adopt_exported(handle)
+pub(crate) fn adopt_exported(connection: crate::ipc::Connection) -> Result<fd::Object, Error> {
+    owner::adopt_exported(connection)
 }
 
 pub fn mkdir(at: At, path: &[u8]) -> Result<(), Error> {

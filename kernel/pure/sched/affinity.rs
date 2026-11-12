@@ -106,15 +106,34 @@ impl CpuMask {
     pub fn words(&self) -> &[u64; MASK_WORDS] {
         &self.0
     }
+}
 
-    pub fn reach(&self) -> Reach {
-        if *self == Self::ANY {
+/// A task's mask as its owner CPU loaded it, with the [`Reach`] a run queue
+/// counts it by: one value, so the two cannot disagree.
+#[derive(Clone, Copy, Debug)]
+pub struct LoadedMask {
+    mask: CpuMask,
+    reach: Reach,
+}
+
+impl LoadedMask {
+    pub fn new(mask: CpuMask) -> Self {
+        let reach = if mask == CpuMask::ANY {
             Reach::Any
-        } else if self.single().is_some() {
+        } else if mask.single().is_some() {
             Reach::One
         } else {
             Reach::Several
-        }
+        };
+        Self { mask, reach }
+    }
+
+    pub fn mask(&self) -> CpuMask {
+        self.mask
+    }
+
+    pub fn reach(&self) -> Reach {
+        self.reach
     }
 }
 

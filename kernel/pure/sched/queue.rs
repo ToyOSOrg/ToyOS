@@ -15,11 +15,6 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-#[cfg(test)]
-mod differential;
-#[cfg(test)]
-mod reference;
-
 use crate::sched::eevdf::{Arena, Lag, Queue, Slot};
 use crate::sched::affinity::{CpuMask, Reach};
 use crate::sched::hw::{CpuId, Nanos};
@@ -27,14 +22,27 @@ use crate::sched::job::{Job, JobKey};
 use crate::sched::sync::Arc;
 use crate::sched::task::{ReadyTask, SchedPayload, Standing, TaskKey};
 
-/// The request every fair thread and group issues: the longest a thread runs
-/// before its CPU decides again, and what bounds the wait of one that queues
-/// behind it.
+/// The longest request a fair thread or group issues, and a thread's until
+/// it has slept ([`next_request`]): the longest a thread runs before its CPU
+/// decides again, and what bounds the wait of one that queues behind it.
 pub const SLICE_NS: u64 = 4_000_000;
 
 /// The least a fair thread runs before a woken thread or an earlier-due group
 /// takes the CPU from it: what bounds the switching a stream of wakes costs.
+/// Also the shortest request any thread or group issues.
 pub const MIN_SLICE_NS: u64 = 250_000;
+
+/// A thread's next request after a burst of `burst` ns, its last request
+/// being `request`: the mean of the two, the burst bounded by
+/// [`MIN_SLICE_NS`] and [`SLICE_NS`]. A thread that runs briefly between sleeps asks
+/// for little and is due soon after it wakes; one that never sleeps keeps the
+/// full slice. Halving forgets an old burst within a few new ones, and one odd
+/// burst moves the request at most half way. A request orders a queue and
+/// does not weigh in it (Stoica and Abdel-Wahab, ODU TR-95-22): a shorter one
+/// is served sooner and no more.
+pub(crate) fn next_request(request: u64, burst: u64) -> u64 {
+    u64::midpoint(request, burst.clamp(MIN_SLICE_NS, SLICE_NS))
+}
 
 /// The most lag a thread or a group keeps while it is out of every queue, in
 /// either direction: no sleeper credit beyond it, and no more debt.
@@ -135,6 +143,7 @@ impl<X: SchedPayload> RunQueue<X> {
 
     fn enter(&mut self, mut task: ReadyTask<X>) {
         let key = task.key();
+        let request = task.request_ns();
         let job = task.job().clone();
         let jk = job.key();
         job.enter();
@@ -161,7 +170,7 @@ impl<X: SchedPayload> RunQueue<X> {
                     &mut self.group_slots,
                     jk,
                     weight,
-                    SLICE_NS,
+                    request,
                     carried,
                     Group { job, threads: Queue::new() },
                 );
@@ -171,11 +180,12 @@ impl<X: SchedPayload> RunQueue<X> {
         };
         let threads = &mut self.group_slots.payload_mut(group).threads;
         match left {
-            Some(left) => threads.rejoin(&mut self.threads, key, THREAD_WEIGHT, SLICE_NS, left, Some(task)),
-            None => threads.join(&mut self.threads, key, THREAD_WEIGHT, SLICE_NS, Lag::ZERO, Some(task)),
+            Some(left) => threads.rejoin(&mut self.threads, key, THREAD_WEIGHT, request, left, Some(task)),
+            None => threads.join(&mut self.threads, key, THREAD_WEIGHT, request, Lag::ZERO, Some(task)),
         };
         self.ready_fair += 1;
         self.reweigh(group);
+        self.resize(group);
     }
 
     /// Take the entity of a fair thread out, writing what it takes with it
@@ -194,7 +204,20 @@ impl<X: SchedPayload> RunQueue<X> {
             standing.group_lag = left.lag.clamp_ns(LAG_BOUND_NS);
         } else {
             self.reweigh(at.group);
+            self.resize(at.group);
         }
+    }
+
+    /// A group asks for its shortest thread's request: it is due as soon as
+    /// its most latency-sensitive thread is.
+    fn resize(&mut self, group: Slot) {
+        let threads = &self.group_slots.payload(group).threads;
+        let request = threads
+            .slots(&self.threads)
+            .map(|thread| self.threads.slice(thread))
+            .min()
+            .expect("a queued group has a thread");
+        self.groups.set_slice(&mut self.group_slots, group, request);
     }
 
     /// Where `job`'s group is in [`Self::members`], or would go.
@@ -271,6 +294,16 @@ impl<X: SchedPayload> RunQueue<X> {
                 self.groups.charge(&mut self.group_slots, at.group, ns);
             }
             self.group_slots.payload_mut(at.group).threads.charge(&mut self.threads, at.thread, ns);
+        }
+    }
+
+    /// The running fair thread asks for `request` from its next request on,
+    /// and its group as its shortest thread then does.
+    pub fn set_running_request(&mut self, request: u64) {
+        if let Some(at) = self.running {
+            let threads = &mut self.group_slots.payload_mut(at.group).threads;
+            threads.set_slice(&mut self.threads, at.thread, request);
+            self.resize(at.group);
         }
     }
 

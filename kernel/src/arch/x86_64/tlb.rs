@@ -4,26 +4,36 @@
 //! free memory as soon as it returns; every `IF`-clear spin able to block one
 //! answers it directly instead of waiting on the interrupt vector. A stale
 //! memory-type translation surviving an early return is undefined per SDM
-//! Vol. 3A §11.12.4.
+//! Vol. 3A §14.12.4. SDM sections here are numbered as in order 325384-093US.
 //!
 //! **A change to one user space's leaves reaches only the CPUs running it**
 //! ([`user_change`], over `crate::tlb_tags`): a CPU that ran it before flushes
-//! when it next enters it, if it changed since. Every other shootdown targets
-//! every other CPU the machine brought up.
+//! when it next enters it, if it changed since. Each CPU reached is asked for
+//! the change's range alone, and flushes that range, or every user
+//! translation where it was asked more than one at once or the range is long.
+//! Every other shootdown targets every other CPU the machine brought up.
+//!
+//! **A CPU in its idle context keeps the root it last loaded** (`arch::hw`);
+//! `crate::tlb_tags` says which changes reach it. Its answer to any shootdown
+//! or ask loads the kernel's root ([`answer`], [`answer_ask`]), so it is
+//! reached once, and a space's [`retire`] reaches every CPU still holding it.
 //!
 //! **A user-half change keeps global translations**: its flush is `INVPCID`
 //! type 3 or a `CR3` reload, and only a kernel-half change, whose leaves are
-//! global, asks the flush that drops them (SDM Vol. 3A §4.10.4.1, APM Vol. 2
+//! global, asks the flush that drops them (SDM Vol. 3A §5.10.4.1, APM Vol. 2
 //! §5.5.2). An answer covering both is the wider.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::shootdown::{Generation, Reach, Shootdown};
+use crate::shootdown::{Asks, CpuSet, Flush, Reach, Shootdown};
 
 use super::{apic, percpu};
 use crate::smp;
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
+
+/// The ranges [`user_change`] asks of the CPUs running a space.
+static ASKS: Asks = Asks::new();
 
 /// Which CPUs run each user space, by its PCID, and when each changed.
 static USER: crate::tlb_tags::Tags = crate::tlb_tags::Tags::new();
@@ -31,6 +41,7 @@ static USER: crate::tlb_tags::Tags = crate::tlb_tags::Tags::new();
 /// An answer for each of the `cpus` CPUs the firmware names.
 pub fn size(cpus: usize) {
     SHOOTDOWN.size(cpus);
+    ASKS.size(cpus);
     USER.size(usize::from(kernel::pcid::MAX_USER_PCID) + 1, cpus);
 }
 
@@ -52,63 +63,108 @@ pub fn switching(to: u16, load: impl FnOnce()) {
     USER.left(cpu, switched.from);
 }
 
-/// Pages a change flushes one at a time on the initiator; past this, its
-/// whole space.
+/// This CPU switches to its idle context, keeping the root it holds.
+pub fn idle() {
+    if USER.sized() {
+        USER.idle(percpu::cpu_id() as usize);
+    }
+}
+
+/// A thread of the space tagged `tag` resumes on this CPU, which holds its
+/// root: where it idled there, every user translation is flushed first if
+/// the space changed after this CPU's last such flush.
+pub fn resume(tag: u16) {
+    if USER.sized() && USER.resume(percpu::cpu_id() as usize, usize::from(tag)) {
+        flush(Reach::Narrow);
+    }
+}
+
+/// No thread will load the root of the space tagged `tag` again: every CPU
+/// still idle on it has loaded the kernel's before this returns.
+pub fn retire(tag: u16) {
+    user_change(Origin::Retire, tag, 0, u64::MAX, true);
+    assert!(!held(tag), "tlb: a CPU still holds the root of a space no thread runs in");
+}
+
+/// Whether any CPU holds the root of the space tagged `tag`.
+pub fn held(tag: u16) -> bool {
+    USER.held(usize::from(tag))
+}
+
+/// Load the kernel's root if this CPU runs its idle context on a user
+/// space's. Its idle code reaches no user address, so nothing it runs needs
+/// the space it leaves.
+fn leave_idle_space() {
+    let kernel = crate::mm::paging::kernel_root();
+    if percpu::current_tid().is_none() && !kernel.is_loaded() {
+        // SAFETY: the kernel's own tables, which hold the code and stack this runs on.
+        unsafe { kernel.activate() };
+    }
+}
+
+/// Pages a change's flush takes one at a time; past this, every user
+/// translation.
 const BY_PAGE: u64 = 64;
 
 /// The user space tagged `tag` changed the leaves of `[start, end)`, already
-/// written: every CPU running it has flushed them before this returns, and
-/// every other flushes before it next enters the space. So the change's
-/// frames may go as soon as it returns.
+/// written, and took tables away where `tables`: every CPU running it has
+/// flushed them before this returns — one idle on it only where `tables` —
+/// and every other flushes before it next uses the space. So the change's
+/// frames and tables may go as soon as it returns.
 /// Answers whether it reached another CPU.
-pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64) -> bool {
+///
+/// A CPU idle on the space may still read those frames speculatively through
+/// its stale translations (SDM Vol. 3A §5.10.4.4). That is sound while SMAP
+/// faults every other access it makes to a user page, a freed user frame is
+/// only ever mapped write-back again (§14.12.4), and a user mapping that is not
+/// write-back is a device window: UC, never read speculatively (§14.3), or the
+/// WC scanout, which a read does not disturb.
+pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64, tables: bool) -> bool {
     let me = percpu::cpu_id() as usize;
-    let mut targets = [0u64; 4];
+    let mut targets = CpuSet::default();
     let mut beyond = false;
-    USER.changed(usize::from(tag), |cpu| match targets.get_mut(cpu / 64) {
+    USER.changed(usize::from(tag), tables, |cpu| match targets.get_mut(cpu / 64) {
         Some(word) => *word |= 1 << (cpu % 64),
         None => beyond = true,
     });
-    // A CPU past what the targets hold reaches every other, as before.
-    let Some(mine) = targets.get(me / 64).copied() else {
-        shootdown(origin, Half::User);
-        return true;
-    };
-    // This CPU first: it may be running the space.
-    if mine & (1 << (me % 64)) != 0 {
-        if (end - start) / crate::mm::PAGE_SIZE <= BY_PAGE {
-            (start..end).step_by(crate::mm::PAGE_SIZE as usize).for_each(|va| crate::mm::paging::flush_user_page(tag, va));
-        } else {
-            flush(Reach::Narrow);
-        }
-        targets[me / 64] &= !(1 << (me % 64));
-    }
-    if beyond {
-        // More CPUs than the targets hold: every one of them, as before.
+    // A CPU past what a set holds reaches every other, and this one, by a
+    // machine-wide shootdown.
+    if beyond || me >= crate::shootdown::ASKABLE {
         shootdown(origin, Half::User);
         return true;
     }
+    // This CPU may be running the space too.
+    let here = targets[me / 64] & 1 << (me % 64) != 0;
+    targets[me / 64] &= !(1 << (me % 64));
     if targets.iter().all(|&word| word == 0) || !smp::answering() {
+        if here {
+            flush_asked(Flush::Range { tag, start, end });
+        }
         return false;
     }
     ISSUED[origin as usize].fetch_add(1, Ordering::Relaxed);
     let began = crate::clock::nanos_since_boot();
-    let generation = SHOOTDOWN.issue(Reach::Narrow);
-    let each = |f: &mut dyn FnMut(u32)| {
-        for (w, &word) in targets.iter().enumerate() {
-            let mut bits = word;
-            while bits != 0 {
-                f((w * 64 + bits.trailing_zeros() as usize) as u32);
-                bits &= bits - 1;
-            }
-        }
-    };
-    each(&mut |cpu| apic::tlb_ipi_to(cpu));
-    each(&mut |cpu| wait_for(me, cpu, generation));
+    ASKS.ask(me, tag, start, end, &targets);
+    crate::shootdown::for_each(&targets, |cpu| apic::tlb_ipi_to(cpu as u32));
+    // Its own flush goes while the IPIs fly.
+    if here {
+        flush_asked(Flush::Range { tag, start, end });
+    }
+    crate::shootdown::for_each(&targets, |cpu| wait_for(cpu, || ASKS.answered(me, cpu)));
     let took = crate::clock::nanos_since_boot().saturating_sub(began);
     WAIT_NS.fetch_add(took, Ordering::Relaxed);
     MAX_NS.fetch_max(took, Ordering::Relaxed);
     true
+}
+
+/// What an ask has this CPU flush.
+fn flush_asked(what: Flush) {
+    match what {
+        Flush::Range { tag, start, end } if (end - start) / crate::mm::PAGE_SIZE <= BY_PAGE => {
+            (start..end).step_by(crate::mm::PAGE_SIZE as usize).for_each(|va| crate::mm::paging::flush_user_page(tag, va));
+        }
+        Flush::Range { .. } | Flush::User => flush(Reach::Narrow),
+    }
 }
 
 use crate::invalidation::{Half, Origin};
@@ -170,10 +226,8 @@ pub fn shootdown(origin: Origin, half: Half) {
     // This CPU answers itself locally instead of by self-IPI.
     SHOOTDOWN.serve(me, answer(Answerer::Initiator));
     apic::tlb_ipi();
-    for cpu in 0..cpus {
-        if cpu as usize != me {
-            wait_for(me, cpu, generation);
-        }
+    for cpu in (0..cpus as usize).filter(|&cpu| cpu != me) {
+        wait_for(cpu, || SHOOTDOWN.served(cpu, generation));
     }
     let took = crate::clock::nanos_since_boot().saturating_sub(began);
     WAIT_NS.fetch_add(took, Ordering::Relaxed);
@@ -215,12 +269,21 @@ pub fn bench() {
     );
 }
 
+/// Spin until `cpu` has `answered`, answering meanwhile whatever this CPU
+/// owes: an initiator inside an `IrqGuard`, a handler or the tick's pass takes
+/// no IPI, so two initiators waiting on each other would deadlock. Answer
+/// first, then ask: the answer is what a sibling waiting on this CPU needs.
+///
 /// Never logs: `drivers::serial`'s lock under its `IrqGuard` would deadlock a
 /// target that cannot answer while blocked on it.
-fn wait_for(me: usize, cpu: u32, generation: Generation) {
+fn wait_for(cpu: usize, answered: impl Fn() -> bool) {
     let mut spins = 0u32;
     let mut deadline = None;
-    while !SHOOTDOWN.wait_turn(me, cpu as usize, generation, answer(Answerer::Initiator)) {
+    loop {
+        answer_owed(Answerer::Initiator);
+        if answered() {
+            return;
+        }
         core::hint::spin_loop();
         spins += 1;
         if spins == SPINS_PER_DEADLINE_CHECK {
@@ -229,8 +292,7 @@ fn wait_for(me: usize, cpu: u32, generation: Generation) {
             match deadline {
                 None => deadline = Some(now.saturating_add(crate::time::DEAF_CPU.nanos())),
                 Some(at) if now >= at => panic!(
-                    "tlb: cpu {cpu} has not flushed for generation {generation:?} in {}ns — \
-                     it is not taking interrupts",
+                    "tlb: cpu {cpu} has not flushed in {}ns — it is not taking interrupts",
                     crate::time::DEAF_CPU.nanos(),
                 ),
                 Some(_) => {}
@@ -261,18 +323,37 @@ enum Answerer {
     Initiator,
 }
 
-/// The flush, then the staged delay: every serve's closure but `join`'s.
+/// The flush, the leave of an idle CPU's space, then the staged delay: every
+/// serve's closure but `join`'s.
 fn answer(by: Answerer) -> impl FnOnce(Reach) {
     move |reach| {
         flush(reach);
+        leave_idle_space();
         stage_ack_delay(by);
     }
 }
 
-/// Vector 0xFE's whole body: flush this CPU and say which generation it covers.
-pub fn serve_ipi() {
+/// [`answer`] for an ask.
+fn answer_ask(by: Answerer) -> impl FnOnce(Flush) {
+    move |what| {
+        flush_asked(what);
+        leave_idle_space();
+        stage_ack_delay(by);
+    }
+}
+
+/// Answer every generation and every ask this CPU owes.
+fn answer_owed(by: Answerer) {
     let cpu = percpu::cpu_id() as usize;
-    SHOOTDOWN.serve(cpu, answer(Answerer::Asked));
+    SHOOTDOWN.serve_if_owed(cpu, answer(by));
+    ASKS.serve(cpu, answer_ask(by));
+}
+
+/// Vector 0xFE's whole body: answer whatever this CPU owes, a generation, an
+/// ask, or both. Each is visible here: the IPI's send is ordered after the
+/// write that asks it (`apic::send`).
+pub fn serve_ipi() {
+    answer_owed(Answerer::Asked);
 }
 
 /// Answers a pending shootdown without taking a lock or allocating, so it is
@@ -286,8 +367,7 @@ pub fn poll() {
         return;
     }
     super::clocksource::serve_here();
-    let cpu = percpu::cpu_id() as usize;
-    SHOOTDOWN.serve_if_owed(cpu, answer(Answerer::Asked));
+    answer_owed(Answerer::Asked);
 }
 
 /// Settle every shootdown issued before this CPU could answer one; called

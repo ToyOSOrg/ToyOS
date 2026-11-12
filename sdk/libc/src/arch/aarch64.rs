@@ -23,7 +23,7 @@ unsafe extern "C" fn _start() -> ! {
 }
 
 /// Copy `n` bytes from `src` to `dest`, lowest address first.
-pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
+pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     unsafe {
         core::arch::asm!(
             "2:",
@@ -48,6 +48,7 @@ pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
             options(nostack),
         );
     }
+    dest
 }
 
 /// Copy `n` bytes from `src` to `dest`, highest address first: the order a

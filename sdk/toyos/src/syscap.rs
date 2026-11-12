@@ -11,7 +11,7 @@ use toyos_abi::handle::Rights;
 use toyos_abi::inventory::{RawRecord, Record, Undecodable};
 use toyos_abi::syscall::{self, DeviceRequest, DeviceType, SyscallError};
 
-use crate::endow::FromHandle;
+use crate::endow::ClaimType;
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
 pub struct SysCap(pub(crate) OwnedHandle);
@@ -27,7 +27,7 @@ impl SysCap {
     /// `NotFound` is a machine with no such device, which is a fact the supervisor logs
     /// and endows nothing for — not a failure. `AlreadyExists` is another
     /// process holding the class, which is a different fact and stays loud.
-    pub fn claim<T: FromHandle>(&self, class: DeviceType) -> Result<T, SyscallError> {
+    pub fn claim<T: ClaimType>(&self, class: DeviceType) -> Result<T, SyscallError> {
         self.mint(DeviceRequest::Class(class))
     }
 
@@ -39,7 +39,7 @@ impl SysCap {
     /// [`DeviceType::PciFunction`] with no function named: a class is the whole
     /// of what the call above asks for, and this one cannot be asked without
     /// an arrival.
-    pub fn claim_function<T: FromHandle>(
+    pub fn claim_function<T: ClaimType>(
         &self,
         arrival: toyos_abi::inventory::Arrival,
     ) -> Result<T, SyscallError> {
@@ -49,7 +49,7 @@ impl SysCap {
     /// [`Self::claim_function`], its claim granted `windows` at the mint: the
     /// firmware windows the signed image's `drives` row names. `NotSupported`
     /// where the function has none of one.
-    pub fn claim_function_granted<T: FromHandle>(
+    pub fn claim_function_granted<T: ClaimType>(
         &self,
         arrival: toyos_abi::inventory::Arrival,
         windows: toyos_abi::pci::FirmwareWindows,
@@ -62,7 +62,7 @@ impl SysCap {
     ///
     /// `NotFound` is a set that is not one function this machine can hand out
     /// whole, and `PermissionDenied` one the kernel drives itself.
-    pub fn claim_isa<T: FromHandle>(
+    pub fn claim_isa<T: ClaimType>(
         &self,
         set: toyos_abi::syscall::IsaId,
     ) -> Result<T, SyscallError> {
@@ -84,10 +84,14 @@ impl SysCap {
         syscall::job_floor(self.0.raw(), job.as_handle().raw(), bytes)
     }
 
-    fn mint<T: FromHandle>(&self, request: DeviceRequest) -> Result<T, SyscallError> {
+    fn mint<T: ClaimType>(&self, request: DeviceRequest) -> Result<T, SyscallError> {
         // The kernel installed this handle in this process's table for this
         // call and no other, so nothing else answers for it.
-        Ok(T::from_handle(OwnedHandle(syscall::device_claim(self.0.raw(), request)?)))
+        let claim = OwnedHandle(syscall::device_claim(self.0.raw(), request)?);
+        // SAFETY: the kernel made a claim of the class `request` names.
+        // That `T` is that class's type, or `Device`, is the caller's to
+        // keep: the bound does not hold it.
+        Ok(unsafe { T::from_handle(claim) })
     }
 
     /// A second handle to this capability, carrying the same rights.

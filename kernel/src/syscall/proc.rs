@@ -67,8 +67,8 @@ pub(super) fn spawn_place(place: u64) -> Result<process::Parent, u64> {
 }
 
 /// The program `args` lays out: each range checked as an ordinary mapping,
-/// and each object it copies looked up with `MAP` before an endowment could
-/// move the handle naming it.
+/// and each object it names looked up with the rights its range needs before
+/// an endowment could move the handle naming it.
 pub(super) fn spawn_program(ctx: &crate::user_ptr::SyscallContext<'_>, args: &SpawnArgs) -> Result<crate::loader::Program, u64> {
     let invalid = || SyscallError::InvalidArgument.to_u64();
     let count = usize::try_from(args.maps_count).ok().filter(|n| (1..=MAX_SPAWN_MAPS).contains(n)).ok_or_else(invalid)?;
@@ -84,8 +84,9 @@ pub(super) fn spawn_program(ctx: &crate::user_ptr::SyscallContext<'_>, args: &Sp
             handle if handle == u64::from(toyos_abi::HANDLE_INVALID.0) => None,
             handle => {
                 let raw_handle = u32::try_from(handle).map_err(|_| invalid())?;
+                let rights = crate::loader::Map::rights(&raw).map_err(SyscallError::to_u64)?;
                 let object = process::with_handles(|handles| {
-                    handles.get::<crate::object::shm::SharedMemObject>(RawHandle(raw_handle), Rights::MAP)
+                    handles.get::<crate::object::shm::SharedMemObject>(RawHandle(raw_handle), rights)
                 });
                 Some(object.map_err(|refused| refused.refuse())?)
             }

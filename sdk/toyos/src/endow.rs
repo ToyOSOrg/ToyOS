@@ -14,7 +14,7 @@ use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
-use toyos_abi::handle::HANDLE_INVALID;
+use toyos_abi::handle::{ObjectKind, HANDLE_INVALID};
 use toyos_abi::syscall::{
     self, DeviceRequest, DeviceType, SyscallError, MAX_ENDOWMENTS, MAX_LABELS_LEN,
 };
@@ -43,41 +43,100 @@ pub enum EndowError {
     Refused(SyscallError),
 }
 
-/// A typed wrapper over a handle it owns, as whoever gave the handle says it
-/// is: the kernel refuses each call on a handle of another type, so the type
-/// is trusted only as far as the giver's protocol says.
+/// A typed wrapper over a handle it owns.
 pub trait FromHandle {
-    fn from_handle(handle: OwnedHandle) -> Self;
+    /// # Safety
+    /// Every call of this type is one the object `handle` names can take:
+    /// the kernel ends a process that makes one on any other. For an
+    /// [`OfKind`] type, that is an object of one of its kinds. For a claim's
+    /// class type ([`ClaimType`]), it is a claim on a device of that class.
+    /// Of a handle a peer sent, only the kernel says which kind it is:
+    /// [`ReceivedHandle::typed`](crate::ipc::ReceivedHandle::typed).
+    unsafe fn from_handle(handle: OwnedHandle) -> Self;
 }
 
+/// A typed wrapper whose every call any object of one of [`Self::KINDS`]
+/// takes, so the kernel's word on a received handle's kind is enough to make
+/// one ([`ReceivedHandle::typed`](crate::ipc::ReceivedHandle::typed)). A
+/// claim's class types are not: a claim's kind does not say its class.
+pub trait OfKind: FromHandle {
+    const KINDS: &'static [ObjectKind];
+}
+
+/// A type the system capability mints a device claim as: [`Device`], or a
+/// class's type over it. The SDK does not pair the type with the class a call
+/// claims: a caller that names a class type keeps it to the class it asks for.
+pub trait ClaimType: FromHandle {}
+
+/// Whether `kinds` names `kind`.
+pub(crate) const fn names(kinds: &[ObjectKind], kind: ObjectKind) -> bool {
+    let mut i = 0;
+    while i < kinds.len() {
+        if kinds[i] as u32 == kind as u32 {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// [`FromHandle`] and [`OfKind`] for each type, made by its constructor.
 macro_rules! from_handle {
-    ($($ty:ty => $make:expr),+ $(,)?) => {
-        $(impl FromHandle for $ty {
-            fn from_handle(handle: OwnedHandle) -> Self {
-                let make: fn(OwnedHandle) -> Self = $make;
+    ($($ty:ty: $($kind:ident)|+ => $make:expr),+ $(,)?) => {
+        $(impl $crate::endow::FromHandle for $ty {
+            unsafe fn from_handle(handle: $crate::OwnedHandle) -> Self {
+                let make: fn($crate::OwnedHandle) -> Self = $make;
                 make(handle)
             }
+        }
+
+        impl $crate::endow::OfKind for $ty {
+            const KINDS: &'static [toyos_abi::handle::ObjectKind] = &[$(toyos_abi::handle::ObjectKind::$kind),+];
         })+
     };
 }
+pub(crate) use from_handle;
 
 from_handle! {
-    OwnedHandle => |h| h,
-    Acceptor => Acceptor,
-    Connector => Connector,
-    Namespace => Namespace,
-    SysCap => SysCap,
-    Job => Job,
-    Device => Device,
-    crate::Pipe => crate::Pipe,
-    crate::wake::Waker => crate::wake::Waker::from,
-    crate::wake::Bell => crate::wake::Bell::from,
-    crate::ipc::Connection => crate::ipc::Connection,
-    crate::FramebufferDev => |h| crate::FramebufferDev(Device(h)),
-    crate::PciDev => |h| crate::PciDev(Device(h)),
-    crate::AcpiDev => |h| crate::AcpiDev(Device(h)),
-    crate::UartDev => |h| crate::UartDev(Device(h)),
+    Acceptor: Acceptor => Acceptor,
+    Connector: Connector => Connector,
+    Namespace: Namespace => Namespace,
+    SysCap: SysCap => SysCap,
+    Job: Job => Job,
+    Process: Process => Process,
+    Device: Device => Device,
+    crate::Pipe: PipeRead | PipeWrite => crate::Pipe,
+    crate::ipc::Connection: Connection => crate::ipc::Connection,
 }
+
+/// Any handle, untyped.
+impl FromHandle for OwnedHandle {
+    unsafe fn from_handle(handle: OwnedHandle) -> Self {
+        handle
+    }
+}
+
+impl OfKind for OwnedHandle {
+    const KINDS: &'static [ObjectKind] = &ObjectKind::ALL;
+}
+
+impl ClaimType for Device {}
+
+/// The class types over a claim: [`FromHandle`] and [`ClaimType`], never
+/// [`OfKind`].
+macro_rules! class_of_claim {
+    ($($ty:ty),+ $(,)?) => {
+        $(impl FromHandle for $ty {
+            unsafe fn from_handle(handle: OwnedHandle) -> Self {
+                Self(Device(handle))
+            }
+        }
+
+        impl ClaimType for $ty {})+
+    };
+}
+
+class_of_claim!(crate::FramebufferDev, crate::PciDev, crate::AcpiDev, crate::UartDev);
 
 /// This process's endowment table, parsed once.
 pub struct Endowments {
@@ -107,7 +166,10 @@ impl Endowments {
         }
         // The swap is what makes this the only caller to see the handle, and
         // the kernel put it in this process's table at spawn.
-        Some(T::from_handle(OwnedHandle(RawHandle(raw))))
+        let handle = OwnedHandle(RawHandle(raw));
+        // SAFETY: what this process was endowed is its parent's to say, which
+        // made it and can end it as it likes.
+        Some(unsafe { T::from_handle(handle) })
     }
 
     /// Whether `label` names something this process still holds.

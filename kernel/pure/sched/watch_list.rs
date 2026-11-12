@@ -26,6 +26,7 @@ use crate::sched::mailbox::{mailbox, PreemptGuard, SchedMsg};
 use crate::sched::park::{prepare, Cancel, Commit, CurrentTask};
 use crate::sched::sync::{Arc, CellLock};
 use crate::sched::task::{TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason};
+use crate::sched::poll::Via;
 use crate::sched::watch::{Fire, Poster, Ring, Waiters, Watch, FEW};
 
 thread_local! {
@@ -158,6 +159,13 @@ impl Ring for Entry {
     fn live(&self) -> bool {
         self.0 .0.load(Acquire) == 0
     }
+    fn via(&self) -> Via {
+        via(0, 0)
+    }
+}
+
+fn via(table: u64, handle: u32) -> Via {
+    Via { table, handle: toyos_abi::handle::RawHandle(handle) }
 }
 
 type TestWatch = Watch<Msg, Entry, Watched<Waiters<Msg, Entry>>>;
@@ -245,6 +253,7 @@ fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_in_place_frees_noth
 /// that counts its fires on a word the test keeps.
 struct Owned {
     fired: Arc<AtomicU32>,
+    via: Via,
     _cell: Box<u64>,
 }
 
@@ -255,12 +264,19 @@ impl Ring for Owned {
     fn live(&self) -> bool {
         self.fired.load(Acquire) == 0
     }
+    fn via(&self) -> Via {
+        self.via
+    }
 }
 
 type OwnedWatch = Watch<Msg, Owned, Watched<Waiters<Msg, Owned>>>;
 
 fn owned(fired: &Arc<AtomicU32>) -> Owned {
-    Owned { fired: fired.clone(), _cell: Box::new(0) }
+    owned_via(fired, via(0, 0))
+}
+
+fn owned_via(fired: &Arc<AtomicU32>, via: Via) -> Owned {
+    Owned { fired: fired.clone(), via, _cell: Box::new(0) }
 }
 
 /// A thread's post of `n` live entries: every entry is fired once, and freed
@@ -324,4 +340,33 @@ fn a_list_outgrowing_the_buffer_sized_for_it_is_not_moved_into_it() {
     for t in &tasks {
         w.unregister(t);
     }
+}
+
+/// A handle's leaving ends its entries, more than one section takes out, and
+/// leaves every other's: another handle's in its table, and its own number's
+/// in another table. Each ended entry is fired once and freed with the list
+/// lock let go.
+#[test]
+fn a_handles_leaving_ends_its_entries_alone_and_frees_none_under_the_lock() {
+    let w: OwnedWatch = Watch::new(Watched(Mutex::new(Waiters::new())));
+    let leaving = via(1, 7);
+    let mine: Vec<_> = (0..2 * FEW + 1).map(|_| Arc::new(AtomicU32::new(0))).collect();
+    let others: Vec<_> = [via(1, 8), via(2, 7)].into_iter().map(|v| (Arc::new(AtomicU32::new(0)), v)).collect();
+    for (at, word) in mine.iter().enumerate() {
+        w.add_ring(owned_via(word, leaving));
+        if let Some((other, v)) = others.get(at) {
+            w.add_ring(owned_via(other, *v));
+        }
+    }
+    clean("registering");
+    w.end_rings(leaving);
+    clean("ending a handle's entries");
+    for (at, word) in mine.iter().enumerate() {
+        assert_eq!(word.load(Acquire), 1, "entry {at} made through the handle fired other than once");
+        assert_eq!(Arc::strong_count(word), 1, "entry {at} made through the handle was not let go of");
+    }
+    for (word, v) in &others {
+        assert_eq!(word.load(Acquire), 0, "{v:?}'s entry was ended by another handle's leaving");
+    }
+    assert_eq!(w.live_rings(), others.len());
 }

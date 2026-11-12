@@ -5,22 +5,31 @@
 //! space, if the space changed since its own last flush of every user
 //! translation.
 //!
+//! **A CPU whose idle context keeps the space's root still runs it** — the
+//! walker may use its tables — but uses no user translation, so a change that
+//! frees no table does not reach it ([`Tags::idle`]): it flushes when a thread
+//! of the space resumes there ([`Tags::resume`]), as an entering CPU does. A
+//! change that frees a table reaches it, since the walker could reach the
+//! freed one.
+//!
 //! **The pairing that makes it sound** is [`Tags::enter`] against
 //! [`Tags::changed`]: a CPU marks itself running the tag, then reads when the
 //! tag last changed; a change stamps the tag, then reads who runs it. A
 //! `SeqCst` fence sits between each side's store and load, so either the
 //! entering CPU sees the stamp and flushes, or the change sees the CPU and
-//! reaches it. The stamp is released after the leaves the change wrote and
-//! acquired by the entering CPU, so its flush follows them.
+//! reaches it. [`Tags::resume`] pairs the same way, with the idle mark the
+//! change reads in place of the running bit. The stamp is released after the
+//! leaves the change wrote and acquired by the entering CPU, so its flush
+//! follows them.
 //!
 //! Compiled a second time by `kernel-loom`, so it names nothing of the kernel
 //! but [`CpuSlice`].
 
 #[cfg(not(feature = "loom"))]
-use core::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
+use loom::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::cpu_slice::CpuSlice;
 
@@ -34,6 +43,21 @@ fn pair() {
 // Kernel-loom's negative-control mutation, never selected by a kernel build.
 #[cfg(feature = "tlb-tags-enter-relaxed")]
 fn pair() {}
+
+/// [`pair`] for [`Tags::resume`]'s side.
+#[cfg(not(feature = "tlb-tags-resume-relaxed"))]
+fn pair_resume() {
+    fence(Ordering::SeqCst);
+}
+
+// Kernel-loom's negative-control mutation, never selected by a kernel build.
+#[cfg(feature = "tlb-tags-resume-relaxed")]
+fn pair_resume() {}
+
+/// A CPU's idle mark, on a line of its own: its CPU writes it at every switch
+/// to and from its idle context.
+#[repr(align(128))]
+struct Idle(AtomicBool);
 
 /// What [`Tags::switch`] answers.
 pub struct Switched {
@@ -56,6 +80,9 @@ pub struct Tags {
     flushed: CpuSlice<AtomicU64>,
     /// Per CPU, the tag it runs, 0 for none.
     on: CpuSlice<AtomicUsize>,
+    /// Per CPU, whether it runs `on` in its idle context, using no user
+    /// translation of it.
+    idle: CpuSlice<Idle>,
 }
 
 impl Tags {
@@ -70,6 +97,7 @@ impl Tags {
             words: AtomicUsize::new(0),
             flushed: CpuSlice::new(),
             on: CpuSlice::new(),
+            idle: CpuSlice::new(),
         }
     }
 
@@ -84,6 +112,7 @@ impl Tags {
             words: AtomicUsize::new(0),
             flushed: CpuSlice::new(),
             on: CpuSlice::new(),
+            idle: CpuSlice::new(),
         }
     }
 
@@ -95,6 +124,7 @@ impl Tags {
         self.running.size(tags * words, |_| AtomicU64::new(0));
         self.flushed.size(cpus, |_| AtomicU64::new(0));
         self.on.size(cpus, |_| AtomicUsize::new(0));
+        self.idle.size(cpus, |_| Idle(AtomicBool::new(false)));
     }
 
     /// Whether [`Self::size`] has run: before it the boot CPU runs alone, no
@@ -113,11 +143,37 @@ impl Tags {
     pub fn switch(&self, cpu: usize, to: usize) -> Switched {
         // Before sizing the boot CPU runs alone and no user space exists.
         let Some(on) = self.on.get(cpu) else { return Switched { from: 0, flush: false } };
+        self.idle[cpu].0.store(false, Ordering::Relaxed);
         let from = on.swap(to, Ordering::Relaxed);
         if from == to {
             return Switched { from: 0, flush: false };
         }
         Switched { from, flush: to != 0 && self.enter(cpu, to) }
+    }
+
+    /// `cpu` runs its idle context on the root it holds, and uses no user
+    /// translation until [`Self::resume`] or [`Self::switch`].
+    pub fn idle(&self, cpu: usize) {
+        if let Some(idle) = self.idle.get(cpu) {
+            idle.0.store(true, Ordering::Release);
+        }
+    }
+
+    /// A thread of `tag` resumes on `cpu`, which holds its root. If `cpu`
+    /// idled on it ([`Self::idle`]), `true` where it must flush every user
+    /// translation first: `tag` changed after its last such flush, as it has
+    /// where a change passed `cpu` by while it idled. A CPU that ran a thread
+    /// of `tag` until now was reached by every change since, and owes nothing.
+    pub fn resume(&self, cpu: usize, tag: usize) -> bool {
+        let Some(idle) = self.idle.get(cpu) else { return false };
+        // Only `cpu` writes its mark.
+        if !idle.0.load(Ordering::Relaxed) {
+            return false;
+        }
+        idle.0.store(false, Ordering::Relaxed);
+        pair_resume();
+        // Acquire: as `enter`'s.
+        self.changed[tag].load(Ordering::Acquire) > self.flushed[cpu].load(Ordering::Relaxed)
     }
 
     /// `cpu` has replaced the root of the space tagged `from`, which
@@ -162,10 +218,18 @@ impl Tags {
         }
     }
 
-    /// `tag`'s leaves changed: call `reach` for each CPU running it now,
-    /// which must flush before the change's frames go. Every other CPU flushes
-    /// when it next enters the tag.
-    pub fn changed(&self, tag: usize, mut reach: impl FnMut(usize)) {
+    /// Whether any CPU runs `tag`.
+    pub fn held(&self, tag: usize) -> bool {
+        let words = self.words.load(Ordering::Relaxed);
+        (0..words).any(|w| self.running[tag * words + w].load(Ordering::Acquire) != 0)
+    }
+
+    /// `tag`'s leaves changed, and with them its tables where `tables`: call
+    /// `reach` for each CPU running it now that must flush before the change's
+    /// frames and tables go — every one where `tables`, and otherwise each
+    /// not idle on it. Every other CPU flushes when it next enters the tag or
+    /// resumes a thread of it.
+    pub fn changed(&self, tag: usize, tables: bool, mut reach: impl FnMut(usize)) {
         let Some(changed) = self.changed.get(tag) else { return };
         let stamp = self.stamp.fetch_add(1, Ordering::Relaxed) + 1;
         // Release: the leaves written before are visible to who reads the stamp.
@@ -175,7 +239,12 @@ impl Tags {
         for w in 0..words {
             let mut bits = self.running[tag * words + w].load(Ordering::Relaxed);
             while bits != 0 {
-                reach(w * 64 + bits.trailing_zeros() as usize);
+                let cpu = w * 64 + bits.trailing_zeros() as usize;
+                // Acquire: what the CPU did in the space before it idled
+                // comes before the change's frames go.
+                if tables || !self.idle[cpu].0.load(Ordering::Acquire) {
+                    reach(cpu);
+                }
                 bits &= bits - 1;
             }
         }

@@ -125,6 +125,7 @@ use toyos_supervisor::declaration::{self, declares, is_block, is_disk_driver, is
 use toyos_abi::devset::Declaration;
 use toyos_supervisor::drives::{self, Act, Drives};
 use toyos_supervisor::restart::{self, AfterEnd, Budget};
+use toyos::admission::{self, Admission, Event, Policy, Refused};
 use toyos::endow::{Endowments, FromHandle};
 use toyos::fs::{Access, Grant, CAPABILITY_PREFIX};
 use toyos::ipc::{self, Connection, RxStep};
@@ -159,38 +160,35 @@ const NETSTACK: &str = "netstack";
 const HOME_FOLDERS: [&str; 8] =
     ["Apps", "Desktop", "Documents", "Downloads", "Fonts", "Music", "Pictures", "Videos"];
 
-/// Connections accepted and not yet carrying a whole launch.
+/// Connections accepted on `launcher`, `grants`, `login`, `admin` and `swap`
+/// and not yet carrying a whole request, a quarter of them one holder's: the
+/// row and session its connector was minted for, and `swap`'s holders one.
 ///
-/// **The bound is the supervisor's handle table, not memory.** A connection nobody has
-/// spoken on costs a `PendingConnection` and no ring page, so what this stops a
-/// client from doing is filling the one table the machine cannot do without.
-/// Thirty-two is the kernel's own per-port queue depth
-/// (`MAX_PENDING_CONNECTIONS`), which is the allowance one step earlier on the
-/// same path — past it the supervisor refuses by name rather than growing.
-const MAX_PENDING_LAUNCHES: usize = 32;
+/// **The bound is the supervisor's handle table, not memory**: what it stops
+/// a client from doing is filling the one table the machine cannot do without.
+const ASKING: Policy = Policy::quartered(32);
 
-/// How long an accepted connection may go without completing its launch.
-///
-/// Policy, and generous: every caller sends its frame in the statement after
-/// `connect` (`toyos::launch::launch`). What this bounds is the one that never
-/// sends it, and it is what guarantees the table above drains.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// `power`'s connections, in a table of their own: a stop never waits behind
+/// a launch. Its connector names no holder, so any holder may hold them all.
+const POWER: Policy = Policy::unshared(8);
 
-/// One caller's inbound frames, taken without waiting: the supervisor never
-/// waits on a client. Room for the largest frame, because a launch carries
-/// the child's argv, environment and working directory.
-type LaunchRx = ipc::FrameRx<{ ipc::MAX_FRAME_LEN as usize }>;
+/// The widest request: a launch carries the child's argv, environment and
+/// working directory.
+const REQUEST_BYTES: usize = ipc::MAX_FRAME_LEN as usize;
 
-/// A connection that has been accepted and has not yet said what to start.
-///
-/// It exists because accept and the request frame are two events.
-struct Pending {
-    conn: Connection,
-    rx: LaunchRx,
-    since: Instant,
-    /// Which of the supervisor's ports it came in on, which decides what its frame
-    /// may ask for.
-    port: Port,
+/// One caller's inbound frames, taken without waiting.
+type LaunchRx = ipc::FrameRx<REQUEST_BYTES>;
+
+/// Callers' connections waiting on their first request, keyed by their
+/// badge's bytes.
+type Asking = Admission<Option<admission::Badge>, Port, Instant, REQUEST_BYTES>;
+
+/// The next connection of `acceptor`, one of the supervisor's own, which
+/// reads ready, while `table` has room for it; `None` while it is full, the
+/// connection queued until the acceptor is watched again.
+fn accepted<K: PartialEq + Clone, C>(table: &Admission<K, C, Instant, REQUEST_BYTES>, acceptor: &Acceptor) -> Option<Connection> {
+    let accepted = table.accept(acceptor)?;
+    Some(accepted.unwrap_or_else(|e| panic!("supervisor: an acceptor of the supervisor's own refused: {e:?}")))
 }
 
 /// A launch's caller: the row and session the badge on its connection names.
@@ -209,7 +207,6 @@ enum Port {
     /// The `logout` asking about the sessions open, off its badge.
     Admin(Caller),
     Swap,
-    Power,
 }
 
 /// The ports the supervisor mints a row's badge on, its row and session: the
@@ -247,9 +244,7 @@ impl<'m> Minting<'m> {
 /// The poll tokens for the `launcher`, `swap`, `power` and `grants` acceptors, for the
 /// one connection whose swap has been answered and whose hang-up is awaited,
 /// for every process the supervisor watches the end of, and
-/// for the two of the launch waiting on an answer. A
-/// pending connection's token is [`TOKEN_PENDING_BASE`] plus its handle, which
-/// is unique among the connections the supervisor holds at once.
+/// for the two of the launch waiting on an answer.
 const TOKEN_ACCEPTOR: u64 = 0;
 const TOKEN_SWAP_ACCEPTOR: u64 = 1;
 const TOKEN_HANGUP: u64 = 2;
@@ -269,16 +264,18 @@ const TOKEN_APPS: u64 = 11;
 const TOKEN_MEMORY: u64 = 12;
 /// The device set changed.
 const TOKEN_DEVICES: u64 = 13;
-const TOKEN_PENDING_BASE: u64 = 14;
-/// Above every pending connection's token, which is a handle's past the base.
+/// A waiting connection's token is its table's base and its slot.
+const TOKEN_ASKING: u64 = 14;
+const TOKEN_STOPPING: u64 = TOKEN_ASKING + ASKING.slots as u64;
 const TOKEN_POWER_WATCHERS: u64 = u64::MAX;
 
 /// The processes whose end the supervisor watches at once: its services and
 /// its `drives` processes, in what a poller holds beside the loop's own
 /// watches. A `drives` process past it is not started, and says so.
 const MAX_CHILDREN: usize = Poller::MAX_HANDLES as usize
-    - TOKEN_PENDING_BASE as usize
-    - MAX_PENDING_LAUNCHES
+    - TOKEN_ASKING as usize
+    - ASKING.slots
+    - POWER.slots
     - 2 * sessions::MAX_SESSIONS;
 
 /// How long a stop waits for `logkeeper` to say the log is whole.
@@ -554,7 +551,8 @@ fn main() {
             }
             builder.finish().expect("supervisor: no namespace for its own files")
         };
-        if let Err(e) = std::os::toyos::fs::adopt_namespace(build().into()) {
+        // SAFETY: the namespace built just above.
+        if let Err(e) = unsafe { std::os::toyos::fs::adopt_namespace(build().into()) } {
             panic!("supervisor: std would not take its namespace ({e}), and the supervisor is endowed none");
         }
         Box::leak(Box::new(build()))
@@ -1646,21 +1644,27 @@ impl<'a> Supervisor<'a> {
     fn serve_forever(&mut self, swap: &Acceptor, power: &Acceptor) -> ! {
         self.say_floors();
         let poller = Poller::new(Poller::MAX_HANDLES);
-        let mut pending: Vec<Pending> = Vec::new();
+        let mut asking = Asking::new(ASKING);
+        let mut stopping: Admission<(), (), Instant, REQUEST_BYTES> = Admission::new(POWER);
         let mut flight: Option<Flight> = None;
         let mut parked: Option<Parked> = None;
         let mut ready: Vec<u64> = Vec::new();
         loop {
-            poller.watch(&self.minted.launcher, READABLE, TOKEN_ACCEPTOR);
-            poller.watch(&self.minted.grants, READABLE, TOKEN_GRANTS_ACCEPTOR);
-            poller.watch(&self.minted.login, READABLE, TOKEN_LOGIN_ACCEPTOR);
-            poller.watch(&self.minted.admin, READABLE, TOKEN_ADMIN_ACCEPTOR);
+            // A full table takes no more: the port's queue holds the next.
+            if asking.has_room() {
+                poller.watch(&self.minted.launcher, READABLE, TOKEN_ACCEPTOR);
+                poller.watch(&self.minted.grants, READABLE, TOKEN_GRANTS_ACCEPTOR);
+                poller.watch(&self.minted.login, READABLE, TOKEN_LOGIN_ACCEPTOR);
+                poller.watch(&self.minted.admin, READABLE, TOKEN_ADMIN_ACCEPTOR);
+                poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
+            }
+            if stopping.has_room() {
+                poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
+            }
             poller.watch(&self.watch.ended, READABLE, TOKEN_APPS);
             for link in self.logins.open.iter().filter_map(|login| login.link.handle()) {
                 poller.watch(&link, READABLE, TOKEN_LINKS);
             }
-            poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
-            poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
             poller.watch(&self.devices, READABLE, TOKEN_DEVICES);
             for watcher in &self.watchers {
                 let writable = if watcher.owes() { WRITABLE } else { 0 };
@@ -1678,25 +1682,14 @@ impl<'a> Supervisor<'a> {
                 poller.watch(&asked.launch.conn, READABLE, TOKEN_PARKED_CALLER);
                 poller.watch(&asked.consent, READABLE, TOKEN_CONSENT);
             }
-            for p in &pending {
-                poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().raw().0 as u64);
-            }
+            asking.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_ASKING + slot));
+            stopping.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_STOPPING + slot));
             // A client that connects and then says nothing wakes nothing, so
-            // the deadline that removes it has to be a wake in its own right —
-            // otherwise a silent client is only ever timed out by some other
-            // client's traffic, and with the table full there is no other
-            // client.
-            //
-            // **What is left of the oldest one's deadline, not a fresh
-            // `HANDSHAKE_TIMEOUT`.** Any readiness at all restarts a wait, so a
-            // full timeout each round is a bound of nearly twice the number for
-            // a client that goes quiet just before some other connection wakes
-            // the loop — and a bound that is not the bound is the class this
-            // whole change is about.
+            // what is left of the oldest one's limit is a wake of its own.
             let now = Instant::now();
-            let timeout = pending
-                .iter()
-                .map(|p| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(p.since)))
+            let timeout = [asking.left(now), stopping.left(now)]
+                .into_iter()
+                .flatten()
                 .chain(flight.iter().map(|f| f.deadline().saturating_duration_since(now)))
                 .chain(self.settle.map(|at| at.saturating_duration_since(now)))
                 .chain(self.storage.deadline().map(|at| at.saturating_duration_since(now)))
@@ -1705,6 +1698,15 @@ impl<'a> Supervisor<'a> {
             ready.clear();
             poller.wait(1, timeout, |token| ready.push(token));
             let open = self.logins.open.len();
+
+            let now = Instant::now();
+            for &token in &ready {
+                if (TOKEN_ASKING..TOKEN_STOPPING).contains(&token) {
+                    asking.woke(token - TOKEN_ASKING);
+                } else if (TOKEN_STOPPING..TOKEN_STOPPING + POWER.slots as u64).contains(&token) {
+                    stopping.woke(token - TOKEN_STOPPING);
+                }
+            }
 
             // Accept and the request are two events. Nothing is read here.
             for (token, acceptor, port) in [
@@ -1717,109 +1719,76 @@ impl<'a> Supervisor<'a> {
                 (TOKEN_LOGIN_ACCEPTOR, &self.minted.login, |s, c| s.opener(c).map(Port::Login)),
                 (TOKEN_ADMIN_ACCEPTOR, &self.minted.admin, |s, c| s.caller(&s.minted.admin, c).map(Port::Admin)),
                 (TOKEN_SWAP_ACCEPTOR, swap, |_, _| Ok(Port::Swap)),
-                (TOKEN_POWER_ACCEPTOR, power, |_, _| Ok(Port::Power)),
             ] {
-                if !ready.contains(&token) {
+                let Some(conn) = ready.contains(&token).then(|| accepted(&asking, acceptor)).flatten() else {
                     continue;
-                }
-                let conn = match acceptor.accept() {
-                    Ok(conn) => conn,
-                    Err(e) => panic!("supervisor: an acceptor of the supervisor's own refused: {e:?}"),
                 };
-                if pending.len() >= MAX_PENDING_LAUNCHES {
-                    say!(
-                        "supervisor: launcher: refusing client {} — {MAX_PENDING_LAUNCHES} connections \
-                         are already waiting to say what they want",
-                        conn.as_handle().raw().0
-                    );
-                    continue;
-                }
                 let port = match port(self, &conn) {
                     Ok(port) => port,
                     Err(why) => {
-                        say!("supervisor: launcher: dropping client {} — {why}", conn.as_handle().raw().0);
+                        say!("supervisor: letting a connection go: {why}");
                         continue;
                     }
                 };
-                pending.push(Pending { conn, rx: LaunchRx::new(), since: Instant::now(), port });
+                let key = admission::Badge::of(acceptor, &conn);
+                if let Err(Refused { key, why, say: Some(unsaid), .. }) = asking.admit(conn, key, port, now) {
+                    say!("supervisor: letting a connection of {key:?} go: {why}{unsaid}");
+                }
+            }
+            if let Some(conn) = ready.contains(&TOKEN_POWER_ACCEPTOR).then(|| accepted(&stopping, power)).flatten() {
+                if let Err(Refused { why, say: Some(unsaid), .. }) = stopping.admit(conn, (), (), now) {
+                    say!("supervisor: power: letting a connection go: {why}{unsaid}");
+                }
             }
 
-            // `remove` rather than `swap_remove`: the entries after `i` shift
-            // down, so leaving `i` alone visits each connection exactly once.
-            let mut i = 0;
-            while i < pending.len() {
-                let handle = pending[i].conn.as_handle().raw();
-                if !ready.contains(&(TOKEN_PENDING_BASE + handle.0 as u64)) {
-                    i += 1;
-                    continue;
+            // A request that is whole is served however late this loop came
+            // round to it; only a connection that sent none in its limit is
+            // let go.
+            while let Some(event) = stopping.next(now) {
+                match event {
+                    Event::Admitted(asker) => {
+                        let (msg_type, payload) = (asker.msg_type(), asker.payload().to_vec());
+                        self.serve_power(asker.into_connection(), msg_type, &payload)
+                    }
+                    Event::Left { why, say: Some(unsaid), .. } => say!("supervisor: power: letting a connection go: {why}{unsaid}"),
+                    Event::Left { .. } => {}
+                    Event::Unsaid(unsaid) => say!("supervisor: power: {}", unsaid.alone()),
                 }
-                let step = {
-                    let p = &mut pending[i];
-                    p.rx.pump(&p.conn)
+            }
+            while let Some(event) = asking.next(now) {
+                let mut asker = match event {
+                    Event::Admitted(asker) => asker,
+                    Event::Left { key, why, say: Some(unsaid), .. } => {
+                        say!("supervisor: letting a connection of {key:?} go: {why}{unsaid}");
+                        continue;
+                    }
+                    Event::Left { .. } => continue,
+                    Event::Unsaid(unsaid) => {
+                        say!("supervisor: {}", unsaid.alone());
+                        continue;
+                    }
                 };
-                match step {
-                    RxStep::Idle => i += 1,
-                    // Unlogged, and the only removal here that is: a caller may
-                    // connect to find out whether it holds a launcher at all
-                    // and hang up, which is its business.
-                    RxStep::Eof => {
-                        pending.remove(i);
-                    }
-                    RxStep::Malformed => {
-                        say!(
-                            "supervisor: launcher: dropping client {} — it sent a frame this protocol \
-                             cannot describe",
-                            handle.0
-                        );
-                        pending.remove(i);
-                    }
-                    RxStep::Frame { msg_type, payload_len, .. } => {
-                        let mut p = pending.remove(i);
-                        match p.port {
-                            Port::Launcher(caller) => {
-                                let payload = p.rx.payload(payload_len).to_vec();
-                                let carried = p.rx.take_batch();
-                                self.serve_launch(p.conn, &caller, msg_type, &payload, carried, &mut parked)
-                            }
-                            Port::Grants(caller) => self.serve_grants(&p.conn, &caller, msg_type, p.rx.payload(payload_len)),
-                            Port::Login(opener) => self.serve_login(&p.conn, opener, msg_type),
-                            Port::Admin(caller) => self.serve_admin(&p.conn, &caller, msg_type, p.rx.payload(payload_len)),
-                            Port::Power => {
-                                let payload = p.rx.payload(payload_len).to_vec();
-                                self.serve_power(p.conn, msg_type, &payload)
-                            }
-                            Port::Swap => {
-                                let payload = p.rx.payload(payload_len).to_vec();
-                                let carried = p.rx.take_batch();
-                                if let Some(accepted) =
-                                    self.accept_swap(p.conn, msg_type, &payload, carried, flight.as_ref())
-                                {
-                                    flight = Some(accepted);
-                                }
-                            }
+                let (msg_type, payload, carried) = (asker.msg_type(), asker.payload().to_vec(), asker.take_batch());
+                let (conn, _, port) = asker.into_parts();
+                match port {
+                    Port::Launcher(caller) => self.serve_launch(conn, &caller, msg_type, &payload, carried, &mut parked),
+                    Port::Grants(caller) => self.serve_grants(&conn, &caller, msg_type, &payload),
+                    Port::Login(opener) => self.serve_login(&conn, opener, msg_type),
+                    Port::Admin(caller) => self.serve_admin(&conn, &caller, msg_type, &payload),
+                    Port::Swap => {
+                        if let Some(accepted) = self.accept_swap(conn, msg_type, &payload, carried, flight.as_ref()) {
+                            flight = Some(accepted);
                         }
                     }
                 }
             }
-
-            // **After the requests that arrived are served**: a client whose
-            // request is here is answered however late this loop came round to
-            // it, and only one that has said nothing in its bound is let go.
-            let now = Instant::now();
-            for p in pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
-                say!(
-                    "supervisor: launcher: dropping client {} — it never finished its launch",
-                    p.conn.as_handle().raw().0
-                );
-            }
-            pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
             flight = flight.and_then(|f| self.advance(f, ready.contains(&TOKEN_HANGUP)));
             let (caller_ready, consent_ready) = (ready.contains(&TOKEN_PARKED_CALLER), ready.contains(&TOKEN_CONSENT));
             parked = parked.and_then(|asked| self.advance_parked(asked, caller_ready, consent_ready));
 
             if ready.contains(&TOKEN_LINKS) {
-                self.pump_links(&mut pending);
+                self.pump_links(&mut asking);
             }
             if ready.contains(&TOKEN_APPS) {
                 self.apps_ended();
@@ -1917,7 +1886,7 @@ impl<'a> Supervisor<'a> {
         if matches!(&service.source, Binary::Swapped(running) if running.digest == request.digest) {
             return refuse(name, Refusal::AlreadyRuns(request.digest));
         }
-        let swapped_in = match Swapped::copied(lent, &request) {
+        let swapped_in = match Swapped::copied(lent.into(), &request) {
             Ok(swapped_in) => swapped_in,
             Err(why) => return refuse(name, why),
         };
@@ -2410,17 +2379,25 @@ impl Supervisor<'_> {
         // Past every refusal that does not know which handle is which: the
         // descriptors, the extras, the place if it names one, and the job.
         let mut carried = carried;
-        let fds: Vec<toyos::OwnedHandle> = carried.by_ref().take(request.fd_count()).collect();
+        let fds: Vec<toyos::OwnedHandle> = carried.by_ref().take(request.fd_count()).map(Into::into).collect();
         // `SYS_NAMESPACE_BUILD` copies a connector into the namespace and
         // leaves the caller's handle, and the supervisor's copy of a client's
-        // connector has no life beyond this launch. **Not a claim about the
-        // type** — a client sends what it likes, and everything below treats a
-        // wrong one as a refused launch rather than as the supervisor's own bug.
-        let extras: Vec<(String, Connector)> =
-            names.into_iter().zip(carried.by_ref()).map(|(name, handle)| (name.to_string(), Connector::from_handle(handle))).collect();
-        let mut rest: Vec<toyos::OwnedHandle> = carried.collect();
-        let job = toyos::job::Job::from_handle(rest.pop().expect("a launch's batch ends with its job"));
-        let place = rest.pop();
+        // connector has no life beyond this launch.
+        let extras: Result<Vec<(String, Connector)>, ipc::WrongKind> =
+            names.into_iter().zip(carried.by_ref()).map(|(name, handle)| Ok((name.to_string(), handle.typed()?))).collect();
+        let mut rest: Vec<ipc::ReceivedHandle> = carried.collect();
+        let job = rest.pop().expect("a launch's batch ends with its job").typed::<toyos::job::Job>();
+        let place = rest.pop().map(ipc::ReceivedHandle::typed::<toyos::process::Process>).transpose();
+        // A client sends what it likes: what its frame calls a connector, a
+        // place or a job and the kernel does not is a refused launch.
+        let (extras, job, place) = match (extras, job, place) {
+            (Ok(extras), Ok(job), Ok(place)) => (extras, job, place),
+            (Err(why), ..) | (_, Err(why), _) | (.., Err(why)) => {
+                say!("supervisor: launcher: refused a launch whose handles are not what its frame says: {why}");
+                let _ = conn.try_signal(launch::MSG_REFUSED);
+                return;
+            }
+        };
 
         // std joins a relative `current_dir` onto the supervisor's own cwd, so passing one
         // on would start the child in the supervisor's `/` — the default this field removes.
@@ -3018,9 +2995,11 @@ fn translated(claim: toyos::Device, function: &Pci) -> Result<toyos::Device, Mis
     if !claims::is_virtio(function) {
         return Ok(claim);
     }
-    let dev = toyos::PciDev::from_handle(claim.into());
+    // SAFETY: `claim` was minted for `function`, a PCI function.
+    let dev = unsafe { toyos::PciDev::from_handle(claim.into()) };
     let offered = toyos_pci_claim::virtio::offers_access_platform(&dev);
-    let claim = toyos::Device::from_handle(dev.into());
+    // SAFETY: a device claim, which a `Device` is whatever its class.
+    let claim = unsafe { toyos::Device::from_handle(dev.into()) };
     match offered {
         Ok(true) => Ok(claim),
         Ok(false) => Err(Missing::Untranslated(None)),

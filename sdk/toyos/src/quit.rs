@@ -11,7 +11,7 @@
 pub use toyos_abi::quit::Reason;
 use toyos_abi::syscall::{self, SyscallError};
 
-use crate::endow::{FromHandle, Once};
+use crate::endow::Once;
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
 /// This process's notice.
@@ -52,11 +52,7 @@ impl AsHandle for Notice {
     }
 }
 
-impl FromHandle for Notice {
-    fn from_handle(handle: OwnedHandle) -> Self {
-        Self(handle)
-    }
-}
+crate::endow::from_handle! { Notice: Notice => Notice }
 
 /// This process's notice, from the kernel under `QUIT_LABEL`. Borrowed, as
 /// [`crate::endow::this_process`] is.

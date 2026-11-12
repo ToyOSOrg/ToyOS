@@ -116,17 +116,9 @@ impl AsHandle for Bell {
     }
 }
 
-/// A side a peer sent: its type is the sender's word, as a connection's is.
-impl From<OwnedHandle> for Waker {
-    fn from(handle: OwnedHandle) -> Self {
-        Self(handle)
-    }
-}
-
-impl From<OwnedHandle> for Bell {
-    fn from(handle: OwnedHandle) -> Self {
-        Self(handle)
-    }
+crate::endow::from_handle! {
+    Waker: EventSignal => Waker,
+    Bell: EventWait => Bell,
 }
 
 impl From<Waker> for OwnedHandle {

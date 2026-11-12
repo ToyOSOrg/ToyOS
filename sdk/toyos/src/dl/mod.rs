@@ -2,7 +2,9 @@
 //! executable names (`DT_NEEDED`, [`start`]), laid out in memory of the
 //! process's own, relocated ([`image`]), given their protections and
 //! published in the process's one module list ([`crate::tls`]), which every
-//! copy of std and libc in the process reads.
+//! copy of std and libc in the process reads. A segment that is the pages of
+//! a file nobody can write is those pages, shared with every process that
+//! loads the library, and not a copy.
 //!
 //! **A load is one set**: the libraries named and every library they name that
 //! is not yet published, found breadth first, so a cycle of names is one set
@@ -28,12 +30,14 @@ use core::ffi::CStr;
 use core::fmt;
 
 use toyos_abi::syscall::{self, SyscallError, VmAt, VmProt};
+
+use crate::AsHandle;
 use crate::elf::RelocError;
 
 use crate::files;
 use crate::process::ImageRefused;
 use crate::tls::{self, Loading, Module};
-use image::{Mapped, Pass, Plan, Scope, Tables, PAGE};
+use image::{FilePages, Mapped, Pass, Plan, Scope, Tables, PAGE};
 
 /// Where a library named by file name alone is looked for.
 const LIBRARY_DIR: &str = "/system/lib/";
@@ -216,8 +220,18 @@ fn lay(name: &str) -> Result<(Laid, Vec<String>), Refused> {
     // SAFETY: placed anywhere, so it replaces nothing.
     let at = unsafe { syscall::vm_reserve(plan.span, VmProt::ReadWrite, VmAt::ANYWHERE) }.map_err(Refused::Memory)?;
     let memory = Reservation { at, len: plan.span, kept: false };
+    let shared = file.as_immutable();
+    let pages = if shared.is_some() { FilePages::Mapped } else { FilePages::Copied };
     // SAFETY: the fresh, zeroed reservation, this function's alone.
-    plan.lay(bytes, unsafe { core::slice::from_raw_parts_mut(at, plan.span) })?;
+    plan.lay(bytes, unsafe { core::slice::from_raw_parts_mut(at, plan.span) }, pages)?;
+    if let Some(image) = shared {
+        for (lo, hi, offset, flags) in plan.file_pages(bytes.len() as u64) {
+            let prot = if flags.executable() { VmProt::ReadExec } else { VmProt::Read };
+            // SAFETY: whole pages of the reservation, which nothing reaches yet.
+            unsafe { syscall::vm_map(image.as_handle().raw(), offset, (hi - lo) as usize, prot, VmAt::Fixed(at.add(lo as usize))) }
+                .map_err(Refused::Memory)?;
+        }
+    }
     // SAFETY: laid out whole and writable, reached by nothing else until
     // published, and released only after every view of it is gone.
     let mapped = unsafe { Mapped::new(at, &plan) };
@@ -383,30 +397,56 @@ unsafe fn construct(inits: &[(usize, usize)]) {
 }
 
 /// Load the libraries the executable at `header` names and bind its symbols
-/// to them, then run their constructors: std's and libc's start call this
-/// once its thread-local storage is laid out, before anything that could
-/// name such a symbol. One whose libraries cannot be had exits 127 with a
-/// line on its stderr naming why, as [`crate::relocate`] does.
+/// to them, take the write away from its `PT_GNU_RELRO` pages, then run the
+/// libraries' constructors: std's and libc's start call this once its
+/// thread-local storage is laid out, before anything that could name such a
+/// symbol. One whose libraries cannot be had, or whose `PT_GNU_RELRO` cannot
+/// be made read-only, exits 127 with a line on its stderr naming why, as
+/// [`crate::relocate`] does.
 ///
 /// # Safety
 /// `header` is the running executable's ELF header, its thread-local storage
 /// is laid out ([`tls::start`]) and this is its main thread, the only one.
 pub unsafe fn start(header: *const u8) {
-    if !crate::relocate::names_a_library() {
-        return;
-    }
-    // SAFETY: the caller's.
-    match unsafe { load_needed(header) } {
-        // SAFETY: each a module just published.
-        Ok(published) => unsafe { construct(&published.inits) },
-        Err(why) => {
-            let line = alloc::format!("this program's libraries could not be loaded: {why}\n");
-            if let Some(stderr) = crate::relocate::stderr() {
-                let _ = syscall::write(stderr, line.as_bytes());
-            }
-            syscall::exit(127)
+    let refuse = |line: String| -> ! {
+        if let Some(stderr) = crate::relocate::stderr() {
+            let _ = syscall::write(stderr, line.as_bytes());
         }
+        syscall::exit(127)
+    };
+    let published = match crate::relocate::names_a_library() {
+        // SAFETY: the caller's.
+        true => match unsafe { load_needed(header) } {
+            Ok(published) => Some(published),
+            Err(why) => refuse(alloc::format!("this program's libraries could not be loaded: {why}\n")),
+        },
+        false => None,
+    };
+    // SAFETY: the caller's, and every relocation of the executable is applied:
+    // its own by `crate::relocate`, the rest by the load above.
+    if let Err(why) = unsafe { seal(header) } {
+        refuse(alloc::format!("this program's PT_GNU_RELRO could not be made read-only: {why}\n"));
     }
+    if let Some(published) = published {
+        // SAFETY: each a module just published.
+        unsafe { construct(&published.inits) };
+    }
+}
+
+/// Make the executable's `PT_GNU_RELRO` pages read-only, as [`protect`] does
+/// a library's: its vtables, `.got` and `.dynamic`, which a stray or hostile
+/// store in the running program could otherwise rewrite.
+///
+/// # Safety
+/// `header` is the running executable's ELF header, and nothing writes its
+/// `PT_GNU_RELRO` again.
+unsafe fn seal(header: *const u8) -> Result<(), Refused> {
+    // SAFETY: the caller's; the page the header begins is mapped.
+    let page = unsafe { core::slice::from_raw_parts(header, HEADER) };
+    let Some((at, len)) = image::executable_relro(page)? else { return Ok(()) };
+    // SAFETY: whole pages of the executable's own image, which the header's
+    // segment begins.
+    unsafe { syscall::vm_protect(header.cast_mut().add(at), len, VmProt::Read) }.map_err(Refused::Memory)
 }
 
 /// # Safety

@@ -15,6 +15,7 @@
 extern crate alloc;
 
 mod arch;
+pub mod admission;
 
 pub mod audio;
 pub mod census;
@@ -298,8 +299,6 @@ impl Pipe {
         self.0.into_raw()
     }
 
-    /// Take ownership of a pipe end that arrived over a connection.
-    ///
     /// # Safety
     /// `raw` must be a live pipe-end handle this process owns and nothing else
     /// answers for.
@@ -310,12 +309,6 @@ impl Pipe {
 
 impl AsHandle for Pipe {
     fn as_handle(&self) -> BorrowedHandle<'_> { self.0.as_handle() }
-}
-
-/// A pipe end a peer sent: its type is the sender's word, as a connection's
-/// is ([`Connection::received`]).
-impl From<OwnedHandle> for Pipe {
-    fn from(handle: OwnedHandle) -> Self { Self(handle) }
 }
 
 /// Each typed handle, given up as the handle it owns: to send, endow or

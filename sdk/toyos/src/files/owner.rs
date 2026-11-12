@@ -405,8 +405,8 @@ fn object(held: Held) -> Object {
 
 /// Take up the one description exported for an endowed file descriptor.
 /// This constructs an object without entering the descriptor table again.
-pub(super) fn adopt_exported(handle: crate::OwnedHandle) -> Result<Object, Error> {
-    let mut dir = Dir::adopt(crate::ipc::Connection::received(handle)).map_err(Error::Served)?;
+pub(super) fn adopt_exported(connection: crate::ipc::Connection) -> Result<Object, Error> {
+    let mut dir = Dir::adopt(connection).map_err(Error::Served)?;
     let fid = Fid { id: 1, generation: dir.generation() };
     dir.fstat(fid).map_err(Error::Served)?;
     Ok(object(Held::Served(Served {

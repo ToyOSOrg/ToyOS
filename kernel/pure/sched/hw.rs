@@ -98,6 +98,14 @@ pub trait Machine: Kicker + 'static {
 
     fn stop_timer(&self);
 
+    /// Whether the one-shot the last [`Self::set_timer`] armed is still to
+    /// be taken: its interrupt not yet handled, so a pass is still owed by
+    /// it. A machine that cannot tell answers `false`, and the core then
+    /// writes every arm.
+    fn timer_pending(&self) -> bool {
+        false
+    }
+
     /// The idle state this CPU waits in once the pass that asks ends, chosen
     /// with the scheduler's timer due at `deadline` (`crate::sched::idle`).
     /// The pass folds [`idle::Plan::wake_at`] into its one timer plan, and the

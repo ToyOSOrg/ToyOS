@@ -217,7 +217,7 @@ impl Helper<'_> {
             crate::startup::Refused::TooLarge => Refused::Invalid("arguments and an environment past what a child starts with"),
             crate::startup::Refused::Memory(e) => Refused::Syscall(e),
         })?;
-        let program = crate::elf::program::lay_out(image.bytes(), crate::elf::Machine::RUNNING, image.handle())
+        let program = crate::elf::program::lay_out(image.bytes(), crate::elf::Machine::RUNNING, image.source())
             .map_err(Refused::Invalid)?
             .starting_with(&block);
         let maps = program.maps();
@@ -375,7 +375,7 @@ impl Independent<'_> {
             job,
         };
         match launch::launch(&conn, request) {
-            Ok(Outcome::Started(handle)) => Ok(Process(handle)),
+            Ok(Outcome::Started(process)) => Ok(process),
             Ok(Outcome::NotPermitted) => {
                 Err(Refused::Permission("no row declares the program, or the launcher's row may not start it"))
             }

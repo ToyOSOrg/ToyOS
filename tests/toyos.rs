@@ -366,6 +366,12 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is each bench's verdict, on the T14's AVX-512 and the AMD
     // bench's AVX; `vector_state_survives_a_switch` runs it under QEMU.
     "vector_state",
+    // Its shared run is each bench's verdict;
+    // `a_ring3_gs_load_leaves_the_kernel_its_gs` runs it under QEMU.
+    "gs_segment_load",
+    // Its shared run is each bench's verdict;
+    // `ring3_debug_traps_end_their_process` runs it under QEMU.
+    "debug_trap",
     "std_alloc",
     // Its shared run asserts what holds of one boot's draws on x86-64;
     // `virt_random_differs` builds it for AArch64, runs it on that
@@ -377,6 +383,10 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is each bench's verdict on its own CPU's fault path;
     // `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` runs it under QEMU.
     "user_copy_faults",
+    // Its shared run is each bench's verdict;
+    // `tmp_holds_empty_files_by_what_each_costs` runs it under QEMU, and
+    // `virt_tmp_holds_empty_files_by_what_each_costs` on AArch64's.
+    "tmp_empty_files",
     // Its shared run is ring's known answers in a guest; the crypto boot runs it
     // first on each bench, and `crypto_instrument_prints_its_table` before the
     // instrument under QEMU.
@@ -385,6 +395,12 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // `virt_wall_clock_utc` builds it for AArch64 and judges what it read
     // against the instant the job case stages in the RTC.
     "wall_clock_now",
+    // Its shared run is the x86-64 verdict; `virt_vm_map_shares` builds it
+    // for AArch64 and runs it on that architecture's job case.
+    "vm_map_shares",
+    // Its shared run is the x86-64 verdict; `virt_jobs_at_el2` builds it for
+    // AArch64 and runs it on that architecture's job case.
+    "relro_sealed",
 ];
 
 /// What the boot's audit of the kernel's tables says when every leaf passed
@@ -436,6 +452,10 @@ const SCREEN_TESTS: &[ScreenTest] = &[
     // `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` on AArch64:
     // the unprivileged copies and their EL1 fixup (`arch::uaccess`).
     ("virt_user_copy_faults", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_USER_COPY}"))),
+    ("virt_vm_map_shares", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_VM_MAP}"))),
+    // `tmp_holds_empty_files_by_what_each_costs` on AArch64: the paged
+    // objects' table and its notices are shared memory-management code.
+    ("virt_tmp_holds_empty_files_by_what_each_costs", qemu::Profile::Virt, |profile, _| virt_tmp_holds_empty_files_by_what_each_costs(profile)),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_RING0_TIMER}"))),
     // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and
     // `virt_reboot`: under HVF a woken thread can go undispatched for seconds
@@ -580,6 +600,12 @@ const MACHINE_TESTS: &[MachineTest] = &[
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     ("nested_nmi_is_loud", |test_config| faults::nested_nmi_is_loud(test_config)),
+    // Vector 2 entered at CPL 0 under a decoy user GS base, which `nmi-user-gs`
+    // stages with `swapgs; int 2`: the entry finds the kernel's own block by
+    // its GDT and returns to the base it found. The IDT, the MSRs and the
+    // entry are a booted kernel's; the `nmi_finds_the_kernels_gs` metal row is
+    // each bench's verdict, and this is the guest runner's CPU's.
+    ("nmi_under_a_user_gs_base", |test_config| faults::nmi_under_a_user_gs_base(test_config)),
     // The boot's W^X audit refusing a leaf an actuator staged: the panic ends
     // the boot, so it cannot share one, and the T14's `kernel_wx` row reads
     // the same audit passing. q35 on `Profile::Metal`, whose 16550 carries
@@ -695,6 +721,12 @@ const MACHINE_TESTS: &[MachineTest] = &[
     ("a_user_copy_highest_first_faults_or_ends_as_bad_address", |test_config| {
         a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &["copies-go-down"])
     }),
+    // `/tmp` holds more empty files than its guest has MiB of memory, and
+    // each one's last holder going reaches its server: the memory file
+    // server's objects as the kernel makes, charges and reports them, which
+    // no host build has. One boot of QEMU's x86-64 machine; the shared boots
+    // run it on each bench.
+    ("tmp_holds_empty_files_by_what_each_costs", |test_config| tmp_holds_empty_files_by_what_each_costs(test_config)),
     // The boot's log written through usbd onto the stick it booted from, and
     // still there once the machine has stopped: the path every metal boot's
     // `/log` takes, which no other QEMU row reads, because their console is
@@ -830,6 +862,18 @@ const MACHINE_TESTS: &[MachineTest] = &[
     // run is the benches'; this is TCG's, whose XSAVE is QEMU's own reading of
     // the SDM, and the KVM runner's CPU.
     ("vector_state_survives_a_switch", |test_config| vector_state_survives_a_switch(test_config)),
+    // Ring 3 loads GS with every selector it may and enters the kernel by a
+    // syscall, a page fault and a park, which only the kernel's own entries
+    // and a CPU's segment loads have. The shared boot's run is each bench's
+    // verdict; this is the guest runner's CPU's, and a kernel that addresses
+    // its per-CPU block through the user's GS base dies on it.
+    ("a_ring3_gs_load_leaves_the_kernel_its_gs", |test_config| a_ring3_gs_load_leaves_the_kernel_its_gs(test_config)),
+    // Every Ring 3 route to `#DB` and `#BP` ends its process as a trap, `TF`
+    // across a `MOV SS` into a syscall and into `INT3` among them: the `#DB`
+    // gate's own stack and its move of a Ring 3 frame to the thread's, which
+    // only a booted kernel has. The shared boot's run is each bench's verdict;
+    // this is the guest runner's CPU's.
+    ("ring3_debug_traps_end_their_process", |test_config| ring3_debug_traps_end_their_process(test_config)),
     // std's CPU count against the CPUs the guest booted with, and an ended
     // thread's stack and table place given back, joined or detached, on the
     // two-CPU q35 guest: std's ToyOS layer, which no host builds.
@@ -1124,9 +1168,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // How long a spawn of `toybox` takes to its exit, printed by the job and
-        // read off the log for an A/B against another build: that it ran, and
-        // what it said, are the verdict.
+        // How long a spawn of `toybox` takes to its exit, and the machine's
+        // busy CPU a spawn, printed by the job and read off the log for an A/B
+        // against another build: that it ran, and what it said, are the verdict.
         "spawn_cost",
         metal::Metal {
             on: On::Every,
@@ -1491,6 +1535,15 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The words each CPU read of itself, which are its bench's pinned
+        // words, and its line for each vulnerability: the lines are
+        // `kernel::mitigation::decide`'s verdict on those words. Metal alone:
+        // a guest's words are its hypervisor's, and what a bench's words
+        // decide is held to its vendor's row by a host test.
+        "mitigations",
+        metal::Metal { on: On::Every, arms: METALCASE, judge: |b| mitigations_on_metal(b[0].kernel().text()) },
+    ),
+    (
         // The machine came back to Ubuntu's ssh server, which is what tells a reset from the
         // S5 power-off the QEMU stop reason exists to catch — the driver
         // established it before this judge ran. What is left is the kernel's own
@@ -1552,6 +1605,13 @@ const METAL: &[(&str, metal::Metal)] = &[
         // the probe's line is either in them or it never ran.
         "sysret_ss_reload",
         metal::Metal { on: On::Every, arms: SELFTESTS, judge: |b| sysret_ss(b[0].kernel().text()) },
+    ),
+    (
+        // Vector 2 at CPL 0 under a decoy user GS base: each bench's NMI entry
+        // finds its own CPU's block without trusting GS, and returns to the
+        // base it found.
+        "nmi_finds_the_kernels_gs",
+        metal::Metal { on: On::Every, arms: SELFTESTS, judge: |b| faults::nmi_user_gs(b[0].kernel().text()).map(|_| ()) },
     ),
     (
         // A unit handed over translating, remapping and queueing, or on an
@@ -2272,6 +2332,7 @@ const SELFTEST_PARAMS: &[&str] = &[
     "unclaimed-vector-selftest",
     "sysret-ss-probe",
     "hpet-stall",
+    "nmi-user-gs",
 ];
 
 const SELFTESTS: &[metal::Arm] = &[metal::Arm {
@@ -2900,6 +2961,15 @@ const VIRT_WALL_CLOCK: &str = "wall_clock_now";
 /// `a_user_copy_faults_in_mid_copy_or_ends_as_bad_address` on x86-64.
 const VIRT_USER_COPY: &str = "user_copy_faults";
 
+/// The AArch64 guest's mappings of a memory object's own pages: the same
+/// binary and claims as the x86-64 row `vm_map_shares`, among them a shared
+/// page mapped executable, which no other AArch64 row reaches.
+const VIRT_VM_MAP: &str = "vm_map_shares";
+
+/// A program's `PT_GNU_RELRO` is read-only once it has relocated itself, on
+/// AArch64; the shared boot's member on x86-64.
+const VIRT_RELRO: &str = "relro_sealed";
+
 /// The instant `tests/images/virtjobcase.toml`'s RTC starts at, and the same in Unix
 /// seconds: years from any host's own, so a reading on it came from the RTC.
 const VIRT_RTC_BASE: &str = "2033-03-07T09:14:25";
@@ -2920,6 +2990,8 @@ const VIRT_JOBS: &[(&str, &str)] = &[
     ("test_rs_random_draws", RANDOM_DRAWS_SAID),
     ("test_rs_wall_clock_now", WALL_CLOCK_SAID),
     ("test_rs_user_copy_faults", "user copies: all checks passed"),
+    ("test_rs_vm_map_shares", "vm_map_shares: an object's pages are mapped where asked"),
+    ("test_rs_relro_sealed", "relro_sealed: a store to a relocated word of PT_GNU_RELRO ended its program as a memory fault"),
     ("test_rs_abuse_readonly_copyout", "a syscall writes only where its caller could store"),
 ];
 
@@ -2944,7 +3016,7 @@ fn boot_virt_jobs(profile: qemu::Profile) -> QemuInstance {
             smp: 1,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: [VIRT_COPYOUT, VIRT_RING0_TIMER, VIRT_RANDOM, VIRT_WALL_CLOCK, VIRT_USER_COPY]
+            extra_root_files: [VIRT_COPYOUT, VIRT_RING0_TIMER, VIRT_RANDOM, VIRT_WALL_CLOCK, VIRT_USER_COPY, VIRT_VM_MAP, VIRT_RELRO]
                 .map(|name| suite_bin(profile.arch(), name))
                 .to_vec(),
             rtc_base: Some(VIRT_RTC_BASE),
@@ -5814,6 +5886,90 @@ fn vector_state_survives_a_switch(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// [`MACHINE_TESTS`]' `a_ring3_gs_load_leaves_the_kernel_its_gs`: the shared
+/// boot's `gs_segment_load` alone.
+fn a_ring3_gs_load_leaves_the_kernel_its_gs(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "gs_segment_load";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu =
+        QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_gs_segment_load", Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let Some(line) = result.stdout.lines().find(|l| l.contains("gs_segment_load: ")) else {
+        return Err(format!("the job never said what it loaded:\n{}", result.stdout));
+    };
+    eprintln!("  [gs] {}", line.trim());
+    Ok(())
+}
+
+/// [`MACHINE_TESTS`]' `ring3_debug_traps_end_their_process`: the shared
+/// boot's `debug_trap` alone.
+fn ring3_debug_traps_end_their_process(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "debug_trap";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu =
+        QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_debug_trap", Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let Some(line) = result.stdout.lines().find(|l| l.contains("the machine is still here")) else {
+        return Err(format!("the job never said every arm ended:\n{}", result.stdout));
+    };
+    eprintln!("  [debug_trap] {}", line.trim());
+    Ok(())
+}
+
+/// What `tmp_empty_files` says once every file it made, one for each MiB of
+/// the machine's memory and 1,024 more, was opened to read and removed.
+const TMP_FILES_SAID: &str = "empty files, one per MiB of memory and 1024 more, made, read-opened and removed";
+
+/// `tmp_empty_files` alone: more empty files in `/tmp` than the guest has
+/// MiB of memory, each opened to read and closed, and removed.
+fn tmp_holds_empty_files_by_what_each_costs(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "tmp_empty_files";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_tmp_empty_files", Duration::from_secs(300));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let Some(said) = result.stdout.lines().find(|l| l.contains(TMP_FILES_SAID)) else {
+        return Err(format!("the job never said {TMP_FILES_SAID:?}:\n{}", result.stdout));
+    };
+    eprintln!("  [tmp] {}", said.trim());
+    Ok(())
+}
+
+/// The same job on AArch64: `tests/images/virttmpcase.toml`, whose one job it
+/// is, beside the memory file server alone.
+fn virt_tmp_holds_empty_files_by_what_each_costs(profile: qemu::Profile) -> Result<(), String> {
+    let config = compile::repo_root().join("tests/images/virttmpcase.toml");
+    let options = BootOptions {
+        profile,
+        ready_marker: "control registers: SCTLR_EL1=",
+        extra_root_files: vec![suite_bin(profile.arch(), "tmp_empty_files")],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "test_rs_tmp_empty_files", TMP_FILES_SAID)
+}
+
 /// `std_threads` on a guest of [`BootOptions`]' CPUs: it asserts what it
 /// frees itself, and the CPU count it prints is held here to the CPUs the
 /// guest was booted with.
@@ -6590,8 +6746,13 @@ const SYSRET_SS_UNARMED: &str = "sysret-ss: probe could not arm";
 const SYSRET_SS_RELOADED: &str = "sysret-ss: reloaded";
 /// The probe, when SS stayed null across a switch.
 const SYSRET_SS_NOT_RELOADED: &str = "sysret-ss: NOT reloaded";
+/// The probe, on a part whose `SYSRET` writes SS whole.
+const SYSRET_SS_NOT_NEEDED: &str = "sysret-ss: not needed";
 
-/// The context switch reloads SS from null before a `sysretq` can see it.
+/// The context switch reloads SS from null before a `sysretq` can see it on an
+/// AMD part, whose `SYSRET` keeps SS's hidden descriptor, and leaves it alone on
+/// an Intel one, whose `SYSRET` writes it whole. Which the boot ran on is its
+/// PCI host bridge's vendor, not the kernel's own reading of CPUID.
 fn sysret_ss(log: &str) -> Result<(), String> {
         if log.contains(SYSRET_SS_UNARMED) {
             return Err(format!("the SS-reload probe could not arm, so it measured nothing:\n{log}"));
@@ -6602,12 +6763,20 @@ fn sysret_ss(log: &str) -> Result<(), String> {
                  unusable one:\n{log}"
             ));
         }
-        if !log.contains(SYSRET_SS_RELOADED) {
-            return Err(format!(
-                "the SS-reload probe never reported — the first syscall may not have run it:\n{log}"
-            ));
+        let host = log
+            .lines()
+            .find_map(|line| line.split_once("PCI 00:00.0 [0600] vendor=").map(|(_, rest)| rest.get(..4)))
+            .flatten()
+            .ok_or_else(|| format!("the boot named no host bridge at 00:00.0:\n{log}"))?;
+        let (wanted, what) = match host {
+            "1022" => (SYSRET_SS_RELOADED, "reloads SS from null before a sysretq can see it"),
+            "8086" => (SYSRET_SS_NOT_NEEDED, "leaves SS alone, which an Intel SYSRET writes whole"),
+            other => return Err(format!("the host bridge's vendor {other} is neither AMD's nor Intel's")),
+        };
+        if !log.contains(wanted) {
+            return Err(format!("on host bridge vendor {host} the probe owed \"{wanted}\" and never said it:\n{log}"));
         }
-        eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
+        eprintln!("  [sysret-ss] the switch {what}");
         Ok(())
 }
 
@@ -6856,6 +7025,141 @@ fn microcode_on_metal(bench: Bench, loader: &str, log: &str, cpus: u32) -> Resul
         return Err(format!("{line:?}: on signature {signature:#x} {held_to}"));
     }
     eprintln!("  [microcode] {} CPUs of signature {signature:#x}: {held_to}", lines.len());
+    Ok(())
+}
+
+/// Each bench's words as its boot of 3b07ea1dd logged them, but its microcode
+/// revision, which the `microcode` row holds: a boot of that machine reads
+/// these again, and `checks::the_benches_words_decide_as_their_vendors_rows`
+/// holds what they decide to each vendor's row for that CPU.
+const MITIGATION_BENCHES: [(&str, &str); 2] = [
+    (
+        "the T14",
+        "Intel signature=0x806c1 hypervisor=false smt=true cpuid.7.0.ebx=0xf3bfa7eb cpuid.7.0.edx=0xfc100710 \
+         cpuid.7.2.edx=0x1 arch_capabilities=0xa005c6b cpuid.80000008.ebx=0x0 cpuid.80000021.eax=0x0 cpuid.80000021.ecx=0x0",
+    ),
+    (
+        "the AMD bench",
+        "Amd signature=0x860f01 hypervisor=false smt=true cpuid.7.0.ebx=0x219c91a9 cpuid.7.0.edx=0x0 cpuid.7.2.edx=0x0 \
+         arch_capabilities=0x0 cpuid.80000008.ebx=0x90cf757 cpuid.80000021.eax=0x0 cpuid.80000021.ecx=0x0",
+    ),
+];
+
+/// A `mitigations:` words line: the facts it gives, its microcode revision
+/// aside, and its other `name=value` fields.
+fn mitigation_words(words: &str) -> Result<(kernel::mitigation::Facts, BTreeMap<&str, &str>), String> {
+    let mut fields = words.split_whitespace();
+    let vendor = match fields.next() {
+        Some("Intel") => kernel::cpu::Vendor::Intel,
+        Some("Amd") => kernel::cpu::Vendor::Amd,
+        other => return Err(format!("the words name the vendor {other:?}, whose guidance nothing reads")),
+    };
+    let fields: BTreeMap<&str, &str> = fields.filter_map(|field| field.split_once('=')).collect();
+    let field = |name: &str| fields.get(name).copied().ok_or_else(|| format!("the words carry no {name}: {words:?}"));
+    let hex = |name: &str| -> Result<u64, String> {
+        let digits = field(name)?;
+        u64::from_str_radix(digits.trim_start_matches("0x"), 16).map_err(|e| format!("{name}={digits}: {e}"))
+    };
+    let word = |name: &str| hex(name).and_then(|value| u32::try_from(value).map_err(|e| format!("{name}: {e}")));
+    let flag = |name: &str| field(name)?.parse::<bool>().map_err(|e| format!("{name}: {e}"));
+    let facts = kernel::mitigation::Facts {
+        vendor,
+        signature: word("signature")?,
+        hypervisor: flag("hypervisor")?,
+        smt: flag("smt")?,
+        microcode: kernel::microcode::Revision(0),
+        cpuid_7_0_ebx: word("cpuid.7.0.ebx")?,
+        cpuid_7_0_edx: word("cpuid.7.0.edx")?,
+        cpuid_7_2_edx: word("cpuid.7.2.edx")?,
+        arch_capabilities: hex("arch_capabilities")?,
+        cpuid_8000_0008_ebx: word("cpuid.80000008.ebx")?,
+        cpuid_8000_0021_eax: word("cpuid.80000021.eax")?,
+        cpuid_8000_0021_ecx: word("cpuid.80000021.ecx")?,
+    };
+    Ok((facts, fields))
+}
+
+/// Every CPU's `mitigations:` lines in `log`, cpu0's and those of each later
+/// CPU that differed from it: [`mitigations_of_a_cpu`] on each.
+fn mitigations_on_metal(log: &str) -> Result<(), String> {
+    let mut said: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+    for line in log.lines() {
+        let Some((_, rest)) = line.split_once("mitigations: cpu") else { continue };
+        let (cpu, rest) = rest.split_once(' ').ok_or_else(|| format!("a `mitigations:` line names no CPU: {line:?}"))?;
+        let cpu = cpu.parse::<u32>().map_err(|e| format!("{line:?}: {e}"))?;
+        said.entry(cpu).or_default().push(rest);
+    }
+    if !said.contains_key(&0) {
+        return Err("cpu0 wrote no `mitigations:` lines".to_string());
+    }
+    for (cpu, lines) in &said {
+        mitigations_of_a_cpu(*cpu, lines)?;
+    }
+    Ok(())
+}
+
+/// One CPU's words and its line for each vulnerability: the words name a
+/// vendor whose guidance is read, are no guest's, and are its bench's pinned
+/// words; each line is what [`kernel::mitigation::decide`] says of the words
+/// with what the registers they give show in force; and what the kernel sets
+/// itself is in force wherever the decision names it.
+fn mitigations_of_a_cpu(cpu: u32, said: &[&str]) -> Result<(), String> {
+    use kernel::mitigation::{decide, Facts, Mitigation, Registers, Verdict, Vulnerability};
+    let mut words = said.iter().filter_map(|said| said.strip_prefix("words "));
+    let words = match (words.next(), words.next()) {
+        (Some(words), None) => words,
+        _ => return Err(format!("cpu{cpu} wrote no one `mitigations:` words line: {said:?}")),
+    };
+    let (facts, fields) = mitigation_words(words).map_err(|e| format!("cpu{cpu}: {e}"))?;
+    if facts.hypervisor {
+        return Err(format!("cpu{cpu}'s words are a hypervisor's guest's, and this row judges a machine's: {words:?}"));
+    }
+    let field = |name: &str| fields.get(name).copied().ok_or_else(|| format!("cpu{cpu}'s words carry no {name}: {words:?}"));
+    let hex = |name: &str, digits: &str| {
+        u64::from_str_radix(digits.trim_start_matches("0x"), 16).map_err(|e| format!("cpu{cpu}'s {name}={digits}: {e}"))
+    };
+    let msr = |name: &str| match field(name)? {
+        "-" => Ok(None),
+        digits => hex(name, digits).map(Some),
+    };
+    let microcode = field("microcode").and_then(|digits| hex("microcode", digits))?;
+    let microcode = kernel::microcode::Revision(u32::try_from(microcode).map_err(|e| format!("cpu{cpu}'s microcode: {e}"))?);
+    let pinned = MITIGATION_BENCHES
+        .iter()
+        .map(|&(bench, pinned)| mitigation_words(pinned).map(|(pinned, _)| (bench, pinned)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(&(bench, pinned)) = pinned.iter().find(|(_, pinned)| pinned.signature == facts.signature) else {
+        return Err(format!("cpu{cpu}'s signature {:#x} is no bench's whose words are pinned: {words:?}", facts.signature));
+    };
+    if facts != pinned {
+        return Err(format!("cpu{cpu}'s words are not {bench}'s pinned words: {words:?} against {pinned:?}"));
+    }
+    let facts = Facts { microcode, ..facts };
+    let registers = Registers { mcu_opt_ctrl: msr("mcu_opt_ctrl")?, de_cfg2: msr("de_cfg2")?, c001_1029: msr("c001_1029")? };
+    let decision = decide(&facts);
+    let in_force = decision.in_force(&registers);
+    let lfence = Mitigation::LfenceDispatchSerializing;
+    if decision.enumerates(lfence) && !in_force.has(lfence) {
+        return Err(format!("cpu{cpu}'s C001_1029 reads {:?}: the LFENCE bit the kernel sets is clear", registers.c001_1029));
+    }
+    for of in Vulnerability::ALL {
+        let prefix = format!("{}: ", of.name());
+        let mut named = said.iter().filter_map(|said| said.strip_prefix(prefix.as_str()));
+        let decided = decision.line(of, in_force).to_string();
+        match (named.next(), named.next()) {
+            (Some(line), None) if line == decided => {}
+            (Some(line), None) => {
+                return Err(format!("cpu{cpu}'s {prefix}line is not the decision on its words: said {line:?}, decided {decided:?}"))
+            }
+            _ => return Err(format!("cpu{cpu}: expected one `{prefix}` line, got {said:?}")),
+        }
+    }
+    let affected = Vulnerability::ALL.iter().filter(|&&of| decision.verdict(of) != Verdict::NotAffected).count();
+    eprintln!(
+        "  [mitigations] cpu{cpu}, {bench}: its lines are the decision on its pinned words, {affected} naming a vulnerability; \
+         C001_1029 found {}",
+        field("c001_1029_found")?,
+    );
     Ok(())
 }
 

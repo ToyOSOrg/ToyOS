@@ -56,7 +56,7 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--hold") {
         return hold();
     }
-    let pager = Pager::create(LARGE + 16 + WRITES, 1, 5, Duration::from_secs(1)).expect("pagerprobe: its row starts it as a pager");
+    let pager = Pager::create(LARGE + 16 + WRITES, 1, Duration::from_secs(1)).expect("pagerprobe: its row starts it as a pager");
     dirty_supply_prefix(&pager);
     let large = pager.object(LARGE * PAGE).expect("pagerprobe: the large object");
     fill(&pager, large);

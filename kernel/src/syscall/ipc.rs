@@ -19,12 +19,11 @@ use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
 use crate::{message, pipe, process};
 
-use toyos_abi::handle::{NotRights, RawHandle, Rights, TransferEntry};
+use toyos_abi::handle::{NotRights, RawHandle, ReceivedEntry, Rights, TransferEntry};
 use toyos_abi::syscall::*;
 use kernel::sched::task::WaitClass;
-use kernel::vm::Prot;
 
-use super::{cancelled, HANDLE_LEN, TRANSFER_ENTRY_LEN};
+use super::{cancelled, RECEIVED_ENTRY_LEN, TRANSFER_ENTRY_LEN};
 use super::handles::handle_result;
 
 pub(super) fn sys_pipe() -> u64 {
@@ -395,39 +394,6 @@ pub(super) fn sys_shm_sub(h: RawHandle, offset: u64, len: u64) -> u64 {
     })
 }
 
-/// `toyos_abi::syscall::shm_map`: readable on `MAP`, writable on `MAP` and `WRITE`.
-pub(super) fn sys_shm_map(h: RawHandle, prot: u64) -> u64 {
-    let (prot, need) = match VmProt::from_u64(prot) {
-        Some(VmProt::Read) => (Prot::Read, Rights::MAP),
-        Some(VmProt::ReadWrite) => (Prot::ReadWrite, Rights::MAP.union(Rights::WRITE)),
-        Some(VmProt::None | VmProt::ReadExec) | None => return SyscallError::InvalidArgument.to_u64(),
-    };
-    let shm = match process::with_handles(|handles| {
-        handles.get::<crate::object::shm::SharedMemObject>(h, need)
-    }) {
-        Ok(shm) => shm,
-        Err(e) => return e.refuse(),
-    };
-    assert!(
-        matches!(prot, Prot::Read) || shm.immutable().is_none(),
-        "shm: a handle to memory nobody writes carries WRITE"
-    );
-    let pt = process::current_address_space();
-    let len = shm.size();
-    let mapped = pt.lock().map(alloc::sync::Arc::clone(&shm), 0, len, prot, crate::mm::space::At::ANYWHERE);
-    let at = match mapped {
-        Ok(at) => at,
-        Err(e) => return e.to_u64(),
-    };
-    // A device's window is taken back with its last handle, so it says
-    // where it is mapped; one whose last handle went meanwhile is refused.
-    if let Err(e) = shm.mapped_at(&pt, at, len) {
-        pt.lock().release_object(at, len, &shm);
-        return e.to_u64();
-    }
-    at.raw()
-}
-
 /// A send's arguments as the dispatch bounded them.
 pub(super) struct Outgoing<'a> {
     pub bytes: crate::user_ptr::UserBytes<'a>,
@@ -627,10 +593,13 @@ fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
 }
 
 /// A message is taken, its bytes in the reader's buffers: answer its
-/// handles' numbers and wake the sender, for its room.
-fn delivered(rx: &QueueRef, into: &mut Incoming<'_>, head: kernel::message::Head, installed: &[RawHandle]) -> u64 {
+/// handles' numbers and kinds and wake the sender, for its room.
+fn delivered(rx: &QueueRef, into: &mut Incoming<'_>, head: kernel::message::Head, installed: &[ReceivedEntry]) -> u64 {
     let installed = &installed[..head.handles];
-    let told = installed.iter().enumerate().try_for_each(|(i, h)| into.handles.write_at(i * HANDLE_LEN, &h.0.to_ne_bytes()));
+    let told = installed
+        .iter()
+        .enumerate()
+        .try_for_each(|(i, entry)| into.handles.write_at(i * RECEIVED_ENTRY_LEN, toyos_abi::usersafe::bytes(entry)));
     if let Err(faulted) = told {
         return undelivered(rx, installed, faulted);
     }
@@ -640,9 +609,9 @@ fn delivered(rx: &QueueRef, into: &mut Incoming<'_>, head: kernel::message::Head
 
 /// A message taken whose reader's buffers faulted: its bytes are lost, and
 /// its handles, installed at numbers the reader was never told, are closed.
-fn undelivered(rx: &QueueRef, installed: &[RawHandle], faulted: crate::user_ptr::Faulted) -> u64 {
+fn undelivered(rx: &QueueRef, installed: &[ReceivedEntry], faulted: crate::user_ptr::Faulted) -> u64 {
     process::with_handles(|handles| {
-        for &h in installed {
+        for ReceivedEntry { handle: h, .. } in installed.iter().copied() {
             // A sibling may have closed the number since, or reused it for a
             // handle of its own, which this then closes: the race is the
             // misbehaving process's own, and stays inside it.

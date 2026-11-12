@@ -3,11 +3,11 @@
 //!
 //! **A kernel watch stays armed until it is answered or replaced**, and its
 //! answer is what the object holds at the look that answers it
-//! (`kernel/src/inbox/polls.rs`). So a watch submitted again with the same
+//! (`kernel/pure/sched/poll.rs`). So a watch submitted again with the same
 //! handle, interest and token replaces a poll with its twin and costs the
 //! submit the poll's registration on every watch it names, for nothing.
 //!
-//! **The kernel keeps one poll a handle** (`admit` in `kernel/src/inbox/polls.rs`):
+//! **The kernel keeps one poll a handle** (`admit` in `kernel/pure/sched/poll.rs`):
 //! a watch of a handle under another token withdraws the handle's earlier poll
 //! unanswered. So a record is kept by handle, and a watch under another token
 //! replaces it as the kernel replaces the poll.

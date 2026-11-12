@@ -69,7 +69,8 @@ impl TimerPlan {
     }
 }
 
-/// Proof that a [`TimerPlan`] reached the hardware. [`crate::sched::cpu::SleepToken`]
+/// Proof that the hardware holds a [`TimerPlan`], or a one-shot still to fire
+/// that is due no later. [`crate::sched::cpu::SleepToken`]
 /// cannot be built without one, so "halted with a deadline pending and the
 /// timer unarmed" is unrepresentable rather than asserted.
 pub struct TimerApplied {

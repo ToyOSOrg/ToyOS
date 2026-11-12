@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-/// The round time past which a volume that answered every call is announced
+/// The batch time past which a volume that answered every call is announced
 /// slow. Nothing in this program ends a volume for slowness: only the device's
 /// own refusal does.
 ///
@@ -34,33 +34,14 @@ impl Retry {
         now >= self.at
     }
 
+    pub fn at(&self) -> Instant {
+        self.at
+    }
+
     /// Asked again at `now` and refused: twice the wait, to [`RETRY_MAX`].
     pub fn again(&mut self, now: Instant) {
         self.wait = (self.wait * 2).min(RETRY_MAX);
         self.at = now + self.wait;
-    }
-}
-
-/// Which call refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Step {
-    /// One of the batch's lines did not reach the file.
-    Append,
-    /// The bytes are in the file and did not reach the device.
-    Flush,
-    /// Everything answered, and the round took longer than
-    /// [`LOG_WRITE_BUDGET`].
-    TooSlow,
-}
-
-impl Step {
-    /// The word this program's console line uses for it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Append => "the append",
-            Self::Flush => "the sync",
-            Self::TooSlow => "the write",
-        }
     }
 }
 
@@ -82,13 +63,5 @@ mod tests {
             retry.again(now);
         }
         assert_eq!(waits, [1, 2, 4, 8, 16, 32, 64, 64, 64]);
-    }
-
-    /// The console words, which the table in `main` is written against.
-    #[test]
-    fn every_step_names_itself() {
-        assert_eq!(Step::Append.as_str(), "the append");
-        assert_eq!(Step::Flush.as_str(), "the sync");
-        assert_eq!(Step::TooSlow.as_str(), "the write");
     }
 }

@@ -37,7 +37,7 @@ use toyos_manifest::Program;
 use toyos_session::{self as wire, Listed, Names, SignOut, SignOutSession, Started, State};
 use toyos_supervisor::sessions::{self as decide, Reopens};
 
-use crate::{exit_of, start, Caller, Extra, LaunchRx, Minting, Output, Pending, Port, Served, Supervisor};
+use crate::{exit_of, start, Asking, Caller, Extra, LaunchRx, Minting, Output, Port, Served, Supervisor};
 
 /// The login sessions the supervisor watches the owners of at once. Each
 /// owner is a process its loop watches, beside its services and `drives`
@@ -55,7 +55,7 @@ pub(crate) struct Login {
     pub link: Link,
     rx: LaunchRx,
     /// The owner's handle to itself, which places a detached app under it.
-    place: Option<OwnedHandle>,
+    place: Option<toyos::process::Process>,
     /// The session's launcher port, which every launcher in it is minted on.
     /// Held here alone, so the session's end closes it and a launch connected
     /// to it reads its end.
@@ -421,7 +421,7 @@ impl Supervisor<'_> {
 
     /// Everything each session owner said on its link: its launcher's
     /// connections, answered as launches in its session, and its reports.
-    pub(crate) fn pump_links(&mut self, pending: &mut Vec<Pending>) {
+    pub(crate) fn pump_links(&mut self, asking: &mut Asking) {
         for at in 0..self.logins.open.len() {
             loop {
                 let login = &mut self.logins.open[at];
@@ -446,12 +446,18 @@ impl Supervisor<'_> {
                 let session = login.session;
                 match msg_type {
                     wire::MSG_HANDOVER => match self.handed_over(session, &payload, batch) {
-                        Ok(handed) if pending.len() < crate::MAX_PENDING_LAUNCHES => pending.push(handed),
-                        Ok(_) => say!("supervisor: launcher: refusing a handed-over launch: the table is full"),
+                        Ok((conn, caller)) => {
+                            let key = toyos::admission::Badge::new(&payload);
+                            let admitted = asking.admit(conn, key, Port::Launcher(caller), Instant::now());
+                            if let Err(toyos::admission::Refused { key, why, say: Some(unsaid), .. }) = admitted {
+                                say!("supervisor: launcher: letting a handed-over launch of {key:?} go: {why}{unsaid}");
+                            }
+                        }
                         Err(why) => say!("supervisor: launcher: a launch session {} handed over is dropped: {why}", session.share()),
                     },
-                    wire::MSG_PLACE => match batch.exact::<1>() {
-                        Some([handle]) => self.logins.open[at].place = Some(handle),
+                    wire::MSG_PLACE => match batch.exact::<1>().map(|[handle]| handle.typed()) {
+                        Some(Ok(place)) => self.logins.open[at].place = Some(place),
+                        Some(Err(why)) => say!("supervisor: session {}'s owner sent a place that is none: {why}", session.share()),
                         None => say!("supervisor: session {}'s owner sent no place", session.share()),
                     },
                     wire::MSG_WAITING => {
@@ -473,15 +479,15 @@ impl Supervisor<'_> {
     /// A connection `session`'s owner accepted on its launcher, as a launch
     /// waiting for its frame. Its caller is the badge's row; its session is
     /// `session`, which the badge must name.
-    fn handed_over(&self, session: Session, badge: &[u8], batch: ipc::Batch) -> Result<Pending, String> {
+    fn handed_over(&self, session: Session, badge: &[u8], batch: ipc::Batch) -> Result<(Connection, Caller), String> {
         let [handle] = batch.exact::<1>().ok_or("it carried no single connection")?;
-        let conn = Connection::received(handle);
+        let conn = handle.typed::<Connection>().map_err(|why| why.to_string())?;
         let Some(Authority { row, session: named }) = Authority::decode(badge) else {
             return Err(format!("its badge is not one this supervisor writes: {badge:?}"));
         };
         let session = decide::handed_over(session, named).map_err(|named| format!("its badge names session {}", named.share()))?;
         let row = self.system.program(&row).ok_or_else(|| format!("its badge names `{row}`, which is no row"))?;
-        Ok(Pending { conn, rx: LaunchRx::new(), since: Instant::now(), port: Port::Launcher(Caller { row, session }) })
+        Ok((conn, Caller { row, session }))
     }
 
     /// An app started in a login session: watched, and its owner told.

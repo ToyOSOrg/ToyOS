@@ -703,9 +703,10 @@ fn teardown_resources(
     ops::close_all(&mut handles.lock());
     // Every thread has left, and none returns to Ring 3 to use them.
     crate::isa::process_ends(pid);
+    let space = Arc::clone(&process_data_arc.lock().space);
+    space.retire();
 
-    let data = process_data_arc.lock();
-    let usage = data.space.usage();
+    let usage = space.usage();
     Consumed {
         peak_memory: usage.peak_bytes(),
         alloc_count: usage.ranges_made(),
@@ -833,7 +834,7 @@ enum Leaving {
 /// Returns rather than diverging: the exit pass never comes back, and the live `Arc`s here would leak with no scope left to drop them.
 fn leave_as(leaving: Leaving) {
     let (pid, tid) = (current_process(), current_tid());
-    crate::mm::paging::activate_kernel();
+    crate::sched::driver::leave_address_space();
     let process_data = process_data();
     scheduler::flush_current_stats(&mut process_data.lock().accounting);
     let out = {
@@ -944,13 +945,9 @@ pub fn thread_sched(pid: Pid, tid: Tid) -> Option<ThreadSched> {
     table.get(pid)?.threads.get(&tid)?.sched().cloned()
 }
 
-/// A futex word's frame, its page populated like any other user access. Alignment matters: the scheduler reads the word through the frame, so an unaligned word could straddle into the next physical page.
-/// Not a lease: nothing pins the frame, and a sibling's `munmap` can free it under a parked wait. Made safe by an unmap ending the waits on the frames it frees (`sched::futex::revoke_frames`) after it counts the change the translation's `holds` reads.
-fn futex_word(addr: UserAddr) -> Option<crate::mm::space::Translation> {
-    if !addr.raw().is_multiple_of(4) {
-        return None;
-    }
-    crate::user_ptr::translate_user(addr, crate::user_ptr::Access::Read)
+/// A futex word's address, refused unless 4-byte aligned: the scheduler reads the word through its frame, so an unaligned word could straddle into the next physical page.
+fn futex_word(addr: UserAddr) -> Option<UserAddr> {
+    addr.raw().is_multiple_of(4).then_some(addr)
 }
 
 /// Atomically check a user futex word and block if it matches `expected`. Returns 0 if woken/never blocked, 1 if timed out, an error if `addr` names no word this process may have.
@@ -963,8 +960,9 @@ pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
         Deadline::never()
     };
 
+    let wait = crate::user_ptr::begin_futex_wait();
     // Physical, so a futex in shared memory works across processes.
-    let Some(word) = futex_word(addr) else {
+    let Some(word) = futex_word(addr).and_then(|addr| wait.translate(addr)) else {
         return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
     };
 
@@ -977,10 +975,10 @@ pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
 
 /// Wake up to `count` threads blocked on the same physical address as `addr`.
 pub fn futex_wake(addr: UserAddr, count: u64) -> u64 {
-    let Some(word) = futex_word(addr) else {
+    let Some(phys) = futex_word(addr).and_then(|addr| crate::user_ptr::translate_user(addr, crate::user_ptr::Access::Read)) else {
         return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
     };
-    scheduler::futex_wake(word.phys(), count as usize)
+    scheduler::futex_wake(phys, count as usize)
 }
 
 /// Wake processes blocked on reading from a pipe that now has data.

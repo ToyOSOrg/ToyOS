@@ -80,7 +80,7 @@ use crate::HOSTNAME;
 const TOKEN_STREAM: u64 = 1 << 32;
 const TOKEN_SOCKET: u64 = 3 << 32;
 /// A client that waits for its lookup's answer, by its connection's handle.
-/// Clear of the loop's own tokens and of a pending connection's.
+/// Clear of the loop's own tokens and of a waiting connection's.
 const TOKEN_LOOKUP: u64 = 5 << 32;
 const TOKEN_KIND: u64 = !(u32::MAX as u64);
 
@@ -213,8 +213,8 @@ type Lent = (Region, [OwnedHandle; BELLS], Rc<Holders>);
 /// connection being `connection`: the session the node is lent, the bells the
 /// answer hands over, and the holders. Refused by name, nothing is
 /// mapped, and the connection is handed back with the refusal's word.
-fn lend(connection: Connection, region: toyos::OwnedHandle) -> Result<Lent, (Connection, u32)> {
-    let mapping = match Region::judged(region) {
+fn lend(connection: Connection, region: ipc::ReceivedHandle) -> Result<Lent, (Connection, u32)> {
+    let mapping = match Region::judged(region.into()) {
         Ok(mapping) => mapping,
         Err(why) => {
             say!("netstack: refusing a stream's region — {why}");

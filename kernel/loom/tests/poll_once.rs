@@ -19,7 +19,7 @@
 
 #![cfg(feature = "loom")]
 
-use kernel_loom::poll_once::Once;
+use kernel_loom::sched::poll::Once;
 use loom::sync::atomic::{AtomicU32, Ordering};
 use loom::sync::Arc;
 

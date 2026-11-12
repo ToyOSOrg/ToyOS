@@ -30,6 +30,7 @@ pub mod idt;
 pub mod iommu_unit;
 pub mod ioapic;
 pub mod microcode;
+pub mod mitigation;
 pub mod mtrr;
 pub mod opregion;
 pub mod paging;
@@ -143,9 +144,10 @@ impl CpuLocal {
 }
 
 /// What this architecture keeps for each of the `cpus` CPUs the firmware
-/// names outside that record: the TLB's and the SMI command port's rounds.
+/// names outside that record.
 pub fn size(cpus: usize) {
     tlb::size(cpus);
     smi_cmd::size(cpus);
     clocksource::size(cpus);
+    mitigation::size(cpus);
 }

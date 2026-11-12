@@ -399,7 +399,9 @@ fn handshake(
         wire::MSG_OPENED => {
             let [ring, answered] = rx.take_handles::<{ wire::OPENED_HANDLES }>().ok_or(Error::Protocol)?;
             let opened = Opened::decode(rx.payload(frame.payload_len)).ok_or(Error::Protocol)?;
-            Ok((Bells { ring: Waker::from(ring), answered: Bell::from(answered) }, opened))
+            let ring = ring.typed::<Waker>().map_err(|_| Error::Protocol)?;
+            let answered = answered.typed::<Bell>().map_err(|_| Error::Protocol)?;
+            Ok((Bells { ring, answered }, opened))
         }
         wire::MSG_REFUSED => Err(Refusal::decode(rx.payload(frame.payload_len)).map_or(Error::Protocol, Error::Refused)),
         _ => Err(Error::Protocol),

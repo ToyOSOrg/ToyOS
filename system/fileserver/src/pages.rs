@@ -9,8 +9,9 @@
 //! **An object per file, by its volume identity**, which the notices name it
 //! by. It holds the volume's node for its life, so a dirty file stays open
 //! on the volume whoever closed it, and outlives its last close for its pages'
-//! sake until room is wanted: then a file nobody holds and nothing dirties
-//! goes first, oldest first. Anonymous objects stay while named or held.
+//! sake until room is wanted, or until a volume on a disk keeps its count of
+//! files: then a file nobody holds and nothing dirties goes first, oldest
+//! first. Anonymous objects stay while named or held.
 //!
 //! **One write at a time.** Every write, truncation and read of the server's
 //! runs under the object's hold (`toyos::paged::Pager::hold`), so to holders
@@ -185,6 +186,9 @@ impl File {
 
 pub struct Files<P: Pager> {
     pager: Option<P>,
+    /// The most files kept on a volume whose files can be let go; `None` for
+    /// a memory volume, whose objects are its files.
+    keeps: Option<usize>,
     files: BTreeMap<u64, File>,
     /// Each object's file, by the object's id, which the notices name.
     by_object: BTreeMap<u64, u64>,
@@ -194,8 +198,8 @@ pub struct Files<P: Pager> {
 }
 
 impl<P: Pager> Files<P> {
-    pub fn new(pager: Option<P>) -> Self {
-        Self { pager, files: BTreeMap::new(), by_object: BTreeMap::new(), tick: 0, buf: Vec::new() }
+    pub fn new(pager: Option<P>, keeps: Option<usize>) -> Self {
+        Self { pager, keeps, files: BTreeMap::new(), by_object: BTreeMap::new(), tick: 0, buf: Vec::new() }
     }
 
     /// The pager, which reads ready while a notice is owed.
@@ -339,8 +343,12 @@ impl<P: Pager> Files<P> {
             None => {}
         }
         let meta = volume.node_meta(node)?;
-        // Objects are bounded by count as pages are: a file nobody holds goes
-        // to make room for another's.
+        // A file nobody holds goes to make room for another's: at the count
+        // kept, or where the pager's job is charged no more.
+        if self.keeps.is_some_and(|keeps| self.files.len() >= keeps) && !self.drop_oldest(volume, identity) {
+            println!("fileserver: every file kept is held; file {identity} is refused");
+            return Err(Error::NoSpace);
+        }
         let object = loop {
             let created = if volume.memory() { self.pg().anonymous(meta.size) } else { self.pg().object(meta.size) };
             match created {

@@ -8,7 +8,9 @@ mod x86_64 {
     use core::arch::asm;
     use core::arch::x86_64::__cpuid_count;
 
-    use toyos_abi::syscall::{Stat, SYS_FSTAT};
+    use toyos_abi::syscall::{
+        Stat, SYS_CURRENT_CPU, SYS_FSTAT, SYS_NANOSLEEP, SYS_THREAD_SET_AFFINITY,
+    };
     use toyos::AsHandle;
 
     /// Which vector registers this machine gives a thread. Only [`width`]
@@ -182,6 +184,125 @@ mod x86_64 {
             options(nostack),
         );
         refused
+    }
+
+    /// What [`away_and_back`]'s block reads and writes through `r15`.
+    #[repr(C)]
+    struct Trip {
+        second: *const u8,
+        bytes: u64,
+        tid: u64,
+        home: *const u64,
+        away: *const u64,
+        /// The CPU each leg ran on: after the nap at home, on arriving away,
+        /// and on arriving home again.
+        cpus: [u64; 3],
+    }
+
+    /// How long each leg naps, so the CPU it leaves goes idle.
+    const NAP_NS: u64 = 200_000;
+
+    /// One trip's system calls, with the registers already loaded from
+    /// `[{p}]`: away, `Trip::second` copied over `[{p}]` and `$load` loading
+    /// it, and home again.
+    macro_rules! trip {
+        ($($load:tt)*) => {
+            concat!(
+                "mov rdi, {sleep}\n", "mov rsi, {nap}\n", "syscall\n",
+                "mov rdi, {cpu}\n", "syscall\n", "mov [r15 + 40], rax\n",
+                "mov rdi, {pin}\n", "mov rsi, [r15 + 16]\n", "mov rdx, [r15 + 32]\n", "mov r8, 1\n", "syscall\n",
+                "mov rdi, {cpu}\n", "syscall\n", "mov [r15 + 48], rax\n",
+                "mov rsi, [r15]\n", "mov rdi, {p}\n", "mov rcx, [r15 + 8]\n", "rep movsb\n",
+                $($load)*,
+                "mov rdi, {sleep}\n", "mov rsi, {nap}\n", "syscall\n",
+                "mov rdi, {pin}\n", "mov rsi, [r15 + 16]\n", "mov rdx, [r15 + 24]\n", "mov r8, 1\n", "syscall\n",
+                "mov rdi, {cpu}\n", "syscall\n", "mov [r15 + 56], rax\n",
+            )
+        };
+    }
+
+    #[target_feature(enable = "avx")]
+    unsafe fn away_and_back_avx(file: *mut u8, trip: *mut Trip) {
+        asm!(
+            ymm!(load 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15),
+            trip!(ymm!(load 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)),
+            ymm!(store 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15),
+            p = in(reg) file,
+            in("r15") trip,
+            sleep = const SYS_NANOSLEEP,
+            nap = const NAP_NS,
+            cpu = const SYS_CURRENT_CPU,
+            pin = const SYS_THREAD_SET_AFFINITY,
+            out("rdi") _,
+            out("rsi") _,
+            out("rdx") _,
+            out("r8") _,
+            out("rax") _,
+            out("rcx") _,
+            out("r11") _,
+            clobber_abi("C"),
+            options(nostack),
+        );
+    }
+
+    #[target_feature(enable = "avx512f")]
+    unsafe fn away_and_back_avx512(file: *mut u8, trip: *mut Trip) {
+        asm!(
+            zmm!(load 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31),
+            zmm!(kload 1 2 3 4 5 6 7),
+            trip!(concat!(
+                zmm!(load 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31),
+                zmm!(kload 1 2 3 4 5 6 7),
+            )),
+            zmm!(store 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31),
+            zmm!(kstore 1 2 3 4 5 6 7),
+            p = in(reg) file,
+            in("r15") trip,
+            sleep = const SYS_NANOSLEEP,
+            nap = const NAP_NS,
+            cpu = const SYS_CURRENT_CPU,
+            pin = const SYS_THREAD_SET_AFFINITY,
+            out("rdi") _,
+            out("rsi") _,
+            out("rdx") _,
+            out("r8") _,
+            out("rax") _,
+            out("rcx") _,
+            out("r11") _,
+            clobber_abi("C"),
+            options(nostack),
+        );
+    }
+
+    /// This thread, pinned to `home`, loads `first` into every vector
+    /// register and naps there, so `home` idles holding them; pinned to
+    /// `away`, it loads `second` and naps there; pinned to `home` again, it
+    /// reads its registers back. Answers them and the CPU each leg ran on.
+    pub fn away_and_back(width: Width, first: &[u8], second: &[u8], home: u32, away: u32) -> (Vec<u8>, [u64; 3]) {
+        assert_eq!(first.len(), width.bytes());
+        assert_eq!(second.len(), width.bytes());
+        let tid = u64::from(toyos::tls::current_tid().0);
+        let (home, away) = ([1u64 << home], [1u64 << away]);
+        toyos_abi::syscall::thread_set_affinity(tid, &home).expect("pin home");
+        let mut file = first.to_vec();
+        let mut trip = Trip {
+            second: second.as_ptr(),
+            bytes: width.bytes() as u64,
+            tid,
+            home: home.as_ptr(),
+            away: away.as_ptr(),
+            cpus: [u64::MAX; 3],
+        };
+        // SAFETY: as `hold`'s; `file` is `width.bytes()` long, as is the
+        // `second` it is overwritten with, every pointer `trip` holds is live
+        // across the block, and the masks are one word.
+        unsafe {
+            match width.0 {
+                Kind::Avx => away_and_back_avx(file.as_mut_ptr(), &mut trip),
+                Kind::Avx512 => away_and_back_avx512(file.as_mut_ptr(), &mut trip),
+            }
+        }
+        (file, trip.cpus)
     }
 
     /// This thread's vector registers, as they are.

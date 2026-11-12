@@ -45,8 +45,11 @@
 //! its core — `dirty` pages and a read's headroom — committed at its making
 //! and kept for its life, every frame of it either promised, in the index or
 //! held aside for the next supply; the rest of `capacity` promised a page at
-//! a time and given back as each goes. Its index, objects and the frames it
-//! holds aside are charged with it, so no call on it allocates.
+//! a time and given back as each goes. Its index and the frames it holds
+//! aside are charged with it. Its objects' slots are made a piece at a time,
+//! each piece charged as an object first needs it and kept for the pager's
+//! life (`issues/one-client-can-fill-the-tmp-servers-memory-and-deny-every-other-client.md`),
+//! so making an object is the one call that allocates.
 
 use alloc::sync::Arc;
 use core::cell::{Cell, UnsafeCell};
@@ -55,17 +58,19 @@ use core::pin::Pin;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kernel::chunked::{Chunked, Stack};
+use kernel::chunked::Stack;
 use kernel::paged::{
     holder_span, Core, Draw, Leave, Lookup, Object, Pages, Refused, Side, Supplied, Version, Waiters, Want, Writer,
     HOLDER_PAGES, PAGE, WRITES_A_READ_MEETS,
 };
 use kernel::sched::task::WaitClass;
+use kernel::slots::Slots;
 use toyos_abi::syscall::{
     PagedNotice, PagedRange, PagedStat, PagedStatus, SyscallError, NOTICE_DIRTIED, NOTICE_NO_HOLDERS, NOTICE_REQUESTED,
     PAGED_RECORD,
 };
 
+use crate::mm::charge::Charge;
 use crate::mm::pmm;
 use crate::process::Pid;
 use crate::sync::Lock;
@@ -78,6 +83,14 @@ use super::{KObjectVariant, ObjectCore, ZeroHandles};
 
 // Two pieces of a table and their allocator headers share one superframe.
 const _: () = assert!(2 * kernel::chunked::CHUNK_BYTES < crate::mm::MAX_HEAP_ALLOC);
+
+// A piece of slots is one allocation the heap takes.
+const _: () = assert!(Slots::<Entry, 2>::PIECE_BYTES <= kernel::chunked::CHUNK_BYTES);
+
+/// The slot table's lists: objects whose last holder went, and objects
+/// holders dirtied, each owing its pager a notice.
+const NO_HOLDERS: usize = 0;
+const DIRTIED: usize = 1;
 
 /// Pages one copy pins, and one supply or write draws, at once.
 const CHUNK: usize = 16;
@@ -111,10 +124,6 @@ struct Entry {
     holders: u32,
     /// Not released: owner calls reach it.
     owned: bool,
-    /// The last holder went and no notice has said so.
-    no_holders: bool,
-    /// A holder dirtied pages and no notice has said so.
-    dirtied: bool,
     /// Holders' writes under way, which outlive the handle they began through:
     /// the last holder is told gone only once none is.
     writers: u32,
@@ -124,14 +133,14 @@ struct Entry {
 
 struct State {
     pages: Pages<u64>,
-    /// Every object's slot, made with the pager.
-    entries: Chunked<Option<Entry>>,
-    free: Stack<u32>,
+    /// Every object, at its id's slot, marked on [`NO_HOLDERS`] while its
+    /// last holder has gone and on [`DIRTIED`] while holders dirtied its
+    /// pages, each until a notice has said so.
+    entries: Slots<Entry, 2>,
+    /// The heap the slots take, charged to the pager's job as each piece is
+    /// made.
+    slots_charge: Charge,
     requests: *mut Request,
-    /// Entries whose `no_holders` is set.
-    no_holders: usize,
-    /// Entries whose `dirtied` is set.
-    dirtied: usize,
     held: Held,
     gone: bool,
 }
@@ -184,18 +193,18 @@ unsafe impl Send for State {}
 
 impl State {
     fn entry(&self, slot: u32) -> &Entry {
-        self.entries[slot as usize].as_ref().expect("paged: a slot an object names is held")
+        self.entries.get(slot).expect("paged: a slot an object names is held")
     }
 
     fn entry_mut(&mut self, slot: u32) -> &mut Entry {
-        self.entries[slot as usize].as_mut().expect("paged: a slot an object names is held")
+        self.entries.get_mut(slot).expect("paged: a slot an object names is held")
     }
 
     /// The slot of the unreleased object `id` names: the caller's word,
     /// refused `InvalidArgument` where it names none.
     fn live(&self, id: u64) -> Result<u32, SyscallError> {
         let slot = u32::try_from(id).map_err(|_| SyscallError::InvalidArgument)?;
-        let entry = (slot as usize) < self.entries.len() && self.entries[slot as usize].as_ref().is_some_and(|e| e.owned);
+        let entry = self.entries.get(slot).is_some_and(|e| e.owned);
         match entry {
             true if !self.gone => Ok(slot),
             _ if self.gone => Err(SyscallError::Gone),
@@ -205,23 +214,36 @@ impl State {
 
     /// The index and the object at `slot`, borrowed apart.
     fn split(&mut self, slot: u32) -> (&mut Pages<u64>, &mut Object) {
-        let entry = self.entries[slot as usize].as_mut().expect("paged: a slot an object names is held");
+        let entry = self.entries.get_mut(slot).expect("paged: a slot an object names is held");
         (&mut self.pages, &mut entry.object)
     }
 
     /// The object at `slot` owes a notice of holders' dirtying, or no longer
     /// does: whether it is owed newly.
     fn owe_dirtied(&mut self, slot: u32, owed: bool) -> bool {
-        let entry = self.entry_mut(slot);
-        if entry.dirtied == owed {
-            return false;
-        }
-        entry.dirtied = owed;
         match owed {
-            true => self.dirtied += 1,
-            false => self.dirtied -= 1,
+            true => self.entries.mark(DIRTIED, slot),
+            false => {
+                self.entries.unmark(DIRTIED, slot);
+                false
+            }
         }
-        owed
+    }
+
+    /// A free slot for the next object, its piece charged where one is made:
+    /// `ResourceExhausted` where the charge is refused or the table is whole.
+    fn make_slot(&mut self) -> Result<(), SyscallError> {
+        if self.entries.has_free() {
+            return Ok(());
+        }
+        let grown = self.entries.grown_bytes().ok_or(SyscallError::ResourceExhausted)?;
+        let more = grown - self.entries.heap_bytes();
+        self.slots_charge.grow(more)?;
+        if !self.entries.grow() {
+            self.slots_charge.shrink(more);
+            return Err(SyscallError::ResourceExhausted);
+        }
+        Ok(())
     }
 }
 
@@ -249,26 +271,19 @@ impl PagerObject {
         toyos_abi::handle::Rights::READ.union(toyos_abi::handle::Rights::WRITE).union(toyos_abi::handle::Rights::WAIT);
 
     /// The calling process's pager: `capacity` pages, `dirty` of them dirty at
-    /// once, at most `objects` objects, readers overdue past `report_ns`.
-    pub fn create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> Result<Arc<Self>, Unmade> {
-        let fits = |n: u64| usize::try_from(n).ok().filter(|&n| n > 0 && n <= Pages::<u64>::MAX_CAPACITY);
-        let (Some(slots), Some(count)) = (fits(capacity), fits(objects)) else { return Err(Unmade::Invalid) };
+    /// once, readers overdue past `report_ns`.
+    pub fn create(capacity: u64, dirty: u64, report_ns: u64) -> Result<Arc<Self>, Unmade> {
+        let Some(slots) = usize::try_from(capacity).ok().filter(|&n| n > 0 && n <= Pages::<u64>::MAX_CAPACITY) else {
+            return Err(Unmade::Invalid);
+        };
         if dirty > capacity {
             return Err(Unmade::Invalid);
         }
         let core_pages = dirty + (capacity - dirty).min(HEADROOM);
         let held = core_pages as usize;
-        let tables = Pages::<u64>::heap_bytes(slots)
-            + Chunked::<Option<Entry>>::heap_bytes(count)
-            + Stack::<u32>::heap_bytes(count)
-            + 2 * Stack::<u64>::heap_bytes(held);
+        let tables = Pages::<u64>::heap_bytes(slots) + 2 * Stack::<u64>::heap_bytes(held);
         let core = Self::new_core(tables).map_err(|_| Unmade::Exhausted)?;
         let pages = Pages::new(slots, dirty as usize).ok_or(Unmade::Exhausted)?;
-        let entries = Chunked::new(count, || None).ok_or(Unmade::Exhausted)?;
-        let mut free = Stack::new(count).ok_or(Unmade::Exhausted)?;
-        for slot in (0..count as u32).rev() {
-            free.push(slot);
-        }
         let spare = Stack::new(held).ok_or(Unmade::Exhausted)?;
         let draining = Stack::new(held).ok_or(Unmade::Exhausted)?;
         if !pmm::promise(core.job(), core_pages) {
@@ -276,11 +291,9 @@ impl PagerObject {
         }
         let state = State {
             pages,
-            entries,
-            free,
+            entries: Slots::new(),
+            slots_charge: Charge::none(core.job()),
             requests: ptr::null_mut(),
-            no_holders: 0,
-            dirtied: 0,
             held: Held { core: Core::new(core_pages), spare, draining },
             gone: false,
         };
@@ -311,11 +324,12 @@ impl PagerObject {
         let state = self.state.lock();
         // SAFETY: every node on the list is live while linked, under this lock.
         let unreported = requests(&state).any(|r| unsafe { (*r).want.unreported() });
-        unreported || state.no_holders > 0 || state.dirtied > 0
+        unreported || state.entries.any_marked(NO_HOLDERS) || state.entries.any_marked(DIRTIED)
     }
 
-    /// A new object of `size` bytes: its id.
-    /// `ResourceExhausted` where every slot holds one.
+    /// A new object of `size` bytes: its id. `ResourceExhausted` where its
+    /// job cannot be charged the slots for another, or the table holds as
+    /// many as it can.
     pub fn add(&self, size: u64, anonymous: bool) -> u64 {
         if size > kernel::paged::LAST_END {
             return SyscallError::InvalidArgument.to_u64();
@@ -324,11 +338,15 @@ impl PagerObject {
         if state.gone {
             return SyscallError::Gone.to_u64();
         }
-        let Some(slot) = state.free.pop() else { return SyscallError::ResourceExhausted.to_u64() };
-        let object = if anonymous { state.pages.anonymous(slot, size) } else { state.pages.object(slot, size) };
-        state.entries[slot as usize] =
-            Some(Entry { object, refs: 1, holders: 0, owned: true, no_holders: false, dirtied: false, writers: 0, record: [0; PAGED_RECORD] });
-        u64::from(slot)
+        if let Err(e) = state.make_slot() {
+            return e.to_u64();
+        }
+        let State { pages, entries, .. } = &mut *state;
+        let made = entries.insert_with(|slot| {
+            let object = if anonymous { pages.anonymous(slot, size) } else { pages.object(slot, size) };
+            Entry { object, refs: 1, holders: 0, owned: true, writers: 0, record: [0; PAGED_RECORD] }
+        });
+        u64::from(made.expect("paged: a slot was made free"))
     }
 
     /// `f` over the index, the live object `id` and its waiters, each frame
@@ -342,7 +360,7 @@ impl PagerObject {
         let slot = state.live(id)?;
         let job = self.core.job();
         let State { pages, entries, held, gone, requests, .. } = &mut *state;
-        let object = &mut entries[slot as usize].as_mut().expect("live").object;
+        let object = &mut entries.get_mut(slot).expect("live").object;
         let mut waiters = Linked { head: *requests, slot };
         let answer = f(pages, object, &mut waiters, &mut |phys| held.give_back(job, *gone, phys, true));
         drop(state);
@@ -368,14 +386,12 @@ impl PagerObject {
     /// Under the lock, `state`: the unreleased object at `slot` released.
     fn let_go(&self, state: &mut State, slot: u32) {
         let job = self.core.job();
-        let State { pages, entries, held, gone, no_holders, .. } = state;
-        let entry = entries[slot as usize].as_mut().expect("paged: a slot an object names is held");
+        let State { pages, entries, held, gone, .. } = state;
+        let entry = entries.get_mut(slot).expect("paged: a slot an object names is held");
         pages.invalidate(&mut entry.object, &mut |phys| held.give_back(job, *gone, phys, true));
         assert!(core::mem::take(&mut entry.owned), "paged: an object released twice");
-        if core::mem::take(&mut entry.no_holders) {
-            *no_holders -= 1;
-        }
-        state.owe_dirtied(slot, false);
+        entries.unmark(NO_HOLDERS, slot);
+        entries.unmark(DIRTIED, slot);
         self.unref_locked(state, slot);
     }
 
@@ -402,9 +418,7 @@ impl PagerObject {
     fn say_no_holders(&self, state: &mut State, slot: u32) {
         let gone = state.gone;
         let entry = state.entry_mut(slot);
-        if entry.holders == 0 && entry.writers == 0 && entry.owned && !gone && !entry.no_holders {
-            entry.no_holders = true;
-            state.no_holders += 1;
+        if entry.holders == 0 && entry.writers == 0 && entry.owned && !gone && state.entries.mark(NO_HOLDERS, slot) {
             self.watch.post();
         }
     }
@@ -421,13 +435,10 @@ impl PagerObject {
         if entry.refs > 0 {
             return;
         }
-        let entry = state.entries[slot as usize].take().expect("paged: a slot an object names is held");
-        state.no_holders -= usize::from(entry.no_holders);
-        state.dirtied -= usize::from(entry.dirtied);
+        let entry = state.entries.remove(slot).expect("paged: a slot an object names is held");
         let job = self.core.job();
         let State { pages, held, gone, .. } = state;
         pages.release(entry.object, &mut |phys| held.give_back(job, *gone, phys, true));
-        state.free.push(slot);
     }
 
     /// Fill `out` with notices, each answered once.
@@ -455,36 +466,19 @@ impl PagerObject {
                     }
                     at = next;
                 }
-                let mut owed = state.no_holders;
-                for slot in 0..state.entries.len() {
-                    if n == want || owed == 0 {
-                        break;
-                    }
-                    let Some(entry) = state.entries[slot].as_mut() else { continue };
-                    if entry.no_holders {
-                        entry.no_holders = false;
-                        owed -= 1;
-                        // Said only while still so: a holder made since is held.
-                        if entry.holders == 0 {
-                            batch[n] = PagedNotice { object: slot as u64, kind: NOTICE_NO_HOLDERS, first: 0, count: 0 };
-                            n += 1;
-                        }
-                    }
-                }
-                state.no_holders = owed;
-                let mut owed = state.dirtied;
-                for slot in 0..state.entries.len() {
-                    if n == want || owed == 0 {
-                        break;
-                    }
-                    let Some(entry) = state.entries[slot].as_mut() else { continue };
-                    if core::mem::take(&mut entry.dirtied) {
-                        owed -= 1;
-                        batch[n] = PagedNotice { object: slot as u64, kind: NOTICE_DIRTIED, first: 0, count: 0 };
+                while n < want {
+                    let Some(slot) = state.entries.take_marked(NO_HOLDERS) else { break };
+                    // Said only while still so: a holder made since is held.
+                    if state.entry(slot).holders == 0 {
+                        batch[n] = PagedNotice { object: u64::from(slot), kind: NOTICE_NO_HOLDERS, first: 0, count: 0 };
                         n += 1;
                     }
                 }
-                state.dirtied = owed;
+                while n < want {
+                    let Some(slot) = state.entries.take_marked(DIRTIED) else { break };
+                    batch[n] = PagedNotice { object: u64::from(slot), kind: NOTICE_DIRTIED, first: 0, count: 0 };
+                    n += 1;
+                }
                 n
             };
             // SAFETY: a `PagedNotice` is `UserSafe`: every byte of it is a
@@ -1579,15 +1573,10 @@ impl ZeroHandles for PagerObject {
         let mut state = self.state.lock();
         state.gone = true;
         for slot in 0..state.entries.len() as u32 {
-            let Some(entry) = state.entries[slot as usize].as_mut() else { continue };
-            entry.no_holders = false;
-            entry.dirtied = false;
-            if entry.owned {
+            if state.entries.get(slot).is_some_and(|e| e.owned) {
                 self.let_go(&mut state, slot);
             }
         }
-        state.no_holders = 0;
-        state.dirtied = 0;
         let job = self.core.job();
         while let Some(phys) = state.held.spare.pop().or_else(|| state.held.draining.pop()) {
             // SAFETY: a frame this pager drew and held aside, which nothing

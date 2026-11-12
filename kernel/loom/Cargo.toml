@@ -23,7 +23,7 @@ publish = false
 default = ["loom"]
 loom = []
 # The negative control for a poll ring's one-shot answer. It splits
-# `inbox/once.rs`'s exchange into a load and a store, so a post and the
+# `pure/sched/poll.rs`'s exchange into a load and a store, so a post and the
 # registrant's own recheck can both answer one poll, and `poll_once.rs` must red:
 #
 #   cargo test --manifest-path kernel/loom/Cargo.toml --features poll-fire-load-store \
@@ -36,7 +36,7 @@ loom = []
 #   cargo test -p kernel-loom --features poll-fire-load-store --test loom_watch
 #
 poll-fire-load-store = []
-# The negative control for a poll ring's answer. It makes `inbox/polls.rs`
+# The negative control for a poll ring's answer. It makes `pure/sched/poll.rs`
 # answer a fired poll with its interest and look at nothing, so a post with
 # nothing behind it is an answer and `inbox_answer.rs` must red:
 #
@@ -45,6 +45,28 @@ poll-fire-load-store = []
 #
 # Never on by default, and no kernel build can reach it.
 post-is-an-answer = []
+# The negative control for a poll's registration. It makes
+# `pure/sched/poll.rs`'s `register` read the handle in one hold of its table
+# and add the entries after it, so a close between the two ends nothing and
+# an entry outlives its handle:
+#
+#   cargo test -p kernel-loom --features register-outside-table --test loom_watch
+#
+register-outside-table = []
+# The negative control for a watch's replacement. It makes
+# `pure/sched/poll.rs`'s `admit` keep the poll a newer watch on the same handle
+# replaces, so one handle is answered twice:
+#
+#   cargo test -p kernel-loom --features admit-keeps-the-replaced --test loom_watch
+#
+admit-keeps-the-replaced = []
+# The negative control for a ring's teardown. It makes `pure/sched/poll.rs`'s
+# `torn_down` post nothing, so a submitter parked on a ring that goes stays
+# parked:
+#
+#   cargo test -p kernel-loom --features teardown-posts-nothing --test loom_watch
+#
+teardown-posts-nothing = []
 # The negative control for the ticket lock's acquire edge. It makes `sync.rs`'s
 # two loads of `now` — the ones that decide ownership — `Relaxed`, so the
 # previous owner's writes are unordered against the next owner's reads, and
@@ -86,6 +108,29 @@ shootdown-serve-relaxed = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 shootdown-served-relaxed = []
+# The negative controls for a user change's ask (`shootdown.rs`'s `Asks`),
+# each of which `tlb_shootdown.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features <one> \
+#     --test tlb_shootdown
+#
+# `shootdown-take-relaxed`: the target takes its asks `Relaxed`, so its flush
+# no longer follows the asking CPU's page-table write.
+# `shootdown-answer-relaxed`: the target answers `Relaxed`, so an asking CPU
+# can read its answer before the flush it stands for.
+# `shootdown-ask-range-late`: the asking CPU writes its range after asking, so
+# a target can flush a range it was not asked.
+# `shootdown-ask-stale-answers`: an ask leaves the last ask's answers standing,
+# so a reused mailbox is answered before its targets have flushed.
+# `shootdown-ask-many-as-one`: an answer to two asks at once flushes one range.
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same names only so `cfg` checking knows them.
+shootdown-take-relaxed = []
+shootdown-answer-relaxed = []
+shootdown-ask-range-late = []
+shootdown-ask-stale-answers = []
+shootdown-ask-many-as-one = []
 # The negative control for the CPU roster's publication. It makes
 # `smp_roster.rs`'s `commit` publish the count with a `Relaxed` store, so a
 # reader can see a count over a slot the commit has not filled, and
@@ -174,6 +219,8 @@ log-ring-loads-swapped = []
 # The negative control of `tests/tlb_tags.rs`: `Tags::enter` with its pairing
 # relaxed, which must red the model.
 tlb-tags-enter-relaxed = []
+# The same for `Tags::resume`, which must red the idle holder's model.
+tlb-tags-resume-relaxed = []
 
 # The negative control for the panic console's published descriptor. It drops
 # the publisher's `Release` fence between its odd mark and its words, so a

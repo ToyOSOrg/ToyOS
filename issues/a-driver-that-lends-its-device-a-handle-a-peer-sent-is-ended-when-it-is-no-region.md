@@ -23,8 +23,7 @@ soundserver sent with its acceptance, unchecked (`offered` and
 pipe end or a connection there ends hda rather than being refused. A disk driver
 is not reached, because `Region::lent` refuses what `SYS_FSTAT` does not answer
 as a region before the session lends it (`Sessions::open`,
-`lib/blockserve/src/sessions.rs`). A region's kind is one `SYS_FSTAT` settles,
-so this is not `issues/a-received-handle-has-no-knowable-type.md`'s case.
+`lib/blockserve/src/sessions.rs`).
 
 The kernel owns the fix rather than each lender: what a holder lends is a
 peer's by `lend`'s contract, and the kernel already answers a peer's handle of

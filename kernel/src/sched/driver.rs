@@ -374,6 +374,7 @@ fn idle_ctx() -> KernelCtx {
         // Never read: the idle loop is entered by jump, not switch, and
         // a switch away from idle always writes the real depth first.
         preempt: 0,
+        fpu: crate::arch::fpu::Left::NOWHERE,
     }
 }
 
@@ -418,6 +419,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
         runs: Runs::User(new.id),
         // The one level `trampoline_entry` discharges before the first `iretq`.
         preempt: 1,
+        fpu: crate::arch::fpu::Left::NOWHERE,
     };
     // One clock read for the placement and the build: `HW.now` is a divide.
     let now = HW.now();
@@ -791,6 +793,14 @@ pub fn current_address_space() -> Option<PageTables> {
 /// The running task's process's handles. `None` off-task.
 pub fn current_handles() -> Option<Arc<crate::process::Handles>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handles.clone())).flatten()
+}
+
+/// The running thread leaves its address space for good: it runs on the
+/// kernel's root from here, and so does every later switch back into it.
+pub fn leave_address_space() {
+    let kernel = crate::mm::paging::kernel_root();
+    with_cpu(|cpu| cpu.running_ctx().expect("a thread leaves its address space with none running").root = kernel);
+    crate::mm::paging::activate_kernel();
 }
 
 pub fn with_current_acct<R>(

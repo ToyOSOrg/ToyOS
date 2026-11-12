@@ -1,13 +1,14 @@
-//! What `CR0`, `CR4`, `IA32_EFER`, `XCR0`, `IA32_XSS`, the save form,
-//! `IA32_APIC_BASE` and the performance request hold on every CPU in this
-//! machine. One declaration, applied by the BSP and every AP and checked on
+//! What `CR0`, `CR4`, `IA32_EFER`, `XCR0`, `IA32_XSS`, the save form, `DR7`,
+//! `IA32_SYSENTER_CS`, `IA32_APIC_BASE` and the performance request hold on
+//! every CPU in this machine. One declaration, applied by the BSP and every AP and checked on
 //! each; nothing else may write any of them but [`flush_global`], which puts
 //! back the `CR4` it read, and an AP's trampoline, which enters long mode
 //! under [`EFER_BEFORE_LONG_MODE`] and [`CR0_ENTERING_PAGING`]. Each register is written whole: `CR0` and
 //! `EFER` are constants, `CR4` is required bits plus whatever optional bits this CPU
 //! offers, `XCR0` and the save form are what `kernel::xsave` makes of this
 //! CPU's CPUID, `IA32_XSS` is zero wherever it exists (no supervisor component
-//! is enabled), and `IA32_APIC_BASE` is the local APIC at its architectural address in the one
+//! is enabled), `DR7` and `IA32_SYSENTER_CS` are [`DR7`] and [`SYSENTER_CS`],
+//! and `IA32_APIC_BASE` is the local APIC at its architectural address in the one
 //! mode CPUID offers — x2APIC where it exists, xAPIC where it does not.
 //! `EFER.NXE` lets bit 63 of a paging entry mean *not executable*
 //! ([`Prot`](crate::mm::policy::Prot)), and `CR0.WP` makes a read-only one
@@ -49,6 +50,22 @@ mod xss {
 
 /// `IA32_XSS` on every CPU that has it: no supervisor component.
 const XSS: u64 = 0;
+
+/// `IA32_SYSENTER_CS`, SDM Vol. 4 Table 2-2.
+mod sysenter {
+    pub const CS_MSR: u32 = 0x174;
+}
+
+/// `DR7` on every CPU: its reset value (SDM Vol. 3A Table 12-1), no breakpoint
+/// armed (Vol. 3B §20.2.4). Firmware may leave one, and a data breakpoint on a `MOV SS`
+/// operand is held over the next instruction into whatever kernel entry that
+/// instruction reaches (SDM Vol. 3A §7.8.3).
+const DR7: u64 = 0x400;
+
+/// `IA32_SYSENTER_CS` on every CPU: zero, under which `SYSENTER` is `#GP`
+/// (SDM Vol. 2B, SYSENTER), so `SYSCALL` is Ring 3's one fast way in. AMD's
+/// `SYSENTER` is `#UD` in long mode whatever it holds.
+const SYSENTER_CS: u64 = 0;
 
 /// `CR0`, SDM Vol. 3A §2.5.
 mod cr0 {
@@ -144,7 +161,7 @@ const ENERGY_PERF_BIAS: u64 = 7;
 pub const CR0: u64 = cr0::PE | cr0::MP | cr0::ET | cr0::NE | cr0::WP | cr0::PG;
 
 /// `CR4` bits every CPU must have. `DE` is zero legacy, not need — this kernel
-/// touches no debug register. `PGE` makes a kernel leaf global
+/// arms no breakpoint ([`DR7`]). `PGE` makes a kernel leaf global
 /// (`paging::kernel_leaf`). `SMEP` and `SMAP` make Ring 0 fault on fetching
 /// from or touching a user page (SDM Vol. 3A §4.6), which every CPU of this
 /// kernel's range (2020 on) offers, so one without them is refused rather than
@@ -201,9 +218,10 @@ impl core::fmt::Display for Cr4Names {
 const CR4_OPTIONAL: u64 = cr4::PCIDE | cr4::UMIP;
 
 /// The `CR4` bit no shipping CPU may hold: `FSGSBASE` gives Ring 3 `WRGSBASE`,
-/// and `GS.base` aims the first memory access of every kernel entry
-/// (`arch::percpu::gs`) — a user-writable `GS.base` is a Ring 3 arbitrary write.
-/// The kernel's FS base uses `IA32_FS_BASE` (`cpu::write_fs_base`) instead.
+/// and the switch moves no thread's GS base, which every Ring 3 GS load
+/// leaves zero (`percpu::clear_user_gs_base`) — one thread's would reach the
+/// next. The kernel's FS base uses `IA32_FS_BASE` (`cpu::write_fs_base`)
+/// instead.
 const CR4_FORBIDDEN: u64 = cr4::FSGSBASE;
 
 // Forbidden in the declaration, and never optional.
@@ -339,6 +357,11 @@ pub fn init(cpu_id: u32) {
             if has_xss {
                 cpu::wrmsr(xss::MSR, XSS);
             }
+            // SAFETY: arms nothing.
+            cpu::write_dr7(DR7);
+            // SAFETY: the MSR exists on every CPU that states `SEP`, which
+            // `declaration` asserted, and zero is its reset value.
+            cpu::wrmsr(sysenter::CS_MSR, SYSENTER_CS);
         }
         // What firmware left in `RFLAGS.AC`; from here on every entry from
         // Ring 3 clears it, and nothing in this kernel sets it.
@@ -508,6 +531,13 @@ fn declaration(cpu_id: u32) -> u64 {
     );
     let declared = CR4_REQUIRED | (have & CR4_OPTIONAL);
 
+    // `IA32_SYSENTER_CS` exists where `CPUID.01H:EDX[11]` (`SEP`) says so (SDM
+    // Vol. 2A, CPUID).
+    assert!(
+        cpu::cpuid(1, 0).3 & (1 << 11) != 0,
+        "control_regs: cpu{cpu_id} has no SEP, so no IA32_SYSENTER_CS to declare",
+    );
+
     // `SYSCALL` is `CPUID.80000001H:EDX[11]` (SDM Vol. 2A Table 3-8), a leaf
     // `init_paging` found.
     assert!(
@@ -671,6 +701,13 @@ fn self_check(cpu_id: u32, declared_cr4: u64, declared_xcr0: u64, form: kernel::
     if let Some(live_xss) = live_xss {
         assert!(live_xss == XSS, "control_regs: cpu{cpu_id} holds ia32_xss={live_xss:#x}, the declaration is {XSS:#x}");
     }
+    let live_dr7 = cpu::read_dr7();
+    assert!(live_dr7 == DR7, "control_regs: cpu{cpu_id} holds dr7={live_dr7:#x}, the declaration is {DR7:#x}");
+    let live_sysenter_cs = cpu::rdmsr(sysenter::CS_MSR);
+    assert!(
+        live_sysenter_cs == SYSENTER_CS,
+        "control_regs: cpu{cpu_id} holds ia32_sysenter_cs={live_sysenter_cs:#x}, the declaration is {SYSENTER_CS:#x}",
+    );
     CHECKED.fetch_add(1, Ordering::Relaxed);
 }
 

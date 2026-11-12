@@ -28,6 +28,8 @@ The metal row `wake_onto_busy` bounds the same shape for ToyOS alone, and
 and `issues/no-row-holds-a-wake-beside-seven-spinners-to-100-us.md` record
 what is known of busy targets; neither compares with Linux.
 
+**Owed on metal:** one A/B of main from before and after #1266 (a thread's request follows its bursts), on the T14 and the AMD bench, of osbench's `sched`, `fair` and `time` groups, with a Linux reference timed through the TSC. Main must read the `wake.*` rows faster or unchanged, the `fair.*` share rows within 3%, `time.yield` within 3%, and no scheduler, wake, timer or fairness row slower. The latency change is measured only in the simulator so far.
+
 **Exit**: `wake.onto_busy` within Linux's on both benches in a labelled
 current-state comparison, or the difference measured to its parts and
 justified.

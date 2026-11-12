@@ -1,21 +1,22 @@
 //! The `log` port: `inspect`'s answer about where this boot's log is going,
 //! and a reader on this machine handed the log itself ([`READ`]).
 //!
-//! **On a thread of its own, so no reader can reach the loop that writes the
-//! file.** The loop publishes what it knows once a round — a few relaxed
-//! stores, and a lock only when the file it writes changes — and this thread
+//! **On a thread of its own, so no reader can reach the loop or the file.**
+//! They publish what they know — a few relaxed stores, and a lock only when
+//! the file changes — and this thread
 //! owns the acceptor, reads each reader's request without ever blocking on it,
 //! answers in one non-blocking write and closes. A reader that connects and
-//! says nothing costs a slot and [`HANDSHAKE_TIMEOUT`], never the log.
+//! says nothing costs a slot of [`READERS`] for its limit, never the log's loop.
 
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use toyos::ipc::{self, FrameRx, RxStep};
+use toyos::admission::{Admission, Event, Policy};
+use toyos::ipc;
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
-use toyos::{AsHandle, Connection};
+use toyos::say;
 use toyos_inspect::Snapshot;
 
 use toyos_logstream::READ;
@@ -28,23 +29,18 @@ const _: () = assert!(
     "a snapshot is one frame"
 );
 
-/// Readers accepted and not yet answered.
-///
-/// Policy: a reader asks once and goes, so this is how many may be mid-request
-/// at once. Past it a connection is refused by name rather than queued.
-const MAX_PENDING: usize = 8;
-
-/// How long an accepted reader may take to send its request.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Readers accepted and not yet asking: a reader asks once and goes. Any
+/// holder of `log` may hold them all, since its connector names no holder.
+const READERS: Policy = Policy::unshared(8);
 
 /// The poll token of the acceptor, clear of every handle's own value.
 const ACCEPT: u64 = u64::MAX;
 
-/// Where the file side of the loop stands.
+/// Where the file stands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum State {
-    /// Every round written, flushed and published.
+    /// Every batch written and synced as it falls due.
     Writing = 0,
     /// The volume answers slower than a log is worth, or refused the part
     /// and is asked again: the replay keeps what the file is owed.
@@ -67,11 +63,11 @@ impl State {
     }
 }
 
-/// The loop's side of the answer. One writer, the loop; one reader, this
-/// module's thread.
+/// The answer's facts: the file's, published by the file's thread, and the
+/// records lost, by the loop; one reader, this module's thread.
 pub struct Published {
     state: AtomicU8,
-    /// The part the loop last published, or 0 for none: the loop's own record
+    /// The part last published, or 0 for none: the file thread's own record
     /// of when `file` changes, and read by nothing else.
     part: AtomicU32,
     /// The part being written and its path, one pair under one lock, so no
@@ -92,24 +88,27 @@ impl Published {
         }
     }
 
-    /// What the loop knows at the top of a round. `lost` is the records the
-    /// kernel overwrote before this reader reached them.
-    pub fn publish(&self, volume: Option<&Volume>, state: State, lost: u64) {
+    /// Where the file stands, from the file's thread.
+    pub fn publish(&self, volume: Option<&Volume>, state: State) {
         self.state.store(state as u8, Ordering::Relaxed);
-        self.lost.store(lost, Ordering::Relaxed);
         let part = volume.map_or(0, Volume::part);
         self.bytes.store(volume.map_or(0, Volume::bytes), Ordering::Relaxed);
-        // The lock is taken when the file changes and at no other round.
+        // The lock is taken when the file changes and at no other batch.
         if self.part.swap(part, Ordering::Relaxed) != part {
             *self.file.lock().expect("the inspect thread does not panic holding this") =
                 volume.map(|v| (v.part(), v.path()));
         }
     }
 
+    /// The records the kernel overwrote before the loop reached them.
+    pub fn publish_lost(&self, lost: u64) {
+        self.lost.store(lost, Ordering::Relaxed);
+    }
+
     fn snapshot(&self) -> Vec<u8> {
         let mut snap = Snapshot::new(toyos_inspect::LOG);
         snap.put("volume.state", State::word(self.state.load(Ordering::Relaxed)));
-        let file = self.file.lock().expect("the loop does not panic holding this").clone();
+        let file = self.file.lock().expect("the file's thread does not panic holding this").clone();
         if let Some((part, path)) = file {
             snap.put("volume.path", path);
             snap.put("volume.part", part);
@@ -118,13 +117,6 @@ impl Published {
         snap.put("records.lost", self.lost.load(Ordering::Relaxed));
         snap.encode().unwrap_or_else(|why| panic!("logkeeper: its snapshot: {why}"))
     }
-}
-
-/// A reader accepted and not yet answered.
-struct Pending {
-    conn: Connection,
-    rx: FrameRx<0>,
-    since: Instant,
 }
 
 /// Serve `inspect` and this machine's readers on `acceptor` for the life of
@@ -137,49 +129,47 @@ pub fn serve(acceptor: Acceptor, published: Arc<Published>, hub: Arc<Hub>) {
 }
 
 fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
-    let poller = Poller::new(1 + MAX_PENDING as u32);
-    let mut pending: Vec<Pending> = Vec::new();
+    let poller = Poller::new(1 + READERS.slots as u32);
+    let mut readers: Admission<(), (), Instant, 0> = Admission::new(READERS);
+    let mut accept_armed = false;
+    let mut ready: Vec<u64> = Vec::new();
     loop {
-        poller.watch(acceptor, READABLE, ACCEPT);
-        for p in &pending {
-            poller.watch(&p.conn, READABLE, u64::from(p.conn.as_handle().raw().0));
+        if !accept_armed && readers.has_room() {
+            poller.watch(acceptor, READABLE, ACCEPT);
+            accept_armed = true;
         }
-        let timeout =
-            if pending.is_empty() { u64::MAX } else { HANDSHAKE_TIMEOUT.as_nanos() as u64 };
-        let mut ready: Vec<u64> = Vec::new();
+        readers.watch(|conn, slot| poller.watch(conn, READABLE, slot));
+        let timeout = readers.left(Instant::now()).map_or(u64::MAX, |left| left.as_nanos() as u64);
+        ready.clear();
         poller.wait(1, timeout, |token| ready.push(token));
 
-        // No line for any reader dropped, refused or unanswered below: each is
-        // the reader's doing, a line apiece would let every holder of `log`
-        // write into the log at its own rate, and the reader is told by its
-        // connection closing.
         let now = Instant::now();
-        pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
-
-        if ready.contains(&ACCEPT) {
-            if let Ok(conn) = acceptor.accept() {
-                if pending.len() < MAX_PENDING {
-                    pending.push(Pending { conn, rx: FrameRx::new(), since: now });
-                }
+        for &token in &ready {
+            if token != ACCEPT {
+                readers.woke(token);
+                continue;
+            }
+            accept_armed = false;
+            // One past the table stays queued until a slot is free, and a
+            // table with room and no shares refuses nobody. A reader the
+            // kernel would not hand over is told by its connection closing.
+            if let Some(Ok(conn)) = readers.accept(acceptor) {
+                let _ = readers.admit(conn, (), (), now);
             }
         }
-
-        pending.retain_mut(|p| {
-            if !ready.contains(&u64::from(p.conn.as_handle().raw().0)) {
-                return true;
+        while let Some(event) = readers.next(now) {
+            match event {
+                Event::Admitted(reader) => match reader.msg_type() {
+                    toyos_inspect::MSG_INSPECT => {
+                        let _ = reader.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot());
+                    }
+                    READ => hub.read(&reader.into_connection()),
+                    _ => {}
+                },
+                Event::Left { why, say: Some(unsaid), .. } => say!("logkeeper: letting a reader go: {why}{unsaid}"),
+                Event::Left { .. } => {}
+                Event::Unsaid(unsaid) => say!("logkeeper: readers: {}", unsaid.alone()),
             }
-            match p.rx.pump(&p.conn) {
-                RxStep::Idle => true,
-                RxStep::Frame { msg_type: toyos_inspect::MSG_INSPECT, .. } => {
-                    let _ = p.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot());
-                    false
-                }
-                RxStep::Frame { msg_type: READ, .. } => {
-                    hub.read(&p.conn);
-                    false
-                }
-                RxStep::Eof | RxStep::Frame { .. } | RxStep::Malformed => false,
-            }
-        });
+        }
     }
 }

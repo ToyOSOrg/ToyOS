@@ -69,11 +69,11 @@ userland library over the SDK.
                   environment (HOME, the starting directory, ...)
 ```
 
-A parent reads the child's program and lays out the child's memory. What it
-tells the child goes in the startup block, which the kernel copies as it
-copies the program and never reads; the SDK, std and libc read it where it
-lies. A child whose parent wrote none starts with no argument and an empty
-environment.
+A parent reads the child's program and lays out the child's memory, each
+range the pages of a memory object or a private copy of them. What it tells
+the child goes in the startup block, which the kernel copies and never reads;
+the SDK, std and libc read it where it lies. A child whose parent wrote none
+starts with no argument and an empty environment.
 
 A program holds nothing it was not given. It asks for more only by connecting
 to a service in its namespace, whose server decides.

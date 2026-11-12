@@ -196,6 +196,11 @@ fn revision(loader: Loader) -> Revision {
     }
 }
 
+/// The revision this CPU runs, if its vendor is one ToyOS reads it of.
+pub fn running() -> Option<Revision> {
+    Loader::of(cpu::vendor()).map(revision)
+}
+
 /// Hands this CPU `patch` and judges what it made of it.
 fn write(loader: Loader, patch: &Patch<'static>) -> Outcome {
     match loader {

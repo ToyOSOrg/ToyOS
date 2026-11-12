@@ -566,8 +566,26 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("an_acknowledged_flush_postdates_the_page_table_write"),
         Fails("one_serve_answers_two_concurrent_shootdowns"),
     ]),
+    red(KERNEL_LOOM, "shootdown-take-relaxed", Some("tlb_shootdown"), &[
+        Fails("an_answered_ask_flushed_its_range_after_the_write"),
+    ]),
+    red(KERNEL_LOOM, "shootdown-answer-relaxed", Some("tlb_shootdown"), &[
+        Fails("an_answered_ask_flushed_its_range_after_the_write"),
+    ]),
+    red(KERNEL_LOOM, "shootdown-ask-range-late", Some("tlb_shootdown"), &[
+        Fails("an_answered_ask_flushed_its_range_after_the_write"),
+    ]),
+    red(KERNEL_LOOM, "shootdown-ask-stale-answers", Some("tlb_shootdown"), &[
+        Fails("a_mailbox_reused_waits_for_its_new_answer"),
+    ]),
+    red(KERNEL_LOOM, "shootdown-ask-many-as-one", Some("tlb_shootdown"), &[
+        Fails("two_asks_of_one_cpu_are_each_answered_for_their_own_page"),
+    ]),
     red(KERNEL_LOOM, "tlb-tags-enter-relaxed", Some("tlb_tags"), &[
         Fails("a_change_reaches_a_runner_or_the_entering_cpu_flushes"),
+    ]),
+    red(KERNEL_LOOM, "tlb-tags-resume-relaxed", Some("tlb_tags"), &[
+        Fails("a_change_passing_an_idle_holder_by_is_flushed_when_its_thread_resumes"),
     ]),
     red(KERNEL_LOOM, "shootdown-served-relaxed", Some("counters_round"), &[
         Fails("a_cpu_read_as_answered_is_read_with_its_answer"),
@@ -662,7 +680,26 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("a_poll_registered_racing_a_post_completes_exactly_once"),
         Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
         Fails("a_poll_on_two_watches_racing_both_posts_completes_exactly_once"),
+        Says {
+            test: "a_close_racing_a_post_answers_a_poll_once",
+            message: "a post and a close both took the poll",
+        },
     ]),
+    // A poll's entries added after the hold that read its handle there.
+    red(KERNEL_LOOM, "register-outside-table", Some("loom_watch"), &[Says {
+        test: "a_close_racing_a_registration_leaves_nothing_through_the_handle",
+        message: "an entry made through a closed handle is live",
+    }]),
+    // A watch that leaves the poll it replaces kept.
+    red(KERNEL_LOOM, "admit-keeps-the-replaced", Some("loom_watch"), &[Says {
+        test: "a_replacing_watch_racing_a_post_answers_once_under_the_newest_token",
+        message: "one handle's one arrival",
+    }]),
+    // A teardown that wakes nobody.
+    red(KERNEL_LOOM, "teardown-posts-nothing", Some("loom_watch"), &[Says {
+        test: "a_teardown_racing_a_park_returns_the_submit",
+        message: "parked on a ring torn down and no wake owed",
+    }]),
     // The ring models' lost-completion half: the producer posts before it
     // stores the readiness its registrant rechecks.
     red(KERNEL_LOOM, "fault-posted-before-it-is-set", Some("loom_watch"), &[

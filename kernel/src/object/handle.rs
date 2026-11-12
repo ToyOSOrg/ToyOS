@@ -10,10 +10,18 @@
 //! The table is charged its storage as it grows (`mm::charge`), doubling,
 //! so a table that cannot grow refuses the install, and removing a handle
 //! never allocates.
+//!
+//! **A poll made through a handle lasts while that handle is in its table.**
+//! Its watch entries are added in one hold of the table that reads the handle
+//! still here ([`HandleTable::while_held`]), and every way out of the table, a
+//! close or a committed move, ends the entries made through that handle and no
+//! other's.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use kernel::sched::poll::Via;
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{SyscallError, MAX_TRANSFER_HANDLES};
@@ -105,6 +113,9 @@ impl core::fmt::Display for HandleError {
 pub struct HandleEntry {
     object: KObjectRef,
     rights: Rights,
+    /// A poll was made through this handle in this table, so its leaving
+    /// ends one.
+    polled: bool,
 }
 
 impl HandleEntry {
@@ -118,7 +129,7 @@ impl HandleEntry {
             core.koid().raw(),
         );
         core.handle_count.fetch_add(1, Ordering::AcqRel);
-        Self { object, rights }
+        Self { object, rights, polled: false }
     }
 
     pub fn object(&self) -> &KObjectRef {
@@ -137,9 +148,11 @@ impl HandleEntry {
     }
 
     /// This handle as a move delivers it: `rights` is [`HandleTable::rights_to_move`]'s answer.
+    /// No poll was made through it in the table it arrives in.
     pub fn arriving_with(mut self, rights: Rights) -> Self {
         assert!(rights.subset_of(self.rights), "a move widened {:?} to {rights:?}", self.rights);
         self.rights = rights;
+        self.polled = false;
         self
     }
 }
@@ -174,7 +187,12 @@ enum Slot {
 /// Handles one process may hold.
 pub const MAX_HANDLES: usize = RawHandle::MAX_SLOTS;
 
+/// The next table's [`HandleTable::id`].
+static NEXT_TABLE: AtomicU64 = AtomicU64::new(1);
+
 pub struct HandleTable {
+    /// Which table a poll was made in ([`Via::table`]): never another's.
+    id: u64,
     slots: Vec<Slot>,
     // A retired slot is never on this list — it is simply never offered again.
     // Its capacity is the slots', so a retire never grows it.
@@ -186,7 +204,29 @@ pub struct HandleTable {
 impl HandleTable {
     /// An empty table, its storage charged to `job` as it grows.
     pub fn new(job: &Arc<kernel::sched::job::Job>) -> Self {
-        Self { slots: Vec::new(), free: Vec::new(), charge: Charge::none(job) }
+        let id = NEXT_TABLE.fetch_add(1, Ordering::Relaxed);
+        Self { id, slots: Vec::new(), free: Vec::new(), charge: Charge::none(job) }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Mark `h` polled and run `add` in this hold, if `h` is still here;
+    /// `false`, with `add` not run, if it is not. The one way a poll's entries
+    /// go on a watch.
+    pub fn while_held(&mut self, h: RawHandle, add: impl FnOnce()) -> bool {
+        let Ok(entry) = self.entry_of_mut(h) else { return false };
+        entry.polled = true;
+        add();
+        true
+    }
+
+    /// `h`'s polls end: it left this table as `entry`.
+    fn left(&self, h: RawHandle, entry: &HandleEntry) {
+        if entry.polled {
+            super::ops::end_polls(&entry.object, Via { table: self.id, handle: h });
+        }
     }
 
     /// The job its storage is charged to.
@@ -255,6 +295,14 @@ impl HandleTable {
         }
     }
 
+    fn entry_of_mut(&mut self, h: RawHandle) -> Result<&mut HandleEntry, HandleError> {
+        match self.slots.get_mut(h.slot() as usize).ok_or(HandleError::BadHandle)? {
+            Slot::Retired => Err(HandleError::Stale),
+            Slot::Serving { generation, .. } if *generation != h.generation() => Err(HandleError::Stale),
+            Slot::Serving { entry, .. } => entry.as_mut().ok_or(HandleError::BadHandle),
+        }
+    }
+
     /// The typed accessor: an owned `Arc` that outlives the guard.
     pub fn get<T: KObjectVariant>(
         &self,
@@ -318,11 +366,13 @@ impl HandleTable {
         }
     }
 
-    /// Take a handle out of the table and retire its slot.
+    /// Take a handle out of the table and retire its slot, ending the polls
+    /// made through it.
     #[must_use = "the removed entry must be dropped by the caller"]
     pub fn remove(&mut self, h: RawHandle) -> Result<HandleEntry, HandleError> {
         let entry = self.take_for_transfer(h)?;
         self.retire(h);
+        self.left(h, &entry);
         Ok(entry)
     }
 
@@ -374,8 +424,9 @@ impl HandleTable {
     }
 
     /// Move `handles` into `sink`, each arriving with the rights beside it
-    /// ([`rights_to_move`](Self::rights_to_move)); if `sink` refuses, every
-    /// handle is restored to its own slot with the rights it had.
+    /// ([`rights_to_move`](Self::rights_to_move)), and end the polls made
+    /// through them here; if `sink` refuses, every handle is restored to its
+    /// own slot as it was, and no poll ends.
     // A refused transfer must not drop the entries: the caller was told nothing happened.
     pub fn transfer<E>(
         &mut self,
@@ -383,23 +434,28 @@ impl HandleTable {
         sink: impl FnOnce(Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, E)>,
     ) -> Result<(), E> {
         let mut batch = Vec::with_capacity(handles.len());
-        let mut held = [Rights::NONE; MAX_TRANSFER_HANDLES];
+        let mut held = [const { (Rights::NONE, None::<KObjectRef>) }; MAX_TRANSFER_HANDLES];
         let held = &mut held[..handles.len()];
         for ((h, rights), held) in handles.iter().zip(held.iter_mut()) {
             let entry = self.take_for_transfer(*h).expect("a handle verified under this same hold");
-            *held = entry.rights;
+            // What the move's commit ends polls on: the entry is the sink's by then.
+            *held = (entry.rights, entry.polled.then(|| entry.object.clone()));
             batch.push(entry.arriving_with(*rights));
         }
         match sink(batch) {
             Ok(()) => {
-                for (h, _) in handles {
+                for ((h, _), (_, polled)) in handles.iter().zip(held.iter()) {
                     self.retire(*h);
+                    if let Some(object) = polled {
+                        super::ops::end_polls(object, Via { table: self.id, handle: *h });
+                    }
                 }
                 Ok(())
             }
             Err((batch, e)) => {
-                for (((h, _), mut entry), held) in handles.iter().zip(batch).zip(held.iter()) {
-                    entry.rights = *held;
+                for (((h, _), mut entry), (rights, polled)) in handles.iter().zip(batch).zip(held.iter()) {
+                    entry.rights = *rights;
+                    entry.polled = polled.is_some();
                     self.give_back(*h, entry);
                 }
                 Err(e)

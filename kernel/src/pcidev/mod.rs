@@ -2108,3 +2108,8 @@ pub fn is_held(who: u16) -> bool {
 pub(crate) fn add_poll(binding: &Binding, entry: PollEntry) {
     binding.function().watch.add_poll(entry);
 }
+
+/// End the polls made through `via` on that watch.
+pub(crate) fn end_polls(binding: &Binding, via: kernel::sched::poll::Via) {
+    binding.function().watch.end_polls(via);
+}

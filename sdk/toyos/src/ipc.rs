@@ -5,9 +5,10 @@
 //! (`SYS_MESSAGE_RECV`): a receiver never sees part of a frame, and a
 //! frame's handles arrive with it and with no other.
 
-use toyos_abi::handle::TransferEntry;
+use toyos_abi::handle::{ObjectKind, ReceivedEntry, TransferEntry};
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, Received, SyscallError};
+use crate::endow::OfKind;
 use crate::{AsHandle, BorrowedHandle, Moved, OwnedHandle};
 
 /// A type that may cross an IPC boundary as a payload.
@@ -126,7 +127,7 @@ pub enum TrySendError {
 
 /// An IPC connection. A server gets one from [`crate::port::Acceptor::accept`],
 /// a client from [`crate::endow::service`], and a server one end a peer
-/// handed it from [`Self::received`].
+/// handed it from [`ReceivedHandle::typed`].
 pub struct Connection(pub(crate) OwnedHandle);
 
 impl AsHandle for Connection {
@@ -134,13 +135,6 @@ impl AsHandle for Connection {
 }
 
 impl Connection {
-    /// A connection end a peer sent, consumed. Its type is the sender's
-    /// word: the kernel refuses each connection call on a handle of another
-    /// type, so trust the sender only as far as its protocol says.
-    pub fn received(handle: OwnedHandle) -> Self {
-        Self(handle)
-    }
-
     /// This end as a handle, to send it on in a frame ([`Self::send_with`]).
     pub fn into_owned(self) -> OwnedHandle {
         self.0
@@ -516,7 +510,7 @@ impl<const MAX: usize> FrameRx<MAX> {
 
     /// The `N` handles the last frame carried, now the caller's; `None`, with
     /// them closed, when it carried another number.
-    pub fn take_handles<const N: usize>(&mut self) -> Option<[OwnedHandle; N]> {
+    pub fn take_handles<const N: usize>(&mut self) -> Option<[ReceivedHandle; N]> {
         self.take_batch().exact::<N>()
     }
 
@@ -532,6 +526,14 @@ impl<const MAX: usize> FrameRx<MAX> {
     /// receiver cannot take, which stays queued.
     pub fn recv(&mut self, conn: &impl AsHandle) -> Result<Frame, IpcError> {
         self.take(conn.as_handle(), false).map_err(Refused::blocking)
+    }
+
+    /// A frame as a test's peer sent it, in hand as [`Self::pump`] leaves one.
+    #[cfg(test)]
+    pub(crate) fn load(&mut self, msg_type: u32, payload: &[u8]) -> RxStep {
+        self.held = Batch::EMPTY;
+        self.payload[..payload.len()].copy_from_slice(payload);
+        RxStep::Frame { msg_type, payload_len: payload.len(), handles: 0 }
     }
 
     fn take(&mut self, conn: BorrowedHandle<'_>, nonblock: bool) -> Result<Frame, Refused> {
@@ -550,7 +552,7 @@ fn receive(
     payload: &mut [u8],
     nonblock: bool,
 ) -> Result<(Frame, Batch), Refused> {
-    let mut handles = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+    let mut handles = [ReceivedEntry::NONE; syscall::MAX_TRANSFER_HANDLES];
     let got = syscall::message_recv(conn.raw(), msg_type, payload, &mut handles, nonblock);
     taken(got, *msg_type, handles)
 }
@@ -559,7 +561,7 @@ fn receive(
 fn taken(
     got: Result<Received, SyscallError>,
     msg_type: [u8; TYPE_LEN],
-    handles: [RawHandle; syscall::MAX_TRANSFER_HANDLES],
+    handles: [ReceivedEntry; syscall::MAX_TRANSFER_HANDLES],
 ) -> Result<(Frame, Batch), Refused> {
     let got = got.map_err(Refused::Kernel)?;
     // The kernel installed each number in this process's table for this
@@ -587,13 +589,13 @@ fn step(taken: Result<Frame, Refused>) -> RxStep {
 /// The handles one frame carried, owned, handed out one at a time: what
 /// nobody takes is closed when this drops.
 pub struct Batch {
-    handles: [RawHandle; syscall::MAX_TRANSFER_HANDLES],
+    handles: [ReceivedEntry; syscall::MAX_TRANSFER_HANDLES],
     next: usize,
     len: usize,
 }
 
 impl Batch {
-    const EMPTY: Batch = Batch { handles: [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES], next: 0, len: 0 };
+    const EMPTY: Batch = Batch { handles: [ReceivedEntry::NONE; syscall::MAX_TRANSFER_HANDLES], next: 0, len: 0 };
 
     /// The handles not yet taken.
     pub fn len(&self) -> usize {
@@ -605,7 +607,7 @@ impl Batch {
     }
 
     /// Exactly `N` handles; `None`, with them closed, for any other number.
-    pub fn exact<const N: usize>(mut self) -> Option<[OwnedHandle; N]> {
+    pub fn exact<const N: usize>(mut self) -> Option<[ReceivedHandle; N]> {
         const { assert!(N <= syscall::MAX_TRANSFER_HANDLES) };
         if self.len() != N {
             return None;
@@ -615,18 +617,79 @@ impl Batch {
 }
 
 impl Iterator for Batch {
-    type Item = OwnedHandle;
+    type Item = ReceivedHandle;
 
-    fn next(&mut self) -> Option<OwnedHandle> {
-        let raw = *self.handles[..self.len].get(self.next)?;
+    fn next(&mut self) -> Option<ReceivedHandle> {
+        let entry = *self.handles[..self.len].get(self.next)?;
         self.next += 1;
-        Some(OwnedHandle(raw))
+        Some(ReceivedHandle { handle: OwnedHandle(entry.handle), kind: entry.kind })
     }
 }
 
 impl Drop for Batch {
     fn drop(&mut self) {
         self.by_ref().for_each(drop);
+    }
+}
+
+/// A handle a frame carried, with the kind of object the kernel said it
+/// names as it installed it. What the sender's protocol says it is is only
+/// the sender's word, and the kernel ends a process that uses a handle as a
+/// kind it is not: a typed handle is made of this by [`Self::typed`] alone.
+#[derive(Debug)]
+pub struct ReceivedHandle {
+    handle: OwnedHandle,
+    kind: u32,
+}
+
+impl ReceivedHandle {
+    /// The handle as a `T`, refused and closed unless the kernel said it
+    /// names one of `T`'s kinds.
+    pub fn typed<T: OfKind>(self) -> Result<T, WrongKind> {
+        admit(T::KINDS, self.kind)?;
+        // SAFETY: the kernel answered one of `T`'s kinds for this handle, and
+        // any object of those takes every call of `T`'s.
+        Ok(unsafe { T::from_handle(self.handle) })
+    }
+}
+
+/// The bare handle, to send on, endow or map: nothing typed is made of it.
+impl From<ReceivedHandle> for OwnedHandle {
+    fn from(received: ReceivedHandle) -> Self {
+        received.handle
+    }
+}
+
+impl AsHandle for ReceivedHandle {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        self.handle.as_handle()
+    }
+}
+
+/// A received handle names another kind of object than its protocol says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WrongKind {
+    pub wanted: &'static [ObjectKind],
+    /// `None` for a kind this SDK does not know.
+    pub got: Option<ObjectKind>,
+}
+
+impl core::fmt::Display for WrongKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.got {
+            Some(got) => write!(f, "a received handle names a {got:?}, not one of {:?}", self.wanted),
+            None => write!(f, "a received handle names a kind this SDK does not know, not one of {:?}", self.wanted),
+        }
+    }
+}
+
+impl core::error::Error for WrongKind {}
+
+/// Whether a handle the kernel reported as `word` is one of `wanted`.
+fn admit(wanted: &'static [ObjectKind], word: u32) -> Result<(), WrongKind> {
+    match ObjectKind::from_word(word) {
+        Some(kind) if crate::endow::names(wanted, kind) => Ok(()),
+        got => Err(WrongKind { wanted, got }),
     }
 }
 
@@ -714,7 +777,7 @@ mod tests {
     /// is no frame, and the type is read from the front.
     #[test]
     fn a_message_shorter_than_a_type_is_malformed() {
-        let none = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+        let none = [ReceivedEntry::NONE; syscall::MAX_TRANSFER_HANDLES];
         let seven = 7u32.to_ne_bytes();
         assert!(matches!(taken(Ok(Received { len: TYPE_LEN - 1, handles: 0 }), seven, none), Err(Refused::Malformed)));
         let (frame, _) = taken(Ok(Received { len: TYPE_LEN, handles: 0 }), seven, none).ok().unwrap();
@@ -726,7 +789,7 @@ mod tests {
     /// The kernel's refusals reach a server as the step it acts on.
     #[test]
     fn a_receive_refused_is_the_step_a_server_acts_on() {
-        let none = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+        let none = [ReceivedEntry::NONE; syscall::MAX_TRANSFER_HANDLES];
         for (e, idle, eof) in [
             (SyscallError::WouldBlock, true, false),
             (SyscallError::Gone, false, true),
@@ -744,7 +807,7 @@ mod tests {
     /// kernel fault.
     #[test]
     fn a_receive_refused_is_the_error_a_client_acts_on() {
-        let none = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+        let none = [ReceivedEntry::NONE; syscall::MAX_TRANSFER_HANDLES];
         let blocking = |got| taken(got, [0; TYPE_LEN], none).map(|(frame, _)| frame).map_err(Refused::blocking);
         assert!(matches!(blocking(Err(SyscallError::InvalidArgument)), Err(IpcError::Malformed)));
         assert!(matches!(blocking(Ok(Received { len: TYPE_LEN - 1, handles: 0 })), Err(IpcError::Malformed)));
@@ -753,6 +816,28 @@ mod tests {
             blocking(Err(SyscallError::ResourceExhausted)),
             Err(IpcError::Syscall(SyscallError::ResourceExhausted))
         ));
+    }
+
+    /// A received handle becomes a typed one only as a kind its type names:
+    /// another kind, and a word this SDK does not know, are refused by name.
+    #[test]
+    fn a_received_handle_is_typed_only_as_the_kind_the_kernel_reported() {
+        use crate::wake::{Bell, Waker};
+        assert_eq!(admit(Bell::KINDS, ObjectKind::EventWait as u32), Ok(()));
+        assert_eq!(
+            admit(Bell::KINDS, ObjectKind::EventSignal as u32),
+            Err(WrongKind { wanted: Bell::KINDS, got: Some(ObjectKind::EventSignal) })
+        );
+        assert_eq!(admit(Waker::KINDS, ObjectKind::EventSignal as u32), Ok(()));
+        assert_eq!(admit(crate::Pipe::KINDS, ObjectKind::PipeRead as u32), Ok(()));
+        assert_eq!(admit(crate::Pipe::KINDS, ObjectKind::PipeWrite as u32), Ok(()));
+        assert_eq!(
+            admit(crate::process::Process::KINDS, ObjectKind::PipeRead as u32),
+            Err(WrongKind { wanted: &[ObjectKind::Process], got: Some(ObjectKind::PipeRead) })
+        );
+        let unknown = ObjectKind::ALL.len() as u32;
+        assert_eq!(admit(Bell::KINDS, unknown), Err(WrongKind { wanted: Bell::KINDS, got: None }));
+        assert_eq!(admit(Bell::KINDS, ReceivedEntry::NONE.kind), Err(WrongKind { wanted: Bell::KINDS, got: None }));
     }
 
     /// The kernel's refusal leaves every handle at its own number, and the

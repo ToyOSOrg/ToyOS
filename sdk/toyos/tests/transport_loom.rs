@@ -293,7 +293,7 @@ fn a_producer_that_looked_again_is_rung_for_room_it_missed() {
 // blocking wait and a drain take every byte there, and a watch is answered at
 // once if the pipe holds a byte when it is registered, and otherwise by
 // whether it holds one when its submitter looks after a post, armed again if
-// it does not (`kernel/src/inbox/polls.rs`, `deliver`). The server rings
+// it does not (`kernel/pure/sched/poll.rs`, `deliver`). The server rings
 // every holder's doorbell a ring names, and is told a holder left only after
 // that holder's last effect, as the kernel closes a process's handles once its
 // last thread is out. loom fails a run that ends with a thread waiting.

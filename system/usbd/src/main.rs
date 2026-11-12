@@ -24,7 +24,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use toyos::endow::{self, EndowError, Endowments};
-use toyos::ipc::{Connection, FrameRx, RxStep, TrySendError};
+use toyos::admission::{self, Admission, Client, Policy};
+use toyos::ipc::{Connection, TrySendError};
 use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::{AsHandle, PciDev};
 use toyos_abi::syscall::{SyscallError, DEV_PREFIX};
@@ -41,9 +42,9 @@ use toyos_xhci::input::{Opened, Owner, Sent};
 use toyos_xhci::msc::{Event, Work};
 use toyos_xhci::usb::{self, Config, Usb};
 
-/// Connections accepted and not yet asked, and how long one may stay so.
-const MAX_PENDING: usize = 8;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// `inspect`'s connections accepted and not yet asking. Any holder of the
+/// port may hold them all, since its connector names no holder.
+const ASKING: Policy = Policy::unshared(8);
 
 const TOKEN_IRQ: u64 = 0;
 const TOKEN_ACCEPT: u64 = 1;
@@ -134,11 +135,8 @@ impl Device for Disk<'_> {
     }
 }
 
-struct Pending {
-    conn: Connection,
-    rx: FrameRx<0>,
-    since: Instant,
-}
+/// A connection of `inspect`'s.
+type Asker = Client<(), (), 0>;
 
 /// The one `dev:pci:` claim this process was started with.
 fn claim() -> PciDev {
@@ -247,8 +245,8 @@ fn serve(
     let mut disks: BTreeMap<u32, Sessions> = BTreeMap::new();
     let mut input = InputPort::default();
     let mut settled = false;
-    let poller = Poller::new(5 + MAX_PENDING as u32 + 4 * MAX_SESSIONS as u32);
-    let mut pending: Vec<Pending> = Vec::new();
+    let poller = Poller::new(5 + ASKING.slots as u32 + 4 * MAX_SESSIONS as u32);
+    let mut asking: Admission<(), (), Instant, 0> = Admission::new(ASKING);
     let mut ready: Vec<u64> = Vec::new();
     let mut wakes = Wakes::default();
     let mut wake_at;
@@ -324,29 +322,29 @@ fn serve(
         usb.input.borrow_mut().flush(&mut input, usb.wake.now());
 
         // inspect's clients.
+        let now = Instant::now();
         if let (true, Some(acceptor)) = (ready.contains(&TOKEN_ACCEPT), &acceptor) {
-            match acceptor.accept() {
-                Ok(conn) if pending.len() < MAX_PENDING => pending.push(Pending { conn, rx: FrameRx::new(), since: Instant::now() }),
-                Ok(conn) => println!("{name}: refusing client {} — {MAX_PENDING} are already waiting", conn.as_handle().raw().0),
-                Err(why) => println!("{name}: the kernel refused a client's connection: {why:?}"),
+            match asking.accept(acceptor) {
+                None => {}
+                Some(Ok(conn)) => {
+                    if let Err(admission::Refused { why, say: Some(unsaid), .. }) = asking.admit(conn, (), (), now) {
+                        println!("{name}: letting a connection go: {why}{unsaid}");
+                    }
+                }
+                Some(Err(why)) => println!("{name}: the kernel refused a client's connection: {why:?}"),
             }
         }
-        pending.retain_mut(|p| {
-            if p.since.elapsed() >= HANDSHAKE_TIMEOUT {
-                return false;
+        for slot in ready.iter().filter_map(|token| token.checked_sub(TOKEN_PENDING)).filter(|slot| *slot < ASKING.slots as u64) {
+            asking.woke(slot);
+        }
+        while let Some(event) = asking.next(now) {
+            match event {
+                admission::Event::Admitted(asker) if asker.msg_type() == MSG_INSPECT => answer(&asker, usb, &wakes, wake_at),
+                admission::Event::Left { why, say: Some(unsaid), .. } => println!("{name}: letting a connection go: {why}{unsaid}"),
+                admission::Event::Unsaid(unsaid) => println!("{name}: {}", unsaid.alone()),
+                admission::Event::Admitted(_) | admission::Event::Left { .. } => {}
             }
-            if !ready.contains(&(TOKEN_PENDING + u64::from(p.conn.as_handle().raw().0))) {
-                return true;
-            }
-            match p.rx.pump(&p.conn) {
-                RxStep::Idle => true,
-                RxStep::Frame { msg_type: MSG_INSPECT, .. } => {
-                    answer(&p.conn, usb, &wakes, wake_at);
-                    false
-                }
-                _ => false,
-            }
-        });
+        }
 
         // Work a session queued is the driver's to run before anything waits.
         if usb.disks.submitted() != submitted {
@@ -357,7 +355,7 @@ fn serve(
         if let Some(stop) = &stop {
             poller.watch(stop, READABLE, TOKEN_STOP);
         }
-        if let Some(acceptor) = &acceptor {
+        if let Some(acceptor) = acceptor.as_ref().filter(|_| asking.has_room()) {
             poller.watch(acceptor, READABLE, TOKEN_ACCEPT);
         }
         if let Some(link) = &link {
@@ -371,13 +369,11 @@ fn serve(
         for (&disk, sessions) in &disks {
             sessions.watch(&poller, TOKEN_SESSION | u64::from(disk) << 16);
         }
-        for p in &pending {
-            poller.watch(&p.conn, READABLE, TOKEN_PENDING + u64::from(p.conn.as_handle().raw().0));
-        }
+        asking.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_PENDING + slot));
         let now = usb.wake.now();
         let mut timeout = wake_at.map_or(u64::MAX, |at| at.saturating_sub(now));
-        if let Some(first) = pending.iter().map(|p| p.since).min() {
-            timeout = timeout.min(HANDSHAKE_TIMEOUT.saturating_sub(first.elapsed()).as_nanos() as u64);
+        if let Some(left) = asking.left(Instant::now()) {
+            timeout = timeout.min(left.as_nanos() as u64);
         }
         ready.clear();
         poller.wait(1, timeout, |token| ready.push(token));
@@ -447,7 +443,7 @@ const CONTROLLER_LOST: i32 = 2;
 /// running: [`toyos_xhci::hc::Stopped::whole`] false.
 const STOP_UNFINISHED: i32 = 3;
 
-fn answer(conn: &Connection, usb: &Driver, wakes: &Wakes, wake_at: Option<Nanos>) {
+fn answer(asker: &Asker, usb: &Driver, wakes: &Wakes, wake_at: Option<Nanos>) {
     let mut snap = Snapshot::new(toyos_inspect::USB);
     snap.put("ports", u32::from(usb.hc.max_ports));
     let named = usb.named.borrow();
@@ -488,7 +484,7 @@ fn answer(conn: &Connection, usb: &Driver, wakes: &Wakes, wake_at: Option<Nanos>
     snap.put("input.unowned", input.unowned);
     snap.put("input.opened", input.opened);
     let encoded = snap.encode().unwrap_or_else(|why| panic!("usbd: its snapshot: {why}"));
-    if let Err(why) = conn.try_send_bytes(MSG_SNAPSHOT, &encoded) {
-        println!("usbd: dropping client {} — its answer would not go: {why:?}", conn.as_handle().raw().0);
+    if let Err(why) = asker.try_send_bytes(MSG_SNAPSHOT, &encoded) {
+        println!("usbd: dropping client {} — its answer would not go: {why:?}", asker.as_handle().raw().0);
     }
 }

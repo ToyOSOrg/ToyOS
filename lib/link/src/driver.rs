@@ -263,7 +263,10 @@ impl<'a> Session<'a> {
             RxStep::Eof => Some(Ended::HungUp("its process ended before it answered")),
             RxStep::Frame { msg_type: wire::MSG_OPENED, payload_len: 0, handles: wire::OPENED_HANDLES } => {
                 let [ring, rung] = self.rx.take_handles::<{ wire::OPENED_HANDLES }>().expect("counted above");
-                self.bells = Some((Waker::from(ring), Bell::from(rung)));
+                let (Ok(ring), Ok(rung)) = (ring.typed::<Waker>(), rung.typed::<Bell>()) else {
+                    panic!("{}: the stack opened this link with handles that are not its bells", self.label);
+                };
+                self.bells = Some((ring, rung));
                 // Its work is done: the bells carry the link from here.
                 self.conn = None;
                 say!("{}: the link is open", self.label);

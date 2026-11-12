@@ -49,6 +49,8 @@ pub struct KernelCtx {
     pub runs: Runs,
     /// Swapped with the per-CPU word at every switch; contexts don't all owe the same `enable` count.
     pub preempt: u32,
+    /// Where the switch last left this context's user machine state.
+    pub fpu: crate::arch::fpu::Left,
 }
 
 /// What a context runs.

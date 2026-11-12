@@ -21,12 +21,12 @@ use crate::UserAddr;
 const _: () = assert!(kernel::paged::HOLDER_PAGES == toyos_abi::syscall::PAGED_HOLDER_PAGES);
 const _: () = assert!(kernel::paged::HOLDER_END == toyos_abi::syscall::PAGED_HOLDER_END);
 
-pub(super) fn sys_pager_create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> u64 {
+pub(super) fn sys_pager_create(capacity: u64, dirty: u64, report_ns: u64) -> u64 {
     let handles = process::handles();
     if let Err(e) = handles.claim_pager() {
         return e.to_u64();
     }
-    let made = PagerObject::create(capacity, dirty, objects, report_ns).map_err(|why| match why {
+    let made = PagerObject::create(capacity, dirty, report_ns).map_err(|why| match why {
         Unmade::Invalid => SyscallError::InvalidArgument,
         Unmade::Exhausted => SyscallError::ResourceExhausted,
     });

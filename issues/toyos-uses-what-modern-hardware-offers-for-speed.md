@@ -46,7 +46,7 @@ and contention).
 - A TSC deadline: before #1061 cut the arm to one register write, the
   re-arm was at most 11.7 to 12.1 % of a pass's pick and switch on the T14,
   and at the AMD bench's TSC floor; it is to be read again
-  (`issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`).
+  (`issues/the-timer-is-a-lapic-count-never-a-tsc-deadline.md`).
 - Deep idle: on the T14 `hlt` holds a one-thread load to the turbo ratio
   for three or more active cores, 38 of `MSR_TURBO_RATIO_LIMIT`'s
   `0x2626262626262a2a` against 42 for one or two (#866's dump,
@@ -79,6 +79,27 @@ is nothing to enable.
 - **The wake storm's per-waiter gap** between the benches; next, its split
   (`issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`).
 
+**The switch's skips (#1251), unmeasured on metal.** A switch loads no
+root, FPU state, FS base or SS the incoming thread already has. No bench has
+run it, so its speed-up is not measured.
+
+- **Owed on metal:** on the T14 and the AMD bench, main's `testcases` boot
+  green, `vector_state` reporting its 16 trips back to a CPU whose registers
+  held the thread's earlier state; and main's `shared-debug` boot with
+  `sysret_ss_reload` judging "not needed" on the T14 (host bridge 8086) and
+  "reloaded" on the AMD bench (1022).
+- **Owed on metal:** on the T14, the restore skip's two negative controls,
+  each main with one half of the skip's test removed
+  ([patches](https://github.com/ToyOSOrg/evidence/tree/1a08e6bb6978c796427b929bb6c9bb764db0a851/r2/patches))
+  and `vector_state` alone, each red for its own reason: ignoring where the
+  thread last left its state, "held the file it had left there"; ignoring
+  the CPU's holder, "changed while it was switched out".
+- **Owed on metal:** `osbench` (the `benchcase` boot) of main before #1251
+  against main after it, four boots a side in a counterbalanced order, on the
+  T14 and the AMD bench: the switch-bound rows (`pingpong.futex.same_cpu`,
+  `pingpong.pipe.same_cpu`, `ipc.reqrep.*`, `wake.onto_busy`, `time.yield`)
+  read as the four skips together, and no row slower beyond its spread.
+
 **Exit**: every issue below is closed. They are listed in the order they are
 taken: the instruments, then what is measured, then the design rounds not
 yet measured.
@@ -88,7 +109,7 @@ yet measured.
 - `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`
 - `issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`
 - `issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`
-- `issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`
+- `issues/the-timer-is-a-lapic-count-never-a-tsc-deadline.md`
 - `issues/no-gate-decodes-kernel-elfs-instructions.md`
 - `issues/kernel-forward-copies-and-fills-are-one-rep-movsb-or-stosb-on-every-cpu.md`
 - `issues/the-direct-map-uses-1-gib-leaves-where-the-cpu-has-them.md`
@@ -97,4 +118,3 @@ yet measured.
 - `issues/idle-cpus-enter-the-c-states-cst-names.md`
 - `issues/syscall-cost-is-unread-since-a-syscall-counts-itself-on-its-thread.md`
 - `issues/malloc-churn-across-eight-threads-fell-with-the-run-queue-arenas.md`
-- `issues/a-thread-resuming-on-the-cpu-that-holds-its-state-restores-it-again.md`

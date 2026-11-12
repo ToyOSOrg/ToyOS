@@ -437,6 +437,11 @@ impl<X: SchedPayload> CpuSched<X> {
         self.running.as_ref()
     }
 
+    /// The running task's saved context, which the next switch into it loads.
+    pub fn running_ctx(&mut self) -> Option<&mut X::Ctx> {
+        self.running.as_mut().map(RunningTask::ctx_mut)
+    }
+
     /// The handle `park::prepare` needs. Only the running task can
     /// be produced, so registering somebody else's task has no expression.
     pub fn current_task(&self) -> Option<CurrentTask<'_, Msg<X>>> {
@@ -1633,6 +1638,9 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             if ns > 0 {
                 cpu.rq.charge_running(ns);
             }
+            if let Some(request) = current.outrun_request() {
+                cpu.rq.set_running_request(request);
+            }
         }
         assert!(!cpu.holding && cpu.held.is_empty(), "the previous pass on cpu{} was never disposed", cpu.id.0);
         // Not standing on any of them now: the pass that took them switched away.
@@ -1878,23 +1886,23 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let rt_due = self.cpu.rq.has_rt() && !current.serves_rt_band() && !self.cpu.aged_grant;
         // The kill arm makes `handle_retire`'s `need_resched` mean what it says, not a
         // kill bounded by the quantum. Guarded by `aged_grant` like the RT arm (a corpse
-        // keeps its chunk) and the running word — `preempt`'s precondition, never mid-commit.
-        let kill_due = current.shared().kill_pending()
-            && !self.cpu.aged_grant
-            && matches!(current.shared().state(), TaskState::Running(_));
+        // keeps its chunk).
+        let kill_due = current.shared().kill_pending() && !self.cpu.aged_grant;
         // Both instants count: `begin`'s charge has already issued the next
         // request, so a recomputed decision alone would never reach the end of
         // the one the last pass armed. A stale armed instant at worst decides
         // early, and the pick keeps `dispatched_at` if it picks this thread again.
         // Leaving is the pick's: the task goes back to its queue, and the pick
         // sends it on.
-        let outside = !current.affinity().contains(self.cpu.id)
-            && matches!(current.shared().state(), TaskState::Running(_));
-        let due = self.now >= self.cpu.decide_at
-            || self.now >= self.cpu.settle_decision(self.now)
-            || rt_due
-            || kill_due
-            || outside;
+        let outside = !current.affinity().contains(self.cpu.id);
+        // Every arm waits for the running word, `preempt`'s precondition: never
+        // mid-commit.
+        let due = matches!(current.shared().state(), TaskState::Running(_))
+            && (self.now >= self.cpu.decide_at
+                || self.now >= self.cpu.settle_decision(self.now)
+                || rt_due
+                || kill_due
+                || outside);
         if !due {
             return;
         }
@@ -2183,18 +2191,30 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             Some(_) => Some(self.cpu.settle_decision(self.now)),
             None => None,
         };
-        let plan = TimerPlan::compute(decision, deadline).no_later_than(extra);
-        match plan {
-            TimerPlan::Arm(at) => self.env.hw.set_timer(at),
-            TimerPlan::Stop => self.env.hw.stop_timer(),
+        match TimerPlan::compute(decision, deadline).no_later_than(extra) {
+            // A one-shot still to fire and due no later is left: an early fire
+            // is a spurious pass, so a running CPU writes its timer once a
+            // request rather than once a pass. An idle CPU arms exactly, so
+            // nothing wakes it before it is owed.
+            TimerPlan::Arm(at)
+                if self.cpu.running.is_some()
+                    && self.cpu.armed.is_some_and(|armed| self.now < armed && armed <= at)
+                    && self.env.hw.timer_pending() => {}
+            TimerPlan::Arm(at) => {
+                self.env.hw.set_timer(at);
+                self.cpu.armed = Some(at);
+            }
+            TimerPlan::Stop => {
+                self.env.hw.stop_timer();
+                self.cpu.armed = None;
+            }
         }
-        self.cpu.armed = plan.armed();
         // Invariant T is a statement about a CPU *outside* a pass, and the
         // arming that makes it true is the last thing a pass does — so the
         // check cannot move earlier.
         #[cfg(feature = "sched-check")]
         crate::sched::invariants::check_cpu(self.cpu);
-        TimerApplied::new(plan.armed())
+        TimerApplied::new(self.cpu.armed)
     }
 
     fn switch_to_current(&mut self) -> Action<<H as Hw>::Payload> {
@@ -2548,9 +2568,14 @@ impl<M: SchedMsg> CpuHandle<M> {
     }
 
     /// Every ask since the last take, emptied: this CPU's own pass, after its
-    /// `begin_pass`.
+    /// `begin_pass`. A word read empty is not swapped: an ask landing after
+    /// the read rings the doorbell after it, and the pass that ring owes
+    /// takes it.
     pub fn take_asks(&self) -> [u64; MASK_WORDS] {
-        core::array::from_fn(|word| self.asks[word].swap(0, Ordering::Relaxed))
+        core::array::from_fn(|word| match self.asks[word].load(Ordering::Relaxed) {
+            0 => 0,
+            _ => self.asks[word].swap(0, Ordering::Relaxed),
+        })
     }
 
     pub fn publish_weight(&self, weight: u64) {
@@ -2934,6 +2959,9 @@ mod tests {
         timers: Vec<Option<Nanos>>,
         /// The revisit an idle plan asks, where a test sets one.
         revisit: Option<u64>,
+        /// The last arm's one-shot, not yet fired: a test fires it by
+        /// clearing this.
+        pending: bool,
     }
 
     #[derive(Default)]
@@ -2959,10 +2987,17 @@ mod tests {
             Nanos::ZERO
         }
         fn set_timer(&self, deadline: Nanos) {
-            self.state().timers.push(Some(deadline));
+            let mut state = self.state();
+            state.timers.push(Some(deadline));
+            state.pending = true;
         }
         fn stop_timer(&self) {
-            self.state().timers.push(None);
+            let mut state = self.state();
+            state.timers.push(None);
+            state.pending = false;
+        }
+        fn timer_pending(&self) -> bool {
+            self.state().pending
         }
         fn idle_plan(&self, deadline: Option<Nanos>, now: Nanos) -> crate::sched::idle::Plan {
             let mut plan = crate::sched::idle::Plan::c1(deadline.map(|d| d.0), now.0);
@@ -4273,11 +4308,12 @@ mod tests {
         w.abandon();
     }
 
-    /// **A wake of an equal job with no standing waits for the running
-    /// request**: its deadline is a whole request after the queue's virtual
-    /// time, and the running thread's is due first.
+    /// **A wake of an equal job with no standing and a shorter request takes
+    /// the CPU once the running thread has had its minimum run.** It parked
+    /// after running nothing, so it asks for less than the running thread's
+    /// whole request and is due first.
     #[test]
-    fn a_wake_with_no_claim_ahead_waits_for_the_running_request() {
+    fn a_brief_sleepers_wake_runs_after_the_minimum_run() {
         let mut w = World::new(1);
         let (sleeper, sleeper_shared) = w.spawn(C0);
         w.run_a_pass(C0);
@@ -4287,12 +4323,121 @@ mod tests {
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
 
         wake(&w, C0, &sleeper_shared);
-        w.run_a_pass_at(C0, NOW.after(2 * MIN_SLICE_NS));
-        assert_eq!(w.cpus[0].decide_at(), NOW.after(SLICE_NS), "the hog keeps its whole request");
+        w.run_a_pass_at(C0, NOW.after(MIN_SLICE_NS / 2));
+        assert_eq!(w.cpus[0].decide_at(), NOW.after(MIN_SLICE_NS), "the hog keeps its minimum run");
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
 
-        w.run_a_pass_at(C0, NOW.after(SLICE_NS));
+        w.run_a_pass_at(C0, NOW.after(MIN_SLICE_NS));
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(sleeper), "and the wake runs at its end");
+        w.abandon();
+    }
+
+    /// Park the running task at `at`, as `World::park_running` does at `NOW`.
+    fn park_at(w: &mut World, at: Nanos) {
+        let (cpus, env) = w.split();
+        let sched = &mut cpus[0];
+        let current = CurrentTask::new(sched.running().expect("a task to park").shared(), C0);
+        let ticket = crate::sched::park::prepare(&current, crate::sched::park::Cancel::Answers, WaitClass::Other)
+            .expect("nothing notified this task");
+        let crate::sched::park::Commit::Parked(committed) = ticket.commit() else { panic!("an uncontended park") };
+        let pass = SchedPass::begin(sched, env, at);
+        let _ = pass.dispose_block(committed, None).finish();
+    }
+
+    /// The pass the running thread's next decision owes, at that instant.
+    fn pass_at_decision(w: &mut World) -> Nanos {
+        let at = w.cpus[0].decide_at();
+        w.run_a_pass_at(C0, at);
+        at
+    }
+
+    /// **A brief sleeper's wake in the pass that ends the running request
+    /// runs in that pass, with no lag of its own.** It ran alone in quarter
+    /// milliseconds, so its request followed down and it carries no lag; the
+    /// hog's request the pass reissues is a whole slice and is due later.
+    #[test]
+    fn a_brief_sleeper_waking_as_the_running_request_ends_runs_at_once() {
+        let mut w = World::new(1);
+        let (sleeper, sleeper_shared) = w.spawn(C0);
+        let mut now = NOW;
+        w.run_a_pass_at(C0, now);
+        for _ in 0..8 {
+            now = now.after(MIN_SLICE_NS);
+            park_at(&mut w, now);
+            wake(&w, C0, &sleeper_shared);
+            w.run_a_pass_at(C0, now);
+        }
+        let request = w.cpus[0].running().map(|t| t.request_ns()).expect("it runs");
+        assert!(request < 2 * MIN_SLICE_NS, "its request followed its bursts down: {request} ns");
+        now = now.after(MIN_SLICE_NS);
+        park_at(&mut w, now);
+        let (hog, _) = w.spawn(C0);
+        w.run_a_pass_at(C0, now);
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
+
+        wake(&w, C0, &sleeper_shared);
+        let end = pass_at_decision(&mut w);
+        assert_eq!(end, now.after(SLICE_NS), "the hog's whole request ran");
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(sleeper), "the wake runs in the pass that ends it");
+        w.abandon();
+    }
+
+    /// **A brief sleeper owing for its last burst runs within the minimum run
+    /// of its wake, though the running request was just reissued.** It ran a
+    /// quarter millisecond while the hog waited, so it comes back owing for it;
+    /// its short request is still due before the hog's whole one, and it runs
+    /// once the hog has served what it owes.
+    #[test]
+    fn a_brief_sleeper_owing_its_last_burst_runs_within_the_minimum_run() {
+        let mut w = World::new(1);
+        let (sleeper, sleeper_shared) = w.spawn(C0);
+        let (hog, _) = w.spawn(C0);
+        let mut now = NOW;
+        w.run_a_pass_at(C0, now);
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(sleeper));
+            now = now.after(MIN_SLICE_NS);
+            park_at(&mut w, now);
+            assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
+            wake(&w, C0, &sleeper_shared);
+            let woke = pass_at_decision(&mut w);
+            now = woke;
+            while w.cpus[0].running().map(|t| t.key()) != Some(sleeper) {
+                now = pass_at_decision(&mut w);
+            }
+            waits.push(now.since(woke));
+        }
+        assert!(
+            waits.iter().all(|&wait| wait <= MIN_SLICE_NS),
+            "every wake, the first owing for its burst included, waits at most the minimum run: {waits:?}",
+        );
+        w.abandon();
+    }
+
+    /// **A thread that stops sleeping gets back to the full slice.** Its
+    /// request followed brief bursts down; once it runs on, each request it
+    /// outruns moves it back up as a park would, so within a dozen requests it
+    /// is no longer held to short ones and their timer interrupts.
+    #[test]
+    fn a_thread_that_stops_sleeping_gets_back_to_the_full_slice() {
+        let mut w = World::new(1);
+        let (_, shared) = w.spawn(C0);
+        let mut now = NOW;
+        w.run_a_pass_at(C0, now);
+        for _ in 0..8 {
+            now = now.after(MIN_SLICE_NS);
+            park_at(&mut w, now);
+            wake(&w, C0, &shared);
+            w.run_a_pass_at(C0, now);
+        }
+        let short = w.cpus[0].running().map(|t| t.request_ns()).expect("it runs");
+        assert!(short < 2 * MIN_SLICE_NS, "its bursts brought its request down: {short} ns");
+        for _ in 0..12 {
+            pass_at_decision(&mut w);
+        }
+        let request = w.cpus[0].running().map(|t| t.request_ns()).expect("it runs");
+        assert!(request >= SLICE_NS / 100 * 99, "twelve requests on it is back to the full slice: {request} ns");
         w.abandon();
     }
 
@@ -4807,6 +4952,83 @@ mod tests {
         let Action::Idle(token) = pass.dispose_none().finish() else { panic!("an empty CPU sleeps") };
         assert_eq!(token.armed(), None);
         assert_eq!(w.hw.state().timers, [None], "a plan with no wake leaves the plan main makes: stopped");
+    }
+
+    /// **A running CPU writes its timer once a request, not once a pass.** A
+    /// pass that finds its one-shot pending and due no later than it needs
+    /// leaves it, so a thread that keeps entering the kernel re-arms nothing;
+    /// once it fired, or once something is owed sooner, the pass writes.
+    #[test]
+    fn a_running_cpu_leaves_a_pending_one_shot_due_no_later() {
+        let mut w = World::new(1);
+        w.spawn(C0);
+        w.run_a_pass_at(C0, NOW);
+        let armed = w.cpus[0].armed().expect("a running thread's request is armed");
+        assert_eq!(w.hw.state().timers, [Some(armed)]);
+
+        w.run_a_pass_at(C0, NOW.after(1_000));
+        assert_eq!(w.hw.state().timers, [Some(armed)], "the request's end has not moved: nothing written");
+        assert_eq!(w.cpus[0].armed(), Some(armed));
+
+        w.hw.state().pending = false;
+        w.run_a_pass_at(C0, NOW.after(2_000));
+        assert_eq!(w.hw.state().timers.len(), 2, "a fired one-shot is armed again");
+
+        // A sleeper due before the request's end is owed sooner.
+        w.spawn(C0);
+        let (cpus, env) = w.split();
+        let pass = SchedPass::begin(&mut cpus[0], env, NOW.after(3_000));
+        let _ = pass.dispose_yield().finish();
+        let due = NOW.after(50_000);
+        let (cpus, env) = w.split();
+        let sched = &mut cpus[0];
+        let current = CurrentTask::new(sched.running().expect("one of them runs").shared(), C0);
+        let ticket = crate::sched::park::prepare(&current, crate::sched::park::Cancel::Answers, WaitClass::Other)
+            .expect("nothing notified this task");
+        let crate::sched::park::Commit::Parked(committed) = ticket.commit() else { panic!("an uncontended park") };
+        let pass = SchedPass::begin(sched, env, NOW.after(4_000));
+        let _ = pass.dispose_block(committed, Some(due)).finish();
+        assert!(w.cpus[0].running().is_some(), "the other thread runs");
+        assert_eq!(w.cpus[0].armed(), Some(due), "a deadline before the armed one-shot is written");
+        assert_eq!(*w.hw.state().timers.last().unwrap(), Some(due));
+        w.abandon();
+    }
+
+    /// A pass takes an ask once: the word it found set is left empty, and the
+    /// next take finds nothing.
+    #[test]
+    fn a_taken_ask_is_gone() {
+        let w = World::new(2);
+        let victim = w.handles.get(C0);
+        let _ = victim.ask(C1);
+        victim.doorbell().begin_pass();
+        assert_eq!(victim.take_asks()[0], 1 << C1.0, "the ask is taken");
+        assert!(!victim.asked_by(C1));
+        assert_eq!(victim.take_asks(), [0; MASK_WORDS], "and taken once");
+        w.abandon();
+    }
+
+    /// **An idle CPU arms exactly**: a pending one-shot due before the
+    /// deadline it parks with is not left to wake it early.
+    #[test]
+    fn a_cpu_going_idle_writes_its_deadline_over_a_pending_earlier_one_shot() {
+        let mut w = World::new(1);
+        w.spawn(C0);
+        w.run_a_pass_at(C0, NOW);
+        let armed = w.cpus[0].armed().expect("armed for the running thread");
+        let due = armed.after(1_000_000);
+        assert!(w.hw.state().pending);
+        let (cpus, env) = w.split();
+        let sched = &mut cpus[0];
+        let current = CurrentTask::new(sched.running().expect("it runs").shared(), C0);
+        let ticket = crate::sched::park::prepare(&current, crate::sched::park::Cancel::Answers, WaitClass::Other)
+            .expect("nothing notified this task");
+        let crate::sched::park::Commit::Parked(committed) = ticket.commit() else { panic!("an uncontended park") };
+        let pass = SchedPass::begin(sched, env, NOW.after(1_000));
+        let _ = pass.dispose_block(committed, Some(due)).finish();
+        assert_eq!(w.cpus[0].armed(), Some(due));
+        assert_eq!(*w.hw.state().timers.last().unwrap(), Some(due), "the idle CPU's deadline is written");
+        w.abandon();
     }
 
     /// **Locality first, then a free physical core, then rotation**: a forward

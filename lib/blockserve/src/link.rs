@@ -156,22 +156,21 @@ impl Link {
                 RxStep::Malformed => "a frame this protocol does not make",
                 RxStep::Frame { msg_type: disk::MSG_SESSION, payload_len, .. } => {
                     let session = disk::Session::decode(self.rx.payload(payload_len));
-                    let handles = self.rx.take_handles::<2>();
+                    let handles = self.rx.take_handles::<2>().map(|[conn, region]| (conn.typed::<Connection>(), region));
                     match (session, handles) {
-                        (Some(session), Some([conn, region])) => {
-                            let conn = Connection::received(conn);
-                            handed.push(Handed::Session { session, conn, region });
+                        (Some(session), Some((Ok(conn), region))) => {
+                            handed.push(Handed::Session { session, conn, region: region.into() });
                             continue;
                         }
+                        (_, Some((Err(_), _))) => "a session whose connection is no connection",
                         (_, Some(_)) => "a session frame this protocol does not make",
                         (_, None) => "a session without its two handles",
                     }
                 }
                 RxStep::Frame { msg_type: msg_type @ (disk::MSG_DESCRIBE | disk::MSG_DESIGNATE), payload_len, .. } => {
                     let payload = self.rx.payload(payload_len).to_vec();
-                    match self.rx.take_handles::<1>() {
-                        Some([conn]) => {
-                            let conn = Connection::received(conn);
+                    match self.rx.take_handles::<1>().map(|[conn]| conn.typed::<Connection>()) {
+                        Some(Ok(conn)) => {
                             let asked = match msg_type {
                                 disk::MSG_DESCRIBE => disk::disk(&payload).map(|disk| Handed::Describe { disk, conn }),
                                 _ => disk::Designation::decode(&payload).map(|order| Handed::Designate { order, conn }),
@@ -184,6 +183,7 @@ impl Link {
                                 None => "a description or designation frame this protocol does not make",
                             }
                         }
+                        Some(Err(_)) => "a description or designation whose connection is no connection",
                         None => "a description or designation without the client's connection",
                     }
                 }

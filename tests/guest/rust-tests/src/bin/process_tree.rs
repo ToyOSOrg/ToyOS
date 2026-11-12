@@ -33,7 +33,7 @@ use std::io::{BufRead, BufReader};
 use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
-use toyos::endow::{self, Endowments, FromHandle, SVC_LABEL, SYSCAP_LABEL};
+use toyos::endow::{self, Endowments, SVC_LABEL, SYSCAP_LABEL};
 use toyos::ipc::Connection;
 use toyos::launch::{self, Launch, Outcome, Parent, LAUNCHER};
 use toyos::process::Process;
@@ -159,8 +159,9 @@ fn grow() -> Grown {
     let frame = rx.recv(&conn).expect("B's word that its subtree is grown");
     assert_eq!(frame.msg_type, MSG_GROWN, "B said something else");
     let [c, d, b_self, e] = rx.take_handles::<4>().expect("B sent four handles");
-    let (c, d, e) = (Process::from_handle(c), Process::from_handle(d), Process::from_handle(e));
-    Grown { b, conn, c, d, b_self, e, _held: held }
+    let process = |handle: toyos::ipc::ReceivedHandle| handle.typed::<Process>().expect("B sent a process");
+    let (c, d, e) = (process(c), process(d), process(e));
+    Grown { b, conn, c, d, b_self: b_self.into(), e, _held: held }
 }
 
 fn an_end_takes_its_subtree(end: Ending) {
@@ -215,7 +216,7 @@ fn under_b_is_gone(grown: &Grown) {
     };
     match launch::launch(&conn, request) {
         Ok(Outcome::Gone) => {}
-        Ok(Outcome::Started(child)) => panic!("a launch under B {when} started {child:?}"),
+        Ok(Outcome::Started(_)) => panic!("a launch under B {when} started"),
         Ok(_) => panic!("a launch under B {when} was answered as something other than gone"),
         Err(_) => panic!("the launcher did not answer a launch under B {when}"),
     }
@@ -299,7 +300,7 @@ fn a_pipe_is_no_place() {
     };
     match launch::launch(&conn, request) {
         Ok(Outcome::Refused) => {}
-        Ok(Outcome::Started(child)) => panic!("a launch whose place is a pipe started {child:?}"),
+        Ok(Outcome::Started(_)) => panic!("a launch whose place is a pipe started"),
         Ok(_) => panic!("a launch whose place is a pipe was answered as something other than refused"),
         Err(_) => panic!("the launcher did not answer a launch whose place is a pipe"),
     }

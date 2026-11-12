@@ -21,7 +21,8 @@ macro_rules! device_irq_entry {
         $(#[$meta])*
         #[unsafe(naked)]
         $vis extern "sysv64" fn $name() {
-            $crate::arch::entry::ring3_naked_asm!(
+            // On entry the 10 GPRs are not yet pushed.
+            $crate::arch::entry::ring3_naked_asm!(cs = $cs - 80;
                 // Handler may clobber any scratch GPR; one left unsaved leaks kernel state into a user register on iretq.
                 "push rax",
                 "push rcx",
@@ -62,7 +63,7 @@ macro_rules! device_irq_entry {
                 "pop rcx",
                 "pop rax",
                 $($drop,)?
-                "iretq",
+                $crate::arch::entry::gate_iretq!(),
                 handler = sym $handler,
                 cs = const $cs,
                 exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,

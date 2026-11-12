@@ -1,4 +1,6 @@
-//! x86-64: the entry, the string instructions, and SSE2's square roots.
+//! x86-64: the entry, the copies and the fill, and SSE2's square roots.
+
+use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 /// Entry point for C programs, on an empty stack. The image relocates itself
 /// first, from its own header's address.
@@ -16,16 +18,101 @@ unsafe extern "C" fn _start() -> ! {
     );
 }
 
-/// Copy `n` bytes from `src` to `dest`, lowest address first.
-pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
+/// Copy `n` bytes from `src` to `dest`, which may overlap `src` from below,
+/// and answer `dest`.
+#[inline(always)]
+pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    let moves_below = MOVES_BELOW.load(Relaxed);
+    if n < moves_below {
+        if moves_below == UNASKED {
+            // SAFETY: the caller's.
+            return unsafe { first_copy(dest, src, n) };
+        }
+        // SAFETY: the caller's, and `n` is at most `SHORT`.
+        unsafe { copy_short(dest, src, n) };
+    } else {
+        unsafe {
+            core::arch::asm!(
+                "rep movsb",
+                inout("rdi") dest => _,
+                inout("rsi") src => _,
+                inout("rcx") n => _,
+                options(nostack),
+            );
+        }
+    }
+    dest
+}
+
+/// The longest copy [`copy_short`] makes where a short `rep movsb` is slow.
+const SHORT: usize = 256;
+
+/// Copies shorter than this are [`copy_short`]'s, the rest one `rep movsb`: 0
+/// where the CPU declares fast short `rep movsb`, CPUID.(EAX=7,ECX=0):EDX[4]
+/// (FSRM; Intel SDM Vol. 1 Table 21-21, AMD APM Vol. 3 Appendix E), its
+/// vendor's statement that a short one starts fast (Intel's Optimization
+/// Reference Manual §3.7.6.1); past [`SHORT`] elsewhere; and [`UNASKED`] until
+/// a process's first copy asks.
+static MOVES_BELOW: AtomicUsize = AtomicUsize::new(UNASKED);
+const UNASKED: usize = usize::MAX;
+
+/// A process's first copy: out of line, so that no copy after it pays for the
+/// call.
+#[cold]
+#[inline(never)]
+unsafe fn first_copy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+    let fsrm = __cpuid(0).eax >= 7 && __cpuid_count(7, 0).edx & (1 << 4) != 0;
+    MOVES_BELOW.store(if fsrm { 0 } else { SHORT + 1 }, Relaxed);
+    // SAFETY: the caller's.
+    unsafe { copy_forward(dest, src, n) }
+}
+
+/// `n` bytes, `16 * k <= n <= 32 * k` for the `k` indices given, as `k`
+/// 16-byte moves from each end. Spelled out rather than looped: a loop over
+/// them is a copy the compiler may lower to a call to `memcpy`, which this is.
+/// Eight from each end are every SSE register.
+macro_rules! vectors {
+    ($d:ident, $s:ident, $n:ident, $($i:tt)+) => {{
+        use core::arch::x86_64::{_mm_loadu_si128 as load, _mm_storeu_si128 as store};
+        let t = $n - 16 * [$($i),+].len();
+        let head = ($(load($s.add(16 * $i).cast()),)+);
+        let tail = ($(load($s.add(t + 16 * $i).cast()),)+);
+        $(store($d.add(16 * $i).cast(), head.$i);)+
+        $(store($d.add(t + 16 * $i).cast(), tail.$i);)+
+    }};
+}
+
+/// Copy `n` bytes, at most [`SHORT`], as moves from each end that overlap in
+/// the middle: every byte is loaded before any is stored, so any overlap of
+/// `dest` and `src` is copied right.
+#[inline(always)]
+pub(crate) unsafe fn copy_short(dest: *mut u8, src: *const u8, n: usize) {
+    // SAFETY: each arm reads and writes inside the `n` bytes, by its range.
     unsafe {
-        core::arch::asm!(
-            "rep movsb",
-            inout("rdi") dest => _,
-            inout("rsi") src => _,
-            inout("rcx") n => _,
-            options(nostack),
-        );
+        match n {
+            0 => {}
+            1 => dest.write(src.read()),
+            2..=3 => ends::<u16>(dest, src, n),
+            4..=7 => ends::<u32>(dest, src, n),
+            8..=15 => ends::<u64>(dest, src, n),
+            16..=32 => vectors!(dest, src, n, 0),
+            33..=64 => vectors!(dest, src, n, 0 1),
+            65..=128 => vectors!(dest, src, n, 0 1 2 3),
+            _ => vectors!(dest, src, n, 0 1 2 3 4 5 6 7),
+        }
+    }
+}
+
+/// `n` bytes, `size_of::<T>() <= n <= 2 * size_of::<T>()`, as one `T` from
+/// each end.
+#[inline(always)]
+unsafe fn ends<T>(dest: *mut u8, src: *const u8, n: usize) {
+    let tail = n - core::mem::size_of::<T>();
+    unsafe {
+        let (a, b) = (src.cast::<T>().read_unaligned(), src.add(tail).cast::<T>().read_unaligned());
+        dest.cast::<T>().write_unaligned(a);
+        dest.add(tail).cast::<T>().write_unaligned(b);
     }
 }
 

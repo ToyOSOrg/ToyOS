@@ -49,6 +49,11 @@
 
 - A connection carries bounded, whole messages, each holding bytes and handles
   together, so a message and the authority it passes arrive atomically.
+- A received handle arrives with the kind of object it names, as the kernel
+  read it when it delivered the handle. What the sender's protocol says the
+  handle is remains the sender's word: a receiver takes it as a kind only where
+  the kernel reported that kind, and refuses any other, including a kind it
+  does not know.
 - Notifications coalesce, and polling for readiness does not consume one;
   signalling and consuming each need their own right.
 - Pipes remain for real byte streams; bulk data stays in shared memory.

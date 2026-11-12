@@ -256,7 +256,7 @@ pub fn set_current_rt(enable: bool) {
 /// Block on a futex word unless it already changed, and answer which of the
 /// two things the ABI names ended the wait.
 #[track_caller]
-pub fn futex_wait(word: &crate::mm::space::Translation, expected: u32, deadline: Deadline) -> FutexEnd {
+pub fn futex_wait(word: &crate::mm::space::Translation<'_>, expected: u32, deadline: Deadline) -> FutexEnd {
     let parkable = Parkable::at_entry();
     let phys = word.phys();
     let changed = || {

@@ -145,7 +145,8 @@ impl<T> Lock<T> {
             // no IPI, and without this would deadlock an initiator that holds
             // the lock.
             // With `IF` set the IPI can land inside this poll's own serve,
-            // which `Shootdown::serve` survives.
+            // which `Shootdown::serve` survives, and `Asks::serve` too: each
+            // bit is answered by whichever serve took it.
             crate::arch::tlb::poll();
             spins += 1;
             if spins == next_warn {

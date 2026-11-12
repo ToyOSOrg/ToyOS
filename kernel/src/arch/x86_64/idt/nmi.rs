@@ -6,19 +6,27 @@
 //! Runs on IST2 for the `#DF` `arch::syscall`'s CPL-0/user-`rsp` window would
 //! otherwise take; `PerCpu::nmi_active` guards IST2's non-reentrancy by
 //! routing a second NMI to [`nested_nmi`] instead of corrupting the stack.
+//! It installs the kernel's GS base whatever it finds and puts back the one it
+//! found before its `iretq`, since it can land where a user's is live
+//! (`arch::entry`).
 
 use core::arch::naked_asm;
 
-use crate::arch::percpu::OFF_NMI_ACTIVE;
+use crate::arch::entry::install_kernel_gs;
+use crate::arch::percpu::{MSR_GS_BASE, OFF_GDT, OFF_NMI_ACTIVE};
 
-/// Ten pushes of eight bytes place the interrupt frame's `rip` at 80, and its
-/// `rflags` two words above. `IF` is what separates a cpu that has stopped
-/// taking interrupts from one that is merely slow.
-const RFLAGS_OFFSET: usize = 80 + 16;
+/// The words the entry pushes before it can tell a nested NMI: three
+/// registers and the GS base it found.
+const FIRST_PUSHES: usize = 4;
 
-/// Before any push, the CPU's own five words start at `rsp`.
-const NESTED_RIP_OFFSET: usize = 0;
-const NESTED_RSP_OFFSET: usize = 24;
+/// The interrupt frame's `rip` and `rsp`, at the nested check.
+const NESTED_RIP_OFFSET: usize = 8 * FIRST_PUSHES;
+const NESTED_RSP_OFFSET: usize = NESTED_RIP_OFFSET + 24;
+
+/// Eleven pushes in all place the frame's `rip` at 88, and its `rflags` two
+/// words above. `IF` is what separates a cpu that has stopped taking
+/// interrupts from one that is merely slow.
+const RFLAGS_OFFSET: usize = 8 * (FIRST_PUSHES + 7) + 16;
 
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn nmi_entry() {
@@ -27,13 +35,19 @@ pub(super) extern "sysv64" fn nmi_entry() {
         "cld",
         // And from Ring 3 it arrives with that thread's `AC`, as every gate does.
         "clac",
-        // Checked before any push: cmp sets flags, and iretq restores RFLAGS from the frame, so flags are free here.
-        "cmp dword ptr gs:[{active}], 0",
-        "jne 2f",
-        "mov dword ptr gs:[{active}], 1",
+        // Flags are free throughout: iretq restores RFLAGS from the frame.
         "push rax",
         "push rcx",
         "push rdx",
+        "mov ecx, {gs_base_msr}",
+        "rdmsr",
+        "shl rdx, 32",
+        "or rax, rdx",
+        "push rax",
+        install_kernel_gs!(),
+        "cmp dword ptr gs:[{active}], 0",
+        "jne 2f",
+        "mov dword ptr gs:[{active}], 1",
         "push rsi",
         "push rdi",
         "push r8",
@@ -53,11 +67,17 @@ pub(super) extern "sysv64" fn nmi_entry() {
         "pop r8",
         "pop rdi",
         "pop rsi",
+        // Cleared before iretq, never after: delivery is blocked until iretq retires, so no second NMI can find it clear while this one is still on the stack.
+        "mov dword ptr gs:[{active}], 0",
+        // The base this NMI found, back: nothing after it reads GS.
+        "pop rax",
+        "mov rdx, rax",
+        "shr rdx, 32",
+        "mov ecx, {gs_base_msr}",
+        "wrmsr",
         "pop rdx",
         "pop rcx",
         "pop rax",
-        // Cleared before iretq, never after: delivery is blocked until iretq retires, so no second NMI can find it clear while this one is still on the stack.
-        "mov dword ptr gs:[{active}], 0",
         // No EOI: an NMI isn't delivered through the IRR, and acknowledging one would clear an unrelated interrupt.
         "iretq",
         // This frame already overwrote the outer handler's stack: nothing to preserve, so read the two words before aligning.
@@ -68,6 +88,8 @@ pub(super) extern "sysv64" fn nmi_entry() {
         "call {nested}",
         "ud2",
         active = const OFF_NMI_ACTIVE,
+        gs_base_msr = const MSR_GS_BASE,
+        gdt_in_percpu = const OFF_GDT,
         rflags_offset = const RFLAGS_OFFSET,
         nested_rip = const NESTED_RIP_OFFSET,
         nested_rsp = const NESTED_RSP_OFFSET,

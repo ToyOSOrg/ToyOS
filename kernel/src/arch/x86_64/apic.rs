@@ -379,6 +379,9 @@ impl OneShot {
 
 /// Arm a one-shot timer to fire after `nanos` nanoseconds, or after [`MIN_ONE_SHOT`] if that is longer.
 pub fn arm_one_shot(nanos: u64) {
+    // Before the write: a fire taken between the two then clears it, and the
+    // next pass writes again rather than trusting a quantum's re-arm.
+    percpu::set_timer_pending(true);
     OneShot::after(nanos).arm();
     crate::trace::trace(crate::trace::Kind::TimerArm, nanos as u32);
 }
@@ -408,19 +411,29 @@ pub fn rearmed_a_quantum(_armed: u64) -> bool {
 /// The Ring 3 fire's re-arm, before its Rust half runs: what this CPU last
 /// armed, again, so the timer survives a handler that panics first.
 pub(crate) extern "sysv64" fn rearm_last() {
+    percpu::set_timer_pending(false);
     Reg::TIMER_INIT.write(percpu::last_armed_ticks());
 }
 
 /// The Ring 0 fire's local-APIC work, called from its stub with interrupts
 /// closed: the EOI, then one quantum on, or a stopped timer left stopped.
 pub(crate) extern "sysv64" fn ring0_fire() {
+    percpu::set_timer_pending(false);
     eoi();
     let stopped = percpu::last_armed_ticks() == 0;
     Reg::TIMER_INIT.write(if stopped { 0 } else { TIMER_TICKS.load(Ordering::Relaxed) });
 }
 
+/// Whether the one-shot [`arm_one_shot`] last armed is still to fire: both of
+/// the timer's entry paths clear it, and [`arm_within`] leaves it, since what
+/// it arms is never later than what it found.
+pub fn timer_pending() -> bool {
+    percpu::timer_pending()
+}
+
 /// Stop the timer. No more interrupts until re-armed.
 pub fn stop_timer() {
+    percpu::set_timer_pending(false);
     percpu::set_last_armed_ticks(0);
     Reg::TIMER_INIT.write(0);
     crate::trace::trace(crate::trace::Kind::TimerStop, 0);

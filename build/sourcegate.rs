@@ -81,10 +81,9 @@ fn kernel_lines() -> Vec<(String, usize, String)> {
 const LOG_PRODUCERS: &[&str] = &["log!(", "alert!(", "boot_phase!(", "log::emit("];
 
 /// Every file whose whole contents run inside an NMI, and so may write no log
-/// record: the handler, and the hard-lockup detector it samples through. The
-/// detector's own control is not here — it stages from ordinary context, in
-/// `kernel/src/hardlockup/probe.rs`, which is why it is a file of its own — and
-/// neither is the line the arm writes, which its caller writes for it.
+/// record: the handler, and the hard-lockup detector it samples through. An
+/// arm that stages vector 2 from ordinary context and reports it is a file of
+/// its own for that reason, `kernel/src/arch/x86_64/idt/nmi_user_gs.rs`.
 const NMI_SILENT: &[&str] =
     &["kernel/src/arch/x86_64/idt/nmi.rs", "kernel/src/hardlockup/mod.rs"];
 
@@ -592,33 +591,6 @@ mod tests {
             "a hand-written `Send`/`Sync` is a bound the compiler stops checking on every later \
              field, so each one is a row somebody wrote on purpose.\n{}",
             complaints.join("\n"),
-        );
-    }
-
-    /// One process closing a capability cancels no other process's log poll:
-    /// every `SysCap` names the log's one machine-wide watch, which outlives
-    /// every handle, so `close_ends_polls` answers a `SysCap` with `false` and
-    /// with nothing that could be anything else.
-    #[test]
-    fn a_capability_closing_ends_no_log_poll() {
-        const OPS: &str = "kernel/src/object/ops.rs";
-        const ARM: &str = "KObjectRef::SysCap(_) =>";
-        let lines = kernel_lines();
-        let body: Vec<String> = lines
-            .iter()
-            .filter(|(file, _, _)| file == OPS)
-            .map(|(_, _, line)| code_only(line))
-            .skip_while(|code| !code.contains("fn close_ends_polls("))
-            .take_while(|code| code != "}")
-            .collect();
-        assert!(!body.is_empty(), "{OPS} has no `fn close_ends_polls(`: this gate reads nothing");
-        let arms: Vec<&str> =
-            body.iter().map(|code| code.trim()).filter(|code| code.starts_with(ARM)).collect();
-        assert_eq!(
-            arms,
-            [format!("{ARM} false,")],
-            "`close_ends_polls` must answer a `SysCap` with `false`: any other answer lets one \
-             process's close cancel every log poll in the machine"
         );
     }
 

@@ -18,7 +18,7 @@ use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::debug_action as DA;
 use toyos_abi::syscall::*;
 
-use super::{HANDLE_LEN, TRANSFER_ENTRY_LEN};
+use super::{RECEIVED_ENTRY_LEN, TRANSFER_ENTRY_LEN};
 #[cfg(feature = "test-actuators")]
 use super::debug::{canary, debug_heap_alloc, ring0_timer_in_syscall, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
 use super::device::{
@@ -35,7 +35,7 @@ use super::ipc::{
     Incoming, Outgoing,
     sys_accept, sys_inbox_setup, sys_message_recv, sys_message_send,
     sys_inbox_submit, sys_namespace_build, sys_namespace_names, sys_namespace_open, sys_pipe,
-    sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map, sys_shm_sub,
+    sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_sub,
 };
 use super::machine::{
     sys_counters, sys_device_inventory, sys_device_set, sys_device_set_read, sys_log_last_words, sys_log_read,
@@ -54,7 +54,7 @@ use super::proc::{
     sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_get_affinity, sys_thread_join, sys_thread_set_affinity, sys_set_thread_pointer, sys_thread_spawn, sys_wake_latency_hold, sys_yield,
 };
 use super::vm::{
-    sys_vm_decommit, sys_vm_discard, sys_vm_remap,
+    sys_vm_decommit, sys_vm_discard, sys_vm_map, sys_vm_remap,
     sys_vm_protect, sys_vm_release, sys_vm_reserve,
 };
 
@@ -252,6 +252,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             None => bad_addr,
         },
         SYS_VM_RESERVE => sys_vm_reserve(a1, a2, a3, a4),
+        SYS_VM_MAP => sys_vm_map(&ctx, RawHandle(a1 as u32), UserAddr::new(a2)),
         SYS_VM_RELEASE => sys_vm_release(a1, a2),
         SYS_VM_PROTECT => sys_vm_protect(a1, a2, a3),
         SYS_VM_DISCARD => sys_vm_discard(a1, a2),
@@ -327,7 +328,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_message_recv(RawHandle(a1 as u32), &mut into, args.flags & MESSAGE_NONBLOCK != 0)
         }
         SYS_SHM_CREATE => sys_shm_create(a1, a2, RawHandle(a3 as u32)),
-        SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32), a2),
         SYS_SHM_SUB => sys_shm_sub(RawHandle(a1 as u32), a2, a3),
         SYS_LOG_SPOKEN => sys_log_spoken(&ctx, RawHandle(a1 as u32), UserAddr::new(a2)),
         SYS_LOG_LAST_WORDS => {
@@ -552,7 +552,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // kernel decides each access by what its address is.
         SYS_ACPI => sys_acpi(&ctx, RawHandle(a1 as u32), a2, a3),
         SYS_DEVICE_REG_READ => sys_device_reg_read(RawHandle(a1 as u32), a2, a3),
-        SYS_PAGER_CREATE => sys_pager_create(a1, a2, a3, a4),
+        SYS_PAGER_CREATE => sys_pager_create(a1, a2, a3),
         SYS_PAGED_CREATE => match a3 {
             0 | 1 => sys_paged_create(RawHandle(a1 as u32), a2, a3 != 0),
             _ => SyscallError::InvalidArgument.to_u64(),
@@ -618,7 +618,7 @@ fn incoming<'a>(ctx: &SyscallContext<'a>, args: &MessageRecv) -> Result<Option<I
         Some(Incoming {
             head: ctx.user_bytes_mut(UserAddr::new(args.head), head_len)?,
             bytes: ctx.user_bytes_mut(UserAddr::new(args.bytes), len)?,
-            handles: ctx.user_bytes_mut(UserAddr::new(args.handles), (cap * HANDLE_LEN) as u64)?,
+            handles: ctx.user_bytes_mut(UserAddr::new(args.handles), (cap * RECEIVED_ENTRY_LEN) as u64)?,
             cap,
         })
     })())

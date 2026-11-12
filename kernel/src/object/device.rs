@@ -132,6 +132,12 @@ impl DeviceClaim {
         }
     }
 
+    /// End the polls made through `via` on the watch this claim holds; a
+    /// claim released has ended every one already.
+    pub(crate) fn end_polls(&self, via: kernel::sched::poll::Via) {
+        self.reference.with(|claim| claim.end_polls(via));
+    }
+
     pub fn info_read(&self) -> bool {
         self.info_read.load(Ordering::Relaxed)
     }

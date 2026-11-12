@@ -1,7 +1,7 @@
 //! A section the build writes reads back as written, and every malformation
 //! the reader fences is refused by name.
 
-use toyos_abi::syscall::{SpawnMap, VmProt};
+use toyos_abi::syscall::{SpawnBacking, SpawnMap, VmProt};
 use toyos_kimage::{Input, Kernel, StackedImage, Symbol};
 
 fn input() -> Input {
@@ -20,7 +20,10 @@ fn input() -> Input {
         supervisor_entry: 0x2_0000_1000,
         supervisor_base: 0x2_0000_0000,
         supervisor_build_id: vec![0x5a; 20],
-        supervisor_maps: vec![SpawnMap { addr: 0x2_0000_0000, len: 0x1000, object: 0, offset: 0, copied: 0x800, prot: VmProt::ReadExec as u64 }],
+        supervisor_maps: vec![
+            SpawnMap { addr: 0x2_0000_0000, len: 0x1000, object: 0, offset: 0, copied: 0, prot: VmProt::ReadExec as u64, backing: SpawnBacking::Share as u64 },
+            SpawnMap { addr: 0x2_0000_1000, len: 0x1000, object: 0, offset: 0x1000, copied: 0x800, prot: VmProt::ReadWrite as u64, backing: SpawnBacking::Copy as u64 },
+        ],
         supervisor_len: 0x1234,
         image: vec![0xcc; 0x2100],
     }

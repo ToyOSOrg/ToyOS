@@ -109,3 +109,19 @@ sources, and the review's target was one `gates` directory under
 `kernel/src/` so that what test machinery exists is auditable in one listing.
 `input_merge_test` was the tell that pure logic was trapped in the kernel: the
 merge is `toyos-input`'s now, host-tested with synthetic multi-source streams.
+
+**The file written in batches** (#1232) rests on host tests and guest rows.
+The benches went down before its T14 half ran; on the AMD bench its
+`spawn_cost` A/B (one boot per arm) and `machine_reboot` passed.
+
+- **Owed on metal:** `machine_reboot` on the T14, at main. Main must pass the
+  boot verdict with the stop mark and the supervisor's stop line in the file,
+  `machine_reboot`'s reset-register line, and `test_rs_ps2server_hold` exit 0
+  (a served-log reader is handed its line through the reader's wake), with no
+  "had not answered the stop's flush", "stop mark was asked … after its time",
+  "answers but slowly" or "refusing reader" line.
+- **Owed on metal:** `spawn_cost`'s A/B on the T14, main before #1232 against
+  main after it, back to back. Main after must show "the machine busy … a
+  spawn" lower than before, by about one write and sync per logkeeper round the
+  loop spans (on the AMD bench, 430 µs against 360 µs a spawn), min and median
+  no worse than the two runs' spread, and both boots passing with the stop mark.

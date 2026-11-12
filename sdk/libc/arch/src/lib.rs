@@ -1,7 +1,8 @@
 //! libc's modules that read and set nothing but what they are handed, on the
 //! host, differentially. The architecture module: every copy and fill it has,
 //! over every length to 300 and every source and destination offset to 20,
-//! against `copy_within` and `fill`, with the two buffers overlapping both ways;
+//! against `copy_within` and `fill`, with the two buffers overlapping both ways,
+//! and x86-64's short copy at every overlap;
 //! and its square roots against `f64::sqrt` and `f32::sqrt`. Each host
 //! architecture checks its own module. The UTF-8 reader against
 //! `core::str::from_utf8`, the number reader against the host C library's and
@@ -194,6 +195,32 @@ mod tests {
         assert_eq!(cases, (LENGTHS * OFFSETS * OFFSETS) as u32);
     }
 
+    /// x86-64's short copy, which `copy_forward` takes only on a CPU without
+    /// fast short `rep movsb`, so called here whatever the host's CPU is: every
+    /// length it takes, at every overlap either way and four alignments.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn every_short_copy_agrees_with_copy_within_at_any_overlap() {
+        const SHORT: usize = 256;
+        const MID: usize = SHORT + 2;
+        for n in 0..=SHORT {
+            for d in 0..=n + 1 {
+                for (from, to) in [(MID, MID - d), (MID, MID + d)] {
+                    for at in [0, 1, 7, 13] {
+                        let base = pattern(2 * MID + SHORT + 16);
+                        let mut want = base.clone();
+                        want.copy_within(at + from..at + from + n, at + to);
+                        let mut got = base.clone();
+                        let p = got.as_mut_ptr();
+                        // SAFETY: both ranges are inside `got`.
+                        unsafe { arch::copy_short(p.add(at + to), p.add(at + from), n) };
+                        assert_eq!(got, want, "n {n} from {from} to {to} at {at}");
+                    }
+                }
+            }
+        }
+    }
+
     /// Two buffers, so neither direction leans on the other's order.
     #[test]
     fn a_disjoint_copy_agrees_either_way() {
@@ -208,7 +235,7 @@ mod tests {
                         if backward {
                             arch::copy_backward(d, s, n);
                         } else {
-                            arch::copy_forward(d, s, n);
+                            assert_eq!(arch::copy_forward(d, s, n), d, "a forward copy answers its destination");
                         }
                     }
                     let mut want = vec![0xAAu8; n + OFFSETS];

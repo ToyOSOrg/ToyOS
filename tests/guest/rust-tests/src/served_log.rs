@@ -1,6 +1,5 @@
 //! This boot's log as logkeeper serves it on test-runner's `log` port, from
-//! its first line. A reader is handed each round only after it is on the
-//! stick.
+//! its first line, each round as logkeeper reads it.
 
 use std::time::{Duration, Instant};
 

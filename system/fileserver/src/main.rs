@@ -51,8 +51,10 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use toyos::admission::{self, Admission, Event};
+
 use fileserver::absent::Absent;
-use fileserver::bounds::{self, Hello, Slot, MAX_HANDSHAKES, MAX_SERVED, MAX_STREAMS};
+use fileserver::bounds::{self, Hello, Slot, HANDSHAKES, MAX_SERVED, MAX_STREAMS};
 use fileserver::data::{DataVolume, Located, Probed};
 use fileserver::descriptions::{self, Description, Held, Ids, Shared};
 use fileserver::listing;
@@ -88,11 +90,7 @@ const STREAM_PRESENT: usize = PIPE_CAPACITY / STREAM_READ;
 const EXPORT_PORT: &str = "export";
 
 // One wait watches the acceptor, every connection and every stream at once.
-const _: () = assert!(1 + MAX_SERVED + MAX_HANDSHAKES + MAX_STREAMS <= Poller::MAX_HANDLES as usize);
-
-/// How long an accepted connection may take to lend its window: while
-/// [`MAX_HANDSHAKES`] wait, the next waits in the port's queue for at most this.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+const _: () = assert!(1 + MAX_SERVED + HANDSHAKES.slots + MAX_STREAMS <= Poller::MAX_HANDLES as usize);
 
 /// Why a client asking for a request number the wire does not have is let go,
 /// whatever its grant.
@@ -106,6 +104,7 @@ const TOKEN_ACCEPTOR: u64 = 0;
 const TOKEN_CLIENT: u64 = 1 << 32;
 const TOKEN_STREAM: u64 = 2 << 32;
 const TOKEN_PAGER: u64 = 3 << 32;
+const TOKEN_HELLO: u64 = 4 << 32;
 
 /// Notices read per call.
 const NOTICES: usize = 64;
@@ -146,6 +145,16 @@ impl Role {
     }
 }
 
+/// What a connection's grant says of it, kept while it waits on its hello.
+struct Granted {
+    root: String,
+    writes: bool,
+}
+
+/// A connection with its first request, which is its hello or nothing; its
+/// key is its grant's share.
+type Greeter = admission::Client<u64, Granted, { core::mem::size_of::<Request>() }>;
+
 struct Client {
     conn: Connection,
     rx: ipc::FrameRx<{ core::mem::size_of::<Request>() }>,
@@ -157,29 +166,13 @@ struct Client {
     share: u64,
     /// Its grant is read-write and the volume is: what it may change.
     writes: bool,
+    /// The window it lent with its hello: `None` only for an exported
+    /// connection whose hello has not come, which holds its served slot from
+    /// its export and waits on no limit.
     window: Option<SharedMemory>,
     fids: Ids,
-    since: Instant,
     /// A watch on its connection waits in the poller.
     armed: bool,
-}
-
-impl Client {
-    /// Whether it was exported: its served slot was taken then, so it waits on
-    /// no handshake.
-    fn exported(&self) -> bool {
-        self.root.is_none()
-    }
-
-    /// Whether it holds a served slot.
-    fn served(&self) -> bool {
-        self.window.is_some() || self.exported()
-    }
-
-    /// Whether it is a handshake still waiting on its hello.
-    fn waiting(&self) -> bool {
-        !self.served()
-    }
 }
 
 /// A pipe a program writes and this server writes to a file at its
@@ -245,13 +238,15 @@ fn main() {
         dirs.iter().map(|d| d.dir).collect::<Vec<_>>().join(", "),
         volume.describe()
     );
-    let files = Files::new(pager(role, volume.memory()));
+    let (pager, keeps) = pager(role, volume.memory());
+    let files = Files::new(pager, keeps);
     Server {
         volume,
         files,
         pager_armed: false,
         memory,
         acceptor,
+        hellos: Admission::new(HANDSHAKES),
         clients: BTreeMap::new(),
         next_client: 0,
         streams: BTreeMap::new(),
@@ -277,25 +272,26 @@ const SMALL_PAGES: u64 = (16 << 20) / toyos::paged::PAGE;
 /// The most pages a DATA pager holds dirty: 32 MiB.
 const DATA_DIRTY: u64 = 8 * 1024;
 
-/// The role's pager: how many pages its files hold, how many of them may be
-/// dirty and how many files it keeps. None for SYSTEM, whose files are
+/// The role's pager: how many pages its files hold and how many of them may
+/// be dirty, and how many files it keeps. None for SYSTEM, whose files are
 /// immutable and are served from ROOT's memory.
-fn pager(role: Role, anonymous: bool) -> Option<toyos::paged::Pager> {
-    let (capacity, dirty, objects) = match role {
-        Role::System => return None,
+fn pager(role: Role, anonymous: bool) -> (Option<toyos::paged::Pager>, Option<usize>) {
+    let (capacity, dirty, keeps) = match role {
+        Role::System => return (None, None),
         Role::Data | Role::Memory => {
             let share = toyos::system::memory_total() / PAGES_SHARE / toyos::paged::PAGE;
             let capacity = (share.saturating_sub(2 * SMALL_PAGES) / 2).max(SMALL_PAGES);
-            // A file held for every 16 pages, the table's own cost a small
-            // part of the pages': at most 65,536.
+            // A file kept for every 16 pages, at most 65,536.
             (capacity, DATA_DIRTY.min(capacity / 2), (capacity / 16).clamp(1024, 64 * 1024))
         }
         Role::Log => (SMALL_PAGES, 512, 1024),
         Role::Boot => (SMALL_PAGES, 0, 1024),
     };
-    let pager = toyos::paged::Pager::create(capacity, if anonymous { 0 } else { dirty }, objects, REPORT)
+    let pager = toyos::paged::Pager::create(capacity, if anonymous { 0 } else { dirty }, REPORT)
         .unwrap_or_else(|e| panic!("fileserver: the {role:?} server makes no pager ({e:?}); its row is no pager row"));
-    Some(pager)
+    // A memory volume's objects are its files, which nothing can let go: they
+    // are bounded by what each is charged as it is made.
+    (Some(pager), (!anonymous).then_some(keeps as usize))
 }
 
 /// A session on the partition diskserver serves under `guid`.
@@ -415,6 +411,9 @@ struct Server {
     memory: Option<&'static toyos::shm::Immutable>,
     /// The role's port, which every grant is minted on.
     acceptor: Acceptor,
+    /// The connections accepted and not yet answered at their hello.
+    hellos: Admission<u64, Granted, Instant, { core::mem::size_of::<Request>() }>,
+    /// The clients served: each lent its window or was exported.
     clients: BTreeMap<u64, Client>,
     next_client: u64,
     streams: BTreeMap<u64, Stream>,
@@ -462,11 +461,6 @@ fn window_of(clients: &BTreeMap<u64, Client>, id: u64) -> Bytes<'_> {
 }
 
 impl Server {
-    /// Whether another accepted connection may wait on its hello.
-    fn takes_handshakes(&self) -> bool {
-        self.clients.values().filter(|c| c.waiting()).count() < MAX_HANDSHAKES
-    }
-
     /// A watch stays in the poller until it fires, so only what fired since
     /// the last wait, and what is new, is watched again: each watch costs the
     /// kernel a pass over every poll the ring holds.
@@ -474,10 +468,11 @@ impl Server {
         let poller = Poller::new(Poller::MAX_HANDLES);
         let mut ready = Vec::new();
         loop {
-            if !self.acceptor_armed && self.takes_handshakes() {
+            if !self.acceptor_armed && self.hellos.has_room() {
                 poller.watch(&self.acceptor, READABLE, TOKEN_ACCEPTOR);
                 self.acceptor_armed = true;
             }
+            self.hellos.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_HELLO + slot));
             for (id, c) in self.clients.iter_mut().filter(|(_, c)| !c.armed) {
                 poller.watch(&c.conn, READABLE, TOKEN_CLIENT + id);
                 c.armed = true;
@@ -492,10 +487,9 @@ impl Server {
             }
             let now = Instant::now();
             let timeout = self
-                .clients
-                .values()
-                .filter(|c| c.waiting())
-                .map(|c| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(c.since)))
+                .hellos
+                .left(now)
+                .into_iter()
                 .chain(self.writeback.left(now))
                 .min()
                 .map_or(u64::MAX, |left| left.as_nanos() as u64);
@@ -506,6 +500,8 @@ impl Server {
                 if token == TOKEN_ACCEPTOR {
                     self.acceptor_armed = false;
                     self.accept();
+                } else if token >= TOKEN_HELLO {
+                    self.hellos.woke(token - TOKEN_HELLO);
                 } else if token == TOKEN_PAGER {
                     self.pager_armed = false;
                     self.notices();
@@ -524,14 +520,15 @@ impl Server {
                 }
             }
             let now = Instant::now();
-            let late: Vec<u64> = self
-                .clients
-                .iter()
-                .filter(|(_, c)| c.waiting() && now.duration_since(c.since) >= HANDSHAKE_TIMEOUT)
-                .map(|(id, _)| *id)
-                .collect();
-            for id in late {
-                self.drop_client(id, "it never lent its window");
+            while let Some(event) = self.hellos.next(now) {
+                match event {
+                    Event::Admitted(greeter) => self.hello(greeter),
+                    Event::Left { key, context, why, say: Some(unsaid), .. } => {
+                        println!("fileserver: letting a connection of {:?}, share {key}, go: {why}{unsaid}", context.root)
+                    }
+                    Event::Left { .. } => {}
+                    Event::Unsaid(unsaid) => println!("fileserver: {}", unsaid.alone()),
+                }
             }
             if self.writeback.take_due(now) && let Err(e) = self.sync() {
                 println!("fileserver: the write-back sync failed: {e:?}");
@@ -539,14 +536,15 @@ impl Server {
         }
     }
 
-    /// Take the next connection and read its grant. Only the supervisor mints
-    /// on this port, so a connection without one this server reads is let go
-    /// by name; one whose share already holds its part of the handshakes is
-    /// answered `TooManyConnections` and let go.
+    /// Take the next connection, while a hello may wait, and read its grant.
+    /// Only the supervisor mints on this port, so a connection without one
+    /// this server reads is let go by name; one whose share already holds its
+    /// part of the handshakes is answered `TooManyConnections` and let go.
     fn accept(&mut self) {
-        let conn = match self.acceptor.accept() {
-            Ok(conn) => conn,
-            Err(why) => panic!("fileserver: its own acceptor refused an accept: {why:?}"),
+        let conn = match self.hellos.accept(&self.acceptor) {
+            None => return,
+            Some(Ok(conn)) => conn,
+            Some(Err(why)) => panic!("fileserver: its own acceptor refused an accept: {why:?}"),
         };
         let mut badge = [0u8; MAX_BADGE];
         let grant = match self.acceptor.badge(&conn, &mut badge) {
@@ -556,26 +554,56 @@ impl Server {
             },
             Err(why) => return println!("fileserver: letting a connection go: it carries no grant ({why:?})"),
         };
-        let mine = self.clients.values().filter(|c| c.share == grant.share && c.waiting()).count();
-        if let Err(why) = bounds::handshake(grant.share, mine) {
+        let granted =
+            Granted { root: grant.root.to_string(), writes: grant.access == Access::ReadWrite && self.volume.writable() };
+        if let Err(refused) = self.hellos.admit(conn, grant.share, granted, Instant::now()) {
             // Let go whether or not the refusal went: either way it is said.
-            let _ = conn.try_send(REPLY, &Reply::refused(Error::TooManyConnections));
-            return println!("fileserver: letting a connection go: {why}");
+            let _ = refused.conn.try_send(REPLY, &Reply::refused(Error::TooManyConnections));
+            if let Some(unsaid) = refused.say {
+                println!("fileserver: letting a connection of share {} go: {}{unsaid}", refused.key, refused.why);
+            }
         }
-        let id = self.next_client;
-        self.next_client += 1;
+    }
+
+    /// A connection's first request: its hello, which lends its window and
+    /// takes its served slot, or it is let go.
+    fn hello(&mut self, mut greeter: Greeter) {
+        let share = *greeter.key();
+        let let_go = |why: &str| println!("fileserver: letting a connection of share {share} go: {why}");
+        let Ok(request) = ipc::decode_payload::<Request>(greeter.payload()) else {
+            return let_go("its request was not one `Request` wide");
+        };
+        if greeter.msg_type() != HELLO {
+            return let_go("it asked before it lent a window");
+        }
+        let (all, mine) = self.served(share);
+        // The window travels in the HELLO frame.
+        let lent = || greeter.take_handles::<1>().map(|[lent]| SharedMemory::lent(lent, WINDOW_BYTES));
+        let window = match bounds::hello(Slot::AtHello, all, mine, lent) {
+            Hello::Served(window) => window,
+            Hello::Refused(why) => {
+                // Let go whether or not the refusal went: either way it is said.
+                let _ = greeter.try_send(REPLY, &Reply { tag: request.tag, ..Reply::refused(Error::TooManyConnections) });
+                return let_go(&why);
+            }
+            Hello::Dropped(why) => return let_go(why),
+        };
+        let (conn, _, Granted { root, writes }) = greeter.into_parts();
         let client = Client {
             conn,
             rx: ipc::FrameRx::new(),
-            root: Some(grant.root.to_string()),
-            share: grant.share,
-            writes: grant.access == Access::ReadWrite && self.volume.writable(),
-            window: None,
+            root: Some(root),
+            share,
+            writes,
+            window: Some(window),
             fids: Ids::default(),
-            since: Instant::now(),
             armed: false,
         };
+        let id = self.next_client;
+        self.next_client += 1;
         self.clients.insert(id, client);
+        let granted = if writes { RIGHT_WRITE } else { 0 };
+        self.reply(id, request.tag, Answer::Reply(Reply { value: granted, ..Reply::ok() }));
     }
 
     fn drop_client(&mut self, id: u64, why: &str) {
@@ -744,10 +772,9 @@ impl Server {
             if client.window.is_some() {
                 return Answer::Drop("it lent a second window");
             }
-            let slot = if client.exported() { Slot::Taken } else { Slot::AtHello };
-            // The window travels in the HELLO frame: its reader took it with the frame.
+            // An exported connection's hello: its slot was taken at its export.
             let lent = || client.rx.take_handles::<1>().map(|[lent]| SharedMemory::lent(lent, WINDOW_BYTES));
-            match bounds::hello(slot, all, mine, lent) {
+            match bounds::hello(Slot::Taken, all, mine, lent) {
                 Hello::Served(window) => client.window = Some(window),
                 Hello::Refused(why) => return Answer::Refuse(Error::TooManyConnections, why),
                 Hello::Dropped(why) => return Answer::Drop(why),
@@ -764,10 +791,9 @@ impl Server {
         }
     }
 
-    /// How many clients hold a served slot, and how many of them are `share`'s.
+    /// How many clients are served, and how many of them are `share`'s.
     fn served(&self, share: u64) -> (usize, usize) {
-        let served = self.clients.values().filter(|c| c.served());
-        served.fold((0, 0), |(all, mine), c| (all + 1, mine + usize::from(c.share == share)))
+        self.clients.values().fold((0, 0), |(all, mine), c| (all + 1, mine + usize::from(c.share == share)))
     }
 
     /// The description `fid` names on client `id`.
@@ -1372,7 +1398,6 @@ impl Server {
             writes,
             window: None,
             fids,
-            since: Instant::now(),
             armed: false,
         };
         let child = self.next_client;

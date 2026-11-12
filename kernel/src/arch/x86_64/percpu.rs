@@ -11,7 +11,11 @@ use crate::log;
 use crate::mm::stack;
 use crate::process::KERNEL_STACK_SIZE;
 
-const MSR_GS_BASE: u32 = 0xC000_0101;
+/// Where this CPU's `PerCpu` is while the kernel runs, and Ring 3's GS base
+/// while it does (`arch::entry`).
+pub(crate) const MSR_GS_BASE: u32 = 0xC000_0101;
+/// The other half of that pair: what `swapgs` exchanges `IA32_GS_BASE` with.
+pub(crate) const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
 // GDT selectors (must match entry order)
 pub const KERNEL_CS: u16 = 0x08;
@@ -109,7 +113,9 @@ pub struct PerCpu {
     pub ring0_timer_fires: AtomicU32,
     pub last_seen_ring0_fires: u32,
     fault_state: u8,
-    _pad_after_fault_state: [u8; 3],
+    /// Non-zero while the scheduler's last one-shot is armed and its interrupt not yet taken.
+    timer_pending: u8,
+    _pad_after_timer_pending: [u8; 2],
     /// Ticks the Ring 3 timer branch re-arms with, and zero when stopped, which the Ring 0 branch leaves stopped.
     pub last_armed_ticks: AtomicU32,
     /// This CPU's [`log::Shard`]; never null on a live CPU ([`alloc_percpu`] fills it first).
@@ -117,6 +123,17 @@ pub struct PerCpu {
     /// Non-zero inside this CPU's NMI handler, written only by `arch::idt::nmi`'s entry; IST2 isn't re-entrant, so this proves no second NMI lands on it.
     nmi_active: u32,
     ap_token: u32,
+    /// The `CR3` value `paging::Cr3::activate` last loaded on this CPU, its
+    /// only writer; `u64::MAX` before the first.
+    root: u64,
+    /// `IA32_FS_BASE` as `load_gdt` left it or this CPU's last switch read or
+    /// wrote it. Exact at every switch-in, since every switch away from a user
+    /// thread reads the register back; stale while a thread runs, which moves
+    /// it by a segment load or `SYS_SET_THREAD_POINTER`.
+    fs_base: u64,
+    /// The context whose switch-out last left its user state in this CPU's
+    /// registers, 0 before the first: `arch::fpu`'s record.
+    fpu_holder: u64,
     /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so a new source moves nothing else.
     pub irq_counts: [AtomicU64; crate::irq_census::Source::COUNT],
 }
@@ -130,6 +147,13 @@ const GDT_ENTRIES: [u64; 7] = [
     0,                      // TSS low (runtime)
     0,                      // TSS high (runtime)
 ];
+
+/// A descriptor's base, bits 16–39 and 56–63 (SDM Vol. 3A §3.4.5).
+const DESCRIPTOR_BASE: u64 = 0xFF00_00FF_FFFF_0000;
+
+// The two descriptors Ring 3 may load into GS, its data and its code: their
+// base is the one a user GS load makes (`clear_user_gs_base`).
+const _: () = assert!(GDT_ENTRIES[3] & DESCRIPTOR_BASE == 0 && GDT_ENTRIES[4] & DESCRIPTOR_BASE == 0);
 
 #[repr(C, packed)]
 struct GdtPointer {
@@ -154,7 +178,9 @@ impl PerCpu {
         self.gdt[6] = high;
     }
 
-    /// Load this CPU's GDT, reload segment registers, and load TSS.
+    /// Load this CPU's GDT, reload segment registers, and load TSS. From here
+    /// on `GDTR`'s base is this block's `gdt`, which is how
+    /// `arch::entry::install_kernel_gs` finds the block without GS.
     /// # Safety: must be called exactly once per CPU during init.
     unsafe fn load_gdt(&self) {
         let ptr = GdtPointer {
@@ -193,6 +219,8 @@ pub(crate) const OFF_KERNEL_RSP: u32 = offset_of!(PerCpu, kernel_rsp) as u32;
 pub(crate) const OFF_USER_RSP: u32 = offset_of!(PerCpu, user_rsp) as u32;
 const OFF_CURRENT_TID: u32 = offset_of!(PerCpu, current_tid) as u32;
 const OFF_CURRENT_PID: u32 = offset_of!(PerCpu, current_pid) as u32;
+/// Where `GDTR` points inside the block (`load_gdt`).
+pub(crate) const OFF_GDT: u32 = offset_of!(PerCpu, gdt) as u32;
 const OFF_IDLE_STACK_TOP: u32 = offset_of!(PerCpu, idle_stack_top) as u32;
 pub(crate) const OFF_SYSCALL_RIP: u32 = offset_of!(PerCpu, syscall_rip) as u32;
 pub(crate) const OFF_SYSCALL_NUM: u32 = offset_of!(PerCpu, syscall_num) as u32;
@@ -209,17 +237,22 @@ pub(crate) const OFF_PREEMPT_COUNT: u32 = offset_of!(PerCpu, preempt_count) as u
 pub(crate) const OFF_NEED_RESCHED: u32 = offset_of!(PerCpu, need_resched) as u32;
 /// Read by `preempt::enable`'s slow path to decline rescheduling a faulting CPU.
 pub(crate) const OFF_FAULT_STATE: u32 = offset_of!(PerCpu, fault_state) as u32;
+const OFF_TIMER_PENDING: u32 = offset_of!(PerCpu, timer_pending) as u32;
 /// Set/cleared only by `arch::idt::nmi`'s naked entry, via this constant.
 pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
 /// The AP's bring-up token, read by `ap_entry` to answer for its own attempt.
 const OFF_AP_TOKEN: u32 = offset_of!(PerCpu, ap_token) as u32;
+const OFF_ROOT: u32 = offset_of!(PerCpu, root) as u32;
+const OFF_FS_BASE: u32 = offset_of!(PerCpu, fs_base) as u32;
+const OFF_FPU_HOLDER: u32 = offset_of!(PerCpu, fpu_holder) as u32;
 /// Where this CPU's interrupt counters start; `irq_census::slot_offset` derives every handler's offset from it.
 pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
 
 
 /// Every GS-relative access this kernel makes, as `const`-generic primitives.
 /// Caller-owed and unchecked: `GS_BASE` must already point at this CPU's `PerCpu`
-/// — set by [`init_bsp`] on the BSP and by the AP trampoline before an AP runs Rust.
+/// — set by [`init_bsp`] on the BSP and by the AP trampoline before an AP runs Rust,
+/// and swapped in by every entry from Ring 3 (`arch::entry`).
 pub(crate) mod gs {
     use core::arch::asm;
 
@@ -319,9 +352,10 @@ pub(crate) mod gs {
     }
 }
 
-/// The IST stacks this machine has: IST1 `#DF`, IST2 NMI, IST3 `#MC` — vectors
-/// that can arrive with `rsp` not a kernel stack (SDM Vol. 3A §6.14.5); `ist[n-1]` is IST*n*.
-pub(crate) const IST_STACKS: usize = 3;
+/// The IST stacks this machine has: IST1 `#DF`, IST2 NMI, IST3 `#MC`, IST4
+/// `#DB` — vectors that can arrive with `rsp` not a kernel stack (SDM Vol. 3A
+/// §6.14.5); `ist[n-1]` is IST*n*.
+pub(crate) const IST_STACKS: usize = 4;
 
 /// One size for every IST stack; must leave room to double the measured high water.
 const IST_STACK_SIZE: usize = 16384;
@@ -371,11 +405,17 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 ring0_timer_fires: AtomicU32::new(0),
                 last_seen_ring0_fires: 0,
                 fault_state: CpuFaultState::Normal as u8,
-                _pad_after_fault_state: [0; 3],
+                timer_pending: 0,
+                _pad_after_timer_pending: [0; 2],
                 last_armed_ticks: AtomicU32::new(0),
                 log_shard: log::shard_for(cpu_id) as *const log::Shard as u64,
                 nmi_active: 0,
                 ap_token: 0,
+                root: u64::MAX,
+                // `load_gdt` loads FS with `KERNEL_DS`, whose base is 0, and a
+                // segment load clears the base's upper half (SDM Vol. 3A §3.4.4).
+                fs_base: 0,
+                fpu_holder: 0,
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::Source::COUNT],
             },
         );
@@ -546,6 +586,7 @@ pub fn init_bsp(lapic_id: u32) {
 
     // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };
+    clear_user_gs_base();
     super::control_regs::init(0);
     // SAFETY: this CPU's own block, with no IDT of this kernel's loaded yet
     // and the `&mut` above ended.
@@ -570,6 +611,14 @@ pub fn init_bsp(lapic_id: u32) {
     log!("percpu: BSP cpu_id=0 lapic_id={lapic_id}");
 }
 
+/// Gives this CPU the user GS base every thread has: zero. Every descriptor
+/// Ring 3 may load into GS has base 0 and `CR4.FSGSBASE` is off, so no thread
+/// makes another and the switch moves none. Before this CPU's first `swapgs`.
+fn clear_user_gs_base() {
+    // SAFETY: zero is canonical, and nothing on this CPU has swapped GS yet.
+    unsafe { cpu::wrmsr(MSR_KERNEL_GS_BASE, 0) };
+}
+
 /// Allocate percpu for an AP; the trampoline writes the pointer into IA32_GS_BASE.
 pub fn alloc_ap(cpu_id: u32, token: u32) -> *mut PerCpu {
     let ptr = alloc_percpu(cpu_id);
@@ -587,6 +636,7 @@ pub fn init_ap(percpu_ptr: *mut PerCpu) {
     let percpu = unsafe { &mut *percpu_ptr };
     // SAFETY: `load_gdt`'s once-per-CPU contract; this is this AP's call.
     unsafe { percpu.load_gdt(); }
+    clear_user_gs_base();
     super::control_regs::init(percpu.cpu_id);
     super::control_regs::init_performance(percpu.cpu_id);
     super::fpu::init(percpu.cpu_id);
@@ -656,6 +706,35 @@ pub fn set_current_pid(pid: Option<crate::process::Pid>) {
     gs::write_u32::<OFF_CURRENT_PID>(pid.map_or(u32::MAX, |p| p.raw()));
 }
 
+/// The `CR3` value this CPU last loaded through `paging::Cr3::activate`.
+pub fn root() -> u64 {
+    gs::read_u64::<OFF_ROOT>()
+}
+
+/// `paging::Cr3::activate`'s record of the value it loads.
+pub fn set_root(cr3: u64) {
+    gs::write_u64::<OFF_ROOT>(cr3);
+}
+
+/// `IA32_FS_BASE` as of this CPU's last switch: exact only at a switch-in.
+pub fn fs_base() -> u64 {
+    gs::read_u64::<OFF_FS_BASE>()
+}
+
+pub fn set_fs_base(base: u64) {
+    gs::write_u64::<OFF_FS_BASE>(base);
+}
+
+/// The context whose switch-out last left its user state in this CPU's
+/// registers; 0 before the first.
+pub fn fpu_holder() -> u64 {
+    gs::read_u64::<OFF_FPU_HOLDER>()
+}
+
+pub fn set_fpu_holder(ctx: u64) {
+    gs::write_u64::<OFF_FPU_HOLDER>(ctx);
+}
+
 /// This CPU's `PerCpu`, reached through its own self-reference at `gs:[0]`; only [`init_ap`]'s caller needs it — everything else reads through [`gs`].
 pub fn percpu_ptr() -> *mut PerCpu {
     gs::read_u64::<OFF_SELF_PTR>() as *mut PerCpu
@@ -682,6 +761,15 @@ pub fn set_last_armed_ticks(ticks: u32) {
 /// The one-shot count this CPU last armed; zero is a stopped timer.
 pub fn last_armed_ticks() -> u32 {
     gs::read_u32::<OFF_LAST_ARMED_TICKS>()
+}
+
+/// Whether the scheduler's one-shot is armed and its interrupt not yet taken; `arch::apic` is the only writer.
+pub(super) fn set_timer_pending(pending: bool) {
+    gs::write_u8::<OFF_TIMER_PENDING>(u8::from(pending));
+}
+
+pub fn timer_pending() -> bool {
+    gs::read_u8::<OFF_TIMER_PENDING>() != 0
 }
 
 /// The last byte of this CPU's idle guard page — the first byte an overflow reaches.

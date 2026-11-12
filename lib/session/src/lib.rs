@@ -299,9 +299,13 @@ pub fn open(
             return Err(format!("the supervisor refused a session: {why}"));
         }
         let [launcher, controls] = rx.take_handles::<2>().ok_or("the session came without its handles")?;
+        let namespace = |handle: toyos::ipc::ReceivedHandle| {
+            handle.typed::<toyos::namespace::Namespace>().map_err(|why| format!("the session's handles are not namespaces: {why}"))
+        };
+        let (launcher, controls) = (namespace(launcher)?, namespace(controls)?);
         asks += 1;
-        match toyos::namespace::Namespace::received(controls).open(CONTROL) {
-            Ok(control) => return Ok((toyos::namespace::Namespace::received(launcher), control)),
+        match controls.open(CONTROL) {
+            Ok(control) => return Ok((launcher, control)),
             Err(toyos_abi::syscall::SyscallError::Gone) if began.elapsed() < ENDED_UNREAD => {}
             Err(toyos_abi::syscall::SyscallError::Gone) => {
                 return Err(format!(

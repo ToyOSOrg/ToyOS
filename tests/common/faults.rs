@@ -40,6 +40,39 @@ pub fn nested_nmi_is_loud(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// What `nmi-user-gs` (`kernel/src/arch/x86_64/idt/nmi.rs`) says, and what
+/// it says when vector 2, entered at CPL 0 under a decoy user GS base, counted
+/// in its CPU's own block, wrote nothing through the decoy and returned to it.
+const NMI_USER_GS: &str = "nmi-user-gs: ";
+const NMI_USER_GS_PASSED: &str = "nmi-user-gs: PASS";
+
+/// The `nmi-user-gs` arm's verdict line in `log`, where it passed.
+pub fn nmi_user_gs(log: &str) -> Result<&str, String> {
+    let verdict = log
+        .lines()
+        .find(|l| l.contains(NMI_USER_GS))
+        .ok_or_else(|| format!("the nmi-user-gs arm never reported: the boot was not armed, or ended before it\n{log}"))?;
+    if !verdict.contains(NMI_USER_GS_PASSED) {
+        return Err(format!("vector 2 under a user's GS base did not find the kernel's own: {}", verdict.trim()));
+    }
+    Ok(verdict)
+}
+
+/// The `nmi-user-gs` arm on a boot of its own, which goes on to userland.
+pub fn nmi_under_a_user_gs_base(test_config: &Path) -> Result<(), String> {
+    let qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions { kernel_params: &["nmi-user-gs"], ..Default::default() },
+    );
+    let serial = Serial::boot(&qemu);
+    serial.must_be_clean()?;
+    let verdict = nmi_user_gs(serial.text())?;
+    eprintln!("  [nmi] {}", verdict.trim());
+    Ok(())
+}
+
 /// `nested_nmi`'s first line, once its three are whole and back to back and
 /// nothing in `capture` says the registers were not clean.
 pub fn report(capture: &str) -> Result<&str, String> {

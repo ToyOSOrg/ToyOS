@@ -72,6 +72,36 @@ impl Prot {
     }
 }
 
+/// What a memory object is, for mapping its own pages.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Shared {
+    /// Its bytes, whole pages.
+    pub size: u64,
+    /// Nobody can write it.
+    pub immutable: bool,
+    /// Memory the kernel does not own, taken back from where each mapper
+    /// said it mapped the whole.
+    pub aperture: bool,
+}
+
+impl Shared {
+    /// Whether `[offset, offset + len)` is whole pages of the object that a
+    /// space may map as `prot`: executable only where nobody can write it,
+    /// writable only where somebody can, and an aperture whole.
+    pub fn maps(self, prot: Prot, offset: u64, len: u64) -> bool {
+        let pages = len != 0 && offset.is_multiple_of(PAGE) && len.is_multiple_of(PAGE);
+        let within = offset.checked_add(len).is_some_and(|end| end <= self.size);
+        let allowed = match prot {
+            Prot::None => false,
+            Prot::Read => true,
+            Prot::ReadWrite => !self.immutable,
+            Prot::ReadExec => self.immutable,
+        };
+        let whole = offset == 0 && len == self.size;
+        pages && within && allowed && (whole || !self.aperture)
+    }
+}
+
 /// An object a range maps, as the kernel holds it; here only so that a range
 /// split in two maps the same object twice and two neighbours mapping one
 /// object in order join.
@@ -362,6 +392,45 @@ mod tests {
     use super::*;
     use std::vec;
     use std::vec::Vec;
+
+    /// Shared memory is executed only where nobody can write it and
+    /// written only where somebody can; a range is whole pages inside the
+    /// object, and an aperture's is the whole of it.
+    #[test]
+    fn an_object_maps_as_what_it_is() {
+        let size = 4 * PAGE;
+        let writable = Shared { size, immutable: false, aperture: false };
+        let immutable = Shared { immutable: true, ..writable };
+        let aperture = Shared { aperture: true, ..writable };
+        for (object, prot, maps) in [
+            (writable, Prot::Read, true),
+            (writable, Prot::ReadWrite, true),
+            (writable, Prot::ReadExec, false),
+            (writable, Prot::None, false),
+            (immutable, Prot::Read, true),
+            (immutable, Prot::ReadExec, true),
+            (immutable, Prot::ReadWrite, false),
+            (immutable, Prot::None, false),
+            (aperture, Prot::ReadWrite, true),
+            (aperture, Prot::ReadExec, false),
+        ] {
+            assert_eq!(object.maps(prot, 0, size), maps, "{object:?} whole as {prot:?}");
+        }
+        for (offset, len, maps) in [
+            (PAGE, 2 * PAGE, true),
+            (3 * PAGE, PAGE, true),
+            (0, 0, false),
+            (1, PAGE, false),
+            (0, PAGE + 1, false),
+            (3 * PAGE, 2 * PAGE, false),
+            (size, PAGE, false),
+            (u64::MAX - PAGE + 1, PAGE, false),
+            (PAGE, u64::MAX - PAGE + 1, false),
+        ] {
+            assert_eq!(writable.maps(Prot::Read, offset, len), maps, "{offset:#x}+{len:#x}");
+            assert!(!aperture.maps(Prot::Read, offset, len), "an aperture's {offset:#x}+{len:#x}");
+        }
+    }
 
     /// An object by number.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]

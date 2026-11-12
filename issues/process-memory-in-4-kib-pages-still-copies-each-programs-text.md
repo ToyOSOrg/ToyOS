@@ -88,21 +88,58 @@ live split of a user leaf.
    holds is refused at the call, not at a fault; its page tables are taken
    then too. Kernel objects a process makes are charged to its job
    (`kernel/src/mm/charge.rs`).
-5. **Shared text.** A spawn copies each page of its program's segments into
-   the process at the page's first touch, out of the image object or out of
-   a snapshot of its `/tmp` file; no fault reads a file. A ROOT program's
-   image object is SYSTEM's subrange of ROOT's own pages (`fs::IMAGE`), so
-   no spawn copies the whole binary first. Mapping ROOT's read-only text
-   into each process without the per-page copy is the next step. Exit: two
-   processes of one binary hold its text once.
-6. **`/apps` image sharing.** The design is the owner's decision, owed when
-   this stage is reached.
+5. **Shared text.** Built for an image nobody can write: a ROOT program's
+   image object is SYSTEM's subrange of ROOT's own pages (`fs::IMAGE`), and
+   a spawn and the library loader map its read-only segments from it
+   (`SpawnBacking::Share`, `vm_map`), copying only a writable segment, a page
+   at its first touch. A program anywhere else is still read whole into
+   memory of the spawner's and copied a page at a time, until 7b's step 3.
+   A shared segment's mapping is never widened, so a program can no longer
+   make its own read-only segment writable (`mprotect`). Exit for that: 7b's
+   step 2 converts on protect, so a protect that adds write to such a range
+   commits its pages and makes it a copy range of the same object; only a
+   page shared until its first write waits for step 5's write faults. Exit:
+   two processes of one binary hold its text once, wherever it is served
+   from.
+6. **`/apps` image sharing.** Decided by the orchestrator under the owner's
+   delegation of technical decisions (2026-11-11): 7b's step 3 maps images
+   from every pager-backed volume, `/apps`, `/tmp` and `/home` alike, sealed
+   against writes in place while they run. When a file server ends, every
+   mapping of its objects is revoked (7b's D1), so a program running from
+   DATA, like any process reading a mapping of a DATA file, dies at its next
+   access to that mapping.
 7. **Large user leaves where they pay.** No user leaf is 2 MiB now, so every
    user page costs a 4 KiB TLB entry and a table walk the 2 MiB windows did
    not: a binary's text and data, a heap, a stack, a large buffer. Unpriced:
    nothing measures the TLB misses of a workload against 2 MiB leaves. Exit:
    whole aligned spans of one range get a 2 MiB leaf where a measurement
    shows it pays, or the measurement shows it does not.
+
+**7b lands in steps**, each a pull request: (1) a range of a memory object
+mapped where the caller says, an immutable one shared and executable, which
+is stage 5 for `/system`: built; (2) a paged object mapped read-only and
+shared: faults that park on the pager, reverse records, revocation; (3) a
+spawn maps its image from any pager-backed volume (stage 6), sealed against
+writes in place while it runs; (4) the
+storage track's attributes and names without a request; (5) writable shared
+mappings and write-back; (6) the #1077 retry
+(`issues/a-tcp-connect-zeroes-twelve-mebibytes.md`).
+
+- **Owed on metal:** step 1 (#1259), on the T14 and the AMD bench: the whole
+  `testcases` boot, whose `vm_map_shares` member is the x86-64 verdict that a
+  program's read-only segments are its image's pages and take no private
+  frame (`spawn_cost` among its other members), and the `shared-debug` and
+  `proctreecase` boots. Main must show every job of each boot exit 0.
+- **Owed on metal:** step 1 (#1259), on the T14 and the AMD bench: osbench's
+  `process.spawn_wait`, `proc.spawn_wait.*` and `proc.posix_spawn_wait.*`,
+  main before #1259
+  against main after, four boots a side. Main after must be no slower than
+  before; a spawn no longer copies a `/system` program's text, and whether
+  that makes it faster is not measured on metal.
+
+Until step 2's revocation exists, an object a space maps must keep its frames
+for the object's life: ROOT's pages stay non-reclaimable, and ROOT is not
+served through a pager, until then.
 
 **Paged objects** (memory design §7, `issues/toyos-builds-itself.md` item 13)
 are split in two. **7a**, delivered by the storage track's file-server work:

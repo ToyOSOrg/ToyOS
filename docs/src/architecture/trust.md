@@ -44,6 +44,21 @@ DMA stays behind the IOMMU.
   microcode loading is privileged kernel work. Neither payload need be embedded
   in the kernel binary.
 
+## Speculative execution applied on request
+
+- The barrier between two programs that run in turn on a CPU, and a
+  program's isolation from the core's other thread, are applied for a
+  program that asks for them. Applied at every switch they would cost every
+  program, most of which have nothing to keep from the others; a program
+  that asks gets them. Where a vendor prescribes either for every program,
+  each boot's report marks it as policy.
+- The same policy limits one protection of the kernel. On an AMD processor
+  affected by Branch Type Confusion, while a CPU runs a program that has not
+  asked, untrusted code on its core's other thread can steer the kernel's
+  speculative returns; where the processor has no STIBP (Family 15h, Zen
+  and Zen+), it can whenever SMT is on. Each boot's report names this as
+  SMT vulnerable.
+
 ## Checks inside the trusted base
 
 - A check there is a bug fence: kept where it is cheap and catches ToyOS's own

@@ -42,8 +42,18 @@ did; the T14's numbers are below:
     same bytes), so no osbench row measures a lone fault any more.
   - **Spawn.** `proc.spawn_wait_loop.100` rose 2.3% at `a75abd3f6` and is
     within 1.5% at `6d826e313`.
-- **Frees.** A clear walks the 64 futex buckets once per table of leaves that
-  held an owned frame (at most 512 frames each), whether or not anything waits.
+- **Frees.** While a thread of the space is in a futex wait, a clear walks
+  the 64 futex buckets once per table of leaves that held an owned frame (at
+  most 512 frames each); with none it walks nothing. A shared object that
+  drops walks every bucket for its frames, whatever waits. The walk read 1,159 ns on the T14
+  and 1,146 ns on the AMD bench per unmap of one touched page.
+  - **Owed on metal:**
+    - the T14's `testcases` boot, where main must pass `test_rs_futex_wake_counts`: its
+      `orphaned_by_unmap` waiter shares the unmapping space, so the walk runs;
+    - an A/B on both benches of `osbench_system`, `osbench_mem` and `osbench_sched`, main from
+      before and after the per-space gate. Main after must read `mem.munmap_touched_remote.4k`
+      and the other unmaps of touched pages faster, by up to the walk's cost, and
+      `pingpong.futex.*` and the wake storm no slower. Until then the gain is unmeasured.
 - **Commits.** A committed range's tables are built when it is made, under the
   space's lock: 1/512 of the range.
 - **Copies.** A copy into memory nothing has touched takes the faults a touch
@@ -87,7 +97,13 @@ The copies (`fs.tmp`, `ipc`, `pipe`) point at the user-copy path above.
 2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`) Linux gave
 131,072 KiB of huge pages and ToyOS none; ToyOS read 0.95 of Linux's on the
 T14 (6,651 against 6,992 MB/s) and 0.98 on the AMD (8,352 against 8,550),
-each resolved worse.
+each resolved worse. Page size explains at most about 1% of it: on
+2026-11-11, in one Linux process on the T14, the same copies over 4 KiB
+pages read within about 1% of those over huge pages (`mem.bw.copy` 6,792
+against 6,865 MB/s, a 64 MiB `memcpy` 9,662 against 9,690), and ToyOS read
+3.7 to 4.7% under both (6,539 and 9,241). `mem.bw.copy` runs the same instructions on both
+systems, so it is not the copy routine either. One boot and one Linux run;
+the cause is not established.
 
 `mem.realloc_grow` no longer copies. std and libc map a block of 256 KiB or
 more on its own (`sdk/libc/src/mapped.rs`) and grow it by `vm_remap`, which
@@ -149,8 +165,7 @@ Owner: the memory track. Exit: each path above measured on the T14 at a
 change and at its base, and against Linux; a regression is fixed or its cost
 accepted by the owner, or by the coordinator for an implementation tradeoff,
 which the owner delegated on 2026-10-23. Cheap remedies when measurement asks: a
-per-CPU frame cache, a count of armed futex waiters that lets a clear
-with none skip the buckets, and tables built at the first touch of their span.
+per-CPU frame cache, and tables built at the first touch of their span.
 
 - **Owed on metal:** #1245, which drops the paged read's pass that faulted its
   destination in and its third pass of the pager's lock, is not measured on

@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 
 use crate::fd::Kind;
 use crate::ipc::{Connection, IpcError};
+use crate::process::Process;
 use crate::OwnedHandle;
 
 /// The label a holder is endowed its launcher under, and the one name in that
@@ -357,7 +358,7 @@ pub enum LaunchError {
 /// What a launch answered.
 pub enum Outcome {
     /// The handle the caller now holds for the child.
-    Started(OwnedHandle),
+    Started(Process),
     /// Not permitted ([`MSG_NOT_PERMITTED`]).
     NotPermitted,
     /// Declared, and it did not start.
@@ -387,7 +388,7 @@ pub fn launch(conn: &Connection, request: Launch<'_>) -> Result<Outcome, LaunchE
     let frame = rx.recv(&conn).map_err(LaunchError::Sent)?;
     match frame.msg_type {
         MSG_LAUNCHED => match rx.take_handles::<1>() {
-            Some([process]) => Ok(Outcome::Started(process)),
+            Some([process]) => process.typed().map(Outcome::Started).map_err(|_| LaunchError::Sent(IpcError::Malformed)),
             None => Err(LaunchError::Sent(IpcError::Malformed)),
         },
         MSG_NOT_PERMITTED => Ok(Outcome::NotPermitted),

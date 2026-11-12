@@ -353,7 +353,9 @@ pub fn flush_tlb_all() {
 }
 
 /// Flush this CPU's translation of the user page `va` in the space tagged
-/// `tag`, which this CPU runs.
+/// `tag`: by the tag where PCIDs are on; otherwise in the space this CPU runs,
+/// since without them loading a root drops every translation of the one it
+/// replaces (SDM Vol. 3A §4.10.4.1, APM Vol. 2 §5.5).
 pub fn flush_user_page(tag: u16, va: u64) {
     match pcid_active() {
         Some(have) => crate::arch::cpu::invpcid(have, Invpcid::Address, tag, va),
@@ -392,18 +394,26 @@ impl Cr3 {
         (self.0 & 0xFFF) as u16
     }
 
+    /// Whether this is the root this CPU last loaded.
+    pub fn is_loaded(self) -> bool {
+        crate::arch::percpu::root() == self.0
+    }
+
     /// Sets NOFLUSH when PCID is active — sound only because a user tag is owned:
     /// no other live space holds it, and a reused one was flushed from every CPU
-    /// before this space took it.
+    /// before this space took it. Masked, so no shootdown this CPU answers finds
+    /// it holding two spaces (`arch::tlb::retire`).
     /// # Safety
     /// The underlying page tables must be valid and live.
     pub unsafe fn activate(self) {
+        let _masked = crate::arch::IrqGuard::close();
         crate::arch::tlb::switching(self.pcid(), || {
             if pcid_active().is_some() {
                 crate::arch::cpu::write_cr3(self.0 | CR3_NOFLUSH);
             } else {
                 crate::arch::cpu::write_cr3(self.0);
             }
+            crate::arch::percpu::set_root(self.0);
         });
     }
 
@@ -1072,24 +1082,36 @@ impl UserTables {
     }
 
     /// Every CPU has dropped what it cached of `[start, end)` and of the
-    /// tables `unlinked` took out before this returns: every CPU's user
-    /// translations go, paging-structure caches with them.
+    /// tables `unlinked` took out before this returns. Where tables went,
+    /// every reached CPU's user translations go, paging-structure caches with
+    /// them; otherwise a short range goes page by page.
     /// Answers whether it reached another CPU.
     pub fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) -> bool {
         // A table taken away is cached apart from the leaves: by page is not
         // enough for it.
-        let (start, end) = if unlinked.is_empty() { (start, end) } else { (0, u64::MAX) };
-        crate::arch::tlb::user_change(crate::invalidation::Origin::Unmap, self.pcid.0.get(), start, end)
+        let tables = !unlinked.is_empty();
+        let (start, end) = if tables { (0, u64::MAX) } else { (start, end) };
+        crate::arch::tlb::user_change(crate::invalidation::Origin::Unmap, self.pcid.0.get(), start, end, tables)
+    }
+
+    /// No thread will load this space's root again: every CPU still idle on
+    /// it leaves it, having dropped what it cached of it, before this returns.
+    pub fn retire(&self) {
+        crate::arch::tlb::retire(self.pcid.0.get());
     }
 }
 
 /// Frees every table under the user half and the root; the frames its leaves
 /// map were freed by their owners first. The kernel half is shared, and the
 /// kernel's own space never drops. No CPU walks a space that drops: its last
-/// thread has left it, and its tag is flushed everywhere before it is issued
-/// again.
+/// thread has left it, [`UserTables::retire`] took it off every CPU idle on
+/// it, and its tag is flushed everywhere before it is issued again.
 impl Drop for UserTables {
     fn drop(&mut self) {
+        assert!(
+            !crate::arch::tlb::held(self.pcid.0.get()),
+            "paging: a space's tables are freed while a CPU still holds its root",
+        );
         let all = self.unlink(0, (ROOT_HIGH_HALF as u64) << 39, |_, _| false);
         all.free(&self.job);
         free_table(&self.job, self.root);

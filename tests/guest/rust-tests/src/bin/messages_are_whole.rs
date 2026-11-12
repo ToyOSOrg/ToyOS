@@ -13,16 +13,17 @@
 //! - Plain reads and writes of a connection are refused.
 //! - A receive after the peer has gone takes what it sent, then answers
 //!   `Gone`; a send to a peer gone answers `Gone`.
+//! - Each handle arrives beside the kind of object it names, and a receiver
+//!   that asks for another kind is refused by name and lives.
 
-use toyos::ipc::Connection;
+use toyos::ipc::{Connection, FrameRx, WrongKind};
 use toyos::poller::OTHER_END_GONE;
 use toyos::{namespace, pipe_pair, port, AsHandle, OwnedHandle, Pipe};
 use toyos_abi::syscall::{
     self, Received, SyscallError, MAX_MESSAGE_LEN, MAX_QUEUED_HANDLES, MAX_QUEUED_MESSAGES, MAX_TRANSFER_HANDLES,
     PIPE_CAPACITY,
 };
-use toyos_abi::handle::TransferEntry;
-use toyos_abi::RawHandle;
+use toyos_abi::handle::{ObjectKind, ReceivedEntry, TransferEntry};
 
 /// A failure ceiling only: an answer that never comes is the defect.
 const CEILING_NANOS: u64 = 10_000_000_000;
@@ -44,6 +45,8 @@ fn main() {
     bytes_alone_are_refused(pair());
     println!("messages_are_whole: plain reads and writes were refused");
     gone_after_what_was_sent(pair());
+    each_handle_arrives_with_its_kind(pair());
+    println!("messages_are_whole: each handle arrived with its kind, and another kind was refused by name");
     println!("messages_are_whole: ok");
 }
 
@@ -65,11 +68,11 @@ fn send(conn: &Connection, bytes: &[u8], handles: Vec<OwnedHandle>, nonblock: bo
 /// The next message, its bytes and its handles, without waiting.
 fn recv(conn: &Connection) -> Result<(Vec<u8>, Vec<OwnedHandle>), SyscallError> {
     let mut bytes = vec![0u8; MAX_MESSAGE_LEN];
-    let mut handles = [RawHandle(0); MAX_TRANSFER_HANDLES];
+    let mut handles = [ReceivedEntry::NONE; MAX_TRANSFER_HANDLES];
     let got = syscall::message_recv(conn.as_handle().raw(), &mut [], &mut bytes, &mut handles, true)?;
     bytes.truncate(got.len);
     // SAFETY: the kernel installed these numbers in this process for this call.
-    Ok((bytes, handles[..got.handles].iter().map(|&h| unsafe { OwnedHandle::from_raw(h) }).collect()))
+    Ok((bytes, handles[..got.handles].iter().map(|h| unsafe { OwnedHandle::from_raw(h.handle) }).collect()))
 }
 
 /// A pipe end to send, and the end that sees it go.
@@ -111,7 +114,7 @@ fn a_short_buffer_leaves_it_queued((client, server): (Connection, Connection)) {
     let (h2, _) = token();
     send(&client, &[7; 8], vec![h1, h2], false).expect("a message of 8 bytes and two handles");
     let raw = server.as_handle().raw();
-    let mut handles = [RawHandle(0); MAX_TRANSFER_HANDLES];
+    let mut handles = [ReceivedEntry::NONE; MAX_TRANSFER_HANDLES];
     assert_eq!(
         syscall::message_recv(raw, &mut [], &mut [0; 7], &mut handles, true),
         Err(SyscallError::InvalidArgument),
@@ -131,7 +134,7 @@ fn a_short_buffer_leaves_it_queued((client, server): (Connection, Connection)) {
     let got = syscall::message_recv(raw, &mut [], &mut bytes, &mut handles, true).expect("the message, whole");
     assert_eq!((got, bytes), (Received { len: 8, handles: 2 }, [7; 8]), "the refused receives took part of it");
     // SAFETY: installed for this call.
-    handles[..2].iter().for_each(|&h| drop(unsafe { OwnedHandle::from_raw(h) }));
+    handles[..2].iter().for_each(|h| drop(unsafe { OwnedHandle::from_raw(h.handle) }));
 
     // Its first bytes fill the head, and the rest the body, in order.
     send(&client, &[1, 2, 3, 4, 5], vec![], false).expect("a message of five bytes");
@@ -186,4 +189,46 @@ fn gone_after_what_was_sent((client, server): (Connection, Connection)) {
     assert_eq!(recv(&server).map(|(b, _)| b), Ok(b"last".to_vec()), "the message sent before leaving");
     assert_eq!(recv(&server).err(), Some(SyscallError::Gone), "after the last message, the leaving");
     assert_eq!(send(&server, b"x", vec![], false), Err(SyscallError::Gone), "a send to a peer gone");
+}
+
+fn each_handle_arrives_with_its_kind((client, server): (Connection, Connection)) {
+    let (read, write) = pipe_pair().expect("a pipe");
+    let (waker, bell) = toyos::wake::pair().expect("an event");
+    let region = toyos::shm::SharedMemory::create(1).expect("a region");
+    let (acceptor, connector) = port::create().expect("a port");
+    let sent = vec![
+        (OwnedHandle::from(read), ObjectKind::PipeRead),
+        (OwnedHandle::from(write), ObjectKind::PipeWrite),
+        (OwnedHandle::from(waker), ObjectKind::EventSignal),
+        (OwnedHandle::from(bell), ObjectKind::EventWait),
+        (region.share().expect("a second handle to the region"), ObjectKind::SharedMem),
+        (OwnedHandle::from(acceptor), ObjectKind::Acceptor),
+        (OwnedHandle::from(connector), ObjectKind::Connector),
+        (OwnedHandle::from(toyos::job::own().expect("this process's job")), ObjectKind::Job),
+    ];
+    let (handles, kinds): (Vec<_>, Vec<_>) = sent.into_iter().unzip();
+    send(&client, &[], handles, false).expect("a message of eight handles");
+    let mut entries = [ReceivedEntry::NONE; MAX_TRANSFER_HANDLES];
+    let got = syscall::message_recv(server.as_handle().raw(), &mut [], &mut [], &mut entries, true).expect("the message");
+    assert_eq!(got.handles, kinds.len(), "the message came with other handles than it carried");
+    let entries = &entries[..got.handles];
+    let reported: Vec<_> = entries.iter().map(|entry| entry.kind()).collect();
+    assert_eq!(reported, kinds.into_iter().map(Some).collect::<Vec<_>>(), "a handle arrived as another kind than it names");
+    // SAFETY: installed for this call.
+    entries.iter().for_each(|entry| drop(unsafe { OwnedHandle::from_raw(entry.handle) }));
+
+    // A pipe end where a process is asked for, then one taken as what it is.
+    let (_read, write) = pipe_pair().expect("a pipe");
+    let (_also, second) = pipe_pair().expect("a second pipe");
+    client.signal_with(1, [OwnedHandle::from(write), OwnedHandle::from(second)]).expect("a frame of two pipe ends");
+    let mut rx = FrameRx::<0>::new();
+    rx.recv(&server).expect("the frame");
+    let [first, second] = rx.take_handles::<2>().expect("its two handles");
+    assert_eq!(
+        first.typed::<toyos::process::Process>().err(),
+        Some(WrongKind { wanted: &[ObjectKind::Process], got: Some(ObjectKind::PipeWrite) }),
+        "a pipe end taken as a process"
+    );
+    let pipe = second.typed::<Pipe>().expect("a pipe end taken as one");
+    assert_eq!(pipe.write(b"x"), Ok(1), "the pipe end taken is not the one sent");
 }

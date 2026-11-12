@@ -15,7 +15,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use toyos::ipc::Connection;
 use toyos::process::Process;
 use toyos::shm::SharedMemory;
-use toyos::endow::FromHandle;
 use toyos::{endow, namespace, port, OwnedHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
 use toyos_abi::RawHandle;
@@ -125,7 +124,7 @@ fn killer() -> ! {
     assert_eq!(frame.msg_type, ARM, "an unexpected frame");
     let [word_handle, victim] = rx.take_handles::<2>().expect("the word and the victim");
     let go = SharedMemory::lent(word_handle, WORD_BYTES).expect("map the word");
-    let victim = Process::from_handle(victim);
+    let victim = victim.typed::<Process>().expect("the victim is a process");
 
     let mut out = std::io::stdout();
     out.write_all(b"armed\n").expect("say armed");

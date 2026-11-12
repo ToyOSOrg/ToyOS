@@ -1783,8 +1783,9 @@ fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
 /// disambiguator that stands in front of it.
 const SYSCALL_ENTRY_SYMBOL: &str = "6kernel4arch6x86_647syscall13syscall_entry";
 
-/// `cld`, which `arch::entry::cld` puts first in `syscall_entry`.
-const CLD: u8 = 0xfc;
+/// `swapgs` then `cld`, which `arch::entry::syscall_naked_asm` puts first in
+/// `syscall_entry`: the kernel's GS base before anything addresses GS.
+const OPENS: [u8; 4] = [0x0f, 0x01, 0xf8, 0xfc];
 /// `mov gs:[disp32], rsp` less its displacement: the `gs` override, `REX.W`,
 /// the opcode, and the ModRM/SIB pair that says `rsp` against an absolute
 /// `disp32`.
@@ -1832,14 +1833,13 @@ fn syscall_entry_bytes(kernel: &[u8]) -> Result<&[u8], String> {
 /// saves the user's, and the bytes that stand between the two where it does
 /// not.
 ///
-/// An entry that does not open `cld`, save is one this cannot read, and is
-/// refused for both kernels rather than passed for either.
+/// An entry that does not open `swapgs`, `cld`, save is one this cannot read,
+/// and is refused for both kernels rather than passed for either.
 fn entry_window(entry: &[u8]) -> Result<Result<(), &[u8]>, String> {
-    let after_save = 1 + MOV_RSP_GS_LEN;
-    if entry.first() != Some(&CLD) || !entry.get(1..).is_some_and(|e| e.starts_with(&SAVE_RSP_TO_GS))
-    {
+    let after_save = OPENS.len() + MOV_RSP_GS_LEN;
+    if !entry.starts_with(&OPENS) || !entry[OPENS.len()..].starts_with(&SAVE_RSP_TO_GS) {
         return Err(format!(
-            "`syscall_entry` does not open `cld`, `mov gs:[…], rsp`: it opens {:02x?}",
+            "`syscall_entry` does not open `swapgs`, `cld`, `mov gs:[…], rsp`: it opens {:02x?}",
             &entry[..entry.len().min(after_save)],
         ));
     }
@@ -1859,8 +1859,9 @@ fn entry_window(entry: &[u8]) -> Result<Result<(), &[u8]>, String> {
 /// Refuse to write a shipping image whose `syscall_entry` does anything between
 /// saving the user's `rsp` and switching to the kernel's.
 ///
-/// Read at the entry's own symbol, the shipping kernel's first three
-/// instructions are `cld`, the save and the switch, with nothing between.
+/// Read at the entry's own symbol, the shipping kernel's first four
+/// instructions are `swapgs`, `cld`, the save and the switch, with nothing
+/// between.
 fn judge_entry_window(features: &str, kernel: &[u8]) -> Result<(), String> {
     if !features.is_empty() {
         return Ok(());
@@ -3460,6 +3461,7 @@ mod tests {
         "tests/images/virtpaniccase.toml",
         "tests/images/virtrebootcase.toml",
         "tests/images/virtsmpcase.toml",
+        "tests/images/virttmpcase.toml",
     ];
 
     fn load(cfg: &str) -> SystemConfig {
@@ -3845,8 +3847,8 @@ mod tests {
         assert_eq!(found, expected);
     }
 
-    /// `cld`, then `mov gs:[0x18], rsp`: how every entry judged here opens.
-    const ENTRY_OPENS: [u8; 10] = [0xfc, 0x65, 0x48, 0x89, 0x24, 0x25, 0x18, 0, 0, 0];
+    /// `swapgs`, `cld`, then `mov gs:[0x18], rsp`: how every entry judged here opens.
+    const ENTRY_OPENS: [u8; 13] = [0x0f, 0x01, 0xf8, 0xfc, 0x65, 0x48, 0x89, 0x24, 0x25, 0x18, 0, 0, 0];
     /// `mov rsp, gs:[0x10]`.
     const SWITCH: [u8; 9] = [0x65, 0x48, 0x8b, 0x24, 0x25, 0x10, 0, 0, 0];
     const LABELLED_HOLD: [u8; 84] = [
@@ -3948,10 +3950,17 @@ mod tests {
 
     #[test]
     fn a_hold_in_front_of_the_save_is_an_entry_the_judge_refuses_to_read() {
-        let entry = [&[0xfc, 0xf3, 0x90][..], &ENTRY_OPENS[1..], &SWITCH[..]].concat();
+        let entry = [&ENTRY_OPENS[..4], &[0xf3, 0x90][..], &ENTRY_OPENS[4..], &SWITCH[..]].concat();
         let kernel = kernel_with_entry(&[ENTRY_NAME], &entry);
         let refusal = judge_entry_window("", &kernel).unwrap_err();
-        assert!(refusal.contains("does not open `cld`"), "{refusal}");
+        assert!(refusal.contains("does not open `swapgs`, `cld`"), "{refusal}");
+    }
+
+    #[test]
+    fn an_entry_without_its_swapgs_is_refused() {
+        let kernel = kernel_with_entry(&[ENTRY_NAME], &[&ENTRY_OPENS[3..], &SWITCH[..]].concat());
+        let refusal = judge_entry_window("", &kernel).unwrap_err();
+        assert!(refusal.contains("does not open `swapgs`, `cld`"), "{refusal}");
     }
 
     #[test]

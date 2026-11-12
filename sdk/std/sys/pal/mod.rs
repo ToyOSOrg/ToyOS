@@ -30,7 +30,7 @@ pub fn to_io_error(e: toyos_abi::syscall::SyscallError) -> crate::io::Error {
         SyscallError::NotSupported => ErrorKind::Unsupported,
         SyscallError::Io => ErrorKind::Other,
         SyscallError::Gone => ErrorKind::BrokenPipe,
-        SyscallError::Busy => ErrorKind::ExecutableFileBusy,
+        SyscallError::Busy => ErrorKind::ResourceBusy,
     };
     crate::io::Error::from(kind)
 }

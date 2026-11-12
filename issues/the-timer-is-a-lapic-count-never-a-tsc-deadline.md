@@ -4,10 +4,10 @@ kind: track
 opened: 2026-10-12
 ---
 
-# The timer is a LAPIC count re-armed every pass, never a TSC deadline
+# The timer is a LAPIC count, never a TSC deadline
 
-Every scheduler pass ends by handing its timer an absolute deadline
-(`kernel/pure/sched/cpu.rs:1912-1918`), and the kernel turns it back into a
+A scheduler pass ends by handing its timer an absolute deadline
+(`SchedPass::apply_timer_no_later_than`), and the kernel turns it back into a
 span from now (`kernel/src/hw.rs:47-51`) that `apic::arm_one_shot` converts to
 LAPIC ticks by the boot's calibration against the TSC-derived clock
 (`kernel/src/arch/x86_64/apic.rs`) and writes into `TIMER_INIT`, one APIC
@@ -27,6 +27,15 @@ CPUID reference has CPUID.01H:ECX[24] reserved (APM 24594 rev. 3.36, Vol. 3,
 §E.3.2), and so does the AMD bench's own (PPR 55922 rev. 3.06,
 `CPUID_Fn00000001_ECX`), so the AMD bench keeps the count, its calibration
 and its spin.
+
+**A running CPU re-arms once a request, since #1263.** A pass on a CPU
+that keeps running leaves a one-shot that is still to fire and due no later
+than it needs, so the timer is written once a request, after a fire, or when
+something is owed sooner; a CPU going idle still arms exactly at every sleep
+and stops at every idle entry. What a deadline would save is now per arm and
+not per pass, which leaves it the idle path's arm and stop and the boot's
+calibration spin, on the T14 alone. The figures below are the old code's,
+which wrote at every pass.
 
 **Its speed reading decides it.** The SDM defines the mode and recommends it
 over the count nowhere, and AMD documents none, so nothing published covers
@@ -71,6 +80,8 @@ lowest to highest. The deadline measures better only where its median is the
 lower and the two spreads do not overlap; where they overlap, the count, the
 path every CPU has, is kept. The split is reported. The twin is a measurement
 arm, deleted once it has answered.
+
+**Owed on metal:** one A/B of main from before and after #1263 (a pass skips the timer write and the ask swaps it does not owe), on the T14 and the AMD bench, of osbench's `system`, `sched`, `ipc` and `time` groups, with a Linux reference timed through the TSC and its `.slack1ns` rows. Main must read `time.yield`, `pingpong.*` and `ipc.reqrep.*` faster by more than 3% on both benches, `time.sleep_late.*`, `time.timer_1ms.late` and `wake.periodic.*` within 3%, and no scheduler, IPC, wake, yield, spawn or timer row slower. The speed-up is not yet measured on metal.
 
 **Exit**: a boot line printing CPUID.01H:ECX, and a T14 boot carrying it
 cited for bit 24; the twin's reading, posted, and the twin deleted. Where the
