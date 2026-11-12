@@ -1,19 +1,19 @@
-//! The cross-CPU message set — these four and no others.
+//! The cross-CPU message set — these three and no others.
 //!
-//! Two of the four messages are requests about a task the target already
+//! Two of the three messages are requests about a task the target already
 //! owns; one *is* the ownership transfer. That is the property that makes
 //! overflow unrepresentable: a queue that cannot drop a message cannot
 //! lose a task, because the message is the task.
 //!
-//! Its own module rather than part of `mailbox.rs`, so that the scheduler core's single
-//! `#[allow(unsafe_code)]` island stays exactly the intrusive-list code.
+//! Its own module rather than part of `mailbox.rs`, whose `#[allow(unsafe_code)]`
+//! then covers only storage: the intrusive list and the slots a message and a
+//! parked task's record live in.
 
 use crate::sched::cpu::CpuHandles;
 use crate::sched::hw::{CpuId, Kicker};
 use crate::sched::mailbox::{MailboxNode, PreemptGuard, SchedMsg};
 use crate::sched::sync::Arc;
 use crate::sched::task::{BlockedTask, SchedPayload, TaskShared, TransitTask, WaitClass, WakeCause};
-use crate::sched::hw::Nanos;
 
 pub enum Msg<X: SchedPayload> {
     /// The claim that ended a park, handed to the task's home CPU, which
@@ -32,8 +32,6 @@ pub enum Msg<X: SchedPayload> {
 pub struct ParkedRecord<X: SchedPayload> {
     pub(crate) task: BlockedTask<X>,
     pub(crate) class: WaitClass,
-    /// The deadline its home CPU holds for it, if any.
-    pub(crate) deadline: Option<Nanos>,
 }
 
 #[cfg(feature = "protocol-port")]

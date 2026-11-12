@@ -18,7 +18,8 @@ use kernel_loom::sched::cpu::{Balance, CpuHandle, CpuHandles, CpuSched, Env, Sch
 use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer};
 use kernel_loom::sched_model::{
-    model, IrqGuard, Kicks, Msg, Owner, Payload, PreemptModel, RemoteGuard, Silent, TaskMsg, CPU0, CPU1, NOW,
+    model, IrqGuard, Kicks, ModelCtx, Msg, Owner, Payload, PreemptModel, RemoteGuard, Silent, TaskMsg, CPU0, CPU1,
+    NOW,
 };
 use kernel_loom::sched::retire;
 use kernel_loom::sched::task::{TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason};
@@ -258,11 +259,11 @@ fn an_adopting_cpu_always_observes_the_kill_bit() {
 /// wrong. The retirer and a remote waker reach for the same rendezvous word;
 /// exactly one of them may win it, and whichever loses must leave the task
 /// somewhere the other one's message will find it. The defect this excludes
-/// is remove-then-convert: the retirer takes the entry out of `parked` and
-/// then loses the claim, so the in-flight `Msg::Wake` lands on a
-/// `handle_wake` whose `parked.remove` returns `None` — and the task is in no
-/// container at all, never runnable, never reaped, until the retirer's own
-/// tripwire panics the machine.
+/// is remove-then-convert: the retirer takes the record out of the task's
+/// slot and then loses the claim, so the in-flight `Msg::Wake` lands on a
+/// `handle_wake` that finds the slot empty — and the task is in no container
+/// at all, never runnable, never reaped, until the retirer's own tripwire
+/// panics the machine.
 ///
 /// Modelled at the claim rather than at the container, because the container
 /// is `CpuSched`'s and `CpuSched` is `!Sync`: one CPU owns it and no
@@ -351,10 +352,9 @@ const OTHER: TaskKey = TaskKey(2);
 /// The property is this: **whichever way the claim goes, the task ends up in
 /// the dying list.** If the retirer wins, its own wake places it there; if it
 /// loses, the waker's `Msg::Wake` is in flight to this same CPU and
-/// `handle_wake` places it — but only if the retirer left the entry in
-/// `parked`. Remove-then-convert reds this model: the entry is gone, the wake
-/// lands on a `parked.remove` that returns `None`, and the task is in no
-/// container at all.
+/// `handle_wake` places it — but only if the retirer left the record in its
+/// slot. Remove-then-convert reds this model: the record is gone, the wake
+/// finds the slot empty, and the task is in no container at all.
 ///
 /// **The CPU is deliberately never idle.** `OTHER` runs throughout, and it is
 /// not scenery: an idle `SchedPass` ends in `try_sleep`, whose `Err(())` retry
@@ -372,7 +372,7 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
             cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)], Topology::flat(1)),
             hw: Silent,
         });
-        let mut cpu = CpuSched::<Payload>::new(CPU0, rx, ());
+        let mut cpu = CpuSched::<Payload>::new(CPU0, rx, ModelCtx::live());
         // A pass runs from the IRQ-exit path, which cannot be preempted, so
         // `IrqGuard` is its guard (N3). The waker is a *remote* CPU and carries
         // its own — the exclusion that would matter here is between a pass and

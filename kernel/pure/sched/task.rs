@@ -145,7 +145,8 @@ pub enum TaskState {
     /// Deciding to park, not yet parked: the two-phase commit's first phase.
     Committing(CpuId, Gen),
     Blocked(CpuId),
-    /// A waker won the claim and a `Wake` message is queued to the home CPU.
+    /// A claim ended the park on this CPU: its winner holds the record, to
+    /// place it or send it on, or a `Wake` to this CPU carries it.
     WakeQueued(CpuId),
     /// Owned by an unconsumed `Msg::Adopt` on its way to this CPU.
     InTransit(CpuId),
@@ -355,6 +356,11 @@ pub struct TaskShared<M: SchedMsg> {
     /// The task's record while it is parked: whoever wins the claim that
     /// ends the park owns it, so the wake goes where that claimant sends it.
     parked: ParkedSlot<M::Parked>,
+    /// Set by the CPU that dispatches the task, and cleared with release by
+    /// the switch that leaves it once its context is saved. While it is set
+    /// a CPU still stands on the task's kernel stack, so only that CPU may
+    /// move it ([`Self::on_cpu`]).
+    on_cpu: AtomicBool,
 }
 
 impl<M: SchedMsg> TaskShared<M> {
@@ -367,7 +373,30 @@ impl<M: SchedMsg> TaskShared<M> {
             waiting: AtomicBool::new(false),
             mask: SharedMask::new(mask),
             parked: ParkedSlot::new(),
+            on_cpu: AtomicBool::new(false),
         }
+    }
+
+    /// Whether a CPU may still stand on this task's context: dispatched and
+    /// not yet left by a switch that saved it. A claimant that reads `false`
+    /// after its claim reads it after that save.
+    pub fn on_cpu(&self) -> bool {
+        if cfg!(feature = "forward-ignores-on-cpu") {
+            return false;
+        }
+        self.on_cpu.load(Ordering::Acquire)
+    }
+
+    /// The dispatching CPU is about to load this task's context. Ordered
+    /// before any park the task makes there by that CPU's own order.
+    pub(crate) fn dispatched(&self) {
+        self.on_cpu.store(true, Ordering::Relaxed);
+    }
+
+    /// The word a switch that leaves this task clears, once the context is
+    /// saved, with a release store ([`crate::sched::cpu::RunToken::left_ptr`]).
+    pub(crate) fn on_cpu_word(&self) -> *const AtomicBool {
+        &self.on_cpu
     }
 
     pub(crate) fn parked(&self) -> &ParkedSlot<M::Parked> {
@@ -430,10 +459,6 @@ impl<M: SchedMsg> TaskShared<M> {
     /// `false` means the word was no longer `from` — the caller lost a race
     /// and must re-read.
     pub fn transition(&self, from: TaskState, to: TaskState) -> bool {
-        self.transition_ordered(from, to, Ordering::AcqRel)
-    }
-
-    fn transition_ordered(&self, from: TaskState, to: TaskState, success: Ordering) -> bool {
         assert!(legal(from, to), "illegal task transition {from:?} -> {to:?}");
         let mut cur = self.state.load(Ordering::Acquire);
         loop {
@@ -441,7 +466,10 @@ impl<M: SchedMsg> TaskShared<M> {
                 return false;
             }
             let next = retarget(cur, to);
-            match self.state.compare_exchange_weak(cur, next, success, Ordering::Acquire) {
+            match self
+                .state
+                .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => return true,
                 Err(observed) => cur = observed,
             }
@@ -490,8 +518,7 @@ impl<M: SchedMsg> TaskShared<M> {
     /// while committing took the word to `WakeQueued` first: that claimant
     /// posted nothing and took nothing, so the record is still the caller's.
     pub fn commit_park(&self, cpu: CpuId, generation: Gen) -> bool {
-        let publish = if cfg!(feature = "parked-publish-relaxed") { Ordering::Relaxed } else { Ordering::AcqRel };
-        if self.transition_ordered(TaskState::Committing(cpu, generation), TaskState::Blocked(cpu), publish) {
+        if self.transition(TaskState::Committing(cpu, generation), TaskState::Blocked(cpu)) {
             return true;
         }
         let state = self.state();
@@ -973,7 +1000,8 @@ linear_state!(
     RunningTask
 );
 linear_state!(
-    /// Exists only inside a `ParkedEntry` in `CpuSched.parked`.
+    /// Exists only inside a parked task's record, in its `TaskShared`'s slot
+    /// or held by the claim that ended the park.
     BlockedTask
 );
 linear_state!(

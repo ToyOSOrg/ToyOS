@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc as StdArc;
 
 use kernel::sched::affinity::CpuMask;
-use kernel::sched::cpu::{homes, Action, CpuHandle, CpuSched, Env, Near, SchedPass};
+use kernel::sched::cpu::{homes, Action, CpuHandle, CpuSched, Env, Near, RunToken, SchedPass};
 use kernel::sched::job::{Job, JobKey};
 use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent, TraceKind};
 use kernel::sched::invariants::Container;
@@ -223,6 +223,10 @@ pub enum Step {
     Pass(usize),
     DeliverIpi(usize),
     FireTimer(usize),
+    /// The switch a pass ended in. A step of its own, interrupts masked, so
+    /// that other CPUs can act between a pass and the switch that saves the
+    /// context it leaves (invariant I11).
+    Switch(usize),
     /// A device completion interrupt (audio): wakes its queue's waiters with
     /// the IRQ-time boost, exactly as the ISR tail does.
     DeviceIrq(usize),
@@ -263,6 +267,8 @@ pub struct Vm<'q> {
     pub registrations: BTreeMap<TaskKey, usize>,
     /// Per CPU: a block that has registered and not yet parked.
     pub blocking: Vec<Option<Blocking>>,
+    /// Per CPU: the switch its last pass ended in, not yet taken.
+    pub switching: Vec<Option<RunToken<SimPayload>>>,
     /// OLD protocol only: the unlocked transit slot.
     pub transit: Vec<Option<ReadyTask<SimPayload>>>,
     pub clock: Nanos,
@@ -630,6 +636,7 @@ impl<'q> Vm<'q> {
             shared: BTreeMap::new(),
             registrations: BTreeMap::new(),
             blocking: (0..n).map(|_| None).collect(),
+            switching: (0..n).map(|_| None).collect(),
             transit: (0..n).map(|_| None).collect(),
             clock: Nanos::ZERO,
             busy_ns: vec![0; n],
@@ -875,6 +882,11 @@ impl<'q> Vm<'q> {
             // given stays where it is, which is the state this dimension exists
             // to reach.
             if self.is_stopped(cpu) {
+                continue;
+            }
+            // Mid-switch, interrupts masked: the switch is all this CPU can do.
+            if self.switching[cpu].is_some() {
+                steps.push(Step::Switch(cpu));
                 continue;
             }
             if pending_ipi[cpu] > 0 {
@@ -1211,6 +1223,7 @@ impl<'q> Vm<'q> {
                 self.woken_by_late_kick[cpu] |= was_halted && late;
                 self.ipi_due[cpu] = None;
             }
+            Step::Switch(cpu) => self.switch(cpu),
             Step::FireTimer(cpu) => {
                 let was_halted = self.hw.with(|s| {
                     s.armed[cpu] = None;
@@ -1358,26 +1371,21 @@ impl<'q> Vm<'q> {
                 Dispose::None => (pass.dispose_none().finish(), None, BlockEnd::Parked),
                 Dispose::Yield => (pass.dispose_yield().finish(), None, BlockEnd::Parked),
                 Dispose::Exit => (pass.dispose_exit().finish(), None, BlockEnd::Parked),
-                // Phase 2 inside the pass, after `begin`'s drain.
-                // Committing here puts every claim on one side of the drain or
-                // the other: an earlier one finds `Committing` and posts no
-                // message, so this CAS observes it; a later one's message
-                // arrives behind the drain and the next pass finds the task
-                // parked.
+                // Phase 2 inside the pass, after `begin`'s drain. A claim
+                // before the park finds `Committing` and posts nothing, so the
+                // park finds it claimed; a later one finds `Blocked`.
                 Dispose::Commit(ticket, deadline, after) => match ticket.commit() {
                     Commit::Parked(committed) => {
                         let key = committed.shared().key();
-                        // The residual window the fix names and cannot close:
-                        // a waker may claim the task in the instructions
-                        // between the commit publishing `Blocked` and the park
-                        // itself. Its `Msg::Wake` lands *behind* this pass's
-                        // drain, so the next pass finds the task parked and
-                        // delivers it — which is the entire reason
-                        // `RunningTask::park` accepts `WakeQueued`. It is
-                        // injected here rather than reached by a step boundary
-                        // because `SchedPass` borrows `CpuSched` and cannot be
-                        // held across one; without it that arm is dead code in
-                        // every simulator run.
+                        // The residual window: a waker may claim the task in
+                        // the instructions between the commit and the park
+                        // that publishes `Blocked`. Its claim takes nothing,
+                        // and the park wakes the record it published
+                        // (`Parked::WokenFirst`). It is injected here rather
+                        // than reached by a step boundary because `SchedPass`
+                        // borrows `CpuSched` and cannot be held across one;
+                        // without it that arm is dead code in every simulator
+                        // run.
                         if let Some(hoisted) = after {
                             let blocking = hw.posting_from(Some(CpuId(hoisted.cpu as u32)));
                             wake(
@@ -1439,7 +1447,11 @@ impl<'q> Vm<'q> {
             self.idle_wakes[cpu] += 1;
             self.late_kick_wakes[cpu] += u64::from(late);
         }
-        self.apply(action);
+        match action {
+            Action::Run(token) => self.switching[cpu] = Some(token),
+            Action::Resume => {}
+            Action::Idle(token) => self.hw.idle_wait(token),
+        }
         self.hw.leave_pass();
         if self.scenario.surplus == SurplusShape::Withheld {
             self.handles.publish_surplus(CpuId(cpu as u32), 0, CpuMask::NONE);
@@ -1449,15 +1461,16 @@ impl<'q> Vm<'q> {
         end
     }
 
-    #[allow(unsafe_code)] // `Hw::switch` is an unsafe fn; SimHw's body derefs nothing
-    fn apply(&mut self, action: Action<SimPayload>) {
-        match action {
-            // SAFETY: the token came from `finish()`, which built it from
-            // live Box-backed records; `SimHw::switch` only reads the keys.
-            Action::Run(token) => unsafe { self.hw.switch(token) },
-            Action::Resume => {}
-            Action::Idle(token) => self.hw.idle_wait(token),
-        }
+    /// Take the switch `cpu`'s last pass ended in.
+    #[allow(unsafe_code)] // `Hw::switch` is an unsafe fn
+    fn switch(&mut self, cpu: usize) {
+        let token = self.switching[cpu].take().expect("a switch step for a CPU with none owed");
+        self.hw.enter_pass(CpuId(cpu as u32), self.clock);
+        // SAFETY: the token came from `finish()`, which built it from live
+        // Box-backed records, and this CPU has run no pass since; every task's
+        // `TaskShared` lives as long as `Vm::shared`.
+        unsafe { self.hw.switch(token) };
+        self.hw.leave_pass();
     }
 
     fn exec_op(&mut self, cpu: usize, choices: &mut ChoiceStream) {

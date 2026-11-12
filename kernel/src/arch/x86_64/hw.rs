@@ -312,8 +312,10 @@ impl Hw for KernelHw {
 
     /// Order is forced: outgoing per-CPU state must be captured, and incoming CR3/TSS/stack installed, before `rsp` moves — after that this frame no longer exists.
     ///
-    /// Until [`context_switch`] writes the outgoing `rsp`, it is `answer_steal_requests`, not this
-    /// function, that keeps another CPU out of that window.
+    /// Until [`context_switch`] writes the outgoing `rsp`, nothing in this function keeps another CPU
+    /// out of that window: a steal is answered only by this CPU's own later pass
+    /// (`answer_steal_requests`), and a claim that ends a park reads the task's on-CPU word, which
+    /// [`context_switch`] clears after that write.
     unsafe fn switch(&self, token: RunToken<KernelPayload>) {
         let save = token.save_ptr();
         let restore = token.restore_ptr();
@@ -391,7 +393,7 @@ impl Hw for KernelHw {
             if let Some(area) = area {
                 super::fpu::leave(area, save as u64, &mut (*save).fpu);
             }
-            context_switch(&raw mut (*save).sp, rsp);
+            context_switch(&raw mut (*save).sp, rsp, token.left_ptr());
             // The preempt count is still raised: nothing switches this task
             // out before its state is back.
             if let Some(area) = area {

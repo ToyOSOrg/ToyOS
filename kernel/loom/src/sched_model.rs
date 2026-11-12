@@ -192,12 +192,12 @@ pub fn model_bounded(preemptions: usize, f: impl Fn() + Sync + Send + 'static) {
     builder.check(f);
 }
 
-/// The smallest payload a `CpuSched` can be built over: no address space and
-/// no saved context.
+/// The smallest payload a `CpuSched` can be built over: no address space,
+/// and a context that is only its own saved-ness.
 pub struct Payload;
 
 impl SchedPayload for Payload {
-    type Ctx = ();
+    type Ctx = ModelCtx;
 
     fn name(&self) -> u64 {
         0
@@ -208,9 +208,36 @@ impl SchedPayload for Payload {
 /// models use: a pass consumes `Adopt` and `Retire` too.
 pub type TaskMsg = crate::sched::msg::Msg<Payload>;
 
-/// An `Hw` that records nothing. Every question these models ask is about
-/// which of `CpuSched`'s own containers a task is in, and `CpuSched` answers
-/// those itself; a recorder would only add state loom has to explore.
+/// A context as the models see it: whether it is saved, in a cell loom checks
+/// at every access, so that a resume no save happens before is a causality
+/// violation and not a lucky read.
+pub struct ModelCtx(loom::cell::UnsafeCell<Frame>);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Frame {
+    /// A new task's initial frame.
+    Fresh,
+    /// A CPU stands on it.
+    Live,
+    Saved,
+}
+
+impl ModelCtx {
+    /// A new task's.
+    pub fn fresh() -> Self {
+        Self(loom::cell::UnsafeCell::new(Frame::Fresh))
+    }
+
+    /// A CPU's idle context, which the CPU starts on.
+    pub fn live() -> Self {
+        Self(loom::cell::UnsafeCell::new(Frame::Live))
+    }
+}
+
+/// An `Hw` that records nothing, and whose switch saves and resumes
+/// [`ModelCtx`]s as the kernel's does: the outgoing context saved, then its
+/// task's on-CPU word cleared with release, then the incoming one resumed. A
+/// model that drops a pass's action switches nothing.
 pub struct Silent;
 
 impl Kicker for Silent {
@@ -234,8 +261,21 @@ impl Machine for Silent {
 
 impl Hw for Silent {
     type Payload = Payload;
-    #[allow(unsafe_code)] // the declaration is unsafe; this body does nothing
-    unsafe fn switch(&self, _token: RunToken<Payload>) {}
+    #[allow(unsafe_code)]
+    unsafe fn switch(&self, token: RunToken<Payload>) {
+        // SAFETY: the trait's: both contexts are live, the outgoing one is
+        // this CPU's, and the word is null or the outgoing task's.
+        unsafe {
+            (*token.save_ptr()).0.with_mut(|frame| *frame = Frame::Saved);
+            if let Some(left) = token.left_ptr().as_ref() {
+                left.store(false, Ordering::Release);
+            }
+            (*token.restore_ptr()).0.with_mut(|frame| {
+                assert_ne!(*frame, Frame::Live, "resumed a context a CPU still stands on");
+                *frame = Frame::Live;
+            });
+        }
+    }
     fn release(&self, _key: TaskKey, _payload: Payload, _acct: TaskAccounting) {}
 }
 
@@ -258,7 +298,7 @@ impl Owner {
         let task = TaskBuilder {
             key,
             job: Arc::new(Job::new(JobKey(key.0))),
-            ctx: (),
+            ctx: ModelCtx::fresh(),
             ext: Payload,
             rt: RtState::default(),
             mask: CpuMask::ANY,

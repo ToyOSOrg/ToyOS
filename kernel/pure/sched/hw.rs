@@ -70,10 +70,11 @@ pub enum TraceKind {
     TimerFire,
 }
 
-/// The one effect a wake path needs from the world: the targeted kick IPI a
-/// [`crate::sched::mailbox::Kick::Send`] obliges the poster to deliver. Split out of
-/// [`Machine`] so a watch's post and the retire protocol — which run at any wake
-/// site, not inside a scheduler pass — depend on nothing else.
+/// What a wake path needs from the world: the targeted kick IPI a
+/// [`crate::sched::mailbox::Kick::Send`] obliges the poster to deliver, and the
+/// clock and the trace a claimant that sends a task on accounts it with. Split
+/// out of [`Machine`] so a watch's post and the retire protocol — which run at
+/// any wake site, not inside a scheduler pass — depend on nothing else.
 pub trait Kicker: Sync {
     /// Targeted kick IPI. Never broadcast. A kick aimed at the calling CPU is
     /// its own `need_resched`, never an IPI to itself.

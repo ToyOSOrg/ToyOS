@@ -63,6 +63,13 @@ use kernel_sim::sweep;
 /// exploration with all of I1–I13 checked after every step.
 const SEEDS: u64 = 500;
 
+/// Seeds for [`a_claim_never_sends_on_a_context_its_home_has_not_saved`].
+const CLAIM_SEEDS: u64 = 1_000;
+
+/// Seeds for [`old_migrate_keeping_the_corpse_is_caught`], whose defect a
+/// seeded schedule reaches about once in 140.
+const CORPSE_SEEDS: u64 = 2_000;
+
 /// Steps per scenario in the in-test fuzz sweep.
 const FUZZ_STEPS: u64 = 20_000;
 
@@ -159,6 +166,22 @@ fn old_steal_port_is_caught() {
     );
 }
 
+/// **A claim never sends on a context its home has not saved.** The
+/// simulator's switch is a step of its own, so a claim can land between the
+/// pass that parks a task and the switch that saves it, and a CPU that ran
+/// the task then is invariant I11's resume of an unsaved context. With the
+/// claimant blind to the on-CPU word, seeded schedules of
+/// `claimed_behind_busy_home` reach that resume about once in 45, so
+/// [`CLAIM_SEEDS`] of them are clean only because the word holds.
+#[test]
+fn a_claim_never_sends_on_a_context_its_home_has_not_saved() {
+    let scenario = scenarios::claimed_behind_busy_home();
+    for seed in 0..CLAIM_SEEDS {
+        let outcome = run(scenario.clone(), &mut ChoiceStream::from_seed(seed));
+        assert!(outcome.passed(), "seed {seed}: {}", outcome.report());
+    }
+}
+
 /// The fourth self-validation gate: the balance path allowed to hand on a task
 /// whose kill bit is already set.
 ///
@@ -173,18 +196,17 @@ fn old_steal_port_is_caught() {
 /// It must be caught by **I14** specifically. The failure rate is a rate and not
 /// a certainty — the migration needs a boosted wake to land on the RT daemon's
 /// CPU in the window between the teardown and that CPU's drain — so this asserts
-/// a floor over the sweep rather than every seed.
+/// a floor over the sweep rather than every seed. Seeded schedules catch it
+/// about once in 140 and PCT's about once in 3,000, since a boosted wake whose
+/// claimant finds the CPU it may leave sends it on itself and never reaches
+/// `hand_off`; [`CORPSE_SEEDS`] seeded schedules catch it about fifteen times.
 #[test]
 fn old_migrate_keeping_the_corpse_is_caught() {
     let scenario = scenarios::old_migrate_kept_the_corpse();
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     let mut caught = 0;
-    for seed in 0..SEEDS {
-        let mut choices = if seed % 2 == 0 {
-            ChoiceStream::from_seed(seed)
-        } else {
-            ChoiceStream::pct(seed, scenario.cpus(), 3)
-        };
+    for seed in 0..CORPSE_SEEDS {
+        let mut choices = ChoiceStream::from_seed(seed);
         let outcome = run(scenario.clone(), &mut choices);
         if outcome.passed() {
             continue;
@@ -197,7 +219,7 @@ fn old_migrate_keeping_the_corpse_is_caught() {
     }
     assert!(
         caught > 0,
-        "migrating a task that is already dead went undetected in {SEEDS} \
+        "migrating a task that is already dead went undetected in {CORPSE_SEEDS} \
          schedules — I14 says nothing about the balance path it was written for",
     );
     assert!(

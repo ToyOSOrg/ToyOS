@@ -2,8 +2,17 @@
 //! onto the outgoing stack and popped off the incoming one.
 
 use core::arch::naked_asm;
+use core::sync::atomic::AtomicBool;
 
 /// The outgoing half of [`context_switch`]. A macro, not inlined twice, so both builds share one instruction sequence.
+///
+/// The outgoing `rsp` is the last of the outgoing context written, so the
+/// store that clears `left` after it may hand the context to another CPU. It
+/// is a release: x86-64 does not reorder a write with older writes (SDM Vol.
+/// 3A §11.2.2, order 325384-093US), and the caller's saves are ordinary
+/// writes made before this call. Nothing pushes onto the outgoing stack after
+/// the clear: interrupts are masked, and NMI, #MC, #DF and #DB switch to IST
+/// stacks.
 macro_rules! switch_save {
     () => {
         "pushfq
@@ -14,6 +23,10 @@ macro_rules! switch_save {
          push r14
          push r15
          mov [rdi], rsp
+         test rdx, rdx
+         jz 2f
+         mov byte ptr [rdx], 0
+         2:
          mov rsp, rsi"
     };
 }
@@ -32,10 +45,11 @@ macro_rules! switch_restore {
     };
 }
 
-/// Callee-saved register save/restore.
+/// Callee-saved register save/restore. `left`, unless null, is the outgoing
+/// task's on-CPU word, cleared once its context is saved.
 #[cfg(not(feature = "switch-witness"))]
 #[unsafe(naked)]
-pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) {
+pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64, left: *const AtomicBool) {
     naked_asm!(switch_save!(), switch_restore!());
 }
 
@@ -46,7 +60,7 @@ pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) 
 /// is caller-saved and already dead here.
 #[cfg(feature = "switch-witness")]
 #[unsafe(naked)]
-pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) {
+pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64, left: *const AtomicBool) {
     naked_asm!(
         switch_save!(),
         "mov rdi, rsp",

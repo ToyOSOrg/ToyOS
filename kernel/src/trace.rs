@@ -9,7 +9,7 @@
 //! CPU's raw counter and published under one `IrqGuard`, so a CPU's ring is in
 //! stamp order and an interrupt's record lands in a slot of its own.
 //!
-//! [`record`] maps a `TraceEvent` onto its [`Kind`] and is `Machine::trace`.
+//! [`record`] maps a `TraceEvent` onto its [`Kind`] and is `Kicker::trace`.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 

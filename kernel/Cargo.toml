@@ -128,9 +128,11 @@ commit-ignores-notify = []
 # off a load rather than a read-modify-write, and
 # `kernel/loom/tests/loom_watch.rs` must red.
 notify-flag-load-only = []
-# `pure/sched/task.rs`'s `commit_park` publishes a parked task's record
-# `Relaxed`, and `kernel/loom/tests/loom_claimed_wake.rs` must red.
-parked-publish-relaxed = []
+# `pure/sched/task.rs`'s `on_cpu` answers `false` always, so a claimant may
+# send on a task whose home still stands on its context. The kernel library's
+# `a_claim_before_the_homes_switch_goes_home`, `kernel-loom`'s
+# `loom_claimed_wake.rs` and `kernel-sim`'s `scenarios.rs` must red.
+forward-ignores-on-cpu = []
 # `pure/sched/cpu.rs`'s steal probe rings its victim before it sets the
 # thief's bit, and `kernel/loom/tests/loom_sleep.rs` must red.
 ask-rings-first = []
@@ -197,7 +199,7 @@ debug-wait = []
 # leaves out, because a simulated pass costs nothing.
 #
 # Off by default because it is not free: each pass gains a walk of this CPU's
-# ready queue and parked map plus a second clock read, and that lands on the
+# ready queue and the deadlines it owes plus a second clock read, and that lands on the
 # audio path. A bring-up, bisect or bare-metal build wants it; a build being
 # measured does not.
 sched-check = []

@@ -1,26 +1,28 @@
 //! Loom: a parked task's record, taken by the claim that ends its park.
 //!
-//! The parking pass writes the record into the task's own slot and then moves
-//! its word `Committing -> Blocked`; whoever claims `Blocked -> WakeQueued`
-//! takes the record and, where the home is busy in the task's band, hands the
-//! task straight to an idle CPU. The release on the first edge and the acquire
-//! on the second are all that order the write before the take. A waker that
-//! lands earlier leaves the record with the home, and so does one that loses
-//! to the home's own deadline.
+//! The parking pass writes the record into the task's own slot and moves its
+//! word `Committing -> Blocked`, and the CPU's switch then saves the task's
+//! context and clears its on-CPU word with release. Whoever claims
+//! `Blocked -> WakeQueued` may take the record and send the task to an idle
+//! CPU only once it reads that word clear; before then the wake goes home,
+//! whose next pass follows the switch. The models run every pass's switch
+//! ([`Silent`]), so a CPU that resumes a context its home has not saved is a
+//! race on that context's cell.
 
 #![cfg(feature = "loom")]
 
 use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
 
-use kernel_loom::sched::cpu::{Balance, CpuHandle, CpuHandles, CpuSched, Env, SchedPass};
-use kernel_loom::sched::hw::Nanos;
+use kernel_loom::sched::cpu::{Action, Balance, CpuHandle, CpuHandles, CpuSched, Env, SchedPass};
+use kernel_loom::sched::hw::{Hw, Nanos};
 use kernel_loom::sched::mailbox::mailbox;
 use kernel_loom::sched::park::{notify, prepare, Cancel, Commit, CommittedTicket};
 use kernel_loom::sched::task::{Notify, TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason};
 use kernel_loom::sched::topology::Topology;
-use kernel_loom::sched_model::{model, IrqGuard, Owner, Payload, RemoteGuard, Silent, TaskMsg, CPU0, CPU1, NOW};
+use kernel_loom::sched_model::{
+    model, IrqGuard, ModelCtx, Owner, Payload, RemoteGuard, Silent, TaskMsg, CPU0, CPU1, NOW,
+};
 use loom::sync::Arc;
-use loom::thread::JoinHandle;
 
 /// The task that parks and is woken.
 const KEY: TaskKey = TaskKey(1);
@@ -29,13 +31,29 @@ const KEY: TaskKey = TaskKey(1);
 /// passes out of `try_sleep`'s retry (`loom_retire.rs` says why that matters).
 const OTHER: TaskKey = TaskKey(2);
 
-/// cpu0, the home, running `KEY` with `OTHER` posted to it, and cpu1 asleep.
+/// The stack of the thread that is cpu1.
+const CPU_STACK: usize = 256 * 1024;
+
+/// cpu0, the home, running `KEY` with `OTHER` queued behind it, and cpu1
+/// asleep. `OTHER` is queued before any race, so no pass in one posts to cpu1
+/// while cpu1 passes: a pass that ends idle retries for as long as a post to
+/// it is in flight, which in a model is unbounded (`loom_retire.rs`).
 struct Machine {
     owner: Arc<Owner>,
     home: CpuSched<Payload>,
-    idle: CpuSched<Payload>,
+    /// `None` while the thread that is cpu1 holds it.
+    idle: Option<CpuSched<Payload>>,
     shared: Arc<TaskShared<TaskMsg>>,
 }
+
+/// cpu1's scheduler state, handed to the thread that is cpu1 for a race and
+/// back after it.
+struct Cpu(CpuSched<Payload>);
+
+// SAFETY: one thread at a time is the CPU that owns it: the model's main
+// thread before the spawn and after the join, the spawned thread in between.
+#[allow(unsafe_code)]
+unsafe impl Send for Cpu {}
 
 impl Machine {
     fn new() -> Self {
@@ -46,39 +64,41 @@ impl Machine {
             hw: Silent,
         });
         let mut machine = Self {
-            home: CpuSched::new(CPU0, rx0, ()),
-            idle: CpuSched::new(CPU1, rx1, ()),
+            home: CpuSched::new(CPU0, rx0, ModelCtx::live()),
+            idle: Some(CpuSched::new(CPU1, rx1, ModelCtx::live())),
             shared: owner.spawn(CPU0, KEY),
             owner,
         };
         pass(&machine.owner, &mut machine.home, NOW);
         machine.owner.spawn(CPU0, OTHER);
-        pass(&machine.owner, &mut machine.idle, NOW);
-        assert!(machine.owner.cpus.get(CPU1).doorbell().sleeping_unrung(), "cpu1 sleeps");
+        pass(&machine.owner, &mut machine.home, NOW);
+        assert_eq!(machine.home.rq().keys().collect::<Vec<_>>(), [OTHER], "queued behind KEY");
+        let owner = machine.owner.clone();
+        pass(&owner, machine.idle(), NOW);
+        assert!(owner.cpus.get(CPU1).doorbell().sleeping_unrung(), "cpu1 sleeps");
         machine
     }
 
-    /// A remote CPU's post to `KEY`.
-    fn waker(&self) -> JoinHandle<Notify> {
-        let owner = self.owner.clone();
-        let shared = self.shared.clone();
-        loom::thread::spawn(move || notify(&shared, WakeCause::new(WakeReason::Woken), &owner.cpus, &owner.hw, &RemoteGuard))
+    fn idle(&mut self) -> &mut CpuSched<Payload> {
+        self.idle.as_mut().expect("cpu1 is back from its thread")
     }
 
     fn park(&mut self, committed: CommittedTicket<TaskMsg>, deadline: Option<Nanos>) {
-        let _ = SchedPass::begin(&mut self.home, env(&self.owner), NOW).dispose_block(committed, deadline).finish();
+        let action = SchedPass::begin(&mut self.home, env(&self.owner), NOW).dispose_block(committed, deadline).finish();
+        execute(&self.owner, action);
     }
 
-    /// Where `KEY` is, once cpu1 has passed at `now`: at home or sent on, and
-    /// never both or neither.
+    /// Where `KEY` is once both CPUs have passed at `now`: at home or on
+    /// cpu1, and never both or neither.
     fn sent_on(&mut self, now: Nanos) -> bool {
-        pass(&self.owner, &mut self.idle, now);
+        pass(&self.owner, &mut self.home, now);
+        let owner = self.owner.clone();
+        pass(&owner, self.idle(), now);
         let at_home = self.home.running().map(|t| t.key()) == Some(KEY) || self.home.rq().keys().any(|key| key == KEY);
-        let sent_on = self.idle.running().map(|t| t.key()) == Some(KEY);
+        let sent_on = self.idle().running().map(|t| t.key()) == Some(KEY);
         assert!(at_home != sent_on, "the task is in {} CPUs' containers", if at_home { 2 } else { 0 });
         if sent_on {
             assert_eq!(self.shared.state(), TaskState::Running(CPU1));
-            assert!(self.home.mailbox_is_empty(), "and the home owes nothing for it");
         }
         sent_on
     }
@@ -86,10 +106,12 @@ impl Machine {
     /// Every task dies by the only death there is, so the model leaves
     /// nothing alive.
     fn wind_down(mut self, now: Nanos) {
-        for cpu in [&mut self.home, &mut self.idle] {
+        let idle = self.idle.as_mut().expect("cpu1 is back from its thread");
+        for cpu in [&mut self.home, idle] {
             pass(&self.owner, cpu, now);
             while cpu.running().is_some() {
-                let _ = SchedPass::begin(&mut *cpu, env(&self.owner), now).dispose_exit().finish();
+                let action = SchedPass::begin(&mut *cpu, env(&self.owner), now).dispose_exit().finish();
+                execute(&self.owner, action);
             }
             pass(&self.owner, cpu, now);
         }
@@ -102,8 +124,19 @@ fn env(owner: &Owner) -> Env<'_, Silent, IrqGuard> {
     Env { hw: &owner.hw, cpus: &owner.cpus, preempt: &IrqGuard, balance: Balance::None }
 }
 
+/// A pass, and the switch it ends in.
 fn pass(owner: &Owner, cpu: &mut CpuSched<Payload>, now: Nanos) {
-    let _ = SchedPass::begin(cpu, env(owner), now).dispose_none().finish();
+    let action = SchedPass::begin(cpu, env(owner), now).dispose_none().finish();
+    execute(owner, action);
+}
+
+#[allow(unsafe_code)]
+fn execute(owner: &Owner, action: Action<Payload>) {
+    if let Action::Run(token) = action {
+        // SAFETY: the token is from the pass that just finished, and its CPU
+        // has run no pass since.
+        unsafe { owner.hw.switch(token) };
+    }
 }
 
 fn committed(machine: &Machine) -> Commit<TaskMsg> {
@@ -111,49 +144,69 @@ fn committed(machine: &Machine) -> Commit<TaskMsg> {
     prepare(&current, Cancel::Answers, WaitClass::Pipe).expect("nothing has posted to this task").commit()
 }
 
-/// **Whichever side of the park a remote wake lands on, the task ends up in
-/// exactly one CPU's containers, and a claimant that takes the record finds
-/// it whole.** A wake before the park is answered by the home's own commit;
-/// one after it takes the record from the slot and sends the task to the
-/// idle CPU as an `Adopt`. Loom checks the slot's write and take as a cell's
-/// accesses, so a publication the claim does not acquire is a causality
-/// violation and not a lucky read.
+/// **A claim sends a parked task on only once its home has saved its
+/// context.** cpu1 is the claimant: it claims `KEY` while cpu0 commits, parks
+/// and switches away from it, and then passes, dispatching whatever it was
+/// sent. A claim before the park is answered by the home's own commit; one
+/// after the park and before the switch goes home; one after the switch sends
+/// the task to cpu1, which resumes the context the switch saved. Each of the
+/// three is reached.
 #[test]
-fn a_record_taken_by_a_remote_claim_is_the_one_its_park_published() {
-    static FORWARDED: AtomicBool = AtomicBool::new(false);
-    static STAYED: AtomicBool = AtomicBool::new(false);
+fn a_claim_sends_a_task_on_only_once_its_home_has_saved_it() {
+    static PRE_PARK: AtomicBool = AtomicBool::new(false);
+    static WENT_HOME: AtomicBool = AtomicBool::new(false);
+    static SENT_ON: AtomicBool = AtomicBool::new(false);
 
     model(|| {
         let mut machine = Machine::new();
         let current = machine.home.current_task().expect("the task is running");
         let ticket = prepare(&current, Cancel::Answers, WaitClass::Pipe).expect("nothing has posted to this task");
-        let waker = machine.waker();
+        let claimant = {
+            let owner = machine.owner.clone();
+            let shared = machine.shared.clone();
+            let mut cpu1 = Cpu(machine.idle.take().expect("cpu1 is here"));
+            // A pass and a switch, and the report of a panic in them, need more
+            // than loom's default coroutine stack.
+            loom::thread::Builder::new().stack_size(CPU_STACK).spawn(move || {
+                let notified =
+                    notify(&shared, WakeCause::new(WakeReason::Woken), &owner.cpus, &owner.hw, &RemoteGuard);
+                pass(&owner, &mut cpu1.0, NOW);
+                let ran = cpu1.0.running().map(|t| t.key()) == Some(KEY);
+                (cpu1, notified, ran)
+            })
+            .expect("loom spawns a thread")
+        };
         match ticket.commit() {
             Commit::Parked(committed) => machine.park(committed, None),
             Commit::AlreadyWoken => {}
             Commit::Killed => unreachable!("nothing kills in this model"),
         }
-        let notified = waker.join().unwrap();
-        let sent_on = machine.sent_on(NOW);
+        let (cpu1, notified, ran) = claimant.join().unwrap();
+        machine.idle = Some(cpu1.0);
+        machine.sent_on(NOW);
         match notified {
             Notify::Parked(cpu) => {
                 assert_eq!(cpu, CPU0);
-                assert!(sent_on, "the claim found the home busy and cpu1 asleep");
-                FORWARDED.store(true, StdOrdering::Relaxed);
+                if ran {
+                    SENT_ON.store(true, StdOrdering::Relaxed);
+                } else {
+                    WENT_HOME.store(true, StdOrdering::Relaxed);
+                }
             }
             Notify::PrePark => {
-                assert!(!sent_on, "the home's commit answered the claim");
-                STAYED.store(true, StdOrdering::Relaxed);
+                assert!(!ran, "the home's commit answered the claim");
+                PRE_PARK.store(true, StdOrdering::Relaxed);
             }
             other => panic!("a post to a committing or parked task claims it: {other:?}"),
         }
         machine.wind_down(NOW);
     });
 
-    let (forwarded, stayed) = (FORWARDED.load(StdOrdering::Relaxed), STAYED.load(StdOrdering::Relaxed));
-    assert!(
-        forwarded && stayed,
-        "a claim after the park: {forwarded}, before it: {stayed}; an exploration missing either never raced them",
+    let reached = [&PRE_PARK, &WENT_HOME, &SENT_ON].map(|seen| seen.load(StdOrdering::Relaxed));
+    assert_eq!(
+        reached,
+        [true; 3],
+        "claims before the park, before the switch and after it: an exploration missing one never raced them",
     );
 }
 
@@ -178,12 +231,17 @@ fn a_deadline_and_a_remote_wake_take_the_record_once() {
         assert_eq!(machine.shared.state(), TaskState::Blocked(CPU0));
         assert_eq!(machine.home.due().count(), 1);
 
-        let waker = machine.waker();
+        let waker = {
+            let owner = machine.owner.clone();
+            let shared = machine.shared.clone();
+            loom::thread::spawn(move || {
+                notify(&shared, WakeCause::new(WakeReason::Woken), &owner.cpus, &owner.hw, &RemoteGuard)
+            })
+        };
         pass(&machine.owner, &mut machine.home, DEADLINE);
         let notified = waker.join().unwrap();
-        let sent_on = machine.sent_on(DEADLINE);
+        assert!(machine.sent_on(DEADLINE), "the task would queue behind `OTHER` at home");
         assert_eq!(machine.home.due().count(), 0, "the deadline's entry outlived its park");
-        assert!(sent_on, "the task would queue behind `OTHER` at home");
         match notified {
             Notify::Parked(cpu) => {
                 assert_eq!(cpu, CPU0);

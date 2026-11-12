@@ -36,10 +36,14 @@ the AMD bench. Four boots a side, in the order B,H,H,B,H,B,B,H, where B is
 before and H is after. The rows are osbench's `wake.onto_busy`,
 `pingpong.*.cross_core`, `ipc.reqrep.*`, `wake.storm.*` and `energy.*`. Main
 must read `wake.onto_busy` faster on both benches, with no other of these
-rows slower beyond its spread. With it, the idle-exit latency per sleep
-depth on both benches, from the existing probes or the A/B's boots, so that
-each bench's `wake.onto_busy` is split between the removed hop and the idle
-exit. The speed-up is not yet measured on metal.
+rows slower beyond its spread. A second set of the same rows runs with
+every CPU busy: there a claimant's scan for an idle CPU finds none, and the
+home's own placement scans again, so main must read no row slower there
+beyond its spread. With it, the idle-exit latency per sleep depth on both
+benches, from the existing probes or the A/B's boots, so that each bench's
+`wake.onto_busy` is split between the removed hop and the idle exit. A wake
+claimed before its home has switched away from the task still takes both
+hops. The speed-up is not yet measured on metal.
 
 **Exit**: `wake.onto_busy` within Linux's on both benches in a labelled
 current-state comparison, or the difference measured to its parts and

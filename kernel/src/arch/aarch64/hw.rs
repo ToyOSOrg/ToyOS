@@ -107,7 +107,7 @@ impl Hw for KernelHw {
                 incoming.root.activate();
             }
             crate::hw::note_running(restore);
-            context_switch(&raw mut (*save).sp, sp);
+            context_switch(&raw mut (*save).sp, sp, token.left_ptr());
         }
     }
 

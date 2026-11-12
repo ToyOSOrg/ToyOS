@@ -25,6 +25,7 @@ pub fn actor(step: &Step) -> Option<usize> {
         | Step::Pass(cpu)
         | Step::DeliverIpi(cpu)
         | Step::FireTimer(cpu)
+        | Step::Switch(cpu)
         | Step::OldInstall(cpu) => Some(*cpu),
         Step::OldSteal { thief, .. } => Some(*thief),
         Step::DeviceIrq(_) | Step::Advance => None,

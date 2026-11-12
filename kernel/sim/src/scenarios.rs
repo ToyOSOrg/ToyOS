@@ -835,6 +835,7 @@ pub fn all() -> Vec<Scenario> {
         sleep_spin_siblings(),
         turn_taking_pair(),
         masked_steals(),
+        claimed_behind_busy_home(),
     ]
 }
 
@@ -1194,6 +1195,37 @@ pub fn turn_taking_pair() -> Scenario {
 
 /// How many turns each of [`turn_taking_pair`]'s threads takes.
 pub const TURN_TAKING_ROUNDS: usize = 8;
+
+/// **A wake claimed on another CPU while its home is busy**: a sleeper and a
+/// hog start on cpu0, a waker runs on cpu1 and wakes the sleeper, and cpu2
+/// sleeps. A claim that lands after cpu0's pass has parked the sleeper and
+/// before cpu0's switch has saved its context finds the home busy and a CPU
+/// to send it to: sending it there would resume a context nothing has saved
+/// (invariant I11), which the on-CPU word refuses.
+pub fn claimed_behind_busy_home() -> Scenario {
+    let wake = Op::Wake { queue: 0, all: false, boost: None };
+    let block = Op::Block { queue: 0, deadline: None };
+    scenario(
+        "claimed_behind_busy_home",
+        3,
+        vec![queue(WaitClass::Io)],
+        vec![process(
+            "trio",
+            vec![0, 1, 2],
+            vec![
+                Script::looping(vec![block, Op::Run(MS / 10)], CLAIMED_BEHIND_ROUNDS),
+                // Outlasts every round the other two take.
+                Script::new(vec![Op::Run(CLAIMED_BEHIND_ROUNDS as u64 * MS)]),
+                Script::looping(vec![Op::Run(MS / 10), wake], CLAIMED_BEHIND_ROUNDS),
+            ],
+        )],
+    )
+    .with_placement(PlacementShape::Listed(&[0, 0, 1]))
+    .with_balance(Balance::None)
+}
+
+/// How many times [`claimed_behind_busy_home`]'s waker wakes the sleeper.
+pub const CLAIMED_BEHIND_ROUNDS: usize = 8;
 
 /// **A thread spawned to work with its spawner**: on the AMD bench's shape,
 /// with balancing off, a thread moves itself to cpu8, in the second LLC, and

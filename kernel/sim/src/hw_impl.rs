@@ -8,6 +8,7 @@
 //! nothing about the code that ships.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 use kernel::sched::cpu::RunToken;
@@ -49,8 +50,8 @@ pub struct SimHwState {
     /// `need_resched`, as the kernel's is. `None` for a device interrupt, which
     /// belongs to no CPU in this model.
     pub poster: Option<CpuId>,
-    /// What a scheduler pass is modelled to cost, in nanoseconds — the only
-    /// thing [`Machine::now`] is read for in this world.
+    /// What a scheduler pass is modelled to cost, in nanoseconds, which
+    /// [`Kicker::now`] adds to the clock inside a pass.
     ///
     /// Zero everywhere except `scenarios::overlong_pass`, and that is the
     /// point: the VM's clock does not advance inside a step, so the core's
@@ -204,15 +205,15 @@ impl Machine for SimHw {
 impl Hw for SimHw {
     type Payload = SimPayload;
 
-    #[allow(unsafe_code)] // the trait method is `unsafe fn`; this body derefs nothing
+    /// Saves the outgoing context (I11's shadow) and then clears the outgoing
+    /// task's on-CPU word, as the kernel's switch does.
+    #[allow(unsafe_code)]
     unsafe fn switch(&self, token: RunToken<SimPayload>) {
+        let left = token.left_ptr();
         self.with(|s| {
             let cpu = Self::cpu(s);
             s.switches += 1;
             if let Some(outgoing) = token.outgoing() {
-                // The context is saved by the switch itself — which is
-                // exactly why park-before-switch is safe only when nothing
-                // touches the task between the park and here.
                 s.ctx_saved.insert(outgoing, true);
             }
             if let Some(incoming) = token.incoming() {
@@ -226,6 +227,11 @@ impl Hw for SimHw {
             }
             s.loaded[cpu] = token.incoming();
         });
+        // SAFETY: the trait's: the word is null or the outgoing task's, whose
+        // `TaskShared` is live.
+        if let Some(left) = unsafe { left.as_ref() } {
+            left.store(false, Ordering::Release);
+        }
     }
 
     fn release(&self, key: TaskKey, payload: SimPayload, acct: TaskAccounting) {

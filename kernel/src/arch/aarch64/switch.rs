@@ -8,6 +8,7 @@
 //! general registers first, because a pair's store reaches only 504 bytes.
 
 use core::arch::naked_asm;
+use core::sync::atomic::AtomicBool;
 
 use super::fpu::STATE_BYTES;
 
@@ -23,12 +24,21 @@ pub const FRAME_BYTES: usize = FP_AT + STATE_BYTES;
 const _: () = assert!(FRAME_BYTES.is_multiple_of(16));
 
 /// Save this context's frame below the stack pointer, store that pointer at
-/// `old_sp`, and return into the frame at `new_sp`.
+/// `old_sp`, clear `left` unless it is null, and return into the frame at
+/// `new_sp`.
+///
+/// The stored stack pointer is the last of the outgoing context written, so
+/// the clear after it may hand the context to another CPU. It is a
+/// store-release (`STLRB`), which orders every earlier load and store of
+/// this CPU before it (Arm ARM, "Load-Acquire, Load-AcquirePC, and
+/// Store-Release"). Nothing is pushed onto the outgoing stack after the clear:
+/// IRQ and FIQ are masked, and an SError ends the machine.
 /// # Safety
 /// `old_sp` is the outgoing context's save slot and `new_sp` a frame this
 /// function or `super::entry::initial_frame` wrote, on a stack that is live.
+/// `left` is null or the outgoing task's on-CPU word.
 #[unsafe(naked)]
-pub(crate) unsafe extern "C" fn context_switch(old_sp: *mut u64, new_sp: u64) {
+pub(crate) unsafe extern "C" fn context_switch(old_sp: *mut u64, new_sp: u64, left: *const AtomicBool) {
     naked_asm!(
         // The kernel is soft-float: the assembler is told these are here for this block alone.
         ".arch_extension fp",
@@ -65,6 +75,9 @@ pub(crate) unsafe extern "C" fn context_switch(old_sp: *mut u64, new_sp: u64) {
         "str x10, [x9, #520]",
         "mov x9, sp",
         "str x9, [x0]",
+        "cbz x2, 2f",
+        "stlrb wzr, [x2]",
+        "2:",
         "mov sp, x1",
         "add x9, sp, #{fp}",
         "ldp q0, q1, [x9, #0]",
