@@ -39,7 +39,7 @@ pub mod taskbar;
 pub mod volume;
 pub mod window;
 
-pub use budget::{create_verdict, requested, Requested, max_windows, pending_admits, window_bytes, Port, Verdict};
+pub use budget::{create_verdict, requested, Requested, max_windows, window_bytes, Port, Verdict};
 pub use damage::{Damage, MAX_DAMAGE_RECTS};
 pub use hit::{hit_test, Hit};
 pub use input::{

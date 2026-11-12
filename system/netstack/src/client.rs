@@ -1,6 +1,5 @@
-use std::time::{Duration, Instant};
-
 use toyos::AsHandle;
+use toyos::admission::{self, Policy};
 use toyos::ipc::{self, Connection};
 use toyos::net::{ErrorResponse, MAX_REQUEST, RespType};
 use toyos::say;
@@ -67,34 +66,12 @@ impl Client {
     }
 }
 
-/// Connections accepted and not yet carrying a whole request.
-///
-/// The kernel queues 32 unaccepted connections per listener
-/// (`listener::MAX_PENDING_CONNECTIONS`); this is the same allowance one step
-/// further along, for a client that has been accepted and has not yet said what
-/// it wants. Past it netstack refuses by name rather than growing, and
-/// [`HANDSHAKE_TIMEOUT`] is what guarantees the table drains.
-pub const MAX_PENDING_CONNS: u32 = 32;
+/// Connections accepted and not yet carrying a whole request, a quarter of
+/// them one holder's: the row and session its connector was minted for.
+pub const ASKING: Policy = Policy::quartered(32);
 
-/// How long an accepted connection may go without completing its request.
-///
-/// Policy, and generous: every client in the tree sends its request in the
-/// statement after `connect` (`toyos::net`'s `NetstackConn::request`). What this
-/// bounds is the one that never sends it.
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// One client's inbound frames, taken without waiting
-/// ([`ipc::FrameRx::pump`]): netstack never waits on a client.
-pub type ClientRx = ipc::FrameRx<MAX_REQUEST>;
-
-/// A connection that has been accepted and has not yet said what it wants.
-///
-/// It exists because `accept` and the request frame are two events.
-pub struct PendingConn {
-    pub conn: Connection,
-    pub rx: ClientRx,
-    pub since: Instant,
-}
+/// A connection with its first request, keyed by its badge's bytes.
+pub type Asker = admission::Client<Option<admission::Badge>, (), MAX_REQUEST>;
 
 /// A whole request, off the connection and in memory.
 ///
@@ -113,6 +90,15 @@ pub struct Request {
 }
 
 impl Request {
+    /// `asker`'s first request, off its connection.
+    pub fn of(mut asker: Asker) -> Self {
+        let mut payload = [0u8; MAX_REQUEST];
+        let payload_len = asker.payload().len();
+        payload[..payload_len].copy_from_slice(asker.payload());
+        let (msg_type, handles) = (asker.msg_type(), asker.take_batch());
+        Self { client: Client { conn: asker.into_connection() }, msg_type, payload, payload_len, handles }
+    }
+
     pub fn payload(&self) -> &[u8] {
         &self.payload[..self.payload_len]
     }

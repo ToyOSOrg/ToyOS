@@ -80,7 +80,7 @@ use crate::HOSTNAME;
 const TOKEN_STREAM: u64 = 1 << 32;
 const TOKEN_SOCKET: u64 = 3 << 32;
 /// A client that waits for its lookup's answer, by its connection's handle.
-/// Clear of the loop's own tokens and of a pending connection's.
+/// Clear of the loop's own tokens and of a waiting connection's.
 const TOKEN_LOOKUP: u64 = 5 << 32;
 const TOKEN_KIND: u64 = !(u32::MAX as u64);
 

@@ -33,11 +33,11 @@
 
 use std::time::{Duration, Instant as Wall};
 
+use toyos::admission::{self, Admission, Event, Policy, Refused};
 use toyos::endow;
-use toyos::ipc::{self, RxStep};
+use toyos::ipc;
 use toyos::poller::{Poller, READABLE};
 use toyos::say;
-use toyos::AsHandle;
 use toyos::port::Acceptor;
 use toyos_abi::syscall::PIPE_CAPACITY;
 use toyos_dhcp::{HostName, Lease};
@@ -57,8 +57,8 @@ mod link;
 mod serve;
 mod watches;
 
-use client::{Client, ClientRx, HANDSHAKE_TIMEOUT, MAX_PENDING_CONNS, PendingConn, Request};
-use link::{Ended, Heard, Pending, Session};
+use client::{Client, Request, ASKING};
+use link::{Ended, Session};
 
 /// The most links netstack drives. Each is an interface of the node's for
 /// the boot, kept for its driver's return; a machine has a handful of NICs.
@@ -136,7 +136,7 @@ const FIXED_WATCHES: u32 = 2 + MAX_LINKS + MAX_PENDING_LINKS;
 /// holder's connection of a stream, a listener or a datagram socket, asked
 /// about in the same batch as the fixed watches, the connections that have not
 /// said what they want and the lookups' clients.
-const MAX_PLACES: u32 = Poller::MAX_HANDLES - FIXED_WATCHES - MAX_PENDING_CONNS - serve::LOOKUP_WATCHES;
+const MAX_PLACES: u32 = Poller::MAX_HANDLES - FIXED_WATCHES - ASKING.slots as u32 - serve::LOOKUP_WATCHES;
 
 /// How many places the node is given, of `total_mem` bytes of physical
 /// memory: its share by what a place costs, at least one, at most what the
@@ -362,23 +362,25 @@ fn refuse(asked: &Asked, why: Refusal, because: &str) {
     link::refuse(&asked.conn, why);
 }
 
-/// Every hello the pending drivers said, in the order heard; a connection
-/// that went, said what no driver says first, or has said nothing within
-/// [`HANDSHAKE_TIMEOUT`] is let go.
-fn hear_links(pending: &mut Vec<Pending>) -> Vec<Asked> {
-    pending.retain(|p| p.since.elapsed() < HANDSHAKE_TIMEOUT);
+/// Drivers' connections that have not said hello: any holder of the port
+/// may hold them all, since its connector names no holder.
+const GREETING: Policy = Policy::unshared(MAX_PENDING_LINKS as usize);
+
+type Greeting = Admission<(), (), Wall, { Hello::MAX_BYTES }>;
+
+/// Every hello the waiting drivers said, in the order heard; a connection
+/// that went, said what no driver says first, or said nothing within its
+/// limit is let go.
+fn hear_links(greeting: &mut Greeting, now: Wall) -> Vec<Asked> {
     let mut asked = Vec::new();
-    let mut i = 0;
-    while i < pending.len() {
-        match pending[i].hear() {
-            Heard::Nothing => i += 1,
-            Heard::Gone => {
-                pending.remove(i);
+    while let Some(event) = greeting.next(now) {
+        match event {
+            Event::Admitted(greeter) => {
+                asked.extend(link::hello(greeter).map(|(hello, mac, region, conn)| Asked { hello, mac, conn, region }))
             }
-            Heard::Hello(hello, mac, region) => {
-                let conn = pending.remove(i).into_conn();
-                asked.push(Asked { hello, mac, conn, region });
-            }
+            Event::Left { why, say: Some(unsaid), .. } => say!("netstack: letting a NIC driver's connection go: {why}{unsaid}"),
+            Event::Left { .. } => {}
+            Event::Unsaid(unsaid) => say!("netstack: NIC drivers: {}", unsaid.alone()),
         }
     }
     asked
@@ -437,12 +439,16 @@ fn hellos(asked: Vec<Asked>, links: &mut Vec<Held>, node: &mut Node, now: Instan
     }
 }
 
-/// A driver's connection, kept to hear its hello while there is room.
-fn accept_link(links: &Acceptor, pending: &mut Vec<Pending>) {
-    match links.accept() {
-        Ok(conn) if pending.len() < MAX_PENDING_LINKS as usize => pending.push(Pending::new(conn)),
-        Ok(_) => say!("netstack: refused a NIC driver's connection: {MAX_PENDING_LINKS} have not said hello yet"),
-        Err(why) => say!("netstack: the kernel refused a NIC driver's connection: {why:?}"),
+/// A driver's connection, kept to hear its hello while one may wait.
+fn accept_link(links: &Acceptor, greeting: &mut Greeting, now: Wall) {
+    match greeting.accept(links) {
+        None => {}
+        Some(Ok(conn)) => {
+            if let Err(Refused { why, say: Some(unsaid), .. }) = greeting.admit(conn, (), (), now) {
+                say!("netstack: refused a NIC driver's connection: {why}{unsaid}");
+            }
+        }
+        Some(Err(why)) => say!("netstack: the kernel refused a NIC driver's connection: {why:?}"),
     }
 }
 
@@ -505,15 +511,14 @@ fn main() {
     let mut held: Vec<Held> = Vec::new();
 
     let mut poller = watches::Watches::new(
-        FIXED_WATCHES + MAX_PLACES + MAX_PENDING_CONNS + serve::LOOKUP_WATCHES,
+        FIXED_WATCHES + MAX_PLACES + ASKING.slots as u32 + serve::LOOKUP_WATCHES,
     );
-    // Clear of the ones above and of a connection's own handle by more than
-    // `MAX_HANDLES` (4096, `kernel/src/object/handle.rs`); `serve`'s tokens
-    // are all above the low word.
-    const TOKEN_PENDING_BASE: u64 = 0x1_0000;
+    // A waiting client's token is this and its slot: clear of the ones
+    // above, and `serve`'s tokens are all above the low word.
+    const TOKEN_ASKING: u64 = 0x1_0000;
 
-    let mut pending: Vec<PendingConn> = Vec::new();
-    let mut pending_links: Vec<Pending> = Vec::new();
+    let mut asking: Admission<Option<admission::Badge>, (), Wall, { toyos::net::MAX_REQUEST }> = Admission::new(ASKING);
+    let mut greeting = Greeting::new(GREETING);
     let mut inspecting: Vec<Inspecting> = Vec::new();
     // What the drivers have answered of the counters `inspecting` waits for.
     let mut gathered: Vec<(IfIndex, Counters)> = Vec::new();
@@ -589,18 +594,18 @@ fn main() {
             );
         }
 
-        poller.watch(&acceptor, READABLE, TOKEN_ACCEPTOR);
-        poller.watch(&links, READABLE, TOKEN_LINKS);
+        if asking.has_room() {
+            poller.watch(&acceptor, READABLE, TOKEN_ACCEPTOR);
+        }
+        if greeting.has_room() {
+            poller.watch(&links, READABLE, TOKEN_LINKS);
+        }
         for (n, session) in held.iter().enumerate().filter_map(|(n, h)| h.session.as_ref().map(|s| (n, s))) {
             session.watch(&mut poller, TOKEN_LINK_BASE + n as u64);
         }
-        for (i, p) in pending_links.iter().enumerate() {
-            p.watch(&mut poller, TOKEN_LINK_PENDING_BASE + i as u64);
-        }
+        greeting.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_LINK_PENDING_BASE + slot));
         sockets.watch(&mut poller);
-        for p in pending.iter() {
-            poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().raw().0 as u64);
-        }
+        asking.watch(|conn, slot| poller.watch(conn, READABLE, TOKEN_ASKING + slot));
 
         // The node's next deadline: a retransmission, a lease's timer, a
         // lookup's wait, a connect's. Zero when one is due, and when the
@@ -617,9 +622,10 @@ fn main() {
             timeout = timeout.min(nanos(INSPECT_BOUND.saturating_sub(first.since.elapsed())));
         }
         // A client that connects and then says nothing wakes nothing, so the
-        // deadline that removes it is a wake in its own right.
-        if !pending.is_empty() || !pending_links.is_empty() {
-            timeout = timeout.min(nanos(HANDSHAKE_TIMEOUT));
+        // limit that lets it go is a wake in its own right.
+        let now_wall = Wall::now();
+        for left in [asking.left(now_wall), greeting.left(now_wall)].into_iter().flatten() {
+            timeout = timeout.min(nanos(left));
         }
 
         let mut ready: Vec<u64> = Vec::new();
@@ -632,20 +638,18 @@ fn main() {
 
         // A driver's connection: each hello is opened on a link of its own, or on
         // its address's once that link has ended.
-        if ready.contains(&TOKEN_LINKS) {
-            accept_link(&links, &mut pending_links);
-        }
-        hellos(hear_links(&mut pending_links), &mut held, &mut node, clock(), &groups);
-        // On a pass that found nothing ready too: otherwise a silent client
-        // is only ever timed out by some other client's traffic.
         let now_wall = Wall::now();
-        for p in pending.iter().filter(|p| now_wall.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
-            say!(
-                "netstack: dropping client {} — it never finished its request",
-                p.conn.as_handle().raw().0
-            );
+        for &token in &ready {
+            if (TOKEN_LINK_PENDING_BASE..TOKEN_LINK_BASE).contains(&token) {
+                greeting.woke(token - TOKEN_LINK_PENDING_BASE);
+            } else if (TOKEN_ASKING..TOKEN_ASKING + ASKING.slots as u64).contains(&token) {
+                asking.woke(token - TOKEN_ASKING);
+            }
         }
-        pending.retain(|p| now_wall.duration_since(p.since) < HANDSHAKE_TIMEOUT);
+        if ready.contains(&TOKEN_LINKS) {
+            accept_link(&links, &mut greeting, now_wall);
+        }
+        hellos(hear_links(&mut greeting, now_wall), &mut held, &mut node, clock(), &groups);
 
         // Accept and the request are two events. Nothing is read here: a client
         // that connects and then says nothing costs a slot and a deadline, not
@@ -653,7 +657,7 @@ fn main() {
         // A connection the kernel would not hand over is gone from its
         // queue, and its client told: the first of a run is named, and the
         // next accept says how many followed it.
-        let accepted = match ready.contains(&TOKEN_ACCEPTOR).then(|| acceptor.accept()) {
+        let accepted = match ready.contains(&TOKEN_ACCEPTOR).then(|| asking.accept(&acceptor)).flatten() {
             Some(Err(why)) => {
                 if accept_refused == 0 {
                     say!("netstack: the kernel refused a client's connection: {why:?}");
@@ -671,62 +675,24 @@ fn main() {
             None => None,
         };
         if let Some(conn) = accepted {
-            if pending.len() >= MAX_PENDING_CONNS as usize {
-                say!(
-                    "netstack: refusing client {} — {MAX_PENDING_CONNS} connections are already \
-                     waiting to say what they want",
-                    conn.as_handle().raw().0
-                );
-            } else {
-                pending.push(PendingConn { conn, rx: ClientRx::new(), since: Wall::now() });
+            let key = admission::Badge::of(&acceptor, &conn);
+            if let Err(refused) = asking.admit(conn, key, (), now_wall) {
+                Client { conn: refused.conn }.error(toyos::net::ERR_RESOURCE_EXHAUSTED);
+                if let Some(unsaid) = refused.say {
+                    say!("netstack: letting a connection of {:?} go: {}{unsaid}", refused.key, refused.why);
+                }
             }
         }
 
-        // `remove` rather than `swap_remove`: the entries after `i` shift down,
-        // so leaving `i` alone visits each connection exactly once. At
-        // `MAX_PENDING_CONNS` entries the shift is not worth a subtler loop.
         let mut requests: Vec<Request> = Vec::new();
-        let mut i = 0;
-        while i < pending.len() {
-            let handle = pending[i].conn.as_handle();
-            if !ready.contains(&(TOKEN_PENDING_BASE + handle.raw().0 as u64)) {
-                i += 1;
-                continue;
-            }
-            let step = {
-                let p = &mut pending[i];
-                p.rx.pump(&p.conn)
-            };
-            match step {
-                RxStep::Idle => i += 1,
-                // Unlogged, and the only removal here that is: a client may
-                // connect to find out whether netstack exists and hang up, which is
-                // its business. The two below are the client getting something
-                // wrong, and those netstack names.
-                RxStep::Eof => {
-                    pending.remove(i);
+        while let Some(event) = asking.next(now_wall) {
+            match event {
+                Event::Admitted(asker) => requests.push(Request::of(asker)),
+                Event::Left { key, why, say: Some(unsaid), .. } => {
+                    say!("netstack: letting a connection of {key:?} go: {why}{unsaid}")
                 }
-                RxStep::Malformed => {
-                    say!(
-                        "netstack: dropping client {} — it sent a frame this protocol cannot \
-                         describe",
-                        pending[i].conn.as_handle().raw().0
-                    );
-                    pending.remove(i);
-                }
-                RxStep::Frame { msg_type, payload_len, .. } => {
-                    let mut payload = [0u8; toyos::net::MAX_REQUEST];
-                    payload[..payload_len].copy_from_slice(pending[i].rx.payload(payload_len));
-                    let handles = pending[i].rx.take_batch();
-                    let p = pending.remove(i);
-                    requests.push(Request {
-                        client: Client { conn: p.conn },
-                        msg_type,
-                        payload,
-                        payload_len,
-                        handles,
-                    });
-                }
+                Event::Left { .. } => {}
+                Event::Unsaid(unsaid) => say!("netstack: {}", unsaid.alone()),
             }
         }
 
@@ -736,7 +702,7 @@ fn main() {
                 // not this protocol.
                 if request.payload_len != 0 {
                     request.client.error(toyos::net::ERR_INVALID_INPUT);
-                } else if held.iter().any(|h| h.session.is_some()) && inspecting.len() < MAX_PENDING_CONNS as usize {
+                } else if held.iter().any(|h| h.session.is_some()) && inspecting.len() < ASKING.slots {
                     for session in held.iter_mut().filter_map(|h| h.session.as_mut()) {
                         session.ask_counters();
                     }

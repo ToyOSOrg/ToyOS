@@ -131,19 +131,6 @@ pub enum Port {
     Display,
 }
 
-/// Whether a connection just accepted off `port` may wait for its first frame,
-/// beside the ones already `waiting`: **one off each port but `compositor`
-/// has a slot of its own**, and the clients' share `max`, so no client filling
-/// the table keeps the prompt from being made, the clipboard from being
-/// watched or the display from being set.
-pub fn pending_admits(port: Port, waiting: impl IntoIterator<Item = Port>, max: usize) -> bool {
-    let mut waiting = waiting.into_iter();
-    match port {
-        Port::Compositor => waiting.filter(|p| *p == Port::Compositor).count() < max,
-        own => !waiting.any(|p| p == own),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,8 +185,7 @@ mod tests {
     }
 
     /// **A desktop full of clients still lets the prompt in**: every client
-    /// window and every waiting client connection is spent, and the prompt's
-    /// window and its connection are each admitted; a second of either is not.
+    /// window is spent, and the prompt's window is admitted.
     #[test]
     fn the_prompt_is_admitted_past_every_client_ceiling() {
         for level in [Level::Ordinary, Level::Topmost] {
@@ -207,11 +193,6 @@ mod tests {
         }
         assert_eq!(create_verdict((600, 400), HD, Level::Prompt, 10, 10), Verdict::Allow);
         assert_eq!(create_verdict((1921, 400), HD, Level::Prompt, 0, 10), Verdict::TooLarge);
-        let full = [Port::Compositor; 32];
-        assert!(!pending_admits(Port::Compositor, full, 32));
-        assert!(pending_admits(Port::Prompt, full, 32));
-        assert!(!pending_admits(Port::Prompt, full.iter().copied().chain([Port::Prompt]), 32));
-        assert!(pending_admits(Port::Compositor, [Port::Prompt].into_iter().chain([Port::Compositor; 31]), 32));
     }
 
     /// doom asks for 960x600 logical. At 2 on a 1920x1080 panel that is
@@ -233,22 +214,5 @@ mod tests {
         assert_eq!(requested(physical, &desk), Requested::Exact(1920, 1200));
         assert_eq!(create_verdict((1920, 1200), HD, Level::Ordinary, 0, 10), Verdict::TooLarge);
         assert_eq!(requested(window::Size::Any, &desk), Requested::Any);
-    }
-
-    /// The display's holder waits in a slot of its own, as the prompt does.
-    #[test]
-    fn a_display_request_is_admitted_past_every_client_ceiling() {
-        let full = [Port::Compositor; 32];
-        assert!(pending_admits(Port::Display, full.iter().copied().chain([Port::Clipboard]), 32));
-        assert!(!pending_admits(Port::Display, full.iter().copied().chain([Port::Display]), 32));
-    }
-
-    /// The clipboard's watcher waits in a slot of its own, as the prompt does.
-    #[test]
-    fn the_watcher_is_admitted_past_every_client_ceiling() {
-        let full = [Port::Compositor; 32];
-        assert!(pending_admits(Port::Clipboard, full.iter().copied().chain([Port::Prompt]), 32));
-        assert!(!pending_admits(Port::Clipboard, full.iter().copied().chain([Port::Clipboard]), 32));
-        assert!(pending_admits(Port::Compositor, [Port::Clipboard].into_iter().chain([Port::Compositor; 31]), 32));
     }
 }

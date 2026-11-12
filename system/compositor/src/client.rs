@@ -12,28 +12,23 @@
 //! handle a client sends stays queued until its connection closes.
 
 use std::fmt;
-use std::time::{Duration, Instant};
 
+use toyos::admission::Policy;
 use toyos::shm::ReadOnly;
 use toyos::{ipc, AsHandle, Connection, OwnedHandle};
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
 use toyos_desktop::{Buffers, Port, Window};
 
-/// Connections accepted but not yet identified by a first frame.
-///
-/// The kernel queues 32 unaccepted connections per listener
-/// (`listener::MAX_PENDING_CONNECTIONS`); this is the same allowance one step
-/// further along, for a client that has been accepted and has not yet said
-/// what it wants. Past it the compositor refuses by name rather than growing,
-/// and [`HANDSHAKE_TIMEOUT`] is what guarantees the table drains.
-pub const MAX_PENDING_CONNS: u32 = 32;
+/// `compositor`'s connections waiting on their first frame, and a copy's on
+/// its commit. Any holder of the port may hold them all, since its connector
+/// names no holder.
+pub const CLIENTS: Policy = Policy::unshared(32);
 
-/// How long a connection may go without completing its first frame.
-///
-/// Policy, and generous: every client in the tree sends its first frame in the
-/// statement after `connect`. What this bounds is the one that never sends it.
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// One connection off each of `prompt`, `clipboard` and `display`, in a table
+/// of their own: no client filling [`CLIENTS`] keeps the prompt from being
+/// made, the clipboard from being watched or the display from being set.
+pub const OWNERS: Policy = Policy { slots: 3, share: 1 };
 
 /// One client's inbound framing: [`window::MAX_INLINE_PAYLOAD`] is the whole
 /// of what a client inlines — `MSG_CLIPBOARD_SET` is the widest, every typed
@@ -78,9 +73,10 @@ pub struct ClientFrame {
     payload: [u8; window::MAX_INLINE_PAYLOAD],
     payload_len: usize,
     pub conn: Option<Connection>,
-    /// The connection's [`PendingConn::copy`].
+    /// The region a `MSG_COPY_BEGIN` on this connection was answered with: it
+    /// may send `MSG_COPY_COMMIT` and nothing else.
     pub copy: Option<CopyRegion>,
-    /// The connection's [`PendingConn::port`].
+    /// The port it came in on, which decides what its first frame may ask.
     pub port: Port,
 }
 
@@ -105,24 +101,6 @@ impl ClientFrame {
     pub fn payload(&self) -> &[u8] {
         &self.payload[..self.payload_len]
     }
-}
-
-/// A connection that has been accepted and has not yet said what it is for.
-///
-/// It exists because `accept` and the first frame are two events: a client
-/// that connects and sends nothing must not hold the desktop.
-pub struct PendingConn {
-    pub conn: Connection,
-    pub rx: ClientRx,
-    pub since: Instant,
-    /// The port it came in on. A connection off the prompt port, whose one
-    /// holder's window goes above every other, may only ask for that window
-    /// with its first frame; one off the clipboard port may only ask to watch.
-    pub port: Port,
-    /// The region a `MSG_COPY_BEGIN` was answered with. A connection holding
-    /// one may send `MSG_COPY_COMMIT` and nothing else, within
-    /// [`HANDSHAKE_TIMEOUT`] of `since`.
-    pub copy: Option<CopyRegion>,
 }
 
 /// A region made for one client's copy, which that client maps and may still

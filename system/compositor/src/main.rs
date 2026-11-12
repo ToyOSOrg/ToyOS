@@ -26,7 +26,7 @@ mod stats;
 
 use std::time::Duration;
 
-use client::MAX_PENDING_CONNS;
+use client::CLIENTS;
 use toyos::poller::Poller;
 use toyos_manifest::package;
 
@@ -61,7 +61,7 @@ pub const INPUT_POLL_HANDLES: u32 = 1 + toyos_input::wire::CONNECTIONS as u32;
 /// binds.
 pub const MAX_WINDOW_SLOTS: u32 = Poller::MAX_HANDLES
     - FIXED_POLL_HANDLES
-    - MAX_PENDING_CONNS
+    - CLIENTS.slots as u32
     - PROMPT_POLL_HANDLES
     - CLIPBOARD_POLL_HANDLES
     - DISPLAY_PORT_POLL_HANDLES
@@ -70,7 +70,7 @@ pub const MAX_WINDOW_SLOTS: u32 = Poller::MAX_HANDLES
     - VOLUME_POLL_HANDLES;
 
 /// The prompt's own: its connection waiting for its first frame, and its
-/// window, which no client's ceiling counts (`toyos_desktop::pending_admits`,
+/// window, which no client's ceiling counts (`client::OWNERS`,
 /// `toyos_desktop::create_verdict`).
 pub const PROMPT_POLL_HANDLES: u32 = 2;
 
@@ -79,7 +79,7 @@ pub const PROMPT_POLL_HANDLES: u32 = 2;
 pub const CLIPBOARD_POLL_HANDLES: u32 = 2;
 
 /// The display port's own: its acceptor, and the one request waiting for its
-/// first frame (`toyos_desktop::pending_admits`).
+/// first frame (`client::OWNERS`).
 pub const DISPLAY_PORT_POLL_HANDLES: u32 = 2;
 
 /// The `display-output` port's own: its acceptor, and its one driver.
