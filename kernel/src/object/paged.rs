@@ -1890,35 +1890,22 @@ impl Index<'_> {
 
     fn zeroed(&mut self, page: u64) -> Result<u64, Missing> {
         let no_room = self.lost(page, Why::NoRoom);
-        let job = self.pager.core.job();
-        let State { pages, entries, held, gone, .. } = &mut *self.state;
-        held.settle();
-        let phys = match held.core.draw(!held.spare.is_empty()) {
-            Draw::Aside => {
-                let phys = held.spare.pop().expect("paged: a frame drawn aside is held aside");
-                // SAFETY: a frame held aside, out of the index and unpinned,
-                // which nothing else reaches.
-                unsafe { ptr::write_bytes(DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE as usize) };
-                phys
-            }
-            Draw::Pool => pmm::alloc_promised().into_raw(),
-            Draw::Beyond if pmm::promise(job, 1) => {
-                held.core.promised();
-                pmm::alloc_promised().into_raw()
-            }
-            Draw::Beyond => return Err(no_room),
-        };
-        let object = &mut entries.get_mut(self.slot).expect("paged: a mapped slot is held").object;
+        let mut drawn = [None];
+        if self.pager.draw(self.state, &mut drawn) == 0 {
+            return Err(no_room);
+        }
+        let phys = materialize(drawn[0], true);
+        let (pages, object) = self.state.split(self.slot);
         match pages.supply(object, page, phys, false, (page + 1) * PAGE) {
             Ok(Supplied::Installed) => {
-                held.core.installed();
+                self.state.held.core.installed();
                 Ok(phys)
             }
             Ok(Supplied::Present) => unreachable!("paged: a hole found under the lock held a page"),
             // Inside the object and the pager alive, as the lookup found it:
             // only a full table refuses.
             Err(_) => {
-                held.give_back(job, *gone, phys, false);
+                self.pager.give_frames(self.state, &[phys]);
                 Err(no_room)
             }
         }
@@ -1973,19 +1960,7 @@ impl MapNode {
             waiting.as_ref().request(&mut state, first, count);
             (first, count)
         };
-        let ready = || over(&pager.state.lock());
-        let parkable = crate::scheduler::Parkable::at_entry();
-        let began = crate::clock::now();
-        if watch::wait_until(&parkable, &pager.changed, 0, WaitClass::Io, Deadline::at(began + pager.report), ready).is_err() {
-            return false;
-        }
-        if !ready() {
-            let _overdue = Overdue::begin(pager, slot, first, count, began);
-            if watch::wait_until(&parkable, &pager.changed, 0, WaitClass::Io, Deadline::never(), ready).is_err() {
-                return false;
-            }
-        }
-        true
+        pager.wait_changed(slot, first, count, || over(&pager.state.lock())).is_ok()
     }
 }
 
