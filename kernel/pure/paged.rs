@@ -18,6 +18,14 @@
 //! for an object a mapper ever linked, a sweep of the futex waits on them,
 //! the walk's end gives every revoking page's frame out ([`Pages::walk`]).
 //!
+//! **Every write is admitted page by page** ([`Pages::admit`]): refused on a
+//! gone or sealed object, refused to a holder whose page would become dirty
+//! without a credit the pager granted, and refused at the dirty ceiling. A
+//! holder's write is checked whole first ([`Pages::holder_fits`]), in the same
+//! hold of the caller's lock as its admission. A page a holder's credit paid
+//! for gives the credit back where the pager writes it, or where it goes
+//! before its write-back.
+//!
 //! **A dirty page holds a slot until a write-back cleans it.** Slots are
 //! bounded by `dirty_ceiling`. A write-back begin clears the dirty bit and
 //! keeps the slot; its end releases the slot of each page that was not
@@ -28,11 +36,20 @@
 //! it in the same step, so the size never covers bytes not yet in the object;
 //! a shrink removes every page past it, dirty or not.
 //!
-//! **A holder's read is atomic against every write** (POSIX XSH 2.9.7): it
-//! begins only while no write is under way ([`Object::read_begin`]), and its
-//! bytes count only where no write has begun since ([`Object::unchanged`]).
-//! A write is one call, or, where a call does not take all it was given, every
-//! call until [`Object::end_write`]: the pager's whole write.
+//! **One write at a time** (POSIX XSH 2.9.7): every write takes the object's
+//! write side ([`Side`]) for its whole: a holder's, which never waits for it
+//! and is refused while it is taken or the pager waits for it; and the
+//! pager's, from its hold to its unhold, its truncations and its own reads
+//! among them. A holder's read begins only while no write is under way
+//! ([`Object::read_begin`]), and its bytes count only where none has begun
+//! since ([`Object::unchanged`]); one that met [`WRITES_A_READ_MEETS`]
+//! writes asks the pager, whose read holds the writes off. While the pager
+//! holds them, a holder states the size and time of the moment it took them
+//! ([`Object::stat`]).
+//!
+//! **A holder's dirtying is told once** ([`Object::take_tell`]): the first page
+//! a holder dirties after the pager last took the range
+//! ([`Object::take_dirtied`]) owes the pager a notice; the rest widen the range.
 //!
 //! What a removed frame owes (the last pin's free, a zeroed tail) is the
 //! caller's: the walk's end answers every frame.
@@ -65,7 +82,8 @@ const NONE: u32 = u32::MAX;
 /// range is named in one notice and not again while the reader waits for it,
 /// unless a withdraw takes back a page of it, which may have been supplied
 /// for that notice. Every other way a page becomes absent again moves the
-/// object's version, which ends the wait ([`Pages::wait_over`]).
+/// object's version, which ends the wait ([`Pages::wait_over`]), and the read
+/// that begins again asks anew ([`Want::anew`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Want {
     first: u64,
@@ -87,13 +105,6 @@ impl Want {
         true
     }
 
-    /// The waiter asks afresh, its wait having ended on a change of the
-    /// object: named in a notice whatever the old request said, as a new
-    /// read's would be.
-    pub fn anew(&mut self, first: u64, count: u64) {
-        *self = Self { first, count, reported: false };
-    }
-
     /// `count` pages from `first` were withdrawn: whether that makes the
     /// range news again.
     pub fn withdrawn(&mut self, first: u64, count: u64) -> bool {
@@ -109,6 +120,12 @@ impl Want {
             self.reported = true;
             (self.first, self.count)
         })
+    }
+
+    /// The reader begins its read again, after a write: its next range is
+    /// news, as what was supplied for its last notice may have gone since.
+    pub fn anew(&mut self) {
+        *self = Self::NONE;
     }
 
     /// Whether a notice is owed.
@@ -238,9 +255,28 @@ pub enum Refused {
     NoRoom,
     /// The dirty ceiling is reached; the pager writes back first.
     DirtyFull,
+    /// The object is sealed: something runs from it, so nothing writes it.
+    Sealed,
+    /// A holder's write would dirty a page past the credit its pager granted.
+    NoCredit,
+    /// A holder's write meets a page inside the size that is not present: the
+    /// pager supplies it.
+    Absent,
+    /// A holder's write spans more pages than one call takes whole, or ends
+    /// past [`HOLDER_END`]: the pager writes it.
+    OutOfReach,
     /// A range that is empty, too long, overlaps an open write-back, or names
     /// none that was begun.
     InvalidArgument,
+}
+
+/// Who asks a page to be written.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Writer {
+    /// The pager, which reserved the space for its own writes.
+    Pager,
+    /// A holder, writing against the credit the pager granted the object.
+    Holder,
 }
 
 /// What a page is, for a read.
@@ -309,7 +345,7 @@ pub trait Mappers {
 }
 
 /// Where an object's walk stands.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Walk {
     Idle,
     /// A walker visits its mappers; `again` where pages were marked since
@@ -335,10 +371,15 @@ struct State {
     writeback: bool,
     write_pins: u16,
     pinned_since_begin: bool,
+    /// A holder's credit paid for its dirtying, and the pager owes the room.
+    credited: bool,
+    /// The write-back under way spends what a holder's credit paid for.
+    credit_in_flight: bool,
 }
 
 impl State {
-    const CLEAN: Self = Self { dirty: false, writeback: false, write_pins: 0, pinned_since_begin: false };
+    const CLEAN: Self =
+        Self { dirty: false, writeback: false, write_pins: 0, pinned_since_begin: false, credited: false, credit_in_flight: false };
 
     fn counts_dirty(&self) -> bool {
         self.dirty || self.writeback
@@ -361,6 +402,7 @@ struct Slot<F> {
 
 /// One object's part of the table: its size, whether its pager ended, the
 /// list of its slots, and its writes under way.
+#[cfg_attr(test, derive(Clone, PartialEq, Eq, Hash))]
 pub struct Object {
     id: u32,
     anonymous: bool,
@@ -368,12 +410,27 @@ pub struct Object {
     gone: bool,
     head: u32,
     pages: usize,
-    /// Moved at every write's begin and end, and at every resize.
+    /// Moved at every writer's take and give of the write side, and at every
+    /// resize.
     version: u64,
-    /// Writes under way: each call's, and the held one.
-    writing: u32,
-    /// A call that did not take all it was given left its write under way.
-    held: bool,
+    side: Side,
+    /// The pager waits for the write side, which no holder takes first.
+    pager_waiting: bool,
+    /// The size and time when the pager took the side, what a holder states
+    /// until it gives it back.
+    held: Option<(u64, u64)>,
+    /// Image holders and the ranges sourced from them: sealed while above 0.
+    seals: u32,
+    /// Pages a holder's write may still turn dirty.
+    credit: u64,
+    /// When it was last written, as the caller's clock says.
+    mtime: u64,
+    /// The pages holders dirtied since the pager last took them: `lo..hi`.
+    dirtied: Option<(u64, u64)>,
+    /// The pager is owed, or was given, a notice of `dirtied`.
+    told: bool,
+    /// A notice is owed and not yet taken.
+    tell: bool,
     /// Its slots that are revoking, and the walk's set of them: a list in
     /// the order they were marked, which only the walk's end empties.
     revoking: usize,
@@ -394,7 +451,7 @@ pub struct Object {
 }
 
 /// What a holder's read began at ([`Object::read_begin`]).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Version(u64);
 
 impl Object {
@@ -404,6 +461,60 @@ impl Object {
 
     pub fn gone(&self) -> bool {
         self.gone
+    }
+
+    /// Pages a holder's write may still turn dirty.
+    pub fn credit(&self) -> u64 {
+        self.credit
+    }
+
+    /// The pager grants `pages` more pages a holder may turn dirty: the
+    /// credit now.
+    pub fn grant(&mut self, pages: u64) -> u64 {
+        self.credit = self.credit.saturating_add(pages);
+        self.credit
+    }
+
+    /// The pager takes back what holders have not spent: how much.
+    pub fn take_back(&mut self) -> u64 {
+        core::mem::take(&mut self.credit)
+    }
+
+    pub fn mtime(&self) -> u64 {
+        self.mtime
+    }
+
+    /// The object was written, or set, at `mtime`.
+    pub fn stamp(&mut self, mtime: u64) {
+        self.mtime = mtime;
+    }
+
+    /// Whether a notice of holders' dirtying is owed and not yet taken; it is
+    /// taken now.
+    pub fn take_tell(&mut self) -> bool {
+        core::mem::take(&mut self.tell)
+    }
+
+    /// The pages holders dirtied since the last call, as `(first, count)`:
+    /// the next page a holder dirties owes the pager a notice again.
+    pub fn take_dirtied(&mut self) -> Option<(u64, u64)> {
+        self.told = false;
+        self.tell = false;
+        self.dirtied.take().map(|(lo, hi)| (lo, hi - lo))
+    }
+
+    /// A holder turned `page` dirty.
+    fn holder_dirtied(&mut self, page: u64) {
+        let (lo, hi) = self.dirtied.unwrap_or((page, page + 1));
+        self.dirtied = Some((lo.min(page), hi.max(page + 1)));
+        if !self.told {
+            self.told = true;
+            self.tell = true;
+        }
+    }
+
+    fn sealed(&self) -> bool {
+        self.seals > 0
     }
 
     /// The pages it holds, present or failed.
@@ -417,7 +528,14 @@ impl Object {
 
     /// Where a holder's read begins: `None` while a write is under way.
     pub fn read_begin(&self) -> Option<Version> {
-        (self.writing == 0).then_some(Version(self.version))
+        (self.side == Side::Free).then_some(Version(self.version))
+    }
+
+    /// The size and modification time a holder states: while the pager holds
+    /// the writes, those of the moment it took them, so a statement of them
+    /// comes whole before the pager's write as a read does.
+    pub fn stat(&self) -> (u64, u64) {
+        self.held.unwrap_or((self.size, self.mtime))
     }
 
     /// Where a fault's wait for one of its pages begins: a write or resize
@@ -432,31 +550,26 @@ impl Object {
         self.version == v.0
     }
 
-    /// A write call begins, before its first byte lands.
-    pub fn write_begin(&mut self) {
-        self.writing = self.writing.checked_add(1).expect("an object's writes overflowed");
-        self.version += 1;
+    pub fn side(&self) -> Side {
+        self.side
     }
 
-    /// A write call ends, after its last byte landed. One that did not take
-    /// all it was given leaves the write under way until
-    /// [`end_write`](Self::end_write), unless an earlier call's already is.
-    pub fn write_end(&mut self, whole: bool) {
-        if !whole && !self.held {
-            self.held = true;
-            return;
-        }
-        self.writing = self.writing.checked_sub(1).expect("a write ended that never began");
-        self.version += 1;
+    /// Whether [`take_pager`](Self::take_pager) would take the side now: what
+    /// a waiting pager waits for.
+    pub fn free_for_pager(&self) -> bool {
+        self.side == Side::Free
     }
 
-    /// The pager ends the write a short call left under way.
-    pub fn end_write(&mut self) -> Result<(), Refused> {
-        if !core::mem::take(&mut self.held) {
-            return Err(Refused::InvalidArgument);
+    /// A holder's write takes the write side, or is refused while anyone
+    /// holds it or the pager waits for it: it never waits, and its writer asks
+    /// the pager instead.
+    pub fn take_holder(&mut self) -> bool {
+        let free = self.side == Side::Free && !self.pager_waiting;
+        if free {
+            self.side = Side::Holder;
+            self.version += 1;
         }
-        self.write_end(true);
-        Ok(())
+        free
     }
 
     /// A mapper links: the epoch it is seen at, which the walk running
@@ -494,6 +607,66 @@ impl Object {
     pub fn empty(&self) -> bool {
         self.pages == 0 && self.walk == Walk::Idle
     }
+
+    /// The pager takes the write side, or waits, and asks again, while a
+    /// holder's write holds it: work inside the kernel that ends without
+    /// waiting on anything. No holder's write begins meanwhile.
+    pub fn take_pager(&mut self) -> bool {
+        let free = self.free_for_pager();
+        self.pager_waiting = !free;
+        if free {
+            self.side = Side::Pager;
+            self.held = Some((self.size, self.mtime));
+            self.version += 1;
+        }
+        free
+    }
+
+    /// `who` gives the write side back.
+    pub fn give(&mut self, who: Side) {
+        assert_eq!(self.side, who, "the write side given back by another than its taker");
+        self.version += 1;
+        self.side = Side::Free;
+        self.held = None;
+    }
+}
+
+/// Who holds an object's write side, which every write takes for its whole.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Side {
+    Free,
+    /// A holder's write: its bytes already in the kernel, admitted and copied
+    /// in without waiting on anything.
+    Holder,
+    /// The pager's, from its hold to its unhold: its writes, truncations and
+    /// own reads, however many calls and waits they take.
+    Pager,
+}
+
+/// The writes a holder's read meets, each waited out but the last, which
+/// sends it to the pager.
+pub const WRITES_A_READ_MEETS: u32 = 3;
+
+/// The most pages one holder's write takes, whole.
+pub const HOLDER_PAGES: u64 = 64;
+
+/// The furthest a holder's write ends, the kernel's reach for holders: one
+/// past it is refused and is the pager's to write, and a pager that mints
+/// write holders accepts that no holder grows an object past it.
+pub const HOLDER_END: u64 = 1 << 44;
+
+/// The pages a holder's write of `len` bytes at `offset` spans, which one
+/// call takes whole: `OutOfReach` for one past [`HOLDER_PAGES`] or ending
+/// past [`HOLDER_END`], which the holder asks the pager to write.
+pub fn holder_span(offset: u64, len: u64) -> Result<u64, Refused> {
+    if !offset.checked_add(len).is_some_and(|end| end <= HOLDER_END) {
+        return Err(Refused::OutOfReach);
+    }
+    let pages = (offset % PAGE + len).div_ceil(PAGE);
+    if pages > HOLDER_PAGES {
+        return Err(Refused::OutOfReach);
+    }
+    Ok(pages)
 }
 
 /// A pager's table: `capacity` slots and a hash of them, both made here.
@@ -580,8 +753,15 @@ impl<F: Copy> Pages<F> {
             head: NONE,
             pages: 0,
             version: 0,
-            writing: 0,
-            held: false,
+            side: Side::Free,
+            pager_waiting: false,
+            held: None,
+            seals: 0,
+            credit: 0,
+            mtime: 0,
+            dirtied: None,
+            told: false,
+            tell: false,
             revoking: 0,
             revoke_head: NONE,
             revoke_tail: NONE,
@@ -700,6 +880,10 @@ impl<F: Copy> Pages<F> {
         if s.revoking.is_some() {
             o.revoking -= 1;
         }
+        // Gone before its write-back, it needs none of the room it was paid for.
+        if s.state.credited {
+            o.credit += 1;
+        }
         self.free[self.free_len] = i;
         self.free_len += 1;
         s.frame
@@ -707,7 +891,7 @@ impl<F: Copy> Pages<F> {
 
     /// Whether a holder's read of `o` that began at `since` and waits for
     /// `page` looks again: the page is no longer absent, or a write or resize
-    /// moved the version, which the read answers `WouldBlock`.
+    /// moved the version, and the read begins again.
     pub fn wait_over(&self, o: &Object, page: u64, since: Version) -> bool {
         !o.unchanged(since) || !matches!(self.lookup(o, page), Lookup::Absent)
     }
@@ -725,14 +909,18 @@ impl<F: Copy> Pages<F> {
             s.revoking = Some(if was == Revoked::Failed { was } else { becomes });
             return;
         }
-        // Its bytes are no longer the file's: no write-back takes them.
-        let counted = s.state.counts_dirty();
+        // Its bytes are no longer the file's: no write-back takes them, and
+        // it needs none of the room a holder's credit paid for.
+        let (counted, credited) = (s.state.counts_dirty(), s.state.credited);
         s.state = State::CLEAN;
         s.revoking = Some(becomes);
         s.revoke_next = NONE;
         o.revoking += 1;
         if counted {
             self.dirty_held -= 1;
+        }
+        if credited {
+            o.credit += 1;
         }
         match o.revoke_tail {
             NONE => o.revoke_head = i,
@@ -853,6 +1041,9 @@ impl<F: Copy> Pages<F> {
         if o.gone {
             return Err(Refused::Gone);
         }
+        if dirty && o.sealed() {
+            return Err(Refused::Sealed);
+        }
         if page >= end.div_ceil(PAGE).max(o.page_end()) || end > (page + 1) * PAGE {
             return Err(Refused::PastEnd);
         }
@@ -879,35 +1070,136 @@ impl<F: Copy> Pages<F> {
         Ok(Supplied::Installed)
     }
 
-    /// A write pin on present `page`, for a copy into it that runs outside the
-    /// object's lock: the page is dirty from here, and a write-back that
-    /// begins or ends before [`write_unpin`](Self::write_unpin) keeps it so.
-    /// The size is not moved until the unpin, so no reader sees bytes past it
-    /// that the copy has not written yet.
-    pub fn write_pin(&mut self, o: &mut Object, page: u64) -> Result<F, Refused> {
+    /// Whether `by` may turn a page whose state is `dirty` dirty: the
+    /// refusals every admission checks, in order, before it changes anything.
+    fn admissible(&self, o: &Object, dirty: Option<State>, by: Writer) -> Result<(), Refused> {
+        if o.gone {
+            return Err(Refused::Gone);
+        }
+        if o.sealed() {
+            return Err(Refused::Sealed);
+        }
+        if o.anonymous {
+            return Ok(());
+        }
+        // A page under write-back is clean again for the space it takes: on a
+        // copy-on-write volume its next write needs room of its own.
+        let becomes_dirty = dirty.is_none_or(|s| !s.dirty);
+        if by == Writer::Holder && becomes_dirty && o.credit == 0 {
+            return Err(Refused::NoCredit);
+        }
+        if dirty.is_none_or(|s| !s.counts_dirty()) && self.dirty_held >= self.dirty_ceiling {
+            return Err(Refused::DirtyFull);
+        }
+        Ok(())
+    }
+
+    /// Admit a write into present `page` and pin it for a copy that runs
+    /// outside the object's lock: the page is dirty from here, and a
+    /// write-back that begins or ends before [`write_unpin`](Self::write_unpin)
+    /// keeps it so. A holder's admission that turns the page dirty spends a
+    /// credit. The size is not moved until the unpin, so no reader sees bytes
+    /// past it that the copy has not written yet. An absent page answers
+    /// `InvalidArgument`: it is supplied, or [`admit_fresh`](Self::admit_fresh) made.
+    pub fn admit(&mut self, o: &mut Object, page: u64, by: Writer) -> Result<F, Refused> {
         if o.gone {
             return Err(Refused::Gone);
         }
         let i = self.find(o.id, page).ok_or(Refused::InvalidArgument)?;
         let s = self.slot(i);
         let frame = s.frame.filter(|_| s.revoking.is_none()).ok_or(Refused::InvalidArgument)?;
-        let needs_slot = !o.anonymous && !s.state.counts_dirty();
-        if needs_slot && self.dirty_held >= self.dirty_ceiling {
-            return Err(Refused::DirtyFull);
-        }
+        let state = s.state;
+        self.admissible(o, Some(state), by)?;
         let s = self.slot_mut(i);
         s.state.dirty = !o.anonymous;
         s.state.write_pins = s.state.write_pins.checked_add(1).expect("a page's write pins overflowed");
         if s.state.writeback {
             s.state.pinned_since_begin = true;
         }
-        if needs_slot {
+        if !o.anonymous && !state.counts_dirty() {
             self.dirty_held += 1;
+        }
+        match by {
+            Writer::Holder if !o.anonymous && !state.dirty => {
+                o.credit -= 1;
+                self.slot_mut(i).state.credited = true;
+                o.holder_dirtied(page);
+            }
+            // The pager's write brings its own room, so what a holder's credit
+            // paid for this page is credit again.
+            Writer::Pager if state.credited => {
+                self.slot_mut(i).state.credited = false;
+                o.credit += 1;
+            }
+            _ => {}
         }
         Ok(frame)
     }
 
-    /// The end of a [`write_pin`](Self::write_pin) of `frame`, once its
+    /// Admit a write into `page`, which holds no slot and reads as zeros — it
+    /// lies past every page the size reaches, or is a hole of an anonymous
+    /// object — with `frame`, zeroed, installed dirty and pinned as
+    /// [`admit`](Self::admit) pins. Nothing needs supplying first.
+    pub fn admit_fresh(&mut self, o: &mut Object, page: u64, frame: F, by: Writer) -> Result<(), Refused> {
+        if o.gone {
+            return Err(Refused::Gone);
+        }
+        if (page < o.page_end() && !o.anonymous) || self.find(o.id, page).is_some() {
+            return Err(Refused::InvalidArgument);
+        }
+        self.admissible(o, None, by)?;
+        let credited = by == Writer::Holder && !o.anonymous;
+        let state = State { dirty: !o.anonymous, write_pins: 1, credited, ..State::CLEAN };
+        self.insert(o, page, Some(frame), state)?;
+        if credited {
+            o.credit -= 1;
+            o.holder_dirtied(page);
+        }
+        Ok(())
+    }
+
+    /// Whether a holder may write `count` pages from `first` whole: every
+    /// page is present, or reads as zeros without a slot, and the credit and
+    /// the dirty ceiling cover each it would turn dirty. The fresh pages it
+    /// would need. The same refusals as [`admit`](Self::admit), and `Absent`
+    /// for a page the pager must supply first, or one that failed.
+    pub fn holder_fits(&self, o: &Object, first: u64, count: u64) -> Result<u64, Refused> {
+        self.admissible(o, Some(State { dirty: true, ..State::CLEAN }), Writer::Holder)?;
+        let (mut fresh, mut dirtying, mut held) = (0u64, 0u64, 0u64);
+        for page in first..first.saturating_add(count) {
+            match self.find(o.id, page) {
+                Some(i) => {
+                    let s = self.slot(i);
+                    if s.frame.is_none() || s.revoking.is_some() {
+                        return Err(Refused::Absent);
+                    }
+                    dirtying += u64::from(!s.state.dirty);
+                    held += u64::from(!s.state.counts_dirty());
+                }
+                None if page >= o.page_end() || o.anonymous => {
+                    fresh += 1;
+                    dirtying += 1;
+                    held += 1;
+                }
+                None => return Err(Refused::Absent),
+            }
+        }
+        if o.anonymous {
+            return if self.free_len as u64 >= fresh { Ok(fresh) } else { Err(Refused::NoRoom) };
+        }
+        if dirtying > o.credit {
+            return Err(Refused::NoCredit);
+        }
+        if self.dirty_held as u64 + held > self.dirty_ceiling as u64 {
+            return Err(Refused::DirtyFull);
+        }
+        if (self.free_len as u64) < fresh {
+            return Err(Refused::NoRoom);
+        }
+        Ok(fresh)
+    }
+
+    /// The end of a [`admit`](Self::admit) of `frame`, once its
     /// bytes are in: the size grows to `end`. A page a shrink or a failure
     /// removed meanwhile is revoking, or, supplied again since, holds another
     /// frame or none; there is nothing left to unpin, and the bytes are not
@@ -927,7 +1219,7 @@ impl<F: Copy> Pages<F> {
         o.size = o.size.max(end);
     }
 
-    /// The end of a [`write_pin`](Self::write_pin) whose bytes did not all
+    /// The end of a [`admit`](Self::admit) whose bytes did not all
     /// come: released as [`write_unpin`](Self::write_unpin) releases it, the
     /// size left as it was.
     pub fn write_abandon(&mut self, o: &Object, page: u64, frame: F)
@@ -967,6 +1259,7 @@ impl<F: Copy> Pages<F> {
                 s.state.dirty = false;
                 s.state.writeback = true;
                 s.state.pinned_since_begin = s.state.write_pins > 0;
+                s.state.credit_in_flight = core::mem::take(&mut s.state.credited);
                 begun[k as usize / 64] |= 1 << (k % 64);
             }
         }
@@ -990,6 +1283,9 @@ impl<F: Copy> Pages<F> {
             s.state.writeback = false;
             let keep = s.state.dirty || s.state.pinned_since_begin || !written;
             s.state.pinned_since_begin = false;
+            // Unwritten, the page still owes the room its credit paid for.
+            let in_flight = core::mem::take(&mut s.state.credit_in_flight);
+            s.state.credited |= in_flight && !written;
             if keep {
                 s.state.dirty = true;
                 kept[k as usize / 64] |= 1 << (k % 64);
@@ -1064,8 +1360,16 @@ impl<F: Copy> Pages<F> {
     /// Set the size. A shrink removes every page past it, dirty or not, and
     /// answers the frame of a partial last page, whose tail past the size the
     /// caller zeroes.
-    pub fn resize(&mut self, o: &mut Object, size: u64) -> Option<F> {
+    pub fn resize(&mut self, o: &mut Object, size: u64) -> Result<Option<F>, Refused> {
+        if o.sealed() {
+            return Err(Refused::Sealed);
+        }
         o.version += 1;
+        // A holder dirtied nothing past the size that the pager owes a write-back.
+        if let Some((lo, hi)) = o.dirtied {
+            let hi = hi.min(size.div_ceil(PAGE));
+            o.dirtied = (lo < hi).then_some((lo, hi));
+        }
         let keep = size.div_ceil(PAGE);
         if size < o.size {
             let mut at = o.head;
@@ -1082,12 +1386,12 @@ impl<F: Copy> Pages<F> {
         }
         o.size = size;
         if size.is_multiple_of(PAGE) {
-            return None;
+            return Ok(None);
         }
-        match self.lookup(o, size / PAGE) {
+        Ok(match self.lookup(o, size / PAGE) {
             Lookup::Present(frame) => Some(frame),
             _ => None,
-        }
+        })
     }
 
     /// The pager ended or let the object go: every page goes, and every
@@ -1245,7 +1549,7 @@ mod tests {
         assert_eq!(p.withdraw(&mut o, 0, 1, &mut Nobody).0, 1);
         assert_eq!(p.lookup(&o, 0), Lookup::Absent);
         assert_eq!(p.supply(&mut o, 0, 8, false, PAGE), Ok(Supplied::Present), "a second frame for the page");
-        assert_eq!(p.write_pin(&mut o, 0), Err(Refused::InvalidArgument));
+        assert_eq!(p.admit(&mut o, 0, Writer::Pager), Err(Refused::InvalidArgument));
         assert_eq!(p.withdraw(&mut o, 0, 1, &mut Nobody).0, 0, "withdrawn once");
         assert_eq!(o.revoke(), Revoke::Walk);
         let mut freed = Vec::new();
@@ -1322,7 +1626,7 @@ mod tests {
         p.supply(&mut o, 1, 8, false, 2 * PAGE).unwrap();
         p.fail(&mut o, 0, 2).unwrap();
         assert_eq!(p.withdraw(&mut o, 0, 2, &mut Nobody).0, 0, "nothing left to withdraw");
-        p.resize(&mut o, PAGE);
+        p.resize(&mut o, PAGE).unwrap();
         assert_eq!(o.revoke(), Revoke::Walk);
         let mut ended = Vec::new();
         assert_eq!(p.walk(&mut o, &mut Unmapped, &mut Nobody, &mut |f, page, becomes| ended.push((f, page, becomes))), Next::Finished);
@@ -1364,38 +1668,119 @@ mod tests {
         let mut p = Pages::<u64>::new(8, 4).unwrap();
         let mut o = p.object(1, PAGE);
         let before = o.read_begin().expect("nothing writes yet");
-        o.write_begin();
+        assert!(o.take_pager());
         assert_eq!(o.read_begin(), None, "a read meets the write in flight");
         assert!(!o.unchanged(before), "a read that began before it meets it");
-        o.write_end(true);
+        o.give(Side::Pager);
         assert!(!o.unchanged(before), "and still does once it ended");
         let after = o.read_begin().expect("the write ended");
         assert!(o.unchanged(after));
-        p.resize(&mut o, 0);
+        p.resize(&mut o, 0).unwrap();
         assert!(!o.unchanged(after), "a shrink is a change a read meets");
     }
 
-    /// A pager's write that takes several calls is one write: the first short
-    /// call leaves it under way, later ones nest in it, and only its end lets
-    /// a read begin.
+    /// One write at a time: a holder's takes the side or is refused at once,
+    /// never waiting; the pager waits for a holder's and is owed the side
+    /// before any later holder's.
     #[test]
-    fn a_short_call_holds_the_write_until_its_end() {
+    fn the_write_side_is_one_writers_and_a_holder_never_waits_for_it() {
         let mut p = Pages::<u64>::new(8, 4).unwrap();
-        let mut o = p.object(2, PAGE);
-        assert_eq!(o.end_write(), Err(Refused::InvalidArgument), "nothing is held");
-        o.write_begin();
-        o.write_end(false);
-        assert_eq!(o.read_begin(), None, "a short call's write is under way");
-        o.write_begin();
-        o.write_end(false);
-        o.write_begin();
-        o.write_end(true);
-        assert_eq!(o.read_begin(), None, "a later call, short or whole, ends no held write");
-        let held = o.version;
-        assert_eq!(o.end_write(), Ok(()));
-        let v = o.read_begin().expect("the end lets a read begin");
-        assert!(o.unchanged(v) && v != Version(held), "the end moved the version");
-        assert_eq!(o.end_write(), Err(Refused::InvalidArgument), "a write ends once");
+        let mut o = p.object(1, PAGE);
+        assert!(o.take_holder());
+        assert!(!o.take_holder(), "a second holder's write is refused");
+        assert!(!o.take_pager(), "the pager waits for the holder's");
+        assert_eq!(o.read_begin(), None);
+        o.give(Side::Holder);
+        assert!(!o.take_holder(), "the waiting pager is owed the side first");
+        assert!(o.take_pager());
+        assert!(!o.take_holder() && o.read_begin().is_none(), "the pager's hold excludes every other write and read");
+        o.give(Side::Pager);
+        assert!(o.take_holder(), "free again");
+    }
+
+    /// While the pager holds the writes, a holder states the size and time of
+    /// the moment it took them, however its writes move them; its unhold
+    /// shows what they left.
+    #[test]
+    fn a_holder_states_the_moment_the_pager_took_the_writes() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, 100);
+        o.stamp(5);
+        assert_eq!(o.stat(), (100, 5));
+        assert!(o.take_pager());
+        p.supply(&mut o, 1, 1, true, 2 * PAGE).unwrap();
+        o.stamp(9);
+        assert_eq!((o.size(), o.mtime()), (2 * PAGE, 9), "the pager sees its own");
+        assert_eq!(o.stat(), (100, 5), "a holder sees the moment the hold began");
+        p.resize(&mut o, 0).unwrap();
+        assert_eq!(o.stat(), (100, 5), "and a truncation under it");
+        p.resize(&mut o, 3 * PAGE).unwrap();
+        o.give(Side::Pager);
+        assert_eq!(o.stat(), (3 * PAGE, 9), "the unhold shows what the writes left");
+        assert!(o.take_holder());
+        o.stamp(11);
+        assert_eq!(o.stat(), (3 * PAGE, 11), "a holder's write holds no statement back");
+    }
+
+    /// A holder's write is taken whole, or refused for the pager to write:
+    /// spanning more pages than one call takes, wherever it starts, or ending
+    /// past a holder's reach, up to the last offsets a `u64` holds.
+    #[test]
+    fn a_holders_span_is_whole_or_refused_up_to_its_reach() {
+        assert_eq!(holder_span(0, HOLDER_PAGES * PAGE), Ok(HOLDER_PAGES));
+        assert_eq!(holder_span(1, HOLDER_PAGES * PAGE), Err(Refused::OutOfReach), "one byte into a page more");
+        assert_eq!(holder_span(PAGE - 1, 2), Ok(2));
+        assert_eq!(holder_span(100, 1 << 30), Err(Refused::OutOfReach));
+        for k in 1..=2 * HOLDER_PAGES {
+            let at = HOLDER_END - k * PAGE;
+            assert_eq!(holder_span(at, 1), Ok(1), "the page {k} below the reach");
+            assert_eq!(holder_span(at + 7, k * PAGE - 7).is_ok(), k <= HOLDER_PAGES);
+        }
+        assert_eq!(holder_span(HOLDER_END - 1, 1), Ok(1), "a size at the reach leaves an append its last byte");
+        assert_eq!(holder_span(HOLDER_END, 1), Err(Refused::OutOfReach), "an append at a size at the reach");
+        assert_eq!(holder_span(HOLDER_END - PAGE + 1, PAGE), Err(Refused::OutOfReach));
+        for at in [LAST_END - PAGE, LAST_END - 1, u64::MAX] {
+            assert_eq!(holder_span(at, 1), Err(Refused::OutOfReach), "{at:#x}");
+        }
+        assert_eq!(holder_span(u64::MAX - 3, 8), Err(Refused::OutOfReach), "an end that wraps");
+    }
+
+    /// The room a holder's credit paid for a page is credit again where the
+    /// pager writes the page itself or the page goes before its write-back,
+    /// and spent where its write-back is written; a refused write-back keeps
+    /// it owed.
+    #[test]
+    fn a_holders_paid_credit_comes_back_unless_its_write_back_spends_it() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, 3 * PAGE);
+        for page in 0..3 {
+            p.supply(&mut o, page, page, false, (page + 1) * PAGE).unwrap();
+        }
+        o.grant(3);
+        for page in 0..3 {
+            p.admit(&mut o, page, Writer::Holder).unwrap();
+            p.write_unpin(&mut o, page, page, (page + 1) * PAGE);
+        }
+        assert_eq!(o.credit(), 0);
+        p.admit(&mut o, 0, Writer::Pager).unwrap();
+        p.write_unpin(&mut o, 0, 0, PAGE);
+        assert_eq!(o.credit(), 1, "the pager's write of page 0 brought its own room");
+        p.resize(&mut o, 2 * PAGE).unwrap();
+        assert_eq!(o.credit(), 2, "page 2 went unwritten");
+        p.writeback_begin(&mut o, 1, 1).unwrap();
+        p.writeback_end(&mut o, 1, 1, false).unwrap();
+        p.admit(&mut o, 1, Writer::Pager).unwrap();
+        p.write_unpin(&mut o, 1, 1, 2 * PAGE);
+        assert_eq!(o.credit(), 3, "a refused write-back left it owed, and the pager's write gave it back");
+        p.writeback_begin(&mut o, 0, 1).unwrap();
+        p.writeback_end(&mut o, 0, 1, true).unwrap();
+        p.admit(&mut o, 0, Writer::Holder).unwrap();
+        p.write_unpin(&mut o, 0, 0, PAGE);
+        p.writeback_begin(&mut o, 0, 1).unwrap();
+        p.writeback_end(&mut o, 0, 1, true).unwrap();
+        p.admit(&mut o, 0, Writer::Pager).unwrap();
+        p.write_unpin(&mut o, 0, 0, PAGE);
+        assert_eq!(o.credit(), 2, "a written write-back spent it");
     }
 
     #[test]
@@ -1404,7 +1789,7 @@ mod tests {
         let mut object = pages.anonymous(1, 0);
         assert_eq!(pages.supply(&mut object, 0, 42, true, PAGE), Ok(Supplied::Installed));
         assert_eq!(pages.dirty_held(), 0);
-        assert_eq!(pages.write_pin(&mut object, 0), Ok(42));
+        assert_eq!(pages.admit(&mut object, 0, Writer::Pager), Ok(42));
         pages.write_unpin(&mut object, 0, 42, PAGE);
         assert_eq!(pages.withdraw(&mut object, 0, 1, &mut Nobody).0, 0);
         assert_eq!(pages.writeback_begin(&mut object, 0, 1), Err(Refused::InvalidArgument));
@@ -1412,9 +1797,9 @@ mod tests {
         assert_eq!(pages.lookup(&object, 0), Lookup::Present(42));
         assert_eq!(pages.supply(&mut object, 1, 43, true, 2 * PAGE), Ok(Supplied::Installed));
         assert_eq!(pages.supply(&mut object, 2, 44, true, 3 * PAGE), Err(Refused::NoRoom));
-        pages.resize(&mut object, 4 * PAGE);
+        pages.resize(&mut object, 4 * PAGE).unwrap();
         assert_eq!(pages.lookup(&object, 3), Lookup::Zero, "a hole reads without any free slot");
-        pages.resize(&mut object, PAGE);
+        pages.resize(&mut object, PAGE).unwrap();
         assert_eq!(settle(&mut pages, &mut object), [43]);
         pages.invalidate(&mut object);
         assert_eq!(settle(&mut pages, &mut object), [42]);
@@ -1454,11 +1839,11 @@ mod tests {
         let mut p = Pages::new(8, 4).unwrap();
         let mut o = p.object(4, 100);
         p.supply(&mut o, 0, 7, false, 100).unwrap();
-        assert_eq!(p.write_pin(&mut o, 0), Ok(7));
+        assert_eq!(p.admit(&mut o, 0, Writer::Pager), Ok(7));
         assert_eq!(o.size(), 100, "the copy is in flight: a reader still stops at the old end");
         p.write_unpin(&mut o, 0, 7, 300);
         assert_eq!(o.size(), 300, "the bytes are in, and the size covers them");
-        assert_eq!(p.write_pin(&mut o, 1), Err(Refused::InvalidArgument), "an absent page is supplied, not pinned");
+        assert_eq!(p.admit(&mut o, 1, Writer::Pager), Err(Refused::InvalidArgument), "an absent page is supplied, not pinned");
     }
 
     /// A write pin whose copy faulted is released with the size as it was.
@@ -1467,7 +1852,7 @@ mod tests {
         let mut p = Pages::new(8, 4).unwrap();
         let mut o = p.object(6, 100);
         p.supply(&mut o, 0, 7, false, 100).unwrap();
-        assert_eq!(p.write_pin(&mut o, 0), Ok(7));
+        assert_eq!(p.admit(&mut o, 0, Writer::Pager), Ok(7));
         p.write_abandon(&o, 0, 7);
         assert_eq!(o.size(), 100, "an abandoned write grows nothing");
         let slot = p.find(o.id, 0).expect("the page stays");
@@ -1479,8 +1864,8 @@ mod tests {
         let mut p = Pages::new(8, 4).unwrap();
         let mut o = p.object(5, PAGE);
         p.supply(&mut o, 0, 7, false, PAGE).unwrap();
-        p.write_pin(&mut o, 0).unwrap();
-        p.resize(&mut o, 0);
+        p.admit(&mut o, 0, Writer::Pager).unwrap();
+        p.resize(&mut o, 0).unwrap();
         settle(&mut p, &mut o);
         p.supply(&mut o, 0, 8, true, 10).unwrap();
         p.write_unpin(&mut o, 0, 7, PAGE);
@@ -1512,12 +1897,12 @@ mod tests {
         for page in 0..6 {
             p.supply(&mut o, page, page, true, (page + 1) * PAGE).unwrap();
         }
-        p.write_pin(&mut o, 0).unwrap(); // pinned across the begin, released inside
+        p.admit(&mut o, 0, Writer::Pager).unwrap(); // pinned across the begin, released inside
         assert_eq!(p.writeback_begin(&mut o, 0, 6).unwrap()[0], 0b11_1111);
         p.write_unpin(&mut o, 0, 0, PAGE);
-        p.write_pin(&mut o, 1).unwrap(); // dirtied inside
+        p.admit(&mut o, 1, Writer::Pager).unwrap(); // dirtied inside
         p.write_unpin(&mut o, 1, 1, 2 * PAGE);
-        p.resize(&mut o, 5 * PAGE); // page 5 removed inside
+        p.resize(&mut o, 5 * PAGE).unwrap(); // page 5 removed inside
         p.fail(&mut o, 4, 1).unwrap(); // page 4 failed inside
         assert_eq!(p.dirty_held(), 4, "a revoking page's bytes are no longer written back");
         assert_eq!(settle(&mut p, &mut o), [5, 4]);
@@ -1562,7 +1947,7 @@ mod tests {
         p.supply(&mut o, 2, 12, true, 3 * PAGE).unwrap();
         p.supply(&mut o, 3, 13, false, 4 * PAGE).unwrap();
         p.writeback_begin(&mut o, 2, 1).unwrap(); // clean but under write-back
-        p.write_pin(&mut o, 3).unwrap(); // write-pinned
+        p.admit(&mut o, 3, Writer::Pager).unwrap(); // write-pinned
         assert_eq!(p.withdraw(&mut o, 0, 4, &mut Nobody).0, 1);
         assert_eq!(p.lookup(&o, 0), Lookup::Absent, "revoking reads as absent");
         assert_eq!(settle(&mut p, &mut o), [10]);
@@ -1649,11 +2034,11 @@ mod tests {
         for page in 0..3 {
             p.supply(&mut o, page, page + 100, true, (page + 1) * PAGE).unwrap();
         }
-        assert_eq!(p.resize(&mut o, PAGE + 5), Some(101));
+        assert_eq!(p.resize(&mut o, PAGE + 5), Ok(Some(101)));
         assert_eq!(p.dirty_held(), 2);
         assert_eq!(p.lookup(&o, 2), Lookup::PastEnd);
         assert_eq!(settle(&mut p, &mut o), [102]);
-        assert_eq!(p.resize(&mut o, 4 * PAGE), None, "growth removes nothing");
+        assert_eq!(p.resize(&mut o, 4 * PAGE), Ok(None), "growth removes nothing");
         assert_eq!(p.lookup(&o, 2), Lookup::Absent, "and leaves the new range absent");
     }
 
@@ -1722,6 +2107,370 @@ mod tests {
         assert_eq!(p.used(), model.len());
     }
 
+    /// A holder's write spends a credit for each page it turns dirty and
+    /// none for a page already dirty; at 0 it is refused with nothing
+    /// changed. A page under write-back costs a credit again, as a
+    /// copy-on-write volume needs new room for it. The pager's writes spend
+    /// none. Granting 0 takes the credit back.
+    #[test]
+    fn a_holder_spends_a_credit_for_each_page_it_turns_dirty() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, 3 * PAGE);
+        for page in 0..3 {
+            p.supply(&mut o, page, page, false, (page + 1) * PAGE).unwrap();
+        }
+        assert_eq!(p.admit(&mut o, 0, Writer::Holder), Err(Refused::NoCredit), "no credit granted");
+        assert_eq!(p.dirty_held(), 0, "a refusal changes nothing");
+        assert_eq!(o.grant(2), 2);
+        assert_eq!(p.admit(&mut o, 0, Writer::Holder), Ok(0));
+        p.write_unpin(&mut o, 0, 0, PAGE);
+        assert_eq!(o.credit(), 1);
+        assert_eq!(p.admit(&mut o, 0, Writer::Holder), Ok(0), "already dirty");
+        p.write_unpin(&mut o, 0, 0, PAGE);
+        assert_eq!(o.credit(), 1, "a dirty page costs nothing again");
+        p.writeback_begin(&mut o, 0, 1).unwrap();
+        assert_eq!(p.admit(&mut o, 0, Writer::Holder), Ok(0), "under write-back");
+        p.write_unpin(&mut o, 0, 0, PAGE);
+        assert_eq!(o.credit(), 0, "a page under write-back needs room again");
+        assert_eq!(p.admit(&mut o, 1, Writer::Holder), Err(Refused::NoCredit));
+        assert_eq!(p.admit(&mut o, 1, Writer::Pager), Ok(1), "the pager reserved its own");
+        p.write_unpin(&mut o, 1, 1, 2 * PAGE);
+        assert_eq!(o.credit(), 0);
+        o.grant(5);
+        assert_eq!(o.take_back(), 5, "what was not spent is taken back");
+        assert_eq!(o.credit(), 0);
+    }
+
+    /// A write past every page the size reaches needs no supply: a fresh
+    /// page is installed dirty and pinned, against the same admission.
+    #[test]
+    fn a_holder_appends_into_a_fresh_page_against_the_same_admission() {
+        let mut p = Pages::new(8, 1).unwrap();
+        let mut o = p.object(2, 100);
+        assert_eq!(p.admit_fresh(&mut o, 0, 9, Writer::Holder), Err(Refused::InvalidArgument), "page 0 holds bytes");
+        assert_eq!(p.admit_fresh(&mut o, 1, 9, Writer::Holder), Err(Refused::NoCredit));
+        o.grant(1);
+        assert_eq!(p.admit_fresh(&mut o, 1, 9, Writer::Holder), Ok(()));
+        assert_eq!(o.size(), 100, "the size waits for the unpin");
+        assert_eq!(p.admit_fresh(&mut o, 1, 10, Writer::Holder), Err(Refused::InvalidArgument), "present now");
+        p.write_unpin(&mut o, 1, 9, PAGE + 10);
+        assert_eq!(o.size(), PAGE + 10);
+        assert_eq!(p.lookup(&o, 1), Lookup::Present(9));
+        o.grant(1);
+        assert_eq!(p.admit_fresh(&mut o, 2, 11, Writer::Holder), Err(Refused::DirtyFull), "the ceiling holds");
+        assert_eq!(o.credit(), 1, "and spends nothing");
+    }
+
+    /// A sealed object refuses every write, the pager's included, and every
+    /// size change; reads go on.
+    #[test]
+    fn a_sealed_object_refuses_every_write_and_resize() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(3, PAGE);
+        p.supply(&mut o, 0, 1, false, PAGE).unwrap();
+        o.grant(4);
+        o.seals = 1;
+        assert_eq!(p.admit(&mut o, 0, Writer::Holder), Err(Refused::Sealed));
+        assert_eq!(p.admit(&mut o, 0, Writer::Pager), Err(Refused::Sealed));
+        assert_eq!(p.admit_fresh(&mut o, 1, 2, Writer::Holder), Err(Refused::Sealed));
+        assert_eq!(p.supply(&mut o, 1, 2, true, 2 * PAGE), Err(Refused::Sealed));
+        assert_eq!(p.resize(&mut o, 0), Err(Refused::Sealed));
+        assert_eq!(p.resize(&mut o, 4 * PAGE), Err(Refused::Sealed));
+        assert_eq!((o.size(), o.credit(), p.dirty_held()), (PAGE, 4, 0), "nothing changed");
+        assert_eq!(p.lookup(&o, 0), Lookup::Present(1));
+        o.seals = 0;
+        assert_eq!(p.admit(&mut o, 0, Writer::Holder), Ok(1));
+    }
+
+    /// A holder's write is refused whole, with nothing admitted, where any
+    /// page of it would be: an unsupplied or failed page, credit or the dirty
+    /// ceiling short for the pages it turns dirty, or no slot for its fresh
+    /// ones. Pages already dirty cost nothing; pages past the size are fresh.
+    #[test]
+    fn a_holders_write_is_checked_whole_before_any_page_is_admitted() {
+        let mut p = Pages::new(8, 3).unwrap();
+        let mut o = p.object(1, 3 * PAGE);
+        p.supply(&mut o, 0, 10, false, PAGE).unwrap();
+        p.supply(&mut o, 1, 11, true, 2 * PAGE).unwrap();
+        assert_eq!(p.holder_fits(&o, 0, 3), Err(Refused::Absent), "page 2 lies inside the size, unsupplied");
+        assert_eq!(p.holder_fits(&o, 0, 2), Err(Refused::NoCredit), "page 0 turns dirty with no credit");
+        o.grant(1);
+        assert_eq!(p.holder_fits(&o, 0, 2), Ok(0), "page 1 is dirty already");
+        assert_eq!(p.holder_fits(&o, 1, 3), Err(Refused::Absent));
+        p.supply(&mut o, 2, 12, false, 3 * PAGE).unwrap();
+        assert_eq!(p.holder_fits(&o, 2, 3), Err(Refused::NoCredit), "pages 3 and 4 are fresh and need credit too");
+        o.grant(2);
+        assert_eq!(p.holder_fits(&o, 2, 3), Err(Refused::DirtyFull), "1 dirty and 3 more pass a ceiling of 3");
+        assert_eq!(p.holder_fits(&o, 2, 2), Ok(1), "page 3 is fresh");
+        assert_eq!((o.credit(), p.dirty_held()), (3, 1), "a check changes nothing");
+        p.fail(&mut o, 0, 1).unwrap();
+        assert_eq!(p.holder_fits(&o, 0, 1), Err(Refused::Absent), "a failed page is the pager's to supply again");
+        o.seals = 1;
+        assert_eq!(p.holder_fits(&o, 1, 1), Err(Refused::Sealed));
+        let mut small = Pages::new(1, 1).unwrap();
+        let mut m = small.anonymous(2, 0);
+        assert_eq!(small.holder_fits(&m, 0, 1), Ok(1), "anonymous memory needs no credit");
+        assert_eq!(small.holder_fits(&m, 0, 2), Err(Refused::NoRoom), "but a slot for each fresh page");
+        small.resize(&mut m, 2 * PAGE).unwrap();
+        assert_eq!(small.admit_fresh(&mut m, 1, 7, Writer::Holder), Ok(()), "a hole inside the size reads as zeros");
+        assert_eq!(small.holder_fits(&m, 0, 2), Err(Refused::NoRoom), "page 1 holds the only slot");
+    }
+
+    /// A revoking page takes no write: a holder's check finds it absent, and
+    /// neither an admission nor a fresh page lands on it. The room a holder's
+    /// credit paid for it is credit again as it is marked, as for a page gone
+    /// before its write-back, and its walk's end gives back nothing twice.
+    #[test]
+    fn a_revoking_page_takes_no_write_and_gives_its_credit_back_once() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, 2 * PAGE);
+        p.supply(&mut o, 0, 10, false, PAGE).unwrap();
+        p.supply(&mut o, 1, 11, false, 2 * PAGE).unwrap();
+        o.grant(1);
+        p.admit(&mut o, 1, Writer::Holder).unwrap();
+        p.write_unpin(&mut o, 1, 11, 2 * PAGE);
+        assert_eq!(o.credit(), 0);
+        p.resize(&mut o, PAGE).unwrap();
+        assert_eq!(o.credit(), 1, "marked revoking, the page needs none of its room");
+        assert_eq!(p.holder_fits(&o, 1, 1), Err(Refused::Absent));
+        assert_eq!(p.admit(&mut o, 1, Writer::Pager), Err(Refused::InvalidArgument));
+        assert_eq!(p.admit_fresh(&mut o, 1, 12, Writer::Holder), Err(Refused::InvalidArgument));
+        assert_eq!(settle(&mut p, &mut o), [11]);
+        assert_eq!(o.credit(), 1, "the walk's end gives nothing twice");
+        assert_eq!(p.holder_fits(&o, 1, 1), Ok(1), "past the size, a fresh page once the walk ended");
+    }
+
+    /// The first page a holder dirties owes the pager one notice; later ones
+    /// widen the range without another, until the pager takes it. A shrink
+    /// keeps only what lies inside the size.
+    #[test]
+    fn a_holders_dirtying_is_told_once_until_the_pager_takes_it() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, PAGE);
+        p.supply(&mut o, 0, 10, false, PAGE).unwrap();
+        o.grant(8);
+        assert!(!o.take_tell());
+        p.admit(&mut o, 0, Writer::Pager).unwrap();
+        p.write_unpin(&mut o, 0, 10, PAGE);
+        assert!(!o.take_tell(), "the pager's own writes are its to know");
+        p.writeback_begin(&mut o, 0, 1).unwrap();
+        p.writeback_end(&mut o, 0, 1, true).unwrap();
+        p.admit(&mut o, 0, Writer::Holder).unwrap();
+        p.write_unpin(&mut o, 0, 10, PAGE);
+        assert!(o.take_tell(), "the first page a holder dirties");
+        p.admit_fresh(&mut o, 3, 13, Writer::Holder).unwrap();
+        p.write_unpin(&mut o, 3, 13, 4 * PAGE);
+        assert!(!o.take_tell(), "told once");
+        assert_eq!(o.take_dirtied(), Some((0, 4)));
+        assert_eq!(o.take_dirtied(), None);
+        p.admit_fresh(&mut o, 5, 15, Writer::Holder).unwrap();
+        p.write_unpin(&mut o, 5, 15, 5 * PAGE + 1);
+        assert!(o.take_tell(), "owed again once taken");
+        p.resize(&mut o, 2 * PAGE).unwrap();
+        assert_eq!(o.take_dirtied(), None, "a shrink takes what lay past it");
+    }
+
+    /// **A model of the kernel's protocol, not its code**: a holder's read of
+    /// two pages, two holders' writes (one of them twice) and a write the
+    /// pager makes, each step an atomic action on the object under its
+    /// pager's lock, driven through every interleaving. They follow
+    /// `kernel/src/object/paged.rs` and the file server: a read that meets a
+    /// write, begun or under way, waits for its end and reads again, and at
+    /// the [`WRITES_A_READ_MEETS`]th asks the pager, which reads under its
+    /// hold; a holder's write that cannot take the side asks the pager, which
+    /// writes it after what it was asked before. Every read is one write's
+    /// generation, no two writes are under way at once, nothing deadlocks,
+    /// and no holder's write takes the side while the pager waits for it.
+    #[test]
+    fn every_interleaving_reads_whole_writes_one_at_a_time_and_the_pager_is_not_overtaken() {
+        use std::collections::HashSet;
+        use std::vec;
+
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        enum Ask {
+            Write(u64),
+            Read,
+        }
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        enum Reader {
+            Begin { met: u32 },
+            Waiting { met: u32 },
+            Copy { v: Version, at: usize, got: [u64; 2], met: u32 },
+            Asked,
+            Done,
+        }
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        enum Writer {
+            Take(Vec<u64>),
+            Write(Vec<u64>, usize),
+            Gone,
+        }
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        enum Pager {
+            Idle,
+            Taking(Ask),
+            Write(u64, usize),
+            Read(usize, [u64; 2]),
+        }
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        struct World {
+            o: Object,
+            page: [u64; 2],
+            reader: Reader,
+            writers: [Writer; 2],
+            pager: Pager,
+            asked: Vec<Ask>,
+        }
+
+        /// The read met one more write, once: it waits for its end, or asks
+        /// the pager.
+        fn meets(asked: &mut Vec<Ask>, met: u32) -> Reader {
+            if met + 1 >= WRITES_A_READ_MEETS {
+                asked.push(Ask::Read);
+                Reader::Asked
+            } else {
+                Reader::Waiting { met: met + 1 }
+            }
+        }
+
+        fn steps(w: &World) -> Vec<World> {
+            let mut next = Vec::new();
+            let mut r = w.clone();
+            match w.reader.clone() {
+                Reader::Begin { met } => {
+                    r.reader = match r.o.read_begin() {
+                        Some(v) => Reader::Copy { v, at: 0, got: [0; 2], met },
+                        None => meets(&mut r.asked, met),
+                    };
+                    next.push(r);
+                }
+                Reader::Waiting { met } if w.o.read_begin().is_some() => {
+                    r.reader = Reader::Begin { met };
+                    next.push(r);
+                }
+                Reader::Copy { v, at, mut got, met } if at < 2 => {
+                    got[at] = w.page[at];
+                    r.reader = Reader::Copy { v, at: at + 1, got, met };
+                    next.push(r);
+                }
+                Reader::Copy { v, got, met, .. } => {
+                    if r.o.unchanged(v) {
+                        assert_eq!(got[0], got[1], "a read met half a write");
+                        r.reader = Reader::Done;
+                    } else {
+                        r.reader = meets(&mut r.asked, met);
+                    }
+                    next.push(r);
+                }
+                _ => {}
+            }
+            for k in 0..2 {
+                let mut n = w.clone();
+                match w.writers[k].clone() {
+                    Writer::Take(gens) if !gens.is_empty() => {
+                        let pager_waits = n.o.pager_waiting;
+                        if n.o.take_holder() {
+                            assert!(!pager_waits, "a holder's write took the side the pager waits for");
+                            n.writers[k] = Writer::Write(gens, 0);
+                        } else {
+                            // Refused, the holder asks the pager to write it.
+                            n.asked.push(Ask::Write(gens[0]));
+                            n.writers[k] = if gens.len() > 1 { Writer::Take(gens[1..].to_vec()) } else { Writer::Gone };
+                        }
+                        next.push(n);
+                    }
+                    Writer::Write(gens, at) if at < 2 => {
+                        assert_eq!(n.o.side(), Side::Holder, "a holder wrote without the side");
+                        n.page[at] = gens[0];
+                        n.writers[k] = Writer::Write(gens, at + 1);
+                        next.push(n);
+                    }
+                    Writer::Write(gens, _) => {
+                        n.o.give(Side::Holder);
+                        n.writers[k] = if gens.len() > 1 { Writer::Take(gens[1..].to_vec()) } else { Writer::Gone };
+                        next.push(n);
+                    }
+                    _ => {}
+                }
+            }
+            let mut p = w.clone();
+            match w.pager {
+                Pager::Idle if !w.asked.is_empty() => {
+                    let ask = p.asked.remove(0);
+                    p.pager = Pager::Taking(ask);
+                    next.push(p);
+                }
+                Pager::Taking(ask) => {
+                    let before = p.o.clone();
+                    if p.o.take_pager() {
+                        p.pager = match ask {
+                            Ask::Write(g) => Pager::Write(g, 0),
+                            Ask::Read => Pager::Read(0, [0; 2]),
+                        };
+                        next.push(p);
+                    } else if p.o != before {
+                        // The first refused take marks the pager waiting.
+                        next.push(p);
+                    }
+                }
+                Pager::Write(g, at) if at < 2 => {
+                    assert_eq!(p.o.side(), Side::Pager, "the pager wrote without the side");
+                    p.page[at] = g;
+                    p.pager = Pager::Write(g, at + 1);
+                    next.push(p);
+                }
+                Pager::Read(at, mut got) if at < 2 => {
+                    got[at] = p.page[at];
+                    p.pager = Pager::Read(at + 1, got);
+                    next.push(p);
+                }
+                Pager::Read(_, got) => {
+                    assert_eq!(got[0], got[1], "the pager's read for the reader met half a write");
+                    p.o.give(Side::Pager);
+                    p.reader = Reader::Done;
+                    p.pager = Pager::Idle;
+                    next.push(p);
+                }
+                Pager::Write(..) => {
+                    p.o.give(Side::Pager);
+                    p.pager = Pager::Idle;
+                    next.push(p);
+                }
+                _ => {}
+            }
+            next
+        }
+
+        let mut p = Pages::<u64>::new(4, 4).unwrap();
+        let start = World {
+            o: p.object(1, 2 * PAGE),
+            page: [0; 2],
+            reader: Reader::Begin { met: 0 },
+            writers: [Writer::Take(vec![1, 2]), Writer::Take(vec![3])],
+            pager: Pager::Idle,
+            asked: vec![Ask::Write(4)],
+        };
+        let (mut seen, mut stack, mut ends, mut asked_reads) = (HashSet::new(), vec![start], 0, 0);
+        while let Some(w) = stack.pop() {
+            if !seen.insert(w.clone()) {
+                continue;
+            }
+            asked_reads += usize::from(w.reader == Reader::Asked);
+            let next = steps(&w);
+            if next.is_empty() {
+                let finished = w.reader == Reader::Done
+                    && w.writers.iter().all(|x| *x == Writer::Gone)
+                    && w.pager == Pager::Idle
+                    && w.asked.is_empty();
+                assert!(finished, "an interleaving deadlocked");
+                ends += 1;
+            }
+            stack.extend(next);
+        }
+        assert!(ends > 0 && seen.len() > 1000, "{} states, {ends} ends: the model explored too little", seen.len());
+        assert!(asked_reads > 0, "no interleaving sent the read to the pager");
+    }
+
     /// A page made absent again by a shrink and a grow, or by a dirty supply
     /// refused over its failure, moves the version, which ends a holder's
     /// wait; a withdraw does not, and names the waiter's range again instead.
@@ -1733,18 +2482,18 @@ mod tests {
         assert!(!p.wait_over(&o, 0, since), "absent");
         p.supply(&mut o, 0, 7, false, PAGE).unwrap();
         assert!(p.wait_over(&o, 0, since), "supplied");
-        p.resize(&mut o, 0);
+        p.resize(&mut o, 0).unwrap();
         settle(&mut p, &mut o);
-        p.resize(&mut o, PAGE);
+        p.resize(&mut o, PAGE).unwrap();
         assert_eq!(p.lookup(&o, 0), Lookup::Absent);
         assert!(p.wait_over(&o, 0, since), "shrunk and grown back before the reader looked");
 
         let mut failed = p.object(2, PAGE);
         let since = failed.read_begin().unwrap();
         p.fail(&mut failed, 0, 1).unwrap();
-        failed.write_begin();
+        assert!(failed.take_pager());
         assert_eq!(p.supply(&mut failed, 0, 8, true, PAGE), Err(Refused::DirtyFull));
-        failed.write_end(true);
+        failed.give(Side::Pager);
         assert_eq!(p.lookup(&failed, 0), Lookup::Absent, "the refused supply took the failure");
         assert!(p.wait_over(&failed, 0, since), "a write over the failure before the reader looked");
 
@@ -1804,6 +2553,8 @@ mod tests {
             want: Want,
             /// The read waits; `false` once it answered.
             waits: bool,
+            /// The writes the read met.
+            met: u32,
             asked: bool,
             next: u64,
         }
@@ -1816,7 +2567,7 @@ mod tests {
                 let since = o.read_begin().unwrap();
                 let mut want = Want::NONE;
                 want.ask(0, 1);
-                World { p, o, since, want, waits: true, asked: false, next: 10 }
+                World { p, o, since, want, waits: true, met: 0, asked: false, next: 10 }
             }
 
             pub(super) fn step(&mut self, step: Step) -> bool {
@@ -1831,17 +2582,17 @@ mod tests {
                         self.settle();
                     }
                     Step::Shrink if self.o.size() == PAGE => {
-                        self.p.resize(&mut self.o, 0);
+                        self.p.resize(&mut self.o, 0).unwrap();
                         self.settle();
                     }
                     Step::Grow if self.o.size() == 0 => {
-                        self.p.resize(&mut self.o, PAGE);
+                        self.p.resize(&mut self.o, PAGE).unwrap();
                         self.settle();
                     }
                     Step::Refused => {
-                        self.o.write_begin();
+                        assert!(self.o.take_pager());
                         let _ = self.p.supply(&mut self.o, 0, next, true, PAGE);
-                        self.o.write_end(true);
+                        self.o.give(Side::Pager);
                     }
                     Step::Supply => {
                         let _ = self.p.supply(&mut self.o, 0, next, false, PAGE);
@@ -1856,9 +2607,20 @@ mod tests {
                         }
                     }
                     Step::Look if self.waits && self.p.wait_over(&self.o, 0, self.since) => {
-                        // As the read loop: a moved version answers
-                        // `WouldBlock`; else the page decides.
-                        let absent = self.o.unchanged(self.since) && matches!(self.p.lookup(&self.o, 0), Lookup::Absent);
+                        // As the read loop: a moved version begins the read
+                        // again, asking anew, until it met
+                        // `WRITES_A_READ_MEETS` writes and asks the pager;
+                        // else the page decides.
+                        if !self.o.unchanged(self.since) {
+                            self.met += 1;
+                            if self.met >= WRITES_A_READ_MEETS {
+                                self.waits = false;
+                                return true;
+                            }
+                            self.since = self.o.read_begin().unwrap();
+                            self.want.anew();
+                        }
+                        let absent = matches!(self.p.lookup(&self.o, 0), Lookup::Absent);
                         self.waits = absent;
                         if absent {
                             self.want.ask(0, 1);
@@ -2085,11 +2847,11 @@ mod tests {
                         self.revoke();
                     }
                     Step::Shrink if !self.o.gone() && self.o.size() == 2 * PAGE => {
-                        self.p.resize(&mut self.o, PAGE);
+                        self.p.resize(&mut self.o, PAGE).unwrap();
                         self.revoke();
                     }
                     Step::Grow if !self.o.gone() && self.o.size() == PAGE => {
-                        self.p.resize(&mut self.o, 2 * PAGE);
+                        self.p.resize(&mut self.o, 2 * PAGE).unwrap();
                         self.revoke();
                     }
                     Step::End if !self.o.gone() => {
@@ -2157,7 +2919,8 @@ mod tests {
                             match self.p.lookup(&self.o, page) {
                                 // A write or resize ended the wait: ask afresh.
                                 Lookup::Absent if !self.o.unchanged(since) => {
-                                    want.anew(page, 1);
+                                    want.anew();
+                                    want.ask(page, 1);
                                     self.parked.push((s, page, want, self.o.version()));
                                 }
                                 Lookup::Absent => {

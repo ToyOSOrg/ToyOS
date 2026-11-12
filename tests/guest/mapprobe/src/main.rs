@@ -41,8 +41,9 @@ const READY: &str = "mapprobe-ready";
 const GO: &str = "mapprobe-go";
 const OUT: &str = "mapprobe-out";
 
-/// Every page the pager holds at once.
+/// Every page the pager holds at once, and dirty at once.
 const CAPACITY: u64 = 256;
+const DIRTY: u64 = 2;
 /// The pager's report time, which `parks` holds a supply past.
 const REPORT: Duration = Duration::from_secs(1);
 /// How long a step may take before the probe gives up on it: a failure
@@ -57,7 +58,7 @@ fn main() {
     if args.next().as_deref() == Some("--map") {
         return map(&args.next().expect("mapprobe --map: a case"));
     }
-    let pager = Pager::create(CAPACITY, 0, REPORT).expect("mapprobe: its row starts it as a pager");
+    let pager = Pager::create(CAPACITY, DIRTY, REPORT).expect("mapprobe: its row starts it as a pager");
     let mut served = Served { pager, poller: Poller::new(1), unheld: Vec::new() };
     coherent(&mut served);
     parks(&mut served);
@@ -116,6 +117,15 @@ impl Served {
         self.poller.wait(1, left.as_nanos() as u64, |_| {});
     }
 
+    /// `f` under the pager's hold of `object`'s writes, which its writes and
+    /// truncations need.
+    fn holding<R>(&self, object: u64, f: impl FnOnce(&Pager) -> R) -> R {
+        self.pager.hold(object).expect("mapprobe: a hold");
+        let r = f(&self.pager);
+        self.pager.unhold(object).expect("mapprobe: an unhold");
+        r
+    }
+
     fn supply(&self, object: u64, first: u64, count: u64, byte: u8) {
         let bytes = vec![byte; (count * PAGE) as usize];
         // A page already present was a duplicate's: the kernel installs nothing.
@@ -124,7 +134,7 @@ impl Served {
 
     /// A mapper of `object` for `case`, endowed a holder and `ends`.
     fn mapper(&self, object: u64, case: &str, ends: Vec<(&str, OwnedHandle)>) -> Child {
-        let holder = self.pager.holder(object).expect("mapprobe: a holder to hand on");
+        let holder = self.pager.holder(object, false).expect("mapprobe: a holder to hand on");
         let mut command = Command::new(SELF);
         command.arg("--map").arg(case).endow(HOLDER, holder.into());
         for (label, end) in ends {
@@ -157,7 +167,7 @@ fn coherent(served: &mut Served) {
     let mut child = served.mapper(object, "coherent", vec![(READY, theirs)]);
     assert_eq!(ready.read(&mut [0]), Ok(1), "mapprobe: the coherent mapper never read the supplied page");
     assert!(!served.heard(|n| n == Notice::NoHolders { object }), "mapprobe: a mapped object's last holder was said to go");
-    assert_eq!(served.pager.write(object, 0, &[0x22; PAGE as usize]), Ok(PAGE as usize));
+    assert_eq!(served.holding(object, |pager| pager.write(object, 0, &[0x22; PAGE as usize])), Ok(PAGE as usize));
     assert_eq!(ended(&mut child), End::Exited(0), "mapprobe: the coherent mapper");
     served.unheld(object);
     served.pager.release(object).expect("mapprobe: release");
@@ -242,7 +252,7 @@ fn shrunk(served: &mut Served) {
         assert_eq!(ready.read(&mut [0]), Ok(1), "mapprobe: a mapper never read every page");
         mappers.push((page, child, go));
     }
-    served.pager.resize(object, PAGE).expect("mapprobe: a shrink");
+    served.holding(object, |pager| pager.resize(object, PAGE)).expect("mapprobe: a shrink");
     for (page, mut child, go) in mappers {
         assert_eq!(go.write(&[1]), Ok(1));
         assert_eq!(ended(&mut child), End::Fault(Fault::Mapping), "mapprobe: a touch of page {page} past a shrunk object");

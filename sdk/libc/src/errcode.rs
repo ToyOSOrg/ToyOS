@@ -27,6 +27,7 @@ pub(crate) const EINVAL: i32 = 22;
 pub(crate) const ENFILE: i32 = 23;
 pub(crate) const EMFILE: i32 = 24;
 pub(crate) const ENOTTY: i32 = 25;
+pub(crate) const ETXTBSY: i32 = 26;
 pub(crate) const EFBIG: i32 = 27;
 pub(crate) const ENOSPC: i32 = 28;
 pub(crate) const EROFS: i32 = 30;
@@ -69,6 +70,7 @@ pub(crate) fn of(e: SyscallError) -> i32 {
         SyscallError::ResourceExhausted => ENOMEM,
         SyscallError::NotSupported => EOPNOTSUPP,
         SyscallError::Busy => EBUSY,
+        SyscallError::TextBusy => ETXTBSY,
         _ => EINVAL,
     }
 }

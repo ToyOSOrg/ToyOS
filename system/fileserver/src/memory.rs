@@ -174,6 +174,12 @@ impl Volume for MemoryVolume {
         Ok(())
     }
 
+    fn adopt(&mut self, node: Node, size: u64, mtime: u64) {
+        if let Ok(inode) = self.inode(node) {
+            (inode.meta.size, inode.meta.mtime) = (size, mtime);
+        }
+    }
+
     fn mkdir(&mut self, path: &str) -> Result<(), Error> {
         self.insert(path, Kind::Dir, None)?;
         Ok(())

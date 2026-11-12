@@ -25,16 +25,16 @@ names the client that took it (`issues/no-physical-memory-fairness.md`).
 
 **What one client leaves charged.** The kernel makes a pager's object slots
 256 at a time and keeps every piece for the pager's life (`kernel/pure/slots.rs`).
-A freed slot is taken again, but its piece never goes back. A slot is 136
-bytes: a 120-byte entry and a 12-byte mark, padded. The walk state and list
-of mappers that mapping needs take 64 bytes of every entry. Measured by the
-compiler for both kernel targets:
-https://github.com/ToyOSOrg/evidence/tree/a5fe696e711c2715f4a1bdc0dfa952c1759993fe/r9/sizes
-So the server's job stays charged 136 bytes for each `/tmp` file of the most
+A freed slot is taken again, but its piece never goes back. A slot is 272
+bytes: a 248-byte entry and two 12-byte marks, one for each notice it can
+owe. Of the entry, the object's own state is 152 bytes, the pager's record 64
+and the list of a mapped object's mappers 16; the walk state mapping needs
+is 48 of the object's 152. Every entry carries all of it. Measured by the
+compiler for both kernel targets, against 216 on main before mapping:
+https://github.com/ToyOSOrg/evidence/tree/94fd400ddab5d9c2ff776ac9df66f1b0bb88b768/r12/sizes
+So the server's job stays charged 272 bytes for each `/tmp` file of the most
 it held at once, until the server ends. A client that makes and removes a
-million files leaves about 136 MB. #1258 grows the entry too: whichever of
-#1269 and #1258 lands second measures the combined slot again, updates these
-figures and deletes this sentence. The manual has unused backing return under
+million files leaves about 272 MB. The manual has unused backing return under
 pressure; this never returns.
 
 Owner: the file server and the kernel's paged objects, once the owner has

@@ -122,7 +122,7 @@ fn map_paged(h: RawHandle, space: &alloc::sync::Arc<crate::mm::space::Space>, of
     if prot != Prot::Read {
         return SyscallError::InvalidArgument.to_u64();
     }
-    let holder = match super::paged::holder(h) {
+    let holder = match super::paged::holder(h, Rights::READ) {
         Ok(holder) => holder,
         Err(refused) => return refused,
     };

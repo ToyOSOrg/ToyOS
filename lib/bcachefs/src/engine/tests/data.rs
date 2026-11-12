@@ -751,6 +751,82 @@ fn a_reserved_write_inside_a_large_block_lands_on_that_block() {
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }
 
+/// A pool's blocks are placed where each write lands, anywhere in the file
+/// and in any order, a write across two blocks taking two; spent, it refuses,
+/// grows again, gives back what it holds unwritten, and writes of a write
+/// what its last block fits.
+#[test]
+fn a_pool_places_each_block_where_it_is_written() {
+    let dev = formatted(64 << 20, None);
+    let mut want = vec![0u8; 41 * 4096];
+    want[..10].fill(0xc3);
+    want[2 * 4096 + 100..2 * 4096 + 5100].fill(0xb2);
+    want[20 * 4096..21 * 4096].fill(0xd4);
+    want[40 * 4096..].fill(0xa1);
+    let ino = mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap().ino;
+        let mut pool = m.reserve_blocks(ino, 3).await.unwrap();
+        assert_eq!(m.unwritten_blocks(&pool), 3);
+        assert_eq!(m.write_placed(&mut pool, 40 * 4096, &[0xa1; 4096], NOW).await.unwrap(), 4096);
+        assert_eq!(m.write_placed(&mut pool, 2 * 4096 + 100, &[0xb2; 5000], NOW).await.unwrap(), 5000);
+        assert_eq!(m.unwritten_blocks(&pool), 0);
+        assert!(matches!(m.write_placed(&mut pool, 0, &[1; 10], NOW).await, Err(Error::Invalid(_))), "spent");
+        m.extend_blocks(&mut pool, 4).await.unwrap();
+        assert_eq!(m.write_placed(&mut pool, 0, &[0xc3; 10], NOW).await.unwrap(), 10);
+        let room = m.space().1;
+        assert_eq!(m.cut_blocks(&mut pool, 2), 2, "the highest it held unwritten");
+        assert!(m.space().1 > room, "the blocks cut are room again");
+        assert_eq!(m.write_placed(&mut pool, 20 * 4096, &[0xd4; 2 * 4096], NOW).await.unwrap(), 4096, "one block left of two");
+        assert_eq!(m.cut_blocks(&mut pool, 5), 0, "nothing left unwritten");
+        m.commit().await.unwrap();
+        ino
+    });
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(read_all(&v, ino).unwrap(), want);
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+/// A device that records each data write's first block and length, and
+/// refuses data writes while told to.
+struct Recording<'a> {
+    dev: &'a Image,
+    data: core::cell::RefCell<Vec<(u64, usize)>>,
+    refuse: core::cell::Cell<bool>,
+}
+
+impl BlockDev for Recording<'_> {
+    fn blocks(&self) -> u64 {
+        self.dev.blocks()
+    }
+    async fn read(&self, lba: u64, out: &mut [toyos_blockdev::Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.dev.read(lba, out).await
+    }
+    async fn write(&self, lba: u64, data: &[toyos_blockdev::Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.dev.write(lba, data).await
+    }
+    async fn flush(&self) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.dev.flush().await
+    }
+    async fn write_data(&self, lba: u64, data: &[toyos_blockdev::Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.data.borrow_mut().push((lba, data.len()));
+        if self.refuse.get() {
+            return Err(toyos_blockdev::Error::Device);
+        }
+        self.dev.write(lba, data).await
+    }
+}
+
+/// The data writes `recording` sent: `blocks` blocks in all, each stretch of
+/// contiguous blocks once, and fewer writes than `extents`.
+fn sent_once_each(recording: &Recording<'_>, blocks: usize, extents: usize) {
+    let sent = recording.data.borrow().clone();
+    assert_eq!(sent.iter().map(|&(_, n)| n).sum::<usize>(), blocks);
+    for pair in sent.windows(2) {
+        assert_ne!(pair[0].0 + pair[0].1 as u64, pair[1].0, "two writes for one stretch of contiguous sectors");
+    }
+    assert!(sent.len() < extents, "{} device writes for {extents} extents", sent.len());
+}
+
 /// A reserved write's bytes reach the device as one write for each stretch
 /// of contiguous sectors, however many extents they are, and no pointer
 /// exists until they have: a write the device refuses leaves every extent
@@ -758,33 +834,6 @@ fn a_reserved_write_inside_a_large_block_lands_on_that_block() {
 #[test]
 fn a_reserved_write_sends_each_contiguous_stretch_once_before_any_pointer() {
     use core::cell::{Cell, RefCell};
-    use toyos_blockdev::Block;
-    struct Recording<'a> {
-        dev: &'a Image,
-        data: RefCell<Vec<(u64, usize)>>,
-        refuse: Cell<bool>,
-    }
-    impl BlockDev for Recording<'_> {
-        fn blocks(&self) -> u64 {
-            self.dev.blocks()
-        }
-        async fn read(&self, lba: u64, out: &mut [Block]) -> core::result::Result<(), toyos_blockdev::Error> {
-            self.dev.read(lba, out).await
-        }
-        async fn write(&self, lba: u64, data: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
-            self.dev.write(lba, data).await
-        }
-        async fn flush(&self) -> core::result::Result<(), toyos_blockdev::Error> {
-            self.dev.flush().await
-        }
-        async fn write_data(&self, lba: u64, data: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
-            self.data.borrow_mut().push((lba, data.len()));
-            if self.refuse.get() {
-                return Err(toyos_blockdev::Error::Device);
-            }
-            self.dev.write(lba, data).await
-        }
-    }
     let dev = formatted(256 << 20, None);
     let old = vec![0x11u8; 256 << 10];
     let new: Vec<u8> = (0..256 << 10).map(|i| (i * 7) as u8).collect();
@@ -797,15 +846,41 @@ fn a_reserved_write_sends_each_contiguous_stretch_once_before_any_pointer() {
     let m = block_on_ready(Mount::open(&recording, MEMORY, random())).unwrap();
     let mut token = block_on_ready(m.reserve(ino, 0, new.len())).unwrap();
     assert_eq!(block_on_ready(m.write_reserved(&mut token, 0, &new[..192 << 10], NOW)).unwrap(), 192 << 10);
-    let sent = recording.data.borrow().clone();
-    assert_eq!(sent.iter().map(|&(_, blocks)| blocks).sum::<usize>(), 48);
-    for pair in sent.windows(2) {
-        assert_ne!(pair[0].0 + pair[0].1 as u64, pair[1].0, "two writes for one stretch of contiguous sectors");
-    }
-    assert!(sent.len() < 3, "{} device writes for three extents", sent.len());
+    sent_once_each(&recording, 48, 3);
 
     recording.refuse.set(true);
     assert_eq!(block_on_ready(m.write_reserved(&mut token, 192 << 10, &new[192 << 10..], NOW)), Err(Error::Device(toyos_blockdev::Error::Device)));
+    let mut got = vec![0; old.len()];
+    block_on_ready(m.read(ino, 0, &mut got)).unwrap();
+    assert_eq!(got[..192 << 10], new[..192 << 10]);
+    assert_eq!(got[192 << 10..], old[192 << 10..], "an extent points at bytes the device refused");
+}
+
+/// A pool's write over its contiguous blocks reaches the device as a reserved
+/// write's does: one write for each stretch of contiguous sectors, however
+/// many extents, and no pointer until they have. A write the device refuses
+/// leaves the file as it was.
+#[test]
+fn a_placed_write_sends_each_contiguous_stretch_once_before_any_pointer() {
+    use core::cell::{Cell, RefCell};
+    let dev = formatted(256 << 20, None);
+    let old = vec![0x11u8; 256 << 10];
+    let new: Vec<u8> = (0..256 << 10).map(|i| (i * 7) as u8).collect();
+    let ino = mounted(&dev, async |m: &Mount<&Image>| {
+        let ino = m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap().ino;
+        assert_eq!(m.write(ino, 0, &old, NOW).await.unwrap(), old.len());
+        ino
+    });
+    let recording = Recording { dev: &dev, data: RefCell::default(), refuse: Cell::new(false) };
+    let m = block_on_ready(Mount::open(&recording, MEMORY, random())).unwrap();
+    let mut pool = block_on_ready(m.reserve_blocks(ino, 64)).unwrap();
+    assert_eq!(block_on_ready(m.write_placed(&mut pool, 0, &new[..192 << 10], NOW)).unwrap(), 192 << 10);
+    sent_once_each(&recording, 48, 3);
+    assert_eq!(m.unwritten_blocks(&pool), 16);
+
+    recording.refuse.set(true);
+    assert_eq!(block_on_ready(m.write_placed(&mut pool, 192 << 10, &new[192 << 10..], NOW)), Err(Error::Device(toyos_blockdev::Error::Device)));
+    assert_eq!(m.unwritten_blocks(&pool), 16, "a refused write spends no block");
     let mut got = vec![0; old.len()];
     block_on_ready(m.read(ino, 0, &mut got)).unwrap();
     assert_eq!(got[..192 << 10], new[..192 << 10]);

@@ -16,6 +16,22 @@ reserved block not yet written. A block of 4 KiB therefore holds as much
 metadata room as data until write-back, and a large write needs about twice
 its size free. Main's private format had no such limit.
 
+Holders' writes widen it. A DATA file a holder may write holds a pool of 64
+reserved blocks for as long as a write holder of it lives, room for the
+credit its holders are granted (`system/fileserver/src/pages.rs`'s `BULK`),
+and each block holds its metadata credit beside it: 512 KiB of free space a
+file open to write, whether it writes or not, until its last holder goes and
+its pages are written back. Many files open to write at once, as a build
+holds, take that much free space each before they write a byte.
+
+- **Owed on metal:** the measurement behind `BULK`. `osbench_disk` on the
+  T14 at main after #1258, with a bulk of 64, and on main with the bulk set to
+  16 and to 256 pages, one boot each. Those two are scratch builds that never
+  land, and a second boot each is owed where two boots differ by more than
+  their spread. This is a measurement, not a bar. Main must show where
+  `fs.disk.write_4k_at` and `fs.disk.seq_write.4096` stand at each bulk, so
+  that 64 is kept or changed on that evidence.
+
 **Evidence.** On QEMU's 128 MiB DATA, osbench's 16 MiB setup file is refused
 for space (#1152's QEMU run of the `fs.disk` rows). The benches' DATA
 partitions are large enough that no row reaches it.
@@ -23,5 +39,5 @@ partitions are large enough that no row reaches it.
 **Exit.** Credit by what write-back will journal: one transaction's credit
 for each run of contiguous reserved blocks, which `write_run` writes as one
 extent, or for each transaction write-back is expected to take, instead of
-for each block. A test that reserves a write of most of a small volume's free
-space and writes it back.
+for each block, a holders' pool included. A test that reserves a write of
+most of a small volume's free space and writes it back.

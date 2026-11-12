@@ -3656,11 +3656,11 @@ fn a_mapped_file_follows_its_pager(test_config: &Path) -> Result<(), String> {
         return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
     }
     // The probe's own stalled run, pages 16 to 32, not any pager's slow read.
-    let overdue = |line: &str| line.contains("'s pager has a read overdue: object ") && line.contains(" pages 16+16, ");
+    let overdue = |line: &str| line.contains("'s pager has a wait overdue: object ") && line.contains(" pages 16+16, ");
     if !result.serial.lines().any(overdue) {
         return Err(format!("the kernel never said the probe's run was overdue:\n{}", result.serial));
     }
-    if !result.serial.contains("'s pager has no read overdue") {
+    if !result.serial.contains("'s pager has no wait overdue") {
         return Err(format!("the kernel never said the overdue wait ended:\n{}", result.serial));
     }
     Ok(())

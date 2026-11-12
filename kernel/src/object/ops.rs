@@ -60,7 +60,7 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::EventSignal(_) => Rights::DUP.union(Rights::TRANSFER).union(Rights::WRITE),
         KObjectRef::EventWait(_) => BASE.union(Rights::READ),
         KObjectRef::Pager(_) => super::paged::PagerObject::RIGHTS,
-        KObjectRef::Paged(_) => super::paged::PagedHolderObject::RIGHTS,
+        KObjectRef::Paged(h) => h.rights(),
         // Neither `DUP` nor `TRANSFER`: the set is its minter's alone.
         KObjectRef::DeviceSet(_) => Rights::READ.union(Rights::WAIT),
     }

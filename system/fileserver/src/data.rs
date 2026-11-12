@@ -1,5 +1,8 @@
 //! Writable bcachefs DATA. Descriptions hold inode identities; buffered
 //! sizes and capacity reservations stay here until their pages are written.
+//! A write of the server's reserves the pages it covers; the pages holders
+//! of a file's object dirty are written into its pool, room granted ahead
+//! and placed at write-back.
 
 use crate::cache::{Cache, Disk};
 use crate::volume::{Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume, WriteBack, parent};
@@ -46,6 +49,8 @@ struct Open {
     /// Where the tail's reservation ended before the current write extended
     /// it.
     extended_from: Option<u64>,
+    /// Room for pages holders dirty, written wherever they lie.
+    pool: Option<Reservation>,
 }
 impl Open {
     /// A page no longer needs `ticket`'s capacity.
@@ -415,6 +420,7 @@ impl<D: Disk> Volume for DataVolume<D> {
                 incoming: BTreeMap::new(),
                 tail: None,
                 extended_from: None,
+                pool: None,
             })
             .holders += 1;
         if how.truncate
@@ -548,10 +554,25 @@ impl<D: Disk> Volume for DataVolume<D> {
         let first = offset / BLOCK as u64;
         let pages = data.len().div_ceil(BLOCK) as u64;
         let mut done = 0;
-        // Each run of pages under one write's capacity goes out at once.
+        // Each run of pages under one write's capacity goes out at once, and
+        // each run of pages no write of the server's reserved into the pool.
         while done < data.len() {
             let page = first + (done / BLOCK) as u64;
-            let ticket = *open.pages.get(&page).ok_or((done, Error::Io))?;
+            let Some(&ticket) = open.pages.get(&page) else {
+                let pool = open.pool.as_mut().ok_or((done, Error::Io))?;
+                let run = (page..first + pages).take_while(|p| !open.pages.contains_key(p)).count();
+                let len = (run * BLOCK).min(data.len() - done);
+                let written = mapped(
+                    "pooled writeback",
+                    self.cache.block_on(self.fs.write_placed(pool, offset + done as u64, &data[done..done + len], time(open.mtime))),
+                )
+                .map_err(|error| (done, error))?;
+                if written != len {
+                    return Err((done + written / BLOCK * BLOCK, Error::Io));
+                }
+                done += len;
+                continue;
+            };
             let run = (page..first + pages).take_while(|p| open.pages.get(p) == Some(&ticket)).count();
             let len = (run * BLOCK).min(data.len() - done);
             let capacity = &mut open.capacity.get_mut(&ticket).expect("a page's write holds capacity").reservation;
@@ -594,6 +615,33 @@ impl<D: Disk> Volume for DataVolume<D> {
         open.mtime = mtime;
         open.changed = true;
         Ok(())
+    }
+    fn grants(&self) -> bool {
+        true
+    }
+    fn grant(&mut self, node: Node, pages: u64) -> Result<(), Error> {
+        let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
+        let blocks = pages * (BLOCK as u64).div_ceil(self.fs.block_bytes());
+        match &mut open.pool {
+            Some(pool) => self.cache.block_on(self.fs.extend_blocks(pool, blocks)).map_err(word),
+            None => {
+                open.pool = Some(self.cache.block_on(self.fs.reserve_blocks(node, blocks)).map_err(word)?);
+                Ok(())
+            }
+        }
+    }
+    fn ungrant(&mut self, node: Node, pages: u64) {
+        let blocks = pages.saturating_mul((BLOCK as u64).div_ceil(self.fs.block_bytes()));
+        if let Some(pool) = self.open.get_mut(&node).and_then(|open| open.pool.as_mut()) {
+            self.fs.cut_blocks(pool, blocks);
+        }
+    }
+    fn adopt(&mut self, node: Node, size: u64, mtime: u64) {
+        if let Some(open) = self.open.get_mut(&node)
+            && (open.size, open.mtime) != (size, mtime)
+        {
+            (open.size, open.mtime, open.changed) = (size, mtime, true);
+        }
     }
     fn mkdir(&mut self, path: &str) -> Result<(), Error> {
         let (dir, name) = self.destination(path)?;

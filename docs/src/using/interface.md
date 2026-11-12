@@ -24,7 +24,7 @@ Every system call is one of these families:
 | Waiting | Watch any set of objects for readiness, and wait |
 | Processes | Spawn from memory ranges the parent lays out, with endowments; wait for and stop a child |
 | Communication | Pipes, service ports, connections carrying bytes and handles, inboxes |
-| Shared and paged memory | Create, map and lend memory; supply pages as a pager |
+| Shared and paged memory | Create, map and lend memory; supply pages as a pager; read, write and state what a pager holds |
 | Devices | Claim through the system capability, map device memory, grant DMA, wait for interrupts |
 | Machine facts | Clock, CPU count, randomness, overall memory |
 | Privileged | Listing processes, reading the log and counters, real-time scheduling, power: each a right on the system capability |
