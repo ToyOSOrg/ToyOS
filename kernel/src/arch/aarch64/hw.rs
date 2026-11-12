@@ -79,8 +79,9 @@ impl Hw for KernelHw {
     unsafe fn switch(&self, token: RunToken<KernelPayload>) {
         let save = token.save_ptr();
         let restore = token.restore_ptr();
-        // Every context is saved masked, so `context_switch`'s `msr daif`
-        // never unmasks; the resumed context's own guard puts back what it had.
+        // Under `mask-windows` every context is saved masked, so
+        // `context_switch`'s `msr daif` never unmasks; the resumed context's
+        // own guard puts back what it had.
         #[cfg(feature = "mask-windows")]
         let _masked = crate::arch::IrqGuard::close();
         // SAFETY: `save`/`restore` are live Box-backed contexts from
@@ -107,7 +108,7 @@ impl Hw for KernelHw {
                 incoming.root.activate();
             }
             crate::hw::note_running(restore);
-            context_switch(&raw mut (*save).sp, sp);
+            context_switch(&raw mut (*save).sp, sp, token.left_ptr());
         }
     }
 

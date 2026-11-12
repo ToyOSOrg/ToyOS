@@ -715,6 +715,24 @@ pub(crate) const CONTROLS: &[Control] = &[
         test: "an_ask_is_taken_by_the_pass_its_ring_owes",
         message: "the ask was neither taken nor owed a pass: it is lost",
     }]),
+    // A claimant blind to the on-CPU word: a task is sent on while its home
+    // still stands on its context, and the CPU it reaches resumes a context
+    // nothing has saved.
+    red(KERNEL, "forward-ignores-on-cpu", None, &[Says {
+        test: "sched::cpu::tests::a_claim_before_the_homes_switch_goes_home",
+        message: "cpu1 ran a task its home still stands on",
+    }]),
+    red(KERNEL_LOOM, "forward-ignores-on-cpu", Some("loom_claimed_wake"), &[Says {
+        test: "a_claim_sends_a_task_on_only_once_its_home_has_saved_it",
+        message: "Causality violation: Concurrent write accesses to `UnsafeCell`",
+    }]),
+    red(KERNEL_SIM, "forward-ignores-on-cpu", Some("scenarios"), &[
+        Fails("a_claim_never_sends_on_a_context_its_home_has_not_saved"),
+        Says {
+            test: "a_claim_never_sends_on_a_context_its_home_has_not_saved",
+            message: "I11: resumed TaskKey(1) whose context was never saved",
+        },
+    ]),
     // The isolation test reds, and the SDM's own judge of the allocator sees
     // the cross-space read it lets through.
     red(KERNEL, "counting-allocator", None, &[

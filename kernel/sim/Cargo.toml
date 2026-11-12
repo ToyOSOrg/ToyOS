@@ -18,3 +18,7 @@ rand = { version = "0.9", features = ["small_rng"] }
 # path that chooses a CPU believes a stopped one's published load, which is what
 # `a_stopped_cpu_stops_taking_work` measures the cost of.
 placement-ignores-staleness = ["kernel/placement-ignores-staleness"]
+# Passthrough for the on-CPU word's negative control: a claimant sends on a
+# task whose home has not saved its context, and invariant I11 must catch the
+# resume.
+forward-ignores-on-cpu = ["kernel/forward-ignores-on-cpu"]

@@ -18,9 +18,11 @@
 //! cargo run --release -p kernel-sim -- fuzz-sweep 10000000  # 10^7 steps/scenario
 //! ```
 
-// Three exemptions, each a single item and each unavoidable: implementing the
-// `unsafe fn Hw::switch` (twice — the declaration and the call), and asserting
-// the `PreemptGuard` contract. Nothing here dereferences a raw pointer.
+// Four exemptions, each a single item and each unavoidable: implementing the
+// `unsafe fn Hw::switch` (twice — the declaration and the call), asserting the
+// `PreemptGuard` contract, and reading a parked task's record
+// (`Vm::parked_record`), which only a checker on one thread may. Nothing here
+// dereferences a raw pointer.
 #![deny(unsafe_code)]
 
 pub mod choice;

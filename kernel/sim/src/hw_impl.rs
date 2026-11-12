@@ -49,8 +49,8 @@ pub struct SimHwState {
     /// `need_resched`, as the kernel's is. `None` for a device interrupt, which
     /// belongs to no CPU in this model.
     pub poster: Option<CpuId>,
-    /// What a scheduler pass is modelled to cost, in nanoseconds — the only
-    /// thing [`Machine::now`] is read for in this world.
+    /// What a scheduler pass is modelled to cost, in nanoseconds, which
+    /// [`Kicker::now`] adds to the clock inside a pass.
     ///
     /// Zero everywhere except `scenarios::overlong_pass`, and that is the
     /// point: the VM's clock does not advance inside a step, so the core's
@@ -135,6 +135,20 @@ impl SimHw {
 }
 
 impl Kicker for SimHw {
+    fn trace(&self, ev: TraceEvent) {
+        self.with(|s| s.trace.push(ev));
+    }
+    /// The VM threads `now` into every pass as a value, so a pass reads this
+    /// only in the core's check-build pass-cost recorder, where it reports the
+    /// pass's modelled cost; outside a pass, a wake that hands a task on reads
+    /// the VM's clock.
+    fn now(&self) -> Nanos {
+        self.with(|s| match s.current {
+            Some(_) => s.now.after(s.pass_cost_ns),
+            None => s.now,
+        })
+    }
+
     fn kick(&self, target: CpuId) {
         self.with(|s| {
             if s.poster == Some(target) {
@@ -154,17 +168,6 @@ impl Kicker for SimHw {
 }
 
 impl Machine for SimHw {
-    /// The VM threads `now` into every pass as a value, so this is read by
-    /// exactly one caller: the core's check-build pass-cost recorder. Inside
-    /// a pass it therefore reports the pass's modelled cost; outside one it is
-    /// the VM's clock.
-    fn now(&self) -> Nanos {
-        self.with(|s| match s.current {
-            Some(_) => s.now.after(s.pass_cost_ns),
-            None => s.now,
-        })
-    }
-
     fn set_timer(&self, deadline: Nanos) {
         self.with(|s| {
             let cpu = Self::cpu(s);
@@ -196,9 +199,6 @@ impl Machine for SimHw {
         self.with(|s| s.need_resched[cpu.0 as usize] = true);
     }
 
-    fn trace(&self, ev: TraceEvent) {
-        self.with(|s| s.trace.push(ev));
-    }
 }
 
 impl Hw for SimHw {
@@ -210,9 +210,6 @@ impl Hw for SimHw {
             let cpu = Self::cpu(s);
             s.switches += 1;
             if let Some(outgoing) = token.outgoing() {
-                // The context is saved by the switch itself — which is
-                // exactly why park-before-switch is safe only when nothing
-                // touches the task between the park and here.
                 s.ctx_saved.insert(outgoing, true);
             }
             if let Some(incoming) = token.incoming() {

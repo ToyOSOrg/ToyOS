@@ -19,7 +19,6 @@
 //! | gate | breaks | caught by |
 //! |---|---|---|
 //! | `old_steal_port` | the old steal-and-scan algorithm | I1 **and** I8 |
-//! | `old_commit_before_pass` | the pre-`8508b37` blocking shape | I1, on every seed that commits at the call site |
 //! | `old_preemptible_window` | preemption left on in the registration window | an abort inside `check_cpu` |
 //! | `old_migrate_kept_the_corpse` | the balance path handing on a killed task | I14 |
 //! | `old_rt_starved_the_corpse` | the RT band outranking the dying list without a bound | I14, on every seed |
@@ -28,10 +27,6 @@
 //! | `fair_double_charge` | a job group charged twice for what it runs | I5, in the opposite direction |
 //! | `fair_lowest_key_within_group` | a group's lowest-keyed thread served, not its EEVDF pick | I13, and nothing else |
 //! | `overlong_pass` | a pass costing five times its budget | `cpu::PassCosts`, which records it rather than aborting |
-//!
-//! The control is `old_commit_fused`, which must come back **clean**: the same
-//! blocking bug with no step boundary to expose it, which is the blind spot
-//! this harness used to have.
 //!
 //! # The liveness gates, which are a different claim
 //!
@@ -67,6 +62,13 @@ use kernel_sim::sweep;
 /// Seeds per scenario in the in-test sweep. Every seed is a complete
 /// exploration with all of I1–I13 checked after every step.
 const SEEDS: u64 = 500;
+
+/// Seeds for [`a_claim_never_sends_on_a_context_its_home_has_not_saved`].
+const CLAIM_SEEDS: u64 = 1_000;
+
+/// Seeds for [`old_migrate_keeping_the_corpse_is_caught`], whose defect a
+/// seeded schedule reaches about once in 140.
+const CORPSE_SEEDS: u64 = 2_000;
 
 /// Steps per scenario in the in-test fuzz sweep.
 const FUZZ_STEPS: u64 = 20_000;
@@ -164,71 +166,20 @@ fn old_steal_port_is_caught() {
     );
 }
 
-/// The second self-validation gate: the kernel's pre-`8508b37` blocking shape,
-/// where phase 2 of the wait handshake ran at the call site instead of inside
-/// the blocking pass. On `--smp 8` that was a panic plus a 30 s hang in roughly
-/// two of five audio suite runs.
-///
-/// It must be caught, and caught by **I1** specifically: a task whose word says
-/// `Blocked` while its own CPU still has it in `running` is a single-ownership
-/// break, and it is the break that makes the lost wake possible — the waker
-/// reads `Blocked`, posts to the home CPU, and that CPU's own pass drains the
-/// message before the task is anywhere a wake can find it.
+/// **A claim never sends on a context its home has not saved.** The
+/// simulator's switch is a step of its own, so a claim can land between the
+/// pass that parks a task and the switch that saves it, and a CPU that ran
+/// the task then is invariant I11's resume of an unsaved context. With the
+/// claimant blind to the on-CPU word, seeded schedules of
+/// `claimed_behind_busy_home` reach that resume about once in 45, so
+/// [`CLAIM_SEEDS`] of them are clean only because the word holds.
 #[test]
-fn old_commit_before_pass_is_caught() {
-    let scenario = scenarios::old_commit_before_pass();
-    let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
-    let (mut caught, mut reached) = (0, 0);
-    let mut worst_steps = 0;
-    for seed in 0..SEEDS {
-        let mut choices = if seed % 2 == 0 {
-            ChoiceStream::from_seed(seed)
-        } else {
-            ChoiceStream::pct(seed, scenario.cpus(), 3)
-        };
-        let outcome = run(scenario.clone(), &mut choices);
-        // The shape is reached the first time a block commits at the call
-        // site and goes on to park: its word then reads `Blocked` while its
-        // CPU still runs it. A schedule in which every block found a token
-        // waiting never executes the defect.
-        let reaches = outcome.call_site_commits > 0;
-        reached += usize::from(reaches);
-        assert_eq!(
-            !outcome.passed(),
-            reaches,
-            "seed {seed}: {} call-site commit(s), and the run {} — the gate must catch exactly \
-             the schedules that commit before the pass",
-            outcome.call_site_commits,
-            if outcome.passed() { "passed" } else { "failed" },
-        );
-        if outcome.passed() {
-            continue;
-        }
-        caught += 1;
-        worst_steps = worst_steps.max(outcome.steps);
-        for violation in &outcome.violations {
-            let id = violation.split(':').next().unwrap_or("?").to_string();
-            *kinds.entry(id).or_default() += 1;
-        }
+fn a_claim_never_sends_on_a_context_its_home_has_not_saved() {
+    let scenario = scenarios::claimed_behind_busy_home();
+    for seed in 0..CLAIM_SEEDS {
+        let outcome = run(scenario.clone(), &mut ChoiceStream::from_seed(seed));
+        assert!(outcome.passed(), "seed {seed}: {}", outcome.report());
     }
-    // Coverage, not detection: the workload must keep reaching the window. In
-    // 85 of 500 schedules the producer stays ahead and every consumer block
-    // finds a token waiting (507 at entry, 2 at the re-check), so none commits.
-    assert!(
-        reached * 4 >= 3 * SEEDS as usize,
-        "only {reached}/{SEEDS} schedules reached a call-site commit; the workload has stopped \
-         exercising the window",
-    );
-    // 50 steps at worst, measured with `caught` above.
-    assert!(
-        worst_steps < 64,
-        "the worst of {caught} caught schedules took {worst_steps} steps to expose it; this is \
-         a structural break and should surface almost immediately",
-    );
-    assert!(
-        kinds.contains_key("I1"),
-        "expected a single-ownership violation; got {kinds:?}",
-    );
 }
 
 /// The fourth self-validation gate: the balance path allowed to hand on a task
@@ -245,18 +196,16 @@ fn old_commit_before_pass_is_caught() {
 /// It must be caught by **I14** specifically. The failure rate is a rate and not
 /// a certainty — the migration needs a boosted wake to land on the RT daemon's
 /// CPU in the window between the teardown and that CPU's drain — so this asserts
-/// a floor over the sweep rather than every seed.
+/// a floor over the sweep rather than every seed. Seeded schedules catch it
+/// about once in 140, so [`CORPSE_SEEDS`] of them catch it about fourteen
+/// times.
 #[test]
 fn old_migrate_keeping_the_corpse_is_caught() {
     let scenario = scenarios::old_migrate_kept_the_corpse();
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     let mut caught = 0;
-    for seed in 0..SEEDS {
-        let mut choices = if seed % 2 == 0 {
-            ChoiceStream::from_seed(seed)
-        } else {
-            ChoiceStream::pct(seed, scenario.cpus(), 3)
-        };
+    for seed in 0..CORPSE_SEEDS {
+        let mut choices = ChoiceStream::from_seed(seed);
         let outcome = run(scenario.clone(), &mut choices);
         if outcome.passed() {
             continue;
@@ -269,7 +218,7 @@ fn old_migrate_keeping_the_corpse_is_caught() {
     }
     assert!(
         caught > 0,
-        "migrating a task that is already dead went undetected in {SEEDS} \
+        "migrating a task that is already dead went undetected in {CORPSE_SEEDS} \
          schedules — I14 says nothing about the balance path it was written for",
     );
     assert!(
@@ -483,10 +432,10 @@ fn a_pass_inside_the_registration_window_is_caught() {
 }
 
 /// The wait handshake's *residual* window, named and deliberately left open: a
-/// waker may claim the task in the instructions between the commit
-/// publishing `Blocked` and the park itself. That is why `RunningTask::park`
-/// accepts `WakeQueued` — and until the block became two steps, no simulator
-/// run had ever executed it, so that acceptance was a claim backed by nothing.
+/// waker may claim the task in the instructions between the commit and the
+/// park publishing `Blocked`. That is why `CommittedTicket::park` hands the
+/// record back to be woken — an arm no run reaches unless the window is
+/// injected.
 ///
 /// The window cannot be a step boundary (a `SchedPass` borrows `CpuSched` and
 /// cannot be held across one), so it is reached by injection. What this test
@@ -504,35 +453,8 @@ fn the_park_sees_claims_that_landed_after_its_commit() {
     assert!(
         claims > 0,
         "in {SEEDS} schedules no park ever saw a claim land after its own \
-         commit, so `RunningTask::park`'s `WakeQueued` arm is dead code here \
+         commit, so `CommittedTicket::park`'s woken-first arm is dead code here \
          and the residual window is back outside the model",
-    );
-}
-
-/// The control that turns "the simulator structurally could not see this" from
-/// a claim into a measurement.
-///
-/// `old_commit_fused` is the *same* workload and the *same* pre-`8508b37`
-/// blocking shape, with one difference: the call site and the pass are one VM
-/// step, which is what this simulator did until the block was split. Nothing
-/// can interleave inside a step, so the window is not in the step relation and
-/// every schedule comes back clean — which is exactly why the harness
-/// certified a protocol whose lost wake it could not execute.
-#[test]
-fn blind_spot_needed_the_step_split() {
-    let fused = sweep::seed_sweep(&scenarios::old_commit_fused(), SEEDS, 1);
-    assert!(
-        fused.passed(),
-        "with the two halves fused into one step the bug is invisible; if this \
-         now fails, the control has stopped controlling for anything: {}",
-        fused.report(),
-    );
-
-    let split = sweep::seed_sweep(&scenarios::old_commit_before_pass(), SEEDS, 1);
-    assert!(
-        !split.passed(),
-        "the identical shape with the halves as separate steps must fail: {}",
-        split.report(),
     );
 }
 

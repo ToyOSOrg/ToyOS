@@ -13,7 +13,7 @@ use kernel_loom::sched::cpu::{CpuHandle, CpuHandles};
 use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer};
 use kernel_loom::sched_model::{model, Kicks, Msg, PreemptModel, RemoteGuard, CPU0};
-use kernel_loom::sched::park::{notify, prepare, Cancel, Cancelled, Commit, CurrentTask};
+use kernel_loom::sched::park::{notify, prepare, Cancel, Cancelled, Commit, CurrentTask, Parked};
 use kernel_loom::sched::task::{
     Notify, TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason,
 };
@@ -65,8 +65,8 @@ fn post(world: &World, waiter: &Arc<TaskShared<Msg>>) -> Notify {
 }
 
 /// A pre-park claim posts no message (`Notify::PrePark`): the waiter's own
-/// commit observes it and refuses to park, so no `Wake` is queued and no
-/// switch happens.
+/// commit, or its park, observes it and does not stay parked, so no `Wake` is
+/// queued.
 #[test]
 fn a_pre_park_claim_never_posts_a_message() {
     model(|| {
@@ -81,21 +81,30 @@ fn a_pre_park_claim_never_posts_a_message() {
             loom::thread::spawn(move || post(&world, &waiter))
         };
 
-        let outcome = ticket.commit();
+        let parked = match ticket.commit() {
+            Commit::Parked(committed) => match committed.park(()) {
+                Parked::Blocked => true,
+                Parked::WokenFirst(()) => {
+                    assert!(waiter.recover_if_claimed(CPU0), "a claim took the word while it committed");
+                    false
+                }
+            },
+            Commit::AlreadyWoken => false,
+            Commit::Killed => unreachable!("{NO_RETIRER}"),
+        };
         let posted = waker.join().unwrap();
         let msgs = drain(&mut rx, &world.preempt);
 
-        match outcome {
-            Commit::Parked(_) => {
+        match parked {
+            true => {
                 assert_eq!(posted, Notify::Parked(CPU0), "the post found us parked");
                 assert_eq!(msgs, [Msg::Wake(TaskKey(1), WakeReason::Woken)]);
             }
-            Commit::AlreadyWoken => {
+            false => {
                 assert_eq!(posted, Notify::PrePark, "somebody must have claimed us");
                 assert!(msgs.is_empty(), "a pre-park claim posts nothing: {msgs:?}");
                 assert_eq!(waiter.state(), TaskState::Running(CPU0));
             }
-            Commit::Killed => unreachable!("{NO_RETIRER}"),
         }
     });
 }
@@ -162,10 +171,16 @@ fn a_notify_ends_exactly_one_iteration() {
                 continue;
             };
             match ticket.commit() {
-                Commit::Parked(_) => {
-                    parked = true;
-                    break;
-                }
+                Commit::Parked(committed) => match committed.park(()) {
+                    Parked::Blocked => {
+                        parked = true;
+                        break;
+                    }
+                    Parked::WokenFirst(()) => {
+                        assert!(waiter.recover_if_claimed(CPU0));
+                        ended += 1;
+                    }
+                },
                 Commit::AlreadyWoken => ended += 1,
                 Commit::Killed => unreachable!("{NO_RETIRER}"),
             }

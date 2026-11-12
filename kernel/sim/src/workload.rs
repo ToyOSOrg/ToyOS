@@ -97,32 +97,6 @@ pub struct IrqSpec {
     pub boost_ns: Option<u64>,
 }
 
-/// Where phase 2 of the wait handshake — the `Committing(gen) → Blocked` CAS —
-/// runs relative to the blocking pass.
-///
-/// This is a scenario dimension rather than a constant because the kernel has
-/// had two of these answers, and the difference between them was a real lost
-/// wake (commit `8508b37`). The VM makes the *step boundary* the thing that
-/// moves: a remote CPU can act between two steps and cannot act inside one, so
-/// which side of the boundary the commit falls on is exactly what decides
-/// whether the window is reachable.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BlockShape {
-    /// The shipped shape: the commit runs inside the pass, after its mailbox
-    /// drain. Every claim then lands on one side of the drain or the other.
-    CommitInPass,
-    /// The kernel before `8508b37`: the commit runs at the call site, so the
-    /// task's word reads `Blocked` while it is still the running task and its
-    /// own CPU has not yet drained. See `scenarios::old_commit_before_pass`.
-    CommitAtCallSite,
-    /// `CommitAtCallSite` with the call site and the pass **fused into one
-    /// step** — the *simulator's* own shape until the split. Nothing can
-    /// interleave, so the window is outside the step relation and the bug is
-    /// invisible. It exists so that the harness's blind spot is a test rather
-    /// than a comment (`blind_spot_needed_the_step_split`).
-    CommitAtCallSiteFused,
-}
-
 /// Whether an *involuntary* scheduler pass can land inside the registration
 /// window — between phase 1 of the wait handshake and phase 2.
 ///
@@ -130,9 +104,8 @@ pub enum BlockShape {
 /// `DeliverIpi` and `FireTimer` are enabled there and set `need_resched`. What
 /// this decides is whether the pass that request asks for may *run* before the
 /// commit, which in the kernel is decided by the preempt count and by nothing
-/// else. It is a scenario dimension rather than a constant for the same reason
-/// [`BlockShape`] is: the kernel has had both answers, and the difference
-/// between them was a live panic.
+/// else. It is a scenario dimension rather than a constant because the kernel has had
+/// both answers, and the difference between them was a live panic.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WindowShape {
     /// The kernel's `sched::driver::Ticket` holds the preempt count raised for
@@ -147,7 +120,7 @@ pub enum WindowShape {
 /// What a `park` does to a borrowed RT window.
 ///
 /// A scenario dimension rather than a constant for the same reason
-/// [`BlockShape`] and [`WindowShape`] are: the kernel has had both answers, and
+/// [`WindowShape`] is: the kernel has had both answers, and
 /// the difference between them is invariant I9's whole content.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ParkShape {
@@ -164,7 +137,7 @@ pub enum ParkShape {
 /// What the balance path does with a ready task whose kill bit is already set.
 ///
 /// A scenario dimension rather than a constant for the same reason
-/// [`BlockShape`] and [`ParkShape`] are: the kernel has had both answers, and
+/// [`WindowShape`] and [`ParkShape`] are: the kernel has had both answers, and
 /// the difference between them was a live panic on the owner's T14 —
 /// `retire_task: task not released after 1s: InTransit(CpuId(1))`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -197,7 +170,7 @@ pub enum AgeShape {
 /// What a job is: the owner a thread's CPU time is shared out by.
 ///
 /// A scenario dimension rather than a constant for the same reason
-/// [`BlockShape`] and [`ParkShape`] are, except that the other answer is one
+/// [`WindowShape`] and [`ParkShape`] are, except that the other answer is one
 /// the design *rejected* rather than one it shipped: a share per thread lets a
 /// process buy CPU by forking. Invariant I5 has to be able to tell the two
 /// apart, or it is not measuring the shipped policy at all.
@@ -302,7 +275,6 @@ pub struct Scenario {
     pub procs: Vec<ProcSpec>,
     pub irqs: Vec<IrqSpec>,
     pub protocol: Protocol,
-    pub block: BlockShape,
     pub window: WindowShape,
     pub park: ParkShape,
     pub migrate: MigrateShape,
@@ -382,11 +354,6 @@ impl Scenario {
     /// The same workload on another machine.
     pub fn with_topology(mut self, topology: Shape) -> Self {
         self.topology = topology;
-        self
-    }
-
-    pub fn with_block(mut self, block: BlockShape) -> Self {
-        self.block = block;
         self
     }
 

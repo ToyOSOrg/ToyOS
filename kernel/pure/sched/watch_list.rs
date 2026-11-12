@@ -123,7 +123,9 @@ enum Msg {
 }
 
 impl SchedMsg for Msg {
-    fn wake(_key: TaskKey, _cause: WakeCause) -> Self {
+    type Parked = ();
+
+    fn wake(_shared: Arc<TaskShared<Self>>, _cause: WakeCause) -> Self {
         Msg::Wake
     }
     fn retire(_shared: Arc<TaskShared<Self>>) -> Self {
@@ -139,6 +141,10 @@ unsafe impl PreemptGuard for NoPreempt {}
 struct NoKick;
 
 impl Kicker for NoKick {
+    fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+    fn now(&self) -> crate::sched::hw::Nanos {
+        crate::sched::hw::Nanos::ZERO
+    }
     fn kick(&self, _target: CpuId) {}
 
     fn runs_on(&self, _cpu: CpuId) -> bool {

@@ -312,13 +312,16 @@ impl Hw for KernelHw {
 
     /// Order is forced: outgoing per-CPU state must be captured, and incoming CR3/TSS/stack installed, before `rsp` moves — after that this frame no longer exists.
     ///
-    /// Until [`context_switch`] writes the outgoing `rsp`, it is `answer_steal_requests`, not this
-    /// function, that keeps another CPU out of that window.
+    /// Until [`context_switch`] has left the outgoing stack, nothing in this function keeps another
+    /// CPU out of that window: a steal is answered only by this CPU's own later pass
+    /// (`answer_steal_requests`), and a claim that ends a park reads the task's on-CPU word, which
+    /// [`context_switch`] clears only once it has left that stack.
     unsafe fn switch(&self, token: RunToken<KernelPayload>) {
         let save = token.save_ptr();
         let restore = token.restore_ptr();
-        // Every context is saved masked, so `context_switch`'s `popfq` never
-        // moves `IF`; the resumed context's own guard puts back what it had.
+        // Under `mask-windows` every context is saved masked, so
+        // `context_switch`'s `popfq` never moves `IF`; the resumed context's
+        // own guard puts back what it had.
         #[cfg(feature = "mask-windows")]
         let _masked = crate::arch::IrqGuard::close();
         // SAFETY: `save`/`restore` are live Box-backed contexts from `SchedPass::finish`, freed only by a later pass; `incoming.thread_pointer` and `incoming.user_bases` are canonical values the CPU itself handed the switch out of that thread, or zero; `area` is the outgoing task's own, saved as it leaves this CPU and restored when it returns into this frame.
@@ -391,7 +394,7 @@ impl Hw for KernelHw {
             if let Some(area) = area {
                 super::fpu::leave(area, save as u64, &mut (*save).fpu);
             }
-            context_switch(&raw mut (*save).sp, rsp);
+            context_switch(&raw mut (*save).sp, rsp, token.left_ptr());
             // The preempt count is still raised: nothing switches this task
             // out before its state is back.
             if let Some(area) = area {

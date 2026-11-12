@@ -32,19 +32,19 @@
 use core::marker::PhantomData;
 
 use crate::sched::cpu::CpuHandles;
-use crate::sched::hw::{CpuId, Kicker};
+use crate::sched::hw::{CpuId, Kicker, Nanos};
 use crate::sched::mailbox::{Kick, PreemptGuard, SchedMsg, Urgency};
 use crate::sched::sync::{Arc, AtomicU32, Ordering};
-use crate::sched::task::{Gen, Notify, ParkOutcome, Refused, TaskShared, WaitClass, WakeCause};
+use crate::sched::task::{Gen, Notify, Refused, TaskShared, WaitClass, WakeCause};
 
 /// The running task, as the wait path sees it. Only `CpuSched::current_task`
 /// hands one out, so [`prepare`] cannot be called for anybody else's task.
-pub struct CurrentTask<'a, M> {
+pub struct CurrentTask<'a, M: SchedMsg> {
     shared: &'a Arc<TaskShared<M>>,
     cpu: CpuId,
 }
 
-impl<'a, M> CurrentTask<'a, M> {
+impl<'a, M: SchedMsg> CurrentTask<'a, M> {
     pub fn new(shared: &'a Arc<TaskShared<M>>, cpu: CpuId) -> Self {
         Self { shared, cpu }
     }
@@ -81,8 +81,8 @@ pub fn prepare<M: SchedMsg>(
 }
 
 /// Post to one task: claim it if it is parked or committing, flag it
-/// otherwise, and post `Msg::Wake` to its home CPU when the claim owes one.
-/// The only producer of wake messages in the system.
+/// otherwise, and send the wake a claim of its park owes
+/// ([`SchedMsg::send_wake`]). The only producer of wake messages in the system.
 pub fn notify<M: SchedMsg>(
     shared: &Arc<TaskShared<M>>,
     cause: WakeCause,
@@ -115,23 +115,36 @@ fn deliver<M: SchedMsg>(
     preempt: &impl PreemptGuard,
 ) -> Notify {
     if let Notify::Parked(cpu) = outcome {
-        // The claim CAS admits exactly one poster, so the node is free (I12).
-        let slot = shared
-            .wake_node()
-            .claim()
-            .expect("the wake claim admits one poster: node must be free");
-        let handle = cpus.get(cpu);
-        let msg = M::wake(shared.key(), cause);
-        // An ordinary wake posted on the CPU it goes to rings nothing: that CPU's
-        // own next pass drains it, so the poster pays no pass for it now, and
-        // no edge stands with no pass owed to elide other CPUs' kicks.
-        if cause.urgency() == Urgency::Normal && kicker.runs_on(cpu) {
-            handle.post_unrung(slot, msg, preempt);
-        } else if handle.post(slot, msg, cause.urgency(), preempt) == Kick::Send {
-            kicker.kick(cpu);
-        }
+        M::send_wake(shared, cpu, cause, cpus, kicker, preempt);
     }
     outcome
+}
+
+/// Hand the claim of a park on `home` to `home`: `Msg::Wake`, whose pass
+/// takes the record and places the task.
+pub fn post_wake<M: SchedMsg>(
+    shared: &Arc<TaskShared<M>>,
+    home: CpuId,
+    cause: WakeCause,
+    cpus: &CpuHandles<M>,
+    kicker: &impl Kicker,
+    preempt: &impl PreemptGuard,
+) {
+    // The claim CAS admits exactly one poster, so the node is free (I12).
+    let slot = shared
+        .wake_node()
+        .claim()
+        .expect("the wake claim admits one poster: node must be free");
+    let handle = cpus.get(home);
+    let msg = M::wake(shared.clone(), cause);
+    // An ordinary wake posted on the CPU it goes to rings nothing: that CPU's
+    // own next pass drains it, so the poster pays no pass for it now, and
+    // no edge stands with no pass owed to elide other CPUs' kicks.
+    if cause.urgency() == Urgency::Normal && kicker.runs_on(home) {
+        handle.post_unrung(slot, msg, preempt);
+    } else if handle.post(slot, msg, cause.urgency(), preempt) == Kick::Send {
+        kicker.kick(home);
+    }
 }
 
 /// The kicks one post owes, sent when it is dropped: after the post's list
@@ -167,6 +180,14 @@ impl<K: Kicker> Kicker for Deferred<'_, K> {
 
     fn runs_on(&self, cpu: CpuId) -> bool {
         self.kicker.runs_on(cpu)
+    }
+
+    fn now(&self) -> Nanos {
+        self.kicker.now()
+    }
+
+    fn trace(&self, ev: crate::sched::hw::TraceEvent) {
+        self.kicker.trace(ev)
     }
 }
 
@@ -220,7 +241,7 @@ pub enum Cancelled {
 
 /// The result of committing a ticket.
 #[must_use]
-pub enum Commit<M> {
+pub enum Commit<M: SchedMsg> {
     /// The state word is `Blocked`; the pass may park the task with the ticket.
     Parked(CommittedTicket<M>),
     /// A post landed between phase 1 and the commit: do not park, do not switch.
@@ -231,15 +252,27 @@ pub enum Commit<M> {
     Killed,
 }
 
-/// Proof that the task's word is `Blocked`. Consumed by
-/// `SchedPass::dispose_block`.
-pub struct CommittedTicket<M> {
+/// Proof that the task's word is `Committing` for this wait and the kill
+/// was checked: [`Self::park`] publishes its record and parks it, which
+/// `SchedPass::dispose_block` does.
+pub struct CommittedTicket<M: SchedMsg> {
     shared: Arc<TaskShared<M>>,
     cpu: CpuId,
+    generation: Gen,
     class: WaitClass,
 }
 
-impl<M> CommittedTicket<M> {
+/// What [`CommittedTicket::park`] did.
+pub enum Parked<P> {
+    /// The word is `Blocked`, with the record in the task's slot for the claim
+    /// that ends the park.
+    Blocked,
+    /// A claim made while committing took the word to `WakeQueued` first and
+    /// took nothing: the record is the caller's, to wake as that claim's.
+    WokenFirst(P),
+}
+
+impl<M: SchedMsg> CommittedTicket<M> {
     pub fn shared(&self) -> &Arc<TaskShared<M>> {
         &self.shared
     }
@@ -248,8 +281,29 @@ impl<M> CommittedTicket<M> {
         self.cpu
     }
 
+    pub fn generation(&self) -> Gen {
+        self.generation
+    }
+
     pub fn class(&self) -> WaitClass {
         self.class
+    }
+
+    /// Put `record` in the task's slot, then move the word to `Blocked`,
+    /// which publishes it: from then on only the claim that ends the park
+    /// takes it.
+    #[allow(unsafe_code)] // the slot's two accesses; their exclusion is the word's
+    pub fn park(self, record: M::Parked) -> Parked<M::Parked> {
+        let slot = self.shared.parked();
+        // SAFETY: the word is `Committing(cpu, generation)`, this task's on
+        // this CPU, so no claim can take the slot until it is `Blocked`.
+        unsafe { slot.publish(record) };
+        if self.shared.commit_park(self.cpu, self.generation) {
+            return Parked::Blocked;
+        }
+        // SAFETY: the claim that took the word while it was `Committing`
+        // takes nothing; the record is still this caller's alone.
+        Parked::WokenFirst(unsafe { slot.take() })
     }
 }
 
@@ -257,13 +311,16 @@ impl<M: SchedMsg> WaitTicket<M> {
     /// The caller is not going to park after all: withdraw.
     pub fn cancel(mut self) -> Cancelled {
         self.armed = false;
-        match self.shared.cancel_commit(self.cpu, self.generation) {
-            ParkOutcome::Parked => Cancelled::Clean,
-            ParkOutcome::AlreadyWoken => Cancelled::AlreadyWoken,
+        if self.shared.cancel_commit(self.cpu, self.generation) {
+            Cancelled::Clean
+        } else {
+            Cancelled::AlreadyWoken
         }
     }
 
-    /// Phase 2, run by the blocking pass.
+    /// Phase 2, run by the blocking pass: answers whether it may park. The
+    /// word stays `Committing`, since the pass publishes the task's record
+    /// before it parks it ([`CommittedTicket::park`]).
     ///
     /// A park is a safe point, so a killed task's promise to die at its next
     /// one has to be kept *here*: `handle_retire` already consumed the retire
@@ -278,14 +335,15 @@ impl<M: SchedMsg> WaitTicket<M> {
             let _ = self.shared.cancel_commit(self.cpu, self.generation);
             return Commit::Killed;
         }
-        match self.shared.commit_park(self.cpu, self.generation) {
-            ParkOutcome::Parked => Commit::Parked(CommittedTicket {
-                shared: self.shared.clone(),
-                cpu: self.cpu,
-                class: self.class,
-            }),
-            ParkOutcome::AlreadyWoken => Commit::AlreadyWoken,
+        if self.shared.recover_if_claimed(self.cpu) {
+            return Commit::AlreadyWoken;
         }
+        Commit::Parked(CommittedTicket {
+            shared: self.shared.clone(),
+            cpu: self.cpu,
+            generation: self.generation,
+            class: self.class,
+        })
     }
 }
 
@@ -320,8 +378,9 @@ mod tests {
     }
 
     impl SchedMsg for Msg {
-        fn wake(key: TaskKey, cause: WakeCause) -> Self {
-            Msg::Wake(key, cause.reason)
+        type Parked = ();
+        fn wake(shared: Arc<TaskShared<Self>>, cause: WakeCause) -> Self {
+            Msg::Wake(shared.key(), cause.reason)
         }
         fn retire(shared: Arc<TaskShared<Self>>) -> Self {
             Msg::Retire(shared.key())
@@ -331,6 +390,10 @@ mod tests {
     #[derive(Default)]
     struct Kicks(Mutex<Vec<CpuId>>);
     impl Kicker for Kicks {
+        fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+        fn now(&self) -> Nanos {
+            Nanos::ZERO
+        }
         fn kick(&self, target: CpuId) {
             self.0.lock().unwrap().push(target);
         }
@@ -365,9 +428,11 @@ mod tests {
             .expect("nothing notified this task")
     }
 
-    fn park(t: &Arc<TaskShared<Msg>>) -> CommittedTicket<Msg> {
+    fn park(t: &Arc<TaskShared<Msg>>) {
         match ticket(t).commit() {
-            Commit::Parked(committed) => committed,
+            Commit::Parked(committed) => {
+                assert!(matches!(committed.park(()), Parked::Blocked), "nothing claimed it while it committed")
+            }
             Commit::AlreadyWoken => panic!("expected the park to commit, got AlreadyWoken"),
             Commit::Killed => panic!("expected the park to commit, got Killed"),
         }
@@ -379,8 +444,7 @@ mod tests {
         let kicks = Kicks::default();
         let t = task(1);
 
-        let committed = park(&t);
-        assert_eq!(committed.class(), WaitClass::Pipe);
+        park(&t);
         assert_eq!(notify(&t, woken(), &handles, &kicks, &NoPreempt), Notify::Parked(C0));
         assert_eq!(rx.pop(&NoPreempt), Some(Msg::Wake(TaskKey(1), WakeReason::Woken)));
         assert_eq!(rx.pop(&NoPreempt), None);
@@ -390,6 +454,10 @@ mod tests {
     /// A poster running on `.0`.
     struct On(CpuId, Kicks);
     impl Kicker for On {
+        fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+        fn now(&self) -> Nanos {
+            Nanos::ZERO
+        }
         fn kick(&self, target: CpuId) {
             self.1.kick(target);
         }
@@ -404,7 +472,7 @@ mod tests {
         let (handles, mut rx) = cpus();
         let here = On(C0, Kicks::default());
         let t = task(1);
-        let _ = park(&t);
+        park(&t);
 
         assert_eq!(notify(&t, woken(), &handles, &here, &NoPreempt), Notify::Parked(C0));
         assert!(!handles.get(C0).doorbell().kick_pending());
@@ -418,7 +486,7 @@ mod tests {
         let (handles, mut rx) = cpus();
         let here = On(C0, Kicks::default());
         let t = task(1);
-        let _ = park(&t);
+        park(&t);
 
         let cause = WakeCause::boosted(WakeReason::Woken, Nanos(1));
         assert_eq!(notify(&t, cause, &handles, &here, &NoPreempt), Notify::Parked(C0));
@@ -452,7 +520,7 @@ mod tests {
         assert!(prepare(&CurrentTask::new(&t, C0), Cancel::Answers, WaitClass::Pipe).is_err());
         assert_eq!(t.state(), TaskState::Running(C0));
         assert_eq!(rx.pop(&NoPreempt), None);
-        let _ = park(&t);
+        park(&t);
     }
 
     /// The park is a safe point, and a killed task dies at its next one.
@@ -489,7 +557,8 @@ mod tests {
         let pending = prepare(&CurrentTask::new(&t, C0), Cancel::Ignores, WaitClass::Other)
             .expect("nothing notified this task");
         t.mark_kill();
-        assert!(matches!(pending.commit(), Commit::Parked(_)));
+        let Commit::Parked(committed) = pending.commit() else { panic!("an uncancellable park commits") };
+        assert!(matches!(committed.park(()), Parked::Blocked));
         assert_eq!(t.state(), TaskState::Blocked(C0));
     }
 
@@ -512,7 +581,7 @@ mod tests {
         let (handles, mut rx) = cpus();
         let kicks = Kicks::default();
         let t = task(1);
-        let _ = park(&t);
+        park(&t);
 
         let cause = WakeCause::boosted(WakeReason::Woken, crate::sched::hw::Nanos(1_000));
         assert!(notify(&t, cause, &handles, &kicks, &NoPreempt).woke());
@@ -537,7 +606,7 @@ mod tests {
         let node: *const MailboxNode<Msg> = t.wake_node();
 
         for _ in 0..3 {
-            let _ = park(&t);
+            park(&t);
             assert!(notify(&t, woken(), &handles, &kicks, &NoPreempt).woke());
             assert!(t.wake_node().in_flight());
             assert_eq!(rx.pop(&NoPreempt), Some(Msg::Wake(TaskKey(1), WakeReason::Woken)));

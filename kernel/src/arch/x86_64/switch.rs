@@ -2,8 +2,17 @@
 //! onto the outgoing stack and popped off the incoming one.
 
 use core::arch::naked_asm;
+use core::sync::atomic::AtomicBool;
 
 /// The outgoing half of [`context_switch`]. A macro, not inlined twice, so both builds share one instruction sequence.
+///
+/// `left` is cleared once the outgoing context is saved and this CPU has left
+/// its stack, so nothing this CPU does afterwards touches either, and the
+/// clear may hand them to another CPU. It is a release: x86-64 does not
+/// reorder a write with older writes (SDM Vol. 3A §11.2.2, order
+/// 325384-093US), and the caller's saves are ordinary writes made before this
+/// call. It is here and not after the macro, where the witness build's `call`
+/// would clobber `rdx`.
 macro_rules! switch_save {
     () => {
         "pushfq
@@ -14,7 +23,11 @@ macro_rules! switch_save {
          push r14
          push r15
          mov [rdi], rsp
-         mov rsp, rsi"
+         mov rsp, rsi
+         test rdx, rdx
+         jz 2f
+         mov byte ptr [rdx], 0
+         2:"
     };
 }
 
@@ -32,10 +45,11 @@ macro_rules! switch_restore {
     };
 }
 
-/// Callee-saved register save/restore.
+/// Callee-saved register save/restore. `left`, unless null, is the outgoing
+/// task's on-CPU word, cleared once its context is saved.
 #[cfg(not(feature = "switch-witness"))]
 #[unsafe(naked)]
-pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) {
+pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64, left: *const AtomicBool) {
     naked_asm!(switch_save!(), switch_restore!());
 }
 
@@ -46,7 +60,7 @@ pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) 
 /// is caller-saved and already dead here.
 #[cfg(feature = "switch-witness")]
 #[unsafe(naked)]
-pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) {
+pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64, left: *const AtomicBool) {
     naked_asm!(
         switch_save!(),
         "mov rdi, rsp",

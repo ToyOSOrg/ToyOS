@@ -1,15 +1,21 @@
 //! Scaffolding shared by the loom models: the message type, the modelled
-//! preempt count, the cell lock and the kick recorder.
+//! preempt count, the cell lock, the kick recorder, and what a model that runs
+//! whole `CpuSched`s is built against.
 
 #![deny(unsafe_code)]
 
 use loom::sync::atomic::{AtomicUsize, Ordering};
 use loom::sync::{Mutex, MutexGuard};
 
-use crate::sched::hw::{CpuId, Kicker};
-use crate::sched::mailbox::{PreemptGuard, SchedMsg};
+use crate::sched::affinity::CpuMask;
+use crate::sched::cpu::{CpuHandles, RunToken};
+use crate::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent};
+use crate::sched::job::{Job, JobKey};
+use crate::sched::mailbox::{PreemptGuard, SchedMsg, Urgency};
 use crate::sched::sync::Arc;
-use crate::sched::task::{TaskKey, TaskShared, WakeCause, WakeReason};
+use crate::sched::task::{
+    RtState, SchedPayload, TaskAccounting, TaskBuilder, TaskKey, TaskShared, WakeCause, WakeReason,
+};
 use crate::sched::sync::CellLock;
 use crate::sched::watch::Waiters;
 
@@ -26,8 +32,9 @@ pub enum Msg {
 }
 
 impl SchedMsg for Msg {
-    fn wake(key: TaskKey, cause: WakeCause) -> Self {
-        Msg::Wake(key, cause.reason)
+    type Parked = ();
+    fn wake(shared: Arc<TaskShared<Self>>, cause: WakeCause) -> Self {
+        Msg::Wake(shared.key(), cause.reason)
     }
 
     fn retire(shared: Arc<TaskShared<Self>>) -> Self {
@@ -131,7 +138,7 @@ impl<T: Send> CellLock<T> for LoomLock<T> {
     }
 }
 
-pub fn watch_list<M, R>() -> LoomLock<Waiters<M, R>>
+pub fn watch_list<M: SchedMsg, R>() -> LoomLock<Waiters<M, R>>
 where
     Waiters<M, R>: Send,
 {
@@ -158,6 +165,10 @@ impl Kicks {
 }
 
 impl Kicker for Kicks {
+    fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+    fn now(&self) -> crate::sched::hw::Nanos {
+        crate::sched::hw::Nanos::ZERO
+    }
     fn kick(&self, _target: CpuId) {
         self.count.fetch_add(1, Ordering::AcqRel);
     }
@@ -179,4 +190,122 @@ pub fn model_bounded(preemptions: usize, f: impl Fn() + Sync + Send + 'static) {
     let mut builder = loom::model::Builder::new();
     builder.preemption_bound = Some(preemptions);
     builder.check(f);
+}
+
+/// The smallest payload a `CpuSched` can be built over: no address space,
+/// and a context that is only its own saved-ness.
+pub struct Payload;
+
+impl SchedPayload for Payload {
+    type Ctx = ModelCtx;
+
+    fn name(&self) -> u64 {
+        0
+    }
+}
+
+/// The full message set, as opposed to the reduced [`Msg`] the primitive
+/// models use: a pass consumes `Adopt` and `Retire` too.
+pub type TaskMsg = crate::sched::msg::Msg<Payload>;
+
+/// A context as the models see it: whether it is saved, in a cell loom checks
+/// at every access, so that a resume no save happens before is a causality
+/// violation and not a lucky read.
+pub struct ModelCtx(loom::cell::UnsafeCell<Frame>);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Frame {
+    /// A new task's initial frame.
+    Fresh,
+    /// A CPU stands on it.
+    Live,
+    Saved,
+}
+
+impl ModelCtx {
+    /// A new task's.
+    pub fn fresh() -> Self {
+        Self(loom::cell::UnsafeCell::new(Frame::Fresh))
+    }
+
+    /// A CPU's idle context, which the CPU starts on.
+    pub fn live() -> Self {
+        Self(loom::cell::UnsafeCell::new(Frame::Live))
+    }
+}
+
+/// An `Hw` that records nothing, and whose switch saves and resumes
+/// [`ModelCtx`]s as the kernel's does: the outgoing context saved, then its
+/// task's on-CPU word cleared with release, then the incoming one resumed. A
+/// model that drops a pass's action switches nothing.
+pub struct Silent;
+
+impl Kicker for Silent {
+    fn trace(&self, _ev: TraceEvent) {}
+    fn now(&self) -> Nanos {
+        NOW
+    }
+    fn kick(&self, _target: CpuId) {}
+
+    fn runs_on(&self, _cpu: CpuId) -> bool {
+        false
+    }
+}
+
+impl Machine for Silent {
+    fn set_timer(&self, _deadline: Nanos) {}
+    fn stop_timer(&self) {}
+    fn halt(&self) {}
+    fn need_resched(&self, _cpu: CpuId) {}
+}
+
+impl Hw for Silent {
+    type Payload = Payload;
+    #[allow(unsafe_code)]
+    unsafe fn switch(&self, token: RunToken<Payload>) {
+        // SAFETY: the trait's: both contexts are live, the outgoing one is
+        // this CPU's, and the word is null or the outgoing task's.
+        unsafe {
+            (*token.save_ptr()).0.with_mut(|frame| *frame = Frame::Saved);
+            if let Some(left) = token.left_ptr().as_ref() {
+                left.store(false, Ordering::Release);
+            }
+            (*token.restore_ptr()).0.with_mut(|frame| {
+                assert_ne!(*frame, Frame::Live, "resumed a context a CPU still stands on");
+                *frame = Frame::Live;
+            });
+        }
+    }
+    fn release(&self, _key: TaskKey, _payload: Payload, _acct: TaskAccounting) {}
+}
+
+/// The instant every pass in these models runs at. Constant on purpose: a
+/// request that never ends keeps `preempt_if_due` out of the interleavings,
+/// which have nothing to do with it.
+pub const NOW: Nanos = Nanos(1_000);
+
+/// Everything a pass touches that is **not** a `CpuSched`. A thread that
+/// stands for a remote CPU gets a handle to this and to nothing else: it may
+/// post and ring, and there is no second way in.
+pub struct Owner {
+    pub cpus: CpuHandles<TaskMsg>,
+    pub hw: Silent,
+}
+
+impl Owner {
+    /// A new task, placed on `cpu` the way every task is: by a message.
+    pub fn spawn(&self, cpu: CpuId, key: TaskKey) -> Arc<TaskShared<TaskMsg>> {
+        let task = TaskBuilder {
+            key,
+            job: Arc::new(Job::new(JobKey(key.0))),
+            ctx: ModelCtx::fresh(),
+            ext: Payload,
+            rt: RtState::default(),
+            mask: CpuMask::ANY,
+        }
+        .build(cpu, NOW);
+        let shared = task.shared().clone();
+        let _ = self.cpus.get(cpu).post_owned(TaskMsg::Adopt { task }, TaskMsg::adopt_node, Urgency::Normal, &IrqGuard);
+        shared
+    }
 }

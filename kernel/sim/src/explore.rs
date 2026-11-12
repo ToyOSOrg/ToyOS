@@ -25,6 +25,7 @@ pub fn actor(step: &Step) -> Option<usize> {
         | Step::Pass(cpu)
         | Step::DeliverIpi(cpu)
         | Step::FireTimer(cpu)
+        | Step::Switch(cpu)
         | Step::OldInstall(cpu) => Some(*cpu),
         Step::OldSteal { thief, .. } => Some(*thief),
         Step::DeviceIrq(_) | Step::Advance => None,
@@ -101,8 +102,6 @@ pub struct Outcome {
     pub migrations: u64,
     /// See [`crate::vm::Vm::migrations_before_exit`].
     pub migrations_before_exit: u64,
-    /// See [`crate::vm::Vm::call_site_commits`].
-    pub call_site_commits: u64,
     /// Threads that ran to their exit.
     pub exits: u64,
     /// Per CPU: when it first took an execution step — see
@@ -334,7 +333,6 @@ fn outcome_of(scenario: &'static str, vm: &Vm<'_>, choices: &ChoiceStream) -> Ou
         placed: vm.placed.clone(),
         migrations: vm.migrations,
         migrations_before_exit: vm.migrations_before_exit,
-        call_site_commits: vm.call_site_commits,
         exits: vm.exits,
         first_exec_ns: vm.first_exec_ns.clone(),
         never_ran: vm.spawned.difference(&vm.ran).count(),

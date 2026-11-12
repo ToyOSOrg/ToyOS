@@ -12,7 +12,7 @@ use core::ptr::addr_of_mut;
 use crate::sched::eevdf::{Lag, Left};
 use crate::sched::hw::{CpuId, Nanos};
 use crate::sched::job::Job;
-use crate::sched::mailbox::MailboxNode;
+use crate::sched::mailbox::{MailboxNode, ParkedSlot, SchedMsg};
 use crate::sched::msg::Msg;
 use crate::sched::affinity::{affinity_fence, CpuMask, LoadedMask, Reach, SharedMask};
 use crate::sched::sync::{Arc, AtomicBool, AtomicU64, Ordering};
@@ -145,7 +145,8 @@ pub enum TaskState {
     /// Deciding to park, not yet parked: the two-phase commit's first phase.
     Committing(CpuId, Gen),
     Blocked(CpuId),
-    /// A waker won the claim and a `Wake` message is queued to the home CPU.
+    /// A claim ended the park on this CPU: its winner holds the record, to
+    /// place it or send it on, or a `Wake` to this CPU carries it.
     WakeQueued(CpuId),
     /// Owned by an unconsumed `Msg::Adopt` on its way to this CPU.
     InTransit(CpuId),
@@ -274,8 +275,7 @@ fn legal(from: TaskState, to: TaskState) -> bool {
         (Blocked(a), WakeQueued(b)) => a == b,
         (WakeQueued(a), Ready(b)) => a == b,
         // A pre-park claim (`Committing → WakeQueued`) posts no message, so
-        // the waiter's own commit or cancel resolves it by staying runnable
-        // (`ParkOutcome::AlreadyWoken`).
+        // the waiter's own commit or cancel resolves it by staying runnable.
         (WakeQueued(a), Running(b)) => a == b,
         (Blocked(_), Dead) | (WakeQueued(_), Dead) => true,
         // Adoption at the far end of a migration.
@@ -288,8 +288,8 @@ fn legal(from: TaskState, to: TaskState) -> bool {
 /// The outcome of a waker's claim.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Claim {
-    /// The task was parked on `CpuId`: we own the wake and must post
-    /// `Msg::Wake` to that CPU.
+    /// The task was parked on `CpuId`: the claimant owns the wake and the
+    /// parked record.
     Parked(CpuId),
     /// The waiter had registered but not yet parked. Its own commit will
     /// observe the claim and refuse to park — no message needed.
@@ -302,8 +302,8 @@ pub enum Claim {
 /// What a post did to one task: the outcome of [`TaskShared::notify`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Notify {
-    /// The task was parked on `CpuId`: this post owns the wake and must post
-    /// `Msg::Wake` to that CPU.
+    /// The task was parked on `CpuId`: this post owns the wake and has sent
+    /// it (`SchedMsg::send_wake`).
     Parked(CpuId),
     /// The task was committing; its own commit observes the claim and refuses
     /// to park, so no message is owed.
@@ -335,20 +335,10 @@ pub enum Refused {
     Revoked,
 }
 
-/// The outcome of the second phase of the wait handshake.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ParkOutcome {
-    /// The state word is now `Blocked`; the pass may park the task.
-    Parked,
-    /// A wake landed between registration and commit. Do not park, do not
-    /// switch.
-    AlreadyWoken,
-}
-
 /// The rendezvous word plus the embedded nodes every remote effect rides on.
 /// Generic over the mailbox message type so the primitives stay free of the
 /// task payload.
-pub struct TaskShared<M> {
+pub struct TaskShared<M: SchedMsg> {
     key: TaskKey,
     /// `{discriminant, cpu, commit generation}` plus the sticky KILL and
     /// RETIRE_QUEUED bits.
@@ -363,9 +353,17 @@ pub struct TaskShared<M> {
     waiting: AtomicBool,
     /// The CPUs the task may run on, as its setters publish them.
     mask: SharedMask,
+    /// The task's record while it is parked: whoever wins the claim that
+    /// ends the park owns it, so the wake goes where that claimant sends it.
+    parked: ParkedSlot<M::Parked>,
+    /// Set by the CPU that dispatches the task, and cleared with release by
+    /// the switch that leaves it once its context is saved and its stack
+    /// left. While it is set a CPU may still stand on the task's kernel stack,
+    /// so only that CPU may move it ([`Self::on_cpu`]).
+    on_cpu: AtomicBool,
 }
 
-impl<M> TaskShared<M> {
+impl<M: SchedMsg> TaskShared<M> {
     pub fn new(key: TaskKey, state: TaskState, mask: CpuMask) -> Self {
         Self {
             key,
@@ -374,7 +372,55 @@ impl<M> TaskShared<M> {
             retire_node: MailboxNode::new(),
             waiting: AtomicBool::new(false),
             mask: SharedMask::new(mask),
+            parked: ParkedSlot::new(),
+            on_cpu: AtomicBool::new(false),
         }
+    }
+
+    /// Whether a CPU may still stand on this task's context: dispatched and
+    /// not yet left by a switch that saved it and moved off its stack. A
+    /// claimant that reads `false` after its claim reads it after that.
+    pub fn on_cpu(&self) -> bool {
+        if cfg!(feature = "forward-ignores-on-cpu") {
+            return false;
+        }
+        self.on_cpu.load(Ordering::Acquire)
+    }
+
+    /// The dispatching CPU is about to load this task's context. The set
+    /// reaches a claimant through the claim's acquire of the state word,
+    /// whose `begin_commit` and `commit_park` release it after the set, so no
+    /// claimant reads a previous run's clear.
+    pub(crate) fn dispatched(&self) {
+        self.on_cpu.store(true, Ordering::Relaxed);
+    }
+
+    /// The word a switch that leaves this task clears, once the context is
+    /// saved, with a release store ([`crate::sched::cpu::RunToken::left_ptr`]).
+    pub(crate) fn on_cpu_word(&self) -> *const AtomicBool {
+        &self.on_cpu
+    }
+
+    /// The simulator's switch has saved this task's context and left it:
+    /// what a kernel switch does through [`Self::on_cpu_word`].
+    #[cfg(feature = "protocol-port")]
+    pub fn left_cpu(&self) {
+        self.on_cpu.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn parked(&self) -> &ParkedSlot<M::Parked> {
+        &self.parked
+    }
+
+    /// The parked record, for a checker that runs every CPU on one thread.
+    ///
+    /// # Safety
+    /// No other thread touches the task while the reference lives.
+    #[cfg(all(feature = "protocol-port", not(feature = "loom")))]
+    #[allow(unsafe_code)]
+    pub unsafe fn peek_parked(&self) -> Option<&M::Parked> {
+        // SAFETY: the caller's.
+        unsafe { self.parked.peek() }
     }
 
     pub fn mask(&self) -> &SharedMask {
@@ -476,41 +522,67 @@ impl<M> TaskShared<M> {
         }
     }
 
-    /// Phase 2: park if no waker claimed us in between.
-    pub fn commit_park(&self, cpu: CpuId, generation: Gen) -> ParkOutcome {
-        if self.transition(
-            TaskState::Committing(cpu, generation),
-            TaskState::Blocked(cpu),
-        ) {
-            return ParkOutcome::Parked;
+    /// The park, once the record is in [`Self::parked`]: `Committing →
+    /// Blocked`, which publishes it (release). `false` where a claim made
+    /// while committing took the word to `WakeQueued` first: that claimant
+    /// posted nothing and took nothing, so the record is still the caller's.
+    pub fn commit_park(&self, cpu: CpuId, generation: Gen) -> bool {
+        if self.transition(TaskState::Committing(cpu, generation), TaskState::Blocked(cpu)) {
+            return true;
         }
-        self.recover_from_claim(cpu)
+        let state = self.state();
+        assert_eq!(state, TaskState::WakeQueued(cpu), "a commit lost to something other than a claim");
+        false
     }
 
-    /// The condition became true before we parked: unwind phase 1.
-    /// `AlreadyWoken` means a waker claimed the registration first — the
-    /// caller must treat the wait as satisfied rather than retry.
-    pub fn cancel_commit(&self, cpu: CpuId, generation: Gen) -> ParkOutcome {
+    /// Whether a claim made while this task was committing on `cpu` took the
+    /// word first; if so the word is put back to `Running(cpu)`, since that
+    /// claimant posted nothing.
+    pub fn recover_if_claimed(&self, cpu: CpuId) -> bool {
+        self.transition(TaskState::WakeQueued(cpu), TaskState::Running(cpu))
+    }
+
+    /// Whether the word still holds the park on `cpu` committed as
+    /// `generation`.
+    pub(crate) fn parked_as(&self, cpu: CpuId, generation: Gen) -> bool {
+        let cur = self.state.load(Ordering::Acquire);
+        unpack(cur) == TaskState::Blocked(cpu) && Gen(((cur >> GEN_SHIFT) & GEN_MASK) as u32) == generation
+    }
+
+    /// The deadline's claim on one park: `Blocked(cpu) → WakeQueued(cpu)`
+    /// only while the word still holds the park committed as `generation`.
+    /// `false` where that park already ended, so a deadline left over from an
+    /// earlier park never claims a later one.
+    pub(crate) fn claim_deadline(&self, cpu: CpuId, generation: Gen) -> bool {
+        let mut cur = self.state.load(Ordering::Acquire);
+        loop {
+            if unpack(cur) != TaskState::Blocked(cpu) || Gen(((cur >> GEN_SHIFT) & GEN_MASK) as u32) != generation {
+                return false;
+            }
+            let next = retarget(cur, TaskState::WakeQueued(cpu));
+            match self.state.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return true,
+                Err(observed) => cur = observed,
+            }
+        }
+    }
+
+    /// The condition became true before we parked: unwind phase 1, back to
+    /// `Running(cpu)`. `false` means a waker claimed the registration first,
+    /// and the caller treats the wait as satisfied rather than retry.
+    pub fn cancel_commit(&self, cpu: CpuId, generation: Gen) -> bool {
         if self.transition(
             TaskState::Committing(cpu, generation),
             TaskState::Running(cpu),
         ) {
-            return ParkOutcome::Parked;
+            return true;
         }
-        self.recover_from_claim(cpu)
-    }
-
-    /// The only way to lose a `Committing` transition is a waker's
-    /// `Committing → WakeQueued` claim, and that waker posted no message, so
-    /// the state word is ours to put back.
-    fn recover_from_claim(&self, cpu: CpuId) -> ParkOutcome {
-        let recovered = self.transition(TaskState::WakeQueued(cpu), TaskState::Running(cpu));
         assert!(
-            recovered,
+            self.recover_if_claimed(cpu),
             "commit lost to something other than a pre-park claim: {:?}",
             self.state(),
         );
-        ParkOutcome::AlreadyWoken
+        false
     }
 
     /// The deadline's claim: one on anything but a waiter is lost, because it
@@ -603,7 +675,7 @@ impl<M> TaskShared<M> {
         self.state.load(Ordering::Acquire) & NOTIFIED != 0
     }
 
-    /// The home CPU handling `Msg::Wake`: `WakeQueued(cpu) → Ready(cpu)`.
+    /// The end of a claimed park on `cpu`: `WakeQueued(cpu) → Ready(cpu)`.
     pub fn finish_wake(&self, cpu: CpuId) -> bool {
         self.transition(TaskState::WakeQueued(cpu), TaskState::Ready(cpu))
     }
@@ -937,7 +1009,8 @@ linear_state!(
     RunningTask
 );
 linear_state!(
-    /// Exists only inside a `ParkedEntry` in `CpuSched.parked`.
+    /// Exists only inside a parked task's record, in its `TaskShared`'s slot
+    /// or held by the claim that ended the park.
     BlockedTask
 );
 linear_state!(
@@ -1112,16 +1185,13 @@ impl<X: SchedPayload> RunningTask<X> {
         ReadyTask(task)
     }
 
-    /// Park. The committed ticket is the proof that the commit CAS won, i.e.
-    /// that no wake was lost between registration and commit — there is no way
-    /// to park without one.
+    /// The parked record, before [`CommittedTicket::park`] publishes it. The
+    /// committed ticket is the proof that no wake was lost between
+    /// registration and commit — there is no way to park without one.
     ///
-    /// The word may read `WakeQueued(cpu)` rather than `Blocked(cpu)`, and
-    /// parking anyway is correct: a waker may claim a `Blocked` task the
-    /// instant the commit publishes it, and its `Msg::Wake` went to *this* CPU,
-    /// whose mailbox this pass has already drained — so the next pass handles
-    /// it and finds the task in `parked`. Refusing would be asserting that a
-    /// remote CPU cannot act between two of our own instructions.
+    /// The word may read `WakeQueued(cpu)` rather than `Committing`: a claim
+    /// may land between the commit and here, and the ticket's park then
+    /// hands the record back to be woken.
     pub(crate) fn park(
         self,
         ticket: &CommittedTicket<Msg<X>>,
@@ -1148,7 +1218,7 @@ impl<X: SchedPayload> RunningTask<X> {
         }
         let state = task.0.shared.state();
         assert!(
-            matches!(state, TaskState::Blocked(c) | TaskState::WakeQueued(c) if c == cpu),
+            state == TaskState::Committing(cpu, ticket.generation()) || state == TaskState::WakeQueued(cpu),
             "park without a committed ticket: {state:?}",
         );
         BlockedTask(task)
@@ -1218,8 +1288,8 @@ impl<X: SchedPayload> RunningTask<X> {
 }
 
 impl<X: SchedPayload> BlockedTask<X> {
-    /// A `Msg::Wake` was handled, or the local deadline fired. The word is
-    /// `WakeQueued(cpu)` — claimed by whoever won the arbitration CAS.
+    /// The park on `cpu` ends, by the hand of whoever won the claim: the word
+    /// is `WakeQueued(cpu)`.
     pub(crate) fn wake(
         self,
         cpu: CpuId,
@@ -1259,7 +1329,21 @@ impl<X: SchedPayload> DeadTask<X> {
 mod tests {
     use super::*;
 
-    type Shared = TaskShared<u32>;
+    struct Never;
+
+    impl SchedMsg for Never {
+        type Parked = ();
+
+        fn wake(_: Arc<TaskShared<Self>>, _: WakeCause) -> Self {
+            unreachable!("no wake is posted here")
+        }
+
+        fn retire(_: Arc<TaskShared<Self>>) -> Self {
+            unreachable!("no retire is posted here")
+        }
+    }
+
+    type Shared = TaskShared<Never>;
 
     const C0: CpuId = CpuId(0);
     const C1: CpuId = CpuId(1);
@@ -1290,7 +1374,7 @@ mod tests {
         let generation = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.state(), TaskState::Committing(C0, generation));
         assert!(s.kill_pending() && s.retire_queued());
-        assert_eq!(s.commit_park(C0, generation), ParkOutcome::Parked);
+        assert!(s.commit_park(C0, generation));
         assert_eq!(s.state(), TaskState::Blocked(C0));
         assert!(s.kill_pending() && s.retire_queued());
     }
@@ -1323,7 +1407,7 @@ mod tests {
     fn park_then_wake_is_the_ordinary_path() {
         let s = running(C0);
         let generation = s.begin_commit(C0).expect("nothing notified this task");
-        assert_eq!(s.commit_park(C0, generation), ParkOutcome::Parked);
+        assert!(s.commit_park(C0, generation));
         assert_eq!(s.claim_wake(), Claim::Parked(C0));
         assert_eq!(s.state(), TaskState::WakeQueued(C0));
         assert!(s.finish_wake(C0));
@@ -1335,20 +1419,20 @@ mod tests {
         let s = running(C0);
         let generation = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.claim_wake(), Claim::PrePark);
-        assert_eq!(s.commit_park(C0, generation), ParkOutcome::AlreadyWoken);
-        assert_eq!(s.state(), TaskState::Running(C0), "no switch, keep running");
+        assert!(!s.commit_park(C0, generation));
+        assert_eq!(s.state(), TaskState::WakeQueued(C0), "the record is the committer's, to wake");
     }
 
     #[test]
     fn cancel_reports_a_claim_it_lost() {
         let s = running(C0);
         let generation = s.begin_commit(C0).expect("nothing notified this task");
-        assert_eq!(s.cancel_commit(C0, generation), ParkOutcome::Parked);
+        assert!(s.cancel_commit(C0, generation));
         assert_eq!(s.state(), TaskState::Running(C0));
 
         let generation = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.claim_wake(), Claim::PrePark);
-        assert_eq!(s.cancel_commit(C0, generation), ParkOutcome::AlreadyWoken);
+        assert!(!s.cancel_commit(C0, generation));
         assert_eq!(s.state(), TaskState::Running(C0));
     }
 
@@ -1356,7 +1440,7 @@ mod tests {
     fn a_stale_generation_cannot_park_the_task() {
         let s = running(C0);
         let stale = s.begin_commit(C0).expect("nothing notified this task");
-        assert_eq!(s.cancel_commit(C0, stale), ParkOutcome::Parked);
+        assert!(s.cancel_commit(C0, stale));
         let fresh = s.begin_commit(C0).expect("nothing notified this task");
         assert_ne!(stale, fresh);
         assert!(!s.transition(TaskState::Committing(C0, stale), TaskState::Blocked(C0)));
@@ -1368,7 +1452,7 @@ mod tests {
         let s = running(C0);
         assert_eq!(s.claim_wake(), Claim::Lost, "running");
         let generation = s.begin_commit(C0).expect("nothing notified this task");
-        assert_eq!(s.commit_park(C0, generation), ParkOutcome::Parked);
+        assert!(s.commit_park(C0, generation));
         assert_eq!(s.claim_wake(), Claim::Parked(C0));
         assert_eq!(s.claim_wake(), Claim::Lost, "already claimed");
     }
@@ -1399,9 +1483,10 @@ mod tests {
         let s = running(C0);
         let generation = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.notify(), Notify::PrePark);
-        assert_eq!(s.commit_park(C0, generation), ParkOutcome::AlreadyWoken);
+        assert!(!s.commit_park(C0, generation));
+        assert!(s.recover_if_claimed(C0));
         let generation = s.begin_commit(C0).expect("a claim sets no bit");
-        assert_eq!(s.commit_park(C0, generation), ParkOutcome::Parked);
+        assert!(s.commit_park(C0, generation));
         assert_eq!(s.notify(), Notify::Parked(C0));
         assert_eq!(s.notify(), Notify::Flagged, "a second post finds the wake queued");
         assert!(s.finish_wake(C0));

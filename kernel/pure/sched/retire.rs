@@ -16,14 +16,14 @@ use crate::sched::task::{TaskShared, TaskState};
 /// Exactly one retirer exists per task (process teardown or thread kill), and
 /// it holds this. Consumed by [`RetireTicket::post`].
 #[must_use = "a claimed retire must be posted"]
-pub struct RetireTicket<'a, M> {
+pub struct RetireTicket<'a, M: SchedMsg> {
     shared: &'a Arc<TaskShared<M>>,
 }
 
 /// Claim the right to retire `shared`: sets the sticky KILL and
 /// RETIRE_QUEUED bits. Panics if a retire is already queued — a second
 /// concurrent retire of one task is a kernel bug, not a condition to tolerate.
-pub fn begin<M>(shared: &Arc<TaskShared<M>>) -> RetireTicket<'_, M> {
+pub fn begin<M: SchedMsg>(shared: &Arc<TaskShared<M>>) -> RetireTicket<'_, M> {
     assert!(
         shared.claim_retire(),
         "a second retirer for task {:?}: single-retirer is a kernel invariant",
@@ -121,8 +121,9 @@ mod tests {
     }
 
     impl SchedMsg for Msg {
-        fn wake(key: TaskKey, _cause: WakeCause) -> Self {
-            Msg::Wake(key)
+        type Parked = ();
+        fn wake(shared: Arc<TaskShared<Self>>, _cause: WakeCause) -> Self {
+            Msg::Wake(shared.key())
         }
         fn retire(shared: Arc<TaskShared<Self>>) -> Self {
             Msg::Retire(shared.key())
@@ -132,6 +133,10 @@ mod tests {
     #[derive(Default)]
     struct Kicks(Mutex<Vec<CpuId>>);
     impl Kicker for Kicks {
+        fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+        fn now(&self) -> crate::sched::hw::Nanos {
+            crate::sched::hw::Nanos::ZERO
+        }
         fn kick(&self, target: CpuId) {
             self.0.lock().unwrap().push(target);
         }
@@ -148,6 +153,10 @@ mod tests {
     }
 
     impl Kicker for SamplingKicks {
+        fn trace(&self, _ev: crate::sched::hw::TraceEvent) {}
+        fn now(&self) -> crate::sched::hw::Nanos {
+            crate::sched::hw::Nanos::ZERO
+        }
         fn kick(&self, _target: CpuId) {
             self.seen.lock().unwrap().push(self.task.kill_pending());
         }

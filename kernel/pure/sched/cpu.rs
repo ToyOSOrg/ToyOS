@@ -30,28 +30,29 @@ use crate::sched::mailbox::{
     Doorbell, Kick, MailboxConsumer, MailboxNode, MailboxProducer, PostSlot, PreemptGuard,
     Quiesced, SchedMsg, SleepArm, Urgency,
 };
-use crate::sched::msg::Msg;
+use crate::sched::msg::{Msg, ParkedRecord};
 use crate::sched::queue::{RunQueue, MIN_SLICE_NS};
-use crate::sched::sync::{fence, Arc, AtomicBool, AtomicU32, AtomicU64, Ordering};
+use crate::sched::sync::{fence, Arc, AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use crate::sched::task::{
-    BlockedTask, Claim, DeadTask, ReadyTask, RunningTask, SchedPayload, TaskKey, TaskShared,
-    TaskState, TransitTask, WaitClass, WakeCause, WakeReason, QUANTUM_NS,
+    Claim, DeadTask, Gen, ReadyTask, RunningTask, SchedPayload, TaskKey, TaskShared,
+    TaskState, TransitTask, WakeCause, WakeReason, QUANTUM_NS,
 };
 use crate::sched::timer::{TimerApplied, TimerPlan};
 use crate::sched::topology::{Level, Topology};
-use crate::sched::park::{CommittedTicket, CurrentTask};
+use crate::sched::park::{CommittedTicket, CurrentTask, Parked};
 
 /// Permission to switch. Holds pointers into the stable Box-backed task
 /// records; constructed only by safe code in
 /// [`SchedPass::finish`], consumed by the driver's `unsafe Hw::switch`.
 ///
 /// The keys let a driver do its own bookkeeping (trace, invariant I11's
-/// `ctx_saved` shadow) without dereferencing the pointers — which is what
-/// keeps the simulator free of `unsafe`.
+/// `ctx_saved` shadow, the outgoing task's on-CPU word) without dereferencing
+/// the pointers, which is what keeps the simulator from dereferencing any.
 #[must_use]
 pub struct RunToken<X: SchedPayload> {
     restore: *const X::Ctx,
     save: *mut X::Ctx,
+    left: *const AtomicBool,
     incoming: Option<TaskKey>,
     outgoing: Option<TaskKey>,
 }
@@ -63,6 +64,14 @@ impl<X: SchedPayload> RunToken<X> {
 
     pub fn save_ptr(&self) -> *mut X::Ctx {
         self.save
+    }
+
+    /// The outgoing task's on-CPU word, which the switch clears with a
+    /// release store once it has saved the outgoing context and left its
+    /// stack: from then on another CPU may run it. Null where the outgoing
+    /// context is this CPU's idle one.
+    pub fn left_ptr(&self) -> *const AtomicBool {
+        self.left
     }
 
     /// The task being switched to; `None` is this CPU's idle context.
@@ -125,88 +134,67 @@ pub enum Action<X: SchedPayload> {
     Idle(SleepToken),
 }
 
-/// A parked task, plus the two facts that are only meaningful while parked.
-///
-/// The deadline lives *here*, so a task that is not parked structurally
-/// cannot have one; [`Parked`]'s order of deadlines is written only beside it.
-/// A `since` field here is omitted for the same reason: the residency stamp is
-/// in the task record.
-pub struct ParkedEntry<X: SchedPayload> {
-    task: BlockedTask<X>,
-    deadline: Option<Nanos>,
-    class: WaitClass,
+/// The deadlines this CPU owes the tasks that parked on it, in the order they
+/// fall due: what it owes first is one lookup, however many it holds. A
+/// parked task's record is in its own `TaskShared`, owned by whoever wins the
+/// claim that ends the park; this keeps only what the timer needs, one entry
+/// per task, its last timed park's. An entry whose park another claim ended
+/// is dropped before the timer is armed for it, or when it falls due, whose
+/// claim then finds that park gone.
+struct Due<X: SchedPayload> {
+    order: BTreeSet<(Nanos, TaskKey)>,
+    parks: BTreeMap<TaskKey, DuePark<X>>,
 }
 
-/// The tasks parked on a CPU, and their deadlines in the order they fall due:
-/// what the CPU owes first is one lookup, however many tasks it holds. Only
-/// these methods write either, so the order cannot disagree with an entry.
-struct Parked<X: SchedPayload> {
-    entries: BTreeMap<TaskKey, ParkedEntry<X>>,
-    due: BTreeSet<(Nanos, TaskKey)>,
+/// One timed park: when it falls due, and which park of the task it is.
+struct DuePark<X: SchedPayload> {
+    at: Nanos,
+    generation: Gen,
+    shared: Arc<TaskShared<Msg<X>>>,
 }
 
-impl<X: SchedPayload> Parked<X> {
+impl<X: SchedPayload> Due<X> {
     fn new() -> Self {
-        Self { entries: BTreeMap::new(), due: BTreeSet::new() }
+        Self { order: BTreeSet::new(), parks: BTreeMap::new() }
     }
 
-    fn insert(&mut self, key: TaskKey, entry: ParkedEntry<X>) {
-        if let Some(at) = entry.deadline {
-            self.due.insert((at, key));
+    fn insert(&mut self, at: Nanos, generation: Gen, shared: Arc<TaskShared<Msg<X>>>) {
+        let key = shared.key();
+        if let Some(old) = self.parks.insert(key, DuePark { at, generation, shared }) {
+            self.order.remove(&(old.at, key));
         }
-        assert!(self.entries.insert(key, entry).is_none(), "a task parked twice");
+        self.order.insert((at, key));
     }
 
-    fn remove(&mut self, key: TaskKey) -> Option<ParkedEntry<X>> {
-        let entry = self.entries.remove(&key)?;
-        if let Some(at) = entry.deadline {
-            self.due.remove(&(at, key));
-        }
-        Some(entry)
-    }
-
-    fn get(&self, key: TaskKey) -> Option<&ParkedEntry<X>> {
-        self.entries.get(&key)
-    }
-
-    /// The deadline that will not be honoured stops being owed.
-    fn forget_deadline(&mut self, key: TaskKey) {
-        if let Some(at) = self.entries.get_mut(&key).and_then(|entry| entry.deadline.take()) {
-            self.due.remove(&(at, key));
+    fn remove(&mut self, key: TaskKey) {
+        if let Some(park) = self.parks.remove(&key) {
+            self.order.remove(&(park.at, key));
         }
     }
 
     fn earliest(&self) -> Option<Nanos> {
-        self.due.first().map(|&(at, _)| at)
+        self.order.first().map(|&(at, _)| at)
     }
 
-    /// The task whose deadline falls due first, if that is by `now`.
-    fn next_due(&self, now: Nanos) -> Option<TaskKey> {
-        self.due.first().filter(|&&(at, _)| at <= now).map(|&(_, key)| key)
-    }
-}
-
-/// One parked task as an outside reader sees it.
-pub struct ParkedView<'a, X: SchedPayload> {
-    key: TaskKey,
-    entry: &'a ParkedEntry<X>,
-}
-
-impl<X: SchedPayload> ParkedView<'_, X> {
-    pub fn key(&self) -> TaskKey {
-        self.key
+    /// Drop the earliest deadlines whose parks another claim has ended, so a
+    /// timer is not armed for one and an idle CPU does not wake for nothing.
+    /// A park that a claim ends after this read leaves its deadline armed.
+    fn prune(&mut self, cpu: CpuId) {
+        while let Some(&(at, key)) = self.order.first() {
+            let park = &self.parks[&key];
+            if park.shared.parked_as(cpu, park.generation) {
+                return;
+            }
+            self.order.remove(&(at, key));
+            self.parks.remove(&key);
+        }
     }
 
-    pub fn deadline(&self) -> Option<Nanos> {
-        self.entry.deadline
-    }
-
-    pub fn is_rt(&self) -> bool {
-        self.entry.task.rt().is_rt()
-    }
-
-    pub fn shared_state(&self) -> TaskState {
-        self.entry.task.shared().state()
+    /// The park whose deadline falls due first, if that is by `now`, taken out.
+    fn pop_due(&mut self, now: Nanos) -> Option<(Gen, Arc<TaskShared<Msg<X>>>)> {
+        let &(at, key) = self.order.first().filter(|&&(at, _)| at <= now)?;
+        self.order.remove(&(at, key));
+        self.parks.remove(&key).map(|park| (park.generation, park.shared))
     }
 }
 
@@ -237,7 +225,7 @@ pub struct CpuSched<X: SchedPayload> {
     id: CpuId,
     running: Option<RunningTask<X>>,
     rq: RunQueue<X>,
-    parked: Parked<X>,
+    due: Due<X>,
     /// Killed tasks that still have a kernel stack to unwind, dispatched
     /// ahead of the **fair** queue, and behind the RT band only until the head
     /// of this list has aged ([`DYING_AGE_NS`]).
@@ -371,6 +359,8 @@ pub struct CpuSched<X: SchedPayload> {
     cursor: usize,
     loaded: Loaded,
     loaded_ctx: *mut X::Ctx,
+    /// The loaded task's on-CPU word; null while idle is loaded.
+    loaded_on_cpu: *const AtomicBool,
     idle_ctx: Box<X::Ctx>,
     /// What the one-shot timer is programmed to. Bookkeeping for invariant T.
     armed: Option<Nanos>,
@@ -398,7 +388,7 @@ impl<X: SchedPayload> CpuSched<X> {
             id,
             running: None,
             rq: RunQueue::new(),
-            parked: Parked::new(),
+            due: Due::new(),
             dying: VecDeque::new(),
             stopped: VecDeque::new(),
             held: Vec::new(),
@@ -417,6 +407,7 @@ impl<X: SchedPayload> CpuSched<X> {
             cursor: 0,
             loaded: Loaded::Idle,
             loaded_ctx,
+            loaded_on_cpu: core::ptr::null(),
             idle_ctx,
             armed: None,
             #[cfg(feature = "protocol-port")]
@@ -454,12 +445,10 @@ impl<X: SchedPayload> CpuSched<X> {
         &self.rq
     }
 
-    pub fn parked(&self) -> impl Iterator<Item = ParkedView<'_, X>> + '_ {
-        self.parked.entries.iter().map(|(key, entry)| ParkedView { key: *key, entry })
-    }
-
-    pub fn parked_task(&self, key: TaskKey) -> Option<&BlockedTask<X>> {
-        self.parked.get(key).map(|e| &e.task)
+    /// The deadlines this CPU owes, as `(deadline, task)`, stale ones
+    /// included.
+    pub fn due(&self) -> impl Iterator<Item = (Nanos, TaskKey)> + '_ {
+        self.due.order.iter().copied()
     }
 
     /// The killed tasks waiting to unwind, for the invariant walks and for a
@@ -509,6 +498,15 @@ impl<X: SchedPayload> CpuSched<X> {
 
     pub fn mailbox_is_empty(&self) -> bool {
         self.mailbox.is_empty()
+    }
+
+    /// Which wakes would queue behind the task this CPU runs.
+    fn behind(&self) -> Behind {
+        let running = self.running.as_ref();
+        Behind {
+            fair: self.rq.running_is_fair() && running.is_some_and(|r| !r.shared().kill_pending()),
+            rt: running.is_some_and(|r| r.is_rt()),
+        }
     }
 
     /// The CPU whose word still holds this one's ask, answering or not.
@@ -624,7 +622,7 @@ impl<X: SchedPayload> CpuSched<X> {
                 (core::mem::offset_of!(Self, id), "id"),
                 (core::mem::offset_of!(Self, running), "running"),
                 (core::mem::offset_of!(Self, rq), "rq (the ready bands: rt deque, job groups)"),
-                (core::mem::offset_of!(Self, parked), "parked (the park map)"),
+                (core::mem::offset_of!(Self, due), "due (the deadlines owed)"),
                 (core::mem::offset_of!(Self, dying), "dying"),
                 (core::mem::offset_of!(Self, stopped), "stopped"),
                 (core::mem::offset_of!(Self, held), "held"),
@@ -643,6 +641,7 @@ impl<X: SchedPayload> CpuSched<X> {
                 (core::mem::offset_of!(Self, cursor), "cursor"),
                 (core::mem::offset_of!(Self, loaded), "loaded"),
                 (core::mem::offset_of!(Self, loaded_ctx), "loaded_ctx"),
+                (core::mem::offset_of!(Self, loaded_on_cpu), "loaded_on_cpu"),
                 (core::mem::offset_of!(Self, idle_ctx), "idle_ctx"),
                 (core::mem::offset_of!(Self, armed), "armed"),
             ],
@@ -944,20 +943,23 @@ impl<X: SchedPayload> CpuSched<X> {
     /// is what makes the chase terminate.
     ///
     /// **The loaded task is never migrated, and the rule is asserted here
-    /// because this is where every migration passes.**
+    /// because every migration a CPU makes of a task it holds passes here.**
     /// [`crate::sched::queue::RunQueue::pop_surplus`]'s `loaded` argument covers the
     /// steal path and only the steal path; the
     /// wake-forward in [`CpuSched::place`] reaches this function too, and what
     /// keeps *it* correct is an argument rather than a check — a task `place`
-    /// hands on came out of `parked` or off the wire in `InTransit`, and the
-    /// loaded task is the one in `running`, which the linear task states make
-    /// disjoint from both. That argument is worth one comparison per migration
+    /// hands on came off the wire in `InTransit`, or was woken from a park,
+    /// and a woken task this CPU still stands on is queued here and not
+    /// placed ([`CpuSched::wake_parked`]). That argument is worth one
+    /// comparison per migration
     /// to stop being an argument: if it is ever wrong, the far CPU restores a
     /// stack this one is standing on, and what the machine reports is not this
     /// site but a container somewhere else reading as a value nothing can write.
     /// Two CPUs
     /// on one kernel stack is not a state to return an error from — it is a
-    /// kernel bug, and it dies here where it can still be named.
+    /// kernel bug, and it dies here where it can still be named. A claimant's
+    /// forward of a parked task does not pass here: its rule is the task's
+    /// on-CPU word ([`CpuHandles::send_claimed_wake`]).
     fn hand_off<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
         task: ReadyTask<X>,
@@ -1098,11 +1100,9 @@ impl<X: SchedPayload> CpuSched<X> {
         // A fair wake behind a running fair thread. A running corpse is not
         // fair-band work: the dying list's bound times its unwind, not the
         // band's order.
-        let behind_fair = !task.is_rt()
-            && self.rq.running_is_fair()
-            && self.running.as_ref().is_some_and(|r| !r.shared().kill_pending());
-        let behind_rt = task.is_rt() && self.running.as_ref().is_some_and(|r| r.is_rt());
-        if behind_fair || behind_rt || queued_ahead {
+        let rt = task.is_rt();
+        let behind = self.behind().holds(rt);
+        if behind || queued_ahead {
             if self.holding {
                 self.held.push(task);
                 return;
@@ -1120,7 +1120,7 @@ impl<X: SchedPayload> CpuSched<X> {
         }
         let key = task.key();
         self.rq.insert(task);
-        if behind_fair && self.rq.would_preempt_for(key) {
+        if behind && !rt && self.rq.would_preempt_for(key) {
             let at = now.max(self.dispatched_at.after(MIN_SLICE_NS));
             self.cut = Some(self.cut.map_or(at, |cut| cut.min(at)));
         }
@@ -1143,22 +1143,52 @@ impl<X: SchedPayload> CpuSched<X> {
         self.stopped.push_back(task);
     }
 
+    /// A claim that ended a park here handed this CPU the wake: the record
+    /// is in the task's slot, this CPU's to take.
     fn handle_wake<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
-        key: TaskKey,
+        shared: &Arc<TaskShared<Msg<X>>>,
         cause: WakeCause,
         env: Env<'_, H, P>,
         now: Nanos,
     ) {
-        let Some(entry) = self.parked.remove(key) else {
-            // Not parked here any more: a `Retire` already woke it into the
-            // dying list, or its deadline fired first and this wake lost the
-            // arbitration CAS. Keys are never reused, so a stale wake is
-            // provably about a task that is no longer waiting — a benign no-op.
-            return;
-        };
-        let mut task = entry.task.wake(self.id, cause, entry.class, now);
+        let record = self.take_parked(shared);
+        self.wake_parked(record, cause, env, now);
+    }
+
+    /// Take the record of a park this CPU holds the claim to.
+    #[allow(unsafe_code)] // the slot's take; the claim is the exclusion
+    fn take_parked(&mut self, shared: &Arc<TaskShared<Msg<X>>>) -> ParkedRecord<X> {
+        assert_eq!(shared.state(), TaskState::WakeQueued(self.id), "a park taken without its claim");
+        // SAFETY: the word is `WakeQueued(self)`, which only the claim this
+        // CPU holds or was handed can have made from this park's `Blocked`.
+        let record = unsafe { shared.parked().take() };
+        // Any deadline still held for the task is this park's or a stale one.
+        self.due.remove(shared.key());
+        record
+    }
+
+    fn wake_parked<H: Hw<Payload = X>, P: PreemptGuard>(
+        &mut self,
+        record: ParkedRecord<X>,
+        cause: WakeCause,
+        env: Env<'_, H, P>,
+        now: Nanos,
+    ) {
+        let key = record.task.key();
+        let mut task = record.task.wake(self.id, cause, record.class, now);
         self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
+        if Some(key) == self.loaded_key() {
+            // Woken in the pass that parked it, before the switch: this CPU
+            // still stands on its context, so it stays for the pick, which
+            // sends on a loaded task its mask leaves out.
+            if task.shared().kill_pending() {
+                self.keep_dying(task, now);
+            } else {
+                self.rq.insert(task);
+            }
+            return;
+        }
         task.refresh_affinity();
         self.place(task, env, now);
     }
@@ -1186,25 +1216,16 @@ impl<X: SchedPayload> CpuSched<X> {
         now: Nanos,
     ) {
         let key = shared.key();
-        if let Some(entry) = self.parked.get(key) {
-            // **Claim-arbitrated, exactly as `fire_deadlines` is**:
-            // remove-then-convert loses the race. If a remote waker has
-            // already claimed this task its `Msg::Wake` is in flight to this
-            // same CPU, so leaving the entry alone is what keeps the task in
-            // *some* container — `handle_wake` finds it and the wake places
-            // it, into the dying list, because the kill bit is already set.
-            match entry.task.shared().claim_wake() {
+        if shared.state() == TaskState::Blocked(self.id) {
+            // **Claim-arbitrated, exactly as `fire_deadlines` is.** A waker
+            // that claimed it first has the record and sends it on, to this
+            // CPU or another; wherever it lands the kill bit, already set,
+            // puts it in that CPU's dying list.
+            match shared.claim_wake() {
                 Claim::Parked(cpu) => {
                     assert_eq!(cpu, self.id, "a task parked here claims another CPU");
-                    let entry = self.parked.remove(key).expect("still there");
-                    let task = entry.task.wake(
-                        self.id,
-                        WakeCause::new(WakeReason::Woken),
-                        entry.class,
-                        now,
-                    );
-                    self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
-                    self.place(task, env, now);
+                    let record = self.take_parked(shared);
+                    self.wake_parked(record, WakeCause::new(WakeReason::Woken), env, now);
                 }
                 Claim::PrePark => panic!("a parked task cannot be pre-park"),
                 Claim::Lost => {}
@@ -1248,11 +1269,12 @@ impl<X: SchedPayload> CpuSched<X> {
         }
         // Somewhere else. Re-post the *same* node — legal precisely because
         // this consumer just unlinked it — unless the word names this CPU,
-        // which means an `Adopt` is on its way here: re-posting would spin
-        // against the producer, and the sticky kill bit already guarantees the
-        // adopter *dispatches* it on arrival, into its own dying list, where it
-        // unwinds and dies by its own `die`. A task in this CPU's stopped band
-        // names this CPU too, and stays in the band.
+        // which means the task is on its way: an `Adopt` or a `Wake` to here,
+        // or a claimant sending it on from here. Re-posting would spin against
+        // the producer, and the sticky kill bit already guarantees that the
+        // CPU that places it *dispatches* it, into its own dying list, where
+        // it unwinds and dies by its own `die`. A task in this CPU's stopped
+        // band names this CPU too, and stays in the band.
         match shared.state() {
             TaskState::Dead => {}
             state if home_of(state) == Some(self.id) => {}
@@ -1267,7 +1289,7 @@ impl<X: SchedPayload> CpuSched<X> {
     fn drain<H: Hw<Payload = X>, P: PreemptGuard>(&mut self, env: Env<'_, H, P>, now: Nanos) {
         while let Some(msg) = self.mailbox.pop(env.preempt) {
             match msg {
-                Msg::Wake { key, cause } => self.handle_wake(key, cause, env, now),
+                Msg::Wake { shared, cause } => self.handle_wake(&shared, cause, env, now),
                 Msg::Adopt { task } => self.handle_adopt(task, env, now),
                 Msg::Retire { shared } => self.handle_retire(&shared, env, now),
             }
@@ -1302,42 +1324,81 @@ impl<X: SchedPayload> CpuSched<X> {
     /// long*: a CPU that owes a wake is the wrong one to run unbounded I/O on,
     /// and the idle loop asks before it flushes (`sched::driver::owes_deadline`).
     pub fn earliest_deadline(&self) -> Option<Nanos> {
-        self.parked.earliest()
+        self.due.earliest()
     }
 
     /// Fire every deadline that is due, arbitrating with remote wakers
-    /// through the same claim CAS they use.
+    /// through the claim they use. A deadline whose park another claim ended
+    /// claims nothing, and goes.
     fn fire_deadlines<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
         env: Env<'_, H, P>,
         now: Nanos,
     ) {
-        while let Some(key) = self.parked.next_due(now) {
-            let entry = self.parked.get(key).expect("just found");
-            match entry.task.shared().claim_wake() {
-                Claim::Parked(cpu) => {
-                    assert_eq!(cpu, self.id, "a task parked here claims another CPU")
-                }
-                Claim::PrePark => panic!("a parked task cannot be pre-park"),
-                // A remote waker got there first and its `Wake` is in flight;
-                // no later claim can succeed either, so this timeout can never
-                // fire and the entry stops claiming it will. Clearing it is
-                // also what advances the loop — the deadline that will not be
-                // honoured and the deadline that is not reported are one field.
-                Claim::Lost => {
-                    self.parked.forget_deadline(key);
-                    continue;
-                }
+        while let Some((generation, shared)) = self.due.pop_due(now) {
+            if !shared.claim_deadline(self.id, generation) {
+                continue;
             }
-            let entry = self.parked.remove(key).expect("still there");
-            let task = entry.task.wake(
-                self.id,
-                WakeCause::new(WakeReason::Timeout),
-                entry.class,
-                now,
-            );
+            let record = self.take_parked(&shared);
             self.trace(env, now, TraceKind::TimerFire);
-            self.place(task, env, now);
+            self.wake_parked(record, WakeCause::new(WakeReason::Timeout), env, now);
+        }
+    }
+}
+
+impl<X: SchedPayload> CpuHandles<Msg<X>> {
+    /// The wake of a park whose claim the caller won, sent where the task
+    /// will run. Where its home runs a task its wake would queue behind
+    /// ([`Behind`]), it goes straight to an idle CPU in its mask that sleeps
+    /// unrung, chosen as [`Self::idle_near`] chooses from the home, as an
+    /// `Adopt`. Otherwise it goes home as a `Wake`, which places it there.
+    ///
+    /// Three claims go home whatever the home runs. A task whose home has not
+    /// yet switched away from it ([`TaskShared::on_cpu`]) may move only by its
+    /// home's hand, in a pass after that switch. A claimant on the home itself
+    /// costs no hop, and leaves placement to the home's own pass, which knows
+    /// whether the poster is about to park. A killed task goes where its dying
+    /// list is.
+    #[allow(unsafe_code)] // the slot's take and hand-back; the claim is the exclusion
+    pub fn send_claimed_wake(
+        &self,
+        shared: &Arc<TaskShared<Msg<X>>>,
+        home: CpuId,
+        cause: WakeCause,
+        kicker: &impl Kicker,
+        preempt: &impl PreemptGuard,
+    ) {
+        let go_home = || crate::sched::park::post_wake(shared, home, cause, self, kicker, preempt);
+        if shared.on_cpu() || kicker.runs_on(home) || shared.kill_pending() {
+            return go_home();
+        }
+        let behind = self.get(home).behind();
+        // SAFETY: the caller's claim took the word from `Blocked(home)`, and
+        // the home has saved the task's context, which the record holds.
+        let record = unsafe { shared.parked().take() };
+        // A boosted wake is lent the RT band by its wake.
+        let rt = record.task.rt().is_rt() || cause.boost.is_some();
+        let mask = shared.mask().load().0;
+        let dst = behind.holds(rt).then(|| {
+            self.idle_near(home, self.topology.position(home) + 1, |cpu| {
+                mask.contains(cpu.id()) && cpu.doorbell().sleeping_unrung()
+            })
+        });
+        let Some(dst) = dst.flatten() else {
+            // SAFETY: the claim's right to the slot goes to the home with the
+            // message, whose post orders this write before its take.
+            unsafe { shared.parked().publish(record) };
+            return go_home();
+        };
+        let now = kicker.now();
+        let task = record.task.wake(home, cause, record.class, now);
+        let (key, name) = (task.key(), task.ext().name());
+        kicker.trace(TraceEvent { ts: now, cpu: home, kind: TraceKind::Wake { task: key, name } });
+        kicker.trace(TraceEvent { ts: now, cpu: home, kind: TraceKind::Migrate { task: key, name, to: dst } });
+        let urgency = if task.is_rt() { Urgency::Preempt } else { Urgency::Normal };
+        let transit = task.migrate(home, dst, now);
+        if self.get(dst).post_owned(Msg::Adopt { task: transit }, Msg::adopt_node, urgency, preempt) == Kick::Send {
+            kicker.kick(dst);
         }
     }
 }
@@ -1702,11 +1763,13 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         self.dispose()
     }
 
-    /// Park the current task **before** the switch. Sound only because of
-    /// per-CPU ownership: a wake for the just-parked task arrives as a message
-    /// to this same CPU and cannot be processed until the next pass, which
-    /// necessarily runs after the switch completes. The stack-reuse race is
-    /// sequentially impossible, not locked away.
+    /// Park the current task **before** the switch. Its record goes into its
+    /// own slot and its word to `Blocked`, so any CPU may claim it at once.
+    /// What keeps its stack this CPU's until the switch has saved it and left
+    /// it is the task's on-CPU word, set when this CPU dispatched it and
+    /// cleared with release by that switch, on the incoming stack: a claimant
+    /// that reads it set sends the wake here as a message, which this CPU's
+    /// next pass, after that switch, places ([`CpuHandles::send_claimed_wake`]).
     pub fn dispose_block(
         mut self,
         ticket: CommittedTicket<Msg<H::Payload>>,
@@ -1720,6 +1783,8 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         let key = current.key();
         let name = current.ext().name();
         let class = ticket.class();
+        let shared = ticket.shared().clone();
+        let generation = ticket.generation();
         self.cpu.rq.leave_running(key, current.standing_mut());
         let task = current.park(
             &ticket,
@@ -1728,16 +1793,19 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             #[cfg(feature = "protocol-port")]
             self.cpu.park_keeps_lapsed_lend,
         );
-        self.cpu.parked.insert(
-            key,
-            ParkedEntry {
-                task,
-                deadline,
-                class,
-            },
-        );
         self.cpu
             .trace(self.env, self.now, TraceKind::ParkCommit { task: key, name });
+        match ticket.park(ParkedRecord { task, class }) {
+            Parked::Blocked => {
+                if let Some(at) = deadline {
+                    self.cpu.due.insert(at, generation, shared);
+                }
+            }
+            // A claim while it committed: woken at once, as that claim's wake.
+            Parked::WokenFirst(record) => {
+                self.cpu.wake_parked(record, WakeCause::new(WakeReason::Woken), self.env, self.now);
+            }
+        }
         self.settle();
         self.dispose()
     }
@@ -1793,7 +1861,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
 impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// The only exit. Picks the next task, answers steal requests from
     /// surplus, publishes load, and — LAST — programs the timer. Arming after
-    /// every change to `parked` is the whole proof of invariant T:
+    /// every change to the deadlines it owes is the whole proof of invariant T:
     /// with no window between the last change and the arming, "deadline exists
     /// but timer unarmed" is not a state the code can be in.
     pub fn finish(self) -> Action<<H as Hw>::Payload> {
@@ -1839,6 +1907,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             let surplus = self.cpu.rq.movable_fair() as u32;
             let takers = if surplus >= PUSH_THRESHOLD { self.cpu.rq.takers() } else { CpuMask::NONE };
             handle.publish_load((self.cpu.rq.len() + self.cpu.dying.len()) as u32);
+            handle.publish_behind(self.cpu.behind());
             self.env.cpus.publish_surplus(self.cpu.id, surplus, takers);
             self.cpu.rq.refresh();
             handle.publish_weight(self.cpu.rq.weight());
@@ -2186,6 +2255,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// extra wake before that instant is a spurious pass, not a missed
     /// deadline.
     fn apply_timer_no_later_than(&mut self, extra: Option<Nanos>) -> TimerApplied {
+        self.cpu.due.prune(self.cpu.id);
         let deadline = self.cpu.earliest_deadline();
         let decision = match self.cpu.running {
             Some(_) => Some(self.cpu.settle_decision(self.now)),
@@ -2230,11 +2300,15 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         }
         let restore = current.ctx_ptr();
         let save = self.cpu.loaded_ctx;
+        let left = self.cpu.loaded_on_cpu;
+        current.shared().dispatched();
         self.cpu.loaded = Loaded::Task(incoming);
         self.cpu.loaded_ctx = restore;
+        self.cpu.loaded_on_cpu = current.shared().on_cpu_word();
         Action::Run(RunToken {
             restore,
             save,
+            left,
             incoming: Some(incoming),
             outgoing,
         })
@@ -2251,12 +2325,14 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         };
         let restore: *mut <H::Payload as SchedPayload>::Ctx = &mut *self.cpu.idle_ctx;
         let save = self.cpu.loaded_ctx;
+        let left = core::mem::replace(&mut self.cpu.loaded_on_cpu, core::ptr::null());
         self.cpu.loaded = Loaded::Idle;
         self.cpu.loaded_ctx = restore;
         self.cpu.trace(self.env, self.now, TraceKind::IdleEnter);
         Action::Run(RunToken {
             restore,
             save,
+            left,
             incoming: None,
             outgoing,
         })
@@ -2270,6 +2346,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let rearm = self.rearm_deadline();
         // The idle choice is made against the timer the CPU would sleep
         // with, and its own wake joins the same plan: one write of the timer.
+        self.cpu.due.prune(self.cpu.id);
         let deadline = TimerPlan::compute(None, self.cpu.earliest_deadline()).no_later_than(rearm).armed();
         let idle = self.env.hw.idle_plan(deadline, self.now);
         let timer = self.apply_timer_no_later_than(match (rearm, idle.wake_at().map(Nanos)) {
@@ -2419,6 +2496,32 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     }
 }
 
+/// Which wakes would queue behind the task a CPU runs: a fair wake behind
+/// running fair work, an RT wake behind a running RT task. A running corpse
+/// is not fair-band work, since the dying list's bound times its unwind and
+/// not the band's order. The home's own placement and a claimant sending a
+/// wake on read this one predicate ([`CpuSched::behind`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Behind {
+    pub fair: bool,
+    pub rt: bool,
+}
+
+impl Behind {
+    /// Whether a wake in the RT band (`rt`) or the fair band would wait.
+    pub fn holds(self, rt: bool) -> bool {
+        if rt { self.rt } else { self.fair }
+    }
+
+    fn word(self) -> u8 {
+        u8::from(self.fair) | u8::from(self.rt) << 1
+    }
+
+    fn from_word(word: u8) -> Self {
+        Self { fair: word & 1 != 0, rt: word & 2 != 0 }
+    }
+}
+
 /// The globally shared, `Sync` face of a CPU, and the whole remote surface:
 /// post a message, ask for a task, ring the doorbell, read the published load.
 pub struct CpuHandle<M> {
@@ -2475,6 +2578,10 @@ pub struct CpuHandle<M> {
     /// `kernel::idle`). A wake forward and a spawn weigh it between sleepers
     /// as a tiebreak ([`CpuHandles::idle_near`], [`CpuHandles::place`]).
     idle_exit: AtomicU64,
+    /// **What would queue behind the task this CPU's last pass left
+    /// running**, a [`Behind`]: what a claim that ends a park reads to tell
+    /// whether the task would wait here ([`CpuHandles::send_claimed_wake`]).
+    behind: AtomicU8,
     /// The on-target counterpart to the simulator's invariants: the sim asserts
     /// what a pass *does*, this measures what a pass *costs*.
     ///
@@ -2505,6 +2612,7 @@ impl<M: SchedMsg> CpuHandle<M> {
             last_pass: AtomicU64::new(0),
             asks: core::array::from_fn(|_| AtomicU64::new(0)),
             idle_exit: AtomicU64::new(0),
+            behind: AtomicU8::new(0),
             #[cfg(feature = "sched-check")]
             pass_costs: PassCosts::new(),
         }
@@ -2529,6 +2637,16 @@ impl<M: SchedMsg> CpuHandle<M> {
 
     pub fn publish_load(&self, queued: u32) {
         self.load.store(queued, Ordering::Relaxed);
+    }
+
+    /// [`Self::behind`]'s word; stale by a pass at most, which costs a
+    /// placement and never a message.
+    pub fn behind(&self) -> Behind {
+        Behind::from_word(self.behind.load(Ordering::Relaxed))
+    }
+
+    pub fn publish_behind(&self, behind: Behind) {
+        self.behind.store(behind.word(), Ordering::Relaxed);
     }
 
     pub fn surplus(&self) -> u32 {
@@ -2929,6 +3047,7 @@ impl<M: SchedMsg> CpuHandles<M> {
 /// container says which second occupant it needs and why.
 #[cfg(test)]
 mod tests {
+    use crate::sched::task::WaitClass;
     extern crate std;
 
     use super::*;
@@ -2936,7 +3055,7 @@ mod tests {
     use crate::sched::job::{Job, JobKey};
     use crate::sched::mailbox::{mailbox, NoPreempt};
     use crate::sched::queue::SLICE_NS;
-    use crate::sched::task::{RtState, TaskAccounting, TaskBuilder};
+    use crate::sched::task::{Notify, RtState, TaskAccounting, TaskBuilder};
     use std::sync::Mutex;
 
     struct TestPayload;
@@ -2974,6 +3093,10 @@ mod tests {
     }
 
     impl Kicker for TestHw {
+        fn trace(&self, _ev: TraceEvent) {}
+        fn now(&self) -> Nanos {
+            Nanos::ZERO
+        }
         fn kick(&self, target: CpuId) {
             self.state().kicks.push(target);
         }
@@ -2983,9 +3106,6 @@ mod tests {
     }
 
     impl Machine for TestHw {
-        fn now(&self) -> Nanos {
-            Nanos::ZERO
-        }
         fn set_timer(&self, deadline: Nanos) {
             let mut state = self.state();
             state.timers.push(Some(deadline));
@@ -3008,13 +3128,19 @@ mod tests {
         fn need_resched(&self, cpu: CpuId) {
             self.state().need_resched.push(cpu);
         }
-        fn trace(&self, _ev: TraceEvent) {}
     }
 
     impl Hw for TestHw {
         type Payload = TestPayload;
-        #[allow(unsafe_code)] // the declaration is unsafe; this body reads keys only
+        /// Saves nothing, since a test task has no context, and then clears
+        /// the outgoing task's on-CPU word as the kernel's switch does.
+        #[allow(unsafe_code)]
         unsafe fn switch(&self, token: RunToken<TestPayload>) {
+            // SAFETY: the trait's: the token's pointers are live until a later
+            // pass, and the word is null or the outgoing task's.
+            if let Some(left) = unsafe { token.left_ptr().as_ref() } {
+                left.store(false, Ordering::Release);
+            }
             self.state().switches.push(token.incoming());
         }
         fn release(&self, key: TaskKey, _payload: TestPayload, _acct: TaskAccounting) {
@@ -3033,6 +3159,8 @@ mod tests {
         hw: TestHw,
         preempt: NoPreempt,
         next_key: u64,
+        /// Every spawned task's job, by key: what a sibling joins.
+        jobs: BTreeMap<TaskKey, Arc<Job>>,
         /// `Env::balance`. [`Balance::None`] by default because most tests want
         /// a CPU's queue to stay where they put it; the probe's own tests turn
         /// the pull half on.
@@ -3049,7 +3177,7 @@ mod tests {
             let mut cpus = Vec::new();
             let mut handles = Vec::new();
             for i in 0..count {
-                let (tx, rx) = mailbox();
+                let (tx, rx) = mailbox::<Msg<TestPayload>>();
                 cpus.push(CpuSched::new(CpuId(i as u32), rx, ()));
                 handles.push(CpuHandle::new(CpuId(i as u32), tx));
             }
@@ -3059,6 +3187,7 @@ mod tests {
                 hw: TestHw::default(),
                 preempt: NoPreempt,
                 next_key: 1,
+                jobs: BTreeMap::new(),
                 balance: Balance::None,
             }
         }
@@ -3116,17 +3245,7 @@ mod tests {
             dst: CpuId,
             of: TaskKey,
         ) -> (TaskKey, Arc<TaskShared<Msg<TestPayload>>>) {
-            let job = (0..self.cpus.len())
-                .find_map(|cpu| {
-                    let sched = &self.cpus[cpu];
-                    sched
-                        .running()
-                        .filter(|t| t.key() == of)
-                        .map(|t| t.job().clone())
-                        .or_else(|| sched.parked_task(of).map(|t| t.job().clone()))
-                        .or_else(|| sched.rq().tasks().find(|t| t.key() == of).map(|t| t.job().clone()))
-                })
-                .expect("the sibling is running, parked or queued");
+            let job = self.jobs.get(&of).expect("the sibling was spawned here").clone();
             self.spawn_into(dst, RtState::default(), job)
         }
 
@@ -3148,6 +3267,7 @@ mod tests {
         ) -> (TaskKey, Arc<TaskShared<Msg<TestPayload>>>) {
             let key = TaskKey(self.next_key);
             self.next_key += 1;
+            self.jobs.insert(key, job.clone());
             let task = TaskBuilder {
                 key,
                 job,
@@ -3172,26 +3292,47 @@ mod tests {
         /// The same at a chosen instant, for the tests that have to let a
         /// quantum expire.
         fn run_a_pass_at(&mut self, cpu: CpuId, now: Nanos) {
-            let (cpus, env) = self.split();
-            let pass = SchedPass::begin(&mut cpus[cpu.0 as usize], env, now);
-            let _ = pass.dispose_none().finish();
+            let action = {
+                let (cpus, env) = self.split();
+                SchedPass::begin(&mut cpus[cpu.0 as usize], env, now).dispose_none().finish()
+            };
+            self.execute(action);
+        }
+
+        /// Run a pass's switch, as the driver does.
+        #[allow(unsafe_code)]
+        fn execute(&self, action: Action<TestPayload>) {
+            if let Action::Run(token) = action {
+                // SAFETY: the token is from the pass that just finished, and
+                // no later pass has run on its CPU.
+                unsafe { self.hw.switch(token) };
+            }
+        }
+
+        /// Commit the running task's park on `cpu`, short of the pass that
+        /// parks it.
+        fn commit_running(&mut self, cpu: CpuId) -> CommittedTicket<Msg<TestPayload>> {
+            let sched = &self.cpus[cpu.0 as usize];
+            let current = CurrentTask::new(sched.running().expect("a running task to park").shared(), cpu);
+            let ticket = crate::sched::park::prepare(&current, crate::sched::park::Cancel::Answers, WaitClass::Other)
+                .expect("nothing notified this task");
+            match ticket.commit() {
+                crate::sched::park::Commit::Parked(c) => c,
+                _ => panic!("the commit refused an uncontended park"),
+            }
         }
 
         fn park_running(&mut self, cpu: CpuId) {
-            let (cpus, env) = self.split();
-            let sched = &mut cpus[cpu.0 as usize];
-            let current = CurrentTask::new(
-                sched.running().expect("a running task to park").shared(),
-                cpu,
-            );
-            let ticket = crate::sched::park::prepare(&current, crate::sched::park::Cancel::Answers, WaitClass::Other)
-                .expect("nothing notified this task");
-            let committed = match ticket.commit() {
-                crate::sched::park::Commit::Parked(c) => c,
-                _ => panic!("the commit refused an uncontended park"),
+            self.park_running_until(cpu, None);
+        }
+
+        fn park_running_until(&mut self, cpu: CpuId, deadline: Option<Nanos>) {
+            let committed = self.commit_running(cpu);
+            let action = {
+                let (cpus, env) = self.split();
+                SchedPass::begin(&mut cpus[cpu.0 as usize], env, NOW).dispose_block(committed, deadline).finish()
             };
-            let pass = SchedPass::begin(sched, env, NOW);
-            let _ = pass.dispose_block(committed, None).finish();
+            self.execute(action);
         }
 
         fn released(&self) -> Vec<TaskKey> {
@@ -3220,7 +3361,7 @@ mod tests {
                 .expect("the wake claim admits one poster: node must be free");
             if self.handles.get(cpu).post(
                 slot,
-                Msg::wake(shared.key(), cause),
+                Msg::<TestPayload>::wake(shared.clone(), cause),
                 cause.urgency(),
                 &NoPreempt,
             ) == Kick::Send
@@ -3253,8 +3394,8 @@ mod tests {
         w.abandon();
     }
 
-    /// **The arm that matters.** A thread parked on a disk transfer is in
-    /// `parked`; reaping it where it lies takes its kernel stack — every guard
+    /// **The arm that matters.** A thread parked on a disk transfer is
+    /// parked; reaping it where it lies takes its kernel stack — every guard
     /// on it — with it, so the retire *wakes* it, claim-arbitrated, into the
     /// dying list.
     #[test]
@@ -3279,25 +3420,22 @@ mod tests {
     }
 
     /// The claim is arbitrated and not assumed: a remote waker that got there
-    /// first owns a `Msg::Wake` in flight to this same CPU, so the retire
-    /// leaves the entry alone. Removing it here would leave the task in no
-    /// container at all — never runnable, never reaped — which is the state the
-    /// arbitration exists to prevent.
+    /// first owns the park's record and a `Msg::Wake` in flight to this same
+    /// CPU, so the retire takes nothing. Taking the record here would leave
+    /// the task in no container at all — never runnable, never reaped — which
+    /// is the state the arbitration exists to prevent.
     ///
     /// **The order has to be driven by hand, or this test does not reach the arm
-    /// it is named for.** Posting the wake and then the
-    /// retire cannot: the mailbox is FIFO, so the wake is drained first,
-    /// `parked` is empty by the time `handle_retire` runs, and the whole
-    /// `parked.contains_key` branch is skipped — with `Claim::Lost =>
-    /// panic!()` staged in it, such a test passes. What reaches the arm is the
-    /// window a waker really has ([`World::post_claimed_wake`]): the claim CAS
-    /// has been won and the push has not happened yet, so the retire is the
-    /// first message this CPU sees.
+    /// it is named for.** Posting the wake and then the retire cannot: the
+    /// mailbox is FIFO, so the wake is drained first, the task is no longer
+    /// parked by the time `handle_retire` runs, and its claim is skipped —
+    /// with `Claim::Lost => panic!()` staged in it, such a test passes. What
+    /// reaches the arm is the window a waker really has
+    /// ([`World::post_claimed_wake`]): the claim CAS has been won and the push
+    /// has not happened yet, so the retire is the first message this CPU sees.
     ///
-    /// The first block below is what has the teeth. It reds under
-    /// remove-then-convert and under a retirer that
-    /// claims and ignores the answer: both take the entry out of `parked`, and
-    /// there is nothing there for the wake to find.
+    /// A retirer that takes the record whatever its claim answers reds this:
+    /// the wake that lands next finds the slot empty.
     #[test]
     fn a_retire_that_loses_the_claim_leaves_the_wake_in_flight() {
         let mut w = World::new(1);
@@ -3313,10 +3451,6 @@ mod tests {
             cpus[0].drain(env, NOW);
         }
 
-        assert!(
-            w.cpus[0].parked_task(key).is_some(),
-            "the retire lost the claim: the entry stays for the wake to find",
-        );
         assert_eq!(w.cpus[0].dying().count(), 0, "the retire placed nothing itself");
         assert!(w.cpus[0].rq.is_empty(), "and queued nothing either");
 
@@ -4515,6 +4649,195 @@ mod tests {
         w.run_a_pass(C1);
         assert!(w.handles.get(C1).doorbell().sleeping(), "cpu1 has published SLEEPING");
         (hog, sleeper)
+    }
+
+    /// The post of a remote waker: its claim, then the wake it sends.
+    fn notify_from_afar(w: &World, shared: &Arc<TaskShared<Msg<TestPayload>>>) -> Notify {
+        crate::sched::park::notify(shared, WakeCause::new(WakeReason::Woken), &w.handles, &w.hw, &NoPreempt)
+    }
+
+    /// **A wake whose home runs a task of its band goes straight to the CPU
+    /// that runs it**: the claimant takes the record and hands it to the
+    /// sleeping sibling as an `Adopt`, so the busy home takes no message and
+    /// no pass for it.
+    #[test]
+    fn a_wake_behind_its_busy_home_goes_straight_to_an_idle_cpu() {
+        let mut w = World::new(2);
+        let (_, sleeper) = hog_and_a_parked_sleeper(&mut w);
+        assert!(w.handles.get(C0).behind().fair, "the hog's pass published what waits behind it");
+        assert_eq!(notify_from_afar(&w, &sleeper), Notify::Parked(C0));
+        assert_eq!(sleeper.state(), TaskState::InTransit(C1), "sent on by its claimant");
+        assert!(w.hw.state().kicks.contains(&C1), "the sleeper's doorbell was rung");
+        assert!(!w.hw.state().kicks.contains(&C0), "the busy home was not");
+        w.run_a_pass(C1);
+        assert_eq!(sleeper.state(), TaskState::Running(C1));
+        w.run_a_pass(C0);
+        assert!(w.cpus[0].mailbox_is_empty(), "the home owes nothing for it");
+        w.abandon();
+    }
+
+    /// **A claim that lands before the home has switched away from the task
+    /// goes home**: the home still stands on the task's stack until that
+    /// switch saves it, so only its next pass may move the task.
+    #[test]
+    fn a_claim_before_the_homes_switch_goes_home() {
+        let mut w = World::new(2);
+        let (_, sleeper) = w.spawn(C0);
+        w.run_a_pass(C0);
+        w.run_a_pass(C1);
+        assert!(w.handles.get(C1).doorbell().sleeping_unrung(), "cpu1 sleeps");
+        let committed = w.commit_running(C0);
+        let action = {
+            let (cpus, env) = w.split();
+            let pass = SchedPass::begin(&mut cpus[0], env, NOW).dispose_block(committed, None);
+            let cause = WakeCause::new(WakeReason::Woken);
+            assert_eq!(crate::sched::park::notify(&sleeper, cause, env.cpus, env.hw, &NoPreempt), Notify::Parked(C0));
+            pass.finish()
+        };
+        w.run_a_pass(C1);
+        assert!(w.cpus[1].running().is_none(), "cpu1 ran a task its home still stands on");
+        assert_eq!(sleeper.state(), TaskState::WakeQueued(C0), "the claim went home");
+        w.execute(action);
+        w.run_a_pass(C0);
+        assert_eq!(sleeper.state(), TaskState::Running(C0), "the home's pass after its switch placed it");
+        w.abandon();
+    }
+
+    /// **A task woken as it parks stays for the pick, whatever its mask now
+    /// says**: its CPU still stands on its context, so the pick sends it on
+    /// after the switch instead of a placement handing it off at once.
+    #[test]
+    fn a_task_woken_as_it_parks_with_its_mask_moved_away_is_sent_on_by_the_pick() {
+        let mut w = World::new(2);
+        let (_, task) = w.spawn(C0);
+        w.run_a_pass(C0);
+        let committed = w.commit_running(C0);
+        assert_eq!(notify_from_afar(&w, &task), Notify::PrePark);
+        set_mask(&w, &task, CpuMask::one(C1));
+        let action = {
+            let (cpus, env) = w.split();
+            SchedPass::begin(&mut cpus[0], env, NOW).dispose_block(committed, None).finish()
+        };
+        assert_eq!(w.cpus[0].outbound().count(), 1, "the pick sends it on once cpu0 has left it");
+        w.execute(action);
+        w.run_a_pass(C0);
+        assert_eq!(task.state(), TaskState::InTransit(C1));
+        w.abandon();
+    }
+
+    /// **A boosted wake behind a fair home goes home**, where the RT band its
+    /// wake lends it runs it ahead of the fair task, rather than to an idle
+    /// CPU's idle exit.
+    #[test]
+    fn a_boosted_wake_behind_a_fair_home_goes_home() {
+        let mut w = World::new(2);
+        let (_, sleeper) = hog_and_a_parked_sleeper(&mut w);
+        let cause = WakeCause::boosted(WakeReason::Woken, Nanos(NOW.0 + 1_000_000));
+        assert_eq!(crate::sched::park::notify(&sleeper, cause, &w.handles, &w.hw, &NoPreempt), Notify::Parked(C0));
+        assert_eq!(sleeper.state(), TaskState::WakeQueued(C0), "the claim went home as a Wake");
+        w.abandon();
+    }
+
+    /// **A wake whose mask admits no idle CPU goes home**, however busy.
+    #[test]
+    fn a_wake_whose_mask_admits_no_idle_cpu_goes_home() {
+        let mut w = World::new(2);
+        let job = Arc::new(Job::new(JobKey(99)));
+        let (_, sleeper) = w.spawn_masked(C0, RtState::default(), job, CpuMask::one(C0));
+        w.run_a_pass(C0);
+        w.park_running(C0);
+        w.spawn(C0);
+        w.run_a_pass(C0);
+        w.run_a_pass(C1);
+        assert!(w.handles.get(C1).doorbell().sleeping_unrung());
+        assert_eq!(notify_from_afar(&w, &sleeper), Notify::Parked(C0));
+        assert_eq!(sleeper.state(), TaskState::WakeQueued(C0), "the claim went home as a Wake");
+        assert!(w.handles.get(C1).doorbell().sleeping_unrung(), "and left cpu1 asleep");
+        w.run_a_pass(C0);
+        assert_eq!(sleeper.state(), TaskState::Ready(C0), "behind the task its home runs");
+        w.abandon();
+    }
+
+    /// **Wakes behind one busy home spread over the sleepers**: a sleeper
+    /// already rung is not chosen again, and once every one is rung the
+    /// next wake goes home.
+    #[test]
+    fn wakes_behind_one_busy_home_take_one_sleeper_each() {
+        const C2: CpuId = CpuId(2);
+        let mut w = World::new(3);
+        let mut sleepers = Vec::new();
+        for _ in 0..3 {
+            let (_, sleeper) = w.spawn(C0);
+            w.run_a_pass(C0);
+            w.park_running(C0);
+            sleepers.push(sleeper);
+        }
+        w.spawn(C0);
+        w.run_a_pass(C0);
+        w.run_a_pass(C1);
+        w.run_a_pass(C2);
+        for sleeper in &sleepers {
+            assert_eq!(notify_from_afar(&w, sleeper), Notify::Parked(C0));
+        }
+        let states: Vec<_> = sleepers.iter().map(|s| s.state()).collect();
+        w.abandon();
+        assert!(states.contains(&TaskState::InTransit(C1)), "{states:?}");
+        assert!(states.contains(&TaskState::InTransit(C2)), "{states:?}");
+        assert_eq!(states[2], TaskState::WakeQueued(C0), "the third found both sleepers rung: {states:?}");
+    }
+
+    /// **A park sent on by its claimant leaves its home no timer**: the
+    /// deadline the home held for it is dropped before the home arms, or an
+    /// idle home would wake at it for nothing.
+    #[test]
+    fn a_park_sent_on_leaves_its_home_no_timer() {
+        let mut w = World::new(2);
+        let (_, sleeper) = w.spawn(C0);
+        w.run_a_pass(C0);
+        let deadline = Nanos(NOW.0 + 50_000_000);
+        w.park_running_until(C0, Some(deadline));
+        w.spawn(C0);
+        w.run_a_pass(C0);
+        w.run_a_pass(C1);
+        assert_eq!(w.cpus[0].due().count(), 1, "the home holds the park's deadline");
+        assert_eq!(notify_from_afar(&w, &sleeper), Notify::Parked(C0));
+        assert_eq!(sleeper.state(), TaskState::InTransit(C1));
+        w.park_running(C0);
+        assert!(w.cpus[0].running().is_none(), "the home has gone idle");
+        assert_ne!(w.cpus[0].armed(), Some(deadline), "and armed nothing for a park it no longer holds");
+        assert_eq!(w.cpus[0].due().count(), 0);
+        w.abandon();
+    }
+
+    /// **A wake whose home runs nothing of its band goes home**, which takes
+    /// the record its claimant handed back and places it there.
+    #[test]
+    fn a_wake_whose_home_is_free_goes_home() {
+        let mut w = World::new(2);
+        let (_, sleeper) = w.spawn(C0);
+        w.run_a_pass(C0);
+        w.park_running(C0);
+        w.run_a_pass(C0);
+        assert_eq!(w.handles.get(C0).behind(), Behind::default());
+        assert_eq!(notify_from_afar(&w, &sleeper), Notify::Parked(C0));
+        assert_eq!(sleeper.state(), TaskState::WakeQueued(C0), "the claim went home as a Wake");
+        w.run_a_pass(C0);
+        assert_eq!(sleeper.state(), TaskState::Running(C0), "which took the record its claimant handed back");
+        w.abandon();
+    }
+
+    /// **A killed task's wake goes home**, where its dying list is, whatever
+    /// its home runs.
+    #[test]
+    fn a_killed_wake_goes_home_though_its_home_is_busy() {
+        let mut w = World::new(2);
+        let (_, sleeper) = hog_and_a_parked_sleeper(&mut w);
+        sleeper.mark_kill();
+        assert_eq!(notify_from_afar(&w, &sleeper), Notify::Parked(C0));
+        assert_eq!(sleeper.state(), TaskState::WakeQueued(C0));
+        w.run_a_pass(C0);
+        assert!(w.cpus[0].dying().any(|t| t.key() == sleeper.key()), "it unwinds at home");
+        w.abandon();
     }
 
     /// **A burst its poster parks behind keeps one task where it was posted**:

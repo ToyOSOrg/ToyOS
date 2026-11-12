@@ -33,13 +33,31 @@ use core::mem::ManuallyDrop;
 use core::ptr;
 
 use crate::sched::sync::{Arc, AtomicBool, AtomicPtr, AtomicU32, Ordering};
-use crate::sched::task::{TaskKey, TaskShared, WakeCause};
+use crate::sched::cpu::CpuHandles;
+use crate::sched::hw::{CpuId, Kicker};
+use crate::sched::task::{TaskShared, WakeCause};
 
 /// The message vocabulary the primitives need to speak. Wait queues and the
 /// retire protocol construct only these two, which is what keeps them free of
 /// the task payload type; [`crate::sched::msg::Msg`] is the full set.
 pub trait SchedMsg: Send + Sized {
-    fn wake(key: TaskKey, cause: WakeCause) -> Self;
+    /// What a parked task leaves in its [`ParkedSlot`].
+    type Parked: Send;
+
+    fn wake(shared: Arc<TaskShared<Self>>, cause: WakeCause) -> Self;
+
+    /// Send the wake of a park on `home` whose claim the caller won: by
+    /// default a `Wake` to the home ([`crate::sched::park::post_wake`]).
+    fn send_wake(
+        shared: &Arc<TaskShared<Self>>,
+        home: CpuId,
+        cause: WakeCause,
+        cpus: &CpuHandles<Self>,
+        kicker: &impl Kicker,
+        preempt: &impl PreemptGuard,
+    ) {
+        crate::sched::park::post_wake(shared, home, cause, cpus, kicker, preempt);
+    }
 
     /// A retire carries the whole [`TaskShared`], not just the key: the home
     /// CPU that finds the task gone must read the state word to chase it, and
@@ -84,6 +102,14 @@ mod slot {
         pub unsafe fn take(&self) -> Option<M> {
             unsafe { (*self.0.get()).take() }
         }
+
+        /// # Safety
+        /// No other thread touches the slot while the reference lives.
+        #[cfg(feature = "protocol-port")]
+        pub unsafe fn peek(&self) -> Option<&M> {
+            // SAFETY: the caller's.
+            unsafe { (*self.0.get()).as_ref() }
+        }
     }
 }
 
@@ -113,6 +139,65 @@ mod slot {
 }
 
 use slot::Slot;
+
+/// A parked task's record, in its own `TaskShared` while it is parked: written
+/// by the CPU it parks on before the state word says `Blocked`, and taken by
+/// whoever wins the claim that ends the park (`TaskShared::claim_wake`, a
+/// post's claim). The state word's release and acquire order the two, and
+/// the claim admits one taker, so the accesses never overlap.
+pub struct ParkedSlot<P>(Slot<P>);
+
+// SAFETY: as `MailboxNode`'s: the record is written strictly before the word
+// publishes it (release) and read strictly after a claim observes that
+// (acquire), by one party at a time.
+unsafe impl<P: Send> Sync for ParkedSlot<P> {}
+// SAFETY: as above.
+unsafe impl<P: Send> Send for ParkedSlot<P> {}
+
+impl<P> ParkedSlot<P> {
+    pub fn new() -> Self {
+        Self(Slot::new())
+    }
+
+    /// # Safety
+    /// The caller holds the slot: the task's home CPU in the pass that parks
+    /// it, the word still `Committing`, so no claim can take it yet; or the
+    /// claim's winner handing the record on with a message, whose post orders
+    /// this write before the receiver's take.
+    pub(crate) unsafe fn publish(&self, record: P) {
+        // SAFETY: the caller's.
+        unsafe { self.0.put(record) };
+    }
+
+    /// The record, taken once.
+    ///
+    /// # Safety
+    /// The caller won the claim that ended the park, or is the home whose own
+    /// `Committing -> Blocked` lost to a claim made before it, which took
+    /// nothing; either way it alone may reach the slot.
+    pub(crate) unsafe fn take(&self) -> P {
+        // SAFETY: the caller's.
+        unsafe { self.0.take() }.expect("a parked task's record is in its slot until its claimant takes it")
+    }
+}
+
+#[cfg(all(feature = "protocol-port", not(feature = "loom")))]
+impl<P> ParkedSlot<P> {
+    /// The record, for a checker that runs every CPU on one thread.
+    ///
+    /// # Safety
+    /// No other thread touches the slot while the reference lives.
+    pub unsafe fn peek(&self) -> Option<&P> {
+        // SAFETY: the caller's.
+        unsafe { self.0.peek() }
+    }
+}
+
+impl<P> Default for ParkedSlot<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// The embedded link a message rides on. Never allocated, never counted.
 pub struct MailboxNode<M> {

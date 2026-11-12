@@ -11,7 +11,7 @@ use kernel::sched::task::WaitClass;
 use crate::topology::Shape;
 use crate::vm::RUN_CHUNK_NS;
 use crate::workload::{
-    AgeShape, BlockShape, ChargeShape, GroupPick, IrqSpec, JobShape, MigrateShape, Op, ParkShape,
+    AgeShape, ChargeShape, GroupPick, IrqSpec, JobShape, MigrateShape, Op, ParkShape,
     PlacementShape, ProcSpec, Protocol, QueueSpec, Scenario, Script, SurplusShape, WindowShape,
 };
 
@@ -34,7 +34,6 @@ fn scenario(
         procs,
         irqs: Vec::new(),
         protocol: Protocol::New,
-        block: BlockShape::CommitInPass,
         window: WindowShape::PreemptOff,
         park: ParkShape::ReleaseLend,
         migrate: MigrateShape::ReapTheCorpse,
@@ -306,38 +305,6 @@ pub fn old_rt_starved_the_corpse() -> Scenario {
 pub fn old_steal_port() -> Scenario {
     let mut scenario = double_drop_exit_race().with_protocol(Protocol::OldSteal);
     scenario.name = "old_steal_port";
-    scenario
-}
-
-/// The second harness self-validation gate, and the reason the block is two
-/// steps: a port of the kernel's pre-`8508b37` blocking shape, where phase 2 of
-/// the wait handshake ran at the *call site* and the pass came after it.
-///
-/// It **must fail**. A remote waker that claims a task whose word already
-/// reads `Blocked` posts `Msg::Wake` to the task's home CPU — the very CPU
-/// about to park it — and that pass's own drain consumes the message while the
-/// task is not in `parked` yet. On real hardware that was a panic plus a hang
-/// on `--smp 8`, roughly twice in five audio suite runs.
-///
-/// Uses the `lost_wake_pipe` workload rather than a bespoke one: this is a
-/// property of the *blocking shape*, not of a particular scenario, so the gate
-/// should be the ordinary wait/wake workload with one thing changed.
-pub fn old_commit_before_pass() -> Scenario {
-    let mut scenario = lost_wake_pipe().with_block(BlockShape::CommitAtCallSite);
-    scenario.name = "old_commit_before_pass";
-    scenario
-}
-
-/// The same shape with the two halves fused into a single VM step — which is
-/// what this simulator did until the split. Nothing can interleave, so the
-/// window is not in the step relation and the run comes back clean.
-///
-/// It is the control for [`old_commit_before_pass`]: without it, "the harness
-/// could not see this" is an assertion about a simulator nobody can run any
-/// more. `blind_spot_needed_the_step_split` runs both.
-pub fn old_commit_fused() -> Scenario {
-    let mut scenario = lost_wake_pipe().with_block(BlockShape::CommitAtCallSiteFused);
-    scenario.name = "old_commit_fused";
     scenario
 }
 
@@ -831,11 +798,9 @@ pub fn overlong_pass() -> Scenario {
 }
 
 /// Every scenario the exit criterion covers.
-/// `old_steal_port` and `old_commit_before_pass` are deliberately absent: they
-/// are the negative gates, and a sweep that treated them as scenarios to pass
-/// would be asserting the opposite of what they are for. `old_commit_fused` is
-/// absent for the mirror-image reason — it passes, but only because the
-/// harness cannot see the bug it contains.
+/// `old_steal_port` is deliberately absent: it is a negative gate, and a sweep
+/// that treated it as a scenario to pass would be asserting the opposite of
+/// what it is for.
 ///
 /// The three measured-policy workloads are here at their **cheapest** widths and
 /// nowhere else. `sim/tests/policy.rs` measures them across a curve of widths and
@@ -870,6 +835,7 @@ pub fn all() -> Vec<Scenario> {
         sleep_spin_siblings(),
         turn_taking_pair(),
         masked_steals(),
+        claimed_behind_busy_home(),
     ]
 }
 
@@ -917,8 +883,6 @@ pub fn by_name(name: &str) -> Option<Scenario> {
         "overlong_pass" => Some(overlong_pass()),
         "old_park_kept_the_lend" => Some(old_park_kept_the_lend()),
         "lend_then_block" => Some(lend_then_block()),
-        "old_commit_before_pass" => Some(old_commit_before_pass()),
-        "old_commit_fused" => Some(old_commit_fused()),
         "old_preemptible_window" => Some(old_preemptible_window()),
         "stopped_cpu" => Some(stopped_cpu()),
         _ => all().into_iter().find(|s| s.name == name),
@@ -1231,6 +1195,37 @@ pub fn turn_taking_pair() -> Scenario {
 
 /// How many turns each of [`turn_taking_pair`]'s threads takes.
 pub const TURN_TAKING_ROUNDS: usize = 8;
+
+/// **A wake claimed on another CPU while its home is busy**: a sleeper and a
+/// hog start on cpu0, a waker runs on cpu1 and wakes the sleeper, and cpu2
+/// sleeps. A claim that lands after cpu0's pass has parked the sleeper and
+/// before cpu0's switch has saved its context finds the home busy and a CPU
+/// to send it to: sending it there would resume a context nothing has saved
+/// (invariant I11), which the on-CPU word refuses.
+pub fn claimed_behind_busy_home() -> Scenario {
+    let wake = Op::Wake { queue: 0, all: false, boost: None };
+    let block = Op::Block { queue: 0, deadline: None };
+    scenario(
+        "claimed_behind_busy_home",
+        3,
+        vec![queue(WaitClass::Io)],
+        vec![process(
+            "trio",
+            vec![0, 1, 2],
+            vec![
+                Script::looping(vec![block, Op::Run(MS / 10)], CLAIMED_BEHIND_ROUNDS),
+                // Outlasts every round the other two take.
+                Script::new(vec![Op::Run(CLAIMED_BEHIND_ROUNDS as u64 * MS)]),
+                Script::looping(vec![Op::Run(MS / 10), wake], CLAIMED_BEHIND_ROUNDS),
+            ],
+        )],
+    )
+    .with_placement(PlacementShape::Listed(&[0, 0, 1]))
+    .with_balance(Balance::None)
+}
+
+/// How many times [`claimed_behind_busy_home`]'s waker wakes the sleeper.
+pub const CLAIMED_BEHIND_ROUNDS: usize = 8;
 
 /// **A thread spawned to work with its spawner**: on the AMD bench's shape,
 /// with balancing off, a thread moves itself to cpu8, in the second LLC, and

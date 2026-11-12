@@ -1,15 +1,10 @@
 //! The timer plan: the one armed instant a CPU carries.
 //!
-//! A deadline lives in exactly one place: the `ParkedEntry` of the task that
-//! owns it, on that task's home CPU. Only *ready* tasks migrate, so a deadline
-//! can never end up on a CPU that no longer owns its task, and a task that is
-//! not parked structurally cannot have one.
-//!
-//! There is no separate index, and the absence is the design: an ordered index
-//! would hold the deadline a second time, and the pass that ended a park would
-//! have to remember to retire both. It did not — `fire_deadlines` discarded the
-//! index entry of a claim it lost and left the entry's copy standing, which is
-//! a CPU reporting a deadline nothing will fire.
+//! A deadline lives in one place: its home CPU's set of the deadlines it owes,
+//! one entry per task, which names the park it was armed for. A park that
+//! another claim ended leaves its entry behind, and the entry claims nothing
+//! when it falls due; the CPU drops such entries before it arms the timer, and
+//! one a claim ends after that costs a spurious pass, never a missed deadline.
 //!
 //! **Not every arming is a deadline.** [`TimerPlan::no_later_than`] lets a caller
 //! pull the arming forward for a reason nothing in this module knows about — a
