@@ -25,7 +25,7 @@ kernel's own callers have to tell the two apart.
   `testcases-watchdog` boot, at main after #1227 (one error table). `main` must
   show every corpus case and Rust member green, `212_full_table` still printing
   `kernel handles ran out first with ENOMEM: yes`, `206_libc_refusals` printing
-  `sysconf _SC_ARG_MAX: 2088939`, and `testcases-watchdog` green. No guest row
+  `sysconf _SC_ARG_MAX: 2023395`, and `testcases-watchdog` green. No guest row
   runs the corpus.
 
 **Exit**: a full handle table and no memory are two answers at the kernel

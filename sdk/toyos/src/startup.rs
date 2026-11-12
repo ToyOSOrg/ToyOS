@@ -51,6 +51,12 @@ pub const WORD: usize = 8;
 /// A table's two counts.
 const TABLE_HEADER: usize = 8;
 
+/// The most bytes of a names table: a share of the block of its own, so the
+/// rest is a caller's to fill with arguments and environment whatever it
+/// endows (`crate::spawn::MAX_ARGS`). It is many times any table a spawn in
+/// this tree makes: as many names as a spawn endows, of 680 bytes each.
+pub const MAX_NAMES: usize = 64 * 1024;
+
 /// The status a process whose endowment table is malformed exits with,
 /// having said so on its `fd:2` where the table still names one.
 pub const MALFORMED_STATUS: i32 = 125;
@@ -60,12 +66,15 @@ fn strings(run: &[u8]) -> impl Iterator<Item = &[u8]> {
 }
 
 /// The table that calls the `i`th endowment `names[i]`. `None` for more
-/// names than a spawn endows, or a name past what its length word holds.
+/// names than a spawn endows, or past [`MAX_NAMES`] bytes.
 fn table(names: &[&str]) -> Option<Vec<u8>> {
     if names.len() > MAX_SPAWN_ENDOWMENTS {
         return None;
     }
     let bytes = TABLE_HEADER + names.iter().map(|name| 2 + name.len()).sum::<usize>();
+    if bytes > MAX_NAMES {
+        return None;
+    }
     let mut table = Vec::with_capacity(bytes);
     table.extend_from_slice(&u32::try_from(bytes).ok()?.to_ne_bytes());
     table.extend_from_slice(&(names.len() as u32).to_ne_bytes());
@@ -388,8 +397,10 @@ mod tests {
         let most = &names[..MAX_SPAWN_ENDOWMENTS];
         assert_eq!(read(&table(most).unwrap()).map(|read| read.len()), Ok(MAX_SPAWN_ENDOWMENTS));
         assert_eq!(table(&names), None);
-        let long = "n".repeat(usize::from(u16::MAX) + 1);
-        assert_eq!(table(&[&long]), None);
+        // A table of MAX_NAMES bytes, one name filling it, and one byte more.
+        let longest = "n".repeat(MAX_NAMES - TABLE_HEADER - 2);
+        assert_eq!(table(&[&longest]).map(|table| table.len()), Some(MAX_NAMES));
+        assert_eq!(table(&[&alloc::format!("{longest}n")]), None);
     }
 
     /// Every way bytes are no table is refused by its own reason, and none
