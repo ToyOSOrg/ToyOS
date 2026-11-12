@@ -28,9 +28,10 @@ names the client that took it (`issues/no-physical-memory-fairness.md`).
 A freed slot is taken again, but its piece never goes back. A slot is 272
 bytes: a 248-byte entry and two 12-byte marks, one for each notice it can
 owe. Of the entry, the object's own state is 152 bytes, the pager's record 64
-and the list of a mapped object's mappers 16; the walk state mapping needs
-is 48 of the object's 152. Every entry carries all of it. Measured by the
-compiler for both kernel targets, against 216 on main before mapping:
+and the list of a mapped object's mappers 16. The walk state mapping needs
+adds 40 bytes to the object, and with the list 56 to a slot. Every entry
+carries all of it. Measured by the compiler for both kernel targets; main
+before mapping, measured the same way on x86-64, has 216:
 https://github.com/ToyOSOrg/evidence/tree/94fd400ddab5d9c2ff776ac9df66f1b0bb88b768/r12/sizes
 So the server's job stays charged 272 bytes for each `/tmp` file of the most
 it held at once, until the server ends. A client that makes and removes a

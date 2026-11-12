@@ -157,11 +157,11 @@ pub fn last_stop() -> Stopped {
     }
 }
 
-/// A copy holding no pin: what stopped it is a fault.
+/// A copy outside [`Pinned`]: what stopped it is a fault.
 fn faulted(copied: Result<(), Stopped>) -> Result<(), Faulted> {
     copied.map_err(|why| match why {
         Stopped::Faulted(faulted) => faulted,
-        Stopped::Absent => panic!("user_ptr: a copy holding no pin stopped short of an absent page"),
+        Stopped::Absent => panic!("user_ptr: a copy outside Pinned stopped short of an absent page"),
     })
 }
 

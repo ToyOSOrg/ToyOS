@@ -22,9 +22,8 @@
 //!   79 pages, more than a walk reads at once, so one of the two is cleared
 //!   by a later batch.
 //! - `written`: a holder's write whose bytes come from a page of the
-//!   mapping that is absent lands whole once the pager supplies the page:
-//!   its copy holds frames of the pager's, so it lets them go and waits for
-//!   the page holding nothing.
+//!   mapping that is absent lands whole, with those bytes, once the pager
+//!   supplies the page: its copy stops there, waits, draws and copies again.
 //! - `ends`, last: the pager's end answers a write from the mapping `Io`
 //!   and ends the mapper at its next touch.
 

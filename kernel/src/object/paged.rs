@@ -12,7 +12,7 @@
 //! may be narrowed and sent.
 //!
 //! **One write at a time** ([`kernel::paged::Side`]): a holder's write
-//! copies its bytes into frames held aside first, then takes the object's
+//! copies its bytes into frames drawn first, then takes the object's
 //! write side in one hold of the lock, refused at once while the side is held
 //! or the pager waits for it, and is checked whole and admitted there; its
 //! copy into the object's frames is the kernel's own. The pager holds the
@@ -1321,10 +1321,6 @@ impl PagerObject {
             for (k, frame) in fresh.iter_mut().take(fresh_count).enumerate() {
                 *frame = materialize(drawn[staged_count + k], true);
             }
-            // The bytes come in while the write holds frames of its pager's,
-            // which no wait may hold: a page of `src` that is absent stops the
-            // copy, the frames go back, and the write waits for the page
-            // holding nothing and draws again.
             let pinned = Pinned::begin();
             let mut stopped = None;
             for (k, &frame) in staged[..staged_count].iter().enumerate() {
@@ -1443,7 +1439,7 @@ impl PagerObject {
     /// Under the lock: draw a frame for each of `out`'s entries from the
     /// core, as a supply does — one held aside, the core's promise, or a
     /// promise the allocator makes now: how many were drawn, each `Some` for
-    /// a frame held aside, which [`materialize`] completes outside the lock.
+    /// a frame held aside, which [`materialize`] completes.
     fn draw(&self, state: &mut State, out: &mut [Option<u64>]) -> usize {
         state.held.settle();
         let mut drawn = 0;
