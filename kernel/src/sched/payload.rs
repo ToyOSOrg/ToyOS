@@ -117,6 +117,7 @@ pub struct TaskHandle {
     /// The releases this thread owns while its process is torn down (`object::Releases`); kept here, as `operation` is, so they follow the thread across a migration.
     releases: Lock<Option<Vec<crate::object::KObjectRef>>>,
     syscalls: SyscallProfile,
+    copies: crate::user_ptr::Copies,
 }
 
 /// What a thread's syscalls cost it. Written only by the thread, at the end of
@@ -170,11 +171,17 @@ impl TaskHandle {
             cancels: AtomicU32::new(0),
             releases: Lock::new(None),
             syscalls: SyscallProfile::new(),
+            copies: crate::user_ptr::Copies::new(),
         }
     }
 
     pub fn syscalls(&self) -> &SyscallProfile {
         &self.syscalls
+    }
+
+    /// Its user copies, as their faults leave them.
+    pub fn copies(&self) -> &crate::user_ptr::Copies {
+        &self.copies
     }
 
     pub(crate) fn publish(&self, acct: &TaskAccounting, running_since: Option<Nanos>) {

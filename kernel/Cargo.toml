@@ -58,6 +58,9 @@ reap-raise-relaxed = []
 # `src/shootdown.rs`'s `serve` reads what it owes `Relaxed`, and
 # `tlb_shootdown` reds.
 shootdown-serve-relaxed = []
+# `src/object/paged/ranges.rs`'s `less` goes `Relaxed`, and `paged_ranges`
+# reds.
+ranges-less-relaxed = []
 # `src/shootdown.rs`'s `served` reads `Relaxed`, and `counters_round` reds.
 shootdown-served-relaxed = []
 # `src/shootdown.rs`'s `Asks::serve` takes its asks `Relaxed`, and

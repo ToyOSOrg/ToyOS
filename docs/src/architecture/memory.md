@@ -68,6 +68,22 @@
   does keeps the server's writes waiting.
 - Mapped files may be larger than RAM, partially mapped, and coherently shared
   and written; their length is never committed in RAM.
+- A file mapping maps the cache's own pages, so a mapper sees a write as it
+  lands, and a private mapping shares them until it is written. A mapping
+  holds its file as an open handle does: a file mapped and then closed or
+  deleted stays until its last mapping goes. A page leaves the cache only once
+  no mapping reaches it.
+- A wait for a file's page behaves like one for swapped memory: it advances
+  with its file server's progress, is reported when overdue and never becomes
+  an error by timeout. The server failing what it cannot read, and its device
+  waits' own timeouts, bound it.
+- A touch of a mapped page its file server failed, or of a file whose server
+  ended, ends the program with a diagnostic naming the file's page and the
+  cause; a copying system call answers an I/O error instead. A touch of a
+  mapped page wholly past the file's end ends the program the same way, as
+  POSIX's `SIGBUS`, and a copy from one is refused as a bad address. A touched
+  unwritten page of a file held in RAM becomes resident within its server's
+  capacity and is refused once that is full.
 - Clean pages are reclaimed; dirty pages are written back first, without losing
   concurrent writes. Dirty data growth is bounded, and writeback starts ahead
   of pressure.

@@ -1,6 +1,6 @@
 //! Paged objects: a pager process's memory, one object per file node, which
 //! holders read, write and stat through `SYS_PAGED_READ`, `SYS_PAGED_WRITE`
-//! and `SYS_PAGED_STAT`. Nothing here is mapped.
+//! and `SYS_PAGED_STAT`, or map read-only.
 //!
 //! **Two kinds.** A [`PagerObject`] is its process's one pager: its index of
 //! `capacity` pages ([`kernel::paged::Pages`]), its objects by id, its
@@ -12,7 +12,7 @@
 //! may be narrowed and sent.
 //!
 //! **One write at a time** ([`kernel::paged::Side`]): a holder's write
-//! copies its bytes into frames held aside first, then takes the object's
+//! copies its bytes into frames drawn first, then takes the object's
 //! write side in one hold of the lock, refused at once while the side is held
 //! or the pager waits for it, and is checked whole and admitted there; its
 //! copy into the object's frames is the kernel's own. The pager holds the
@@ -25,9 +25,16 @@
 //! its record of the rest is bytes the kernel keeps and never reads.
 //!
 //! **Supply copies into fresh frames**, so no frame the pager still maps
-//! enters an object. A frame leaves at withdrawal, failure, shrink or the
-//! object's release: out of the index under the pager's lock, then freed,
-//! which a reader's pin defers to its last unpin.
+//! enters an object. A frame leaves at withdrawal, failure, shrink, the
+//! object's release or the pager's end: its page is revoking, keeping the
+//! frame, until a walk of the object's mappers ([`MapNode`]) has cleared
+//! every space's leaves of it; then it leaves the index under the pager's
+//! lock and is freed, which a reader's pin defers to its last unpin.
+//!
+//! **A mapping shares the index's frames.** A space mapping an object holds
+//! one [`MapNode`] on the object's list while it has a range of it, and
+//! counts as one of its holders. A fault on an absent page requests it and
+//! waits as a reader does, holding nothing.
 //!
 //! **A reader waits only on its pager and on the kernel's copies.** An
 //! absent page is requested in the waiter's own record, linked on its
@@ -37,9 +44,11 @@
 //! counted and logged overdue and goes on. A pager's own process is refused a
 //! holder's calls, so no pager waits on a pager.
 //!
-//! **Lock order.** The pager's lock is innermost but for the allocator's. A
-//! copy to or from user memory holds pins, never the lock; no wait holds a
-//! pin.
+//! **Lock order.** A space's lock, then the pager's, then the allocator's.
+//! A copy to or from user memory holds pins, or a holder's write the frames
+//! it drew, never the lock; no wait holds either, so such a copy stops at an
+//! absent page (`user_ptr::Pinned`), lets them go, and waits for the page
+//! holding nothing.
 //!
 //! **What a pager holds** (`issues/a-pager-holds-a-fixed-capacity-until-the-memory-service-reclaims-its-clean-pages.md`):
 //! its core — `dirty` pages and a read's headroom — committed at its making
@@ -51,7 +60,7 @@
 //! life (`issues/one-client-can-fill-the-tmp-servers-memory-and-deny-every-other-client.md`),
 //! so making an object is the one call that allocates.
 
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use core::cell::{Cell, UnsafeCell};
 use core::marker::PhantomPinned;
 use core::pin::Pin;
@@ -60,23 +69,27 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel::chunked::Stack;
 use kernel::paged::{
-    holder_span, Core, Draw, Leave, Lookup, Object, Pages, Refused, Side, Supplied, Version, Waiters, Want, Writer,
-    HOLDER_PAGES, PAGE, WRITES_A_READ_MEETS,
+    holder_span, Core, Cursor, Draw, Leave, Lookup, Mappers, Next, Object, Pages, Refused, Revoke, Revoked, Side, Supplied, Version,
+    Waiters, Want, Writer, HOLDER_PAGES, PAGE, WRITES_A_READ_MEETS,
 };
 use kernel::sched::task::WaitClass;
 use kernel::slots::Slots;
 use toyos_abi::syscall::{
-    PagedNotice, PagedRange, PagedStat, PagedStatus, SyscallError, NOTICE_DIRTIED, NOTICE_NO_HOLDERS, NOTICE_REQUESTED,
+    self as abi, PagedNotice, PagedStat, PagedStatus, SyscallError, NOTICE_DIRTIED, NOTICE_NO_HOLDERS, NOTICE_REQUESTED,
     PAGED_RECORD,
 };
 
-use crate::mm::charge::Charge;
+use crate::mm::charge::{self, Charge};
 use crate::mm::pmm;
+use crate::mm::space::Space;
 use crate::process::Pid;
-use crate::sync::Lock;
+use crate::sync::{Lock, LockGuard};
 use crate::time::{Deadline, Duration};
-use crate::user_ptr::{UserBytes, UserBytesMut};
+use crate::user_ptr::{Pinned, Stopped, UserBytes, UserBytesMut};
 use crate::watch::{self, Watch};
+
+mod ranges;
+use ranges::Ranges;
 use crate::DirectMap;
 
 use super::{KObjectVariant, ObjectCore, ZeroHandles};
@@ -117,10 +130,10 @@ struct Request {
 /// One object of a pager's, at its id's slot.
 struct Entry {
     object: Object,
-    /// The pager's own reference, while unreleased, each holder object's, and
-    /// each owner read's, while it runs: the slot is free again with the last.
+    /// References that keep the slot: it is free again with the last.
     refs: u32,
-    /// Holder objects whose handles have not all gone.
+    /// Holder objects whose handles have not all gone, and spaces mapping it:
+    /// a mapping holds the object as a handle does.
     holders: u32,
     /// Not released: owner calls reach it.
     owned: bool,
@@ -129,6 +142,14 @@ struct Entry {
     writers: u32,
     /// The pager's record, which holders read beside the size and time.
     record: [u8; PAGED_RECORD],
+    /// The spaces mapping it, one node each ([`MapNode`]).
+    mappers: Ends,
+}
+
+/// The ends of an object's list of mappers.
+struct Ends {
+    head: *const MapNode,
+    tail: *const MapNode,
 }
 
 struct State {
@@ -332,55 +353,164 @@ impl PagerObject {
         let State { pages, entries, .. } = &mut *state;
         let made = entries.insert_with(|slot| {
             let object = if anonymous { pages.anonymous(slot, size) } else { pages.object(slot, size) };
-            Entry { object, refs: 1, holders: 0, owned: true, writers: 0, record: [0; PAGED_RECORD] }
+            let mappers = Ends { head: ptr::null(), tail: ptr::null() };
+            Entry { object, refs: 1, holders: 0, owned: true, writers: 0, record: [0; PAGED_RECORD], mappers }
         });
         u64::from(made.expect("paged: a slot was made free"))
     }
 
-    /// `f` over the index, the live object `id` and its waiters, each frame
-    /// it removes given back as it goes; waiters read again.
-    fn removing<R>(
-        &self,
-        id: u64,
-        f: impl FnOnce(&mut Pages<u64>, &mut Object, &mut Linked, &mut dyn FnMut(u64)) -> R,
-    ) -> Result<R, SyscallError> {
+    /// `f` over the index, the live object `id` and its waiters, marking
+    /// pages revoking, then their walk ([`Self::revoked`]); waiters read again.
+    fn removing<R>(&self, id: u64, f: impl FnOnce(&mut Pages<u64>, &mut Object, &mut Linked) -> R) -> Result<R, SyscallError> {
         let mut state = self.state.lock();
         let slot = state.live(id)?;
-        let job = self.core.job();
-        let State { pages, entries, held, gone, requests, .. } = &mut *state;
-        let object = &mut entries.get_mut(slot).expect("live").object;
-        let mut waiters = Linked { head: *requests, slot };
-        let answer = f(pages, object, &mut waiters, &mut |phys| held.give_back(job, *gone, phys, true));
+        let mut waiters = Linked { head: state.requests, slot };
+        let (pages, object) = state.split(slot);
+        let answer = f(pages, object, &mut waiters);
+        let (mut state, queued) = self.revoked(state, slot);
+        let Some(epoch) = queued else {
+            drop(state);
+            self.changed.post();
+            return Ok(answer);
+        };
+        // A walk runs: its next pass takes these pages, and the call returns
+        // once it has, with the slot held meanwhile.
+        state.entry_mut(slot).refs += 1;
         drop(state);
         self.changed.post();
+        let _held = Ref { pager: self, slot };
+        let parkable = crate::scheduler::Parkable::at_entry();
+        let over = || self.state.lock().entry(slot).object.finished(epoch);
+        // A kill ends either wait, and its thread never reads the answer. A
+        // walk takes no wait of its own, so one past the report time is a
+        // kernel fault worth a line, and the wait goes on.
+        let report = Deadline::at(crate::clock::now() + self.report);
+        if watch::wait_until(&parkable, &self.changed, 0, WaitClass::Io, report, over).is_ok() && !over() {
+            log!("paged: pid {}'s removal waits past {} ms on another's walk", self.pid, self.report.nanos() / 1_000_000);
+            let _ = watch::wait_until(&parkable, &self.changed, 0, WaitClass::Io, Deadline::never(), over);
+        }
         Ok(answer)
+    }
+
+    /// The pages of the object at `slot` just marked revoking leave once no
+    /// mapping reaches them and no futex wait is keyed on their frames: this
+    /// visits the object's mappers and sweeps the waits on the walk's set as
+    /// [`Pages::walk`] directs, the lock dropped for each visit and sweep and
+    /// the slot held meanwhile, until the walk's end gives each frame back
+    /// and names again every waiter's want a page that ends absent meets.
+    /// Answers the lock and, where another's walk runs and takes the pages in
+    /// its next pass, that pass's epoch.
+    fn revoked<'a>(&'a self, mut state: LockGuard<'a, State>, slot: u32) -> (LockGuard<'a, State>, Option<u64>) {
+        match state.entry_mut(slot).object.revoke() {
+            Revoke::Done => return (state, None),
+            Revoke::Queued(epoch) => return (state, Some(epoch)),
+            Revoke::Walk => {}
+        }
+        let job = self.core.job();
+        state.entry_mut(slot).refs += 1;
+        let mut absent = false;
+        loop {
+            let mut waiters = Linked { head: state.requests, slot };
+            let State { pages, entries, held, gone, .. } = &mut *state;
+            let Entry { object, mappers, .. } = entries.get_mut(slot).expect("paged: a walked slot is held");
+            let walked = pages.walk(object, &mut Ring(mappers), &mut waiters, &mut |phys, _, becomes| {
+                held.give_back(job, *gone, phys, true);
+                absent |= becomes == Revoked::Absent;
+            });
+            match walked {
+                Next::Visit(node) => {
+                    // SAFETY: linked, so live, under the lock; a range holds
+                    // it, so it upgrades, and the count kept holds it past
+                    // its unlinking while the lock is dropped.
+                    let node = unsafe { (*node).this.upgrade() }.expect("paged: a linked mapper is held by a range");
+                    state = self.visit(state, slot, &node);
+                }
+                Next::Sweep => state = self.end_futex_waits(state, slot),
+                Next::Finished => break,
+            }
+        }
+        self.unref_locked(&mut state, slot);
+        if absent {
+            self.watch.post();
+        }
+        (state, None)
+    }
+
+    /// A walk's visit of `node`'s space: the object's revoking pages read a
+    /// batch at a time under the pager's lock alone, each batch's leaves then
+    /// cleared and shot down under the space's lock alone
+    /// ([`Space::clear_paged`]). One lock at a time, and O(revoking pages).
+    fn visit<'a>(&'a self, mut state: LockGuard<'a, State>, slot: u32, node: &MapNode) -> LockGuard<'a, State> {
+        let mut at = Cursor::Start;
+        loop {
+            let mut batch = [(0u64, 0u64); REVOKE_BATCH];
+            let n = state.pages.revoking(&state.entry(slot).object, &mut at, &mut batch);
+            drop(state);
+            if n > 0 {
+                let Some(space) = node.space.upgrade() else { return self.state.lock() };
+                space.lock().clear_paged(node, &batch[..n]);
+            }
+            state = self.state.lock();
+            if n < REVOKE_BATCH {
+                return state;
+            }
+        }
+    }
+
+    /// Every futex wait on a frame of the walk's set at `slot` ends
+    /// ([`Next::Sweep`], asked only of an object a mapper ever linked): the
+    /// frames read a batch at a time under the pager's lock, and the waits
+    /// ended outside it in every bucket, since a wait in any space that mapped
+    /// the object can be keyed on them (`sched::futex::revoke_sorted`).
+    /// An unmap, `discard`, `protect` to none or a space's end clears a leaf
+    /// without ending the waits on a frame it does not own, so a waiter keyed
+    /// on a file's frame through such a leaf is ended here, before the frame
+    /// goes back.
+    fn end_futex_waits<'a>(&'a self, mut state: LockGuard<'a, State>, slot: u32) -> LockGuard<'a, State> {
+        let mut at = Cursor::Start;
+        loop {
+            let mut batch = [(0u64, 0u64); REVOKE_BATCH];
+            let n = state.pages.revoking(&state.entry(slot).object, &mut at, &mut batch);
+            drop(state);
+            let mut frames = [0u64; REVOKE_BATCH];
+            for (frame, &(_, phys)) in frames.iter_mut().zip(&batch[..n]) {
+                *frame = phys;
+            }
+            frames[..n].sort_unstable();
+            crate::sched::futex::revoke_sorted(&frames[..n], |&phys| phys);
+            state = self.state.lock();
+            if n < REVOKE_BATCH {
+                return state;
+            }
+        }
     }
 
     /// The pager lets object `id` go, in one hold of the lock: it answers
     /// `Gone` from now on, its pages go, and its slot with its last holder. A
     /// second release, or one racing the pager's end, finds it released.
     pub fn release(&self, id: u64) -> u64 {
-        let mut state = self.state.lock();
+        let state = self.state.lock();
         let slot = match state.live(id) {
             Ok(slot) => slot,
             Err(e) => return e.to_u64(),
         };
-        self.let_go(&mut state, slot);
-        drop(state);
+        drop(self.let_go(state, slot));
         self.changed.post();
         0
     }
 
     /// Under the lock, `state`: the unreleased object at `slot` released.
-    fn let_go(&self, state: &mut State, slot: u32) {
-        let job = self.core.job();
-        let State { pages, entries, held, gone, .. } = state;
+    fn let_go<'a>(&'a self, mut state: LockGuard<'a, State>, slot: u32) -> LockGuard<'a, State> {
+        let State { pages, entries, .. } = &mut *state;
         let entry = entries.get_mut(slot).expect("paged: a slot an object names is held");
-        pages.invalidate(&mut entry.object, &mut |phys| held.give_back(job, *gone, phys, true));
+        pages.invalidate(&mut entry.object);
         assert!(core::mem::take(&mut entry.owned), "paged: an object released twice");
         entries.unmark(NO_HOLDERS, slot);
         entries.unmark(DIRTIED, slot);
-        self.unref_locked(state, slot);
+        // A walk already running takes the pages; nothing here waits.
+        let (mut state, _) = self.revoked(state, slot);
+        self.unref_locked(&mut state, slot);
+        state
     }
 
     /// A holder of object `id`, which writes it where `writes`, and counts
@@ -424,9 +554,7 @@ impl PagerObject {
             return;
         }
         let entry = state.entries.remove(slot).expect("paged: a slot an object names is held");
-        let job = self.core.job();
-        let State { pages, held, gone, .. } = state;
-        pages.release(entry.object, &mut |phys| held.give_back(job, *gone, phys, true));
+        assert!(entry.object.empty(), "paged: an object's slot freed while it holds pages");
     }
 
     /// Fill `out` with notices, each answered once.
@@ -473,9 +601,9 @@ impl PagerObject {
             };
             // SAFETY: a `PagedNotice` is `UserSafe`: every byte of it is a
             // field, and the batch outlives the copy.
-            if unsafe { out.write_raw(filled * size, batch.as_ptr().cast::<u8>(), n * size) }.is_err() {
+            if let Err(faulted) = unsafe { out.write_raw(filled * size, batch.as_ptr().cast::<u8>(), n * size) } {
                 // The notices taken are lost with the window that could not hold them.
-                return if filled > 0 { filled as u64 } else { SyscallError::BadAddress.to_u64() };
+                return if filled > 0 { filled as u64 } else { SyscallError::from(faulted).to_u64() };
             }
             filled += n;
             if n < want {
@@ -539,20 +667,23 @@ impl PagerObject {
             };
             match step {
                 Step::Copy { count, last } => {
-                    let mut faulted = false;
+                    let (first, chunk) = (done, pieces[..count].iter().map(|piece| piece.len).sum::<usize>());
+                    let mut stopped = None;
+                    let pinned = Pinned::begin();
                     for piece in &pieces[..count] {
                         let copied = match piece.phys {
                             // SAFETY: `phys` is pinned by `pin_chunk`, and
                             // `within + len` lies inside its frame.
-                            Some(phys) => unsafe { out.write_raw(done, DirectMap::from_phys(phys).as_ptr::<u8>().add(piece.within), piece.len) },
-                            None => out.fill_zero(done, piece.len),
+                            Some(phys) => unsafe { pinned.write(out, done, DirectMap::from_phys(phys).as_ptr::<u8>().add(piece.within), piece.len) },
+                            None => pinned.zero(out, done, piece.len),
                         };
-                        if copied.is_err() {
-                            faulted = true;
+                        if let Err(why) = copied {
+                            stopped = Some(why);
                             break;
                         }
                         done += piece.len;
                     }
+                    drop(pinned);
                     for piece in &pieces[..count] {
                         if let Some(phys) = piece.phys { pmm::unpin_range(phys, PAGE as usize); }
                     }
@@ -567,11 +698,19 @@ impl PagerObject {
                     }
                     if !written {
                         // After the checks: bytes copied before the fault
-                        // count only as every copied chunk's do.
-                        if faulted {
-                            return if done > 0 { done as u64 } else { SyscallError::BadAddress.to_u64() };
+                        // count only as every copied chunk's do. A page of
+                        // the buffer that is absent is waited for with
+                        // nothing pinned, and the rest of the chunk read
+                        // again.
+                        let faulted = match stopped {
+                            None => None,
+                            Some(Stopped::Absent) => out.wait_in(done, first + chunk - done).err(),
+                            Some(Stopped::Faulted(faulted)) => Some(faulted),
+                        };
+                        if let Some(faulted) = faulted {
+                            return if done > 0 { done as u64 } else { SyscallError::from(faulted).to_u64() };
                         }
-                        if last {
+                        if last && stopped.is_none() {
                             return done as u64;
                         }
                         continue;
@@ -821,6 +960,7 @@ impl PagerObject {
             let mut ends = [0u64; CHUNK];
             // The frames filled from `src`, in order: a fault stops the fill.
             let mut filled = 0;
+            let mut faulted = None;
             for k in 0..reserved {
                 let page_at = (first + k as u64) * PAGE;
                 let from = done + k * PAGE as usize;
@@ -833,8 +973,12 @@ impl PagerObject {
                 frames[k] = phys;
                 ends[k] = page_at + (src.len() - from).min(PAGE as usize) as u64;
                 // SAFETY: a frame just drawn, which nothing else reaches yet.
-                if filled == k && unsafe { src.read_raw(from, DirectMap::from_phys(phys).as_mut_ptr::<u8>(), n) }.is_ok() {
-                    filled += 1;
+                if filled == k {
+                    // SAFETY: as above.
+                    match unsafe { src.read_raw(from, DirectMap::from_phys(phys).as_mut_ptr::<u8>(), n) } {
+                        Ok(()) => filled += 1,
+                        Err(why) => faulted = Some(why),
+                    }
                 }
             }
             let mut refused = None;
@@ -875,8 +1019,8 @@ impl PagerObject {
                 }
             }
             self.changed.post();
-            if filled < reserved && !stopped {
-                refused.get_or_insert(SyscallError::BadAddress);
+            if let Some(faulted) = faulted.filter(|_| !stopped) {
+                refused.get_or_insert(faulted.into());
             }
             if let Some(why) = refused {
                 return refusal(installed, why);
@@ -905,7 +1049,7 @@ impl PagerObject {
             let mut pinned = [(0u64, 0u64, 0usize, 0usize); CHUNK];
             let mut count = 0;
             let mut stopped = None;
-            let mut faulted = false;
+            let mut stopped_at = None;
             let slot = {
                 let mut state = self.state.lock();
                 let slot = match state.live(id) {
@@ -936,15 +1080,18 @@ impl PagerObject {
             let mut from = done;
             // The pages whose bytes all came: a fault in the owner's buffer stops there.
             let mut copied = 0;
+            let copies = Pinned::begin();
             for &(_, phys, within, n) in &pinned[..count] {
                 // SAFETY: a frame of the object, pinned and write-pinned above.
-                if unsafe { src.read_raw(from, DirectMap::from_phys(phys).as_mut_ptr::<u8>().add(within), n) }.is_err() {
-                    faulted = true;
+                if let Err(why) = unsafe { copies.read(src, from, DirectMap::from_phys(phys).as_mut_ptr::<u8>().add(within), n) } {
+                    stopped_at = Some(why);
                     break;
                 }
                 from += n;
                 copied += 1;
             }
+            drop(copies);
+            let chunk: usize = pinned[..count].iter().map(|&(_, _, _, n)| n).sum();
             {
                 let mut state = self.state.lock();
                 for (k, &(page, phys, within, n)) in pinned[..count].iter().enumerate() {
@@ -963,9 +1110,19 @@ impl PagerObject {
             for &(_, phys, _, _) in &pinned[..count] {
                 pmm::unpin_range(phys, PAGE as usize);
             }
+            // A page of the owner's buffer that is absent is waited for with
+            // nothing pinned, and the rest of the chunk written again.
+            let faulted = match stopped_at {
+                None => None,
+                Some(Stopped::Absent) => src.wait_in(from, done + chunk - from).err(),
+                Some(Stopped::Faulted(faulted)) => Some(faulted),
+            };
             done = from;
-            if faulted {
-                return refusal(done as u64, SyscallError::BadAddress);
+            if let Some(faulted) = faulted {
+                return refusal(done as u64, faulted.into());
+            }
+            if stopped_at.is_some() {
+                continue;
             }
             match stopped {
                 None => {}
@@ -976,10 +1133,8 @@ impl PagerObject {
         done as u64
     }
 
-    /// Its pages end absent, so every reader waiting on one is named in a
-    /// notice again (`Want::withdrawn`).
     pub fn withdraw(&self, id: u64, first: u64, count: u64) -> u64 {
-        match self.removing(id, |pages, object, waiters, out| pages.withdraw(object, first, count, waiters, &mut |f| out(f))) {
+        match self.removing(id, |pages, object, waiters| pages.withdraw(object, first, count, waiters)) {
             Ok((n, news)) => {
                 if news {
                     self.watch.post();
@@ -991,7 +1146,7 @@ impl PagerObject {
     }
 
     pub fn fail(&self, id: u64, first: u64, count: u64) -> u64 {
-        match self.removing(id, |pages, object, _, out| pages.fail(object, first, count, &mut |f| out(f))) {
+        match self.removing(id, |pages, object, _| pages.fail(object, first, count)) {
             Ok(Ok(())) => 0,
             Ok(Err(why)) => word(why).to_u64(),
             Err(e) => e.to_u64(),
@@ -1005,8 +1160,8 @@ impl PagerObject {
         if let Err(e) = self.holding(id) {
             return e.to_u64();
         }
-        let resized = self.removing(id, |pages, object, _, out| {
-            let tail = pages.resize(object, size, &mut |f| out(f))?;
+        let resized = self.removing(id, |pages, object, _| {
+            let tail = pages.resize(object, size)?;
             if let Some(phys) = tail {
                 let within = (size % PAGE) as usize;
                 // SAFETY: the last page's frame, the object's while the lock is
@@ -1087,11 +1242,11 @@ impl PagerObject {
 
     /// The pages of object `id` holders dirtied since the last call: a notice
     /// not yet taken of them is owed no more.
-    pub fn take_dirtied(&self, id: u64) -> Result<PagedRange, SyscallError> {
+    pub fn take_dirtied(&self, id: u64) -> Result<abi::PagedRange, SyscallError> {
         self.on_live(id, |state, slot| {
             state.entries.unmark(DIRTIED, slot);
             let (first, count) = state.entry_mut(slot).object.take_dirtied().unwrap_or((0, 0));
-            PagedRange { first, count }
+            abi::PagedRange { first, count }
         })
     }
 
@@ -1107,8 +1262,10 @@ impl PagerObject {
     }
 
     /// A holder's write of `src` at `at`, or at the size where `None`: whole
-    /// or refused, and never waiting. Its bytes are copied into frames held
-    /// aside first, with nothing else held; then, in one hold of the lock, it
+    /// or refused, and never waiting for the write side. Its bytes are copied
+    /// into frames drawn first, with nothing else held, and a page of `src`
+    /// that is absent is waited for with the frames given back
+    /// (`user_ptr::Pinned`); then, in one hold of the lock, it
     /// takes the write side, refused while anyone holds or waits for it, and
     /// is checked and admitted whole ([`Pages::holder_fits`]). Its copy into
     /// the object's frames is the kernel's own, so whoever waits for the side
@@ -1132,50 +1289,69 @@ impl PagerObject {
         let Some(_writing) = HolderWriting::begin(self, slot) else {
             return SyscallError::Gone.to_u64();
         };
-        // Frames for the bytes, and for the pages the write would install,
-        // as the object stands now: one fewer than it needs then refuses it.
-        let fresh_count = {
-            let mut state = self.state.lock();
-            if state.gone {
-                return SyscallError::Gone.to_u64();
-            }
-            let (pages, object) = state.split(slot);
-            let offset = at.unwrap_or(object.size());
-            let span = match holder_span(offset, len as u64) {
-                Ok(span) => span,
-                Err(why) => return holder_word(why).to_u64(),
+        let fresh_count = loop {
+            // Frames for the bytes, and for the pages the write would install,
+            // as the object stands now: one fewer than it needs then refuses it.
+            let fresh_count = {
+                let mut state = self.state.lock();
+                if state.gone {
+                    return SyscallError::Gone.to_u64();
+                }
+                let (pages, object) = state.split(slot);
+                let offset = at.unwrap_or(object.size());
+                let span = match holder_span(offset, len as u64) {
+                    Ok(span) => span,
+                    Err(why) => return holder_word(why).to_u64(),
+                };
+                let fresh_count = match pages.holder_fits(object, offset / PAGE, span) {
+                    Ok(fresh) => fresh as usize,
+                    Err(why) => return holder_word(why).to_u64(),
+                };
+                let wanted = staged_count + fresh_count;
+                let got = self.draw(&mut state, &mut drawn[..wanted]);
+                if got < wanted {
+                    self.give_back_drawn(&mut state, &drawn[..got]);
+                    return SyscallError::WouldBlock.to_u64();
+                }
+                fresh_count
             };
-            let fresh_count = match pages.holder_fits(object, offset / PAGE, span) {
-                Ok(fresh) => fresh as usize,
-                Err(why) => return holder_word(why).to_u64(),
-            };
-            let wanted = staged_count + fresh_count;
-            let got = self.draw(&mut state, &mut drawn[..wanted]);
-            if got < wanted {
-                self.give_back_drawn(&mut state, &drawn[..got]);
-                return SyscallError::WouldBlock.to_u64();
+            for (k, frame) in staged.iter_mut().take(staged_count).enumerate() {
+                *frame = materialize(drawn[k], false);
             }
-            fresh_count
+            for (k, frame) in fresh.iter_mut().take(fresh_count).enumerate() {
+                *frame = materialize(drawn[staged_count + k], true);
+            }
+            let pinned = Pinned::begin();
+            let mut stopped = None;
+            for (k, &frame) in staged[..staged_count].iter().enumerate() {
+                let n = (len - k * PAGE as usize).min(PAGE as usize);
+                // SAFETY: a frame this write drew, which nothing else reaches.
+                if let Err(why) = unsafe { pinned.read(src, k * PAGE as usize, DirectMap::from_phys(frame).as_mut_ptr::<u8>(), n) } {
+                    stopped = Some((k * PAGE as usize, why));
+                    break;
+                }
+            }
+            drop(pinned);
+            let Some((from, why)) = stopped else { break fresh_count };
+            {
+                let mut state = self.state.lock();
+                self.give_frames(&mut state, &staged[..staged_count]);
+                self.give_frames(&mut state, &fresh[..fresh_count]);
+            }
+            let waited = match why {
+                Stopped::Absent => src.wait_in(from, len - from),
+                Stopped::Faulted(faulted) => Err(faulted),
+            };
+            if let Err(faulted) = waited {
+                return SyscallError::from(faulted).to_u64();
+            }
         };
-        for (k, frame) in staged.iter_mut().take(staged_count).enumerate() {
-            *frame = materialize(drawn[k], false);
-        }
-        for (k, frame) in fresh.iter_mut().take(fresh_count).enumerate() {
-            *frame = materialize(drawn[staged_count + k], true);
-        }
         let give_up = |e: SyscallError| {
             let mut state = self.state.lock();
             self.give_frames(&mut state, &staged[..staged_count]);
             self.give_frames(&mut state, &fresh[..fresh_count]);
             e.to_u64()
         };
-        for (k, &frame) in staged[..staged_count].iter().enumerate() {
-            let n = (len - k * PAGE as usize).min(PAGE as usize);
-            // SAFETY: a frame this write drew, which nothing else reaches.
-            if unsafe { src.read_raw(k * PAGE as usize, DirectMap::from_phys(frame).as_mut_ptr::<u8>(), n) }.is_err() {
-                return give_up(SyscallError::BadAddress);
-            }
-        }
         let mut pinned = [(0u64, 0u64, 0usize, 0usize); HOLDER];
         let (offset, count, used) = {
             let mut state = self.state.lock();
@@ -1263,7 +1439,7 @@ impl PagerObject {
     /// Under the lock: draw a frame for each of `out`'s entries from the
     /// core, as a supply does — one held aside, the core's promise, or a
     /// promise the allocator makes now: how many were drawn, each `Some` for
-    /// a frame held aside, which [`materialize`] completes outside the lock.
+    /// a frame held aside, which [`materialize`] completes.
     fn draw(&self, state: &mut State, out: &mut [Option<u64>]) -> usize {
         state.held.settle();
         let mut drawn = 0;
@@ -1566,7 +1742,7 @@ impl ZeroHandles for PagerObject {
         state.gone = true;
         for slot in 0..state.entries.len() as u32 {
             if state.entries.get(slot).is_some_and(|e| e.owned) {
-                self.let_go(&mut state, slot);
+                state = self.let_go(state, slot);
             }
         }
         let job = self.core.job();
@@ -1588,6 +1764,326 @@ impl Drop for PagerObject {
         assert!(state.requests.is_null(), "paged: a pager went with a reader still linked");
         assert!(state.held.spare.is_empty() && state.held.draining.is_empty(), "paged: a pager went holding frames aside");
         pmm::unpromise(self.core.job(), state.held.core.pool());
+    }
+}
+
+/// One space's mappings of one paged object, on the object's list from its
+/// space's first range of the object until its last, which unlinks it only
+/// once that range's leaves are cleared and shot down: the space drops a
+/// removed range after its shootdown. It holds a reference on the object's
+/// slot, so a mapped object outlives its release, and is charged to the
+/// mapper's job.
+pub struct MapNode {
+    pager: Arc<PagerObject>,
+    slot: u32,
+    space: Weak<Space>,
+    /// The ranges holding it ([`PagedRange`]).
+    ranges: Ranges,
+    /// Under the pager's lock.
+    link: UnsafeCell<Link>,
+    /// Itself, for a walk to hold while it visits.
+    this: Weak<MapNode>,
+    _charge: Charge,
+}
+
+struct Link {
+    /// The epoch of the walk that last visited it, or the one current at
+    /// its linking ([`kernel::paged::Mappers`]).
+    seen: u64,
+    prev: *const MapNode,
+    next: *const MapNode,
+}
+
+// SAFETY: `link` is reached only under its pager's lock, and the rest is
+// immutable or atomic.
+unsafe impl Send for MapNode {}
+// SAFETY: as for `Send`.
+unsafe impl Sync for MapNode {}
+
+/// Why the index holds no frame a fault may map for a page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Missing {
+    /// Absent, or revoking, at this version of the object: the fault waits.
+    Absent(Version),
+    /// A hole of an anonymous object, which only [`Index::fault`] fills.
+    Hole,
+    /// Its pager cannot let a mapping have it.
+    Lost(Lost),
+    /// Wholly past the object's end: nothing is there.
+    PastEnd(Lost),
+}
+
+/// A page a fault was refused, as the record of its end names it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Lost {
+    pub pager: Pid,
+    pub object: u32,
+    pub page: u64,
+    pub why: Why,
+}
+
+/// Why a pager cannot let a mapping have a page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Why {
+    /// The pager failed it.
+    Failed,
+    /// The pager released the object.
+    Released,
+    /// The pager ended.
+    Ended,
+    /// A hole of an anonymous object, and the pager has no room for its page.
+    NoRoom,
+    /// The page lies wholly past the object's end: nothing is there, so a
+    /// touch of it ends the process and a copy from it is refused as a bad
+    /// address.
+    PastEnd,
+}
+
+impl Why {
+    pub fn name(self) -> &'static str {
+        match self {
+            Why::Failed => "failed by its pager",
+            Why::Released => "released by its pager",
+            Why::Ended => "its pager ended",
+            Why::NoRoom => "no room in its pager",
+            Why::PastEnd => "past the object's end",
+        }
+    }
+}
+
+/// A mapped object's pages as its index holds them, under the pager's lock.
+pub struct Index<'a> {
+    pager: &'a PagerObject,
+    state: &'a mut State,
+    slot: u32,
+}
+
+impl Index<'_> {
+    /// The frame present for the object's `page`, or why there is none.
+    pub fn page(&self, page: u64) -> Result<u64, Missing> {
+        let object = &self.state.entry(self.slot).object;
+        match self.state.pages.lookup(object, page) {
+            _ if self.state.gone => Err(self.lost(page, Why::Ended)),
+            Lookup::Present(phys) => Ok(phys),
+            Lookup::Absent => Err(Missing::Absent(object.version())),
+            Lookup::PastEnd => Err(Missing::PastEnd(self.record(page, Why::PastEnd))),
+            Lookup::Zero => Err(Missing::Hole),
+            Lookup::Failed => Err(self.lost(page, Why::Failed)),
+            Lookup::Gone => Err(self.lost(page, Why::Released)),
+        }
+    }
+
+    /// As [`Self::page`], for the page a fault touched: a hole of an
+    /// anonymous object, a MEMORY volume's, gets a zeroed frame of its
+    /// pager's, installed clean and charged as a supply's is, and is refused
+    /// where the pager has no room for it (7b's N4).
+    pub fn fault(&mut self, page: u64) -> Result<u64, Missing> {
+        match self.page(page) {
+            Err(Missing::Hole) => self.zeroed(page),
+            found => found,
+        }
+    }
+
+    fn zeroed(&mut self, page: u64) -> Result<u64, Missing> {
+        let no_room = self.lost(page, Why::NoRoom);
+        let mut drawn = [None];
+        if self.pager.draw(self.state, &mut drawn) == 0 {
+            return Err(no_room);
+        }
+        let phys = materialize(drawn[0], true);
+        let (pages, object) = self.state.split(self.slot);
+        match pages.supply(object, page, phys, false, (page + 1) * PAGE) {
+            Ok(Supplied::Installed) => {
+                self.state.held.core.installed();
+                Ok(phys)
+            }
+            Ok(Supplied::Present) => unreachable!("paged: a hole found under the lock held a page"),
+            // Inside the object and the pager alive, as the lookup found it:
+            // only a full table refuses.
+            Err(_) => {
+                self.pager.give_frames(self.state, &[phys]);
+                Err(no_room)
+            }
+        }
+    }
+
+    fn lost(&self, page: u64, why: Why) -> Missing {
+        Missing::Lost(self.record(page, why))
+    }
+
+    fn record(&self, page: u64, why: Why) -> Lost {
+        Lost { pager: self.pager.pid, object: self.slot, page, why }
+    }
+}
+
+/// The revoking pages a walk reads under its pager's lock at once.
+/// `tests/guest/mapprobe`'s `shrunk` case revokes 79 pages so that its
+/// revocation takes two batches; at 79 or more it would take one, and that
+/// case would no longer reach a second.
+const REVOKE_BATCH: usize = 64;
+
+/// The pages a fault's request names: the aligned run around its page.
+const FAULT_RUN: u64 = kernel::vm::AROUND / PAGE;
+
+impl MapNode {
+    /// `f` over the object's pages, under the pager's lock.
+    pub fn with_index<R>(&self, f: impl FnOnce(&mut Index<'_>) -> R) -> R {
+        let mut state = self.pager.state.lock();
+        f(&mut Index { pager: &self.pager, state: &mut state, slot: self.slot })
+    }
+
+    /// A fault's wait for the object's `page`, found absent at `since`, its
+    /// space's lock not held: the page's aligned run is requested in a fresh
+    /// request, so a fault whose last wait a write or resize ended asks
+    /// afresh, and the wait lasts until the page is no longer absent, the
+    /// version moved, or the pager is gone. Reported overdue past the pager's
+    /// report time, as a holder's read is, and never ended by a timeout; a
+    /// file's page behaves as memory does (7b's D6). `false` where a kill
+    /// ended it.
+    pub fn wait(&self, page: u64, since: Version) -> bool {
+        let (pager, slot) = (&*self.pager, self.slot);
+        let over = |state: &State| state.gone || state.pages.wait_over(&state.entry(slot).object, page, since);
+        let waiting = core::pin::pin!(Waiting::new(pager, slot));
+        let (first, count) = {
+            let mut state = pager.state.lock();
+            if over(&state) {
+                return true;
+            }
+            // Absent, so inside the object.
+            let end = state.entry(slot).object.size().div_ceil(PAGE);
+            let first = page - page % FAULT_RUN;
+            let count = (first + FAULT_RUN).min(end) - first;
+            waiting.as_ref().request(&mut state, first, count);
+            (first, count)
+        };
+        pager.wait_changed(slot, first, count, || over(&pager.state.lock())).is_ok()
+    }
+}
+
+/// A range's hold on its space's [`MapNode`]: a clone is another range of
+/// the same object in the space, and the last one dropped unlinks the node.
+pub struct PagedRange(Arc<MapNode>);
+
+impl PagedRange {
+    pub fn node(&self) -> &MapNode {
+        &self.0
+    }
+}
+
+impl Clone for PagedRange {
+    fn clone(&self) -> Self {
+        self.0.ranges.more();
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl Drop for PagedRange {
+    fn drop(&mut self) {
+        if self.0.ranges.less() {
+            self.0.pager.unlink(&self.0);
+        }
+    }
+}
+
+impl PagerObject {
+    /// The first range of object `slot` in `space`, whose memory is counted
+    /// to `job`: its node linked, seen at the object's epoch now, under
+    /// the space's lock the caller holds. `Gone` where the object or its
+    /// pager is.
+    pub fn link(self: &Arc<Self>, slot: u32, space: Weak<Space>, job: &Arc<kernel::sched::job::Job>) -> Result<PagedRange, SyscallError> {
+        let charge = Charge::new(job, charge::arc::<MapNode>()).map_err(|_| SyscallError::ResourceExhausted)?;
+        let link = UnsafeCell::new(Link { seen: 0, prev: ptr::null(), next: ptr::null() });
+        let node = Arc::new_cyclic(|this| MapNode {
+            pager: Arc::clone(self),
+            slot,
+            space,
+            ranges: Ranges::one(),
+            link,
+            this: this.clone(),
+            _charge: charge,
+        });
+        let mut state = self.state.lock();
+        let entry = state.entry_mut(slot);
+        if entry.object.gone() {
+            return Err(SyscallError::Gone);
+        }
+        let at = Arc::as_ptr(&node);
+        // SAFETY: a fresh node no list holds yet, and the tail's, linked,
+        // under the lock.
+        unsafe {
+            *(*at).link.get() = Link { seen: entry.object.link(), prev: entry.mappers.tail, next: ptr::null() };
+            match entry.mappers.tail.is_null() {
+                true => entry.mappers.head = at,
+                false => (*(*entry.mappers.tail).link.get()).next = at,
+            }
+        }
+        entry.mappers.tail = at;
+        // A mapping holds the object as a handle does: a file mapped and
+        // closed, or unlinked, stays until the last mapping goes.
+        entry.refs += 1;
+        entry.holders += 1;
+        Ok(PagedRange(node))
+    }
+
+    /// The last range of `node`'s space went, its leaves cleared and shot
+    /// down: the node leaves the list, and its hold and reference on the
+    /// slot go.
+    fn unlink(&self, node: &MapNode) {
+        let mut state = self.state.lock();
+        let entry = state.entry_mut(node.slot);
+        // SAFETY: linked, as are its neighbours, under the lock.
+        unsafe {
+            let Link { prev, next, .. } = *node.link.get();
+            match prev.is_null() {
+                true => entry.mappers.head = next,
+                false => (*(*prev).link.get()).next = next,
+            }
+            match next.is_null() {
+                true => entry.mappers.tail = prev,
+                false => (*(*next).link.get()).prev = prev,
+            }
+        }
+        state.entry_mut(node.slot).holders -= 1;
+        self.say_no_holders(&mut state, node.slot);
+        self.unref_locked(&mut state, node.slot);
+    }
+}
+
+/// An object's list of mappers, as its walk visits them, under the pager's
+/// lock.
+struct Ring<'a>(&'a mut Ends);
+
+impl Mappers for Ring<'_> {
+    type Node = *const MapNode;
+
+    fn head(&self) -> Option<*const MapNode> {
+        (!self.0.head.is_null()).then_some(self.0.head)
+    }
+
+    fn seen(&self, node: *const MapNode) -> u64 {
+        // SAFETY: linked, so live, under the lock.
+        unsafe { (*(*node).link.get()).seen }
+    }
+
+    fn visited(&mut self, node: *const MapNode, epoch: u64) {
+        // SAFETY: linked, as are its neighbours, under the lock; it moves to
+        // the tail.
+        unsafe {
+            let link = &mut *(*node).link.get();
+            link.seen = epoch;
+            if self.0.tail == node {
+                return;
+            }
+            match link.prev.is_null() {
+                true => self.0.head = link.next,
+                false => (*(*link.prev).link.get()).next = link.next,
+            }
+            (*(*link.next).link.get()).prev = link.prev;
+            (*(*self.0.tail).link.get()).next = node;
+            link.prev = self.0.tail;
+            link.next = ptr::null();
+            self.0.tail = node;
+        }
     }
 }
 
@@ -1670,6 +2166,17 @@ impl PagedHolderObject {
 
     pub fn read(&self, out: &mut UserBytesMut, offset: u64) -> u64 {
         self.named.pager.read(self.named.slot, out, offset, true)
+    }
+
+    /// Whether `range` maps this holder's object.
+    pub fn maps(&self, range: &PagedRange) -> bool {
+        ptr::eq(Arc::as_ptr(&range.0.pager), Arc::as_ptr(&self.named.pager)) && range.0.slot == self.named.slot
+    }
+
+    /// The first range of its object in `space`, whose memory is counted to
+    /// `job` ([`PagerObject::link`]).
+    pub fn link(&self, space: Weak<Space>, job: &Arc<kernel::sched::job::Job>) -> Result<PagedRange, SyscallError> {
+        self.named.pager.link(self.named.slot, space, job)
     }
 
     /// A write of `src` at `at`, or at the size where `None`.

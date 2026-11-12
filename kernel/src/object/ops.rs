@@ -341,7 +341,7 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
         KObjectRef::PipeRead(r) => match r.pipe().read(&crate::scheduler::Parkable::at_entry(), buf) {
             Ok(read) => read.map(|n| n as u64),
             Err(pipe::ReadStopped::Cancelled) => Some(SyscallError::Gone.to_u64()),
-            Err(pipe::ReadStopped::Faulted) => Some(SyscallError::BadAddress.to_u64()),
+            Err(pipe::ReadStopped::Faulted(faulted)) => Some(SyscallError::from(faulted).to_u64()),
         },
         KObjectRef::Device(_) => unreachable!("a device claim is read by `read_device`"),
         KObjectRef::Null(_) => Some(0),
@@ -376,7 +376,7 @@ pub fn pipe_written(wrote: pipe::PipeWrite) -> Option<u64> {
         // The reader is gone, not absent: `NotFound` means the name is not there and nothing else may say so.
         pipe::PipeWrite::BrokenPipe => Some(SyscallError::Gone.to_u64()),
         pipe::PipeWrite::NoMemory => Some(SyscallError::ResourceExhausted.to_u64()),
-        pipe::PipeWrite::Faulted => Some(SyscallError::BadAddress.to_u64()),
+        pipe::PipeWrite::Faulted(faulted) => Some(SyscallError::from(faulted).to_u64()),
         pipe::PipeWrite::Wrote(n) => Some(n as u64),
         pipe::PipeWrite::NoRoom => None,
     }
@@ -541,8 +541,10 @@ fn write_device(claim: &DeviceClaim, buf: &UserBytes) -> u64 {
         return SyscallError::PermissionDenied.to_u64();
     }
     let mut word = [0u8; 4];
-    if buf.len() == word.len() && buf.read_at(0, &mut word).is_err() {
-        return SyscallError::BadAddress.to_u64();
+    if buf.len() == word.len() {
+        if let Err(faulted) = buf.read_at(0, &mut word) {
+            return SyscallError::from(faulted).to_u64();
+        }
     }
     let acknowledges = buf.len() == word.len() && u32::from_ne_bytes(word) == ack;
     let pid = crate::process::current_process();

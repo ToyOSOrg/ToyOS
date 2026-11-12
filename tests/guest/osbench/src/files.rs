@@ -117,6 +117,154 @@ fn parts(
     each(&name("pread_8"), 100, 2000, fields, |i| io("pread", f.read_at(&mut buf[..8], page_at(i, pages))).map(drop));
 }
 
+/// The `map` group under `target`: files written there, so their pages are
+/// cached, mapped read-only and shared, each line naming what served them.
+/// The 16 MiB file is mapped, each page touched once and unmapped, so each
+/// touch is a fault unless fault-around mapped its page already
+/// (`touch_16m`, 20 after 2); the same by eight threads, each its eighth of
+/// the pages (`threads_touch_16m`, 10 after 1); and 4 KiB copied out of a
+/// page of one mapping every page of which was touched (`read_4k`, 2,000
+/// after 100). A 1 MiB file mapped and touched whole by 255 other processes
+/// is truncated to nothing, which takes its pages from every one
+/// (`truncate_255`, 5, the truncate alone timed).
+pub fn map_suite(target: &Target) {
+    condition(&format!("map.{}.served_by", target.name), &target.served_by);
+    let scratch = match Scratch::new(&target.dir) {
+        Ok(s) => s,
+        Err(e) => return refuse(&format!("map.{}", target.name), format!("no scratch directory under {}: {e}", target.dir)),
+    };
+    let name = |op: &str| format!("map.{}.{op}", target.name);
+    let big = scratch.at("big");
+    if let Err(e) = fill(&big, 16 * MIB) {
+        return refuse(&name("setup"), e);
+    }
+    let fields: Vec<(&'static str, String)> =
+        [("file_bytes", (16 * MIB).to_string())].into_iter().chain(target.fields()).collect();
+    mapped(&name, &fields, &big, 16 * MIB / 4096);
+    let _ = fs::remove_file(&big);
+    let held = scratch.at("held");
+    let fields: Vec<(&'static str, String)> =
+        [("file_bytes", MIB.to_string()), ("mappers", MAPPERS.to_string())].into_iter().chain(target.fields()).collect();
+    held_by_many(&name("truncate_255"), &fields, &held);
+    let _ = fs::remove_file(&held);
+}
+
+/// Every page of `len` bytes at `at`, read once.
+fn touch(at: usize, pages: std::ops::Range<usize>) -> u8 {
+    pages.fold(0u8, |sum, page| {
+        // SAFETY: a page of a read-only mapping the caller holds.
+        sum.wrapping_add(unsafe { (at as *const u8).add(page * 4096).read_volatile() })
+    })
+}
+
+fn mapped(name: &dyn Fn(&str) -> String, fields: &[(&'static str, String)], big: &Path, pages: usize) {
+    let len = pages * 4096;
+    each(&name("touch_16m"), 2, 20, fields, |_| {
+        let at = crate::sys::map_file(big, len)?;
+        std::hint::black_box(touch(at as usize, 0..pages));
+        // SAFETY: the mapping just made, which nothing else names.
+        unsafe { crate::sys::unmap(at, len) };
+        Ok(())
+    });
+    each(&name("threads_touch_16m"), 1, 10, fields, |_| {
+        let at = crate::sys::map_file(big, len)? as usize;
+        std::thread::scope(|threads| {
+            for t in 0..THREADS {
+                threads.spawn(move || std::hint::black_box(touch(at, t * pages / THREADS..(t + 1) * pages / THREADS)));
+            }
+        });
+        // SAFETY: the mapping just made, whose threads have all ended.
+        unsafe { crate::sys::unmap(at as *mut u8, len) };
+        Ok(())
+    });
+    let at = match crate::sys::map_file(big, len) {
+        Ok(at) => at,
+        Err(why) => return refuse(&name("read_4k"), why),
+    };
+    std::hint::black_box(touch(at as usize, 0..pages));
+    let mut buf = [0u8; 4096];
+    each(&name("read_4k"), 100, 2000, fields, |i| {
+        // SAFETY: a page of the mapping, every one of which is mapped.
+        unsafe { core::ptr::copy_nonoverlapping(at.add(page_at(i, pages) as usize), buf.as_mut_ptr(), buf.len()) };
+        std::hint::black_box(&buf);
+        Ok(())
+    });
+    // SAFETY: the mapping made above, which nothing else names.
+    unsafe { crate::sys::unmap(at, len) };
+}
+
+/// The threads `threads_touch_16m` faults one mapping with.
+const THREADS: usize = 8;
+/// The processes holding `truncate_255`'s file mapped.
+const MAPPERS: usize = 255;
+
+/// `held`, 1 MiB, mapped and touched whole by [`MAPPERS`] helpers of this
+/// program (`osbench map-hold`), then truncated to nothing: the truncate's
+/// time, five times, the file written again and the helpers started afresh
+/// for each.
+fn held_by_many(bench: &str, fields: &[(&'static str, String)], held: &Path) {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => return refuse(bench, format!("no path to this program: {e}")),
+    };
+    let mut ns = Vec::new();
+    for _ in 0..5 {
+        let sample = (|| -> Result<u64, String> {
+            io("write", fill(held, MIB))?;
+            let mut helpers = Vec::with_capacity(MAPPERS);
+            for _ in 0..MAPPERS {
+                let mut helper = io(
+                    "spawn",
+                    std::process::Command::new(&exe)
+                        .arg("map-hold")
+                        .arg(held)
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .spawn(),
+                )?;
+                let mut said = [0u8; 5];
+                io("read", helper.stdout.take().expect("piped").read_exact(&mut said))?;
+                if &said != b"held\n" {
+                    return Err(format!("a helper said {said:?}"));
+                }
+                helpers.push(helper);
+            }
+            let file = io("open", OpenOptions::new().write(true).open(held))?;
+            let t = std::time::Instant::now();
+            io("truncate", file.set_len(0))?;
+            let took = t.elapsed().as_nanos() as u64;
+            for mut helper in helpers {
+                drop(helper.stdin.take());
+                let status = io("wait", helper.wait())?;
+                if !status.success() {
+                    return Err(format!("a helper ended {status}"));
+                }
+            }
+            Ok(took)
+        })();
+        match sample {
+            Ok(took) => ns.push(took),
+            Err(why) => return refuse(bench, why),
+        }
+    }
+    crate::report::result(bench, "ns", &mut ns, fields);
+}
+
+/// `osbench map-hold <path>`: the file at `path` mapped whole and every page
+/// touched, said by "held", and held until stdin ends.
+pub fn hold(args: &[String]) {
+    let path = Path::new(args.first().map(String::as_str).expect("osbench map-hold: a path"));
+    let len = fs::metadata(path).expect("osbench map-hold: the file").len() as usize;
+    let at = crate::sys::map_file(path, len).expect("osbench map-hold: the file mapped");
+    std::hint::black_box(touch(at as usize, 0..len / 4096));
+    let mut out = std::io::stdout();
+    out.write_all(b"held\n").and_then(|()| out.flush()).expect("osbench map-hold: say held");
+    let _ = std::io::stdin().read_to_end(&mut Vec::new());
+    // SAFETY: the mapping made above; the file may have shrunk under it, and
+    // nothing touches it again.
+    unsafe { crate::sys::unmap(at, len) };
+}
+
 /// Every benchmark under `target`, each line naming what served it and its
 /// medium. Each one's comment is its warm-up and repetitions.
 pub fn suite(target: &Target) {

@@ -58,9 +58,22 @@ pub fn map_anon(len: usize) -> *mut u8 {
     ptr.cast()
 }
 
+/// `len` bytes of the file at `path` from its start, mapped read-only and
+/// shared.
+pub fn map_file(path: &std::path::Path, len: usize) -> Result<*mut u8, String> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::File::open(path).map_err(|e| format!("open: {e}"))?;
+    // SAFETY: a fresh read-only mapping of a file this process opened.
+    let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, file.as_raw_fd(), 0) };
+    if ptr == libc::MAP_FAILED {
+        return Err(format!("mmap: {}", std::io::Error::last_os_error()));
+    }
+    Ok(ptr.cast())
+}
+
 /// # Safety
-/// `ptr` and `len` are one whole mapping from [`map_anon`], and nothing
-/// reaches it afterwards.
+/// `ptr` and `len` are one whole mapping from [`map_anon`] or
+/// [`map_file`], and nothing reaches it afterwards.
 pub unsafe fn unmap(ptr: *mut u8, len: usize) {
     // SAFETY: as the caller promises.
     assert_eq!(unsafe { libc::munmap(ptr.cast(), len) }, 0);

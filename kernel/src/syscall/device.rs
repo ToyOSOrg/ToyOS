@@ -263,8 +263,8 @@ pub(super) fn sys_device_firmware_window(ctx: &SyscallContext, handle: RawHandle
     // Written first, before anything is opened, so a window the caller cannot
     // write as the call begins leaves no grant it was never told of. One a
     // sibling unmaps meanwhile can; the claim's release takes it back.
-    if out.fill_zero(0, len as usize).is_err() {
-        return SyscallError::BadAddress.to_u64();
+    if let Err(faulted) = out.fill_zero(0, len as usize) {
+        return SyscallError::from(faulted).to_u64();
     }
     let mut grant = toyos_abi::pci::WindowGrant { shm: toyos_abi::HANDLE_INVALID, refused: 0, offset: 0, len: 0 };
     match on_function(&claim, |function| crate::pcidev::firmware_window(function, window)) {
@@ -304,8 +304,8 @@ pub(super) fn sys_device_dma_alloc(
     let Some(mut window) = ctx.user_bytes_mut(out, len) else {
         return SyscallError::BadAddress.to_u64();
     };
-    if window.fill_zero(0, len as usize).is_err() {
-        return SyscallError::BadAddress.to_u64();
+    if let Err(faulted) = window.fill_zero(0, len as usize) {
+        return SyscallError::from(faulted).to_u64();
     }
     let granted = on_function(&claim, |function| crate::pcidev::dma_alloc(function, bytes));
     let (memory, device_addr, granted) = match granted {
@@ -363,8 +363,8 @@ pub(super) fn sys_device_dma_map(
         return SyscallError::BadAddress.to_u64();
     };
     // Written first, before anything is mapped, for `sys_device_dma_alloc`'s reason.
-    if window.fill_zero(0, len as usize).is_err() {
-        return SyscallError::BadAddress.to_u64();
+    if let Err(faulted) = window.fill_zero(0, len as usize) {
+        return SyscallError::from(faulted).to_u64();
     }
     let mapped = on_function(&claim, |function| crate::pcidev::dma_map(function, &memory));
     let (device_addr, bytes) = match mapped {

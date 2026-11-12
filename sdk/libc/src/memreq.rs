@@ -26,7 +26,8 @@ pub(crate) enum MapRefusal {
     /// No bytes, a fixed place off a page boundary, or not exactly one of
     /// `MAP_SHARED` and `MAP_PRIVATE`: `EINVAL`.
     Invalid,
-    /// A file's bytes, which the kernel maps for no process: `ENODEV`.
+    /// A file's bytes other than read-only, which no mapping of a file gives
+    /// yet: `ENODEV`.
     File,
     /// Memory writable and executable at once, which no page is: `ENOTSUP`.
     WriteExec,
@@ -43,7 +44,7 @@ pub(crate) fn mmap_refusal(addr: usize, len: usize, prot: i32, flags: i32) -> Op
     {
         return Some(MapRefusal::Invalid);
     }
-    if flags & MAP_ANONYMOUS == 0 {
+    if flags & MAP_ANONYMOUS == 0 && prot != PROT_READ {
         return Some(MapRefusal::File);
     }
     if prot & PROT_EXEC != 0 && prot & PROT_WRITE != 0 {

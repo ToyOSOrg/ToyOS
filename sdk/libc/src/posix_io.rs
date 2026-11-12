@@ -807,7 +807,7 @@ fn range_errno(e: syscall::SyscallError) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn mmap(
-    addr: *mut u8, len: usize, prot: i32, flags: i32, _fd: i32, _offset: i64,
+    addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64,
 ) -> *mut u8 {
     use crate::memreq::{self, MapRefusal};
 
@@ -829,6 +829,25 @@ pub unsafe extern "C" fn mmap(
     // POSIX takes a null address with `MAP_FIXED` as the address zero, which
     // no process holds; anything else without it is only a hint.
     let at = if flags & memreq::MAP_FIXED != 0 { syscall::VmAt::Fixed(addr) } else { syscall::VmAt::ANYWHERE };
+    if flags & memreq::MAP_ANONYMOUS == 0 {
+        // Read-only, so private and shared are the same pages until a write.
+        let Some(offset) = u64::try_from(offset).ok().filter(|o| o.is_multiple_of(syscall::PAGE_SIZE as u64)) else {
+            crate::errno::set(EINVAL);
+            return MAP_FAILED;
+        };
+        // SAFETY: a `MAP_FIXED` caller gives up what those pages held, as POSIX says.
+        return match unsafe { files::map(fd, offset, len, at) } {
+            Ok(ptr) => ptr,
+            Err(files::Error::Kernel(syscall::SyscallError::NotSupported)) => {
+                crate::errno::set(crate::errcode::ENODEV);
+                MAP_FAILED
+            }
+            Err(e) => {
+                set_errno(e);
+                MAP_FAILED
+            }
+        };
+    }
     // SAFETY: a `MAP_FIXED` caller gives up what those pages held, as POSIX says.
     match unsafe { syscall::vm_reserve(len, prot, at) } {
         Ok(ptr) => ptr,

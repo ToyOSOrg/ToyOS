@@ -1,5 +1,5 @@
 //! What libc's memory calls refuse before the kernel or the allocator is
-//! asked: `mmap` a file, memory writable and executable at once, no bytes, a fixed place off a
+//! asked: `mmap` a file other than read-only, memory writable and executable at once, no bytes, a fixed place off a
 //! page, or no one disposition; `posix_madvise` anything but its five; `madvise` the same, an
 //! address off a page, and `MADV_DONTNEED`'s discard.
 
@@ -22,8 +22,13 @@ fn mmap_refuses_what_the_kernel_cannot_map_and_nothing_else() {
         (0, 4096, rw, MAP_ANONYMOUS, Some(MapRefusal::Invalid)),
         (0, 4096, rw, MAP_SHARED | MAP_PRIVATE | MAP_ANONYMOUS, Some(MapRefusal::Invalid)),
         (0, 4096, PROT_READ, 0, Some(MapRefusal::Invalid)),
-        (0, 4096, PROT_READ, MAP_PRIVATE, Some(MapRefusal::File)),
+        // A file read-only, shared or private, and nothing else of one.
+        (0, 4096, PROT_READ, MAP_PRIVATE, None),
+        (0, 4096, PROT_READ, MAP_SHARED, None),
         (0, 4096, rw, MAP_SHARED, Some(MapRefusal::File)),
+        (0, 4096, rw, MAP_PRIVATE, Some(MapRefusal::File)),
+        (0, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, Some(MapRefusal::File)),
+        (0, 4096, 0, MAP_SHARED, Some(MapRefusal::File)),
         (0, 4096, PROT_READ | PROT_EXEC, anonymous, None),
         (0, 4096, PROT_WRITE | PROT_EXEC, anonymous, Some(MapRefusal::WriteExec)),
         (0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, anonymous, Some(MapRefusal::WriteExec)),

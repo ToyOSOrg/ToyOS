@@ -32,6 +32,9 @@ pub enum Fault {
     /// A syscall named a handle the process does not hold, which ends it
     /// (`kernel::object::HandleError`'s rule).
     Handle,
+    /// A touch of a mapped file's page its server failed or can no longer
+    /// supply (`SIGBUS`).
+    Mapping,
 }
 
 const EXITED: u64 = 0;
@@ -47,6 +50,7 @@ const fn fault_kind(fault: Fault) -> u64 {
         Fault::Arithmetic => 5,
         Fault::Trap => 6,
         Fault::Handle => 7,
+        Fault::Mapping => 8,
     }
 }
 
@@ -74,6 +78,7 @@ impl End {
             (5, 0) => Fault::Arithmetic,
             (6, 0) => Fault::Trap,
             (7, 0) => Fault::Handle,
+            (8, 0) => Fault::Mapping,
             _ => return None,
         };
         (fault_kind(fault) == kind).then_some(End::Fault(fault))
@@ -102,6 +107,7 @@ impl Fault {
             Fault::Arithmetic => "arithmetic",
             Fault::Trap => "trap",
             Fault::Handle => "handle",
+            Fault::Mapping => "mapping",
         }
     }
 }
@@ -123,8 +129,8 @@ mod tests {
     use super::*;
     use crate::syscall::SyscallError;
 
-    const FAULTS: [Fault; 6] =
-        [Fault::Memory, Fault::Alignment, Fault::Instruction, Fault::Arithmetic, Fault::Trap, Fault::Handle];
+    const FAULTS: [Fault; 7] =
+        [Fault::Memory, Fault::Alignment, Fault::Instruction, Fault::Arithmetic, Fault::Trap, Fault::Handle, Fault::Mapping];
 
     fn every_end() -> impl Iterator<Item = End> {
         let exits = [0, 1, 137, 139, -1, i32::MIN, i32::MAX].map(End::Exited);
@@ -158,7 +164,7 @@ mod tests {
     /// or fault carrying a code.
     #[test]
     fn a_word_no_end_makes_names_none() {
-        let past = 8 << 32;
+        let past = 9 << 32;
         for word in [past, (KILLED << 32) | 1, End::Fault(Fault::Trap).to_word() | 7] {
             assert_eq!(End::from_word(word), None, "{word:#x}");
         }

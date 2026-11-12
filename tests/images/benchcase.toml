@@ -78,6 +78,7 @@ args = [
     "osbench_sched",
     "osbench_fair",
     "osbench_files",
+    "osbench_map",
     "osbench_ipc",
     "osbench_net",
     "osbench_procs",
@@ -103,6 +104,7 @@ args = [
 "bin/osbench_sched" = "/system/bin/osbench"
 "bin/osbench_fair" = "/system/bin/osbench"
 "bin/osbench_files" = "/system/bin/osbench"
+"bin/osbench_map" = "/system/bin/osbench"
 "bin/osbench_ipc" = "/system/bin/osbench"
 "bin/osbench_net" = "/system/bin/osbench"
 "bin/osbench_procs" = "/system/bin/osbench"

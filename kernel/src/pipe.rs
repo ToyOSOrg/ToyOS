@@ -17,7 +17,7 @@ use alloc::sync::Arc;
 
 use crate::scheduler::Parkable;
 use crate::sync::Lock;
-use crate::user_ptr::{UserBytes, UserBytesMut};
+use crate::user_ptr::{Faulted, UserBytes, UserBytesMut};
 use crate::watch::{Cancelled, Watch};
 
 /// A reference to a pipe that holds neither end: what an end's object, a
@@ -173,16 +173,16 @@ pub enum PipeWrite {
     /// The memory its bytes need could not be taken; no wait for room makes
     /// it appear, so a caller must not park on it.
     NoMemory,
-    /// A byte of the writer's buffer it cannot reach: nothing was written.
-    Faulted,
+    /// A byte of the writer's buffer it cannot have: nothing was written.
+    Faulted(Faulted),
 }
 
 /// Why a read answered no count.
 pub enum ReadStopped {
     /// A kill ended the wait for another read's claim.
     Cancelled,
-    /// A byte of the reader's buffer it cannot reach: the bytes it took are lost.
-    Faulted,
+    /// A byte of the reader's buffer it cannot have: the bytes it took are lost.
+    Faulted(Faulted),
 }
 
 impl From<Cancelled> for ReadStopped {
@@ -219,7 +219,7 @@ impl PipeRef {
                 if boost {
                     crate::scheduler::boost_current_rt_inherited();
                 }
-                buf.write_at(0, bounce.bytes()).map_err(|_| ReadStopped::Faulted)?;
+                buf.write_at(0, bounce.bytes()).map_err(ReadStopped::Faulted)?;
                 return Ok(Some(n));
             }
             pipe.held.claim_read(n);
@@ -238,7 +238,7 @@ impl PipeRef {
         frame_bytes::give_back(&self.0.state, |s| &mut s.held, spares);
         drop(unread);
         frame_bytes::wake(&self.0.read_watch, ended);
-        copied.map_err(|_| ReadStopped::Faulted)?;
+        copied.map_err(ReadStopped::Faulted)?;
         Ok(Some(n))
     }
 
@@ -249,7 +249,7 @@ impl PipeRef {
             let mut bounce = PipeBounce::new();
             return match bounce.read(buf) {
                 Ok(src) => self.write_bounced(p, src),
-                Err(_) => Ok(PipeWrite::Faulted),
+                Err(faulted) => Ok(PipeWrite::Faulted(faulted)),
             };
         }
         let (n, first) = {
@@ -273,7 +273,7 @@ impl PipeRef {
         let wrote = match supplied {
             Ok(runs) => match frame_bytes::fill(&self.0.state, |s| &mut s.held, buf, n, runs) {
                 Ok(()) => PipeWrite::Wrote(n),
-                Err(_) => PipeWrite::Faulted,
+                Err(faulted) => PipeWrite::Faulted(faulted),
             },
             Err(Exhausted) => PipeWrite::NoMemory,
         };

@@ -60,7 +60,7 @@ impl Refused {
 pub enum Notice {
     /// A reader waits for `count` pages from `first`.
     Requested { object: u64, first: u64, count: u64 },
-    /// The last holder handle went.
+    /// The last holder, a handle or a space's mapping, went.
     NoHolders { object: u64 },
     /// A holder dirtied pages, which [`Pager::take_dirtied`] names.
     Dirtied { object: u64 },
@@ -279,6 +279,19 @@ impl Paged {
     /// whose read holds the writes off.
     pub fn read(&self, out: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
         syscall::paged_read(self.0.raw(), out, offset)
+    }
+
+    /// `len` bytes of the object from the page boundary `offset`, mapped
+    /// read-only and shared where `at` says: the pager's own frames, so a
+    /// write of its lands in them, and a touch of a page not yet supplied
+    /// waits for it as a read does. A touch of a page that failed, past the
+    /// object's end, or after its pager ended, ends the process.
+    ///
+    /// # Safety
+    /// As [`syscall::vm_map`]'s: a `Fixed` range replaces what those pages held.
+    pub unsafe fn map(&self, offset: u64, len: usize, at: syscall::VmAt) -> Result<*mut u8, SyscallError> {
+        // SAFETY: the caller's.
+        unsafe { syscall::vm_map(self.0.raw(), offset, len, syscall::VmProt::Read, at) }
     }
 
     /// `bytes` at `offset`, one write whole: the bytes written. `WouldBlock`

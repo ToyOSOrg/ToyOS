@@ -532,9 +532,21 @@ pub(super) fn page_fault_handler(frame: &mut TrapFrame) {
         } else {
             kernel::vm::Access::Read
         };
-        if is_user && process::handle_page_fault(fault_addr, access) {
-            percpu::set_fault_state(percpu::CpuFaultState::Normal);
-            return;
+        if is_user {
+            match process::handle_page_fault(fault_addr, access) {
+                process::Faulted::Unreachable => {}
+                process::Faulted::Lost(lost) | process::Faulted::PastEnd(lost) => {
+                    percpu::set_fault_state(percpu::CpuFaultState::Normal);
+                    process::lost(fault_addr, lost);
+                }
+                process::Faulted::Absent => unreachable!("a Ring 3 fault while its thread's copies hold pins"),
+                // A kill that ended a wait is acted on as the thread returns
+                // to Ring 3.
+                process::Faulted::Served | process::Faulted::Killed => {
+                    percpu::set_fault_state(percpu::CpuFaultState::Normal);
+                    return;
+                }
+            }
         }
         log!("#PF UNHANDLED: cr2={:#x} rip={:#x} err={:#x} user={} tid={:?}",
             fault_addr, frame.rip, frame.error_code, is_user, percpu::current_tid());
@@ -559,14 +571,18 @@ fn user_copy_fault(frame: &mut TrapFrame, addr: u64, fixup: u64) {
     const AC: u64 = 1 << 18;
     assert!(frame.rflags & AC != 0, "uaccess: a copy faulted at {:#x} with RFLAGS.AC clear", frame.rip);
     let access = if frame.error_code & PF_WRITE != 0 { kernel::vm::Access::Write } else { kernel::vm::Access::Read };
-    if frame.error_code & PF_PRESENT == 0 {
+    let faulted = if frame.error_code & PF_PRESENT == 0 {
         percpu::preempt_count_down();
-        let served = process::handle_page_fault(addr, access);
+        let faulted = process::handle_page_fault(addr, access);
         percpu::preempt_count_up();
-        if served {
-            return;
-        }
+        faulted
+    } else {
+        process::Faulted::Unreachable
+    };
+    if faulted == process::Faulted::Served {
+        return;
     }
+    crate::user_ptr::stopped(faulted.stop());
     frame.rip = fixup;
 }
 

@@ -401,6 +401,10 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is the x86-64 verdict; `virt_jobs_at_el2` builds it for
     // AArch64 and runs it on that architecture's job case.
     "relro_sealed",
+    // Its shared run is the x86-64 verdict on its cases;
+    // `a_mapped_file_follows_its_pager` runs it again for the kernel's report
+    // on serial, and `virt_mapped_file` on AArch64's job case.
+    "mapped_file",
 ];
 
 /// What the boot's audit of the kernel's tables says when every leaf passed
@@ -456,6 +460,9 @@ const SCREEN_TESTS: &[ScreenTest] = &[
     // `tmp_empty_files` on AArch64: the paged objects' table and its notices
     // are shared memory-management code.
     ("virt_tmp_holds_empty_files_by_what_each_costs", qemu::Profile::Virt, |profile, _| virt_tmp_holds_empty_files_by_what_each_costs(profile)),
+    // `a_mapped_file_follows_its_pager` on AArch64: a fault that parks on its
+    // pager there, the CPU's fault mark down while it waits.
+    ("virt_mapped_file", qemu::Profile::Virt, |profile, _| virt_job(profile, "test_rs_mapped_file")),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt, |profile, _| virt_job(profile, &format!("test_rs_{VIRT_RING0_TIMER}"))),
     // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and
     // `virt_reboot`: under HVF a woken thread can go undispatched for seconds
@@ -658,6 +665,12 @@ const MACHINE_TESTS: &[MachineTest] = &[
     // endowments a job gets is the image's and the supervisor's, which no
     // host build has, and the benches run osbench only nightly.
     ("osbench_capability_groups_exit_0", |_| osbench_capability_groups_exit_0()),
+    // `osbench map` on tests/images/benchcase.toml with only that job, on
+    // QEMU x86-64's q35: its rows over a mapped file, eight threads faulting
+    // one mapping and 255 processes holding one while it is truncated, each
+    // required measured. Whether they measure correctly is a guest's to say;
+    // what they measure is owed on metal (the memory track record).
+    ("osbench_map_group_exits_0", |_| osbench_map_group_exits_0()),
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the
     // firmware's tables, to COM1, to `PM1a_CNT`, to a function's configuration
@@ -731,6 +744,15 @@ const MACHINE_TESTS: &[MachineTest] = &[
     ("a_user_copy_highest_first_faults_or_ends_as_bad_address", |test_config| {
         a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config, &["copies-go-down"])
     }),
+    // A paged object mapped by a second process (`tests/guest/mapprobe`), and
+    // the kernel's report that a mapper's fault waited past its pager's
+    // report time and then no longer did. That report is on serial and not
+    // the job's, and `testcases_members_exit_0` judges the member by its exit
+    // alone, so this boot of QEMU's x86-64 machine is its own. The job's
+    // cases, two processes, real tables and the kernel's fault path, which no
+    // host test has, are the shared run's too, and `virt_mapped_file` runs
+    // them on AArch64.
+    ("a_mapped_file_follows_its_pager", |test_config| a_mapped_file_follows_its_pager(test_config)),
     // The boot's log written through usbd onto the stick it booted from, and
     // still there once the machine has stopped: the path every metal boot's
     // `/log` takes, which no other QEMU row reads, because their console is
@@ -3105,6 +3127,7 @@ const VIRT_JOBS: &[(&str, &str)] = &[
     ("test_rs_user_copy_faults", "user copies: all checks passed"),
     ("test_rs_vm_map_shares", "vm_map_shares: an object's pages are mapped where asked"),
     ("test_rs_relro_sealed", "relro_sealed: a store to a relocated word of PT_GNU_RELRO ended its program as a memory fault"),
+    ("test_rs_mapped_file", "mapped_file: a mapped paged object follows its pager"),
     ("test_rs_abuse_readonly_copyout", "a syscall writes only where its caller could store"),
 ];
 
@@ -3443,6 +3466,32 @@ fn osbench_capability_groups_exit_0() -> Result<(), String> {
     Ok(())
 }
 
+/// `osbench map` on tests/images/benchcase.toml alone: it exits 0, which it
+/// does only once every row it ran measured, and says each row's name.
+fn osbench_map_group_exits_0() -> Result<(), String> {
+    const JOB: &str = "osbench_map";
+    let committed = compile::repo_root().join("tests/images/benchcase.toml");
+    let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
+    let derived = toyos_metal::image::derive(&text, 600_000, &[JOB], &[]).map_err(|why| why.to_string())?;
+    let config = common::lane::dir().join("osbench-map-group.toml");
+    fs::write(&config, derived).map_err(|e| format!("{}: {e}", config.display()))?;
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        &[],
+        &[],
+        BootOptions { ready_marker: bootlog::COMPLETE, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    let end = format!("===TEST_END {JOB} ");
+    await_guest(&mut qemu, &mut console, "osbench's map group to end", |said| said.contains(&end))?;
+    let said = serial::Serial::named("osbench map", console);
+    said.must_say(&format!("===TEST_END {JOB} exit=0==="))?;
+    for row in ["touch_16m", "threads_touch_16m", "read_4k", "truncate_255"] {
+        said.must_say(&format!(".{row} unit="))?;
+    }
+    Ok(())
+}
+
 /// Boot the image `--console-boot` builds, on the machine shape with a panel
 /// for `/system/bin/console` to claim, and wait for what that image owes at
 /// boot: the console up on its panel, having read the log and the keyboard,
@@ -3572,6 +3621,48 @@ fn a_user_copy_faults_in_mid_copy_or_ends_as_bad_address(test_config: &Path, ker
         if !result.stdout.contains(claim) {
             return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
         }
+    }
+    Ok(())
+}
+
+/// What `mapprobe` says as each of its cases holds (`tests/guest/mapprobe`).
+const MAPPED_FILE_SAID: &[&str] = &[
+    "mapprobe: a mapper sees the pager's write, and its mapping holds the object it closed",
+    "mapprobe: a fault waits for its page, a withdrawn page comes back, and a stalled supply is waited out",
+    "mapprobe: a range taken away under a parked thread is nothing when its page comes",
+    "mapprobe: a kill ends a thread parked in its fault or in a copy, and the copy's write wrote nothing",
+    "mapprobe: a touched hole is a zeroed page of the pager's, and none where it has no room",
+    "mapprobe: a touch of a page the object shrank past ends its mapper as SIGBUS",
+    "mapprobe: a holder's write from a mapped page not yet supplied lands whole once it is",
+    "mapprobe: a pager's end answers a write from its page Io, and ends its mapper at the next touch",
+    "mapped_file: a mapped paged object follows its pager",
+];
+
+/// `mapped_file` alone: each of the probe's claims said, and the kernel's
+/// report that a mapper's fault waited past its pager's report time and then
+/// no longer did, which is on the serial line and not the job's own.
+fn a_mapped_file_follows_its_pager(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "mapped_file";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_mapped_file", Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    if let Some(claim) = MAPPED_FILE_SAID.iter().find(|claim| !result.stdout.contains(*claim)) {
+        return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
+    }
+    // The probe's own stalled run, pages 16 to 32, not any pager's slow read.
+    let overdue = |line: &str| line.contains("'s pager has a wait overdue: object ") && line.contains(" pages 16+16, ");
+    if !result.serial.lines().any(overdue) {
+        return Err(format!("the kernel never said the probe's run was overdue:\n{}", result.serial));
+    }
+    if !result.serial.contains("'s pager has no wait overdue") {
+        return Err(format!("the kernel never said the overdue wait ended:\n{}", result.serial));
     }
     Ok(())
 }

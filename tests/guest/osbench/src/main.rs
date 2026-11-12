@@ -130,18 +130,23 @@ fn files() {
     files::suite(&files::memory());
 }
 
+fn map() {
+    files::map_suite(&files::memory());
+}
+
 /// Every group the machine alone runs, in the order `all` and the ToyOS job
 /// list run them: `boot` first, since it reads how long the boot took to
 /// reach it; and `crunch`, which heats it, last: ToyOS reads no temperature
 /// to cool down by, so a group after it would start at a clock its Linux run
 /// does not.
-const GROUPS: [(&str, fn()); 16] = [
+const GROUPS: [(&str, fn()); 17] = [
     ("boot", boot::suite),
     ("identity", identity::suite),
     ("system", system),
     ("sched", sched),
     ("fair", fair),
     ("files", files),
+    ("map", map),
     ("ipc", ipc::suite),
     ("net", net::suite),
     ("procs", procs::suite),
@@ -205,6 +210,7 @@ fn main() {
         "fair-job" => return fair::job(rest),
         "fair-helper" => return fair::helper(rest),
         "ipc-serve" => return ipc::serve(),
+        "map-hold" => return files::hold(rest),
         "cc" => return work::cc(rest),
         named => match GROUPS.iter().chain(&BY_NAME).find(|(name, _)| *name == named) {
             Some((name, run)) => group(name, *run),

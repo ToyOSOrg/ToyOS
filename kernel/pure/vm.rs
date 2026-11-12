@@ -21,6 +21,14 @@ pub const PAGE: u64 = 4096;
 /// run of 64 KiB.
 pub const AROUND: u64 = 16 * PAGE;
 
+/// Where a range at `[start, end)` that maps its object from byte `offset`
+/// maps the object's `page`, if it does. A pager names the page, so every
+/// step is checked and none overflows.
+pub fn page_at(start: u64, end: u64, offset: u64, page: u64) -> Option<u64> {
+    let into = page.checked_mul(PAGE)?.checked_sub(offset)?;
+    (into < end - start).then(|| start + into)
+}
+
 /// The pages `[from, to)` a touch of the empty `page` of the range `[start,
 /// end)` populates: its own, and where a page beside it in the range is
 /// `populated`, every page of its aligned run of [`AROUND`] in the range. So a
@@ -392,6 +400,20 @@ mod tests {
     use super::*;
     use std::vec;
     use std::vec::Vec;
+
+    /// A page a range maps lands at its place; one before the range's
+    /// offset, at or past its end, or so high its byte offset overflows is
+    /// no place, never an overflow: a pager names the page.
+    #[test]
+    fn a_page_is_placed_only_inside_its_range() {
+        let (start, end) = (0x10_0000, 0x10_0000 + 4 * PAGE);
+        assert_eq!(page_at(start, end, 2 * PAGE, 2), Some(start));
+        assert_eq!(page_at(start, end, 2 * PAGE, 5), Some(start + 3 * PAGE));
+        assert_eq!(page_at(start, end, 2 * PAGE, 6), None, "the range's end");
+        assert_eq!(page_at(start, end, 2 * PAGE, 1), None, "before the range's offset");
+        assert_eq!(page_at(start, end, 0, (1 << 52) - 2), None, "a page near the last a pager may name");
+        assert_eq!(page_at(start, end, 0, u64::MAX), None, "a byte offset past u64");
+    }
 
     /// Shared memory is executed only where nobody can write it and
     /// written only where somebody can; a range is whole pages inside the

@@ -158,6 +158,11 @@ pub mod shootdown;
 #[path = "../../src/tlb_tags.rs"]
 pub mod tlb_tags;
 
+// A mapped object's count of the ranges holding a space's node: its last
+// letting go sees every other's clearing (`tests/paged_ranges.rs`).
+#[path = "../../src/object/paged/ranges.rs"]
+pub mod paged_ranges;
+
 /// The CPU roster and the release/answer word, driven by `tests/smp_bringup.rs`;
 /// under `loom` alone, as is the [`arch::cpu`] shim it names.
 #[cfg(feature = "loom")]

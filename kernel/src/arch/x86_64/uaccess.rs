@@ -23,7 +23,7 @@
 use toyos_userbound::USER_TOP;
 
 use super::copy::{self, copy_down_asm};
-use crate::user_ptr::Faulted;
+use crate::user_ptr::Stopped;
 
 core::arch::global_asm!(
     ".pushsection .text.toyos_uaccess, \"ax\"",
@@ -139,8 +139,8 @@ unsafe extern "C" {
 const REP_STRING_LEN: u64 = 2;
 
 /// A routine's answer: 0 where it copied every byte.
-fn whole(left: usize) -> Result<(), Faulted> {
-    if left == 0 { Ok(()) } else { Err(Faulted) }
+fn whole(left: usize) -> Result<(), Stopped> {
+    if left == 0 { Ok(()) } else { Err(crate::user_ptr::last_stop()) }
 }
 
 /// Copy `len` bytes from user address `user` to `dst`. On `Err` some or none
@@ -149,7 +149,7 @@ fn whole(left: usize) -> Result<(), Faulted> {
 /// # Safety
 /// `dst` is writable kernel memory for `len` bytes; `[user, user + len)` lies
 /// below [`USER_TOP`]; no lock is held (`crate::user_ptr`).
-pub unsafe fn copy_from_user(dst: *mut u8, user: u64, len: usize) -> Result<(), Faulted> {
+pub unsafe fn copy_from_user(dst: *mut u8, user: u64, len: usize) -> Result<(), Stopped> {
     // SAFETY: the caller's contract; each routine touches nothing else, and
     // the rule sends down only a copy of at least 8 bytes.
     whole(unsafe {
@@ -164,7 +164,7 @@ pub unsafe fn copy_from_user(dst: *mut u8, user: u64, len: usize) -> Result<(), 
 ///
 /// # Safety
 /// As [`copy_from_user`], with `src` readable.
-pub unsafe fn copy_to_user(user: u64, src: *const u8, len: usize) -> Result<(), Faulted> {
+pub unsafe fn copy_to_user(user: u64, src: *const u8, len: usize) -> Result<(), Stopped> {
     // SAFETY: as in `copy_from_user`.
     whole(unsafe {
         match copy::rule().goes_down(user as usize, src as usize, len) {
@@ -178,7 +178,7 @@ pub unsafe fn copy_to_user(user: u64, src: *const u8, len: usize) -> Result<(), 
 ///
 /// # Safety
 /// As [`copy_from_user`].
-pub unsafe fn clear_user(user: u64, len: usize) -> Result<(), Faulted> {
+pub unsafe fn clear_user(user: u64, len: usize) -> Result<(), Stopped> {
     // SAFETY: the caller's contract; the routine touches nothing else.
     whole(unsafe { toyos_clear_user(user, len) })
 }
